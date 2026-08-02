@@ -131,6 +131,14 @@ struct arena_node {
      * The rope tier answers `false` once its injected flatten backend refused, because a
      * refused flatten yields an EMPTY span where the frame had bytes. Constant here, so the
      * walk's two checks fold away entirely on the MCU terminus.
+     *
+     * It stays constant after #801 put @ref own_wire on the seam, and that is a statement
+     * about spans, not about allocation. A refused ownership copy on this tier consumes no
+     * span and shortens none: `wire()` still points into the frame and every value the walk
+     * derived from it stays sound. The refusal is carried by the empty view `own_wire`
+     * returns, through the by-value BACKPRESSURE channel `own_tlv`'s callers already read.
+     * Flipping this flag instead would be strictly worse — it would condemn a walk whose
+     * spans are provably intact.
      */
     [[nodiscard]] static bool spans_intact() noexcept { return true; }
 
@@ -141,8 +149,43 @@ struct arena_node {
      *
      * The lazy rope reader overrides this
      * to adopt a multi-link flatten instead of copying it twice (ADR-0053 ⑤).
+     *
+     * Through the INJECTED seam (#801). This is the arena tier's only allocating site, and
+     * until #801 it was the last ownership copy in either tier still drawing from
+     * `view::over_bytes`'s global heap — so a bounded node whose peer sent a CONTIGUOUS
+     * terminus WRITE (the span-delivered shape a synchronous CAN/UART child hands up, and
+     * the MCU terminus's ordinary case) allocated outside its own memory bound, peer-driven,
+     * and an `abort()` under `-fno-exceptions`. #793 closed the same site one tier over.
+     *
+     * A refusal answers `std::nullopt` ⇒ the empty view, which is exactly what `own_tlv`'s
+     * callers already read as BACKPRESSURE (`resolve_node`'s empty-value guards). A wire TLV
+     * is never zero bytes, so `over_bytes`' engaged-empty "legitimately-empty input" outcome
+     * is unreachable here and `nullopt` is unambiguously a refusal. Never an abort, never a
+     * short span: see @ref spans_intact for why no flag is set.
+     *
+     * @section by_parameter Why the backend is a PARAMETER and not a member
+     *
+     * The obvious shape — give the node a pointer to the walk's seam, the way `view_node`
+     * holds one — takes `arena_node` from 16 bytes to 24, and this node is copied BY VALUE
+     * everywhere: `parsed_fwd_t` holds five of them and the child cursor makes one per step.
+     * Passing the backend down as an argument keeps the node two words wide, so the reference
+     * lives in one register for the whole walk instead of in every copy. It costs nothing to
+     * choose, and it is the only one of the two shapes that cannot cost anything.
+     *
+     * That is a structural argument, deliberately not a measured one. `bench_terminus_tier`
+     * CANNOT resolve either shape: identical `origin/main` source compiled at two different
+     * build paths differs by +1.7 % to +6.7 % on this leg (12 interleaved rounds, ranges
+     * disjoint), which is larger than anything either shape does and has the same
+     * frame-size profile. Any cross-worktree A/B of this leg measures code layout. The
+     * evidence that the un-injected path is unchanged is the object-file `cmp`, not a
+     * stopwatch.
+     *
+     * The rope tier keeps its seam POINTER regardless: it needs the sticky `refused` flag,
+     * and its `ensure_cache` is reached from `wire()`/`body()`, which take no arguments.
      */
-    [[nodiscard]] view_t own_wire() const { return view::over_bytes(wire()).value_or(view_t{}); }
+    [[nodiscard]] view_t own_wire(mem::mem_backend_t& flat) const {
+        return view::over_bytes(wire(), flat).value_or(view_t{});
+    }
 
     /**
      * @brief The trailer-excluded whole-TLV byte length — read WITHOUT materializing (the ADR-0042
@@ -359,8 +402,8 @@ template <class N>
  * The opt patch lives here, ONE locus for both readers.
  */
 template <class N>
-[[nodiscard]] view_t own_tlv(const N& node) {
-    view_t v = node.own_wire();  // owned, trailer-excluded; empty view on alloc failure
+[[nodiscard]] view_t own_tlv(const N& node, mem::mem_backend_t& flat) {
+    view_t v = node.own_wire(flat);  // owned, trailer-excluded; empty view on alloc failure
     if (!v.empty()) v.owner->bytes[1] = struct_opt(v.owner->bytes[1]);
     return v;
 }
@@ -411,7 +454,8 @@ template <class N>
  * payload keeps its segments.
  */
 template <class N>
-[[nodiscard]] rope_t own_or_ref_tlv(const N& node, const view_t* frame_view, std::uint32_t k) {
+[[nodiscard]] rope_t own_or_ref_tlv(const N& node, const view_t* frame_view, std::uint32_t k,
+                                    mem::mem_backend_t& flat) {
     if (k != tr::graph::kPinNever && trailer_less(node)) {
         // 64-bit product: `payload * k` overflows 32 bits at k = pin-always on any real payload,
         // and an overflowed product decides the branch backwards.
@@ -423,11 +467,11 @@ template <class N>
                 return std::move(*pinned);
             }
             LIBTRACER_TICK_PIN_REFUSED();
-            return rope_t(own_tlv(node));
+            return rope_t(own_tlv(node, flat));
         }
     }
     LIBTRACER_TICK_COPY();
-    return rope_t(own_tlv(node));
+    return rope_t(own_tlv(node, flat));
 }
 
 /**
@@ -631,8 +675,8 @@ template <class N>
  */
 template <class N>
 [[nodiscard]] result_t<rope_t> resolve_node(graph_t& graph, const N& root,
-                                            std::string_view inbound_link,
-                                            const view_t* frame_view) {
+                                            std::string_view inbound_link, const view_t* frame_view,
+                                            mem::mem_backend_t& flat) {
     result_t<parsed_fwd_t<N>> parsed = parse_fwd(root);
     if (!parsed) return std::unexpected(parsed.error());
     const parsed_fwd_t<N>& req = *parsed;
@@ -772,12 +816,12 @@ template <class N>
             // wire TLV is never empty, so an empty copy is exactly an allocation failure
             // ⇒ BACKPRESSURE.
             if (remote_sub) {
-                const view_t sub_value = own_tlv(payload_node);
+                const view_t sub_value = own_tlv(payload_node, flat);
                 if (sub_value.empty())
                     return assemble_error(reply_dst_wire, reply_src_wire, status_t::BACKPRESSURE);
                 // The ONE route copy of the subscription's life (ADR-0041 §2), into a
                 // refcounted segment — every later delivery clones the refcount.
-                const view_t return_route = own_tlv(req.src);
+                const view_t return_route = own_tlv(req.src, flat);
                 if (return_route.empty())
                     return assemble_error(reply_dst_wire, reply_src_wire, status_t::BACKPRESSURE);
                 // ADR-0049: the wire append enters the graph's single admission door
@@ -809,7 +853,7 @@ template <class N>
             const std::uint32_t pin_k = graph.pin_payload_ratio(v) != 0
                                             ? graph.pin_payload_ratio(v)
                                             : tr::graph::kPinPayloadRatio;
-            const rope_t value = own_or_ref_tlv(payload_node, frame_view, pin_k);
+            const rope_t value = own_or_ref_tlv(payload_node, frame_view, pin_k, flat);
             if (value.total_length() == 0)
                 return assemble_error(reply_dst_wire, reply_src_wire, status_t::BACKPRESSURE);
 

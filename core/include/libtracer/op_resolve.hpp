@@ -68,8 +68,8 @@ class op_resolver_t {
      * @brief Bind the resolver to the local @p graph it resolves `dst` against.
      *
      * @param graph The node's local graph.
-     * @param flat  The byte backend the ROPE-tier terminus draws its owned `segment`s from
-     *              (#766, #793) — the per-node contiguous-span materialize
+     * @param flat  The byte backend the terminus draws its owned `segment`s from
+     *              (#766, #793, #801) — the per-node contiguous-span materialize
      *              (`view_node::ensure_cache`, reached by every `wire()`/`body()` read of a
      *              multi-link TLV) and BOTH branches of the ownership copy
      *              (`view_node::own_wire`: the ADR-0053 ⑤ flatten of a straddling payload and
@@ -83,8 +83,20 @@ class op_resolver_t {
      *              a peer sent a FRAGMENTED terminus request — peer-drivable, and an
      *              `abort()` under `-fno-exceptions`. `fwd_router_t` passes its own `flat`
      *              here, so one injection now covers the router's four sites AND the terminus.
-     *              The default is the global heap, so the span (arena) tier and every existing
-     *              call site are byte-identical to before.
+     *
+     *              The SPAN (arena) tier draws from it too since #801 — at one site,
+     *              `arena_node::own_wire`, the ADR-0041 §2 ownership copy of a borrowed arena
+     *              span. That is the whole of what this tier allocates (its `wire()`/`body()`
+     *              spans are borrowed from the frame and never materialize), and it was the
+     *              last ownership copy in either tier still going to `view::over_bytes`'s
+     *              global heap. It is the MCU terminus's ORDINARY case, not an exotic one: a
+     *              synchronous CAN/UART child delivers a contiguous span, so every WRITE it
+     *              carries took the unbounded copy. A refusal is answered by value, through
+     *              the empty-view BACKPRESSURE channel below — not through `spans_intact()`,
+     *              which stays a constant `true` on this tier because a borrowed span cannot
+     *              be shortened by a refused allocation.
+     *
+     *              The default is the global heap, so every existing call site is unchanged.
      *
      *              A refused flatten is answered BY VALUE, never by reading a short span: the
      *              resolve walk carries a per-call "spans intact" flag (`spans_intact()` on the

@@ -92,7 +92,7 @@ Verified from source, not assumed. Nothing on the wire path counts segments:
 
 - `core/src/frame.cpp:166-179` (`wire::path_key`) sums child lengths only to reserve, then emits.
   No cap test.
-- `core/src/op_resolve_walk.hpp:560-569` (`path_lookup_key`) rejects a non-`NAME` child and counts
+- `core/src/op_resolve_walk.hpp:656-665` (`path_lookup_key`) rejects a non-`NAME` child and counts
   nothing.
 - `core/src/graph.cpp:458-483` (`ensure_vertex_ptr`) calls `key_view_t::split_levels`, which checks
   only `NAME` framing and exactness (`core/include/libtracer/key_view.hpp:122-136`), then
@@ -516,7 +516,7 @@ This pre-answers RFC-0018 §12 open question 2 with **no**, and this RFC does no
 **Contradiction surfaced, not fixed here** (house rule): six lines later the same document says
 "Field depth is the worked example: resource-keyed rather than configurable" — but
 `core/include/libtracer/path.hpp:36` is a bare `inline constexpr kMaxFieldDepth = 8` with literal
-comparisons at `core/src/path.cpp:129` and `core/src/op_resolve_walk.hpp:315`. It almost certainly
+comparisons at `core/src/path.cpp:129` and `core/src/op_resolve_walk.hpp:376`. It almost certainly
 means TLV *nesting* depth (RFC-0006). Separate erratum; flagged because §9.2 leans on the first
 bullet.
 

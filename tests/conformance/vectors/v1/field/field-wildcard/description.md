@@ -7,7 +7,7 @@ FIELD{ NAME "subscribers", index_mode=WILDCARD } — :subscribers[*]
 ```
 
 The `[*]` spelling of RFC-0004 §C, and the third of the four index_mode forms
-(`SCALAR=0`, `ELEMENT=1`, `WILDCARD=2`; `core/src/op_resolve_walk.hpp:237`).
+(`SCALAR=0`, `ELEMENT=1`, `WILDCARD=2`; `core/src/op_resolve_walk.hpp:311`).
 
 It differs from `field-append` in **exactly one byte** — the trailing index_mode
 VALUE, `0x01` → `0x02` — while meaning something entirely different: append one

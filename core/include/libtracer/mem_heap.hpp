@@ -229,8 +229,9 @@ namespace tr::view {
  * An L1 helper (it produces an owning handle), so it lives in `tr::view`, not `tr::mem`
  * (docs/adr/0016 §2). It exists so an ownership COPY on a peer-driven path can draw from the
  * node's injected byte seam instead of the global heap — the rope-tier `own_wire`'s
- * single-link branch was the last such copy that could not (#793); the multi-link branch
- * beside it already flattened through the injection (#766).
+ * single-link branch was the first such copy converted (#793), the span-tier
+ * `arena_node::own_wire` the second (#801); the multi-link branch beside the former already
+ * flattened through the injection (#766).
  * @retval {} An empty handle on allocation failure (the backend refused).
  */
 [[nodiscard]] segment_ptr_t segment_alloc(mem::mem_backend_t& backend, std::size_t size);
@@ -277,9 +278,13 @@ namespace tr::view {
  *
  * Same contract, same two outcomes; the only difference is where the bytes come from. It
  * exists for the ADR-0041 §2 ownership copies on a PEER-DRIVEN path — the rope-tier
- * `view_node::own_wire`'s single-link branch was the last one still copying through the
+ * `view_node::own_wire`'s single-link branch was still copying through the
  * global heap after #766 seamed the multi-link branch beside it, so one function drew from
- * two different allocators depending on how the peer fragmented the frame.
+ * two different allocators depending on how the peer fragmented the frame. #801 took the
+ * span tier's `arena_node::own_wire` through the same overload: the two tiers must not
+ * differ on WHERE a stored value's bytes come from, since which one runs is decided by the
+ * delivering transport (a rope-delivering child vs a span-delivering one) and not by
+ * anything the application chose.
  *
  * @par Why an overload and not a defaulted parameter
  * A defaulted `mem_backend_t& = mem::heap_backend()` reads better and was the first shape

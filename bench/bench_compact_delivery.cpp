@@ -84,12 +84,8 @@ bool g_arm = false;
 // is then handed a pointer this file `malloc`ed. The sized+aligned `operator delete` is the
 // hole libstdc++'s `std::pmr::memory_resource::deallocate` walks into on every pmr control
 // block — inert today only because no sanitizer job runs this bench. Set completed from
-// `core/tests/terminus_flatten_backend_test.cpp`.
-//
-// NOT copied from that file: its over-aligned `operator new` routes to `aligned_alloc`, while
-// the ones below keep routing to `malloc` — held back for the reason spelled out at the same
-// place in `bench_forward_heap.cpp` (it moves a published live-bytes figure there, and the
-// two benches' allocation columns are only comparable while they share one shape).
+// `core/tests/terminus_flatten_backend_test.cpp`, including — since #801 — its over-aligned
+// `operator new`, so the two benches and the test now share ONE shape with no exception.
 namespace {
 void* counted(std::size_t n) {
     if (g_arm) {
@@ -97,6 +93,28 @@ void* counted(std::size_t n) {
         g_bytes += n;
     }
     return std::malloc(n == 0 ? 1 : n);
+}
+
+/**
+ * @brief The aligned counted allocation (#801) — `aligned_alloc` for a genuinely OVER-aligned
+ *        request, whose result `free` accepts; `malloc` for a fundamental one.
+ *
+ * Forwarding an over-aligned request to plain `malloc` (what this file did until #801) hands
+ * back memory aligned only to `max_align_t`, so a `std::pmr` control block asking for 32-byte
+ * alignment is under-aligned — real UB, latent only because nothing on today's measured path
+ * asks for more. The `>` test is the same one `bench_forward_heap` documents at length: a
+ * fundamental-alignment request is already correct on `malloc`, and keeping it there is what
+ * leaves the published live-bytes figures where they are.
+ */
+void* counted_aligned(std::size_t n, std::size_t align) {
+    if (align <= alignof(std::max_align_t)) return counted(n);  // malloc already suits it
+    if (g_arm) {
+        ++g_allocs;
+        g_bytes += n;
+    }
+    // aligned_alloc requires a size that is a multiple of the alignment.
+    const std::size_t rounded = ((n == 0 ? 1 : n) + align - 1) / align * align;
+    return std::aligned_alloc(align, rounded);
 }
 }  // namespace
 
@@ -112,13 +130,17 @@ void* operator new[](std::size_t n) {
 }
 void* operator new(std::size_t n, const std::nothrow_t&) noexcept { return counted(n); }
 void* operator new[](std::size_t n, const std::nothrow_t&) noexcept { return counted(n); }
-void* operator new(std::size_t n, std::align_val_t) { return operator new(n); }
-void* operator new[](std::size_t n, std::align_val_t) { return operator new(n); }
-void* operator new(std::size_t n, std::align_val_t, const std::nothrow_t&) noexcept {
-    return counted(n);
+void* operator new(std::size_t n, std::align_val_t a) {
+    void* const p = counted_aligned(n, static_cast<std::size_t>(a));
+    if (p == nullptr) throw std::bad_alloc();
+    return p;
 }
-void* operator new[](std::size_t n, std::align_val_t, const std::nothrow_t&) noexcept {
-    return counted(n);
+void* operator new[](std::size_t n, std::align_val_t a) { return operator new(n, a); }
+void* operator new(std::size_t n, std::align_val_t a, const std::nothrow_t&) noexcept {
+    return counted_aligned(n, static_cast<std::size_t>(a));
+}
+void* operator new[](std::size_t n, std::align_val_t a, const std::nothrow_t&) noexcept {
+    return counted_aligned(n, static_cast<std::size_t>(a));
 }
 void operator delete(void* p) noexcept { std::free(p); }
 void operator delete[](void* p) noexcept { std::free(p); }

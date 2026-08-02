@@ -129,8 +129,8 @@ class child_registry_t {                 // the one NAME -> link demux table (AD
 }  // namespace tr::net
 ```
 
-Signature source: `core/include/libtracer/fwd_router.hpp:146` (constructor), `:205`
-(`add_child`), `:255` (`subscribe_toward`), `:265-276` (the sink function-pointer types);
+Signature source: `core/include/libtracer/fwd_router.hpp:151` (constructor), `:210`
+(`add_child`), `:260` (`subscribe_toward`), `:270-281` (the sink function-pointer types);
 `core/include/libtracer/child_registry.hpp:209` (`add`), `:458` (`resolve_peer`), `:473`
 (`erase`), `:499` (`entry_by_name`), `:520` (`by_name`), `:561`/`:571` (`size`/`live_size`).
 
@@ -159,7 +159,7 @@ flowchart TB
   address size grows with hop count, which is what `ADVERTISE`/`COMPACT` route handles exist to
   amortise on a steady flow.
 - **A reply is delivered as a rope, never flattened by the router**
-  (`core/include/libtracer/fwd_router.hpp:280-284`). A sink that wants contiguous bytes holds
+  (`core/include/libtracer/fwd_router.hpp:285-294`). A sink that wants contiguous bytes holds
   `const view_t m = reply.materialize()` and reads `m.bytes()`; a **single-link reply — the common
   case — is returned zero-copy, no allocation and no copy**, and only a multi-link reply pays one
   flatten, on demand. The escape hatch sits at the consumer, so the router never pays for a
@@ -182,7 +182,11 @@ flowchart TB
   leaving no trustworthy address — a drop. Never a reply built on a short span. Since #793 it also
   covers the rope tier's **single-link** ownership copy, which used to reach the global heap
   through `view::over_bytes` — so `own_wire`'s two branches no longer allocate from two different
-  allocators depending on where the peer's fragmentation fell. What `flat` still does **not**
+  allocators depending on where the peer's fragmentation fell. Since #801 it covers the **span
+  (arena) tier's** `own_wire` as well — that tier's only allocating site, and the one a
+  span-delivering child (a synchronous CAN/UART link) takes on every ordinary WRITE — so which
+  allocator a stored value's bytes come from no longer depends on which transport delivered the
+  frame. What `flat` still does **not**
   cover: the terminus arena (that is `rx`'s nothrow `block_source_t`, bounded by a different seam,
   not unbounded) and the reply head segment (genuinely unbounded on both tiers; it answers
   exhaustion by value, and folding it into `flat` would silently re-scope an injection callers have

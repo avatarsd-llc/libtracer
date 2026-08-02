@@ -47,9 +47,9 @@ reads it, so placing it there leaves every other member at the byte offset it ha
 existed, which keeps the forward-hop bench measuring the same layout (`graph.hpp:1151-1155`).
 
 `fwd_router_t` carries the same failable seam separately as its `rx` parameter
-(`core/include/libtracer/fwd_router.hpp:148`), because the terminus arena decode belongs to the
+(`core/include/libtracer/fwd_router.hpp:153`), because the terminus arena decode belongs to the
 router's receive thread rather than to the graph. It carries a **fourth** injection beside it, and
-for a different contract: `flat` (`fwd_router.hpp:149`, documented at `:94`), the `mem_backend_t` **every rope flatten on
+for a different contract: `flat` (`fwd_router.hpp:154`, documented at `:94`), the `mem_backend_t` **every rope flatten on
 the forward and terminus paths** draws its owned `segment` from — the byte-buffer seam, with cache
 hooks and a refcount, which the block source is not. The split is `graph_t`'s `ctl_` /
 `value_backend_` split one layer out. Like `value_backend_`, an injected `flat` **MUST be
@@ -76,11 +76,13 @@ so a constrained node points `value_backend` and `flat` at a bounded pool rather
 is the terminus reply head segment, named in
 [What `flat` covers](#what-flat-covers-and-the-two-things-beside-it-that-it-does-not) below.
 
-The resolver's rope-tier flattens (`view_node::ensure_cache`, `view_node::own_wire` in
-`core/src/op_resolve_view.cpp`) are inside the bound: the router hands `flat` to its
-`op_resolver_t`, which threads it through the rope-tier node reader, and
-`core/tests/terminus_flatten_backend_test.cpp` pins both halves — the same request costs strictly
-fewer global allocations with `flat` on a slab, and a refusal is answered rather than read short.
+The resolver's flattens and ownership copies are inside the bound on **both** tiers: the router
+hands `flat` to its `op_resolver_t`, which threads it through whichever node reader runs — the rope
+tier's `view_node::ensure_cache` / `view_node::own_wire` (`core/src/op_resolve_view.cpp`) and, since
+#801, the span tier's `arena_node::own_wire` (`core/src/op_resolve_walk.hpp`), which is the whole of
+what that tier allocates. `core/tests/terminus_flatten_backend_test.cpp` pins every half — the same
+request costs strictly fewer global allocations with `flat` on a slab, the stored value's bytes are
+asserted to lie *inside* the injected slab, and a refusal is answered rather than read short.
 
 **The bound covers the arena, and every rope flatten on the forward and terminus paths beside
 it.** Read the arena claim below as a claim about the arena only. An unguarded flatten is not a
@@ -93,28 +95,32 @@ in that table, not "the router's allocations".
 
 ### What `flat` covers, and the two things beside it that it does not
 
-#766 left three rope-tier heap sites outside the injection and #793 closed exactly one of them.
-The other two are **not** oversights, and the reason each is out is different — so they are named
-here rather than left to be rediscovered:
+#766 left three rope-tier heap sites outside the injection; #793 closed one of them and #801 closed
+the span tier's counterpart, which #766 had not counted at all. What is left out is **not** an
+oversight, and the reason each is out is different — so they are named here rather than left to be
+rediscovered:
 
 | Site | Code | Verdict |
 | --- | --- | --- |
-| `own_wire`'s SINGLE-link ownership copy | `core/src/op_resolve_view.cpp:139` | **Closed by #793.** Same function, same ADR-0041 §2 obligation and same peer-drivability as the multi-link flatten beside it — one function must not draw from two allocators. |
+| `own_wire`'s SINGLE-link ownership copy (rope tier) | `core/src/op_resolve_view.cpp:146` | **Closed by #793.** Same function, same ADR-0041 §2 obligation and same peer-drivability as the multi-link flatten beside it — one function must not draw from two allocators. |
+| `own_wire`'s ownership copy (SPAN tier) | `core/src/op_resolve_walk.hpp:186` | **Closed by #801.** The same ADR-0041 §2 copy on the other tier, and the arena tier's *only* allocating site (its `wire()`/`body()` spans are borrowed from the frame). Which tier runs is decided by the delivering transport — a rope-delivering child vs a span-delivering one — so leaving it on the global heap made a stored value's provenance depend on the link it arrived over. It is the MCU terminus's ordinary case, not an exotic one: a synchronous CAN/UART child delivers a contiguous span. |
 | The terminus **arena** | `core/src/fwd_router.cpp:1012` — `wire::decode_into(frame, rx_for(inbound_ctx))` | **Already bounded, by a different seam.** It draws from the router's injected `rx` (`block_source_t`), which is the seam [ADR-0065](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md) created *specifically* so exhaustion returns `nullptr` instead of throwing. Routing it through `flat` would move it from a nothrow seam to a segment seam and buy nothing: a node injecting `rx` already bounds it. "Not covered by `flat`" was never the same claim as "not covered". |
-| The reply **head segment** | `core/src/op_resolve_walk.hpp:500` — `view::heap_alloc(head_len)` inside `assemble` | **Genuinely uncovered, deliberately not folded into `flat`.** See below. |
+| The reply **head segment** | `core/src/op_resolve_walk.hpp:544` — `view::heap_alloc(head_len)` inside `assemble` | **Genuinely uncovered, deliberately not folded into `flat`.** See below. |
 
 The reply head is reachable from the bounded-node resolve path — every terminus reply allocates
 it, on **both** tiers (`assemble` lives in the shared walk header, so the arena/MCU terminus runs
 it too). Its *failure* half is already closed: a null segment returns an empty rope, which
-`or_backpressure` (`core/src/op_resolve_walk.hpp:577`) turns into an addressed
+`or_backpressure` (`core/src/op_resolve_walk.hpp:621`) turns into an addressed
 `kind=ERROR BACKPRESSURE` rather than a silent drop. What is open is the *bound*.
 
 It is not folded into `flat` here for a reason that is about the seam's contract, not about
 effort. `flat` is documented — in a public `@param` on `fwd_router_t` and `op_resolver_t` — as the
 backend **every rope flatten** draws from, and a deployment sizes its slab against that sentence.
-A reply head is not a flatten; it is egress construction, its size tracks the route bytes rather
-than the payload, and it is allocated once per reply on paths (the span tier) where `flat` is
-today provably inert. Pointing it at `flat` would silently re-scope an injection somebody has
+A reply head is not a flatten; it is egress construction, and its size tracks the route bytes
+rather than the payload. (Before #801 there was a second half to this argument — that on the span
+tier `flat` was provably inert, so folding the head in would have created the tier's first draw
+from it. That half is now spent: the span tier draws from `flat` for its ownership copy. The
+contract argument stands on its own and is the one that decides it.) Pointing it at `flat` would silently re-scope an injection somebody has
 already sized, so a node that budgeted a small pool for flattens could begin refusing replies it
 used to send. Closing the bound properly is therefore a decision about the seam — widen and
 **rename** `flat`, or give the terminus egress its own injection — and it wants an ADR, not a
@@ -196,17 +202,21 @@ defines for "exceeds this receiver's decode resources".
 | Ingress `ADVERTISE` route flatten | flatten `core/src/fwd_router.cpp:1086-1087`, answered at `:1094` | the empty flatten **fails the `wire::decode`** ⇒ the frame is **dropped**; the label stays **unbound** (the peer's COMPACTs draw a `HANDLE_NACK`) |
 | Ingress `COMPACT` payload flatten | flatten `core/src/fwd_router.cpp:1107`, answered at `:1114` | the delivery is **dropped**; the subscriber keeps its last-known value |
 | Bus-name rejection reply flatten (cold) | flatten `core/src/fwd_router.cpp:767`, answered by the `wire::decode` opening `reject_bus_name_hop` | the frame is **dropped** by value — no reply |
-| Terminus per-node span materialize (rope tier) | flatten `core/src/op_resolve_view.cpp:237`, answered at `core/src/op_resolve_walk.hpp:654` / `core/src/op_resolve_walk.hpp:699` | a refusal on the reply's own route bytes ⇒ `BACKPRESSURE` on the error side ⇒ the frame is **dropped**; anywhere else before dispatch ⇒ an **addressed** `kind=ERROR STATUS{BACKPRESSURE}` reply |
-| Terminus ownership flatten (rope tier, ADR-0053 ⑤, MULTI-link) | flatten `core/src/op_resolve_view.cpp:129`, answered by the empty-value guards in `resolve_node` (`core/src/op_resolve_walk.hpp:813-814`) | the write is **not stored** — the vertex keeps its previous value — and the reply is `BACKPRESSURE` |
-| Terminus ownership **copy** (rope tier, ADR-0041 §2, SINGLE-link) | copy `core/src/op_resolve_view.cpp:139`, answered by the same guards | the write is **not stored** — the vertex keeps its previous value — and the reply is `BACKPRESSURE` |
+| Terminus per-node span materialize (rope tier) | flatten `core/src/op_resolve_view.cpp:254`, answered at `core/src/op_resolve_walk.hpp:698` / `core/src/op_resolve_walk.hpp:743` | a refusal on the reply's own route bytes ⇒ `BACKPRESSURE` on the error side ⇒ the frame is **dropped**; anywhere else before dispatch ⇒ an **addressed** `kind=ERROR STATUS{BACKPRESSURE}` reply |
+| Terminus ownership flatten (rope tier, ADR-0053 ⑤, MULTI-link) | flatten `core/src/op_resolve_view.cpp:136`, answered by the empty-value guards in `resolve_node` (`core/src/op_resolve_walk.hpp:857-858`) | the write is **not stored** — the vertex keeps its previous value — and the reply is `BACKPRESSURE` |
+| Terminus ownership **copy** (rope tier, ADR-0041 §2, SINGLE-link) | copy `core/src/op_resolve_view.cpp:146`, answered by the same guards | the write is **not stored** — the vertex keeps its previous value — and the reply is `BACKPRESSURE` |
+| Terminus ownership **copy** (SPAN tier, ADR-0041 §2) | copy `core/src/op_resolve_walk.hpp:186`, answered by the same guards | the write is **not stored** — the vertex keeps its previous value — and the reply is `BACKPRESSURE`. Note this row's refusal does **not** set the walk's `spans_intact()` flag, and must not: an arena span is borrowed from the frame, so a refused copy shortens nothing and the empty view is the whole channel |
 
-The three terminus rows are the resolver's, reached through the same `flat` the router injects
-(#766, #793), and all three are exercised by `core/tests/terminus_flatten_backend_test.cpp` —
+The four terminus rows are the resolver's, reached through the same `flat` the router injects
+(#766, #793, #801), and all four are exercised by `core/tests/terminus_flatten_backend_test.cpp` —
 including two sweeps that move the refusal point across every draw one request makes and require
 each outcome to be a drop or an addressed `BACKPRESSURE`, never a `kind=RESULT` built on a short
 span and never a vertex left holding a third value.
 
-The last of the three is #793's. It is worth stating separately from the flatten above it because
+The fourth row is #801's — the same ADR-0041 §2 copy on the span tier, whose refusal is answered
+through the empty view alone and never through `spans_intact()`; see the seam table above.
+
+The third is #793's. It is worth stating separately from the flatten above it because
 the two are **branches of one function** that used to allocate from two different allocators:
 `own_wire` flattens a multi-link subrope through the injection and copied a single-link one
 through `view::over_bytes`'s global heap. Which branch a peer takes is decided by where its
@@ -318,7 +328,7 @@ of them ([`../reference/09-memory-substrate.md:305`](../reference/09-memory-subs
 
 **A pool shared across receive threads is slower than the heap it replaced.** See the topology
 result below; `fwd_router_t::add_child` takes an optional per-child source
-(`fwd_router.hpp:205`, resolved at `fwd_router.hpp:617-619`) precisely so each transport's receive
+(`fwd_router.hpp:210`, resolved at `fwd_router.hpp:622-624`) precisely so each transport's receive
 thread owns one. A source shared at *wiring* frequency — a graph's `ctl` — is fine behind a lock.
 
 **A `size_class_t` span is a bound the caller sets, not the library.** `pool_source_t` classes do

@@ -64,7 +64,7 @@ Those are the three injection points of `graph_t`'s constructor — the pmr reso
 the value backend and the failable control source
 (`core/include/libtracer/graph.hpp:187-189`) — and the matching three of
 `fwd_router_t`: the pmr resource, the failable `rx` source and the `flat` byte backend
-its rope flattens draw from (`core/include/libtracer/fwd_router.hpp:147-149`). The full set of
+its rope flattens draw from (`core/include/libtracer/fwd_router.hpp:152-154`). The full set of
 build-time and injected bounds is catalogued in
 [the configuration space](../design/config/00-configuration-space.md); the failure
 semantics of the third seam are in
@@ -112,7 +112,9 @@ sits outside the node's slab bound — the ingress `ADVERTISE` / `COMPACT` sub-r
 flattens, the cold bus-name rejection flatten and the per-delivery egress one, plus
 the terminus resolver's rope-tier flattens one call below `resolve_terminus_rope`
 (`view_node::ensure_cache`, `view_node::own_wire` — both of its branches, so a
-peer cannot escape the bound by sending a payload that happens to land contiguously), which
+peer cannot escape the bound by sending a payload that happens to land contiguously) and, since
+#801, the span tier's `arena_node::own_wire` (which is what this node's synchronous CAN/UART
+children actually take, since they deliver contiguous spans rather than ropes), all of which
 the router reaches by handing `flat` to its `op_resolver_t`. Two caveats remain, so
 the bound is not read wider than it is: `flat` bounds the flattened and copied *bytes*, not
 the frame builds beside them, and not the terminus arena — that is `blocks`. And the

@@ -60,12 +60,38 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **`op_resolver_t`'s `flat` now bounds the SPAN (arena) tier too (#801).**
+  `core/include/libtracer/op_resolve.hpp`, `core/include/libtracer/fwd_router.hpp` — **no
+  signature changes**; what changed is which allocation the already-public `flat` parameter
+  covers, which is why it is documented here. `arena_node::own_wire` — the ADR-0041 §2 ownership
+  copy of a borrowed arena span, and the *only* site the span tier allocates at — drew from
+  `view::over_bytes`'s global heap. It now takes the `over_bytes(bytes, backend)` overload #793
+  added, carried by the same per-resolve seam the rope tier uses. This was the tier that mattered
+  most in practice: a synchronous CAN/UART child forwards a **contiguous span** inline on its
+  receive (ADR-0038), so the MCU terminus took the unbounded copy on its *ordinary* WRITE, not on
+  an exotic fragmented one — and which tier runs is decided by the delivering transport, so a
+  stored value's provenance depended on the link it arrived over. A refusal answers
+  `std::nullopt` → the empty view the walk's existing empty-value guards already read as
+  `BACKPRESSURE`; `arena_node::spans_intact()` deliberately stays a constant `true`, because an
+  arena span is borrowed from the frame and a refused allocation cannot shorten one. The backend
+  travels as a `resolve_node` argument rather than as a node member, so `arena_node` — copied by
+  value throughout the walk — stays two words wide. **Default unchanged** (the global heap), and
+  25 of the library's 27 object files `cmp` byte-identical to `origin/main` — only
+  `op_resolve.cpp.o` and `op_resolve_view.cpp.o`, the two TUs that instantiate the walk, differ.
+  Covered by
+  `core/tests/terminus_flatten_backend_test.cpp`: an exact-size seam instrument, a
+  slab-containment *provenance* assertion on the stored value, a READ control that must draw
+  nothing, a refusing-backend case and a mutation-aware sweep. Reverting the site reddens **8** of
+  the new checks and takes the seam count to zero.
+
 - **`op_resolver_t` takes the flatten backend, so the TERMINUS rope flattens are bounded too
   (#766).** `core/include/libtracer/op_resolve.hpp`.
   `explicit op_resolver_t(graph_t&)` gains a second, defaulted parameter:
   **`explicit op_resolver_t(graph_t& graph, mem::mem_backend_t* flat = &mem::heap_backend())`**.
-  Every existing call site compiles unchanged and the default is the global heap, so the span
-  (arena) tier and an un-injected node are byte-identical to before. `fwd_router_t` now passes its
+  Every existing call site compiles unchanged and the default is the global heap, so an
+  un-injected node is byte-identical to before. (At the time of #766 the span (arena) tier drew
+  from this parameter not at all; #801, above, put its one allocating site on it.)
+  `fwd_router_t` now passes its
   own `flat` down, which closes the #730 gap this issue was split out for: the resolver's rope-tier
   flattens — `view_node::ensure_cache` (the per-node contiguous span every `wire()`/`body()` read
   of a multi-link TLV materializes) and `view_node::own_wire` (the ADR-0053 ⑤ ownership flatten) —

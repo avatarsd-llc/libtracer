@@ -90,19 +90,27 @@ void* counted(std::size_t n) {
 }
 
 /**
- * @brief The over-aligned counted allocation — `aligned_alloc`, whose result `free` accepts.
+ * @brief The aligned counted allocation — `aligned_alloc` for a genuinely OVER-aligned request,
+ *        whose result `free` accepts; `malloc` for a fundamental one.
  *
  * Forwarding an over-aligned request to plain `malloc` would hand back memory aligned only to
- * `max_align_t`; a `std::pmr` control block asking for 16- or 32-byte alignment would then be
+ * `max_align_t`; a `std::pmr` control block asking for 32-byte alignment would then be
  * under-aligned. The size is rounded up to a multiple of the alignment, which `aligned_alloc`
  * requires.
+ *
+ * The test is `> alignof(std::max_align_t)`: `malloc` is specified to suit any FUNDAMENTAL
+ * alignment, so that case is already correct on it and the over-aligned case is the whole bug.
+ * This file is the reference replacement set the two benches copy (#793, #801), and the benches
+ * additionally need the fundamental case to stay on `malloc` — `malloc_usable_size` of an
+ * `aligned_alloc` block rounds up, which would move their published live-bytes figures without
+ * anything in the library having changed. One shape, correct in all three.
  */
 void* counted_aligned(std::size_t n, std::size_t align) {
+    if (align <= alignof(std::max_align_t)) return counted(n);  // malloc already suits it
     if (g_arm) {
         ++g_allocs;
         g_bytes += n;
     }
-    if (align < alignof(std::max_align_t)) align = alignof(std::max_align_t);
     const std::size_t rounded = ((n == 0 ? 1 : n) + align - 1) / align * align;
     return std::aligned_alloc(align, rounded);
 }
@@ -882,6 +890,255 @@ void test_single_link_ownership_copy_sweep() {
     check(drops + addressed > 0, "instrument: the sweep actually hit refusals");
 }
 
+// --- #801: the SPAN (arena) tier's ownership copy is the seam's too ------------------
+
+/**
+ * @brief The bytes the vertex's stored value actually lives in, or an empty span when it
+ *        holds nothing storable — the PROVENANCE observable (#801).
+ *
+ * Counting allocations says the seam was consulted; it does not say the stored value's bytes
+ * came from it. This reads the owning `segment` off the stored rope, so the assertion is
+ * about the address the value sits at — inside the injected slab, or on the global heap.
+ */
+std::span<const std::byte> stored_segment_bytes(const graph_t& g, vertex_handle_t v) {
+    const auto ref = g.read(v);
+    if (!ref || !*ref || (*ref)->link_count() != 1) return {};
+    const tr::view::view_t& link = (*ref)->only();
+    if (!link.owner) return {};
+    return link.owner->bytes;
+}
+
+/** @brief Does @p inner lie wholly inside @p outer? (Address containment, not equality.) */
+bool within(std::span<const std::byte> inner, std::span<const std::byte> outer) {
+    return !inner.empty() && !outer.empty() && inner.data() >= outer.data() &&
+           inner.data() + inner.size() <= outer.data() + outer.size();
+}
+
+/** @brief The #801 fixture: a CONTIGUOUS terminus WRITE, delivered as a borrowed SPAN. */
+std::vector<std::byte> arena_write() {
+    return b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"origin"}),
+                 b_value_filled(kOwnPayloadBytes, kOwnFill));
+}
+
+/**
+ * @brief A span-delivered terminus WRITE draws its ADR-0041 §2 ownership copy from the
+ *        INJECTED seam, and those bytes leave the global heap.
+ *
+ * @section why_this_tier Why this is the tier that mattered most
+ *
+ * The rope tier (#766/#793) is the multi-segment, asynchronous shape. The SPAN tier is what a
+ * synchronous CAN/UART child hands up — one contiguous frame, forwarded inline on its receive
+ * with no async handoff (ADR-0038) — which is the MCU terminus's ordinary case, not an exotic
+ * one. `arena_node::own_wire` is the ONLY site this tier allocates at (its `wire()`/`body()`
+ * spans are borrowed from the frame), and until #801 it was `view::over_bytes`'s global heap.
+ * So a bounded node that had injected every documented seam still allocated globally on
+ * every WRITE its own bus delivered.
+ *
+ * @section instrument Three instruments, none of which can pass vacuously
+ *
+ *   1. `served_size(kOwnTlvBytes)` — the seam was asked for EXACTLY the payload TLV's byte
+ *      count. Site-specific: unlike the rope tier there is no frame flatten here to satisfy a
+ *      bare `served() > 0`, and the READ control below proves the count is zero without a
+ *      payload to copy.
+ *   2. PROVENANCE — the stored value's bytes lie inside the injected slab. Counting says
+ *      "consulted"; this says "the value is THERE".
+ *   3. The global-new comparison, with a STRICT inequality. Under the pre-#801 code the two
+ *      arms make the same number of global allocations, because the copy went to the heap in
+ *      both; strictly fewer is the statement the ablation reddens.
+ */
+void test_arena_ownership_copy_draws_from_the_seam() {
+    std::printf("a span-delivered terminus WRITE copies through the injected seam:\n");
+    const std::vector<std::byte> frame = arena_write();
+
+    static std::array<std::byte, 64 * 1024> slab{};
+    const std::span<const std::byte> slab_span{slab};
+    tr::mem::pool_t pool(slab, 2048);
+    arming_backend_t seam(pool);
+    std::size_t pool_allocs = 0;
+    {
+        node_t n;
+        fwd_router_t router(n.g, std::pmr::get_default_resource(), &tr::mem::heap_source(), &seam);
+        router.add_child("in", n.in);
+        g_allocs = 0;
+        g_bytes = 0;
+        g_arm = true;
+        router.on_frame("in", frame);  // the SPAN (arena) tier — no rope, no frame_view
+        g_arm = false;
+        pool_allocs = g_allocs;
+
+        check(seam.served_size(kOwnTlvBytes),
+              "instrument: the seam served the exact payload-TLV size — the arena tier's "
+              "ownership COPY, the one site it allocates at");
+        const auto stored = stored_filled(n.g, n.temp);
+        check(stored.has_value() && stored->first == kOwnPayloadBytes && stored->second == kOwnFill,
+              "and the write landed intact (a copy, not a short span)");
+        check(within(stored_segment_bytes(n.g, n.temp), slab_span),
+              "and the stored value's bytes live INSIDE the injected slab — provenance, not "
+              "just a call count");
+    }
+
+    std::size_t heap_allocs = 0;
+    {
+        node_t n;
+        fwd_router_t router(n.g);  // defaults: flat = heap_backend()
+        router.add_child("in", n.in);
+        g_allocs = 0;
+        g_bytes = 0;
+        g_arm = true;
+        router.on_frame("in", frame);
+        g_arm = false;
+        heap_allocs = g_allocs;
+        check(stored_filled(n.g, n.temp).has_value(),
+              "the un-injected default lands the same write");
+        check(!within(stored_segment_bytes(n.g, n.temp), slab_span),
+              "instrument: and its value is NOT in the slab — the provenance check "
+              "discriminates");
+    }
+    std::printf("    global new: %zu calls with the seam on a slab, %zu on the heap (%d served)\n",
+                pool_allocs, heap_allocs, seam.served());
+    check(pool_allocs < heap_allocs,
+          "and the arena tier's copy is STRICTLY fewer global allocations on the slab — the "
+          "pre-#801 arms were equal");
+
+    // The READ control: no payload to own ⇒ this tier asks the seam for nothing at all. It
+    // is what makes check 1 above a claim about `own_wire` and not about "some allocation".
+    seam.reset_counts();
+    {
+        node_t n;
+        fwd_router_t router(n.g, std::pmr::get_default_resource(), &tr::mem::heap_source(), &seam);
+        router.add_child("in", n.in);
+        (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x88888888u))));
+        router.on_frame("in", read_frame());
+        check(n.in.sent.size() == 1, "control: a span-delivered READ is answered");
+        check(seam.served() == 0,
+              "control: and asks the seam for NOTHING — the arena tier's only draw is the "
+              "ownership copy");
+    }
+}
+
+/**
+ * @brief The ABLATION, run as a test rather than described in prose: a refusing seam under a
+ *        span-delivered WRITE must change the outcome.
+ *
+ * This is the check that cannot survive the pre-#801 code in any form. With
+ * `arena_node::own_wire` on `view::over_bytes`'s global heap, an injected backend armed to
+ * refuse EVERYTHING is never consulted at all: `refusals()` is zero and the write lands
+ * exactly as if nothing had been injected. Every assertion below reddens on that revert —
+ * the instrument first, so the case reports itself vacuous rather than green.
+ *
+ * The contract on the answering side is the by-value one #789 built and #793 reused: the
+ * vertex keeps its PREVIOUS value and the reply is a drop or an addressed
+ * `kind=ERROR STATUS{BACKPRESSURE}` with an intact route. Never an abort (the refusal is a
+ * `nullopt`, not a `bad_alloc`), and never a short span read as a value — on this tier
+ * `spans_intact()` stays a constant `true` precisely because a borrowed arena span cannot be
+ * shortened by a refused allocation, so the empty view IS the whole channel.
+ */
+void test_arena_ownership_copy_refusal_is_answered() {
+    std::printf("a refused span-delivered ownership copy is answered by value:\n");
+    const std::vector<std::byte> frame = arena_write();
+    node_t n;
+    (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_filled(4, kPriorFill))));
+    arming_backend_t seam;
+    fwd_router_t router(n.g, std::pmr::get_default_resource(), &tr::mem::heap_source(), &seam);
+    router.add_child("in", n.in);
+
+    seam.arm();
+    router.on_frame("in", frame);
+    check(seam.refusals() > 0,
+          "instrument: the injected backend was ASKED and refused (zero on the pre-#801 code)");
+    check(!seam.served_size(kOwnTlvBytes), "and the ownership copy is the draw that was refused");
+    const auto stored = stored_filled(n.g, n.temp);
+    check(stored.has_value() && stored->second == kPriorFill,
+          "the vertex still holds its PREVIOUS value — a refused copy is not stored");
+    if (!n.in.sent.empty()) {
+        const reply_facts_t f = read_reply(n.in.sent[0]);
+        check(f.is_fwd_reply && f.kind_error && f.code == backpressure_code() && f.route_bytes > 0,
+              "and the answer is an addressed BACKPRESSURE with an intact route, never a RESULT");
+    } else {
+        check(true, "the answer is a drop — by value, never an abort");
+    }
+
+    // The positive control: the identical write lands once memory returns, so the outcome
+    // above was the exhaustion and not a frame that never reached the terminus.
+    seam.disarm();
+    n.in.sent.clear();
+    router.on_frame("in", frame);
+    const auto after = stored_filled(n.g, n.temp);
+    check(after.has_value() && after->first == kOwnPayloadBytes && after->second == kOwnFill,
+          "and the same write lands once memory returns");
+}
+
+/**
+ * @brief The #801 refusal SWEEP: move the exhaustion point across every draw the
+ *        span-delivered WRITE makes and require each outcome to be sound.
+ *
+ * Same stronger form the #793 WRITE sweep asserts, because a WRITE mutates: on top of "a
+ * drop or an addressed BACKPRESSURE, never a `kind=RESULT`", the vertex must hold either its
+ * previous value or the intended one — never a third thing derived from a refused draw.
+ *
+ * The arena tier draws less than the rope tier does (no frame flatten, no per-node
+ * materialize), so the sweep is short by construction — which is the point of asserting
+ * `total > 0` first. On the pre-#801 code that bound is ZERO and the loop body never runs.
+ */
+void test_arena_refusal_sweep() {
+    std::printf("moving the refusal across every draw of a span-delivered WRITE stays sound:\n");
+    const std::vector<std::byte> frame = arena_write();
+
+    int total = 0;
+    {
+        node_t n;
+        arming_backend_t seam;
+        fwd_router_t router(n.g, std::pmr::get_default_resource(), &tr::mem::heap_source(), &seam);
+        router.add_child("in", n.in);
+        router.on_frame("in", frame);
+        total = seam.served();
+    }
+    check(total > 0, "instrument: the un-refused span-delivered write DOES draw through the seam");
+
+    int drops = 0;
+    int addressed = 0;
+    bool sound = true;
+    for (int k = 0; k < total; ++k) {
+        node_t n;
+        arming_backend_t seam;
+        fwd_router_t router(n.g, std::pmr::get_default_resource(), &tr::mem::heap_source(), &seam);
+        router.add_child("in", n.in);
+        (void)n.g.write(n.temp,
+                        tr::view::rope_t(*tr::view::over_bytes(b_value_filled(4, kPriorFill))));
+        seam.refuse_after(k);
+        router.on_frame("in", frame);
+        if (seam.refusals() == 0) continue;
+
+        const auto stored = stored_filled(n.g, n.temp);
+        const bool value_ok = stored.has_value() &&
+                              (stored->second == kPriorFill ||
+                               (stored->second == kOwnFill && stored->first == kOwnPayloadBytes));
+        if (!value_ok) {
+            sound = false;
+            std::printf("    refusal after %d served: the vertex holds a THIRD value\n", k);
+        }
+        if (n.in.sent.empty()) {
+            ++drops;
+            continue;
+        }
+        const reply_facts_t f = read_reply(n.in.sent[0]);
+        const bool ok =
+            f.is_fwd_reply && f.kind_error && f.code == backpressure_code() && f.route_bytes > 0;
+        if (ok) {
+            ++addressed;
+        } else {
+            sound = false;
+            std::printf("    refusal after %d served: unsound answer (reply=%d error=%d code=%u)\n",
+                        k, static_cast<int>(f.is_fwd_reply), static_cast<int>(f.kind_error),
+                        static_cast<unsigned>(f.code));
+        }
+    }
+    std::printf("    %d refusal points: %d dropped, %d answered addressed BACKPRESSURE\n", total,
+                drops, addressed);
+    check(sound, "every refusal point answers soundly and stores nothing derived from it");
+    check(drops + addressed > 0, "instrument: the sweep actually hit refusals");
+}
+
 // --- the default path: byte-identical, no regression -------------------------------
 
 /**
@@ -914,7 +1171,7 @@ void test_default_backend_unchanged() {
 }  // namespace
 
 int main() {
-    std::printf("terminus rope-flatten backend seam (#766)\n\n");
+    std::printf("terminus flatten/ownership backend seam (#766, #793, #801)\n\n");
 
     test_terminus_read_draws_from_the_injected_seam();
     std::printf("\n");
@@ -929,6 +1186,12 @@ int main() {
     test_single_link_ownership_copy_refusal_is_answered();
     std::printf("\n");
     test_single_link_ownership_copy_sweep();
+    std::printf("\n");
+    test_arena_ownership_copy_draws_from_the_seam();
+    std::printf("\n");
+    test_arena_ownership_copy_refusal_is_answered();
+    std::printf("\n");
+    test_arena_refusal_sweep();
     std::printf("\n");
     test_default_backend_unchanged();
 

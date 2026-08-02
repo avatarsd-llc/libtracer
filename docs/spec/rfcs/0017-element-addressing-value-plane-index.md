@@ -227,7 +227,7 @@ already has the concept: `reliability` is bits 0–1 of the subscription's deliv
 - **A decoder that does not implement this fails safe, verifiably.** The reference decoder's
   level loop already begins each level with
   `if (cur->type() != type_t::NAME) return std::unexpected(status_t::INVALID_PATH);`
-  (`core/src/op_resolve_walk.hpp:266`), so a pre-RFC node handed a value-plane selector answers
+  (`core/src/op_resolve_walk.hpp:327`), so a pre-RFC node handed a value-plane selector answers
   **`INVALID_PATH`** — it cannot mistake it for a whole-value write, and it cannot silently
   ignore the index. That is the correct answer for a node that does not offer element
   addressing, and it needs no new code to produce it.

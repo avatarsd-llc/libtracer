@@ -44,6 +44,12 @@ namespace {
  * caches its own materialize, so the failure signal cannot live in a node: a refusal seen
  * while reading the `dst` PATH's third NAME must still be visible at the walk's decision
  * point. The flag is sticky by construction — nothing clears it inside a resolve.
+ *
+ * This stays rope-tier-local. The SPAN tier takes its backend as a `resolve_node` ARGUMENT
+ * instead (#801): it has no flag to carry (a borrowed arena span cannot be shortened by a
+ * refusal), and `arena_node` is copied by value on a hot walk, so it is kept two words wide.
+ * A `view_node` needs the pointer regardless, because `ensure_cache` is reached from
+ * `wire()`/`body()`, which take no arguments — and it is already a heavyweight node.
  */
 struct flatten_seam_t {
     mem::mem_backend_t* backend = nullptr; /**< @brief Injected byte backend; null ⇒ heap. */
@@ -94,8 +100,9 @@ class view_node {
      * so every value the walk derived from it downstream (the op discriminant, a lookup key,
      * a field name) is unsound. The walk checks this at its two decision points and answers
      * `BACKPRESSURE` — it never sends a reply built on a refused flatten. The span tier's
-     * `arena_node` borrows and never allocates, so it answers a constant `true` and the
-     * checks fold away.
+     * `arena_node` answers a constant `true` and the checks fold away: it draws from the
+     * same seam for its ownership copy (#801), but its SPANS are borrowed from the frame and
+     * a refusal cannot shorten one, so there is nothing here for it to condemn.
      */
     [[nodiscard]] bool spans_intact() const noexcept { return seam_ == nullptr || !seam_->refused; }
 
@@ -117,7 +124,7 @@ class view_node {
      * was the one that escaped the node's memory bound. A whole terminus WRITE whose payload
      * TLV lands inside one RX segment is exactly that case, and it is the common one.
      */
-    [[nodiscard]] view_t own_wire() const {
+    [[nodiscard]] view_t own_wire(mem::mem_backend_t& flat) const {
         const rope_t sub = v_->wire().subrope(0, wire_size());  // trailer excluded
         if (sub.link_count() > 1) {                             // one flatten, adopt (no 2nd copy)
             // Through the injected seam (#766): the ADR-0053 ⑤ ownership flatten of a
@@ -126,9 +133,9 @@ class view_node {
             // (`own_tlv` → the empty-value guards in `resolve_node`), so the refusal needs
             // no second channel here — but it is recorded so a LATER span read on the same
             // walk cannot be believed either.
-            view_t flat = sub.flatten(backend());
-            if (flat.empty()) note_refusal();
-            return flat;
+            view_t owned = sub.flatten(flat);
+            if (owned.empty()) note_refusal();
+            return owned;
         }
         // Single link: the ADR-0041 §2 ownership COPY, through the same seam (#793). A wire
         // TLV is never zero bytes, so `over_bytes` cannot answer its engaged-empty
@@ -136,7 +143,7 @@ class view_node {
         // the empty view the walk's empty-value guards already read as BACKPRESSURE. It is
         // recorded for the same reason the flatten branch records its own: a LATER span read
         // on this walk must not be believed either.
-        std::optional<view_t> owned = view::over_bytes(sub.only().bytes(), backend());
+        std::optional<view_t> owned = view::over_bytes(sub.only().bytes(), flat);
         if (!owned) {
             note_refusal();
             return view_t{};
@@ -213,6 +220,16 @@ class view_node {
         return children_cursor{v_->children(), seam_};
     }
 
+    /**
+     * @brief The walk's injected byte backend, or the global heap when none was injected —
+     *        public because `op_resolver_t::resolve` hands the SAME backend to `resolve_node`
+     *        as its `flat` argument (#801), so the two tiers' walks take one shape.
+     */
+    [[nodiscard]] mem::mem_backend_t& backend() const noexcept {
+        return (seam_ != nullptr && seam_->backend != nullptr) ? *seam_->backend
+                                                               : mem::heap_backend();
+    }
+
    private:
     /**
      * @brief A TLV header is type(1) + opt(1) + length(2, or 4 when opt.LL) — the width the
@@ -244,11 +261,6 @@ class view_node {
         return cache_.length >= header_size() + v_->body_size();
     }
 
-    /** @brief The walk's injected byte backend, or the global heap when none was injected. */
-    [[nodiscard]] mem::mem_backend_t& backend() const noexcept {
-        return (seam_ != nullptr && seam_->backend != nullptr) ? *seam_->backend
-                                                               : mem::heap_backend();
-    }
     /** @brief Mark this resolve's spans untrustworthy (sticky; see @ref spans_intact). */
     void note_refusal() const noexcept {
         if (seam_ != nullptr) seam_->refused = true;
@@ -273,7 +285,8 @@ result_t<rope_t> op_resolver_t::resolve(const wire::tlv_view_t& fwd, std::string
     // AND a refusal anywhere in the walk is visible at the walk's decision points. Its
     // lifetime covers the nodes', which never outlive `resolve_node`.
     flatten_seam_t seam{.backend = flat_, .refused = false};
-    return resolve_node(graph_, view_node{fwd, &seam}, inbound_link, frame_view);
+    view_node root{fwd, &seam};
+    return resolve_node(graph_, root, inbound_link, frame_view, root.backend());
 }
 
 }  // namespace tr::graph
