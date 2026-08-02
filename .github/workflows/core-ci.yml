@@ -40,7 +40,7 @@ jobs:
       - name: Configure + build (C++23) + ctest
         run: |
           cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo -DLIBTRACER_ACL_FULL=${{ matrix.acl_full }} -DLIBTRACER_LKV_SLOT=${{ matrix.lkv_slot }}
-          cmake --build core/build -j
+          cmake --build core/build -j "$(nproc)"
           ctest --test-dir core/build --output-on-failure
 
   # GCC-15 host gate: build the core + ctest with GCC 15 (the same major the
@@ -85,7 +85,7 @@ jobs:
           cmake -S core -B core/build-asan -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Debug \
             -DLIBTRACER_LKV_SLOT=${{ matrix.lkv_slot }} \
             -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -g"
-          cmake --build core/build-asan -j
+          cmake --build core/build-asan -j "$(nproc)"
           # ASLR can make ASan/TSan abort in this runner; pin it off.
           setarch "$(uname -m)" -R ctest --test-dir core/build-asan --output-on-failure
 
@@ -102,7 +102,7 @@ jobs:
           cmake -S core -B core/build-tsan -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Debug \
             -DLIBTRACER_LKV_SLOT=${{ matrix.lkv_slot }} \
             -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"
-          cmake --build core/build-tsan -j
+          cmake --build core/build-tsan -j "$(nproc)"
           setarch "$(uname -m)" -R ctest --test-dir core/build-tsan --output-on-failure
 
   # Regression guard for the CMake install/export (find_package packaging). Builds
