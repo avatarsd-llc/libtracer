@@ -1,0 +1,69 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# The doc-citation gate, on every change that can move a cited line.
+#
+# `tools/check_doc_citations.py` pins each `file:line` citation in the docs to a
+# substring the cited line must contain. It ran in ONE place — `docs.yml` — whose path
+# filter is a documentation filter: `docs/**`, `*.md`, `core/include/**`, `tools/**`.
+# `core/src/**` is not in it, and neither is `integrations/**`. Over half the anchors
+# point into exactly those two trees, so the commits most able to shift a citation were
+# the commits that ran no check at all (#803). This job closes that: its filter is the
+# UNION of every tree an anchor can name plus every tree a citation can live in.
+#
+# It is deliberately its own workflow rather than a step inside core-ci: the check needs
+# no build, no toolchain and ~0.3 s, and hanging it off a 3-way build matrix would make a
+# doc-only failure wait on compilation.
+name: doc-citations
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "**/*.md"
+      - "core/**"
+      - "bench/**"
+      - "tests/**"
+      - "integrations/**"
+      - "examples/**"
+      - "tools/check_doc_citations.py"
+      - "tools/tests/test_check_doc_citations.py"
+      - ".github/workflows/doc-citations.yml"
+  pull_request:
+    # Duplicated rather than a YAML anchor: GitHub Actions does not expand aliases.
+    paths:
+      - "docs/**"
+      - "**/*.md"
+      - "core/**"
+      - "bench/**"
+      - "tests/**"
+      - "integrations/**"
+      - "examples/**"
+      - "tools/check_doc_citations.py"
+      - "tools/tests/test_check_doc_citations.py"
+      - ".github/workflows/doc-citations.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: doc-citations-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The resolver reads three citation spellings (full path, basename shorthand,
+      # bare `:N` continuation) and must not guess; its unit tests run FIRST so a
+      # resolver bug reports as a resolver bug rather than as 300 phantom drifts.
+      - name: Resolver unit tests
+        run: python3 -m unittest discover -s tools/tests -p "test_check_doc_citations.py" -v
+      - name: Doc-citation gate (anchored file:line citations still resolve)
+        run: python3 tools/check_doc_citations.py
