@@ -169,6 +169,15 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::b
                                                               const tlv_t* config,
                                                               conn_role_t role) {
     const std::lock_guard ctl(ctl_m_);  // ADR-0063 §3 control-plane serialization
+    // ORDERING INVARIANT (#688 trace): this function is reached ONLY through the graph's
+    // child-type catalog, i.e. from `graph_t::create_child`, which runs THE segment
+    // predicate (`graph::valid_segment`, ADR-0073 §1) on the peer-supplied name BEFORE it
+    // composes the key or looks up a factory. That matters because `name` becomes the last
+    // segment of the router MOUNT below — an unaddressable name here would register a
+    // healthy-looking child that no conforming `dst` can reach. The check is NOT repeated
+    // here: one predicate, one call site per boundary, is what stops the tiers drifting
+    // (the drift is the defect, #681). `transport_vertex_test.cpp`'s
+    // `test_wire_name_reaches_add_child` pins the ordering against the production wiring.
     const std::string name = last_segment(child_key);
     if (name.empty()) return std::unexpected(status_t::INVALID_PATH);
 
