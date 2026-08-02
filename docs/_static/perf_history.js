@@ -18,6 +18,11 @@
 // sits at the nearest following recorded commit). Series colors are assigned
 // once per label page-wide (the generator embeds a global color index), so
 // "fan 8" is the same color on the latency and the throughput chart.
+//
+// Each block carries TWO payloads — the GitHub-hosted store and the bench-local
+// (fixed pinned host) store — and a global source selector switches every chart
+// between them in place, remembering the choice in localStorage. The two stores
+// answer different questions and are never drawn on one axis.
 // Vanilla JS + inline SVG only — self-contained, no CDN, theme-aware via CSS vars.
 (function () {
 
@@ -527,8 +532,14 @@
         } else {
           var rel = (suite.releases || []).filter(function (rr) { return rr.i === i; })
             .map(function (rr) { return ' <span class="rel">🏷 ' + (rr.approx ? "≈ " : "") + rr.label + "</span>"; }).join("");
+          // The HOST the point was measured on, when the store records one. Only the
+          // bench-local store does, and it is the whole reason that store is readable
+          // as an absolute trend: "same silicon every point" is a claim the reader must
+          // be able to check per point, not take on the chapter's word.
+          var host = suite.host || (suite.hosts && suite.hosts[i]) || "";
           head = "<div class='sha'><code>" + suite.shas[i] + "</code>" + rel + "</div>"
-            + (suite.msgs && suite.msgs[i] ? "<div class='msg'>" + suite.msgs[i] + "</div>" : "");
+            + (suite.msgs && suite.msgs[i] ? "<div class='msg'>" + suite.msgs[i] + "</div>" : "")
+            + (host ? "<div class='host'>" + host + "</div>" : "");
           rows = c.series.map(function (se, si) {
             var v = byIdx[si][i];
             return v === undefined ? "" : '<div><span class="dot" style="background:' + col(se.ci) + '"></span>'
@@ -556,14 +567,107 @@
     });
   }
 
+  // ---------------------------------------------------------------- source --
+  // The page charts two independent stores of the same benchmarks: the GitHub-hosted
+  // series (a portability envelope — runners vary ~2x, best of three per point) and the
+  // bench-local series (one pinned self-hosted CPU, the absolute-trend instrument). They
+  // answer different questions and are never mixed on one axis, so the page offers a
+  // SELECTOR, not an overlay. Both payloads are embedded by render_history.html_blocks,
+  // so switching is a re-render, not a fetch — the page stays self-contained.
+  var SRC_KEY = "ph-source";
+
+  /** @brief The stored source preference, defaulting to the hosted store.
+   *
+   * `hosted` is the default on purpose: it is what every existing reader and every
+   * existing deep link has been looking at, so a first visit must not silently change
+   * which numbers the page shows. localStorage may be unavailable (file:// in some
+   * browsers, privacy modes) — that degrades to the default, never to an exception.
+   */
+  function readSource() {
+    try { return localStorage.getItem(SRC_KEY) === "local" ? "local" : "hosted"; }
+    catch (e) { return "hosted"; }
+  }
+  function writeSource(src) {
+    try { localStorage.setItem(SRC_KEY, src); } catch (e) { /* preference is optional */ }
+  }
+
+  /** @brief Draw one chart block from the selected store, or say why it is empty.
+   *
+   * An absent family is reported in words rather than as a bare empty grid: the
+   * bench-local store started far later than the hosted one and does not carry every
+   * family (the memory probes, for one), and a chapter that simply went blank on switch
+   * would read as "the numbers vanished" instead of "this store has no such series".
+   */
+  function renderRoot(root, src) {
+    var host = root.querySelector(".ph-charts");
+    if (!host) return;
+    var D = src === "local" ? root._phLocal : root._phHosted;
+    host.innerHTML = "";
+    var note = root.querySelector(".ph-count");
+    if (!D || !D.charts || !D.charts.length) {
+      host.innerHTML = '<p class="ph-empty">No '
+        + (src === "local" ? "bench-local" : "GitHub-hosted")
+        + " series for this chapter yet — the store carries no chartable family here."
+        + " Switch source above to see the other store.</p>";
+      if (note) note.textContent = "0 family charts · 0 series";
+      return;
+    }
+    if (note) {
+      var nser = 0;
+      D.charts.forEach(function (c) {
+        (c.metrics || [{ series: c.series }]).forEach(function (v) { nser += v.series.length; });
+      });
+      note.textContent = D.charts.length + " family charts · " + nser + " series";
+    }
+    draw(D, host);
+  }
+
+  /** @brief Switch every chart block on the page to one store, and remember it.
+   *
+   * The selector is GLOBAL even though the markup repeats it per chapter: a page whose
+   * chapters could sit on different stores would put two incomparable instruments under
+   * one set of conclusions. Every block re-renders and every button row restates the
+   * same answer.
+   */
+  function setSource(src) {
+    writeSource(src);
+    document.querySelectorAll(".ph-hist.ph-sourced").forEach(function (root) {
+      root.querySelectorAll(".ph-srcbtn").forEach(function (b) {
+        b.classList.toggle("on", b.dataset.src === src);
+        b.setAttribute("aria-pressed", b.dataset.src === src ? "true" : "false");
+      });
+      renderRoot(root, src);
+    });
+  }
+
   function boot() {
     document.querySelectorAll(".ph-hist").forEach(function (root) {
       var el = root.querySelector("script.ph-data"), host = root.querySelector(".ph-charts");
       if (!el || !host) return;
       var D;
       try { D = JSON.parse(el.textContent); } catch (e) { return; }
-      draw(D, host);
+      // A block with no source selector (the comparison charts emit the same root shape)
+      // is drawn exactly as before — one payload, no switching.
+      if (!root.classList.contains("ph-sourced")) { draw(D, host); return; }
+      var lel = root.querySelector("script.ph-data-local"), L = null;
+      try { L = lel ? JSON.parse(lel.textContent) : null; } catch (e) { L = null; }
+      root._phHosted = D;
+      root._phLocal = L;
+      root.querySelectorAll(".ph-srcbtn").forEach(function (b) {
+        b.addEventListener("click", function () {
+          if (b.disabled) return;
+          setSource(b.dataset.src);
+        });
+      });
     });
+    var roots = document.querySelectorAll(".ph-hist.ph-sourced");
+    if (!roots.length) return;
+    var src = readSource();
+    // A remembered "local" is honoured only if the build actually embedded that store.
+    if (src === "local" && !Array.prototype.some.call(roots, function (r) { return !!r._phLocal; })) {
+      src = "hosted";
+    }
+    setSource(src);
   }
   // This script is inlined into the LAST chapter block, so every host div is
   // already parsed by the time it runs; the readyState guard covers the case
