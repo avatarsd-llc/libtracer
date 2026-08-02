@@ -33,6 +33,29 @@
  * The measurement is batch-amortized and self-calibrating for the same reason
  * `bench_forward_demux` is: a resolve is close enough to `clock_gettime` that per-op timing
  * measures the clock. The batch size is derived on THIS host and printed.
+ *
+ * @section ab_protocol How to A/B this bench (read before believing a delta)
+ *
+ * The `terminus-arena` leg resolves in ~230 ns at the small end, so a few nanoseconds of
+ * machine difference reads as a few percent of "regression". PR #806 was misled by exactly
+ * that and #807 chased it down; the conclusions, so nobody pays the round again:
+ *
+ *   - **Build path is NOT a confound.** The same commit built in two different worktrees
+ *     produces byte-identical objects, `libtracer.a` and executable. The "cross-worktree A/B
+ *     measures code layout" claim (#806's LATENCY section, #807's title) is REFUTED, and no
+ *     alignment flag ships for it: `-falign-functions=64` over the whole build reads
+ *     −1.50 % to +1.56 % against stock, sign varying — i.e. nothing.
+ *   - **CPU placement IS the confound, and it is worth ~50 %.** On a heterogeneous host the
+ *     same binary runs 47–54 % slower on a compact core than on a classic one, with tight
+ *     disjoint per-arm ranges that look exactly like a real, reproducible regression.
+ *   - Therefore: pin BOTH arms to the SAME single logical CPU, interleave the arms
+ *     round-robin, report medians AND ranges over ≥10 rounds, and drop the first execution
+ *     (a cold process's first point reads ~+37 % here).
+ *   - When the expected effect is below this leg's noise floor, do not use this bench at
+ *     all — use object-file `cmp` against the baseline tree.
+ *
+ * The full protocol and the measurements behind each rule are in `docs/methodology.md`,
+ * "The A/B protocol".
  */
 
 #include <array>
