@@ -384,9 +384,7 @@ optional TLS module. An absent transport must never be readable as a tie.
   makes the *same* quantity more accurately measured, the name is kept and the
   instrument marker carries the discontinuity.
 
-### The A/B protocol: what a two-arm comparison may and may not vary
-
-An A/B of a code change runs two binaries and attributes the difference to the change.
+**The A/B protocol — what a two-arm comparison may and may not vary.** An A/B of a code change runs two binaries and attributes the difference to the change.
 That attribution is only sound if **nothing else** differed. Two things that look
 harmless routinely do.
 
@@ -469,8 +467,7 @@ Compare a change against its own baseline **on the same machine in the same
 session** (`git stash`, rebuild, re-run) — never against a number from a different
 host or a different day, and never with one arm pinned differently from the other.
 The full two-arm protocol, and the measurements behind each of its rules, is above
-under [The A/B protocol](#the-ab-protocol-what-a-two-arm-comparison-may-and-may-not-vary).
-The single-CPU `taskset -c 2` in the commands above is part of the measurement, not
+under **The A/B protocol**, in *Reading the numbers*. The single-CPU `taskset -c 2` in the commands above is part of the measurement, not
 decoration: this host is heterogeneous and an unpinned arm can land on a core class
 50 % slower than its partner's.
 
