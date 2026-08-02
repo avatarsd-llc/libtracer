@@ -87,8 +87,13 @@ jobs:
       # Doc-citation gate: every anchored `file:line` citation in the docs must still
       # land on the line it names. Hand-maintained pointers rot silently — a stale
       # citation still RESOLVES, reads authoritative, and sends the reader somewhere
-      # else, so nothing fails without this check. Run it here rather than in core-ci
-      # because it gates documentation, and it needs no build.
+      # else, so nothing fails without this check.
+      #
+      # The AUTHORITATIVE run is `doc-citations.yml`, whose path filter covers every tree
+      # an anchor can name — `core/src/**` and `integrations/**` are absent from THIS
+      # workflow's filter, so for most of the anchors this step never fires (#803). It is
+      # kept because it costs ~0.3 s inside a job that already runs for minutes, and it
+      # fails the docs build itself rather than only a sibling check.
       - name: Doc-citation gate (anchored file:line citations still resolve)
         run: python3 tools/check_doc_citations.py
       # Auto-generate the Performance & Conformance page from the LIVE harnesses

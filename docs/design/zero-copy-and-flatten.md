@@ -115,11 +115,11 @@ core/src/graph.cpp:1026   wire::decode_into(head.bytes(), src);
 **Cost A, the flatten (`:1010`)** is zero-copy for a single-link rope — `materialize` returns
 `links()[0]`, a refcount bump (`core/include/libtracer/rope.hpp:148`) — and memcpys only a
 multi-link rope, drawing from the injected `value_backend_`. An exhausted pool yields an empty
-head, which `:1009` surfaces as `BACKPRESSURE` rather than letting the decoder read it back as a
+head, which `graph.cpp:1009` surfaces as `BACKPRESSURE` rather than letting the decoder read it back as a
 malformed value. Because ingress values are single-link until the rope-native branch decode lands,
 Cost A does not fire on single-link traffic. It is a fallback.
 
-**Cost B, the arena (`:1021`)** is the `std::array<std::byte, 4096>` backing `decode_into`'s node
+**Cost B, the arena (`graph.cpp:1021`)** is the `std::array<std::byte, 4096>` backing `decode_into`'s node
 array (`std::pmr::vector<arena_tlv_t>`) plus the grammar walk stack and the open-node stack. It is
 structure-only scratch, allocated on every branch write regardless of link count, on the deepest
 thread — the httpd/WS receive task.
