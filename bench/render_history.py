@@ -327,10 +327,12 @@ FAMILIES: list[dict] = [
 # release-tag resolution (directive: mark releases on graph history)
 # ---------------------------------------------------------------------------
 def _release_tags() -> list[tuple[str, str]]:
-    """@brief All ``v*`` tags as (name, peeled commit sha); [] when git/tags absent."""
+    """@brief All ``v*`` tags as (name, peeled commit sha), version-sorted oldest first
+    (so the newest release is always last — lexicographic name order would misplace
+    ``v0.10.0`` before ``v0.2.0``); [] when git/tags absent."""
     try:
         p = subprocess.run(
-            ["git", "for-each-ref", "refs/tags/v*",
+            ["git", "for-each-ref", "refs/tags/v*", "--sort=version:refname",
              "--format=%(refname:short) %(objectname) %(*objectname)"],
             capture_output=True, text=True, cwd=REPO, timeout=30)
     except (OSError, subprocess.TimeoutExpired):
@@ -478,9 +480,10 @@ def release_annotations(entries: list[dict]) -> list[dict]:
     stacks its whole release history on entry 0 — the bench-local store opened after
     v0.7.0 and drew five overprinted '≈' labels on its first commit, which is unreadable
     and reads as five events. Where several land together the NEWEST wins (tags come out
-    of `_release_tags` in name order, so that is the last one), and an exact hit always
-    beats an approximate one: the older releases at that index are strictly implied by
-    it, and neither was measured on that point anyway.
+    of `_release_tags` in version order, oldest first, so the newest is the last one
+    to land on an index), and an exact hit always beats an approximate one: the older
+    releases at that index are strictly implied by it, and neither was measured on
+    that point anyway.
     """
     shas = [e.get("commit", {}).get("id", "") for e in entries]
     at: dict[int, dict] = {}

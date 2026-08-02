@@ -587,6 +587,12 @@
     try { return localStorage.getItem(SRC_KEY) === "local" ? "local" : "hosted"; }
     catch (e) { return "hosted"; }
   }
+  /** @brief Persist the source preference; silently a no-op where storage is denied.
+   *
+   * The mirror of `readSource`: localStorage may be unavailable (file:// in some
+   * browsers, privacy modes), and a preference is optional by nature — failing to
+   * remember it must never break the switch itself.
+   */
   function writeSource(src) {
     try { localStorage.setItem(SRC_KEY, src); } catch (e) { /* preference is optional */ }
   }
