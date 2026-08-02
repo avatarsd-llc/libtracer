@@ -5,7 +5,7 @@
 
 A long-lived ``[Unreleased]`` accumulates one ``### Category`` heading per landing
 PR, so the section ends up with the categories interleaved — `core/CHANGELOG.md`
-carries eighteen of them against six distinct names. Consolidating that by hand at
+carries eighteen of them against three distinct names. Consolidating that by hand at
 tag time is the error-prone half of `.github/RELEASING.md`; this does it.
 
 What it does, and *only* this:
@@ -42,8 +42,8 @@ import sys
 # The Keep-a-Changelog 1.1.0 category sequence. Anything else is kept, after these.
 CATEGORY_ORDER = ["Added", "Changed", "Deprecated", "Removed", "Fixed", "Security"]
 
-SECTION_RE = re.compile(r"^##\s+(?!#)")
-SUBSECTION_RE = re.compile(r"^###\s+(?!#)(?P<name>.+?)\s*$")
+SECTION_RE = re.compile(r"^##\s+")
+SUBSECTION_RE = re.compile(r"^###\s+(?P<name>.+?)\s*$")
 FENCE_RE = re.compile(r"^\s*(```|~~~)")
 UNRELEASED_RE = re.compile(r"^##\s+\[?Unreleased\]?", re.IGNORECASE)
 

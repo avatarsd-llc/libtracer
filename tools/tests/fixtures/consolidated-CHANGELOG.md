@@ -1,9 +1,10 @@
 # Changelog — fixture (release-mechanics test input)
 
 A miniature of `core/CHANGELOG.md` at tag time: an `[Unreleased]` section whose
-`###` headings are interleaved one-per-landing-PR, plus the two traps the real
-file contains — a fenced code block holding a line that *looks* like a `###`
-heading, and an em-dash-bearing released heading below.
+`###` headings are interleaved one-per-landing-PR, plus two traps the parser
+must survive even though today's real file happens to contain neither — a fenced
+code block holding a line that *looks* like a `###` heading, and an
+em-dash-bearing released heading below.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 

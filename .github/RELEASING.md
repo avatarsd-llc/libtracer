@@ -108,7 +108,7 @@ git tag over `VERSION`).
 1. **Changelog-cut PR (+ recommended version reconcile) — the LAST pre-tag
    commit.** Consolidation is done *at tag time*, never speculatively: a
    long-lived `[Unreleased]` accumulates one `### Category` heading per landing PR
-   (18 against 6 distinct names, at the time of writing), and merging them early
+   (18 against 3 distinct names, at the time of writing), and merging them early
    only creates conflicts for every PR still in flight. Do it mechanically:
    ```sh
    python3 tools/consolidate_changelog.py \
