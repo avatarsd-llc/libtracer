@@ -219,11 +219,21 @@ Details that make these trustworthy:
   spread is reported as the run's drift figure** — the baseline binary cannot be moved
   by the change under test, so its spread is the invariant control leg. It does not
   gate; it tells a reader whether the run was worth believing.
-- The same gate additionally checks **three memory probes** — per-vertex live bytes,
-  the increment one LKV write adds, and a leaf carrying a five-field app-field table.
-  These come from the counting allocator (`bench_forward_heap`), so they are exact
-  rather than sampled: they need no repetition at all and ratchet tightly at **+2%**,
-  with the baseline binary's bytes probed same-runner via `--baseline-bench-fwd`.
+- The same gate additionally checks **five memory probes** (`perf_gate.py`'s
+  `MEM_POINTS`, named here in full because this page is hand-written and a bare count
+  rots): `vertex` — a default leaf at rest; `vertex_value` — the increment one LKV write
+  adds; `vertex_app5` — a leaf carrying a *copied* five-field app-field table;
+  `vertex_app5_static` — the *borrowed* twin of that table (ADR-0058); and `reg_escape` —
+  the global-heap blocks a runtime registration takes that the graph's injected
+  `memory_resource` never sees (ADR-0039 / RFC-0014), whose target is zero. Each ratchets
+  on two quantities: **live bytes** per vertex, tolerant at **+2%** because it is
+  host-allocator-dependent, and the **number of heap blocks**, which is host-independent
+  and therefore ratchets *exactly* — one extra block is a regression, full stop. All come
+  from the counting allocator (`bench_forward_heap`), so they are exact rather than
+  sampled and need no repetition at all, with the baseline binary probed same-runner via
+  `--baseline-bench-fwd`. Supplying that binary for one arm and not the other **fails**
+  the gate as a wiring error; supplying it for neither prints an explicit `SKIP` — a
+  probe that cannot run never passes silently.
 - The gate's decision rules have their **own unit tests**
   ([`bench/test_perf_gate.py`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/test_perf_gate.py)),
   run in the same CI job before anything is timed, pinning both directions: the recorded
