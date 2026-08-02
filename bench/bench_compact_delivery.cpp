@@ -96,21 +96,23 @@ void* counted(std::size_t n) {
 }
 
 /**
- * @brief The OVER-ALIGNED counted allocation — `aligned_alloc`, whose result `free` accepts.
+ * @brief The aligned counted allocation (#801) — `aligned_alloc` for a genuinely OVER-aligned
+ *        request, whose result `free` accepts; `malloc` for a fundamental one.
  *
  * Forwarding an over-aligned request to plain `malloc` (what this file did until #801) hands
  * back memory aligned only to `max_align_t`, so a `std::pmr` control block asking for 32-byte
  * alignment is under-aligned — real UB, latent only because nothing on today's measured path
- * asks for more. `aligned_alloc` requires a size that is a multiple of the alignment, so it is
- * rounded up; the COUNTED byte figure stays the requested @p n, so this bench's `bytes=`
- * column is unmoved (it counts requests, never `malloc_usable_size`).
+ * asks for more. The `>` test is the same one `bench_forward_heap` documents at length: a
+ * fundamental-alignment request is already correct on `malloc`, and keeping it there is what
+ * leaves the published live-bytes figures where they are.
  */
 void* counted_aligned(std::size_t n, std::size_t align) {
+    if (align <= alignof(std::max_align_t)) return counted(n);  // malloc already suits it
     if (g_arm) {
         ++g_allocs;
         g_bytes += n;
     }
-    if (align < alignof(std::max_align_t)) align = alignof(std::max_align_t);
+    // aligned_alloc requires a size that is a multiple of the alignment.
     const std::size_t rounded = ((n == 0 ? 1 : n) + align - 1) / align * align;
     return std::aligned_alloc(align, rounded);
 }

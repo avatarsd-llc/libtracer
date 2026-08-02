@@ -90,19 +90,27 @@ void* counted(std::size_t n) {
 }
 
 /**
- * @brief The over-aligned counted allocation — `aligned_alloc`, whose result `free` accepts.
+ * @brief The aligned counted allocation — `aligned_alloc` for a genuinely OVER-aligned request,
+ *        whose result `free` accepts; `malloc` for a fundamental one.
  *
  * Forwarding an over-aligned request to plain `malloc` would hand back memory aligned only to
- * `max_align_t`; a `std::pmr` control block asking for 16- or 32-byte alignment would then be
+ * `max_align_t`; a `std::pmr` control block asking for 32-byte alignment would then be
  * under-aligned. The size is rounded up to a multiple of the alignment, which `aligned_alloc`
  * requires.
+ *
+ * The test is `> alignof(std::max_align_t)`: `malloc` is specified to suit any FUNDAMENTAL
+ * alignment, so that case is already correct on it and the over-aligned case is the whole bug.
+ * This file is the reference replacement set the two benches copy (#793, #801), and the benches
+ * additionally need the fundamental case to stay on `malloc` — `malloc_usable_size` of an
+ * `aligned_alloc` block rounds up, which would move their published live-bytes figures without
+ * anything in the library having changed. One shape, correct in all three.
  */
 void* counted_aligned(std::size_t n, std::size_t align) {
+    if (align <= alignof(std::max_align_t)) return counted(n);  // malloc already suits it
     if (g_arm) {
         ++g_allocs;
         g_bytes += n;
     }
-    if (align < alignof(std::max_align_t)) align = alignof(std::max_align_t);
     const std::size_t rounded = ((n == 0 ? 1 : n) + align - 1) / align * align;
     return std::aligned_alloc(align, rounded);
 }

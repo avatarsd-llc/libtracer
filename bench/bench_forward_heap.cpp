@@ -80,30 +80,34 @@ void* counted_alloc(std::size_t size) {
     return p;
 }
 /**
- * @brief The OVER-ALIGNED counted allocation — `aligned_alloc`, whose result `free` accepts.
+ * @brief The aligned counted allocation (#801) — `aligned_alloc` for a genuinely OVER-aligned
+ *        request, whose result `free` accepts; `malloc` for a fundamental one.
  *
  * Forwarding an over-aligned request to plain `malloc` (what this file did until #801) hands
  * back memory aligned only to `max_align_t`, so a `std::pmr` control block asking for 32-byte
  * alignment is under-aligned — real UB, latent only because nothing on today's measured path
- * asks for more. `aligned_alloc` requires the size to be a multiple of the alignment, so it is
- * rounded up; the COUNTED byte figure stays the requested @p size, so `bytes=` is unmoved.
+ * asks for more.
  *
- * Copied verbatim in shape from `core/tests/terminus_flatten_backend_test.cpp`, which is the
- * repo's reference replacement set. The live-bytes figures DO move, and that is expected and
- * measured, not a surprise: `malloc_usable_size` of an `aligned_alloc` block rounds up to the
- * alignment, and libtracer's heap backend allocates every segment through
- * `operator new(size, align_val_t{alignof(max_align_t)}, nothrow)` (mem_heap.hpp). #793
- * measured the shift and deferred it rather than move a published number as a side effect;
- * #801 is where it is moved deliberately. Allocation COUNTS and requested-byte totals are
- * unchanged.
+ * The alignment TEST is `> alignof(std::max_align_t)`, not `>=`, and that is the whole
+ * correctness question. `malloc` is specified to return storage suitably aligned for any
+ * object with FUNDAMENTAL alignment, so forwarding a fundamental-alignment request to it is
+ * correct C — the bug was forwarding an OVER-aligned one, which is what this arm now catches.
+ * Keeping the fundamental case on `malloc` also keeps every published figure where it was:
+ * libtracer's heap backend asks for exactly `alignof(std::max_align_t)` (mem_heap.hpp), and
+ * `malloc_usable_size` of an `aligned_alloc` block rounds up to the alignment, so routing it
+ * would move the gh-pages-tracked `vertex_value` live-bytes trend 104 -> 120 B — measured, and
+ * caught by the perf gate's RAM ratchet as a 15.4 % pullback. That number is a property of the
+ * measuring instrument, not of the library, so moving it would report a regression that did not
+ * happen.
  */
 void* counted_aligned_alloc(std::size_t size, std::size_t align) {
+    if (align <= alignof(std::max_align_t)) return counted_alloc(size);  // malloc already suits
     const bool armed = probe::g_armed.load(std::memory_order_relaxed);
     if (armed) {
         probe::g_allocs.fetch_add(1, std::memory_order_relaxed);
         probe::g_bytes.fetch_add(size, std::memory_order_relaxed);
     }
-    if (align < alignof(std::max_align_t)) align = alignof(std::max_align_t);
+    // aligned_alloc requires a size that is a multiple of the alignment.
     const std::size_t rounded = ((size == 0 ? 1 : size) + align - 1) / align * align;
     void* p = std::aligned_alloc(align, rounded);
 #ifdef BENCH_HAS_USABLE_SIZE
@@ -157,8 +161,8 @@ void* operator new[](std::size_t size, std::align_val_t align, const std::nothro
 // is then handed a pointer this file allocated: ASan reports `alloc-dealloc-mismatch` the
 // first time such a job runs this bench. The sized+aligned `operator delete` is the one
 // libstdc++'s `std::pmr::memory_resource::deallocate` walks into on every pmr control block.
-// Set completed from `core/tests/terminus_flatten_backend_test.cpp` — including, since #801,
-// its over-aligned `operator new` (see counted_aligned_alloc above for what that moves).
+// Set completed from `core/tests/terminus_flatten_backend_test.cpp`, whose over-aligned
+// `operator new` arm this file now shares as well (#801) — see counted_aligned_alloc above.
 void operator delete(void* p) noexcept { counted_free(p); }
 void operator delete[](void* p) noexcept { counted_free(p); }
 void operator delete(void* p, std::size_t) noexcept { counted_free(p); }
