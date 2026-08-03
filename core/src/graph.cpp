@@ -2137,10 +2137,24 @@ result_t<rope_t> graph_t::read_subtree_folded(vertex_handle_t vh, std::string_vi
     for (const snap_node_t& n : nodes) {
         const bool ll = n.body_len > 0xFFFFu;  // mirror emit_tlv's auto-widen exactly
         // The POINT header as one exactly-sized OWNED segment, emitted by cursor straight
-        // into heap_alloc'd bytes (the op_resolve_walk assemble pattern) — no throwing
+        // into the segment's bytes (the op_resolve_walk assemble pattern) — no throwing
         // std::vector<std::byte> transient sits on the reply path. Byte-identical to the
         // retired wire::emit_header(type, {.pl, .ll}, body_len).
-        view::segment_ptr_t hseg = view::heap_alloc(hdr_len(n.body_len));
+        //
+        // The bytes come from the ADR-0060 value_backend_, not view::heap_alloc's global
+        // heap (#831): this is PAYLOAD framing — its length field wraps the stored TLV
+        // and the name record below it — so it belongs to the same byte class the seam's
+        // other two sites (the write-path decomposition and field-write flattens, 1106
+        // and 1343) already serve, under the identical alloc-or-nullptr → BACKPRESSURE
+        // contract. It is NOT the ADR-0074 egress seam, which is scoped to reply-egress
+        // construction sized against ROUTE bytes. The count is PEER-influenced (a peer
+        // picks the composed root and thus how many subtree nodes fold), so an
+        // ADR-0067-class node with every backend at one slab would otherwise still leak
+        // this framing to malloc. The segments escape inside the returned reply rope and
+        // are freed on whichever thread drops the last reference — exactly the
+        // cross-thread self-routed reclaim ADR-0060 §2 already requires of this backend.
+        // Default is &mem::heap_backend(), so a shipped shape allocates byte-identically.
+        view::segment_ptr_t hseg = view::segment_alloc(*value_backend_, hdr_len(n.body_len));
         if (!hseg) return std::unexpected(status_t::BACKPRESSURE);
         std::byte* p = hseg->bytes.data();
         *p++ = static_cast<std::byte>(std::to_underlying(type_t::POINT));

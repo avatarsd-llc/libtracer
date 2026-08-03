@@ -166,6 +166,25 @@ without it.
 
 ### Fixed
 
+- **The composed-root folded READ's POINT headers no longer come from the global heap** (#831).
+  `graph_t::read_subtree_folded`'s pass-3 emit frames one exactly-sized OWNED POINT header per
+  included subtree node; each was built by `view::heap_alloc`, hard-wired to
+  `mem::heap_backend()`, so an
+  [ADR-0067](../docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md)-class node with
+  `mr`, `ctl`, `value_backend`, `flat`, `egress` and its transport backend all pointed at one slab
+  still leaked this framing to `malloc` — at a count a **peer** chooses (it picks which composed
+  root to READ, and thus how many nodes fold). They now draw from the graph's existing injected
+  `value_backend` ([ADR-0060](../docs/adr/0060-lkv-copy-store-injected-value-backend.md)): these
+  are *payload* framing bytes — each header's length field wraps that node's stored TLV and the
+  name record below it — as distinct from the route-byte-sized reply-egress seam of
+  [ADR-0074](../docs/adr/0074-terminus-reply-egress-is-its-own-injected-backend.md), and the seam
+  already carries the required cross-thread self-routed reclaim (§2), which these segments need
+  because they escape inside the reply rope. **No signature change and no new injection** — one
+  existing seam widened in scope, so no deployment gains a constructor parameter; an injector
+  sizing a bounded slab now budgets these 4/6-byte headers too. Exhaustion is unchanged and still
+  answered by value (`BACKPRESSURE`, never a throw), and the default `&mem::heap_backend()` makes
+  the shipped shape allocate byte-identically. Gated by `core/tests/folded_read_backend_test.cpp`.
+
 - **A reconnect landing *inside* an in-flight `ADVERTISE` no longer binds a stale forwarding
   swap** (#827). `route_handle_t::clear_link(L)`'s cross-link sweep (#716) can only erase
   bindings that already exist. An `on_advertise` running on another link's receive thread
@@ -195,7 +214,8 @@ without it.
   `view::heap_alloc`, hard-wired to `mem::heap_backend()`, on *every* reply. It was the last
   *reply-egress* byte source an [ADR-0067](../docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md)-class
   bounded node could not bound (peer-drivable, and reachable pre-authorization); the
-  composed-root folded READ's POINT-header framing is a separate value-seam residual (#831). Both sites now
+  composed-root folded READ's POINT-header framing was a separate value-seam residual (#831), since closed
+  on `graph_t`'s `value_backend`. Both sites now
   draw from a **new, dedicated** `mem::mem_backend_t* egress` injection, deliberately kept
   separate from `flat` (the *flatten* seam, sized against payload bytes) so a slab sized for
   flattens is not silently re-scoped by egress heads sized against route bytes

@@ -401,6 +401,13 @@ target_link_libraries(graph_value_backend_test PRIVATE libtracer)
 libtracer_test_warnings(graph_value_backend_test)
 add_test(NAME graph_value_backend COMMAND graph_value_backend_test)
 
+# #831 — the composed-root folded READ's per-node POINT headers draw from the ADR-0060 value
+# seam, not view::heap_alloc's global heap; exhaustion answered by value.
+add_executable(folded_read_backend_test folded_read_backend_test.cpp)
+target_link_libraries(folded_read_backend_test PRIVATE libtracer)
+libtracer_test_warnings(folded_read_backend_test)
+add_test(NAME folded_read_backend COMMAND folded_read_backend_test)
+
 # #477 — the store/delivery path's nothrow soft-fail discipline: OOM injected through
 # tr::detail::probe_fail_hook (store => BACKPRESSURE, delivery => drop/defer, never abort).
 add_executable(graph_oom_softfail_test graph_oom_softfail_test.cpp)
