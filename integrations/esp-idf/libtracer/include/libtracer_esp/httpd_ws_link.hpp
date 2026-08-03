@@ -133,8 +133,16 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     httpd_ws_link_t(httpd_handle_t external, const char* uri, std::size_t max_peers = 0,
                     bool peer_named = false);
 
-    /** @brief Stop the owned httpd instance (or unregister the adopted WS URI) and release
-     *         all peer slots. */
+    /**
+     * @brief Stop the owned httpd instance (or unregister the adopted WS URI) and release
+     *        all peer slots.
+     *
+     * Adopted mode does more, because the server outlives this link: the destructor also
+     * retires every session's close callback before any member dies (@ref
+     * detach_sessions) and drains the in-flight TX slots. It may block for that — bounded,
+     * teardown-only — and both expiries leak rather than free, so a wedged server task
+     * costs memory, never a use-after-free.
+     */
     ~httpd_ws_link_t() override;
 
     httpd_ws_link_t(const httpd_ws_link_t&) = delete;
@@ -178,9 +186,10 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     [[nodiscard]] std::uint16_t local_port() const noexcept { return port_; }
 
    private:
-    struct session_t;  // one peer slot's connection state (defined in the .cpp)
-    struct tx_work_t;  // one queued outbound frame (defined in the .cpp)
-    struct tx_slot_t;  // one pre-allocated TX work slot (defined in the .cpp)
+    struct session_t;     // one peer slot's connection state (defined in the .cpp)
+    struct tx_work_t;     // one queued outbound frame (defined in the .cpp)
+    struct tx_slot_t;     // one pre-allocated TX work slot (defined in the .cpp)
+    struct detach_req_t;  // the teardown session-detach work item (defined in the .cpp)
 
     /**
      * @brief The directed per-peer sending endpoint @ref peer_link hands out:
@@ -205,6 +214,7 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     static esp_err_t ws_handler(httpd_req_t* req);  // the WS URI handler (handshake + frames)
     static void on_session_closed(void* slot_ctx);  // free_ctx_fn: a peer departed
     static void tx_work(void* work_arg);            // httpd_queue_work fn: one queued send
+    static void detach_work(void* req_arg);         // httpd_queue_work fn: teardown detach
 
     // --- instance handlers (run on the httpd task) ---
     esp_err_t on_handshake(httpd_req_t* req);   // admit or refuse a new peer
@@ -235,14 +245,58 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      */
     void note_tx_result(int fd, bool queued, std::size_t bytes);
 
+    /**
+     * @brief Adopted-mode teardown step 1: make it IMPOSSIBLE for the adopted server
+     *        to call back into this link after the destructor returns.
+     *
+     * Every admitted session carries `httpd_sess_set_ctx(handle, fd, slot,
+     * on_session_closed)`, so an external server that outlives us would run that
+     * `free_ctx` into freed memory on the peer's next disconnect (or at its own
+     * `httpd_stop`). This clears each session's ctx AND free_ctx *from the server's own
+     * task* — the only context in which the session table may be touched — via
+     * @ref detach_work, then closes the sessions (harmless once detached). Returns only
+     * once that work has run; if it cannot run (the dtor IS the server task) it runs
+     * inline, and if it never runs within the teardown bound the sessions are
+     * neutralised instead (@ref abandon_sessions). Owning mode needs none of this:
+     * `httpd_stop` closes every session synchronously, before any member dies.
+     */
+    void detach_sessions();
+
+    /**
+     * @brief Adopted-mode teardown fallback: neutralise, never free, the sessions the
+     *        adopted server still holds a `free_ctx` pointer into.
+     *
+     * Reached only when @ref detach_sessions could not get its work onto the server
+     * task (queue refused, allocation refused, or the bound expired with the task
+     * wedged). Each still-open slot has its `owner` cleared — which is exactly the
+     * condition @ref on_session_closed already tests — and is then LEAKED, so the late
+     * callback lands on valid, inert memory instead of a freed slot. Bounded
+     * (one shell per live peer), teardown-only, and loudly logged: the #815 precedent
+     * that a drain expiry must leak rather than free under a live callback.
+     */
+    void abandon_sessions();
+
     httpd_handle_t handle_ = nullptr;  // nullptr => the instance never started
     std::uint16_t port_;
     std::size_t max_peers_;
     bool peer_named_;
     bool owns_httpd_ = true;  // false when adopting an external server (dtor must not httpd_stop)
     /** @brief Set at destructor entry: suppresses the departure notifier for session
-     *         closes the teardown itself provokes (see reclaim_slot). */
+     *         closes the teardown itself provokes (see reclaim_slot), refuses new TX
+     *         slot claims so the pool drain converges, and refuses to ARM a new session
+     *         (a frame racing the URI unregister) so the detach snapshot is complete. */
     std::atomic<bool> stopping_{false};
+    /**
+     * @brief The `esp_http_server` task, latched the first time this link runs on it.
+     *
+     * `TaskHandle_t` as an opaque `void*` so the public header names no FreeRTOS type.
+     * The teardown detach compares it against the current task: a destructor running ON
+     * the adopting server's task can never see queued work drain (the work runs on the
+     * task that would be sleeping in the dtor — the #814 deadlock), so it must do the
+     * detach inline instead. Latched in the URI handler, which is the only way a session
+     * — and therefore anything to detach — can exist at all.
+     */
+    std::atomic<void*> server_task_{nullptr};
     std::string uri_;  // the WS URI registered (unregistered by the adopting dtor)
     /** @brief Guards the slot vector and each slot's name/fd/open — the cross-thread
      *         reads (enumerate_peers / peer_link / a send's fd snapshot) against the

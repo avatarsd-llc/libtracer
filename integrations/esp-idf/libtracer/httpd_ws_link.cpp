@@ -26,12 +26,36 @@
 #include <vector>
 
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 namespace tr::net {
 
 namespace {
 
 constexpr const char* kTag = "httpd_ws";
+
+/**
+ * @brief The adopted-mode teardown drain: turns of @ref kDrainSliceMs each.
+ *
+ * The ONE bound the destructor spends waiting on the adopted server's task — first for
+ * the session detach, then for the in-flight TX slots (#815 established this pair of
+ * numbers; naming them keeps the two drains on one bound rather than inventing a
+ * second). Nothing depends on it for CORRECTNESS: both expiries are memory-safe by
+ * construction (leak the sessions / leak the pool) and are logged, so the bound only
+ * trades how long a teardown blocks against how often that leak is taken. An adopted
+ * server we do not own exposes no timeout of its own to derive it from — the send/recv
+ * wait it was configured with belongs to the caller's `httpd_config_t`, not to us.
+ */
+constexpr int kDrainTurns = 200;
+
+/** @brief One drain turn, milliseconds — see @ref kDrainTurns. */
+constexpr int kDrainSliceMs = 5;
+
+/** @brief The calling task's identity, as the opaque token `server_task_` latches. */
+[[nodiscard]] void* current_task() noexcept {
+    return static_cast<void*>(xTaskGetCurrentTaskHandle());
+}
 
 /**
  * @brief httpd task stack, in bytes.
@@ -175,16 +199,26 @@ struct asm_buf_t {
  * life. Threading: `fd`/`open`/`name` are read cross-thread (peer_link /
  * enumerate_peers / a send's fd snapshot) and written by the httpd task
  * (accept/close) — all under `peers_m_`. `asm_buf` is touched only on the httpd
- * task (RX reassembly). `owner`/`endpoint` are set once at creation.
+ * task (RX reassembly). `endpoint` is set once at creation, and so is `owner` — except
+ * for the one teardown path that clears it to retire an un-interceptable close callback
+ * (@ref abandon_sessions), which is why it is atomic.
  */
 struct httpd_ws_link_t::session_t {
-    httpd_ws_link_t* owner = nullptr; /**< @brief Owning link (set once, for reclaim). */
-    int fd = -1;                      /**< @brief Peer socket; -1 => free slot. */
-    bool open = false;                /**< @brief True between handshake and close. */
-    std::string name;                 /**< @brief `<ip>:<port>` of the peer. */
-    asm_buf_t asm_buf;                /**< @brief RFC 6455 fragment reassembly (nothrow). */
-    std::uint8_t tx_drops = 0;        /**< @brief Consecutive TX-enqueue drops (peers_m_). */
-    peer_endpoint_t endpoint;         /**< @brief The directed facade `peer_link` returns. */
+    /**
+     * @brief Owning link — set once at creation, and cleared exactly once by
+     *        @ref abandon_sessions when a teardown has to leave this slot behind for a
+     *        callback it could not intercept.
+     *
+     * Atomic because that clear is the one cross-task write: the reader is
+     * @ref on_session_closed on the httpd task, and a null owner is its "inert" case.
+     */
+    std::atomic<httpd_ws_link_t*> owner{nullptr};
+    int fd = -1;               /**< @brief Peer socket; -1 => free slot. */
+    bool open = false;         /**< @brief True between handshake and close. */
+    std::string name;          /**< @brief `<ip>:<port>` of the peer. */
+    asm_buf_t asm_buf;         /**< @brief RFC 6455 fragment reassembly (nothrow). */
+    std::uint8_t tx_drops = 0; /**< @brief Consecutive TX-enqueue drops (peers_m_). */
+    peer_endpoint_t endpoint;  /**< @brief The directed facade `peer_link` returns. */
 };
 
 /**
@@ -220,6 +254,25 @@ struct httpd_ws_link_t::tx_slot_t {
     std::atomic<bool> busy{false};        /**< @brief Claimed flag (acquire/release). */
     tx_work_t work;                       /**< @brief The slot's embedded work item. */
     std::byte inline_buf[kTxInlineBytes]; /**< @brief Inline payload storage. */
+};
+
+/**
+ * @brief The teardown session-detach work item — everything @ref detach_work needs, and
+ *        NOTHING that belongs to the link.
+ *
+ * Deliberately self-contained (a server handle and a snapshot of fds): the item may be
+ * sitting in the adopted server's control queue when the destructor gives up on it, so
+ * touching the link from the work function would reintroduce exactly the
+ * use-after-free this fixes. Ownership is settled by @ref released — the destructor and
+ * the work function each exchange it once, and the SECOND one to do so deletes the
+ * item; a work item the server never runs is a single small leak, never a double free.
+ */
+struct httpd_ws_link_t::detach_req_t {
+    httpd_handle_t handle = nullptr;   /**< @brief The adopted server (still running). */
+    std::unique_ptr<int[]> fds;        /**< @brief Snapshot of the open peers' sockets. */
+    std::size_t n = 0;                 /**< @brief Entries in @ref fds. */
+    std::atomic<bool> done{false};     /**< @brief Set once every fd has been detached. */
+    std::atomic<bool> released{false}; /**< @brief Ownership handshake (see the brief). */
 };
 
 httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, std::size_t max_peers, bool peer_named)
@@ -329,10 +382,15 @@ httpd_ws_link_t::~httpd_ws_link_t() {
     // plane the notifier targets may be tearing down alongside us.
     stopping_.store(true, std::memory_order_relaxed);
     if (handle_ != nullptr) {
-        if (owns_httpd_)
+        if (owns_httpd_) {
             httpd_stop(handle_);
-        else
+        } else {
             httpd_unregister_uri_handler(handle_, uri_.c_str(), HTTP_GET);
+            // The URI is gone, so no FURTHER frame can reach us and (with stopping_ set)
+            // no further session can be armed — only now is the set of sessions holding a
+            // free_ctx into this link closed, and only now can detaching it be complete.
+            detach_sessions();
+        }
     }
     // Adopted mode: the caller's server keeps running after our URI is unregistered,
     // so a queued tx_work may still execute on its task while it references a pool
@@ -341,11 +399,11 @@ httpd_ws_link_t::~httpd_ws_link_t() {
     // the pool afterwards (an undrained work item is simply never run).
     if (!owns_httpd_ && tx_pool_ != nullptr) {
         bool busy = true;
-        for (int turn = 0; turn < 200 && busy; ++turn) {  // <= ~1 s
+        for (int turn = 0; turn < kDrainTurns && busy; ++turn) {
             busy = false;
             for (std::size_t i = 0; i < kTxPoolSlots; ++i)
                 if (tx_pool_[i].busy.load(std::memory_order_acquire)) busy = true;
-            if (busy) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            if (busy) std::this_thread::sleep_for(std::chrono::milliseconds(kDrainSliceMs));
         }
         if (busy) {
             // The drain bound expired with a send still in flight. That is not a
@@ -366,6 +424,117 @@ httpd_ws_link_t::~httpd_ws_link_t() {
     handle_ = nullptr;
 }
 
+void httpd_ws_link_t::detach_work(void* req_arg) {
+    auto* const req = static_cast<detach_req_t*>(req_arg);
+    // Runs ON the adopted server's task (httpd_queue_work's whole contract), so the
+    // session table is ours to touch for the duration — the one context in which it is.
+    for (std::size_t i = 0; i < req->n; ++i) {
+        const int fd = req->fds[i];
+        if (fd < 0) continue;
+        // httpd_sess_set_ctx(.., nullptr, nullptr) is the detach: on a ctx CHANGE it runs
+        // the session's current free_ctx there and then (so our on_session_closed fires
+        // here, on this task, while the link is still alive and blocked in its dtor) and
+        // then stores the new ctx/free_ctx pair. Both being null is what makes the
+        // session inert forever after: httpd's own close path (httpd_sess_clear_ctx)
+        // early-outs on a null ctx, so NOTHING can re-enter the link. A session that
+        // already closed is simply not in the table any more and is a no-op here — its
+        // free_ctx has already run.
+        httpd_sess_set_ctx(req->handle, fd, nullptr, nullptr);
+        // Now that nothing can call back, closing is pure courtesy — the peer's socket
+        // would otherwise sit open on a URI that no longer exists. Asynchronous, and we
+        // deliberately do NOT drain it: the close can no longer reach the link.
+        (void)httpd_sess_trigger_close(req->handle, fd);
+    }
+    req->done.store(true, std::memory_order_release);
+    if (req->released.exchange(true, std::memory_order_acq_rel)) delete req;
+}
+
+void httpd_ws_link_t::detach_sessions() {
+    std::size_t open_n = 0;
+    {
+        const std::lock_guard lock(peers_m_);
+        for (const auto& s : slots_)
+            if (s->open) ++open_n;
+    }
+    if (open_n == 0) return;  // nothing armed => nothing holds a pointer to us
+
+    // Nothrow throughout: a teardown that cannot allocate must still be memory-safe, so
+    // an OOM here takes the neutralise-and-leak path rather than skipping the detach.
+    std::unique_ptr<detach_req_t> req(new (std::nothrow) detach_req_t);
+    std::unique_ptr<int[]> fds(new (std::nothrow) int[open_n]);
+    if (req == nullptr || fds == nullptr) {
+        abandon_sessions();
+        return;
+    }
+    {
+        const std::lock_guard lock(peers_m_);
+        std::size_t i = 0;
+        for (const auto& s : slots_)
+            if (s->open && i < open_n) fds[i++] = s->fd;
+        req->n = i;
+    }
+    req->handle = handle_;
+    req->fds = std::move(fds);
+
+    detach_req_t* raw = req.release();
+    bool detached = false;
+    // Relaxed both ways: a match can only be observed by the task that stored it, and a
+    // stale MISS on any other task is the safe direction (queue the work and wait, which
+    // is what a task that is not the server must do anyway).
+    if (server_task_.load(std::memory_order_relaxed) == current_task()) {
+        // We ARE the server task (the dtor was reached from a work item or a handler on
+        // it). Queued work could only run after we return, so waiting for it would
+        // deadlock by construction — the #814 lesson. Being that task is exactly the
+        // permission detach_work needs, so run it right here instead.
+        detach_work(raw);
+        detached = true;
+    } else if (httpd_queue_work(handle_, &httpd_ws_link_t::detach_work, raw) != ESP_OK) {
+        ESP_LOGE(kTag, "session detach could not be queued (ctrl queue full)");
+        delete raw;  // never queued => nobody else can own it
+        raw = nullptr;
+    } else {
+        for (int turn = 0; turn < kDrainTurns && !detached; ++turn) {
+            detached = raw->done.load(std::memory_order_acquire);
+            if (!detached) std::this_thread::sleep_for(std::chrono::milliseconds(kDrainSliceMs));
+        }
+    }
+    if (raw != nullptr && !detached)
+        ESP_LOGE(kTag, "session detach did not run on the httpd task within the drain bound");
+    if (raw != nullptr && raw->released.exchange(true, std::memory_order_acq_rel)) delete raw;
+    if (!detached) abandon_sessions();
+}
+
+void httpd_ws_link_t::abandon_sessions() {
+    std::size_t leaked = 0;
+    {
+        const std::lock_guard lock(peers_m_);
+        for (auto it = slots_.begin(); it != slots_.end();) {
+            // A closed slot is already safe: on_session_closed only runs from httpd's
+            // free_ctx, and httpd nulls the session's ctx as it calls it — so `!open`
+            // means the server no longer holds this pointer and the slot can just die.
+            if (!(*it)->open) {
+                ++it;
+                continue;
+            }
+            // Still armed: the server holds `slot` as ctx and WILL call free_ctx on it
+            // eventually. Make that call inert (the null-owner case on_session_closed
+            // already tests, and the null-owner case the endpoint facade already tests)
+            // and then leak the shell — a late callback must land on valid memory. Never
+            // free it: that is the use-after-free this whole path exists to avoid.
+            (*it)->owner.store(nullptr, std::memory_order_release);
+            (*it)->endpoint.owner_ = nullptr;
+            (*it)->endpoint.slot_ = nullptr;
+            (void)it->release();
+            it = slots_.erase(it);
+            ++leaked;
+        }
+    }
+    ESP_LOGW(kTag,
+             "%u session slot(s) leaked at teardown: the adopted server still holds "
+             "their close callback",
+             (unsigned)leaked);
+}
+
 // ---------------------------------------------------------------------------
 // RX — runs on the esp_http_server task.
 // ---------------------------------------------------------------------------
@@ -373,6 +542,12 @@ httpd_ws_link_t::~httpd_ws_link_t() {
 esp_err_t httpd_ws_link_t::ws_handler(httpd_req_t* req) {
     auto* const self = static_cast<httpd_ws_link_t*>(req->user_ctx);
     if (self == nullptr) return ESP_FAIL;
+    // Latch the server's task identity here, where we are provably running on it: this
+    // handler is the only way a session (and so anything the teardown must detach) comes
+    // into existence, so a link with sessions has always latched. Relaxed: the only
+    // reader is the destructor, which needs the value ONLY when it is itself that task —
+    // and then the store and the load are on one task, so no ordering is at stake.
+    self->server_task_.store(current_task(), std::memory_order_relaxed);
     // The opening HTTP GET Upgrade arrives as method GET (httpd has already sent the
     // 101); every subsequent data frame re-enters here with method != GET.
     if (req->method == HTTP_GET) return self->on_handshake(req);
@@ -382,6 +557,11 @@ esp_err_t httpd_ws_link_t::ws_handler(httpd_req_t* req) {
 esp_err_t httpd_ws_link_t::on_handshake(httpd_req_t* req) {
     const int fd = httpd_req_to_sockfd(req);
     if (fd < 0) return ESP_FAIL;
+    // Teardown gate: never ARM a session once the dtor is running. A frame that raced the
+    // URI unregister would otherwise register a free_ctx into a link that is already past
+    // its detach snapshot — the very callback the teardown exists to retire. Refusing is
+    // clean (httpd closes the socket) and correct: the link is going away regardless.
+    if (stopping_.load(std::memory_order_relaxed)) return ESP_FAIL;
 
     session_t* slot = nullptr;
     {
@@ -483,6 +663,9 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
                 break;
             }
         if (slot == nullptr) {
+            // Teardown gate (see on_handshake): a frame that raced the URI unregister must
+            // not arm a NEW session, or its free_ctx would outlive the detach snapshot.
+            if (stopping_.load(std::memory_order_relaxed)) return ESP_FAIL;
             // Admission cap: refuse cleanly (ESP_FAIL => httpd closes the socket).
             if (max_peers_ != 0) {
                 std::size_t open_n = 0;
@@ -546,8 +729,13 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
 
 void httpd_ws_link_t::on_session_closed(void* ctx) {
     auto* const slot = static_cast<session_t*>(ctx);
-    if (slot == nullptr || slot->owner == nullptr) return;
-    slot->owner->reclaim_slot(slot);
+    if (slot == nullptr) return;
+    // A null owner is an ABANDONED slot: a teardown that could not retire this callback
+    // deliberately leaked the shell so that landing here is inert instead of a
+    // use-after-free (see abandon_sessions).
+    httpd_ws_link_t* const owner = slot->owner.load(std::memory_order_acquire);
+    if (owner == nullptr) return;
+    owner->reclaim_slot(slot);
 }
 
 void httpd_ws_link_t::reclaim_slot(session_t* slot) {

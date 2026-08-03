@@ -158,6 +158,31 @@ target_link_libraries(can_tx_pool_test PRIVATE libtracer)
 libtracer_test_warnings(can_tx_pool_test)
 add_test(NAME can_tx_pool COMMAND can_tx_pool_test)
 
+# #816 — the ESP-IDF httpd WS link's ADOPTED-MODE TEARDOWN. The real chip TU
+# (integrations/esp-idf/libtracer/httpd_ws_link.cpp) is compiled here against a host
+# fake of the one IDF facility the teardown contract rests on: the session table
+# (free_ctx stored by the server, run later, on the server's task) and the control work
+# queue. That is what turns "the destructor left a callback pointing into freed memory"
+# into something a host sanitizer can catch. The rest of the link (sockets, framing) is
+# still proved only by the on-silicon esp-idf workflow build.
+set(LIBTRACER_ESP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../integrations/esp-idf")
+add_executable(httpd_ws_teardown_test
+    "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_teardown_test.cpp"
+    "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
+    "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
+target_include_directories(httpd_ws_teardown_test PRIVATE
+    "${LIBTRACER_ESP_DIR}/tests/host"
+    "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+    "${LIBTRACER_ESP_DIR}/libtracer/include")
+target_link_libraries(httpd_ws_teardown_test PRIVATE libtracer)
+libtracer_test_warnings(httpd_ws_teardown_test)
+add_test(NAME httpd_ws_teardown COMMAND httpd_ws_teardown_test)
+# One case here PROVES a deliberate leak (the drain-expiry path must leak a session
+# shell rather than free it under a live callback — the #815 precedent), so LeakSanitizer
+# would flag the very behaviour under test. ASan's use-after-free detection, which is the
+# point of running this suite under sanitizers, stays on.
+set_tests_properties(httpd_ws_teardown PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+
 # ADR-0050 — the pure ACL policy seam: both adapters + typed parse/build, no graph.
 add_executable(security_acl_test security_acl_test.cpp)
 target_link_libraries(security_acl_test PRIVATE libtracer)

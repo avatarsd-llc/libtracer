@@ -10,6 +10,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`httpd_ws_link_t` (adopted mode): the destructor now retires every session's close
+  callback before the link dies (#816).** Each admitted peer is registered with
+  `httpd_sess_set_ctx(handle, fd, slot, on_session_closed)`, so a link that adopted an
+  external server used to leave that `free_ctx` pointing into freed memory: the next
+  peer disconnect — or the adopting server's own `httpd_stop`, arbitrarily later — called
+  it. The destructor now queues a self-contained detach onto the server's control queue
+  (`httpd_queue_work`), which is the only context allowed to touch the session table, and
+  clears each session's ctx/free_ctx there (`httpd_sess_set_ctx(.., nullptr, nullptr)` —
+  which runs the outgoing callback inline, while the link is still alive) before closing
+  the sessions; it returns only once that has happened. A destructor running ON the
+  adopting server's own task detaches inline instead, because queued work there could
+  only run after the destructor returns (the same self-deadlock #815 fixed for the TX
+  pool). If the detach cannot run at all — the queue refuses it, or the server task is
+  wedged past the teardown drain bound — the still-armed session slots are neutralised
+  and LEAKED with a warning rather than freed under a live callback, so the late
+  callback lands on valid, inert memory. No public API change; owning mode is unaffected
+  (`httpd_stop` already closes every session synchronously). Teardown-only: on-device
+  nodes leak the link by design, so the exposure was host/testbench teardown and any
+  future dynamic-reconfiguration path.
+
 ## [0.7.0] — 2026-08-02
 
 ### Added
