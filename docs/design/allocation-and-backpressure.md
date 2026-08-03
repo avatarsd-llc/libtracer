@@ -262,8 +262,8 @@ The key render and its parse copy are nothrow so that OOM soft-fails the branch 
 
 The remote-delivery leg answers differently on purpose. A stored write that reached its LKV has
 succeeded; the fan-out to one subscriber is a separate obligation, and a subscriber missing
-one value under heap exhaustion is valid delivery behaviour where failing the write is not. Every
-per-delivery allocation on that writer-thread leg is nothrow, and a failed flatten or frame build
+one value under heap exhaustion is valid delivery behaviour where failing the write is not. The
+flatten and frame build on that writer-thread leg allocate nothrow, and a failure of either
 drops that one delivery (`core/src/fwd_router.cpp:1701-1702`). Dropping *invisibly* is the part that
 needs an answer, which is why `graph_t::delivery_drops()` exists
 (`core/include/libtracer/graph.hpp:1044`): three relaxed monotonic counters — `no_target`, `denied`,
