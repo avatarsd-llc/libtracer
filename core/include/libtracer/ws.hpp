@@ -390,9 +390,13 @@ inline constexpr std::size_t kMaxServerFrameHeader = 10;
  * Writes byte0 = `(fin?0x80:0)|op`, then the payload length in the smallest legal
  * encoding (7-bit, then the 126 + 2-byte u16-BE marker, then the 127 + 8-byte
  * u64-BE marker); the MASK bit is always 0 (server frames MUST NOT be masked,
- * RFC 6455 §5.1). This is the ONE length-encoding implementation —
- * `encode_frame()` appends the payload after it, and the transport's zero-copy
- * scatter-gather egress rides the payload spans behind it with no copy.
+ * RFC 6455 §5.1). This is the one SERVER-side (unmasked) length-encoding
+ * implementation — @ref encode_frame appends the payload after it, @ref
+ * encode_server_control delegates to it, and both gather sites in
+ * `transport_ws.cpp` ride the payload spans behind it with no copy. The MASKED
+ * client side does NOT share it: `detail::put_client_frame` carries its own
+ * ladder, because the MASK bit rides in the same byte as the 7-bit length
+ * (`0x80u | len`) and the 4-byte key follows the length it just wrote.
  *
  * @param out The header buffer to fill (`kMaxServerFrameHeader` bytes suffice).
  * @param op  The frame opcode.
@@ -542,10 +546,14 @@ namespace detail {
  *        length-encoding + masking implementation for DATA frames, shared by the throwing
  *        @ref ws::encode_client_frame and the nothrow @ref ws::try_encode_client_frame.
  *
- * Control frames do not come through here: @ref ws::encode_client_control masks its own
- * payload against a hard-coded 2-byte header, because §5.5 bounds a control payload at
+ * No SHIPPING path routes a control frame through here — the client PONG is built by
+ * @ref ws::encode_client_control (`transport_ws.cpp:739`), which masks its own payload
+ * against a hard-coded 2-byte header, because §5.5 bounds a control payload at
  * @ref kMaxControlPayload and the general length ladder below is then dead code on a path
- * that must stay on the stack.
+ * that must stay on the stack. Neither entry point CONSTRAINS @p op, though: the one caller
+ * that does hand this function a control opcode is the byte-equivalence oracle in
+ * `core/tests/transport_alloc_softfail_test.cpp`, which checks the stack form's bytes
+ * against a PONG encoded the general way.
  *
  * Writes through an already-sized buffer by index rather than appending, so the store it
  * fills is the caller's choice (a `std::vector` for the throwing form, a
