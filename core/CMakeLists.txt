@@ -220,6 +220,11 @@ set(LIBTRACER_LKV_SLOT sp_atomic_slot_t CACHE STRING
 # Costs (N+1)*128 bytes of .bss, and zero unless LIBTRACER_LKV_SLOT=hazard_slot_t.
 set(LIBTRACER_HAZARD_READER_SLOTS 64 CACHE STRING
     "Hazard-pointer domain size (threads that may concurrently touch an LKV slot)")
+# Edge-pin domain size (#635) — threads that may PUBLISH concurrently. Always emitted (the
+# publish path is not a policy binding); costs N*max(LIBTRACER_CACHE_LINE_BYTES, sizeof(void*))
+# bytes of .bss. Undersizing costs throughput on the overflow threads, never correctness.
+set(LIBTRACER_EDGE_PIN_SLOTS 32 CACHE STRING
+    "Edge-pin domain size (threads that may publish to one graph concurrently)")
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/include/libtracer/config.hpp.in
     ${CMAKE_CURRENT_BINARY_DIR}/generated/include/libtracer/config.hpp
@@ -234,11 +239,13 @@ set(_lt_saved_stripes "${LIBTRACER_VERTEX_LOCK_STRIPES}")
 set(_lt_saved_policy "${LIBTRACER_ACL_POLICY}")
 set(_lt_saved_slot "${LIBTRACER_LKV_SLOT}")
 set(_lt_saved_hp "${LIBTRACER_HAZARD_READER_SLOTS}")
+set(_lt_saved_ep "${LIBTRACER_EDGE_PIN_SLOTS}")
 set(_lt_saved_line "${LIBTRACER_CACHE_LINE_BYTES}")
 set(LIBTRACER_VERTEX_LOCK_STRIPES 16)
 set(LIBTRACER_ACL_POLICY allow_only_policy_t)
 set(LIBTRACER_LKV_SLOT sp_atomic_slot_t)
 set(LIBTRACER_HAZARD_READER_SLOTS 64)
+set(LIBTRACER_EDGE_PIN_SLOTS 32)
 set(LIBTRACER_CACHE_LINE_BYTES 64)
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/include/libtracer/config.hpp.in
@@ -248,6 +255,7 @@ set(LIBTRACER_VERTEX_LOCK_STRIPES "${_lt_saved_stripes}")
 set(LIBTRACER_ACL_POLICY "${_lt_saved_policy}")
 set(LIBTRACER_LKV_SLOT "${_lt_saved_slot}")
 set(LIBTRACER_HAZARD_READER_SLOTS "${_lt_saved_hp}")
+set(LIBTRACER_EDGE_PIN_SLOTS "${_lt_saved_ep}")
 set(LIBTRACER_CACHE_LINE_BYTES "${_lt_saved_line}")
 file(READ ${CMAKE_CURRENT_SOURCE_DIR}/include/libtracer/config.hpp _lt_cfg_default)
 file(READ ${CMAKE_CURRENT_BINARY_DIR}/generated/drift-check/config.hpp _lt_cfg_rendered)

@@ -105,6 +105,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -929,6 +930,17 @@ void run_graph(topo_t topo, std::size_t T, std::size_t subs, op_t op) {
 
 int main(int argc, char** argv) {
     const std::string only = argc > 1 ? argv[1] : "";
+    // Optional SECOND argument: restrict the graph half to one topology (`hot1` / `stripe1` /
+    // `spread`) and skip the read sweep. A #635-class A/B needs >= 11 interleaved pairs of the
+    // write arms, and paying the full 24-thread read sweep in every one of them buys nothing
+    // the gate reads. Absent ⇒ the complete sweep, exactly as before.
+    const std::string topo_only = argc > 2 ? argv[2] : "";
+    // Optional THIRD argument: one thread count. The T=1 arms are the ones that must be run
+    // under a PINNED cpu (the ADR-0064 discipline), and a pinned process cannot also host the
+    // T=24 arms — so the two halves of the gate are separate invocations by construction.
+    const std::size_t t_only = argc > 3 ? std::strtoul(argv[3], nullptr, 10) : 0;
+    const auto want = [&](topo_t t) { return topo_only.empty() || topo_only == topo_name(t); };
+    const auto want_t = [&](std::size_t t) { return t_only == 0 || t_only == t; };
     const std::size_t hw = std::max<std::size_t>(1, std::thread::hardware_concurrency());
 
     if (only.empty() || only == "slot") {
@@ -942,8 +954,9 @@ int main(int argc, char** argv) {
     if (only.empty() || only == "graph") {
         for (std::size_t subs : {std::size_t{0}, std::size_t{1}}) {
             for (topo_t topo : {topo_t::HOT1, topo_t::STRIPE1, topo_t::SPREAD}) {
+                if (!want(topo)) continue;
                 for (std::size_t T : kThreads) {
-                    if (T > hw) continue;
+                    if (T > hw || !want_t(T)) continue;
                     run_graph(topo, T, subs, op_t::WRITE);
                 }
             }
@@ -951,8 +964,9 @@ int main(int argc, char** argv) {
         // The read arm takes no `subs` sweep: a read delivers to nobody, so fan-out is not a
         // dimension of it. HOT1 is the shape that matters — T readers on ONE shared LKV.
         for (topo_t topo : {topo_t::HOT1, topo_t::STRIPE1, topo_t::SPREAD}) {
+            if (!want(topo)) continue;
             for (std::size_t T : kThreads) {
-                if (T > hw) continue;
+                if (T > hw || !want_t(T)) continue;
                 run_graph(topo, T, /*subs=*/0, op_t::READ);
             }
         }

@@ -75,6 +75,7 @@ INPUT                  = core/include/libtracer/config.hpp \
                          core/include/libtracer/loopback.hpp \
                          core/include/libtracer/builtin_transports.hpp \
                          core/include/libtracer/lkv_slot.hpp \
+                         core/include/libtracer/edge_pin.hpp \
                          core/include/libtracer/mem_source_sync.hpp \
                          core/include/libtracer/pin_instrument.hpp \
                          core/include/libtracer/posix_endpoint.hpp \

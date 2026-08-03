@@ -16,6 +16,22 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`tr::graph::kEdgePinSlots` and the edge-pin domain (`libtracer/edge_pin.hpp`,
+  [#635](https://github.com/avatarsd-llc/libtracer/issues/635),
+  [ADR-0075](../docs/adr/0075-a-vertexs-edges-are-published-and-read-under-an-edge-pin.md)).**
+  A vertex now PUBLISHES its edges as an immutable array that `fan_out` copies out under a
+  bounded per-participant pin instead of the shared stripe mutex — ×19.4 on the same-stripe
+  fan-1 write at twenty-four threads, and the negative scaling past four threads is gone.
+  `kEdgePinSlots` sizes the announcement registry (CMake `-DLIBTRACER_EDGE_PIN_SLOTS=`);
+  correctness never depends on it, only scaling does. `sizeof(vertex_t)` drops 112 -> 96 B
+  on x86-64 and 80 -> 72 B on rv32.
+
+- **`vertex_t::kNoSlot`.** The answer `vertex_t::add_edge` gives when the edge could not be
+  admitted because the injected resource is exhausted. **Behaviour change:** `add_edge`
+  could not previously fail, and a caller that ignores `kNoSlot` would count a listener that
+  does not exist. `graph_t::subscribe` reports this as `status_t::BACKPRESSURE`, the
+  injected-resource status; it used to be unreachable there.
+
 - **`wire::type_t::PATH_REF` (`0x14`) and the bound-path element codec
   ([RFC-0024](../docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §4).**
   New header `core/include/libtracer/path_ref.hpp`: `path_ref_element_t`

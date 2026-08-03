@@ -1458,6 +1458,15 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
         idx = *slot;
     } else {
         idx = v->add_edge(std::move(s), &latch);
+        // The injected resource could not carry the edge (#477 / #635: publishing the new edge
+        // array is the one allocation an append now makes). Nothing was admitted, so give the
+        // speculative listener bump back and report it — an admitted-but-unpublished edge
+        // would be a subscription that never receives. BACKPRESSURE is the injected-resource
+        // status (ADR-0060 §3), the same one the store leg answers on exhaustion.
+        if (idx == vertex_t::kNoSlot) {
+            note_subscriber_removed(v);
+            return std::unexpected(status_t::BACKPRESSURE);
+        }
     }
 
     if (latch.value) dispatch_edge(latch.edge, *latch.value);

@@ -136,6 +136,29 @@ struct default_config_t {
     static constexpr std::size_t kHazardReaderSlots = 64;
 
     /**
+     * @brief How many threads may hold an EDGE PIN at once (#635) — the per-participant
+     *        announcement the fan-out snapshot claims while it copies a vertex's published
+     *        edge array out.
+     *
+     * Read this as "threads that may publish (`graph_t::write`) concurrently". Each claims one
+     * index for the life of the thread; the pin itself is held only across the copy-out, never
+     * across a dispatch. A per-target knob rather than a thread ceiling picked out of the air
+     * (RFC-0006); CMake: `-DLIBTRACER_EDGE_PIN_SLOTS=24`.
+     *
+     * **Correctness never depends on this number** — only scaling does. A thread that finds
+     * every index taken falls back to copying the CURRENT array under the vertex stripe mutex,
+     * which is safe for the reason the mutex existed in the first place: displacing an array
+     * requires that same lock, so the current array cannot be retired underneath the fallback
+     * reader. Undersizing costs those threads exactly what every thread paid before #635.
+     *
+     * Unlike @ref kHazardReaderSlots this registry is ALWAYS emitted — the publish path is not a
+     * policy binding. Its `.bss` is `N * max(kCacheLineBytes, alignof(void*))` bytes: at N = 32
+     * that is 2,048 B on a host (64-byte padding) and 256 B on a single-core MCU profile, which
+     * sets @ref kCacheLineBytes to 0 and has no second core to false-share against.
+     */
+    static constexpr std::size_t kEdgePinSlots = 32;
+
+    /**
      * @brief The RAM-diet ceiling on `sizeof(vertex_t)`, 64-bit targets (#361 §8).
      *
      * Measured 112 B post-#380 §1; 144 post-packing, 168 post-§3, 160 post-§2, 248 post-§1,
@@ -233,6 +256,8 @@ inline constexpr std::size_t kVertexLockStripes = config_t::kVertexLockStripes;
 inline constexpr std::size_t kCacheLineBytes = config_t::kCacheLineBytes;
 /** @brief @ref default_config_t::kHazardReaderSlots for this build. */
 inline constexpr std::size_t kHazardReaderSlots = config_t::kHazardReaderSlots;
+/** @brief @ref default_config_t::kEdgePinSlots for this build. */
+inline constexpr std::size_t kEdgePinSlots = config_t::kEdgePinSlots;
 /** @brief @ref default_config_t::kPinPayloadRatio for this build. */
 inline constexpr std::uint32_t kPinPayloadRatio = config_t::kPinPayloadRatio;
 /** @brief @ref default_config_t::acl_policy_t for this build. */
