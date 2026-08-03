@@ -26,6 +26,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -238,31 +239,39 @@ struct advertise_t {
 };
 
 /**
- * @brief Serialize ONLY the fixed @ref kAdvertiseHeaderSize-byte header of an
+ * @brief Serialize ONLY the fixed-size header (@ref kAdvertiseHeaderSize bytes) of an
  *        @ref advertise_t into @p out — on the STACK, nothrow.
  *
  * This is the ONE advertise field-encoding implementation (the `%ws.hpp`
  * `encode_frame_header` / `encode_frame` split, applied to CAN): @ref encode_advertise
  * appends the path after it, and `transport_can::emit_advertise` walks this stack header and
- * then `cfg_.path`'s bytes in place, so slicing an advertise into 8-byte CAN windows
- * allocates NOTHING — it never needed a contiguous buffer (#848). That matters because
+ * then the path's bytes in place, so slicing an advertise into 8-byte CAN windows allocates
+ * NOTHING — it never needed a contiguous buffer (#848). That matters because
  * `emit_advertise` runs on *every* CAN send, so the old `std::vector` was a per-send
  * `abort()` risk under `-fno-exceptions`.
+ *
+ * The path is a SEPARATE parameter because the header is a function of the path's LENGTH,
+ * not of who owns its bytes: `transport_can` passes its own `cfg_.path` and never copies a
+ * path into the @ref advertise_t it emits, which is what keeps the whole emission free of
+ * allocation. @ref advertise_t::path on @p a is therefore NOT read here — @ref
+ * encode_advertise is the caller that passes it.
  *
  * It also enforces the bound @ref kAdvertiseMaxPathLen only documented before: an
  * over-long path used to be cast to `std::uint16_t` unchecked, encoding a frame every
  * decoder rejects (or, past 65535, one whose length field silently truncates) — a
  * permanent, silent wedge.
  *
- * @param out The 18-byte header buffer to fill.
- * @param a   The advertise whose header to encode.
- * @retval false @p a's path exceeds @ref kAdvertiseMaxPathLen — @p out is untouched and
+ * @param out  The 18-byte header buffer to fill.
+ * @param a    The advertise whose header fields to encode (its own `path` is ignored).
+ * @param path The path this advertise announces — only its length reaches the header.
+ * @retval false @p path exceeds @ref kAdvertiseMaxPathLen — @p out is untouched and
  *               NOTHING may be emitted for this advertise.
  */
 [[nodiscard]] inline bool encode_advertise_header(std::array<std::byte, kAdvertiseHeaderSize>& out,
-                                                  const advertise_t& a) noexcept {
-    if (a.path.size() > kAdvertiseMaxPathLen) return false;
-    const auto path_len = static_cast<std::uint16_t>(a.path.size());
+                                                  const advertise_t& a,
+                                                  std::string_view path) noexcept {
+    if (path.size() > kAdvertiseMaxPathLen) return false;
+    const auto path_len = static_cast<std::uint16_t>(path.size());
 
     std::size_t i = 0;
     const auto put_u8 = [&](std::uint8_t v) { out[i++] = static_cast<std::byte>(v); };
@@ -301,7 +310,7 @@ struct advertise_t {
  */
 [[nodiscard]] inline std::vector<std::byte> encode_advertise(const advertise_t& a) {
     std::array<std::byte, kAdvertiseHeaderSize> header{};
-    if (!encode_advertise_header(header, a)) return {};
+    if (!encode_advertise_header(header, a, a.path)) return {};
 
     std::vector<std::byte> out;
     out.reserve(kAdvertiseHeaderSize + a.path.size());

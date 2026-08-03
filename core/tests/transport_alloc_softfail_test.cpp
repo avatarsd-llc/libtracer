@@ -32,7 +32,8 @@
  *   - ws client `send(span)` — the one nothrow twin (A5);
  *   - tcp `send(iov)` and the multi-peer broadcast scratch;
  *   - udp `send(iov)`;
- *   - can `encode_advertise_header` (A1 — the allocation is DELETED, not guarded);
+ *   - can `transport_can::send` — its advertise (A1 — the allocation is DELETED, not
+ *     guarded, so the case is an allocation BUDGET on the transport, not a drop leg);
  *   - the oversized / non-final control frame fails the connection instead of being echoed.
  */
 
@@ -49,8 +50,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <new>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -65,6 +68,8 @@
 #include "libtracer/transport_tcp.hpp"
 #include "libtracer/transport_udp.hpp"
 #include "libtracer/transport_ws.hpp"
+#include "libtracer/view.hpp"
+#include "libtracer/view_can.hpp"
 #include "libtracer/ws.hpp"
 
 // --- the fail-the-k-th-allocation injector (this TU owns the override) -------
@@ -688,6 +693,43 @@ void test_udp_send_iov_overflow_drops() {
 // CAN (A1 — the allocation is DELETED, not made failable)
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief A `can_link_t` that records into FIXED storage — it never allocates, so an
+ *        allocation count taken around a send reflects the transport and nothing else.
+ */
+class fixed_link_t final : public tr::net::can_link_t {
+   public:
+    void write_raw(const tr::net::can_frame_data_t& f) override {
+        const std::lock_guard lock(m_);
+        if (n_ < frames_.size()) frames_[n_++] = f;
+    }
+    void on_receive(rx_fn_t rx) override { rx_ = std::move(rx); }
+
+    /** @brief Forget every recorded frame (drops the join hello before a measurement). */
+    void reset() {
+        const std::lock_guard lock(m_);
+        n_ = 0;
+    }
+    [[nodiscard]] std::size_t count() const {
+        const std::lock_guard lock(m_);
+        return n_;
+    }
+    /** @brief The concatenated data bytes of every recorded frame, in order. */
+    [[nodiscard]] std::vector<std::byte> stream() const {
+        const std::lock_guard lock(m_);
+        std::vector<std::byte> out;
+        for (std::size_t f = 0; f < n_; ++f)
+            for (std::size_t i = 0; i < frames_[f].len; ++i) out.push_back(frames_[f].data[i]);
+        return out;
+    }
+
+   private:
+    mutable std::mutex m_;
+    std::array<tr::net::can_frame_data_t, 64> frames_{};
+    std::size_t n_ = 0;
+    rx_fn_t rx_;
+};
+
 /** @brief A `can_link_t` that just records what was written. */
 class recording_link_t final : public tr::net::can_link_t {
    public:
@@ -740,7 +782,7 @@ void test_can_advertise_header_is_allocation_free() {
     bool ok = false;
     std::size_t allocs = 0;
     const bool escaped = escapes_at(1, [&] {
-        ok = can::encode_advertise_header(header, adv);
+        ok = can::encode_advertise_header(header, adv, adv.path);
         allocs = t_allocs;
     });
     check(!escaped, "encode_advertise_header with the first allocation refused does not throw");
@@ -757,7 +799,8 @@ void test_can_over_long_path_refused() {
     adv.can_id = 0x7;
     adv.path = std::string(can::kAdvertiseMaxPathLen + 1, 'x');
     std::array<std::byte, can::kAdvertiseHeaderSize> header{};
-    check(!can::encode_advertise_header(header, adv), "encode_advertise_header refuses it");
+    check(!can::encode_advertise_header(header, adv, adv.path),
+          "encode_advertise_header refuses it");
     check(can::encode_advertise(adv).empty(), "encode_advertise returns no bytes");
 
     auto link = std::make_unique<recording_link_t>();
@@ -788,6 +831,58 @@ void test_can_emit_advertise_wire_identical() {
     hello.path = cfg.path;
     const std::vector<std::byte> expect = can::encode_advertise(hello);
     check(raw->stream() == expect, "the emitted hello byte stream equals encode_advertise(hello)");
+}
+
+/**
+ * @brief A1, at the TRANSPORT: the advertise a real `transport_can::send` emits costs ZERO
+ *        allocations, and still lands on the wire whole.
+ *
+ * The free `encode_advertise_header` being stack-only proves nothing about `transport_can` —
+ * only this drives the site `send_impl` actually reaches. The budget is DERIVED rather than
+ * hard-coded: a send legitimately owns exactly two allocating steps, the payload block
+ * (`view::over_bytes`) and the window table (`view_can_frames_t::split`), so running those
+ * two standalone gives the number `send` must not exceed. Both halves of the deleted
+ * allocation show up here as one over budget on EVERY send — `encode_advertise`'s
+ * `std::vector`, and the `adv.path = cfg_.path` copy that used to feed it (the path is past
+ * the SSO bound on purpose).
+ */
+void test_can_send_advertise_allocates_nothing() {
+    std::printf("can send — the advertise costs the transport ZERO allocations (A1):\n");
+    tr::net::transport_can_config_t cfg;
+    cfg.node = 9;
+    cfg.path = "node9/sensor/temperature";  // 24 chars: past SSO, so a copy WOULD allocate
+    auto link = std::make_unique<fixed_link_t>();
+    fixed_link_t* raw = link.get();
+    tr::net::transport_can can_tx(std::move(link), cfg);
+
+    const std::vector<std::byte> payload(24, std::byte{0xA5});  // 3 CLASSIC windows
+
+    // The budget. `owned`/`windows` outlive the measured lambda so the optimizer cannot
+    // elide the very allocations being counted.
+    std::optional<tr::view::view_t> owned;
+    tr::view::view_can_frames_t windows;
+    const std::size_t budget = count_allocs([&] {
+        owned = tr::view::over_bytes(payload);
+        windows = tr::view::view_can_frames_t::split(*owned, cfg.mode);
+    });
+    check(owned.has_value() && windows.frame_count() == 3, "the budget's two steps ran");
+
+    raw->reset();  // forget the join hello — measure one send
+    const std::size_t actual = count_allocs([&] { can_tx.send(payload); });
+    check(actual == budget,
+          "a CAN send allocates for its payload and window table ONLY — the advertise adds none");
+
+    // ...and the advertise is still whole on the wire, walked out of two sources.
+    const std::vector<std::byte> stream = raw->stream();
+    const auto decoded = can::decode_advertise(stream);
+    check(decoded.has_value(), "the emitted advertise decodes off the sliced control stream");
+    if (decoded) {
+        check(decoded->second == can::kAdvertiseHeaderSize + cfg.path.size(),
+              "it is exactly header + path bytes long");
+        check(decoded->first.path == cfg.path, "it carries this node's path, walked in place");
+        check(decoded->first.slice_count == 3 && decoded->first.group_total_len == payload.size(),
+              "and the group manifest the peer trims by");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -935,6 +1030,7 @@ int main() {
     test_can_advertise_header_is_allocation_free();
     test_can_over_long_path_refused();
     test_can_emit_advertise_wire_identical();
+    test_can_send_advertise_allocates_nothing();
     test_ws_ping_at_the_bound_is_answered();
     test_ws_oversized_ping_fails_the_connection();
     test_ws_fragmented_control_fails_the_connection();

@@ -563,7 +563,7 @@ int run_guard() {
         {"can_encode_advertise_header", expect_t::NOALLOC,
          [] {
              std::array<std::byte, can::kAdvertiseHeaderSize> header{};
-             const bool ok = can::encode_advertise_header(header, adv);
+             const bool ok = can::encode_advertise_header(header, adv, adv.path);
              asm volatile("" : : "r"(ok), "r"(header.data()) : "memory");
          }},
         // B1/B2 + tcp:78 + tcp:358 + udp:103 — the ONE overflow gather all five share.

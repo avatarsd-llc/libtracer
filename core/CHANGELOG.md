@@ -44,10 +44,19 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   (§5.5/§7.1.7) instead of being echoed, so the PONG reply is built entirely on the stack and
   a heap blip can no longer cost a link that an unanswered PING entitles the peer to drop.
 
-- **`tr::net::can::encode_advertise_header`.** The one field-encoding locus for a CAN
-  advertise, filling a caller-owned `std::array` and returning `false` past
-  `kAdvertiseMaxPathLen`. `emit_advertise` slices it in place and allocates nothing; the
-  contiguous `encode_advertise` twin is retained for callers that want the whole frame.
+- **`tr::net::can::encode_advertise_header(std::array&, const advertise_t&, std::string_view)`.**
+  The one field-encoding locus for a CAN advertise, filling a caller-owned `std::array` and
+  returning `false` past `kAdvertiseMaxPathLen`. The path is a separate parameter because the
+  header is a function of its LENGTH, not of who owns its bytes: `transport_can::emit_advertise`
+  now slices the 18-byte stack header and then `cfg_.path` IN PLACE into 8-byte CAN windows, so
+  the advertise on **every** send costs zero allocations — no contiguous buffer, and no
+  `adv.path = cfg_.path` copy either (an advertise this node emits always announces its own
+  path, so `advertise_t::path` is left empty on egress). The contiguous `encode_advertise` twin
+  is retained, unchanged in behaviour, for callers that want the whole frame in one buffer.
+  **Scope:** this removes the advertise's allocations only. A CAN `send` still allocates for
+  the owning payload block (`view::over_bytes`, which soft-fails and DROPS) and for
+  `view_can_frames_t::split`'s window vector (still a THROWING `push_back` — the remaining
+  `-fno-exceptions` abort risk on this path, not addressed here).
 
 - **`ws::try_encode_client_frame(mem::block_array_t<std::byte>&, …)`.** The nothrow twin of
   `encode_client_frame` — a client frame MUST be masked (§5.1), so its wire bytes are not the
