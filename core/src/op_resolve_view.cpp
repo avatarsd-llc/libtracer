@@ -286,7 +286,11 @@ result_t<rope_t> op_resolver_t::resolve(const wire::tlv_view_t& fwd, std::string
     // lifetime covers the nodes', which never outlive `resolve_node`.
     flatten_seam_t seam{.backend = flat_, .refused = false};
     view_node root{fwd, &seam};
-    return resolve_node(graph_, root, inbound_link, frame_view, root.backend());
+    // `egress` is the reply head + mint seam (#795, ADR-0074), separate from the flatten seam
+    // the walk's nodes carry: it is passed straight to `resolve_node` because only the reply
+    // builders draw from it, never a node's `wire()`/`body()`. Default heap when un-injected.
+    return resolve_node(graph_, root, inbound_link, frame_view, root.backend(),
+                        egress_ != nullptr ? *egress_ : mem::heap_backend());
 }
 
 }  // namespace tr::graph

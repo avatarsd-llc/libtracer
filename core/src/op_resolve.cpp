@@ -21,8 +21,11 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view
     // seam member could only cost more (see `arena_node::own_wire`). No `refused` flag on
     // this tier: an arena span is borrowed and cannot be shortened by a refusal, so the copy
     // answers by value through the empty view (see `arena_node::spans_intact`).
+    // `egress` is the reply head + mint seam (#795, ADR-0074), injected alongside `flat`; the
+    // default is the global heap, so an un-injected span-tier resolve is byte-unchanged.
     return resolve_node(graph_, arena_node{&fwd, 0}, inbound_link, frame_view,
-                        flat_ != nullptr ? *flat_ : mem::heap_backend());
+                        flat_ != nullptr ? *flat_ : mem::heap_backend(),
+                        egress_ != nullptr ? *egress_ : mem::heap_backend());
 }
 
 }  // namespace tr::graph
