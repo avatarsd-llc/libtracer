@@ -592,6 +592,17 @@ int main() {
         }
     }
 
+    // Quiesce the wire BEFORE anything a receive thread touches goes out of scope. The
+    // channels are declared above the probe and the mailbox, so scope exit would destroy
+    // those two FIRST and leave a delivery thread pushing into freed storage — a race TSan
+    // reports against `~mailbox_t` and against the endpoint's own destructor. `shutdown()`
+    // joins both receive threads, which is the contract loopback.hpp states and the reason
+    // it exists: a test that only asserts on what arrived still has to say when nothing more
+    // may arrive. Later cases in this file drop frames deliberately, so a reply for one of
+    // them can still be in flight at the last assertion.
+    ch_cli.shutdown();
+    ch_ab.shutdown();
+
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;
