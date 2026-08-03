@@ -36,18 +36,34 @@
  *     guarded, so the case is an allocation BUDGET on the transport, not a drop leg);
  *   - the oversized / non-final control frame fails the connection instead of being echoed.
  *
- * ## What this harness deliberately does NOT gate: the PING→PONG call sites
+ * ## What this harness deliberately does NOT gate: three sites, named
  *
- * The two PONG replies (`transport_ws_server::service_peer`'s `PING` case, and the client
- * `serve` loop's) build their frame with `ws::encode_server_control` /
- * `ws::encode_client_control` into a stack `std::array`. That the ENCODERS allocate nothing
- * is gated — `bench_failable_census guard` holds both to `NOALLOC`. That these two call
- * sites CHOSE the stack encoder is not gated here, and cannot be: the injector state above is
- * `thread_local` to the test thread, while a PONG is built on the transport's own poll /
- * recv thread, so no arming this test can do is visible to it. Swapping either call site back
- * to a heap encoder would therefore not redden anything in this file. Gating it would mean a
- * process-wide injector, which would also arm the transports' unrelated receive allocations
- * and make every case here flaky — a worse instrument than the census arm plus this note.
+ * **The two PING→PONG call sites.** The two PONG replies
+ * (`transport_ws_server::service_peer`'s `PING` case, and the client `serve` loop's) build
+ * their frame with `ws::encode_server_control` / `ws::encode_client_control` into a stack
+ * `std::array`. That the ENCODERS allocate nothing is gated — `bench_failable_census guard`
+ * holds both to `NOALLOC`. That these two call sites CHOSE the stack encoder is not gated
+ * here, and cannot be: the injector state above is `thread_local` to the test thread, while
+ * a PONG is built on the transport's own poll / recv thread, so no arming this test can do
+ * is visible to it. Swapping either call site back to a heap encoder would therefore not
+ * redden anything in this file. Gating it would mean a process-wide injector, which would
+ * also arm the transports' unrelated receive allocations and make every case here flaky — a
+ * worse instrument than the census arm plus this note.
+ *
+ * **`transport_can::emit_hello`'s dropped `hello.path = cfg_.path`.** #848 dropped the same
+ * `std::string` path copy in TWO places, and only one of them is gated. MEASURED, by putting
+ * each line back and rebuilding:
+ *   - `send_impl`'s `adv.path = cfg_.path` restored => A1 REDDENS (91 PASS / 1 FAIL, rc=1):
+ *     "a CAN send allocates for its payload and window table ONLY — the advertise adds none".
+ *   - `emit_hello`'s `hello.path = cfg_.path` restored (`core/src/transport_can.cpp:224`)
+ *     => everything stays green: 92 PASS / 0 FAIL here, 88/88 under `ctest`.
+ * That gap is a DIFFERENT reason from the two PONG sites above, not a weaker version of it.
+ * `emit_hello` is called exactly once, from the constructor (`core/src/transport_can.cpp:99`),
+ * so it is neither per-send nor peer-reachable, and the wire is unchanged either way
+ * (`emit_advertise` never reads `advertise_t::path` — it walks `cfg_.path` in place). It is
+ * outside what A1's per-send allocation BUDGET is a budget over. The copy A1 does cover is
+ * the one a peer can provoke: `send_impl` calls `emit_advertise` on every send that carries
+ * bytes (`core/src/transport_can.cpp:262`).
  */
 
 #include <arpa/inet.h>
