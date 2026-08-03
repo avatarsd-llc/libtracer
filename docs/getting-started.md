@@ -263,9 +263,15 @@ hop and end-to-end figures are on the generated
 
 Two properties of this net plane are worth knowing from the first frame:
 
-- **A forward hop never touches the heap.** The router reads three headers by offset,
-  builds the shrunk-`dst` and grown-`src` heads on the stack, and scatter-gathers them
-  with untouched views of the inbound frame — zero allocations, CI-gated.
+- **A forward hop of a contiguous frame allocates nothing of its own.** The router reads
+  three headers by offset, builds the shrunk-`dst` and grown-`src` heads on the stack, and
+  scatter-gathers them with untouched views of the inbound frame. `bench_forward_heap`
+  CI-gates *that arm* at zero allocations — but the gate covers the hop's own work against a
+  **stub link**, not the shipping transport's `iovec` table, which spills to the heap above
+  16 spans (`bench_transport_iov` measures the spill at 17 caller spans / ~288 B). And a
+  **multi-link rope** frame draws its scatter-gather table from the injected receive source,
+  because the sub-span count is the sender's choice and is known only at run time: nothrow,
+  not allocation-free. See [04 §multi-hop FWD forwarding](reference/04-communication-flows.md).
 - **Routes cannot loop.** `dst` only ever shrinks — by a whole mount run per hop, never by
   nothing — so a route is
   finite and a physical cycle is harmless per-op: there is no revisit check and none is
