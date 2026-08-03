@@ -14,11 +14,14 @@
  * server and the client path. Each BINARY message is one libtracer frame (one
  * TLV) handed to the receiver — tagged with the SENDING peer's name through the
  * bus_link_t facet (ADR-0044), so return routes name the right browser tab; PING
- * is answered with a stack-built PONG. One connection is torn down by a CLOSE,
- * by the peer closing the socket, or by an RFC 6455 violation the checked decode
- * reports (an oversized or non-final control frame, §5.5/§7.1.7) — one teardown
- * path, three causes. send(frame) broadcasts to every open peer (the flat
- * point-to-point surface); a directed per-peer send is peer_link(name)->send().
+ * is answered with a stack-built PONG. Every connection dies down ONE path
+ * (transport_ws_server::teardown_slot, five call sites in `service_peer`): the
+ * peer closing the socket or a read error, at either phase; on an ESTABLISHED
+ * stream a CLOSE or an RFC 6455 violation the checked decode reports (an
+ * oversized or non-final control frame, §5.5/§7.1.7); during the opening
+ * HANDSHAKE a request that overruns 16 KiB or carries no `Sec-WebSocket-Key`.
+ * send(frame) broadcasts to every open peer (the flat point-to-point surface);
+ * a directed per-peer send is peer_link(name)->send().
  *
  * Both roles live here: transport_ws_server (accept inbound peers) and
  * transport_ws_client (dial out to a ws:// peer — device-to-device / NAT egress),
