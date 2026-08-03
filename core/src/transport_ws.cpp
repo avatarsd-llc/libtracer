@@ -415,6 +415,11 @@ void transport_ws_server::service_peer(session_t& s) {
             // of the handshake reply.)
             s.open.store(true, std::memory_order_release);
         }
+        // The seam that makes the line above testable: here the response is out AND the slot
+        // is published, so a send that lands in this instant must reach the peer. Move the
+        // store below this point and the same probe reads an empty socket — that is the
+        // regression this hook exists to redden (`ws_transport_test`, the handshake race).
+        if (detail::ws_peer_published_hook != nullptr) detail::ws_peer_published_hook();
         // Bytes pipelined past the header are the start of the frame stream —
         // the old one-peer server dropped them; carry them over.
         const auto* rest = reinterpret_cast<const std::byte*>(s.hs_buf.data()) + hdr_end + 4;

@@ -429,12 +429,12 @@ ANCHORS = [
     ('core/include/libtracer/transport_webtransport.hpp:156',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }'),
     # core/include/libtracer/transport_ws.hpp
-    ('core/include/libtracer/transport_ws.hpp:140',
+    ('core/include/libtracer/transport_ws.hpp:161',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'void send(std::span<const std::span<const std::byte>> iov) override;'),
-    ('core/include/libtracer/transport_ws.hpp:142',
+    ('core/include/libtracer/transport_ws.hpp:163',
      '/** @brief The @ref bus_link_t facet (ADR-0044) when constructed `peer_named`,'),
-    ('core/include/libtracer/transport_ws.hpp:298',
+    ('core/include/libtracer/transport_ws.hpp:319',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'transport_ws_client& operator=(const transport_ws_client&) = delete;'),
     # core/include/libtracer/vertex.hpp
@@ -579,7 +579,7 @@ ANCHORS = [
      'listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);'),
     ('core/src/transport_ws.cpp:353',
      '// The routable NAME is the slot index — `p<slot>`, legal by construction and a'),
-    ('core/src/transport_ws.cpp:668', 'if (stop_.load(std::memory_order_relaxed)) return false;'),
+    ('core/src/transport_ws.cpp:673', 'if (stop_.load(std::memory_order_relaxed)) return false;'),
     # core/tests/registry_teardown_test.cpp
     ('core/tests/registry_teardown_test.cpp:289', 'void test_digest_paths_agree() {'),
     # core/tests/tlv_arena_test.cpp

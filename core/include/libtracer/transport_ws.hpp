@@ -41,6 +41,27 @@
 
 namespace tr::net {
 
+namespace detail {
+
+/**
+ * @brief TEST SEAM: run by `transport_ws_server::service_peer` at the exact instant a peer's
+ *        `101 Switching Protocols` response is on the wire AND its slot is published open.
+ *
+ * The handshake's two visible transitions — "the peer may believe the connection is up" and
+ * "a sender may use this slot" — are ONE step only because the `open` store sits inside the
+ * same `write_m_` critical section as the response write. That is not observable from the
+ * outside by racing: the window is a few instructions wide. This hook is where a test HOLDS
+ * that instant open, sends into it, and checks the frame arrives; with the store moved back
+ * out of the lock the identical test reads an empty socket. Null in production — the cost is
+ * one predictable null-check, once per accepted peer, on the (cold) handshake path.
+ *
+ * Same shape and same rules as `tr::detail::probe_fail_hook`: install it before the peer that
+ * should trip it connects, and clear it before the test returns.
+ */
+inline void (*ws_peer_published_hook)() = nullptr;
+
+}  // namespace detail
+
 /**
  * @brief Suggested module name for a DIAL `ws` connection (ADR-0073 §4).
  *

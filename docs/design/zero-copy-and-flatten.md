@@ -170,7 +170,7 @@ deep receive task.
 
 A stack budget for that task counts five such buffers, not one. The decode arena is the only one
 this document covers; the other four are transport receive and chunk scratch — `transport_tcp.cpp:193`
-and `:433`, `transport_ws.cpp:353` and `:668`. They are not decode arenas and carry no structure,
+and `:433`, `transport_ws.cpp:353` and `:673`. They are not decode arenas and carry no structure,
 but they occupy the same frames and none of the five has a measured per-task high-water.
 
 That receive task is the binding constraint on a single-core, RAM-constrained node. In the ESP-IDF
