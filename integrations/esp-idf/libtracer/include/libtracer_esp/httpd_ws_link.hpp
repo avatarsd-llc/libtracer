@@ -231,6 +231,30 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
         return enqueue_drops_.load(std::memory_order_relaxed);
     }
 
+    /**
+     * @brief Admission predicate: given the opening-handshake request, return true to
+     *        admit the peer or false to refuse it — a clean refusal that closes the
+     *        socket, exactly as the @ref max_peers cap does. @p ctx is the opaque
+     *        pointer registered alongside it in @ref set_admission_cb.
+     */
+    using admission_fn_t = bool (*)(void* ctx, httpd_req_t* req);
+
+    /**
+     * @brief Install (or clear, with `nullptr`) an admission predicate consulted at the
+     *        top of every opening handshake, BEFORE the peer-cap check and any slot
+     *        allocation. Unset (the default) admits every peer — the historical behavior.
+     *
+     * The seam a host uses to authenticate the graph WS the same way it gates the rest of
+     * its HTTP surface: inspect the handshake request's headers (a session cookie, a
+     * shared token) and refuse an unauthenticated peer before it can read or write a
+     * single vertex. NOT synchronized — set it once at wiring time, before the link
+     * serves; the hook is read on the httpd task with no lock.
+     */
+    void set_admission_cb(admission_fn_t fn, void* ctx) noexcept {
+        admission_fn_ = fn;
+        admission_ctx_ = ctx;
+    }
+
    private:
     struct gate_t;        // the handler-admission gate + teardown barrier (in the .cpp)
     struct session_t;     // one peer slot's connection state (defined in the .cpp)
@@ -432,6 +456,10 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     httpd_handle_t handle_ = nullptr;  // nullptr => the instance never started
     std::uint16_t port_;
     std::size_t max_peers_;
+    /** @brief Opening-handshake admission predicate + its opaque ctx; null admits every
+     *         peer (the default). Read on the httpd task — see @ref set_admission_cb. */
+    admission_fn_t admission_fn_ = nullptr;
+    void* admission_ctx_ = nullptr;
     /** @brief The per-socket send bound applied at admission — see @ref send_timeout_ms. */
     std::uint32_t send_timeout_ms_ = 0;
     /** @brief Frames the control queue refused, for this link's life — see @ref

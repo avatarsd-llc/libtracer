@@ -877,6 +877,14 @@ esp_err_t httpd_ws_link_t::ws_handler(httpd_req_t* req) {
 esp_err_t httpd_ws_link_t::on_handshake(httpd_req_t* req) {
     const int fd = httpd_req_to_sockfd(req);
     if (fd < 0) return ESP_FAIL;
+    // Admission hook (optional): let the host refuse an unauthenticated peer before any
+    // slot is touched. Consulted FIRST so a refusal costs nothing, and returns ESP_FAIL
+    // (httpd closes the socket) — the same clean refusal path as the max_peers cap. A
+    // null hook admits every peer, preserving the historical open-graph behavior.
+    if (admission_fn_ != nullptr && !admission_fn_(admission_ctx_, req)) {
+        ESP_LOGW(kTag, "peer refused by admission hook (fd=%d)", fd);
+        return ESP_FAIL;
+    }
     // No teardown test here: reaching this point already means the handler gate admitted
     // this frame, and the destructor's barrier will not take its session snapshot until
     // this frame has left. So a session armed here — however late — is still IN that
