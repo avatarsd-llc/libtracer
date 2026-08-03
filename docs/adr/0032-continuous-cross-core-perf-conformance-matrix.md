@@ -40,6 +40,16 @@ results auto-published.**
   vs pooled vs borrowed vs rope/scatter): how many layers fold into the hot path.
 - **n-routers** — bridge/ROUTER hop count (cross-node fan, bounded by `MAX_HOPS`).
 
+> **Erratum (2026-08-03) — the `n-routers` axis is WITHDRAWN; both halves of it are dead.**
+> [ADR-0040](0040-net-plane-is-explicit-source-routed-only.md) retired `bridge_t` and the whole
+> ROUTER-flood mechanism (`bridge.hpp`/`bridge.cpp`/`router.hpp`/`router.cpp` are gone from
+> `core/`), and [ADR-0038](0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md)'s
+> 2026-07-30 erratum retracted `MAX_HOPS`, which never existed in code and must not be built.
+> Nothing in this axis can be implemented as written. The cross-node dimension it was reaching
+> for is the **bare-FWD forwarding-hop count**, which is bounded by `dst`-monotonicity, not by a
+> cap, and whose in-tree instrument is `bench/bench_hop_chain.cpp`. A replacement axis must be
+> specified against that instrument, not resurrected from this bullet.
+
 **On vector data:** the workload is the conformance vectors (real structured TLVs), so the
 surface measures *protocol* cost on *real* shapes, and the perf map and the correctness map
 share the same inputs — one matrix, two metrics (agree? + how fast?).

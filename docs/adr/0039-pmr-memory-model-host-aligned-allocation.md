@@ -127,14 +127,15 @@ resource than seam purity, and the seam buys nothing here."* A host that needs e
 drawn from its own resource is asking for a different ownership model, not a different call site.
 
 **Consequence to carry, so this is not re-derived from the stale wording:** the registration path
-*is* wire-driven and peer-reachable (`transport_vertex.cpp:274` reaches it from a CREATE), so the
-bound on how many vertices a peer can cause to be allocated is **not** supplied by this seam
-(`transport_vertex.cpp:277` reaches `register_vertex_key` from a resolved CREATE). That bound
+*is* wire-driven and peer-reachable (`transport_vertex.cpp:100-106` wires `make_connection` as the
+graph's CREATE factory), so the bound on how many vertices a peer can cause to be allocated is
+**not** supplied by this seam (`transport_vertex.cpp:309` reaches `register_vertex_key` from a
+resolved CREATE, and `:247` registers the module identity vertex on the same path). That bound
 belongs to the connection/creation admission surface RFC-0014 defines, and is where it must be
 enforced.
 
-**Trap for any future attempt.** Do not "just route the root allocation first": `graph.hpp:1052`
-declares `root_`, `graph.hpp:1098` declares `ctl_`, and C++ initialises members in **declaration**
+**Trap for any future attempt.** Do not "just route the root allocation first": `graph.hpp:1276`
+declares `root_`, `graph.hpp:1335` declares `ctl_`, and C++ initialises members in **declaration**
 order regardless of the constructor's init-list — so routing `graph.cpp:268` reads `ctl_` before it
 is constructed. Silent UB that a debug build hides, in a codebase already bitten by "`-Os` deletes a
 null check no test covers".

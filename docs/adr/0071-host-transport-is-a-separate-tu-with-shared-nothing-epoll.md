@@ -6,7 +6,7 @@ Status: **accepted (design); not implemented.** Records two decisions that were 
 
 libtracer serves a single-core ESP32-C6 and a many-core host from one codebase. The TCP transport currently serves both from one file, and the way it does so is a deliberate MCU-shaped choice that no ADR records.
 
-**The shipped server is one thread.** `transport_tcp_server::run` (`core/src/transport_tcp.cpp:505`) multiplexes the listen socket and every live peer in a single `poll()` pass, and says so:
+**The shipped server is one thread.** `transport_tcp_server::run` (`core/src/transport_tcp.cpp:521`) multiplexes the listen socket and every live peer in a single `poll()` pass, and says so:
 
 > `// ONE poll pass multiplexes the listen socket and every live peer — no`
 > `// per-peer thread (the MCU-shaped choice, #362)`
@@ -15,7 +15,7 @@ Three properties follow, and they are separable:
 
 1. **One thread** services accept and all peers, so a 24-core host runs the transport on one core.
 2. **`poll()`, not `epoll`** — the kernel rescans the whole descriptor set on every call, so cost grows with peer count even when peers are idle.
-3. **The `pollfd` array is rebuilt under `peers_m_` on every pass** (`:512-522`) — O(peers) of userspace work plus a mutex acquisition per iteration, again independent of how many peers are active.
+3. **The `pollfd` array is rebuilt under `peers_m_` on every pass** (`:528-540`) — O(peers) of userspace work plus a mutex acquisition per iteration, again independent of how many peers are active.
 
 **The MCU cannot adopt the fix.** ESP-IDF's lwIP provides `select` and `poll` only; there is no `epoll_create`/`epoll_ctl` anywhere in the component, and `sockets.h` defines `lwip_poll` as `poll`. `epoll` is a Linux-host capability that cannot be pushed down. The portable file is therefore **correct for its platform**, not a compromise — and the ESP build compiles that same file (`integrations/esp-idf/libtracer/CMakeLists.txt:85-86`), resolving `<sys/socket.h>` into lwIP, which is an unconditional `PRIV_REQUIRES` for exactly that reason.
 

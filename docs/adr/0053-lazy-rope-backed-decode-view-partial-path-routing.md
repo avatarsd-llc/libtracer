@@ -267,9 +267,9 @@ The amendment above ratified the lazy reader as serving
 
 **That is not what shipped, and measurement says what shipped is right.**
 
-`fwd_router_t::on_frame_rope_impl` short-circuits a single-link rope onto the span path (`fwd_router.cpp:336`, commented "the pre-ADR-0053 view path, unchanged"), so the lazy reader serves **only** multi-link ropes — precisely the case the amendment said it must not be limited to. Nothing had measured which was correct: `bench_forward_demux` times the *forward* hop, which never resolves, and `bench_forward_heap` counts allocations without timing them.
+`fwd_router_t::on_frame_rope_impl` short-circuits a single-link rope onto the span path (`fwd_router.cpp:908-909`, commented "the pre-ADR-0053 view path, unchanged"), so the lazy reader serves **only** multi-link ropes — precisely the case the amendment said it must not be limited to. Nothing had measured which was correct: `bench_forward_demux` times the *forward* hop, which never resolves, and `bench_forward_heap` counts allocations without timing them.
 
-`bench/bench_terminus_tier.cpp` closes that gap — the same frame through both public `op_resolver_t::resolve` overloads (the pairing `op_resolve_view_test` already uses as a correctness oracle), plus a `flat+arena` arm. Host p50 ns, arena decoding into a monotonic pmr buffer as production does (`fwd_router.cpp:532`):
+`bench/bench_terminus_tier.cpp` closes that gap — the same frame through both public `op_resolver_t::resolve` overloads (the pairing `op_resolve_view_test` already uses as a correctness oracle), plus a `flat+arena` arm. Host p50 ns, arena decoding from the router's injected block source as production does (`fwd_router.cpp:1259`) — at the time of this measurement that seam was still a monotonic `std::pmr` buffer; #588 / [ADR-0065](0065-failable-allocation-gets-its-own-seam-block-source.md) later moved `wire::decode_into` onto `tr::mem::block_source_t` and [ADR-0067](0067-bounded-recycling-source-and-per-owner-topology.md) made it per-router-child, neither of which affects the numbers below:
 
 | frame | arena L=1 | view L=1 | flat+arena L=2 | view L=2 | flat+arena L=8 | view L=8 |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -292,7 +292,7 @@ Three corrections follow:
 
 3. **The lazy tier's real domain is narrow but real**: large, lightly-fragmented frames. It is not dead code — `tlv_view_t` has production consumers in `op_resolve_view.cpp`, `op_resolve_walk.hpp` and `fwd_router.cpp` — it is simply scoped an order of magnitude tighter than ratified.
 
-4. **The DEVICE/RDMA justification for the lazy tier is false and is struck.** A heterogeneous ADR-0024 rope cannot be read by *either* tier: `tlv_view_t::over` rejects `!all_host()` with `FRAME_INVALID` (`tlv_view.cpp:15`), `rope_t::flatten` returns an empty `view_t` on the same condition (`rope.cpp:15`), and the router refuses a non-all-host rope before it reaches either (`fwd_router.cpp:350`). Lazy decode buys nothing for device-backed segments, and no future argument to keep the tier may rest on it.
+4. **The DEVICE/RDMA justification for the lazy tier is false and is struck.** A heterogeneous ADR-0024 rope cannot be read by *either* tier: `tlv_view_t::over` rejects `!all_host()` with `FRAME_INVALID` (`tlv_view.cpp:15`), `rope_t::flatten` returns an empty `view_t` on the same condition (`rope.cpp:15`), and the router refuses a non-all-host rope before it reaches either (`fwd_router.cpp:923`). Lazy decode buys nothing for device-backed segments, and no future argument to keep the tier may rest on it.
 
 **Decision recorded here:** the multi-link routing of ④b **stands**; the "single-link ropes included / every TCP/QUIC/WS frame" scope is **withdrawn**. `on_frame_rope_impl`'s short-circuit is the correct behaviour and must not be "fixed" to match the original wording.
 
@@ -317,7 +317,16 @@ rebuilt->gather(cur_src, [&](std::span<const std::byte> s) { iov.push_back(s); }
 
 The entry count is `~6 + link_count()`, chosen by the **peer's** frame, on the **forward** path — which is behind no ACL and is not even the terminus. `push_back`'s growth went through `std::pmr`, so on a fragmented heap it threw, and on `-fno-exceptions` that is the link-wrapped `abort()` stub. Same class as [#588](https://github.com/avatarsd-llc/libtracer/issues/588), on the egress path instead of the decode path.
 
-The **reply** egress was already a different story: it uses `rope_t::try_to_iovec`, which nothrow-reserves a plain `std::vector` and drops the reply on failure. That asymmetry — reply guarded, forward not — was the finding.
+The **reply** egress was already a different story: it uses `rope_t::try_to_iovec` (`fwd_router.cpp:1268`), which reserves a plain `std::vector` through the `tr::detail::try_reserve` probe and drops the reply on refusal instead of growing unguarded. That asymmetry — reply guarded, forward not — was the finding.
+
+> **Erratum (2026-08-03): "nothrow-reserves" over-states the guard.** `try_reserve`
+> (`core/include/libtracer/mem_heap.hpp:116-121`) probes with `::operator new(bytes, std::nothrow)`,
+> **frees the probe**, and then runs the *throwing* `std::vector::reserve` — inside a function
+> declared `noexcept`. If another thread takes the just-freed block, the reserve throws in a
+> `noexcept` frame and the process terminates: the exact abort class this erratum exists to close,
+> still open as [#850](https://github.com/avatarsd-llc/libtracer/issues/850). The helper's own
+> comment concedes the trick holds only single-threaded. The finding recorded here — reply guarded,
+> forward not — stands and the fix below stands; only the absolute nothrow claim does not.
 
 **The mechanism is now a `mem::block_array_t` over the router's injected `rx_`** ([ADR-0065](0065-failable-allocation-gets-its-own-seam-block-source.md)); exhaustion returns `false` and the hop **drops the frame**. Dropping — rather than emitting the entries that did fit — is the only correct answer: a partial iov is a *truncated FWD on the wire*, which is worse than silence, and FWD is not delivery-guaranteed, so the sender retries.
 

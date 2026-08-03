@@ -62,6 +62,15 @@ ADR-0052 escape hatch itself.
    A consumer that wants the tree feeds those bytes to `wire::decode`. (Hold `m` while
    reading its span — `materialize()` returns an owning `view_t` for the multi-link case.)
 
+   > **Erratum (2026-08-03) — the erasure spelling changed after this ADR; the payload type did not.**
+   > `on_reply` is no longer a `std::function` at all: [ADR-0047](0047-build-time-closed-module-sets-compile-time-seams.md)'s
+   > 2026-07-08 amendment and [ADR-0068](0068-build-configuration-is-plain-cpp-config-header.md) §3
+   > moved the router's per-frame callbacks to function-pointer + `void* ctx`, so the shipped
+   > signature is `void on_reply(reply_fn_t fn, void* ctx = nullptr) noexcept`
+   > (`core/include/libtracer/fwd_router.hpp:418`, with the rationale at `:379`). What **this**
+   > decision fixed — that the payload crossing the sink is a `const view::rope_t&`, and the router
+   > neither decodes nor flattens a reply — is unchanged and is what `reply_fn_t` carries.
+
 2. **Control-frame delivery is served off the rope.** `on_advertise` / `on_nack` read
    only a `u16` label — stitched via the existing `grammar::rope_cursor` loads, no
    flatten. `on_compact` still needs a **contiguous payload** for `deliver_local` and a

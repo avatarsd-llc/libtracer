@@ -10,6 +10,23 @@ Both segments came from `view::heap_alloc` — hard-wired to `mem::heap_backend(
 
 The failure *half* was already closed: a null segment yields an empty rope, which `resolve_node`'s `or_backpressure` turns into an addressed `kind=ERROR STATUS{BACKPRESSURE}` reply rather than a silent drop. Exhaustion is answered by value; there is no abort here. The **bound** half was open.
 
+> **Erratum (2026-08-03) — "there is no abort here" is true of the *segment*, and over-broad as written.**
+> It is exact for what the sentence is about: `view::segment_alloc` refuses by returning a null
+> handle, and the head/mint allocation this ADR moved cannot throw. It is NOT true of the reply
+> path as a whole. `assemble` first sizes the reply chain through
+> `rope_t::try_reserve` (`core/src/op_resolve_walk.hpp:575`), and once the chain exceeds the
+> rope's inline capacity that delegates to `tr::detail::try_reserve`
+> (`core/include/libtracer/rope.hpp:107`), whose second step is the **throwing**
+> `std::vector::reserve` run after a probe-and-free
+> (`core/include/libtracer/mem_heap.hpp:116-121`). The helper is declared `noexcept`, so a lost
+> race on the just-freed probe block terminates rather than degrading by value — its own comment
+> concedes the trick is sound only single-threaded. Tracked as
+> [#850](https://github.com/avatarsd-llc/libtracer/issues/850); the same residual makes
+> [ADR-0053](0053-lazy-rope-backed-decode-view-partial-path-routing.md)'s "nothrow-reserves"
+> sentence over-broad, annotated there. Nothing in this ADR's decision changes — the reply-egress
+> **backend** swap is unaffected — but a reader must not take this sentence as "the terminus
+> reply path cannot abort".
+
 ## Decision
 
 **Option B — a dedicated injected `mem::mem_backend_t*` for terminus reply egress.**

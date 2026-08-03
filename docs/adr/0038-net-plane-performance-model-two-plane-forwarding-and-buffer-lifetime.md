@@ -178,13 +178,13 @@ segments), sized by `:settings`"*.
 
 **What is actually in tree:**
 
-| §3 says | today (`route_handle.hpp:279-296`) |
+| §3 says | today (`route_handle.hpp:430-461`) |
 | --- | --- |
-| `egress_` / `egress_label_` / `next_label_` node-global members | none exist; the state is a per-link `link_tables_t` |
-| a node-global `std::mutex` at `:158` | `:158` is a doc comment; each link has its own `std::mutex m` (`:279`) and `links_m_` (`:295`) is a `shared_mutex` over the **registry only** |
-| four `std::map` | one `std::pmr::map` registry (`:296`) plus **two `std::pmr::vector`** per link (`:280-281`) |
+| `egress_` / `egress_label_` / `next_label_` node-global members | none exist; the state is a per-link `link_tables_t` (`:430`) |
+| a node-global `std::mutex` at `:158` | there is none; each link has its own `std::mutex m` (`:432`) and `links_m_` (`:460`) is a `shared_mutex` over the **registry only** |
+| four `std::map` | one `std::pmr::map` registry (`:461`) plus **two `std::pmr::vector`** per link (`:433-434`) |
 | a fixed-capacity open-addressed table | growable pmr vectors with a linear scan — deliberate, per their own comment: a link carries few compact flows, so a linear scan beats a node-based map |
-| `next_label_` becomes one `std::atomic<u16>` fetch-add | a plain `std::uint16_t` (`:282`) under the per-link mutex |
+| `next_label_` becomes one `std::atomic<u16>` fetch-add | a plain `std::uint16_t` (`:435`) under the per-link mutex |
 
 So the *goal* of the egress bullet — "hot path lock-free, flow-setup per-connection-spinlocked", no
 cross-link contention — was met by a different mechanism than the one specified, and the

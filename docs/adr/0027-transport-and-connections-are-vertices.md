@@ -13,6 +13,15 @@ Status: accepted. **Refined by [ADR-0059](0059-creator-endpoint-creation-and-rem
 > "a subsystem with its own lifecycle and counters" is the correct statement of that rule and is
 > untouched.
 
+> **Erratum (2026-08-03) — §Decision 2's closing clause "bounded only by `MAX_HOPS`" is withdrawn.**
+> It is a fourth site of the clause [ADR-0038](0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md)'s
+> 2026-07-30 erratum retracted ("**No such cap exists.** … And it must not be implemented"); that
+> erratum's own 2026-07-31 correction records that the retraction had to sweep the *citing* documents
+> and names three sites (ADR-0038 ×2, ADR-0037's Status line) — this one was missed. No hop counter,
+> hop cap or `MAX_HOPS` constant exists anywhere under `core/`. **What actually bounds a bare-FWD
+> route is `dst`-monotonicity alone.** The arbitrary-folding / self-healing claim the clause was
+> attached to stands on its own and never depended on the cap.
+
 [ADR-0021](0021-colon-field-plane-is-the-vertex-ioctl.md) established the `:` field plane as a vertex's `ioctl` and **rejected** turning a vertex's *control facets* (`/v/acl`, `/v/subscribers`) into `/` sub-vertices, because that dissolves one-identity atomicity. [ADR-0017](0017-in-band-vertex-creation-controller-orchestration.md) made vertex creation an in-band, ACL-gated `:children[]` write. The open question for third-party network formation: **how does an orchestrator (typically a web UI) bring up a transport link — e.g. a QUIC connection from B to A?** A first sketch squeezed it into a `transport_quic:peers[]` field. This ADR rejects that and places the transport in the path tree.
 
 ## Decision
