@@ -30,6 +30,16 @@
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
 
+/**
+ * @file
+ * @brief `tr::net::ws` — the socket-free RFC 6455 handshake and frame codec.
+ *
+ * Without this block doxygen indexes the header's namespace-scope entities but refuses to
+ * make them `@ref` TARGETS ("unable to resolve reference"), because a file's namespace-scope
+ * members are only linkable once the file itself is documented — which is why every
+ * `@ref kMaxControlPayload` / `@ref decode_frame_checked` in here needs it.
+ */
+
 namespace tr::net::ws {
 
 namespace detail {
@@ -487,7 +497,7 @@ inline constexpr std::size_t kMaxClientControlFrame = 2 + 4 + kMaxControlPayload
  * @brief Encode one whole client→server CONTROL frame into @p out — on the STACK, nothrow,
  *        MASKED (RFC 6455 §5.1).
  *
- * The client twin of @ref encode_server_control: same reasoning, plus the 4-byte masking
+ * The client twin of @ref encode_server_control — same reasoning, plus the 4-byte masking
  * key and the payload XOR. A control length is always < 126, so the header is the 2-byte
  * form with `MASK=1`.
  *
@@ -579,7 +589,7 @@ inline std::size_t put_client_frame(std::span<std::byte> out, opcode_t op,
  * one @p out buffer across calls and the steady state allocates nothing. On `0` the caller
  * DROPS the frame — the same answer the delivery path already gives under exhaustion.
  *
- * @par Why @ref tr::mem::block_array_t and not a `std::vector` + `tr::detail::try_reserve`
+ * @par Why a `tr::mem::block_array_t` and not a `std::vector` + `tr::detail::try_reserve`
  * `try_reserve` is `noexcept`, but only its PROBE is nothrow: it frees the probe block and
  * then runs the throwing `std::vector::reserve`, on the argument that the just-freed block
  * satisfies it. Refuse that second allocation and the `bad_alloc` crosses a `noexcept`
