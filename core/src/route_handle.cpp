@@ -213,7 +213,6 @@ void route_handle_t::clear_link(std::string_view link) {
     // a now-detached table; those edits are correctly discarded, since the next tables()
     // mints a fresh entry — exactly the clean slate the self-heal wants. Erasing bounds
     // `links_` to LIVE link names instead of retaining an empty shell per departed name.
-    //
     const std::unique_lock lock(links_m_);
     if (const auto it = links_.find(link); it != links_.end()) links_.erase(it);
     // The CROSS-LINK half (#716). Erasing `link`'s own tables is not the whole clean slate: a
