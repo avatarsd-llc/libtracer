@@ -24,6 +24,7 @@
 #include <utility>
 #include <vector>
 
+#include "libtracer/iov_table.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/ws.hpp"
@@ -110,10 +111,10 @@ std::string header_value(std::string_view request, std::string_view name) {
     return {};
 }
 
-/** @brief Inline iovec capacity for a scatter-gather send before the heap fallback:
+/** @brief Inline iovec capacity for a scatter-gather send before the overflow store:
  *         a FWD forward/reply gathers only a few spans, so the common broadcast
- *         never allocates (mirrors transport_tcp's bound). */
-constexpr std::size_t kMaxServerIov = 16;
+ *         never allocates (the shared `%iov_table.hpp` bound, as tcp/udp). */
+constexpr std::size_t kMaxServerIov = kMaxInlineIov;
 
 /**
  * @brief Build the scatter-gather iovec for one server→client frame: entry 0 is the
@@ -121,26 +122,25 @@ constexpr std::size_t kMaxServerIov = 16;
  *        @p iov spans follow (empty spans skipped).
  *
  * Server frames are UNMASKED (RFC 6455 §5.1), so the payload bytes ride straight to
- * the wire with no copy. Uses the caller's @p inline_vec when the span count fits,
- * else grows @p heap; both @p inline_vec / @p heap and @p header must outlive the
- * write, since the returned iovec aliases them.
+ * the wire with no copy. The entry storage comes from @p table — the caller's stack array
+ * while the span count fits, a NOTHROW overflow block when it does not; @p table and
+ * @p header must outlive the write, since the returned iovec aliases them.
  *
+ * @param table      The entry store (its inline array is the no-allocation fast path).
  * @param header     The already-encoded frame header buffer (its bytes are aliased).
  * @param header_len The number of valid header bytes in @p header.
  * @param iov        The payload spans to gather after the header.
- * @param inline_vec The caller's stack iovec array (the no-alloc fast path).
- * @param heap       Grown only when the span count exceeds @p inline_vec.
+ * @retval {nullptr, 0} The overflow store refused — the caller DROPS the frame. The entry
+ *                      count is `link count x region count`, chosen by the SENDING peer
+ *                      (`fwd_router.cpp`'s rope arm), so this is peer-reachable; a
+ *                      truncated frame on the wire would be worse than none (#848).
  * @return `{vec, count}` — the assembled iovec array and its entry count.
  */
 std::pair<::iovec*, std::size_t> build_server_iov(
-    std::array<std::byte, ws::kMaxServerFrameHeader>& header, std::size_t header_len,
-    std::span<const std::span<const std::byte>> iov, std::span<::iovec> inline_vec,
-    std::vector<::iovec>& heap) {
-    ::iovec* vec = inline_vec.data();
-    if (iov.size() + 1 > inline_vec.size()) {
-        heap.resize(iov.size() + 1);
-        vec = heap.data();
-    }
+    iov_table_t<::iovec>& table, std::array<std::byte, ws::kMaxServerFrameHeader>& header,
+    std::size_t header_len, std::span<const std::span<const std::byte>> iov) {
+    ::iovec* vec = table.acquire(iov.size() + 1);
+    if (vec == nullptr) return {nullptr, 0};
     vec[0] = ::iovec{header.data(), header_len};
     std::size_t n = 1;
     for (const std::span<const std::byte>& s : iov) {
@@ -222,16 +222,13 @@ transport_ws_server::~transport_ws_server() {
 }
 
 void transport_ws_server::send(std::span<const std::byte> frame) {
-    // Encode ONCE, then one serialized record per open peer. Lock order per the
-    // header contract: peers_m_ (slot list stable) → write_m_ (the stream
-    // write-serialization invariant, now covering every peer fd).
-    const std::vector<std::byte> encoded = ws::encode_frame(ws::opcode_t::BINARY, frame);
-    const std::lock_guard plock(peers_m_);
-    const std::lock_guard wlock(write_m_);
-    for (const std::unique_ptr<session_t>& s : slots_) {
-        if (!s->open.load(std::memory_order_relaxed)) continue;
-        write_all(s->fd.load(std::memory_order_relaxed), encoded);
-    }
+    // One span, same wire bytes — the gathered path is the ONE implementation (the
+    // tcp_transport_t::send idiom). A server frame is UNMASKED (RFC 6455 §5.1), so the
+    // caller's payload rides to the wire untouched behind a stack-built header: this
+    // removes the per-send `std::vector` (a peer-reachable abort() under -fno-exceptions,
+    // #848) AND a full payload memcpy, at the same one writev per peer.
+    const std::span<const std::byte> one[1] = {frame};
+    send(std::span<const std::span<const std::byte>>(one));
 }
 
 void transport_ws_server::send(std::span<const std::span<const std::byte>> iov) {
@@ -246,22 +243,21 @@ void transport_ws_server::send(std::span<const std::span<const std::byte>> iov) 
     const std::size_t hlen = ws::encode_frame_header(header, ws::opcode_t::BINARY, total);
 
     std::array<::iovec, kMaxServerIov + 1> inline_vec;
-    std::vector<::iovec> heap;
-    const auto [pristine, n] = build_server_iov(header, hlen, iov, inline_vec, heap);
+    iov_table_t<::iovec> table(inline_vec);
+    const auto [pristine, n] = build_server_iov(table, header, hlen, iov);
+    if (pristine == nullptr) return;  // gather store exhausted => drop the frame
 
-    const std::lock_guard plock(peers_m_);
-    const std::lock_guard wlock(write_m_);
     // write_all_iov CONSUMES its iovec array (advances base/len on partial writes),
     // so each peer must write from a fresh COPY of the pristine gather — otherwise
     // peer 2+ would writev a consumed/zeroed array. peer_endpoint_t::send is
     // single-fd and needs no such copy.
     std::array<::iovec, kMaxServerIov + 1> scratch_inline;
-    std::vector<::iovec> scratch_heap;
-    ::iovec* scratch = scratch_inline.data();
-    if (n > scratch_inline.size()) {
-        scratch_heap.resize(n);
-        scratch = scratch_heap.data();
-    }
+    iov_table_t<::iovec> scratch_table(scratch_inline);
+    ::iovec* scratch = scratch_table.acquire(n);
+    if (scratch == nullptr) return;  // same store, same answer: drop, never truncate
+
+    const std::lock_guard plock(peers_m_);
+    const std::lock_guard wlock(write_m_);
     for (const std::unique_ptr<session_t>& s : slots_) {
         if (!s->open.load(std::memory_order_relaxed)) continue;
         std::copy_n(pristine, n, scratch);
@@ -270,11 +266,10 @@ void transport_ws_server::send(std::span<const std::span<const std::byte>> iov) 
 }
 
 void transport_ws_server::peer_endpoint_t::send(std::span<const std::byte> frame) {
-    if (owner_ == nullptr || slot_ == nullptr) return;
-    const std::vector<std::byte> encoded = ws::encode_frame(ws::opcode_t::BINARY, frame);
-    const std::lock_guard lock(owner_->write_m_);
-    if (!slot_->open.load(std::memory_order_relaxed)) return;  // departed ⇒ no-op
-    write_all(slot_->fd.load(std::memory_order_relaxed), encoded);
+    // One span through the gathered path — the same delegation as the broadcast override
+    // (#848): no per-send vector, no payload copy.
+    const std::span<const std::byte> one[1] = {frame};
+    send(std::span<const std::span<const std::byte>>(one));
 }
 
 void transport_ws_server::peer_endpoint_t::send(std::span<const std::span<const std::byte>> iov) {
@@ -287,8 +282,9 @@ void transport_ws_server::peer_endpoint_t::send(std::span<const std::span<const 
     const std::size_t hlen = ws::encode_frame_header(header, ws::opcode_t::BINARY, total);
 
     std::array<::iovec, kMaxServerIov + 1> inline_vec;
-    std::vector<::iovec> heap;
-    const auto [vec, n] = build_server_iov(header, hlen, iov, inline_vec, heap);
+    iov_table_t<::iovec> table(inline_vec);
+    const auto [vec, n] = build_server_iov(table, header, hlen, iov);
+    if (vec == nullptr) return;  // gather store exhausted => drop the frame
 
     // Single consumer, so no pristine copy is needed (unlike the broadcast).
     const std::lock_guard lock(owner_->write_m_);
@@ -425,13 +421,14 @@ void transport_ws_server::service_peer(session_t& s) {
 
 bool transport_ws_server::drain_frames(session_t& s) {
     // Drain every complete frame currently buffered; leftover partial bytes stay
-    // for the next read. Returns false when the peer sent CLOSE.
+    // for the next read. Returns false when the peer sent CLOSE — or broke RFC 6455,
+    // which fails the connection through the exact same teardown (§7.1.7).
     while (true) {
-        auto decoded = ws::decode_frame(s.buf);
-        if (!decoded) return true;
-        ws::frame_t frame = std::move(decoded->first);
-        const std::size_t consumed = decoded->second;
-        s.buf.erase(s.buf.begin(), s.buf.begin() + static_cast<std::ptrdiff_t>(consumed));
+        ws::decode_result_t decoded = ws::decode_frame_checked(s.buf);
+        if (decoded.status == ws::decode_status_t::NEED_MORE) return true;
+        if (decoded.status == ws::decode_status_t::PROTOCOL_ERROR) return false;
+        ws::frame_t frame = std::move(decoded.frame);
+        s.buf.erase(s.buf.begin(), s.buf.begin() + static_cast<std::ptrdiff_t>(decoded.consumed));
 
         switch (frame.op) {
             case ws::opcode_t::BINARY:
@@ -464,10 +461,17 @@ bool transport_ws_server::drain_frames(session_t& s) {
                 break;
             }
             case ws::opcode_t::PING: {
-                const std::vector<std::byte> pong =
-                    ws::encode_frame(ws::opcode_t::PONG, frame.payload);
+                // Built on the STACK: decode_frame_checked has already enforced RFC 6455
+                // §5.5, so the payload is <= 125 bytes and the reply cannot fail to be
+                // built. There is deliberately no drop policy here — an unanswered PING
+                // entitles the peer to fail the connection (§5.5.2/§5.5.3), so a heap blip
+                // must not be able to cost the link (#848).
+                std::array<std::byte, ws::kMaxServerControlFrame> pong{};
+                const std::size_t plen =
+                    ws::encode_server_control(pong, ws::opcode_t::PONG, frame.payload);
                 const std::lock_guard lock(write_m_);
-                write_all(s.fd.load(std::memory_order_relaxed), pong);
+                write_all(s.fd.load(std::memory_order_relaxed),
+                          std::span<const std::byte>(pong.data(), plen));
                 break;
             }
             case ws::opcode_t::CLOSE:
@@ -602,8 +606,18 @@ std::uint32_t transport_ws_client::next_mask_key() {
 
 void transport_ws_client::send(std::span<const std::byte> frame) {
     // One serialized MASKED record under write_m_ (the stream_endpoint_t
-    // write-serialization invariant).
-    send_all_locked(ws::encode_client_frame(ws::opcode_t::BINARY, frame, next_mask_key()));
+    // write-serialization invariant). A client frame MUST be masked (RFC 6455 §5.1), so
+    // unlike every server-side send this one cannot gather the caller's bytes by reference
+    // and genuinely needs a buffer — the single WS egress site that keeps an allocation.
+    // It is the NOTHROW twin over a REUSED buffer (#848): steady state allocates nothing,
+    // and exhaustion drops the frame instead of aborting under -fno-exceptions.
+    //
+    // tx_buf_ is guarded by write_m_, the same lock that serializes the write, so the
+    // encode happens inside it rather than through send_all_locked.
+    const std::lock_guard lock(write_m_);
+    if (!ws::try_encode_client_frame(tx_buf_, ws::opcode_t::BINARY, frame, next_mask_key()))
+        return;  // frame buffer exhausted => drop the frame
+    write_all(conn_fd_.load(std::memory_order_relaxed), tx_buf_);
 }
 
 bool transport_ws_client::handshake(int fd, const std::string& host, std::uint16_t port) {
@@ -670,11 +684,13 @@ void transport_ws_client::serve(int fd) {
 
         // Drain every complete frame; leftover partial bytes stay for next read.
         while (true) {
-            auto decoded = ws::decode_frame(buf);
-            if (!decoded) break;
-            ws::frame_t frame = std::move(decoded->first);
-            const std::size_t consumed = decoded->second;
-            buf.erase(buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(consumed));
+            ws::decode_result_t decoded = ws::decode_frame_checked(buf);
+            if (decoded.status == ws::decode_status_t::NEED_MORE) break;
+            // RFC 6455 §7.1.7: a protocol violation FAILS the connection — the same
+            // teardown a peer CLOSE takes, not an unbounded wait for legal bytes.
+            if (decoded.status == ws::decode_status_t::PROTOCOL_ERROR) goto teardown;
+            ws::frame_t frame = std::move(decoded.frame);
+            buf.erase(buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(decoded.consumed));
 
             switch (frame.op) {
                 case ws::opcode_t::BINARY:
@@ -698,11 +714,15 @@ void transport_ws_client::serve(int fd) {
                     break;
                 }
                 case ws::opcode_t::PING: {
-                    // A client PONG must be masked, just like client data frames.
-                    const std::vector<std::byte> pong =
-                        ws::encode_client_frame(ws::opcode_t::PONG, frame.payload, next_mask_key());
+                    // A client PONG must be masked, just like client data frames — and,
+                    // like the server's, it is built on the STACK: §5.5 was enforced at
+                    // decode, so the payload is <= 125 bytes and the reply cannot fail
+                    // to be built (#848).
+                    std::array<std::byte, ws::kMaxClientControlFrame> pong{};
+                    const std::size_t plen = ws::encode_client_control(
+                        pong, ws::opcode_t::PONG, frame.payload, next_mask_key());
                     const std::lock_guard lock(write_m_);
-                    write_all(fd, pong);
+                    write_all(fd, std::span<const std::byte>(pong.data(), plen));
                     break;
                 }
                 case ws::opcode_t::CLOSE:

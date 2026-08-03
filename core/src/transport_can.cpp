@@ -5,6 +5,8 @@
 
 #include "libtracer/transport_can.hpp"
 
+#include <algorithm>
+#include <array>
 #include <charconv>
 #include <cstring>
 #include <optional>
@@ -169,6 +171,12 @@ void transport_can::emit_advertise(const can::advertise_t& adv) {
     // The advertise rides the control ID as an in-order byte stream, sliced into
     // CLASSIC (≤8B, exact-length) windows so no CAN-FD DLC padding can perturb the
     // stream decoder on the far side.
+    //
+    // It NEVER needed a contiguous buffer (#848): the loop below already walks the stream
+    // 8 bytes at a time, so it walks TWO sources in order — the 18-byte stack header, then
+    // `adv.path`'s bytes in place. `emit_advertise` is unconditional in `send_impl`, so the
+    // `std::vector` this replaces was a per-send abort() risk under `-fno-exceptions`.
+    // Zero allocation, zero drop, 18 bytes of stack.
     const std::vector<std::byte> bytes = can::encode_advertise(adv);
     const std::uint32_t control_id =
         can::encode_can_id({cfg_.version, cfg_.node, kCanControlEndpoint});

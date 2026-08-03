@@ -29,16 +29,34 @@
  * Rep-interleaved (base, cand, ctrl, base, ...) so a thermal/frequency drift hits all three arms;
  * every rep's value is printed so a reader can run the overlap check, not just the median.
  *
- * Single-threaded by construction: both modes measure per-operation allocation shape, and the
- * global counter is process-wide.
+ * `guard` — a GATE, not a measurement (#848). For each registered peer-reachable egress
+ * operation it learns the operation's allocation count `N` by running it once with the
+ * allocator counting, then runs it `N` more times with allocation `k = 1..N` REFUSED, and
+ * counts how many of those refusals escaped as a `std::bad_alloc`. An escape at injection
+ * point `k` is a mechanical proof that allocation `k` on that path is unguarded — no label,
+ * no hand-written note, no human judgement. `main` returns non-zero if any arm's expectation
+ * is violated, so this mode is runnable as a CI gate rather than a bench somebody reads.
+ *
+ * The instrument is kept honest by a deliberately-UNGUARDED control arm (the retained
+ * throwing `ws::encode_frame`), which the gate requires to escape: if the injector ever
+ * breaks, stops arming, or the compiler elides the allocation, that arm reports `escaped=0`
+ * and the gate fails ON THE GOOD BUILD. That is a permanently-live mutant, unlike a one-off
+ * "revert a site and confirm it reddens" ritual nobody repeats.
+ *
+ * Single-threaded by construction: all three modes measure per-operation allocation shape,
+ * and the global counter is process-wide.
  */
 
+#include <sys/uio.h>
+
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <memory_resource>
 #include <new>
 #include <span>
@@ -47,11 +65,14 @@
 #include <vector>
 
 #include "bench_common.hpp"
+#include "libtracer/can.hpp"
 #include "libtracer/frame.hpp"
+#include "libtracer/iov_table.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/route_handle.hpp"
 #include "libtracer/tlv_emit.hpp"
+#include "libtracer/ws.hpp"
 
 // --- global operator-new counter (this TU owns the override) -----------------
 
@@ -61,11 +82,40 @@ bool g_armed = false;
 std::size_t g_allocs = 0;
 std::size_t g_frees = 0;
 std::size_t g_bytes = 0;
+/**
+ * @brief While armed, refuse any request LARGER than this — "the heap cannot serve a block
+ *        this big". `SIZE_MAX` refuses nothing.
+ *
+ * The `guard` mode's injection point. It sits in the real `operator new` because that is
+ * what an UNGUARDED `std::vector::reserve` actually calls — `tr::detail::probe_fail_hook`
+ * is consulted only from inside the `try_*` seams, so a harness built on it would pass
+ * vacuously at exactly the sites this gate exists to catch.
+ *
+ * @par Why a size threshold and not "fail the k-th allocation"
+ * `tr::detail::try_reserve` PROBES with a nothrow allocation of exactly n bytes, frees it,
+ * and then runs the throwing `reserve(n)` that the just-freed block satisfies. An
+ * index-based injector refuses that second call even though a real heap that served the
+ * probe would always serve it — and because the `try_*` seams are `noexcept`, the
+ * fabricated throw `terminate`s the process instead of proving anything. A size threshold
+ * cannot fabricate it: the probe and its `reserve` ask for the SAME number of bytes, so
+ * they always agree. Thresholds are swept over the request sizes the operation was
+ * OBSERVED to make, so nothing here is hand-chosen.
+ */
+std::size_t g_max_alloc = static_cast<std::size_t>(-1);
+/** @brief The request sizes seen in the current armed window (for the threshold sweep). */
+std::vector<std::size_t>* g_size_log = nullptr;
 
 void* counted_alloc(std::size_t size) {
     if (g_armed) {
         ++g_allocs;
         g_bytes += size;
+        if (g_size_log != nullptr) {
+            std::vector<std::size_t>* log = g_size_log;
+            g_size_log = nullptr;  // the log's own growth must not recurse into itself
+            log->push_back(size);
+            g_size_log = log;
+        }
+        if (size > g_max_alloc) return nullptr;
     }
     return std::malloc(size != 0 ? size : 1);
 }
@@ -107,6 +157,9 @@ void operator delete(void* p, const std::nothrow_t&) noexcept { counted_free(p);
 void operator delete(void* p, std::align_val_t, const std::nothrow_t&) noexcept { counted_free(p); }
 
 namespace {
+
+namespace ws = tr::net::ws;
+namespace can = tr::net::can;
 
 /** @brief A `std::pmr::memory_resource` that counts what it serves (blocks and bytes). */
 class counting_resource_t final : public std::pmr::memory_resource {
@@ -365,6 +418,173 @@ int run_blocks() {
     return 0;
 }
 
+// --- mode C: the GUARD gate (#848) -------------------------------------------
+
+/** @brief What an arm's escape count is REQUIRED to be for the gate to pass. */
+enum class expect_t : std::uint8_t {
+    GUARDED,   /**< @brief Every injection point must soft-fail: `escaped == 0`. */
+    NOALLOC,   /**< @brief The operation must allocate nothing at all: `allocs == 0`. */
+    UNGUARDED, /**< @brief The control arm: at least one injection point MUST escape. */
+};
+
+/** @brief One registered peer-reachable egress operation the gate drives. */
+struct arm_t {
+    const char* name;          /**< @brief Stable, greppable arm name. */
+    expect_t expect;           /**< @brief The pass condition for this arm. */
+    std::function<void()> run; /**< @brief Perform the operation once, fixed inputs. */
+};
+
+/**
+ * @brief Drive one arm: learn its allocation count, then refuse each allocation in turn.
+ * @return true when the arm met its @ref expect_t.
+ */
+bool run_arm(const arm_t& arm) {
+    /** @brief Clears the arming state on EVERY exit, including a stack unwind. */
+    struct armed_scope_t {
+        explicit armed_scope_t(std::size_t max_alloc,
+                               std::vector<std::size_t>* log = nullptr) noexcept {
+            g_allocs = g_frees = g_bytes = 0;
+            g_max_alloc = max_alloc;
+            g_size_log = log;
+            g_armed = true;
+        }
+        ~armed_scope_t() {
+            g_armed = false;
+            g_max_alloc = static_cast<std::size_t>(-1);
+            g_size_log = nullptr;
+        }
+        armed_scope_t(const armed_scope_t&) = delete;
+        armed_scope_t& operator=(const armed_scope_t&) = delete;
+    };
+
+    // (1) Learn the operation's allocation count AND its request sizes, refusing nothing.
+    std::vector<std::size_t> sizes;
+    sizes.reserve(64);  // outside the armed window: this growth must not be counted
+    std::size_t n = 0;
+    {
+        const armed_scope_t scope(static_cast<std::size_t>(-1), &sizes);
+        arm.run();
+        n = g_allocs;
+    }
+    std::sort(sizes.begin(), sizes.end());
+    sizes.erase(std::unique(sizes.begin(), sizes.end()), sizes.end());
+
+    // (2) For each observed request size, deny a block that big and see if the failure escapes.
+    std::size_t escaped = 0;
+    std::size_t first_escape = 0;
+    for (const std::size_t s : sizes) {
+        if (s == 0) continue;
+        bool threw = false;
+        try {
+            const armed_scope_t scope(s - 1);
+            arm.run();
+        } catch (const std::bad_alloc&) {
+            threw = true;
+        }
+        if (threw) {
+            ++escaped;
+            if (first_escape == 0) first_escape = s;
+        }
+    }
+
+    const bool ok = arm.expect == expect_t::UNGUARDED ? escaped > 0
+                    : arm.expect == expect_t::NOALLOC ? n == 0 && escaped == 0
+                                                      : escaped == 0;
+    const char* expect_s = arm.expect == expect_t::UNGUARDED ? "UNGUARDED"
+                           : arm.expect == expect_t::NOALLOC ? "NOALLOC"
+                                                             : "GUARDED";
+    std::printf(
+        "RESULT failable guarded op=%s expect=%s allocs=%zu sizes=%zu escaped=%zu "
+        "first_escape_bytes=%zu "
+        "verdict=%s\n",
+        arm.name, expect_s, n, sizes.size(), escaped, first_escape, ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+/**
+ * @brief The gate over every peer-reachable egress operation this bench can link.
+ *
+ * Coverage is bounded by linkage, and that is why #848 EXTRACTED `tr::net::iov_table_t`
+ * out of `transport_ws.cpp`'s anonymous namespace: the five copies of the overflow gather
+ * (ws broadcast, ws directed, tcp record, tcp broadcast scratch, udp datagram) all reduce
+ * to `iov_table_t::acquire`, so one arm here covers all five. The socket-driving legs
+ * themselves are gated behaviourally by `core/tests/transport_alloc_softfail_test.cpp`.
+ */
+int run_guard() {
+    // Fixed inputs, built OUTSIDE the armed windows so their own allocations never count.
+    static const std::vector<std::byte> payload(512, std::byte{0x5A});
+    static const std::vector<std::byte> control(ws::kMaxControlPayload, std::byte{0x11});
+    static std::array<::iovec, tr::net::kMaxInlineIov + 1> inline_vec;
+    static const std::vector<std::byte> route = make_route(4);
+    static can::advertise_t adv = [] {
+        can::advertise_t a;
+        a.can_id = 0x1234;
+        a.slice_count = 3;
+        a.path = "node/sensor/temperature";
+        return a;
+    }();
+
+    const arm_t arms[] = {
+        // The CONTROL arm: the retained THROWING server encoder, which nothing on a
+        // peer-driven path calls any more. It MUST escape — if it stops escaping, the
+        // injector is broken and every other verdict on this page is worthless.
+        {"ws_encode_frame_throwing_CONTROL", expect_t::UNGUARDED,
+         [] {
+             const std::vector<std::byte> f = ws::encode_frame(ws::opcode_t::BINARY, payload);
+             asm volatile("" : : "r"(f.data()) : "memory");
+         }},
+        // A5 — the one WS egress encoder that survives as a nothrow twin.
+        {"ws_try_encode_client_frame", expect_t::GUARDED,
+         [] {
+             // A FRESH buffer per run: a warmed capacity would make the sweep vacuous
+             // (`try_reserve` returns true without allocating at all).
+             std::vector<std::byte> out;
+             (void)ws::try_encode_client_frame(out, ws::opcode_t::BINARY, payload, 7u);
+             asm volatile("" : : "r"(out.data()) : "memory");
+         }},
+        // A4/A6 — the PONG reply, now built entirely on the stack.
+        {"ws_encode_server_control_pong", expect_t::NOALLOC,
+         [] {
+             std::array<std::byte, ws::kMaxServerControlFrame> out{};
+             const std::size_t n = ws::encode_server_control(out, ws::opcode_t::PONG, control);
+             asm volatile("" : : "r"(n) : "memory");
+         }},
+        {"ws_encode_client_control_pong", expect_t::NOALLOC,
+         [] {
+             std::array<std::byte, ws::kMaxClientControlFrame> out{};
+             const std::size_t n = ws::encode_client_control(out, ws::opcode_t::PONG, control, 9u);
+             asm volatile("" : : "r"(n) : "memory");
+         }},
+        // A1 — the CAN advertise header, on the stack; `emit_advertise` slices it in place.
+        {"can_encode_advertise_header", expect_t::NOALLOC,
+         [] {
+             const std::vector<std::byte> b = can::encode_advertise(adv);  // ABLATION
+             asm volatile("" : : "r"(b.data()) : "memory");
+         }},
+        // B1/B2 + tcp:78 + tcp:358 + udp:103 — the ONE overflow gather all five share.
+        {"iov_table_overflow_gather", expect_t::GUARDED,
+         [] {
+             tr::net::iov_table_t<::iovec> table(inline_vec);
+             ::iovec* v = table.acquire(inline_vec.size() + 8);  // past the inline bound
+             asm volatile("" : : "r"(v) : "memory");
+         }},
+        // #603's nothrow label encoder, already shipped — kept under the same gate.
+        {"try_encode_advertise", expect_t::GUARDED,
+         [] {
+             std::vector<std::byte> out;  // fresh, for the same reason
+             (void)tr::net::try_encode_advertise(out, 1, route);
+             asm volatile("" : : "r"(out.data()) : "memory");
+         }},
+    };
+
+    int failures = 0;
+    for (const arm_t& a : arms)
+        if (!run_arm(a)) ++failures;
+    std::printf("RESULT failable guard_gate arms=%zu failed=%d verdict=%s\n",
+                sizeof(arms) / sizeof(arms[0]), failures, failures == 0 ? "PASS" : "FAIL");
+    return failures == 0 ? 0 : 1;
+}
+
 // --- mode B: the guard-shape A/B --------------------------------------------
 
 /** @brief A 48-byte trivially-copyable element — the arena/plan node shape these arrays hold. */
@@ -512,6 +732,7 @@ int main(int argc, char** argv) {
         const std::size_t reps = argc > 2 ? std::strtoul(argv[2], nullptr, 10) : 9;
         return run_probe(reps);
     }
-    std::printf("usage: bench_failable_census [blocks|grow N REPS|probe REPS]\n");
+    if (mode == "guard") return run_guard();
+    std::printf("usage: bench_failable_census [blocks|grow N REPS|probe REPS|guard]\n");
     return 2;
 }

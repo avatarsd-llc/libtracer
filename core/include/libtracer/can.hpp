@@ -20,6 +20,7 @@
  */
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -237,26 +238,41 @@ struct advertise_t {
 };
 
 /**
- * @brief Serialize an @ref advertise_t frame to its on-wire bytes.
+ * @brief Serialize ONLY the fixed @ref kAdvertiseHeaderSize-byte header of an
+ *        @ref advertise_t into @p out — on the STACK, nothrow.
  *
- * @param a The advertise to encode (its @ref advertise_t::path may be empty).
- * @return The fully serialized frame bytes (@ref kAdvertiseHeaderSize + path length).
+ * This is the ONE advertise field-encoding implementation (the `%ws.hpp`
+ * `encode_frame_header` / `encode_frame` split, applied to CAN): @ref encode_advertise
+ * appends the path after it, and `transport_can::emit_advertise` walks this stack header and
+ * then `cfg_.path`'s bytes in place, so slicing an advertise into 8-byte CAN windows
+ * allocates NOTHING — it never needed a contiguous buffer (#848). That matters because
+ * `emit_advertise` runs on *every* CAN send, so the old `std::vector` was a per-send
+ * `abort()` risk under `-fno-exceptions`.
+ *
+ * It also enforces the bound @ref kAdvertiseMaxPathLen only documented before: an
+ * over-long path used to be cast to `std::uint16_t` unchecked, encoding a frame every
+ * decoder rejects (or, past 65535, one whose length field silently truncates) — a
+ * permanent, silent wedge.
+ *
+ * @param out The 18-byte header buffer to fill.
+ * @param a   The advertise whose header to encode.
+ * @retval false @p a's path exceeds @ref kAdvertiseMaxPathLen — @p out is untouched and
+ *               NOTHING may be emitted for this advertise.
  */
-[[nodiscard]] inline std::vector<std::byte> encode_advertise(const advertise_t& a) {
-    const std::size_t path_len = a.path.size();
-    std::vector<std::byte> out;
-    out.reserve(kAdvertiseHeaderSize + path_len);
+[[nodiscard]] inline bool encode_advertise_header(std::array<std::byte, kAdvertiseHeaderSize>& out,
+                                                  const advertise_t& a) noexcept {
+    if (a.path.size() > kAdvertiseMaxPathLen) return false;
+    const auto path_len = static_cast<std::uint16_t>(a.path.size());
 
-    const auto put_u8 = [&](std::uint8_t v) { out.push_back(static_cast<std::byte>(v)); };
+    std::size_t i = 0;
+    const auto put_u8 = [&](std::uint8_t v) { out[i++] = static_cast<std::byte>(v); };
     const auto put_u16 = [&](std::uint16_t v) {
         put_u8(static_cast<std::uint8_t>(v & 0xFFu));
         put_u8(static_cast<std::uint8_t>((v >> 8) & 0xFFu));
     };
     const auto put_u32 = [&](std::uint32_t v) {
-        put_u8(static_cast<std::uint8_t>(v & 0xFFu));
-        put_u8(static_cast<std::uint8_t>((v >> 8) & 0xFFu));
-        put_u8(static_cast<std::uint8_t>((v >> 16) & 0xFFu));
-        put_u8(static_cast<std::uint8_t>((v >> 24) & 0xFFu));
+        put_u16(static_cast<std::uint16_t>(v & 0xFFFFu));
+        put_u16(static_cast<std::uint16_t>((v >> 16) & 0xFFFFu));
     };
 
     put_u8(kAdvertiseMagic);
@@ -267,8 +283,30 @@ struct advertise_t {
     put_u32(a.group_total_len);
     put_u16(a.slice_count);
     put_u16(a.target);
-    put_u16(static_cast<std::uint16_t>(path_len));
-    for (char c : a.path) put_u8(static_cast<std::uint8_t>(c));
+    put_u16(path_len);
+    return true;
+}
+
+/**
+ * @brief Serialize an @ref advertise_t frame to its on-wire bytes.
+ *
+ * The header comes from @ref encode_advertise_header (the one field-encoding locus); this
+ * form appends the path and exists for callers that want the whole frame contiguous. The
+ * CAN transport does not use it — it slices the header and the path separately, allocating
+ * nothing.
+ *
+ * @param a The advertise to encode (its @ref advertise_t::path may be empty).
+ * @retval {} @p a's path exceeds @ref kAdvertiseMaxPathLen — the advertise is unencodable.
+ * @return The fully serialized frame bytes (@ref kAdvertiseHeaderSize + path length).
+ */
+[[nodiscard]] inline std::vector<std::byte> encode_advertise(const advertise_t& a) {
+    std::array<std::byte, kAdvertiseHeaderSize> header{};
+    if (!encode_advertise_header(header, a)) return {};
+
+    std::vector<std::byte> out;
+    out.reserve(kAdvertiseHeaderSize + a.path.size());
+    out.insert(out.end(), header.begin(), header.end());
+    for (char c : a.path) out.push_back(static_cast<std::byte>(c));
     return out;
 }
 

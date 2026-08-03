@@ -18,6 +18,8 @@
 #include <utility>
 #include <vector>
 
+#include "libtracer/iov_table.hpp"
+
 namespace tr::net {
 
 namespace {
@@ -91,23 +93,19 @@ void udp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
     //
     // MEASURED (`bench_transport_iov`): the fallback fires at exactly **17 spans**, costing
     // one allocation of ~288 B. `bench_forward_heap`'s `allocs=0` gate CANNOT see it — that
-    // bench drives a stub link which never assembles an iovec — so this is the one per-frame
-    // heap allocation on the shipping forward path with no gate over it. Headroom against
-    // `kFwdMaxIov` (9) is **8 regions**, and a rope source may split any region further.
-    constexpr std::size_t kMaxInlineIov = 16;
+    // bench drives a stub link which never assembles an iovec. Headroom against
+    // `kFwdMaxIov` (9) is **8 regions**, and a rope source may split any region further —
+    // which is exactly why the fallback is drawn from the shared NOTHROW overflow store
+    // (`%iov_table.hpp`) and exhaustion DROPS the datagram (#848): the entry count is the
+    // sending peer's choice, and the old throwing `reserve` made that an abort() under
+    // `-fno-exceptions`.
     std::array<::iovec, kMaxInlineIov> inline_vec;
-    std::vector<::iovec> heap_vec;
-    ::iovec* vec = inline_vec.data();
-    std::size_t n = iov.size();
-    if (n > kMaxInlineIov) {
-        heap_vec.reserve(n);
-        for (const auto& s : iov)
-            heap_vec.push_back(::iovec{const_cast<std::byte*>(s.data()), s.size()});
-        vec = heap_vec.data();
-    } else {
-        for (std::size_t i = 0; i < n; ++i)
-            inline_vec[i] = ::iovec{const_cast<std::byte*>(iov[i].data()), iov[i].size()};
-    }
+    iov_table_t<::iovec> table(inline_vec);
+    const std::size_t n = iov.size();
+    ::iovec* vec = table.acquire(n);
+    if (vec == nullptr) return;  // gather store exhausted => drop the datagram
+    for (std::size_t i = 0; i < n; ++i)
+        vec[i] = ::iovec{const_cast<std::byte*>(iov[i].data()), iov[i].size()};
     const std::uint64_t p = peer();
     if (p == 0) return;  // no peer (learned or configured) => nobody to send to
     sockaddr_in peer{};

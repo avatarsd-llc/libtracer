@@ -306,6 +306,16 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
 
     // conn_fd_ + write_m_ (and their teardown discipline) live in stream_endpoint_t.
     std::atomic<std::uint64_t> mask_state_{0};
+    /**
+     * @brief The REUSED masked-frame buffer `send` encodes into, guarded by `write_m_`.
+     *
+     * A client frame must be masked (RFC 6455 §5.1), so its wire bytes are not the caller's
+     * bytes and cannot be gathered by reference — this is the one WS egress path that still
+     * needs a buffer. Reused across sends so the steady state allocates nothing, and grown
+     * through `ws::try_encode_client_frame`'s nothrow probe so exhaustion drops the frame
+     * rather than aborting under `-fno-exceptions` (#848).
+     */
+    std::vector<std::byte> tx_buf_;
     bool connected_ = false;
 };
 
