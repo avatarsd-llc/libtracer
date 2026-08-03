@@ -41,11 +41,19 @@ All arms per the #807 protocol: ≥11 interleaved A/B pairs, medians and full ra
 
 | arm | T | base median | candidate median | | |
 | --- | ---: | ---: | ---: | ---: | --- |
-| `stripe1-fan1` | 4 | 8.30 M/s | 29.75 M/s | ×3.59 | disjoint |
-| `stripe1-fan1` | 8 | 4.83 M/s | 44.44 M/s | ×9.21 | disjoint |
-| `stripe1-fan1` | 16 | 4.26 M/s | 68.90 M/s | ×16.17 | disjoint |
-| `stripe1-fan1` | 24 | 4.59 M/s | 88.82 M/s | ×19.35 | disjoint |
-| `stripe1-fan1` (pinned) | 1 | 10.99 M/s | 12.47 M/s | ×1.13 | disjoint |
+| `stripe1-fan1` | 4 | 7.56 M/s | 33.98 M/s | ×4.50 | disjoint |
+| `stripe1-fan1` | 8 | 4.65 M/s | 44.74 M/s | ×9.61 | disjoint |
+| `stripe1-fan1` | 16 | 4.33 M/s | 71.67 M/s | ×16.57 | disjoint |
+| `stripe1-fan1` | 24 | 4.63 M/s | 86.04 M/s | ×18.58 | disjoint |
+| `stripe1-fan1` (pinned) | 1 | 10.65 M/s | 11.96 M/s | ×1.12 | disjoint |
+
+The published entry carries the HOT dispatch fields only, with the wire/gate half out of line
+behind a pointer, for the reason #380 §3 gave `subscriber_t` the same split — and it is not
+decoration. An entry that inlined those four members was 136 B against `subscriber_t`'s 72, and
+the fan-out copy loop STREAMS the array: at fan-out 1024 that cost **+23 % on the publish**, a
+regression the CI perf gate reproduced in 4/4 interleaved pairs. Split out, the entry is 48 B —
+narrower than the slot it projects — and the local edge's copy is the two-pointer,
+one-refcount-clone work `try_edge_view_of` always did.
 
 Aggregate throughput is monotonically non-decreasing from T=4 to T=24 — the negative-scaling headline is gone — and T=24 reaches the deletion ceiling the issue measured (78.7 M/s) on this host. The single-threaded arm, pinned, is *faster*: ADR-0064's own argument is that this path is serializing-op-count bound, and a `seq_cst` store to the reader's own cache-line-isolated cell plus a release clear is fewer serializing operations than a mutex lock/unlock pair. That is also why a refcounted published array was rejected instead: its refcount RMW lands on a line every reader of the vertex shares.
 

@@ -45,16 +45,16 @@ reclones nothing (`graph.cpp:1074-1078`).
 
 Delivery runs outside the vertex lock, because a callback or a re-dispatch may re-enter the
 graph. The edge list therefore has to be copied out first. `fan_out` (`graph.cpp:921`) does that
-in one call to `snapshot_edges` (`core/include/libtracer/vertex.hpp:1914`), which takes **no
+in one call to `snapshot_edges` (`core/include/libtracer/vertex.hpp:1934`), which takes **no
 lock at all** (#635): it copies the vertex's PUBLISHED, immutable-after-publish edge array
-(`vertex.hpp:834`) into one of two buffers under a bounded per-participant **edge pin**
+(`vertex.hpp:854`) into one of two buffers under a bounded per-participant **edge pin**
 (`core/include/libtracer/edge_pin.hpp:154`), and releases the pin before the caller's first
 `dispatch_edge`. The stripe mutex used to be taken here, which serialized the publishes of
 every vertex that merely hashed to the same stripe — ×16.6 at twenty-four threads
-([ADR-0075](../../adr/0075-a-vertexs-edges-are-published-and-read-under-an-edge-pin.md)). It
+([ADR-0075](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0075-a-vertexs-edges-are-published-and-read-under-an-edge-pin.md)). It
 still serializes writer-vs-writer on the control plane, where a mutation builds the new array
-and swaps it in (`vertex.hpp:2569`); the displaced array is scanned and freed on the mutator's
-own thread, outside the lock, once no participant announces it (`vertex.hpp:932`).
+and swaps it in (`vertex.hpp:2589`); the displaced array is scanned and freed on the mutator's
+own thread, outside the lock, once no participant announces it (`vertex.hpp:952`).
 
 It reaches that call only when something subscribes here. `fan_out` opens on
 `own_subs_ordered() == 0 ⇒ return` (#635), so an unobserved write — and every placeholder
@@ -74,12 +74,12 @@ lock-free `own_subs()` count:
 `inline_buf` is an `edge_snapshot_t`, a raw byte array placement-constructed into, so a small
 fan-out neither allocates nor pays the zeroing a default-constructed `edge_view_t` array would
 (`vertex.hpp:760-798`). Its width is `kInlineFanout` — the no-heap small-fan-out snapshot width,
-`edge_snapshot_t::kCapacity`, 8 (`vertex.hpp:1179`, `:763`). A warm wide publish reuses the
+`edge_snapshot_t::kCapacity`, 8 (`vertex.hpp:1199`, `:763`). A warm wide publish reuses the
 thread-local vector's capacity and so allocates nothing either.
 
 `own_subs()` is read without the lock, so the width it reports can be stale.
 That costs nothing but a re-read: **`snapshot_edges` re-checks the width against the published
-array** (`graph.cpp:954-955`, `vertex.hpp:2608`), so a subscriber added between the count and
+array** (`graph.cpp:954-955`, `vertex.hpp:2637`), so a subscriber added between the count and
 the copy costs at most one fallback allocation on the small path and never a wrong answer. Re-entrancy is
 handled by a `tls_busy` flag: a subscriber callback that re-publishes takes the local-buffer
 path, so the outer fan-out's thread-local buffer is never aliased, and the flag resets on scope
@@ -87,7 +87,7 @@ exit (`graph.cpp:961-980`).
 
 Both allocations inside the snapshot are nothrow. An unreservable overflow vector degrades the
 snapshot to the first `kInlineFanout` views and drops the rest of that delivery; an edge whose
-owning copies cannot be cloned is skipped, dropping that one delivery (`vertex.hpp:2614-2620`).
+owning copies cannot be cloned is skipped, dropping that one delivery (`vertex.hpp:2643-2649`).
 Neither can abort. A thread that cannot claim a pin cell — more concurrent publishers than
 `kEdgePinSlots` — copies the current array under the stripe mutex instead, which is the
 pre-#635 path for those threads and nobody else; correctness never depends on the constant.

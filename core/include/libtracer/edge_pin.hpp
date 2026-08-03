@@ -73,7 +73,7 @@ static_assert(alignof(cell_t) == kCellAlign,
 inline constexpr std::size_t kNoIndex = static_cast<std::size_t>(-1);
 
 /**
- * @brief The domain's storage: @ref tr::graph::kEdgePinSlots claimable announcements.
+ * @brief The domain's storage: `kEdgePinSlots` claimable announcements.
  *
  * `constinit` and trivially destructible on purpose. It lands in `.bss` with no guard variable
  * and is never destroyed, so a `thread_local` participant unwinding at process exit can always
@@ -204,7 +204,7 @@ class pin_t {
  * @brief Is @p p announced by any participant right now?
  *
  * The scan half, run by the MUTATOR on its own thread outside every lock. `seq_cst` loads for
- * the reason @ref pin_t::acquire gives. O(@ref tr::graph::kEdgePinSlots) and reached only on a
+ * the reason @ref pin_t::acquire gives. O(`kEdgePinSlots`) and reached only on a
  * control-plane verb, so it is never on a delivery path.
  */
 [[nodiscard]] inline bool is_pinned(const void* p) noexcept {

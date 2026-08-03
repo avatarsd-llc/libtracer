@@ -298,7 +298,7 @@ vertices can physically exist**, so the derivation is a RAM floor:
 - The smallest vertex costs `sizeof(vertex_t)`, gated at **80 B on rv32**
   (`core/include/libtracer/config.hpp:188`) and **120 B on a 64-bit host**
   (`core/include/libtracer/config.hpp:176`), enforced at compile time
-  (`core/include/libtracer/vertex.hpp:2906`, `:2909`).
+  (`core/include/libtracer/vertex.hpp:2944`, `:2947`).
   [ADR-0070](../../adr/0070-configuration-is-a-named-traits-type.md):41 records that rv32 sits at
   *exactly* 80 with zero headroom — so 80 is a floor, not a budget.
 - Add the index slot itself: one pointer, 4 B on rv32, 8 B on a host (§6.4).

@@ -800,13 +800,30 @@ class edge_snapshot_t {
 };
 
 /**
- * @brief One entry of a PUBLISHED edge array: a dispatch view plus its own liveness bit.
+ * @brief The COLD wire/gate half of a published edge — null for the plain in-process edge.
  *
- * The view half is written once, before the array is published, and never touched again —
- * that is what lets a reader copy it out with no lock. The `active` bit is the ONE mutable
- * word, and it is MONOTONE: it starts true and an unsubscribe (@ref vertex_t::clear_edge,
+ * Split out for the reason #380 §3 split `subscriber_remote_t` out of @ref subscriber_t, and
+ * it is not decoration: the fan-out copy loop STREAMS this array, so the entry's width is the
+ * loop's bandwidth. Inlining these four members made the entry 136 B against `subscriber_t`'s
+ * 72 and cost **+23 % on the fan-out-1024 publish** — the wide-fan-out arm, measured, not
+ * predicted. Out of line, an entry is 48 B, and a local edge's copy is the pointer-and-refcount
+ * work `vertex_t::try_edge_view_of` always did.
+ */
+struct pub_remote_t {
+    std::string link;              /**< @brief Remote-delivery link NAME. */
+    view_t return_route{};         /**< @brief Consumer return route (refcount clone). */
+    std::string caller;            /**< @brief The edge's stored ACL fan-in context (#81). */
+    bool delivery_compact = false; /**< @brief RFC-0004 §E.1 label-compaction opt-in. */
+};
+
+/**
+ * @brief One entry of a PUBLISHED edge array: the hot dispatch fields plus a liveness bit.
+ *
+ * Written once, before the array is published, and never touched again — that is what lets a
+ * reader copy it out with no lock. The `active` bit is the ONE mutable word, and it is
+ * MONOTONE: it starts true and an unsubscribe (@ref vertex_t::clear_edge,
  * @ref vertex_t::evict_link_edges, retirement) flips it to false under the stripe lock. A
- * reader loads it relaxed and skips the entry.
+ * reader loads it and skips the entry.
  *
  * That single mutable bit is not a hedge on immutability, it removes a failure mode. Without
  * it every unsubscribe would have to BUILD a smaller array, and an unsubscribe that cannot
@@ -816,8 +833,11 @@ class edge_snapshot_t {
  * successful publish, where a failure costs nothing but a delayed release.
  */
 struct pub_edge_t {
-    edge_view_t view;               /**< @brief The immutable dispatch view. */
-    std::atomic<bool> active{true}; /**< @brief Monotone true -> false liveness bit. */
+    subscriber_fn_t callback = nullptr;   /**< @brief In-process sink fn (null ⇒ target-only). */
+    void* callback_ctx = nullptr;         /**< @brief The sink's caller-owned context. */
+    target_key_t target_key;              /**< @brief Local re-dispatch target (refcount share). */
+    std::unique_ptr<pub_remote_t> remote; /**< @brief The cold wire half; null for a local edge. */
+    std::atomic<bool> active{true};       /**< @brief Monotone true -> false liveness bit. */
 };
 
 /**
@@ -1904,7 +1924,7 @@ class vertex_t {
      * whole reason a refcounted published array was rejected instead.
      *
      * Fallback: a thread that cannot claim a pin (more publishers than
-     * @ref tr::graph::kEdgePinSlots) copies the CURRENT array under the stripe mutex — safe
+     * `kEdgePinSlots`) copies the CURRENT array under the stripe mutex — safe
      * because displacing an array requires that same lock. Correctness never depends on the
      * constant; only scaling does.
      * @param inline_buf The caller's raw stack buffer (cleared on entry).
@@ -2580,10 +2600,19 @@ class vertex_t {
                     e.active.store(false, std::memory_order_relaxed);
                     continue;
                 }
-                if (!try_edge_view_of(s, e.view)) {  // OOM on an owning copy
-                    destroy_edge_pub(np);
+                e.callback = s.callback;
+                e.callback_ctx = s.callback_ctx;
+                e.target_key = s.target_key;        // refcount clone — nothrow
+                if (s.remote == nullptr) continue;  // the plain in-process edge: no cold half
+                e.remote.reset(new (std::nothrow) pub_remote_t{});
+                if (e.remote == nullptr ||
+                    !tr::detail::try_assign(e.remote->link, s.remote->link) ||
+                    !tr::detail::try_assign(e.remote->caller, s.remote->caller)) {
+                    destroy_edge_pub(np);  // OOM on an owning copy — publish nothing
                     return false;
                 }
+                e.remote->return_route = s.remote->return_route;  // refcount clone — nothrow
+                e.remote->delivery_compact = s.remote->delivery_compact;
             }
         }
         // seq_cst, not release: this exchange and the pinned reader's validating load must
@@ -2615,7 +2644,7 @@ class vertex_t {
             // the remainder of this fan-out is dropped — never an abort.
             if (!use_heap && n == edge_snapshot_t::kCapacity) break;
             edge_view_t e;
-            if (!try_copy_edge_view(src[i].view, e)) continue;  // OOM: drop this one delivery
+            if (!try_copy_published(src[i], e)) continue;  // OOM: drop this one edge's delivery
             if (use_heap)
                 overflow.push_back(std::move(e));  // reserved above — no reallocation
             else
@@ -2625,17 +2654,26 @@ class vertex_t {
         return n;
     }
 
-    /** @brief The NOTHROW copy of one published dispatch view (#477) — the string fields are
-     *         the only members that can allocate; the key and the route are refcount clones.
-     *  @retval false An owning copy failed (OOM) — drop this edge's delivery. */
-    [[nodiscard]] static bool try_copy_edge_view(const edge_view_t& in, edge_view_t& out) noexcept {
+    /**
+     * @brief The NOTHROW copy of one published entry into a dispatch view (#477).
+     *
+     * Deliberately the same SHAPE as `try_edge_view_of`, which it replaced on this path: a
+     * single named return filled in place, and the cold half touched only when it exists. The
+     * plain in-process edge — the fan-1-vs-Zenoh case and the bulk of a wide fan-out — copies
+     * two pointers and takes one refcount clone, reaching no allocator and therefore no probe.
+     * @retval false An owning copy failed (OOM) — drop this edge's delivery.
+     */
+    [[nodiscard]] static bool try_copy_published(const pub_edge_t& in, edge_view_t& out) noexcept {
         out.callback = in.callback;
         out.callback_ctx = in.callback_ctx;
-        out.target_key = in.target_key;      // refcount clone — nothrow
-        out.return_route = in.return_route;  // refcount clone — nothrow
-        out.delivery_compact = in.delivery_compact;
-        return tr::detail::try_assign(out.link, in.link) &&
-               tr::detail::try_assign(out.caller, in.caller);
+        out.target_key = in.target_key;  // refcount clone — nothrow
+        if (in.remote == nullptr) return true;
+        if (!tr::detail::try_assign(out.link, in.remote->link) ||
+            !tr::detail::try_assign(out.caller, in.remote->caller))
+            return false;
+        out.return_route = in.remote->return_route;  // refcount clone — nothrow
+        out.delivery_compact = in.remote->delivery_compact;
+        return true;
     }
 
     /** @brief The slot index of the descriptor-table entry named @p name, or `-1` (no

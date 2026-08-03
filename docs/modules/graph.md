@@ -454,6 +454,11 @@ followed by the owner's own announce write.
 :members:
 ```
 
+```{doxygenstruct} tr::graph::edge_block_t
+:project: libtracer
+:members:
+```
+
 ```{doxygenenum} tr::graph::role_t
 :project: libtracer
 ```

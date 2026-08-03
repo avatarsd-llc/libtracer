@@ -255,13 +255,13 @@ Four differences that surprise people, each a property of the target rather than
   `atomic::wait` back-end `.bss` beyond the registry itself.
 - **`sizeof(vertex_t)` is gated in the header, not in a test.** The ceilings are `config_t`
   members and the assertions sit in `vertex.hpp` beside the type they constrain
-  (`core/include/libtracer/vertex.hpp:2906,2532`), so every build on every target checks its
+  (`core/include/libtracer/vertex.hpp:2944,2532`), so every build on every target checks its
   own binding, for free. A test-resident gate covers only the configurations CI actually
   builds: one, in practice, and never the 32-bit arm, because no CI leg cross-compiles that
   test while the ESP-IDF legs compile `vertex_t` itself on every change. That distinction has
   teeth here — **rv32 sits exactly on its 80 B ceiling with zero headroom** (`config.hpp.in:188`),
   so the next 32-bit member is a build failure by design. The stripe carries a companion
-  assertion of a different kind: `alignof(vertex_stripe_t) == kStripeAlign` (`vertex.hpp:997`),
+  assertion of a different kind: `alignof(vertex_stripe_t) == kStripeAlign` (`vertex.hpp:1017`),
   which catches an `alignas` that asked for less than the payload's natural alignment and was
   therefore ignored — silently, by GCC, per `[dcl.align]/5`.
 - **A single-core target's constraint is RAM; a many-core host's is the read path.** The two
