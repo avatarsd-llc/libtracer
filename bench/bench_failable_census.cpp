@@ -30,11 +30,16 @@
  * every rep's value is printed so a reader can run the overlap check, not just the median.
  *
  * `guard` — a GATE, not a measurement (#848). For each registered peer-reachable egress
- * operation it learns the operation's allocation count `N` by running it once with the
- * allocator counting, then runs it `N` more times with allocation `k = 1..N` REFUSED, and
- * counts how many of those refusals escaped as a `std::bad_alloc`. An escape at injection
- * point `k` is a mechanical proof that allocation `k` on that path is unguarded — no label,
- * no hand-written note, no human judgement. `main` returns non-zero if any arm's expectation
+ * operation it runs the operation once with the allocator counting and LOGGING every request
+ * size, dedupes those sizes, and then re-runs the operation once per distinct observed size
+ * `s` with the allocator refusing every request larger than `s - 1`. It counts how many of
+ * those runs escaped as a `std::bad_alloc`. An escape is a mechanical proof that a request of
+ * that size on that path is unguarded — no label, no hand-written note, no human judgement.
+ * The injection threshold is derived from what the operation was OBSERVED to ask for, never
+ * hand-chosen; see "Why a size threshold and not 'fail the k-th allocation'" on
+ * `g_max_alloc` below for why the index-based injector is the wrong instrument HERE (the
+ * behavioural harness in `core/tests/transport_alloc_softfail_test.cpp` does use one, over
+ * paths that hold no `try_reserve` probe). `main` returns non-zero if any arm's expectation
  * is violated, so this mode is runnable as a CI gate rather than a bench somebody reads.
  *
  * The instrument is kept honest by a deliberately-UNGUARDED control arm (the retained
@@ -504,11 +509,16 @@ bool run_arm(const arm_t& arm) {
 /**
  * @brief The gate over every peer-reachable egress operation this bench can link.
  *
- * Coverage is bounded by linkage, and that is why #848 EXTRACTED `tr::net::iov_table_t`
- * out of `transport_ws.cpp`'s anonymous namespace: the five copies of the overflow gather
- * (ws broadcast, ws directed, tcp record, tcp broadcast scratch, udp datagram) all reduce
- * to `iov_table_t::acquire`, so one arm here covers all five. The socket-driving legs
- * themselves are gated behaviourally by `core/tests/transport_alloc_softfail_test.cpp`.
+ * Coverage is bounded by linkage, and that is why #848 gave the overflow gather a NAMED
+ * type in a header. `tr::net::iov_table_t` is new — what `transport_ws.cpp`'s anonymous
+ * namespace held was the free function `build_server_iov` over a bare
+ * `std::vector<::iovec>&`; the PATTERN was extracted, not the class. The five throwing
+ * growths it replaced were `build_server_iov`'s own table (shared by the WS broadcast and
+ * the directed per-peer send), the WS broadcast's per-peer scratch table, tcp
+ * `prefixed_iov_t`'s record table, tcp's broadcast scratch table, and the udp datagram
+ * gather. All five now reduce to `iov_table_t::acquire`, which is why one arm here covers
+ * them. The socket-driving legs themselves are gated behaviourally by
+ * `core/tests/transport_alloc_softfail_test.cpp`.
  */
 int run_guard() {
     // Fixed inputs, built OUTSIDE the armed windows so their own allocations never count.
@@ -566,7 +576,9 @@ int run_guard() {
              const bool ok = can::encode_advertise_header(header, adv, adv.path);
              asm volatile("" : : "r"(ok), "r"(header.data()) : "memory");
          }},
-        // B1/B2 + tcp:78 + tcp:358 + udp:103 — the ONE overflow gather all five share.
+        // B1/B2 — the ONE overflow gather behind all five `acquire` call sites:
+        // transport_ws.cpp:142 (build_server_iov, for both WS send overrides) and :256,
+        // transport_tcp.cpp:81 and :356, transport_udp.cpp:105.
         {"iov_table_overflow_gather", expect_t::GUARDED,
          [] {
              tr::net::iov_table_t<::iovec> table(inline_vec);

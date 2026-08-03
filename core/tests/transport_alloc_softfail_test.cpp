@@ -597,7 +597,9 @@ void test_ws_client_send_drops_then_recovers() {
 }
 
 // ---------------------------------------------------------------------------
-// TCP (transport_tcp.cpp:78 and :358 — the sites the issue's inventory missed)
+// TCP — the two sites the issue's inventory missed: `prefixed_iov_t`'s record table
+// (transport_tcp.cpp:71, acquired at :81) and the broadcast's per-peer scratch (:355/:356).
+// Both were a THROWING `resize` before #848 (base 3479051: :78 and :358).
 // ---------------------------------------------------------------------------
 
 /** @brief The identical overflow gather over TCP: a wide iov drops, then the link recovers. */
