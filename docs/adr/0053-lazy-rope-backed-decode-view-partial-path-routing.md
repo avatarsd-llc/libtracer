@@ -317,7 +317,7 @@ rebuilt->gather(cur_src, [&](std::span<const std::byte> s) { iov.push_back(s); }
 
 The entry count is `~6 + link_count()`, chosen by the **peer's** frame, on the **forward** path — which is behind no ACL and is not even the terminus. `push_back`'s growth went through `std::pmr`, so on a fragmented heap it threw, and on `-fno-exceptions` that is the link-wrapped `abort()` stub. Same class as [#588](https://github.com/avatarsd-llc/libtracer/issues/588), on the egress path instead of the decode path.
 
-The **reply** egress was already a different story: it uses `rope_t::try_to_iovec` (`fwd_router.cpp:1268`), which reserves a plain `std::vector` through the `tr::detail::try_reserve` probe and drops the reply on refusal instead of growing unguarded. That asymmetry — reply guarded, forward not — was the finding.
+The **reply** egress was already a different story: it uses `rope_t::try_to_iovec`, which nothrow-reserves a plain `std::vector` and drops the reply on failure. That asymmetry — reply guarded, forward not — was the finding.
 
 > **Erratum (2026-08-03): "nothrow-reserves" over-states the guard.** `try_reserve`
 > (`core/include/libtracer/mem_heap.hpp:116-121`) probes with `::operator new(bytes, std::nothrow)`,
