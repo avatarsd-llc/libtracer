@@ -16,15 +16,19 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
-- **`graph_t::has_subscribers(vertex_handle_t)` — the demand-driven publisher's gate**
+- **`graph_t::has_subscribers(vertex_handle_t)` — the demand-driven producer's DELIVERY gate**
   ([#852](https://github.com/avatarsd-llc/libtracer/issues/852)). True iff a delivery here
-  would reach anyone: this vertex's own subscribers **or** a subtree subscriber on a strict
-  ancestor (RFC-0005). The same two-sided question `mark_pending` asks internally, so a
-  producer that skips on `false` skips exactly what the library would have found no receiver
-  for. The own half is the `seq_cst` `own_subs_ordered` read — the Dekker pairing against
-  ADR-0049's durability latch that makes a SKIP safe. The ancestor half is `listeners_above`,
-  which has no `seq_cst` twin, so this predicate is exactly as ordered as the library's own
-  `bubble_up` gate and no more; it neither adds that hazard nor closes it.
+  would reach a subscriber: this vertex's own **or** a subtree subscriber on a strict ancestor
+  (RFC-0005). The same two-sided question the eager `deliver_vertex` asks — `fan_out` on the
+  own count, then `bubble_up` on `listeners_above` — so a producer that skips on `false` skips
+  exactly what that path would have found no receiver for. Two limits are documented on the
+  declaration and are load-bearing: **`read` pollers and `await` waiters are not counted**, so
+  a producer that skips the value STORE (rather than just the delivery) starves them; and a
+  **skipped publish is not recovered by ADR-0049's durability latch** — that argument belongs
+  to the fan-out skip, which stores the LKV *before* loading the count, whereas this gate loads
+  first and never stores. The `seq_cst` own half buys only that a landed subscribe is ordered
+  before the producer's next read, so at most one round is skipped; the ancestor half is
+  relaxed and not even that.
 
 - **`graph_t::own_subs(vertex_handle_t)` — the owner-side subscriber-slot count.** Exposes
   the `own_subs` counter (#635) through the graph as a sizing/observability read: how many

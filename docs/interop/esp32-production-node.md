@@ -316,8 +316,8 @@ itself, described via `:schema` like any other data
 ```
 
 The backpressure counters come from `graph_t::delivery_drops()`
-(`core/include/libtracer/graph.hpp:1089`), which snapshots three per-cause totals —
-`no_target`, `denied`, `out_of_memory` (`graph.hpp:1072-1079`). They are counted and
+(`core/include/libtracer/graph.hpp:1102`), which snapshots three per-cause totals —
+`no_target`, `denied`, `out_of_memory` (`graph.hpp:1085-1092`). They are counted and
 never enforced: nothing in the library reads them, so the deployment decides what to
 alarm on. The three loads are individually relaxed rather than one atomic snapshot,
 so their useful reading is "is this growing", not an instant total.

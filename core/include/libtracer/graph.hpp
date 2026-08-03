@@ -323,25 +323,38 @@ class graph_t {
     }
 
     /**
-     * @brief Would a delivery at @p vh reach anyone — its own subscribers, OR a subtree
-     *        subscriber on a strict ancestor (RFC-0005)? The predicate a demand-driven
-     *        producer gates its publish on.
+     * @brief Would a **delivery** at @p vh reach any subscriber — its own, OR a subtree
+     *        subscriber on a strict ancestor (RFC-0005)?
      *
-     * The same two-sided question `mark_pending` asks internally, so a producer that skips
-     * on `false` skips exactly what the library would have found no receiver for. Gating on
-     * the own-slot count alone silently drops every subtree subscriber, which is why
-     * @ref own_subs carries a warning against it.
+     * The gate for a demand-driven producer that wants to skip *delivery work*. It is the
+     * same two-sided question the eager `deliver_vertex` asks — `fan_out` on the own count,
+     * then `bubble_up` on `listeners_above` — so a producer that skips on `false` skips
+     * exactly what that path would have found no receiver for. Gating on the own-slot count
+     * alone silently drops every subtree subscriber, which is why @ref own_subs carries a
+     * warning against it. (`mark_pending`, the deferred half, gates on `delivery_mode` first
+     * and so asks a third question this predicate deliberately does not.)
      *
-     * The own half is the `seq_cst` read (@ref vertex_t::own_subs_ordered) — the Dekker
-     * pairing against ADR-0049's durability latch that makes a SKIP safe: a producer that
-     * reads zero is ordered before a racing subscribe's latch load, so the latch carries
-     * the value the skipped publish would have delivered.
+     * @warning **Subscribers are not the only consumers.** `read` pollers and threads blocked
+     *          in @ref await are invisible here — libtracer's data API is read/write/await
+     *          (ADR-0006) and this counts the receivers of the third verb only. A producer
+     *          that skips its *delivery* on `false` is fine; one that also skips the VALUE
+     *          STORE starves every awaiter and freezes the LKV for every reader.
      *
-     * @warning The ancestor half is **not** so ordered — `listeners_above` is a relaxed
-     *          counter with no `seq_cst` twin, so a publish racing a *subtree* subscribe can
-     *          still be missed by that subscriber. This predicate is exactly as ordered as
-     *          the library's own `bubble_up` gate, and no more; it does not add a hazard,
-     *          and it does not close that one.
+     * @warning A skipped publish is not recovered by ADR-0049's durability latch. That
+     *          argument belongs to @ref vertex_t::own_subs_ordered's fan-out skip, whose
+     *          protocol is *store the LKV, THEN load the count* — a producer gating on this
+     *          predicate loads the count FIRST and never stores, so there is no value for a
+     *          joining subscriber's latch to carry. What the `seq_cst` own half does buy is
+     *          narrower: a subscribe that lands is globally ordered before the producer's
+     *          NEXT read, so at most one round is skipped. A subscriber joining across a
+     *          skipped round latches the PREVIOUS publish; for a one-shot or slow producer
+     *          it latches nothing. The ancestor half is not even that — `listeners_above` is
+     *          relaxed with no `seq_cst` twin, so this predicate is exactly as ordered as
+     *          `bubble_up`'s own gate and no more. It neither adds that hazard nor closes it.
+     *
+     * @note No test covers the `seq_cst` own half: swapping it for the relaxed
+     *       @ref vertex_t::own_subs leaves the whole suite green, so its presence here rests
+     *       on the argument above, not on coverage.
      */
     [[nodiscard]] bool has_subscribers(vertex_handle_t vh) const noexcept {
         const vertex_t* const v = vh.get();

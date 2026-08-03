@@ -498,7 +498,7 @@ two silent misroutes shipped because no test used the production wiring.
 This RFC adds **no wire registry and no per-hop route table**. It does require one node-local
 structure that does not exist today, and the RFC would be dishonest not to name it:
 `graph.hpp:57`'s "vertex map" is *described* as a map but *stored* as the ADR-0057 composite
-vertex tree (`core/include/libtracer/graph.hpp:1204-1215`) — a tree of non-moving `unique_ptr`
+vertex tree (`core/include/libtracer/graph.hpp:1217-1228`) — a tree of non-moving `unique_ptr`
 allocations with no dense index. A **dense, append-only `vector<vertex_t*>`**, one slot appended
 per registration, is therefore required to give an index meaning.
 
@@ -513,7 +513,7 @@ Its cost and its properties:
   no unpriced headroom — while keeping the index O(1) and its elements non-moving. The cost model
   and the wire surface are unchanged; only the sentence naming a container was wrong.
 - It is **append-only**, which the registration path already is ("vertices are added, never
-  erased", `graph.hpp:1207`), so it introduces no new lifetime rule and no new invalidation event.
+  erased", `graph.hpp:1220`), so it introduces no new lifetime rule and no new invalidation event.
 - It is **node-local** and unobservable on the wire; a peer never learns another node's
   cardinality.
 - It is **not** a route table: its size tracks the graph, not the traffic, so it does not
