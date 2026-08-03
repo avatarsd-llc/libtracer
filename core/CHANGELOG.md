@@ -59,8 +59,9 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `transport_can_peers_test`), and now delegates its header to `encode_advertise_header`.
   **Behaviour change in that twin:** a path longer than `kAdvertiseMaxPathLen` now yields an
   empty vector — nothing to emit — where it previously cast the length to `std::uint16_t`
-  unchecked and returned a frame carrying a truncated length field. Its bytes are unchanged
-  for every path within the bound.
+  unchecked, encoding a frame every decoder rejects (`decode_advertise` bounds `path_len` at
+  `kAdvertiseMaxPathLen`, `core/include/libtracer/can.hpp:361`) — or, past 65535, one whose
+  length field silently truncates. Its bytes are unchanged for every path within the bound.
   **Scope:** this removes the advertise's allocations only. A CAN `send` still allocates for
   the owning payload block (`view::over_bytes`, which soft-fails and DROPS) and for
   `view_can_frames_t::split`'s window vector (still a THROWING `push_back` — the remaining
@@ -262,9 +263,11 @@ without it.
   write: a sender can only reach the fd through that lock, so anyone who could observe the
   response also observes the slot as open. (`open` deliberately does NOT move ahead of the
   response write instead — a concurrent `send` would then be free to put a BINARY frame on
-  the wire in front of the handshake reply.) The window predates this branch and was too
-  narrow to lose a frame through until removing the per-send `std::vector` encode from the
-  server egress made senders fast enough to land in it. No signature or API change.
+  the wire in front of the handshake reply.) The window predates this branch: it spans the
+  gap between the `write_m_` scope closing and the `open` store, so a test cannot reliably
+  be inside it by racing for it. `ws_transport_test`'s guard therefore PARKS the server's
+  poll thread at that exact point (`detail::ws_peer_published_hook`) and makes its whole
+  `send` in the parked window. No signature or API change.
 
 - **The owning receiver seam holds no library reference *during* the callback** (#845). The
   UDP, TCP and QUIC/WebTransport receive paths built the delivered frame as
