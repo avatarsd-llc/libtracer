@@ -12,9 +12,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- **`httpd_ws_link_t`: a stalled WebSocket peer no longer starves the httpd task, and the
-  brokenness detector now aims at the peer that is actually broken (#835).** Two defects on
-  one seam. (1) `esp_http_server` sets `SO_SNDTIMEO` on every accepted socket from
+- **`httpd_ws_link_t`: WebSocket sends are now bounded by a derived per-socket send timeout,
+  and the brokenness detector now aims at the peer that is actually broken (#835).** Two
+  defects on one seam. (1) `esp_http_server` sets `SO_SNDTIMEO` on every accepted socket from
   `config.send_wait_timeout` (5 s by default) and every WS send runs on the single httpd
   task — the task that owns accept/recv for every socket the server has — so one peer with a
   full TCP window blocked that task for up to the whole timeout per frame, serialized under
@@ -22,8 +22,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (observed on an ESP32-C6 under a delivery burst with a throttled browser tab subscribed).
   Every UPGRADED socket now gets a short `SO_SNDTIMEO` of its own at admission, DERIVED as
   the task-watchdog period divided by the peer cap — so one full fan-out round with every
-  peer stalled still fits inside one watchdog window. REST sockets are untouched: the
-  server's `send_wait_timeout` still governs HTTP responses, so there is no config ripple.
+  peer stalled still fits inside one watchdog window. The bound is a DERIVATION, not a
+  measurement: the host tests prove the timeout is installed, the short-write handling and
+  the strike attribution, while the starvation repro itself is silicon-only — that the task
+  watchdog no longer trips is HIL-verified per the #835 merge gate. REST sockets are
+  untouched: the server's `send_wait_timeout` still governs HTTP responses, so there is no
+  config ripple.
   (2) The three-strikes teardown counted ENQUEUE drops and charged each to the fd of the
   frame that failed to enqueue. The control queue is shared, so when the stalled peer's slow
   sends jammed it the drops — and the session closes — landed on whichever HEALTHY peers
