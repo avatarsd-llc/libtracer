@@ -170,8 +170,9 @@ without it.
   egress-construction segments — the head (peer-driven size: the swapped route bytes plus the
   inline tail) and, on an RFC-0024 mint, the trailing 12-byte `PATH_REF` — were built by
   `view::heap_alloc`, hard-wired to `mem::heap_backend()`, on *every* reply. It was the last
-  terminus byte source an [ADR-0067](../docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md)-class
-  bounded node could not bound (peer-drivable, and reachable pre-authorization). Both sites now
+  *reply-egress* byte source an [ADR-0067](../docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md)-class
+  bounded node could not bound (peer-drivable, and reachable pre-authorization); the
+  composed-root folded READ's POINT-header framing is a separate value-seam residual (#831). Both sites now
   draw from a **new, dedicated** `mem::mem_backend_t* egress` injection, deliberately kept
   separate from `flat` (the *flatten* seam, sized against payload bytes) so a slab sized for
   flattens is not silently re-scoped by egress heads sized against route bytes

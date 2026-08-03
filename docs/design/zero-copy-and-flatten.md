@@ -220,12 +220,12 @@ exhaustion is representable. The general failable-allocation contract is
   (`:1334`, `:1354`) — out of the router's injected `flat` backend, and a refused flatten drops the
   frame rather than delivering an empty value (#730).
 - The FWD request terminus: `resolve_terminus_rope`
-  (`core/include/libtracer/fwd_router.hpp:702-712`) adopts a fragmented request as
+  (`core/include/libtracer/fwd_router.hpp:704-712`) adopts a fragmented request as
   `tlv_view_t::over(rope)` and resolves it through `op_resolver_t::resolve(tlv_view_t)`.
 
 The forward hop scatter-gathers a multi-link frame over the rope cursor with no flatten; the egress
 gathers each region's per-link sub-spans into a `block_array_t` drawn from the injected `rx_`, and
-exhaustion drops the frame rather than throwing (`core/include/libtracer/fwd_router.hpp:720-730`,
+exhaustion drops the frame rather than throwing (`core/include/libtracer/fwd_router.hpp:722-730`,
 [#596]).
 
 Two limits on that tier are load-bearing. First, **a single-link rope never reaches

@@ -176,7 +176,7 @@ class child_registry_t {                 // the one NAME -> link demux table (AD
 }  // namespace tr::net
 ```
 
-Signature source: `core/include/libtracer/fwd_router.hpp:173` (constructor), `:235`
+Signature source: `core/include/libtracer/fwd_router.hpp:175` (constructor), `:235`
 (`add_child`), `:285` (`subscribe_toward`), `:382-393` (the sink function-pointer types);
 `core/include/libtracer/child_registry.hpp:209` (`add`), `:458` (`resolve_peer`), `:473`
 (`erase`), `:499` (`entry_by_name`), `:520` (`by_name`), `:561`/`:571` (`size`/`live_size`).

@@ -47,9 +47,9 @@ reads it, so placing it there leaves every other member at the byte offset it ha
 existed, which keeps the forward-hop bench measuring the same layout (`graph.hpp:1305-1309`).
 
 `fwd_router_t` carries the same failable seam separately as its `rx` parameter
-(`core/include/libtracer/fwd_router.hpp:175`), because the terminus arena decode belongs to the
+(`core/include/libtracer/fwd_router.hpp:177`), because the terminus arena decode belongs to the
 router's receive thread rather than to the graph. It carries a **fourth** injection beside it, and
-for a different contract: `flat` (`fwd_router.hpp:176`, documented at `:97`), the `mem_backend_t` **every rope flatten on
+for a different contract: `flat` (`fwd_router.hpp:178`, documented at `:97`), the `mem_backend_t` **every rope flatten on
 the forward and terminus paths** draws its owned `segment` from — the byte-buffer seam, with cache
 hooks and a refcount, which the block source is not. The split is `graph_t`'s `ctl_` /
 `value_backend_` split one layer out. Like `value_backend_`, an injected `flat` **MUST be
@@ -347,7 +347,7 @@ of them ([`../reference/09-memory-substrate.md:305`](../reference/09-memory-subs
 
 **A pool shared across receive threads is slower than the heap it replaced.** See the topology
 result below; `fwd_router_t::add_child` takes an optional per-child source
-(`fwd_router.hpp:235`, resolved at `fwd_router.hpp:831-833`) precisely so each transport's receive
+(`fwd_router.hpp:237`, resolved at `fwd_router.hpp:833-833`) precisely so each transport's receive
 thread owns one. A source shared at *wiring* frequency — a graph's `ctl` — is fine behind a lock.
 
 **A `size_class_t` span is a bound the caller sets, not the library.** `pool_source_t` classes do

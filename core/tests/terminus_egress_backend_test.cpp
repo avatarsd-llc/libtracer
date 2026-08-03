@@ -7,7 +7,7 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * The reply head was the LAST terminus byte source a bounded node could not bound: it was
+ * The reply head was the last reply-egress byte source a bounded node could not bound: it was
  * hard-wired to `view::heap_alloc`'s global heap (`op_resolve_walk.hpp` `assemble`, two
  * `heap_alloc` sites — the head and the RFC-0024 mint), reached on EVERY reply and sized by the
  * peer's swapped route bytes. ADR-0074 gives it its own injection, kept separate from `flat`

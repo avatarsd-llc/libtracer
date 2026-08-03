@@ -136,7 +136,8 @@ class op_resolver_t {
      * @param egress The byte backend the FWD{REPLY}'s EGRESS-construction segments draw from
      *              (#795, ADR-0074) — the reply head (peer-driven size: the swapped route bytes
      *              plus the inline tail) and, on a mint, the trailing 12-byte `PATH_REF`. It is
-     *              the LAST terminus byte source a bounded node could not previously bound: the
+     *              the last reply-egress byte source a bounded node could not previously bound
+     *              (the folded READ's POINT-header framing remains on the value seam, #831): the
      *              head was hard-wired to `view::heap_alloc`'s global heap regardless of every
      *              other injection. A DEDICATED seam, not `flat`: `flat` is documented and sized
      *              against FLATTEN (payload) bytes, and folding an egress head into it would

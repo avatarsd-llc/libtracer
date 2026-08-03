@@ -64,7 +64,7 @@ Those are the three injection points of `graph_t`'s constructor — the pmr reso
 the value backend and the failable control source
 (`core/include/libtracer/graph.hpp:206-208`) — and the matching three of
 `fwd_router_t`: the pmr resource, the failable `rx` source and the `flat` byte backend
-its rope flattens draw from (`core/include/libtracer/fwd_router.hpp:174-176`). The full set of
+its rope flattens draw from (`core/include/libtracer/fwd_router.hpp:176-176`). The full set of
 build-time and injected bounds is catalogued in
 [the configuration space](../design/config/00-configuration-space.md); the failure
 semantics of the third seam are in

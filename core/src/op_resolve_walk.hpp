@@ -550,7 +550,7 @@ constexpr std::size_t kU8ValueLen = 5;  // 4-byte VALUE header + 1 payload byte
  * segment — draw from (#795, ADR-0074). It is the terminus reply's EGRESS-construction seam,
  * distinct from the flatten seam: its size tracks the swapped ROUTE bytes plus the inline tail,
  * not the payload bytes `flat` is sized against. A bounded node points it at its own slab so
- * this last terminus allocation stays inside the node's memory bound; the default is the global
+ * this reply-egress allocation stays inside the node's memory bound; the default is the global
  * heap. A refusal returns an EMPTY rope, which `resolve_node`'s `or_backpressure` turns into an
  * addressed `kind=ERROR STATUS{BACKPRESSURE}` — exhaustion answered by value, never an abort.
  */
