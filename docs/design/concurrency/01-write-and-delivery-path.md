@@ -171,8 +171,13 @@ rope link (`fwd_router.cpp:1725-1732`). The header is a `stack_writer<16>` — t
 most 6 bytes plus the 5-byte op TLV — and both constant TLVs are `constexpr` arrays with no
 runtime construction (`fwd_router.cpp:1722-1726`). The route bytes were copied once at subscribe
 time, so a delivery re-uses them by reference; a multi-link value crosses as its own segments,
-with no flatten. The iov vector is nothrow-reserved and an exhausted reserve drops that delivery
-rather than emitting a truncated frame (`fwd_router.cpp:1738-1739`).
+with no flatten. The iov vector is sized once up front through `tr::detail::try_reserve`, and a
+refused reserve drops that delivery rather than emitting a truncated frame
+(`fwd_router.cpp:1738-1739`). That helper is not a nothrow reserve: it probes, **frees the probe**,
+then runs the *throwing* `std::vector::reserve` inside a `noexcept` frame
+(`core/include/libtracer/mem_heap.hpp:116-121`). So the ordinary OOM becomes a drop, but a lost race
+on the just-freed block still terminates — [#850](https://github.com/avatarsd-llc/libtracer/issues/850),
+tabulated in [`../allocation-and-backpressure.md`](../allocation-and-backpressure.md).
 
 **The COMPACT leg is the one that flattens.** `const view_t flat = value.materialize(*flat_);`
 (`fwd_router.cpp:1701`) precedes the compact encode, because a COMPACT wraps a contiguous

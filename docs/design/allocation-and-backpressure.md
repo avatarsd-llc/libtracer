@@ -299,9 +299,19 @@ A dropped fresh ADVERTISE on the COMPACT leg self-heals: the peer answers the un
 an `abort()` under `-fno-exceptions` (`core/include/libtracer/rope.hpp:213-217`). The terminus reply
 egress builds that table on every send, so on a fragmented heap it was a reachable abort. The
 nothrow twin is `rope_t::try_to_iovec(std::vector<std::span<const std::byte>>& out) noexcept`
-(`rope.hpp:230-235`): it clears `out`, nothrow-reserves it to `link_count()`, and returns `false`
-without touching `out` further when the table cannot be grown — the caller drops the reply
-(`rope.hpp:220-228`).
+(`rope.hpp:230-235`): it clears `out`, sizes it to `link_count()` through `tr::detail::try_reserve`,
+and returns `false` without touching `out` further when the table cannot be grown — the caller drops
+the reply (`rope.hpp:220-228`).
+
+Be exact about what that helper buys, because the twin is named for its *signature*, not for an
+absolute guarantee. `tr::detail::try_reserve` probes the target allocation, **frees the probe**, and
+only then runs the ordinary **throwing** `std::vector::reserve` — inside a function declared
+`noexcept` (`core/include/libtracer/mem_heap.hpp:116-121`). It converts the ordinary OOM into a
+`false` the caller can answer with BACKPRESSURE, which is the whole of the improvement over
+`to_iovec`. It does not make the leg unconditionally nothrow: if anything else takes the just-freed
+block first, the `reserve` throws in a `noexcept` frame and the process terminates. That is the
+`try_reserve` row of §"Where the rule is not met today" above — [#850](https://github.com/avatarsd-llc/libtracer/issues/850) —
+and every `try_*` helper on this page inherits it.
 
 Both forms remain. `to_iovec` is correct wherever the caller is on a host build with exceptions or
 holds a table it sized beforehand; any path a peer can drive uses `try_to_iovec`.
