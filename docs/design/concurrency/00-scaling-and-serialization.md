@@ -45,19 +45,32 @@ Process-wide by construction: one graph, one mutex. Guards the Composite child l
 a reallocation) and the `registered_` placeholder flag
 ([ADR-0057 — graph composite vertex tree](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0057-graph-composite-vertex-tree.md)).
 
-The list below is the complete set of acquisitions in `graph.cpp`.
+The list below is every acquisition in `graph.cpp` — **18 sites in 17 functions**, which is what
+`grep -n map_mutex_ core/src/graph.cpp` returns once its two comment hits (`:382`, `:535`) are
+discounted. `evict_link_edges` is the one function that takes it twice.
 
 | taken | where | frequency |
 | --- | --- | --- |
-| **unique** | `register_vertex_key` (`:304`), `retire` (`:392`), `collect` (`:424`) | control plane |
-| shared | `find_ptr` (`:568`) — **so every `path_t` overload pays it once**; ≥3× and non-scaling (§6) | per op, path-addressed only |
-| shared | `field_write` (`:1585`) | per `:field` write |
-| shared | `read_children` (`:1865`), `read_children_folded` (`:1912`), `read_subtree_folded` (`:1984`) | per composed read — these walk, so they need it |
-| shared | `note_subscriber_added` / `_removed` (`:556`, `:562`), `evict_link_edges` (`:466`, `:471`), `has_first_level_child` (`:632`), `parked_seam_count` (`:433`) | control plane |
+| **unique** | `register_vertex_key` (`:309`), `retire` (`:488`), `collect` (`:520`) | control plane |
+| shared | `find_ptr` (`:663-664`) — **so every `path_t` overload pays it once**; ≥3× and non-scaling (§6) | per op, path-addressed only |
+| shared | `vertex_slot` (`:407`), `vertex_slot_at` (`:422`), `deref_vertex_slot` (`:448`), `vertex_slot_count` (`:396`) | per op, bound-path addressed only — see below |
+| shared | `field_write` (`:1690`) — the `:acl` branch only, not every `:field` write | per `:acl` write |
+| shared | `read_children` (`:1970`), `read_children_folded` (`:2073`), `read_subtree_folded` (`:2136`) | per composed read — these walk, so they need it |
+| shared | `note_subscriber_added` / `_removed` (`:652`, `:658`), `evict_link_edges` (`:562`, `:567`), `has_first_level_child` (`:728`), `parked_seam_count` (`:529`) | control plane |
 
-`retire_subtree` (`:341`) takes nothing of its own: it is called from inside `retire`'s unique
-hold and recurses under it. The doc comment at `:439` states the same contract for the
+`retire_subtree` (`:352`) takes nothing of its own: it is called from inside `retire`'s unique
+hold and recurses under it. The doc comment at `:535` states the same contract for the
 `evict_link_edges` snapshot helper — it documents a required hold, it is not an acquisition.
+
+**The RFC-0024 bound-path slot API is on this list, and it is not control plane.** Minting an
+element takes the lock (`op_resolve_walk.hpp:781` → `vertex_slot`) and honouring one takes it
+again (`op_resolve_walk.hpp:1031` and `fwd_router.cpp:781` → `deref_vertex_slot`), so a bound-path hop pays
+`map_mutex_` on both ends of the round trip that bound paths exist to make cheap. The two are not
+the same cost: `vertex_slot` **scans `vertex_slots_` linearly** inside the hold, while
+`deref_vertex_slot` and `vertex_slot_at` are a bounds check and one compare — the asymmetry
+`graph.hpp:357` states in the header. The hold is not incidental in either: one shared
+acquisition is what stops the slot index and the retire generation straddling a concurrent
+`retire`, which is how an element gets stamped with the successor tenant's number.
 
 The leaf/branch fork reads a per-vertex bit (`vertex_t::has_registered_child`,
 `core/include/libtracer/vertex.hpp:1378`), called from `core/src/graph.cpp:831`, and takes no
@@ -65,7 +78,8 @@ lock. The symbol exists on the vertex rather than on the graph, so a reader grep
 a flag test rather than a lock acquisition.
 
 A **handle**-addressed scalar read or write takes no map lock. A **path**-addressed one resolves
-through `find_ptr` and pays it once. Every measurement on this page uses the handle overloads,
+through `find_ptr` and pays it once, and a **bound-path**-addressed one pays it in
+`deref_vertex_slot` instead. Every measurement on this page uses the handle overloads,
 which `bench_lkv_slot` benches exclusively; the path-addressed figures are in §6 and are worse in
 kind, not only in degree.
 

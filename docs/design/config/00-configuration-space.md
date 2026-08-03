@@ -104,7 +104,8 @@ the build, not by the modules: it compiles when *any* of them is on.
 The minimum-feature module set — `frame`, `tlv_arena`, `backend_set`, `mem_pool`, `mem_source`,
 `rope`, `path` — targets **≤ 16 KiB of stripped flash** on
 `arm-none-eabi-g++ -std=c++23 -Os -fno-exceptions -fno-rtti -mcpu=cortex-m0` with
-`--specs=nano.specs` (`tools/cortexm0_footprint.py:56,86-90,104-106`). One committed sentinel
+`--specs=nano.specs` (`tools/cortexm0_footprint.py:57` for the module list, `:87-91` for the
+compile flags, `:107` for the link spec). One committed sentinel
 measures against it: `tools/cortexm0_footprint.py`, driven by `.github/workflows/footprint-cortexm0.yml`
 over the `core/tests/footprint/sentinel_node.cpp` fixture. A second tool, `tools/esp_size_gate.py`,
 *reports* the component's flash and static-RAM contribution to the esp32c3/c6 **full-node** image
@@ -130,13 +131,13 @@ type-erasure bloat and template-instantiation bloat alike.
 | knob | kind | default | CMake | ESP-IDF |
 | --- | --- | --- | --- | --- |
 | `kVertexLockStripes` (`config.hpp.in:86`) | count | 16 | `-DLIBTRACER_VERTEX_LOCK_STRIPES` | menuconfig `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` |
-| `kCacheLineBytes` (`:109`) | padding width | 64 | `-DLIBTRACER_CACHE_LINE_BYTES` | derived from `CONFIG_FREERTOS_UNICORE`, not exposed (`integrations/esp-idf/libtracer/CMakeLists.txt:193-197`) |
-| `kHazardReaderSlots` (`:136`) | count | 64 | `-DLIBTRACER_HAZARD_READER_SLOTS` | hardcoded to 64 (`CMakeLists.txt:188`) |
-| `kEdgePinSlots` (`:159`) | count | 32 | `-DLIBTRACER_EDGE_PIN_SLOTS` | hardcoded to 8 (`integrations/esp-idf/libtracer/CMakeLists.txt:213`) |
+| `kCacheLineBytes` (`:109`) | padding width | 64 | `-DLIBTRACER_CACHE_LINE_BYTES` | derived from `CONFIG_FREERTOS_UNICORE`, not exposed (`integrations/esp-idf/libtracer/CMakeLists.txt:220-224`) |
+| `kHazardReaderSlots` (`:136`) | count | 64 | `-DLIBTRACER_HAZARD_READER_SLOTS` | hardcoded to 64 (`integrations/esp-idf/libtracer/CMakeLists.txt:205`) |
+| `kEdgePinSlots` (`:159`) | count | 32 | `-DLIBTRACER_EDGE_PIN_SLOTS` | hardcoded to 8 (`integrations/esp-idf/libtracer/CMakeLists.txt:215`) |
 | `kMaxVertexBytes64` / `kMaxVertexBytes32` (`:176` / `:188`) | RAM ceiling | 120 / 80 | the preset — deliberately not a CMake variable | the preset |
 | `kPinPayloadRatio` (`:212`) | ratio | 0 — the `kPinNever` sentinel | no variable — a preset member | not exposed |
-| `acl_policy_t` (`:221`) | policy type | `allow_only_policy_t` | `-DLIBTRACER_ACL_FULL=ON` | hardcoded to `allow_only_policy_t` (`CMakeLists.txt:186`) — the full policy is not selectable |
-| `lkv_slot_t` (`:237`) | policy type | `sp_atomic_slot_t` | `-DLIBTRACER_LKV_SLOT=<type>` | hardcoded to `sp_atomic_slot_t` (`CMakeLists.txt:187`) — the hazard slot is not selectable |
+| `acl_policy_t` (`:221`) | policy type | `allow_only_policy_t` | `-DLIBTRACER_ACL_FULL=ON` | hardcoded to `allow_only_policy_t` (`integrations/esp-idf/libtracer/CMakeLists.txt:203`) — the full policy is not selectable |
+| `lkv_slot_t` (`:237`) | policy type | `sp_atomic_slot_t` | `-DLIBTRACER_LKV_SLOT=<type>` | hardcoded to `sp_atomic_slot_t` (`integrations/esp-idf/libtracer/CMakeLists.txt:204`) — the hazard slot is not selectable |
 
 Each is documented at its declaration with what it costs and when to move it; that header is
 the reference, not this table. What matters here is the shape: **eight knobs, all named, all
@@ -255,7 +256,7 @@ Four differences that surprise people, each a property of the target rather than
   `atomic::wait` back-end `.bss` beyond the registry itself.
 - **`sizeof(vertex_t)` is gated in the header, not in a test.** The ceilings are `config_t`
   members and the assertions sit in `vertex.hpp` beside the type they constrain
-  (`core/include/libtracer/vertex.hpp:2944,2532`), so every build on every target checks its
+  (`core/include/libtracer/vertex.hpp:2944,2947`), so every build on every target checks its
   own binding, for free. A test-resident gate covers only the configurations CI actually
   builds: one, in practice, and never the 32-bit arm, because no CI leg cross-compiles that
   test while the ESP-IDF legs compile `vertex_t` itself on every change. That distinction has
