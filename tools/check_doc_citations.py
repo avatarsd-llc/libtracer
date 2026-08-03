@@ -429,12 +429,12 @@ ANCHORS = [
     ('core/include/libtracer/transport_webtransport.hpp:156',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }'),
     # core/include/libtracer/transport_ws.hpp
-    ('core/include/libtracer/transport_ws.hpp:161',
+    ('core/include/libtracer/transport_ws.hpp:164',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'void send(std::span<const std::span<const std::byte>> iov) override;'),
-    ('core/include/libtracer/transport_ws.hpp:163',
+    ('core/include/libtracer/transport_ws.hpp:166',
      '/** @brief The @ref bus_link_t facet (ADR-0044) when constructed `peer_named`,'),
-    ('core/include/libtracer/transport_ws.hpp:319',
+    ('core/include/libtracer/transport_ws.hpp:322',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'transport_ws_client& operator=(const transport_ws_client&) = delete;'),
     # core/include/libtracer/vertex.hpp

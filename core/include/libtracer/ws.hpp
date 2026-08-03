@@ -473,8 +473,11 @@ inline constexpr std::size_t kMaxClientControlFrame = 2 + 4 + kMaxControlPayload
  * @ref kMaxControlPayload — enforced by @ref decode_frame_checked — the whole frame fits a
  * fixed stack buffer and there is no failure mode left to have a policy about (#848).
  *
- * Length encoding is delegated to @ref encode_frame_header, which stays the ONE
- * length-encoding implementation.
+ * Length encoding is delegated to @ref encode_frame_header, which stays the one
+ * SERVER-side (unmasked) length-encoding implementation: every unmasked frame this header
+ * emits — @ref encode_frame, this function, and both gather sites in `transport_ws.cpp` —
+ * goes through it. The masked client side encodes its own lengths (see
+ * `detail::put_client_frame` and @ref encode_client_control).
  *
  * @param out     The frame buffer to fill.
  * @param op      The control opcode (PONG / CLOSE).
@@ -535,9 +538,14 @@ namespace detail {
 }
 
 /**
- * @brief Write one whole MASKED client frame into @p out — the ONE client-side
- *        length-encoding + masking implementation, shared by the throwing
+ * @brief Write one whole MASKED client frame into @p out — the one client-side
+ *        length-encoding + masking implementation for DATA frames, shared by the throwing
  *        @ref ws::encode_client_frame and the nothrow @ref ws::try_encode_client_frame.
+ *
+ * Control frames do not come through here: @ref ws::encode_client_control masks its own
+ * payload against a hard-coded 2-byte header, because §5.5 bounds a control payload at
+ * @ref kMaxControlPayload and the general length ladder below is then dead code on a path
+ * that must stay on the stack.
  *
  * Writes through an already-sized buffer by index rather than appending, so the store it
  * fills is the caller's choice (a `std::vector` for the throwing form, a

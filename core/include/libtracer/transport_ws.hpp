@@ -10,11 +10,14 @@
  * thread — FreeRTOS stacks are the scarce resource on the MCU target). Each
  * peer runs the opening handshake (parse the HTTP Upgrade request, reply 101
  * Switching Protocols with ws::accept_key), then its byte stream is
- * ws::decode_frame()d into complete frames. Each BINARY message is one
- * libtracer frame (one TLV) handed to the receiver — tagged with the SENDING
- * peer's name through the bus_link_t facet (ADR-0044), so return routes name
- * the right browser tab; PING is answered with PONG, CLOSE tears that one
- * connection down. send(frame) broadcasts to every open peer (the flat
+ * ws::decode_frame_checked()d into complete frames — the same call on both the
+ * server and the client path. Each BINARY message is one libtracer frame (one
+ * TLV) handed to the receiver — tagged with the SENDING peer's name through the
+ * bus_link_t facet (ADR-0044), so return routes name the right browser tab; PING
+ * is answered with a stack-built PONG. One connection is torn down by a CLOSE,
+ * by the peer closing the socket, or by an RFC 6455 violation the checked decode
+ * reports (an oversized or non-final control frame, §5.5/§7.1.7) — one teardown
+ * path, three causes. send(frame) broadcasts to every open peer (the flat
  * point-to-point surface); a directed per-peer send is peer_link(name)->send().
  *
  * Both roles live here: transport_ws_server (accept inbound peers) and
