@@ -101,11 +101,12 @@
   // ---------------------------------------------------------------- ratio --
   /** @brief The per-commit quotient chart of a paired family, or null if it has no pairs.
    *
-   * Both arms of a `(zenoh )?` family are measured in the SAME pass on the SAME machine,
-   * so a quotient taken between two values recorded at the same commit divides that
+   * Both arms of a `(zenoh )?` family are recorded at the same commit — on bench-local
+   * that is the same pass on the same pinned machine, so the quotient divides that
    * machine's speed on the day out of the answer to first order. That is what makes this
    * the better view across a long history — better, not immune: the cancellation is
-   * partial. Measured over the last 60 recorded commits at p50, the quotient's spread is
+   * partial. Measured at p50 (the hosted store's last 60 recorded commits; bench-local's
+   * full store of 12 runs), the quotient's spread is
    * about a tenth below the libtracer line's own on the hosted store (that store keeps
    * the best of three runners *per series*, so a point's two arms need not come from one
    * runner's transcript) and about a third below it on bench-local, where every point is
@@ -684,12 +685,13 @@
       drawRange(A.full);
       byIdx = A.c.series.map(lookup);
       blurb.textContent = ratioOn && c.ratio
-        ? "Both arms are measured in the same pass on the same machine, so the runner's speed "
-          + "on the day divides out of this quotient to first order — it damps the shared-runner "
-          + "spread the absolute lines carry, but does not escape it: measured over the last 60 "
-          + "commits the quotient's spread is about a tenth below the libtracer line's own on the "
-          + "hosted store (best of three runners per series) and about a third below it on "
-          + "bench-local. Each point pairs the two engines at ONE "
+        ? "Both arms are recorded at the same commit — on bench-local that is one pass on "
+          + "one pinned machine, so its speed on the day divides out of this quotient to first "
+          + "order; on the hosted store best-of-three per series means the arms' runners can "
+          + "differ. The quotient damps the shared-runner spread the absolute lines carry, but "
+          + "does not escape it: measured, its spread is about a tenth below the libtracer "
+          + "line's own on the hosted store (last 60 commits) and about a third below it on "
+          + "bench-local (full 12-run store). Each point pairs the two engines at ONE "
           + "recorded commit; a commit where only one arm recorded a value contributes no point."
         : (mets[mi].blurb || "");
     }

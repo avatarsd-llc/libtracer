@@ -718,9 +718,10 @@ are not comparable to each other: different denominator, by construction.
   the two engines at one commit; a commit where only one arm recorded contributes no point.
   The cancellation is partial on the **hosted** store and not total, because that store
   records the best of three runners *per series*, so a point's two arms are not guaranteed
-  to be the same runner's — measured over the last 60 recorded commits at fan 128/1024/8192,
-  the quotient's spread is about a tenth lower than the libtracer line's own. On the
-  bench-local store, where every point is one pinned CPU, it is about a third lower.
+  to be the same runner's — measured at fan 128/1024/8192 over that store's last 60 recorded
+  commits, the quotient's spread is about a tenth lower than the libtracer line's own. On the
+  bench-local store, where every point is one pinned CPU (measured over its full store of 12
+  runs), it is about a third lower.
 - A `source` selector heads each chart block: **GitHub-hosted** (the default — best of three
   runners per point, a portability envelope) or **bench-local** (one pinned self-hosted CPU,
   the absolute-trend instrument). One store at a time, page-wide, never overlaid — the two

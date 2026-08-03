@@ -86,10 +86,11 @@ METRICS: list[dict] = [
 # the reader slice a commit range: a server-side ratio would have to be emitted once per
 # store per range and would go stale the moment either control moved.
 #
-# Why it earns a view of its own: both arms are measured in one pass on one machine, so
-# whatever that machine's speed was on the day divides out of the quotient to first order.
-# The cancellation is partial, not total, and it is measured rather than asserted: over the
-# last 60 recorded commits at p50, the quotient's coefficient of variation is about a tenth
+# Why it earns a view of its own: both arms are recorded at the same commit — on bench-local
+# that is one pass on one pinned machine, so its speed on the day divides out of the quotient
+# to first order. The cancellation is partial, not total, and it is measured rather than
+# asserted: at p50 (hosted store, last 60 recorded commits; bench-local, its full 12-run
+# store), the quotient's coefficient of variation is about a tenth
 # below the libtracer line's own on the HOSTED store (that store keeps the best of three
 # runners *per series*, so a point's two arms need not come from one runner's transcript)
 # and about a third below it on bench-local, where every point is one pinned CPU. So the
