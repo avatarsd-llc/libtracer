@@ -293,6 +293,32 @@ Headers: `frame.hpp`, `tlv.hpp`, `tlv_emit.hpp`, `tlv_arena.hpp`, `path_ref.hpp`
 :project: libtracer
 ```
 
+The bound-path element codec (RFC-0024 §4) — the element's layout and the purely STRUCTURAL
+rules the grammar enforces. What an element *means* — the bounds check into a host's vertex
+map, the generation compare, the ACL re-check at the dereferenced vertex — is L4 routing and
+lives in [fwd-router.md](fwd-router.md) §the bound hop.
+
+```{doxygenstruct} tr::wire::path_ref_element_t
+:project: libtracer
+:members:
+```
+
+```{doxygenfunction} tr::wire::path_ref_element_count
+:project: libtracer
+```
+
+```{doxygenfunction} tr::wire::path_ref_body_valid
+:project: libtracer
+```
+
+```{doxygenfunction} tr::wire::path_ref_element_at
+:project: libtracer
+```
+
+```{doxygenfunction} tr::wire::path_ref_store_element
+:project: libtracer
+```
+
 ```{doxygenfunction} tr::wire::emit_name(std::vector<std::byte>&, std::span<const std::byte>)
 :project: libtracer
 ```

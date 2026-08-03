@@ -464,6 +464,18 @@ tested against hand-built frames with no live transport.
 :project: libtracer
 ```
 
+```{doxygenfunction} tr::net::peek_fwd_dst_ref
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::read_path_ref_element
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::peek_reply_mint
+:project: libtracer
+```
+
 ```{doxygenfunction} tr::net::peek_fwd_first_dst_seg
 :project: libtracer
 ```
@@ -476,7 +488,7 @@ tested against hand-built frames with no live transport.
 :project: libtracer
 ```
 
-```{doxygenfunction} tr::net::rebuild_fwd_forward(const Cursor&, std::span<const std::byte>, std::string_view, std::size_t, const fwd_pre_t*)
+```{doxygenfunction} tr::net::rebuild_fwd_forward(const Cursor&, std::span<const std::byte>, std::string_view, std::size_t, const fwd_pre_t*, const wire::path_ref_element_t*)
 :project: libtracer
 ```
 

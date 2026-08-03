@@ -230,7 +230,7 @@ template <class Cursor>
  * performs, which is why a bound path is loop-free by construction and needs no visited set).
  *
  * The four STRUCTURAL rules (`opt.PL = 0`, `opt.LL = 0`, `length % 8 == 0`, `length <= 2040`)
- * are checked here through @ref tr::wire::path_ref_body_valid — the one locus that owns them —
+ * are checked here through `tr::wire::path_ref_body_valid` — the one locus that owns them —
  * so a frame that fails any of them is not a bound address and falls through to the caller's
  * terminus arm, where the resolver refuses it as it refuses every other malformed `dst`.
  *
@@ -274,7 +274,7 @@ template <class Cursor>
 /**
  * @brief Read the 8-byte `PATH_REF` element at @p off through the cursor seam.
  *
- * Byte-wise rather than through @ref tr::wire::path_ref_element_at, because on the rope tier
+ * Byte-wise rather than through `tr::wire::path_ref_element_at`, because on the rope tier
  * an element may straddle a link boundary and there is then no span to hand that function.
  * Eight `byte_at` calls need no scratch, no stitch slot and no flatten, which is the property
  * that lets a bound hop stay allocation-free on a fragmented frame; the codec's own reader
