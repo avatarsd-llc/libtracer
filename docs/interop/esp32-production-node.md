@@ -2,8 +2,9 @@
 
 A node that runs libtracer as its **primary communication stack** on an ESP32-class
 MCU is a **bounded reactor**: every resource the graph plane touches is an injected,
-fixed-capacity pool declared at init, and every overload surfaces as backpressure
-rather than as an allocation failure. Where the
+fixed-capacity pool declared at init, and overload is answered as backpressure
+rather than as an allocation failure — §1 names the sites where that is not yet
+true. Where the
 [custom-device guide](custom-device.md) says *what* a device exposes, this page says
 how to run it within an MCU's RAM, flash and task budget.
 
@@ -57,14 +58,18 @@ std::pmr::synchronized_pool_resource shared{&arena};
 // ... graph_t graph{&shared, /*value_backend=*/&tr::mem::heap_backend(),
 // ...               /*ctl=*/&blocks};
 // ... fwd_router_t router{graph, &shared, /*rx=*/&blocks,
-// ...                     /*flat=*/&tr::mem::heap_backend()};
+// ...                     /*flat=*/&tr::mem::heap_backend(),
+// ...                     /*max_label_bindings_per_link=*/64,
+// ...                     /*egress=*/&tr::mem::heap_backend()};
 ```
 
 Those are the three injection points of `graph_t`'s constructor — the pmr resource,
 the value backend and the failable control source
-(`core/include/libtracer/graph.hpp:216-218`) — and the matching three of
-`fwd_router_t`: the pmr resource, the failable `rx` source and the `flat` byte backend
-its rope flattens draw from (`core/include/libtracer/fwd_router.hpp:177-177`). The full set of
+(`core/include/libtracer/graph.hpp:216-218`) — and the **four** of
+`fwd_router_t`: the pmr resource, the failable `rx` source, the `flat` byte backend
+its rope flattens draw from, and the `egress` byte backend the terminus reply head
+draws from (`core/include/libtracer/fwd_router.hpp:176-181`; `egress` is #795 /
+ADR-0074, and the `max_label_bindings_per_link` bound sits between the last two). The full set of
 build-time and injected bounds is catalogued in
 [the configuration space](../design/config/00-configuration-space.md); the failure
 semantics of the third seam are in
@@ -118,9 +123,11 @@ children actually take, since they deliver contiguous spans rather than ropes), 
 the router reaches by handing `flat` to its `op_resolver_t`. Two caveats remain, so
 the bound is not read wider than it is: `flat` bounds the flattened and copied *bytes*, not
 the frame builds beside them, and not the terminus arena — that is `blocks`. And the
-terminus **reply head segment** is bounded by neither: it draws from the global heap on both
-tiers, answers exhaustion as an addressed `BACKPRESSURE` rather than an abort, and is the
-one peer-drivable terminus allocation this recipe does not yet put inside the slab.
+terminus **reply head segment** is not `flat`'s either: since #795 it draws from the router's
+own `egress` injection (ADR-0074), defaulting to the global heap, so a node that wants it in
+the slab must point `egress` there too — leaving it defaulted is a live allocation on both
+tiers outside the bound. Its *failure* half was always answered by value: a refused head
+degrades to an addressed `BACKPRESSURE`, never an abort.
 
 :::{warning}
 Do **not** reach for `tr::mem::bump_source_t` as `blocks`. It is scope-lifetime only:
@@ -182,9 +189,15 @@ Rules that follow:
 - **Steady state allocates from the slab, not the global heap.** After init, an
   ESP-IDF heap trace shows libtracer flat.
 - **Allocation failure must not abort.** ESP-IDF's default C++ `new` throws; under
-  `-fno-exceptions` that lowers to `abort()`. Every allocation on the delivery path
-  is alloc-or-backpressure: drop the sample, count it, publish the counter (§6).
-  Audit any path that calls throwing `new`.
+  `-fno-exceptions` that lowers to `abort()`. The seams above are the mechanism for
+  alloc-or-backpressure — drop the sample, count it, publish the counter (§6) — but the
+  rule is **not yet met everywhere**: as of v0.7.1 the CAN egress window table
+  (`core/include/libtracer/view_can.hpp:100`, one throwing `push_back` per frame on every
+  CAN send), the peer-driven label-table binds of #603 (`core/src/route_handle.cpp:82`)
+  and `try_reserve`'s throwing second step under concurrency (#850) still abort on
+  exhaustion. Price those three before shipping a `-fno-exceptions` image, and audit any
+  path that calls throwing `new`; the full accounting is in
+  [failable allocation and backpressure](../design/allocation-and-backpressure.md).
 - **Size the pool from the transport, not from hope.** `udp_transport_t` sizes RX
   segments to `min(64 KiB, backend->max_segment_size())`
   (`core/src/transport_udp.cpp:140`; `kMaxDatagram = 65536` at

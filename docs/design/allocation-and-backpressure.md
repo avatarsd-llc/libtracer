@@ -26,6 +26,25 @@ non-throwing `memory_resource` subclass. It fails for a reason that has nothing 
 `allocate` has no way to say "no", so a non-throwing resource must either abort or return a
 pointer, and the caller has no branch to write.
 
+### Where the rule is not met today
+
+The rule above is an obligation, not a description of the tree — read it as "must", never as
+"does". Three peer-reachable sites still report exhaustion by throwing, so **"nothing on the
+delivery path can abort" is false as of v0.7.1** and a doc sentence asserting it is wrong. They
+are named here so a bounded deployment prices them rather than rediscovers them; this list is the
+sites found by the sweeps behind #603, #850 and the CAN egress review, and is not claimed to be
+exhaustive:
+
+| Site | Code | Who provokes it |
+| --- | --- | --- |
+| CAN egress window table | `core/include/libtracer/view_can.hpp:100` — `frames_.push_back` in `view_can_frames_t::split`, reached on every send (`core/src/transport_can.cpp:215`) | the sender: one `push_back` per frame the payload splits into |
+| Label-table binds (#603) | `core/src/route_handle.cpp:82`, `:179`, `:236` — `std::pmr::vector::push_back` and the route copy beside it | a **peer**: an ingress `ADVERTISE` binds a label. `max_label_bindings_per_link` bounds the entry *count*, not the allocation's failure mode |
+| `try_reserve`'s second step (#850) | `core/include/libtracer/mem_heap.hpp:116-121` — the `noexcept` helper probes, frees, then runs the **throwing** `std::vector::reserve` | anything concurrent: the probe-then-reserve is sound only single-threaded, which the code says at `:120`. Every `try_*` helper and every soft-fail leg below inherits this |
+
+The nothrow seams and the status legs described below are real and are what makes each *covered*
+site answer by value. They do not make the three rows above go away, and #848 (the WS/TCP/UDP/CAN
+egress gather) does not close them either.
+
 ## The three injected seams
 
 `graph_t`'s constructor takes all three, each defaulted so an unconfigured host gets the platform
@@ -172,7 +191,7 @@ std::array<std::byte, 4096> stack;
 mem::bump_source_t src(stack, *ctl_);
 ```
 
-(`core/src/graph.cpp:1119-1054`.) Three properties follow, and each closes a different failure mode:
+(`core/src/graph.cpp:1119-1120`.) Three properties follow, and each closes a different failure mode:
 
 - **A bounded node that injected `ctl` gets its own store here too.** The overflow leg draws from
   that injection rather than from the global heap, so the node's memory bound covers **this
@@ -189,7 +208,7 @@ The arena is *structure* storage — a node array and the walk's open-node stack
 independent of the payload's byte count. No node-counting pre-pass exists, and none is needed: the
 seam alone carries the failure. The three draws that make the RX decode path peer-provokable — the
 node array's growth, the sink's open-node stack, and the walk stack's spill past its inline slots —
-are enumerated in the changelog (`core/CHANGELOG.md:906-911`), which is the citation for that leg being
+are enumerated in the changelog (`core/CHANGELOG.md:1433-1438`), which is the citation for that leg being
 closed.
 
 TLV nesting has no depth constant. Depth is bounded by the receiver's decode resources, and

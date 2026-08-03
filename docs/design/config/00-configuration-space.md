@@ -139,11 +139,11 @@ type-erasure bloat and template-instantiation bloat alike.
 | `lkv_slot_t` (`:237`) | policy type | `sp_atomic_slot_t` | `-DLIBTRACER_LKV_SLOT=<type>` | hardcoded to `sp_atomic_slot_t` (`CMakeLists.txt:187`) — the hazard slot is not selectable |
 
 Each is documented at its declaration with what it costs and when to move it; that header is
-the reference, not this table. What matters here is the shape: **seven knobs, all named, all
-finite.** Two are counts, one is a padding width, one is a per-target RAM ceiling, one is a
-ratio, and two are type bindings.
+the reference, not this table. What matters here is the shape: **eight knobs, all named, all
+finite.** Three are counts (`kVertexLockStripes`, `kHazardReaderSlots`, `kEdgePinSlots`), one is a
+padding width, one is a per-target RAM ceiling, one is a ratio, and two are type bindings.
 
-Two of the seven carry no build-system variable at all. `kMaxVertexBytes64` / `kMaxVertexBytes32`
+Two of the eight carry no build-system variable at all. `kMaxVertexBytes64` / `kMaxVertexBytes32`
 and `kPinPayloadRatio` are preset members: an application moves them by declaring its own traits
 type, not by passing `-D`. `kPinPayloadRatio` is the pin/copy amplification ratio `K` — a
 trailer-less written value is stored as a subview of the inbound frame, rather than copied out,

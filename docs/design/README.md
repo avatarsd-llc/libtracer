@@ -16,7 +16,7 @@ The toctree below is the order of record; this table adds the topic of each area
 | [Concurrency](concurrency/README.md) | Which serializers exist in the graph runtime and what each costs; the two independent limits on the read path; the cost budget; the remaining serializers; and how measurement goes wrong in this area. |
 | [Zero-copy and flatten](zero-copy-and-flatten.md) | Where a copy still lands on the data plane: every `materialize` call site classified single-link vs multi-link, the 4096-byte decode arena, and the structural copies. |
 | [Build configuration](config/README.md) | Which knobs exist, what each costs on which target, and which constants are deliberately off-limits — the integrator question the reference suite is not allowed to answer. |
-| [Failable allocation and backpressure](allocation-and-backpressure.md) | Why no peer-provokable allocation can abort under `-fno-exceptions`, which seam each allocation draws from, and how exhaustion surfaces as `BACKPRESSURE`. |
+| [Failable allocation and backpressure](allocation-and-backpressure.md) | Why a peer-provokable allocation **must not** abort under `-fno-exceptions`, which seam each covered allocation draws from, how exhaustion surfaces as `BACKPRESSURE` — and the three sites that still throw today. |
 
 ```{toctree}
 :caption: Design notes
