@@ -133,9 +133,24 @@ class op_resolver_t {
      *              documents for its own: the terminus resolves on a transport child's receive
      *              thread and several children receive concurrently. Must outlive the
      *              resolver.
+     * @param egress The byte backend the FWD{REPLY}'s EGRESS-construction segments draw from
+     *              (#795, ADR-0074) — the reply head (peer-driven size: the swapped route bytes
+     *              plus the inline tail) and, on a mint, the trailing 12-byte `PATH_REF`. It is
+     *              the last reply-egress byte source a bounded node could not previously bound
+     *              (the folded READ's POINT-header framing remains on the value seam, #831): the
+     *              head was hard-wired to `view::heap_alloc`'s global heap regardless of every
+     *              other injection. A DEDICATED seam, not `flat`: `flat` is documented and sized
+     *              against FLATTEN (payload) bytes, and folding an egress head into it would
+     *              silently re-scope a budget deployments already set. The default is the global
+     *              heap, so every existing call site is byte-unchanged; a bounded node points it
+     *              at its own slab and this allocation joins the bound. A refusal returns an empty
+     *              rope that `or_backpressure` turns into an addressed `kind=ERROR`
+     *              `STATUS{BACKPRESSURE}` — exhaustion answered by value, never an abort. MUST be
+     *              thread-safe on the same terms as @p flat. Must outlive the resolver.
      */
-    explicit op_resolver_t(graph_t& graph, mem::mem_backend_t* flat = &mem::heap_backend()) noexcept
-        : graph_(graph), flat_(flat) {}
+    explicit op_resolver_t(graph_t& graph, mem::mem_backend_t* flat = &mem::heap_backend(),
+                           mem::mem_backend_t* egress = &mem::heap_backend()) noexcept
+        : graph_(graph), flat_(flat), egress_(egress) {}
 
     /**
      * @brief Resolve an arena-decoded request FWD and build the zero-copy `FWD{REPLY}` rope.
@@ -214,7 +229,8 @@ class op_resolver_t {
 
    private:
     graph_t& graph_;
-    mem::mem_backend_t* flat_ = &mem::heap_backend();  // rope-tier terminus flattens (#766)
+    mem::mem_backend_t* flat_ = &mem::heap_backend();    // rope-tier terminus flattens (#766)
+    mem::mem_backend_t* egress_ = &mem::heap_backend();  // reply head + mint egress bytes (#795)
 };
 
 }  // namespace tr::graph

@@ -559,6 +559,14 @@ target_link_libraries(terminus_flatten_backend_test PRIVATE libtracer)
 libtracer_test_warnings(terminus_flatten_backend_test)
 add_test(NAME terminus_flatten_backend COMMAND terminus_flatten_backend_test)
 
+# #795 — the terminus reply's EGRESS-construction seam (ADR-0074): the FWD{REPLY}
+# head and the RFC-0024 mint draw from the injected `egress` backend, not the global
+# heap, and a refusal degrades by value (drop, or an addressed BACKPRESSURE).
+add_executable(terminus_egress_backend_test terminus_egress_backend_test.cpp)
+target_link_libraries(terminus_egress_backend_test PRIVATE libtracer)
+libtracer_test_warnings(terminus_egress_backend_test)
+add_test(NAME terminus_egress_backend COMMAND terminus_egress_backend_test)
+
 add_executable(fwd_rope_forward_test fwd_rope_forward_test.cpp)
 target_link_libraries(fwd_rope_forward_test PRIVATE libtracer)
 libtracer_test_warnings(fwd_rope_forward_test)

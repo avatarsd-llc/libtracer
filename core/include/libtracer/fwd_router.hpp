@@ -112,8 +112,9 @@ class fwd_router_t {
      *              MCU terminus (a synchronous CAN/UART child delivers spans, not ropes) no
      *              longer escapes the bound on its ordinary WRITE. Still NOT every
      *              allocation the router path makes: the reply head segment and the arena
-     *              are their own injections (@p rx and `view::heap_alloc`), which is the
-     *              reading #730 was filed about.
+     *              are their own injections (@p egress and @p rx) — the head drew from
+     *              `view::heap_alloc`'s global heap until #795 gave it @p egress below, which
+     *              is the reading #730 was filed about.
      *              Split from
      *              @p rx because these are BYTE buffers with cache hooks and an owning
      *              refcount (a @ref mem::mem_backend_t), not the arena's raw blocks —
@@ -150,17 +151,40 @@ class fwd_router_t {
      *              megabytes per link on a 16 KB node. A full table refuses NEW flows, which
      *              then deliver over the full-route `FWD{WRITE}` form; established flows are
      *              untouched. See @ref route_handle_t::refused_bindings for the counter.
+     * @param egress
+     *              The byte backend the terminus REPLY's egress-construction segments draw
+     *              from (#795, ADR-0074): the reply head (peer-driven size — the swapped route
+     *              bytes plus the inline tail) and, on a mint, the trailing 12-byte `PATH_REF`.
+     *              It is the last *reply-egress* byte source that escaped a bounded node's
+     *              slab (the composed-root folded READ still frames POINT headers from the
+     *              global heap on the value seam — a separate residual, #831) — the
+     *              head was hard-wired to `view::heap_alloc`'s global heap, one allocation on
+     *              every reply, peer-drivable and pre-auth reachable (the denied path builds a
+     *              head too). A DEDICATED injection, deliberately NOT folded into @p flat: @p
+     *              flat is documented and sized against FLATTEN (payload) bytes, and a reply
+     *              head is egress construction sized against ROUTE bytes, so widening @p flat's
+     *              contract would silently re-scope a slab deployments already set for flattens
+     *              (a node could begin refusing replies it used to send). Passed straight to the
+     *              @ref graph::op_resolver_t. Appended with a default of the global heap, so
+     *              every existing call site is byte-unchanged and only a bounded node that points
+     *              it at its slab gets the bound. A refusal degrades through the same
+     *              empty-rope → `or_backpressure` → addressed `STATUS{BACKPRESSURE}` path OOM
+     *              already takes — answered by value, never an abort. MUST be thread-safe on the
+     *              same terms as @p flat. Must outlive the router.
      */
     explicit fwd_router_t(graph::graph_t& graph,
                           std::pmr::memory_resource* mr = std::pmr::get_default_resource(),
                           mem::block_source_t* rx = &mem::heap_source(),
                           mem::mem_backend_t* flat = &mem::heap_backend(),
-                          std::size_t max_label_bindings_per_link = 0)
+                          std::size_t max_label_bindings_per_link = 0,
+                          mem::mem_backend_t* egress = &mem::heap_backend())
         : graph_(graph),
-          resolver_(graph, flat),  // the terminus tier draws from the SAME seam (#766)
+          resolver_(graph, flat, egress),  // the terminus tier draws flatten from the SAME
+                                           // seam (#766) and reply egress from `egress` (#795)
           mr_(mr),
           rx_(rx),
           flat_(flat),
+          egress_(egress),
           handles_(mr, max_label_bindings_per_link) {
         graph_.set_remote_delivery_sink(
             [this](const graph::remote_delivery_t& sub, const view::rope_t& value) {
@@ -817,6 +841,8 @@ class fwd_router_t {
                                            // a child may carry its own (ADR-0067 §3)
     mem::mem_backend_t* flat_;             // every rope flatten the router performs (#730);
                                            // a null result is answered by value, never stored
+    mem::mem_backend_t* egress_;           // terminus REPLY head + mint egress bytes (#795);
+                                           // a refusal degrades to addressed BACKPRESSURE
     child_registry_t registry_;            // the one NAME→link demux table (Brick 3a, ADR-0037)
     route_handle_t handles_;               // per-link label tables (compact flows only)
     std::deque<child_rx_ctx_t> child_rx_;  // stable receiver contexts, one per child

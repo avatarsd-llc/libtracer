@@ -47,9 +47,9 @@ reads it, so placing it there leaves every other member at the byte offset it ha
 existed, which keeps the forward-hop bench measuring the same layout (`graph.hpp:1305-1309`).
 
 `fwd_router_t` carries the same failable seam separately as its `rx` parameter
-(`core/include/libtracer/fwd_router.hpp:156`), because the terminus arena decode belongs to the
+(`core/include/libtracer/fwd_router.hpp:177`), because the terminus arena decode belongs to the
 router's receive thread rather than to the graph. It carries a **fourth** injection beside it, and
-for a different contract: `flat` (`fwd_router.hpp:157`, documented at `:97`), the `mem_backend_t` **every rope flatten on
+for a different contract: `flat` (`fwd_router.hpp:178`, documented at `:97`), the `mem_backend_t` **every rope flatten on
 the forward and terminus paths** draws its owned `segment` from — the byte-buffer seam, with cache
 hooks and a refcount, which the block source is not. The split is `graph_t`'s `ctl_` /
 `value_backend_` split one layer out. Like `value_backend_`, an injected `flat` **MUST be
@@ -60,20 +60,28 @@ on whichever thread drops the last reference. A bare `pool_t` is not thread-safe
 composition, and its critical section is a compile-time policy: `sync_pool_t` for the multi-core
 spinlock, `tr::esp::critical_pool_t` for the single-core interrupt-disable variant.
 
+It carries a **fifth** injection with the same thread-safety force and, again, a different
+contract: `egress` (`fwd_router.hpp`, documented on the constructor), the `mem_backend_t` the
+terminus **reply head** and its RFC-0024 mint draw from. It is kept separate from `flat` because a
+reply head is egress construction sized against *route* bytes, not the *payload* bytes a flatten
+seam is sized against — folding it into `flat` would silently re-scope a slab already sized for
+flattens ([ADR-0074](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0074-terminus-reply-egress-is-its-own-injected-backend.md);
+see [What `flat` covers](#what-flat-covers-and-the-two-things-beside-it-that-it-does-not) below).
+
 **A bounded node must inject all of them.** Injecting `mr_` and `value_backend_` alone leaves every
 peer-driven allocation on the global heap, where the failure mode on a `-fno-exceptions` target is
 the abort this seam exists to remove. A host reaching for "one slab, whole stack" points all three
-plus the router's `rx` **and its `flat`** and the transport-receive backend at the same underlying
-slab; the composition guidance is in
+plus the router's `rx`, its `flat` **and its `egress`**, and the transport-receive backend at the
+same underlying slab; the composition guidance is in
 [`../reference/09-memory-substrate.md`](../reference/09-memory-substrate.md).
 
 **"One slab, whole stack" is a direction, not a state the tree is in**, but the thread-safe
 byte backend it needs is no longer what stops it. Both spellings of the synchronised pool exist:
 `sync_pool_t` for a multi-core host's spinlock and `tr::esp::critical_pool_t` for a single-core
 target's interrupt-disable critical section ([zero-copy and flatten](zero-copy-and-flatten.md) §5),
-so a constrained node points `value_backend` and `flat` at a bounded pool rather than
-`heap_backend()`. What a node that has injected every seam above still cannot hold in its own slab
-is the terminus reply head segment, named in
+so a constrained node points `value_backend`, `flat` and `egress` at a bounded pool rather than
+`heap_backend()`. With `egress` injected there is no terminus byte source left on the global heap;
+the reply head that was the last such source is detailed in
 [What `flat` covers](#what-flat-covers-and-the-two-things-beside-it-that-it-does-not) below.
 
 The resolver's flattens and ownership copies are inside the bound on **both** tiers: the router
@@ -96,40 +104,39 @@ in that table, not "the router's allocations".
 ### What `flat` covers, and the two things beside it that it does not
 
 #766 left three rope-tier heap sites outside the injection; #793 closed one of them and #801 closed
-the span tier's counterpart, which #766 had not counted at all. What is left out is **not** an
-oversight, and the reason each is out is different — so they are named here rather than left to be
-rediscovered:
+the span tier's counterpart, which #766 had not counted at all; #795 closed the reply head — the
+last one — with its own `egress` seam. None of what `flat` does not cover is an oversight, and the
+reason each is out is different — so they are named here rather than left to be rediscovered:
 
 | Site | Code | Verdict |
 | --- | --- | --- |
 | `own_wire`'s SINGLE-link ownership copy (rope tier) | `core/src/op_resolve_view.cpp:146` | **Closed by #793.** Same function, same ADR-0041 §2 obligation and same peer-drivability as the multi-link flatten beside it — one function must not draw from two allocators. |
 | `own_wire`'s ownership copy (SPAN tier) | `core/src/op_resolve_walk.hpp:190` | **Closed by #801.** The same ADR-0041 §2 copy on the other tier, and the arena tier's *only* allocating site (its `wire()`/`body()` spans are borrowed from the frame). Which tier runs is decided by the delivering transport — a rope-delivering child vs a span-delivering one — so leaving it on the global heap made a stored value's provenance depend on the link it arrived over. It is the MCU terminus's ordinary case, not an exotic one: a synchronous CAN/UART child delivers a contiguous span. |
 | The terminus **arena** | `core/src/fwd_router.cpp:1259` — `wire::decode_into(frame, rx_for(inbound_ctx))` | **Already bounded, by a different seam.** It draws from the router's injected `rx` (`block_source_t`), which is the seam [ADR-0065](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md) created *specifically* so exhaustion returns `nullptr` instead of throwing. Routing it through `flat` would move it from a nothrow seam to a segment seam and buy nothing: a node injecting `rx` already bounds it. "Not covered by `flat`" was never the same claim as "not covered". |
-| The reply **head segment** | `core/src/op_resolve_walk.hpp:567` — `view::heap_alloc(head_len)` inside `assemble` | **Genuinely uncovered, deliberately not folded into `flat`.** See below. |
+| The reply **head segment** (and its RFC-0024 mint) | `core/src/op_resolve_walk.hpp:580` — `view::segment_alloc(egress, head_len)` inside `assemble` | **Closed by #795, by its OWN injection.** Not folded into `flat` — see below. |
 
 The reply head is reachable from the bounded-node resolve path — every terminus reply allocates
 it, on **both** tiers (`assemble` lives in the shared walk header, so the arena/MCU terminus runs
-it too). Its *failure* half is already closed: a null segment returns an empty rope, which
-`or_backpressure` (`core/src/op_resolve_walk.hpp:665`) turns into an addressed
-`kind=ERROR BACKPRESSURE` rather than a silent drop. What is open is the *bound*.
+it too), and on a mint a second fixed 12-byte `PATH_REF` segment beside it. Its *failure* half was
+always closed: a null segment returns an empty rope, which `or_backpressure`
+(`core/src/op_resolve_walk.hpp:683`) turns into an addressed `kind=ERROR BACKPRESSURE` rather than
+a silent drop. The *bound* is closed by a **dedicated** `egress` injection on `fwd_router_t` and
+`op_resolver_t`, threaded to both `assemble` allocation sites.
 
-It is not folded into `flat` here for a reason that is about the seam's contract, not about
+It is deliberately **not** `flat`, for a reason that is about the seam's contract, not about
 effort. `flat` is documented — in a public `@param` on `fwd_router_t` and `op_resolver_t` — as the
 backend **every rope flatten** draws from, and a deployment sizes its slab against that sentence.
 A reply head is not a flatten; it is egress construction, and its size tracks the route bytes
-rather than the payload. (Before #801 there was a second half to this argument — that on the span
-tier `flat` was provably inert, so folding the head in would have created the tier's first draw
-from it. That half is now spent: the span tier draws from `flat` for its ownership copy. The
-contract argument stands on its own and is the one that decides it.) Pointing it at `flat` would silently re-scope an injection somebody has
+rather than the payload. Pointing it at `flat` would silently re-scope an injection somebody has
 already sized, so a node that budgeted a small pool for flattens could begin refusing replies it
-used to send. Closing the bound properly is therefore a decision about the seam — widen and
-**rename** `flat`, or give the terminus egress its own injection — and it wants an ADR, not a
-one-line redirect. That decision is
-[#795](https://github.com/avatarsd-llc/libtracer/issues/795). Until it lands this is the honest
-statement: **`flat` covers every rope flatten and
-every rope-tier ownership copy on the forward and terminus paths; the reply head segment draws
-from the global heap on both tiers, answers exhaustion by value, and is the one peer-drivable
-terminus allocation a "one slab, whole stack" node cannot yet bound.**
+used to send. So the terminus egress gets its own `mem_backend_t`, defaulting to the global heap
+so an un-injected node is byte-unchanged; a bounded node points it at its slab and this last
+terminus allocation joins the bound. The seam decision is
+[ADR-0074](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0074-terminus-reply-egress-is-its-own-injected-backend.md).
+The honest statement is now: **`flat` covers every rope flatten and every rope-tier ownership copy
+on the forward and terminus paths; the reply head and its mint draw from the injected `egress`
+backend, answer exhaustion by value, and — with `egress` pointed at the node's slab — are bounded
+too, leaving no terminus byte source on the global heap.**
 
 ## The block source
 
@@ -202,10 +209,11 @@ defines for "exceeds this receiver's decode resources".
 | Ingress `ADVERTISE` route flatten | flatten `core/src/fwd_router.cpp:1333-1334`, answered at `:1341` | the empty flatten **fails the `wire::decode`** ⇒ the frame is **dropped**; the label stays **unbound** (the peer's COMPACTs draw a `HANDLE_NACK`) |
 | Ingress `COMPACT` payload flatten | flatten `core/src/fwd_router.cpp:1354`, answered at `:1361` | the delivery is **dropped**; the subscriber keeps its last-known value |
 | Bus-name rejection reply flatten (cold) | flatten `core/src/fwd_router.cpp:954`, answered by the `wire::decode` opening `reject_bus_name_hop` | the frame is **dropped** by value — no reply |
-| Terminus per-node span materialize (rope tier) | flatten `core/src/op_resolve_view.cpp:254`, answered at `core/src/op_resolve_walk.hpp:943` / `core/src/op_resolve_walk.hpp:1030` | a refusal on the reply's own route bytes ⇒ `BACKPRESSURE` on the error side ⇒ the frame is **dropped**; anywhere else before dispatch ⇒ an **addressed** `kind=ERROR STATUS{BACKPRESSURE}` reply |
-| Terminus ownership flatten (rope tier, ADR-0053 ⑤, MULTI-link) | flatten `core/src/op_resolve_view.cpp:136`, answered by the empty-value guards in `resolve_node` (`core/src/op_resolve_walk.hpp:866-867`) | the write is **not stored** — the vertex keeps its previous value — and the reply is `BACKPRESSURE` |
+| Terminus per-node span materialize (rope tier) | flatten `core/src/op_resolve_view.cpp:254`, answered at `core/src/op_resolve_walk.hpp:972` / `core/src/op_resolve_walk.hpp:1059` | a refusal on the reply's own route bytes ⇒ `BACKPRESSURE` on the error side ⇒ the frame is **dropped**; anywhere else before dispatch ⇒ an **addressed** `kind=ERROR STATUS{BACKPRESSURE}` reply |
+| Terminus ownership flatten (rope tier, ADR-0053 ⑤, MULTI-link) | flatten `core/src/op_resolve_view.cpp:136`, answered by the empty-value guards in `resolve_node` (`core/src/op_resolve_walk.hpp:892-893`) | the write is **not stored** — the vertex keeps its previous value — and the reply is `BACKPRESSURE` |
 | Terminus ownership **copy** (rope tier, ADR-0041 §2, SINGLE-link) | copy `core/src/op_resolve_view.cpp:146`, answered by the same guards | the write is **not stored** — the vertex keeps its previous value — and the reply is `BACKPRESSURE` |
 | Terminus ownership **copy** (SPAN tier, ADR-0041 §2) | copy `core/src/op_resolve_walk.hpp:190`, answered by the same guards | the write is **not stored** — the vertex keeps its previous value — and the reply is `BACKPRESSURE`. Note this row's refusal does **not** set the walk's `spans_intact()` flag, and must not: an arena span is borrowed from the frame, so a refused copy shortens nothing and the empty view is the whole channel |
+| Terminus reply **head** + mint (egress seam, both tiers) | alloc `core/src/op_resolve_walk.hpp:580`, answered at `core/src/op_resolve_walk.hpp:683` | a refused RESULT head yields an empty rope; `or_backpressure` answers an **addressed** `kind=ERROR STATUS{BACKPRESSURE}` when the smaller error head can still be built, else the frame is **dropped** — never an abort, never a `kind=RESULT` on bytes it could not allocate. A refused mint is not an error: the plain reply is rebuilt without it |
 
 The four terminus rows are the resolver's, reached through the same `flat` the router injects
 (#766, #793, #801), and all four are exercised by `core/tests/terminus_flatten_backend_test.cpp` —
@@ -339,7 +347,7 @@ of them ([`../reference/09-memory-substrate.md:305`](../reference/09-memory-subs
 
 **A pool shared across receive threads is slower than the heap it replaced.** See the topology
 result below; `fwd_router_t::add_child` takes an optional per-child source
-(`fwd_router.hpp:213`, resolved at `fwd_router.hpp:809-811`) precisely so each transport's receive
+(`fwd_router.hpp:237`, resolved at `fwd_router.hpp:833-833`) precisely so each transport's receive
 thread owns one. A source shared at *wiring* frequency — a graph's `ctl` — is fine behind a lock.
 
 **A `size_class_t` span is a bound the caller sets, not the library.** `pool_source_t` classes do

@@ -166,6 +166,24 @@ without it.
 
 ### Fixed
 
+- **The terminus reply head + mint no longer draw from the global heap.** The `FWD{REPLY}`
+  egress-construction segments — the head (peer-driven size: the swapped route bytes plus the
+  inline tail) and, on an RFC-0024 mint, the trailing 12-byte `PATH_REF` — were built by
+  `view::heap_alloc`, hard-wired to `mem::heap_backend()`, on *every* reply. It was the last
+  *reply-egress* byte source an [ADR-0067](../docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md)-class
+  bounded node could not bound (peer-drivable, and reachable pre-authorization); the
+  composed-root folded READ's POINT-header framing is a separate value-seam residual (#831). Both sites now
+  draw from a **new, dedicated** `mem::mem_backend_t* egress` injection, deliberately kept
+  separate from `flat` (the *flatten* seam, sized against payload bytes) so a slab sized for
+  flattens is not silently re-scoped by egress heads sized against route bytes
+  ([ADR-0074](../docs/adr/0074-terminus-reply-egress-is-its-own-injected-backend.md)). **Public
+  constructor signature change:** `graph::op_resolver_t` gains an `egress` parameter (after
+  `flat`) and `net::fwd_router_t` gains one (after `max_label_bindings_per_link`), both
+  defaulted to `&mem::heap_backend()` — every existing call site is source- and byte-unchanged;
+  only a bounded node that points `egress` at its slab gets the bound. No wire surface changes;
+  the reply bytes are byte-for-byte identical. Exhaustion still degrades by value through the
+  existing empty-rope → `or_backpressure` → addressed `STATUS{BACKPRESSURE}` path — never an
+  abort, never a silent drop.
 - **A mid-chain reconnect no longer kills a compacted flow permanently and silently.**
   `route_handle_t::clear_link(L)` (and therefore `fwd_router_t::clear_link` / `link_down`) now
   also drops every **ingress** binding the node holds, **on any link**, whose downstream half
