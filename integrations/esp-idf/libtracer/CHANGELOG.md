@@ -10,6 +10,47 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`httpd_ws_link_t` (adopted mode): the destructor now retires every session's close
+  callback before the link dies (#816).** Each admitted peer is registered with
+  `httpd_sess_set_ctx(handle, fd, slot, on_session_closed)`, so a link that adopted an
+  external server used to leave that `free_ctx` pointing into freed memory: the next
+  peer disconnect — or the adopting server's own `httpd_stop`, arbitrarily later — called
+  it. The destructor now queues a self-contained detach onto the server's control queue
+  (`httpd_queue_work`), which is the only context allowed to touch the session table, and
+  clears each session's ctx/free_ctx there (`httpd_sess_set_ctx(.., nullptr, nullptr)` —
+  which runs the outgoing callback inline, while the link is still alive) before closing
+  the sessions; it returns only once that has happened. A destructor running ON the
+  adopting server's own task detaches inline instead, because queued work there could
+  only run after the destructor returns (the same self-deadlock #815 fixed for the TX
+  pool). If the detach cannot run at all — the queue refuses it, or the server task is
+  wedged past the teardown drain bound — the still-armed session slots are neutralised
+  and LEAKED with a warning rather than freed under a live callback, so the late
+  callback lands on valid, inert memory. No public API change; owning mode is unaffected
+  (`httpd_stop` already closes every session synchronously). Teardown-only: on-device
+  nodes leak the link by design, so the exposure was host/testbench teardown and any
+  future dynamic-reconfiguration path.
+- **`httpd_ws_link_t` (adopted mode): frames can no longer be dispatched into a
+  destroyed link, and the destructor joins the handler before freeing anything (#816).**
+  Unregistering the WS URI does not stop inbound frames: `esp_http_server` copies the
+  route (`handler` + `user_ctx`) into each session as it answers the handshake
+  (`httpd_uri.c`) and dispatches from there (`httpd_parse.c`), clearing it only when that
+  session is deleted — which a link cannot force and, for a peer that upgraded without
+  ever sending a frame, cannot even observe. The registered `user_ctx` is therefore now a
+  small handler GATE rather than the link: after teardown the gate holds no link, so a
+  late frame is refused (httpd closes that socket) and a late session callback is inert,
+  and while a handler frame IS inside the link the destructor blocks until it leaves.
+  The gate is deliberately leaked in adopted mode, since the set of sessions still
+  routed at it is unknowable. Also fixed on the same seam: the session being serviced by
+  an in-flight handler is now neutralised rather than detached (`httpd_sess_set_ctx`
+  edits the request, not the socket table, for that one fd, and `httpd_req_cleanup` runs
+  its callback after the destructor has returned); a completed reassembly is moved out of
+  its slot before delivery, so an in-call teardown cannot be followed by a write into the
+  freed slot; and the queued detach now identifies its sessions by stored context, not by
+  socket descriptor alone, so an item draining late cannot run a co-tenant's `free_ctx`
+  or force-close its session after the descriptor was recycled on the shared server.
+
 ## [0.7.0] — 2026-08-02
 
 ### Added
