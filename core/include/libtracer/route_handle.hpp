@@ -204,13 +204,19 @@ class route_handle_t {
      * Sampled by a forwarding hop BEFORE it mints anything against its downstream link, and
      * handed back to @ref bind_ingress_forward when the swap is finally bound. Every
      * @ref clear_link advances a node-wide counter, and a link's tables carry the value they
-     * were created at, so the epoch changes if and only if THIS link was cleared in between —
-     * an unrelated link's reconnect leaves it alone.
+     * were created at, so once the link HAS tables its epoch changes only when THIS link is
+     * cleared — an unrelated link's reconnect leaves it alone. Before the tables exist there
+     * is nothing to stamp, so a sample reads the shared counter: an unrelated clear_link
+     * landing between that sample and the table creation makes the fresh tables stamp the
+     * bumped value and the bind is refused SPURIOUSLY. The refusal direction is safe — the
+     * upstream's next COMPACT draws a stale-label NACK and the re-advertise binds normally —
+     * a liveness nit confined to a link's first-contact window, never a stale binding.
      *
      * @param link This node's NAME for the link.
      * @return An opaque token, meaningful only when compared against a later sample of the
      *         SAME link. A link with no tables reads the current counter, so creating them
-     *         changes nothing and the very first advertise on a link is never refused.
+     *         changes nothing and the first advertise on a link is refused only in the
+     *         first-contact window above.
      */
     [[nodiscard]] std::uint32_t link_epoch(std::string_view link) const;
 

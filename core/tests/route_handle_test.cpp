@@ -509,7 +509,10 @@ void reconnect_inside_advertise() {
     {
         // Scope: the guard keys on the DOWNSTREAM link. A reconnect of some unrelated link in
         // the same window must not refuse the swap — a guard that refuses everything is as
-        // wrong as one that refuses nothing.
+        // wrong as one that refuses nothing. This holds once the downstream tables EXIST
+        // (they do here: the leg's alloc_label runs before the hook); in the narrower
+        // first-contact sub-window (no tables at epoch-sample time) an unrelated clear DOES
+        // refuse spuriously — the documented, safe-direction liveness nit in link_epoch's doc.
         route_handle_t h;
         (void)h.ensure_egress("other", route_bytes(7));
         const advertise_leg_t r = advertise_forwarding_leg(h, "up", 6, "down", route_bytes(2),

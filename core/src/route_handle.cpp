@@ -34,9 +34,10 @@ std::shared_ptr<route_handle_t::link_tables_t> route_handle_t::tables(std::strin
     auto sp = std::allocate_shared<link_tables_t>(
         std::pmr::polymorphic_allocator<link_tables_t>(mr_), mr_);
     // Stamp the tables with the clear epoch they were born at (#827), under the same
-    // exclusive lock clear_link advances it under — so a link's epoch changes if and only if
-    // THAT link was cleared, and a link seen for the first time reads the same value
-    // `link_epoch` reported for it a moment ago (no table ⇒ the current counter).
+    // exclusive lock clear_link advances it under — once tables exist, a link's epoch moves
+    // only when THAT link is cleared. Before they exist a sample reads the shared counter,
+    // so an unrelated clear in the sample→creation window makes the bind refuse spuriously
+    // (safe direction: the re-advertise after the stale-label NACK binds normally).
     sp->born_gen = clear_gen_;
     links_.emplace(std::pmr::string(link, mr_), sp);
     return sp;
