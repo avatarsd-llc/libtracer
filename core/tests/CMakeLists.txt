@@ -183,7 +183,7 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     target_link_libraries(httpd_ws_teardown_test PRIVATE libtracer)
     # The fake's socket layer interposes the ONE ::send the link's send override does
     # (see the send-stall target below); every target that links fake_httpd.cpp needs it.
-    target_link_options(httpd_ws_teardown_test PRIVATE "-Wl,--wrap=send")
+    target_link_options(httpd_ws_teardown_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
     libtracer_test_warnings(httpd_ws_teardown_test)
     add_test(NAME httpd_ws_teardown COMMAND httpd_ws_teardown_test)
     # Several cases here PROVE a deliberate leak (a teardown that cannot retire the
@@ -210,8 +210,10 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     # keeps its own default send private, and routing back through httpd_socket_send would
     # re-enter the override). Interposing that ONE call is what lets the fake script a
     # FULL / timed-out / SHORT write; descriptors the fake did not hand out fall through
-    # to the real syscall, so nothing else in the binary changes behaviour.
-    target_link_options(httpd_ws_send_stall_test PRIVATE "-Wl,--wrap=send")
+    # to the real syscall, so nothing else in the binary changes behaviour. `shutdown` is
+    # interposed on the same rule: it is the link's forced close, and the only close path
+    # that does not ride the control socket a jammed queue starves.
+    target_link_options(httpd_ws_send_stall_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
     libtracer_test_warnings(httpd_ws_send_stall_test)
     add_test(NAME httpd_ws_send_stall COMMAND httpd_ws_send_stall_test)
     # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent the

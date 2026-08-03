@@ -100,6 +100,21 @@ void server_t::set_queue_refusing(bool refusing) {
     queue_refusing_ = refusing;
 }
 
+void server_t::set_queue_capacity(std::size_t cap) {
+    const std::lock_guard lock(m_);
+    queue_cap_ = cap;
+}
+
+std::size_t server_t::queue_depth() const {
+    const std::lock_guard lock(m_);
+    return queue_.size();
+}
+
+std::size_t server_t::queue_drops() const {
+    const std::lock_guard lock(m_);
+    return queue_drops_;
+}
+
 void server_t::set_send_script(int fd, std::vector<send_result_t> script) {
     const std::lock_guard lock(m_);
     const auto it = sessions_.find(fd);
@@ -127,6 +142,38 @@ bool server_t::owns_socket(int fd) const {
     return sessions_.find(fd) != sessions_.end();
 }
 
+bool server_t::is_shut(int fd) const {
+    const std::lock_guard lock(m_);
+    const auto it = sessions_.find(fd);
+    return it != sessions_.end() && it->second.shut;
+}
+
+int server_t::raw_shutdown(int fd) {
+    const std::lock_guard lock(m_);
+    const auto it = sessions_.find(fd);
+    if (it == sessions_.end()) {
+        errno = ENOTCONN;
+        return -1;
+    }
+    it->second.shut = true;
+    return 0;
+}
+
+std::size_t server_t::reap_shut() {
+    // httpd_server's select arm: a socket that `shutdown` made readable-at-EOF comes back
+    // from select, httpd_sess_process reads 0 bytes and deletes the session. No control
+    // message is involved anywhere on this path — which is exactly why the link can rely
+    // on it while the control queue is jammed.
+    std::vector<int> fds;
+    {
+        const std::lock_guard lock(m_);
+        for (const auto& [fd, sess] : sessions_)
+            if (sess.shut) fds.push_back(fd);
+    }
+    for (const int fd : fds) close_session(fd);  // runs free_ctx, unlocked
+    return fds.size();
+}
+
 int server_t::raw_send(int fd, std::size_t buf_len) {
     const std::lock_guard lock(m_);
     ++writes_[fd];
@@ -136,6 +183,12 @@ int server_t::raw_send(int fd, std::size_t buf_len) {
         return -1;
     }
     session_t& sess = it->second;
+    if (sess.shut) {
+        // lwIP fails a write on a shut socket AT ONCE — it does not wait out SO_SNDTIMEO,
+        // which is half of why `shutdown` is the lever that unjams a starved task.
+        errno = EPIPE;
+        return -1;
+    }
     send_result_t outcome = send_result_t::FULL;
     if (!sess.script.empty()) {
         const std::size_t i =
@@ -261,42 +314,70 @@ void server_t::set_ctx(int fd, void* ctx, httpd_free_ctx_fn_t free_fn) {
     if (old_ctx != nullptr && old_free != nullptr) old_free(old_ctx);
 }
 
+/**
+ * @brief The shared enqueue behind `httpd_queue_work` and `httpd_sess_trigger_close` —
+ *        ONE control socket, and its two distinct failure modes.
+ *
+ * Transcribed from `httpd_queue_work` (httpd_main.c, release/v5.9bb7aa84fe): a refusal
+ * from `cs_send_to_ctrl_sock` is reported as `ESP_FAIL`, but an enqueue past the receiving
+ * UDP mbox's depth is dropped INSIDE lwIP with `sendto` still returning success. The
+ * caller therefore cannot distinguish "queued" from "silently discarded", which is what a
+ * link that treats `ESP_OK` as proof of a close gets wrong.
+ *
+ * @pre `m_` is held.
+ * @retval false The caller must report ESP_FAIL (the observable refusal only).
+ */
+bool server_t::enqueue_locked(std::function<void()> item, bool* dropped) {
+    *dropped = false;
+    if (queue_refusing_) return false;
+    if (queue_cap_ != 0 && queue_.size() >= queue_cap_) {
+        *dropped = true;  // lost in lwIP; the caller is told ESP_OK
+        ++queue_drops_;
+        return true;
+    }
+    queue_.push_back(std::move(item));
+    return true;
+}
+
 esp_err_t server_t::queue_work(httpd_work_fn_t work, void* arg) {
     const std::lock_guard lock(m_);
-    if (queue_refusing_) return ESP_FAIL;
-    queue_.push_back([work, arg]() { work(arg); });
+    bool dropped = false;
+    if (!enqueue_locked([work, arg]() { work(arg); }, &dropped)) return ESP_FAIL;
     return ESP_OK;
 }
 
 esp_err_t server_t::trigger_close(int fd) {
     const std::lock_guard lock(m_);
     if (sessions_.find(fd) == sessions_.end()) return ESP_ERR_NOT_FOUND;
-    // Deliberately NOT gated on queue_refusing_ — see set_queue_refusing: a full control
-    // socket only delays this close on silicon, and modelling it as always landing keeps
-    // a wrongly-aimed teardown visible instead of hidden behind the jam that caused it.
-    queue_.push_back([this, fd]() { close_session(fd); });
+    // `httpd_sess_trigger_close` IS `httpd_queue_work(httpd_sess_close, sd)`
+    // (httpd_sess.c:476-481) — the same socket, the same queue, the same silent drop.
+    bool dropped = false;
+    if (!enqueue_locked([this, fd]() { close_session(fd); }, &dropped)) return ESP_FAIL;
     return ESP_OK;
 }
 
 void server_t::post(std::function<void()> action) {
     const std::lock_guard lock(m_);
-    queue_.push_back(std::move(action));
+    bool dropped = false;
+    (void)enqueue_locked(std::move(action), &dropped);
+}
+
+bool server_t::run_one() {
+    std::function<void()> item;
+    {
+        const std::lock_guard lock(m_);
+        if (queue_.empty()) return false;
+        item = std::move(queue_.front());
+        queue_.pop_front();
+    }
+    item();  // unlocked: the work re-enters this fake and the link
+    return true;
 }
 
 std::size_t server_t::run_pending() {
     std::size_t ran = 0;
-    for (;;) {
-        std::function<void()> item;
-        {
-            const std::lock_guard lock(m_);
-            if (queue_.empty()) break;
-            item = std::move(queue_.front());
-            queue_.pop_front();
-        }
-        item();  // unlocked: the work re-enters this fake and the link
-        ++ran;
-    }
-    return ran;
+    while (run_one()) ++ran;
+    return ran + reap_shut();
 }
 
 httpd_ws_client_info_t server_t::fd_info(int fd) {
@@ -471,6 +552,19 @@ extern "C" ssize_t __real_send(int fd, const void* buf, std::size_t len, int fla
 extern "C" ssize_t __wrap_send(int fd, const void* buf, std::size_t len, int flags) {
     if (!fake_httpd::instance().owns_socket(fd)) return __real_send(fd, buf, len, flags);
     return fake_httpd::instance().raw_send(fd, len);
+}
+
+/**
+ * @brief The link's forced close, interposed (`-Wl,--wrap=shutdown` on the test targets).
+ *
+ * The one socket call the link makes that does NOT go through esp_http_server, and the
+ * reason it works when the control queue does not. Descriptors the fake did not hand out
+ * go to the real syscall, on the same rule as `__wrap_send`.
+ */
+extern "C" int __real_shutdown(int fd, int how);
+extern "C" int __wrap_shutdown(int fd, int how) {
+    if (!fake_httpd::instance().owns_socket(fd)) return __real_shutdown(fd, how);
+    return fake_httpd::instance().raw_shutdown(fd);
 }
 
 httpd_ws_client_info_t httpd_ws_get_fd_info(httpd_handle_t handle, int fd) {

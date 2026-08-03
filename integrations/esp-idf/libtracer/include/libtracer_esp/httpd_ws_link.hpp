@@ -297,6 +297,32 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     void note_tx_result(int fd, bool sent, std::size_t bytes);
 
     /**
+     * @brief Has @p fd been condemned? (takes @ref peers_m_ — callers must not hold it.)
+     *
+     * The one question every producer and every queued send asks before spending anything
+     * on a socket: the link's OWN verdict about the session, reached and readable the
+     * instant it was reached, rather than the server's — which only becomes true once a
+     * queued close it may never run has run.
+     */
+    [[nodiscard]] bool fd_is_dead(int fd) const;
+
+    /**
+     * @brief Force @p fd's session closed without asking the control queue for anything
+     *        (takes nothing; must run on the httpd task).
+     *
+     * `httpd_sess_trigger_close` is `httpd_queue_work(httpd_sess_close, …)` — the same
+     * loopback control socket, drained by the same single task that is serialized behind
+     * this fd's queued sends, and on the default non-blocking path an enqueue past that
+     * socket's mbox is dropped inside lwIP while still reporting success. So a close
+     * requested through it can be delayed by the backlog it exists to clear, or lost with
+     * no error at all. `shutdown` is not a request of the server: it takes effect
+     * immediately, makes every later write on the socket fail at once, and raises the
+     * readable-at-EOF event that gets the session reaped through httpd's own select arm.
+     * It never frees the descriptor, so httpd keeps sole ownership of the fd's lifetime.
+     */
+    void condemn(int fd);
+
+    /**
      * @brief Count a frame the shared control queue would not take (takes nothing).
      *
      * The demoted half of the old accounting: a refused enqueue is charged to the link,

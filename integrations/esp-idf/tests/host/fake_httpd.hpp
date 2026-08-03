@@ -66,6 +66,16 @@ struct session_t {
     httpd_send_func_t send_fn = nullptr;
     std::vector<send_result_t> script; /**< @brief Scripted write outcomes (see set_send_script). */
     std::size_t script_pos = 0;        /**< @brief Next entry; the last one repeats forever. */
+    /**
+     * @brief `shutdown(fd, SHUT_RDWR)` has been called on this socket.
+     *
+     * Two consequences, both lwIP's: every later write on it fails AT ONCE (no bound to
+     * wait out), and the socket becomes select-readable-at-EOF — `lwip_netconn_do_shutdown`
+     * fires `NETCONN_EVT_RCVPLUS` (api_msg.c) precisely so `select()` wakes. The second is
+     * what lets httpd's OWN loop reap the session without any control message, which is
+     * the entire reason the link uses it (see @ref server_t::run_pending).
+     */
+    bool shut = false;
 };
 
 /** @brief The fake server: one session table, one control queue, no sockets. */
@@ -94,8 +104,43 @@ class server_t {
     /** @brief Enqueue a test action onto the same control queue `httpd_queue_work` uses,
      *         so it runs on whichever thread drains it (the fake's "httpd task"). */
     void post(std::function<void()> action);
-    /** @brief Run every queued item; returns how many ran. Call from the server thread. */
+    /**
+     * @brief ONE pass of the httpd task's server loop: drain the control queue, then reap
+     *        every socket a `shutdown` has made readable-at-EOF.
+     *
+     * @return How many things happened (items run + sessions reaped) — zero means the
+     *         server has gone quiescent.
+     *
+     * The reap is not decoration: it is `httpd_server`'s select arm, and it is the ONLY
+     * arm that does not go through the control socket. Modelling it is what lets a host
+     * test tell a close that depends on the jammed queue apart from one that does not.
+     */
     std::size_t run_pending();
+    /** @brief Run at most ONE queued item and reap nothing — the stepper a test needs to
+     *         observe the instant between "the link decided to close" and "httpd noticed".
+     *  @return True if an item ran. */
+    bool run_one();
+    /** @brief Items currently sitting in the control queue. */
+    [[nodiscard]] std::size_t queue_depth() const;
+    /**
+     * @brief Enqueues lwIP swallowed because the control mbox was full, ever.
+     *
+     * The counter a host test needs to tell "the link refused this frame itself" apart
+     * from "the link handed it to a control socket that silently binned it" — two
+     * outcomes that look identical from the queue's depth, and only one of which leaves
+     * the httpd task free.
+     */
+    [[nodiscard]] std::size_t queue_drops() const;
+    /**
+     * @brief Cap the control queue at @p cap entries (0 = unbounded, the default).
+     *
+     * The cap models `CONFIG_LWIP_UDP_RECVMBOX_SIZE`: `httpd_queue_work` is a bare
+     * `sendto` to a loopback UDP socket, so an enqueue past the receiver's mbox is
+     * DROPPED by lwIP while `sendto` — and therefore `httpd_queue_work` — still reports
+     * success (httpd_main.c, release/v5.5). See @ref set_queue_refusing for the other,
+     * observable, enqueue failure.
+     */
+    void set_queue_capacity(std::size_t cap);
 
     /**
      * @brief Deliver one WebSocket frame to @p fd's LATCHED handler, as the server task
@@ -146,14 +191,14 @@ class server_t {
     [[nodiscard]] httpd_ws_client_info_t fd_info(int fd);
     void note_sent();
     /**
-     * @brief Refuse further `httpd_queue_work` calls — the ctrl-queue-full failure.
+     * @brief Refuse further enqueues with an OBSERVABLE failure — `cs_send_to_ctrl_sock`
+     *        returning < 0, which `httpd_queue_work` maps to `ESP_FAIL`.
      *
-     * `httpd_sess_trigger_close` is deliberately NOT refused with it. On silicon both
-     * ride the one control socket, so a full queue DELAYS the close as well — but only
-     * delays it, since the link retries the close on its next drop. Modelling the close
-     * as always reaching the session table is therefore the conservative choice for a
-     * test that asks "was this peer torn down?": it can only make a wrong teardown
-     * VISIBLE sooner, never invent one.
+     * The distinction from @ref set_queue_capacity is the whole point: this failure the
+     * caller can see, the capacity drop it cannot. `httpd_sess_trigger_close` rides the
+     * same socket, so it is refused too — the pre-#835-round-2 fake exempted it on the
+     * theory that a full queue only DELAYS a close, and the on-silicon run refuted that
+     * theory (the close never landed at all).
      */
     void set_queue_refusing(bool refusing);
     /** @brief Install a session's send override (`httpd_sess_set_send_override`). */
@@ -170,10 +215,27 @@ class server_t {
      * not its business — see `__wrap_send`.
      */
     int raw_send(int fd, std::size_t buf_len);
+    /**
+     * @brief The RAW `shutdown` on @p fd, reached through `--wrap=shutdown`.
+     *
+     * Marks the socket shut (see @ref session_t::shut). It does NOT free the descriptor:
+     * `shutdown` never does, and httpd stays the sole owner of the fd's lifetime — the
+     * property that makes calling it from the link safe at all.
+     */
+    int raw_shutdown(int fd);
     /** @brief True while @p fd is one of the fake's sockets (the `--wrap` predicate). */
     [[nodiscard]] bool owns_socket(int fd) const;
+    /** @brief True once `shutdown` has been called on @p fd. */
+    [[nodiscard]] bool is_shut(int fd) const;
 
    private:
+    /** @brief Close every socket a `shutdown` left readable-at-EOF, as httpd's select arm
+     *         does; returns how many were reaped. */
+    std::size_t reap_shut();
+    /** @brief The one control-socket enqueue both `httpd_queue_work` and
+     *         `httpd_sess_trigger_close` go through (`m_` held). */
+    bool enqueue_locked(std::function<void()> item, bool* dropped);
+
     mutable std::mutex m_;
     std::map<int, session_t> sessions_;
     std::deque<std::function<void()>> queue_;
@@ -182,6 +244,8 @@ class server_t {
     std::size_t frames_sent_ = 0;
     std::map<int, std::size_t> writes_;
     bool queue_refusing_ = false;
+    std::size_t queue_cap_ = 0;   /**< @brief 0 = unbounded; see set_queue_capacity. */
+    std::size_t queue_drops_ = 0; /**< @brief Enqueues lost to a full mbox. */
 };
 
 /** @brief The one fake server; its address IS the `httpd_handle_t` the link adopts. */

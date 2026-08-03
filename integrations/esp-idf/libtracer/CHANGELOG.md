@@ -36,6 +36,39 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a link-level counter and strike nobody. #481's protected behaviour is unchanged: one failed
   send still only drops that frame, and any successful send resets the streak, so the shipped
   "large reply times out between small frames" shape still never closes the session.
+  (3) A close the link ASKS FOR is not a close that happens. `httpd_sess_trigger_close` is
+  `httpd_queue_work(httpd_sess_close, …)` — the same loopback control socket, drained by the
+  same single httpd task that is already serialized behind the stalled fd's queued sends — so
+  it is strictly FIFO behind the very backlog it exists to clear, at a full send bound per
+  entry; and on the default non-blocking path `httpd_queue_work` is a bare `sendto`, so an
+  enqueue past that socket's small UDP mbox is dropped inside lwIP while still returning
+  success. An `ESP_OK` from it is therefore no evidence a close was queued at all. The first
+  on-silicon run of this fix measured the consequence exactly: the desync was detected and
+  logged, and then the same fd kept failing every 2 s for a further two minutes with the peer
+  never dropped — the starvation's period had shrunk, not the starvation. So the decision and
+  the close are now separated. At the strike cap or on one short write the session is marked
+  DEAD in the link's own state, under the existing peer-mutex discipline, at the instant of
+  the verdict: `queue_send` then refuses new frames to that fd, `tx_work` skips frames already
+  queued to it (the backlog drains at queue speed instead of a send bound apiece, which is
+  what frees the httpd task), and the socket is `shutdown`, which needs nothing from the
+  control queue — it takes effect on the calling line, makes every later write fail at once,
+  and raises the readable-at-EOF event that gets the session reaped through httpd's own select
+  arm. It never frees the descriptor, so `esp_http_server` keeps sole ownership of the fd's
+  lifetime; the dead mark is cleared where the slot is recycled, on the httpd task, so it
+  cannot outlive its session onto a reused descriptor number. `trigger_close` is still called
+  as a best-effort second path, but nothing depends on its result. HIL-pending: that the
+  stalled peer is now actually dropped and new WS connections stop timing out is a property
+  of a real lwIP socket under a real fan-out and is re-verified on the bench, not claimed here.
+
+- **`httpd_ws_link_t`: peers on IPv6 sockets were all named `0.0.0.0` (#835).** With
+  `CONFIG_LWIP_IPV6` on — the default on this target — `esp_http_server` binds its listener
+  `PF_INET6`, so every accepted WebSocket socket is `AF_INET6` and `getpeername` fills a
+  `sockaddr_in6`. The peer namer decoded it as a `sockaddr_in`: the port read correctly (same
+  offset) but the address read `sin6_flowinfo`, which is always zero. Every peer name on the
+  bus tag, the census and — the case that mattered — the strike log was therefore
+  `0.0.0.0:<port>`, so the one line that had to identify a stalled peer identified nothing.
+  The family is now read from what `getpeername` actually returned, with v4-mapped addresses
+  unwrapped so a dual-stack node keeps naming its IPv4 peers exactly as the census always has.
 
 ### Added
 
@@ -47,8 +80,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   when a bounded write expires mid-buffer, and `esp_http_server` treats any non-negative
   return as a delivered frame — which would report a half-written WebSocket frame as success
   and desynchronise the peer's framing for the life of the socket. A short write is now an
-  error AND closes that session immediately, bypassing the streak (a different fault class:
-  the stream is broken, not a frame missing). Existing call sites are source-compatible.
+  error AND condemns that session immediately, bypassing the streak (a different fault class:
+  the stream is broken, not a frame missing) — see (3) above for what "immediately" had to be
+  made to mean, since the queued close it originally used could be delayed or silently lost.
+  Existing call sites are source-compatible.
 
 - **`httpd_ws_link_t` (adopted mode): the destructor now retires every session's close
   callback before the link dies (#816).** Each admitted peer is registered with

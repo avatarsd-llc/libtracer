@@ -181,15 +181,42 @@ constexpr std::size_t kTxPoolSlots = 4;
  */
 constexpr std::size_t kTxInlineBytes = 1600;
 
-/** @brief `<ip>:<port>` of the far side of @p fd — the peer name (bus tag / census),
- *         byte-compatible with transport_ws_server's naming. Falls back to `fd<n>`. */
+/**
+ * @brief `<ip>:<port>` of the far side of @p fd — the peer name (bus tag / census),
+ *        byte-compatible with transport_ws_server's naming. Falls back to `fd<n>`.
+ *
+ * The address family is read from what `getpeername` actually filled, never assumed. With
+ * `CONFIG_LWIP_IPV6` on — the default on this target — `esp_http_server` binds its
+ * listener `PF_INET6` (httpd_main.c), so every accepted WS socket is an AF_INET6 one and
+ * a `sockaddr_in6` is what comes back. Decoding that as a `sockaddr_in` reads the port
+ * correctly (same offset) and then reads `sin6_flowinfo` as the address — which is zero,
+ * so every peer on the node was named `0.0.0.0:<port>`. That is what the on-silicon run
+ * saw in the strike log, and it made the strike unattributable to a peer at exactly the
+ * moment the attribution mattered. A v4-mapped v6 address (`::ffff:a.b.c.d`) is unwrapped
+ * so a dual-stack node keeps naming its IPv4 peers the way the census always has.
+ */
 [[nodiscard]] std::string peer_name(int fd) {
-    sockaddr_in addr = {};
+    sockaddr_storage addr = {};
     socklen_t len = sizeof(addr);
     if (::getpeername(fd, reinterpret_cast<sockaddr*>(&addr), &len) == 0) {
-        char ip[INET_ADDRSTRLEN] = {};
-        ::inet_ntop(AF_INET, &addr.sin_addr, ip, sizeof(ip));
-        return std::string(ip) + ':' + std::to_string(ntohs(addr.sin_port));
+        char ip[INET6_ADDRSTRLEN] = {};
+        if (addr.ss_family == AF_INET6) {
+            const auto& a6 = reinterpret_cast<const sockaddr_in6&>(addr);
+            if (IN6_IS_ADDR_V4MAPPED(&a6.sin6_addr)) {
+                in_addr v4 = {};
+                std::memcpy(&v4, reinterpret_cast<const std::uint8_t*>(&a6.sin6_addr) + 12,
+                            sizeof(v4));
+                ::inet_ntop(AF_INET, &v4, ip, sizeof(ip));
+            } else {
+                ::inet_ntop(AF_INET6, &a6.sin6_addr, ip, sizeof(ip));
+            }
+            return std::string(ip) + ':' + std::to_string(ntohs(a6.sin6_port));
+        }
+        if (addr.ss_family == AF_INET) {
+            const auto& a4 = reinterpret_cast<const sockaddr_in&>(addr);
+            ::inet_ntop(AF_INET, &a4.sin_addr, ip, sizeof(ip));
+            return std::string(ip) + ':' + std::to_string(ntohs(a4.sin_port));
+        }
     }
     return std::string("fd") + std::to_string(fd);
 }
@@ -329,9 +356,23 @@ struct httpd_ws_link_t::session_t {
     std::string name;          /**< @brief `<ip>:<port>` of the peer. */
     asm_buf_t asm_buf;         /**< @brief RFC 6455 fragment reassembly (nothrow). */
     std::uint8_t tx_drops = 0; /**< @brief Consecutive failed sends (peers_m_). */
-    /** @brief Set once a SHORT write proved this stream desynchronised; the session is
-     *         already closing, so further send results about it are noise (peers_m_). */
-    bool desync = false;
+    /**
+     * @brief This peer has been condemned — no frame may reach its socket again (peers_m_).
+     *
+     * Set at the INSTANT the link decides the session is broken (the strike cap, or one
+     * short write), not when a close eventually runs. That distinction is the whole of
+     * #835's second round: the decision is local and immediate, the close is not, and
+     * everything the link does between them has to already be behaving as if the peer
+     * were gone. It gates three things — @ref httpd_ws_link_t::queue_send refuses new
+     * frames, @ref httpd_ws_link_t::tx_work skips frames already queued, and both
+     * accounting paths stop treating this session as evidence about anything.
+     *
+     * Cleared with the rest of the slot in @ref httpd_ws_link_t::reclaim_slot. Slots are
+     * recycled in place and lwIP hands a descriptor NUMBER straight back, so a mark that
+     * outlived its session would mute an unrelated peer; the reclaim runs from `free_ctx`
+     * on the httpd task, before that task can accept anything onto the number.
+     */
+    bool dead = false;
     peer_endpoint_t endpoint; /**< @brief The directed facade `peer_link` returns. */
 };
 
@@ -1040,9 +1081,12 @@ void httpd_ws_link_t::reclaim_slot(session_t* slot) {
         slot->asm_buf.clear();
         slot->tx_drops = 0;
         // Slots are RECYCLED in place, so both TX verdicts about the departed peer must
-        // be cleared with it — a stale desync flag would mute the next peer's accounting
-        // for as long as it held this slot.
-        slot->desync = false;
+        // be cleared with it. The dead mark especially: lwIP hands a descriptor NUMBER
+        // straight back, so a mark left standing would refuse every frame to whichever
+        // unrelated peer next landed on that number. This runs from `free_ctx` on the
+        // httpd task — before that task can accept anything onto it — so the clear
+        // strictly precedes any reuse.
+        slot->dead = false;
     }
     // Departure seam (RFC-0009 §D extended to peer departure): a browser tab that
     // hung up leaves its subscriber edges behind — fire the routing plane's eviction
@@ -1078,6 +1122,15 @@ void httpd_ws_link_t::deliver(std::string_view peer, std::span<const std::byte> 
 
 void httpd_ws_link_t::queue_send(int fd, std::span<const std::span<const std::byte>> iov) {
     if (handle_ == nullptr || fd < 0) return;
+    // A condemned peer takes no more frames, and is refused HERE rather than at the far
+    // end of the queue. Queueing to it would be worse than useless: the control socket is
+    // the scarce resource under this failure (one small UDP mbox, shared with the close
+    // the link is trying to land), so every frame accepted for a doomed fd is a slot the
+    // rest of the node does not get. Both production callers below already skip dead slots
+    // from the lock they were holding anyway; this is the locus that makes it a property
+    // of the seam rather than of its callers, and it costs one uncontended mutex on a path
+    // that is about to memcpy a frame and do a syscall.
+    if (fd_is_dead(fd)) return;
     // Gather-copy the payload ONCE: httpd_queue_work is asynchronous, so the caller's
     // spans are gone by the time the httpd task runs tx_work. Fast path: claim a
     // pre-allocated pool slot (lock-free CAS) and gather straight into its inline
@@ -1149,6 +1202,48 @@ void httpd_ws_link_t::note_enqueue_drop(int fd, std::size_t bytes) {
              (unsigned)total);
 }
 
+bool httpd_ws_link_t::fd_is_dead(int fd) const {
+    const std::lock_guard lock(peers_m_);
+    for (const auto& s : slots_)
+        if (s->fd == fd) return s->dead;
+    return false;
+}
+
+void httpd_ws_link_t::condemn(int fd) {
+    // The close that does NOT ride the control socket, and the reason this round exists.
+    //
+    // `httpd_sess_trigger_close` is `httpd_queue_work(httpd_sess_close, sd)`
+    // (httpd_sess.c:476-481, release/v5.5): the SAME loopback control socket, drained by
+    // the SAME single httpd task that is currently working through this fd's queued
+    // sends. So it is strictly FIFO behind the very backlog it exists to clear, and every
+    // entry ahead of it costs a full send bound on a stalled socket. Worse, on the
+    // default non-blocking path `httpd_queue_work` is a bare `sendto` to that socket
+    // (httpd_main.c) — an enqueue past the receiver's UDP mbox is dropped inside lwIP
+    // while `sendto`, and therefore `httpd_queue_work`, still returns success. An ESP_OK
+    // from trigger_close is not evidence that anything was queued. On silicon the close
+    // was asked for repeatedly and never took effect; the fd kept failing for two minutes.
+    //
+    // `shutdown` answers instead, because it is not a request of the server at all:
+    //   - it costs one syscall, taking effect before this function returns;
+    //   - lwIP raises NETCONN_EVT_RCVPLUS on a shut socket (api_msg.c
+    //     lwip_netconn_do_shutdown), so the fd comes back readable-at-EOF from the very
+    //     next `select` in `httpd_server` and httpd reaps the session through its OWN
+    //     path — the one arm of that loop with no control message on it;
+    //   - every later write on the socket fails AT ONCE instead of waiting out the bound.
+    //
+    // It does NOT close the descriptor — `shutdown` never does — so httpd remains the
+    // sole owner of the fd's lifetime and its own `close` stays correct. Calling it is
+    // safe against that lifetime because both callers run ON the httpd task (a tx_work
+    // item and a send override invoked from one), the single task that accepts and closes
+    // sockets, so the fd cannot be recycled underneath this call.
+    if (::shutdown(fd, SHUT_RDWR) != 0) ESP_LOGW(kTag, "shutdown failed fd=%d (%d)", fd, errno);
+    // Best-effort belt: if the control socket does have room, this reaps the session a
+    // select cycle sooner. Its return is deliberately not trusted — see above — so a
+    // failure is logged at debug and nothing depends on it.
+    if (httpd_sess_trigger_close(handle_, fd) != ESP_OK)
+        ESP_LOGD(kTag, "trigger_close not queued fd=%d (the shutdown carries the close)", fd);
+}
+
 void httpd_ws_link_t::note_tx_result(int fd, bool sent, std::size_t bytes) {
     bool close_now = false;
     std::string peer;
@@ -1161,7 +1256,7 @@ void httpd_ws_link_t::note_tx_result(int fd, bool sent, std::size_t bytes) {
                 break;
             }
         if (slot == nullptr) return;  // peer departed between the fd snapshot and now
-        if (slot->desync) return;     // already closing on a broken stream, not a streak
+        if (slot->dead) return;       // already condemned — no further evidence is wanted
         if (sent) {
             slot->tx_drops = 0;  // a failure streak is CONSECUTIVE — any success resets it
             return;
@@ -1169,24 +1264,27 @@ void httpd_ws_link_t::note_tx_result(int fd, bool sent, std::size_t bytes) {
         if (slot->tx_drops < kMaxConsecutiveTxDrops) ++slot->tx_drops;
         close_now = slot->tx_drops >= kMaxConsecutiveTxDrops;
         peer = slot->name;
+        // Condemn UNDER the same lock that reached the verdict. Any later moment is a
+        // window in which the fan-out enqueues more frames for a peer already known to be
+        // broken, and each of those costs the httpd task a whole send bound.
+        if (close_now) slot->dead = true;
     }
     if (!close_now) return;  // the drop itself is already logged by tx_work
+    // The peer name comes from the slot, filled at admission. Never `getpeername` here:
+    // the socket is by definition the one that is not working, and naming a peer at the
+    // moment it is being struck must not depend on that socket answering.
     ESP_LOGW(kTag, "%u consecutive failed sends peer=%s fd=%d len=%u - closing session",
              (unsigned)kMaxConsecutiveTxDrops, peer.c_str(), fd, (unsigned)bytes);
     // At the streak cap the session is broken, not bursty: close it so the peer's onclose
     // fires and it reconnects, instead of silently missing frames forever. This is what
-    // aims the teardown at the peer that is actually stalled — and closing it is also
-    // what unjams the control queue its multi-second sends were saturating.
+    // aims the teardown at the peer that is actually stalled — and the dead mark set above
+    // is what makes the teardown REACHABLE, by emptying the queue between here and it.
     //
     // Consistent with lru_purge_enable=false: that admission contract forbids evicting a
     // LIVE peer to make room for a new one, and a peer that has failed
     // kMaxConsecutiveTxDrops bounded sends with no success between is not live mid-stream
     // by the transport's own definition.
-    //
-    // trigger_close rides the same control socket a full queue starves, so it can fail
-    // here too — the streak stays at the cap and the next failed send re-triggers.
-    if (httpd_sess_trigger_close(handle_, fd) != ESP_OK)
-        ESP_LOGW(kTag, "trigger_close failed fd=%d (will retry on next failed send)", fd);
+    condemn(fd);
 }
 
 void httpd_ws_link_t::bound_socket(int fd) const {
@@ -1242,24 +1340,31 @@ int httpd_ws_link_t::send_guarded(httpd_handle_t handle, int fd, const char* buf
 
 void httpd_ws_link_t::note_send_desync(int fd, std::size_t written, std::size_t len) {
     std::string peer;
+    bool condemned = false;
     {
         const std::lock_guard lock(peers_m_);
         for (const auto& s : slots_)
             if (s->open && s->fd == fd) {
-                if (s->desync) return;  // already closing this stream
-                s->desync = true;
+                if (s->dead) return;  // already condemned — this stream is going
+                s->dead = true;
+                condemned = true;
                 peer = s->name;
                 break;
             }
     }
+    if (!condemned) return;  // no slot for this fd: not a peer of ours to condemn
+    // Named from the slot, not from the socket — see note_tx_result.
     ESP_LOGE(kTag, "short write peer=%s fd=%d (%u of %u bytes) - closing: stream desynchronised",
              peer.c_str(), fd, (unsigned)written, (unsigned)len);
     // NOT the streak: a different fault class. The streak means "this peer keeps missing
     // whole frames"; this means "the byte stream is no longer parseable", and one
     // occurrence is already proof. Dropping the frame and keeping the socket — the #481
     // response — is only sound when ZERO bytes of it reached the wire.
-    if (httpd_sess_trigger_close(handle_, fd) != ESP_OK)
-        ESP_LOGE(kTag, "trigger_close failed on a desynchronised session fd=%d", fd);
+    //
+    // This close is ONE-SHOT by construction (the mark above makes a second call return
+    // early), so it may not be an operation that can silently fail to happen — which the
+    // control queue's is. @ref condemn is the one that cannot.
+    condemn(fd);
 }
 
 void httpd_ws_link_t::tx_work(void* arg) {
@@ -1267,8 +1372,22 @@ void httpd_ws_link_t::tx_work(void* arg) {
     // Runs on the httpd task, sequenced with accept/close — so a peer that departed
     // between enqueue and now is a clean skip (no cross-thread send to a dead/reused fd).
     const bool live = httpd_ws_get_fd_info(work->handle, work->fd) == HTTPD_WS_CLIENT_WEBSOCKET;
+    // The second skip, and the one that unblocks the task: this frame may have been
+    // queued BEFORE the link condemned its destination. Attempting it would cost the full
+    // send bound on a socket already known to be broken, and the queue behind it holds
+    // the close. Skipping releases the slot at queue speed, so a backlog that would have
+    // taken minutes to grind through drains in microseconds. The gate is taken briefly
+    // and released before the send: holding it across the write would block a concurrent
+    // destructor for the whole bound. Lock order is gate->m then peers_m_, the same order
+    // on_session_closed and the accounting below use.
+    bool doomed = false;
+    if (live && work->gate != nullptr) {
+        const std::lock_guard lock(work->gate->m);
+        if (httpd_ws_link_t* const owner = work->gate->link; owner != nullptr)
+            doomed = owner->fd_is_dead(work->fd);
+    }
     esp_err_t err = ESP_OK;
-    if (live) {
+    if (live && !doomed) {
         httpd_ws_frame_t f = {};
         f.final = true;
         f.fragmented = false;
@@ -1304,8 +1423,9 @@ void httpd_ws_link_t::tx_work(void* arg) {
     const int fd = work->fd;
     const std::size_t len = work->len;
     release_tx_work(work);  // recycle the pool slot, or free the heap-fallback shell
-    // A skipped send (the peer departed) is not evidence about anyone: no result.
-    if (!live || gate == nullptr) return;
+    // A skipped send is not evidence about anyone: no result. Both skips qualify — the
+    // peer departed, or it was condemned and the verdict is already in.
+    if (!live || doomed || gate == nullptr) return;
     // Resolve the link through the gate — the same contract on_session_closed uses. Held
     // for the whole call, so a concurrent destructor either waits here or finds the gate
     // already shut and this outcome has nobody to inform.
@@ -1330,8 +1450,10 @@ void httpd_ws_link_t::send(std::span<const std::span<const std::byte>> iov) {
     {
         const std::lock_guard lock(peers_m_);
         fds.reserve(slots_.size());
+        // A condemned peer is skipped from the lock the snapshot already holds, so the
+        // fan-out never even offers it a frame (queue_send would refuse it anyway).
         for (const auto& s : slots_)
-            if (s->open) fds.push_back(s->fd);
+            if (s->open && !s->dead) fds.push_back(s->fd);
     }
     for (const int fd : fds) queue_send(fd, iov);
 }
@@ -1348,7 +1470,7 @@ void httpd_ws_link_t::peer_endpoint_t::send(std::span<const std::span<const std:
     int fd = -1;
     {
         const std::lock_guard lock(owner_->peers_m_);
-        if (!slot_->open) return;  // departed => no-op
+        if (!slot_->open || slot_->dead) return;  // departed or condemned => no-op
         fd = slot_->fd;
     }
     owner_->queue_send(fd, iov);
