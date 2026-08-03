@@ -551,7 +551,11 @@ ANCHORS = [
      "*        `bench_forward_heap`'s `allocs=0` gate cannot see it: that bench drives"),
     ('core/src/transport_tcp.cpp:181', 'bool tcp_transport_t::read_exact(int fd, std::byte* dst, std::size_t len) {'),
     ('core/src/transport_tcp.cpp:201', 'std::array<std::byte, 4096> scratch;'),
-    ('core/src/transport_tcp.cpp:210', 'void tcp_transport_t::serve(int fd) {'),
+    # zero-copy-and-flatten.md quotes this comment's tail verbatim, so the anchor carries the
+    # QUOTED line — pinning `serve()`'s signature two constructs up passed while the citation
+    # pointed at code the doc never quotes.
+    ('core/src/transport_tcp.cpp:223',
+     '// buffer, no copy; feeding recv chunks through feed() would add one).'),
     ('core/src/transport_tcp.cpp:243', 'if (!read_exact(fd, seg->bytes.data(), len)) return;'),
     ('core/src/transport_tcp.cpp:457', 'std::array<std::byte, 4096> chunk;',
      'void transport_tcp_server::service_peer(session_t& s) {'),

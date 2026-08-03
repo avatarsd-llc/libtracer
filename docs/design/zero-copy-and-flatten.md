@@ -305,7 +305,7 @@ accepted segment: `read_exact(fd, seg->bytes.data(), len)` (`core/src/transport_
 `length_prefix_framer::on_prefix`. The pooled receive target *is* the owned segment — one kernel
 copy and zero user-space copies. The in-source rationale names the trade explicitly: feeding recv
 chunks through `feed()` "would add one" copy, so the pull loop shares framing *rules* with the
-chunk-fed transports rather than their state machine (`core/src/transport_tcp.cpp:210-215`). The
+chunk-fed transports rather than their state machine (`core/src/transport_tcp.cpp:218-223`). The
 only stack scratch left on this path is `drain()`'s 4096-byte backpressure discard buffer
 (`core/src/transport_tcp.cpp:201`), which runs when a frame is dropped, not when one is delivered.
 
