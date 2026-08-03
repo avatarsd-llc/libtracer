@@ -620,8 +620,8 @@ struct subscriber_remote_t {
  * @brief A subscription edge's canonical PATH key — **immutable and refcount-shared**.
  *
  * Shared rather than owned because the dispatch snapshot must outlive a concurrent
- * unsubscribe: @ref vertex_t::snapshot_edges copies each active slot out under the vertex
- * lock so the graph can dispatch OUTSIDE it, and the slot may be cleared in between. A
+ * unsubscribe: @ref vertex_t::snapshot_edges copies each active slot out under an edge pin
+ * so the graph can dispatch after releasing it, and the slot may be cleared in between. A
  * deep copy satisfied that and cost a **malloc + free per edge per delivery** — a
  * `std::vector` has no small-buffer optimisation, so every non-null key allocated, which is
  * the ordinary local-binding case (`/sensor/temp:subscribers[] -> /dev/ctrl0/in/temp`).
@@ -711,10 +711,10 @@ struct subscriber_t {
 /**
  * @brief The dispatch-relevant snapshot of one ACTIVE subscription edge.
  *
- * What @ref vertex_t::snapshot_edges copies out under the vertex lock so the graph can
- * dispatch OUTSIDE it (callbacks / re-dispatch re-enter the graph): the `{fn, ctx}`
- * callback pair, owning copies of the link / caller strings (the slot may be cleared
- * concurrently once dispatch runs outside the lock), and refcount CLONES of the target
+ * What @ref vertex_t::snapshot_edges copies out under an edge pin so the graph can
+ * dispatch with the pin released (callbacks / re-dispatch re-enter the graph): the
+ * `{fn, ctx}` callback pair, owning copies of the link / caller strings (the slot may be
+ * cleared concurrently once dispatch runs), and refcount CLONES of the target
  * key and the stored return route (ADR-0041 §2 — a bump, not a byte copy; the clone keeps
  * each alive across a concurrent unsubscribe).
  *
@@ -1899,7 +1899,7 @@ class vertex_t {
 
     /**
      * @brief Snapshot every ACTIVE edge's dispatch view into caller storage — the
-     *        snapshot-under-lock half of the snapshot/dispatch-outside discipline.
+     *        snapshot-under-pin half of the snapshot/dispatch-after-release discipline.
      *
      * Small fan-out (the common case, ≤ `kInlineFanout`) placement-constructs into
      * @p inline_buf — no heap allocation AND no dead stack zeroing per publish; a

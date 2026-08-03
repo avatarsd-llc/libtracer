@@ -80,7 +80,7 @@ the ACL state. `add_edge`, `clear_edge` and `set_acl` take one; **`snapshot_edge
 longer does.** Delivery reads a published, immutable edge array under a bounded edge pin
 instead — the stripe mutex left the publish path and kept the control plane
 ([ADR-0075](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0075-a-vertexs-edges-are-published-and-read-under-an-edge-pin.md)),
-which is worth ×19.4 on the same-stripe fan-1 write at twenty-four threads. The zero-subscriber
+which is worth ×18.58 on the same-stripe fan-1 write at twenty-four threads. The zero-subscriber
 gate stands in front of it either way: `fan_out` returns on a zero `own_subs_ordered()` first,
 so an unobserved write — and every placeholder ancestor a bubble walks past — touches neither
 the stripe nor the pin ([#635](https://github.com/avatarsd-llc/libtracer/issues/635)). Without

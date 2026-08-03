@@ -919,13 +919,13 @@ inline void graph_t::dispatch_edge(const edge_view_t& e, const rope_t& value) {
 }
 
 void graph_t::fan_out(vertex_t* v, const rope_t& value) {
-    // NOBODY SUBSCRIBED HERE ⇒ take no lock at all (#635). `snapshot_edges` acquires the
-    // vertex STRIPE mutex, and a stripe is shared by kVertexLockStripes-many vertices, so
-    // without this gate two unrelated vertices serialise their writes against each other for
-    // no reason but a hash collision — measured at ×8.6 (fan-0) and ×12.3 (fan-1) against the
-    // same write on distinct stripes, and NEGATIVELY scaling: aggregate throughput falls as
-    // threads are added. RFC-0005's near-free-when-idle promise is already kept this way by
-    // mark_pending / clear_pending; fan_out was the one write-path verb that did not keep it.
+    // NOBODY SUBSCRIBED HERE ⇒ do no snapshot work at all (#635). When this gate landed
+    // `snapshot_edges` took the vertex STRIPE mutex, shared by kVertexLockStripes-many
+    // vertices, so without it two unrelated vertices serialised their writes on nothing but a
+    // hash collision — ×8.6 (fan-0) and ×12.3 (fan-1) against the same write on distinct
+    // stripes, and NEGATIVELY scaling. The fan-1 half has since deleted that mutex from the
+    // read path, so this gate now saves the pin claim and the copy loop, not a lock. RFC-0005's
+    // near-free promise is kept this way by mark_pending; fan_out was the verb that did not.
     //
     // This is the delivery-skipping read, so it is the ORDERED one — see
     // vertex_t::own_subs_ordered for the Dekker pairing against ADR-0049's subscribe latch,
@@ -937,8 +937,8 @@ void graph_t::fan_out(vertex_t* v, const rope_t& value) {
     // and both callers check that separately.
     if (v->own_subs_ordered() == 0) return;
 
-    // Snapshot every active edge UNDER the vertex lock (vertex_t::snapshot_edges), then
-    // dispatch OUTSIDE it (callbacks / re-dispatch may re-enter the graph). Delivery is
+    // Snapshot every active edge UNDER AN EDGE PIN (vertex_t::snapshot_edges), released
+    // before we dispatch (callbacks / re-dispatch may re-enter the graph). Delivery is
     // value-agnostic — no per-subscriber comparison — so every active edge receives
     // `value`; WHICH vertices propagate is the per-vertex delivery_mode decided by the
     // sweep (RFC-0008). Small fan-out (the common case) placement-constructs into a RAW

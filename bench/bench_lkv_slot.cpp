@@ -87,8 +87,8 @@
  *
  * Each topology runs at fan-0 (the store leg alone) and fan-1 (`inproc`, the reference point
  * the rest of the suite sweeps around). Since #635 the two differ in KIND, not just degree:
- * fan-0 returns from `fan_out` before the lock, fan-1 still takes it once per publish. Keep
- * both — fan-0 is what guards the gate, fan-1 is what still has headroom in it.
+ * fan-0 returns from `fan_out` before any snapshot; fan-1 copies the published array under an
+ * edge pin — neither takes the stripe mutex now. Keep both: fan-0 gates, fan-1 carried the cost.
  *
  * DIAGNOSTIC, not a CI gate: thread-contention numbers are runner-dependent, so this is
  * deliberately not wired into perf.yml's regression gate — the same call

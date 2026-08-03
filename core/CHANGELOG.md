@@ -20,7 +20,7 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   [#635](https://github.com/avatarsd-llc/libtracer/issues/635),
   [ADR-0075](../docs/adr/0075-a-vertexs-edges-are-published-and-read-under-an-edge-pin.md)).**
   A vertex now PUBLISHES its edges as an immutable array that `fan_out` copies out under a
-  bounded per-participant pin instead of the shared stripe mutex — ×19.4 on the same-stripe
+  bounded per-participant pin instead of the shared stripe mutex — ×18.58 on the same-stripe
   fan-1 write at twenty-four threads, and the negative scaling past four threads is gone.
   `kEdgePinSlots` sizes the announcement registry (CMake `-DLIBTRACER_EDGE_PIN_SLOTS=`);
   correctness never depends on it, only scaling does. `sizeof(vertex_t)` drops 112 -> 96 B

@@ -204,8 +204,10 @@ set(LIBTRACER_ACL_POLICY allow_only_policy_t)  # the MCU profile — no full-ACL
 set(LIBTRACER_LKV_SLOT sp_atomic_slot_t)  # write-dominated single core: keep the refcount slot
 set(LIBTRACER_HAZARD_READER_SLOTS 64)  # unused here: the refcount slot never builds the domain
 # Edge-pin announcements (#635) — one index per task that may PUBLISH concurrently. Unlike the
-# hazard domain this one is ALWAYS emitted, so it is real static RAM: N * max(padding, 4) bytes,
-# i.e. 32 B on a unicore build (padding 0) at the 8 chosen here. A node's publishers are its
+# hazard domain this one is ALWAYS emitted, so it is real static RAM: N * max(padding,
+# sizeof(cell_t)) bytes. A cell is the announced pointer PLUS its claimed flag, so it is 8 B on
+# rv32 at padding 0 (not 4) — i.e. 64 B at the 8 chosen here, matching the +256 B .bss the
+# 32-slot host default costs. A node's publishers are its
 # transport-receive tasks plus the app's own; eight covers that with room and stays a rounding
 # error against the 896 B the stripe padding costs. Undersizing it is not a correctness problem
 # — a task past the bound copies the edge array under the stripe mutex instead, which is what
