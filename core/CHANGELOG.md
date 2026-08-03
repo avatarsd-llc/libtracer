@@ -16,6 +16,40 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`tr::net::iov_table_t` (`libtracer/iov_table.hpp`) and the nothrow transport egress
+  ([#848](https://github.com/avatarsd-llc/libtracer/issues/848)).** The scatter-gather entry
+  table every POSIX transport gathers its egress through: the caller's stack array while the
+  entries fit (`kMaxInlineIov`, 16), else ONE block from a `tr::mem::block_source_t`
+  (ADR-0065) whose exhaustion answer is `nullptr`. It replaces five copies of a *throwing*
+  `std::vector` resize/reserve in `transport_ws.cpp`, `transport_tcp.cpp` and
+  `transport_udp.cpp`. **Behaviour change:** those growths sized an entry count the SENDING
+  peer chooses (a rope's link count × its region count, uncapped by `ws_assembler_t::on_data`),
+  so exhaustion was a peer-reachable `abort()` under the `-fno-exceptions` MCU profile;
+  a `send` that cannot obtain the table now DROPS the frame — it never truncates one.
+
+- **RFC 6455 control-frame surface in `tr::net::ws`:** `kMaxControlPayload` (125),
+  `is_control_opcode`, `kMaxServerControlFrame` / `kMaxClientControlFrame`,
+  `encode_server_control` / `encode_client_control` (stack buffers, returning the byte count),
+  and `decode_status_t` / `decode_result_t` / `decode_one` / `decode_frame_checked`.
+  **Behaviour change:** an oversized or non-final control frame now FAILS the connection
+  (§5.5/§7.1.7) instead of being echoed, so the PONG reply is built entirely on the stack and
+  a heap blip can no longer cost a link that an unanswered PING entitles the peer to drop.
+
+- **`tr::net::can::encode_advertise_header`.** The one field-encoding locus for a CAN
+  advertise, filling a caller-owned `std::array` and returning `false` past
+  `kAdvertiseMaxPathLen`. `emit_advertise` slices it in place and allocates nothing; the
+  contiguous `encode_advertise` twin is retained for callers that want the whole frame.
+
+- **`ws::try_encode_client_frame(mem::block_array_t<std::byte>&, …)`.** The nothrow twin of
+  `encode_client_frame` — a client frame MUST be masked (§5.1), so its wire bytes are not the
+  caller's and it is the one WS egress path that still needs a buffer. Returns the frame's
+  byte count, `0` on refusal. It takes a `tr::mem::block_array_t` rather than a
+  `std::vector` + `tr::detail::try_reserve`: that helper is `noexcept` but only its PROBE is
+  nothrow — it frees the probe block and then runs the THROWING `std::vector::reserve`, so
+  refusing that second allocation crosses a `noexcept` boundary into `std::terminate` (and a
+  bare `abort()` under `-fno-exceptions`). Drawing from the failable seam leaves exactly one
+  refusable allocation and no unguardable second step.
+
 - **`tr::graph::kEdgePinSlots` and the edge-pin domain (`libtracer/edge_pin.hpp`,
   [#635](https://github.com/avatarsd-llc/libtracer/issues/635),
   [ADR-0075](../docs/adr/0075-a-vertexs-edges-are-published-and-read-under-an-edge-pin.md)).**

@@ -537,8 +537,8 @@ int run_guard() {
         {"ws_try_encode_client_frame", expect_t::GUARDED,
          [] {
              // A FRESH buffer per run: a warmed capacity would make the sweep vacuous
-             // (`try_reserve` returns true without allocating at all).
-             std::vector<std::byte> out;
+             // (the reserve returns true without allocating at all).
+             tr::mem::block_array_t<std::byte> out(tr::mem::heap_source());
              (void)ws::try_encode_client_frame(out, ws::opcode_t::BINARY, payload, 7u);
              asm volatile("" : : "r"(out.data()) : "memory");
          }},

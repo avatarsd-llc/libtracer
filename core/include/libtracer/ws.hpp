@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_source.hpp"
 
 namespace tr::net::ws {
 
@@ -524,30 +525,34 @@ namespace detail {
 }
 
 /**
- * @brief Append one whole MASKED client frame to @p out — the ONE client-side
+ * @brief Write one whole MASKED client frame into @p out — the ONE client-side
  *        length-encoding + masking implementation, shared by the throwing
  *        @ref ws::encode_client_frame and the nothrow @ref ws::try_encode_client_frame.
  *
- * @pre @p out is empty and already has capacity for `client_frame_bytes(payload.size())`,
- *      so no `push_back` here can reallocate (and therefore none can throw).
+ * Writes through an already-sized buffer by index rather than appending, so the store it
+ * fills is the caller's choice (a `std::vector` for the throwing form, a
+ * `tr::mem::block_array_t` for the nothrow one) and this function allocates nothing at all.
+ *
+ * @pre @p out.size() >= `client_frame_bytes(payload.size())`.
+ * @return The number of bytes written (exactly `client_frame_bytes(payload.size())`).
  */
-inline void put_client_frame(std::vector<std::byte>& out, opcode_t op,
-                             std::span<const std::byte> payload, std::uint32_t mask_key,
-                             bool fin) noexcept {
-    out.push_back(static_cast<std::byte>((fin ? 0x80u : 0x00u) | static_cast<std::uint8_t>(op)));
+inline std::size_t put_client_frame(std::span<std::byte> out, opcode_t op,
+                                    std::span<const std::byte> payload, std::uint32_t mask_key,
+                                    bool fin) noexcept {
+    std::size_t n = 0;
+    out[n++] = static_cast<std::byte>((fin ? 0x80u : 0x00u) | static_cast<std::uint8_t>(op));
 
     const std::size_t len = payload.size();
     if (len < 126) {
-        out.push_back(static_cast<std::byte>(0x80u | static_cast<std::uint8_t>(len)));  // MASK=1
+        out[n++] = static_cast<std::byte>(0x80u | static_cast<std::uint8_t>(len));  // MASK=1
     } else if (len <= 0xFFFF) {
-        out.push_back(static_cast<std::byte>(0x80u | 126u));
-        out.push_back(static_cast<std::byte>((len >> 8) & 0xFFu));
-        out.push_back(static_cast<std::byte>(len & 0xFFu));
+        out[n++] = static_cast<std::byte>(0x80u | 126u);
+        out[n++] = static_cast<std::byte>((len >> 8) & 0xFFu);
+        out[n++] = static_cast<std::byte>(len & 0xFFu);
     } else {
-        out.push_back(static_cast<std::byte>(0x80u | 127u));
+        out[n++] = static_cast<std::byte>(0x80u | 127u);
         for (int i = 7; i >= 0; --i) {
-            out.push_back(
-                static_cast<std::byte>((static_cast<std::uint64_t>(len) >> (i * 8)) & 0xFFu));
+            out[n++] = static_cast<std::byte>((static_cast<std::uint64_t>(len) >> (i * 8)) & 0xFFu);
         }
     }
 
@@ -555,11 +560,11 @@ inline void put_client_frame(std::vector<std::byte>& out, opcode_t op,
                                          static_cast<std::uint8_t>((mask_key >> 16) & 0xFFu),
                                          static_cast<std::uint8_t>((mask_key >> 8) & 0xFFu),
                                          static_cast<std::uint8_t>(mask_key & 0xFFu)};
-    for (std::uint8_t m : mk) out.push_back(static_cast<std::byte>(m));
+    for (std::uint8_t m : mk) out[n++] = static_cast<std::byte>(m);
     for (std::size_t i = 0; i < len; ++i) {
-        out.push_back(
-            static_cast<std::byte>(std::to_integer<std::uint8_t>(payload[i]) ^ mk[i % 4]));
+        out[n++] = static_cast<std::byte>(std::to_integer<std::uint8_t>(payload[i]) ^ mk[i % 4]);
     }
+    return n;
 }
 
 }  // namespace detail
@@ -571,24 +576,36 @@ inline void put_client_frame(std::vector<std::byte>& out, opcode_t op,
  * The one WS egress encoder that survives as a nothrow twin rather than being deleted: a
  * client frame MUST be masked (RFC 6455 §5.1), so the bytes on the wire are not the caller's
  * bytes and cannot be gathered by reference the way the UNMASKED server frames are. Reuse
- * one @p out buffer across calls and the steady state allocates nothing. On `false` the
- * caller DROPS the frame — the same answer the delivery path already gives under exhaustion.
+ * one @p out buffer across calls and the steady state allocates nothing. On `0` the caller
+ * DROPS the frame — the same answer the delivery path already gives under exhaustion.
  *
- * @param out      The reusable frame buffer; cleared first, left EMPTY on failure.
+ * @par Why @ref tr::mem::block_array_t and not a `std::vector` + `tr::detail::try_reserve`
+ * `try_reserve` is `noexcept`, but only its PROBE is nothrow: it frees the probe block and
+ * then runs the throwing `std::vector::reserve`, on the argument that the just-freed block
+ * satisfies it. Refuse that second allocation and the `bad_alloc` crosses a `noexcept`
+ * boundary — `std::terminate`, not a soft failure, and a bare `abort()` under
+ * `-fno-exceptions`. That is the very outcome #848 exists to remove, so this path draws from
+ * the failable seam instead (ADR-0065): growth is ONE `block_source_t::try_alloc` that
+ * answers `nullptr`, with no unguardable second step.
+ *
+ * @param out      The reusable frame buffer; its capacity is retained across calls.
  * @param op       The frame opcode.
  * @param payload  The application payload to send.
  * @param mask_key The 32-bit masking key (its 4 bytes form the RFC 6455 key).
  * @param fin      The FIN bit (default true — a complete, unfragmented message).
- * @retval false The frame buffer could not be grown — @p out is empty, drop the frame.
+ * @retval 0 The frame buffer could not be grown — nothing was written, drop the frame.
+ * @return The number of frame bytes written to `out.data()` (never 0 on success: a client
+ *         frame is at least a 2-byte header plus the 4-byte masking key).
  */
-[[nodiscard]] inline bool try_encode_client_frame(std::vector<std::byte>& out, opcode_t op,
-                                                  std::span<const std::byte> payload,
-                                                  std::uint32_t mask_key,
-                                                  bool fin = true) noexcept {
-    out.clear();
-    if (!tr::detail::try_reserve(out, detail::client_frame_bytes(payload.size()))) return false;
-    detail::put_client_frame(out, op, payload, mask_key, fin);
-    return true;
+[[nodiscard]] inline std::size_t try_encode_client_frame(mem::block_array_t<std::byte>& out,
+                                                         opcode_t op,
+                                                         std::span<const std::byte> payload,
+                                                         std::uint32_t mask_key,
+                                                         bool fin = true) noexcept {
+    const std::size_t want = detail::client_frame_bytes(payload.size());
+    if (!out.reserve(want)) return 0;
+    return detail::put_client_frame(std::span<std::byte>(out.data(), want), op, payload, mask_key,
+                                    fin);
 }
 
 /**
@@ -613,9 +630,8 @@ inline void put_client_frame(std::vector<std::byte>& out, opcode_t op,
                                                                 std::span<const std::byte> payload,
                                                                 std::uint32_t mask_key,
                                                                 bool fin = true) {
-    std::vector<std::byte> out;
-    out.reserve(detail::client_frame_bytes(payload.size()));  // the throwing grow
-    detail::put_client_frame(out, op, payload, mask_key, fin);
+    std::vector<std::byte> out(detail::client_frame_bytes(payload.size()));  // the throwing grow
+    detail::put_client_frame(std::span<std::byte>(out), op, payload, mask_key, fin);
     return out;
 }
 

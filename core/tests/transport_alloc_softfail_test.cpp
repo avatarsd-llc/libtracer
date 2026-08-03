@@ -60,6 +60,7 @@
 #include "libtracer/can.hpp"
 #include "libtracer/iov_table.hpp"
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_source.hpp"
 #include "libtracer/transport_can.hpp"
 #include "libtracer/transport_tcp.hpp"
 #include "libtracer/transport_udp.hpp"
@@ -479,19 +480,41 @@ void test_ws_client_send_drops_then_recovers() {
     check(server.ok(), "server bound");
     server.set_receiver(srv_rx);
 
-    tr::net::transport_ws_client client("127.0.0.1", server.local_port());
-    check(client.ok(), "ws client handshaken");
-
     const std::vector<std::byte> payload(64, std::byte{0x5A});
 
-    // The buffer starts empty, so the first send must grow it — and that growth is refused.
-    const bool escaped = escapes_at(1, [&] { client.send(payload); });
-    check(!escaped, "send with the frame-buffer growth refused does not throw");
-    std::this_thread::sleep_for(150ms);
-    check(at_server.n() == 0, "the refused frame was DROPPED (nothing reached the server)");
+    // How many allocations a COLD send makes bounds the sweep below. Measured on a client of
+    // its own: `tx_buf_` keeps its block between sends, so a count taken from an already-warm
+    // client would be 0 and every injection point would be vacuous.
+    std::size_t n_allocs = 0;
+    {
+        tr::net::transport_ws_client probe("127.0.0.1", server.local_port());
+        check(probe.ok(), "ws probe client handshaken");
+        n_allocs = count_allocs([&] { probe.send(payload); });
+        check(at_server.wait_for(1, 2s), "the unrefused baseline frame arrived");
+    }
+    // The whole point of moving this path off `tr::detail::try_reserve`: that helper probed
+    // with a nothrow allocation and then ran a THROWING `std::vector::reserve` behind it, so a
+    // cold encode had TWO allocation points and only the first was refusable — refusing the
+    // second crossed `try_reserve`'s own `noexcept` and called std::terminate (an abort no
+    // test can catch, and a bare abort() under -fno-exceptions). One allocation here means
+    // there is no unguardable second step left to refuse.
+    check(n_allocs == 1,
+          "a cold send makes exactly ONE refusable allocation (no unguardable second step)");
 
+    // EVERY injection point, each on a client whose tx_buf_ is still COLD.
+    for (std::size_t k = 1; k <= n_allocs; ++k) {
+        tr::net::transport_ws_client client("127.0.0.1", server.local_port());
+        check(client.ok(), "ws client handshaken");
+        const bool escaped = escapes_at(k, [&] { client.send(payload); });
+        check(!escaped, "send with the frame-buffer growth refused does not throw");
+    }
+    std::this_thread::sleep_for(150ms);
+    check(at_server.n() == 1, "every refused frame was DROPPED (only the baseline arrived)");
+
+    tr::net::transport_ws_client client("127.0.0.1", server.local_port());
+    check(client.ok(), "ws client handshaken");
     client.send(payload);
-    check(at_server.wait_for(1, 2s), "the node is LIVE: the next send arrives");
+    check(at_server.wait_for(2, 2s), "the node is LIVE: the next send arrives");
     check(at_server.bytes() == payload, "and its bytes are intact");
 }
 
@@ -792,18 +815,37 @@ void test_try_encode_client_frame() {
     const std::vector<std::byte> ref =
         ws::encode_client_frame(ws::opcode_t::BINARY, payload, 0x01020304u);
 
-    std::vector<std::byte> out;
-    check(ws::try_encode_client_frame(out, ws::opcode_t::BINARY, payload, 0x01020304u),
-          "the nothrow twin succeeds on a healthy heap");
-    check(out == ref, "and produces exactly the throwing form's bytes");
+    tr::mem::block_array_t<std::byte> out(tr::mem::heap_source());
+    const std::size_t n =
+        ws::try_encode_client_frame(out, ws::opcode_t::BINARY, payload, 0x01020304u);
+    check(n == ref.size(), "the nothrow twin succeeds on a healthy heap");
+    check(n == ref.size() && std::memcmp(out.data(), ref.data(), n) == 0,
+          "and produces exactly the throwing form's bytes");
 
-    std::vector<std::byte> fresh;
-    bool ok = true;
-    const bool escaped = escapes_at(1, [&] {
-        ok = ws::try_encode_client_frame(fresh, ws::opcode_t::BINARY, payload, 0x01020304u);
+    // A cold encode must have exactly ONE refusable allocation. The previous
+    // `std::vector` + `tr::detail::try_reserve` form had two — a nothrow probe and the
+    // throwing `reserve` behind it — and refusing the second escaped `try_reserve`'s
+    // `noexcept` into std::terminate. A k=1-only test could never see that; the sweep can.
+    tr::mem::block_array_t<std::byte> probe(tr::mem::heap_source());
+    const std::size_t n_allocs = count_allocs([&] {
+        (void)ws::try_encode_client_frame(probe, ws::opcode_t::BINARY, payload, 0x01020304u);
     });
-    check(!escaped && !ok && fresh.empty(),
-          "on a refused growth it returns false, leaves the buffer empty, and does not throw");
+    check(n_allocs == 1, "a cold encode makes exactly ONE refusable allocation");
+
+    std::size_t escaped = 0;
+    std::size_t wrote_despite_refusal = 0;
+    for (std::size_t k = 1; k <= n_allocs; ++k) {
+        tr::mem::block_array_t<std::byte> fresh(tr::mem::heap_source());
+        std::size_t got = 1;
+        if (escapes_at(k, [&] {
+                got =
+                    ws::try_encode_client_frame(fresh, ws::opcode_t::BINARY, payload, 0x01020304u);
+            }))
+            ++escaped;
+        if (got != 0) ++wrote_despite_refusal;
+    }
+    check(escaped == 0, "no injection point escapes — every refusal is a soft failure");
+    check(wrote_despite_refusal == 0, "and a refused encode reports 0 bytes: drop the frame");
 }
 
 }  // namespace

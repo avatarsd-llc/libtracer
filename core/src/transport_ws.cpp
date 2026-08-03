@@ -615,9 +615,11 @@ void transport_ws_client::send(std::span<const std::byte> frame) {
     // tx_buf_ is guarded by write_m_, the same lock that serializes the write, so the
     // encode happens inside it rather than through send_all_locked.
     const std::lock_guard lock(write_m_);
-    if (!ws::try_encode_client_frame(tx_buf_, ws::opcode_t::BINARY, frame, next_mask_key()))
-        return;  // frame buffer exhausted => drop the frame
-    write_all(conn_fd_.load(std::memory_order_relaxed), tx_buf_);
+    const std::size_t n =
+        ws::try_encode_client_frame(tx_buf_, ws::opcode_t::BINARY, frame, next_mask_key());
+    if (n == 0) return;  // frame buffer exhausted => drop the frame
+    write_all(conn_fd_.load(std::memory_order_relaxed),
+              std::span<const std::byte>(tx_buf_.data(), n));
 }
 
 bool transport_ws_client::handshake(int fd, const std::string& host, std::uint16_t port) {

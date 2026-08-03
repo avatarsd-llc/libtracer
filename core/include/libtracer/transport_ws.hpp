@@ -35,6 +35,7 @@
 #include <string_view>
 #include <vector>
 
+#include "libtracer/mem_source.hpp"
 #include "libtracer/posix_endpoint.hpp"
 #include "libtracer/transport.hpp"
 
@@ -311,11 +312,12 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
      *
      * A client frame must be masked (RFC 6455 §5.1), so its wire bytes are not the caller's
      * bytes and cannot be gathered by reference — this is the one WS egress path that still
-     * needs a buffer. Reused across sends so the steady state allocates nothing, and grown
-     * through `ws::try_encode_client_frame`'s nothrow probe so exhaustion drops the frame
-     * rather than aborting under `-fno-exceptions` (#848).
+     * needs a buffer. Reused across sends so the steady state allocates nothing, and drawn
+     * from the failable seam (ADR-0065) so exhaustion is a `nullptr` the send turns into a
+     * dropped frame, never the `abort()` a throwing grow becomes under `-fno-exceptions`
+     * (#848).
      */
-    std::vector<std::byte> tx_buf_;
+    mem::block_array_t<std::byte> tx_buf_{mem::heap_source()};
     bool connected_ = false;
 };
 
