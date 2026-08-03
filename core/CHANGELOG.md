@@ -16,11 +16,22 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`graph_t::has_subscribers(vertex_handle_t)` — the demand-driven publisher's gate**
+  ([#852](https://github.com/avatarsd-llc/libtracer/issues/852)). True iff a delivery here
+  would reach anyone: this vertex's own subscribers **or** a subtree subscriber on a strict
+  ancestor (RFC-0005). The same two-sided question `mark_pending` asks internally, so a
+  producer that skips on `false` skips exactly what the library would have found no receiver
+  for. The own half is the `seq_cst` `own_subs_ordered` read — the Dekker pairing against
+  ADR-0049's durability latch that makes a SKIP safe. The ancestor half is `listeners_above`,
+  which has no `seq_cst` twin, so this predicate is exactly as ordered as the library's own
+  `bubble_up` gate and no more; it neither adds that hazard nor closes it.
+
 - **`graph_t::own_subs(vertex_handle_t)` — the owner-side subscriber-slot count.** Exposes
-  the `own_subs` counter (#635) through the graph so a producer can SKIP its own publish
-  work when nobody is subscribed (a demand-driven publisher) — the app-facing counterpart of
-  the internal fan-out skip. Inline, `noexcept`, relaxed load; a caller that needs the
-  race-ordered read for a single delivery still uses `vertex_t::own_subs_ordered` directly.
+  the `own_subs` counter (#635) through the graph as a sizing/observability read: how many
+  slots a delivery here would feed. Inline, `noexcept`, relaxed load. **It must not be used
+  to gate a publish** — it omits subtree subscribers entirely (they are counted by
+  `listeners_above`, not here), and it is the relaxed load `vertex_t::own_subs_ordered`
+  documents as unfit for a skip decision. Use `has_subscribers` for that.
 
 - **`tr::graph::kEdgePinSlots` and the edge-pin domain (`libtracer/edge_pin.hpp`,
   [#635](https://github.com/avatarsd-llc/libtracer/issues/635),

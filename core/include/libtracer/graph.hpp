@@ -304,17 +304,48 @@ class graph_t {
     [[nodiscard]] std::uint32_t retire_generation(vertex_handle_t vh) const noexcept;
 
     /**
-     * @brief This vertex's active subscriber-slot count — the owner-side read of the
-     *        `own_subs` counter (#635) that lets a producer SKIP its own publish work
-     *        when nobody is subscribed (a demand-driven publisher).
+     * @brief This vertex's OWN active subscriber-slot count (#635) — how many slots a
+     *        delivery here would feed, for sizing and observability.
      *
-     * Relaxed, like @ref vertex_t::own_subs: correct for a continuous stream, where a
-     * just-joined subscriber is served the durability latch and picked up on the next
-     * publish. A caller deciding whether to deliver ONE race-sensitive value instead
-     * wants the `seq_cst` pairing @ref vertex_t::own_subs_ordered documents.
+     * @warning This is NOT the "is anyone listening" question, on two counts, and a
+     *          producer must not gate a publish on it — use @ref has_subscribers.
+     *          It omits subtree subscribers, who subscribe on a strict ANCESTOR and are
+     *          counted by `listeners_above` rather than here (RFC-0005), so a zero here
+     *          says nothing about them. And it is the relaxed load, which
+     *          @ref vertex_t::own_subs_ordered documents as unfit for a skip decision.
+     *
+     * Relaxed by design: this answers "how much work would a delivery be", the use
+     * @ref vertex_t::own_subs is specified for. A racing subscribe is observed by the next
+     * read at worst, which is what a sizing hint needs.
      */
     [[nodiscard]] std::uint32_t own_subs(vertex_handle_t vh) const noexcept {
         return vh.get()->own_subs();
+    }
+
+    /**
+     * @brief Would a delivery at @p vh reach anyone — its own subscribers, OR a subtree
+     *        subscriber on a strict ancestor (RFC-0005)? The predicate a demand-driven
+     *        producer gates its publish on.
+     *
+     * The same two-sided question `mark_pending` asks internally, so a producer that skips
+     * on `false` skips exactly what the library would have found no receiver for. Gating on
+     * the own-slot count alone silently drops every subtree subscriber, which is why
+     * @ref own_subs carries a warning against it.
+     *
+     * The own half is the `seq_cst` read (@ref vertex_t::own_subs_ordered) — the Dekker
+     * pairing against ADR-0049's durability latch that makes a SKIP safe: a producer that
+     * reads zero is ordered before a racing subscribe's latch load, so the latch carries
+     * the value the skipped publish would have delivered.
+     *
+     * @warning The ancestor half is **not** so ordered — `listeners_above` is a relaxed
+     *          counter with no `seq_cst` twin, so a publish racing a *subtree* subscribe can
+     *          still be missed by that subscriber. This predicate is exactly as ordered as
+     *          the library's own `bubble_up` gate, and no more; it does not add a hazard,
+     *          and it does not close that one.
+     */
+    [[nodiscard]] bool has_subscribers(vertex_handle_t vh) const noexcept {
+        const vertex_t* const v = vh.get();
+        return v->own_subs_ordered() != 0 || v->listeners_above() != 0;
     }
 
     /**
