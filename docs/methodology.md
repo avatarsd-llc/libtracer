@@ -100,11 +100,25 @@ read from `malloc_usable_size`, so a resident figure is what the allocator reall
 holds rather than what the caller asked for; whole-run max RSS comes from
 `/usr/bin/time -v` and is the coarse process-level number beside them.
 
-Two invariants sit on this surface. The steady-state forward hop must touch no heap
-at all — the two-plane forwarding model
+Two invariants sit on this surface, and **the scope of the armed window is part of the
+first one**. The steady-state forward hop's *own* work must touch no heap — the two-plane
+forwarding model
 ([ADR-0038](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md))
-requires it, so a single stray `malloc` there fails the build — while a terminus
-*may* allocate
+requires it — so `bench_forward_heap` arms the counting allocator around one hop and CI
+runs it at `ZEROHEAP_MAX=0`: on a **contiguous (single-link)** frame the hop dispatches by
+offset, builds its replacement heads in fixed stack buffers and its gather table in a stack
+`iov` array, and a single stray `malloc` inside *that* window fails the job.
+
+Two terms sit **outside** that window, so this is not the claim that a forward hop is
+heap-free end to end. The gate drives `capture_transport_t`, a stub link that only sums the
+spans it is handed, so the shipping transports' `::iovec` table is never assembled —
+`transport_udp` and `transport_tcp` each hold 16 spans inline and spill to the heap above
+that, measured at **17 caller spans / ~288 B** by `bench_transport_iov`. And the
+**multi-link rope** arm gathers into a block array drawn from the injected receive source,
+because the sub-span count is the sender's choice and is known only at run time — nothrow,
+so an exhausted heap drops the frame rather than aborting, but not allocation-free. Read
+the two benches together; neither is sufficient alone. A terminus, by contrast, *may*
+allocate
 ([ADR-0041](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0041-terminus-arena-decode-span-contract.md))
 and is measured rather than gated. The per-vertex resident figure is the one the
 constrained profile lives or dies by (a ~16 KB RAM budget on the ESP32 target),
