@@ -112,7 +112,11 @@ The value is delivered as the ordinary constexpr `tr::graph::kVertexLockStripes`
 - **Exceptions / RTTI** stay at the ESP-IDF default (**OFF**). Two of the three parts of that are true and one is not, and the distinction matters most on exactly this target:
   - **RTTI-free — true.** No `typeid`, no `dynamic_cast` anywhere in `core/include` or `core/src`.
   - **Links clean under `-fno-exceptions -fno-rtti` — true**, for the full-node profile including the examples; CI builds it for esp32c6, esp32c3 and `linux`.
-  - **"Never throws" — FALSE.** The data path *reports* by value (`std::expected` / `status_t`) and draws peer-driven allocations from injected **nothrow** seams (ADR-0065), which is the shape worth relying on — but the tree is not throw-free, and under `-fno-exceptions` a throw is not an exception, it is `abort()` — a reboot. **Three sites that still report exhaustion by throwing compile into this component's full-node profile**, so price them on a node that must not reboot ([docs/design/allocation-and-backpressure.md](../../docs/design/allocation-and-backpressure.md) §"Where the rule is not met today"):
+  - **"Never throws" — FALSE.** The data path *reports* by value (`std::expected` / `status_t`) and draws peer-driven allocations from injected **nothrow** seams (ADR-0065), which is the shape worth relying on — but the tree is not throw-free, and under `-fno-exceptions` a throw is not an exception, it is `abort()` — a reboot. See the table below.
+
+### The three throwing sites this component compiles in
+
+Each of these still reports exhaustion by throwing and is reachable by a peer or by the local sender, so price them on a node that must not reboot. They are the same three rows [docs/design/allocation-and-backpressure.md](../../docs/design/allocation-and-backpressure.md) §"Where the rule is not met today" names; what this table adds is *why each one is in this component's archive*.
 
 | Site | Code | Provoked by | In this component because |
 | ---- | ---- | ----------- | ------------------------- |
@@ -120,7 +124,7 @@ The value is delivered as the ordinary constexpr `tr::graph::kVertexLockStripes`
 | Label-table binds (#603) | `core/src/route_handle.cpp:82`, `:179`, `:236` — `std::pmr::vector::push_back` and the route copy beside it | a **peer**: an ingress `ADVERTISE` binds a label. `max_label_bindings_per_link` bounds the entry *count*, not the allocation's failure mode | `route_handle.cpp` is unconditional in the source list (`libtracer/CMakeLists.txt:57`) |
 | `try_reserve`'s second step (#850) | `core/include/libtracer/mem_heap.hpp:116-121` — the `noexcept` helper probes, frees, then runs the **throwing** `std::vector::reserve` | anything concurrent: the probe-then-reserve is sound only single-threaded. Every `try_*` helper inherits it | header-only, reached from the graph and every transport |
 
-  Turning `CONFIG_LIBTRACER_TRANSPORT_CAN` off sheds the first row outright; the other two are structural until #603 / #850 land.
+Turning `CONFIG_LIBTRACER_TRANSPORT_CAN` off sheds the first row outright; the other two are structural until #603 / #850 land.
 
 ## Security posture
 
