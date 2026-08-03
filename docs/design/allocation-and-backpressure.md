@@ -300,8 +300,10 @@ One leg still has **no** nothrow twin, and the rule at the top of this page is v
 throwing is the only channel it has. `deliver_remote` reaches it on every fresh remote subscription
 (`core/src/fwd_router.cpp:1691`), and `on_advertise` reaches the same tables **from a peer's bytes
 before any ACL check** — the only `graph_.allows` in that file guards the RFC-0024 bound-path
-forward, not label admission. Neither bound that would cap the growth is set by any in-tree
-construction site; both default to `0 = unbounded`. Tracked by
+forward, not label admission. The bound that would cap the growth defaults to `0 = unbounded` and
+**no `fwd_router_t` construction site in the tree passes a non-zero one**, so no production wiring
+caps it; `route_handle_t`'s own bound is exercised directly by
+`core/tests/route_handle_test.cpp:259-260`, which is how the refusal path stays tested. Tracked by
 [#603](https://github.com/avatarsd-llc/libtracer/issues/603), which also carries the design
 question (which block source, and the public shape of `handle_binding_t`).
 
