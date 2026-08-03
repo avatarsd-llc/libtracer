@@ -156,8 +156,9 @@ class fwd_router_t {
      *              from (#795, ADR-0074): the reply head (peer-driven size — the swapped route
      *              bytes plus the inline tail) and, on a mint, the trailing 12-byte `PATH_REF`.
      *              It is the last *reply-egress* byte source that escaped a bounded node's
-     *              slab (the composed-root folded READ still frames POINT headers from the
-     *              global heap on the value seam — a separate residual, #831) — the
+     *              slab (both folded READs' POINT headers — the composed root's and the
+     *              `":children"` listing's — are payload framing and draw from the graph's own
+     *              `value_backend` seam instead: #831, closed) — the
      *              head was hard-wired to `view::heap_alloc`'s global heap, one allocation on
      *              every reply, peer-drivable and pre-auth reachable (the denied path builds a
      *              head too). A DEDICATED injection, deliberately NOT folded into @p flat: @p

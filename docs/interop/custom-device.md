@@ -156,7 +156,7 @@ arrive beside it, not instead of it.
 
 Removal has no wire spelling on either surface: a `[N]` clear of `:children[]` is
 not implemented, and `graph_t::retire` is an owner-side call with no wire operation
-behind it (`core/include/libtracer/graph.hpp:274-278`). Retirement empties the
+behind it (`core/include/libtracer/graph.hpp:284-288`). Retirement empties the
 vertex in place rather than freeing it — the handle stays dereferenceable and a
 holder that caches a resolution re-checks `retire_generation` before use — and it
 re-virginizes the address, clearing the previous owner's `:acl`, value seam, stored

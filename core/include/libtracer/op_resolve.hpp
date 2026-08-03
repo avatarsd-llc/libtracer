@@ -137,7 +137,9 @@ class op_resolver_t {
      *              (#795, ADR-0074) — the reply head (peer-driven size: the swapped route bytes
      *              plus the inline tail) and, on a mint, the trailing 12-byte `PATH_REF`. It is
      *              the last reply-egress byte source a bounded node could not previously bound
-     *              (the folded READ's POINT-header framing remains on the value seam, #831): the
+     *              (both folded READs' POINT-header framing — composed-root and `":children"` —
+     *              is payload framing and draws from the graph's value seam instead: #831,
+     *              closed): the
      *              head was hard-wired to `view::heap_alloc`'s global heap regardless of every
      *              other injection. A DEDICATED seam, not `flat`: `flat` is documented and sized
      *              against FLATTEN (payload) bytes, and folding an egress head into it would

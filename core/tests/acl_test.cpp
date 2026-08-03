@@ -869,7 +869,7 @@ void test_gates_no_test_defended() {
         check(denied(g.read(v, kids->field(), "peer-b")), ":children DENIED without the READ bit");
     }
 
-    // graph.cpp:2177 — read_subscribers()'s gate. Its own comment calls it "a
+    // graph.cpp:2191 — read_subscribers()'s gate. Its own comment calls it "a
     // control-surface read, like `:schema`", but unlike `:schema` it is a DIRECT API, not
     // a field path, so it never passes the :2124 gate above — it is the only thing
     // standing between an unauthorized caller and the whole subscriber list, which is a

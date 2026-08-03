@@ -1983,6 +1983,54 @@ result_t<rope_t> graph_t::read_children_materialized(vertex_handle_t vh) const {
     return rope_t{*mv};
 }
 
+namespace {
+
+/**
+ * @brief The POINT header width `wire::emit_header` produces for a @p body-byte body — TYPE +
+ *        OPT + the u16 length, widening to u32 at the same 0xFFFF boundary `emit_tlv`
+ *        auto-widens at.
+ */
+[[nodiscard]] constexpr std::size_t folded_hdr_len(std::size_t body) noexcept {
+    return body > 0xFFFFu ? 6u : 4u;
+}
+
+/**
+ * @brief One structured POINT header as a single exactly-sized OWNED segment drawn from @p
+ *        backend and emitted by cursor. Null ⇒ the seam refused (the caller answers
+ *        `BACKPRESSURE` by value; nothing here throws).
+ *
+ * Byte-identical to `wire::emit_header(out, type_t::POINT, {.pl = true, .ll}, body_len)` into a
+ * `std::vector<std::byte>` — the ONE home of the folded reads' header framing, so the `ll`
+ * auto-widen boundary cannot drift between the composed-root fold and the ":children" fold.
+ * No throwing `std::vector` transient sits on the reply path (the op_resolve_walk assemble
+ * pattern).
+ *
+ * @p backend is the graph's ADR-0060 `value_backend_` at both call sites (#831). These are
+ * PAYLOAD framing bytes — the length field wraps the stored TLV and the name records below it —
+ * so they are that seam's byte class, NOT the ADR-0074 `egress` seam, which is documented and
+ * sized against ROUTE bytes. Both counts are PEER-influenced (a peer picks the composed root,
+ * and thus how many subtree nodes fold; or whose ":children" to list, and thus how many members
+ * frame), so an ADR-0067-class node with every backend at one slab would otherwise still leak
+ * this framing to `malloc`. The segments escape inside the returned reply rope and are freed on
+ * whichever thread drops the last reference — exactly the cross-thread self-routed reclaim
+ * ADR-0060 §2 already requires of this backend. The default is `&mem::heap_backend()`, so a
+ * shipped shape allocates byte-identically.
+ */
+[[nodiscard]] view::segment_ptr_t folded_point_header(mem::mem_backend_t& backend,
+                                                      std::size_t body_len) {
+    const bool ll = body_len > 0xFFFFu;  // mirror emit_tlv's auto-widen exactly
+    view::segment_ptr_t seg = view::segment_alloc(backend, folded_hdr_len(body_len));
+    if (!seg) return seg;  // the seam refused — a null segment_ptr_t IS the refusal
+    std::byte* p = seg->bytes.data();
+    *p++ = static_cast<std::byte>(std::to_underlying(type_t::POINT));
+    *p++ = static_cast<std::byte>(opt_t{.pl = true, .ll = ll}.encode());
+    detail::store_le(std::span<std::byte>(p, ll ? 4u : 2u), static_cast<std::uint32_t>(body_len),
+                     ll ? 4u : 2u);
+    return seg;
+}
+
+}  // namespace
+
 result_t<rope_t> graph_t::read_children_folded(vertex_handle_t vh) const {
     vertex_t* v = vh.get();
     // Synthesized listing (ADR-0044): a live bus-peer snapshot, already one contiguous
@@ -2001,37 +2049,37 @@ result_t<rope_t> graph_t::read_children_folded(vertex_handle_t vh) const {
     // the borrowed bytes outlive this rope. flatten() is byte-identical to read_children:
     // same header (opt.ll auto-widened at the same 0xFFFF boundary) followed by the same
     // name bytes, in the same child order.
+    //
+    // Every header here — one per registered child, plus the outer one — is framed by
+    // folded_point_header from the ADR-0060 value_backend_, NOT from view::over_bytes' global
+    // heap (#831). The count is PEER-influenced (a peer picks which vertex's ":children" to
+    // READ, and thus how many members frame), and this is the site the wire ":children" field
+    // READ routes to — see folded_point_header for the full seam argument, which the
+    // composed-root fold below shares verbatim.
+    mem::mem_backend_t& hdr_backend = *value_backend_;
     rope_t members;
     std::size_t members_len = 0;
     bool oom = false;
     {
         const std::shared_lock lock(map_mutex_);
-        v->for_each_child([&members, &members_len, &oom](const vertex_t& c) {
+        v->for_each_child([&members, &members_len, &oom, &hdr_backend](const vertex_t& c) {
             if (oom || !c.registered()) return;
             const std::span<const std::byte> name = c.name().bytes();
-            opt_t mo{.pl = true};
-            if (name.size() > 0xFFFFu) mo.ll = true;  // mirror emit_tlv's auto-widen
-            std::vector<std::byte> mhdr;
-            wire::emit_header(mhdr, type_t::POINT, mo, name.size());
-            const auto mhv = view::over_bytes(mhdr);
+            view::segment_ptr_t mseg = folded_point_header(hdr_backend, name.size());
             view::segment_ptr_t nseg = view::borrow_const(name);
-            if (!mhv || !nseg) {
+            if (!mseg || !nseg) {
                 oom = true;
                 return;
             }
-            members.append(*mhv);                                 // owned POINT header
+            members.append(view::view_t::over(std::move(mseg)));  // owned POINT header
             members.append(view::view_t::over(std::move(nseg)));  // borrowed name (zero copy)
-            members_len += mhdr.size() + name.size();
+            members_len += folded_hdr_len(name.size()) + name.size();
         });
     }
     if (oom) return std::unexpected(status_t::BACKPRESSURE);
-    opt_t outer{.pl = true};
-    if (members_len > 0xFFFFu) outer.ll = true;  // mirror emit_tlv's auto-widen exactly
-    std::vector<std::byte> ohdr;
-    wire::emit_header(ohdr, type_t::POINT, outer, members_len);
-    const auto ohv = view::over_bytes(ohdr);
-    if (!ohv) return std::unexpected(status_t::BACKPRESSURE);
-    rope_t out{*ohv};
+    view::segment_ptr_t oseg = folded_point_header(hdr_backend, members_len);
+    if (!oseg) return std::unexpected(status_t::BACKPRESSURE);
+    rope_t out{view::view_t::over(std::move(oseg))};
     out.concat(members);  // empty members (no children) => header-only rope, len 0
     return out;
 }
@@ -2053,11 +2101,10 @@ result_t<rope_t> graph_t::read_subtree_folded(vertex_handle_t vh, std::string_vi
         std::size_t body_len = 0;          /**< @brief POINT body length, completed bottom-up. */
     };
     constexpr std::size_t kNoParent = static_cast<std::size_t>(-1);
-    // The POINT header size emit_header will produce for `body` — TYPE + OPT + the u16
-    // length, widening to u32 at the same 0xFFFF boundary emit_tlv auto-widens at.
-    const auto hdr_len = [](std::size_t body) noexcept -> std::size_t {
-        return body > 0xFFFFu ? 6u : 4u;
-    };
+    // The POINT header width and the header framing itself both come from the file-local
+    // folded_hdr_len / folded_point_header, shared with read_children_folded — one home, so
+    // the emit_tlv auto-widen boundary cannot drift between the two folded reads (#831).
+    mem::mem_backend_t& hdr_backend = *value_backend_;
 
     // Pass 1 — collect, under ONE shared map lock: an ITERATIVE pre-order stack machine
     // (house style, parse_branch_node). The stack is heap-backed, so its bound is the
@@ -2116,7 +2163,7 @@ result_t<rope_t> graph_t::read_subtree_folded(vertex_handle_t vh, std::string_vi
     // Pass 2 — body lengths bottom-up: reverse pre-order visits every child before its
     // parent, so each node's completed wire size (header + body) folds into the parent.
     for (std::size_t i = nodes.size(); i-- > 1;)
-        nodes[nodes[i].parent].body_len += hdr_len(nodes[i].body_len) + nodes[i].body_len;
+        nodes[nodes[i].parent].body_len += folded_hdr_len(nodes[i].body_len) + nodes[i].body_len;
 
     // Pass 3 preamble — the exact final link count, so the reply rope reserves its heap
     // chain ONCE (nothrow) and every append/concat below is guaranteed non-reallocating:
@@ -2135,18 +2182,14 @@ result_t<rope_t> graph_t::read_subtree_folded(vertex_handle_t vh, std::string_vi
     // links refcount-CLONED (no byte copy). Zero flatten anywhere; a view allocation
     // failure is the audited BACKPRESSURE pattern.
     for (const snap_node_t& n : nodes) {
-        const bool ll = n.body_len > 0xFFFFu;  // mirror emit_tlv's auto-widen exactly
         // The POINT header as one exactly-sized OWNED segment, emitted by cursor straight
-        // into heap_alloc'd bytes (the op_resolve_walk assemble pattern) — no throwing
+        // into the segment's bytes (the op_resolve_walk assemble pattern) — no throwing
         // std::vector<std::byte> transient sits on the reply path. Byte-identical to the
-        // retired wire::emit_header(type, {.pl, .ll}, body_len).
-        view::segment_ptr_t hseg = view::heap_alloc(hdr_len(n.body_len));
+        // retired wire::emit_header(type, {.pl, .ll}, body_len). The bytes come from the
+        // ADR-0060 value_backend_ rather than view::heap_alloc's global heap (#831) — the
+        // seam argument, shared with read_children_folded, is on folded_point_header.
+        view::segment_ptr_t hseg = folded_point_header(hdr_backend, n.body_len);
         if (!hseg) return std::unexpected(status_t::BACKPRESSURE);
-        std::byte* p = hseg->bytes.data();
-        *p++ = static_cast<std::byte>(std::to_underlying(type_t::POINT));
-        *p++ = static_cast<std::byte>(opt_t{.pl = true, .ll = ll}.encode());
-        detail::store_le(std::span<std::byte>(p, ll ? 4u : 2u),
-                         static_cast<std::uint32_t>(n.body_len), ll ? 4u : 2u);
         out.append(view::view_t::over(std::move(hseg)));  // owned POINT header
         if (n.parent != kNoParent) {
             // The child's own canonical NAME record IS the leading NAME TLV verbatim

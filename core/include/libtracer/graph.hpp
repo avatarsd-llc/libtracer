@@ -180,6 +180,16 @@ class graph_t {
      * slab ("one slab, whole stack"); a host passes nothing and gets the standard
      * heap for each (zero churn, behaviour byte-identical).
      *
+     * The seam's scope is PAYLOAD bytes, which includes READ-path framing and not only
+     * the write-path copy-store (#831): BOTH folded READs frame their exactly-sized POINT
+     * headers from it — one per subtree node in the composed-root fold, and one per
+     * registered child plus the outer listing header in the `":children"` fold the wire
+     * field READ routes to. These are payload bytes whose length field wraps the stored
+     * TLV and the name records below it, as distinct from
+     * the route-byte-sized reply-egress seam of ADR-0074. Both counts are peer-influenced, so an
+     * injector sizing a bounded slab must budget for them; the size classes are the
+     * host's composition problem (ADR-0060 §3 keeps the graph size-agnostic).
+     *
      * An injected @p value_backend MUST be thread-safe (ADR-0060 §2): a value @ref
      * view::segment_t self-routes its reclaim on whatever thread drops the last ref —
      * typically a reader/subscriber, concurrent with a writer's `alloc` — so
