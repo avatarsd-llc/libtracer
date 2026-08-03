@@ -418,6 +418,21 @@ std::optional<vertex_slot_t> graph_t::vertex_slot(vertex_handle_t vh) const noex
     return std::nullopt;  // not this graph's vertex — defensive, unreachable via the API.
 }
 
+std::optional<vertex_slot_t> graph_t::vertex_slot_at(std::uint32_t index) const noexcept {
+    const std::shared_lock lock(map_mutex_);
+    if (index >= vertex_slots_.size()) return std::nullopt;
+    // Read under the same hold the index bound was tested under, for the reason
+    // `vertex_slot` states: a generation read outside it can straddle a retire and stamp
+    // the SUCCESSOR tenant's number onto an element the operation never reached.
+    const std::uint32_t gen = vertex_slots_[index]->retire_gen();
+    if (gen == kGenerationSaturated) return std::nullopt;  // permanently unbindable (§4.4 r3)
+    return vertex_slot_t{.index = index, .generation = gen};
+}
+
+bool graph_t::allows(vertex_handle_t v, std::string_view caller, acl_right_t right) const {
+    return acl_allows(v.get(), caller, right);
+}
+
 std::optional<vertex_handle_t> graph_t::deref_vertex_slot(std::uint32_t index,
                                                           std::uint32_t generation) const noexcept {
     const std::shared_lock lock(map_mutex_);

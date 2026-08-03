@@ -366,6 +366,43 @@ class graph_t {
         std::uint32_t index, std::uint32_t generation) const noexcept;
 
     /**
+     * @brief The element a mint would issue for the slot at @p index — the FORWARDER's mint
+     *        (RFC-0024 §7.1 step 2), in O(1).
+     *
+     * The terminus mints for a vertex it just resolved, so it has a handle and can afford
+     * @ref vertex_slot's scan. A forwarder mints for the connection vertex of the link a
+     * reply arrived on — a vertex whose index it recorded once, at registration — so all it
+     * needs is that index's CURRENT generation, and paying a scan of the whole index per
+     * forwarded reply to re-derive an index it already holds would be the wrong shape at the
+     * wrong place. This is the same read the other way round: index in, generation out.
+     *
+     * @retval std::nullopt @p index is out of range, or the slot's generation has SATURATED
+     *         — a permanently unbindable vertex (RFC-0024 §4.4 rule 3), which is refused at
+     *         the mint exactly as @ref vertex_slot refuses it, so a forwarder that cannot
+     *         mint simply forwards the reply unchanged and the origin stays canonical.
+     */
+    [[nodiscard]] std::optional<vertex_slot_t> vertex_slot_at(std::uint32_t index) const noexcept;
+
+    /**
+     * @brief Evaluate the ACL at @p v for @p caller and @p right — the §6.2 check, exposed.
+     *
+     * The same predicate every data op already runs before it acts, published for the ONE
+     * caller that reaches a vertex without performing a data op on it: the bound-path
+     * forwarder, whose element dereferences to a **connection** vertex it will egress
+     * through rather than read or write (RFC-0024 §6.2 — "every operation arriving on a bound
+     * path MUST evaluate `acl_allows` at the dereferenced vertex, for the operation's own
+     * right"). Nothing is cached: an `:acl` write marks the subtree dirty and the next call
+     * rebuilds, so a revoked right takes effect on the very next frame over an already-minted
+     * binding.
+     *
+     * @param v      The vertex to evaluate at.
+     * @param caller The subject context — a transport link name; empty is the trusted local
+     *               caller, which is allowed everything (the shipped convention).
+     * @param right  The right the operation needs.
+     */
+    [[nodiscard]] bool allows(vertex_handle_t v, std::string_view caller, acl_right_t right) const;
+
+    /**
      * @brief Free every value seam @ref retire parked — the EXPLICIT collector (#576).
      *
      * @ref retire detaches a vertex's value seam and **parks** it: the seam is read
