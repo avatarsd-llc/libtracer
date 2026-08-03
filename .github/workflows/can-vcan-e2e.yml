@@ -44,7 +44,11 @@ jobs:
       - name: Build core (C++23)
         run: |
           cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
-          cmake --build core/build -j
+          # Bounded, as core-ci does. A bare `-j` is UNLIMITED parallelism, and this is the
+          # only job that combines that with an all-targets build: every other bare `-j` here
+          # builds one `--target`. On a 4-core / 16 GB runner it OOMs (SIGTERM, exit 143,
+          # ~70% through, no compile error) as soon as a branch adds a heavy TU.
+          cmake --build core/build -j "$(nproc)"
 
       - name: Run the real-vcan transport_can E2E smoke test
         run: |
