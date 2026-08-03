@@ -10,6 +10,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`httpd_ws_link_t::set_admission_cb(admission_fn_t, void*)`: an optional predicate
+  consulted at the top of every opening handshake, before the peer-cap check and any slot
+  allocation.** Returning `false` refuses the peer cleanly (httpd closes the socket — the
+  same path as the `max_peers` cap); a null hook (the default) admits every peer, so the
+  historical open-graph behavior is unchanged. The seam a host uses to authenticate the
+  graph WS the way it gates the rest of its HTTP surface — inspect the handshake request's
+  headers (a session cookie, a shared token) and refuse an unauthenticated peer before it
+  can read or write a single vertex. Read on the httpd task with no lock; set it once at
+  wiring time before the link serves.
+
 ### Fixed
 
 - **`httpd_ws_link_t` and `esp_ws_client_link_t`: `TCP_NODELAY` is now set on every
