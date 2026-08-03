@@ -9,11 +9,16 @@
 
 #include "libtracer_esp/esp_ws_client_link.hpp"
 
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+
 #include <chrono>
 #include <cstring>
 #include <utility>
 
 #include "esp_log.h"
+#include "esp_transport.h"
 #include "esp_transport_tcp.h"
 #include "esp_transport_ws.h"
 
@@ -96,6 +101,18 @@ bool esp_ws_client_link_t::connect_once() {
     if (rc != 0) {
         esp_transport_close(ws_);
         return false;
+    }
+    // Disable Nagle on the freshly connected socket, symmetric with the server side
+    // (httpd_ws_link_t::bound_socket): a board-to-board dial carries the same small,
+    // latency-sensitive TLV frames whose replies the peer awaits, so delayed-ACK +
+    // Nagle would add tens of ms per round-trip. esp_transport exposes the underlying
+    // fd; best-effort, so a transport that hides it (rc < 0) just keeps Nagle for
+    // this link rather than failing the dial.
+    const int fd = esp_transport_get_socket(tcp_);
+    if (fd >= 0) {
+        const int nodelay = 1;
+        if (::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay)) != 0)
+            ESP_LOGW(kTag, "TCP_NODELAY not applied fd=%d", fd);
     }
     connected_.store(true, std::memory_order_release);
     ESP_LOGI(kTag, "connected ws://%s:%u%s", host_.c_str(), static_cast<unsigned>(port_),

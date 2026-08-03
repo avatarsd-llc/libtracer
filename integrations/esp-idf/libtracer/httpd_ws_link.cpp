@@ -14,6 +14,7 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 
@@ -1298,6 +1299,17 @@ void httpd_ws_link_t::bound_socket(int fd) const {
     tv.tv_usec = static_cast<suseconds_t>((send_timeout_ms_ % 1000U) * 1000U);
     if (::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) != 0)
         ESP_LOGW(kTag, "SO_SNDTIMEO not applied fd=%d (%u ms)", fd, (unsigned)send_timeout_ms_);
+    // Disable Nagle on the UPGRADED socket. A libtracer WS frame is a small,
+    // self-contained TLV whose reply the peer is already waiting on — the exact
+    // request-reply shape Nagle + delayed-ACK stalls, adding tens of ms of pure
+    // latency to every round-trip. WS frames carry their own length, so there is
+    // nothing for Nagle to coalesce that the framing does not already batch. REST
+    // responses on this server are unaffected: they ride sockets this link never
+    // upgrades. Best-effort like the timeout above: a peer that cannot take the
+    // option is the pre-patch latency for that one peer, never a reason to refuse it.
+    const int nodelay = 1;
+    if (::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay)) != 0)
+        ESP_LOGW(kTag, "TCP_NODELAY not applied fd=%d", fd);
     // The short-write guard is not optional decoration: a BOUNDED write is exactly the
     // one that can expire mid-buffer, so shortening the bound raises the rate of the case
     // esp_http_server reports as success. See send_guarded.
