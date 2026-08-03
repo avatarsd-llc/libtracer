@@ -104,8 +104,13 @@
    * Both arms of a `(zenoh )?` family are measured in the SAME pass on the SAME machine,
    * so a quotient taken between two values recorded at the same commit divides that
    * machine's speed on the day out of the answer to first order. That is what makes this
-   * the trustworthy view across a long history: the absolute hosted lines carry the
-   * runner spread the page documents, the quotient does not.
+   * the better view across a long history — better, not immune: the cancellation is
+   * partial. Measured over the last 60 recorded commits at p50, the quotient's spread is
+   * about a tenth below the libtracer line's own on the hosted store (that store keeps
+   * the best of three runners *per series*, so a point's two arms need not come from one
+   * runner's transcript) and about a third below it on bench-local, where every point is
+   * one pinned CPU. The quotient damps the runner spread the page documents; it does not
+   * escape it.
    *
    * Pairing is therefore strict and cheap: same store, same suite, same commit index,
    * same shape key (`rk`). A commit where only one arm recorded a value contributes no
@@ -680,8 +685,11 @@
       byIdx = A.c.series.map(lookup);
       blurb.textContent = ratioOn && c.ratio
         ? "Both arms are measured in the same pass on the same machine, so the runner's speed "
-          + "on the day divides out of this quotient to first order — unlike the absolute lines, "
-          + "which carry the shared-runner spread. Each point pairs the two engines at ONE "
+          + "on the day divides out of this quotient to first order — it damps the shared-runner "
+          + "spread the absolute lines carry, but does not escape it: measured over the last 60 "
+          + "commits the quotient's spread is about a tenth below the libtracer line's own on the "
+          + "hosted store (best of three runners per series) and about a third below it on "
+          + "bench-local. Each point pairs the two engines at ONE "
           + "recorded commit; a commit where only one arm recorded a value contributes no point."
         : (mets[mi].blurb || "");
     }

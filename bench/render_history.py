@@ -88,8 +88,13 @@ METRICS: list[dict] = [
 #
 # Why it earns a view of its own: both arms are measured in one pass on one machine, so
 # whatever that machine's speed was on the day divides out of the quotient to first order.
-# The absolute hosted trends stay subject to the runner spread the page documents; the
-# ratio does not, which makes it the trustworthy cross-history comparison.
+# The cancellation is partial, not total, and it is measured rather than asserted: over the
+# last 60 recorded commits at p50, the quotient's coefficient of variation is about a tenth
+# below the libtracer line's own on the HOSTED store (that store keeps the best of three
+# runners *per series*, so a point's two arms need not come from one runner's transcript)
+# and about a third below it on bench-local, where every point is one pinned CPU. So the
+# ratio damps the runner spread the page documents — it does not escape it — which still
+# makes it the better cross-history comparison, not an immune one.
 #
 # `arm` names which side of the quotient a series is (num = zenoh, den = libtracer),
 # `shape` is the pairing key (two series pair iff their shapes are equal) and `pv` is the
