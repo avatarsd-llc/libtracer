@@ -614,9 +614,16 @@ void test_udp_send_iov_overflow_drops() {
     std::printf("udp send(iov) — overflow gather drops, node lives:\n");
     sink_t at_b;
     auto b_rx = [&](std::span<const std::byte> f) { at_b.push(f); };
-    tr::net::udp_transport_t a(47140, "127.0.0.1", 47141);
-    tr::net::udp_transport_t b(47141, "127.0.0.1", 47140);
-    check(a.ok() && b.ok(), "udp pair bound");
+    // EPHEMERAL ports, like every other case here. Hardcoded ones (this test used 47140/47141)
+    // make the binary non-reentrant: two concurrent copies — which is exactly what
+    // `ctest -j` runs — bind the same pair and cross-deliver each other's datagrams, so the
+    // "every refused datagram was DROPPED" count picks up the other process's traffic.
+    // `b` binds first with peer_port 0 (it only ever receives, and would learn its peer from
+    // the inbound source address anyway); `a` then targets the port `b` actually got.
+    tr::net::udp_transport_t b(0, "127.0.0.1", 0);
+    check(b.ok(), "udp receiver bound");
+    tr::net::udp_transport_t a(0, "127.0.0.1", b.local_port());
+    check(a.ok(), "udp sender bound");
     b.set_receiver(b_rx);
 
     const std::vector<std::byte> storage(kWideSpans, std::byte{0x33});
