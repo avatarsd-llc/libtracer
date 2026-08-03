@@ -184,9 +184,10 @@ Rules that follow:
 - **Allocation failure must not abort.** ESP-IDF's default C++ `new` throws; under
   `-fno-exceptions` that lowers to `abort()`. The delivery path's byte allocations are
   alloc-or-backpressure: drop the sample, count it, publish the counter (§6). One
-  exception is live today — the label-table growth reached through `ensure_egress`
-  allocates from a `std::pmr` resource and therefore throws, on a path a peer can drive
-  before any ACL check ([#603](https://github.com/avatarsd-llc/libtracer/issues/603)).
+  exception is live today — the label tables still grow through a `std::pmr` resource and
+  therefore throw. `ensure_egress` reaches that growth from `deliver_remote`, behind the
+  SUBSCRIBE ACL; `on_advertise` reaches the same tables from a peer's bytes with **no ACL
+  check at all** ([#603](https://github.com/avatarsd-llc/libtracer/issues/603)).
   Audit any path that calls throwing `new`.
 - **Size the pool from the transport, not from hope.** `udp_transport_t` sizes RX
   segments to `min(64 KiB, backend->max_segment_size())`

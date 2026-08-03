@@ -257,7 +257,7 @@ class transport_t {
         // frame. That is reachable on the FORWARD hot path today — `route_fwd_forward`
         // scatter-gathers into `send(iov)`, and a transport that does not override this
         // (`transport_can`, and any embedder's) lands here. An egress that cannot allocate
-        // must DROP, exactly as every other writer-side allocation on this plane does.
+        // must DROP, as every writer-side FRAME allocation here does (label tables: #603).
         std::size_t total = 0;
         for (const auto& s : iov) total += s.size();
         std::vector<std::byte> tmp;
