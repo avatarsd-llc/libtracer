@@ -1,0 +1,12 @@
+{
+  "name": "fwd-bound-forward",
+  "category": "fwd",
+  "hex": "0F4031000100010000140010000100000000000000EFBE00000700000006400C00020008007265706C792D65700100040009000000",
+  "total_bytes": 53,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "meaning": "FWD{ op=READ, dst=PATH_REF{ (index=1,generation=0), (index=0xBEEF,generation=7) }, src=/reply-ep, VALUE u32=9 } — a bound request as it ARRIVES at a forwarder: two elements are left, so this host is a hop and not the terminus.",
+    "note": "RFC-0024 §4.1/§5.1. Element 0 is THIS host's reference to its next-hop connection vertex; element 1 means nothing here and is carried through untouched."
+  }
+}

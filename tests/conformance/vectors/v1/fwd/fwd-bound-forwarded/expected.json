@@ -1,0 +1,12 @@
+{
+  "name": "fwd-bound-forwarded",
+  "category": "fwd",
+  "hex": "0F403000010001000014000800EFBE0000070000000640130002000300636C69020008007265706C792D65700100040009000000",
+  "total_bytes": 52,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "meaning": "FWD{ op=READ, dst=PATH_REF{ (index=0xBEEF,generation=7) }, src=/cli/reply-ep, VALUE u32=9 } — the same operation after ONE bound hop: element 0 consumed, src grown by the inbound mount.",
+    "note": "RFC-0024 §4.1. The dst shrank by exactly 8 bytes and the src grew by the inbound mount run exactly as a canonical hop grows it — the bound form changes how the address is spelled and nothing else about a hop."
+  }
+}

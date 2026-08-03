@@ -1200,3 +1200,64 @@ fn acl_bound_vs_canonical_deny() {
         "010001000109400a0008400600010002005000"
     );
 }
+
+/* --------------------------- RFC-0024 §3.4/§5 — the forwarder hop (car 3) --- */
+
+/**
+ * @brief `fwd/fwd-bound-forward` -> `fwd/fwd-bound-forwarded` — one bound hop, byte for byte.
+ *
+ * The pair is the whole of what a forwarder does to a bound frame: the `dst` loses exactly
+ * one element — its own, consumed, never rewritten — and `src` grows by the inbound mount
+ * run, canonically. A binding that grew or reordered the residual would still route and
+ * would no longer be this protocol, which is why the residual is pinned as the tail of the
+ * inbound body rather than re-derived.
+ */
+#[test]
+fn fwd_bound_forward_is_one_hop_from_forwarded() {
+    let before = assert_vector_consistent("fwd/fwd-bound-forward");
+    let after = assert_vector_consistent("fwd/fwd-bound-forwarded");
+    assert_eq!(
+        hex(&before),
+        "0f4031000100010000140010000100000000000000efbe00000700000006400c00020008007265706c792d65700100040009000000"
+    );
+    assert_eq!(
+        hex(&after),
+        "0f403000010001000014000800efbe0000070000000640130002000300636c69020008007265706c792d65700100040009000000"
+    );
+
+    let bf = libtracer::fwd::decode_fwd(&before).unwrap();
+    let af = libtracer::fwd::decode_fwd(&after).unwrap();
+    assert_eq!(bf.op, libtracer::fwd::fwd_op::READ);
+    assert_eq!(af.op, bf.op, "a hop relays the opcode it was given");
+    assert!(bf.dst_bound && af.dst_bound);
+
+    // Two elements in, one out, and the survivor is the NEXT host's — element 0 is this
+    // host's own and is consumed (RFC-0024 §4.1).
+    let bt = decode(&before).unwrap();
+    let at = decode(&after).unwrap();
+    let bin_dst = &bt.children[1];
+    let out_dst = &at.children[1];
+    assert_eq!(bin_dst.type_code, libtracer::type_code::PATH_REF);
+    assert!(!out_dst.opt.pl, "the re-headed PATH_REF keeps PL clear — a record array");
+    assert_eq!(bin_dst.payload.len() / libtracer::PATH_REF_ELEMENT_BYTES, 2);
+    assert_eq!(out_dst.payload.len() / libtracer::PATH_REF_ELEMENT_BYTES, 1);
+    assert_eq!(
+        path_ref_element(&bin_dst.payload, 0),
+        Some(PathRefElement { index: 1, generation: 0 })
+    );
+    assert_eq!(
+        path_ref_element(&out_dst.payload, 0),
+        path_ref_element(&bin_dst.payload, 1),
+        "the residual is the inbound element array minus its head"
+    );
+
+    // `src` accumulates CANONICALLY on a bound frame: the return route is the one every
+    // canonical hop builds, so a peer that never speaks the bound form still answers.
+    assert_eq!(bt.children[2].type_code, libtracer::type_code::PATH);
+    assert_eq!(at.children[2].type_code, libtracer::type_code::PATH);
+    assert_eq!(bt.children[2].children.len(), 1, "src = /reply-ep");
+    assert_eq!(at.children[2].children.len(), 2, "src = /cli/reply-ep");
+
+    // The payload rode through untouched.
+    assert_eq!(hex(&before[before.len() - 8..]), hex(&after[after.len() - 8..]));
+}
