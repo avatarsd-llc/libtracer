@@ -19,9 +19,10 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 - **`graph_t::has_subscribers(vertex_handle_t)` — the demand-driven producer's DELIVERY gate**
   ([#852](https://github.com/avatarsd-llc/libtracer/issues/852)). True iff a delivery here
   would reach a subscriber: this vertex's own **or** a subtree subscriber on a strict ancestor
-  (RFC-0005). It joins the two gates the eager delivery path applies — `fan_out`'s own
-  self-gate on the own count, then `deliver_vertex`'s on `listeners_above` — so a producer
-  that skips on `false` skips exactly what that path would have found no receiver for. Two
+  (RFC-0005). It joins the two gates `deliver_vertex` applies — `fan_out`'s own self-gate on
+  the own count, then the `listeners_above` gate over `bubble_up` — so a producer that skips
+  a `deliver_vertex` on `false` skips exactly what that call would have found no receiver
+  for. (A decomposing branch write is not one `deliver_vertex`.) Two
   limits are documented on the declaration and are load-bearing: **`read` pollers and `await`
   waiters are not counted** (subscription is a field-write to `:subscribers[]`, not one of
   ADR-0006's three verbs), so a producer that skips the value STORE rather than just the

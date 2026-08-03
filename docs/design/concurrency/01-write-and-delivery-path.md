@@ -100,12 +100,12 @@ Declared in `core/include/libtracer/graph.hpp`, all private:
 
 | function | declaration | role |
 | --- | --- | --- |
-| `deliver_vertex` | `graph.hpp:1160` | the per-vertex delivery unit both `write` and `propagate` build on: `fan_out`, then `bubble_up` if anyone listens above |
-| `fan_out` | `graph.hpp:1140` | return at once if nothing subscribes here; else snapshot under the stripe lock, then `dispatch_edge` per view, outside it |
-| `dispatch_edge` | `graph.hpp:1146` | the one dispatch of an edge's three legs, shared by `fan_out` and the admission durability latch so the legs cannot diverge |
-| `dispatch_edge_target` | `graph.hpp:1152` | the local re-dispatch leg — a delivery into another vertex |
-| `dispatch_edge_remote` | `graph.hpp:1153` | the remote leg — a `FWD{WRITE}` through the injected sink |
-| `bubble_up` | `graph.hpp:1156` | vertical fan-out to every registered ancestor's subscribers |
+| `deliver_vertex` | `graph.hpp:1162` | the per-vertex delivery unit both `write` and `propagate` build on: `fan_out`, then `bubble_up` if anyone listens above |
+| `fan_out` | `graph.hpp:1142` | return at once if nothing subscribes here; else snapshot under the stripe lock, then `dispatch_edge` per view, outside it |
+| `dispatch_edge` | `graph.hpp:1148` | the one dispatch of an edge's three legs, shared by `fan_out` and the admission durability latch so the legs cannot diverge |
+| `dispatch_edge_target` | `graph.hpp:1154` | the local re-dispatch leg — a delivery into another vertex |
+| `dispatch_edge_remote` | `graph.hpp:1155` | the remote leg — a `FWD{WRITE}` through the injected sink |
+| `bubble_up` | `graph.hpp:1158` | vertical fan-out to every registered ancestor's subscribers |
 
 `dispatch_edge` is defined inline (`graph.cpp:911-918`) precisely so its body stays in the
 fan-out loop; the target and remote legs are split into out-of-line helpers to keep that body's
@@ -199,9 +199,9 @@ the drop:
 
 ```cpp
 struct delivery_drops_t {
-    std::uint64_t no_target = 0;      // graph.hpp:1093
-    std::uint64_t denied = 0;         // graph.hpp:1095
-    std::uint64_t out_of_memory = 0;  // graph.hpp:1097
+    std::uint64_t no_target = 0;      // graph.hpp:1095
+    std::uint64_t denied = 0;         // graph.hpp:1097
+    std::uint64_t out_of_memory = 0;  // graph.hpp:1099
 };
 ```
 
@@ -211,7 +211,7 @@ struct delivery_drops_t {
 | `denied` | the target's `:acl` denied WRITE to the **edge's stored caller**, not the writer's | `graph.cpp:876-879` |
 | `out_of_memory` | the nothrow delivery clone could not be allocated | `graph.cpp:888-891` |
 
-`delivery_drops()` (`graph.hpp:1108`, `graph.cpp:634`) is the only record that any of this
+`delivery_drops()` (`graph.hpp:1110`, `graph.cpp:634`) is the only record that any of this
 happened. Without it, a node whose target was retired, or whose fan-in gate denies the edge's
 stored caller, drops every delivery for the rest of its life with nothing anywhere to say so.
 

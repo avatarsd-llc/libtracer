@@ -327,12 +327,15 @@ class graph_t {
      *        subscriber on a strict ancestor (RFC-0005)?
      *
      * The gate for a demand-driven producer that wants to skip *delivery work*. It joins the
-     * two gates the eager delivery path applies — `fan_out`'s own self-gate on the own count,
-     * then `deliver_vertex`'s gate on `listeners_above` — so a producer that skips on `false`
-     * skips exactly what that path would have found no receiver for. Gating on the own-slot
-     * count alone silently drops every subtree subscriber, which is why @ref own_subs carries
-     * a warning against it. (`mark_pending`, the deferred half, gates on `delivery_mode`
-     * first and so asks a third question this predicate deliberately does not.)
+     * two gates `deliver_vertex`, the eager per-vertex delivery unit, applies — `fan_out`'s
+     * own self-gate on the own count, then the `listeners_above` gate `deliver_vertex` holds
+     * over `bubble_up` — so a producer that skips a `deliver_vertex` on `false` skips exactly
+     * what that call would have found no receiver for. (A decomposing BRANCH write is not one
+     * `deliver_vertex`: it fans out at each descendant landing site under that site's own
+     * gate, which this predicate does not answer for.) Gating on the own-slot count alone
+     * silently drops every subtree subscriber, which is why @ref own_subs carries a warning
+     * against it. (`mark_pending`, the deferred half, gates on `delivery_mode` first and so
+     * asks a third question this predicate deliberately does not.)
      *
      * @warning **Subscribers are not the only consumers.** `read` pollers and threads blocked
      *          in @ref await are invisible here — this counts subscription edges only, which
@@ -351,8 +354,7 @@ class graph_t {
      *          whatever last wrote that slot, not necessarily this producer's prior publish;
      *          if nothing has ever stored, it latches nothing. What the `seq_cst` own half
      *          does buy is narrower: a subscribe that lands is globally ordered before the
-     *          producer's NEXT read, so at most one round is skipped (this does not extend to
-     *          a concurrent @ref retire, whose re-virginize stores the count relaxed). The
+     *          producer's NEXT read, so at most one round is skipped. The
      *          ancestor half is not even that — `listeners_above` is relaxed with no
      *          `seq_cst` twin, so this predicate is exactly as ordered as `deliver_vertex`'s
      *          own `listeners_above` gate and no more. It neither adds that hazard nor

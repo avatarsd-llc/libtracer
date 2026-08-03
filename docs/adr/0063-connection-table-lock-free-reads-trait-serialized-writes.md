@@ -107,6 +107,6 @@ drive the rebind path of Erratum 3 and the writer-vs-writer paths above.
 
 - **This class is currently unpoliced.** The `tsan` CI job exists but does not exercise concurrent creates. A TSan test that hammers create/remove against a live forward stream lands with this change, or the invariant is only asserted in prose.
 
-- **`transport_vertex_t` gains its first synchronization.** Anything called under the control-plane trait must not re-enter the graph's mutation APIs or block — the same discipline `graph.hpp:624` already documents for resolvers, and sharper here if the trait resolves to an interrupt-disable critical section.
+- **`transport_vertex_t` gains its first synchronization.** Anything called under the control-plane trait must not re-enter the graph's mutation APIs or block — the same discipline `graph.hpp:626` already documents for resolvers, and sharper here if the trait resolves to an interrupt-disable critical section.
 
 - **ADR-0061's "immutable after setup" premise is formally retired.** Its erratum already records that the registry mutates at runtime; this ADR is where that fact acquires a mechanism instead of a caveat.
