@@ -269,7 +269,7 @@ The amendment above ratified the lazy reader as serving
 
 `fwd_router_t::on_frame_rope_impl` short-circuits a single-link rope onto the span path (`fwd_router.cpp:336`, commented "the pre-ADR-0053 view path, unchanged"), so the lazy reader serves **only** multi-link ropes — precisely the case the amendment said it must not be limited to. Nothing had measured which was correct: `bench_forward_demux` times the *forward* hop, which never resolves, and `bench_forward_heap` counts allocations without timing them.
 
-`bench/bench_terminus_tier.cpp` closes that gap — the same frame through both public `op_resolver_t::resolve` overloads (the pairing `op_resolve_view_test` already uses as a correctness oracle), plus a `flat+arena` arm. Host p50 ns, arena decoding into a monotonic pmr buffer as production does (`fwd_router.cpp:546`):
+`bench/bench_terminus_tier.cpp` closes that gap — the same frame through both public `op_resolver_t::resolve` overloads (the pairing `op_resolve_view_test` already uses as a correctness oracle), plus a `flat+arena` arm. Host p50 ns, arena decoding into a monotonic pmr buffer as production does (`fwd_router.cpp:532`):
 
 | frame | arena L=1 | view L=1 | flat+arena L=2 | view L=2 | flat+arena L=8 | view L=8 |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |

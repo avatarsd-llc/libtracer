@@ -56,7 +56,7 @@ The amendment's only gain — node-assigned naming — now exists where it is co
   > **Erratum, 2026-08-01 (#491) — the last sentence of the bullet above is WRONG.** A conformance test built to this recipe (`test/491-orchestrate-and-depart`) refutes it at the subscription step, and the refutation was verified against `main`:
   >
   > 1. The wire `:subscribers[]` door executes **`s.target_key.reset()`** (`core/src/graph.cpp:1468`) — *"a PATH child names the consumer at ITS origin — never a local re-dispatch target"* — so the B-rooted target the orchestrator composed is **discarded**, and the edge binds to `(caller = the inbound session, return_route = the accumulated src)`. The producer's updates are delivered to **the orchestrator**, not to A.
-  > 2. On the orchestrator's departure, `fwd_router_t::link_down` → `graph_t::evict_link_edges` (`core/src/fwd_router.cpp:482`) removes that edge, so nothing survives at all.
+  > 2. On the orchestrator's departure, `fwd_router_t::link_down` → `graph_t::evict_link_edges` (`core/src/fwd_router.cpp:468`) removes that edge, so nothing survives at all.
   > 3. The dual that *does* resolve a mount-path target, `fwd_router_t::subscribe_toward` (#739), is **host-local only** — not reachable from the wire.
   >
   > What survives: the *creation* half (step 1 — a remote creator write under a creator-chosen name) works end to end, and offline computability of the target **string** is real. What fails is the inference that an identical write yields an identical *binding* — the binding is derived from the **arrival session**, which differs for a third party. ADR-0026 is not contradicted; the conclusion drawn from it here was.

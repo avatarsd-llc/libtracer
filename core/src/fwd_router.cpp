@@ -376,20 +376,6 @@ template <class Cursor>
 }
 
 /**
- * @brief Peek the `dst` window and resolve the mount in one call.
- *
- * For a caller that has NOT already peeked. The rope arm has — it peeks to decide whether the
- * frame is a structured FWD at all — so it calls @ref resolve_mount_at directly with the
- * window it already holds, instead of paying a second walk of the same TLV headers.
- */
-template <class Cursor>
-[[nodiscard]] mount_hit_t resolve_mount(const child_registry_t& registry, const Cursor& cur,
-                                        seg_reader_t<Cursor>& rd, fwd_pre_t& pre) {
-    if (!peek_fwd_dst(cur, pre)) return {};
-    return resolve_mount_at(registry, cur, rd, pre);
-}
-
-/**
  * @brief Emit `COMPACT{ VALUE label(u16), payload }` over @p down by SCATTER-GATHER — the
  *        steady-state egress, allocating NOTHING in the router.
  *
@@ -1006,7 +992,13 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
         {
             seg_reader_t<wire::grammar::span_cursor> rd{cur};
             fwd_pre_t pre;
-            const mount_hit_t hit = resolve_mount(registry_, cur, rd, pre);
+            // The peek's verdict is kept, because `resolve_mount_at` overwrites `pre.valid`
+            // to mean something else entirely once the descent has run ("nothing to hand the
+            // rebuild"). Only the peek says whether the `dst` is a canonical PATH at all,
+            // which is what decides below whether a bound hop is even possible.
+            const bool canonical_dst = peek_fwd_dst(cur, pre);
+            const mount_hit_t hit =
+                canonical_dst ? resolve_mount_at(registry_, cur, rd, pre) : mount_hit_t{};
             if (hit.link != nullptr) {
                 route_fwd_forward(inbound_name, inbound_ctx, from_peer, hit.strip_k, cur, *hit.link,
                                   &pre);
@@ -1019,7 +1011,13 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
             // The dst names no mount ⇒ this node is the terminus — unless the dst is BOUND
             // with more than one element left, in which case this node is a forwarder for it
             // (RFC-0024 §4.1) and the descent above never had an address it could read.
-            if (route_bound_forward(inbound_name, inbound_ctx, from_peer, cur)) return;
+            //
+            // Gated on the PEEK's verdict, and the gate is a cost decision as much as a
+            // correctness one: a frame whose `dst` is a canonical PATH of NAMEs cannot be a
+            // bound hop, so trying anyway would put three header re-reads on EVERY canonical
+            // terminus frame — a shipped shape — to serve a form that frame provably is not.
+            if (!canonical_dst && route_bound_forward(inbound_name, inbound_ctx, from_peer, cur))
+                return;
         }
         if (peek_fwd_op(cur) == fwd_op_t::REPLY) {
             // The accumulated return route is fully consumed — this node is the
