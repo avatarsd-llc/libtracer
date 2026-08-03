@@ -189,9 +189,9 @@ without it.
   full-expression — which is the `deliver(...)` call, hence the whole receiver callback. The
   frame is now built by aggregate init (`view_t{std::move(seg), 0, len}`): one fewer
   refcount round-trip per received frame, and a receiver that inspects
-  `view.owner.use_count()` inside (or straight after) its callback now sees the `1` that
-  ownership transfer that [ADR-0042](../docs/adr/0042-refcounted-receiver-seam-view-delivery.md)
-  describes, rather than racing the temporary's destruction. Observable only through
+  `view.owner.use_count()` inside (or straight after) its callback now sees the `1` that the
+  ownership transfer in [ADR-0042](../docs/adr/0042-refcounted-receiver-seam-view-delivery.md)
+  implies, rather than racing the temporary's destruction. Observable only through
   the refcount; no signature, ownership or lifetime rule changes.
 
 - **BOTH folded READs' POINT headers no longer come from the global heap** (#831).

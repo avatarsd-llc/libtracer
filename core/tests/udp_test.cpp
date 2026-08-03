@@ -291,7 +291,7 @@ void test_view_pool_exhaustion() {
  * @section udp_pin_ratio What K has to be here, and why that is the finding
  *
  * `udp_transport_t` receives every datagram into a `kMaxDatagram` (65,536 B) segment and
- * delivers `subview(0, n)` of it, so `segment_bytes` at the decision site is 65,536 whatever
+ * delivers a length-`n` window over it, so `segment_bytes` at the decision site is 65,536 whatever
  * the datagram's length. §3.D's predicate is `payload * K >= segment`, so this 68-byte payload
  * TLV needs **K >= 964** before it pins at all — and a 1 KB payload needs K >= 64.
  *
