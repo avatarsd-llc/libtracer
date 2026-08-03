@@ -35,6 +35,19 @@
  *   - can `transport_can::send` — its advertise (A1 — the allocation is DELETED, not
  *     guarded, so the case is an allocation BUDGET on the transport, not a drop leg);
  *   - the oversized / non-final control frame fails the connection instead of being echoed.
+ *
+ * ## What this harness deliberately does NOT gate: the PING→PONG call sites
+ *
+ * The two PONG replies (`transport_ws_server::service_peer`'s `PING` case, and the client
+ * `serve` loop's) build their frame with `ws::encode_server_control` /
+ * `ws::encode_client_control` into a stack `std::array`. That the ENCODERS allocate nothing
+ * is gated — `bench_failable_census guard` holds both to `NOALLOC`. That these two call
+ * sites CHOSE the stack encoder is not gated here, and cannot be: the injector state above is
+ * `thread_local` to the test thread, while a PONG is built on the transport's own poll /
+ * recv thread, so no arming this test can do is visible to it. Swapping either call site back
+ * to a heap encoder would therefore not redden anything in this file. Gating it would mean a
+ * process-wide injector, which would also arm the transports' unrelated receive allocations
+ * and make every case here flaky — a worse instrument than the census arm plus this note.
  */
 
 #include <arpa/inet.h>
@@ -387,7 +400,9 @@ void test_ws_server_send_span_is_allocation_free() {
     std::array<std::byte, 8> payload{};
     for (std::size_t i = 0; i < payload.size(); ++i) payload[i] = static_cast<std::byte>(i + 1);
 
-    std::size_t allocs = 0;
+    // The sentinel start (not 0) keeps the count assertion honest: if the send throws, the
+    // assignment below never runs, and a zero-initialised counter would still read as PASS.
+    std::size_t allocs = static_cast<std::size_t>(-1);
     const bool escaped = escapes_at(1, [&] {
         server.send(std::span<const std::byte>(payload));
         allocs = t_allocs;
@@ -451,9 +466,20 @@ void test_ws_server_send_iov_overflow_drops() {
     ::close(cfd);
 }
 
-/** @brief The directed per-peer facade takes the same overflow store, and the same answer. */
+/**
+ * @brief The directed per-peer facade: its single-span send allocates NOTHING (the A2/A3
+ *        twin of `test_ws_server_send_span_is_allocation_free`), and its gather takes the
+ *        same overflow store, and the same answer.
+ *
+ * Both halves are needed. Delivery through `peer_endpoint_t::send(span)` is already
+ * asserted by `ws_transport_test`'s directed-send case — but delivery is equally true of
+ * the pre-#848 body, which built a whole `std::vector` frame per send. Only the allocation
+ * assertion below distinguishes them, so without it the #848 property of THIS site is
+ * ungated while its behaviour is covered.
+ */
 void test_ws_peer_endpoint_send_iov_overflow_drops() {
-    std::printf("ws peer_endpoint send(iov) — overflow gather drops, node lives (A3/B1):\n");
+    std::printf(
+        "ws peer_endpoint send — directed span allocates nothing, gather drops (A2/A3/B1):\n");
     tr::net::transport_ws_server server(0, /*max_peers=*/0, /*peer_named=*/true);
     check(server.ok(), "peer-named server bound");
     const int cfd = tcp_connect(server.local_port());
@@ -469,6 +495,26 @@ void test_ws_peer_endpoint_send_iov_overflow_drops() {
         ::close(cfd);
         return;
     }
+
+    // A2/A3 — the DIRECTED single-span send, first: it rides the same gathered path as the
+    // broadcast override, so the frame header is stack-built and the caller's payload goes
+    // to the wire by reference. `span_allocs` starts at a sentinel, not 0, so a throw that
+    // skips the assignment cannot leave the count assertion vacuously true.
+    std::array<std::byte, 8> payload{};
+    for (std::size_t i = 0; i < payload.size(); ++i) payload[i] = static_cast<std::byte>(i + 1);
+    std::size_t span_allocs = static_cast<std::size_t>(-1);
+    const bool span_escaped = escapes_at(1, [&] {
+        peer->send(std::span<const std::byte>(payload));
+        span_allocs = t_allocs;
+    });
+    check(!span_escaped, "directed send(span) with the FIRST allocation refused does not throw");
+    check(span_allocs == 0, "directed send(span) performs ZERO heap allocations");
+    const auto one =
+        read_until(cfd, [](const std::vector<std::byte>& b) { return b.size() >= 10; }, 2s);
+    const auto one_dec = ws::decode_frame(one);
+    check(one_dec.has_value() && one_dec->first.payload.size() == payload.size() &&
+              std::memcmp(one_dec->first.payload.data(), payload.data(), payload.size()) == 0,
+          "the peer received the directed single-span frame intact");
 
     const std::vector<std::byte> storage(kWideSpans, std::byte{0xCD});
     const auto iov = wide_gather(storage, kWideSpans);
