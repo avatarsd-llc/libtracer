@@ -10,6 +10,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **The RFC-0024 forwarding car's two vectors are pinned.** `fwd/fwd-bound-forward` and
+  `fwd/fwd-bound-forwarded` — the same operation one bound hop apart — are round-tripped and
+  byte-pinned by `fwd_bound_forward_is_one_hop_from_forwarded`, including the residual being
+  the inbound element array minus its head and `src` growing canonically. No API change: this
+  crate carries the shape and, having no router, never interprets an element.
+
 - **`fwd::ParsedFwd` learns the RFC-0024 §5-§7 routing surface.** Two new fields —
   `mint_request` (the `op` byte's bit 7) and `dst_bound` (`dst` is a `PATH_REF`, not a `PATH`)
   — plus `fwd_op::OPCODE_MASK` (`0x3F`) and `fwd_op::FLAG_MINT_REQUEST` (`0x80`).

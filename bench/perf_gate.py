@@ -290,17 +290,15 @@ _MEM_RE = re.compile(r"^RESULT zeroheap (\w+) allocs=(\d+) frees=\d+ bytes=(\d+)
 # What a charge is NOT: a tolerance. It does not scale, it does not accumulate, and
 # it is not a per-point budget to spend later — two charged steps to one point mean
 # two reviews, each pricing its own.
-MEM_CHARGED = {
-    # RFC-0024 §6.4: the node-scoped vertex index costs one pointer per vertex — 4 B on
-    # rv32, 8 B on a host — and §4.4's RAM floor is computed WITH it. Measured on this
-    # probe at exactly 8 B on all four points a vertex allocation touches; the index is a
-    # chunked deque rather than a vector precisely so the figure is the priced pointer and
-    # not a vector's geometric slack, which measured 15 B (see graph.hpp's storage note).
-    "mem:vertex": (8, "RFC-0024 §6.4 vertex-index slot (one pointer/vertex, 8 B on a host)"),
-    "mem:vertex_app5": (8, "RFC-0024 §6.4 vertex-index slot"),
-    "mem:vertex_app5_static": (8, "RFC-0024 §6.4 vertex-index slot"),
-    "mem:reg_escape": (8, "RFC-0024 §6.4 vertex-index slot"),
-}
+#
+# EMPTY, and that is the mechanism working rather than the mechanism unused. The one
+# entry this table has ever carried — RFC-0024 §6.4's 8 B/vertex index slot, on the four
+# points a vertex allocation touches — landed on `main` with the routing car, so the
+# paired baseline now contains it, the delta is zero, and the charge would print UNSPENT
+# on every run while excusing nothing. Deleted on the expiry rule it was written with: a
+# charge outlives its step only as dead weight, and dead weight in a ratchet is the first
+# byte of a tolerance. The next priced step declares its own.
+MEM_CHARGED: dict[str, tuple[int, str]] = {}
 
 # --- ADR-0060 LKV copy-store gate (same-run pool-vs-heap ratio, NOT vs-baseline) --
 # The pooled value_backend vs the default heap on the write-path alloc/free op. A

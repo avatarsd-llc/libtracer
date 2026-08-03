@@ -77,8 +77,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   and applies the operation at that vertex, through the **same** `graph_t` call the canonical
   spelling makes — so the per-operation ACL check happens at the dereferenced vertex by
   construction, and the two spellings' outcomes agree without a second policy. Any validation
-  failure is a **drop**: no forward, no apply, no repair (§5.3). Forwarding a bound path is not
-  implemented — a residual longer than one element is dropped rather than guessed at.
+  failure is a **drop**: no forward, no apply, no repair (§5.3). (A residual longer than one
+  element is a forwarder's, and is routed as such — see the forwarder-hop entry below.)
 - **A mint answers in the reply.** An operation whose `op` byte sets bit 7 gets a one-element
   `PATH_REF` appended as the reply's **last** child, on **success only**. A denied or failed
   operation mints nothing, which is the anti-enumeration property of §6.1.
@@ -88,9 +88,51 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   and the fallback a failed one drops back to. `bind()` refuses past the element cap rather
   than truncating. Purely additive.
 
-Still not implemented, and named rather than implied: the **forwarder's** element-consuming
-hop (a bound `dst` terminates locally today) and the §5.3 NACK carrying the failing hop index,
-whose spelling RFC-0024 §9.2 leaves open. A drop is already the conformant answer without it.
+- **The bound-path FORWARDER hop, and the origin-side bind — RFC-0024 §3.4/§5/§7, car 3.**
+  A `PATH_REF` `dst` whose residual is longer than one element now routes: the hop consumes
+  element 0 (bounds, generation, then `acl_allows` at the dereferenced vertex for the
+  operation's own right), egresses over the link that vertex names, and forwards the remainder
+  with `src` grown canonically — so the return route of a bound request is **byte-identical**
+  to the canonical spelling's and every hop on the way back may be a peer that does not speak
+  the bound form. No mount descent runs on the hop: `resolve_mount_*` is not entered. Any
+  validation failure is a **drop** (§5.3) — never a fall-through to the local terminus. New
+  public API on `net::fwd_router_t`:
+  - `connection_ref(link_name)` — this node's own element for a child's connection vertex,
+    which is element 0 of any route leaving through it and the one element no peer can supply;
+  - `bound_egress(element, caller, right)` — the §5.1 check plus the element→link join, shared
+    by the forwarder's hop and the origin's own;
+  - `adopt_binding(path, link_name, reply)` — the §7.4 origin side: takes the accumulated
+    `PATH_REF` off a mint reply, stacks this node's own element under it, and records the whole
+    stack on the `path_t` (the first production caller of `path_t::bind`);
+  - `bound_dispatch(path, right)` → `{link, dst}` — what the next operation over a binding is
+    sent as: the origin consumes element 0 exactly as a forwarder does, and puts the residual
+    on the wire.
+- **`graph_t::vertex_slot_at(index)` and `graph_t::allows(vertex, caller, right)`.** Two
+  primitives the hop needs and nothing else could give it: the O(1) index→generation read a
+  forwarder's mint uses (`vertex_slot` scans, which is right for the terminus and wrong here),
+  and the ACL predicate published for the one caller that reaches a vertex without performing
+  a data op on it. Both purely additive.
+- **A hop that forwards a mint reply now either contributes its element or STRIPS the answer**
+  (RFC-0024 §7.1 **erratum 1**, landed with this car). **Behaviour change** for a node that
+  cannot mint for the link a reply arrived on: it removes the trailing `PATH_REF` instead of
+  relaying it. A list that skips a hop is not a shorter route but a wrong one — the origin
+  would consume its own element and the non-contributing hop would find one element left,
+  believe itself the terminus, and dereference another host's element against its own vertex
+  map. Stripping closes that mis-route class; the origin simply stays canonical.
+- **`net::peek_fwd_dst_ref`, `net::read_path_ref_element`, `net::peek_reply_mint` and
+  `stack_writer::header_bare`** in `fwd_frame_view.hpp`; `fwd_pre_t` gains `dst_ref`,
+  `fwd_rebuild_t` gains the mint accumulation fields, and `rebuild_fwd_forward` takes an
+  optional mint element. `kFwdMaxIov` moves 9 → 11 (the two regions a re-headed mint answer
+  adds; a REPLY grows no `src`, so the reachable maximum is unchanged).
+- **`rebuild_fwd_forward` accepts a `PATH_REF` `src` on a REPLY.** A reply to a bound request
+  echoes the request's `dst` in `src`, so refusing it dropped every such reply at the first
+  forwarder. On a REQUEST the same shape is still refused: this hop grows `src` by its inbound
+  mount, and a NAME prepended into a fixed-stride record array is not a longer route but a
+  corrupt one.
+
+Still not implemented, and named rather than implied: the §5.3 NACK carrying the failing hop
+index, whose spelling RFC-0024 §9.2 leaves open. A drop is already the conformant answer
+without it.
 
 ### Fixed
 
