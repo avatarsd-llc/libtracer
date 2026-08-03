@@ -166,6 +166,26 @@ without it.
 
 ### Fixed
 
+- **A mid-chain reconnect no longer kills a compacted flow permanently and silently.**
+  `route_handle_t::clear_link(L)` (and therefore `fwd_router_t::clear_link` / `link_down`) now
+  also drops every **ingress** binding the node holds, **on any link**, whose downstream half
+  crossed `L`. A forwarding binding is stored under the link its label *arrives* on while
+  `handle_binding_t::down_link` names the link the swapped label *leaves* by, so clearing only
+  `L`'s own tables left a forwarder still aimed at an out-label that died with them. The
+  upstream never observed the reconnect and so never re-advertised: it kept streaming
+  `COMPACT`s, the forwarder kept swapping onto the dead out-label, the downstream kept
+  returning `HANDLE_NACK`s, and `on_nack` answered them out of the table `clear_link` had just
+  erased — a silent return, forever, with the origin never told. The sweep hands recovery back
+  to shipped machinery: the upstream's next `COMPACT` misses, draws the ordinary stale-label
+  `HANDLE_NACK`, and re-advertises. **No wire surface changes** — every frame in the cascade is
+  an already-specified frame in an already-specified situation (normative in
+  [reference/05](../docs/reference/05-protocol-tlvs.md) §route-handle and RFC-0004 §E.1;
+  corrects [ADR-0062](../docs/adr/0062-resolve-once-label-bindings-hold-resolutions-not-names.md)'s
+  erratum, which named the asymmetry but judged it harmless from the link-*departure* case
+  alone). **Behaviour change:** a `clear_link` now invalidates strictly more bindings than
+  before — terminus bindings, which have no downstream half, are untouched. Cost is
+  O(links × bindings) on the cold (re)connect path only; nothing on the per-delivery path
+  moves.
 - **A `PATH_REF`-addressed `FWD` delivered as a MULTI-LINK rope is no longer silently
   dropped.** `fwd_router_t`'s rope arm gated its routing on `peek_fwd_dst`, which asks "does
   this frame carry an address this node can *descend*" and therefore requires a canonical

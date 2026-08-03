@@ -42,6 +42,22 @@ The Decision above claimed the cached `transport_t*` is "safe only because #494 
 
 So when the downstream link departs, an upstream binding retains `down_link = "B"`. Today that is harmless: the next delivery calls `by_name("B")`, gets `nullptr` (since #494 tombstones the entry), and drops. **Caching the pointer would convert that clean miss into a use-after-free** — re-introducing, in a second place, precisely the dangling-`transport_t*` class #494 closed in the registry.
 
+> **Erratum 2 (#716): "today that is harmless" was wrong for the RECONNECT case.** The
+> paragraph above reasons about link *departure*, where the registry tombstone turns the
+> retained `down_link` into a clean miss. On a **(re)connect** the link does not depart — the
+> registry entry is live and `by_name("B")` resolves — so the surviving cross-link binding is
+> not missed at all: it is *used*, swapping onto an `out_label` that died with the table
+> `clear_link` erased. The downstream `HANDLE_NACK`s that label; `on_nack` looks it up in the
+> table just erased and returns silently; the upstream never saw the reconnect and never
+> re-advertises. The flow drops every delivery, permanently, with nothing reported. The
+> asymmetry this erratum correctly identified therefore needed a fix, not merely a caveat —
+> the "sweep on teardown" option listed below, scoped to the cleared link's crossing bindings
+> and paid only on the cold `clear_link` path. It is normative in
+> [reference/05](../reference/05-protocol-tlvs.md) §route-handle and RFC-0004 §E.1, and
+> changes no wire surface: the recovery cascade emits only frames those documents already
+> specify. The **slot-caching** resolution below is untouched by this — it answers the
+> departure hazard, which is a different failure.
+
 The terminus half is unaffected: its generation stamp ([#511](https://github.com/avatarsd-llc/libtracer/pull/511)) is a different mechanism and does not rely on this claim.
 
 **Options considered for the forward half:**
