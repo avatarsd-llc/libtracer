@@ -1422,6 +1422,13 @@ void fwd_router_t::on_advertise(std::string_view inbound_name, std::uint16_t lab
             stripped.children.begin() + static_cast<std::ptrdiff_t>(hit.strip_k));
         const std::vector<std::byte> stripped_bytes = wire::encode(stripped);
 
+        // Sample the downstream link's clear epoch BEFORE minting anything against it (#827).
+        // This runs on the INBOUND link's rx thread, so a reconnect of `down_name` on its own
+        // thread can land anywhere in the three steps below; the sample is what lets the bind
+        // tell "the tables I minted into" from "the tables that are there now". It must
+        // precede `alloc_label`, which creates those tables: sampling after would name a
+        // post-clear allocator while the label came from the pre-clear one.
+        const std::uint32_t down_epoch = handles_.link_epoch(down_name);
         const std::uint16_t out_label = handles_.alloc_label(down_name);
         // Exhausted downstream label space (#603): bind nothing and re-advertise nothing.
         // The alternative -- reusing a live label -- would swap this flow onto another
@@ -1444,7 +1451,12 @@ void fwd_router_t::on_advertise(std::string_view inbound_name, std::uint16_t lab
         fwd.down_link = down_name;
         fwd.out_label = out_label;
         fwd.mount_gen = shape;
-        if (!handles_.bind_ingress(inbound_name, label, std::move(fwd))) return;
+        // Epoch-checked (#827): a downstream reconnect anywhere between the sample above and
+        // this bind refuses the swap, so no ingress binding is left aiming at an out-label
+        // whose egress route died with the erased table. The refusal takes the same path a
+        // full table takes — the upstream's next COMPACT misses and draws the ordinary
+        // stale-label HANDLE_NACK, which prompts it to re-advertise onto the new tables.
+        if (!handles_.bind_ingress_forward(inbound_name, label, std::move(fwd), down_epoch)) return;
         const std::vector<std::byte> adv2 = encode_advertise(out_label, stripped_bytes);
         hit.link->send(std::span<const std::byte>(adv2));
         return;

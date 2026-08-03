@@ -58,6 +58,33 @@ So when the downstream link departs, an upstream binding retains `down_link = "B
 > specify. The **slot-caching** resolution below is untouched by this — it answers the
 > departure hazard, which is a different failure.
 
+> **Erratum 3 (#827): the sweep erratum 2 called for is only half of the rule.** Erratum 2
+> reasoned about the bindings a node *holds* when a link reconnects, and the sweep it produced
+> can only erase those. It does not reach a forwarding binding that is still being *made*: an
+> `ADVERTISE` is processed on its inbound link's rx thread while the reconnect is processed on
+> the downstream link's, so the hop mints its out-label and retains its egress route against
+> the pre-clear tables and binds the swap after the sweep has already scanned that inbound
+> link. The binding lands aimed at the out-label the sweep existed to invalidate, and the
+> outcome is byte-for-byte erratum 2's: the downstream `HANDLE_NACK`s a label `on_nack` can no
+> longer answer, the upstream never learns, and the flow is permanently and silently dead.
+> Erratum 2 narrowed the defect to a window; it did not close it.
+>
+> The fix is the **"generation-stamp the link too"** option this ADR listed below and set aside
+> for adding "a second generation concept" — a judgement worth correcting, because the concept
+> is no longer second: RFC-0024's saturating generation is shipped machinery, and mirroring it
+> costs one node-wide counter that every `clear_link` advances and every per-link table stamps.
+> A forwarding hop samples the downstream link's stamp before it mints anything and hands it
+> back when it binds; a mismatch refuses the binding. The refusal and the sweep are one
+> critical section, so there is no third interleaving in which a binding outlives the tables it
+> names. Refusing degrades exactly like an unbindable label, so the recovery cascade and the
+> wire surface are the ones erratum 2 already specified. Normative in
+> [reference/05](../reference/05-protocol-tlvs.md) §route-handle and RFC-0004 §E.1.
+>
+> The slot-caching resolution below is again untouched — it answers link *departure*, a third
+> distinct failure. What this erratum records is that the sweep and the stamp are not competing
+> options, as the list below framed them: the sweep handles bindings that exist, the stamp
+> handles bindings in flight, and neither covers the other's case.
+
 The terminus half is unaffected: its generation stamp ([#511](https://github.com/avatarsd-llc/libtracer/pull/511)) is a different mechanism and does not rely on this claim.
 
 **Options considered for the forward half:**

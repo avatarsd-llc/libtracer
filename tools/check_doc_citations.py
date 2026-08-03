@@ -131,11 +131,11 @@ ANCHORS = [
     ("core/src/graph.cpp:1343", "value.materialize(*value_backend_)", "field_write read it back"),
     ("core/src/graph.cpp:1576", "result_t<void> graph_t::field_write"),
     ("core/src/graph.cpp:1703", "acl_right_t::CREATE", 'step0.name == "children"'),
-    ("core/src/fwd_router.cpp:1660", "fwd_router_t::deliver_remote"),
-    ("core/src/fwd_router.cpp:1689", "value.materialize(*flat_)"),
-    ("core/src/fwd_router.cpp:1690", "flatten OOM"),
-    ("core/src/fwd_router.cpp:1694", "try_encode_compact", "fwd_router_t::deliver_remote"),
-    ("core/src/fwd_router.cpp:1726", "std::vector<std::span<const std::byte>> iov;", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:1672", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:1701", "value.materialize(*flat_)"),
+    ("core/src/fwd_router.cpp:1702", "flatten OOM"),
+    ("core/src/fwd_router.cpp:1706", "try_encode_compact", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:1738", "std::vector<std::span<const std::byte>> iov;", "fwd_router_t::deliver_remote"),
     # #730 — the two INGRESS flatten guards. Anchored because the whole point of the
     # seam is that these are testable; a citation to them silently rotting would be the
     # first step back to "the guard nobody can prove still works".
@@ -480,8 +480,8 @@ ANCHORS = [
     ('core/src/fwd_router.cpp:1334',
      'frame.subrope(head->child1_off, head->child1_total).materialize(*flat_);',
      'void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::rope_t frame) {'),
-    ('core/src/fwd_router.cpp:1675', "// dropped fresh ADVERTISE self-heals via the peer's HANDLE_NACK (§E.1)."),
-    ('core/src/fwd_router.cpp:1710',
+    ('core/src/fwd_router.cpp:1687', "// dropped fresh ADVERTISE self-heals via the peer's HANDLE_NACK (§E.1)."),
+    ('core/src/fwd_router.cpp:1722',
      'constexpr std::array<std::byte, 5> op_tlv{std::byte{0x01}, std::byte{0x00}, std::byte{0x01},'),
     # core/src/graph.cpp
     ('core/src/graph.cpp:163', 'const view_t& frame_view, std::vector<std::byte> key,'),

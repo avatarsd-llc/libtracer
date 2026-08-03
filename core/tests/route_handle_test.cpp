@@ -26,6 +26,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <memory_resource>
 #include <string_view>
 #include <thread>
@@ -437,6 +438,141 @@ void cross_link_sweep() {
     check(h.link_count() == 1, "only the surviving link's shell remains");
 }
 
+/**
+ * @brief Model `fwd_router_t::on_advertise`'s FORWARDING leg, with @p mid run in the window
+ *        between retaining the egress route and binding the ingress swap.
+ *
+ * The three calls and their order are the router's, not the test's: mint this hop's own
+ * out-label on the downstream link, retain the stripped egress route so a NACK can
+ * re-advertise, then bind the inbound label to that swap. @p mid is where a reconnect on the
+ * DOWNSTREAM link lands — the #827 window. Passing a no-op models the uncontended path.
+ *
+ * @return `{out_label, bound}` — the label minted downstream, and whether the swap was bound.
+ */
+struct advertise_leg_t {
+    std::uint16_t out_label = 0; /**< @brief The downstream label this hop minted (0 ⇒ none). */
+    bool bound = false;          /**< @brief Whether the ingress swap was actually recorded. */
+};
+
+advertise_leg_t advertise_forwarding_leg(route_handle_t& h, std::string_view in_link,
+                                         std::uint16_t in_label, std::string_view down,
+                                         const std::vector<std::byte>& route,
+                                         const std::function<void()>& mid) {
+    const std::uint32_t epoch = h.link_epoch(down);
+    const std::uint16_t out = h.alloc_label(down);
+    if (out == 0) return {};
+    if (!h.record_egress(down, out, route)) return {out, false};
+    mid();  // a (re)connect on `down` lands HERE — after the mint, before the bind
+    handle_binding_t fwd = forward_binding(down);
+    fwd.out_label = out;
+    return {out, h.bind_ingress_forward(in_link, in_label, std::move(fwd), epoch)};
+}
+
+/**
+ * @brief #827 — a reconnect landing INSIDE an in-flight advertise must not leave a stale swap.
+ *
+ * #716's sweep closed the steady-state gap, but it can only erase bindings that already
+ * exist. An `on_advertise` running on another link's rx thread mints its out-label and
+ * retains its egress route against the PRE-clear downstream table, and then binds the swap —
+ * and if `clear_link` runs between those two steps, the sweep scans the inbound link before
+ * the binding is there and the bind lands after the table it aims into is gone. The result is
+ * byte-for-byte the #716 state the sweep exists to prevent: an ingress swap naming an
+ * out-label whose egress route no longer exists, so the downstream's NACKs die in an empty
+ * lookup and the upstream is never told. A microsecond window, but a permanent outcome.
+ *
+ * Run against a build with the epoch check deleted, the first two assertions FAIL: the swap
+ * binds and the stale binding is readable. The third PASSES either way — the egress route is
+ * gone in both builds, which is precisely why it cannot be the separating assertion.
+ */
+void reconnect_inside_advertise() {
+    std::printf(" a reconnect INSIDE an in-flight advertise binds no stale swap (#827):\n");
+    const auto nop = []() {};
+
+    {
+        route_handle_t h;
+        const advertise_leg_t r = advertise_forwarding_leg(h, "up", 5, "down", route_bytes(1), nop);
+        check(r.bound && h.lookup_ingress("up", 5).has_value(),
+              "control: with no reconnect in the window the swap binds normally");
+    }
+    {
+        // The window. `clear_link("down")` runs after the egress route is retained and before
+        // the swap is bound — exactly the interleaving the issue describes.
+        route_handle_t h;
+        const advertise_leg_t r = advertise_forwarding_leg(h, "up", 5, "down", route_bytes(1),
+                                                           [&h]() { h.clear_link("down"); });
+        check(!r.bound, "the swap minted against the PRE-clear table is refused");
+        check(!h.lookup_ingress("up", 5),
+              "no ingress swap survives aiming at the erased egress table");
+        check(!h.egress_route("down", r.out_label).has_value(),
+              "corroborating: the egress route it aimed at is indeed gone (true either way)");
+    }
+    {
+        // Scope: the guard keys on the DOWNSTREAM link. A reconnect of some unrelated link in
+        // the same window must not refuse the swap — a guard that refuses everything is as
+        // wrong as one that refuses nothing.
+        route_handle_t h;
+        (void)h.ensure_egress("other", route_bytes(7));
+        const advertise_leg_t r = advertise_forwarding_leg(h, "up", 6, "down", route_bytes(2),
+                                                           [&h]() { h.clear_link("other"); });
+        check(r.bound && h.lookup_ingress("up", 6).has_value(),
+              "an unrelated link's reconnect in the same window does NOT refuse the swap");
+    }
+    {
+        // And the inbound link's own reconnect: the swap may or may not be retained (it may
+        // land in a detached table), but it must never be readable AND stale.
+        route_handle_t h;
+        (void)advertise_forwarding_leg(h, "up", 7, "down", route_bytes(3),
+                                       [&h]() { h.clear_link("up"); });
+        const auto b = h.lookup_ingress("up", 7);
+        check(!b || h.egress_route("down", b->out_label).has_value(),
+              "an inbound reconnect leaves no readable swap without its egress route");
+    }
+}
+
+/**
+ * @brief The same window, driven CONCURRENTLY — the shape the race actually has in the field.
+ *
+ * One thread runs the forwarding leg with the window held open (a yield spin, the harness's
+ * only lever — nothing in the shipped path knows this test exists); the other reconnects the
+ * downstream link. The invariant is the #716 state itself: this node must never end a round
+ * holding a readable forwarding swap whose out-label has no egress route behind it.
+ *
+ * Also the TSan gate for the new guard — the epoch read and the bind must be one critical
+ * section against `clear_link`'s bump-erase-sweep, or the sweep and the bind interleave and
+ * the guard is decorative.
+ */
+void reconnect_race_invariant() {
+    std::printf(" the same window under two threads (#827):\n");
+    constexpr int kRounds = 400;
+    int violations = 0;
+    for (int i = 0; i < kRounds; ++i) {
+        route_handle_t h;
+        (void)h.ensure_egress("down", route_bytes(9));  // the pre-clear table already exists
+        std::atomic<bool> go{false};
+        advertise_leg_t r;
+        std::thread adv([&]() {
+            while (!go.load(std::memory_order_acquire)) {
+            }
+            r = advertise_forwarding_leg(h, "up", 5, "down", route_bytes(1), []() {
+                for (int k = 0; k < 64; ++k) std::this_thread::yield();
+            });
+        });
+        std::thread rec([&]() {
+            while (!go.load(std::memory_order_acquire)) {
+            }
+            h.clear_link("down");
+        });
+        go.store(true, std::memory_order_release);
+        adv.join();
+        rec.join();
+        const auto b = h.lookup_ingress("up", 5);
+        if (b && !b->terminus && b->down_link == "down" && !h.egress_route("down", b->out_label))
+            ++violations;
+    }
+    check(violations == 0, "no round left a readable swap pointing at a dead egress table");
+    if (violations != 0) std::printf("       (%d of %d rounds)\n", violations, kRounds);
+}
+
 int main() {
     std::printf("route_handle_t (Brick 4 — per-connection pmr label tables):\n");
 
@@ -463,6 +599,8 @@ int main() {
 
     cache_after_teardown();
     cross_link_sweep();
+    reconnect_inside_advertise();
+    reconnect_race_invariant();
 
     if (g_failures == 0) {
         std::printf("route_handle: ALL PASS\n");

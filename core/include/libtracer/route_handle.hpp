@@ -198,6 +198,61 @@ class route_handle_t {
                                     handle_binding_t binding);
 
     /**
+     * @brief The CLEAR EPOCH of @p link — the token that says "this link's tables have not been
+     *        reconnected since" (#827).
+     *
+     * Sampled by a forwarding hop BEFORE it mints anything against its downstream link, and
+     * handed back to @ref bind_ingress_forward when the swap is finally bound. Every
+     * @ref clear_link advances a node-wide counter, and a link's tables carry the value they
+     * were created at, so the epoch changes if and only if THIS link was cleared in between —
+     * an unrelated link's reconnect leaves it alone.
+     *
+     * @param link This node's NAME for the link.
+     * @return An opaque token, meaningful only when compared against a later sample of the
+     *         SAME link. A link with no tables reads the current counter, so creating them
+     *         changes nothing and the very first advertise on a link is never refused.
+     */
+    [[nodiscard]] std::uint32_t link_epoch(std::string_view link) const;
+
+    /**
+     * @brief @ref bind_ingress for a FORWARDING swap, refused if @p down_epoch went stale.
+     *
+     * The store-under-inbound / point-at-outbound asymmetry again (#716), now in its racing
+     * form (#827). @ref clear_link's cross-link sweep can only erase bindings that already
+     * exist; an `on_advertise` running on another link's rx thread mints its out-label and
+     * retains its egress route against the PRE-clear downstream table, and binds the swap
+     * afterwards. A reconnect landing between those two steps sweeps the inbound link before
+     * the binding is there, and the binding lands after the table it aims into is gone —
+     * reproducing the exact #716 state the sweep exists to prevent, through a window
+     * measured in microseconds and with a permanent outcome.
+     *
+     * So the swap is bound only if @p down_epoch — sampled from @ref link_epoch before the
+     * mint — still names the downstream tables the label was minted against. The epoch read
+     * and the insert are ONE critical section against @ref clear_link, so the sweep cannot
+     * interleave between them. Refusing takes the path a full ingress table already takes
+     * (`false`, nothing recorded): the peer's COMPACT misses, draws the ordinary stale-label
+     * HANDLE_NACK, and the flow re-advertises from a clean slate. Nothing new goes on the
+     * wire, and this is the COLD advertise path — the per-delivery path is untouched.
+     *
+     * A refusal is deliberately NOT counted in @ref refused_bindings, which means "a link's
+     * table was at its injected bound". This is not a resource refusal and it is not silent:
+     * the very next COMPACT on the unbound label fires the stale-label observer, which is
+     * where the event is already visible.
+     *
+     * @param in_link    This node's NAME for the link the ADVERTISE arrived on.
+     * @param label      The label as seen on that inbound link.
+     * @param binding    The forwarding swap; `binding.down_link` names the link @p down_epoch
+     *                   was sampled from. A terminus binding has no downstream half and must
+     *                   use @ref bind_ingress instead.
+     * @param down_epoch The @ref link_epoch of `binding.down_link`, sampled BEFORE the
+     *                   out-label was minted.
+     * @retval false Nothing was recorded — either the ingress table is at its bound, or the
+     *               downstream link was reconnected inside the window.
+     */
+    [[nodiscard]] bool bind_ingress_forward(std::string_view in_link, std::uint16_t label,
+                                            handle_binding_t binding, std::uint32_t down_epoch);
+
+    /**
      * @brief Look up what a @p label arriving on @p in_link means (nullopt ⇒ stale/unknown).
      * @param in_link This node's NAME for the inbound link.
      * @param label   The inbound label.
@@ -312,6 +367,12 @@ class route_handle_t {
      * stale-label `HANDLE_NACK` and prompts the upstream to re-advertise; nothing new is put
      * on the wire. Terminus bindings have no downstream half and are never swept.
      *
+     * The sweep can only erase bindings that already EXIST, which is why it is only half the
+     * guard (#827): a forwarding swap still in flight on another rx thread is bound after the
+     * sweep has already scanned its inbound link. That half is @ref bind_ingress_forward's —
+     * this call advances the clear epoch @ref link_epoch reports, so a swap minted against the
+     * tables erased here is refused rather than bound.
+     *
      * Cost is O(links x bindings) on this COLD (re)connect path; the per-delivery path is
      * untouched.
      * @param link This node's NAME for the link whose state to forget.
@@ -366,6 +427,10 @@ class route_handle_t {
         std::pmr::vector<ingress_entry_t> ingress;
         std::pmr::vector<egress_entry_t> egress;
         std::uint16_t next_label = 1;  // 0 is reserved "none"
+        // The node-wide clear counter these tables were created at (#827). Appended AFTER the
+        // hot fields on purpose: `resolved()` reads `ingress` and nothing else, and keeping
+        // its offset put keeps the per-delivery lookup byte-for-byte what it was.
+        std::uint32_t born_gen = 0;
     };
 
     // Each link's tables are heap-owned via a shared_ptr and the registry stores that
@@ -376,12 +441,22 @@ class route_handle_t {
     [[nodiscard]] std::shared_ptr<link_tables_t> tables(std::string_view link);
     /** @brief The link's tables if they exist (shared registry lock), else nullptr. */
     [[nodiscard]] std::shared_ptr<link_tables_t> find_tables(std::string_view link) const;
+    /** @brief @ref link_epoch with `links_m_` ALREADY held (either mode). */
+    [[nodiscard]] std::uint32_t link_epoch_locked(std::string_view link) const;
+    /** @brief The bind-or-refuse body shared by @ref bind_ingress and
+     *         @ref bind_ingress_forward, with @p t's own mutex ALREADY held. */
+    [[nodiscard]] bool bind_locked(link_tables_t& t, std::uint16_t label,
+                                   handle_binding_t&& binding);
 
     std::pmr::memory_resource* mr_;
     std::size_t max_bindings_ = 0;         // 0 => unbounded; injected, never assumed
     std::atomic<std::size_t> refused_{0};  // counted drops (diagnostic)
     mutable std::shared_mutex links_m_;    // registry only: create/clear, never per delivery
     std::pmr::map<std::pmr::string, std::shared_ptr<link_tables_t>, std::less<>> links_;
+    // The node-wide clear counter (#827), guarded by `links_m_` — every clear_link advances
+    // it, every newly created link_tables_t stamps it. Saturating, per RFC-0024 §4.4's rule:
+    // see clear_link's body for what the ceiling costs and why it is the safe direction.
+    std::uint32_t clear_gen_ = 0;
 };
 
 /**
