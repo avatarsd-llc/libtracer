@@ -1,8 +1,8 @@
 /**
  * @file
- * @brief #831 — the composed-root folded READ's per-node POINT headers draw from `graph_t`'s
- *        injected `value_backend` (ADR-0060), not the global heap — and exhaustion degrades by
- *        value (`BACKPRESSURE`), never a throw.
+ * @brief #831 — BOTH folded READs' POINT headers draw from `graph_t`'s injected `value_backend`
+ *        (ADR-0060), not the global heap — and exhaustion degrades by value (`BACKPRESSURE`),
+ *        never a throw.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -13,9 +13,15 @@
  * backend all pointed at one slab still leaked this framing to `malloc`, at a count a PEER
  * chooses (it picks which composed root to READ, and thus how many nodes fold).
  *
- * These are payload framing bytes — each header's length field wraps that node's stored TLV and
- * the name record below it — so they belong on the ADR-0060 value seam, not the route-byte-sized
- * ADR-0074 egress seam. This test is the ablation that proves the redirect landed.
+ * `read_children_folded` is the SAME defect class on the other folded read — one POINT header per
+ * registered child plus the outer listing header, and the wire ":children" READ routes THERE, at
+ * a count a peer likewise chooses (it picks which vertex's listing to read). Sections (d)–(f)
+ * cover it with the identical instrument, including through the production ":children" field
+ * route rather than the direct call alone.
+ *
+ * These are payload framing bytes — each header's length field wraps the stored TLV and the name
+ * records below it — so they belong on the ADR-0060 value seam, not the route-byte-sized ADR-0074
+ * egress seam. This test is the ablation that proves the redirect landed.
  *
  * @section instrument The instrument is checked before the guard is
  *
@@ -241,6 +247,22 @@ std::vector<std::byte> folded_bytes(graph_t& g, vertex_handle_t root) {
     return std::vector<std::byte>(b.begin(), b.end());
 }
 
+/**
+ * @brief The direct children of `/s` the fixture registers — `/s/a` and `/s/b`. `read_children_
+ *        folded` frames one POINT header per registered child PLUS the outer listing header, so
+ *        the seam draw count on that path is this + 1.
+ */
+constexpr int kDirectChildCount = 2;
+
+/** @brief The folded `:children` bytes, flattened — the `:children` differential comparand. */
+std::vector<std::byte> children_bytes(graph_t& g, vertex_handle_t parent) {
+    const auto r = g.read_children_folded(parent);
+    if (!r) return {};
+    const view_t flat = r->flatten();
+    const std::span<const std::byte> b = flat.bytes();
+    return std::vector<std::byte>(b.begin(), b.end());
+}
+
 }  // namespace
 
 /** @brief Run the #831 folded-READ value-seam ablation. */
@@ -337,6 +359,103 @@ int main() {
         const std::vector<std::byte> b = folded_bytes(pool_g, pool_root);
         check(!a.empty(), "the default-path folded read produces bytes");
         check(a == b, "pool-backed and default folded replies are byte-identical");
+    }
+
+    // (d) The SAME defect class on the OTHER folded read: `read_children_folded` frames one
+    // POINT header per registered child plus the outer listing header, and the wire ":children"
+    // READ routes THERE, not to read_subtree_folded. Same instrument, same order — routing
+    // first, and on the old `view::over_bytes` code served() is 0.
+    {
+        arming_backend_t be;
+        graph_t g(std::pmr::get_default_resource(), &be);
+        const vertex_handle_t root = build_subtree(g, payload);
+        check(be.served() == 0, "no write in the fixture touches the value seam (:children arm)");
+        const auto r = g.read_children_folded(root);
+        check(r.has_value(), "the folded :children read succeeds through the injected backend");
+        check(be.served() == kDirectChildCount + 1,
+              "one seam draw per registered child, plus the outer listing header");
+        check(be.all_served_size(kShortHeaderBytes),
+              "every :children seam draw is exactly the POINT header width");
+        check(be.refusals() == 0, "an unarmed backend refuses nothing on the :children fold");
+    }
+
+    // ...and through the PRODUCTION wire route — the ":children" field READ, the path a peer
+    // actually reaches this code by. Without this the fix could be proven only on a direct call.
+    {
+        arming_backend_t be;
+        graph_t g(std::pmr::get_default_resource(), &be);
+        (void)build_subtree(g, payload);
+        const auto r = g.read(path_t("/s:children"));
+        check(r.has_value(), "the production :children field read succeeds");
+        check(be.served() == kDirectChildCount + 1,
+              "the wire :children READ draws its headers from the injected seam");
+    }
+
+    // ...and NOT the global heap, by the same strict differential as (a2): the identical
+    // ":children" fold over a POOL-backed graph makes exactly 2 fewer global allocations per
+    // framed header (the heap backend spends one global `new` on the bytes and one on the
+    // `segment_t`, where the pool carves both from its slab). On the old code the arms are equal.
+    {
+        graph_t heap_g;
+        const vertex_handle_t heap_root = build_subtree(heap_g, payload);
+        scratch_pool_t sp(/*slot=*/64);
+        graph_t pool_g(std::pmr::get_default_resource(), &sp.pool);
+        const vertex_handle_t pool_root = build_subtree(pool_g, payload);
+        (void)children_bytes(heap_g, heap_root);  // warm both arms outside the count
+        (void)children_bytes(pool_g, pool_root);
+
+        g_allocs = 0;
+        g_arm = true;
+        (void)children_bytes(heap_g, heap_root);
+        const std::size_t heap_arm = g_allocs;
+        g_allocs = 0;
+        (void)children_bytes(pool_g, pool_root);
+        const std::size_t pool_arm = g_allocs;
+        g_arm = false;
+
+        std::printf("    (:children global new: heap arm %zu, pool arm %zu)\n", heap_arm, pool_arm);
+        check(pool_arm < heap_arm, "a pool-backed :children fold hits the global heap LESS");
+        check(heap_arm - pool_arm == 2u * static_cast<std::size_t>(kDirectChildCount + 1),
+              "the difference is exactly the member+outer header count (2 global news each)");
+    }
+
+    // (e) EXHAUSTION on the :children fold, answered BY VALUE. Fully refusing first, then a LATE
+    // refusal (serve every member header, refuse only the OUTER one) — a truncated listing must
+    // never be returned under an OK status.
+    {
+        arming_backend_t be;
+        graph_t g(std::pmr::get_default_resource(), &be);
+        const vertex_handle_t root = build_subtree(g, payload);
+        be.arm();
+        const auto r = g.read_children_folded(root);
+        check(be.refusals() > 0, "the armed backend WAS consulted on the :children fold");
+        check(!r.has_value() && r.error() == status_t::BACKPRESSURE,
+              "a refused member header degrades to BACKPRESSURE by value");
+    }
+    {
+        arming_backend_t be;
+        graph_t g(std::pmr::get_default_resource(), &be);
+        const vertex_handle_t root = build_subtree(g, payload);
+        be.serve_first(kDirectChildCount);  // every member header, then refuse the outer one
+        const auto r = g.read_children_folded(root);
+        check(be.served() == kDirectChildCount, "the seam served every member header");
+        check(!r.has_value() && r.error() == status_t::BACKPRESSURE,
+              "a refused OUTER header rejects the whole listing, never a truncated one");
+    }
+
+    // (f) The :children differential oracle — pool-backed and default listings are byte-identical
+    // (the invariant; green either way by design, and the guard that this is a source-of-bytes
+    // fix and not a framing change).
+    {
+        graph_t heap_g;
+        const vertex_handle_t heap_root = build_subtree(heap_g, payload);
+        scratch_pool_t sp(/*slot=*/64);
+        graph_t pool_g(std::pmr::get_default_resource(), &sp.pool);
+        const vertex_handle_t pool_root = build_subtree(pool_g, payload);
+        const std::vector<std::byte> a = children_bytes(heap_g, heap_root);
+        const std::vector<std::byte> b = children_bytes(pool_g, pool_root);
+        check(!a.empty(), "the default-path :children fold produces bytes");
+        check(a == b, "pool-backed and default :children listings are byte-identical");
     }
 
     std::printf("%s\n", g_failures == 0 ? "ALL PASS" : "FAILURES");
