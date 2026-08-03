@@ -976,16 +976,26 @@ template <class N>
     // re-resolution, no nearest match, no retry against a different vertex. The origin still
     // holds the canonical path the binding was minted from, and re-resolving canonically and
     // re-minting is its recovery, not this node's. (§5.3's NACK carrying the failing hop
-    // index is deferred with the forwarder branch: §9.2's spelling question is still open,
-    // and a drop is already the conformant behaviour — the NACK only makes it faster.)
+    // index is still deferred: §9.2's spelling question is open, and a drop is already the
+    // conformant behaviour — the NACK only makes the origin's recovery faster.)
+    //
+    // **This is the TERMINUS tier, and the forwarder hop is not here.** A residual longer
+    // than one element is a hop, and a hop needs a LINK — which this tier does not have and
+    // must not grow, because it is instantiated for a graph with no transports at all
+    // (`op_resolver_t` is the local op applier). The hop therefore lives one layer out, in
+    // `fwd_router_t::route_bound_forward`, which owns the child registry and consumes the
+    // element before the frame ever reaches this call. A long residual arriving HERE means it
+    // came from a caller that is not the router — a direct resolve, a test, an embedder's own
+    // sink — and for that caller the answer is unchanged and correct: this node is not a
+    // forwarder for the frame, so it drops it rather than guessing which element is its own.
     if (req.dst_bound) {
         if (!req.dst.spans_intact()) return std::unexpected(status_t::BACKPRESSURE);
         const std::span<const std::byte> elems = req.dst.body();
         // Exactly one element reaches a terminus: each hop consumes element 0 and forwards the
         // remainder (§4.1), so what is left here is the last element — this node's own
-        // reference to the target vertex. A longer residual means this node is a FORWARDER for
-        // a bound path, which this node does not do; an empty one is a route with no hops,
-        // which the codec deliberately admits and the router refuses (§9.4 `ref-empty`).
+        // reference to the target vertex. A longer residual is a hop the router already took
+        // (see above); an empty one is a route with no hops, which the codec deliberately
+        // admits and the router refuses (§9.4 `ref-empty`).
         if (wire::path_ref_element_count(elems.size()) != 1)
             return std::unexpected(status_t::INVALID_PATH);
         const wire::path_ref_element_t e = wire::path_ref_element_at(elems, 0);

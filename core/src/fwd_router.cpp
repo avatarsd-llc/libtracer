@@ -580,6 +580,12 @@ bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_sou
         // segment, which is what keeps two buses' same-named peers distinct on the way back.
         // Departure seam (RFC-0009 §D extended): a bus peer that hangs up carries its
         // own name, and label state is keyed by that name, so link_down still takes the peer.
+        // No `conn_slot` is recorded for a BUS child, and that is the RFC-0024 §5 refusal
+        // rather than an omission: a bus mount's own NAME is not a routable next-hop
+        // (ADR-0073 §3 / RFC-0020 — its `send()` BROADCASTS), and a bus PEER has no vertex at
+        // all, so there is nothing an element could name here. A bound route over a bus fails
+        // validation at this hop and the origin falls back to canonical, which is exactly what
+        // the canonical spelling already does with the bus link's own name.
         child_rx_ctx_t& bctx =
             child_rx_.emplace_back(this, name, registry_.mount_run_for(name), rx);
         bus->set_peer_down_notifier(
@@ -607,6 +613,15 @@ bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_sou
     // Point-to-point: the inbound NAME is fixed per child, carried by a stable
     // per-child ctx (child_rx_ holds the address for the transport's lifetime).
     child_rx_ctx_t& ctx = child_rx_.emplace_back(this, name, registry_.mount_run_for(name), rx);
+    // The bound-path join (RFC-0024 §5.1), resolved ONCE here: the child's mount run IS the
+    // canonical key of its connection vertex, so this is one map lookup of bytes already in
+    // hand. A child whose vertex does not exist yet keeps `kNoConnSlot` and is simply not
+    // bindable — a bound route through it fails validation and the origin falls back, which
+    // is the degrade every other refusal in this design takes.
+    if (const std::optional<graph::vertex_handle_t> v = graph_.find(ctx.mount_tlv)) {
+        if (const std::optional<graph::vertex_slot_t> slot = graph_.vertex_slot(*v))
+            ctx.conn_slot = slot->index;
+    }
     // Departure seam (RFC-0009 §D extended): the same stable ctx carries the child's
     // NAME to link_down when the transport reports its one connection dead.
     link.set_down_notifier(
@@ -708,6 +723,145 @@ void fwd_router_t::send_compact(std::string_view link_name, std::uint16_t label,
     if (transport_t* const link = registry_.by_name(link_name)) emit_compact(*link, label, payload);
 }
 
+// --- bound paths (RFC-0024) --------------------------------------------------
+
+const fwd_router_t::child_rx_ctx_t* fwd_router_t::ctx_by_name(std::string_view link_name) const {
+    for (const child_rx_ctx_t& c : child_rx_)
+        if (c.name == link_name) return &c;
+    return nullptr;
+}
+
+const fwd_router_t::child_rx_ctx_t* fwd_router_t::ctx_by_conn_slot(std::uint32_t index) const {
+    // A linear pass over the CHILDREN — one `u32` compare each, and the table is the node's
+    // link count, not its traffic. It replaces the canonical descent's registry scan on this
+    // frame rather than adding to it: a bound hop runs this instead of `resolve_mount_at`, not
+    // as well as, so the per-hop work is strictly the smaller of the two (RFC-0024 §3.4).
+    if (index == kNoConnSlot) return nullptr;
+    for (const child_rx_ctx_t& c : child_rx_)
+        if (c.conn_slot == index) return &c;
+    return nullptr;
+}
+
+std::optional<wire::path_ref_element_t> fwd_router_t::connection_ref(
+    std::string_view link_name) const {
+    const child_rx_ctx_t* const ctx = ctx_by_name(link_name);
+    if (ctx == nullptr || ctx->conn_slot == kNoConnSlot) return std::nullopt;
+    const std::optional<graph::vertex_slot_t> slot = graph_.vertex_slot_at(ctx->conn_slot);
+    if (!slot) return std::nullopt;  // saturated ⇒ permanently unbindable (§4.4 rule 3)
+    return wire::path_ref_element_t{.index = slot->index, .generation = slot->generation};
+}
+
+std::optional<wire::path_ref_element_t> fwd_router_t::hop_mint(
+    std::string_view inbound_name, const child_rx_ctx_t* inbound_ctx) const {
+    // The link a REPLY arrived on IS the link its request went out on, so the connection
+    // vertex this hop selected on the way in is the one it answers with on the way back —
+    // read from the frame's own arrival, never from a per-flow table (there is none).
+    const child_rx_ctx_t* const ctx =
+        inbound_ctx != nullptr ? inbound_ctx : ctx_by_name(inbound_name);
+    if (ctx == nullptr || ctx->conn_slot == kNoConnSlot) return std::nullopt;
+    const std::optional<graph::vertex_slot_t> slot = graph_.vertex_slot_at(ctx->conn_slot);
+    if (!slot) return std::nullopt;
+    return wire::path_ref_element_t{.index = slot->index, .generation = slot->generation};
+}
+
+transport_t* fwd_router_t::bound_egress(wire::path_ref_element_t e, std::string_view caller,
+                                        graph::acl_right_t right) const {
+    // §5.1 in order: bounds, generation (both inside `deref_vertex_slot`, which also refuses a
+    // saturated element), then the ACL at the DEREFERENCED vertex. Order matters only in that
+    // the authorization comes last and is never skipped — a generation match authorizes
+    // nothing (§6.2).
+    const std::optional<graph::vertex_handle_t> v = graph_.deref_vertex_slot(e.index, e.generation);
+    if (!v) return nullptr;
+    if (!graph_.allows(*v, caller, right)) return nullptr;
+    const child_rx_ctx_t* const ctx = ctx_by_conn_slot(e.index);
+    if (ctx == nullptr) return nullptr;  // a vertex, but not one of this node's egresses
+    const child_registry_t::child_t* const child = registry_.entry_by_name(ctx->name);
+    if (child == nullptr || child->multi_peer.load(std::memory_order_relaxed)) return nullptr;
+    return child->link.load(std::memory_order_acquire);  // null ⇒ tombstoned ⇒ drop
+}
+
+bool fwd_router_t::adopt_binding(graph::path_t& path, std::string_view link_name,
+                                 const wire::tlv_t& reply) {
+    // The mint answer is the reply's LAST child (RFC-0024 §7.1), so a reply that carries none
+    // ends here and the path stays canonical — a request is a hint, never an obligation.
+    if (reply.children.empty()) return false;
+    const tlv_t& last = reply.children.back();
+    if (last.type != type_t::PATH_REF) return false;
+    const std::size_t n = wire::path_ref_element_count(last.payload.size());
+    if (n == 0) return false;
+    // Element 0 is this node's own, and nobody else could have written it: the hop out of the
+    // origin is the one hop no peer ever sees (§4.1).
+    const std::optional<wire::path_ref_element_t> own = connection_ref(link_name);
+    if (!own) return false;
+    std::vector<wire::path_ref_element_t> elements;
+    elements.reserve(n + 1);
+    elements.push_back(*own);
+    for (std::size_t i = 0; i < n; ++i)
+        elements.push_back(wire::path_ref_element_at(last.payload, i));
+    return path.bind(elements);
+}
+
+std::optional<fwd_router_t::bound_dispatch_t> fwd_router_t::bound_dispatch(
+    const graph::path_t& path, graph::acl_right_t right) const {
+    const graph::path_binding_t& b = path.binding();
+    if (!b.bound || b.elements.empty()) return std::nullopt;
+    // The origin's caller is local, so the subject context is empty — the trusted-caller
+    // convention every other local API here uses. The check still runs: it is the same one
+    // line a forwarder runs, and having ONE of them is what keeps the two from drifting.
+    transport_t* const link = bound_egress(b.elements.front(), {}, right);
+    if (link == nullptr) return std::nullopt;
+    bound_dispatch_t out;
+    out.link = link;
+    if (!wire::emit_path_ref(out.dst,
+                             std::span<const wire::path_ref_element_t>(b.elements).subspan(1)))
+        return std::nullopt;
+    return out;
+}
+
+template <class Cursor>
+bool fwd_router_t::route_bound_forward(std::string_view inbound_name,
+                                       const child_rx_ctx_t* inbound_ctx, bool from_peer,
+                                       const Cursor& cur) {
+    fwd_pre_t pre;
+    const std::optional<std::size_t> count = peek_fwd_dst_ref(cur, pre);
+    if (!count) return false;       // not a bound `dst` at all
+    if (*count <= 1) return false;  // 0 or 1 element: this node is the terminus, not a forwarder
+    // The op's own right, at the dereferenced vertex (§6.2). AWAIT reads, so it asks for READ;
+    // a REPLY carries no right of its own — it is the answer to an op already authorized at
+    // every gate on the way in — and a bound REPLY is not a shape this node ever emits, so it
+    // is refused rather than guessed at.
+    const std::optional<graph::fwd_op_t> op = peek_fwd_op(cur);
+    if (!op) return true;  // a bound `dst` with no readable op is malformed ⇒ drop
+    graph::acl_right_t right = graph::acl_right_t::READ;
+    switch (*op) {
+        case fwd_op_t::READ:
+        case fwd_op_t::AWAIT:
+            right = graph::acl_right_t::READ;
+            break;
+        case fwd_op_t::WRITE:
+            right = graph::acl_right_t::WRITE;
+            break;
+        case fwd_op_t::REPLY:
+            return true;  // drop
+    }
+    const wire::path_ref_element_t e = read_path_ref_element(cur, pre.dst_body_off);
+    transport_t* const child = bound_egress(e, inbound_name, right);
+    // §5.3: no re-resolution, no nearest match, no retry against a different vertex, and NO
+    // fall-through to the terminus — a bound frame this node cannot route is dropped, and the
+    // origin's recovery is the canonical path it still holds.
+    //
+    // Honest about what this line is: today it is a REDUNDANT EARLY-OUT, not a proven guard.
+    // Ablated to `return false`, no test moves, because the terminus tier refuses a residual
+    // that is not exactly one element and drops it too (`op_resolve_walk.hpp`) — the same
+    // outcome by a longer road. It is written this way so the POLICY lives where the decision
+    // is made rather than being inherited from a downstream refusal that is free to change,
+    // and nothing may cite it as a measured guard. The refusals it reports — the deref, the
+    // ACL, the egress lookup — are each pinned by ablation in `bound_forward_test`.
+    if (child == nullptr) return true;
+    route_fwd_forward(inbound_name, inbound_ctx, from_peer, 0, cur, *child, &pre);
+    return true;
+}
+
 void fwd_router_t::on_frame(std::string_view inbound_name, std::span<const std::byte> frame) {
     on_frame_impl(inbound_name, frame, nullptr);
 }
@@ -799,6 +953,11 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
             if (reply_cb_ != nullptr) reply_cb_(reply_ctx_, frame);
             return;
         }
+        // A BOUND `dst` with a residual longer than one element: this node is a FORWARDER for
+        // it (RFC-0024 §4.1). Tried before the terminus conclusion below, because a bound
+        // forward and a bound terminus are told apart by the element COUNT and by nothing
+        // else — and getting that wrong the other way would apply a passing operation here.
+        if (route_bound_forward(inbound_name, inbound_ctx, from_peer, cur)) return;
         // A structured FWD whose `dst` is NOT a canonical PATH of NAMEs. `peek_fwd_dst` is
         // the mount descent's gate, not a frame classifier: it says "this frame has an
         // address this node can descend", and a BOUND dst (`PATH_REF`, RFC-0024 §5) has no
@@ -857,7 +1016,10 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
                 reject_bus_name_hop(registry_, inbound_name, frame);
                 return;
             }
-            // The dst names no mount ⇒ this node is the terminus.
+            // The dst names no mount ⇒ this node is the terminus — unless the dst is BOUND
+            // with more than one element left, in which case this node is a forwarder for it
+            // (RFC-0024 §4.1) and the descent above never had an address it could read.
+            if (route_bound_forward(inbound_name, inbound_ctx, from_peer, cur)) return;
         }
         if (peek_fwd_op(cur) == fwd_op_t::REPLY) {
             // The accumulated return route is fully consumed — this node is the
@@ -959,15 +1121,26 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
                                : std::span<const std::byte>{};
     const child_registry_t::child_t* const inbound =
         inbound_ctx != nullptr ? nullptr : registry_.entry_by_name(inbound_name);
+    // This hop's mint contribution, on a forwarded REPLY that already carries a `PATH_REF`
+    // (RFC-0024 §7.1 step 2). Computed here rather than inside the rebuild because it is a
+    // GRAPH fact — this node's own reference to the connection vertex for the link the reply
+    // came back over — and the rebuild knows only bytes. Requesting it costs one bounds-checked
+    // read of a slot index recorded at registration; a node with nothing to give answers
+    // `nullopt` and the reply is forwarded unchanged, which is what a hop that does not
+    // participate looks like on the wire.
+    const std::optional<wire::path_ref_element_t> mint = peek_fwd_op(cur_src) == fwd_op_t::REPLY
+                                                             ? hop_mint(inbound_name, inbound_ctx)
+                                                             : std::nullopt;
+    const wire::path_ref_element_t* const mint_p = mint ? &*mint : nullptr;
     const auto rebuilt =
         !mount.empty()
             ? rebuild_fwd_forward(cur_src, mount, from_peer ? inbound_name : std::string_view{},
-                                  strip_k, pre)
+                                  strip_k, pre, mint_p)
         : inbound != nullptr && !inbound->mount_tlv.empty()
             ? rebuild_fwd_forward(cur_src, std::span<const std::byte>(inbound->mount_tlv),
-                                  std::string_view{}, strip_k, pre)
-            : rebuild_fwd_forward(cur_src, std::span<const std::byte>{}, inbound_name, strip_k,
-                                  pre);
+                                  std::string_view{}, strip_k, pre, mint_p)
+            : rebuild_fwd_forward(cur_src, std::span<const std::byte>{}, inbound_name, strip_k, pre,
+                                  mint_p);
     if (!rebuilt) return;        // not a forwardable FWD ⇒ drop (callers pre-peeked)
     if (!rebuilt->ok()) return;  // malformed oversized op ⇒ drop, no overrun
 
