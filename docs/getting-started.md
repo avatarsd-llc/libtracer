@@ -43,10 +43,10 @@ first build; the rest of the module set is enumerated in
 
 | option | default | what it selects |
 | --- | --- | --- |
-| `BUILD_TESTING` | unset (off) | compiles `core/tests` and registers the example programs as `example_*` smoke tests (`core/CMakeLists.txt:380`) |
-| `LIBTRACER_BUILD_EXAMPLES` | on when libtracer is the top-level project | compiles the seven programs under `core/examples/` (`core/CMakeLists.txt:387`) |
+| `BUILD_TESTING` | unset (off) | compiles `core/tests` and registers the example programs as `example_*` smoke tests (`core/CMakeLists.txt:388`) |
+| `LIBTRACER_BUILD_EXAMPLES` | on when libtracer is the top-level project | compiles the seven programs under `core/examples/` (`core/CMakeLists.txt:395`) |
 | `LIBTRACER_NET_PLANE` | `ON` | the FWD routing plane — `op_resolve`, `route_handle`, `fwd_router_t`, `transport_vertex` (`core/CMakeLists.txt:63`) |
-| `LIBTRACER_WITH_QUIC` | `OFF` | configures the separate `libtracer_quic` target (QUIC and WebTransport); needs msquic installed (`core/CMakeLists.txt:283`) |
+| `LIBTRACER_WITH_QUIC` | `OFF` | configures the separate `libtracer_quic` target (QUIC and WebTransport); needs msquic installed (`core/CMakeLists.txt:291`) |
 
 Two of the seven examples — `two_node_fwd` and `tree_of_ropes` — are built and
 registered only under `LIBTRACER_NET_PLANE`, so `ctest -R example_` runs five of seven
@@ -77,7 +77,7 @@ target_link_libraries(app PRIVATE libtracer::libtracer)
 ```
 
 The package version file is written with `COMPATIBILITY SameMinorVersion`
-(`core/CMakeLists.txt:369-372`): pre-1.0, a minor bump may break the C++ API, so a
+(`core/CMakeLists.txt:377-380`): pre-1.0, a minor bump may break the C++ API, so a
 request for one minor never silently accepts another. The repository version is
 `0.6.0`; asking for `0.3` against it fails to configure.
 
@@ -154,7 +154,7 @@ loses the allocation-failure signal that `std::optional` carries.
 published value returns a reference to it; a read that composes a new value returns the
 value* — which is why `read_children_folded` and its siblings still return a `rope_t`.
 Under an injected `std::pmr::memory_resource` an outstanding `value_ref_t` **pins** the
-value it names (`core/include/libtracer/vertex.hpp:141-144`), so a long-lived reference
+value it names (`core/include/libtracer/vertex.hpp:142-145`), so a long-lived reference
 holds the graph's memory; take the bytes and drop it.
 
 ```{note}
@@ -188,7 +188,7 @@ auto r = g.await(temp, std::chrono::seconds{2});
 The callback form is sugar over the primitive
 `subscribe(const path_t&, subscriber_fn_t fn, void* ctx)` with
 `subscriber_fn_t = void (*)(void*, const rope_t&)`
-(`core/include/libtracer/vertex.hpp:572`). The sugar takes the callable as `F&`
+(`core/include/libtracer/vertex.hpp:573`). The sugar takes the callable as `F&`
 (`core/include/libtracer/graph.hpp:792-795`), so a temporary lambda written inline at
 the call site does not compile — and would dangle if it did. **Lifetime obligation:**
 the bound callable is the `ctx`, and `ctx` must outlive every possible delivery;

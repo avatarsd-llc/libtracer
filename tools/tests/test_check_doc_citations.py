@@ -87,13 +87,13 @@ class TemplateExtensionTest(unittest.TestCase):
     """`config.hpp.in` — the knob declarations the configuration pages cite."""
 
     def test_dot_in_template_resolves(self):
-        self.assertEqual(locs("`config.hpp.in:214`"),
-                         {"core/include/libtracer/config.hpp.in:214"})
+        self.assertEqual(locs("`config.hpp.in:237`"),
+                         {"core/include/libtracer/config.hpp.in:237"})
 
     def test_the_template_does_not_truncate_to_the_generated_header(self):
         # The extension alternation is ordered longest-first; a `.hpp` match on
         # `config.hpp.in` would silently pin the wrong (generated, untracked) file.
-        self.assertNotIn("core/include/libtracer/config.hpp:214", locs("`config.hpp.in:214`"))
+        self.assertNotIn("core/include/libtracer/config.hpp:237", locs("`config.hpp.in:237`"))
 
     def test_source_map_indexes_the_template_by_its_full_basename(self):
         with tempfile.TemporaryDirectory() as root:

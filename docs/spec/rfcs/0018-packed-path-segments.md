@@ -286,11 +286,11 @@ call sites. The named loci: `fwd_frame_view.hpp` (both `peek_fwd_dst_segs` overl
 (`path_key`), `graph.cpp` (`parse_subscriber_tlv`), `child_registry.hpp` (`encode_mount_name`),
 `path.cpp`, `key_view.hpp`.
 
-**Vertex-map key.** The graph key **is** the `PATH` body (`path.hpp:114,124`; `graph.cpp:1637`;
-`vertex.hpp:535` subscription keys), so it moves with the encoding. A `/sensor/temp` key goes
+**Vertex-map key.** The graph key **is** the `PATH` body (`path.hpp:114,124`; `graph.cpp:1646`;
+`vertex.hpp:536` subscription keys), so it moves with the encoding. A `/sensor/temp` key goes
 18 B → 12 B. **RAM effect: UNMEASURED**, and this project's own record says a static-RAM census
 belongs on rv32, not host — and that `std::vector` has no small-buffer optimisation
-(`vertex.hpp:541`), so logical bytes are not heap bytes.
+(`vertex.hpp:542`), so logical bytes are not heap bytes.
 
 **Bindings.** Rust: 5 files (`path.rs`, `fwd.rs`, `tlv_builders.rs`, `structured.rs`, `lib.rs`) —
 `path.rs:95-98` currently returns `TypeMismatch` on a non-`NAME` child and must be rewritten to a
@@ -299,7 +299,7 @@ body walk. TypeScript: `client/src/tlv.ts`, `fwd.ts`, `topology.ts`, `client.ts`
 already says the codec does not enforce the child-type rule; with a packed body there is nothing
 to not-enforce.
 
-**Wireshark.** `tools/wireshark/libtracer.lua`'s `PATH` handler (`:357-370`) joins `type == 0x02`
+**Wireshark.** `tools/wireshark/libtracer.lua`'s `PATH` handler (`:358-371`) joins `type == 0x02`
 children; it must walk the packed body. Its checked-in `sample.pcap` needs regeneration.
 
 **Docs.** `v1.md` §3.1.1 clause 1 and §3.1.2's NAME-child bullets; `05-protocol-tlvs.md` §`0x06`
@@ -336,9 +336,9 @@ This RFC does not need that clause narrowed. It needs it **re-pointed**:
 - **§3.1.5**'s inline-NAMEs / reference-NAMEs strategies both still satisfy §3.1.1; its
   "wire bytes MUST be identical regardless of strategy" guarantee is unchanged.
 
-**Reversal on the record.** [RFC-0004](0004-remote-operation-addressing.md):133 states *"`PATH`
+**Reversal on the record.** [RFC-0004](0004-remote-operation-addressing.md):134 states *"`PATH`
 (`0x06`) is **untouched** — its 'children MUST be NAME' invariant and every existing parser
-stand"*, and :211 rejected extending `0x06` because it *"breaks `PATH`'s 'children MUST be NAME'
+stand"*, and :212 rejected extending `0x06` because it *"breaks `PATH`'s 'children MUST be NAME'
 invariant and touches every existing `PATH`/`SUBSCRIBER`/`ROUTER` parser."* [RFC-0017](0017-element-addressing-value-plane-index.md)
 re-affirmed it. **This RFC reverses that rejection**, and does so explicitly rather than silently.
 The reversal is justified on two grounds RFC-0004 did not have: the freeze is lifted, and

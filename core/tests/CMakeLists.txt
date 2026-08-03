@@ -278,6 +278,17 @@ libtracer_test_warnings(net_control_plane_race_test)
 add_test(NAME net_control_plane_race COMMAND net_control_plane_race_test)
 set_tests_properties(net_control_plane_race PROPERTIES RUN_SERIAL TRUE TIMEOUT 300)
 
+# The published edge array + its edge pin (#635): a snapshot sees the old or the new edge
+# set and never a torn mixture, an unsubscribe stops delivering at once, the pin is never
+# held across a dispatch, and the retire list is flushed at teardown. Read by the TSan leg
+# (the announce/validate protocol) and the ASan/LSan leg (nothing freed under a reader,
+# nothing parked forever). RUN_SERIAL: it saturates every core on purpose.
+add_executable(edge_publish_test edge_publish_test.cpp)
+target_link_libraries(edge_publish_test PRIVATE libtracer Threads::Threads)
+libtracer_test_warnings(edge_publish_test)
+add_test(NAME edge_publish COMMAND edge_publish_test)
+set_tests_properties(edge_publish PROPERTIES RUN_SERIAL TRUE TIMEOUT 300)
+
 add_executable(registry_teardown_test registry_teardown_test.cpp)
 target_link_libraries(registry_teardown_test PRIVATE libtracer)
 libtracer_test_warnings(registry_teardown_test)

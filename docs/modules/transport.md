@@ -92,7 +92,7 @@ kind keeps the `nullptr` default.
 ## QUIC and WebTransport
 
 Both live in the separate `libtracer_quic` target, configured by
-`LIBTRACER_WITH_QUIC` (`core/CMakeLists.txt:283`, default `OFF` because msquic must
+`LIBTRACER_WITH_QUIC` (`core/CMakeLists.txt:291`, default `OFF` because msquic must
 be installed). Core itself contains no `#ifdef` and no msquic reference: the module
 extends the transport catalog through `register_transport_type`, registering
 `quic_transport_factory()` under kind `quic` and `webtransport_transport_factory()`

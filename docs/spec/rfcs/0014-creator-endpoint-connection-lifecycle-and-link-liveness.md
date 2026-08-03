@@ -59,7 +59,7 @@ This unblocks the transport-link half of
   **not** supply). Un-stubbing tracks **#82** (the code's cited issue) and **#407**.
 - **The current creation path is the superseded spelling.** `transport_vertex_t` registers ONE
   global `client`/`listener` catalog through `register_child_type` as a `:children[]` target on
-  `/net` (`graph.cpp:1583`), and the `quic` module extends the *same* catalog via
+  `/net` (`graph.cpp:1592`), and the `quic` module extends the *same* catalog via
   `register_transport_type` with a `kind` selector (open/closed). RFC-0014 keeps that module
   ownership but **replaces the single-global-catalog mechanism** with a per-*(transport, role)*
   module endpoint (§1); the per-module structure, the positional role, and `conn:schema`-as-catalog
@@ -69,7 +69,7 @@ This unblocks the transport-link half of
 
 > **Implementation status.** Except where noted, this describes **new mechanism**. Today connections
 > register flat at `/net/<name>` (not `/net/<module>/<name>`), the catalog is a single global
-> `:children[]` target, `:schema` is whole-vertex-only (`graph.cpp:1904`, `size()==1`), `set_link_state`
+> `:children[]` target, `:schema` is whole-vertex-only (`graph.cpp:1913`, `size()==1`), `set_link_state`
 > is a manual binary up/down bool, and no refcount / dormancy / self-heal exists. Per the clause-kind
 > rule (see Discussion) the byte-level clauses here are **proposed pending** code + conformance
 > vectors.

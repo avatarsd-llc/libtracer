@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "libtracer/config.hpp"
+#include "libtracer/edge_pin.hpp"
 #include "libtracer/lkv_slot.hpp"
 #include "libtracer/path.hpp"
 #include "libtracer/rope.hpp"
@@ -619,8 +620,8 @@ struct subscriber_remote_t {
  * @brief A subscription edge's canonical PATH key — **immutable and refcount-shared**.
  *
  * Shared rather than owned because the dispatch snapshot must outlive a concurrent
- * unsubscribe: @ref vertex_t::snapshot_edges copies each active slot out under the vertex
- * lock so the graph can dispatch OUTSIDE it, and the slot may be cleared in between. A
+ * unsubscribe: @ref vertex_t::snapshot_edges copies each active slot out under an edge pin
+ * so the graph can dispatch after releasing it, and the slot may be cleared in between. A
  * deep copy satisfied that and cost a **malloc + free per edge per delivery** — a
  * `std::vector` has no small-buffer optimisation, so every non-null key allocated, which is
  * the ordinary local-binding case (`/sensor/temp:subscribers[] -> /dev/ctrl0/in/temp`).
@@ -710,10 +711,10 @@ struct subscriber_t {
 /**
  * @brief The dispatch-relevant snapshot of one ACTIVE subscription edge.
  *
- * What @ref vertex_t::snapshot_edges copies out under the vertex lock so the graph can
- * dispatch OUTSIDE it (callbacks / re-dispatch re-enter the graph): the `{fn, ctx}`
- * callback pair, owning copies of the link / caller strings (the slot may be cleared
- * concurrently once dispatch runs outside the lock), and refcount CLONES of the target
+ * What @ref vertex_t::snapshot_edges copies out under an edge pin so the graph can
+ * dispatch with the pin released (callbacks / re-dispatch re-enter the graph): the
+ * `{fn, ctx}` callback pair, owning copies of the link / caller strings (the slot may be
+ * cleared concurrently once dispatch runs), and refcount CLONES of the target
  * key and the stored return route (ADR-0041 §2 — a bump, not a byte copy; the clone keeps
  * each alive across a concurrent unsubscribe).
  *
@@ -797,6 +798,176 @@ class edge_snapshot_t {
     alignas(edge_view_t) std::byte raw_[kCapacity * sizeof(edge_view_t)];
     std::size_t n_ = 0; /**< @brief Constructed-view count. */
 };
+
+/**
+ * @brief The COLD wire/gate half of a published edge — null for the plain in-process edge.
+ *
+ * Split out for the reason #380 §3 split `subscriber_remote_t` out of @ref subscriber_t, and
+ * it is not decoration: the fan-out copy loop STREAMS this array, so the entry's width is the
+ * loop's bandwidth. Inlining these four members made the entry 136 B against `subscriber_t`'s
+ * 72 and cost **+23 % on the fan-out-1024 publish** — the wide-fan-out arm, measured, not
+ * predicted. Out of line, an entry is 48 B, and a local edge's copy is the pointer-and-refcount
+ * work `vertex_t::try_edge_view_of` always did.
+ */
+struct pub_remote_t {
+    std::string link;              /**< @brief Remote-delivery link NAME. */
+    view_t return_route{};         /**< @brief Consumer return route (refcount clone). */
+    std::string caller;            /**< @brief The edge's stored ACL fan-in context (#81). */
+    bool delivery_compact = false; /**< @brief RFC-0004 §E.1 label-compaction opt-in. */
+};
+
+/**
+ * @brief One entry of a PUBLISHED edge array: the hot dispatch fields plus a liveness bit.
+ *
+ * Written once, before the array is published, and never touched again — that is what lets a
+ * reader copy it out with no lock. The `active` bit is the ONE mutable word, and it is
+ * MONOTONE: it starts true and an unsubscribe (@ref vertex_t::clear_edge,
+ * @ref vertex_t::evict_link_edges, retirement) flips it to false under the stripe lock. A
+ * reader loads it and skips the entry.
+ *
+ * That single mutable bit is not a hedge on immutability, it removes a failure mode. Without
+ * it every unsubscribe would have to BUILD a smaller array, and an unsubscribe that cannot
+ * allocate would be left publishing an edge the caller has already torn its `callback_ctx`
+ * down behind. With it, dropping an edge is allocation-free and therefore infallible; the
+ * compaction that actually reclaims the dropped entry's refcount clones rides the next
+ * successful publish, where a failure costs nothing but a delayed release.
+ */
+struct pub_edge_t {
+    subscriber_fn_t callback = nullptr;   /**< @brief In-process sink fn (null ⇒ target-only). */
+    void* callback_ctx = nullptr;         /**< @brief The sink's caller-owned context. */
+    target_key_t target_key;              /**< @brief Local re-dispatch target (refcount share). */
+    std::unique_ptr<pub_remote_t> remote; /**< @brief The cold wire half; null for a local edge. */
+    std::atomic<bool> active{true};       /**< @brief Monotone true -> false liveness bit. */
+};
+
+/**
+ * @brief A vertex's published, immutable-after-publish edge array (#635) — what
+ *        @ref vertex_t::snapshot_edges copies out under an edge pin instead of the stripe
+ *        mutex.
+ *
+ * One allocation: this header immediately followed by `count` inline @ref pub_edge_t. The
+ * array is never resized, never reordered and never freed while any participant announces it
+ * (`%edge_pin.hpp`); a control-plane mutation publishes a NEW array and pushes this one onto
+ * the owning block's retire list. `retire_next` is touched only once the array is off the
+ * slot, so it never races the readers.
+ */
+struct alignas(pub_edge_t) edge_pub_t {
+    edge_pub_t* retire_next = nullptr; /**< @brief Retire-list link (off-slot only). */
+    std::uint32_t count = 0;           /**< @brief Constructed entries following this header. */
+
+    /** @brief The inline entry storage. */
+    [[nodiscard]] pub_edge_t* entries() noexcept {
+        return std::launder(reinterpret_cast<pub_edge_t*>(this + 1));
+    }
+    /** @brief The inline entry storage, const. */
+    [[nodiscard]] const pub_edge_t* entries() const noexcept {
+        return std::launder(reinterpret_cast<const pub_edge_t*>(this + 1));
+    }
+};
+
+/**
+ * @brief Allocate an UNFILLED edge array of @p n entries, NOTHROW.
+ *
+ * The caller placement-constructs the entries and bumps `count` as it goes, so a partially
+ * filled array is always destroyable by `destroy_edge_pub`.
+ * @return Null on OOM (#477 — the control-plane verb soft-fails; nothing is published).
+ */
+[[nodiscard]] inline edge_pub_t* alloc_edge_pub(std::size_t n) noexcept {
+    void* raw = ::operator new(sizeof(edge_pub_t) + n * sizeof(pub_edge_t), std::nothrow);
+    if (raw == nullptr) return nullptr;
+    return ::new (raw) edge_pub_t{};
+}
+
+/** @brief Destroy an edge array's constructed entries and free it. Null-safe. */
+inline void destroy_edge_pub(edge_pub_t* p) noexcept {
+    if (p == nullptr) return;
+    pub_edge_t* e = p->entries();
+    for (std::uint32_t i = p->count; i-- > 0;) e[i].~pub_edge_t();
+    p->~edge_pub_t();
+    ::operator delete(static_cast<void*>(p));
+}
+
+/**
+ * @brief A vertex's edge state, allocated on FIRST subscribe and freed with the vertex.
+ *
+ * Pay-for-what-you-use, the #361 §1 discipline: an edgeless vertex — the overwhelming
+ * majority on an MCU node — owns a single null pointer, where it used to own an empty
+ * `std::vector` (24 B on a host, 12 on rv32). The block itself is never displaced or
+ * reclaimed, only its published arrays are, which is why `snapshot_edges` may load it with a
+ * plain acquire and no pin at all.
+ *
+ * @ref slots is the MASTER: the `:subscribers[N]` slot table, index-stable per RFC-0009 §D.2,
+ * mutated only under the vertex stripe mutex exactly as it was before #635. @ref pub is the
+ * dispatch-side projection of it that publishers read without any lock.
+ */
+struct edge_block_t {
+    std::vector<subscriber_t> slots;       /**< @brief The master slot table (stripe-locked). */
+    std::atomic<edge_pub_t*> pub{nullptr}; /**< @brief The published array (null ⇒ no edges). */
+    std::atomic<edge_pub_t*> retired{nullptr}; /**< @brief Displaced arrays awaiting a scan. */
+
+    edge_block_t() = default;
+    edge_block_t(const edge_block_t&) = delete;
+    edge_block_t& operator=(const edge_block_t&) = delete;
+
+    /**
+     * @brief The teardown flush: free the published array AND everything still parked.
+     *
+     * The contract this states, in the same shape ADR-0069 §6 states for the LKV domain: the
+     * graph — and therefore every vertex — must OUTLIVE the threads that published through
+     * it. A thread still inside `snapshot_edges` when its vertex is destroyed is a
+     * use-after-free with or without this mechanism, and the ASan/LSan legs exercise the flush
+     * on the joined-threads side of that line.
+     */
+    ~edge_block_t() {
+        destroy_edge_pub(pub.exchange(nullptr, std::memory_order_acq_rel));
+        for (edge_pub_t* p = retired.exchange(nullptr, std::memory_order_acq_rel); p != nullptr;) {
+            edge_pub_t* next = p->retire_next;
+            destroy_edge_pub(p);
+            p = next;
+        }
+    }
+};
+
+/** @brief Push @p p onto @p head — a wait-free-on-x86 Treiber push; the mutator's thread
+ *         runs it OUTSIDE every lock, so no free ever happens under the stripe mutex. */
+inline void retire_push(std::atomic<edge_pub_t*>& head, edge_pub_t* p) noexcept {
+    edge_pub_t* old = head.load(std::memory_order_relaxed);
+    do {
+        p->retire_next = old;
+    } while (
+        !head.compare_exchange_weak(old, p, std::memory_order_acq_rel, std::memory_order_relaxed));
+}
+
+/**
+ * @brief Free every parked array no participant announces; park the rest again.
+ *
+ * NEVER waits. An array still pinned stays parked until the next mutation's scan or the
+ * block's teardown flush, so parked memory is bounded by (arrays displaced while some reader
+ * is mid-copy) — a control-plane rate times a sub-microsecond window. Run by the MUTATOR, on
+ * its own thread, after the stripe lock is released: the destructors that run here belong to
+ * library types only (an @ref edge_view_t owns strings, a refcount clone and a target key — a
+ * `subscriber_t::callback_ctx` is caller-owned and never destroyed by us), so no embedder code
+ * can execute inside this machinery.
+ */
+inline void scan_retired_edges(edge_block_t& b) noexcept {
+    edge_pub_t* p = b.retired.exchange(nullptr, std::memory_order_acq_rel);
+    edge_pub_t* keep = nullptr;
+    while (p != nullptr) {
+        edge_pub_t* next = p->retire_next;
+        if (detail_ep::is_pinned(p)) {
+            p->retire_next = keep;
+            keep = p;
+        } else {
+            destroy_edge_pub(p);
+        }
+        p = next;
+    }
+    while (keep != nullptr) {
+        edge_pub_t* next = keep->retire_next;
+        retire_push(b.retired, keep);
+        keep = next;
+    }
+}
 
 // The stripe count and the padding width both live in libtracer/config.hpp (ADR-0068):
 // kVertexLockStripes and kCacheLineBytes are ordinary constexprs shared by every TU
@@ -1027,6 +1198,17 @@ class vertex_t {
     /** @brief The no-heap small-fan-out snapshot width (@ref snapshot_edges buffer size). */
     static constexpr std::size_t kInlineFanout = edge_snapshot_t::kCapacity;
 
+    /**
+     * @brief What @ref add_edge answers when the edge could NOT be admitted — the injected
+     *        resource is exhausted (#477: the writer soft-fails by value; a `bad_alloc` under
+     *        `-fno-exceptions` would be an `abort()`, and admission is reachable from a peer's
+     *        bytes since RFC-0014).
+     *
+     * A caller that sees it must NOT count a listener: nothing was appended and nothing was
+     * published, so the vertex is exactly as it was.
+     */
+    static constexpr std::size_t kNoSlot = static_cast<std::size_t>(-1);
+
     /** @brief Construct a vertex with its role, own canonical NAME record (ADR-0057 — one
      *         segment, not the full key), and handlers. The cold extension block is
      *         allocated only if this identity needs one (#361 §1). */
@@ -1038,8 +1220,13 @@ class vertex_t {
     vertex_t(const vertex_t&) = delete;
     vertex_t& operator=(const vertex_t&) = delete;
 
-    /** @brief Free the cold extension block (allocated at most once, ADR-0057 lifetime). */
-    ~vertex_t() { delete ext_.load(std::memory_order_acquire); }
+    /** @brief Free the cold extension block (allocated at most once, ADR-0057 lifetime) and
+     *         flush the edge block's published + parked arrays (`edge_block_t`'s destructor
+     *         states the outlive-the-publishers contract that makes this safe). */
+    ~vertex_t() {
+        delete ext_.load(std::memory_order_acquire);
+        delete edges_.load(std::memory_order_acquire);
+    }
 
     /** @brief This vertex's behavioral role. */
     [[nodiscard]] role_t role() const noexcept { return role_; }
@@ -1518,27 +1705,52 @@ class vertex_t {
      * its freed slots instead of growing `subs_` without bound. Slot indices of
      * ACTIVE edges are never renumbered (§D.2 stability); only a slot already
      * cleared can come to mean a new edge.
-     * @return The occupied slot's index (the `:subscribers[N]` slot number).
+     * The edge is PUBLISHED under the same lock hold, in the position the slot append itself
+     * holds (#635): the caller's `own_subs_` seq_cst bump still precedes this whole verb, so
+     * ADR-0049's Dekker pairing against a skipping publisher is byte-for-byte the one #708
+     * landed. Displaced arrays are scanned AFTER the lock is dropped, on this thread.
+     *
+     * @return The occupied slot's index (the `:subscribers[N]` slot number), or @ref kNoSlot
+     *         when the edge array could not be allocated — nothing was admitted and the
+     *         previously published array is untouched, so the vertex is unchanged.
      */
     std::size_t add_edge(subscriber_t s, edge_latch_t* latch = nullptr) {
-        const std::lock_guard lock(vertex_stripe_of(this).m);
-        std::size_t idx = subs_.size();
-        for (std::size_t i = 0; i < subs_.size(); ++i) {
-            if (!subs_[i].active) {
-                idx = i;
-                break;
+        edge_block_t* b = nullptr;
+        std::size_t idx = kNoSlot;
+        {
+            const std::lock_guard lock(vertex_stripe_of(this).m);
+            b = ensure_edges();
+            if (b == nullptr) return kNoSlot;  // OOM on the block itself: admit nothing
+            std::vector<subscriber_t>& subs = b->slots;
+            idx = subs.size();
+            for (std::size_t i = 0; i < subs.size(); ++i) {
+                if (!subs[i].active) {
+                    idx = i;
+                    break;
+                }
+            }
+            if (idx == subs.size())
+                subs.push_back(std::move(s));
+            else
+                subs[idx] = std::move(s);  // reuse frees the cleared slot's leftovers
+            if (!try_publish_edges(*b)) {
+                // The new edge could not be published. ROLL THE SLOT BACK rather than leave a
+                // subscriber the fan-out will never see: the array still on the slot lists
+                // exactly the pre-existing actives, so undoing the append leaves publisher and
+                // master consistent with each other and with the caller's kNoSlot answer.
+                subscriber_t reclaimed;
+                reclaimed.active = false;
+                subs[idx] = std::move(reclaimed);
+                return kNoSlot;
+            }
+            if (latch != nullptr && subs[idx].policy.durability_request()) {
+                if (std::shared_ptr<const rope_t> lkv = lkv_.load()) {
+                    latch->value = std::move(lkv);
+                    latch->edge = edge_view_of(subs[idx]);
+                }
             }
         }
-        if (idx == subs_.size())
-            subs_.push_back(std::move(s));
-        else
-            subs_[idx] = std::move(s);  // reuse frees the cleared slot's leftovers
-        if (latch != nullptr && subs_[idx].policy.durability_request()) {
-            if (std::shared_ptr<const rope_t> lkv = lkv_.load()) {
-                latch->value = std::move(lkv);
-                latch->edge = edge_view_of(subs_[idx]);
-            }
-        }
+        scan_retired_edges(*b);  // outside the lock, on the mutator's thread — never waits
         return idx;
     }
 
@@ -1548,22 +1760,36 @@ class vertex_t {
      *         RFC-0005 listener bookkeeping).
      */
     bool clear_edge(std::size_t idx) {
-        const std::lock_guard lock(vertex_stripe_of(this).m);
-        if (idx >= subs_.size() || !subs_[idx].active) return false;
-        // RECLAIM in place, not merely deactivate. Flipping `active` alone left the slot's
-        // `target_key` buffer, its `source_view` segment pin and the whole cold `remote`
-        // half resident until an unrelated `add_edge` happened to land on this index — so an
-        // unsubscribed edge kept a frame segment alive indefinitely. This is the same
-        // move-an-inert-shell reclaim @ref evict_link_edges already performs under this very
-        // lock, and it is safe for the same reason: an @ref edge_view_t snapshot owns its
-        // copies and a refcount clone of the route (ADR-0041 §2), so releasing the pin here
-        // can never dangle a dispatch already in flight.
-        //
-        // The 80-byte slot SHELL stays — RFC-0009 §D.2 makes `:subscribers[]` indices
-        // stable, so the vector must not shrink; only the retained state is freed.
-        subscriber_t reclaimed;    // an inert shell: no view, no route, no cold half
-        reclaimed.active = false;  // the slot is free for add_edge reuse
-        subs_[idx] = std::move(reclaimed);
+        edge_block_t* b = nullptr;
+        {
+            const std::lock_guard lock(vertex_stripe_of(this).m);
+            b = edges_locked();
+            if (b == nullptr) return false;
+            std::vector<subscriber_t>& subs = b->slots;
+            if (idx >= subs.size() || !subs[idx].active) return false;
+            // RECLAIM in place, not merely deactivate. Flipping `active` alone left the slot's
+            // `target_key` buffer, its `source_view` segment pin and the whole cold `remote`
+            // half resident until an unrelated `add_edge` happened to land on this index — so
+            // an unsubscribed edge kept a frame segment alive indefinitely. This is the same
+            // move-an-inert-shell reclaim @ref evict_link_edges already performs under this
+            // very lock, and it is safe for the same reason: an @ref edge_view_t snapshot owns
+            // its copies and a refcount clone of the route (ADR-0041 §2), so releasing the pin
+            // here can never dangle a dispatch already in flight.
+            //
+            // The 80-byte slot SHELL stays — RFC-0009 §D.2 makes `:subscribers[]` indices
+            // stable, so the vector must not shrink; only the retained state is freed.
+            subscriber_t reclaimed;    // an inert shell: no view, no route, no cold half
+            reclaimed.active = false;  // the slot is free for add_edge reuse
+            subs[idx] = std::move(reclaimed);
+            // Stop delivering to it AT ONCE and unconditionally (#635): the monotone bit is
+            // allocation-free, so an unsubscribe can never fail to take effect. Republishing
+            // is what actually releases the published entry's own refcount clones, and it is
+            // allowed to fail — the bit already made that a memory question, not a
+            // correctness one.
+            deactivate_published(*b, idx);
+            (void)try_publish_edges(*b);
+        }
+        scan_retired_edges(*b);
         return true;
     }
 
@@ -1602,17 +1828,33 @@ class vertex_t {
      * @return Which case applied — see @ref edge_replace_t.
      */
     edge_replace_t replace_edge(std::size_t idx, subscriber_t s, edge_latch_t* latch = nullptr) {
-        const std::lock_guard lock(vertex_stripe_of(this).m);
-        if (idx >= subs_.size()) return edge_replace_t::OUT_OF_RANGE;
-        const bool was_active = subs_[idx].active;
-        subs_[idx] = std::move(s);  // reclaims the displaced edge's pins in place
-        if (latch != nullptr && subs_[idx].policy.durability_request()) {
-            if (std::shared_ptr<const rope_t> lkv = lkv_.load()) {
-                latch->value = std::move(lkv);
-                latch->edge = edge_view_of(subs_[idx]);
+        edge_block_t* b = nullptr;
+        edge_replace_t result = edge_replace_t::OUT_OF_RANGE;
+        {
+            const std::lock_guard lock(vertex_stripe_of(this).m);
+            b = edges_locked();
+            if (b == nullptr) return edge_replace_t::OUT_OF_RANGE;
+            std::vector<subscriber_t>& subs = b->slots;
+            if (idx >= subs.size()) return edge_replace_t::OUT_OF_RANGE;
+            const bool was_active = subs[idx].active;
+            subs[idx] = std::move(s);  // reclaims the displaced edge's pins in place
+            // The OLD edge must stop receiving before the new one starts, and that half is
+            // infallible; the republish that installs the REPLACEMENT may soft-fail on OOM, in
+            // which case the slot holds the new edge and the publisher delivers to neither
+            // until the next successful mutation (#477 — a dropped delivery, never a delivery
+            // to a torn-down `callback_ctx`).
+            deactivate_published(*b, idx);
+            (void)try_publish_edges(*b);
+            if (latch != nullptr && subs[idx].policy.durability_request()) {
+                if (std::shared_ptr<const rope_t> lkv = lkv_.load()) {
+                    latch->value = std::move(lkv);
+                    latch->edge = edge_view_of(subs[idx]);
+                }
             }
+            result = was_active ? edge_replace_t::REPLACED_ACTIVE : edge_replace_t::FILLED_EMPTY;
         }
-        return was_active ? edge_replace_t::REPLACED_ACTIVE : edge_replace_t::FILLED_EMPTY;
+        scan_retired_edges(*b);
+        return result;
     }
 
     /**
@@ -1633,21 +1875,31 @@ class vertex_t {
      *         from the RFC-0005 listener bookkeeping).
      */
     std::size_t evict_link_edges(std::string_view link) {
-        const std::lock_guard lock(vertex_stripe_of(this).m);
+        edge_block_t* b = nullptr;
         std::size_t n = 0;
-        for (subscriber_t& s : subs_) {
-            if (!s.active || s.remote == nullptr || s.remote->link != link) continue;
-            subscriber_t reclaimed;    // an inert shell: no view, no route, no cold half
-            reclaimed.active = false;  // the slot is free for add_edge reuse
-            s = std::move(reclaimed);  // frees the old slot's retained state in place
-            ++n;
+        {
+            const std::lock_guard lock(vertex_stripe_of(this).m);
+            b = edges_locked();
+            if (b == nullptr) return 0;
+            std::vector<subscriber_t>& subs = b->slots;
+            for (std::size_t i = 0; i < subs.size(); ++i) {
+                subscriber_t& s = subs[i];
+                if (!s.active || s.remote == nullptr || s.remote->link != link) continue;
+                subscriber_t reclaimed;       // an inert shell: no view, no route, no cold half
+                reclaimed.active = false;     // the slot is free for add_edge reuse
+                s = std::move(reclaimed);     // frees the old slot's retained state in place
+                deactivate_published(*b, i);  // infallible: the departed peer stops receiving
+                ++n;
+            }
+            if (n != 0) (void)try_publish_edges(*b);
         }
+        if (n != 0) scan_retired_edges(*b);
         return n;
     }
 
     /**
      * @brief Snapshot every ACTIVE edge's dispatch view into caller storage — the
-     *        snapshot-under-lock half of the snapshot/dispatch-outside discipline.
+     *        snapshot-under-pin half of the snapshot/dispatch-after-release discipline.
      *
      * Small fan-out (the common case, ≤ `kInlineFanout`) placement-constructs into
      * @p inline_buf — no heap allocation AND no dead stack zeroing per publish; a
@@ -1661,6 +1913,20 @@ class vertex_t {
      * whose owning copies cannot be cloned is skipped (that one delivery dropped).
      * The small local fan-out (empty target/link/caller strings) stays allocation-
      * free end to end, so the hot path cannot even reach a probe.
+     * **NO LOCK (#635).** The source is the vertex's PUBLISHED, immutable-after-publish edge
+     * array, read under a bounded per-participant EDGE PIN (`%edge_pin.hpp`) whose scope is
+     * this copy loop and nothing else — released before the caller's first `dispatch_edge`, so
+     * a subscriber callback that re-enters the graph always finds this thread's cell empty
+     * (`pin_t` asserts it). What this deletes is the stripe mutex, which serialised the
+     * publishes of every vertex that merely HASHED to the same stripe: measured at ×16.6 with
+     * NEGATIVE scaling past four threads. What it does not add is any shared-cacheline RMW —
+     * the announcement is a `seq_cst` store to this thread's own isolated cell, which is the
+     * whole reason a refcounted published array was rejected instead.
+     *
+     * Fallback: a thread that cannot claim a pin (more publishers than
+     * `kEdgePinSlots`) copies the CURRENT array under the stripe mutex — safe
+     * because displacing an array requires that same lock. Correctness never depends on the
+     * constant; only scaling does.
      * @param inline_buf The caller's raw stack buffer (cleared on entry).
      * @param overflow   The heap fallback for large fan-out (cleared on entry).
      * @return The number of views snapshotted (into whichever buffer was used).
@@ -1668,23 +1934,15 @@ class vertex_t {
     std::size_t snapshot_edges(edge_snapshot_t& inline_buf, std::vector<edge_view_t>& overflow) {
         inline_buf.clear();
         overflow.clear();
-        const std::lock_guard lock(vertex_stripe_of(this).m);
-        const bool use_heap = subs_.size() > edge_snapshot_t::kCapacity &&
-                              tr::detail::try_reserve(overflow, subs_.size());
-        std::size_t n = 0;
-        for (const subscriber_t& s : subs_) {
-            if (!s.active) continue;
-            // OOM fallback (reserve failed on a wide list): the inline prefix delivers,
-            // the remainder of this fan-out is dropped — never an abort.
-            if (!use_heap && n == edge_snapshot_t::kCapacity) break;
-            edge_view_t e;
-            if (!try_edge_view_of(s, e)) continue;  // OOM: drop this one edge's delivery
-            if (use_heap)
-                overflow.push_back(std::move(e));  // reserved above — no reallocation
-            else
-                inline_buf.push_back(std::move(e));
-            ++n;
+        edge_block_t* b = edges_.load(std::memory_order_acquire);
+        if (b == nullptr) return 0;  // never subscribed: no block was ever allocated
+        detail_ep::pin_t pin;
+        if (!pin.valid()) {  // domain exhausted: the pre-#635 path, for these threads only
+            const std::lock_guard lock(vertex_stripe_of(this).m);
+            return copy_published(b->pub.load(std::memory_order_acquire), inline_buf, overflow);
         }
+        const std::size_t n = copy_published(pin.acquire(b->pub), inline_buf, overflow);
+        pin.release();  // BEFORE the caller dispatches — the invariant `pin_t` asserts
         return n;
     }
 
@@ -1695,8 +1953,11 @@ class vertex_t {
      */
     [[nodiscard]] std::optional<view_t> edge_source(std::size_t idx) {
         const std::lock_guard lock(vertex_stripe_of(this).m);
-        if (idx < subs_.size() && subs_[idx].active && subs_[idx].source_view.owner)
-            return subs_[idx].source_view;  // clone (refcount bump)
+        const edge_block_t* b = edges_locked();
+        if (b == nullptr) return std::nullopt;
+        const std::vector<subscriber_t>& subs = b->slots;
+        if (idx < subs.size() && subs[idx].active && subs[idx].source_view.owner)
+            return subs[idx].source_view;  // clone (refcount bump)
         return std::nullopt;
     }
 
@@ -1705,8 +1966,10 @@ class vertex_t {
     [[nodiscard]] std::vector<view_t> edge_sources() {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         std::vector<view_t> out;
-        out.reserve(subs_.size());
-        for (const subscriber_t& s : subs_)
+        const edge_block_t* b = edges_locked();
+        if (b == nullptr) return out;
+        out.reserve(b->slots.size());
+        for (const subscriber_t& s : b->slots)
             if (s.active && s.source_view.owner) out.push_back(s.source_view);
         return out;
     }
@@ -1784,13 +2047,20 @@ class vertex_t {
             e->app.reset();
             e->last_flushed_seq = 0;
         }
-        // subs_ is stripe-guarded; clear it in its own critical section (the ext block may
-        // be absent, but subs_ always exists). The graph has already adjusted descendant
-        // listeners_above_ for these edges before calling us.
+        // The edge block is stripe-guarded; clear it in its own critical section (both it and
+        // the ext block may be absent). The graph has already adjusted descendant
+        // listeners_above_ for these edges before calling us. Publishing the EMPTY array
+        // allocates nothing, so retirement can never fail to stop delivering.
+        edge_block_t* b = nullptr;
         {
             const std::lock_guard lock(vertex_stripe_of(this).m);
-            subs_.clear();
+            b = edges_locked();
+            if (b != nullptr) {
+                b->slots.clear();
+                (void)try_publish_edges(*b);  // slots are empty ⇒ publishes null, cannot fail
+            }
         }
+        if (b != nullptr) scan_retired_edges(*b);
         return detached;
     }
 
@@ -2266,6 +2536,146 @@ class vertex_t {
         return true;
     }
 
+    // -- the published edge array (#635) ------------------------------------------------
+    //
+    // Everything below runs with the stripe lock held EXCEPT copy_published, which is the
+    // pinned reader's copy loop.
+
+    /** @brief This vertex's edge block, or null when nothing was ever subscribed. Call with
+     *         the stripe lock held (the relaxed load is enough under it — only ensure_edges
+     *         ever publishes, and only under the same lock). */
+    [[nodiscard]] edge_block_t* edges_locked() const noexcept {
+        return edges_.load(std::memory_order_relaxed);
+    }
+
+    /** @brief This vertex's edge block, allocating it on first subscribe. Call with the
+     *         stripe lock held.
+     *  @return Null on OOM (#477 — the caller soft-fails; the vertex is unchanged). */
+    [[nodiscard]] edge_block_t* ensure_edges() noexcept {
+        edge_block_t* b = edges_.load(std::memory_order_relaxed);
+        if (b != nullptr) return b;
+        b = new (std::nothrow) edge_block_t{};
+        if (b == nullptr) return nullptr;
+        edges_.store(b, std::memory_order_release);  // pairs with snapshot_edges' acquire
+        return b;
+    }
+
+    /**
+     * @brief Flip the published entry mirroring slot @p idx to INACTIVE. Call with the stripe
+     *        lock held.
+     *
+     * Allocation-free and therefore infallible, which is the point: an unsubscribe must stop
+     * a delivery even when the compacting republish behind it cannot allocate. The published
+     * array mirrors the slot table one-for-one (no compaction), so the index maps straight
+     * through — the same identity RFC-0009 §D.2 already guarantees for `:subscribers[N]`.
+     */
+    static void deactivate_published(edge_block_t& b, std::size_t idx) noexcept {
+        edge_pub_t* p = b.pub.load(std::memory_order_relaxed);
+        if (p == nullptr || idx >= p->count) return;
+        p->entries()[idx].active.store(false, std::memory_order_release);
+    }
+
+    /**
+     * @brief Rebuild and PUBLISH this block's edge array from its slot table, retiring the
+     *        displaced one. Call with the stripe lock held; the caller runs
+     *        `scan_retired_edges` afterwards, outside the lock.
+     *
+     * The array mirrors the slot table one-for-one so that `deactivate_published` can index
+     * straight through; an inactive slot contributes an EMPTY entry, so a cleared edge's
+     * refcount clones are released here rather than lingering behind a flipped bit.
+     * @retval false The array could not be allocated (or an edge's owning copies could not) —
+     *         NOTHING was published and the array on the slot is exactly as it was.
+     */
+    [[nodiscard]] bool try_publish_edges(edge_block_t& b) noexcept {
+        edge_pub_t* np = nullptr;
+        if (!b.slots.empty()) {
+            np = alloc_edge_pub(b.slots.size());
+            if (np == nullptr) return false;
+            pub_edge_t* dst = np->entries();
+            for (const subscriber_t& s : b.slots) {
+                ::new (static_cast<void*>(dst + np->count)) pub_edge_t{};
+                pub_edge_t& e = dst[np->count];
+                ++np->count;  // constructed ⇒ destroy_edge_pub can always unwind it
+                if (!s.active) {
+                    e.active.store(false, std::memory_order_relaxed);
+                    continue;
+                }
+                e.callback = s.callback;
+                e.callback_ctx = s.callback_ctx;
+                e.target_key = s.target_key;        // refcount clone — nothrow
+                if (s.remote == nullptr) continue;  // the plain in-process edge: no cold half
+                e.remote.reset(new (std::nothrow) pub_remote_t{});
+                if (e.remote == nullptr ||
+                    !tr::detail::try_assign(e.remote->link, s.remote->link) ||
+                    !tr::detail::try_assign(e.remote->caller, s.remote->caller)) {
+                    destroy_edge_pub(np);  // OOM on an owning copy — publish nothing
+                    return false;
+                }
+                e.remote->return_route = s.remote->return_route;  // refcount clone — nothrow
+                e.remote->delivery_compact = s.remote->delivery_compact;
+            }
+        }
+        // seq_cst, not release: this exchange and the pinned reader's validating load must
+        // share ONE total order for the announce/scan protocol to hold (see pin_t::acquire).
+        if (edge_pub_t* old = b.pub.exchange(np, std::memory_order_seq_cst); old != nullptr)
+            retire_push(b.retired, old);
+        return true;
+    }
+
+    /**
+     * @brief Copy every ACTIVE entry of @p p into the caller's buffers — the pinned reader's
+     *        whole critical section, and the only work an edge pin covers.
+     *
+     * Bounded, allocation-light and provably non-re-entrant: every allocation here is NOTHROW
+     * (#477), and the small local fan-out (empty target/link/caller strings) reaches no probe
+     * at all — it is refcount clones and POD copies, exactly what it was under the lock.
+     */
+    [[nodiscard]] static std::size_t copy_published(const edge_pub_t* p,
+                                                    edge_snapshot_t& inline_buf,
+                                                    std::vector<edge_view_t>& overflow) noexcept {
+        if (p == nullptr) return 0;
+        const bool use_heap =
+            p->count > edge_snapshot_t::kCapacity && tr::detail::try_reserve(overflow, p->count);
+        const pub_edge_t* src = p->entries();
+        std::size_t n = 0;
+        for (std::uint32_t i = 0; i < p->count; ++i) {
+            if (!src[i].active.load(std::memory_order_acquire)) continue;
+            // OOM fallback (reserve failed on a wide list): the inline prefix delivers,
+            // the remainder of this fan-out is dropped — never an abort.
+            if (!use_heap && n == edge_snapshot_t::kCapacity) break;
+            edge_view_t e;
+            if (!try_copy_published(src[i], e)) continue;  // OOM: drop this one edge's delivery
+            if (use_heap)
+                overflow.push_back(std::move(e));  // reserved above — no reallocation
+            else
+                inline_buf.push_back(std::move(e));
+            ++n;
+        }
+        return n;
+    }
+
+    /**
+     * @brief The NOTHROW copy of one published entry into a dispatch view (#477).
+     *
+     * Deliberately the same SHAPE as `try_edge_view_of`, which it replaced on this path: a
+     * single named return filled in place, and the cold half touched only when it exists. The
+     * plain in-process edge — the fan-1-vs-Zenoh case and the bulk of a wide fan-out — copies
+     * two pointers and takes one refcount clone, reaching no allocator and therefore no probe.
+     * @retval false An owning copy failed (OOM) — drop this edge's delivery.
+     */
+    [[nodiscard]] static bool try_copy_published(const pub_edge_t& in, edge_view_t& out) noexcept {
+        out.callback = in.callback;
+        out.callback_ctx = in.callback_ctx;
+        out.target_key = in.target_key;  // refcount clone — nothrow
+        if (in.remote == nullptr) return true;
+        if (!tr::detail::try_assign(out.link, in.remote->link) ||
+            !tr::detail::try_assign(out.caller, in.remote->caller))
+            return false;
+        out.return_route = in.remote->return_route;  // refcount clone — nothrow
+        out.delivery_compact = in.remote->delivery_compact;
+        return true;
+    }
+
     /** @brief The slot index of the descriptor-table entry named @p name, or `-1` (no
      *         entry / no extension block). Call with the stripe lock held. Linear: an
      *         owner's table is small (RFC-0010 targets MCU vertices), field ops are
@@ -2406,7 +2816,12 @@ class vertex_t {
      *         documents that caveat and the contract any replacement must satisfy. Do not
      *         read "lock-free" here as "no serializing operation". */
     lkv_slot_t lkv_{};
-    std::vector<subscriber_t> subs_;  // fan-out edges; guarded by m_
+    // The fan-out edges (#635). Null until this vertex is first subscribed to, which is the
+    // overwhelming majority of an MCU node's vertices — where an always-present empty
+    // std::vector cost 24 B (12 on rv32) of pure header. Allocated once by ensure_edges under
+    // the stripe lock, published with a release store, freed by ~vertex_t and NEVER displaced,
+    // which is why the publish path may load it with a plain acquire and no pin.
+    std::atomic<edge_block_t*> edges_{nullptr};
     // The lazily-allocated cold half (#361 §1): handlers, STREAM ring, the ACL state +
     // ADR-0050 effective-merge cache, the owner-side storage magnitudes, and the stream
     // drain cursor.

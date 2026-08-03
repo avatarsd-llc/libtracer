@@ -14,7 +14,7 @@ That was harmless while `fwd_router_t::add_child`'s own comment was true — "Re
 
 So a forward read can race a connection-create across threads and walk a freed buffer. This is the same use-after-free class #494 closed in the registry, re-entering from the write side.
 
-Exploring the write side found the problem is wider than the registry. `transport_vertex_t` has **no synchronization at all** — no mutex, no atomics — yet `make_connection` mutates three containers (`pending_links_`, `conns_`, `modules_`; `transport_vertex.hpp:348-361`), and the graph invokes the factory **outside** `map_mutex_` (`graph.cpp:1575`). Two concurrent CREATEs give concurrent `insert_or_assign` into a `std::map` — tree rebalancing under a racing insert, a worse failure than the vector realloc.
+Exploring the write side found the problem is wider than the registry. `transport_vertex_t` has **no synchronization at all** — no mutex, no atomics — yet `make_connection` mutates three containers (`pending_links_`, `conns_`, `modules_`; `transport_vertex.hpp:348-361`), and the graph invokes the factory **outside** `map_mutex_` (`graph.cpp:1584`). Two concurrent CREATEs give concurrent `insert_or_assign` into a `std::map` — tree rebalancing under a racing insert, a worse failure than the vector realloc.
 
 ## Decision
 
@@ -59,7 +59,7 @@ multi-core). Three grounds retire that:
   millisecond socket setup.
 
 The cost is ~4 B static per lock plus ~90 B of FreeRTOS mutex allocated on first lock (the figure
-already recorded at `vertex.hpp:473`), i.e. ~188 B one-time for both locks — not per connection.
+already recorded at `vertex.hpp:474`), i.e. ~188 B one-time for both locks — not per connection.
 Against the priority order this also *converges* on the primitive `route_handle_t` and the vertex
 stripes already use, rather than adding a second.
 
