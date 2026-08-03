@@ -109,11 +109,28 @@ The value is delivered as the ordinary constexpr `tr::graph::kVertexLockStripes`
 
 - **ESP-IDF v6.0** (tested in CI; matches the origin firmware's IDF v6.0-dev / GCC 15 toolchain) — libtracer's core is **C++23** (`std::expected`, `std::span`), which needs GCC 13+ (i.e. IDF ≥ 5.3); CI pins `release-v6.0`. The TWAI link uses the `esp_driver_twai` node API (IDF ≥ 5.5).
 - `PRIV_REQUIRES pthread, lwip, esp_driver_twai` (chip targets) — all **private**: libtracer's public headers expose only libstdc++ headers, never `<pthread.h>` or lwIP/driver headers, so nothing propagates to dependents. On the `linux` target only pthread is required (sockets come from glibc).
-- **Exceptions / RTTI** stay at the ESP-IDF default (**OFF**): the core's data path is exception-free and RTTI-free (it returns `std::expected`, never throws; no `typeid`/`dynamic_cast`), and the full-node profile (including the examples) links clean under `-fno-exceptions -fno-rtti`.
+- **Exceptions / RTTI** stay at the ESP-IDF default (**OFF**). Two of the three parts of that are true and one is not, and the distinction matters most on exactly this target:
+  - **RTTI-free — true.** No `typeid`, no `dynamic_cast` anywhere in `core/include` or `core/src`.
+  - **Links clean under `-fno-exceptions -fno-rtti` — true**, for the full-node profile including the examples; CI builds it for esp32c6, esp32c3 and `linux`.
+  - **"Never throws" — FALSE.** The data path *reports* by value (`std::expected` / `status_t`) and draws peer-driven allocations from injected **nothrow** seams (ADR-0065), which is the shape worth relying on — but the tree is not throw-free, and under `-fno-exceptions` a throw is not an exception, it is `abort()` — a reboot. **Three sites that still report exhaustion by throwing compile into this component's full-node profile**, so price them on a node that must not reboot ([docs/design/allocation-and-backpressure.md](../../docs/design/allocation-and-backpressure.md) §"Where the rule is not met today"):
+
+| Site | Code | Provoked by | In this component because |
+| ---- | ---- | ----------- | ------------------------- |
+| CAN egress window table | `core/include/libtracer/view_can.hpp:100` — `frames_.push_back` in `view_can_frames_t::split`, reached on **every** send (`core/src/transport_can.cpp:215`) | the sender: one `push_back` per CAN frame the payload splits into | `CONFIG_LIBTRACER_TRANSPORT_CAN` is `default y`, so `transport_can.cpp` is in the archive (`libtracer/CMakeLists.txt:131`) unless you turn CAN off |
+| Label-table binds (#603) | `core/src/route_handle.cpp:82`, `:179`, `:236` — `std::pmr::vector::push_back` and the route copy beside it | a **peer**: an ingress `ADVERTISE` binds a label. `max_label_bindings_per_link` bounds the entry *count*, not the allocation's failure mode | `route_handle.cpp` is unconditional in the source list (`libtracer/CMakeLists.txt:57`) |
+| `try_reserve`'s second step (#850) | `core/include/libtracer/mem_heap.hpp:116-121` — the `noexcept` helper probes, frees, then runs the **throwing** `std::vector::reserve` | anything concurrent: the probe-then-reserve is sound only single-threaded. Every `try_*` helper inherits it | header-only, reached from the graph and every transport |
+
+  Turning `CONFIG_LIBTRACER_TRANSPORT_CAN` off sheds the first row outright; the other two are structural until #603 / #850 land.
 
 ## Security posture
 
-**Unsafe by default in v0.1** — no `security_*` modules exist yet (TLS/DTLS/PSK/ACL enforcement are post-MVP). The full-node component DOES open sockets (udp/tcp/ws listeners are plaintext, unauthenticated); do not expose them beyond a trusted LAN until the matching `security_*` module lands.
+**Unsafe by default — but "by default" is the operative word, not "unavailable".** The distinction the previous wording erased:
+
+- **ACL enforcement ships and this component compiles it in.** `core/include/libtracer/security_acl.hpp` is real: `graph_t::acl_allows` gates READ / WRITE / CREATE (`core/src/graph.cpp:751`, called at `:443`, `:601`, `:809` and the write paths), and the component pins the MCU profile `allow_only_policy_t` into the generated `<libtracer/config.hpp>` (`libtracer/CMakeLists.txt:203`) — first-match-per-bit ALLOW, DENY rejected at parse time, no full-ACL Kconfig yet. See [docs/modules/security-acl.md](../../docs/modules/security-acl.md).
+- **It is OFF until you turn it on.** `acl_allows` returns `true` immediately when no `subject_resolver_` is installed (`graph.cpp:752`), returns `true` for a caller the resolver maps to no subject (a local API call), and returns `true` when no ancestor up the chain bears an ACE — *open by default*, by design. A node is enforced only once the host calls `graph_t::set_subject_resolver` **and** writes `:acl` ACEs.
+- **Link security does not exist here.** No TLS/DTLS/PSK module is compiled into this component: the udp/tcp/ws listeners the full-node profile opens are **plaintext and unauthenticated**, and QUIC (the one transport with TLS 1.3, ADR-0043) is a separate `libtracer_quic` target that this component does not build. Do not expose the listeners beyond a trusted LAN.
+
+So: ACL is an opt-in you can turn on today; transport security is genuinely absent and still post-MVP.
 
 ## Status
 
