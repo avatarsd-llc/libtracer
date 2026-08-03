@@ -381,6 +381,52 @@ void test_branch_write_acl_admission() {
 
 }  // namespace
 
+/**
+ * @brief The demand-driven publisher's gate (#852): `has_subscribers` answers the two-sided
+ *        question a publish must be gated on; `own_subs` answers only the near half.
+ *
+ * The whole point of RFC-0005 is that a subscription observes descendants, so at the vertex
+ * being written the subtree subscriber contributes NOTHING to `own_subs` — it is counted by
+ * `listeners_above` on the way up. A producer that skipped on `own_subs(vh) == 0` would drop
+ * every delivery in this test while the graph happily routes them.
+ */
+void test_demand_driven_predicate() {
+    std::printf("demand-driven publish gate — own_subs vs has_subscribers (#852):\n");
+    graph_t g;
+    (void)g.register_vertex(path_t("/a"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/a/b"), role_t::STORED_VALUE);
+    const vertex_handle_t abc = g.register_vertex(path_t("/a/b/c"), role_t::STORED_VALUE);
+
+    check(g.own_subs(abc) == 0, "quiet graph: own_subs is zero");
+    check(!g.has_subscribers(abc), "quiet graph: has_subscribers agrees — skipping is correct");
+
+    std::vector<std::vector<std::byte>> at_a;
+    auto on_a = [&](const rope_t& v) {
+        at_a.emplace_back(v.only().bytes().begin(), v.only().bytes().end());
+    };
+    check(g.subscribe(path_t("/a"), on_a).has_value(), "subscribe at the ANCESTOR /a");
+
+    // The divergence this predicate exists for: the subscriber is real and will be fed, but
+    // it is not counted at the vertex being written.
+    check(g.own_subs(abc) == 0, "own_subs at the leaf is STILL zero — the subscriber is above it");
+    check(g.has_subscribers(abc), "has_subscribers sees the subtree subscriber");
+
+    const std::vector<std::byte> written{std::byte{0x01}, std::byte{0x00}, std::byte{0x02},
+                                         std::byte{0x00}, std::byte{0xAB}, std::byte{0xCD}};
+    check(g.write(abc, make_value(written)).has_value(), "write at the leaf");
+    check(at_a.size() == 1,
+          "the ancestor subscriber DID receive it — an own_subs gate would have dropped it");
+
+    // And the near half still works: a subscriber ON the vertex shows up in both.
+    std::vector<std::vector<std::byte>> at_c;
+    auto on_c = [&](const rope_t& v) {
+        at_c.emplace_back(v.only().bytes().begin(), v.only().bytes().end());
+    };
+    check(g.subscribe(path_t("/a/b/c"), on_c).has_value(), "subscribe AT /a/b/c");
+    check(g.own_subs(abc) == 1, "own_subs counts a subscriber on the vertex itself");
+    check(g.has_subscribers(abc), "has_subscribers still true with both kinds present");
+}
+
 int main() {
     std::printf("libtracer subtree-subscription tests (RFC-0005):\n");
     test_bubbling_and_idle_walk();
@@ -391,6 +437,7 @@ int main() {
     test_write_creates();
     test_write_creates_acl_gate();
     test_branch_write_acl_admission();
+    test_demand_driven_predicate();
     std::printf(g_failures == 0 ? "ALL PASS\n" : "%d FAILURES\n", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

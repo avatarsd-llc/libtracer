@@ -104,7 +104,7 @@ carve-out stands — but it no longer rests on "init/setup", which is the wordin
 It rests on a measurement.
 
 Routing the registration through `ctl_` requires the allocation's owner to know which resource
-freed it, i.e. a source-carrying deleter on `std::unique_ptr<vertex_t>` (`graph.hpp:1038`). Sizes
+freed it, i.e. a source-carrying deleter on `std::unique_ptr<vertex_t>` (`graph.hpp:1104`). Sizes
 read out of the compiler on the deployment target (`riscv32-esp-elf-g++ 15.2.0`,
 `-march=rv32imac_zicsr_zifencei -mabi=ilp32 -Os -fno-exceptions -fno-rtti -std=c++23`):
 
@@ -133,8 +133,8 @@ bound on how many vertices a peer can cause to be allocated is **not** supplied 
 belongs to the connection/creation admission surface RFC-0014 defines, and is where it must be
 enforced.
 
-**Trap for any future attempt.** Do not "just route the root allocation first": `graph.hpp:1038`
-declares `root_`, `graph.hpp:1084` declares `ctl_`, and C++ initialises members in **declaration**
+**Trap for any future attempt.** Do not "just route the root allocation first": `graph.hpp:1104`
+declares `root_`, `graph.hpp:1150` declares `ctl_`, and C++ initialises members in **declaration**
 order regardless of the constructor's init-list — so routing `graph.cpp:268` reads `ctl_` before it
 is constructed. Silent UB that a debug build hides, in a codebase already bitten by "`-Os` deletes a
 null check no test covers".

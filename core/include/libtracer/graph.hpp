@@ -304,6 +304,72 @@ class graph_t {
     [[nodiscard]] std::uint32_t retire_generation(vertex_handle_t vh) const noexcept;
 
     /**
+     * @brief This vertex's OWN active subscriber-slot count (#635) — how many slots a
+     *        delivery here would feed, for sizing and observability.
+     *
+     * @warning This is NOT the "is anyone listening" question, on two counts, and a
+     *          producer must not gate a publish on it — use @ref has_subscribers.
+     *          It omits subtree subscribers, who subscribe on a strict ANCESTOR and are
+     *          counted by `listeners_above` rather than here (RFC-0005), so a zero here
+     *          says nothing about them. And it is the relaxed load, which
+     *          @ref vertex_t::own_subs_ordered documents as unfit for a skip decision.
+     *
+     * Relaxed by design: this answers "how much work would a delivery be", the use
+     * @ref vertex_t::own_subs is specified for. A racing subscribe is observed by the next
+     * read at worst, which is what a sizing hint needs.
+     */
+    [[nodiscard]] std::uint32_t own_subs(vertex_handle_t vh) const noexcept {
+        return vh.get()->own_subs();
+    }
+
+    /**
+     * @brief Would a **delivery** at @p vh reach any subscriber — its own, OR a subtree
+     *        subscriber on a strict ancestor (RFC-0005)?
+     *
+     * The gate for a demand-driven producer that wants to skip *delivery work*. It joins the
+     * two gates `deliver_vertex`, the eager per-vertex delivery unit, applies — `fan_out`'s
+     * own self-gate on the own count, then the `listeners_above` gate `deliver_vertex` holds
+     * over `bubble_up` — so a producer that skips a `deliver_vertex` on `false` skips exactly
+     * what that call would have found no receiver for. (A decomposing BRANCH write is not one
+     * `deliver_vertex`: it fans out at each descendant landing site under that site's own
+     * gate, which this predicate does not answer for.) Gating on the own-slot count alone
+     * silently drops every subtree subscriber, which is why @ref own_subs carries a warning
+     * against it. (`mark_pending`, the deferred half, gates on `delivery_mode` first and so
+     * asks a third question this predicate deliberately does not.)
+     *
+     * @warning **Subscribers are not the only consumers.** `read` pollers and threads blocked
+     *          in @ref await are invisible here — this counts subscription edges only, which
+     *          ADR-0006 makes a field-write to `:subscribers[]` rather than one of its three
+     *          verbs. A producer that skips its *delivery* on `false` is fine; one that also
+     *          skips the VALUE STORE starves every awaiter (no `write_seq_` bump to wake
+     *          them) and freezes the LKV for every reader.
+     *
+     * @warning A skipped publish is not recovered by ADR-0049's durability latch. That
+     *          argument belongs to @ref vertex_t::own_subs_ordered's fan-out skip, whose
+     *          protocol is *store the LKV, THEN load the count*; a producer that skips on
+     *          this predicate never reaches the store, so there is no new value to latch.
+     *          And the latch is **opt-in**: it fills only for a subscriber whose policy sets
+     *          RFC-0022 §3.A bit 5 (`durability_request`) — a default `policy = {}` latches
+     *          nothing at all. One that did ask latches whatever the LKV then holds, which is
+     *          whatever last wrote that slot, not necessarily this producer's prior publish;
+     *          if nothing has ever stored, it latches nothing. What the `seq_cst` own half
+     *          does buy is narrower: a subscribe that lands is globally ordered before the
+     *          producer's NEXT read, so at most one round is skipped. The
+     *          ancestor half is not even that — `listeners_above` is relaxed with no
+     *          `seq_cst` twin, so this predicate is exactly as ordered as `deliver_vertex`'s
+     *          own `listeners_above` gate and no more. It neither adds that hazard nor
+     *          closes it.
+     *
+     * @note No test covers the `seq_cst` own half: swapping it for the relaxed
+     *       @ref vertex_t::own_subs leaves the whole suite green, so its presence here rests
+     *       on the argument above, not on coverage.
+     */
+    [[nodiscard]] bool has_subscribers(vertex_handle_t vh) const noexcept {
+        const vertex_t* const v = vh.get();
+        return v->own_subs_ordered() != 0 || v->listeners_above() != 0;
+    }
+
+    /**
      * @brief Slots in the node-scoped vertex index — the cardinality a bound-path element's
      *        index is bounds-checked against (RFC-0024 §6.4).
      *

@@ -12,6 +12,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`httpd_ws_link_t` and `esp_ws_client_link_t`: `TCP_NODELAY` is now set on every
+  WebSocket socket, removing the Nagle + delayed-ACK latency floor.** A libtracer WS frame
+  is a small, self-contained TLV whose reply the peer is already awaiting — the request-reply
+  shape Nagle stalls, adding tens of ms per round-trip with nothing to coalesce that the WS
+  framing does not already batch. The server sets it per accepted socket at admission
+  (`bound_socket`, alongside the #835 `SO_SNDTIMEO`), so REST sockets — which this link never
+  upgrades — are untouched; the client sets it on the freshly connected `esp_transport` fd in
+  `connect_once`. Both are best-effort: a peer whose socket refuses the option keeps the
+  pre-patch latency for that one link rather than failing. Measured on an ESP32-C6 bench: WS
+  request-reply RTT floor drops from ~52 ms toward the airtime bound (HIL-verified per the
+  merge gate).
+
 - **`httpd_ws_link_t`: WebSocket sends are now bounded by a derived per-socket send timeout,
   and the brokenness detector now aims at the peer that is actually broken (#835).** Two
   defects on one seam. (1) `esp_http_server` sets `SO_SNDTIMEO` on every accepted socket from

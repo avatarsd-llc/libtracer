@@ -18,7 +18,7 @@ mechanical rather than a re-investigation.
 
 The docs spell a citation three ways, and all three are read here (#803). A full
 repo-relative path (`core/src/graph.cpp:956`), the design pages' established
-BASENAME shorthand (`graph.hpp:1063`), and a bare continuation (`:304`) that
+BASENAME shorthand (`graph.hpp:1129`), and a bare continuation (`:304`) that
 inherits the file most recently named. The shorthand is resolved against a map of
 every source basename in the tree; a basename carried by two files is an ERROR,
 not a guess — the doc must spell the full path. Generated headers (`config.hpp.in`)
@@ -259,37 +259,37 @@ ANCHORS = [
      '[[nodiscard]] mem::block_source_t& control_source() const noexcept { return *ctl_; }'),
     ('core/include/libtracer/graph.hpp:284',
      '* already-retired or unregistered vertex succeeds and does nothing. The root cannot be'),
-    ('core/include/libtracer/graph.hpp:562',
+    ('core/include/libtracer/graph.hpp:628',
      '[[nodiscard]] result_t<value_ref_t> read(vertex_handle_t v, std::string_view caller = {}) const;'),
-    ('core/include/libtracer/graph.hpp:616',
+    ('core/include/libtracer/graph.hpp:682',
      '* makes host-side after registration — and it has **no wire surface at all**: no peer'),
-    ('core/include/libtracer/graph.hpp:649',
+    ('core/include/libtracer/graph.hpp:715',
      '[[nodiscard]] result_t<value_ref_t> await(vertex_handle_t v, std::chrono::nanoseconds timeout,'),
-    ('core/include/libtracer/graph.hpp:736', '[[nodiscard]] result_t<rope_t> read_subtree_folded(vertex_handle_t v,'),
-    ('core/include/libtracer/graph.hpp:754',
+    ('core/include/libtracer/graph.hpp:802', '[[nodiscard]] result_t<rope_t> read_subtree_folded(vertex_handle_t v,'),
+    ('core/include/libtracer/graph.hpp:820',
      '*               into exactly that child here so the two doors stay byte-identical.'),
-    ('core/include/libtracer/graph.hpp:792', 'template <typename F>'),
-    ('core/include/libtracer/graph.hpp:906', 'std::function<void(const remote_delivery_t&, const rope_t&)> sink);'),
-    ('core/include/libtracer/graph.hpp:930',
+    ('core/include/libtracer/graph.hpp:858', 'template <typename F>'),
+    ('core/include/libtracer/graph.hpp:972', 'std::function<void(const remote_delivery_t&, const rope_t&)> sink);'),
+    ('core/include/libtracer/graph.hpp:996',
      '* Called by the FWD resolver on an inbound `:subscribers[]` WRITE (#59/#136); it'),
-    ('core/include/libtracer/graph.hpp:1027', 'struct delivery_drops_t {'),
-    ('core/include/libtracer/graph.hpp:1029', 'std::uint64_t no_target = 0;'),
-    ('core/include/libtracer/graph.hpp:1031', 'std::uint64_t denied = 0;'),
-    ('core/include/libtracer/graph.hpp:1033', 'std::uint64_t out_of_memory = 0;'),
-    ('core/include/libtracer/graph.hpp:1044', '[[nodiscard]] delivery_drops_t delivery_drops() const noexcept;'),
-    ('core/include/libtracer/graph.hpp:1076', 'void fan_out(vertex_t* v, const rope_t& value);'),
-    ('core/include/libtracer/graph.hpp:1082', 'void dispatch_edge(const edge_view_t& e, const rope_t& value);'),
-    ('core/include/libtracer/graph.hpp:1088', 'void dispatch_edge_target(const edge_view_t& e, const rope_t& value);'),
-    ('core/include/libtracer/graph.hpp:1089', 'void dispatch_edge_remote(const edge_view_t& e, const rope_t& value);'),
-    ('core/include/libtracer/graph.hpp:1092', 'void bubble_up(vertex_t* v, const rope_t& value);'),
-    ('core/include/libtracer/graph.hpp:1096', 'void deliver_vertex(vertex_t* v, const rope_t& value);'),
-    ('core/include/libtracer/graph.hpp:1252', 'std::pmr::memory_resource* mr_ = std::pmr::get_default_resource();'),
-    ('core/include/libtracer/graph.hpp:1261', 'mem::mem_backend_t* value_backend_ = &mem::heap_backend();'),
-    ('core/include/libtracer/graph.hpp:1312',
+    ('core/include/libtracer/graph.hpp:1093', 'struct delivery_drops_t {'),
+    ('core/include/libtracer/graph.hpp:1095', 'std::uint64_t no_target = 0;'),
+    ('core/include/libtracer/graph.hpp:1097', 'std::uint64_t denied = 0;'),
+    ('core/include/libtracer/graph.hpp:1099', 'std::uint64_t out_of_memory = 0;'),
+    ('core/include/libtracer/graph.hpp:1110', '[[nodiscard]] delivery_drops_t delivery_drops() const noexcept;'),
+    ('core/include/libtracer/graph.hpp:1142', 'void fan_out(vertex_t* v, const rope_t& value);'),
+    ('core/include/libtracer/graph.hpp:1148', 'void dispatch_edge(const edge_view_t& e, const rope_t& value);'),
+    ('core/include/libtracer/graph.hpp:1154', 'void dispatch_edge_target(const edge_view_t& e, const rope_t& value);'),
+    ('core/include/libtracer/graph.hpp:1155', 'void dispatch_edge_remote(const edge_view_t& e, const rope_t& value);'),
+    ('core/include/libtracer/graph.hpp:1158', 'void bubble_up(vertex_t* v, const rope_t& value);'),
+    ('core/include/libtracer/graph.hpp:1162', 'void deliver_vertex(vertex_t* v, const rope_t& value);'),
+    ('core/include/libtracer/graph.hpp:1318', 'std::pmr::memory_resource* mr_ = std::pmr::get_default_resource();'),
+    ('core/include/libtracer/graph.hpp:1327', 'mem::mem_backend_t* value_backend_ = &mem::heap_backend();'),
+    ('core/include/libtracer/graph.hpp:1378',
      '*         to migrate. Kept a DIFFERENT type from `mr_` on purpose (see'),
-    ('core/include/libtracer/graph.hpp:1315',
+    ('core/include/libtracer/graph.hpp:1381',
      '*         LAST on purpose: no hot path reads it, so declaring it here keeps'),
-    ('core/include/libtracer/graph.hpp:1321', 'mem::block_source_t* ctl_ = &mem::heap_source();'),
+    ('core/include/libtracer/graph.hpp:1387', 'mem::block_source_t* ctl_ = &mem::heap_source();'),
     # core/include/libtracer/lkv_slot.hpp
     ('core/include/libtracer/lkv_slot.hpp:99', '* **Lock-free BY CONTRACT, and spin-locked in practice.**'),
     ('core/include/libtracer/lkv_slot.hpp:100',
@@ -596,11 +596,11 @@ ANCHORS = [
     # core/tests/tlv_arena_test.cpp
     ('core/tests/tlv_arena_test.cpp:293', 'const std::vector<std::byte> deep_bytes = encode(nested(100));'),
     # integrations/esp-idf/libtracer/httpd_ws_link.cpp
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:68',
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:69',
      '* reply, and (the deep path) the whole /unit batch-apply transaction. The device'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:75', 'constexpr std::size_t kHttpdTaskStack = 12288;'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:271', 'if (chunk.empty()) return true;'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:277',
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:76', 'constexpr std::size_t kHttpdTaskStack = 12288;'),
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:272', 'if (chunk.empty()) return true;'),
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:278',
      'if (len_ != 0) std::memcpy(grown.get(), bytes_.get(), len_);'),
     # integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp
     ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:38',
@@ -678,7 +678,7 @@ def citation_spans(context: str, filemap: dict = None) -> tuple:
     """Every cited source SPAN in one doc, as ([(path, lo, hi)], ambiguity errors).
 
     Handles every spelling the docs actually use: a full path `core/src/graph.cpp:12`,
-    the design pages' basename shorthand `graph.hpp:1063`, a generated header
+    the design pages' basename shorthand `graph.hpp:1129`, a generated header
     `config.hpp.in:237`, a range `file.cpp:12-20`, a comma list `file.hpp:145,153`, and
     the UNBACKTICKED form that appears inside annotated code-excerpt blocks. A bare
     `` `:99` `` inherits the most recently named file, which is how the glossary and the
