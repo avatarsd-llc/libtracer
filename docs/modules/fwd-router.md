@@ -527,7 +527,7 @@ tested against hand-built frames with no live transport.
 :project: libtracer
 ```
 
-```{doxygenfunction} tr::net::rebuild_fwd_forward(const Cursor&, std::span<const std::byte>, std::string_view, std::size_t, const fwd_pre_t*, const wire::path_ref_element_t*)
+```{doxygenfunction} tr::net::rebuild_fwd_forward(const Cursor&, std::span<const std::byte>, std::string_view, std::size_t, const fwd_pre_t*, MintFn)
 :project: libtracer
 ```
 
