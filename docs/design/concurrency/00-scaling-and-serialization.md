@@ -60,7 +60,7 @@ hold and recurses under it. The doc comment at `:439` states the same contract f
 `evict_link_edges` snapshot helper — it documents a required hold, it is not an acquisition.
 
 The leaf/branch fork reads a per-vertex bit (`vertex_t::has_registered_child`,
-`core/include/libtracer/vertex.hpp:1191`), called from `core/src/graph.cpp:806`, and takes no
+`core/include/libtracer/vertex.hpp:1191`), called from `core/src/graph.cpp:831`, and takes no
 lock. The symbol exists on the vertex rather than on the graph, so a reader grepping for it finds
 a flag test rather than a lock acquisition.
 
@@ -148,7 +148,7 @@ Two limits, and the second hides the first:
    There the limit is the value's own reference count, and the `sp-load` calibration arm —
    1.4 M/s at T=24 — accounts for nearly all of the 1.74 M/s stock rate.
 
-The write path takes no map lock (`write_impl`, `graph.cpp:1019`), which is the entire "writes
+The write path takes no map lock (`write_impl`, `graph.cpp:1044`), which is the entire "writes
 scale 5×, reads do not" asymmetry.
 
 **A caution on the calibration arms.** `sp-load` measures 710 ns/op at T=24 against a whole real

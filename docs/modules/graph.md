@@ -86,6 +86,8 @@ class graph_t {
     std::optional<vertex_slot_t>    vertex_slot(vertex_handle_t) const noexcept;   // mint side
     std::optional<vertex_handle_t>  deref_vertex_slot(std::uint32_t index,
                                                       std::uint32_t generation) const noexcept;
+    std::optional<vertex_slot_t>    vertex_slot_at(std::uint32_t index) const noexcept;  // O(1)
+    bool allows(vertex_handle_t, std::string_view caller, acl_right_t) const;  // the §6.2 check
 
     // value plane
     result_t<value_ref_t> read (vertex_handle_t, std::string_view caller = {}) const;
@@ -140,7 +142,7 @@ Subscription edges are never destroyed while the graph lives. `unsubscribe` only
 **deactivates** the slot; an in-flight delivery has already snapshotted the edge and
 completes. The caller-owned `ctx` (or, for the templated overload, the callable itself)
 must therefore stay alive past any delivery that may still be running, not merely past
-the `unsubscribe` call (`core/include/libtracer/graph.hpp:704-707`).
+the `unsubscribe` call (`core/include/libtracer/graph.hpp:744-747`).
 ```
 
 ```{admonition} No strings on the hot path
@@ -190,7 +192,7 @@ for (...) g.write(v, p.field(), setpoint_tlv);           // hot loop — zero st
 ## What a read hands back
 
 `read` and `await` return `result_t<value_ref_t>`, not `result_t<rope_t>`
-(`core/include/libtracer/graph.hpp:512,566` by handle, `:880,856` by path;
+(`core/include/libtracer/graph.hpp:552,606` by handle, `:920,896` by path;
 `value_ref_t` at `core/include/libtracer/vertex.hpp:146`). A `value_ref_t` is an **owning
 reference** to the value the vertex published: the LKV slot holds it as a
 `std::shared_ptr<const rope_t>`, so handing that reference back costs a refcount clone of
@@ -487,6 +489,18 @@ the ceiling the counter stops, so a saturated element would keep matching its sl
 every subsequent retire and revive, with staleness detection permanently dead for that
 slot. "Permanently unbindable" therefore has to be enforced on the side that *honours* an
 element, not only on the side that issues one.
+
+`vertex_slot_at` is the same read the other way round — index in, generation out, in O(1) —
+and it exists for the FORWARDER's mint: a hop mints for the connection vertex of the link a
+reply arrived on, an index it recorded once at registration, so paying a scan of the whole
+index per forwarded reply to re-derive an index it already holds would be the wrong shape in
+the wrong place. It refuses a saturated slot exactly as the scanning form does.
+
+`allows(vertex, caller, right)` publishes the ACL predicate every data op already runs, for
+the one caller that reaches a vertex without performing a data op on it: the bound-path
+forwarder, whose element dereferences to a **connection** vertex it will egress through
+rather than read or write. Nothing is cached, so a revoked right takes effect on the very
+next frame over an already-minted binding.
 
 `vertex_slot` is the mint side. It returns the index **and** the generation together, from
 one lock hold, because either alone is not a reference: read as two calls they can straddle

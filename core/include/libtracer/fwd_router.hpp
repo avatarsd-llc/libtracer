@@ -32,11 +32,13 @@
  */
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <memory_resource>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -47,6 +49,7 @@
 #include "libtracer/graph.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/op_resolve.hpp"
+#include "libtracer/path_ref.hpp"
 #include "libtracer/route_handle.hpp"
 #include "libtracer/transport.hpp"
 
@@ -260,6 +263,93 @@ class fwd_router_t {
     [[nodiscard]] graph::result_t<void> subscribe_toward(const graph::path_t& producer,
                                                          const graph::path_t& target);
 
+    // -- bound paths (RFC-0024) -------------------------------------------------------
+    // The origin's half of the bound form. The forwarder's half needs no API: it is a
+    // branch on the inbound frame's own `dst` type, taken inside the routing hop.
+
+    /**
+     * @brief This node's own vertex ref for the connection vertex of child @p link_name —
+     *        element 0 of a route that leaves through it (RFC-0024 §4.1).
+     *
+     * The origin mints its OWN first element, because no one else can: an element is
+     * node-scoped, and the hop out of this node is the one hop no peer ever sees. A mint
+     * reply therefore comes back one element short of the route, and this is the element
+     * that completes it (which @ref adopt_binding does for the caller).
+     *
+     * @retval std::nullopt @p link_name names no registered child, the child has no
+     *         connection vertex in this node's graph, or that vertex's generation has
+     *         SATURATED (permanently unbindable, §4.4 rule 3). Every one of those means the
+     *         route has no bound spelling from here, and the canonical path is the answer.
+     */
+    [[nodiscard]] std::optional<wire::path_ref_element_t> connection_ref(
+        std::string_view link_name) const;
+
+    /**
+     * @brief The egress link a bound element names, after the full §5.1 check.
+     *
+     * The forwarder's hop and the origin's first hop are the same act — consume element 0,
+     * dereference it, egress — so they are the same function. It bounds-checks the index,
+     * compares the generation, refuses a saturated one, and evaluates the ACL at the
+     * dereferenced vertex for @p right (§6.2: a generation match authorizes nothing).
+     *
+     * @param e      The element to consume.
+     * @param caller The subject context — the inbound link's name at a forwarder, empty for
+     *               this node's own local caller at an origin.
+     * @param right  The right the operation carries.
+     * @retval nullptr Any part of the check failed, or the vertex is not a connection vertex
+     *         of a live point-to-point child of this node. The caller MUST then drop —
+     *         never repair, never fall through to a different route (§5.3). A bus PEER is
+     *         among the refusals and not by omission: a peer has no vertex, so no element
+     *         can name one, and egressing over the bus link itself would BROADCAST a
+     *         directed operation (ADR-0073 §3 / RFC-0020).
+     */
+    [[nodiscard]] transport_t* bound_egress(wire::path_ref_element_t e, std::string_view caller,
+                                            graph::acl_right_t right) const;
+
+    /**
+     * @brief Install the bound form on @p path from the mint answer on a reply (RFC-0024 §7.4).
+     *
+     * The origin's side of the exchange, and the reason `path_t::bind` had no production
+     * caller until now. @p reply is a decoded `FWD{REPLY}`; its LAST child is the accumulated
+     * `PATH_REF` — the terminus's element, with one prepended by every hop that forwarded the
+     * reply. This prepends THIS node's own element for @p link_name (§4.1: element 0 is the
+     * origin's reference to its first-hop connection vertex) and records the whole stack.
+     *
+     * Nothing is installed unless the complete route is spellable: a reply with no mint, a
+     * link with no bindable connection vertex, or a stack past the normative element cap all
+     * leave @p path exactly as it was — bound to nothing, and therefore canonical. A binding
+     * is an optimisation with a fallback that always works, so a partial one is never worth
+     * having.
+     *
+     * @return true iff @p path came out bound.
+     */
+    bool adopt_binding(graph::path_t& path, std::string_view link_name, const wire::tlv_t& reply);
+
+    /** @brief What the origin sends a bound operation as: the link, and the `dst` on the wire. */
+    struct bound_dispatch_t {
+        transport_t* link = nullptr; /**< @brief The egress link element 0 named. */
+        std::vector<std::byte> dst;  /**< @brief The `PATH_REF` TLV carrying the RESIDUAL. */
+    };
+
+    /**
+     * @brief Spell the next operation over @p path's binding — the origin's own hop (§4.1).
+     *
+     * The origin consumes element 0 exactly as every forwarder consumes its own: it is this
+     * node's reference to its first-hop connection vertex, so it selects the link and does
+     * NOT go on the wire. What goes out is the residual, `4 + 8×(H−1)` bytes, and the host
+     * that receives it consumes ITS element in turn — the monotone shrink that makes a bound
+     * path loop-free for the same reason a canonical `dst` is.
+     *
+     * @param right The right the operation carries, evaluated at the dereferenced connection
+     *              vertex like any other hop's (§6.2).
+     * @retval std::nullopt @p path is unbound, or element 0 no longer validates — a link
+     *         removed, a connection vertex retired, an ACL revoked. The caller's recovery is
+     *         the one that always works: `clear_binding()` and send the canonical path it
+     *         still holds, which may then re-mint (§5.3).
+     */
+    [[nodiscard]] std::optional<bound_dispatch_t> bound_dispatch(const graph::path_t& path,
+                                                                 graph::acl_right_t right) const;
+
     // -- observability / terminus sinks (fn-ptr + context, ADR-0047/ADR-0068 §3) -------
     // Not std::function: these fire on the per-frame RX path, where the erasure
     // machinery (code size, heap capability, exception paths) is the largest avoidable
@@ -431,6 +521,11 @@ class fwd_router_t {
     [[nodiscard]] const child_registry_t& registry() const noexcept { return registry_; }
 
    private:
+    /** @brief "This child has no connection vertex" — the unbindable child (RFC-0024 §5.1).
+     *         A sentinel rather than an `optional` because it lives in the per-frame ctx and
+     *         a `u32` compare is the whole test the bound hop performs against it. */
+    static constexpr std::uint32_t kNoConnSlot = 0xFFFFFFFFu;
+
     /**
      * @brief A link's stable per-child receiver state — its identity AND its mount run.
      *
@@ -470,6 +565,51 @@ class fwd_router_t {
          * the bound per-peer: one noisy link cannot starve another's decode.
          */
         mem::block_source_t* rx = nullptr;
+        /**
+         * @brief This child's CONNECTION vertex slot index, resolved once at registration
+         *        (RFC-0024 §5.1) — `kNoConnSlot` when the child has none.
+         *
+         * A bound element names a vertex; an egress needs a link; this integer is the whole
+         * of the join, and it is recorded here rather than looked up per frame because the
+         * lookup runs the other way (vertex → name → child) and there is no reverse index.
+         * The child's mount run IS its connection vertex's canonical key — `add_child` is
+         * given `net/<module>/<name>` and the vertex is registered at `/net/<module>/<name>`
+         * — so the resolution is one `graph_t::find` of bytes the registry already holds.
+         *
+         * It is NOT a route table: one entry per LINK, sized by the graph and never by the
+         * traffic, which is the property RFC-0024 §2.1 credits the design with keeping. A
+         * child registered before its connection vertex exists simply has none, and every
+         * bound route through it fails validation and falls back to canonical — the shipped
+         * wiring registers the vertex first (`transport_vertex_t::make_connection`).
+         */
+        std::uint32_t conn_slot = kNoConnSlot;
+        /**
+         * @brief The registry slot this child was registered into — resolved once, here.
+         *
+         * A bound hop needs the LINK an element names, and the link lives in the registry
+         * slot, so the alternative is a `entry_by_name` string scan on every bound frame to
+         * re-find a slot whose address never moved. Registry slots are embedded in
+         * heap chunks that are appended to and never freed before the registry itself, so a
+         * slot pointer is stable for the registry's lifetime — which is what makes caching it
+         * sound. (The `mount_tlv` member doc's older aside about an append invalidating a slot
+         * pointer describes a shape the registry has not had since it became chunked.)
+         */
+        const child_registry_t::child_t* entry = nullptr;
+        /**
+         * @brief Next published receiver ctx — the LOCK-FREE reader chain (ADR-0063 §3).
+         *
+         * The bound hop reads this table from a transport RECEIVE thread while `add_child`
+         * appends to it from whichever thread a CREATE arrived on, and those are genuinely
+         * concurrent (see `ctl_m_`). Walking the owning `std::deque` under no lock is a data
+         * race on the deque's own chunk map, however benign a given codegen looks — the same
+         * ruling ADR-0063 erratum 3 made about `multi_peer`. So the deque OWNS the contexts and
+         * this intrusive chain PUBLISHES them, exactly as `child_registry_t` does with its
+         * chunks: the node is fully built before the release-store that links it, and a reader
+         * acquires each link before touching the node behind it. The chain is append-only —
+         * `remove_child` deliberately leaves the ctx in place — so a reader's walk is never
+         * invalidated.
+         */
+        std::atomic<child_rx_ctx_t*> next{nullptr};
     };
 
     /**
@@ -569,6 +709,47 @@ class fwd_router_t {
                            bool from_peer, std::size_t strip_k, const Cursor& cur,
                            transport_t& child, const fwd_pre_t* pre = nullptr);
     /**
+     * @brief The BOUND forward hop (RFC-0024 §3.4/§5) — try to route @p cur by its `PATH_REF`.
+     *
+     * The whole of a bound hop: read element 0, bounds-check the index, compare the
+     * generation, evaluate the ACL at the dereferenced vertex, and egress the residual over
+     * the link that vertex names. No digest fold, no segment compare, no variable-length
+     * walk — the `resolve_mount_*` family is not entered at all, which is the structural
+     * claim §3.4 makes and §8.4 makes measuring a condition of acceptance.
+     *
+     * @retval true  The frame was consumed — forwarded, or DROPPED because validation failed
+     *               (§5.3: a host that cannot validate element 0 MUST NOT forward, MUST NOT
+     *               apply and MUST NOT repair; either way the caller must not fall through
+     *               to its terminus arm, or a bound frame this node could not route would be
+     *               applied LOCALLY, which is the mis-route the whole design exists to
+     *               refuse).
+     * @retval false This frame is not a bound FORWARD — the residual is one element and this
+     *               node is its terminus, or the op is one no bound hop carries. The caller
+     *               continues exactly as it did before bound paths existed.
+     *
+     * @param pre           The offsets @ref peek_fwd_dst_any already filled for this frame,
+     *                      with `dst_ref` set. Passed in rather than re-peeked: the caller has
+     *                      to classify the `dst` anyway, and reading the same three headers a
+     *                      second time is what made a bound terminus measurably slower than
+     *                      the canonical one it is supposed to beat.
+     * @param element_count The `PATH_REF` element count that peek reported.
+     */
+    template <class Cursor>
+    [[nodiscard]] bool route_bound_forward(std::string_view inbound_name,
+                                           const child_rx_ctx_t* inbound_ctx, bool from_peer,
+                                           const Cursor& cur, const fwd_pre_t& pre,
+                                           std::size_t element_count);
+    /** @brief Publish @p ctx onto the lock-free reader chain. Control plane, under `ctl_m_`. */
+    void publish_ctx(child_rx_ctx_t& ctx) noexcept;
+    /** @brief The receiver ctx of child @p link_name, or nullptr — the name → ctx direction. */
+    [[nodiscard]] const child_rx_ctx_t* ctx_by_name(std::string_view link_name) const;
+    /** @brief The registered child whose CONNECTION vertex sits at slot @p index, or nullptr. */
+    [[nodiscard]] const child_rx_ctx_t* ctx_by_conn_slot(std::uint32_t index) const;
+    /** @brief This node's element for the link a REPLY arrived on — the forwarder's mint
+     *         contribution (RFC-0024 §7.1 step 2); nullopt when it has none to give. */
+    [[nodiscard]] std::optional<wire::path_ref_element_t> hop_mint(
+        std::string_view inbound_name, const child_rx_ctx_t* inbound_ctx) const;
+    /**
      * @brief Dispatch a multi-link control frame (ADVERTISE / COMPACT / HANDLE_NACK)
      *        rope-native (ADR-0055 §2).
      *
@@ -633,6 +814,11 @@ class fwd_router_t {
     child_registry_t registry_;            // the one NAME→link demux table (Brick 3a, ADR-0037)
     route_handle_t handles_;               // per-link label tables (compact flows only)
     std::deque<child_rx_ctx_t> child_rx_;  // stable receiver contexts, one per child
+    /** @brief Head of the LOCK-FREE published chain through `child_rx_` — the only spelling a
+     *         frame-path reader may use (see `child_rx_ctx_t::next`). */
+    std::atomic<child_rx_ctx_t*> rx_head_{nullptr};
+    /** @brief Tail of that chain. Written under `ctl_m_` only, never read by a frame path. */
+    child_rx_ctx_t* rx_tail_ = nullptr;
     /**
      * @brief Serializes CONTROL-PLANE mutation of the registry and `child_rx_` (ADR-0063 §3).
      *

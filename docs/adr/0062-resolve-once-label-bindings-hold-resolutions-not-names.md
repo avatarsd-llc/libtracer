@@ -8,8 +8,8 @@ RFC-0004 already delivers "resolve the route once, then address it by a small to
 
 What the label eliminated is the **wire** cost. It did not eliminate the **resolution** cost, because a binding stores bytes and names rather than resolutions:
 
-- **Terminus** (`fwd_router.cpp:488-492`): `deliver_local(binding->local_route, …)` — and `local_route` is, by its own doc, "the local dst PATH TLV bytes **to resolve** + write" (`route_handle.hpp:56`). Every delivery on an established flow re-walks the path.
-- **Forwarding hop** (`fwd_router.cpp:497`): `registry_.by_name(binding->down_link)` — `down_link` is a `std::string` (`route_handle.hpp:53`), so every compact frame pays a linear registry scan. The `bench_forward_demux` baseline measures that scan at **~1.0–1.4 ns per registered link**, linear in table size.
+- **Terminus** (`fwd_router.cpp:474-478`): `deliver_local(binding->local_route, …)` — and `local_route` is, by its own doc, "the local dst PATH TLV bytes **to resolve** + write" (`route_handle.hpp:56`). Every delivery on an established flow re-walks the path.
+- **Forwarding hop** (`fwd_router.cpp:483`): `registry_.by_name(binding->down_link)` — `down_link` is a `std::string` (`route_handle.hpp:53`), so every compact frame pays a linear registry scan. The `bench_forward_demux` baseline measures that scan at **~1.0–1.4 ns per registered link**, linear in table size.
 
 So an established, hot flow — the case delivery compaction exists for — still re-resolves both ends on every frame. The resolution is *known* and *stable*; only its cached form is missing.
 
@@ -23,7 +23,7 @@ So an established, hot flow — the case delivery compaction exists for — stil
 
 The generation stamp is load-bearing and is the non-obvious half of this decision. A `vertex_handle_t` never dangles — the vertex map is pinned, pointer-stable and insert-only (`graph.hpp:46-57`) — but `retire()` **re-virginizes the same object**: a retired-then-revived path keeps its `vertex_t` while shedding all owner state, ACEs included (RFC-0009 §B.6; `retire_test.cpp`'s confused-deputy case). Today's per-delivery re-resolution is *accidentally* safe against this: a retired path fails to resolve, so delivery stops. Caching a bare handle would therefore **introduce the bug that re-resolution currently prevents** — an established subscriber flow continuing to deliver into a path after it was retired and re-created for a different owner. A misdelivery across an ownership boundary is a confused deputy, not merely a stale read.
 
-**A generation mismatch is treated as exactly what it is: a stale label.** It drops the frame, fires the existing `on_stale_label` observer, and NACKs upstream to prompt a re-advertise — the RFC-0004 §E.1 self-heal path, already implemented and tested (`fwd_router.cpp:477-486`). No second invalidation mechanism is introduced, and the flow re-binds itself without a handshake.
+**A generation mismatch is treated as exactly what it is: a stale label.** It drops the frame, fires the existing `on_stale_label` observer, and NACKs upstream to prompt a re-advertise — the RFC-0004 §E.1 self-heal path, already implemented and tested (`fwd_router.cpp:463-472`). No second invalidation mechanism is introduced, and the flow re-binds itself without a handshake.
 
 **A binding caches the address, never the authorization.** ACL gating stays per-operation on the resolved vertex. A label is an addressing shortcut; it must not become a capability that outlives the grant that created it.
 

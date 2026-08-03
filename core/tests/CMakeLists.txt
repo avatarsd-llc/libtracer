@@ -72,6 +72,15 @@ target_compile_definitions(bound_path_test PRIVATE
     LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 add_test(NAME bound_path COMMAND bound_path_test)
 
+# RFC-0024 car 3 — the FORWARDER hop and the origin-side bind, over a three-node
+# loopback chain with production `/net:children[]` wiring.
+add_executable(bound_forward_test bound_forward_test.cpp)
+target_link_libraries(bound_forward_test PRIVATE libtracer)
+libtracer_test_warnings(bound_forward_test)
+target_compile_definitions(bound_forward_test PRIVATE
+    LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
+add_test(NAME bound_forward COMMAND bound_forward_test)
+
 add_executable(path_ref_test path_ref_test.cpp)
 target_link_libraries(path_ref_test PRIVATE libtracer)
 libtracer_test_warnings(path_ref_test)

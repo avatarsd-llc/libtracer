@@ -30,12 +30,13 @@ auto-multipath discovered by the router. `0x0D ROUTER` is a reserved, decodable 
 (`type_t::ROUTER`, `core/include/libtracer/tlv.hpp:42`) with no implemented mechanism behind it;
 source routing needs none.
 
-Three dispositions, decided by resolving the **first `dst` segment** against the registry:
+Four dispositions. Three are decided by resolving the **first `dst` segment** against the registry; the fourth is decided by the `dst`'s own type code, because a bound address has no segment to resolve:
 
 | First `dst` segment resolves to | Disposition |
 | --- | --- |
 | a registered transport child | **forward** — strip the segment from `dst`, prepend this node's NAME for the inbound link to `src`, scatter-gather onward |
 | a local non-transport vertex | **terminus** — decode into an arena, apply the op, build `FWD{REPLY}`, send it back over the link the request arrived on |
+| a `PATH_REF` `dst` with >1 element | **bound hop** — consume element 0 (bounds, generation, ACL at the dereferenced vertex), egress the residual over the link it names (§bound hop) |
 | nothing, on a `REPLY` | **terminal reply** — the accumulated return route is fully consumed, so this node is the originator; the frame goes to the reply sink |
 
 A `REPLY` routes by the same step but never accumulates `src`: a reply expects no reply
@@ -48,6 +49,52 @@ into an arena drawn from a failable block source rather than the container resou
 peer-sized frame arriving behind no ACL cannot exhaust the heap silently. Registry lookups take no
 lock; the control-plane mutex covers `add_child` / `remove_child` only, and the forward path never
 takes it.
+
+### The bound hop
+
+A `dst` that is a `PATH_REF` rather than a canonical `PATH` takes a fourth disposition, and it is
+decided by the element **count** rather than by the registry ([RFC-0024 — bound paths](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §3.4/§5):
+**one** element left means this node is the terminus and the element names its target vertex;
+**more than one** means this node is a hop, and it consumes element 0 — bounds-check the index,
+compare the generation, evaluate the ACL at the dereferenced vertex for the operation's own right
+— then egresses the residual over the link that vertex names. No mount descent runs at all: the
+`resolve_mount_*` family is not entered, there is no digest fold and no segment compare.
+
+One peek decides all four dispositions. The `dst`'s form — canonical `PATH`, bound `PATH_REF`, or
+neither — is read once, from the three headers a frame leads with, and the two forms are mutually
+exclusive by that type code. Asking the canonical question and the bound question as separate
+walks costs the bound form a whole second parse of the same bytes while buying the canonical form
+nothing, and it measured a bound terminus slower than the canonical terminus it exists to beat.
+
+The element→link join is one integer per child, recorded at `add_child`: a child's mount run **is**
+its connection vertex's canonical key, so the router resolves that vertex once and remembers its
+slot index. It is not a route table — one entry per link, sized by the graph and never by the
+traffic — and a child registered before its connection vertex exists simply has none, which makes
+every bound route through it fall back to canonical rather than misroute. A **bus** child never
+records one, deliberately: a bus mount's own `send()` broadcasts and a bus peer has no vertex, so
+no element can name either.
+
+An opcode the build cannot name is dropped rather than forwarded: §6.2 evaluates the ACL for the
+operation's **own** right, and a hop that does not know an opcode does not know its right, so
+charging it the `READ` right that happens to be at hand is a guess a future write-like opcode
+would cross a read-only gate on. A bound `REPLY` is refused the same way.
+
+Any validation failure is a **drop**, and never a fall-through to the local terminus: a bound frame
+this node cannot route is dropped, the origin still holds the canonical path the binding was minted
+from, and re-resolving canonically and re-minting is its recovery. `src` accumulates canonically
+throughout, so the reply of a bound request routes home through the ordinary descent and every hop
+on the way back may be a peer that does not speak the bound form at all.
+
+A hop that forwards a mint reply either contributes its element or **strips** the answer. Every
+cannot-contribute case strips — no connection vertex for the inbound link, a saturated or retired
+generation, and a list already at the 255-element cap — because a relayed list that skips a hop is
+not a shorter route but a wrong one: the skipped hop would later find one element left, believe
+itself the terminus, and dereference another host's element against its own vertex map.
+
+The router also carries the origin's half — `connection_ref`, `bound_egress`, `adopt_binding` and
+`bound_dispatch` — because both halves are the same act: consume element 0, dereference it,
+egress. The origin's element is the one no peer can supply, since the hop out of this node is the
+one hop nobody else sees.
 
 Alongside the routing legs the router installs the graph's **remote-delivery sink**: a write to a
 vertex that carries a remote subscriber fans out as `FWD{WRITE}` addressed by that subscriber's
@@ -129,8 +176,8 @@ class child_registry_t {                 // the one NAME -> link demux table (AD
 }  // namespace tr::net
 ```
 
-Signature source: `core/include/libtracer/fwd_router.hpp:151` (constructor), `:210`
-(`add_child`), `:260` (`subscribe_toward`), `:270-281` (the sink function-pointer types);
+Signature source: `core/include/libtracer/fwd_router.hpp:154` (constructor), `:213`
+(`add_child`), `:263` (`subscribe_toward`), `:360-371` (the sink function-pointer types);
 `core/include/libtracer/child_registry.hpp:209` (`add`), `:458` (`resolve_peer`), `:473`
 (`erase`), `:499` (`entry_by_name`), `:520` (`by_name`), `:561`/`:571` (`size`/`live_size`).
 
@@ -159,15 +206,15 @@ flowchart TB
   address size grows with hop count, which is what `ADVERTISE`/`COMPACT` route handles exist to
   amortise on a steady flow.
 - **A reply is delivered as a rope, never flattened by the router**
-  (`core/include/libtracer/fwd_router.hpp:285-294`). A sink that wants contiguous bytes holds
+  (`core/include/libtracer/fwd_router.hpp:375-384`). A sink that wants contiguous bytes holds
   `const view_t m = reply.materialize()` and reads `m.bytes()`; a **single-link reply — the common
   case — is returned zero-copy, no allocation and no copy**, and only a multi-link reply pays one
   flatten, on demand. The escape hatch sits at the consumer, so the router never pays for a
   consumer that did not need contiguity. `m` must stay alive while its span is read.
 - **The default delivery leg copies nothing.** A full-route `FWD{WRITE}` fan-out scatter-gathers a
   fresh stack head, the stored return-route bytes, an empty `src`, and one span per link of the
-  stored value (`core/src/fwd_router.cpp:1510`). The `COMPACT` leg is the one that flattens,
-  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:1473`) — single-link, that
+  stored value (`core/src/fwd_router.cpp:1726`). The `COMPACT` leg is the one that flattens,
+  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:1689`) — single-link, that
   flatten is a zero-copy adopt, and multi-link it draws from the router's injected `flat` backend
   (#730), not the global heap.
 - **All rope flattens on the forward AND terminus paths draw from the injected seam.** `flat`
@@ -227,7 +274,7 @@ the role default. Extra transport kinds join the catalog through `register_trans
 file ever learning about it.
 
 **The write is ACL-gated.** The `:children[]` append is gated on the parent vertex's `CREATE`
-right and denied with `PERMISSION_DENIED` otherwise (`core/src/graph.cpp:1678-1680`). Under
+right and denied with `PERMISSION_DENIED` otherwise (`core/src/graph.cpp:1703-1705`). Under
 [RFC-0014 — creator endpoint, connection lifecycle and link liveness](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)
 that gate relocates onto the creator endpoint's own ACL and gains its removal counterpart: a `NAME`
 write is gated on `WRITE` — **not** `DELETE` — per
@@ -430,7 +477,41 @@ tested against hand-built frames with no live transport.
 :project: libtracer
 ```
 
+```{doxygenenum} tr::net::fwd_dst_kind_t
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::peek_fwd_dst_any
+:project: libtracer
+```
+
 ```{doxygenfunction} tr::net::peek_fwd_dst
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::peek_fwd_dst_ref
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::read_path_ref_element
+:project: libtracer
+```
+
+```{doxygenstruct} tr::net::reply_mint_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::net::no_mint_t
+:project: libtracer
+:members:
+```
+
+```{doxygenfunction} tr::net::peek_reply_mint
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::rebuild_reply_mint
 :project: libtracer
 ```
 
@@ -446,7 +527,7 @@ tested against hand-built frames with no live transport.
 :project: libtracer
 ```
 
-```{doxygenfunction} tr::net::rebuild_fwd_forward(const Cursor&, std::span<const std::byte>, std::string_view, std::size_t, const fwd_pre_t*)
+```{doxygenfunction} tr::net::rebuild_fwd_forward(const Cursor&, std::span<const std::byte>, std::string_view, std::size_t, const fwd_pre_t*, MintFn)
 :project: libtracer
 ```
 

@@ -448,3 +448,44 @@ test('acl/bound-vs-canonical-deny denies, carries no mint, and agrees on the out
   // The outcome tail is what the canonical spelling produces byte for byte — §6.3's claim.
   assert.equal(hex(bin.subarray(bin.length - 19)), '010001000109400a0008400600010002005000');
 });
+
+/* ------------------------------ RFC-0024 §3.4/§5 — the forwarder hop (car 3) --- */
+
+test('fwd-bound-forward / fwd-bound-forwarded are one hop apart, byte for byte', () => {
+  const before = vector('fwd/fwd-bound-forward');
+  const after = vector('fwd/fwd-bound-forwarded');
+  assert.equal(
+    hex(before),
+    '0f4031000100010000140010000100000000000000efbe00000700000006400c00020008007265706c792d65700100040009000000',
+  );
+  assert.equal(
+    hex(after),
+    '0f403000010001000014000800efbe0000070000000640130002000300636c69020008007265706c792d65700100040009000000',
+  );
+
+  const bf = decodeFwd(before);
+  const af = decodeFwd(after);
+  assert.equal(bf.op, FWD_OP.READ);
+  assert.equal(af.op, bf.op, 'a hop relays the opcode it was given');
+  assert.equal(bf.dstBound, true);
+  assert.equal(af.dstBound, true);
+
+  // The shrink: TWO elements arrive, ONE leaves, and the one that leaves is the NEXT host's
+  // — element 0 was this host's own and is consumed, never rewritten (RFC-0024 §4.1).
+  assert.equal(bf.dst.payload.length / PATH_REF_ELEMENT_BYTES, 2);
+  assert.equal(af.dst.payload.length / PATH_REF_ELEMENT_BYTES, 1);
+  assert.ok(sameBytes(bf.dst.payload, pathRefBody([[1, 0], [0xbeef, 7]])));
+  assert.ok(sameBytes(af.dst.payload, bf.dst.payload.subarray(PATH_REF_ELEMENT_BYTES)));
+  assert.equal(af.dst.opt.pl, false, 'the re-headed PATH_REF keeps PL clear — a record array');
+
+  // The grow: `src` accumulates CANONICALLY on a bound frame, so the return route is the one
+  // every canonical hop builds and a peer that never speaks the bound form still answers.
+  assert.equal(bf.src.type, TYPE.PATH);
+  assert.equal(af.src.type, TYPE.PATH);
+  assert.equal(bf.src.children.length, 1, 'src = /reply-ep');
+  assert.equal(af.src.children.length, 2, 'src = /cli/reply-ep — the inbound mount prepended');
+
+  // Exactly 8 bytes of dst left, and the payload rode through untouched.
+  assert.equal(before.length - after.length, PATH_REF_ELEMENT_BYTES - 7 /* src grew by 7 */);
+  assert.equal(hex(before.subarray(before.length - 8)), hex(after.subarray(after.length - 8)));
+});

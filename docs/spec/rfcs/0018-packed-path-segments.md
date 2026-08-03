@@ -67,9 +67,9 @@ reps × 8192 iterations, four consecutive runs):
 
 A **3.25× deeper address in a 2.1× larger frame costs the same hop.** The cause is in the code and
 is not subtle: `peek_fwd_dst_segs` stops at `kMountPeekMax = 4`
-(`core/include/libtracer/fwd_frame_view.hpp:94`, loop guard at `:161` and `:194`), and
+(`core/include/libtracer/fwd_frame_view.hpp:95`, loop guard at `:277` and `:207`), and
 `rebuild_fwd_forward` forwards the residual `dst` as **one untouched span**
-(`fwd_frame_view.hpp:604-605`, emitted once by `gather` at `:470`). Segments 5..13 are never
+(`fwd_frame_view.hpp:850-851`, emitted once by `gather` at `:689`). Segments 5..13 are never
 parsed at any hop.
 
 Two corrections follow. The draft's "**eight** `read_fwd_header` calls" is **seven**: three
@@ -88,7 +88,7 @@ Reproduced today on `main` (in tree, three runs × three reps): `chain-path` p50
 The two arms do not differ only in how the destination is named. `chain-path` injects
 `FWD{op=WRITE}`, and a `WRITE` terminus **always** assembles a `RESULT` reply
 (`core/src/op_resolve_walk.hpp:808-813`) which then routes four hops home. `chain-label` injects
-`COMPACT`, and the `COMPACT` terminus **never** replies (`core/src/fwd_router.cpp:895-929`).
+`COMPACT`, and the `COMPACT` terminus **never** replies (`core/src/fwd_router.cpp:1098-1132`).
 Instrumented (`scratchpad/probe_chain.cpp`, reverse counters added to `wire_link_t`):
 
 | arm | forward | **reverse** |
@@ -191,7 +191,7 @@ enforcement note at `docs/reference/05-protocol-tlvs.md:279-299` and the conform
 **A second, still-unfixed locus of that same bug is closed by this RFC.** `wire::path_key`
 (`core/src/frame.cpp:166-178`) emits **every** child's payload through `wire::emit_name`
 with no type check — the #436 fix landed only in the arena tier. Its wire-facing caller
-`resolve_route_vertex` (`core/src/fwd_router.cpp:980-982`) resolves an ADVERTISE route, so a peer
+`resolve_route_vertex` (`core/src/fwd_router.cpp:1196-1198`) resolves an ADVERTISE route, so a peer
 sending `PATH{VALUE "sensor"}` binds a label to `/sensor` today while the arena tier correctly
 answers `INVALID_PATH`. With a packed body there are no child TLVs to mistype, and the divergence
 is structurally impossible. (If this RFC is rejected, that locus still needs fixing on its own —
@@ -234,7 +234,7 @@ rise, the correct instrument is §8's reserved escape, not a variable-width leng
 
 - **Zero-copy strip-K.** `rebuild_fwd_forward` advances `p += 1 + len` exactly as well as it
   advances by `seg_h->total`, and still emits the residual `dst` as one span with a fresh 4-byte
-  `PATH` header (`fwd_frame_view.hpp:604-605`, `gather` at `:470`). No length table is rewritten.
+  `PATH` header (`fwd_frame_view.hpp:850-851`, `gather` at `:689`). No length table is rewritten.
 - **`key_view_t`'s byte-prefix-implies-ancestor invariant** (`core/include/libtracer/key_view.hpp:12-17`).
   Records are self-delimiting and parsed left-to-right, so a shared byte prefix parses identically
   in both keys and every prefix boundary is a record boundary. `/a` = `01 'a'` is a prefix of
@@ -252,7 +252,7 @@ rise, the correct instrument is §8's reserved escape, not a variable-width leng
   real reduction in forward-compatibility surface and belongs in the ledger, not in the benefits
   column.
 - **Per-segment `TS`/`CRC` trailers.** Nothing emits them — `encode_mount_tlv`
-  (`fwd_frame_view.hpp:656-673`) always writes `opt = 0` — and the `PATH`'s own trailer still
+  (`fwd_frame_view.hpp:916-940`) always writes `opt = 0` — and the `PATH`'s own trailer still
   covers the whole address.
 - **A non-`NAME` child in a `PATH`.** Already forbidden (`05-protocol-tlvs.md:274`); the vector
   `path/path-value-children-illegal` exists precisely to reject it. That vector becomes
@@ -286,7 +286,7 @@ call sites. The named loci: `fwd_frame_view.hpp` (both `peek_fwd_dst_segs` overl
 (`path_key`), `graph.cpp` (`parse_subscriber_tlv`), `child_registry.hpp` (`encode_mount_name`),
 `path.cpp`, `key_view.hpp`.
 
-**Vertex-map key.** The graph key **is** the `PATH` body (`path.hpp:114,124`; `graph.cpp:1612`;
+**Vertex-map key.** The graph key **is** the `PATH` body (`path.hpp:114,124`; `graph.cpp:1637`;
 `vertex.hpp:535` subscription keys), so it moves with the encoding. A `/sensor/temp` key goes
 18 B → 12 B. **RAM effect: UNMEASURED**, and this project's own record says a static-RAM census
 belongs on rv32, not host — and that `std::vector` has no small-buffer optimisation

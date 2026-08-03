@@ -9,6 +9,12 @@ versioning/publish strategy.
 
 ### Added
 
+- **The RFC-0024 forwarding car's two vectors are pinned** in `packages/client/test/vectors.test.mjs`:
+  `fwd/fwd-bound-forward` and `fwd/fwd-bound-forwarded`, the same operation one bound hop apart —
+  the `dst` losing exactly one element (the hop's own, consumed, never rewritten), the re-headed
+  `PATH_REF` keeping `PL` clear, and `src` growing canonically so the return route is the one every
+  canonical hop builds. No API change: the client carries the shape and, having no router, never
+  interprets an element.
 - **`ParsedFwd` learns the RFC-0024 §5-§7 routing surface.** Two new fields — `mintRequest`
   (the `op` byte's bit 7) and `dstBound` (`dst` is a `PATH_REF`, not a `PATH`) — plus the
   exported `FWD_OPCODE_MASK` (`0x3f`) and `FWD_OP_FLAG_MINT_REQUEST` (`0x80`).

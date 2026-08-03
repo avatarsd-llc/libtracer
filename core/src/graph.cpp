@@ -418,6 +418,31 @@ std::optional<vertex_slot_t> graph_t::vertex_slot(vertex_handle_t vh) const noex
     return std::nullopt;  // not this graph's vertex — defensive, unreachable via the API.
 }
 
+std::optional<vertex_slot_t> graph_t::vertex_slot_at(std::uint32_t index) const noexcept {
+    const std::shared_lock lock(map_mutex_);
+    if (index >= vertex_slots_.size()) return std::nullopt;
+    // Read under the same hold the index bound was tested under, for the reason
+    // `vertex_slot` states: a generation read outside it can straddle a retire and stamp
+    // the SUCCESSOR tenant's number onto an element the operation never reached.
+    const vertex_t* const v = vertex_slots_[index];
+    const std::uint32_t gen = v->retire_gen();
+    if (gen == kGenerationSaturated) return std::nullopt;  // permanently unbindable (§4.4 r3)
+    // A retired-but-not-yet-revived vertex is a PLACEHOLDER, and minting for one is how an
+    // element outlives the tenancy it was issued against: `retire` bumps the generation and
+    // clears `registered_`, so an element minted in that window already carries the number
+    // the SUCCESSOR tenant will validate under, and `deref_vertex_slot` would honour it once
+    // the vertex revives at the same path. The validate-on-use stamp is the whole guard here
+    // (#511), so it has to be refused on the side that ISSUES an element as well as on the
+    // side that honours one — the same symmetry rule 3 needed. A hop that cannot mint STRIPS
+    // the mint answer (§7.1 erratum 1) and the origin stays canonical.
+    if (!v->registered()) return std::nullopt;
+    return vertex_slot_t{.index = index, .generation = gen};
+}
+
+bool graph_t::allows(vertex_handle_t v, std::string_view caller, acl_right_t right) const {
+    return acl_allows(v.get(), caller, right);
+}
+
 std::optional<vertex_handle_t> graph_t::deref_vertex_slot(std::uint32_t index,
                                                           std::uint32_t generation) const noexcept {
     const std::shared_lock lock(map_mutex_);
