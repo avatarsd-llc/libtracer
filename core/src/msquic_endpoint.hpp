@@ -351,11 +351,14 @@ class msquic_endpoint_t {
      *         consuming this event's remaining chunks.
      */
     bool on_rx_chunk(const std::uint8_t* p, std::size_t n) {
-        const auto res =
-            framer_.feed(*backend, max_frame, reinterpret_cast<const std::byte*>(p), n,
-                         [this](view::segment_ptr_t seg, std::size_t len) {
-                             rx->deliver(view::view_t::over(std::move(seg)).subview(0, len));
-                         });
+        const auto res = framer_.feed(*backend, max_frame, reinterpret_cast<const std::byte*>(p), n,
+                                      [this](view::segment_ptr_t seg, std::size_t len) {
+                                          // aggregate init, not over().subview(): the const subview
+                                          // copies the handle, so the discarded temporary would
+                                          // hold a 2nd reference across the whole receiver callback
+                                          // (#845).
+                                          rx->deliver(view::view_t{std::move(seg), 0, len});
+                                      });
         if (res.dropped != 0) dropped_rx.fetch_add(res.dropped, std::memory_order_relaxed);
         if (res.malformed) {
             malformed_rx.fetch_add(1, std::memory_order_relaxed);

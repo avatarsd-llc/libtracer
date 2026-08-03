@@ -240,10 +240,10 @@ void tcp_transport_t::serve(int fd) {
         view::segment_ptr_t seg = std::move(dec.seg);
         if (!read_exact(fd, seg->bytes.data(), len)) return;
 
-        // Tier select lives in the slot (receiver_slot.hpp): the rope sink gets
-        // the frame OWNING (narrowed to the frame length — pin/subview beyond
-        // this call); a span-only sink gets the same segment bytes borrowed.
-        rx_.deliver(view::view_t::over(std::move(seg)).subview(0, len));
+        // Tier select lives in the slot (receiver_slot.hpp): the rope sink gets the
+        // frame OWNING, narrowed by aggregate init (over().subview() would copy the
+        // handle, leaving a 2nd ref live across the callback, #845); span sink borrows.
+        rx_.deliver(view::view_t{std::move(seg), 0, len});
     }
 }
 
@@ -468,8 +468,8 @@ void transport_tcp_server::service_peer(session_t& s) {
     // wiring), flat transport_t slot as the point-to-point fallback.
     const auto res = s.framer.feed(*backend_, max_frame_, chunk.data(), static_cast<std::size_t>(n),
                                    [this, &s](view::segment_ptr_t seg, std::size_t len) {
-                                       view::view_t frame =
-                                           view::view_t::over(std::move(seg)).subview(0, len);
+                                       // aggregate init — no handle copy (#845)
+                                       view::view_t frame{std::move(seg), 0, len};
                                        if (peer_rx_.has_any())
                                            peer_rx_.deliver(s.name, std::move(frame));
                                        else

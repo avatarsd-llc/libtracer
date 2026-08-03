@@ -182,6 +182,18 @@ without it.
 
 ### Fixed
 
+- **The owning receiver seam holds no library reference *during* the callback** (#845). The
+  UDP, TCP and QUIC/WebTransport receive paths built the delivered frame as
+  `view_t::over(std::move(seg)).subview(0, len)`. `subview` is `const` and **copies** the
+  segment handle, so the discarded whole-segment temporary stayed alive for the rest of the
+  full-expression — which is the `deliver(...)` call, hence the whole receiver callback. The
+  frame is now built by aggregate init (`view_t{std::move(seg), 0, len}`): one fewer
+  refcount round-trip per received frame, and a receiver that inspects
+  `view.owner.use_count()` inside (or straight after) its callback now sees the `1` that the
+  ownership transfer in [ADR-0042](../docs/adr/0042-refcounted-receiver-seam-view-delivery.md)
+  implies, rather than racing the temporary's destruction. Observable only through
+  the refcount; no signature, ownership or lifetime rule changes.
+
 - **BOTH folded READs' POINT headers no longer come from the global heap** (#831).
   `graph_t::read_subtree_folded`'s pass-3 emit frames one exactly-sized OWNED POINT header per
   included subtree node, and `graph_t::read_children_folded` — where the wire `":children"` READ

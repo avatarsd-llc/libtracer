@@ -200,7 +200,7 @@ struct default_config_t {
      * `segment_bytes` is the ALLOCATED size of the segment the pin would keep alive, not the
      * length of the delivered frame view. Those differ by a lot on a real transport:
      * `udp_transport_t` receives every datagram into a `kMaxDatagram`-sized segment and delivers
-     * a `subview(0, n)` of it, so a 1 KB datagram pins 64 KB. Measuring the view length instead
+     * a length-`n` window over it, so a 1 KB datagram pins 64 KB. Measuring the view length instead
      * would price a cost nobody pays and ignore the one everybody does.
      *
      * @ref kPinNever (0) is the reserved sentinel: never pin. It is the value shipped here, and

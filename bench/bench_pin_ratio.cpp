@@ -148,7 +148,7 @@ std::vector<std::byte> b_fwd_write(const std::vector<std::byte>& payload) {
  *        `frame.size()` bytes are the frame — the shape a view-delivering transport hands up.
  *
  * The view is narrowed to the frame length, exactly as `udp_transport_t` narrows its
- * `kMaxDatagram` RX segment with `subview(0, n)`. That gap between the delivered LENGTH and
+ * `kMaxDatagram` RX segment to a length-`n` window. That gap between the delivered LENGTH and
  * the allocated SEGMENT is the whole subject of §3.D, so the bench must be able to open it.
  */
 tr::view::view_t frame_view_over(std::span<const std::byte> frame, std::size_t segment_bytes) {
