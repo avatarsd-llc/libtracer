@@ -16,6 +16,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`graph_t::own_subs(vertex_handle_t)` — the owner-side subscriber-slot count.** Exposes
+  the `own_subs` counter (#635) through the graph so a producer can SKIP its own publish
+  work when nobody is subscribed (a demand-driven publisher) — the app-facing counterpart of
+  the internal fan-out skip. Inline, `noexcept`, relaxed load; a caller that needs the
+  race-ordered read for a single delivery still uses `vertex_t::own_subs_ordered` directly.
+
 - **`tr::graph::kEdgePinSlots` and the edge-pin domain (`libtracer/edge_pin.hpp`,
   [#635](https://github.com/avatarsd-llc/libtracer/issues/635),
   [ADR-0075](../docs/adr/0075-a-vertexs-edges-are-published-and-read-under-an-edge-pin.md)).**

@@ -112,7 +112,7 @@ amendment:
 > one that survives `kMaxSegments` being lifted.
 
 PR #685 corrected the three code comments that claimed "graph depth is `kMaxSegments`-bounded
-structurally" (`core/include/libtracer/graph.hpp:665-671`, `core/src/graph.cpp:1905`).
+structurally" (`core/include/libtracer/graph.hpp:679-685`, `core/src/graph.cpp:1905`).
 
 ### 2.4 Doctrine
 
@@ -258,7 +258,7 @@ One comparison, no restructuring.
 - The reserve guard at `path.cpp:99` (`want <= kMaxPathBytes`) is **untouched** — this RFC keeps
   `kMaxPathBytes`, so the ~1 KiB reserve ceiling on a 16 KB node is preserved exactly. (A design that
   dissolved the byte cap would have had to re-derive it; see §9.1.)
-- Comment-only sites needing the corrected wording: `core/include/libtracer/graph.hpp:665-671`,
+- Comment-only sites needing the corrected wording: `core/include/libtracer/graph.hpp:679-685`,
   `core/src/graph.cpp:1905`, `docs/modules/path.md:15` and `:69-72`.
 
 ## 5. The arithmetic — measured, and the maintainer's redundancy hypothesis is refuted
