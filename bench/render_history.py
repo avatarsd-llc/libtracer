@@ -77,6 +77,28 @@ METRICS: list[dict] = [
 ]
 
 
+# The RATIO spec a paired family carries. A family qualifies when its series come in
+# arms that pair across a product prefix — the same measured shape run by two engines in
+# the SAME pass on the SAME runner — which is exactly what the `(zenoh )?` families are.
+#
+# The ratio is computed CLIENT-SIDE from same-run pairs (same store, same suite, same
+# recorded commit), never precomputed here, because the page charts two stores and lets
+# the reader slice a commit range: a server-side ratio would have to be emitted once per
+# store per range and would go stale the moment either control moved.
+#
+# Why it earns a view of its own: both arms are measured in one pass on one machine, so
+# whatever that machine's speed was on the day divides out of the quotient to first order.
+# The absolute hosted trends stay subject to the runner spread the page documents; the
+# ratio does not, which makes it the trustworthy cross-history comparison.
+#
+# `arm` names which side of the quotient a series is (num = zenoh, den = libtracer),
+# `shape` is the pairing key (two series pair iff their shapes are equal) and `pv` is the
+# numeric parameter the ratio view's sweep / heatmap / 3D axes are drawn over.
+def _zenoh_ratio(shape, pv, px: dict) -> dict:
+    return dict(label="ratio (zenoh ÷ libtracer)", arm=lambda m: "num" if m.group(1) else "den",
+                shape=shape, pv=pv, px=px)
+
+
 FAMILIES: list[dict] = [
     # -- latency suite ------------------------------------------------------
     dict(id="fan", section="dispatch", title="In-process write — by fan-out",
@@ -114,10 +136,28 @@ FAMILIES: list[dict] = [
     dict(id="vs-zenoh-fan", section="dispatch",
          title="libtracer vs Zenoh — by fan-out, over commits",
          cond="inproc · 64 B · 1 topic · same runner, same pass — Zenoh (zenoh-c 1.9.0) is "
-              "version-pinned, so its line is the runner's own drift",
+              "version-pinned, so its line is the runner's own drift. The `ratio` toggle "
+              "divides the two arms per commit, which cancels that drift",
+         # `\d+` already spans the deep fans (1024, 8192) the store records for BOTH arms,
+         # so the fan sweep needs no widening — only the check that says so.
          pat=r"^(zenoh )?inproc 64B/fan(\d+)/1ep",
          label=lambda m: ("zenoh" if m.group(1) else "libtracer") + " fan " + m.group(2),
-         key=lambda m: ("z" if m.group(1) else "l") + f"-{int(m.group(2)):05d}", log=True,),
+         key=lambda m: ("z" if m.group(1) else "l") + f"-{int(m.group(2)):05d}", log=True,
+         ratio=_zenoh_ratio(lambda m: f"fan {m.group(2)}", lambda m: float(m.group(2)),
+                            dict(label="fan-out (subscribers)", log=True, fmt="count"))),
+    # The payload arm of the same comparison. The store has carried both engines across the
+    # whole 1 B .. 8 KB sweep for as long as it has carried the fan sweep, but no family
+    # named it, so half the paired data was drawn nowhere — the same omission the metric
+    # axis above was written to stop, one axis over.
+    dict(id="vs-zenoh-payload", section="dispatch",
+         title="libtracer vs Zenoh — by payload size, over commits",
+         cond="inproc · fan-out 1 · 1 topic · same runner, same pass — the payload arm of the "
+              "comparison; `ratio` divides the two engines per commit",
+         pat=r"^(zenoh )?inproc (\d+)B/fan1/1ep",
+         label=lambda m: ("zenoh" if m.group(1) else "libtracer") + f" {m.group(2)} B",
+         key=lambda m: ("z" if m.group(1) else "l") + f"-{int(m.group(2)):06d}", log=True,
+         ratio=_zenoh_ratio(lambda m: f"{m.group(2)} B", lambda m: float(m.group(2)),
+                            dict(label="payload size", log=True, fmt="bytes"))),
     dict(id="mixed", section="dispatch", title="Mixed workload — the composed topology",
          cond="mixed · 128 topics · varied fan-out and payloads — one gated point, tracked "
               "over time rather than compared against a sibling",
@@ -640,12 +680,13 @@ def build(data: dict, colors: dict[str, int] | None = None) -> dict:
         comparison, and a card offering a metric that draws one line is worse than a
         card that does not offer it.
         """
-        picked: list[tuple] = []  # (sort_key, label, pv, pts)
+        rat = fam.get("ratio")
+        picked: list[tuple] = []  # (sort_key, label, pv, pts, ratio_meta)
         if "names" in fam:  # explicit fixed list (heap/memory probes, not point-swept)
             for i, (name, label) in enumerate(fam["names"]):
                 if name in names:
                     seen.append(name)
-                    picked.append((i, label, None, names[name]))
+                    picked.append((i, label, None, names[name], None))
         else:
             for name in names:
                 m = re.match(pat, name)
@@ -654,18 +695,24 @@ def build(data: dict, colors: dict[str, int] | None = None) -> dict:
                 seen.append(name)
                 key = fam["key"](m)
                 pv = key if isinstance(key, float) else None
-                picked.append((key, fam["label"](m), pv, names[name]))
+                # A paired family carries, per series, which ARM of the quotient it is,
+                # the shape it pairs on, and the numeric parameter the ratio view sweeps.
+                rm = (dict(arm=rat["arm"](m), rk=rat["shape"](m), rpv=rat["pv"](m))
+                      if rat else None)
+                picked.append((key, fam["label"](m), pv, names[name], rm))
         picked.sort(key=lambda t: (t[0],) if not isinstance(t[0], str) else (float("inf"), t[0]))
         if len(picked) < fam.get("min_series", 2):
             return []
         out = []
-        for _, label, pv, pts in picked:
+        for _, label, pv, pts, rm in picked:
             # Color is global BY LABEL across every chart and every metric, so "fan 8"
             # is one color everywhere — switching metric must not reshuffle the legend.
             ci = colors.setdefault(label, len(colors))
             s = {"label": label, "ci": ci, "pts": pts}
             if pv is not None:
                 s["pv"] = pv
+            if rm is not None:
+                s.update(rm)
             out.append(s)
         return out
 
@@ -701,6 +748,14 @@ def build(data: dict, colors: dict[str, int] | None = None) -> dict:
                  "series": first["series"]}
         if "px" in fam and all(all("pv" in s for s in v["series"]) for v in variants):
             chart["px"] = fam["px"]
+        # The ratio view is offered only when BOTH arms of at least one shape survived into
+        # every metric — a card advertising a quotient it cannot compute is worse than a
+        # card without the toggle.
+        if "ratio" in fam and all(
+                {s["rk"] for s in v["series"] if s.get("arm") == "num"}
+                & {s["rk"] for s in v["series"] if s.get("arm") == "den"}
+                for v in variants):
+            chart["ratio"] = {"label": fam["ratio"]["label"], "px": fam["ratio"]["px"]}
         charts.append(chart)
     return {"suites": suites, "charts": charts}
 
@@ -813,7 +868,7 @@ def html_blocks(data: dict, local: dict | None = None) -> dict[str, str]:
   <code>main</code> commits (oldest \u2192 newest) \u00b7 \U0001f3f7 dashed verticals mark release
   tags (<b>\u2248</b> = tag commit itself is not a recorded point; marker sits at the nearest
   following recorded commit) \u00b7 \U0001f527 dotted verticals mark commits where the BENCH
-  changed \u2014 points either side of one are not comparable. Each card carries every METRIC that point\n  recorded \u2014 <b>p50</b> / <b>p99</b> / <b>ns per delivery</b> / <b>throughput</b> \u2014 pick one under the title. Families with a numeric parameter\n  axis also offer <b>trend</b> / <b>sweep</b> / <b>heatmap</b> / <b>3D</b> views \u2014 same data,\n  three axes (commit \u00d7 parameter \u00d7 value). Hover any chart for exact per-commit values.</p>
+  changed \u2014 points either side of one are not comparable. Each card carries every METRIC that point\n  recorded \u2014 <b>p50</b> / <b>p99</b> / <b>ns per delivery</b> / <b>throughput</b> \u2014 pick one under the title. Families with a numeric parameter\n  axis also offer <b>trend</b> / <b>sweep</b> / <b>heatmap</b> / <b>3D</b> views \u2014 same data,\n  three axes (commit \u00d7 parameter \u00d7 value), over a selectable <b>commit range</b>. The paired\n  libtracer-vs-Zenoh cards add a <b>ratio</b> toggle: both engines run in the same pass on the\n  same runner, so their per-commit quotient cancels runner speed and is the comparison to read\n  across a long history. Hover any chart for exact per-commit values.</p>
   <div class="ph-grid ph-charts"></div>
   <script type="application/json" class="ph-data">{blob}</script>
   <script type="application/json" class="ph-data-local">{lblob}</script>

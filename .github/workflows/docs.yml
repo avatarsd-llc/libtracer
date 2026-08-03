@@ -198,6 +198,14 @@ jobs:
         run: |
           if git fetch --no-tags --depth=1 origin gh-pages; then
             git archive FETCH_HEAD dev | tar -x -C docs/_build/html/
+            # Overlay a store-navigation banner onto the MIRRORED COPY of the two stock
+            # benchmark-action pages. Each of them renders one store and names neither the
+            # other one nor the unified family charts, so a reader landing there concludes
+            # the site has a single store and no selector. The gh-pages branch is not
+            # touched — only the extracted artifact tree. Idempotent, and fail-soft: an
+            # upstream page whose shape changed ships unmodified with a workflow warning
+            # rather than failing the deploy.
+            python3 tools/inject_store_nav.py docs/_build/html
           else
             echo "gh-pages branch not found — perf-history chart omitted from this deploy"
           fi

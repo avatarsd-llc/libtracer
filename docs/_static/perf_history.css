@@ -90,6 +90,29 @@ body[data-theme="dark"] .ph-hist, :root[data-theme="dark"] .ph-hist {
 .ph-hist .ph-tabs { position: absolute; top: 12px; right: 12px; display: flex; gap: 4px; }
 .ph-hist .ph-tab { font-family: var(--ph-mono); font-size: 10.5px; padding: 2px 8px; border-radius: 6px; border: 1px solid var(--ph-line); background: transparent; color: var(--ph-muted); cursor: pointer; }
 .ph-hist .ph-tab.on { background: var(--ph-sweep); border-color: var(--ph-sweep); color: #fff; }
+/* Ratio toggle: whether the card draws the two engines' ABSOLUTE lines or the per-commit
+   quotient between them. It sits in the view row but is deliberately a different hue from
+   .ph-tab.on — it does not select one of a set, it transforms what the selected view is
+   drawn from, and a reader must be able to tell at a glance that a quotient is on screen. */
+.ph-hist .ph-rtoggle { font-family: var(--ph-mono); font-size: 10.5px; padding: 2px 8px; border-radius: 6px; border: 1px solid var(--ph-line); background: transparent; color: var(--ph-muted); cursor: pointer; }
+.ph-hist .ph-rtoggle:hover { color: var(--ph-ink); border-color: var(--ph-hair); }
+.ph-hist .ph-rtoggle.on { background: var(--ph-rel); border-color: var(--ph-rel); color: #fff; }
+/* Break-even line on the ratio view. Same hue as the ratio toggle, so the control and the
+   line it puts on the chart read as one thing. */
+.ph-hist .ph-unity { stroke: var(--ph-rel); stroke-width: 1.2; stroke-dasharray: 3 3; opacity: .75; }
+.ph-hist .ph-unitylab { fill: var(--ph-rel); font-family: var(--ph-mono); font-size: 9.5px; }
+
+/* Commit-range control: WHICH SLICE of the recorded history every view of this card is
+   drawn over. Two native range inputs and a readout — no library, nothing fetched, which
+   is what the inlined-assets doctrine on this page requires. */
+.ph-hist .ph-range { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 0 0 8px; }
+.ph-hist .ph-range:empty { display: none; }
+.ph-hist .ph-rlab { font-family: var(--ph-mono); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--ph-muted); }
+.ph-hist .ph-range input[type="range"] { width: 130px; max-width: 30vw; accent-color: var(--ph-sweep); }
+.ph-hist .ph-rout { font-family: var(--ph-mono); font-size: 10.5px; color: var(--ph-muted); }
+.ph-hist .ph-rout code { font-family: var(--ph-mono); color: var(--ph-ink); }
+.ph-hist .ph-rfull { font-family: var(--ph-mono); font-size: 10px; padding: 1px 7px; border-radius: 6px; border: 1px solid var(--ph-line); background: transparent; color: var(--ph-muted); cursor: pointer; }
+.ph-hist .ph-rfull[disabled] { opacity: .4; cursor: default; }
 
 /* Metric selector: which NUMBER is on the y-axis (p50 / p99 / ns-per-delivery /
    throughput). Distinct from .ph-tabs, which chooses the VIEW (trend / sweep /
