@@ -146,24 +146,24 @@ target](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0007-
 
 ## 5. Remote delivery legs
 
-`fwd_router_t::deliver_remote` (`core/src/fwd_router.cpp:1615`) is the sink the remote leg calls.
+`fwd_router_t::deliver_remote` (`core/src/fwd_router.cpp:1623`) is the sink the remote leg calls.
 It has two legs, and only one of them copies payload bytes.
 
 **The default full-route leg copies nothing.** It emits
 `FWD{ op=WRITE, dst=<stored return route>, src=<empty PATH>, payload=<VALUE> }` as a
 scatter-gather send: a fresh stack header, the stored route, an empty `src`, and one span per
-rope link (`fwd_router.cpp:1680-1687`). The header is a `stack_writer<16>` — the FWD header of at
+rope link (`fwd_router.cpp:1688-1695`). The header is a `stack_writer<16>` — the FWD header of at
 most 6 bytes plus the 5-byte op TLV — and both constant TLVs are `constexpr` arrays with no
-runtime construction (`fwd_router.cpp:1665-1669`). The route bytes were copied once at subscribe
+runtime construction (`fwd_router.cpp:1673-1677`). The route bytes were copied once at subscribe
 time, so a delivery re-uses them by reference; a multi-link value crosses as its own segments,
 with no flatten. The iov vector is nothrow-reserved and an exhausted reserve drops that delivery
-rather than emitting a truncated frame (`fwd_router.cpp:1681-1682`).
+rather than emitting a truncated frame (`fwd_router.cpp:1689-1690`).
 
 **The COMPACT leg is the one that flattens.** `const view_t flat = value.materialize(*flat_);`
-(`fwd_router.cpp:1644`) precedes the compact encode, because a COMPACT wraps a contiguous
+(`fwd_router.cpp:1652`) precedes the compact encode, because a COMPACT wraps a contiguous
 payload. Single-link — the common case — that materialize is a zero-copy adopt; a multi-link
 value pays one flatten per delivery, out of the router's INJECTED byte backend rather than the
-global heap. A failed flatten drops the delivery (`fwd_router.cpp:1645`).
+global heap. A failed flatten drops the delivery (`fwd_router.cpp:1653`).
 Auto-promotion advertises the label once per flow and then streams
 compact frames; a dropped fresh ADVERTISE self-heals through the peer's `HANDLE_NACK`
 ([RFC-0004 — Remote operation

@@ -1122,13 +1122,21 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
     // This hop's mint contribution, on a forwarded REPLY that already carries a `PATH_REF`
     // (RFC-0024 §7.1 step 2). Computed here rather than inside the rebuild because it is a
     // GRAPH fact — this node's own reference to the connection vertex for the link the reply
-    // came back over — and the rebuild knows only bytes. Requesting it costs one bounds-checked
-    // read of a slot index recorded at registration; a node with nothing to give answers
-    // `nullopt` and the reply is forwarded unchanged, which is what a hop that does not
-    // participate looks like on the wire.
-    const std::optional<wire::path_ref_element_t> mint = peek_fwd_op(cur_src) == fwd_op_t::REPLY
-                                                             ? hop_mint(inbound_name, inbound_ctx)
-                                                             : std::nullopt;
+    // came back over — and the rebuild knows only bytes. A node with nothing to give answers
+    // `nullopt`, and the rebuild then STRIPS the answer rather than relaying a list that skips
+    // a hop (§7.1 erratum 1).
+    //
+    // The REQUEST hop pays exactly one masked byte compare for this, and that is the reason
+    // the op byte is read from the offsets the peek already carried rather than through
+    // `peek_fwd_op`: peeking again would re-parse three headers on every forwarded frame —
+    // the benched forward hop — to answer a question only a REPLY can say yes to. A caller
+    // with no `pre` (the public `on_frame` door) falls back to the peek.
+    const bool reply_hop = pre != nullptr && pre->valid
+                               ? static_cast<fwd_op_t>(cur_src.byte_at(pre->op_body_off) &
+                                                       graph::kFwdOpcodeMask) == fwd_op_t::REPLY
+                               : peek_fwd_op(cur_src) == fwd_op_t::REPLY;
+    const std::optional<wire::path_ref_element_t> mint =
+        reply_hop ? hop_mint(inbound_name, inbound_ctx) : std::nullopt;
     const wire::path_ref_element_t* const mint_p = mint ? &*mint : nullptr;
     const auto rebuilt =
         !mount.empty()
