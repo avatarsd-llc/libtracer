@@ -304,6 +304,20 @@ class graph_t {
     [[nodiscard]] std::uint32_t retire_generation(vertex_handle_t vh) const noexcept;
 
     /**
+     * @brief This vertex's active subscriber-slot count — the owner-side read of the
+     *        `own_subs` counter (#635) that lets a producer SKIP its own publish work
+     *        when nobody is subscribed (a demand-driven publisher).
+     *
+     * Relaxed, like @ref vertex_t::own_subs: correct for a continuous stream, where a
+     * just-joined subscriber is served the durability latch and picked up on the next
+     * publish. A caller deciding whether to deliver ONE race-sensitive value instead
+     * wants the `seq_cst` pairing @ref vertex_t::own_subs_ordered documents.
+     */
+    [[nodiscard]] std::uint32_t own_subs(vertex_handle_t vh) const noexcept {
+        return vh.get()->own_subs();
+    }
+
+    /**
      * @brief Slots in the node-scoped vertex index — the cardinality a bound-path element's
      *        index is bounds-checked against (RFC-0024 §6.4).
      *
