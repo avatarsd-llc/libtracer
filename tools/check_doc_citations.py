@@ -550,10 +550,11 @@ ANCHORS = [
     ('core/src/transport_tcp.cpp:62',
      "*        `bench_forward_heap`'s `allocs=0` gate cannot see it: that bench drives"),
     ('core/src/transport_tcp.cpp:181', 'bool tcp_transport_t::read_exact(int fd, std::byte* dst, std::size_t len) {'),
-    ('core/src/transport_tcp.cpp:193', 'return false;  // hard error'),
+    ('core/src/transport_tcp.cpp:201', 'std::array<std::byte, 4096> scratch;'),
     ('core/src/transport_tcp.cpp:210', 'void tcp_transport_t::serve(int fd) {'),
     ('core/src/transport_tcp.cpp:243', 'if (!read_exact(fd, seg->bytes.data(), len)) return;'),
-    ('core/src/transport_tcp.cpp:433', 'slot = slots_.back().get();'),
+    ('core/src/transport_tcp.cpp:457', 'std::array<std::byte, 4096> chunk;',
+     'void transport_tcp_server::service_peer(session_t& s) {'),
     # core/src/transport_udp.cpp
     ('core/src/transport_udp.cpp:138',
      'const std::size_t rx_cap = std::min(kMaxDatagram, backend_->max_segment_size());'),
@@ -577,9 +578,10 @@ ANCHORS = [
     ('core/src/transport_ws.cpp:245',
      'std::array<::iovec, kMaxServerIov + 1> inline_vec;',
      'listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);'),
-    ('core/src/transport_ws.cpp:353',
-     '// The routable NAME is the slot index — `p<slot>`, legal by construction and a'),
-    ('core/src/transport_ws.cpp:673', 'if (stop_.load(std::memory_order_relaxed)) return false;'),
+    ('core/src/transport_ws.cpp:371', 'std::array<std::byte, 4096> chunk;',
+     'void transport_ws_server::service_peer(session_t& s) {'),
+    ('core/src/transport_ws.cpp:691', 'std::array<std::byte, 4096> chunk;',
+     'void transport_ws_client::serve(int fd) {'),
     # core/tests/registry_teardown_test.cpp
     ('core/tests/registry_teardown_test.cpp:289', 'void test_digest_paths_agree() {'),
     # core/tests/tlv_arena_test.cpp

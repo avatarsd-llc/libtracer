@@ -169,8 +169,8 @@ a flat 4096 bytes — a `std::array` reserves its whole frame slot whether fille
 deep receive task.
 
 A stack budget for that task counts five such buffers, not one. The decode arena is the only one
-this document covers; the other four are transport receive and chunk scratch — `transport_tcp.cpp:193`
-and `:433`, `transport_ws.cpp:353` and `:673`. They are not decode arenas and carry no structure,
+this document covers; the other four are transport receive and chunk scratch — `transport_tcp.cpp:201`
+and `:457`, `transport_ws.cpp:371` and `:691`. They are not decode arenas and carry no structure,
 but they occupy the same frames and none of the five has a measured per-task high-water.
 
 That receive task is the binding constraint on a single-core, RAM-constrained node. In the ESP-IDF
@@ -307,7 +307,7 @@ copy and zero user-space copies. The in-source rationale names the trade explici
 chunks through `feed()` "would add one" copy, so the pull loop shares framing *rules* with the
 chunk-fed transports rather than their state machine (`core/src/transport_tcp.cpp:210-215`). The
 only stack scratch left on this path is `drain()`'s 4096-byte backpressure discard buffer
-(`core/src/transport_tcp.cpp:193`), which runs when a frame is dropped, not when one is delivered.
+(`core/src/transport_tcp.cpp:201`), which runs when a frame is dropped, not when one is delivered.
 
 **Where the pull-path shape is not followed**, the residual costs are pool-recv questions, not
 flatten questions:
