@@ -60,6 +60,12 @@ compare the generation, evaluate the ACL at the dereferenced vertex for the oper
 — then egresses the residual over the link that vertex names. No mount descent runs at all: the
 `resolve_mount_*` family is not entered, there is no digest fold and no segment compare.
 
+One peek decides all four dispositions. The `dst`'s form — canonical `PATH`, bound `PATH_REF`, or
+neither — is read once, from the three headers a frame leads with, and the two forms are mutually
+exclusive by that type code. Asking the canonical question and the bound question as separate
+walks costs the bound form a whole second parse of the same bytes while buying the canonical form
+nothing, and it measured a bound terminus slower than the canonical terminus it exists to beat.
+
 The element→link join is one integer per child, recorded at `add_child`: a child's mount run **is**
 its connection vertex's canonical key, so the router resolves that vertex once and remembers its
 slot index. It is not a route table — one entry per link, sized by the graph and never by the
@@ -68,11 +74,22 @@ every bound route through it fall back to canonical rather than misroute. A **bu
 records one, deliberately: a bus mount's own `send()` broadcasts and a bus peer has no vertex, so
 no element can name either.
 
+An opcode the build cannot name is dropped rather than forwarded: §6.2 evaluates the ACL for the
+operation's **own** right, and a hop that does not know an opcode does not know its right, so
+charging it the `READ` right that happens to be at hand is a guess a future write-like opcode
+would cross a read-only gate on. A bound `REPLY` is refused the same way.
+
 Any validation failure is a **drop**, and never a fall-through to the local terminus: a bound frame
 this node cannot route is dropped, the origin still holds the canonical path the binding was minted
 from, and re-resolving canonically and re-minting is its recovery. `src` accumulates canonically
 throughout, so the reply of a bound request routes home through the ordinary descent and every hop
 on the way back may be a peer that does not speak the bound form at all.
+
+A hop that forwards a mint reply either contributes its element or **strips** the answer. Every
+cannot-contribute case strips — no connection vertex for the inbound link, a saturated or retired
+generation, and a list already at the 255-element cap — because a relayed list that skips a hop is
+not a shorter route but a wrong one: the skipped hop would later find one element left, believe
+itself the terminus, and dereference another host's element against its own vertex map.
 
 The router also carries the origin's half — `connection_ref`, `bound_egress`, `adopt_binding` and
 `bound_dispatch` — because both halves are the same act: consume element 0, dereference it,
@@ -460,6 +477,14 @@ tested against hand-built frames with no live transport.
 :project: libtracer
 ```
 
+```{doxygenenum} tr::net::fwd_dst_kind_t
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::peek_fwd_dst_any
+:project: libtracer
+```
+
 ```{doxygenfunction} tr::net::peek_fwd_dst
 :project: libtracer
 ```
@@ -472,7 +497,21 @@ tested against hand-built frames with no live transport.
 :project: libtracer
 ```
 
+```{doxygenstruct} tr::net::reply_mint_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::net::no_mint_t
+:project: libtracer
+:members:
+```
+
 ```{doxygenfunction} tr::net::peek_reply_mint
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::rebuild_reply_mint
 :project: libtracer
 ```
 

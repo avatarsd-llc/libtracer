@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0024 |
 | **Title** | Bound paths: node-scoped vertex-ref source routing |
-| **Status** | **accepted** (2026-08-03, maintainer-ratified, comment window waived). The whole document is ratified, and **§4-§7 are now incorporated in full** as of the forwarding car (2026-08-03): `docs/spec/v1.md` §3 and `docs/reference/05-protocol-tlvs.md` §`0x14` cite the wire form (§4), the routing semantics (§5-§7) and the **hop rules** normatively, `docs/reference/03-addressing.md` carries the two-forms rule, and `docs/reference/13-network-formation.md` the bound diameter ([#809](https://github.com/avatarsd-llc/libtracer/issues/809)). The forwarder's element-consuming hop (§4.1, §5.1 step 4) and the origin-side bind (§7.2/§7.4) ship with that car; §7.1's accumulation gains **erratum 1** below, which is what makes multi-hop minting safe. ONE clause remains ratified and NOT incorporated: the §5.3 **NACK** carrying the failing hop index, whose spelling §9.2 still leaves open. A drop is already the conformant behaviour without it; the NACK only makes the origin's recovery faster. |
+| **Status** | **accepted** (2026-08-03, maintainer-ratified, comment window waived). The whole document is ratified, and **§4-§7 are now incorporated in full** as of the forwarding car (2026-08-03): `docs/spec/v1.md` §3 and `docs/reference/05-protocol-tlvs.md` §`0x14` cite the wire form (§4), the routing semantics (§5-§7) and the **hop rules** normatively, `docs/reference/03-addressing.md` carries the two-forms rule, and `docs/reference/13-network-formation.md` the bound diameter ([#809](https://github.com/avatarsd-llc/libtracer/issues/809)). The forwarder's element-consuming hop (§4.1, §5.1 step 4) and the origin-side bind (§7.2/§7.4) ship with that car; §7.1's accumulation gains **erratum 1** below, which is what makes multi-hop minting safe. ONE clause remains ratified and NOT incorporated: the §5.3 **NACK** carrying the failing hop index, whose spelling §9.2 still leaves open. A drop is already the conformant behaviour without it; the NACK only makes the origin's recovery faster. The **§8 bench gate is discharged** with the forwarding car: no shipped shape regresses with disjoint ranges under §8.2's protocol (16 interleaved pairs, `taskset -c 2`, both arms collated, first round discarded), the mandatory four-link `reply-spread` arm is level, and §8.4's per-hop question is answered in §3.4 — the first build of the car answered it NEGATIVE and the three costs behind that are recorded there. |
 | **Author(s)** | AvatarSD (maintainer) — written up from the 2026-08-02 grill, in which the design below was **ruled**, not proposed |
 | **Created** | 2026-08-02 |
 | **Comment window** | waived by default while solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"); invoke explicitly if outside input is wanted. Verified: `docs/implementations.md:13` still reads `_(none yet)_`, so the waiver's revert trigger has not fired. |
@@ -173,8 +173,30 @@ Under a bound path a forwarder does not descend at all: read element *i*, bounds
 load the vertex pointer, compare one `u32`, egress. No digest fold, no segment compare, no
 variable-length walk — the `resolve_mount_*` family (§3.1) is not entered.
 
-**This is UNMEASURED** and is labelled as such per the standing rule (§10). It is a structural
-argument about which code runs, not a number; §8 makes measuring it a condition of acceptance.
+**MEASURED, with the forwarding car** (§8.4's condition of acceptance, discharged). A chain
+bench routes the same `FWD{WRITE}` + `RESULT` traffic over H = 2/4/8 hops in both spellings, with
+frames-per-direction asserted equal and the terminus value verified, so the only variable is how
+the address is spelled. Taken as the 2→8-hop slope, each hop being one forward plus one
+reply-forward:
+
+| arm | H = 2 | H = 4 | H = 8 | ns/hop (2→8 slope) |
+| --- | ---: | ---: | ---: | ---: |
+| canonical (mount descent) | 788 ns | 1374 ns | 2616 ns | **304.7** |
+| bound (`PATH_REF`) | 804 ns | 1274 ns | 2374 ns | **261.7** |
+
+**A bound hop is ~43 ns/hop cheaper than the canonical descent it bypasses (~14 %)**, and the
+saving is a slope: at H = 2 the two are level and the bound arm only pulls ahead as hops
+accumulate, which is exactly the shape a per-hop saving has. The bound arm's exercise of the new
+hop is proven rather than assumed — a deliberately stale mid-chain generation drives the delivered
+count to 0, and the byte-identical frame with a sound generation delivers.
+
+A first measurement of this claim, taken against an earlier build of the same car, came back
+**negative** (bound 352 ns/hop vs canonical 313). That build is what §14.2's withdrawal clause is
+for, and the clause was not invoked because the cost was not the hop: it was two header walks
+where one classification suffices, a duplicated op-byte read on every forwarded frame, and a
+`flatten` that pulled the mint accumulation into the request path. None of the three is the
+`PATH_REF` deref, and removing them left the structural argument standing where the number now
+agrees with it.
 
 ## 4. The wire form
 
@@ -667,8 +689,11 @@ implementation, per the standing ruling that a latency regression is never an ac
 
 ### 8.4 What must be measured, not argued
 
-- **The per-hop descent saving** (§3.4) — currently UNMEASURED and labelled. Instrument:
-  `bench_forward_demux` (forward hop vs registry size, `methodology.md:458`) with a bound arm.
+- **The per-hop descent saving** (§3.4) — **discharged**: a multi-hop chain bench with both
+  spellings, H = 2/4/8, identical traffic semantics per round, read as a slope rather than a point
+  so the fixed origin and terminus legs cancel. `bench_forward_demux` was the named instrument and
+  is the wrong one for this question: it times a single hop against registry size, where a slope
+  over hop COUNT is what a per-hop claim is about.
 - **The terminus deref** against the canonical resolve — expected below the noise floor, so §8.2
   rule 5 applies (object-file `cmp`) before any stopwatch.
 - **rv32 flash/RAM delta**, including §6.4's index vector at a realistic vertex count. The
@@ -830,8 +855,9 @@ Labelled per the standing rule — a quantitative claim names its instrument or 
   (`reference/05:377`) and the recorded mount-run shapes (RFC-0023:185-188). Not a capture. A
   routed capture at H ≥ 3 does not exist; `bench_hop_chain` remains recorded as **confounded** and
   must not be cited.
-- **The per-hop descent saving (§3.4) is UNMEASURED.** Structural argument only. §8.4 names the
-  instrument.
+- **The per-hop descent saving (§3.4) is MEASURED** — 261.7 ns/hop bound against 304.7 canonical,
+  as the 2→8-hop slope under §8.2's protocol. It is no longer a structural argument. What remains
+  labelled is its GENERALITY: one host, one registry width, one link class.
 - **The terminus deref cost is UNMEASURED**, and expected to sit below the noise floor — §8.2
   rule 5 applies before any stopwatch.
 - **rv32 flash/RAM delta is UNMEASURED**, including §6.4's index vector. The size census is the
@@ -847,7 +873,9 @@ Labelled per the standing rule — a quantitative claim names its instrument or 
 2. **The per-hop descent saving measures to nothing.** If a bound hop is not measurably cheaper
    than `resolve_mount_at` at realistic registry widths, §3.4 collapses and the case reduces to
    bytes alone — at which point §E.1's 10 B flat beats 8 B/host from H ≥ 2, and this RFC should be
-   withdrawn in favour of extending §E.1.
+   withdrawn in favour of extending §E.1. **Tested and not met** (§3.4): 261.7 vs 304.7 ns/hop.
+   The clause stays live for a second host or a wider registry — one instrument is not a general
+   result — and it came within one build of firing, which is the record §3.4 keeps.
 3. **The index vector's RAM cost is not affordable on rv32** at a realistic vertex count (§6.4).
    4 B/vertex is small, but ADR-0067's census banked "libtracer's own static RAM is approximately
    zero", and this is not zero.
