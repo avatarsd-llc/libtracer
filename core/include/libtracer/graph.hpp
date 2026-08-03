@@ -376,10 +376,13 @@ class graph_t {
      * forwarded reply to re-derive an index it already holds would be the wrong shape at the
      * wrong place. This is the same read the other way round: index in, generation out.
      *
-     * @retval std::nullopt @p index is out of range, or the slot's generation has SATURATED
-     *         — a permanently unbindable vertex (RFC-0024 §4.4 rule 3), which is refused at
-     *         the mint exactly as @ref vertex_slot refuses it, so a forwarder that cannot
-     *         mint simply forwards the reply unchanged and the origin stays canonical.
+     * @retval std::nullopt @p index is out of range, the slot's generation has SATURATED — a
+     *         permanently unbindable vertex (RFC-0024 §4.4 rule 3) — or the slot holds a
+     *         retired/never-registered PLACEHOLDER, which `deref_vertex_slot` refuses on the
+     *         honouring side and which is therefore refused here too: otherwise the window
+     *         between a retire and its revival mints an element valid against the SUCCESSOR
+     *         tenancy. A forwarder that cannot mint STRIPS the mint answer (§7.1 erratum 1)
+     *         and the origin stays canonical.
      */
     [[nodiscard]] std::optional<vertex_slot_t> vertex_slot_at(std::uint32_t index) const noexcept;
 

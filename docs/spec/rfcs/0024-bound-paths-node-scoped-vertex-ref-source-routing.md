@@ -431,7 +431,7 @@ as requirements, because a route form that skipped a gate would be a capability,
 **Normative.** A host MUST NOT mint a vref for a vertex the requesting caller could not have
 reached canonically in the same operation. Since a mint rides an ordinary canonical op (§7), this
 is automatic: the op already ran `acl_allows` at every gate on its way through
-(`core/src/graph.cpp:690`), and a denial is `PERMISSION_DENIED` before any vref is produced.
+(`core/src/graph.cpp:700`), and a denial is `PERMISSION_DENIED` before any vref is produced.
 
 **The anti-enumeration property, stated:** because denial happens at resolve time, **no vref is
 ever minted for a destination an ancestor ACL hides**. Probing a bound-path mint therefore yields
@@ -444,14 +444,14 @@ handle to it*. A bound path cannot be used to discover a namespace its holder ca
 dereferenced vertex, for the operation's own right, exactly as the canonical form does. A
 generation match authorizes nothing (`graph.hpp:290-292`).
 
-The evaluation is the shipped one: `graph_t::acl_allows` (`core/src/graph.cpp:690`) walks to the
+The evaluation is the shipped one: `graph_t::acl_allows` (`core/src/graph.cpp:700`) walks to the
 nearest **bearing** ancestor lock-free and evaluates that vertex's **cached effective-ACE merge**
 through the `kAceInherit` projection —
 [ADR-0050](../../adr/0050-acl-pure-policy-cached-effective-ace-merge.md), one pre-merged list, no
-per-operation ancestor rebuild (`graph.cpp:708-717`).
+per-operation ancestor rebuild (`graph.cpp:718-727`).
 
 **Revocation is immediate; there is no snapshot to go stale.** An `:acl` write marks the subtree
-dirty (`graph_t::mark_subtree_acl_dirty`, `core/src/graph.cpp:740`) and the next check rebuilds.
+dirty (`graph_t::mark_subtree_acl_dirty`, `core/src/graph.cpp:750`) and the next check rebuilds.
 A bound path holds no ACL state of any kind, so a revoked right takes effect on the very next
 operation over an already-minted binding — the property `graph.hpp:290-292` demands and the reason
 this RFC stores nothing authorization-shaped.
@@ -459,7 +459,7 @@ this RFC stores nothing authorization-shaped.
 ### 6.3 Equivalence by construction — and a vector pair anyway
 
 Path-form operations check `acl_allows(target)` and nothing else: `graph_t::read`
-(`core/src/graph.cpp:748`), `graph_t::write_impl` (`core/src/graph.cpp:984`). A bound-form
+(`core/src/graph.cpp:758`), `graph_t::write_impl` (`core/src/graph.cpp:994`). A bound-form
 operation dereferences to the same `vertex_t*` and calls the same function with the same right
 and the same caller context, so the outcomes are **identical by construction** — there is no
 second policy to keep in sync, which is the property that makes this section short.
@@ -476,7 +476,7 @@ two silent misroutes shipped because no test used the production wiring.
 This RFC adds **no wire registry and no per-hop route table**. It does require one node-local
 structure that does not exist today, and the RFC would be dishonest not to name it:
 `graph.hpp:57`'s "vertex map" is *described* as a map but *stored* as the ADR-0057 composite
-vertex tree (`core/include/libtracer/graph.hpp:1146-1157`) — a tree of non-moving `unique_ptr`
+vertex tree (`core/include/libtracer/graph.hpp:1149-1160`) — a tree of non-moving `unique_ptr`
 allocations with no dense index. A **dense, append-only `vector<vertex_t*>`**, one slot appended
 per registration, is therefore required to give an index meaning.
 
@@ -491,7 +491,7 @@ Its cost and its properties:
   no unpriced headroom — while keeping the index O(1) and its elements non-moving. The cost model
   and the wire surface are unchanged; only the sentence naming a container was wrong.
 - It is **append-only**, which the registration path already is ("vertices are added, never
-  erased", `graph.hpp:1149`), so it introduces no new lifetime rule and no new invalidation event.
+  erased", `graph.hpp:1152`), so it introduces no new lifetime rule and no new invalidation event.
 - It is **node-local** and unobservable on the wire; a peer never learns another node's
   cardinality.
 - It is **not** a route table: its size tracks the graph, not the traffic, so it does not
@@ -591,7 +591,7 @@ child and not a TLV option bit.
 - **Cost: 0 bytes.** The alternative — a dedicated presence child — costs a 4-byte TLV header
   (plus a body byte if it carries anything) to express one bit, so it is not in the format.
 - **Compatibility is not free, and is stated rather than hidden.** Today `peek_fwd_op` casts the
-  raw byte straight to `fwd_op_t` (`core/include/libtracer/fwd_frame_view.hpp:540-545`), so a
+  raw byte straight to `fwd_op_t` (`core/include/libtracer/fwd_frame_view.hpp:628-633`), so a
   pre-amendment peer sees an unknown opcode and rejects — a clean error, not a mis-execution, but
   an error. §9.3 makes the masking rule normative for every forwarder; until it is deployed, a
   bind request to an unknown peer costs one failed op.

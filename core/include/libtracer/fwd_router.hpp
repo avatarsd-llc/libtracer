@@ -32,6 +32,7 @@
  */
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -582,6 +583,33 @@ class fwd_router_t {
          * wiring registers the vertex first (`transport_vertex_t::make_connection`).
          */
         std::uint32_t conn_slot = kNoConnSlot;
+        /**
+         * @brief The registry slot this child was registered into — resolved once, here.
+         *
+         * A bound hop needs the LINK an element names, and the link lives in the registry
+         * slot, so the alternative is a `entry_by_name` string scan on every bound frame to
+         * re-find a slot whose address never moved. Registry slots are embedded in
+         * heap chunks that are appended to and never freed before the registry itself, so a
+         * slot pointer is stable for the registry's lifetime — which is what makes caching it
+         * sound. (The `mount_tlv` member doc's older aside about an append invalidating a slot
+         * pointer describes a shape the registry has not had since it became chunked.)
+         */
+        const child_registry_t::child_t* entry = nullptr;
+        /**
+         * @brief Next published receiver ctx — the LOCK-FREE reader chain (ADR-0063 §3).
+         *
+         * The bound hop reads this table from a transport RECEIVE thread while `add_child`
+         * appends to it from whichever thread a CREATE arrived on, and those are genuinely
+         * concurrent (see `ctl_m_`). Walking the owning `std::deque` under no lock is a data
+         * race on the deque's own chunk map, however benign a given codegen looks — the same
+         * ruling ADR-0063 erratum 3 made about `multi_peer`. So the deque OWNS the contexts and
+         * this intrusive chain PUBLISHES them, exactly as `child_registry_t` does with its
+         * chunks: the node is fully built before the release-store that links it, and a reader
+         * acquires each link before touching the node behind it. The chain is append-only —
+         * `remove_child` deliberately leaves the ctx in place — so a reader's walk is never
+         * invalidated.
+         */
+        std::atomic<child_rx_ctx_t*> next{nullptr};
     };
 
     /**
@@ -695,14 +723,24 @@ class fwd_router_t {
      *               to its terminus arm, or a bound frame this node could not route would be
      *               applied LOCALLY, which is the mis-route the whole design exists to
      *               refuse).
-     * @retval false This frame is not a bound FORWARD — its `dst` is not a `PATH_REF`, or the
-     *               residual is one element and this node is its terminus. The caller
+     * @retval false This frame is not a bound FORWARD — the residual is one element and this
+     *               node is its terminus, or the op is one no bound hop carries. The caller
      *               continues exactly as it did before bound paths existed.
+     *
+     * @param pre           The offsets @ref peek_fwd_dst_any already filled for this frame,
+     *                      with `dst_ref` set. Passed in rather than re-peeked: the caller has
+     *                      to classify the `dst` anyway, and reading the same three headers a
+     *                      second time is what made a bound terminus measurably slower than
+     *                      the canonical one it is supposed to beat.
+     * @param element_count The `PATH_REF` element count that peek reported.
      */
     template <class Cursor>
     [[nodiscard]] bool route_bound_forward(std::string_view inbound_name,
                                            const child_rx_ctx_t* inbound_ctx, bool from_peer,
-                                           const Cursor& cur);
+                                           const Cursor& cur, const fwd_pre_t& pre,
+                                           std::size_t element_count);
+    /** @brief Publish @p ctx onto the lock-free reader chain. Control plane, under `ctl_m_`. */
+    void publish_ctx(child_rx_ctx_t& ctx) noexcept;
     /** @brief The receiver ctx of child @p link_name, or nullptr — the name → ctx direction. */
     [[nodiscard]] const child_rx_ctx_t* ctx_by_name(std::string_view link_name) const;
     /** @brief The registered child whose CONNECTION vertex sits at slot @p index, or nullptr. */
@@ -776,6 +814,11 @@ class fwd_router_t {
     child_registry_t registry_;            // the one NAME→link demux table (Brick 3a, ADR-0037)
     route_handle_t handles_;               // per-link label tables (compact flows only)
     std::deque<child_rx_ctx_t> child_rx_;  // stable receiver contexts, one per child
+    /** @brief Head of the LOCK-FREE published chain through `child_rx_` — the only spelling a
+     *         frame-path reader may use (see `child_rx_ctx_t::next`). */
+    std::atomic<child_rx_ctx_t*> rx_head_{nullptr};
+    /** @brief Tail of that chain. Written under `ctl_m_` only, never read by a frame path. */
+    child_rx_ctx_t* rx_tail_ = nullptr;
     /**
      * @brief Serializes CONTROL-PLANE mutation of the registry and `child_rx_` (ADR-0063 §3).
      *

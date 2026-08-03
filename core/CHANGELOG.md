@@ -111,7 +111,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   primitives the hop needs and nothing else could give it: the O(1) index→generation read a
   forwarder's mint uses (`vertex_slot` scans, which is right for the terminus and wrong here),
   and the ACL predicate published for the one caller that reaches a vertex without performing
-  a data op on it. Both purely additive.
+  a data op on it. Both purely additive. `vertex_slot_at` refuses a **placeholder** — a
+  retired-but-not-yet-revived slot, or a never-registered structural intermediate — exactly as
+  `deref_vertex_slot` does: `retire` bumps the generation and clears `registered_`, so an
+  element minted in that window already carries the number the SUCCESSOR tenancy validates
+  under, and the validate-on-use stamp has to hold on the issuing side as well as the honouring
+  one.
 - **A hop that forwards a mint reply now either contributes its element or STRIPS the answer**
   (RFC-0024 §7.1 **erratum 1**, landed with this car). **Behaviour change** for a node that
   cannot mint for the link a reply arrived on: it removes the trailing `PATH_REF` instead of
@@ -119,11 +124,28 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   would consume its own element and the non-contributing hop would find one element left,
   believe itself the terminus, and dereference another host's element against its own vertex
   map. Stripping closes that mis-route class; the origin simply stays canonical.
-- **`net::peek_fwd_dst_ref`, `net::read_path_ref_element`, `net::peek_reply_mint` and
-  `stack_writer::header_bare`** in `fwd_frame_view.hpp`; `fwd_pre_t` gains `dst_ref`,
-  `fwd_rebuild_t` gains the mint accumulation fields, and `rebuild_fwd_forward` takes an
-  optional mint element. `kFwdMaxIov` moves 9 → 11 (the two regions a re-headed mint answer
-  adds; a REPLY grows no `src`, so the reachable maximum is unchanged).
+  **Every** cannot-contribute case strips, the erratum's full-list arm included: a reply whose
+  trailing `PATH_REF` already holds 255 elements cannot be extended, so it is removed rather
+  than relayed. `peek_reply_mint` reports that as `reply_mint_t::can_contribute == false`
+  rather than as "no answer found", because "not found" is the one verdict that would take the
+  forbidden relay branch.
+- **`net::peek_fwd_dst_any` + `net::fwd_dst_kind_t`, `net::peek_fwd_dst_ref`,
+  `net::read_path_ref_element`, `net::peek_reply_mint` + `net::reply_mint_t`,
+  `net::no_mint_t` and `stack_writer::header_bare`** in `fwd_frame_view.hpp`; `fwd_pre_t`
+  gains `dst_ref`, `fwd_rebuild_t` gains the mint accumulation fields. `kFwdMaxIov` moves
+  9 → 11 (the two regions a re-headed mint answer adds; a REPLY grows no `src`, so the
+  reachable maximum is unchanged).
+  `peek_fwd_dst_any` is the routing gate both forms now share: it classifies a frame's `dst`
+  as canonical `PATH`, bound `PATH_REF` or neither in ONE read of the three leading headers.
+  `peek_fwd_dst` and `peek_fwd_dst_ref` keep their spellings as its two arms, for callers with
+  only one of the questions to ask. **The router asks once** — running the two gates in
+  sequence put a whole second header walk on every bound frame and measured a bound terminus
+  slower than the canonical terminus it is meant to beat.
+- **`rebuild_fwd_forward` takes a mint SUPPLIER, not a mint element** — a callable defaulting
+  to `no_mint_t`, invoked at most once and only on a forwarded REPLY that carries an
+  extendable mint answer. Eager evaluation meant reading the frame's op byte a second time on
+  **every** forwarded frame, request hops included, and on a multi-link rope that read is a
+  cursor walk rather than a load. Callers that pass no supplier are unaffected.
 - **`rebuild_fwd_forward` accepts a `PATH_REF` `src` on a REPLY.** A reply to a bound request
   echoes the request's `dst` in `src`, so refusing it dropped every such reply at the first
   forwarder. On a REQUEST the same shape is still refused: this hop grows `src` by its inbound
@@ -147,6 +169,21 @@ without it.
   `FWD` the descent cannot gate on now reaches the terminus arm, which is the conclusion the
   contiguous path always came to — restoring the router's own invariant that fragmenting a
   frame must not change whether it is applied.
+- **A bound hop no longer walks the receiver-context table without synchronization.** The
+  RFC-0024 element→egress lookup iterated the router's owning `std::deque` of per-child
+  receiver contexts from a transport RECEIVE thread while `add_child` appended to it from
+  whichever thread a CREATE arrived on — genuinely concurrent on any multi-transport node, and
+  a data race on the deque's own chunk map (the container-level twin of ADR-0063 erratum 3).
+  The contexts are now published through an append-only atomic chain, the same
+  release/acquire shape `child_registry_t` uses for its chunks; the deque still owns them and
+  is never walked by a frame path. `net_control_plane_race_test` drives a bound frame down
+  that chain against the create/remove churn, and reports the race under `-fsanitize=thread`
+  when the chain is ablated back to the deque walk.
+- **An unknown `FWD` opcode arriving on a bound `dst` is dropped, not charged `READ`.** The
+  right an operation carries is what §6.2 evaluates the ACL for; an opcode this build cannot
+  name has no known right, so forwarding it after a `READ` check was a guess that a future
+  write-like opcode would have crossed a READ-only gate on. It joins `REPLY` among the shapes
+  a bound hop refuses rather than guesses at.
 - **The bus-NAME hop rejection masks the `op` byte** (RFC-0024 §9.3). It compared the **raw**
   byte against `REPLY`, so a `REPLY` carrying a flag bit (`0x83`) was not recognised as one
   and the node answered it with an addressed error reply — the reply-to-a-reply the guard

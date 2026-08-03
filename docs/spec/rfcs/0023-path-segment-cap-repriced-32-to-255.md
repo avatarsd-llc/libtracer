@@ -212,8 +212,8 @@ Verified against `core/` at `549ec0d`, inheriting and re-running RFC-0019 §6.2'
 - **The C stack no longer sees depth.** RFC-0019 §6.2 found four wire-reachable recursive subtree
   walks (up to 208 B/level — 32 → 255 would have been +46 KB of worst-case stack). All four are
   now O(1)-memory iterative ascents via `vertex_t::for_each_descendant`
-  (`core/include/libtracer/vertex.hpp:1175`; sites `core/src/graph.cpp:398`, `:508`, `:604`,
-  `:757`; [#690](https://github.com/avatarsd-llc/libtracer/issues/690), fixed by #692) — no
+  (`core/include/libtracer/vertex.hpp:1175`; sites `core/src/graph.cpp:398`, `:518`, `:614`,
+  `:767`; [#690](https://github.com/avatarsd-llc/libtracer/issues/690), fixed by #692) — no
   auxiliary storage, nothing to fail. The prerequisite RFC-0019 flagged is already satisfied.
 - **Decode state is resource-keyed, not count-keyed**: terminus decode draws per-open-level nodes
   from the injected block source (RFC-0006; `core/include/libtracer/grammar.hpp:209-218`,
@@ -250,10 +250,10 @@ turns out not to price anything, which is itself a result:
   (≤ 1024 B body + ≤ 6 B header each) — segment count does not appear in the frame's worst case,
   before or after this RFC.
 - The forward hop's stack heads are structural, not depth-keyed: `kFwdHead1Cap = 64`
-  (`core/include/libtracer/fwd_frame_view.hpp:529`) is FWD header + op + shrunk-dst header;
-  `kFwdSrcHdrCap = 6` (`fwd_frame_view.hpp:540`) is deliberately a *header-only* bound after the
+  (`core/include/libtracer/fwd_frame_view.hpp:617`) is FWD header + op + shrunk-dst header;
+  `kFwdSrcHdrCap = 6` (`fwd_frame_view.hpp:628`) is deliberately a *header-only* bound after the
   synthetic-limit incident recorded in its own comment; and `kFwdMaxIov = 9`
-  (`fwd_frame_view.hpp:572`) is counted from the emit sequence with the mount as **one span** —
+  (`fwd_frame_view.hpp:660`) is counted from the emit sequence with the mount as **one span** —
   its comment states it "does not move when the descent is uncapped", 8 regions of headroom under
   the transports' `kMaxInlineIov = 16` spill.
 

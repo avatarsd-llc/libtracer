@@ -80,7 +80,7 @@ A **3.2×–5.1× diameter uplift on the same 1024 bytes**, with no new mechanis
 new code. This is arithmetic over the shipped encoding, not a routed measurement (§11).
 
 **Sequencing.** The 2026-07-30 ruling is "do the 32 amendment first, then uncap width". The code
-agrees, in writing: `core/include/libtracer/fwd_frame_view.hpp:559-562` warns that lifting
+agrees, in writing: `core/include/libtracer/fwd_frame_view.hpp:647-650` warns that lifting
 `kMountPeekMax` and re-deriving `kFwdMaxIov = 6 + 2 * depth` "would cross 17 at depth 6 and put a
 heap allocation on every deep-mount forward hop, silently" (against `kMaxInlineIov = 16`;
 instrument named in-tree: `bench_transport_iov`). Uncapping *width* first has a known allocation
@@ -94,7 +94,7 @@ Verified from source, not assumed. Nothing on the wire path counts segments:
   No cap test.
 - `core/src/op_resolve_walk.hpp:660-669` (`path_lookup_key`) rejects a non-`NAME` child and counts
   nothing.
-- `core/src/graph.cpp:493-518` (`ensure_vertex_ptr`) calls `key_view_t::split_levels`, which checks
+- `core/src/graph.cpp:503-528` (`ensure_vertex_ptr`) calls `key_view_t::split_levels`, which checks
   only `NAME` framing and exactness (`core/include/libtracer/key_view.hpp:122-136`), then
   `mkdir -p`s every missing level with no count or byte check.
 
@@ -112,7 +112,7 @@ amendment:
 > one that survives `kMaxSegments` being lifted.
 
 PR #685 corrected the three code comments that claimed "graph depth is `kMaxSegments`-bounded
-structurally" (`core/include/libtracer/graph.hpp:652-658`, `core/src/graph.cpp:1886`).
+structurally" (`core/include/libtracer/graph.hpp:655-661`, `core/src/graph.cpp:1896`).
 
 ### 2.4 Doctrine
 
@@ -258,8 +258,8 @@ One comparison, no restructuring.
 - The reserve guard at `path.cpp:99` (`want <= kMaxPathBytes`) is **untouched** — this RFC keeps
   `kMaxPathBytes`, so the ~1 KiB reserve ceiling on a 16 KB node is preserved exactly. (A design that
   dissolved the byte cap would have had to re-derive it; see §9.1.)
-- Comment-only sites needing the corrected wording: `core/include/libtracer/graph.hpp:652-658`,
-  `core/src/graph.cpp:1886`, `docs/modules/path.md:15` and `:69-72`.
+- Comment-only sites needing the corrected wording: `core/include/libtracer/graph.hpp:655-661`,
+  `core/src/graph.cpp:1896`, `docs/modules/path.md:15` and `:69-72`.
 
 ## 5. The arithmetic — measured, and the maintainer's redundancy hypothesis is refuted
 
@@ -329,7 +329,7 @@ array, reserve, or bitset in `core/` is dimensioned by it. The one cap-sized all
 is `core/src/fwd_router.cpp:62`, `std::array<std::byte, graph::kMaxSegmentBytes * tr::net::kMountPeekMax>`
 = 64 × 4 = 256 B of stack — keyed to the *byte* cap and the mount peek width, neither touched here,
 and double-guarded (`fwd_router.cpp:67`, `:81`). `kFwdHead1Cap = 64`
-(`core/include/libtracer/fwd_frame_view.hpp:528-529`) is derived from header widths, not from
+(`core/include/libtracer/fwd_frame_view.hpp:616-617`) is derived from header widths, not from
 `kMaxSegmentBytes` — a coincidence of value, so no forward-hop buffer needs re-deriving.
 
 **This section previously concluded "lifting the segment cap cannot overflow anything." That was
@@ -341,10 +341,10 @@ level, and recursion depth *is* segment count:
 
 | walk | recurses at | frame (x86-64, `-O2 -fstack-usage`) |
 | --- | --- | ---: |
-| `graph_t::bump_subtree_listeners` (`:672`) | `:675`, inside the `for_each_child` lambda | 208 B/level |
-| `graph_t::retire_subtree` (`:494`) | `:513` | 144 B/level |
-| `collect_subscribed` (`:557`) | `:559` | 80 B/level |
-| `graph_t::mark_subtree_acl_dirty` (`:854`) | `:856` | 32 B/level + lambda |
+| `graph_t::bump_subtree_listeners` (`:760`) | `:763`, inside the `for_each_child` lambda | 208 B/level |
+| `graph_t::retire_subtree` (`:582`) | `:601` | 144 B/level |
+| `collect_subscribed` (`:645`) | `:647` | 80 B/level |
+| `graph_t::mark_subtree_acl_dirty` (`:942`) | `:944` | 32 B/level + lambda |
 
 All three reachable from the wire: `bump_subtree_listeners` via `admit_subscriber`
 (`:1285`, whose comment calls it *"the single admission step (ADR-0049): every door lands here"*),
@@ -357,7 +357,7 @@ removes is the last *local-only* speed bump. It is nonetheless a hard **prerequi
 [#690](https://github.com/avatarsd-llc/libtracer/issues/690), and this RFC MUST NOT land before it.
 
 The fix shape is in the same file: the iterative heap-backed stack machine at
-`core/src/graph.cpp:1900-1910` (`std::vector<work_t>` + `detail::try_push_back` →
+`core/src/graph.cpp:1910-1920` (`std::vector<work_t>` + `detail::try_push_back` →
 `status_t::BACKPRESSURE`). Two of the four return `void`, so an error channel changes their
 signatures — that is the open design question in #690, not something this RFC decides.
 
@@ -646,7 +646,7 @@ labelled unmeasured.
   `fwd_router`'s mount scratch is keyed to `kMaxSegmentBytes × kMountPeekMax` rather than to
   `kMaxSegments`, so I **expect** no cliff — expectation, not measurement. Instruments that would
   settle it: (a) a `path_t::parse` microbench at depths 1 / 32 / 204; (b) `bench_transport_iov`,
-  which `fwd_frame_view.hpp:559-562` already names as the one that would catch the deep-mount cliff.
+  which `fwd_frame_view.hpp:647-650` already names as the one that would catch the deep-mount cliff.
   Neither has been run for this change. Note `bench_hop_chain` is recorded as **confounded with its
   depth claim refuted** and must be repaired before it is cited at all.
 - **Flash delta.** One `if` removed plus one `inline constexpr` that never occupied storage.

@@ -312,6 +312,18 @@ int main() {
                   std::span<const std::byte> f) { static_cast<hop_probe_t*>(ctx)->observe(on, f); },
                &at_b);
 
+    // The BACKWARD half of every drop claim below. A refusal that turned into a misroute onto
+    // the INBOUND link — the first child, the one the frame came from — would echo the frame
+    // back toward the origin and B would still see nothing, so B's count alone cannot tell a
+    // drop from a bounce. This counts what A puts back on the client's link.
+    hop_probe_t at_cli;
+    at_cli.link = "net/uplink/a";
+    r_cli.on_raw(
+        [](void* ctx, std::string_view on, std::span<const std::byte> f) {
+            static_cast<hop_probe_t*>(ctx)->observe(on, f);
+        },
+        &at_cli);
+
     mailbox_t inbox;
     r_cli.on_reply(
         [](void* ctx, const tr::view::rope_t& reply) {
@@ -411,26 +423,33 @@ int main() {
     std::printf("A stale MID-CHAIN element drops at the consuming hop, not later (§5.3):\n");
     {
         const std::size_t before = at_b.count();
+        const std::size_t before_cli = at_cli.count();
         const path_ref_element_t stale[2] = {
             {.index = elem_a.index, .generation = elem_a.generation + 1}, elem_b};
         ch_cli.a().send(
             b_fwd_raw(kWrite, b_path_ref(stale), b_path({"reply-ep"}), b_value_u32(0xDEADBEEFu)));
         check(!at_b.wait_for_count(before + 1, kDropBudget),
               "B never sees it — A refused the element it was asked to consume");
+        check(!at_cli.wait_for_count(before_cli + 1, kDropBudget),
+              "and it does not come BACK either: a drop, not a bounce onto the inbound link");
         check(!inbox.wait(kDropBudget).has_value(), "and nothing answers: a drop, not an error");
     }
     // ===== 4) an out-of-range mid-chain index drops AT A =================================
     {
         const std::size_t before = at_b.count();
+        const std::size_t before_cli = at_cli.count();
         const path_ref_element_t absurd[2] = {{.index = 0xFFFFFFFFu, .generation = 0}, elem_b};
         ch_cli.a().send(
             b_fwd_raw(kWrite, b_path_ref(absurd), b_path({"reply-ep"}), b_value_u32(0xDEADBEEFu)));
         check(!at_b.wait_for_count(before + 1, kDropBudget),
               "a peer-chosen u32 maximum mid-chain drops at A rather than faulting");
+        check(!at_cli.wait_for_count(before_cli + 1, kDropBudget),
+              "and nothing goes back down the inbound link");
     }
     // ===== 5) an element naming a NON-egress vertex of A drops ===========================
     {
         const std::size_t before = at_b.count();
+        const std::size_t before_cli = at_cli.count();
         const auto net_root = g_a.find(path_t("/net").key());
         const std::optional<tr::graph::vertex_slot_t> root_slot =
             net_root ? g_a.vertex_slot(*net_root) : std::nullopt;
@@ -442,6 +461,8 @@ int main() {
             b_fwd_raw(kWrite, b_path_ref(wrong), b_path({"reply-ep"}), b_value_u32(0xDEADBEEFu)));
         check(!at_b.wait_for_count(before + 1, kDropBudget),
               "a VALID element that names no egress drops — a vref is an address, not a route");
+        check(!at_cli.wait_for_count(before_cli + 1, kDropBudget),
+              "and it is not resolved to the inbound link instead — the drop is a drop");
     }
     // ===== 6) the ablation: the sound binding still lands ================================
     {
@@ -589,6 +610,166 @@ int main() {
                   "what is left is an ordinary reply: op, dst, src, kind, payload");
             check(stripped[0].size() == contributed[0].size() - 20,
                   "20 bytes lighter: the 12 it did not add, plus the 8 it removed");
+        }
+    }
+
+    // ===== 10) a FULL mint list is stripped too — the erratum names it (§7.1) ============
+    //
+    // "Cannot contribute" is not only "has no vertex to mint from": a list already at the
+    // element cap cannot be extended either, and the erratum names a full list among the
+    // MUST-STRIP cases for the reason every other one is there. Relaying it would hand the
+    // origin a route that SKIPS this hop, and a skipped hop is the §5.3 misroute: it receives
+    // a residual minted on a different host, finds one element left, believes itself the
+    // terminus, and dereferences that element against its own vertex map.
+    //
+    // The two arms differ in ONE element of the inbound list, so the strip cannot be an
+    // accident of the frame's shape.
+    std::printf("A mint list already at the element cap is stripped, not relayed (§7.1):\n");
+    {
+        const auto reply_with = [&](std::size_t n) {
+            std::vector<path_ref_element_t> acc(n);
+            for (std::size_t i = 0; i < n; ++i)
+                acc[i] = path_ref_element_t{.index = static_cast<std::uint32_t>(100 + i),
+                                            .generation = 1};
+            std::vector<std::byte> mint_tail;
+            (void)tr::wire::emit_path_ref(mint_tail, std::span<const path_ref_element_t>(acc));
+            std::vector<std::byte> body;
+            const std::byte op_reply{static_cast<std::uint8_t>(fwd_op_t::REPLY)};
+            tr::wire::emit_tlv(body, type_t::VALUE, opt_t{},
+                               std::span<const std::byte>(&op_reply, 1));
+            const std::vector<std::byte> rdst = b_path({"cli", "reply-ep"});
+            const std::vector<std::byte> rsrc = b_path({"sensor"});
+            body.insert(body.end(), rdst.begin(), rdst.end());
+            body.insert(body.end(), rsrc.begin(), rsrc.end());
+            const std::byte kind{static_cast<std::uint8_t>(reply_kind_t::RESULT)};
+            tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&kind, 1));
+            const std::vector<std::byte> payload = b_value_u32(5);
+            body.insert(body.end(), payload.begin(), payload.end());
+            body.insert(body.end(), mint_tail.begin(), mint_tail.end());
+            std::vector<std::byte> out;
+            tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
+            return out;
+        };
+        const auto relay = [&](const std::vector<std::byte>& reply) {
+            graph_t g;
+            (void)g.register_vertex(path_t("/up"), role_t::STORED_VALUE);
+            fwd_router_t r(g);
+            span_sink_t cli;
+            span_sink_t up;
+            r.add_child("cli", cli);
+            r.add_child("up", up);
+            r.on_frame("up", reply);
+            return std::move(cli.sent);
+        };
+
+        const auto under = relay(reply_with(tr::wire::kMaxPathRefElements - 1));
+        check(under.size() == 1, "a list one short of the cap is forwarded");
+        if (under.size() == 1) {
+            const auto dec = tr::wire::decode(under[0]);
+            check(dec.has_value() && !dec->children.empty() &&
+                      dec->children.back().type == type_t::PATH_REF &&
+                      tr::wire::path_ref_element_count(dec->children.back().payload.size()) ==
+                          tr::wire::kMaxPathRefElements,
+                  "and this hop's element fills it exactly to the cap");
+        }
+
+        const auto full = relay(reply_with(tr::wire::kMaxPathRefElements));
+        check(full.size() == 1, "a list AT the cap is still forwarded — the reply is not dropped");
+        if (full.size() == 1) {
+            const auto dec = tr::wire::decode(full[0]);
+            check(dec.has_value() && !dec->children.empty() &&
+                      dec->children.back().type != type_t::PATH_REF,
+                  "but its mint answer is STRIPPED — a hop that cannot extend must not relay");
+            check(dec.has_value() && dec->children.size() == 5,
+                  "what is left is an ordinary reply: op, dst, src, kind, payload");
+        }
+    }
+
+    // ===== 11) an opcode with no known right is dropped, never charged READ =============
+    //
+    // §6.2 says the ACL is evaluated for "the operation's own right". A hop that does not
+    // know an opcode does not know its right, so it cannot evaluate §6.2 for it — and the
+    // initialized READ is a GUESS, not an answer. Guessing READ is how a future write-like
+    // opcode crosses a READ-only gate. The two arms below are the same frame with one byte
+    // changed, so the refusal is the opcode's and nothing else's.
+    std::printf("An opcode this build cannot price is dropped at a bound hop (§6.2):\n");
+    {
+        const auto forward_op = [&](std::uint8_t op_byte) {
+            graph_t g;
+            (void)g.register_vertex(path_t("/up"), role_t::STORED_VALUE);
+            fwd_router_t r(g);
+            span_sink_t cli;
+            span_sink_t up;
+            r.add_child("cli", cli);
+            r.add_child("up", up);
+            const path_ref_element_t route[2] = {{.index = 1, .generation = 0},
+                                                 {.index = 0x0000BEEFu, .generation = 7}};
+            r.on_frame("cli",
+                       b_fwd_raw(op_byte, b_path_ref(route), b_path({"reply-ep"}), b_value_u32(9)));
+            return up.sent.size();
+        };
+        check(forward_op(kRead) == 1, "the known opcode forwards — the route itself is sound");
+        check(forward_op(0x05) == 0,
+              "and the SAME frame with an unpriced opcode drops instead of being charged READ");
+    }
+
+    // ===== 12) a mint for a RETIRED connection vertex strips ============================
+    //
+    // `retire` bumps the generation AND clears `registered_`, so an element minted between a
+    // retire and the revival that follows already carries the number the SUCCESSOR tenancy
+    // will validate under — the validate-on-use stamp (#511) defeated by the side that ISSUES
+    // the element rather than the side that honours one. The mint refuses a placeholder for
+    // exactly the reason `deref_vertex_slot` does, and a hop that cannot mint strips.
+    std::printf("A mint for a retired connection vertex strips rather than stamping (§4.4):\n");
+    {
+        const path_ref_element_t from_terminus{.index = 9, .generation = 1};
+        std::vector<std::byte> mint_tail;
+        (void)tr::wire::emit_path_ref(mint_tail,
+                                      std::span<const path_ref_element_t>(&from_terminus, 1));
+        std::vector<std::byte> body;
+        const std::byte op_reply{static_cast<std::uint8_t>(fwd_op_t::REPLY)};
+        tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op_reply, 1));
+        const std::vector<std::byte> rdst = b_path({"cli", "reply-ep"});
+        const std::vector<std::byte> rsrc = b_path({"sensor"});
+        body.insert(body.end(), rdst.begin(), rdst.end());
+        body.insert(body.end(), rsrc.begin(), rsrc.end());
+        const std::byte kind{static_cast<std::uint8_t>(reply_kind_t::RESULT)};
+        tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&kind, 1));
+        const std::vector<std::byte> payload = b_value_u32(5);
+        body.insert(body.end(), payload.begin(), payload.end());
+        body.insert(body.end(), mint_tail.begin(), mint_tail.end());
+        std::vector<std::byte> reply;
+        tr::wire::emit_tlv(reply, type_t::FWD, opt_t{.pl = true}, body);
+
+        const auto relay = [&](bool retire_it) {
+            graph_t g;
+            const tr::graph::vertex_handle_t up_v =
+                g.register_vertex(path_t("/up"), role_t::STORED_VALUE);
+            fwd_router_t r(g);
+            span_sink_t cli;
+            span_sink_t up;
+            r.add_child("cli", cli);
+            r.add_child("up", up);
+            if (retire_it) (void)g.retire(up_v);
+            r.on_frame("up", reply);
+            return std::move(cli.sent);
+        };
+
+        const auto live = relay(false);
+        check(live.size() == 1, "the live connection vertex mints");
+        if (live.size() == 1) {
+            const auto dec = tr::wire::decode(live[0]);
+            check(dec.has_value() && !dec->children.empty() &&
+                      dec->children.back().type == type_t::PATH_REF,
+                  "and the answer carries this hop's element");
+        }
+        const auto retired = relay(true);
+        check(retired.size() == 1, "the reply through a RETIRED connection vertex still forwards");
+        if (retired.size() == 1) {
+            const auto dec = tr::wire::decode(retired[0]);
+            check(dec.has_value() && !dec->children.empty() &&
+                      dec->children.back().type != type_t::PATH_REF,
+                  "but nothing is minted for a placeholder — the answer is stripped");
         }
     }
 

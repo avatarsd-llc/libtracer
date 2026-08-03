@@ -14,7 +14,7 @@ That was harmless while `fwd_router_t::add_child`'s own comment was true — "Re
 
 So a forward read can race a connection-create across threads and walk a freed buffer. This is the same use-after-free class #494 closed in the registry, re-entering from the write side.
 
-Exploring the write side found the problem is wider than the registry. `transport_vertex_t` has **no synchronization at all** — no mutex, no atomics — yet `make_connection` mutates three containers (`pending_links_`, `conns_`, `modules_`; `transport_vertex.hpp:348-361`), and the graph invokes the factory **outside** `map_mutex_` (`graph.cpp:1565`). Two concurrent CREATEs give concurrent `insert_or_assign` into a `std::map` — tree rebalancing under a racing insert, a worse failure than the vector realloc.
+Exploring the write side found the problem is wider than the registry. `transport_vertex_t` has **no synchronization at all** — no mutex, no atomics — yet `make_connection` mutates three containers (`pending_links_`, `conns_`, `modules_`; `transport_vertex.hpp:348-361`), and the graph invokes the factory **outside** `map_mutex_` (`graph.cpp:1575`). Two concurrent CREATEs give concurrent `insert_or_assign` into a `std::map` — tree rebalancing under a racing insert, a worse failure than the vector realloc.
 
 ## Decision
 
@@ -95,7 +95,7 @@ drive the rebind path of Erratum 3 and the writer-vs-writer paths above.
 
 - **`std::deque` instead of a chunked list.** Rejected as a half-measure: it stabilizes element *references* across `push_back`, but a reader iterating still walks the deque's spine, whose map an append can reallocate. It fixes the pointer hazard and leaves the iteration hazard.
 
-- **Lock-free `graph_t` descent (fully lock-free writers).** Rejected on measurement, not on difficulty. The only reader that takes the graph lock on a hot path is the **terminus** (`deliver_local` → `graph_.find` → `find_ptr` → `std::shared_lock`, `graph.cpp:518`); deliveries themselves don't, since `write_impl` operates on an already-resolved `vertex_t*`. And `bench_forward_heap` measures the terminus at **9 allocations / 937 bytes** per resolve. Removing a 3 ns lock from a path that allocates 937 bytes is invisible — roughly 1% of a path this change cannot otherwise improve — in exchange for epoch or hazard-pointer reclamation across the whole L4 surface. If it is ever wanted, it is its own ADR with its own evidence.
+- **Lock-free `graph_t` descent (fully lock-free writers).** Rejected on measurement, not on difficulty. The only reader that takes the graph lock on a hot path is the **terminus** (`deliver_local` → `graph_.find` → `find_ptr` → `std::shared_lock`, `graph.cpp:528`); deliveries themselves don't, since `write_impl` operates on an already-resolved `vertex_t*`. And `bench_forward_heap` measures the terminus at **9 allocations / 937 bytes** per resolve. Removing a 3 ns lock from a path that allocates 937 bytes is invisible — roughly 1% of a path this change cannot otherwise improve — in exchange for epoch or hazard-pointer reclamation across the whole L4 surface. If it is ever wanted, it is its own ADR with its own evidence.
 
 - **Serializing creates by holding `map_mutex_` unique across the factory call.** Rejected: it widens the graph's global lock to cover socket construction and transport-plane state, coupling two layers and lengthening a hold that currently blocks every terminus resolution device-wide.
 
@@ -107,6 +107,6 @@ drive the rebind path of Erratum 3 and the writer-vs-writer paths above.
 
 - **This class is currently unpoliced.** The `tsan` CI job exists but does not exercise concurrent creates. A TSan test that hammers create/remove against a live forward stream lands with this change, or the invariant is only asserted in prose.
 
-- **`transport_vertex_t` gains its first synchronization.** Anything called under the control-plane trait must not re-enter the graph's mutation APIs or block — the same discipline `graph.hpp:547` already documents for resolvers, and sharper here if the trait resolves to an interrupt-disable critical section.
+- **`transport_vertex_t` gains its first synchronization.** Anything called under the control-plane trait must not re-enter the graph's mutation APIs or block — the same discipline `graph.hpp:550` already documents for resolvers, and sharper here if the trait resolves to an interrupt-disable critical section.
 
 - **ADR-0061's "immutable after setup" premise is formally retired.** Its erratum already records that the registry mutates at runtime; this ADR is where that fact acquires a mechanism instead of a caveat.

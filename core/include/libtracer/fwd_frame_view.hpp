@@ -155,12 +155,115 @@ struct fwd_pre_t {
 };
 
 /**
+ * @brief Which of the two routable `dst` forms a FWD frame carries.
+ *
+ * The two forms are mutually exclusive by the `dst`'s own type code, and telling them apart
+ * is ONE read of the frame's three leading headers — so it is one function that answers, not
+ * two gates run in sequence. Running them in sequence is what put a whole second header walk
+ * on every bound frame (a shipped shape once RFC-0024 lands) while buying the canonical form
+ * nothing at all.
+ */
+enum class fwd_dst_kind_t : std::uint8_t {
+    NONE,     /**< @brief Not a structured FWD, or a `dst` in neither routable form. */
+    PATH,     /**< @brief A canonical `PATH` of NAMEs — the mount descent's address. */
+    PATH_REF, /**< @brief A BOUND address (RFC-0024 §4) — a fixed-stride element array. */
+};
+
+/**
+ * @brief Open the `dst` window of a FWD frame and say WHICH form it is — the routing gate.
+ *
+ * Fills @p pre with everything the descent, the bound hop and the head rebuild need about the
+ * frame's structure: where the op VALUE and the `dst` body are, and where the body ends. It
+ * reads NO segments and materializes nothing, so its cost and its stack are the same whatever
+ * the `dst`'s depth or element count.
+ *
+ * The two arms diverge only at the `dst` header's type code:
+ *   - `PATH` — the canonical address. The leading child must be a NAME (a `dst` whose first
+ *     child is not a NAME is not an address), and @ref fwd_pre_t::strip_at starts at the body
+ *     because only `strip_k` can say how much of it this hop consumes.
+ *   - `PATH_REF` — the bound address. The four STRUCTURAL rules (`opt.PL = 0`, `opt.LL = 0`,
+ *     `length % 8 == 0`, `length <= 2040`) are checked through `tr::wire::path_ref_body_valid`
+ *     — the one locus that owns them — and @ref fwd_pre_t::strip_at is known HERE, past
+ *     element 0: each hop consumes exactly one element (§4.1), with no descent to wait for.
+ *
+ * @tparam Cursor A grammar byte-source cursor (span or rope).
+ * @param  cur    The cursor positioned at the frame's first byte.
+ * @param  pre    Filled on every non-`NONE` answer; reset with `valid = false` otherwise, so a
+ *                caller cannot pass stale offsets to the rebuild.
+ * @param  ref_count Written with the `PATH_REF` element count on the `PATH_REF` answer, 0
+ *                otherwise. **1 is the terminus** (the residual is this node's own reference
+ *                to the target vertex); **> 1 is a forwarder hop**; **0 is a route with no
+ *                hops**, which the codec deliberately admits and the router refuses.
+ *
+ * @note `flatten` — see @ref rebuild_fwd_forward for the measurement. The four
+ *       @ref read_fwd_header calls below are this function's whole body, and each returns a
+ *       ~56-byte `std::optional<fwd_hdr_t>` that an out-of-line call must return through
+ *       memory.
+ */
+template <class Cursor>
+[[gnu::flatten]] [[nodiscard]] fwd_dst_kind_t peek_fwd_dst_any(const Cursor& cur, fwd_pre_t& pre,
+                                                               std::size_t& ref_count) {
+    pre = fwd_pre_t{};
+    ref_count = 0;
+    const auto fwd_h = read_fwd_header(cur, 0);
+    if (!fwd_h || fwd_h->type != wire::type_t::FWD || !fwd_h->opt.pl) return fwd_dst_kind_t::NONE;
+    const std::size_t body_end = fwd_h->body_off + fwd_h->body_len;
+    const auto op_h = read_fwd_header(cur, fwd_h->body_off);
+    if (!op_h || op_h->type != wire::type_t::VALUE) return fwd_dst_kind_t::NONE;
+    const std::size_t dst_pos = fwd_h->body_off + op_h->total;
+    if (dst_pos >= body_end) return fwd_dst_kind_t::NONE;
+    const auto dst_h = read_fwd_header(cur, dst_pos);
+    if (!dst_h) return fwd_dst_kind_t::NONE;
+    const bool is_ref = dst_h->type == wire::type_t::PATH_REF;
+    // The gate's own read of segment 0, handed over below rather than discarded — see the
+    // `seg0_off` member doc. Nothing is filled until BOTH arms have accepted, so a rejected
+    // frame leaves `pre` cleared exactly as it did when these were two functions.
+    std::size_t seg0_off = 0;
+    std::size_t seg0_len = 0;
+    if (is_ref) {
+        if (!wire::path_ref_body_valid(dst_h->opt.pl, dst_h->opt.ll, dst_h->body_len))
+            return fwd_dst_kind_t::NONE;
+    } else {
+        if (dst_h->type != wire::type_t::PATH || dst_h->body_len == 0) return fwd_dst_kind_t::NONE;
+        const auto seg_h = read_fwd_header(cur, dst_h->body_off);
+        if (!seg_h || seg_h->type != wire::type_t::NAME) return fwd_dst_kind_t::NONE;
+        seg0_off = seg_h->body_off;
+        seg0_len = seg_h->body_len;
+    }
+    pre.valid = true;
+    pre.body_end = body_end;
+    pre.op_pos = fwd_h->body_off;
+    pre.op_total = op_h->total;
+    pre.op_body_off = op_h->body_off;
+    pre.op_body_len = op_h->body_len;
+    pre.dst_body_off = dst_h->body_off;
+    pre.dst_end = dst_h->body_off + dst_h->body_len;
+    pre.after_dst = dst_pos + dst_h->total;
+    if (!is_ref) {
+        pre.seg0_off = seg0_off;
+        pre.seg0_len = seg0_len;
+        pre.strip_at = dst_h->body_off;  // caller overwrites once strip_k is known
+        return fwd_dst_kind_t::PATH;
+    }
+    pre.dst_ref = true;
+    // Element 0 is this hop's own, and consuming it is not conditional on anything the
+    // descent decides — there is no descent. So the shrink is known here, unlike the
+    // canonical arm's, which has to wait for `strip_k`.
+    pre.strip_at = dst_h->body_off + wire::kPathRefElementBytes;
+    if (pre.strip_at > pre.dst_end) pre.strip_at = pre.dst_end;  // the H = 0 body
+    ref_count = wire::path_ref_element_count(dst_h->body_len);
+    return fwd_dst_kind_t::PATH_REF;
+}
+
+/**
  * @brief Open the `dst` window of a FWD frame — the mount descent's gate, read by OFFSET.
  *
- * Fills @p pre with everything the descent and the head rebuild need about the frame's
- * structure: where the op VALUE and the `dst` PATH body are, and where the body ends. It
- * reads NO segments and materializes nothing, so its cost and its stack are the same
- * whatever the `dst`'s depth — which is the point (#523). Segments are then walked lazily
+ * The canonical arm of @ref peek_fwd_dst_any, for a caller that routes only the canonical
+ * form (the unit tests and `bench_forward_demux`). Fills @p pre with everything the descent
+ * and the head rebuild need about the frame's structure: where the op VALUE and the `dst`
+ * PATH body are, and where the body ends. It reads NO segments and materializes nothing, so
+ * its cost and its stack are the same whatever the `dst`'s depth — the point of #523. Segments
+ * are then walked lazily
  * through @ref dst_seg_walk_t, one at a time, only as far as the registry actually asks.
  *
  * This replaces `peek_fwd_dst_segs`, which eagerly filled a `kMountPeekMax`-sized array of
@@ -175,63 +278,33 @@ struct fwd_pre_t {
  *                cannot pass stale offsets to the rebuild.
  * @retval false  Not a structured FWD with an op VALUE, a non-empty `dst` PATH, and a
  *                leading NAME segment — the caller falls through to the terminus/control
- *                arms exactly as it did on the old `n == 0`.
- *
- * @note `flatten` — see @ref rebuild_fwd_forward for the measurement. The four
- *       @ref read_fwd_header calls below are this function's whole body, and each returns a
- *       ~56-byte `std::optional<fwd_hdr_t>` that an out-of-line call must return through
- *       memory.
+ *                arms exactly as it did on the old `n == 0`. A well-formed BOUND `dst` is
+ *                among the false answers, and @p pre is cleared for it too.
  */
 template <class Cursor>
-[[gnu::flatten]] [[nodiscard]] bool peek_fwd_dst(const Cursor& cur, fwd_pre_t& pre) {
-    pre = fwd_pre_t{};
-    const auto fwd_h = read_fwd_header(cur, 0);
-    if (!fwd_h || fwd_h->type != wire::type_t::FWD || !fwd_h->opt.pl) return false;
-    const std::size_t body_end = fwd_h->body_off + fwd_h->body_len;
-    const auto op_h = read_fwd_header(cur, fwd_h->body_off);
-    if (!op_h || op_h->type != wire::type_t::VALUE) return false;
-    const std::size_t dst_pos = fwd_h->body_off + op_h->total;
-    if (dst_pos >= body_end) return false;
-    const auto dst_h = read_fwd_header(cur, dst_pos);
-    if (!dst_h || dst_h->type != wire::type_t::PATH || dst_h->body_len == 0) return false;
-    // The leading NAME is the gate the old peek expressed as "returned at least one segment".
-    // Kept EXACTLY: a `dst` whose first child is not a NAME is not an address, and it must
-    // still fall to the terminus arm rather than into the descent.
-    const auto seg_h = read_fwd_header(cur, dst_h->body_off);
-    if (!seg_h || seg_h->type != wire::type_t::NAME) return false;
-    pre.valid = true;
-    pre.body_end = body_end;
-    pre.op_pos = fwd_h->body_off;
-    pre.op_total = op_h->total;
-    pre.op_body_off = op_h->body_off;
-    pre.op_body_len = op_h->body_len;
-    pre.dst_body_off = dst_h->body_off;
-    pre.dst_end = dst_h->body_off + dst_h->body_len;
-    pre.after_dst = dst_pos + dst_h->total;
-    // The gate's own read, handed over rather than discarded — see the member doc.
-    pre.seg0_off = seg_h->body_off;
-    pre.seg0_len = seg_h->body_len;
-    pre.strip_at = dst_h->body_off;  // caller overwrites once strip_k is known
-    return true;
+[[nodiscard]] bool peek_fwd_dst(const Cursor& cur, fwd_pre_t& pre) {
+    std::size_t ref_count = 0;
+    if (peek_fwd_dst_any(cur, pre, ref_count) == fwd_dst_kind_t::PATH) return true;
+    pre = fwd_pre_t{};  // a bound `dst` fills it; this gate's contract is "cleared on false"
+    return false;
 }
 
 /**
  * @brief Open the `dst` window of a BOUND FWD frame — the bound hop's gate (RFC-0024 §5).
  *
- * The `PATH_REF` twin of @ref peek_fwd_dst, and deliberately a SEPARATE function rather than a
- * relaxation of it: `peek_fwd_dst` is the mount descent's gate, and its answer means "this
- * frame carries an address this node can DESCEND". A bound `dst` has no NAME to descend, so
- * widening that gate would feed the descent a body it must never walk. Two gates, one frame,
- * mutually exclusive by the `dst`'s own type code.
+ * The bound arm of @ref peek_fwd_dst_any, for a caller that has only the bound question to
+ * ask (the conformance and unit tests). The router asks BOTH questions at once, because a
+ * frame is one form or the other and finding out twice is a second header walk for nothing.
  *
- * Fills @p pre exactly as the canonical peek does, plus @ref fwd_pre_t::dst_ref, and sets
+ * Fills @p pre as @ref peek_fwd_dst_any does on its `PATH_REF` answer, plus
+ * @ref fwd_pre_t::dst_ref, and sets
  * @ref fwd_pre_t::strip_at past element 0 — the ONE element this hop consumes (§4.1: each hop
  * consumes element 0 and forwards the remainder, the same monotone shrink the canonical `dst`
  * performs, which is why a bound path is loop-free by construction and needs no visited set).
  *
  * The four STRUCTURAL rules (`opt.PL = 0`, `opt.LL = 0`, `length % 8 == 0`, `length <= 2040`)
- * are checked here through `tr::wire::path_ref_body_valid` — the one locus that owns them —
- * so a frame that fails any of them is not a bound address and falls through to the caller's
+ * are checked through `tr::wire::path_ref_body_valid` — the one locus that owns them — so a
+ * frame that fails any of them is not a bound address and falls through to the caller's
  * terminus arm, where the resolver refuses it as it refuses every other malformed `dst`.
  *
  * @retval std::nullopt Not a structured FWD whose `dst` is a structurally valid `PATH_REF`.
@@ -241,34 +314,12 @@ template <class Cursor>
  */
 template <class Cursor>
 [[nodiscard]] std::optional<std::size_t> peek_fwd_dst_ref(const Cursor& cur, fwd_pre_t& pre) {
-    pre = fwd_pre_t{};
-    const auto fwd_h = read_fwd_header(cur, 0);
-    if (!fwd_h || fwd_h->type != wire::type_t::FWD || !fwd_h->opt.pl) return std::nullopt;
-    const std::size_t body_end = fwd_h->body_off + fwd_h->body_len;
-    const auto op_h = read_fwd_header(cur, fwd_h->body_off);
-    if (!op_h || op_h->type != wire::type_t::VALUE) return std::nullopt;
-    const std::size_t dst_pos = fwd_h->body_off + op_h->total;
-    if (dst_pos >= body_end) return std::nullopt;
-    const auto dst_h = read_fwd_header(cur, dst_pos);
-    if (!dst_h || dst_h->type != wire::type_t::PATH_REF) return std::nullopt;
-    if (!wire::path_ref_body_valid(dst_h->opt.pl, dst_h->opt.ll, dst_h->body_len))
+    std::size_t ref_count = 0;
+    if (peek_fwd_dst_any(cur, pre, ref_count) != fwd_dst_kind_t::PATH_REF) {
+        pre = fwd_pre_t{};  // a canonical `dst` fills it; this gate is cleared on nullopt
         return std::nullopt;
-    pre.valid = true;
-    pre.dst_ref = true;
-    pre.body_end = body_end;
-    pre.op_pos = fwd_h->body_off;
-    pre.op_total = op_h->total;
-    pre.op_body_off = op_h->body_off;
-    pre.op_body_len = op_h->body_len;
-    pre.dst_body_off = dst_h->body_off;
-    pre.dst_end = dst_h->body_off + dst_h->body_len;
-    pre.after_dst = dst_pos + dst_h->total;
-    // Element 0 is this hop's own, and consuming it is not conditional on anything the
-    // descent decides — there is no descent. So the shrink is known here, unlike the
-    // canonical peek's, which has to wait for `strip_k`.
-    pre.strip_at = dst_h->body_off + wire::kPathRefElementBytes;
-    if (pre.strip_at > pre.dst_end) pre.strip_at = pre.dst_end;  // the H = 0 body
-    return wire::path_ref_element_count(dst_h->body_len);
+    }
+    return ref_count;
 }
 
 /**
@@ -295,6 +346,36 @@ template <class Cursor>
 }
 
 /**
+ * @brief The trailing `PATH_REF` a forwarded REPLY carries — the mint answer so far.
+ *
+ * @see peek_reply_mint
+ */
+struct reply_mint_t {
+    std::size_t pos = 0;      /**< @brief Offset of the `PATH_REF` child's own header. */
+    std::size_t body_len = 0; /**< @brief Length of the element array already on the wire. */
+    /**
+     * @brief False ⇔ the list is at the normative element cap and one more would not be
+     *        spellable, so this hop MUST strip it rather than relay it (§7.1 erratum 1).
+     */
+    bool can_contribute = false;
+};
+
+/**
+ * @brief The mint supplier of a hop that contributes nothing — @ref rebuild_fwd_forward's
+ *        default, and the shape every caller outside the router has.
+ *
+ * A callable rather than a pointer so the router's own supplier can be a closure that runs
+ * ONLY when the frame turns out to carry an extendable mint answer. Returning `nullopt` here
+ * does not relay the answer: the rebuild STRIPS it, which is the §7.1 erratum-1 rule.
+ */
+struct no_mint_t {
+    /** @brief Nothing to give. */
+    [[nodiscard]] std::optional<wire::path_ref_element_t> operator()() const noexcept {
+        return std::nullopt;
+    }
+};
+
+/**
  * @brief Where a forwarded REPLY's trailing `PATH_REF` sits, if it carries one (RFC-0024 §7.1).
  *
  * A mint answer rides the reply as its LAST child, so a hop that wants to contribute its own
@@ -302,17 +383,22 @@ template <class Cursor>
  * the origin asked for a mint — a hop holds no per-flow state and has nothing else to read it
  * from, which is what keeps the accumulation stateless.
  *
+ * FINDING the answer and being able to ADD to it are two different answers, and the caller
+ * needs both: a hop that finds a list it cannot extend MUST STRIP it (§7.1 erratum 1), never
+ * relay it. A relayed list that skips a hop is not a shorter route, it is a WRONG one — see
+ * the strip branch in @ref rebuild_fwd_forward for the mis-route it produces. Reporting a
+ * full-cap list as "not found" would take exactly that forbidden branch, so the cap rides back
+ * as @ref reply_mint_t::can_contribute rather than as a `nullopt`.
+ *
  * @param cur   Cursor over the reply frame.
  * @param from  First byte after `src` — where the reply's trailing children begin.
  * @param end   End of the FWD body.
- * @retval std::nullopt No trailing `PATH_REF`, a malformed tail, or a body already at the
- *         normative element cap (one more element would not be spellable, so the reply is
- *         forwarded unchanged and the origin simply binds the hosts that did answer).
+ * @retval std::nullopt No trailing `PATH_REF` at all, or a malformed tail. The reply carries
+ *         no mint exchange and is forwarded untouched.
  */
 template <class Cursor>
-[[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>> peek_reply_mint(const Cursor& cur,
-                                                                                 std::size_t from,
-                                                                                 std::size_t end) {
+[[nodiscard]] std::optional<reply_mint_t> peek_reply_mint(const Cursor& cur, std::size_t from,
+                                                          std::size_t end) {
     std::size_t pos = from;
     std::size_t ref_pos = 0;
     std::size_t ref_body_len = 0;
@@ -328,9 +414,11 @@ template <class Cursor>
         pos += h->total;
     }
     if (!found) return std::nullopt;
-    if (wire::path_ref_element_count(ref_body_len) >= wire::kMaxPathRefElements)
-        return std::nullopt;
-    return std::pair{ref_pos, ref_body_len};
+    return reply_mint_t{
+        .pos = ref_pos,
+        .body_len = ref_body_len,
+        .can_contribute = wire::path_ref_element_count(ref_body_len) < wire::kMaxPathRefElements,
+    };
 }
 
 /**
@@ -867,6 +955,14 @@ struct fwd_rebuild_t {
  * @param  extra_seg     One further mount segment whose name is only known now — a bus PEER.
  *                       Empty when the mount is fully precomputed.
  * @param  strip_k       How many leading dst segments this hop consumes.
+ * @param  pre           The offsets the routing peek already read, or nullptr to re-parse.
+ * @param  mint_fn       This hop's mint contribution, supplied LAZILY: invoked at most once,
+ *                       and only on a forwarded REPLY that actually carries an extendable
+ *                       mint answer. Laziness is the whole point — deciding eagerly meant
+ *                       reading the op byte a second time on EVERY forwarded frame,
+ *                       including the request hops that can never mint, and that duplicate
+ *                       read is a rope-cursor byte walk on a fragmented frame. Defaults to
+ *                       @ref no_mint_t, the hop that contributes nothing.
  * @retval std::nullopt The frame is not a well-formed forwardable FWD (wrong
  *         type/shape, or fewer than @p strip_k dst segments) — the caller falls to its
  *         terminus path.
@@ -886,11 +982,10 @@ struct fwd_rebuild_t {
  *       @ref read_fwd_header itself: that inlines it into the cold control-frame and terminus
  *       paths too and measured **+16 to +24%** — strictly worse than doing nothing.
  */
-template <class Cursor>
+template <class Cursor, class MintFn = no_mint_t>
 [[gnu::flatten]] [[nodiscard]] std::optional<fwd_rebuild_t> rebuild_fwd_forward(
     const Cursor& cur, std::span<const std::byte> mount_tlv, std::string_view extra_seg,
-    std::size_t strip_k, const fwd_pre_t* pre = nullptr,
-    const wire::path_ref_element_t* mint = nullptr) {
+    std::size_t strip_k, const fwd_pre_t* pre = nullptr, MintFn mint_fn = MintFn{}) {
     // The frame's leading headers were already parsed by the `dst` peek that routed this hop.
     // When the caller hands them over, re-reading them is pure duplicated work — profiling put
     // ~88% of a 1-link forward hop in header parsing, most of it exactly this. There is still
@@ -975,14 +1070,18 @@ template <class Cursor>
     // is the whole point of putting the flag in the op byte (§7.5).
     std::size_t mint_growth = 0;
     if (is_reply) {
-        if (const auto found = peek_reply_mint(cur, pos, body_end)) {
-            const std::size_t ref_pos = found->first;
+        if (const std::optional<reply_mint_t> found = peek_reply_mint(cur, pos, body_end)) {
             // The tail stops short of the mint answer either way: this hop re-heads it one
             // element longer, or removes it. It is never relayed untouched.
-            r.tail_len = ref_pos > pos ? ref_pos - pos : 0;
-            if (mint != nullptr) {
-                r.ref_body_off = ref_pos + 4;  // LL = 0 is a MUST, so the header is 4 bytes
-                r.ref_body_len = found->second;
+            r.tail_len = found->pos > pos ? found->pos - pos : 0;
+            // The ONE call, made only now that the frame is known to carry an extendable
+            // answer. A list already at the cap is NOT extendable, so it takes the strip
+            // branch below with everything else this hop cannot contribute to.
+            const std::optional<wire::path_ref_element_t> mint =
+                found->can_contribute ? mint_fn() : std::nullopt;
+            if (mint) {
+                r.ref_body_off = found->pos + 4;  // LL = 0 is a MUST, so the header is 4 bytes
+                r.ref_body_len = found->body_len;
                 r.mint.header_bare(wire::type_t::PATH_REF,
                                    r.ref_body_len + wire::kPathRefElementBytes);
                 std::array<std::byte, wire::kPathRefElementBytes> e{};
@@ -991,7 +1090,10 @@ template <class Cursor>
                 mint_growth = wire::kPathRefElementBytes;
             }
             // else: STRIP the mint answer, and this is a SAFETY rule, not tidiness (RFC-0024
-            // §7.1, car-3 erratum). A list that skips a hop is not a shorter route, it is a
+            // §7.1, car-3 erratum). Every cannot-contribute case lands here — no connection
+            // vertex, a saturated or retired generation, AND a list already at the element cap
+            // — because the erratum names them together and they have one safe outcome
+            // between them. A list that skips a hop is not a shorter route, it is a
             // WRONG one: the origin would consume its own element, send a list one element
             // short, and the hop that could not contribute would find exactly one element
             // left, believe itself the terminus, and dereference an element minted on a

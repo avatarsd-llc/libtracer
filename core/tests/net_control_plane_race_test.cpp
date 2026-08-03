@@ -42,6 +42,7 @@
 
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/graph.hpp"
+#include "libtracer/path_ref.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 
@@ -82,6 +83,33 @@ std::vector<std::byte> make_fwd(std::span<const std::string_view> dst) {
     const std::byte op{static_cast<std::uint8_t>(tr::graph::fwd_op_t::WRITE)};
     tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
     emit_path(body, dst);
+    const std::string_view reply[] = {"reply"};
+    emit_path(body, std::span<const std::string_view>(reply, 1));
+    const std::byte payload[2] = {std::byte{0xAB}, std::byte{0xCD}};
+    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(payload, 2));
+    std::vector<std::byte> frame;
+    tr::wire::emit_tlv(frame, type_t::FWD, opt_t{.pl = true}, body);
+    return frame;
+}
+
+/**
+ * @brief `FWD{ op=WRITE, dst=PATH_REF{2 elements}, src, VALUE }` — a BOUND forward hop.
+ *
+ * The second reader shape, and it exists because the bound hop reads a DIFFERENT table from
+ * the mount descent: it walks the router's per-child receiver contexts to turn an element's
+ * slot index into an egress, while `add_child` is appending to that same table from a control
+ * thread. Walking the owning deque there is a race on its chunk map — the container-level twin
+ * of ADR-0063 erratum 3 — so the contexts are published through an append-only atomic chain
+ * and this frame is what drives a reader down it. The route names no slot of this node, so the
+ * frame is dropped after the walk; the walk is the point.
+ */
+std::vector<std::byte> make_bound_fwd() {
+    std::vector<std::byte> body;
+    const std::byte op{static_cast<std::uint8_t>(tr::graph::fwd_op_t::WRITE)};
+    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
+    const tr::wire::path_ref_element_t route[2] = {{.index = 3, .generation = 0},
+                                                   {.index = 4, .generation = 0}};
+    (void)tr::wire::emit_path_ref(body, std::span<const tr::wire::path_ref_element_t>(route, 2));
     const std::string_view reply[] = {"reply"};
     emit_path(body, std::span<const std::string_view>(reply, 1));
     const std::byte payload[2] = {std::byte{0xAB}, std::byte{0xCD}};
@@ -133,10 +161,13 @@ int main() {
     const auto reader = [&] {
         const std::string_view dst[] = {"net", "a", "c0", "leaf"};
         const std::vector<std::byte> frame = make_fwd(std::span<const std::string_view>(dst, 4));
+        const std::vector<std::byte> bound = make_bound_fwd();
         while (!stop.load(std::memory_order_relaxed)) {
             // Drives resolve_mount_segs over the churning table: the mount descent reads each
             // slot's name, `multi_peer` and `link` with no lock, by design (ADR-0038 §3).
             router.on_frame("net/in/up", frame);
+            // And the BOUND hop's own table walk, against the same churn (RFC-0024 §5.1).
+            router.on_frame("net/in/up", bound);
         }
     };
 
