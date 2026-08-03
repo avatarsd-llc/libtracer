@@ -79,8 +79,8 @@ Each module has its own page in the sidebar, grouped by layer:
 
 The diagram draws dispatch as a box because it is a distinct *function*: fan-out to an
 edge set and the colon-field write plane. It is not a distinct translation unit. Both
-live in the graph module — `graph_t::fan_out` (`core/src/graph.cpp:896`) and
-`graph_t::field_write` (`core/src/graph.cpp:1551`) — so [graph](graph.md) is the page
+live in the graph module — `graph_t::fan_out` (`core/src/graph.cpp:911`) and
+`graph_t::field_write` (`core/src/graph.cpp:1566`) — so [graph](graph.md) is the page
 that documents them, and there is no `dispatcher` source file to look for.
 
 At the standard level the split is real: `dispatcher` is one of the **required modules**
