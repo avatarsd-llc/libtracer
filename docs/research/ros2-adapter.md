@@ -20,6 +20,21 @@ longer holds. The "reliable stream = M6" prerequisite still stands. The architec
 analysis below remains useful background.
 ```
 
+```{admonition} Also superseded (2026-08-04) — the `:settings` QoS mapping is retracted
+:class: warning
+Two places below map ROS QoS onto a per-vertex `:settings` container: the `graph::Settings qos`
+member of `TopicMap` in the interface sketch, and the "QoS mapping is a small table" design
+choice (`:settings.reliability` / `durability` / `history_keep_last`). **That surface no longer
+exists.** [RFC-0022](../spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md)
+deleted `settings_t` outright and removed the `:settings.<knob>` write surface; a write to any of
+those names answers `SCHEMA_NOT_FOUND`. Nor do "the names already line up" any more: reliability
+and durability ride the **subscription's** packed `delivery_policy`, history depth is owner-side
+`graph_t::set_history_depth`, and deadline/liveliness/lifespan have no libtracer mapping at all.
+The live mapping is [`bindings/ros2/README.md` §QoS](https://github.com/avatarsd-llc/libtracer/blob/main/bindings/ros2/README.md)
+and [ADR-0023](../adr/0023-ros2-binding-via-rmw-tracer.md)'s two errata. The sketch below is left
+as written — it is a dated record of the interface as this note proposed it.
+```
+
 ## TL;DR — how far are we?
 
 There are **two integration models**, mirroring exactly how Zenoh integrates with
@@ -111,6 +126,8 @@ Design choices (no boilerplate, all reuse):
 - **QoS mapping** is a small table: ROS `reliability`/`durability`/`history` ↔
   libtracer `:settings.reliability`/`durability`/`history_keep_last` (the names
   already line up — `reference/02` §core writable fields).
+  *(Retracted 2026-08-04 — RFC-0022 deleted these three names and the container
+  they sat in; see the second admonition at the top of this note.)*
 - **No type support on the data path** — the bridge moves CDR bytes; only the two
   `rclcpp` generic endpoints know the type string.
 
