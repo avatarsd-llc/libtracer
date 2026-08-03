@@ -471,6 +471,12 @@ class fwd_router_t {
      *
      * A transport calls this on (re)connect/disconnect; a subsequent re-advertise
      * rebinds cleanly and a delivery on a now-cleared label is NACK'd, not misrouted.
+     *
+     * On a MID-CHAIN node this also drops every ingress binding held on ANY link whose
+     * downstream half crossed @p link_name (#716) — see `tr::net::route_handle_t::clear_link`.
+     * Without it the upstream, which never saw the reconnect, keeps streaming COMPACTs onto a
+     * dead out-label and the flow drops silently forever; with it the upstream's next COMPACT
+     * draws the ordinary stale-label `HANDLE_NACK` and the flow re-advertises itself back up.
      * @param link_name This node's NAME for the link whose label state to drop.
      */
     void clear_link(std::string_view link_name);

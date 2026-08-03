@@ -920,10 +920,16 @@ int main() {
             check(up.sent() == oracle, "one-link-per-byte NACK rope self-heals byte-identically");
         }
 
-        // #667's unconfirmed rider, now pinned either way: is the NACK self-heal dead after
-        // clear_link? clear_link drops the link's whole table, and on_nack re-advertises from
-        // exactly the egress_route that table held — so after a (re)connect the self-heal has
-        // nothing to answer from. Whatever the answer, it stops being folklore.
+        // #667's unconfirmed rider, pinned by #715 and RULED by #716. `clear_link("up")` drops
+        // that link's whole table, and `on_nack` re-advertises from exactly the `egress_route`
+        // the table held — so a NACK arriving back on "up" after a (re)connect still has
+        // nothing to answer from, and sending nothing DOWNSTREAM remains correct. What #716
+        // changed is the other direction, which this fixture also holds: the ingress binding
+        // stored under "cli" pointed its downstream half at "up", so `clear_link` now sweeps it
+        // too. The recovery is therefore UPSTREAM — the client's next COMPACT misses and draws
+        // the ordinary stale-label HANDLE_NACK, which prompts it to re-advertise — rather than
+        // "only on a fresh advertise" someone else has to think to send. The end-to-end cascade
+        // is proven in `fwd_reconnect_selfheal_test`; both legs are pinned here.
         {
             graph_t g;
             fwd_router_t router(g);
@@ -935,13 +941,24 @@ int main() {
             const std::uint16_t lbl = up.sent().empty() ? 0 : advertise_label(up.sent()[0]);
             router.clear_link("up");  // what a transport calls on (re)connect
             up.sent().clear();
+            cli.sent().clear();
             std::vector<std::size_t> every_byte;
             for (std::size_t i = 1; i < nack.size(); ++i) every_byte.push_back(i);
             up.inject(rope_split(tr::net::encode_handle_nack(lbl), every_byte));
             check(up.sent().empty(),
-                  "after clear_link the NACK self-heal sends NOTHING — the route it would "
-                  "re-advertise from is the one clear_link erased, so a peer that NACKs after a "
-                  "reconnect gets no answer and the flow only recovers on a fresh advertise");
+                  "after clear_link a NACK arriving back on the cleared link still sends NOTHING "
+                  "downstream — the route it would re-advertise from is the one clear_link "
+                  "erased, and re-advertising into a link that just reconnected would be wrong");
+            // The #716 half: the cross-link binding went with it, so the UPSTREAM is told.
+            check(router.handles().ingress_count() == 0,
+                  "clear_link also swept the \"cli\" ingress binding whose downstream half "
+                  "crossed \"up\" (#716) — the stale out-label cannot be forwarded any more");
+            cli.inject(tr::net::encode_compact(kLabel, b_value_u32(0xFEEDBEEFu)));
+            const auto back = cli.sent().size() == 1 ? tr::wire::decode(cli.sent()[0])
+                                                     : decltype(tr::wire::decode(cli.sent()[0])){};
+            check(cli.sent().size() == 1 && back.has_value() && back->type == type_t::HANDLE_NACK,
+                  "and the client's next COMPACT draws a HANDLE_NACK upstream, which is what "
+                  "makes it re-advertise (the origin learns, instead of streaming into a hole)");
         }
 
         // The silent-return leg, asserted so it cannot be mistaken for the bug it resembles:

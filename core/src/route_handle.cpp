@@ -214,10 +214,37 @@ void route_handle_t::clear_link(std::string_view link) {
     // mints a fresh entry — exactly the clean slate the self-heal wants. Erasing bounds
     // `links_` to LIVE link names instead of retaining an empty shell per departed name.
     //
-    // We touch only the registry (map) structure under links_m_, never the link_tables_t
-    // object itself, so this never contends with a writer holding the per-link mutex.
     const std::unique_lock lock(links_m_);
     if (const auto it = links_.find(link); it != links_.end()) links_.erase(it);
+    // The CROSS-LINK half (#716). Erasing `link`'s own tables is not the whole clean slate: a
+    // forwarding binding is stored under the INBOUND link while `down_link` names the OUTBOUND
+    // one, so a mid-chain node keeps an ingress binding on some OTHER link whose downstream
+    // half crossed `link` — pointing at an out-label that died with the table just erased.
+    // ADR-0062's erratum named this asymmetry and judged it harmless because the forward step
+    // re-resolves by name; it is not, because the label it re-resolves toward is stale. The
+    // shipped consequence: the upstream never saw the reconnect, so it never re-advertises and
+    // keeps streaming COMPACTs; this node forwards the dead out-label; the downstream NACKs it;
+    // `on_nack` looks the label up in the table `clear_link` erased and returns silently. The
+    // flow drops every delivery, forever, and the origin is never told.
+    //
+    // Sweeping those bindings hands the recovery back to machinery that already ships: the
+    // upstream's next COMPACT misses, draws the SAME HANDLE_NACK a stale label always drew,
+    // and the upstream — whose own egress route is untouched — re-advertises. Every frame the
+    // cascade emits is an already-specified frame in an already-specified situation, so no
+    // wire surface moves.
+    //
+    // This is the COLD (re)connect path: O(links x bindings) once per link event, and nothing
+    // on the per-delivery path changes. Taking each table's mutex under the registry lock is
+    // the order `ingress_count`/`egress_count` already establish (registry then table), so it
+    // introduces no new lock ordering; sweeping in place also keeps the teardown allocation-free.
+    for (const auto& [name, t] : links_) {
+        const std::lock_guard tl(t->m);
+        std::erase_if(t->ingress, [link](const ingress_entry_t& e) {
+            // A terminus binding has no downstream half — its `down_link` is empty and it
+            // survives, because nothing about it crossed the cleared link.
+            return !e.binding.terminus && e.binding.down_link == link;
+        });
+    }
 }
 
 std::size_t route_handle_t::ingress_count() const {

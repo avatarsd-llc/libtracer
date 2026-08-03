@@ -497,6 +497,15 @@ target_link_libraries(fwd_compact_test PRIVATE libtracer)
 libtracer_test_warnings(fwd_compact_test)
 add_test(NAME fwd_compact COMMAND fwd_compact_test)
 
+# RFC-0004 §E.1 (#716) — the MID-CHAIN reconnect self-heal: clear_link sweeps every ingress
+# binding, on ANY link, whose downstream half crossed the cleared link, so an origin that never
+# saw the reconnect stops streaming onto a dead out-label. Asserts RECOVERY end to end over a
+# 3-node in-process chain, not merely the NACK.
+add_executable(fwd_reconnect_selfheal_test fwd_reconnect_selfheal_test.cpp)
+target_link_libraries(fwd_reconnect_selfheal_test PRIVATE libtracer)
+libtracer_test_warnings(fwd_reconnect_selfheal_test)
+add_test(NAME fwd_reconnect_selfheal COMMAND fwd_reconnect_selfheal_test)
+
 # RFC-0004 / ADR-0035 slice 4 (#136) — the PRODUCER auto fan-out: a plain graph.write to a
 # vertex with a remote subscriber delivers a full-route FWD{WRITE} (or auto-promoted COMPACT)
 # with no explicit advertise/send. Covers the transient-local latch, the compact byte-delta,

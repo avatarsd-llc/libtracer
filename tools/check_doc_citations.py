@@ -74,10 +74,10 @@ ANCHORS = [
     # silently (they cited the pre-#739 header). Anchored so they cannot rot again.
     # zero-copy-and-flatten.md's rope-tier citations and ADR-0072's stale-comment pointer —
     # all four had rotted on main and were re-asserted by a mechanical +24 shift (#768 verify).
-    ("core/include/libtracer/fwd_router.hpp:674", "Terminus over a MULTI-LINK rope"),
-    ("core/include/libtracer/fwd_router.hpp:680", "64 KB / 2 links"),
-    ("core/include/libtracer/fwd_router.hpp:692", "The forward hop, read entirely by OFFSET"),
-    ("core/include/libtracer/fwd_router.hpp:539", "Slot addresses are NOT stable"),
+    ("core/include/libtracer/fwd_router.hpp:680", "Terminus over a MULTI-LINK rope"),
+    ("core/include/libtracer/fwd_router.hpp:686", "64 KB / 2 links"),
+    ("core/include/libtracer/fwd_router.hpp:698", "The forward hop, read entirely by OFFSET"),
+    ("core/include/libtracer/fwd_router.hpp:545", "Slot addresses are NOT stable"),
     ("core/include/libtracer/fwd_router.hpp:154", "explicit fwd_router_t"),
     ("core/include/libtracer/fwd_router.hpp:213", "bool add_child"),
     ("core/include/libtracer/fwd_router.hpp:263", "subscribe_toward"),
@@ -235,7 +235,7 @@ ANCHORS = [
     ('core/include/libtracer/fwd_router.hpp:157', 'mem::mem_backend_t* flat = &mem::heap_backend(),'),
     ('core/include/libtracer/fwd_router.hpp:376',
      "* Invoked (with the `FWD{REPLY}` frame as a @ref view::rope_t) when a REPLY's first"),
-    ('core/include/libtracer/fwd_router.hpp:803',
+    ('core/include/libtracer/fwd_router.hpp:809',
      '[[nodiscard]] mem::block_source_t& rx_for(const child_rx_ctx_t* ctx) const noexcept {'),
     # core/include/libtracer/grammar.hpp
     ('core/include/libtracer/grammar.hpp:318',

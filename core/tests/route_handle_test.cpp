@@ -62,6 +62,15 @@ handle_binding_t terminus_binding(std::string_view down = {}) {
     return b;
 }
 
+/**
+ * @brief Build a FORWARDING binding whose downstream half crosses @p down.
+ *
+ * Spelled separately from @ref terminus_binding because #716 turns on the difference: the
+ * sweep keys on `down_link`, so a test that reads "terminus_binding(\"left\")" would name the
+ * exact property under test as its opposite.
+ */
+handle_binding_t forward_binding(std::string_view down) { return terminus_binding(down); }
+
 void exercise(route_handle_t& h) {
     // Per-link label spaces are independent and start at 1.
     check(h.alloc_label("a") == 1 && h.alloc_label("a") == 2 && h.alloc_label("b") == 1,
@@ -384,6 +393,50 @@ void cache_after_teardown() {
     check(h.resolved("live", 9).warm, "and cache_resolution warms a LIVE link's binding");
 }
 
+/**
+ * @brief #716 — `clear_link(L)` also sweeps every ingress binding, on ANY link, whose
+ *        downstream half crossed `L`.
+ *
+ * The store-under-inbound / point-at-outbound asymmetry ADR-0062's erratum named: a
+ * forwarding binding lives under the link it ARRIVES on while `down_link` names the link it
+ * LEAVES by, so clearing `L`'s own tables left a binding elsewhere aimed at an out-label that
+ * died with them. Whether that mattered is a routing question the unit cannot see; what the
+ * unit CAN pin is the state, which is the whole input to the routing decision.
+ *
+ * The three-way discrimination is the point — a sweep that took too much would be as wrong as
+ * one that took too little: the crossing binding goes, the sibling forwarding binding through
+ * another link stays, and a TERMINUS binding (no downstream half at all) stays.
+ */
+void cross_link_sweep() {
+    std::printf(
+        " clear_link sweeps CROSS-LINK bindings whose downstream half crossed it (#716):\n");
+    route_handle_t h;
+
+    check(h.bind_ingress("up", 1, forward_binding("left")), "a binding on \"up\" forwards to left");
+    check(h.bind_ingress("up", 2, forward_binding("right")), "another forwards to right");
+    check(h.bind_ingress("up", 3, terminus_binding()), "and a third terminates locally");
+    check(h.bind_ingress("left", 4, forward_binding("right")),
+          "a binding on the doomed link itself forwards elsewhere");
+    check(h.record_egress("left", 8, route_bytes(3)), "left holds an egress route too");
+    check(h.ingress_count() == 4, "four ingress bindings before the clear");
+
+    h.clear_link("left");
+
+    check(!h.lookup_ingress("up", 1),
+          "the CROSS-LINK binding pointing at \"left\" is swept — it is as stale as the erased "
+          "table it aimed into");
+    check(h.lookup_ingress("up", 2).has_value(),
+          "the sibling binding through \"right\" is untouched (the sweep is scoped)");
+    check(h.lookup_ingress("up", 3).has_value(),
+          "the TERMINUS binding is untouched — it has no downstream half to cross anything");
+    check(!h.lookup_ingress("left", 4), "the cleared link's own bindings go with its table");
+    check(!h.egress_route("left", 8).has_value(), "as does its egress table");
+    check(h.ingress_count() == 2, "exactly two bindings survive");
+
+    // The sweep must not resurrect or invent a link shell for a name it merely scanned.
+    check(h.link_count() == 1, "only the surviving link's shell remains");
+}
+
 int main() {
     std::printf("route_handle_t (Brick 4 — per-connection pmr label tables):\n");
 
@@ -409,6 +462,7 @@ int main() {
     egress_route_soft_fails_on_exhaustion();
 
     cache_after_teardown();
+    cross_link_sweep();
 
     if (g_failures == 0) {
         std::printf("route_handle: ALL PASS\n");

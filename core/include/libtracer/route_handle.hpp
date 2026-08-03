@@ -294,11 +294,26 @@ class route_handle_t {
     [[nodiscard]] std::uint16_t alloc_label(std::string_view link);
 
     /**
-     * @brief Drop ALL state (ingress, egress, allocator) for @p link — the self-heal hook.
+     * @brief Drop ALL state (ingress, egress, allocator) for @p link, AND every ingress
+     *        binding on any OTHER link whose downstream half crossed @p link — the self-heal hook.
      *
      * A transport calls this on (re)connect/disconnect of @p link so a subsequent
      * re-advertise rebinds from a clean slate; a delivery on a now-cleared label is
      * stale and is NACK'd rather than misrouted.
+     *
+     * The cross-link sweep is what makes that true on a MID-CHAIN node (#716). A forwarding
+     * binding is stored under the **inbound** link while `handle_binding_t::down_link` names
+     * the **outbound** one, so clearing only @p link's own tables leaves an ingress binding
+     * elsewhere still pointing at an out-label that died with them. The upstream never saw
+     * the reconnect and so never re-advertises: it keeps streaming COMPACTs, this node keeps
+     * forwarding the dead out-label, the downstream keeps NACKing, and the NACK is answered
+     * from the very table that was erased — a permanent, silent drop of the whole flow.
+     * Erasing those bindings makes the upstream's next COMPACT miss, which draws the ordinary
+     * stale-label `HANDLE_NACK` and prompts the upstream to re-advertise; nothing new is put
+     * on the wire. Terminus bindings have no downstream half and are never swept.
+     *
+     * Cost is O(links x bindings) on this COLD (re)connect path; the per-delivery path is
+     * untouched.
      * @param link This node's NAME for the link whose state to forget.
      */
     void clear_link(std::string_view link);
