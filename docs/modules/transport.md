@@ -50,7 +50,7 @@ A transport that can hand up *owning* frames implements the rope-receiver seam
 view delivery](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md),
 generalized to ropes by [ADR-0053 — lazy rope-backed decode, view partial-path
 routing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0053-lazy-rope-backed-decode-view-partial-path-routing.md)):
-it overrides `delivers_ropes()` (`core/include/libtracer/transport.hpp:333`) and
+it overrides `delivers_ropes()` (`core/include/libtracer/transport.hpp:353`) and
 delivers each inbound frame as a `rope_t` of refcounted links over segments drawn
 from a host-injected `mem_backend_t`. A contiguous frame is the single-link case; a
 scattered one — a CAN reassembly group, a fragmented WebSocket message — crosses the
@@ -76,7 +76,7 @@ and the tier an out-of-tree transport gets for free.
 A point-to-point link carries one peer, so the child NAME the router registers it
 under fully addresses the far side. A **bus** link reaches many peers over one wire
 and exposes them through the optional `bus_link_t` facet
-(`core/include/libtracer/transport.hpp:63`, [ADR-0044 — stateless transport peer
+(`core/include/libtracer/transport.hpp:65`, [ADR-0044 — stateless transport peer
 enumeration](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0044-stateless-transport-peer-enumeration-separate-paths-client-side-identity.md)):
 `enumerate_peers` synthesizes the currently-audible names from the wire's own live
 traffic, `peer_link` resolves one name to a directed sending endpoint, and
@@ -221,7 +221,7 @@ flowchart LR
   and a callable destroyed early dangles exactly like a stale `ctx`.
 - **Overriding `send(iov)` is not optional for a scatter-gather wire.** The base
   implementation gathers into a temporary buffer and, when that allocation fails,
-  **drops the frame** rather than aborting (`transport.hpp:254`). A transport with a
+  **drops the frame** rather than aborting (`transport.hpp:256`). A transport with a
   native `sendmsg`/`writev` that does not override it silently pays a copy per
   forward hop and inherits a drop path it did not intend.
 - **The link-down notifier is a routing seam, not a log hook.** It re-enters the

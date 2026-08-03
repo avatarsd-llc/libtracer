@@ -159,7 +159,7 @@ client-side projection and dedup is the client's job, keyed by the identity face
 the architecture working as intended; it does not belong in a register of gaps.
 
 > One phantom outlives #406: `reference/07` describes a 128-bit `peer_id_t` with generation
-> rules, while `transport.hpp:33` declares `using peer_id_t = std::array<std::byte, 16>`
+> rules, while `transport.hpp:35` declares `using peer_id_t = std::array<std::byte, 16>`
 > with no generation rules. #406 closed without reconciling it, and it is covered by neither
 > #599 nor #586 — tracked in [#606].
 

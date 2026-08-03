@@ -610,6 +610,46 @@ void test_tcp_server_broadcast_scratch_drops() {
 // ---------------------------------------------------------------------------
 
 /** @brief The datagram gather's overflow store: refuse it and the datagram drops. */
+/**
+ * @brief `transport_t::send(iov)`'s DEFAULT body — the gather every transport that does not
+ *        override it lands on, `transport_can` and any embedder's included.
+ *
+ * `compact_cache_test` already drives this path's drop leg through `probe_fail_hook`, but a
+ * hook the code consults by hand cannot see an allocation the code makes without asking:
+ * this body used `tr::detail::try_reserve`, whose second step is a THROWING
+ * `std::vector::reserve` behind a `noexcept`, so refusing that allocation terminated instead
+ * of dropping. Only the k-th-allocation injector reaches it, so the sweep lives here.
+ */
+void test_default_send_iov_gather_drops() {
+    std::printf("transport_t::send(iov) default gather — drops, never aborts:\n");
+    struct counting_link_t : tr::net::transport_t {
+        // The base send(iov) is deliberately NOT overridden — it is the case under test.
+        using tr::net::transport_t::send;
+        std::size_t sends = 0;
+        std::size_t bytes = 0;
+        void send(std::span<const std::byte> f) override {
+            ++sends;
+            bytes = f.size();
+        }
+    };
+    counting_link_t link;
+    const std::vector<std::byte> storage(kWideSpans, std::byte{0x5C});
+    const auto iov = wide_gather(storage, kWideSpans);
+    const auto send_wide = [&] { link.send(std::span<const std::span<const std::byte>>(iov)); };
+
+    const std::size_t n_allocs = count_allocs(send_wide);
+    check(n_allocs == 1, "the gather makes exactly ONE refusable allocation");
+    check(link.sends == 1 && link.bytes == kWideSpans, "the baseline gather was sent whole");
+
+    const std::size_t escaped = escape_sweep(n_allocs, send_wide);
+    check(escaped == 0, "no allocation failure escapes the default send(iov)");
+    check(link.sends == 1, "every refused gather was DROPPED, not truncated");
+
+    send_wide();
+    check(link.sends == 2 && link.bytes == kWideSpans,
+          "the link is LIVE: the next gather is whole");
+}
+
 void test_udp_send_iov_overflow_drops() {
     std::printf("udp send(iov) — overflow gather drops, node lives:\n");
     sink_t at_b;
@@ -890,6 +930,7 @@ int main() {
     test_ws_client_send_drops_then_recovers();
     test_tcp_send_iov_overflow_drops();
     test_tcp_server_broadcast_scratch_drops();
+    test_default_send_iov_gather_drops();
     test_udp_send_iov_overflow_drops();
     test_can_advertise_header_is_allocation_free();
     test_can_over_long_path_refused();

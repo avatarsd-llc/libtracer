@@ -27,6 +27,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   so exhaustion was a peer-reachable `abort()` under the `-fno-exceptions` MCU profile;
   a `send` that cannot obtain the table now DROPS the frame — it never truncates one.
 
+- **`transport_t::send(iov)`'s default gather draws from the failable seam.** The base
+  class's scatter-gather fallback — what `transport_can` and any embedder's transport that
+  does not override `send(iov)` lands on, reachable from `route_fwd_forward` — assembled its
+  contiguous temporary with `tr::detail::try_reserve`, i.e. a nothrow probe in front of a
+  THROWING `std::vector::reserve` behind a `noexcept`. It now uses a
+  `tr::mem::block_array_t<std::byte>` and honours the `probe_fail_hook` injection seam
+  explicitly (as `iov_table_t::acquire` does). No signature change; exhaustion still DROPS
+  the frame, but it can no longer `std::terminate` on the way there.
+
 - **RFC 6455 control-frame surface in `tr::net::ws`:** `kMaxControlPayload` (125),
   `is_control_opcode`, `kMaxServerControlFrame` / `kMaxClientControlFrame`,
   `encode_server_control` / `encode_client_control` (stack buffers, returning the byte count),
