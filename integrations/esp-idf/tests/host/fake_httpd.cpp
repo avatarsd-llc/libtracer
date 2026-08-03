@@ -27,23 +27,43 @@ struct pending_frame_t {
 
 thread_local pending_frame_t t_pending;
 
-/** @brief The handler passed to the last httpd_register_uri_handler (see the header). */
-esp_err_t (*g_handler)(httpd_req_t*) = nullptr;
+/**
+ * @brief The request the calling thread is currently servicing — httpd's `hd_req` /
+ *        `hd_req_aux.sd` pair, which is what makes `httpd_sess_set_ctx` behave
+ *        differently for the session being serviced than for any other.
+ */
+struct request_scope_t {
+    bool active = false;                    /**< @brief A handler frame is on this stack. */
+    int fd = -1;                            /**< @brief The session it is servicing. */
+    void* sess_ctx = nullptr;               /**< @brief `httpd_req_t::sess_ctx`. */
+    httpd_free_ctx_fn_t free_ctx = nullptr; /**< @brief `httpd_req_t::free_ctx`. */
+};
+
+thread_local request_scope_t t_req;
+
+/** @brief The route the last httpd_register_uri_handler installed (see the header). */
+route_t g_route;
 
 }  // namespace
 
-esp_err_t (*registered_handler())(httpd_req_t*) { return g_handler; }
+route_t registered_route() { return g_route; }
 
-void set_registered_handler(esp_err_t (*handler)(httpd_req_t*)) { g_handler = handler; }
+void set_registered_route(route_t route) { g_route = route; }
 
 server_t& instance() {
     static server_t server;
     return server;
 }
 
-void server_t::open_session(int fd) {
+void server_t::open_session(int fd, void* ctx, httpd_free_ctx_fn_t free_fn) {
     const std::lock_guard lock(m_);
-    sessions_[fd] = session_t{};
+    session_t sess;
+    sess.ctx = ctx;
+    sess.free_ctx = free_fn;
+    // The handshake latches the route INTO the session; nothing later can revoke it.
+    sess.ws_handler = g_route.handler;
+    sess.ws_user_ctx = g_route.user_ctx;
+    sessions_[fd] = sess;
 }
 
 void* server_t::session_ctx(int fd) {
@@ -103,10 +123,41 @@ void server_t::close_all() {
     for (const int fd : fds) close_session(fd);
 }
 
+void* server_t::get_ctx(int fd) {
+    // httpd_sess_get_ctx: inside the handler servicing this very session the live value
+    // is the REQUEST's, not the socket table's.
+    if (t_req.active && t_req.fd == fd) return t_req.sess_ctx;
+    return session_ctx(fd);
+}
+
 void server_t::set_ctx(int fd, void* ctx, httpd_free_ctx_fn_t free_fn) {
-    // Transcribed from httpd_sess_set_ctx: on a CHANGE of ctx the previous context's
-    // free_ctx runs inline, right here on the calling (server) task; then the new pair is
-    // stored. Setting (nullptr, nullptr) therefore both fires and retires the callback.
+    // Transcribed from httpd_sess_set_ctx (httpd_sess.c:280-311). Two branches, and the
+    // difference between them is a use-after-free:
+    //   - REQUEST-SCOPED — called from inside the handler servicing THIS session: only
+    //     the in-flight httpd_req_t is edited. The socket table keeps its ctx, and the
+    //     previous context is NOT freed here ("it will be freed inside
+    //     httpd_req_cleanup()") — i.e. after the handler returns;
+    //   - otherwise the socket table is edited and a CHANGE of ctx runs the previous
+    //     free_ctx inline, right here on the calling (server) task.
+    if (t_req.active && t_req.fd == fd) {
+        void* stale = nullptr;
+        httpd_free_ctx_fn_t stale_free = nullptr;
+        if (t_req.sess_ctx != ctx) {
+            // Only a context the socket table does NOT also hold is freed here.
+            if (session_ctx(fd) != t_req.sess_ctx) {
+                stale = t_req.sess_ctx;
+                stale_free = t_req.free_ctx;
+                if (stale != nullptr) {
+                    const std::lock_guard lock(m_);
+                    ++free_ctx_calls_;
+                }
+            }
+            t_req.sess_ctx = ctx;
+        }
+        t_req.free_ctx = free_fn;
+        if (stale != nullptr && stale_free != nullptr) stale_free(stale);
+        return;
+    }
     void* old_ctx = nullptr;
     httpd_free_ctx_fn_t old_free = nullptr;
     {
@@ -167,16 +218,63 @@ httpd_ws_client_info_t server_t::fd_info(int fd) {
     return it->second.websocket ? HTTPD_WS_CLIENT_WEBSOCKET : HTTPD_WS_CLIENT_HTTP;
 }
 
-esp_err_t server_t::deliver_frame(const httpd_uri_t& uri, int fd, std::span<const std::byte> body,
-                                  bool final, httpd_ws_type_t type) {
-    t_pending = pending_frame_t{body.data(), body.size(), final, type};
+void server_t::set_frame_hook(std::function<void()> hook) {
+    const std::lock_guard lock(m_);
+    frame_hook_ = std::move(hook);
+}
+
+void server_t::run_frame_hook() {
+    std::function<void()> hook;
+    {
+        const std::lock_guard lock(m_);
+        hook = frame_hook_;
+    }
+    if (hook) hook();  // unlocked: the hook drives a concurrent teardown
+}
+
+esp_err_t server_t::deliver_frame(int fd, std::span<const std::byte> body, bool final,
+                                  httpd_ws_type_t type) {
+    // The route comes from the SESSION (httpd_parse.c:796,824), so this dispatches
+    // whether or not the URI is still registered — the reachability an unregister does
+    // not close.
+    esp_err_t (*handler)(httpd_req_t*) = nullptr;
     httpd_req_t req = {};
+    {
+        const std::lock_guard lock(m_);
+        const auto it = sessions_.find(fd);
+        if (it == sessions_.end() || it->second.ws_handler == nullptr) return ESP_ERR_NOT_FOUND;
+        handler = it->second.ws_handler;
+        req.user_ctx = it->second.ws_user_ctx;
+        // httpd_req_new: the session's context pair is copied INTO the request.
+        t_req = request_scope_t{true, fd, it->second.ctx, it->second.free_ctx};
+    }
+    t_pending = pending_frame_t{body.data(), body.size(), final, type};
     req.handle = static_cast<httpd_handle_t>(this);
     req.method = HTTP_POST;  // any non-GET: a data frame, not the opening handshake
-    req.user_ctx = uri.user_ctx;
     req.fd = fd;
-    const esp_err_t err = uri.handler(&req);
+    const esp_err_t err = handler(&req);
     t_pending = pending_frame_t{};
+
+    // httpd_req_cleanup (httpd_parse.c:733-735): a socket-table ctx that no longer
+    // matches the request's is freed HERE, with the STORED destructor, after the handler
+    // has returned — the call an in-call teardown cannot be present for.
+    void* stale = nullptr;
+    httpd_free_ctx_fn_t stale_free = nullptr;
+    {
+        const std::lock_guard lock(m_);
+        const auto it = sessions_.find(fd);
+        if (it != sessions_.end()) {
+            if (it->second.ctx != t_req.sess_ctx) {
+                stale = it->second.ctx;
+                stale_free = it->second.free_ctx;
+                if (stale != nullptr) ++free_ctx_calls_;
+            }
+            it->second.ctx = t_req.sess_ctx;
+            it->second.free_ctx = t_req.free_ctx;
+        }
+    }
+    t_req = request_scope_t{};
+    if (stale != nullptr && stale_free != nullptr) stale_free(stale);
     return err;
 }
 
@@ -202,7 +300,7 @@ esp_err_t httpd_stop(httpd_handle_t handle) {
 
 esp_err_t httpd_register_uri_handler(httpd_handle_t handle, const httpd_uri_t* uri) {
     (void)handle;
-    fake_httpd::set_registered_handler(uri->handler);
+    fake_httpd::set_registered_route({uri->handler, uri->user_ctx});
     return ESP_OK;
 }
 
@@ -211,10 +309,18 @@ esp_err_t httpd_unregister_uri_handler(httpd_handle_t handle, const char* uri,
     (void)handle;
     (void)uri;
     (void)method;
+    // Drops the route for FUTURE handshakes only. Sessions that already latched it keep
+    // dispatching — httpd_uri.c never walks the session table on unregister.
+    fake_httpd::set_registered_route({});
     return ESP_OK;
 }
 
 int httpd_req_to_sockfd(httpd_req_t* req) { return req->fd; }
+
+void* httpd_sess_get_ctx(httpd_handle_t handle, int sockfd) {
+    (void)handle;
+    return fake_httpd::instance().get_ctx(sockfd);
+}
 
 void httpd_sess_set_ctx(httpd_handle_t handle, int sockfd, void* ctx, httpd_free_ctx_fn_t free_fn) {
     (void)handle;
@@ -238,6 +344,9 @@ esp_err_t httpd_ws_recv_frame(httpd_req_t* req, httpd_ws_frame_t* frame, std::si
     frame->final = pending.final;
     frame->len = pending.len;
     if (max_len == 0) return ESP_OK;  // header pass, exactly as httpd's
+    // The payload pass: the handler is inside the link but has claimed nothing yet — the
+    // window the destructor's handler barrier exists to cover.
+    fake_httpd::instance().run_frame_hook();
     if (max_len < pending.len) return ESP_FAIL;
     if (pending.len != 0) std::memcpy(frame->payload, pending.data, pending.len);
     return ESP_OK;

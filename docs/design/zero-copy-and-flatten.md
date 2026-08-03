@@ -177,8 +177,8 @@ That receive task is the binding constraint on a single-core, RAM-constrained no
 WS integration, servicing a graph request in-call was measured overflowing an 8 KB stack and needing
 ~12 KB on the raw WS receive thread, against the 4 KB `esp_http_server` default; the integration
 therefore sizes the task at `kHttpdTaskStack = 12288`
-(`integrations/esp-idf/libtracer/httpd_ws_link.cpp:71`, rationale and the 8 KB / ~12 KB figures at
-`:64-66`; the 4 KB platform default is named at
+(`integrations/esp-idf/libtracer/httpd_ws_link.cpp:73`, rationale and the 8 KB / ~12 KB figures at
+`:66-68`; the 4 KB platform default is named at
 `integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:38`). Against a 4096-byte
 default the arena is a full half of the frame, and it is the single largest consumer on the write
 path. A 4 KB stack-high-water reclaim is the real saving even though total RAM is flat.
@@ -319,7 +319,7 @@ flatten questions:
   feeding the rope tier an owned segment, let the branch and field decode collapse to refcount
   bumps once the sink is rope-native.
 - **WS reassembly (⑧)** regrows exact-size per fragment
-  (`integrations/esp-idf/libtracer/httpd_ws_link.cpp:174-184`), which is O(n²) in total bytes
+  (`integrations/esp-idf/libtracer/httpd_ws_link.cpp:192-202`), which is O(n²) in total bytes
   copied. Chaining each fragment as an owning rope link makes it O(n) owning copies — the CAN model,
   which is what the host `transport_ws.cpp` does.
 

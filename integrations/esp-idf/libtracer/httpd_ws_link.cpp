@@ -17,8 +17,10 @@
 #include <sys/socket.h>
 
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <string>
 #include <thread>
@@ -166,6 +168,22 @@ struct asm_buf_t {
         len_ = 0;
     }
     /**
+     * @brief Move the assembled message OUT, leaving this buffer empty.
+     *
+     * The delivery of a completed reassembly must not be followed by a write back into
+     * the slot: the app callback the delivery runs can tear this link down in-call
+     * (#814), and the slot is gone by the time deliver() returns. Taking the bytes into
+     * a caller-local buffer first makes the post-delivery `clear()` unnecessary, so the
+     * RX path touches NOTHING owned by the link once it has delivered.
+     */
+    [[nodiscard]] asm_buf_t take() noexcept {
+        asm_buf_t out;
+        out.bytes_ = std::move(bytes_);
+        out.len_ = len_;
+        len_ = 0;
+        return out;
+    }
+    /**
      * @brief Append @p chunk, nothrow.
      * @retval false Allocation failed — the buffer is cleared (the partial message is
      *               unrecoverable) and the caller drops the message (backpressure).
@@ -192,6 +210,49 @@ struct asm_buf_t {
 }  // namespace
 
 /**
+ * @brief The handler-admission gate: the ONE object the adopted server may still hold a
+ *        pointer to after this link is gone, and the barrier the destructor joins the
+ *        in-flight URI handler on.
+ *
+ * It exists because `esp_http_server` LATCHES the WebSocket route into the session, not
+ * into the URI table: `httpd_uri.c` copies `uri->handler` and `uri->user_ctx` into
+ * `sock_db::ws_handler` / `ws_user_ctx` when it answers the handshake, and only deleting
+ * the session clears them. Unregistering the URI therefore stops NEW handshakes and
+ * nothing else — every already-upgraded peer keeps dispatching its data frames straight
+ * into the handler, with the registered `user_ctx`, for as long as its session lives.
+ * A destructor cannot outrun that: it can neither enumerate those sessions (a peer that
+ * upgraded but never sent a frame is invisible to this link) nor force them deleted
+ * (`httpd_sess_trigger_close` is itself a queued request that can be refused).
+ *
+ * So the registered `user_ctx` is this gate, never the link. The handler resolves the
+ * link THROUGH it under @ref m, which makes two things true at once:
+ *   - after @ref httpd_ws_link_t::close_gate, `link` is null and every later dispatch
+ *     is refused before it can touch a single link member (httpd then closes that
+ *     socket, so the stale sessions reap themselves);
+ *   - while a handler frame IS inside the link, `depth` is non-zero, and the destructor
+ *     blocks until it leaves — the barrier that the URI unregister never was.
+ *
+ * Its lifetime is deliberately longer than the link's in adopted mode: since the set of
+ * sessions still holding the pointer is unknowable, the gate is LEAKED there (one small
+ * block, teardown-only — the same leak-rather-than-free discipline #815 established for
+ * the TX pool). Owning mode frees it: `httpd_stop` deletes every session first.
+ */
+struct httpd_ws_link_t::gate_t {
+    std::mutex m;                    /**< @brief Guards every member below. */
+    std::condition_variable cv;      /**< @brief Signalled as @ref depth falls. */
+    httpd_ws_link_t* link = nullptr; /**< @brief The link, or null once it is going. */
+    unsigned depth = 0;              /**< @brief Live URI-handler frames inside the link. */
+    /**
+     * @brief The socket whose request the in-flight handler frame is servicing, or -1.
+     *
+     * Read by a destructor nested inside that frame (#814): `httpd_sess_set_ctx` takes a
+     * REQUEST-SCOPED branch for exactly this session and detaching it is impossible
+     * there (see @ref httpd_ws_link_t::detach_sessions).
+     */
+    int serving_fd = -1;
+};
+
+/**
  * @brief One peer slot: a single inbound WebSocket client's connection state.
  *
  * Slots are recycled in place across connections (never freed before the link), so
@@ -199,20 +260,18 @@ struct asm_buf_t {
  * life. Threading: `fd`/`open`/`name` are read cross-thread (peer_link /
  * enumerate_peers / a send's fd snapshot) and written by the httpd task
  * (accept/close) — all under `peers_m_`. `asm_buf` is touched only on the httpd
- * task (RX reassembly). `endpoint` is set once at creation, and so is `owner` — except
- * for the one teardown path that clears it to retire an un-interceptable close callback
- * (@ref abandon_sessions), which is why it is atomic.
+ * task (RX reassembly). `endpoint` and `gate` are set once at creation and never
+ * change.
  */
 struct httpd_ws_link_t::session_t {
     /**
-     * @brief Owning link — set once at creation, and cleared exactly once by
-     *        @ref abandon_sessions when a teardown has to leave this slot behind for a
-     *        callback it could not intercept.
+     * @brief The owning link's gate — how @ref on_session_closed reaches the link.
      *
-     * Atomic because that clear is the one cross-task write: the reader is
-     * @ref on_session_closed on the httpd task, and a null owner is its "inert" case.
+     * Never the link itself: this slot may be LEAKED past the link's death (a teardown
+     * that could not retire the server's `free_ctx` pointer), and the gate is the one
+     * object guaranteed to still be there to say so.
      */
-    std::atomic<httpd_ws_link_t*> owner{nullptr};
+    gate_t* gate = nullptr;
     int fd = -1;               /**< @brief Peer socket; -1 => free slot. */
     bool open = false;         /**< @brief True between handshake and close. */
     std::string name;          /**< @brief `<ip>:<port>` of the peer. */
@@ -266,17 +325,27 @@ struct httpd_ws_link_t::tx_slot_t {
  * use-after-free this fixes. Ownership is settled by @ref released — the destructor and
  * the work function each exchange it once, and the SECOND one to do so deletes the
  * item; a work item the server never runs is a single small leak, never a double free.
+ *
+ * The fds are paired with the ctx pointer each one was carrying at snapshot time,
+ * because a socket NUMBER does not identify a session over time: `httpd_sess_get`
+ * resolves purely by fd, so an item that drains late — after the peer hung up and the
+ * shared server accepted an unrelated client onto the recycled descriptor — would
+ * otherwise run a stranger's `free_ctx` mid-life and force its session closed. The
+ * ctx pointers are COMPARED, never dereferenced, and the abandon path leaks every slot
+ * precisely so those addresses stay unique for as long as this item can run.
  */
 struct httpd_ws_link_t::detach_req_t {
     httpd_handle_t handle = nullptr;   /**< @brief The adopted server (still running). */
     std::unique_ptr<int[]> fds;        /**< @brief Snapshot of the open peers' sockets. */
-    std::size_t n = 0;                 /**< @brief Entries in @ref fds. */
+    std::unique_ptr<void*[]> ctxs;     /**< @brief The ctx each fd carried (identity only). */
+    std::size_t n = 0;                 /**< @brief Entries in @ref fds / @ref ctxs. */
     std::atomic<bool> done{false};     /**< @brief Set once every fd has been detached. */
     std::atomic<bool> released{false}; /**< @brief Ownership handshake (see the brief). */
 };
 
 httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, std::size_t max_peers, bool peer_named)
     : port_(bind_port), max_peers_(max_peers), peer_named_(peer_named) {
+    if (!open_gate()) return;  // ok() stays false; nothing was registered
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port = bind_port;
     // A SECOND httpd instance must not share the first's control UDP port — the SPA
@@ -303,7 +372,10 @@ httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, std::size_t max_peers,
     uri.uri = "/";         // ws_pre/post_handshake_cb members behind extra Kconfig)
     uri.method = HTTP_GET;
     uri.handler = &httpd_ws_link_t::ws_handler;
-    uri.user_ctx = this;
+    // The GATE, never `this` — esp_http_server latches this pointer into every upgraded
+    // session and keeps dispatching through it until that session is deleted, which can
+    // be long after this link is gone. See gate_t.
+    uri.user_ctx = gate_;
     uri.is_websocket = true;
     uri.handle_ws_control_frames = false;  // httpd answers PING/PONG and tracks CLOSE
     if (httpd_register_uri_handler(handle_, &uri) != ESP_OK) {
@@ -317,6 +389,7 @@ httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, std::size_t max_peers,
 httpd_ws_link_t::httpd_ws_link_t(httpd_handle_t external, const char* uri_pattern,
                                  std::size_t max_peers, bool peer_named)
     : max_peers_(max_peers), peer_named_(peer_named) {
+    if (!open_gate()) return;  // ok() stays false; nothing was registered
     // Adopt an already-running server (the firmware's :80 SPA httpd): register the WS URI
     // as one more handler on it rather than standing up a second esp_http_server. We do
     // NOT own the server, so port_ is 0 (no bind of ours) and the dtor must never
@@ -331,7 +404,7 @@ httpd_ws_link_t::httpd_ws_link_t(httpd_handle_t external, const char* uri_patter
     uri.uri = uri_.c_str();  // ws_pre/post_handshake_cb members behind extra Kconfig)
     uri.method = HTTP_GET;
     uri.handler = &httpd_ws_link_t::ws_handler;
-    uri.user_ctx = this;
+    uri.user_ctx = gate_;  // the GATE, never `this` — see gate_t
     uri.is_websocket = true;
     uri.handle_ws_control_frames = false;  // httpd answers PING/PONG and tracks CLOSE
     if (httpd_register_uri_handler(external, &uri) != ESP_OK) {
@@ -339,6 +412,37 @@ httpd_ws_link_t::httpd_ws_link_t(httpd_handle_t external, const char* uri_patter
         return;
     }
     alloc_buffers();
+}
+
+bool httpd_ws_link_t::open_gate() {
+    // Nothrow, and load-bearing: the gate is what makes the registered handler safe to
+    // dispatch after this link dies, so a link that could not allocate one must not
+    // register a handler at all. Both constructors bail to ok() == false on failure.
+    gate_ = new (std::nothrow) gate_t;
+    if (gate_ == nullptr) return false;
+    gate_->link = this;
+    return true;
+}
+
+void httpd_ws_link_t::close_gate() {
+    if (gate_ == nullptr) return;
+    // A destructor reached from INSIDE the URI handler — an app teardown driven by the
+    // very frame being serviced (#814) — IS the in-flight frame, so waiting for `depth`
+    // to reach zero would wait on a stack frame below this one. Running on the server's
+    // task is the proof of that, and equally the proof that no OTHER frame can be in
+    // flight: esp_http_server dispatches every request from that one task.
+    const bool on_server_task = server_task_.load(std::memory_order_relaxed) == current_task();
+    std::unique_lock lock(gate_->m);
+    // From here no dispatch can enter the link — ws_handler refuses (httpd closes that
+    // socket) and on_session_closed is inert. Both were reachable a moment ago through
+    // pointers the adopted server latched and no API of ours can revoke.
+    gate_->link = nullptr;
+    // Unbounded BY DESIGN, unlike the two drains: there is no leak-instead-of-free
+    // fallback for the link itself, so a handler frame still reading peers_m_ /
+    // rx_scratch_ / slots_ has to be joined, not out-waited. It is bounded in practice by
+    // the app callback the delivery runs, and the one way it could wait on itself is the
+    // case skipped above.
+    if (!on_server_task) gate_->cv.wait(lock, [this] { return gate_->depth == 0; });
 }
 
 void httpd_ws_link_t::alloc_buffers() {
@@ -381,14 +485,20 @@ httpd_ws_link_t::~httpd_ws_link_t() {
     // (httpd_stop closes every session, re-entering on_session_closed) — the routing
     // plane the notifier targets may be tearing down alongside us.
     stopping_.store(true, std::memory_order_relaxed);
+    // Shut the handler gate FIRST and join whatever frame is inside it. Unregistering the
+    // URI does NOT do this: esp_http_server latched the route into each upgraded session,
+    // so frames keep arriving at the handler regardless (see gate_t). Once close_gate
+    // returns, no dispatch can reach a single member of this link — which is also what
+    // makes the session snapshot below COMPLETE, since no handler can still be about to
+    // claim a slot behind it.
+    close_gate();
     if (handle_ != nullptr) {
         if (owns_httpd_) {
             httpd_stop(handle_);
         } else {
+            // Courtesy only, now that the gate is shut: it stops new handshakes from
+            // latching the route, so the population of stale sessions cannot grow.
             httpd_unregister_uri_handler(handle_, uri_.c_str(), HTTP_GET);
-            // The URI is gone, so no FURTHER frame can reach us and (with stopping_ set)
-            // no further session can be armed — only now is the set of sessions holding a
-            // free_ctx into this link closed, and only now can detaching it be complete.
             detach_sessions();
         }
     }
@@ -421,6 +531,19 @@ httpd_ws_link_t::~httpd_ws_link_t() {
             (void)tx_pool_.release();
         }
     }
+    // The gate outlives the link exactly when the server does. Owning mode: httpd_stop
+    // has deleted every session, so nothing holds the pointer any more and it is freed.
+    // Adopted mode: the set of sessions that latched it is unknowable (a peer that
+    // upgraded and never sent a frame is invisible here) and no API deletes them on
+    // demand, so it is LEAKED — one small block, teardown-only, and the price of a
+    // handler that stays safe to dispatch forever. Nothing was registered when the
+    // constructor failed, so that case frees it too.
+    if (owns_httpd_ || handle_ == nullptr) {
+        delete gate_;
+    } else {
+        ESP_LOGD(kTag, "handler gate leaked at teardown: the adopted server still routes to it");
+    }
+    gate_ = nullptr;
     handle_ = nullptr;
 }
 
@@ -431,18 +554,28 @@ void httpd_ws_link_t::detach_work(void* req_arg) {
     for (std::size_t i = 0; i < req->n; ++i) {
         const int fd = req->fds[i];
         if (fd < 0) continue;
+        // IDENTITY gate, and the reason the snapshot carries ctx pointers at all. This
+        // item can drain arbitrarily late — a full control queue delays it, and a
+        // destructor that gave up on its bound leaves it queued for a server task that
+        // may only recover minutes later. By then the peer may have hung up and the
+        // SHARED server (the firmware's :80 SPA httpd serves other routes too) may have
+        // accepted an unrelated client onto the recycled descriptor. httpd_sess_get
+        // resolves by fd alone, so detaching blind would run that stranger's free_ctx
+        // mid-life and force its live session closed. The stored ctx is compared, never
+        // dereferenced; a mismatch means this is not our session any more, and the only
+        // correct action on someone else's session is none.
+        if (httpd_sess_get_ctx(req->handle, fd) != req->ctxs[i]) continue;
         // httpd_sess_set_ctx(.., nullptr, nullptr) is the detach: on a ctx CHANGE it runs
-        // the session's current free_ctx there and then (so our on_session_closed fires
-        // here, on this task, while the link is still alive and blocked in its dtor) and
-        // then stores the new ctx/free_ctx pair. Both being null is what makes the
-        // session inert forever after: httpd's own close path (httpd_sess_clear_ctx)
-        // early-outs on a null ctx, so NOTHING can re-enter the link. A session that
-        // already closed is simply not in the table any more and is a no-op here — its
-        // free_ctx has already run.
+        // the session's current free_ctx there and then and stores the new pair. Both
+        // being null is what makes the session inert forever after: httpd's own close
+        // path early-outs on a null ctx. Our on_session_closed may fire from inside this
+        // call; it resolves the link through the gate, so it is inert if the destructor
+        // has already shut it, and harmless if it has not.
         httpd_sess_set_ctx(req->handle, fd, nullptr, nullptr);
-        // Now that nothing can call back, closing is pure courtesy — the peer's socket
-        // would otherwise sit open on a URI that no longer exists. Asynchronous, and we
-        // deliberately do NOT drain it: the close can no longer reach the link.
+        // Now that nothing can call back, closing is what finally retires the session's
+        // latched WS route as well — the peer's socket would otherwise sit open on a URI
+        // that no longer exists. Asynchronous, and we deliberately do NOT drain it: with
+        // the gate shut, neither the close nor any frame that beats it can reach a link.
         (void)httpd_sess_trigger_close(req->handle, fd);
     }
     req->done.store(true, std::memory_order_release);
@@ -450,19 +583,37 @@ void httpd_ws_link_t::detach_work(void* req_arg) {
 }
 
 void httpd_ws_link_t::detach_sessions() {
+    // The one session that CANNOT be detached: the request a URI handler frame this
+    // destructor is nested inside is servicing (#814). For it, httpd_sess_set_ctx takes
+    // its request-scoped branch — it edits the in-flight httpd_req_t, leaves the socket
+    // table's ctx/free_ctx untouched, and explicitly does not run the outgoing callback
+    // (httpd_req_cleanup does, after the handler returns, i.e. after this destructor and
+    // this slot are gone). Calling it there would arm exactly the use-after-free this
+    // path exists to remove, so that slot is neutralised-and-leaked instead and its
+    // session left as it is: with the gate shut, the callback it still holds is inert.
+    if (gate_ != nullptr) {
+        int serving_fd = -1;
+        {
+            const std::lock_guard lock(gate_->m);
+            if (gate_->depth != 0) serving_fd = gate_->serving_fd;
+        }
+        if (serving_fd >= 0) abandon_session(serving_fd);
+    }
+
     std::size_t open_n = 0;
     {
         const std::lock_guard lock(peers_m_);
         for (const auto& s : slots_)
             if (s->open) ++open_n;
     }
-    if (open_n == 0) return;  // nothing armed => nothing holds a pointer to us
+    if (open_n == 0) return;  // no slot armed => no ctx of ours left to retire
 
     // Nothrow throughout: a teardown that cannot allocate must still be memory-safe, so
     // an OOM here takes the neutralise-and-leak path rather than skipping the detach.
     std::unique_ptr<detach_req_t> req(new (std::nothrow) detach_req_t);
     std::unique_ptr<int[]> fds(new (std::nothrow) int[open_n]);
-    if (req == nullptr || fds == nullptr) {
+    std::unique_ptr<void*[]> ctxs(new (std::nothrow) void*[open_n]);
+    if (req == nullptr || fds == nullptr || ctxs == nullptr) {
         abandon_sessions();
         return;
     }
@@ -470,11 +621,16 @@ void httpd_ws_link_t::detach_sessions() {
         const std::lock_guard lock(peers_m_);
         std::size_t i = 0;
         for (const auto& s : slots_)
-            if (s->open && i < open_n) fds[i++] = s->fd;
+            if (s->open && i < open_n) {
+                fds[i] = s->fd;
+                ctxs[i] = s.get();  // the ctx this fd was armed with — identity only
+                ++i;
+            }
         req->n = i;
     }
     req->handle = handle_;
     req->fds = std::move(fds);
+    req->ctxs = std::move(ctxs);
 
     detach_req_t* raw = req.release();
     bool detached = false;
@@ -508,26 +664,18 @@ void httpd_ws_link_t::abandon_sessions() {
     std::size_t leaked = 0;
     {
         const std::lock_guard lock(peers_m_);
-        for (auto it = slots_.begin(); it != slots_.end();) {
-            // A closed slot is already safe: on_session_closed only runs from httpd's
-            // free_ctx, and httpd nulls the session's ctx as it calls it — so `!open`
-            // means the server no longer holds this pointer and the slot can just die.
-            if (!(*it)->open) {
-                ++it;
-                continue;
-            }
-            // Still armed: the server holds `slot` as ctx and WILL call free_ctx on it
-            // eventually. Make that call inert (the null-owner case on_session_closed
-            // already tests, and the null-owner case the endpoint facade already tests)
-            // and then leak the shell — a late callback must land on valid memory. Never
-            // free it: that is the use-after-free this whole path exists to avoid.
-            (*it)->owner.store(nullptr, std::memory_order_release);
-            (*it)->endpoint.owner_ = nullptr;
-            (*it)->endpoint.slot_ = nullptr;
-            (void)it->release();
-            it = slots_.erase(it);
+        // EVERY slot, not just the still-open ones. A closed slot's address is also in
+        // the detach snapshot the server may still be holding, and that snapshot's
+        // fd-reuse guard compares ctx POINTERS: freeing a shell here would let an
+        // unrelated allocation land on its address and be mistaken for ours. Leaking the
+        // whole set keeps those addresses unique for as long as the item can run, and
+        // this path is already the loudly-logged, teardown-only loss.
+        for (auto& s : slots_) {
+            neutralise(s.get());
+            (void)s.release();
             ++leaked;
         }
+        slots_.clear();
     }
     ESP_LOGW(kTag,
              "%u session slot(s) leaked at teardown: the adopted server still holds "
@@ -535,34 +683,82 @@ void httpd_ws_link_t::abandon_sessions() {
              (unsigned)leaked);
 }
 
+void httpd_ws_link_t::abandon_session(int fd) {
+    const std::lock_guard lock(peers_m_);
+    for (auto it = slots_.begin(); it != slots_.end(); ++it) {
+        if ((*it)->fd != fd) continue;
+        neutralise(it->get());
+        (void)it->release();
+        slots_.erase(it);
+        ESP_LOGW(kTag, "session slot fd=%d leaked at teardown: it is the request in flight", fd);
+        return;
+    }
+}
+
+void httpd_ws_link_t::neutralise(session_t* slot) {
+    // Take the slot out of service without freeing it. The server may still hold it as a
+    // session ctx and WILL run free_ctx on it eventually; the gate already makes that
+    // call inert, and leaving the shell allocated is what makes it land on valid memory.
+    // Clearing `open`/`fd` also keeps it out of any later snapshot, and the endpoint
+    // facade's own null-owner case covers a directed send that outlives the link.
+    slot->open = false;
+    slot->fd = -1;
+    slot->asm_buf.clear();
+    slot->endpoint.owner_ = nullptr;
+    slot->endpoint.slot_ = nullptr;
+}
+
 // ---------------------------------------------------------------------------
 // RX — runs on the esp_http_server task.
 // ---------------------------------------------------------------------------
 
 esp_err_t httpd_ws_link_t::ws_handler(httpd_req_t* req) {
-    auto* const self = static_cast<httpd_ws_link_t*>(req->user_ctx);
-    if (self == nullptr) return ESP_FAIL;
-    // Latch the server's task identity here, where we are provably running on it: this
-    // handler is the only way a session (and so anything the teardown must detach) comes
-    // into existence, so a link with sessions has always latched. Relaxed: the only
-    // reader is the destructor, which needs the value ONLY when it is itself that task —
-    // and then the store and the load are on one task, so no ordering is at stake.
+    // req->user_ctx is the GATE (see gate_t), because esp_http_server keeps dispatching
+    // through this pointer for as long as the SESSION lives — unregistering the URI does
+    // not revoke it, and the link may be long gone. Resolving the link through the gate
+    // is the admission test AND the barrier registration.
+    auto* const gate = static_cast<gate_t*>(req->user_ctx);
+    if (gate == nullptr) return ESP_FAIL;
+    const int fd = httpd_req_to_sockfd(req);
+    httpd_ws_link_t* self = nullptr;
+    {
+        const std::lock_guard lock(gate->m);
+        // Null link => the destructor has shut the gate. Refusing makes httpd close this
+        // socket, which is exactly what should happen to a session still routed at a
+        // link that no longer exists — and it is the only reason it is safe to leave
+        // those sessions behind.
+        if (gate->link == nullptr) return ESP_FAIL;
+        self = gate->link;
+        ++gate->depth;  // the destructor blocks until this frame leaves
+        gate->serving_fd = fd;
+    }
+    // Latch the server's task identity here, where we are provably running on it. Relaxed:
+    // the only reader is a destructor asking whether it is itself that task — and then the
+    // store and the load are on one task, so no ordering is at stake.
     self->server_task_.store(current_task(), std::memory_order_relaxed);
     // The opening HTTP GET Upgrade arrives as method GET (httpd has already sent the
     // 101); every subsequent data frame re-enters here with method != GET.
-    if (req->method == HTTP_GET) return self->on_handshake(req);
-    return self->on_data_frame(req);
+    const esp_err_t err =
+        req->method == HTTP_GET ? self->on_handshake(req) : self->on_data_frame(req);
+    // `self` may be DESTROYED by now: the delivery above runs the app in-call and the app
+    // may tear this link down (#814). Only `gate`, which deliberately outlives it, may be
+    // touched from here on.
+    {
+        const std::lock_guard lock(gate->m);
+        --gate->depth;
+        gate->serving_fd = -1;
+    }
+    gate->cv.notify_all();
+    return err;
 }
 
 esp_err_t httpd_ws_link_t::on_handshake(httpd_req_t* req) {
     const int fd = httpd_req_to_sockfd(req);
     if (fd < 0) return ESP_FAIL;
-    // Teardown gate: never ARM a session once the dtor is running. A frame that raced the
-    // URI unregister would otherwise register a free_ctx into a link that is already past
-    // its detach snapshot — the very callback the teardown exists to retire. Refusing is
-    // clean (httpd closes the socket) and correct: the link is going away regardless.
-    if (stopping_.load(std::memory_order_relaxed)) return ESP_FAIL;
-
+    // No teardown test here: reaching this point already means the handler gate admitted
+    // this frame, and the destructor's barrier will not take its session snapshot until
+    // this frame has left. So a session armed here — however late — is still IN that
+    // snapshot, and refusing the frame would only lose a message the link can still serve.
     session_t* slot = nullptr;
     {
         const std::lock_guard lock(peers_m_);
@@ -587,7 +783,7 @@ esp_err_t httpd_ws_link_t::on_handshake(httpd_req_t* req) {
         if (slot == nullptr) {
             auto s = std::make_unique<session_t>();
             slot = s.get();
-            slot->owner = this;
+            slot->gate = gate_;
             slot->endpoint.owner_ = this;
             slot->endpoint.slot_ = slot;
             slots_.push_back(std::move(s));
@@ -663,9 +859,8 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
                 break;
             }
         if (slot == nullptr) {
-            // Teardown gate (see on_handshake): a frame that raced the URI unregister must
-            // not arm a NEW session, or its free_ctx would outlive the detach snapshot.
-            if (stopping_.load(std::memory_order_relaxed)) return ESP_FAIL;
+            // No teardown test (see on_handshake): the gate admitted this frame, so the
+            // barrier has not snapshotted yet and a session armed here is still caught.
             // Admission cap: refuse cleanly (ESP_FAIL => httpd closes the socket).
             if (max_peers_ != 0) {
                 std::size_t open_n = 0;
@@ -684,7 +879,7 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
             if (slot == nullptr) {
                 auto s = std::make_unique<session_t>();
                 slot = s.get();
-                slot->owner = this;
+                slot->gate = gate_;
                 slot->endpoint.owner_ = this;
                 slot->endpoint.slot_ = slot;
                 slots_.push_back(std::move(s));
@@ -721,19 +916,27 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
         return ESP_OK;  // nothrow growth failed: drop the message, keep the peer
     }
     if (frame.final) {
-        deliver(peer, slot->asm_buf.bytes());
-        slot->asm_buf.clear();
+        // Take the message OUT of the slot before delivering it. Delivery runs the app
+        // in-call and the app may destroy this link (#814) — after which `slot` and every
+        // other member is freed, so the old clear()-after-deliver was a use-after-free on
+        // the fragmented path. Nothing owned by the link is touched past this point.
+        const asm_buf_t message = slot->asm_buf.take();
+        deliver(peer, message.bytes());
     }
     return ESP_OK;
 }
 
 void httpd_ws_link_t::on_session_closed(void* ctx) {
     auto* const slot = static_cast<session_t*>(ctx);
-    if (slot == nullptr) return;
-    // A null owner is an ABANDONED slot: a teardown that could not retire this callback
-    // deliberately leaked the shell so that landing here is inert instead of a
-    // use-after-free (see abandon_sessions).
-    httpd_ws_link_t* const owner = slot->owner.load(std::memory_order_acquire);
+    if (slot == nullptr || slot->gate == nullptr) return;
+    // Resolve the link through the gate, and hold the gate for the whole callback. That
+    // is what makes this safe against a concurrent teardown: a destructor can only shut
+    // the gate by taking this same lock, so either the reclaim completes first with the
+    // link provably alive, or it finds a null link and is inert. A slot reached here
+    // after its link is gone is one a teardown deliberately leaked (@ref
+    // abandon_sessions) — landing on valid, inert memory rather than a freed shell.
+    const std::lock_guard lock(slot->gate->m);
+    httpd_ws_link_t* const owner = slot->gate->link;
     if (owner == nullptr) return;
     owner->reclaim_slot(slot);
 }
@@ -755,13 +958,14 @@ void httpd_ws_link_t::reclaim_slot(session_t* slot) {
     // hung up leaves its subscriber edges behind — fire the routing plane's eviction
     // hook (fwd_router_t::link_down via the installed notifier) LAST, with peers_m_
     // released (the notifier re-enters router → graph locks). Only a session that
-    // completed its handshake (open) can have flowed subscribes. Suppressed while the
-    // link itself is being torn down (stopping_): the routing plane may already be
-    // gone, and whole-node teardown needs no per-peer eviction. A TX-failure-triggered
+    // completed its handshake (open) can have flowed subscribes. A TX-failure-triggered
     // close (tx_work / note_tx_result) arrives here through the same free_ctx path, so
     // the departed peer's subscriber edges are evicted too; was_open (flipped under
-    // peers_m_ on the first pass) keeps the notifier single-fire per session.
-    if (was_open && !departed.empty() && !stopping_.load(std::memory_order_relaxed)) {
+    // peers_m_ on the first pass) keeps the notifier single-fire per session. No
+    // teardown test is needed to suppress it: the caller holds the gate, so reaching
+    // here at all means the destructor has not shut it and the routing plane the
+    // notifier targets is still standing.
+    if (was_open && !departed.empty()) {
         if (peer_named_)
             notify_peer_down(departed);
         else

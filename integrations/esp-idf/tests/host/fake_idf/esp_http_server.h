@@ -12,9 +12,19 @@
  * `components/esp_http_server/src/httpd_sess.c` and `httpd_main.c`:
  *   - `httpd_sess_set_ctx` runs the session's PREVIOUS `free_ctx` inline on a ctx
  *     change, then stores the new ctx/free_fn pair (so setting `(nullptr, nullptr)`
- *     both fires and retires the callback);
+ *     both fires and retires the callback) — EXCEPT when it is called from inside the
+ *     handler servicing that same session, where it edits the request instead, frees
+ *     nothing, and leaves `httpd_req_cleanup` to run the stored callback after the
+ *     handler has returned (httpd_sess.c:291-302, httpd_parse.c:733-735);
+ *   - the WebSocket route is latched into the SESSION at handshake, not looked up per
+ *     frame: `sd->ws_handler` / `sd->ws_user_ctx` are copied from the registration
+ *     (httpd_uri.c:351-354) and survive `httpd_unregister_uri_handler`, so a frame on
+ *     an already-upgraded socket still dispatches after the URI is gone
+ *     (httpd_parse.c:796,824);
  *   - closing a session calls `free_ctx` once and nulls the stored ctx, so a second
  *     close is a no-op;
+ *   - sessions are resolved by socket DESCRIPTOR only (`httpd_sess_get`), and a
+ *     descriptor is reissued to the next accepted client;
  *   - `httpd_queue_work` merely ENQUEUES; the work function runs later, on whichever
  *     thread drains the control queue (the fake's stand-in for the httpd task);
  *   - `httpd_sess_trigger_close` is that same asynchronous queue, not an inline close.
@@ -114,6 +124,7 @@ esp_err_t httpd_register_uri_handler(httpd_handle_t handle, const httpd_uri_t* u
 esp_err_t httpd_unregister_uri_handler(httpd_handle_t handle, const char* uri,
                                        httpd_method_t method);
 int httpd_req_to_sockfd(httpd_req_t* req);
+void* httpd_sess_get_ctx(httpd_handle_t handle, int sockfd);
 void httpd_sess_set_ctx(httpd_handle_t handle, int sockfd, void* ctx, httpd_free_ctx_fn_t free_fn);
 esp_err_t httpd_sess_trigger_close(httpd_handle_t handle, int sockfd);
 esp_err_t httpd_queue_work(httpd_handle_t handle, httpd_work_fn_t work, void* arg);
