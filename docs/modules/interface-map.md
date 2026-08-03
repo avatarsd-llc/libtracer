@@ -50,7 +50,7 @@ flowchart LR
     subgraph fwd["remote op (FWD source-routing, RFC-0004)"]
         direction TB
         W1["client: FWD{op, dst=/net/&lt;module&gt;/&lt;name&gt;/&lt;peer path&gt;, src, payload?}"] --> W2["fwd_router: peek the leading dst segment run (offset, no decode)"]
-        W2 --> W3["child_registry_t::by_segments → transport"]
+        W2 --> W3["child_registry_t::longest_prefix → transport"]
         W3 --> W4["strip the matched dst run · grow src (pooled head) · scatter-gather send"]
     end
     subgraph term["terminus (dst empty → this node)"]
@@ -76,7 +76,7 @@ flowchart LR
 | [path](path.md) | `class path_t{ parse(); key(); field() }` · `bool valid_segment(string_view)` — THE segment predicate every minting boundary shares (ADR-0073 §1; the local parser and the wire creation door both call it, so they cannot drift) · `struct path_key_t` + `path_key_hash_t` |
 | [graph](graph.md) | `class graph_t{ register_vertex→vertex_handle_t; try_register_vertex; retire; read; write; assign; propagate; await; history; subscribe; unsubscribe; set_delivery_mode; set_history_depth; set_pin_payload_ratio; set_app_fields; subscribe_wire(vertex_handle_t, view_t source_view, …) }` · `class vertex_handle_t` · `enum class role_t` · `struct delivery_policy_t` (the per-subscription packed policy, RFC-0022 — there is no per-vertex settings type; §3.B deleted it) · `struct handlers_t` — `read` and `await` return `result_t<value_ref_t>` (a reference to the published value); the folding reads `read_children_folded` / `read_children_materialized` / `read_subtree_folded` compose a new value and return `result_t<rope_t>` |
 | [transport](transport.md) | `using peer_id_t = array<byte,16>` · `class transport_t{ send(span); send(iov); set_receiver() }` · `class loopback_channel_t` |
-| [fwd-router](fwd-router.md) | `class fwd_router_t{ fwd_router_t(graph_t&, std::pmr::memory_resource* = default, mem::block_source_t* rx = &mem::heap_source()); add_child; remove_child; on_frame; on_reply; advertise; send_compact; subscribe_toward(producer, mount_path); registry() }` — the label tables draw from the `memory_resource`, the terminus arena from the nothrow `rx` block source (ADR-0065) · `class child_registry_t{ add; erase; by_name; by_segments }` · `class op_resolver_t` · `class route_handle_t` — FWD source-routing (RFC-0004) |
+| [fwd-router](fwd-router.md) | `class fwd_router_t{ fwd_router_t(graph_t&, std::pmr::memory_resource* mr = default, mem::block_source_t* rx = &mem::heap_source(), mem::mem_backend_t* flat = &mem::heap_backend(), std::size_t max_label_bindings_per_link = 0, mem::mem_backend_t* egress = &mem::heap_backend()); add_child; remove_child; on_frame; on_reply; advertise; send_compact; subscribe_toward(producer, mount_path); registry() }` — the label tables draw from the `memory_resource`, the terminus arena from the nothrow `rx` block source (ADR-0065), every rope flatten from `flat` and the reply egress from `egress` · `class child_registry_t{ add; erase; by_name; longest_prefix }` · `class op_resolver_t` · `class route_handle_t` — FWD source-routing (RFC-0004) |
 | transport-vertex | `class transport_vertex_t{ register_transport_type; register_module; provide_link; set_link_state; settings_of }` · `enum class conn_role_t` · `struct conn_settings_t{ addr; port; role; keepalive_ms; max_frame; kind; … }` — a connection as a `/net/<module>/<name>` vertex (ADR-0027); a `:children[]` SPEC whose config names a transport `kind` (built-ins `udp`/`tcp`/`ws`) CONSTRUCTS and owns the real socket — the `<module>` segment comes from the application's own `register_module` declaration, never derived by the library (ADR-0073 §4); `provide_link` is the test/manual seam |
 
 ## Two contracts hold the stack together
@@ -120,18 +120,23 @@ source-routing needs no dedup.
   `## API reference` block generated from the headers; where the two disagree, the
   generated block is the one that was compiled. A signature read off this page and not
   off the header is a signature that may have moved.
-- **`fwd_router_t` takes two independent allocation seams, not one.** `mr` funds the
+- **`fwd_router_t` takes four independent allocation seams, not one.** `mr` funds the
   `route_handle` label tables; `rx` funds the terminus arena, which is built from a
-  peer's frame behind no ACL. Passing a bounded pool for `mr` and leaving `rx` at the
-  default heap leaves the attacker-sized allocation unbounded — the split exists because
+  peer's frame behind no ACL; `flat` funds every rope flatten on the forward *and*
+  terminus paths, including the terminus rope-tier ownership copy, which is likewise
+  peer-driven; `egress` funds the reply egress. Each defaults to the global heap
+  independently, so bounding only `mr` and `rx` still leaves two peer-reachable
+  allocations unbounded. The `mr`/`rx` split exists because
   a `std::pmr::memory_resource` cannot report exhaustion by value, so a nothrow
   `mem::block_source_t` is what turns an over-large frame into a
   `TLV_NESTING_TOO_DEEP` reject instead of an `abort()` under `-fno-exceptions`
   (ADR-0065).
 - **A connection's routing key is the whole `net/<module>/<name>` run, not one segment.**
   `by_name` / `by_segment` resolve a single link NAME and scan globally; the forward path
-  matches the multi-segment run with `by_segments`. Code that assumes the first `dst`
-  segment names the link addresses a connection that no longer exists at that shape.
+  matches the multi-segment run with `longest_prefix`, one pass, each slot matched against
+  the prefix of its own `seg_count` (`by_segments` was removed with the mount-width lift,
+  [#523](https://github.com/avatarsd-llc/libtracer/issues/523)). Code that assumes the first
+  `dst` segment names the link addresses a connection that no longer exists at that shape.
 - **`child_registry_t::erase` tombstones, it does not compact.** The slot's `link` is
   nulled and its NAME kept, so a racing lock-free reader sees the old pointer or
   `nullptr` and never a shifted vector. A re-`add` of the same name reuses the tombstone;

@@ -209,7 +209,7 @@ A portable **C binding** would be a thin `extern "C"` layer over the C++23 core 
 
 Future incompatible changes — should they ever be needed — are versioned at the **discovery layer**: a different mDNS service name (`_libtracer-v2._tcp` vs `_libtracer._tcp`), a different default TCP port, a different CAN-ID prefix, etc. Peers learn each other's wire-format identity at discovery time.
 
-The forward-extension path within v1 is the type-code registry: new core type codes can be added in `0x0E – 0x7F` without breaking existing receivers, who gracefully ignore unknown codes per [01-data-format.md](01-data-format.md) §handling unknown type codes.
+The forward-extension path within v1 is the type-code registry: new core type codes can be added in the unassigned reaches — `0x15`–`0x1F` in the fast-track range and `0x20`–`0x7F` in the long-term registry — without breaking existing receivers, who gracefully ignore unknown codes per [01-data-format.md](01-data-format.md) §handling unknown type codes. (`0x0E`–`0x14` are assigned: SPEC, FWD, FIELD, ADVERTISE, COMPACT, HANDLE_NACK, PATH_REF — see [05-protocol-tlvs.md](05-protocol-tlvs.md) §type-code registry.)
 
 ---
 
@@ -234,7 +234,7 @@ For a forwarder implementer: 02, 03, 04, 07 are mandatory; 06 is illustrative of
 ## Out-of-scope for this reference suite
 
 - The API/ABI of any specific implementation (header signatures, struct layouts beyond the packed wire header). See the implementation's own headers — for the reference C++23 core, those land in [../../core/](https://github.com/avatarsd-llc/libtracer/tree/main/core/).
-- The module ABI (`transport_vtable_t`, etc.). See [10-module-catalog.md](10-module-catalog.md) §module ABI.
+- The module ABI (the shape of a transport or backend seam, and the version tag a loader would check). See [10-module-catalog.md](10-module-catalog.md) §module ABI.
 - The configuration file format (TOML for forwarding/discovery). The catalog deliberately declines to fix it — see [10-module-catalog.md](10-module-catalog.md) §boundaries of the catalog.
 - Build options and CMake toggles (defined with the `core/` rebuild).
 - Cluster consensus, CRDTs, distributed transactions — explicit non-goals. See [04-communication-flows.md](04-communication-flows.md) §coherency.
