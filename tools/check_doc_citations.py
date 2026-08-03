@@ -119,6 +119,11 @@ ANCHORS = [
     ("core/include/libtracer/backend.hpp:101", "class mem_backend_t"),
     ("core/include/libtracer/backend.hpp:145", "before_io"),
     ("core/include/libtracer/grammar.hpp:220", "receiver-resource depth bound"),
+    # CONTEXT.md quotes the AMENDED meaning of `nesting_too_deep` twice. Its citation was
+    # `:210-216` — right until `24ea6d5` inserted the PATH_REF codec above and shifted the
+    # whole block +10, after which it landed on `walk_frame_t` and no doc pinned it.
+    ('core/include/libtracer/grammar.hpp:230',
+     '`TLV_NESTING_TOO_DEEP` ("exceeds this receiver'),
     ("core/src/graph.cpp:1123", "!arena"),
     ("core/include/libtracer/segment.hpp:78", "struct segment_t"),
     # --- the design + module pages (#728). Every one of these had drifted. ---
