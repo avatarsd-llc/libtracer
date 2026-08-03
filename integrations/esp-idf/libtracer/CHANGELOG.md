@@ -12,6 +12,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`esp_ws_client_link_t::set_handshake_headers(std::string)`: append extra HTTP header
+  lines to the opening-handshake request** (each `Name: value\r\n`-terminated,
+  `esp_transport_ws` emits them verbatim; empty leaves the handshake byte-for-byte the
+  historical one). The client counterpart to `httpd_ws_link_t::set_admission_cb`: a
+  board-to-board dial carries no browser session cookie, so a token header here is how a
+  dialing node authenticates itself to a peer whose graph WS gates admission. Applied on
+  the next dial — set it once at wiring time before the link first connects.
 - **`httpd_ws_link_t::set_admission_cb(admission_fn_t, void*)`: an optional predicate
   consulted at the top of every opening handshake, before the peer-cap check and any slot
   allocation.** Returning `false` refuses the peer cleanly (httpd closes the socket — the

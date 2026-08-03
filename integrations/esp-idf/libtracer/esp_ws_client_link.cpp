@@ -94,6 +94,10 @@ bool esp_ws_client_link_t::connect_once() {
     esp_transport_ws_config_t cfg = {};
     cfg.ws_path = ws_path_.c_str();
     cfg.propagate_control_frames = false;  // esp_transport_ws answers PING/CLOSE itself
+    // Optional handshake auth: extra header lines a peer's admission hook can gate on (a
+    // b2b dial carries no browser cookie). esp_transport_ws appends them verbatim; empty
+    // leaves the field null so the handshake is byte-for-byte the historical one.
+    if (!handshake_headers_.empty()) cfg.headers = handshake_headers_.c_str();
     esp_transport_ws_set_config(ws_, &cfg);
 
     // esp_transport_connect performs the full RFC 6455 client handshake for ws_path_.
