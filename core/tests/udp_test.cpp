@@ -214,8 +214,15 @@ void test_view_delivery() {
     std::printf("UDP transport — owning view delivery (ADR-0042 receiver seam):\n");
     std::promise<tr::view::view_t> got;
     auto fut = got.get_future();
+    // The receiver must release its OWN references BEFORE it unblocks the waiter (#845):
+    // set_value wakes the main thread immediately, so a rope still holding the link is a
+    // live second reference the use_count() assertion below can observe. Steal the link,
+    // clear the rope, and only then signal — leaving exactly the receiver's reference.
     auto rope_rx = [&](tr::view::rope_t f) {
-        if (f.link_count() == 1) got.set_value(f.links()[0]);  // single-link: the trivial rope
+        if (f.link_count() != 1) return;  // single-link: the trivial rope
+        tr::view::view_t v = f.only();    // +1: the rope and v now share the segment
+        f = tr::view::rope_t{};           // -1: the rope's link is gone before the wake
+        got.set_value(std::move(v));      // hand the sole reference to the waiter
     };
     tr::net::udp_transport_t a(47106, "127.0.0.1", 47107);
     tr::net::udp_transport_t b(47107, "127.0.0.1", 47106);

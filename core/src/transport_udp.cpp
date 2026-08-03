@@ -168,9 +168,12 @@ void udp_transport_t::run() {
                 continue;
             }
             // Narrow the whole-segment view to the received length and hand it up
-            // owning — the receiver may pin/subview it beyond this call.
-            rx_.deliver(
-                view::view_t::over(std::move(rx_seg)).subview(0, static_cast<std::size_t>(n)));
+            // owning — the receiver may pin/subview it beyond this call. Built by
+            // aggregate init, NOT over().subview(): `subview` is const and copies the
+            // handle, so the discarded whole-segment temporary would hold a second
+            // reference for the whole delivery call — a refcount round-trip per
+            // datagram, and a library reference live across the receiver callback (#845).
+            rx_.deliver(view::view_t{std::move(rx_seg), 0, static_cast<std::size_t>(n)});
             continue;
         }
 
@@ -197,7 +200,7 @@ void udp_transport_t::run() {
                 continue;
             }
             std::memcpy(seg->bytes.data(), buf, static_cast<std::size_t>(n));
-            rx_.deliver(view::view_t::over(std::move(seg)).subview(0, static_cast<std::size_t>(n)));
+            rx_.deliver(view::view_t{std::move(seg), 0, static_cast<std::size_t>(n)});
             continue;
         }
         rx_.deliver_borrowed(std::span<const std::byte>(buf, static_cast<std::size_t>(n)));
