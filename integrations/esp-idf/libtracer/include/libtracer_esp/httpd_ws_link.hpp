@@ -43,10 +43,19 @@
  *     interleave — the payload is heap-copied into the work item and freed after
  *     the send. send() may be called from any task (subscription pushes on the
  *     io/event threads, a reply on the httpd task itself); all funnel through the
- *     same queue. TX failure is never silent: repeated enqueue drops (queue full /
- *     work-slot OOM) close the session after kMaxConsecutiveTxDrops in a row, and
- *     a failed oversized async send drops that one frame while keeping the socket
- *     (see tx_work).
+ *     same queue. TX failure is never silent, and each kind is aimed at what it is
+ *     actually evidence about (#835): a failed SEND strikes its DESTINATION — the
+ *     peer that did not drain — and kMaxConsecutiveTxDrops of them in a row, with
+ *     no success between, closes that session; a failed ENQUEUE is evidence about
+ *     the shared control queue and nobody's peer, so it is a dropped frame on a
+ *     link-level counter (@ref enqueue_drops) and strikes no session at all.
+ *   - Every upgraded socket gets a SHORT, derived SO_SNDTIMEO of its own (@ref
+ *     send_timeout_ms) plus a send override that rejects a SHORT write. Without
+ *     the bound one full-window peer parks the httpd task — the task that owns
+ *     accept/recv for every other socket — in one send for the server's whole
+ *     send_wait_timeout, and under fan-out those stalls serialize until the task
+ *     watchdog fires (#835). REST sockets are untouched: the server's own
+ *     send_wait_timeout still governs HTTP responses.
  *
  * Steady-state allocation — the RX scratch and the TX work-slot pool are allocated
  * ONCE at construction, so typical graph traffic (control TLVs, value pushes,
@@ -103,9 +112,14 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *                   own `<ip>:<port>` return-route identity (the browser-tabs
      *                   deployment). Off keeps point-to-point hop naming (send()
      *                   fans out; inbound arrives as the registered child NAME).
+     * @param send_timeout_ms Per-socket send bound for UPGRADED sockets, milliseconds;
+     *                   0 (the default) derives it — see @ref send_timeout_ms. Pass a
+     *                   value only on a host whose watchdog regime differs from the
+     *                   derivation's inputs; it is clamped to the server's own
+     *                   `send_wait_timeout`.
      */
     explicit httpd_ws_link_t(std::uint16_t bind_port, std::size_t max_peers = 0,
-                             bool peer_named = false);
+                             bool peer_named = false, std::uint32_t send_timeout_ms = 0);
 
     /**
      * @brief Adopt an already-running `esp_http_server` and register the WebSocket URI
@@ -129,9 +143,11 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *                   own `<ip>:<port>` return-route identity (the browser-tabs
      *                   deployment). Off keeps point-to-point hop naming (send()
      *                   fans out; inbound arrives as the registered child NAME).
+     * @param send_timeout_ms Per-socket send bound for UPGRADED sockets, milliseconds;
+     *                   0 (the default) derives it — see @ref send_timeout_ms.
      */
     httpd_ws_link_t(httpd_handle_t external, const char* uri, std::size_t max_peers = 0,
-                    bool peer_named = false);
+                    bool peer_named = false, std::uint32_t send_timeout_ms = 0);
 
     /**
      * @brief Stop the owned httpd instance (or unregister the adopted WS URI) and release
@@ -189,6 +205,32 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *         adopts an external server). */
     [[nodiscard]] std::uint16_t local_port() const noexcept { return port_; }
 
+    /**
+     * @brief The per-socket send bound applied to every UPGRADED socket, milliseconds.
+     *
+     * DERIVED, never configured: the task-watchdog period divided by the peer cap. Both
+     * factors are facts already in hand — the watchdog period is the system's own
+     * definition of "too long to starve a task" (it is the tripwire #835 observed
+     * firing), and the peer cap is the serialization multiplier — so one full fan-out
+     * round, every peer stalled, still fits inside one watchdog window. Clamped to the
+     * server's `send_wait_timeout`, which remains what REST sockets use.
+     */
+    [[nodiscard]] std::uint32_t send_timeout_ms() const noexcept { return send_timeout_ms_; }
+
+    /**
+     * @brief Frames dropped because the shared control queue refused them (or the work
+     *        item could not be allocated), for this link's life.
+     *
+     * A LINK-level count on purpose. A refused enqueue says the httpd control queue is
+     * saturated — which under #835's failure shape is caused by whichever peer is
+     * stalling the task, not by the peer whose frame is being enqueued at that instant.
+     * Charging it to that peer closed HEALTHY sessions while the culprit never accrued a
+     * strike; the per-session streak now counts failed SENDS, which do name their peer.
+     */
+    [[nodiscard]] std::uint32_t enqueue_drops() const noexcept {
+        return enqueue_drops_.load(std::memory_order_relaxed);
+    }
+
    private:
     struct gate_t;        // the handler-admission gate + teardown barrier (in the .cpp)
     struct session_t;     // one peer slot's connection state (defined in the .cpp)
@@ -242,13 +284,78 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     static void release_tx_work(tx_work_t* work);
 
     /**
-     * @brief Per-session TX-enqueue accounting (takes @ref peers_m_ — callers must
-     *        not hold it): a successful enqueue resets the session's consecutive-drop
-     *        counter; a drop (work-item OOM or a refused httpd_queue_work) bumps it
-     *        and, once kMaxConsecutiveTxDrops is reached, triggers the session's
-     *        close so the peer reconnects instead of missing frames silently.
+     * @brief Per-session SEND accounting (takes @ref peers_m_ — callers must not hold
+     *        it): a send that completed resets the session's consecutive-failure
+     *        counter; one that failed bumps it and, once kMaxConsecutiveTxDrops is
+     *        reached, triggers the session's close so the peer reconnects instead of
+     *        missing frames silently.
+     *
+     * Fed from @ref tx_work only — the one result that names a peer. It is the peer's
+     * OWN socket that did not accept the bytes within its bound, so the destination fd
+     * is the culprit by construction (#835).
      */
-    void note_tx_result(int fd, bool queued, std::size_t bytes);
+    void note_tx_result(int fd, bool sent, std::size_t bytes);
+
+    /**
+     * @brief Has @p fd been condemned? (takes @ref peers_m_ — callers must not hold it.)
+     *
+     * The one question every producer and every queued send asks before spending anything
+     * on a socket: the link's OWN verdict about the session, reached and readable the
+     * instant it was reached, rather than the server's — which only becomes true once a
+     * queued close it may never run has run.
+     */
+    [[nodiscard]] bool fd_is_dead(int fd) const;
+
+    /**
+     * @brief Force @p fd's session closed without asking the control queue for anything
+     *        (takes nothing; must run on the httpd task).
+     *
+     * `httpd_sess_trigger_close` is `httpd_queue_work(httpd_sess_close, …)` — the same
+     * loopback control socket, drained by the same single task that is serialized behind
+     * this fd's queued sends, and on the default non-blocking path an enqueue past that
+     * socket's mbox is dropped inside lwIP while still reporting success. So a close
+     * requested through it can be delayed by the backlog it exists to clear, or lost with
+     * no error at all. `shutdown` is not a request of the server: it takes effect
+     * immediately, makes every later write on the socket fail at once, and raises the
+     * readable-at-EOF event that gets the session reaped through httpd's own select arm.
+     * It never frees the descriptor, so httpd keeps sole ownership of the fd's lifetime.
+     */
+    void condemn(int fd);
+
+    /**
+     * @brief Count a frame the shared control queue would not take (takes nothing).
+     *
+     * The demoted half of the old accounting: a refused enqueue is charged to the link,
+     * never to a session — see @ref enqueue_drops.
+     */
+    void note_enqueue_drop(int fd, std::size_t bytes);
+
+    /**
+     * @brief Bound a freshly-upgraded socket's writes and arm the short-write guard.
+     *
+     * Two calls on the peer's own fd, both at admission and nowhere else: `SO_SNDTIMEO`
+     * of @ref send_timeout_ms, and a send override so a SHORT write is seen. Nothing
+     * touches the server's configuration, so REST sockets keep their long bound.
+     */
+    void bound_socket(int fd) const;
+
+    /**
+     * @brief The per-session send override (`httpd_send_func_t`): the default write,
+     *        plus the check `esp_http_server` does not do.
+     *
+     * IDF treats any non-negative return from the send function as a delivered frame,
+     * but lwIP returns the PARTIAL count when a bounded write expires mid-buffer. Half a
+     * WebSocket frame on the wire destroys the framing for everything after it, so this
+     * turns a short write into an error AND closes the session at once — the one case
+     * where "drop the frame, keep the socket" is unsound, and one a short bound makes
+     * more likely rather than less.
+     */
+    static int send_guarded(httpd_handle_t handle, int fd, const char* buf, std::size_t len,
+                            int flags);
+
+    /** @brief Handle a detected short write on @p fd: log it and close that session
+     *         immediately, bypassing the streak (takes @ref peers_m_). */
+    void note_send_desync(int fd, std::size_t written, std::size_t len);
 
     /**
      * @brief Allocate the handler-admission gate and point it at this link; false when
@@ -325,6 +432,11 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     httpd_handle_t handle_ = nullptr;  // nullptr => the instance never started
     std::uint16_t port_;
     std::size_t max_peers_;
+    /** @brief The per-socket send bound applied at admission — see @ref send_timeout_ms. */
+    std::uint32_t send_timeout_ms_ = 0;
+    /** @brief Frames the control queue refused, for this link's life — see @ref
+     *         enqueue_drops. Relaxed: a diagnostic count, ordered against nothing. */
+    std::atomic<std::uint32_t> enqueue_drops_{0};
     bool peer_named_;
     bool owns_httpd_ = true;  // false when adopting an external server (dtor must not httpd_stop)
     /** @brief Set at destructor entry: refuses new TX slot claims so the pool drain

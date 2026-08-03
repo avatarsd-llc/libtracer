@@ -12,6 +12,79 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`httpd_ws_link_t`: WebSocket sends are now bounded by a derived per-socket send timeout,
+  and the brokenness detector now aims at the peer that is actually broken (#835).** Two
+  defects on one seam. (1) `esp_http_server` sets `SO_SNDTIMEO` on every accepted socket from
+  `config.send_wait_timeout` (5 s by default) and every WS send runs on the single httpd
+  task — the task that owns accept/recv for every socket the server has — so one peer with a
+  full TCP window blocked that task for up to the whole timeout per frame, serialized under
+  delivery fan-out, until the task watchdog fired and the HTTP plane stopped answering
+  (observed on an ESP32-C6 under a delivery burst with a throttled browser tab subscribed).
+  Every UPGRADED socket now gets a short `SO_SNDTIMEO` of its own at admission, DERIVED as
+  the task-watchdog period divided by the peer cap — so one full fan-out round with every
+  peer stalled still fits inside one watchdog window. The bound is a DERIVATION, not a
+  measurement: the host tests prove the timeout is installed, the short-write handling and
+  the strike attribution, while the starvation repro itself is silicon-only — that the task
+  watchdog no longer trips is HIL-verified per the #835 merge gate. REST sockets are
+  untouched: the server's `send_wait_timeout` still governs HTTP responses, so there is no
+  config ripple.
+  (2) The three-strikes teardown counted ENQUEUE drops and charged each to the fd of the
+  frame that failed to enqueue. The control queue is shared, so when the stalled peer's slow
+  sends jammed it the drops — and the session closes — landed on whichever HEALTHY peers
+  sent next, while the stalled peer never accrued a strike. Failed SENDS now feed the
+  per-session streak (they name their destination by construction) and refused enqueues feed
+  a link-level counter and strike nobody. #481's protected behaviour is unchanged: one failed
+  send still only drops that frame, and any successful send resets the streak, so the shipped
+  "large reply times out between small frames" shape still never closes the session.
+  (3) A close the link ASKS FOR is not a close that happens. `httpd_sess_trigger_close` is
+  `httpd_queue_work(httpd_sess_close, …)` — the same loopback control socket, drained by the
+  same single httpd task that is already serialized behind the stalled fd's queued sends — so
+  it is strictly FIFO behind the very backlog it exists to clear, at a full send bound per
+  entry; and on the default non-blocking path `httpd_queue_work` is a bare `sendto`, so an
+  enqueue past that socket's small UDP mbox is dropped inside lwIP while still returning
+  success. An `ESP_OK` from it is therefore no evidence a close was queued at all. The first
+  on-silicon run of this fix measured the consequence exactly: the desync was detected and
+  logged, and then the same fd kept failing every 2 s for a further two minutes with the peer
+  never dropped — the starvation's period had shrunk, not the starvation. So the decision and
+  the close are now separated. At the strike cap or on one short write the session is marked
+  DEAD in the link's own state, under the existing peer-mutex discipline, at the instant of
+  the verdict: `queue_send` then refuses new frames to that fd, `tx_work` skips frames already
+  queued to it (the backlog drains at queue speed instead of a send bound apiece, which is
+  what frees the httpd task), and the socket is `shutdown`, which needs nothing from the
+  control queue — it takes effect on the calling line, makes every later write fail at once,
+  and raises the readable-at-EOF event that gets the session reaped through httpd's own select
+  arm. It never frees the descriptor, so `esp_http_server` keeps sole ownership of the fd's
+  lifetime; the dead mark is cleared where the slot is recycled, on the httpd task, so it
+  cannot outlive its session onto a reused descriptor number. `trigger_close` is still called
+  as a best-effort second path, but nothing depends on its result. HIL-pending: that the
+  stalled peer is now actually dropped and new WS connections stop timing out is a property
+  of a real lwIP socket under a real fan-out and is re-verified on the bench, not claimed here.
+
+- **`httpd_ws_link_t`: peers on IPv6 sockets were all named `0.0.0.0` (#835).** With
+  `CONFIG_LWIP_IPV6` on — the default on this target — `esp_http_server` binds its listener
+  `PF_INET6`, so every accepted WebSocket socket is `AF_INET6` and `getpeername` fills a
+  `sockaddr_in6`. The peer namer decoded it as a `sockaddr_in`: the port read correctly (same
+  offset) but the address read `sin6_flowinfo`, which is always zero. Every peer name on the
+  bus tag, the census and — the case that mattered — the strike log was therefore
+  `0.0.0.0:<port>`, so the one line that had to identify a stalled peer identified nothing.
+  The family is now read from what `getpeername` actually returned, with v4-mapped addresses
+  unwrapped so a dual-stack node keeps naming its IPv4 peers exactly as the census always has.
+
+### Added
+
+- **`httpd_ws_link_t` short-write guard.** Both constructors gained a trailing
+  `send_timeout_ms` parameter (default `0` = derive, clamped to the server's
+  `send_wait_timeout`) for hosts whose watchdog regime differs from the derivation's inputs,
+  plus the accessors `send_timeout_ms()` and `enqueue_drops()`. Every admitted session also
+  installs a send override (`httpd_sess_set_send_override`): lwIP returns the PARTIAL count
+  when a bounded write expires mid-buffer, and `esp_http_server` treats any non-negative
+  return as a delivered frame — which would report a half-written WebSocket frame as success
+  and desynchronise the peer's framing for the life of the socket. A short write is now an
+  error AND condemns that session immediately, bypassing the streak (a different fault class:
+  the stream is broken, not a frame missing) — see (3) above for what "immediately" had to be
+  made to mean, since the queued close it originally used could be delayed or silently lost.
+  Existing call sites are source-compatible.
+
 - **`httpd_ws_link_t` (adopted mode): the destructor now retires every session's close
   callback before the link dies (#816).** Each admitted peer is registered with
   `httpd_sess_set_ctx(handle, fd, slot, on_session_closed)`, so a link that adopted an

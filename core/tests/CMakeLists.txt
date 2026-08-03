@@ -181,6 +181,9 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
         "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
         "${LIBTRACER_ESP_DIR}/libtracer/include")
     target_link_libraries(httpd_ws_teardown_test PRIVATE libtracer)
+    # The fake's socket layer interposes the ONE ::send the link's send override does
+    # (see the send-stall target below); every target that links fake_httpd.cpp needs it.
+    target_link_options(httpd_ws_teardown_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
     libtracer_test_warnings(httpd_ws_teardown_test)
     add_test(NAME httpd_ws_teardown COMMAND httpd_ws_teardown_test)
     # Several cases here PROVE a deliberate leak (a teardown that cannot retire the
@@ -189,6 +192,34 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     # the very behaviour under test. ASan's use-after-free detection, which is the point
     # of running this suite under sanitizers, stays on.
     set_tests_properties(httpd_ws_teardown PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+
+    # #835 — the BOUNDED send and the aim of the brokenness detector, on the same fake:
+    # a jammed control queue must strike nobody, a failing send strikes its destination,
+    # and a SHORT write closes the session instead of being reported as delivered. The
+    # starvation itself (SO_SNDTIMEO under fan-out) is silicon-only and stays on the HIL.
+    add_executable(httpd_ws_send_stall_test
+        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_send_stall_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
+    target_include_directories(httpd_ws_send_stall_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(httpd_ws_send_stall_test PRIVATE libtracer)
+    # The link's send override does a plain BSD ::send on the peer's fd (esp_http_server
+    # keeps its own default send private, and routing back through httpd_socket_send would
+    # re-enter the override). Interposing that ONE call is what lets the fake script a
+    # FULL / timed-out / SHORT write; descriptors the fake did not hand out fall through
+    # to the real syscall, so nothing else in the binary changes behaviour. `shutdown` is
+    # interposed on the same rule: it is the link's forced close, and the only close path
+    # that does not ride the control socket a jammed queue starves.
+    target_link_options(httpd_ws_send_stall_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    libtracer_test_warnings(httpd_ws_send_stall_test)
+    add_test(NAME httpd_ws_send_stall COMMAND httpd_ws_send_stall_test)
+    # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent the
+    # teardown suite pins); every case here constructs an adopting link, so LeakSanitizer
+    # would flag that deliberate leak. ASan's use-after-free detection stays on.
+    set_tests_properties(httpd_ws_send_stall PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 else()
     message(STATUS "httpd_ws_teardown_test skipped: integrations/esp-idf is not in this tree")
 endif()

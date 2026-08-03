@@ -8,6 +8,9 @@
 
 #include "fake_httpd.hpp"
 
+#include <sys/socket.h>
+
+#include <cerrno>
 #include <cstring>
 #include <utility>
 #include <vector>
@@ -97,6 +100,142 @@ void server_t::set_queue_refusing(bool refusing) {
     queue_refusing_ = refusing;
 }
 
+void server_t::set_queue_capacity(std::size_t cap) {
+    const std::lock_guard lock(m_);
+    queue_cap_ = cap;
+}
+
+std::size_t server_t::queue_depth() const {
+    const std::lock_guard lock(m_);
+    return queue_.size();
+}
+
+std::size_t server_t::queue_drops() const {
+    const std::lock_guard lock(m_);
+    return queue_drops_;
+}
+
+void server_t::set_send_script(int fd, std::vector<send_result_t> script) {
+    const std::lock_guard lock(m_);
+    const auto it = sessions_.find(fd);
+    if (it == sessions_.end()) return;
+    it->second.script = std::move(script);
+    it->second.script_pos = 0;
+}
+
+std::size_t server_t::writes(int fd) const {
+    const std::lock_guard lock(m_);
+    const auto it = writes_.find(fd);
+    return it == writes_.end() ? 0 : it->second;
+}
+
+esp_err_t server_t::set_send_override(int fd, httpd_send_func_t send_fn) {
+    const std::lock_guard lock(m_);
+    const auto it = sessions_.find(fd);
+    if (it == sessions_.end()) return ESP_ERR_NOT_FOUND;
+    it->second.send_fn = send_fn;
+    return ESP_OK;
+}
+
+bool server_t::owns_socket(int fd) const {
+    const std::lock_guard lock(m_);
+    return sessions_.find(fd) != sessions_.end();
+}
+
+bool server_t::is_shut(int fd) const {
+    const std::lock_guard lock(m_);
+    const auto it = sessions_.find(fd);
+    return it != sessions_.end() && it->second.shut;
+}
+
+int server_t::raw_shutdown(int fd) {
+    const std::lock_guard lock(m_);
+    const auto it = sessions_.find(fd);
+    if (it == sessions_.end()) {
+        errno = ENOTCONN;
+        return -1;
+    }
+    it->second.shut = true;
+    return 0;
+}
+
+std::size_t server_t::reap_shut() {
+    // httpd_server's select arm: a socket that `shutdown` made readable-at-EOF comes back
+    // from select, httpd_sess_process reads 0 bytes and deletes the session. No control
+    // message is involved anywhere on this path — which is exactly why the link can rely
+    // on it while the control queue is jammed.
+    std::vector<int> fds;
+    {
+        const std::lock_guard lock(m_);
+        for (const auto& [fd, sess] : sessions_)
+            if (sess.shut) fds.push_back(fd);
+    }
+    for (const int fd : fds) close_session(fd);  // runs free_ctx, unlocked
+    return fds.size();
+}
+
+int server_t::raw_send(int fd, std::size_t buf_len) {
+    const std::lock_guard lock(m_);
+    ++writes_[fd];
+    const auto it = sessions_.find(fd);
+    if (it == sessions_.end()) {
+        errno = EBADF;
+        return -1;
+    }
+    session_t& sess = it->second;
+    if (sess.shut) {
+        // lwIP fails a write on a shut socket AT ONCE — it does not wait out SO_SNDTIMEO,
+        // which is half of why `shutdown` is the lever that unjams a starved task.
+        errno = EPIPE;
+        return -1;
+    }
+    send_result_t outcome = send_result_t::FULL;
+    if (!sess.script.empty()) {
+        const std::size_t i =
+            sess.script_pos < sess.script.size() ? sess.script_pos : sess.script.size() - 1;
+        outcome = sess.script[i];
+        ++sess.script_pos;  // the LAST entry repeats: a stalled peer stays stalled
+    }
+    switch (outcome) {
+        case send_result_t::FULL:
+            return static_cast<int>(buf_len);
+        case send_result_t::TIMEOUT:
+            errno = EAGAIN;  // lwIP: SO_SNDTIMEO expired with NOTHING written
+            return -1;
+        case send_result_t::SHORT:
+            break;
+    }
+    // The bound expired MID-buffer: lwIP returns the PARTIAL count, not an error. Half a
+    // WebSocket frame is on the wire and the stream is desynchronised from here on.
+    return static_cast<int>(buf_len / 2);
+}
+
+/** @brief httpd's own default send function (`httpd_default_send`): the raw write plus
+ *         IDF's errno-to-HTTPD_SOCK_ERR mapping. Used for a session with no override. */
+[[nodiscard]] int default_send_fn(httpd_handle_t hd, int fd, const char* buf, std::size_t buf_len,
+                                  int flags) {
+    (void)flags;
+    if (buf == nullptr) return HTTPD_SOCK_ERR_INVALID;
+    const int ret = static_cast<server_t*>(hd)->raw_send(fd, buf_len);
+    if (ret < 0)
+        return errno == EAGAIN || errno == EWOULDBLOCK ? HTTPD_SOCK_ERR_TIMEOUT
+                                                       : HTTPD_SOCK_ERR_FAIL;
+    return ret;
+}
+
+int server_t::socket_send(int fd, const char* buf, std::size_t buf_len, int flags) {
+    httpd_send_func_t send_fn = nullptr;
+    {
+        const std::lock_guard lock(m_);
+        const auto it = sessions_.find(fd);
+        if (it == sessions_.end()) return -1;
+        send_fn = it->second.send_fn;
+    }
+    // Unlocked: an override re-enters the link (and the link re-enters this fake).
+    if (send_fn == nullptr) send_fn = &default_send_fn;
+    return send_fn(static_cast<httpd_handle_t>(this), fd, buf, buf_len, flags);
+}
+
 void server_t::close_session(int fd) {
     // Lift the callback OUT of the lock before running it: httpd calls free_ctx from its
     // own task with no session lock held, and the link's handler re-enters this fake.
@@ -175,40 +314,70 @@ void server_t::set_ctx(int fd, void* ctx, httpd_free_ctx_fn_t free_fn) {
     if (old_ctx != nullptr && old_free != nullptr) old_free(old_ctx);
 }
 
+/**
+ * @brief The shared enqueue behind `httpd_queue_work` and `httpd_sess_trigger_close` —
+ *        ONE control socket, and its two distinct failure modes.
+ *
+ * Transcribed from `httpd_queue_work` (httpd_main.c, release/v5.9bb7aa84fe): a refusal
+ * from `cs_send_to_ctrl_sock` is reported as `ESP_FAIL`, but an enqueue past the receiving
+ * UDP mbox's depth is dropped INSIDE lwIP with `sendto` still returning success. The
+ * caller therefore cannot distinguish "queued" from "silently discarded", which is what a
+ * link that treats `ESP_OK` as proof of a close gets wrong.
+ *
+ * @pre `m_` is held.
+ * @retval false The caller must report ESP_FAIL (the observable refusal only).
+ */
+bool server_t::enqueue_locked(std::function<void()> item, bool* dropped) {
+    *dropped = false;
+    if (queue_refusing_) return false;
+    if (queue_cap_ != 0 && queue_.size() >= queue_cap_) {
+        *dropped = true;  // lost in lwIP; the caller is told ESP_OK
+        ++queue_drops_;
+        return true;
+    }
+    queue_.push_back(std::move(item));
+    return true;
+}
+
 esp_err_t server_t::queue_work(httpd_work_fn_t work, void* arg) {
     const std::lock_guard lock(m_);
-    if (queue_refusing_) return ESP_FAIL;
-    queue_.push_back([work, arg]() { work(arg); });
+    bool dropped = false;
+    if (!enqueue_locked([work, arg]() { work(arg); }, &dropped)) return ESP_FAIL;
     return ESP_OK;
 }
 
 esp_err_t server_t::trigger_close(int fd) {
     const std::lock_guard lock(m_);
     if (sessions_.find(fd) == sessions_.end()) return ESP_ERR_NOT_FOUND;
-    if (queue_refusing_) return ESP_FAIL;
-    queue_.push_back([this, fd]() { close_session(fd); });
+    // `httpd_sess_trigger_close` IS `httpd_queue_work(httpd_sess_close, sd)`
+    // (httpd_sess.c:476-481) — the same socket, the same queue, the same silent drop.
+    bool dropped = false;
+    if (!enqueue_locked([this, fd]() { close_session(fd); }, &dropped)) return ESP_FAIL;
     return ESP_OK;
 }
 
 void server_t::post(std::function<void()> action) {
     const std::lock_guard lock(m_);
-    queue_.push_back(std::move(action));
+    bool dropped = false;
+    (void)enqueue_locked(std::move(action), &dropped);
+}
+
+bool server_t::run_one() {
+    std::function<void()> item;
+    {
+        const std::lock_guard lock(m_);
+        if (queue_.empty()) return false;
+        item = std::move(queue_.front());
+        queue_.pop_front();
+    }
+    item();  // unlocked: the work re-enters this fake and the link
+    return true;
 }
 
 std::size_t server_t::run_pending() {
     std::size_t ran = 0;
-    for (;;) {
-        std::function<void()> item;
-        {
-            const std::lock_guard lock(m_);
-            if (queue_.empty()) break;
-            item = std::move(queue_.front());
-            queue_.pop_front();
-        }
-        item();  // unlocked: the work re-enters this fake and the link
-        ++ran;
-    }
-    return ran;
+    while (run_one()) ++ran;
+    return ran + reap_shut();
 }
 
 httpd_ws_client_info_t server_t::fd_info(int fd) {
@@ -354,10 +523,48 @@ esp_err_t httpd_ws_recv_frame(httpd_req_t* req, httpd_ws_frame_t* frame, std::si
 
 esp_err_t httpd_ws_send_frame_async(httpd_handle_t handle, int fd, httpd_ws_frame_t* frame) {
     (void)handle;
-    (void)fd;
-    (void)frame;
+    // httpd_ws.c writes the frame through the session's send fn and calls the send a
+    // success on ANY non-negative return — the check that turns a short write into a
+    // silently-lost half frame. Transcribed as-is: the fake must reproduce the bug, not
+    // the intent. The header bytes are not modelled; only the payload write is.
+    const int ret = fake_httpd::instance().socket_send(
+        fd, reinterpret_cast<const char*>(frame->payload), frame->len, 0);
+    if (ret < 0) return ESP_FAIL;
     fake_httpd::instance().note_sent();
     return ESP_OK;
+}
+
+esp_err_t httpd_sess_set_send_override(httpd_handle_t handle, int sockfd,
+                                       httpd_send_func_t send_fn) {
+    (void)handle;
+    return fake_httpd::instance().set_send_override(sockfd, send_fn);
+}
+
+/**
+ * @brief The link's own socket write, interposed (`-Wl,--wrap=send` on this test target).
+ *
+ * The link's send override does a plain BSD `::send` on the peer's fd, exactly as
+ * `httpd_default_send` does — so the ONE thing a host suite has to fake for #835 is that
+ * write. Descriptors the fake did not hand out are none of its business and go to the
+ * real syscall, so nothing else linked into the test binary changes behaviour.
+ */
+extern "C" ssize_t __real_send(int fd, const void* buf, std::size_t len, int flags);
+extern "C" ssize_t __wrap_send(int fd, const void* buf, std::size_t len, int flags) {
+    if (!fake_httpd::instance().owns_socket(fd)) return __real_send(fd, buf, len, flags);
+    return fake_httpd::instance().raw_send(fd, len);
+}
+
+/**
+ * @brief The link's forced close, interposed (`-Wl,--wrap=shutdown` on the test targets).
+ *
+ * The one socket call the link makes that does NOT go through esp_http_server, and the
+ * reason it works when the control queue does not. Descriptors the fake did not hand out
+ * go to the real syscall, on the same rule as `__wrap_send`.
+ */
+extern "C" int __real_shutdown(int fd, int how);
+extern "C" int __wrap_shutdown(int fd, int how) {
+    if (!fake_httpd::instance().owns_socket(fd)) return __real_shutdown(fd, how);
+    return fake_httpd::instance().raw_shutdown(fd);
 }
 
 httpd_ws_client_info_t httpd_ws_get_fd_info(httpd_handle_t handle, int fd) {

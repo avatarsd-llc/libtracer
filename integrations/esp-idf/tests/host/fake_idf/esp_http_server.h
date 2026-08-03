@@ -27,7 +27,12 @@
  *     descriptor is reissued to the next accepted client;
  *   - `httpd_queue_work` merely ENQUEUES; the work function runs later, on whichever
  *     thread drains the control queue (the fake's stand-in for the httpd task);
- *   - `httpd_sess_trigger_close` is that same asynchronous queue, not an inline close.
+ *   - `httpd_sess_trigger_close` is that same asynchronous queue, not an inline close;
+ *   - every socket write goes through the SESSION's send function — `httpd_default_send`
+ *     unless `httpd_sess_set_send_override` replaced it — and
+ *     `httpd_ws_send_frame_async` treats any return `>= 0` as success
+ *     (`httpd_ws.c`: only `ret < 0` is an error), so a SHORT write is reported as a
+ *     delivered frame. That is the silent-corruption edge #835's send bound sharpens.
  * The behaviours a UAF hides behind are therefore reproducible on the host, under the
  * sanitizers, without silicon.
  */
@@ -55,6 +60,13 @@ typedef enum { HTTP_GET = 1, HTTP_POST = 3 } httpd_method_t;
 typedef void (*httpd_free_ctx_fn_t)(void* ctx);
 /** @brief Control-queue work function. */
 typedef void (*httpd_work_fn_t)(void* arg);
+#define HTTPD_SOCK_ERR_FAIL (-1)    /**< @brief Unrecoverable socket error. */
+#define HTTPD_SOCK_ERR_INVALID (-2) /**< @brief Bad arguments. */
+#define HTTPD_SOCK_ERR_TIMEOUT (-3) /**< @brief The send bound expired. */
+
+/** @brief A session's socket-send function, as httpd stores it (`sock_db::send_fn`). */
+typedef int (*httpd_send_func_t)(httpd_handle_t hd, int sockfd, const char* buf,
+                                 std::size_t buf_len, int flags);
 
 /** @brief A request as the URI handler sees it (the fields the TU reads). */
 typedef struct httpd_req {
@@ -81,6 +93,7 @@ typedef struct httpd_config {
     std::size_t stack_size;         /**< @brief Server task stack. */
     std::uint16_t max_open_sockets; /**< @brief Socket budget. */
     bool lru_purge_enable;          /**< @brief Evict the oldest session at the cap. */
+    int send_wait_timeout;          /**< @brief Per-socket SO_SNDTIMEO, seconds. */
 } httpd_config_t;
 
 #define ESP_HTTPD_DEF_CTRL_PORT 32768 /**< @brief IDF's default control port. */
@@ -90,7 +103,8 @@ typedef struct httpd_config {
      .ctrl_port = ESP_HTTPD_DEF_CTRL_PORT, \
      .stack_size = 4096,                   \
      .max_open_sockets = 7,                \
-     .lru_purge_enable = false}
+     .lru_purge_enable = false,            \
+     .send_wait_timeout = 5}
 
 /** @brief WebSocket frame types. */
 typedef enum {
@@ -130,4 +144,6 @@ esp_err_t httpd_sess_trigger_close(httpd_handle_t handle, int sockfd);
 esp_err_t httpd_queue_work(httpd_handle_t handle, httpd_work_fn_t work, void* arg);
 esp_err_t httpd_ws_recv_frame(httpd_req_t* req, httpd_ws_frame_t* frame, std::size_t max_len);
 esp_err_t httpd_ws_send_frame_async(httpd_handle_t handle, int fd, httpd_ws_frame_t* frame);
+esp_err_t httpd_sess_set_send_override(httpd_handle_t handle, int sockfd,
+                                       httpd_send_func_t send_fn);
 httpd_ws_client_info_t httpd_ws_get_fd_info(httpd_handle_t handle, int fd);
