@@ -19,16 +19,18 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 - **`graph_t::has_subscribers(vertex_handle_t)` — the demand-driven producer's DELIVERY gate**
   ([#852](https://github.com/avatarsd-llc/libtracer/issues/852)). True iff a delivery here
   would reach a subscriber: this vertex's own **or** a subtree subscriber on a strict ancestor
-  (RFC-0005). The same two-sided question the eager `deliver_vertex` asks — `fan_out` on the
-  own count, then `bubble_up` on `listeners_above` — so a producer that skips on `false` skips
-  exactly what that path would have found no receiver for. Two limits are documented on the
-  declaration and are load-bearing: **`read` pollers and `await` waiters are not counted**, so
-  a producer that skips the value STORE (rather than just the delivery) starves them; and a
-  **skipped publish is not recovered by ADR-0049's durability latch** — that argument belongs
-  to the fan-out skip, which stores the LKV *before* loading the count, whereas this gate loads
-  first and never stores. The `seq_cst` own half buys only that a landed subscribe is ordered
-  before the producer's next read, so at most one round is skipped; the ancestor half is
-  relaxed and not even that.
+  (RFC-0005). It joins the two gates the eager delivery path applies — `fan_out`'s own
+  self-gate on the own count, then `deliver_vertex`'s on `listeners_above` — so a producer
+  that skips on `false` skips exactly what that path would have found no receiver for. Two
+  limits are documented on the declaration and are load-bearing: **`read` pollers and `await`
+  waiters are not counted** (subscription is a field-write to `:subscribers[]`, not one of
+  ADR-0006's three verbs), so a producer that skips the value STORE rather than just the
+  delivery starves them; and a **skipped publish is not recovered by ADR-0049's durability
+  latch** — that argument belongs to the fan-out skip, which stores the LKV *before* loading
+  the count, and the latch is opt-in besides (RFC-0022 §3.A bit 5; a default `policy = {}`
+  latches nothing). The `seq_cst` own half buys only that a landed subscribe is ordered before
+  the producer's next read, so at most one round is skipped; the ancestor half is relaxed and
+  not even that.
 
 - **`graph_t::own_subs(vertex_handle_t)` — the owner-side subscriber-slot count.** Exposes
   the `own_subs` counter (#635) through the graph as a sizing/observability read: how many
