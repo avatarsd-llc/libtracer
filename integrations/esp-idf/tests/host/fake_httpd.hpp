@@ -25,10 +25,21 @@
 #include <mutex>
 #include <span>
 #include <utility>
+#include <vector>
 
 #include "esp_http_server.h"
 
 namespace fake_httpd {
+
+/**
+ * @brief What the fake's socket write does with one buffer — the lwIP behaviours a
+ *        bounded `SO_SNDTIMEO` selects between.
+ */
+enum class send_result_t {
+    FULL,    /**< @brief The whole buffer went out: return `buf_len`. */
+    TIMEOUT, /**< @brief The bound expired with ZERO bytes written: return -1. */
+    SHORT    /**< @brief The bound expired MID-buffer: return the partial count. */
+};
 
 /** @brief One entry of the fake session table — httpd's `struct sock_db`, trimmed. */
 struct session_t {
@@ -45,6 +56,16 @@ struct session_t {
      */
     esp_err_t (*ws_handler)(httpd_req_t*) = nullptr;
     void* ws_user_ctx = nullptr; /**< @brief The registered `user_ctx`, latched with it. */
+    /**
+     * @brief The session's socket write — httpd's `sock_db::send_fn`.
+     *
+     * Null means `httpd_default_send`. `httpd_sess_set_send_override` replaces it, which
+     * is the only seam a link has to see the RAW return of a write and therefore the
+     * only place a SHORT write can be told apart from a delivered frame.
+     */
+    httpd_send_func_t send_fn = nullptr;
+    std::vector<send_result_t> script; /**< @brief Scripted write outcomes (see set_send_script). */
+    std::size_t script_pos = 0;        /**< @brief Next entry; the last one repeats forever. */
 };
 
 /** @brief The fake server: one session table, one control queue, no sockets. */
@@ -96,6 +117,17 @@ class server_t {
     [[nodiscard]] std::size_t frames_sent() const;
 
     /**
+     * @brief Script what @p fd's socket writes do, one entry per write; the LAST entry
+     *        repeats once the script is exhausted (an empty script means always FULL).
+     *
+     * The only lever #835 needs from the socket layer: a peer whose window is full
+     * (TIMEOUT), a peer whose window drains mid-frame (SHORT), and a healthy one (FULL).
+     */
+    void set_send_script(int fd, std::vector<send_result_t> script);
+    /** @brief How many socket writes @p fd has taken, whatever they returned. */
+    [[nodiscard]] std::size_t writes(int fd) const;
+
+    /**
      * @brief Run @p hook between the handler's header pass and its payload pass — the
      *        instant a frame is INSIDE the handler but has claimed nothing yet.
      *
@@ -113,8 +145,33 @@ class server_t {
     esp_err_t trigger_close(int fd);
     [[nodiscard]] httpd_ws_client_info_t fd_info(int fd);
     void note_sent();
-    /** @brief Refuse further `httpd_queue_work` calls — the ctrl-queue-full failure. */
+    /**
+     * @brief Refuse further `httpd_queue_work` calls — the ctrl-queue-full failure.
+     *
+     * `httpd_sess_trigger_close` is deliberately NOT refused with it. On silicon both
+     * ride the one control socket, so a full queue DELAYS the close as well — but only
+     * delays it, since the link retries the close on its next drop. Modelling the close
+     * as always reaching the session table is therefore the conservative choice for a
+     * test that asks "was this peer torn down?": it can only make a wrong teardown
+     * VISIBLE sooner, never invent one.
+     */
     void set_queue_refusing(bool refusing);
+    /** @brief Install a session's send override (`httpd_sess_set_send_override`). */
+    esp_err_t set_send_override(int fd, httpd_send_func_t send_fn);
+    /** @brief One socket write on @p fd through its session's send fn (or httpd's own
+     *         default, which is the raw write plus IDF's error mapping). */
+    int socket_send(int fd, const char* buf, std::size_t buf_len, int flags);
+    /**
+     * @brief The RAW write on @p fd — the `::send` the link's override calls, reached
+     *        through the test binary's `--wrap=send` interposition.
+     *
+     * Returns @p buf_len (FULL), -1 with `errno == EAGAIN` (TIMEOUT), or half of
+     * @p buf_len (SHORT), per @p fd's script. Sockets the fake knows nothing about are
+     * not its business — see `__wrap_send`.
+     */
+    int raw_send(int fd, std::size_t buf_len);
+    /** @brief True while @p fd is one of the fake's sockets (the `--wrap` predicate). */
+    [[nodiscard]] bool owns_socket(int fd) const;
 
    private:
     mutable std::mutex m_;
@@ -123,6 +180,7 @@ class server_t {
     std::function<void()> frame_hook_;
     std::size_t free_ctx_calls_ = 0;
     std::size_t frames_sent_ = 0;
+    std::map<int, std::size_t> writes_;
     bool queue_refusing_ = false;
 };
 

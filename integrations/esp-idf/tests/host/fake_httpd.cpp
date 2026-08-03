@@ -8,6 +8,9 @@
 
 #include "fake_httpd.hpp"
 
+#include <sys/socket.h>
+
+#include <cerrno>
 #include <cstring>
 #include <utility>
 #include <vector>
@@ -95,6 +98,89 @@ void server_t::note_sent() {
 void server_t::set_queue_refusing(bool refusing) {
     const std::lock_guard lock(m_);
     queue_refusing_ = refusing;
+}
+
+void server_t::set_send_script(int fd, std::vector<send_result_t> script) {
+    const std::lock_guard lock(m_);
+    const auto it = sessions_.find(fd);
+    if (it == sessions_.end()) return;
+    it->second.script = std::move(script);
+    it->second.script_pos = 0;
+}
+
+std::size_t server_t::writes(int fd) const {
+    const std::lock_guard lock(m_);
+    const auto it = writes_.find(fd);
+    return it == writes_.end() ? 0 : it->second;
+}
+
+esp_err_t server_t::set_send_override(int fd, httpd_send_func_t send_fn) {
+    const std::lock_guard lock(m_);
+    const auto it = sessions_.find(fd);
+    if (it == sessions_.end()) return ESP_ERR_NOT_FOUND;
+    it->second.send_fn = send_fn;
+    return ESP_OK;
+}
+
+bool server_t::owns_socket(int fd) const {
+    const std::lock_guard lock(m_);
+    return sessions_.find(fd) != sessions_.end();
+}
+
+int server_t::raw_send(int fd, std::size_t buf_len) {
+    const std::lock_guard lock(m_);
+    ++writes_[fd];
+    const auto it = sessions_.find(fd);
+    if (it == sessions_.end()) {
+        errno = EBADF;
+        return -1;
+    }
+    session_t& sess = it->second;
+    send_result_t outcome = send_result_t::FULL;
+    if (!sess.script.empty()) {
+        const std::size_t i =
+            sess.script_pos < sess.script.size() ? sess.script_pos : sess.script.size() - 1;
+        outcome = sess.script[i];
+        ++sess.script_pos;  // the LAST entry repeats: a stalled peer stays stalled
+    }
+    switch (outcome) {
+        case send_result_t::FULL:
+            return static_cast<int>(buf_len);
+        case send_result_t::TIMEOUT:
+            errno = EAGAIN;  // lwIP: SO_SNDTIMEO expired with NOTHING written
+            return -1;
+        case send_result_t::SHORT:
+            break;
+    }
+    // The bound expired MID-buffer: lwIP returns the PARTIAL count, not an error. Half a
+    // WebSocket frame is on the wire and the stream is desynchronised from here on.
+    return static_cast<int>(buf_len / 2);
+}
+
+/** @brief httpd's own default send function (`httpd_default_send`): the raw write plus
+ *         IDF's errno-to-HTTPD_SOCK_ERR mapping. Used for a session with no override. */
+[[nodiscard]] int default_send_fn(httpd_handle_t hd, int fd, const char* buf, std::size_t buf_len,
+                                  int flags) {
+    (void)flags;
+    if (buf == nullptr) return HTTPD_SOCK_ERR_INVALID;
+    const int ret = static_cast<server_t*>(hd)->raw_send(fd, buf_len);
+    if (ret < 0)
+        return errno == EAGAIN || errno == EWOULDBLOCK ? HTTPD_SOCK_ERR_TIMEOUT
+                                                       : HTTPD_SOCK_ERR_FAIL;
+    return ret;
+}
+
+int server_t::socket_send(int fd, const char* buf, std::size_t buf_len, int flags) {
+    httpd_send_func_t send_fn = nullptr;
+    {
+        const std::lock_guard lock(m_);
+        const auto it = sessions_.find(fd);
+        if (it == sessions_.end()) return -1;
+        send_fn = it->second.send_fn;
+    }
+    // Unlocked: an override re-enters the link (and the link re-enters this fake).
+    if (send_fn == nullptr) send_fn = &default_send_fn;
+    return send_fn(static_cast<httpd_handle_t>(this), fd, buf, buf_len, flags);
 }
 
 void server_t::close_session(int fd) {
@@ -185,7 +271,9 @@ esp_err_t server_t::queue_work(httpd_work_fn_t work, void* arg) {
 esp_err_t server_t::trigger_close(int fd) {
     const std::lock_guard lock(m_);
     if (sessions_.find(fd) == sessions_.end()) return ESP_ERR_NOT_FOUND;
-    if (queue_refusing_) return ESP_FAIL;
+    // Deliberately NOT gated on queue_refusing_ — see set_queue_refusing: a full control
+    // socket only delays this close on silicon, and modelling it as always landing keeps
+    // a wrongly-aimed teardown visible instead of hidden behind the jam that caused it.
     queue_.push_back([this, fd]() { close_session(fd); });
     return ESP_OK;
 }
@@ -354,10 +442,35 @@ esp_err_t httpd_ws_recv_frame(httpd_req_t* req, httpd_ws_frame_t* frame, std::si
 
 esp_err_t httpd_ws_send_frame_async(httpd_handle_t handle, int fd, httpd_ws_frame_t* frame) {
     (void)handle;
-    (void)fd;
-    (void)frame;
+    // httpd_ws.c writes the frame through the session's send fn and calls the send a
+    // success on ANY non-negative return — the check that turns a short write into a
+    // silently-lost half frame. Transcribed as-is: the fake must reproduce the bug, not
+    // the intent. The header bytes are not modelled; only the payload write is.
+    const int ret = fake_httpd::instance().socket_send(
+        fd, reinterpret_cast<const char*>(frame->payload), frame->len, 0);
+    if (ret < 0) return ESP_FAIL;
     fake_httpd::instance().note_sent();
     return ESP_OK;
+}
+
+esp_err_t httpd_sess_set_send_override(httpd_handle_t handle, int sockfd,
+                                       httpd_send_func_t send_fn) {
+    (void)handle;
+    return fake_httpd::instance().set_send_override(sockfd, send_fn);
+}
+
+/**
+ * @brief The link's own socket write, interposed (`-Wl,--wrap=send` on this test target).
+ *
+ * The link's send override does a plain BSD `::send` on the peer's fd, exactly as
+ * `httpd_default_send` does — so the ONE thing a host suite has to fake for #835 is that
+ * write. Descriptors the fake did not hand out are none of its business and go to the
+ * real syscall, so nothing else linked into the test binary changes behaviour.
+ */
+extern "C" ssize_t __real_send(int fd, const void* buf, std::size_t len, int flags);
+extern "C" ssize_t __wrap_send(int fd, const void* buf, std::size_t len, int flags) {
+    if (!fake_httpd::instance().owns_socket(fd)) return __real_send(fd, buf, len, flags);
+    return fake_httpd::instance().raw_send(fd, len);
 }
 
 httpd_ws_client_info_t httpd_ws_get_fd_info(httpd_handle_t handle, int fd) {

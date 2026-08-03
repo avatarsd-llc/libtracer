@@ -12,6 +12,40 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`httpd_ws_link_t`: a stalled WebSocket peer no longer starves the httpd task, and the
+  brokenness detector now aims at the peer that is actually broken (#835).** Two defects on
+  one seam. (1) `esp_http_server` sets `SO_SNDTIMEO` on every accepted socket from
+  `config.send_wait_timeout` (5 s by default) and every WS send runs on the single httpd
+  task — the task that owns accept/recv for every socket the server has — so one peer with a
+  full TCP window blocked that task for up to the whole timeout per frame, serialized under
+  delivery fan-out, until the task watchdog fired and the HTTP plane stopped answering
+  (observed on an ESP32-C6 under a delivery burst with a throttled browser tab subscribed).
+  Every UPGRADED socket now gets a short `SO_SNDTIMEO` of its own at admission, DERIVED as
+  the task-watchdog period divided by the peer cap — so one full fan-out round with every
+  peer stalled still fits inside one watchdog window. REST sockets are untouched: the
+  server's `send_wait_timeout` still governs HTTP responses, so there is no config ripple.
+  (2) The three-strikes teardown counted ENQUEUE drops and charged each to the fd of the
+  frame that failed to enqueue. The control queue is shared, so when the stalled peer's slow
+  sends jammed it the drops — and the session closes — landed on whichever HEALTHY peers
+  sent next, while the stalled peer never accrued a strike. Failed SENDS now feed the
+  per-session streak (they name their destination by construction) and refused enqueues feed
+  a link-level counter and strike nobody. #481's protected behaviour is unchanged: one failed
+  send still only drops that frame, and any successful send resets the streak, so the shipped
+  "large reply times out between small frames" shape still never closes the session.
+
+### Added
+
+- **`httpd_ws_link_t` short-write guard.** Both constructors gained a trailing
+  `send_timeout_ms` parameter (default `0` = derive, clamped to the server's
+  `send_wait_timeout`) for hosts whose watchdog regime differs from the derivation's inputs,
+  plus the accessors `send_timeout_ms()` and `enqueue_drops()`. Every admitted session also
+  installs a send override (`httpd_sess_set_send_override`): lwIP returns the PARTIAL count
+  when a bounded write expires mid-buffer, and `esp_http_server` treats any non-negative
+  return as a delivered frame — which would report a half-written WebSocket frame as success
+  and desynchronise the peer's framing for the life of the socket. A short write is now an
+  error AND closes that session immediately, bypassing the streak (a different fault class:
+  the stream is broken, not a frame missing). Existing call sites are source-compatible.
+
 - **`httpd_ws_link_t` (adopted mode): the destructor now retires every session's close
   callback before the link dies (#816).** Each admitted peer is registered with
   `httpd_sess_set_ctx(handle, fd, slot, on_session_closed)`, so a link that adopted an
