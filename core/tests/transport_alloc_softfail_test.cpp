@@ -323,6 +323,29 @@ bool raw_handshake(int cfd) {
                .find("101 Switching Protocols") != std::string_view::npos;
 }
 
+/**
+ * @brief Block until @p server counts at least @p want OPEN peers.
+ *
+ * `raw_handshake` returning is NOT enough to make a subsequent `server.send` observable.
+ * `service_peer` writes the 101 response and only THEN stores `open = true`, so between
+ * those two points the client has read "101 Switching Protocols" while the broadcast still
+ * skips the slot — the send goes to nobody and the frame never arrives. `enumerate_peers`
+ * visits exactly the open, named slots, which is the same predicate `send` broadcasts over,
+ * so it is the precise barrier. (The peer's routable `p<slot>` name is stamped at accept
+ * regardless of the server's `peer_named` setting, so this works on a default server too.)
+ */
+[[nodiscard]] bool wait_for_peers(const tr::net::transport_ws_server& server, std::size_t want,
+                                  std::chrono::milliseconds budget) {
+    const auto deadline = std::chrono::steady_clock::now() + budget;
+    while (std::chrono::steady_clock::now() < deadline) {
+        std::size_t n = 0;
+        server.enumerate_peers([&n](std::string_view) { ++n; });
+        if (n >= want) return true;
+        std::this_thread::sleep_for(2ms);
+    }
+    return false;
+}
+
 /** @brief > `kMaxInlineIov` (16) + the header entry, so the egress table must overflow. */
 constexpr std::size_t kWideSpans = 24;
 
@@ -352,6 +375,7 @@ void test_ws_server_send_span_is_allocation_free() {
     check(server.ok(), "server bound");
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
+    check(wait_for_peers(server, 1, 2s), "the server registered the peer as open");
 
     std::array<std::byte, 8> payload{};
     for (std::size_t i = 0; i < payload.size(); ++i) payload[i] = static_cast<std::byte>(i + 1);
@@ -383,6 +407,7 @@ void test_ws_server_send_iov_overflow_drops() {
     check(server.ok(), "server bound");
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
+    check(wait_for_peers(server, 1, 2s), "the server registered the peer as open");
 
     const std::vector<std::byte> storage(kWideSpans, std::byte{0xAB});
     const auto iov = wide_gather(storage, kWideSpans);

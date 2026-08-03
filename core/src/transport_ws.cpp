@@ -403,6 +403,17 @@ void transport_ws_server::service_peer(session_t& s) {
         {
             const std::lock_guard lock(write_m_);
             write_all(fd, bytes);
+            // Publish the slot as OPEN while still holding the write lock, so the
+            // "101 is on the wire" and "senders may use this slot" transitions are one
+            // step. Storing it after the lock is released opens a window in which the peer
+            // has already read `101 Switching Protocols` — and so believes the connection
+            // is up — while every send still skips the slot as not-open and the frame goes
+            // nowhere. A sender can only reach the fd through this same lock, so taking the
+            // store inside it means anyone who could observe the response also observes the
+            // slot as open. (`open` must NOT move ahead of the response write instead: a
+            // concurrent send would then be free to put a BINARY frame on the wire in front
+            // of the handshake reply.)
+            s.open.store(true, std::memory_order_release);
         }
         // Bytes pipelined past the header are the start of the frame stream —
         // the old one-peer server dropped them; carry them over.
@@ -410,7 +421,6 @@ void transport_ws_server::service_peer(session_t& s) {
         s.buf.assign(rest, rest + (s.hs_buf.size() - hdr_end - 4));
         s.hs_buf.clear();
         s.hs_buf.shrink_to_fit();
-        s.open.store(true, std::memory_order_release);
         if (!drain_frames(s)) teardown_slot(s);
         return;
     }
