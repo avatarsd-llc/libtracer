@@ -220,7 +220,7 @@ struct arena_node {
      * A subview shares the segment's refcount, so the segment is freed only when the last
      * subview dies — the held quantity is `owner->bytes.size()`, whatever window the transport
      * narrowed the frame to. `udp_transport_t` makes the gap concrete: it receives into a
-     * `kMaxDatagram` (64 KB) segment and delivers `subview(0, n)`, so a 200-byte datagram's
+     * `kMaxDatagram` (64 KB) segment and delivers a length-`n` window, so a 200-byte datagram's
      * payload pins 64 KB. 0 when there is no owning segment (a borrowed, span-delivered frame),
      * which the predicate reads as "cannot pin" without ever consulting the ratio.
      */
@@ -468,7 +468,7 @@ template <class N>
  * `N::segment_bytes` answers the ALLOCATED size of the segment(s) a pin would keep alive, not
  * the length of the delivered frame view. On a real transport those differ by orders of
  * magnitude: `udp_transport_t` receives every datagram into a `kMaxDatagram`-sized segment and
- * delivers a `subview(0, n)` of it, so pinning a 1 KB datagram's payload holds 64 KB. Pricing
+ * delivers a length-`n` window over it, so pinning a 1 KB datagram's payload holds 64 KB. Pricing
  * the view length instead would measure a cost nobody pays.
  *
  * The eligibility test lives HERE, one locus for both readers; each reader only produces its

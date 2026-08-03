@@ -190,8 +190,8 @@ without it.
   frame is now built by aggregate init (`view_t{std::move(seg), 0, len}`): one fewer
   refcount round-trip per received frame, and a receiver that inspects
   `view.owner.use_count()` inside (or straight after) its callback now sees the `1` that
-  [ADR-0042](../docs/adr/0042-owning-view-receiver-seam.md)'s "the library retains no copy"
-  contract promises, rather than racing the temporary's destruction. Observable only through
+  ownership transfer that [ADR-0042](../docs/adr/0042-refcounted-receiver-seam-view-delivery.md)
+  describes, rather than racing the temporary's destruction. Observable only through
   the refcount; no signature, ownership or lifetime rule changes.
 
 - **BOTH folded READs' POINT headers no longer come from the global heap** (#831).
