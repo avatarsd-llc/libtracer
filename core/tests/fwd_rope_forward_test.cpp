@@ -462,6 +462,71 @@ int main() {
         check(reply_count(bound, mid) == 1, "a 3-link split through the element array answers");
     }
 
+    // A bound FORWARDER hop over a multi-link rope (RFC-0024 §3.4/§5, car 3). The terminus
+    // arm above proves a bound frame is APPLIED at every split; this proves the other half —
+    // that a bound frame with a residual longer than one element is FORWARDED at every split,
+    // with the same bytes on the egress as the contiguous route. The two together are the
+    // fragmentation invariant for the whole bound form: splitting a frame changes neither
+    // whether it is applied nor what the next hop receives.
+    {
+        std::printf("A BOUND FORWARDER hop over a multi-link rope (RFC-0024 §3.4):\n");
+        // `/up` is the connection vertex of the child named "up" — a child's mount run IS its
+        // connection vertex's canonical key, which is the whole of the element→link join.
+        const auto forward_bound = [](const std::vector<std::byte>& f,
+                                      std::span<const std::size_t> cuts) {
+            graph_t g;
+            (void)g.register_vertex(path_t("/up"), role_t::STORED_VALUE);
+            fwd_router_t router(g);
+            fake_rope_link_t cli;
+            fake_link_t up;
+            router.add_child("cli", cli);
+            router.add_child("up", up);
+            cli.inject(rope_split(f, cuts));
+            return std::move(up.sent());
+        };
+        graph_t shape;
+        const tr::graph::vertex_handle_t uv =
+            shape.register_vertex(path_t("/up"), role_t::STORED_VALUE);
+        const std::optional<tr::graph::vertex_slot_t> hop = shape.vertex_slot(uv);
+        check(hop.has_value(), "the connection vertex is bindable");
+        // Two elements: this node's own hop, and the terminus's reference to the target. The
+        // second is opaque here — only the next host can read it, which is the point.
+        const tr::wire::path_ref_element_t els[2] = {
+            {.index = hop->index, .generation = hop->generation},
+            {.index = 0x0000BEEFu, .generation = 7u}};
+        std::vector<std::byte> ref;
+        (void)tr::wire::emit_path_ref(ref, std::span<const tr::wire::path_ref_element_t>(els));
+        const std::vector<std::byte> bfwd =
+            b_fwd(fwd_op_t::READ, ref, b_path({"reply-ep"}), b_value_u32(9));
+
+        const auto boracle = forward_bound(bfwd, std::span<const std::size_t>{});
+        check(boracle.size() == 1, "contiguous: the bound forward hop egresses exactly once");
+        if (boracle.size() == 1) {
+            const auto dec = tr::wire::decode(boracle[0]);
+            check(dec && dec->children.size() >= 3 && dec->children[1].type == type_t::PATH_REF &&
+                      tr::wire::path_ref_element_count(dec->children[1].payload.size()) == 1,
+                  "the egress dst is a PATH_REF with ONE element — this hop consumed its own");
+            if (dec && dec->children.size() >= 3 && dec->children[1].type == type_t::PATH_REF &&
+                tr::wire::path_ref_element_count(dec->children[1].payload.size()) == 1) {
+                check(tr::wire::path_ref_element_at(dec->children[1].payload, 0) == els[1],
+                      "and it is the NEXT host's element, untouched");
+                check(tr::wire::equal(dec->children[2],
+                                      *tr::wire::decode(b_path({"cli", "reply-ep"}))),
+                      "src grew by the inbound mount exactly as a canonical hop grows it");
+            }
+        }
+        int bmismatch = 0;
+        for (std::size_t cut = 1; cut < bfwd.size(); ++cut) {
+            const std::array<std::size_t, 1> cuts{cut};
+            if (forward_bound(bfwd, cuts) != boracle) ++bmismatch;
+        }
+        check(bmismatch == 0, "every 2-link split forwards byte-identically to the contiguous hop");
+        std::vector<std::size_t> every_byte;
+        for (std::size_t i = 1; i < bfwd.size(); ++i) every_byte.push_back(i);
+        check(forward_bound(bfwd, every_byte) == boracle,
+              "one link per byte forwards byte-identically (the element itself straddles links)");
+    }
+
     // Terminus over a multi-link rope: dst names NO child (local /sensor), so the
     // router resolves the request straight off the rope through the view-tier
     // resolver (ADR-0053 3c-iii — NO flatten) and applies the WRITE to the LKV.
