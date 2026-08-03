@@ -19,6 +19,10 @@
 // once per label page-wide (the generator embeds a global color index), so
 // "fan 8" is the same color on the latency and the throughput chart.
 //
+// Every commit-axis view is drawn over a selectable commit RANGE (two sliders per card,
+// full by default), and a family whose series pair across two engines adds a RATIO
+// toggle: the per-commit quotient of the two arms, computed here from same-run pairs.
+//
 // Each block carries TWO payloads — the GitHub-hosted store and the bench-local
 // (fixed pinned host) store — and a global source selector switches every chart
 // between them in place, remembering the choice in localStorage. The two stores
@@ -36,7 +40,10 @@
   function fmtCount(v) { return v >= 1000 ? (v / 1000) + "k" : "" + v; }
   // fmtMB is the one formatter the deleted ltz_compare.js had and this one did not.
   function fmtMB(v) { return v >= 1000 ? (v / 1000).toFixed(1) + " GB/s" : Math.round(v) + " MB/s"; }
-  var FMT = { ns: fmtNs, rate: fmtRate, num: fmtNum, bytes: fmtBytes, count: fmtCount, mb: fmtMB };
+  // A dimensionless quotient. Printed with the '×' so it can never be mistaken for the
+  // absolute number it was divided out of.
+  function fmtRatio(v) { return (v >= 100 ? Math.round(v) : v >= 10 ? v.toFixed(1) : v.toFixed(2)) + "×"; }
+  var FMT = { ns: fmtNs, rate: fmtRate, num: fmtNum, bytes: fmtBytes, count: fmtCount, mb: fmtMB, ratio: fmtRatio };
 
   function logTicks(min, max) {
     var lo = Math.floor(Math.log10(min)), hi = Math.ceil(Math.log10(max)), t = [];
@@ -90,6 +97,110 @@
   }
 
   function lookup(se) { var m = {}; se.pts.forEach(function (p) { m[p[0]] = p[1]; }); return m; }
+
+  // ---------------------------------------------------------------- ratio --
+  /** @brief The per-commit quotient chart of a paired family, or null if it has no pairs.
+   *
+   * Both arms of a `(zenoh )?` family are recorded at the same commit — on bench-local
+   * that is the same pass on the same pinned machine, so the quotient divides that
+   * machine's speed on the day out of the answer to first order. That is what makes this
+   * the better view across a long history — better, not immune: the cancellation is
+   * partial. Measured at p50 (the hosted store's last 60 recorded commits; bench-local's
+   * full store of 12 runs), the quotient's spread is
+   * about a tenth below the libtracer line's own on the hosted store (that store keeps
+   * the best of three runners *per series*, so a point's two arms need not come from one
+   * runner's transcript) and about a third below it on bench-local, where every point is
+   * one pinned CPU. The quotient damps the runner spread the page documents; it does not
+   * escape it.
+   *
+   * Pairing is therefore strict and cheap: same store, same suite, same commit index,
+   * same shape key (`rk`). A commit where only one arm recorded a value contributes no
+   * point rather than an interpolated one — a half-measured pair is not a comparison.
+   *
+   * Polarity depends on which direction the underlying metric runs, so it is stated on
+   * the y-axis in words rather than left to the reader: for a latency metric a quotient
+   * above 1 means Zenoh took longer, i.e. libtracer is faster; for throughput the same
+   * statement is a quotient below 1.
+   */
+  function ratioChart(c) {
+    var num = {}, den = {};
+    c.series.forEach(function (se) {
+      if (se.arm === "num") num[se.rk] = se;
+      else if (se.arm === "den") den[se.rk] = se;
+    });
+    var out = [];
+    Object.keys(den).forEach(function (k) {
+      var n = num[k], d = den[k];
+      if (!n) return;
+      var dm = lookup(d), pts = [];
+      n.pts.forEach(function (p) {
+        var dv = dm[p[0]];
+        if (dv === undefined || !(dv > 0)) return;
+        pts.push([p[0], p[1] / dv]);
+      });
+      if (pts.length) out.push({ label: k, ci: d.ci, pts: pts, pv: d.rpv });
+    });
+    if (!out.length) return null;
+    out.sort(function (a, b) { return a.pv - b.pv; });
+    var thr = c.suite === "throughput";
+    return {
+      id: c.id, section: c.section, title: c.title, cond: c.cond, src: c.src,
+      suite: c.suite, fmt: "ratio", log: true, unity: true, px: c.ratio.px, series: out,
+      ylabel: "zenoh ÷ libtracer · " + (thr ? "<1 = libtracer faster" : ">1 = libtracer faster")
+    };
+  }
+
+  /** @brief A dashed reference line at the value 1 — the ratio view's break-even.
+   *
+   * Emitted only for the ratio chart. On an absolute chart 1 is an arbitrary value; on a
+   * quotient it is the whole question, and a chart that makes the reader find it by
+   * reading tick labels has buried its own answer.
+   */
+  function unityMark(Y, x0, x1, lo, hi) {
+    if (!(1 >= lo && 1 <= hi)) return "";
+    var y = Y(1).toFixed(1);
+    return '<line class="ph-unity" x1="' + x0 + '" y1="' + y + '" x2="' + x1 + '" y2="' + y + '"/>'
+      + '<text class="ph-unitylab" x="' + (x0 + 6) + '" y="' + (+y - 4) + '">parity (1×)</text>';
+  }
+
+  // ---------------------------------------------------------------- range --
+  /** @brief The chart and suite restricted to recorded commits [a, b].
+   *
+   * A slice, not a filter flag: every renderer already reads a commit axis as "index 0 to
+   * shas.length - 1", so re-basing the points and the markers onto a shorter axis reuses
+   * all four views unchanged rather than teaching each of them about a window. Release and
+   * instrument markers outside the window are dropped (they mark nothing on this axis);
+   * the ones inside are re-based with it.
+   *
+   * The full range returns the originals untouched, so the default view costs nothing.
+   */
+  function sliceRange(c, suite, a, b) {
+    var N = suite.shas.length;
+    if (a <= 0 && b >= N - 1) return { c: c, suite: suite };
+    function shift(marks) {
+      return (marks || []).filter(function (r) { return r.i >= a && r.i <= b; })
+        .map(function (r) { return { i: r.i - a, label: r.label, approx: r.approx }; });
+    }
+    var c2 = {};
+    for (var k in c) if (Object.prototype.hasOwnProperty.call(c, k)) c2[k] = c[k];
+    c2.series = c.series.map(function (se) {
+      var s2 = {};
+      for (var k2 in se) if (Object.prototype.hasOwnProperty.call(se, k2)) s2[k2] = se[k2];
+      s2.pts = se.pts.filter(function (p) { return p[0] >= a && p[0] <= b; })
+        .map(function (p) { return [p[0] - a, p[1]]; });
+      return s2;
+    });
+    return {
+      c: c2,
+      suite: {
+        shas: suite.shas.slice(a, b + 1),
+        msgs: (suite.msgs || []).slice(a, b + 1),
+        host: suite.host,
+        hosts: suite.hosts ? suite.hosts.slice(a, b + 1) : undefined,
+        releases: shift(suite.releases), instruments: shift(suite.instruments)
+      }
+    };
+  }
 
   function relMark(x, y0, y1, r) {
     return '<line class="ph-rel" x1="' + x.toFixed(1) + '" y1="' + y0 + '" x2="' + x.toFixed(1) + '" y2="' + y1 + '"/>' +
@@ -151,6 +262,7 @@
     });
     s += '<rect class="ph-frame" x="' + m.l + '" y="' + m.t + '" width="' + pw + '" height="' + ph + '"/>';
     s += '<text class="ph-axtitle" transform="translate(13 ' + (m.t + ph / 2) + ') rotate(-90)" text-anchor="middle">' + c.ylabel + "</text>";
+    if (c.unity) s += unityMark(Y, m.l, W - m.r, ymin, ymax);
     (suite.releases || []).forEach(function (r) { if (r.i < N) s += relMark(X(r.i), m.t, m.t + ph, r); });
     (suite.instruments || []).forEach(function (r) { if (r.i < N) s += instrMark(X(r.i), m.t, m.t + ph, r); });
     c.series.forEach(function (se) {
@@ -202,6 +314,7 @@
     s += '<rect class="ph-frame" x="' + m.l + '" y="' + m.t + '" width="' + pw + '" height="' + ph + '"/>';
     s += '<text class="ph-axtitle" x="' + (m.l + pw / 2) + '" y="' + (H - 4) + '" text-anchor="middle">' + c.px.label + "</text>";
     s += '<text class="ph-axtitle" transform="translate(13 ' + (m.t + ph / 2) + ') rotate(-90)" text-anchor="middle">' + c.ylabel + "</text>";
+    if (c.unity) s += unityMark(Y, m.l, W - m.r, ymin, ymax);
     var maps = c.series.map(lookup);
     var relAt = {};
     (suite.releases || []).forEach(function (r) { relAt[r.i] = r; });
@@ -424,6 +537,10 @@
       mi = i;
       c.series = mets[i].series; c.suite = mets[i].suite;
       c.fmt = mets[i].fmt; c.ylabel = mets[i].ylabel;
+      // A metric switch can change the SUITE, and the two suites are recorded
+      // independently — index 40 of one is a different commit from index 40 of the other,
+      // so a carried-over window would silently point somewhere else.
+      r0 = 0; r1 = -1;
     }
     useMetric(0);
     // A param-x chart carries its own axis in its points and has no commit
@@ -453,40 +570,134 @@
     card.innerHTML = "<h4>" + c.title + "</h4>" + '<div class="ph-tabs"></div>'
       + '<p class="cond">' + c.cond + (src ? ' \u00b7 measured by ' + src : "") + "</p>" + mrow
       + '<p class="ph-metblurb"></p>'
+      + '<div class="ph-range"></div>'
       + '<div class="ph-legend">' + legend + "</div>"
       + '<div class="ph-plot"></div><div class="ph-tip" style="display:none"></div>'
       + (c.reading ? '<p class="ph-reading">' + c.reading + "</p>" : "");
     host.appendChild(card);
     var plot = card.querySelector(".ph-plot"), tip = card.querySelector(".ph-tip");
     var tabhost = card.querySelector(".ph-tabs"), blurb = card.querySelector(".ph-metblurb");
-    var byIdx = c.series.map(lookup);
-    var suite, idxs, multi, view = "trend";
+    var rangehost = card.querySelector(".ph-range");
+    var suite, idxs, multi, byIdx = [], view = "trend";
+    // Ratio and range are card state, not render state: switching view must not lose
+    // either. The range is held as absolute indices into the ACTIVE metric's suite and
+    // reset when the metric changes, because the two suites are recorded independently
+    // and index 40 of one is not index 40 of the other.
+    var ratioOn = false, r0 = 0, r1 = -1;
+
+    // The chart the views are actually drawn from: the active metric's series, optionally
+    // turned into the per-commit quotient, then restricted to the selected commit range.
+    // Every downstream consumer — renderers, dense-index derivation, hover rows — reads
+    // THIS, so a view, a tooltip and a legend can never disagree about which numbers are
+    // on screen.
+    var A = { c: c, suite: null };
+    function derive() {
+      var base = (ratioOn && c.ratio) ? (ratioChart(c) || c) : c;
+      var full = param ? null : D.suites[base.suite];
+      if (!full) return { c: base, suite: null, full: null };
+      if (r1 < 0 || r1 > full.shas.length - 1) r1 = full.shas.length - 1;
+      if (r0 > r1) r0 = r1;
+      if (r0 < 0) r0 = 0;
+      var sl = sliceRange(base, full, r0, r1);
+      sl.full = full;
+      return sl;
+    }
+
+    /** @brief The commit-range control: two sliders over the active suite's commits.
+     *
+     * Two `<input type="range">` and a text readout — no library, nothing fetched, which
+     * the inlined-assets doctrine on this page requires. It is a control rather than a
+     * fixed window because the two stores have wildly different lengths (the hosted store
+     * is hundreds of commits deep, the bench-local one a dozen), and because the question
+     * "what changed since the last release" and the question "what is the long shape"
+     * want different windows over the same series.
+     */
+    function drawRange(full) {
+      if (!full || full.shas.length < 3) { rangehost.innerHTML = ""; return; }
+      var N = full.shas.length;
+      // Dragging a slider re-renders the card, and re-rendering must NOT rebuild the
+      // slider the pointer is currently on — replacing the element mid-drag drops the
+      // drag. So an existing control over the same axis is UPDATED in place; only a
+      // changed axis length (a metric switch, a store switch) rebuilds it.
+      var i0e = rangehost.querySelector(".ph-r0");
+      if (i0e && +i0e.max === N - 1) {
+        i0e.value = r0;
+        rangehost.querySelector(".ph-r1").value = r1;
+        rangehost.querySelector(".ph-rout").innerHTML =
+          "<code>" + full.shas[r0] + "</code> → <code>" + full.shas[r1] + "</code> · "
+          + (r1 - r0 + 1) + " of " + N;
+        rangehost.querySelector(".ph-rfull").disabled = (r0 === 0 && r1 === N - 1);
+        return;
+      }
+      rangehost.innerHTML = '<span class="ph-rlab">commits</span>'
+        + '<input type="range" class="ph-r0" min="0" max="' + (N - 1) + '" value="' + r0 + '" aria-label="first commit">'
+        + '<input type="range" class="ph-r1" min="0" max="' + (N - 1) + '" value="' + r1 + '" aria-label="last commit">'
+        + '<span class="ph-rout"><code>' + full.shas[r0] + '</code> → <code>' + full.shas[r1] + '</code> · '
+        + (r1 - r0 + 1) + ' of ' + N + "</span>"
+        + '<button class="ph-rfull"' + (r0 === 0 && r1 === N - 1 ? " disabled" : "") + ">full</button>";
+      var i0 = rangehost.querySelector(".ph-r0"), i1 = rangehost.querySelector(".ph-r1");
+      function moved() {
+        // The two ends may cross on the way past each other; clamping rather than
+        // swapping keeps the handle the reader is dragging under the cursor.
+        r0 = Math.min(+i0.value, +i1.value); r1 = Math.max(+i0.value, +i1.value);
+        rebind(); show(view);
+      }
+      i0.addEventListener("input", moved);
+      i1.addEventListener("input", moved);
+      rangehost.querySelector(".ph-rfull").addEventListener("click", function () {
+        r0 = 0; r1 = N - 1; rebind(); show(view);
+      });
+    }
 
     // Re-derive everything the active metric decides: its suite's commit axis, whether
     // there are enough dense points for the sweep/heatmap/3D views, and the view tabs.
     // A metric with sparser history can lose those views, so the tab row is rebuilt
     // rather than fixed at card creation.
     function rebind() {
-      suite = param ? null : D.suites[c.suite];
+      A = derive();
+      suite = A.suite;
       var N = suite ? suite.shas.length : 0;
-      idxs = suite ? denseIdxs(c, N) : [];
-      multi = !param && !!c.px && idxs.length >= 2 && c.series.length >= 2;
+      idxs = suite ? denseIdxs(A.c, N) : [];
+      multi = !param && !!A.c.px && idxs.length >= 2 && A.c.series.length >= 2;
       var views = multi ? ["trend", "sweep", "heatmap", "3D"] : ["trend"];
       if (views.indexOf(view) < 0) view = "trend";
-      tabhost.innerHTML = views.length > 1 ? views.map(function (v) {
+      var html = views.length > 1 ? views.map(function (v) {
         return '<button class="ph-tab' + (v === view ? " on" : "") + '" data-v="' + v + '">' + v + "</button>";
       }).join("") : "";
+      // The ratio toggle is a THIRD question, next to which view and which metric: whether
+      // the card shows the two engines' absolute lines or the quotient between them.
+      if (c.ratio) html += '<button class="ph-rtoggle' + (ratioOn ? " on" : "") + '">' + c.ratio.label + "</button>";
+      tabhost.innerHTML = html;
       tabhost.querySelectorAll(".ph-tab").forEach(function (b) {
         b.addEventListener("click", function () {
           tabhost.querySelectorAll(".ph-tab").forEach(function (x) { x.classList.remove("on"); });
           b.classList.add("on"); view = b.dataset.v; show(view);
         });
       });
-      byIdx = c.series.map(lookup);
-      blurb.textContent = mets[mi].blurb || "";
+      var rt = tabhost.querySelector(".ph-rtoggle");
+      if (rt) rt.addEventListener("click", function () { ratioOn = !ratioOn; rebind(); show(view); });
+      // The legend follows the active chart: in ratio mode a pair of engine lines has
+      // collapsed into one quotient line, and a legend still naming both arms would
+      // describe a chart that is not there.
+      card.querySelector(".ph-legend").innerHTML = A.c.series.map(function (se) {
+        return '<span class="item"><span class="sw" style="background:' + col(se.ci) + '"></span>' + se.label + "</span>";
+      }).join("");
+      drawRange(A.full);
+      byIdx = A.c.series.map(lookup);
+      blurb.textContent = ratioOn && c.ratio
+        ? "Both arms are recorded at the same commit — on bench-local that is one pass on "
+          + "one pinned machine, so its speed on the day divides out of this quotient to first "
+          + "order; on the hosted store best-of-three per series means the arms' runners can "
+          + "differ. The quotient damps the shared-runner spread the absolute lines carry, but "
+          + "does not escape it: measured, its spread is about a tenth below the libtracer "
+          + "line's own on the hosted store (last 60 commits) and about a third below it on "
+          + "bench-local (full 12-run store). Each point pairs the two engines at ONE "
+          + "recorded commit; a commit where only one arm recorded a value contributes no point."
+        : (mets[mi].blurb || "");
     }
 
     function show(view) {
+      var c = A.c, suite = A.suite;
       if (!suite && !param) { plot.innerHTML = ""; return; }
       var r = param ? renderParam(c)
         : view === "sweep" ? renderSweep(c, suite, idxs)
