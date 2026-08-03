@@ -13,6 +13,7 @@
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/tlv.hpp"
 #include "libtracer/tlv_emit.hpp"
+#include "libtracer/vertex.hpp"
 
 namespace tr::net {
 
@@ -32,8 +33,24 @@ std::shared_ptr<route_handle_t::link_tables_t> route_handle_t::tables(std::strin
     // can erase the registry entry while a concurrent writer still holds this table (#488).
     auto sp = std::allocate_shared<link_tables_t>(
         std::pmr::polymorphic_allocator<link_tables_t>(mr_), mr_);
+    // Stamp the tables with the clear epoch they were born at (#827), under the same
+    // exclusive lock clear_link advances it under — once tables exist, a link's epoch moves
+    // only when THAT link is cleared. Before they exist a sample reads the shared counter,
+    // so an unrelated clear in the sample→creation window makes the bind refuse spuriously
+    // (safe direction: the re-advertise after the stale-label NACK binds normally).
+    sp->born_gen = clear_gen_;
     links_.emplace(std::pmr::string(link, mr_), sp);
     return sp;
+}
+
+std::uint32_t route_handle_t::link_epoch_locked(std::string_view link) const {
+    const auto it = links_.find(link);
+    return it == links_.end() ? clear_gen_ : it->second->born_gen;
+}
+
+std::uint32_t route_handle_t::link_epoch(std::string_view link) const {
+    const std::shared_lock lock(links_m_);
+    return link_epoch_locked(link);
 }
 
 std::shared_ptr<route_handle_t::link_tables_t> route_handle_t::find_tables(
@@ -43,11 +60,9 @@ std::shared_ptr<route_handle_t::link_tables_t> route_handle_t::find_tables(
     return it == links_.end() ? nullptr : it->second;  // a pinning copy; per-link mutex inside
 }
 
-bool route_handle_t::bind_ingress(std::string_view in_link, std::uint16_t label,
-                                  handle_binding_t binding) {
-    const std::shared_ptr<link_tables_t> t = tables(in_link);
-    const std::lock_guard lock(t->m);
-    for (ingress_entry_t& e : t->ingress) {
+bool route_handle_t::bind_locked(link_tables_t& t, std::uint16_t label,
+                                 handle_binding_t&& binding) {
+    for (ingress_entry_t& e : t.ingress) {
         if (e.label == label) {
             e.binding = std::move(binding);
             return true;  // rebind in place — adds no entry, so the bound cannot refuse it
@@ -60,12 +75,44 @@ bool route_handle_t::bind_ingress(std::string_view in_link, std::uint16_t label,
     // a write on `resolved()`, which is the per-delivery hot path, to solve a flow-setup
     // problem. Refusing keeps every established flow untouched and degrades only NEW ones,
     // down the path a full label space already takes.
-    if (max_bindings_ != 0 && t->ingress.size() >= max_bindings_) {
+    if (max_bindings_ != 0 && t.ingress.size() >= max_bindings_) {
         refused_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
-    t->ingress.push_back(ingress_entry_t{.label = label, .binding = std::move(binding)});
+    t.ingress.push_back(ingress_entry_t{.label = label, .binding = std::move(binding)});
     return true;
+}
+
+bool route_handle_t::bind_ingress(std::string_view in_link, std::uint16_t label,
+                                  handle_binding_t binding) {
+    const std::shared_ptr<link_tables_t> t = tables(in_link);
+    const std::lock_guard lock(t->m);
+    return bind_locked(*t, label, std::move(binding));
+}
+
+bool route_handle_t::bind_ingress_forward(std::string_view in_link, std::uint16_t label,
+                                          handle_binding_t binding, std::uint32_t down_epoch) {
+    // Create the inbound tables FIRST and outside the registry lock below: creating them
+    // needs it exclusively, and a shared holder cannot upgrade. The pinning copy survives a
+    // concurrent clear of `in_link` (#488) — a bind into a detached table is discarded, which
+    // is the clean slate an inbound reconnect wants anyway.
+    const std::shared_ptr<link_tables_t> t = tables(in_link);
+    // The epoch read and the insert are ONE critical section against clear_link's
+    // bump-erase-sweep, which holds this lock exclusively (#827). Without that, the sweep can
+    // still run between the two and the check answers about a state the bind then leaves.
+    // Lock order registry -> table is the one clear_link and ingress_count already establish.
+    const std::shared_lock reg(links_m_);
+    // `bound_generation_matches` rather than `==`, for the reason RFC-0024 §4.4 gives: at the
+    // ceiling the counter STOPS, so a saturated epoch would compare equal forever and this
+    // guard would be permanently dead. Refusing at saturation instead costs a node that has
+    // seen 2^32 link clears its compacted FORWARDING only — every flow through it degrades to
+    // the full-route FWD form, which carries its own route and always works. That is the same
+    // degrade an exhausted label space already takes (#603), and it is the safe direction: the
+    // alternative is a swap bound against a table that no longer exists, which is #716.
+    if (!graph::bound_generation_matches(link_epoch_locked(binding.down_link), down_epoch))
+        return false;
+    const std::lock_guard lock(t->m);
+    return bind_locked(*t, label, std::move(binding));
 }
 
 std::optional<handle_binding_t> route_handle_t::lookup_ingress(std::string_view in_link,
@@ -214,6 +261,17 @@ void route_handle_t::clear_link(std::string_view link) {
     // mints a fresh entry — exactly the clean slate the self-heal wants. Erasing bounds
     // `links_` to LIVE link names instead of retaining an empty shell per departed name.
     const std::unique_lock lock(links_m_);
+    // Advance the clear epoch BEFORE the erase, and under the same exclusive lock the erase,
+    // the sweep and every table creation take (#827). That makes the whole of this call
+    // indivisible against `bind_ingress_forward`: an in-flight advertise either binds entirely
+    // before it (and the sweep below erases the binding) or reads an epoch that has already
+    // moved (and is refused). There is no third interleaving, which is what the sweep alone
+    // could not say — it can only erase bindings that already exist.
+    //
+    // Saturating, not wrapping (`saturating_next_generation`, RFC-0024 §4.4). A wrapped
+    // counter would let a swap minted 2^32 clears ago compare equal to a live link and bind
+    // against tables that died long before — the misroute the whole guard exists to refuse.
+    clear_gen_ = graph::saturating_next_generation(clear_gen_);
     if (const auto it = links_.find(link); it != links_.end()) links_.erase(it);
     // The CROSS-LINK half (#716). Erasing `link`'s own tables is not the whole clean slate: a
     // forwarding binding is stored under the INBOUND link while `down_link` names the OUTBOUND

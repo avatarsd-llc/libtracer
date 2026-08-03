@@ -204,8 +204,8 @@ defines for "exceeds this receiver's decode resources".
 | Branch-write root key render (`try_build_key`) | `core/src/graph.cpp:1138-1139` | `false` → `BACKPRESSURE` |
 | Branch-write parse-key copy (`detail::try_assign`) | `core/src/graph.cpp:1141` | `false` → `BACKPRESSURE` |
 | Branch-write decode arena | `core/src/graph.cpp:1119-1122` | decode error → `TYPE_MISMATCH` |
-| Per-delivery COMPACT flatten (egress) | `core/src/fwd_router.cpp:1689-1690` | the delivery is **dropped** |
-| Per-delivery frame build | `core/src/fwd_router.cpp:1694` | the delivery is **dropped** |
+| Per-delivery COMPACT flatten (egress) | `core/src/fwd_router.cpp:1701-1702` | the delivery is **dropped** |
+| Per-delivery frame build | `core/src/fwd_router.cpp:1706` | the delivery is **dropped** |
 | Ingress `ADVERTISE` route flatten | flatten `core/src/fwd_router.cpp:1333-1334`, answered at `:1341` | the empty flatten **fails the `wire::decode`** ⇒ the frame is **dropped**; the label stays **unbound** (the peer's COMPACTs draw a `HANDLE_NACK`) |
 | Ingress `COMPACT` payload flatten | flatten `core/src/fwd_router.cpp:1354`, answered at `:1361` | the delivery is **dropped**; the subscriber keeps its last-known value |
 | Bus-name rejection reply flatten (cold) | flatten `core/src/fwd_router.cpp:954`, answered by the `wire::decode` opening `reject_bus_name_hop` | the frame is **dropped** by value — no reply |
@@ -262,7 +262,7 @@ The remote-delivery leg answers differently on purpose. A stored write that reac
 succeeded; the fan-out to one subscriber is a separate obligation, and a subscriber missing
 one value under heap exhaustion is valid delivery behaviour where failing the write is not. Every
 per-delivery allocation on that writer-thread leg is nothrow, and a failed flatten or frame build
-drops that one delivery (`core/src/fwd_router.cpp:1689-1690`). Dropping *invisibly* is the part that
+drops that one delivery (`core/src/fwd_router.cpp:1701-1702`). Dropping *invisibly* is the part that
 needs an answer, which is why `graph_t::delivery_drops()` exists
 (`core/include/libtracer/graph.hpp:1034`): three relaxed monotonic counters — `no_target`, `denied`,
 `out_of_memory` (`graph.hpp:1017-1023`) — incremented only on a drop, so the delivering path is
@@ -270,7 +270,7 @@ byte-identical while nothing drops. Nothing in the library reads them; a deploym
 to alarm.
 
 A dropped fresh ADVERTISE on the COMPACT leg self-heals: the peer answers the unknown label with
-`HANDLE_NACK` and the next delivery re-advertises (`fwd_router.cpp:1675`).
+`HANDLE_NACK` and the next delivery re-advertises (`fwd_router.cpp:1687`).
 
 ## Legs that throw, and their nothrow twins
 

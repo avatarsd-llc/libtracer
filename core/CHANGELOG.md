@@ -166,6 +166,29 @@ without it.
 
 ### Fixed
 
+- **A reconnect landing *inside* an in-flight `ADVERTISE` no longer binds a stale forwarding
+  swap** (#827). `route_handle_t::clear_link(L)`'s cross-link sweep (#716) can only erase
+  bindings that already exist. An `on_advertise` running on another link's receive thread
+  mints its out-label and retains its egress route against `L`'s pre-clear tables and binds
+  the swap *afterwards* — after the sweep has already scanned its inbound link — so the
+  binding lands aimed at exactly the out-label the sweep existed to invalidate. That is
+  #716's permanent silent drop, recreated through a microsecond window: the downstream
+  `HANDLE_NACK`s a label `on_nack` can no longer answer and the upstream never learns.
+  **Two additions to `route_handle_t`, both cold-path:** `link_epoch(link)` returns an opaque
+  clear-epoch token for a link, and `bind_ingress_forward(in_link, label, binding,
+  down_epoch)` binds a *forwarding* swap only if that token still names the downstream tables
+  the label was minted against, refusing otherwise. `clear_link` advances the epoch, and the
+  epoch read and the bind are one critical section against it, so there is no interleaving in
+  which a binding outlives the tables it names. `bind_ingress` is unchanged and remains the
+  call for terminus bindings, which have no downstream half. A refusal is **not** counted in
+  `refused_bindings` (which means "at the injected bound") and is not silent: the peer's next
+  `COMPACT` misses and fires the stale-label observer, prompting a re-advertise — the
+  recovery cascade and the wire surface are the ones #716 already specified. The counter
+  saturates rather than wraps, per RFC-0024 §4.4; at the ceiling forwarding swaps stop being
+  bound and flows degrade to the full-route `FWD` form, the same degrade an exhausted label
+  space takes. The per-delivery path is untouched — `resolved` / `cache_resolution` /
+  `on_compact` disassemble to the same instruction streams.
+
 - **The terminus reply head + mint no longer draw from the global heap.** The `FWD{REPLY}`
   egress-construction segments — the head (peer-driven size: the swapped route bytes plus the
   inline tail) and, on an RFC-0024 mint, the trailing 12-byte `PATH_REF` — were built by
