@@ -293,6 +293,21 @@ exhaustion **drops the hop rather than emitting the entries that fit**: a partia
 FWD on the wire, which is strictly worse than silence, and FWD is not delivery-guaranteed so the
 sender retries.
 
+One leg still has **no** nothrow twin, and the rule at the top of this page is violated there today.
+`route_handle_t::ensure_egress` grows the per-link egress table with a
+`std::pmr::vector<std::byte>` built from the injected `std::pmr::memory_resource`
+(`core/src/route_handle.cpp:236-237`) — and `std::pmr` reports exhaustion by throwing, because
+throwing is the only channel it has. `deliver_remote` reaches it on every fresh remote subscription
+(`core/src/fwd_router.cpp:1691`), and `on_advertise` reaches the same tables **from a peer's bytes
+before any ACL check** — the only `graph_.allows` in that file guards the RFC-0024 bound-path
+forward, not label admission. Neither bound that would cap the growth is set by any in-tree
+construction site; both default to `0 = unbounded`. Tracked by
+[#603](https://github.com/avatarsd-llc/libtracer/issues/603), which also carries the design
+question (which block source, and the public shape of `handle_binding_t`).
+
+It is named here rather than left implicit: a normative "none may abort" with an unstated live
+exception is worse than no rule, because it invites the next reader to assume the seam is closed.
+
 ## The host TX gather
 
 A host integration that marshals sends onto a separate task must copy the caller's spans before

@@ -239,11 +239,13 @@ flowchart TB
   exhaustion by value, and folding it into `flat` would silently re-scope an injection callers have
   already sized — see
   [failable allocation and backpressure](../design/allocation-and-backpressure.md)).
-- **Delivery is nothrow and drops rather than aborts.** Every per-delivery allocation on the writer
-  thread is failable: a failed flatten, frame build or `iovec` reserve **drops that one delivery**
-  — a subscriber misses a value under exhaustion, which is valid delivery behaviour — instead of
-  raising an exception that `-fno-exceptions` would turn into `abort()`. A dropped fresh
-  `ADVERTISE` self-heals through the peer's `HANDLE_NACK`. See
+- **The delivery leg's byte allocations drop rather than abort — with one exception.** A failed
+  flatten, frame build or `iovec` reserve **drops that one delivery** — a subscriber misses a value
+  under exhaustion, which is valid delivery behaviour — instead of raising an exception that
+  `-fno-exceptions` would turn into `abort()`. A dropped fresh `ADVERTISE` self-heals through the
+  peer's `HANDLE_NACK`. The exception is the label-table growth reached through `ensure_egress`,
+  which still allocates from a `std::pmr` resource and therefore throws: see
+  [#603](https://github.com/avatarsd-llc/libtracer/issues/603) and
   [failable allocation and backpressure](../design/allocation-and-backpressure.md).
 - **Per-frame sinks are a function pointer plus a context, not `std::function`**
   ([ADR-0047 — build-time closed module sets and compile-time seams](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md)).
