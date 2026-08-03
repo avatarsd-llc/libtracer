@@ -828,17 +828,22 @@ inline constexpr std::size_t kFwdSrcHdrCap = 6;
  * put a per-frame allocation on every deep-mount forward hop while `bench_forward_heap` still
  * reported `allocs=0`, because that gate drives a stub link which never assembles an iovec.
  *
- * At 11 the headroom to the transport spill is **6 regions**. Keep the mount one span and this
+ * At 9 the headroom to the transport spill is **8 regions**. Keep the mount one span and this
  * constant does not move when the descent is uncapped.
  *
- * The last two are the bound-path mint accumulation (RFC-0024 §7.1), and they cost nothing on
- * any other frame: a forwarded REPLY carrying a trailing `PATH_REF` splits its tail into the
- * bytes before that child, this hop's own 12-byte head-plus-element (10), and the elements
- * already there (11). A REPLY grows no `src`, so regions 5-7 are empty on exactly the frames
- * that use 10-11 and the *reachable* maximum is unchanged — the constant is the array bound,
- * not a prediction.
+ * **The bound-path mint accumulation (RFC-0024 §7.1) does not move it either**, and this is
+ * counted rather than assumed. A forwarded REPLY's mint adds two regions — this hop's 12-byte
+ * head-plus-element, and the elements already on the wire — but a REPLY grows no `src`, so the
+ * mount run and the bus peer's header-and-segment pair (regions 5-7) are empty on exactly the
+ * frames that use them. The two sets are mutually exclusive by `is_reply`: a REQUEST emits at
+ * most head1, remaining dst, selector, head2, mount, peer header, peer segment, `src` body and
+ * tail = **9**; a REPLY at most head1, remaining dst, selector, head2, `src` body, tail, mint
+ * head and mint elements = **8**. It was briefly raised to 11 by adding the two sets together,
+ * which is a bound no frame can reach — and the constant is measured, not defensive: the
+ * change moved code placement enough to cost `bench_forward_rope` a disjoint **+13% at fan 2**
+ * in branch mispredicts, on a shape that emits none of the regions it was raised for.
  */
-inline constexpr std::size_t kFwdMaxIov = 11;
+inline constexpr std::size_t kFwdMaxIov = 9;
 
 /**
  * @brief The rebuilt forward-hop frame: fresh stack heads + the untouched source
@@ -928,6 +933,56 @@ struct fwd_rebuild_t {
         }
     }
 };
+
+/**
+ * @brief The mint accumulation half of a forwarded REPLY's rebuild (RFC-0024 §7.1 step 2),
+ *        deliberately kept OUT OF LINE.
+ *
+ * `noinline` against @ref rebuild_fwd_forward's `flatten`, and it is a measurement, not a
+ * preference. `flatten` pulls everything a function calls into it, so inlined this dragged
+ * @ref peek_reply_mint's header loop into the rebuild's body — on the branch a REQUEST hop
+ * never takes. The extra front end that bought cost `bench_forward_rope` **+13% at fan 2** in
+ * branch mispredicts (3x armA's count under `perf stat`, on ~equal instructions): a shipped
+ * shape paying for a form its frames cannot be. Out of line, the request hop sees one
+ * not-taken branch and the rope arm measures at or below `main` at every fan.
+ *
+ * Writes @p r's tail and mint fields; @return the bytes this hop's element adds to the body,
+ * or 0 when it contributes nothing — which INCLUDES the strip cases (no element to give, or a
+ * list already at the cap). A reply with no mint answer at all leaves @p r untouched.
+ */
+template <class Cursor, class MintFn>
+[[gnu::noinline]] std::size_t rebuild_reply_mint(const Cursor& cur, std::size_t pos,
+                                                 std::size_t body_end, MintFn& mint_fn,
+                                                 fwd_rebuild_t& r) {
+    const std::optional<reply_mint_t> found = peek_reply_mint(cur, pos, body_end);
+    if (!found) return 0;
+    // The tail stops short of the mint answer either way: this hop re-heads it one element
+    // longer, or removes it. It is never relayed untouched.
+    r.tail_len = found->pos > pos ? found->pos - pos : 0;
+    // The ONE call, made only now that the frame is known to carry an extendable answer. A
+    // list already at the cap is NOT extendable, so it strips with everything else this hop
+    // cannot contribute to.
+    const std::optional<wire::path_ref_element_t> mint =
+        found->can_contribute ? mint_fn() : std::nullopt;
+    // STRIP, and it is a SAFETY rule rather than tidiness (RFC-0024 §7.1, car-3 erratum).
+    // Every cannot-contribute case lands here — no connection vertex, a saturated or retired
+    // generation, and a full list — because the erratum names them together and they have one
+    // safe outcome between them. A list that skips a hop is not a shorter route, it is a WRONG
+    // one: the origin would consume its own element, send a list one element short, and the
+    // hop that could not contribute would find exactly one element left, believe itself the
+    // terminus, and dereference an element minted on a DIFFERENT host against its own vertex
+    // map — where the same index and generation are an ordinary live vertex. That is a
+    // mis-route, which the design refuses outright. The origin sees an ordinary reply, stays
+    // canonical, and loses nothing but the optimisation.
+    if (!mint) return 0;
+    r.ref_body_off = found->pos + 4;  // LL = 0 is a MUST, so the header is 4 bytes
+    r.ref_body_len = found->body_len;
+    r.mint.header_bare(wire::type_t::PATH_REF, r.ref_body_len + wire::kPathRefElementBytes);
+    std::array<std::byte, wire::kPathRefElementBytes> e{};
+    wire::path_ref_store_element(e, *mint);
+    r.mint.raw(e);
+    return wire::kPathRefElementBytes;
+}
 
 /**
  * @brief The forward hop's head rebuild, read entirely by OFFSET — no decoded
@@ -1068,42 +1123,9 @@ template <class Cursor, class MintFn = no_mint_t>
     // reply's trailing `PATH_REF` is re-headed one element longer and this hop's element goes
     // in front. A request is never touched — the mint request costs zero request bytes, which
     // is the whole point of putting the flag in the op byte (§7.5).
-    std::size_t mint_growth = 0;
-    if (is_reply) {
-        if (const std::optional<reply_mint_t> found = peek_reply_mint(cur, pos, body_end)) {
-            // The tail stops short of the mint answer either way: this hop re-heads it one
-            // element longer, or removes it. It is never relayed untouched.
-            r.tail_len = found->pos > pos ? found->pos - pos : 0;
-            // The ONE call, made only now that the frame is known to carry an extendable
-            // answer. A list already at the cap is NOT extendable, so it takes the strip
-            // branch below with everything else this hop cannot contribute to.
-            const std::optional<wire::path_ref_element_t> mint =
-                found->can_contribute ? mint_fn() : std::nullopt;
-            if (mint) {
-                r.ref_body_off = found->pos + 4;  // LL = 0 is a MUST, so the header is 4 bytes
-                r.ref_body_len = found->body_len;
-                r.mint.header_bare(wire::type_t::PATH_REF,
-                                   r.ref_body_len + wire::kPathRefElementBytes);
-                std::array<std::byte, wire::kPathRefElementBytes> e{};
-                wire::path_ref_store_element(e, *mint);
-                r.mint.raw(e);
-                mint_growth = wire::kPathRefElementBytes;
-            }
-            // else: STRIP the mint answer, and this is a SAFETY rule, not tidiness (RFC-0024
-            // §7.1, car-3 erratum). Every cannot-contribute case lands here — no connection
-            // vertex, a saturated or retired generation, AND a list already at the element cap
-            // — because the erratum names them together and they have one safe outcome
-            // between them. A list that skips a hop is not a shorter route, it is a
-            // WRONG one: the origin would consume its own element, send a list one element
-            // short, and the hop that could not contribute would find exactly one element
-            // left, believe itself the terminus, and dereference an element minted on a
-            // DIFFERENT host against its own vertex map — where index 2 generation 0 is an
-            // ordinary vertex on both. That is a mis-route, which the design refuses
-            // outright. A hop that cannot mint therefore refuses the whole exchange: the
-            // origin sees an ordinary reply, stays canonical, and loses nothing but the
-            // optimisation.
-        }
-    }
+    // The mint half is a CALL, never inlined here (see `rebuild_reply_mint`).
+    const std::size_t mint_growth =
+        is_reply ? rebuild_reply_mint(cur, pos, body_end, mint_fn, r) : 0u;
 
     // The K leading dst segments (NAMEs) this hop consumes. The peek already walked exactly
     // these, so a caller that recorded where they end hands the answer over; `strip_at` below

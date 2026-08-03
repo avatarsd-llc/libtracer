@@ -132,15 +132,23 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 - **`net::peek_fwd_dst_any` + `net::fwd_dst_kind_t`, `net::peek_fwd_dst_ref`,
   `net::read_path_ref_element`, `net::peek_reply_mint` + `net::reply_mint_t`,
   `net::no_mint_t` and `stack_writer::header_bare`** in `fwd_frame_view.hpp`; `fwd_pre_t`
-  gains `dst_ref`, `fwd_rebuild_t` gains the mint accumulation fields. `kFwdMaxIov` moves
-  9 → 11 (the two regions a re-headed mint answer adds; a REPLY grows no `src`, so the
-  reachable maximum is unchanged).
+  gains `dst_ref`, `fwd_rebuild_t` gains the mint accumulation fields. **`kFwdMaxIov` stays
+  9**: the mint's two regions and the mount run's three are mutually exclusive by `is_reply`,
+  so the counted maximum is 9 for a request and 8 for a reply. It was briefly raised to 11 by
+  adding the two sets together — a bound no frame can reach — and that alone moved code
+  placement enough to cost `bench_forward_rope` a disjoint +13% at fan 2 in branch mispredicts.
+  The constant is counted from `gather`'s emit sequence, and it is measured.
   `peek_fwd_dst_any` is the routing gate both forms now share: it classifies a frame's `dst`
   as canonical `PATH`, bound `PATH_REF` or neither in ONE read of the three leading headers.
   `peek_fwd_dst` and `peek_fwd_dst_ref` keep their spellings as its two arms, for callers with
   only one of the questions to ask. **The router asks once** — running the two gates in
   sequence put a whole second header walk on every bound frame and measured a bound terminus
   slower than the canonical terminus it is meant to beat.
+- **The mint accumulation is an out-of-line call (`net::rebuild_reply_mint`).**
+  `rebuild_fwd_forward` carries `flatten`, which pulled `peek_reply_mint`'s header loop into
+  its body on a branch a REQUEST hop never takes; the front end that bought cost the rope
+  forward hop a disjoint +13% at fan 2. `noinline` on the helper puts one not-taken branch on
+  the request path instead.
 - **`rebuild_fwd_forward` takes a mint SUPPLIER, not a mint element** — a callable defaulting
   to `no_mint_t`, invoked at most once and only on a forwarded REPLY that carries an
   extendable mint answer. Eager evaluation meant reading the frame's op byte a second time on
