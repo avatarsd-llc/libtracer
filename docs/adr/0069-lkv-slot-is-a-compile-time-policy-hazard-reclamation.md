@@ -121,8 +121,31 @@ Ablated (`has_registered_child` short-circuited to `return false`, otherwise the
 
 So there are **two** independent limits, and the first one was invisible because the second hid it:
 
-- **Every `graph_t::read` takes `map_mutex_` in shared mode**, before it reaches the slot — `graph_t::read` called `graph_t::has_registered_child`, which takes it (`graph.cpp:727-728`, still there for its other callers) to decide the leaf/branch fork. One process-wide reader-writer lock therefore caps *all* reads at roughly **20 M/s per process regardless of core count or topology**, which is why the healthy distinct-vertex shape looked flat. `write_impl` takes no map lock, which is the whole of the "writes scale 5×, reads do not" asymmetry. This is a larger finding than anything else in §6, and it is now **fixed** ([#652](https://github.com/avatarsd-llc/libtracer/issues/652)): the fork is a bit on the vertex (`graph.cpp:831`, `v->has_registered_child()`), and twenty-four readers on distinct vertices went **19.7 → 163.5 M ops/s (8.28×)** — 99% of the ablation ceiling below. Nothing about the slot changed and nothing about the shared-vertex shape moved, which is exactly what the two-independent-limits reading predicts.
+- **Every `graph_t::read` takes `map_mutex_` in shared mode**, before it reaches the slot — `graph.cpp:695` calls `has_registered_child`, which takes it at `:704` to decide the leaf/branch fork. One process-wide reader-writer lock therefore caps *all* reads at roughly **20 M/s per process regardless of core count or topology**, which is why the healthy distinct-vertex shape looked flat. `write_impl` takes no map lock, which is the whole of the "writes scale 5×, reads do not" asymmetry. This is a larger finding than anything else in §6, and it is now **fixed** ([#652](https://github.com/avatarsd-llc/libtracer/issues/652)): the fork is a bit on the vertex, and twenty-four readers on distinct vertices went **19.7 → 163.5 M ops/s (8.28×)** — 99% of the ablation ceiling below. Nothing about the slot changed and nothing about the shared-vertex shape moved, which is exactly what the two-independent-limits reading predicts.
 - **On one shared vertex the map lock is not the binding constraint** — removing it changes nothing (0.94×). There the limit is the vertex itself, and on a read shape the only line every reader *modifies* is the rope's control block: the promotion §5 called irreducible for an owning read. Hazard reclamation moved that shape from 1.7 to 7.4 M/s and left the promotion untouched, so the scoped read (#649) remains the next lever **for that shape**. It is not the lever for the distinct-vertex ceiling, which no slot policy can touch.
+
+> **Erratum (2026-08-04): the first bullet's two pins are of their date, and must not be
+> re-pinned.** As authored on 2026-07-30 they read `graph.cpp:697` — the
+> `if (has_registered_child(v))` fork inside `graph_t::read` — and `:706`, that function's
+> `const std::shared_lock lock(map_mutex_)`. Both were exact for the tree of that day, and the
+> finding they support stands. What has since happened to them is the rot this erratum exists to
+> stop: [#652](https://github.com/avatarsd-llc/libtracer/issues/652) **deleted**
+> `graph_t::has_registered_child` the same day, and four later mechanical re-pins walked the
+> numbers forward anyway — `:668`, `:670`, `:685`, and finally the `:695`/`:704` printed above —
+> every one of them long after the function they name was gone. A line number was carried
+> forward; the fact it pointed at was not re-read. There is no member
+> `graph_t::has_registered_child` in the tree; the surviving
+> predicate is `vertex_t::has_registered_child()`
+> (`core/include/libtracer/vertex.hpp:1378`), an acquire load of a flag on the vertex, consulted
+> at `core/src/graph.cpp:831` under **no** lock. `vertex.hpp:1361` records the move in the
+> source itself.
+>
+> Beware the near-miss that invites a third bad re-pin: `core/src/graph.cpp:727` today is
+> `graph_t::has_first_level_child`, which *does* take `map_mutex_` shared at `:728` and is *not*
+> the function this bullet names — it is the #373 first-level shadow guard, a public `graph_t`
+> member (`core/include/libtracer/graph.hpp:990`) with **no in-tree caller**, whose retirement
+> [ADR-0061](0061-per-transport-mount-routing-strip-k-l5-demux.md) still lists as open. Pointing
+> this bullet at it would assert a call `graph_t::read` does not make.
 
 **Which points at the next lever, and it is not a reclamation scheme.** Of the four `read_stored()` call sites, only `read_subtree_folded` (`graph.cpp:2096`, its `read_stored()` at `:2151`) keeps the handle; the other three — the leaf read, `deliver_current`, and `await`'s return — are `const shared_ptr sp = v->read_stored(); … use *sp …` and drop it before returning. A **scoped** read that hands back a guard instead of an owning handle would skip the promotion entirely on those three, which is the non-owning contract the `hazard` arm measured at 2,357 M/s. That is an API question, not a slot question, and it is where the rest of this read lives.
 
