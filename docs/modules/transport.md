@@ -339,7 +339,35 @@ computation — is pure and lives in `tr::net::ws`:
 :project: libtracer
 ```
 
+```{doxygenfunction} tr::net::ws::decode_frame_checked
+:project: libtracer
+```
+
+```{doxygenvariable} tr::net::ws::kMaxControlPayload
+:project: libtracer
+```
+
 ```{doxygenfunction} tr::net::ws::encode_frame
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::ws::encode_frame_header
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::ws::encode_server_control
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::ws::encode_client_control
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::ws::encode_client_frame
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::ws::try_encode_client_frame
 :project: libtracer
 ```
 

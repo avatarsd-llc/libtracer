@@ -124,6 +124,10 @@ with its platform's blocking primitive.
 :project: libtracer
 ```
 
+```{doxygenfunction} tr::net::can::encode_advertise_header
+:project: libtracer
+```
+
 ```{doxygenfunction} tr::net::can::encode_advertise
 :project: libtracer
 ```
