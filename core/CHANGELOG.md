@@ -14,6 +14,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-08-04
+
 ### Added
 
 - **`graph_t::has_subscribers(vertex_handle_t)` — the demand-driven producer's DELIVERY gate**
