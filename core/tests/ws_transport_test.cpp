@@ -163,6 +163,97 @@ bool raw_handshake(int cfd) {
 }
 
 /**
+ * @brief A peer is OPEN to senders the instant its `101` is on the wire — the handshake
+ *        window is closed, proven by holding it open rather than by racing for it.
+ *
+ * `service_peer` writes the `101 Switching Protocols` response and publishes the slot
+ * (`open = true`) inside ONE `write_m_` critical section. Store `open` after that lock is
+ * released and there is a window in which the peer has already read the response — so it
+ * believes the connection is up — while every `send` still skips the slot as not-open and
+ * the frame goes nowhere. In production that window is a few instructions and shows up only
+ * as an occasional lost first frame (it went from 0/40 to 1/40 the moment #848 made the
+ * server egress fast enough to reach `send` inside it), which is exactly the kind of fix a
+ * racing test cannot pin.
+ *
+ * So this test does not race: `detail::ws_peer_published_hook` PARKS the server's poll
+ * thread at the instant after the response write, the test does its whole `send` inside that
+ * parked window, and only then releases it. With the store inside the lock the send lands
+ * and the client decodes the frame; with the store moved back out, the identical sequence
+ * reads an empty socket until the budget expires. Deterministic in both directions.
+ */
+void test_peer_open_before_response_is_readable() {
+    std::printf("transport_ws server — a peer is open to senders the instant its 101 lands:\n");
+
+    tr::net::transport_ws_server server(0);
+    check(server.ok(), "listen socket bound");
+
+    // The parked window. `reached` is set on the server's poll thread; `released` is set by
+    // this thread once its send has been made.
+    std::mutex m;
+    std::condition_variable cv;
+    bool reached = false;
+    bool released = false;
+    bool armed = true;  // one-shot: later peers (none here) must not park
+    struct hook_state_t {
+        std::mutex* m;
+        std::condition_variable* cv;
+        bool* reached;
+        bool* released;
+        bool* armed;
+    };
+    static hook_state_t s_state{};  // the hook is a plain function pointer: no capture
+    s_state = hook_state_t{&m, &cv, &reached, &released, &armed};
+
+    /** @brief Clears the seam however this test leaves. */
+    struct hook_guard_t {
+        ~hook_guard_t() { tr::net::detail::ws_peer_published_hook = nullptr; }
+    } const guard;
+
+    tr::net::detail::ws_peer_published_hook = [] {
+        std::unique_lock lock(*s_state.m);
+        if (!*s_state.armed) return;
+        *s_state.armed = false;
+        *s_state.reached = true;
+        s_state.cv->notify_all();
+        // Park the handshake here until the test has sent. Bounded so a broken build fails
+        // the assertions rather than hanging the suite.
+        s_state.cv->wait_for(lock, 5s, [] { return *s_state.released; });
+    };
+
+    const int cfd = tcp_connect(server.local_port());
+    check(cfd >= 0 && raw_handshake(cfd), "raw client connected + 101 handshake");
+
+    {
+        std::unique_lock lock(m);
+        check(cv.wait_for(lock, 2s, [&] { return reached; }),
+              "the server reached the instant just past the 101 write");
+    }
+
+    // The whole send happens INSIDE the parked window: nothing but the publish-under-lock
+    // can make this frame reach the peer.
+    const std::array<std::byte, 4> payload{std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE},
+                                           std::byte{0xEF}};
+    server.send(std::span<const std::byte>(payload));
+
+    {
+        const std::lock_guard lock(m);
+        released = true;
+    }
+    cv.notify_all();
+
+    const auto got = read_until(
+        cfd, [](const std::vector<std::byte>& b) { return ws::decode_frame(b).has_value(); }, 2s);
+    const auto dec = ws::decode_frame(got);
+    check(dec.has_value(), "the frame sent in that instant REACHED the peer");
+    if (dec)
+        check(dec->first.payload.size() == payload.size() &&
+                  std::memcmp(dec->first.payload.data(), payload.data(), payload.size()) == 0,
+              "and it is byte-identical to what was sent");
+
+    ::close(cfd);
+}
+
+/**
  * @brief A fragmented message reaches the OWNING sink as the rope its fragments already are — one
  *        owning link per fragment, chained, never memcpy'd flat (ADR-0053 §5) — with an interleaved
  *        control frame (PING) handled mid-message per RFC 6455.
@@ -712,6 +803,7 @@ void test_close_peer() {
 
 int main() {
     test_handshake_and_frames();
+    test_peer_open_before_response_is_readable();
     test_fragmented_message_rope();
     test_fragmented_message_span();
     test_scatter_gather_send();

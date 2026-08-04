@@ -114,11 +114,16 @@ ANCHORS = [
     ("core/include/libtracer/view.hpp:26", "namespace tr::view"),
     ("core/include/libtracer/frame.hpp:23", "namespace tr::wire"),
     ("core/include/libtracer/graph.hpp:44", "namespace tr::graph"),
-    ("core/include/libtracer/transport.hpp:29", "namespace tr::net"),
+    ("core/include/libtracer/transport.hpp:31", "namespace tr::net"),
     ("core/include/libtracer/backend.hpp:40", "enum class io_dir_t"),
     ("core/include/libtracer/backend.hpp:101", "class mem_backend_t"),
     ("core/include/libtracer/backend.hpp:145", "before_io"),
     ("core/include/libtracer/grammar.hpp:220", "receiver-resource depth bound"),
+    # CONTEXT.md quotes the AMENDED meaning of `nesting_too_deep` twice. Its citation was
+    # `:210-216` — right until `24ea6d5` inserted the PATH_REF codec above and shifted the
+    # whole block +10, after which it landed on `walk_frame_t` and no doc pinned it.
+    ('core/include/libtracer/grammar.hpp:230',
+     '`TLV_NESTING_TOO_DEEP` ("exceeds this receiver'),
     ("core/src/graph.cpp:1123", "!arena"),
     ("core/include/libtracer/segment.hpp:78", "struct segment_t"),
     # --- the design + module pages (#728). Every one of these had drifted. ---
@@ -390,11 +395,11 @@ ANCHORS = [
     ('core/include/libtracer/tlv_arena.hpp:115',
      '* NOTHROW end to end (#588). This function is on the wire RX path and reachable'),
     # core/include/libtracer/transport.hpp
-    ('core/include/libtracer/transport.hpp:33', 'using peer_id_t = std::array<std::byte, 16>;'),
-    ('core/include/libtracer/transport.hpp:63', 'class bus_link_t {'),
-    ('core/include/libtracer/transport.hpp:254',
+    ('core/include/libtracer/transport.hpp:35', 'using peer_id_t = std::array<std::byte, 16>;'),
+    ('core/include/libtracer/transport.hpp:65', 'class bus_link_t {'),
+    ('core/include/libtracer/transport.hpp:256',
      'virtual void send(std::span<const std::span<const std::byte>> iov) {'),
-    ('core/include/libtracer/transport.hpp:333',
+    ('core/include/libtracer/transport.hpp:353',
      '[[nodiscard]] virtual bool delivers_ropes() const { return false; }',
      'rx_.set_rope([](void* c, view::rope_t f) { (*static_cast<F*>(c))(std::move(f)); }, &sink);'),
     # core/include/libtracer/transport_can.hpp
@@ -429,12 +434,12 @@ ANCHORS = [
     ('core/include/libtracer/transport_webtransport.hpp:156',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }'),
     # core/include/libtracer/transport_ws.hpp
-    ('core/include/libtracer/transport_ws.hpp:139',
+    ('core/include/libtracer/transport_ws.hpp:167',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'void send(std::span<const std::span<const std::byte>> iov) override;'),
-    ('core/include/libtracer/transport_ws.hpp:141',
+    ('core/include/libtracer/transport_ws.hpp:169',
      '/** @brief The @ref bus_link_t facet (ADR-0044) when constructed `peer_named`,'),
-    ('core/include/libtracer/transport_ws.hpp:297',
+    ('core/include/libtracer/transport_ws.hpp:325',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'transport_ws_client& operator=(const transport_ws_client&) = delete;'),
     # core/include/libtracer/vertex.hpp
@@ -545,17 +550,22 @@ ANCHORS = [
     ('core/src/tlv_arena.cpp:130', 'std::array<grammar::walk_frame_t<grammar::span_cursor>, 8> slots;'),
     ('core/src/tlv_arena.cpp:131', 'grammar::walk_stack_t<grammar::span_cursor> stack(slots, &src);'),
     # core/src/transport_tcp.cpp
-    ('core/src/transport_tcp.cpp:54',
+    ('core/src/transport_tcp.cpp:59',
      '*        MEASURED (`bench_transport_iov`): the fallback fires at exactly **17'),
-    ('core/src/transport_tcp.cpp:57',
+    ('core/src/transport_tcp.cpp:62',
      "*        `bench_forward_heap`'s `allocs=0` gate cannot see it: that bench drives"),
-    ('core/src/transport_tcp.cpp:179', 'bool tcp_transport_t::read_exact(int fd, std::byte* dst, std::size_t len) {'),
-    ('core/src/transport_tcp.cpp:191', 'return false;  // hard error'),
-    ('core/src/transport_tcp.cpp:208', 'void tcp_transport_t::serve(int fd) {'),
-    ('core/src/transport_tcp.cpp:241', 'if (!read_exact(fd, seg->bytes.data(), len)) return;'),
-    ('core/src/transport_tcp.cpp:434', 'slot = slots_.back().get();'),
+    ('core/src/transport_tcp.cpp:181', 'bool tcp_transport_t::read_exact(int fd, std::byte* dst, std::size_t len) {'),
+    ('core/src/transport_tcp.cpp:201', 'std::array<std::byte, 4096> scratch;'),
+    # zero-copy-and-flatten.md quotes this comment's tail verbatim, so the anchor carries the
+    # QUOTED line — pinning `serve()`'s signature two constructs up passed while the citation
+    # pointed at code the doc never quotes.
+    ('core/src/transport_tcp.cpp:223',
+     '// buffer, no copy; feeding recv chunks through feed() would add one).'),
+    ('core/src/transport_tcp.cpp:243', 'if (!read_exact(fd, seg->bytes.data(), len)) return;'),
+    ('core/src/transport_tcp.cpp:457', 'std::array<std::byte, 4096> chunk;',
+     'void transport_tcp_server::service_peer(session_t& s) {'),
     # core/src/transport_udp.cpp
-    ('core/src/transport_udp.cpp:140',
+    ('core/src/transport_udp.cpp:138',
      'const std::size_t rx_cap = std::min(kMaxDatagram, backend_->max_segment_size());'),
     # core/src/transport_vertex.cpp
     ('core/src/transport_vertex.cpp:53',
@@ -570,16 +580,17 @@ ANCHORS = [
     ('core/src/transport_vertex.cpp:230',
      '// Compose the mount key: `<net_root>/<module>/<name>`, replacing the flat key the'),
     # core/src/transport_ws.cpp
-    ('core/src/transport_ws.cpp:61', 'std::optional<tr::view::rope_t> on_data(ws::opcode_t op, bool fin,'),
-    ('core/src/transport_ws.cpp:66', 'const std::optional<tr::view::view_t> link = tr::view::over_bytes(payload);'),
-    ('core/src/transport_ws.cpp:116', 'constexpr std::size_t kMaxServerIov = 16;'),
-    ('core/src/transport_ws.cpp:240', '// no flatten, no re-copy (server frames are UNMASKED, RFC 6455 §5.1). Lock'),
-    ('core/src/transport_ws.cpp:248',
+    ('core/src/transport_ws.cpp:62', 'std::optional<tr::view::rope_t> on_data(ws::opcode_t op, bool fin,'),
+    ('core/src/transport_ws.cpp:67', 'const std::optional<tr::view::view_t> link = tr::view::over_bytes(payload);'),
+    ('core/src/transport_ws.cpp:117', 'constexpr std::size_t kMaxServerIov = kMaxInlineIov;'),
+    ('core/src/transport_ws.cpp:237', '// no flatten, no re-copy (server frames are UNMASKED, RFC 6455 §5.1). Lock'),
+    ('core/src/transport_ws.cpp:245',
      'std::array<::iovec, kMaxServerIov + 1> inline_vec;',
-     'if (::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&bound), &blen) == 0)'),
-    ('core/src/transport_ws.cpp:357',
-     '// The routable NAME is the slot index — `p<slot>`, legal by construction and a'),
-    ('core/src/transport_ws.cpp:642', 'if (stop_.load(std::memory_order_relaxed)) return false;'),
+     'listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);'),
+    ('core/src/transport_ws.cpp:371', 'std::array<std::byte, 4096> chunk;',
+     'void transport_ws_server::service_peer(session_t& s) {'),
+    ('core/src/transport_ws.cpp:691', 'std::array<std::byte, 4096> chunk;',
+     'void transport_ws_client::serve(int fd) {'),
     # core/tests/registry_teardown_test.cpp
     ('core/tests/registry_teardown_test.cpp:289', 'void test_digest_paths_agree() {'),
     # core/tests/tlv_arena_test.cpp

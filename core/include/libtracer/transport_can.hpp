@@ -326,7 +326,9 @@ class transport_can : public transport_t, public bus_link_t {
 
     // --- egress helpers ---
     std::uint16_t alloc_base(std::size_t slice_count);  // requires tx_m_ held
-    void emit_advertise(const can::advertise_t& adv);   // requires tx_m_ held
+    // Slices adv's 18-byte header and cfg_.path (in place, never copied — this node only
+    // ever advertises its OWN path, so adv.path is left empty) into CLASSIC windows.
+    void emit_advertise(const can::advertise_t& adv);  // requires tx_m_ held
     void send_impl(std::span<const std::byte> frame, std::uint16_t target);
     void emit_hello();  // the join-time presence advertise (slice_count == 0)
 

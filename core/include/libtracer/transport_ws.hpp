@@ -10,12 +10,18 @@
  * thread — FreeRTOS stacks are the scarce resource on the MCU target). Each
  * peer runs the opening handshake (parse the HTTP Upgrade request, reply 101
  * Switching Protocols with ws::accept_key), then its byte stream is
- * ws::decode_frame()d into complete frames. Each BINARY message is one
- * libtracer frame (one TLV) handed to the receiver — tagged with the SENDING
- * peer's name through the bus_link_t facet (ADR-0044), so return routes name
- * the right browser tab; PING is answered with PONG, CLOSE tears that one
- * connection down. send(frame) broadcasts to every open peer (the flat
- * point-to-point surface); a directed per-peer send is peer_link(name)->send().
+ * ws::decode_frame_checked()d into complete frames — the same call on both the
+ * server and the client path. Each BINARY message is one libtracer frame (one
+ * TLV) handed to the receiver — tagged with the SENDING peer's name through the
+ * bus_link_t facet (ADR-0044), so return routes name the right browser tab; PING
+ * is answered with a stack-built PONG. Every connection dies down ONE path
+ * (transport_ws_server::teardown_slot, five call sites in `service_peer`): the
+ * peer closing the socket or a read error, at either phase; on an ESTABLISHED
+ * stream a CLOSE or an RFC 6455 violation the checked decode reports (an
+ * oversized or non-final control frame, §5.5/§7.1.7); during the opening
+ * HANDSHAKE a request that overruns 16 KiB or carries no `Sec-WebSocket-Key`.
+ * send(frame) broadcasts to every open peer (the flat point-to-point surface);
+ * a directed per-peer send is peer_link(name)->send().
  *
  * Both roles live here: transport_ws_server (accept inbound peers) and
  * transport_ws_client (dial out to a ws:// peer — device-to-device / NAT egress),
@@ -35,10 +41,32 @@
 #include <string_view>
 #include <vector>
 
+#include "libtracer/mem_source.hpp"
 #include "libtracer/posix_endpoint.hpp"
 #include "libtracer/transport.hpp"
 
 namespace tr::net {
+
+namespace detail {
+
+/**
+ * @brief TEST SEAM: run by `transport_ws_server::service_peer` at the exact instant a peer's
+ *        `101 Switching Protocols` response is on the wire AND its slot is published open.
+ *
+ * The handshake's two visible transitions — "the peer may believe the connection is up" and
+ * "a sender may use this slot" — are ONE step only because the `open` store sits inside the
+ * same `write_m_` critical section as the response write. That is not observable from the
+ * outside by racing: the window is a few instructions wide. This hook is where a test HOLDS
+ * that instant open, sends into it, and checks the frame arrives; with the store moved back
+ * out of the lock the identical test reads an empty socket. Null in production — the cost is
+ * one predictable null-check, once per accepted peer, on the (cold) handshake path.
+ *
+ * Same shape and same rules as `tr::detail::probe_fail_hook`: install it before the peer that
+ * should trip it connects, and clear it before the test returns.
+ */
+inline void (*ws_peer_published_hook)() = nullptr;
+
+}  // namespace detail
 
 /**
  * @brief Suggested module name for a DIAL `ws` connection (ADR-0073 §4).
@@ -306,6 +334,17 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
 
     // conn_fd_ + write_m_ (and their teardown discipline) live in stream_endpoint_t.
     std::atomic<std::uint64_t> mask_state_{0};
+    /**
+     * @brief The REUSED masked-frame buffer `send` encodes into, guarded by `write_m_`.
+     *
+     * A client frame must be masked (RFC 6455 §5.1), so its wire bytes are not the caller's
+     * bytes and cannot be gathered by reference — this is the one WS egress path that still
+     * needs a buffer. Reused across sends so the steady state allocates nothing, and drawn
+     * from the failable seam (ADR-0065) so exhaustion is a `nullptr` the send turns into a
+     * dropped frame, never the `abort()` a throwing grow becomes under `-fno-exceptions`
+     * (#848).
+     */
+    mem::block_array_t<std::byte> tx_buf_{mem::heap_source()};
     bool connected_ = false;
 };
 

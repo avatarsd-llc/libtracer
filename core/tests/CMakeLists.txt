@@ -132,6 +132,16 @@ target_link_libraries(transport_can_test PRIVATE libtracer)
 libtracer_test_warnings(transport_can_test)
 add_test(NAME transport_can COMMAND transport_can_test)
 
+# #848 — the transport EGRESS framing path soft-fails: a refusing allocator yields a
+# DROPPED FRAME AND A LIVE NODE (never abort()), across ws / tcp / udp / can, plus the
+# RFC 6455 §5.5 control-frame rules that make the PONG unfailable. This TU overrides the
+# global operator new with a fail-the-k-th-allocation injector, so it must stay its OWN
+# executable (the override is process-wide).
+add_executable(transport_alloc_softfail_test transport_alloc_softfail_test.cpp)
+target_link_libraries(transport_alloc_softfail_test PRIVATE libtracer)
+libtracer_test_warnings(transport_alloc_softfail_test)
+add_test(NAME transport_alloc_softfail COMMAND transport_alloc_softfail_test)
+
 # ADR-0044 — stateless transport-peer enumeration + transparent per-peer FWD over
 # the CAN bus binding: join hellos -> synthesized /net/can0:children[], directed
 # forwarding to an announced peer with the reply routed back, peer expiry, and the
