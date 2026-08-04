@@ -29,7 +29,7 @@ lock each stage takes, where the buffers come from, and what the delivery legs c
 
 The handle overload is the whole of `write(vertex_handle_t, rope_t, caller)`
 (`graph.cpp:1330-1332`) — a call straight into `write_impl`. A **path**-addressed write resolves
-first, and `find_ptr` takes `map_mutex_` in shared mode (`graph.cpp:613`), so the path overload
+first, and `find_ptr` takes `map_mutex_` in shared mode (`graph.cpp:663-664`), so the path overload
 (`graph.cpp:2364`) pays one shared map hold that the handle overload does not.
 
 Two allocation-shaped details on the store leg. A `HANDLER`-role write clones the rope before
@@ -48,7 +48,7 @@ graph. The edge list therefore has to be copied out first. `fan_out` (`graph.cpp
 in one call to `snapshot_edges` (`core/include/libtracer/vertex.hpp:1934`), which takes **no
 lock at all** (#635): it copies the vertex's PUBLISHED, immutable-after-publish edge array
 (`vertex.hpp:854`) into one of two buffers under a bounded per-participant **edge pin**
-(`core/include/libtracer/edge_pin.hpp:154`), and releases the pin before the caller's first
+(`core/include/libtracer/edge_pin.hpp:153`), and releases the pin before the caller's first
 `dispatch_edge`. The stripe mutex used to be taken here, which serialized the publishes of
 every vertex that merely hashed to the same stripe — ×16.6 at twenty-four threads
 ([ADR-0075](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0075-a-vertexs-edges-are-published-and-read-under-an-edge-pin.md)). It
@@ -171,8 +171,13 @@ rope link (`fwd_router.cpp:1725-1732`). The header is a `stack_writer<16>` — t
 most 6 bytes plus the 5-byte op TLV — and both constant TLVs are `constexpr` arrays with no
 runtime construction (`fwd_router.cpp:1722-1726`). The route bytes were copied once at subscribe
 time, so a delivery re-uses them by reference; a multi-link value crosses as its own segments,
-with no flatten. The iov vector is nothrow-reserved and an exhausted reserve drops that delivery
-rather than emitting a truncated frame (`fwd_router.cpp:1738-1739`).
+with no flatten. The iov vector is sized once up front through `tr::detail::try_reserve`, and a
+refused reserve drops that delivery rather than emitting a truncated frame
+(`fwd_router.cpp:1738-1739`). That helper is not a nothrow reserve: it probes, **frees the probe**,
+then runs the *throwing* `std::vector::reserve` inside a `noexcept` frame
+(`core/include/libtracer/mem_heap.hpp:116-121`). So the ordinary OOM becomes a drop, but a lost race
+on the just-freed block still terminates — [#850](https://github.com/avatarsd-llc/libtracer/issues/850),
+tabulated in [`../allocation-and-backpressure.md`](../allocation-and-backpressure.md).
 
 **The COMPACT leg is the one that flattens.** `const view_t flat = value.materialize(*flat_);`
 (`fwd_router.cpp:1701`) precedes the compact encode, because a COMPACT wraps a contiguous
@@ -280,7 +285,7 @@ read side of the same table is in [`00-scaling-and-serialization.md`](00-scaling
 `bench/bench_forward_demux`, 8 alternating rounds across two builds. The scan's marginal cost
 over a fixed-position hop falls **35 ns to ~0 at 8 links, 86 to 2 at 16, and 333 to 17 at 64
 links (95% removed)**, with the fixed-position hop itself unchanged within ±2 ns
-(`core/CHANGELOG.md:582-587`). The digest is a filter and never a decision — `live()` and the full
+(`core/CHANGELOG.md:430-435`). The digest is a filter and never a decision — `live()` and the full
 compare still gate every answer — and the two digest functions are pinned against each other
 directly by `test_digest_paths_agree`
 (`core/tests/registry_teardown_test.cpp:289`), because a disagreement would throw nothing and

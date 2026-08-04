@@ -19,7 +19,7 @@ The names below are the canonical type-code names; an implementation's own enume
 
 ### Structured TLVs
 
-Several core type codes are **structured** — they carry `opt.PL=1` and their payload is a concatenation of child TLVs. The structured types are: `0x04` SUBSCRIBER, `0x06` PATH, `0x07` POINT, `0x09` STATUS (when non-empty), `0x0A` ACL, `0x0B` SETTINGS, `0x0E` SPEC. Each entry below specifies its own children layout.
+Several core type codes are **structured** — they carry `opt.PL=1` and their payload is a concatenation of child TLVs. In the first block the structured types are: `0x04` SUBSCRIBER, `0x06` PATH, `0x07` POINT, `0x09` STATUS (when non-empty), `0x0A` ACL, `0x0B` SETTINGS, `0x0E` SPEC. In the fast-track range `0x0F` FWD, `0x10` FIELD and the `0x11`–`0x13` route-handle frames are structured as well (§the fast-track range); `0x14` PATH_REF is the one code in that range that is not. Each entry below specifies its own children layout.
 
 There is no generic container type: every structured container declares its purpose via its type code. User-range type codes (`0x80–0xFF`) MAY also be structured (set `opt.PL=1`) for application-defined records.
 
@@ -101,6 +101,8 @@ A single name segment. UTF-8 bytes, **no NUL terminator on the wire**.
 - Length: 1..64 bytes (per [03-addressing.md](03-addressing.md) §path syntax).
 - MUST NOT contain reserved characters (`/ : . [ ] * ?`).
 - MUST be valid UTF-8. Invalid byte sequences MUST be rejected with `ERROR{tr::path::invalid}`.
+
+> ⚠️ **Conformance gap — the reference implementation accepts `[` and `]` in a NAME.** Its segment predicate rejects only `/ : . * ?`, by its own account a deliberate temporary subset held until address-index parsing lands ([03-addressing.md](03-addressing.md) §reserved characters, `core/include/libtracer/path.hpp:50-58`). The rule above is unchanged.
 
 ### Where it appears
 
@@ -269,7 +271,7 @@ Type code `0x05` is a **reserved code with no assigned meaning** in v1. Structur
 - Receivers MUST treat `type=0x05` as a reserved-but-unassigned code per [01-data-format.md](01-data-format.md) §handling unknown type codes (skip safely, do not crash).
 - The code is not available for reuse; collision-prevention keeps it unassigned.
 
-The structural concept lives in the options bits: any TLV with `opt.PL=1` is a structured container holding concatenated child TLVs. The protocol's structured types are SUBSCRIBER (0x04), PATH (0x06), POINT (0x07), STATUS (0x09), ACL (0x0A), SETTINGS (0x0B), SPEC (0x0E). User-defined structured records use user-range type codes (`0x80–0xFF`) with `PL=1`.
+The structural concept lives in the options bits: any TLV with `opt.PL=1` is a structured container holding concatenated child TLVs. The protocol's structured types are SUBSCRIBER (0x04), PATH (0x06), POINT (0x07), STATUS (0x09), ACL (0x0A), SETTINGS (0x0B), SPEC (0x0E) in the first block, plus FWD (0x0F), FIELD (0x10) and the route-handle frames ADVERTISE (0x11) / COMPACT (0x12) / HANDLE_NACK (0x13) in the fast-track range; PATH_REF (0x14) is the one code in that range that is not. User-defined structured records use user-range type codes (`0x80–0xFF`) with `PL=1`.
 
 ### Why no generic container
 
@@ -380,6 +382,8 @@ The encoder's invariants:
 - **Each NAME child**: `02 00 SS_lo SS_hi <segment_bytes>`, where `SS` is the segment's UTF-8 byte length (`1..64`).
 - **No inner trailers.** Children inside a PATH carry no TS and no CRC; the outer (when in transit) covers everything.
 - **Reserved characters** (`/ : . [ ] * ?`) MUST NOT appear inside any segment_bytes.
+
+> ⚠️ **Conformance gap — the reference encoder does not enforce the bracket half of that rule** (`core/include/libtracer/path.hpp:50-58` rejects only `/ : . * ?`; §`0x02` NAME §constraints, [03-addressing.md](03-addressing.md) §reserved characters). The invariant above is unchanged.
 
 A path that resolves to more than 255 segments ([RFC-0023](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0023-path-segment-cap-repriced-32-to-255.md)), has a single segment longer than 64 bytes, or whose **encoded `PATH` body** exceeds the addressing-level cap MUST fail to encode.
 
@@ -714,6 +718,8 @@ Nested SETTINGS for module namespacing (instead of an unnamed structured wrapper
 
 - Unknown NAMEs MUST be either (a) ignored if module-namespaced and the module is not loaded, or (b) rejected with `ERROR{tr::schema::not_found}` if in the core namespace.
 - Type mismatches (e.g., a u32 where u8 expected) MUST return `ERROR{tr::schema::type_mismatch}`.
+
+> ⚠️ **Conformance gap — arm (a) is unimplemented in the reference core.** It does not distinguish a module-namespaced NAME from a core one: every second step below `settings` other than the reserved `app` is *rejected* with `tr::schema::not_found`, not ignored, and there is no module registry keyed on a settings sub-name. The rule above is the requirement and is unchanged; the reference implementation currently meets only arm (b). See [02-graph-model.md](02-graph-model.md) §module field namespacing.
 
 ### The core knob namespace is empty
 

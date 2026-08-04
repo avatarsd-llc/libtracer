@@ -23,9 +23,9 @@ code changes. Architecture and rationale: **[ADR-0023](../../docs/adr/0023-ros2-
 | topic `/ns/foo` | vertex at path `/ns/foo` |
 | message (CDR bytes from `rosidl` type support) | **opaque** `VALUE` payload (libtracer never parses it) |
 | message type name | `:schema` POINT (introspection only) |
-| `rmw_qos_profile_t` | `:settings` (reliability/durability/history/deadline/liveliness) |
+| `rmw_qos_profile_t` | **no single carrier** — see [QoS](#qos-there-is-no-settings-to-map-onto) below |
 | publisher | a writer handle on the topic path |
-| subscription | `subscribe(path)` into a per-subscription history ring |
+| subscription | `subscribe(path)` — an edge appended to the *producer* vertex; delivery is a push, and the retained history is that **vertex's** STREAM ring (owner-sized and with no wire surface at all — `core/include/libtracer/graph.hpp:630-638`), never a per-subscriber queue |
 | service / client | a `…/_request` + `…/_response` path pair |
 
 ## RMW entry points → graph operations (the implementation checklist)
@@ -45,13 +45,55 @@ code changes. Architecture and rationale: **[ADR-0023](../../docs/adr/0023-ros2-
   This is required, not optional ([ADR-0023 §loaned messages](../../docs/adr/0023-ros2-binding-via-rmw-tracer.md)).
 - **Wait set** — `rmw_create_wait_set`, `rmw_wait`, guard conditions: driven by
   the graph's `await` + subscription callbacks signalling readiness.
-- **QoS** — translate `rmw_qos_profile_t` ⇄ `:settings`; expose libtracer-only
-  knobs (the per-vertex `delivery_mode=EXPLICIT`, RFC-0008) under an
-  `rmw_tracer`-namespaced QoS extension.
+- **QoS** — translate `rmw_qos_profile_t` onto the three carriers below; there is
+  no `:settings` to map onto and no wire surface for a namespaced QoS extension.
 - **Graph events** — `rmw_get_node_names`, `rmw_*_graph_guard_condition`: from the
   graph's structural feed (subscribing a parent's `:children[]`).
 - **Services / actions** — request/response path pairs; actions compose from
   services + topics, as ROS already does.
+
+## QoS: there is no `:settings` to map onto
+
+**Retracted (2026-08-04).** This page previously mapped `rmw_qos_profile_t` onto a
+per-vertex `:settings` container — `:settings.reliability`, `:settings.durability`,
+`:settings.history_keep_last`, `:settings.deadline_ns` — and proposed an
+`rmw_tracer`-namespaced QoS *extension* riding the same container.
+[RFC-0022](../../docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md)
+(with its Amendment 1) deleted `settings_t` outright and removed the whole
+`:settings.<knob>` **write** surface: a write to any of the seven names now answers
+`SCHEMA_NOT_FOUND`, caller-independently (`core/src/graph.cpp:1758-1764`). The `:settings`
+**read** container survives with its shape and none
+of its knobs — `SETTINGS{ [NAME "app" SETTINGS{…}] }`, `core/src/graph.cpp:1904` — so
+there is nothing left for QoS to round-trip through, and no wire surface a namespaced
+extension could ride. See [ADR-0023](../../docs/adr/0023-ros2-binding-via-rmw-tracer.md)'s
+two errata. Nothing shipped against the old mapping: this package has one real TU
+(`identity.c`) and `qos.c` is unwritten.
+
+What `qos.c` maps onto instead — **three carriers, not one**:
+
+| `rmw_qos_profile_t` field | libtracer carrier | where |
+| --- | --- | --- |
+| `reliability`, `durability` (libtracer packs a third bit-field, `priority`, that ROS has no profile member for) | the **subscription's** packed 16-bit `delivery_policy`, set at `rmw_create_subscription` time and carried in the `SUBSCRIBER`'s existing `SETTINGS` child as `NAME "delivery_policy" VALUE u16` | `core/include/libtracer/vertex.hpp:204`, decoded at `core/src/graph.cpp:1404`, RFC-0022 §3.A |
+| `history` + `depth` | **owner-side** ring depth — the topic's owner calls `graph_t::set_history_depth`; a remote subscriber cannot set it | `core/include/libtracer/graph.hpp:638` |
+| `deadline`, `liveliness`, `lifespan` | **no mapping at all** | — |
+
+This is *closer* to DDS than the retracted shape, not further: DDS puts reliability and
+durability on the reader/writer pair for the same reason RFC-0022 did, and `durability`
+became a per-subscriber *request* matched where the latch already fires rather than one
+vertex-level flag silently applying to every subscriber. The three unmapped fields are the
+honest state and were already the effective one — nothing ever enforced `deadline_ns`.
+
+Two consequences `qos.c` has to live with:
+
+- **`depth` is not the subscriber's to choose.** `rmw_create_subscription` on a *remote*
+  topic can request durability but not ring depth. An `rmw_tracer` that wants ROS's
+  per-subscription `depth` semantics must either enforce them in its own take-side buffer
+  or report the owner's depth back through `rmw_get_subscriptions_info_by_topic`.
+- **A libtracer-only delivery mode is `rmw_tracer`-local, not a QoS extension.**
+  `delivery_mode_t` (`vertex.hpp:553` — `IF_NEWER` / `UNCONDITIONAL` / `EXPLICIT`; there is
+  no `ON_CHANGE` member) is owner-side and wiring-time via `graph_t::set_delivery_mode`
+  (`core/src/graph.cpp:1313`) with no wire spelling. `rmw_tracer` may set it on vertices it
+  owns; it cannot round-trip it to a remote peer.
 
 ## Transports & the differentiators
 
@@ -72,7 +114,7 @@ returns `RMW_RET_UNSUPPORTED` so the library always links.
 | **R0 — loads** | `identity.c` (done), `init.c` (`rmw_init`/`shutdown`/`init_options`), `serialization.c`, plus an `unsupported.c` returning `RMW_RET_UNSUPPORTED` for the rest | `rmw_tracer` loads; `ros2 doctor` sees it |
 | **R1 — pub/sub (copy path)** | `node.c`, `publisher.c` (`rmw_publish` → `graph.write(path, VALUE=CDR)`), `subscription.c` (`rmw_take` pops the ring, copies out), `wait.c` (`rmw_wait` over graph `await` + guard conditions) | a `talker`/`listener` pair over `rmw_tracer` |
 | **R2 — zero-copy (the edge over `rmw_zenoh`)** | loaned-message TUs: `rmw_borrow_loaned_message`/`rmw_publish_loaned_message`/`rmw_take_loaned_message`/`rmw_return_loaned_message` | a `view_t` **is** the loaned message — no copy. This is the **`inproc-borrow` path the bench shows beating zenoh** (flat 80 ns @ 8 KB); intra-host SHM = `mem_shared`. |
-| **R3 — QoS + graph** | `qos.c` (`rmw_qos_profile_t` ⇄ `:settings`; `rmw_tracer`-namespaced `delivery_mode=EXPLICIT`), `graph.c` (`rmw_get_node_names`, graph guard conditions via `:children[]`) | QoS round-trips; `ros2 topic list` works |
+| **R3 — QoS + graph** | `qos.c` (`rmw_qos_profile_t` → the subscription's packed `delivery_policy` + owner-side `set_history_depth`; `deadline`/`liveliness`/`lifespan` unmapped — see [QoS](#qos-there-is-no-settings-to-map-onto)), `graph.c` (`rmw_get_node_names`, graph guard conditions via `:children[]`) | reliability/durability ride the subscribe; `ros2 topic list` works |
 | **R4 — services/actions** | `service.c`, `client.c` (request/response path pairs) | services; actions compose on top |
 | **R5 — transport differentiators** | wire `rmw_tracer` to libtracer transports | ROS over **CAN/UART** (header-elided, [ADR-0022](../../docs/adr/0022-transport-framing-modes-elided-full-tlv-advertise.md)); ROS into **GPU memory** ([mem_cuda](../../docs/adr/0024-mem-cuda-gpu-backend-heterogeneous-rope.md)); high-rate topics over **scatter-gather composition** (`send(iov)` — see [Performance](../../docs/performance.md)) |
 

@@ -54,7 +54,7 @@ A path that violates any limit MUST be rejected with `ERROR{tr::path::invalid}`.
 /sensor/temp:subscribers[0]            — a control field on a vertex
 /sensor/temp:subscribers[]             — append-or-list view of subscribers
 /sensor/temp:settings.app.setpoint     — a nested control field (owner-declared)
-/sensor/temp:settings.transport_tcp.send_buf_kb  — module-namespaced field
+/sensor/temp:settings.transport_tcp.send_buf_kb  — module-namespaced field (⚠️ grammar only, see below)
 /net/can/can0/wheel-encoder/left       — a remote vertex, routed through a transport-vertex
                                          (the mount is two segments: module, then connection NAME)
 /camera/frame[7]                       — an indexed child endpoint (one vertex per index)
@@ -62,6 +62,8 @@ A path that violates any limit MUST be rejected with `ERROR{tr::path::invalid}`.
 /i2c-bus/0x68/accel                    — peripheral on I²C bus 0x68
 /                                      — the root vertex (rarely addressed directly)
 ```
+
+> ⚠️ **The module-namespaced line is grammar, not a reachable field.** `:settings.<module>.<field>` parses and is the resolving form should module fields land, but no module-namespaced field is implemented: the runtime resolves only the reserved `app` subkey below `settings` and answers `tr::schema::not_found` for every other second step, on read and on write, caller-independently ([02-graph-model.md](02-graph-model.md) §module field namespacing).
 
 ### Index forms
 
@@ -112,6 +114,10 @@ Two consequences:
 The five characters `/ : . [ ]` plus `*` and `?` cannot appear inside a NAME segment. Implementations MUST reject any NAME containing them with `ERROR{tr::path::invalid}`.
 
 (`*` and `?` are not path characters in v1; they are reserved to keep the door open for a possible future per-segment wildcard grammar — see [§per-segment wildcards](#per-segment-wildcards-unratified).)
+
+> ⚠️ **Conformance gap — the reference implementation rejects only five of the seven.** `tr::graph::valid_segment` (`core/include/libtracer/path.hpp:50-58`) tests `seg.find_first_of("/:.*?")`, so a NAME carrying `[` or `]` is accepted at every boundary that predicate guards — the string parser, a wire `SPEC` child name, a module registration. Its own comment says so and says why: "`[` / `]` are deliberately NOT rejected: they delimit an address index suffix (`/camera/frame[7]`, reference/03 §Index forms / ADR-0008), and address-segment index parsing is not yet implemented — rejecting brackets would break that documented form. This enforces the unambiguous subset now; bracket handling lands with address-index parsing." The MUST above is unchanged and is what conformance is measured against; the implementation currently meets a subset of it.
+>
+> The gap has a second edge worth naming, because closing it is what closes the gap: §index forms above reads a bracketed segment's brackets as travelling *inside* that segment's NAME bytes, while the grammar at the top of this section puts `index` outside `name` (`segment = name [ index ]`, `name = 1*64 ( UTF8-codepoint - reserved )`) and this rule forbids them in a NAME. Which of the two an address-index encoding picks is a **wire-surface** question — it decides which byte sequences are legal in a `NAME` TLV — so it is an RFC amendment ([GOVERNANCE.md](https://github.com/avatarsd-llc/libtracer/blob/main/.github/GOVERNANCE.md)), not an erratum, and not something the implementation's current subset settles by default.
 
 ---
 
@@ -305,7 +311,7 @@ A common convention (not normative): a peer's data is addressed through the conn
 
 When two registrations would claim the same local path:
 
-- **First-binder wins**: the first registrant to bind a vertex name owns it. Subsequent attempts return `ERROR{tr::path::in_use}` (a yet-to-be-assigned error code in the `0x0C..0x7F` reserved range).
+- **First-binder wins**: the first registrant to bind a vertex name owns it. Subsequent attempts return `ERROR{tr::path::in_use}` (`0x0022` — [05-protocol-tlvs.md](05-protocol-tlvs.md) §error codes).
 - Configuration avoids collisions by giving each link a distinct connection NAME within its module (`/net/can/can0`, `/net/ws/ws0`).
 - For routed addresses, uniqueness comes from the connection-NAME namespace of each node along the route. Conflicting peer identities on the network are a discovery-layer problem, not an addressing problem.
 

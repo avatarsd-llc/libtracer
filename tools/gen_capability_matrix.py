@@ -56,7 +56,11 @@ CORES = [
         "Transports":      ("🟡", "ws + webtransport", [f"{TSPKG}/transport-ws/test/ws-codec.test.mjs", f"{TSPKG}/transport-webtransport/test/framing.test.mjs", f"{TSPKG}/transport-webtransport/test/interop-browser.test.mjs"]),
         "Graph runtime":   ("❌", "by design", []),
         "Cross-validated": ("✅", "+ live interop", [f"{TSPKG}/transport-ws/test/interop.test.mjs", f"{TSPKG}/client/test/interop.test.mjs"]),
-        "Published":       ("npm", "core + client + ws", [f"{TSPKG}/core/package.json"]),
+        # All FOUR workspace packages are on npm at 0.7.0 (verified against the
+        # registry 2026-08-04): @avatarsd-llc/libtracer, -client, -ws, -webtransport.
+        # The note used to read "core + client + ws", which undercounted by one and
+        # contradicted bindings/README.md.
+        "Published":       ("npm", "core + client + ws + wt", [f"{TSPKG}/core/package.json", f"{TSPKG}/client/package.json", f"{TSPKG}/transport-ws/package.json", f"{TSPKG}/transport-webtransport/package.json"]),
     }),
     ("Rust", "native · no_std", {
         "Wire codec":      ("✅", "byte-exact", [f"{RUST}/conformance_vectors.rs"]),
@@ -66,7 +70,10 @@ CORES = [
         "Transports":      ("❌", "deferred", []),
         "Graph runtime":   ("❌", "", []),
         "Cross-validated": ("✅", "28/28 + 31 tests", [f"{RUST}/conformance_vectors.rs"]),
-        "Published":       ("⚠️", "pre-release", []),
+        # crates.io/crates/libtracer: 5 versions, max_stable 0.7.0, not yanked
+        # (verified against the registry 2026-08-04). "⚠️ pre-release" was false —
+        # and ⚠️ is legended "unpublished / stub", which the crate is not.
+        "Published":       ("crates.io", "0.7.0", ["bindings/rust/Cargo.toml"]),
     }),
 ]
 CAP_COLS = ["Wire codec", "Typed TLVs", "FWD / FIELD", "Client / node", "Transports", "Graph runtime", "Cross-validated", "Published"]
@@ -136,7 +143,8 @@ def module_status(src_stem, test_stem):
 
 def cell(badge, note):
     n = f'<span class="capm-note">{note}</span>' if note else ""
-    s = {"✅": "ok", "🟡": "partial", "⚠️": "warn", "❌": "no", "—": "na", "npm": "ok"}.get(badge, "na")
+    s = {"✅": "ok", "🟡": "partial", "⚠️": "warn", "❌": "no", "—": "na",
+         "npm": "ok", "crates.io": "ok"}.get(badge, "na")
     return f'<td data-s="{s}"><span class="capm-badge">{badge}</span>{n}</td>'
 
 
@@ -246,7 +254,7 @@ CONTROLS = """  <div class="capm-controls" role="group" aria-label="Filter cells
 
 LEGEND = """  <div class="capm-legend">
     <span><b>✅</b> verified by a CI-run test</span><span><b>🟡</b> functional, experimental</span>
-    <span><b>⚠️</b> present — unpublished / stub</span><span><b>❌</b> absent</span>
+    <span><b>⚠️</b> present — stub, or shipped with no verifying CI job</span><span><b>❌</b> absent</span>
     <span><b>native</b> from-scratch reimpl</span><span><b>port</b> compiles the C++ core</span>
   </div>"""
 

@@ -26,6 +26,28 @@ non-throwing `memory_resource` subclass. It fails for a reason that has nothing 
 `allocate` has no way to say "no", so a non-throwing resource must either abort or return a
 pointer, and the caller has no branch to write.
 
+### Where the rule is not met today
+
+The rule above is an obligation, not a description of the tree — read it as "must", never as
+"does". Three sites still report exhaustion by throwing, so **"nothing on the delivery path can
+abort" is false as of v0.7.1** and a doc sentence asserting it is wrong. Only one of the three is
+reached from a *peer's* bytes — read the "who provokes it" column per row rather than treating the
+set as uniformly peer-driven, because the provoker is what decides whether a bound is an
+admission-control problem or a sizing one. They
+are named here so a bounded deployment prices them rather than rediscovers them; this list is the
+sites found by the sweeps behind #603, #850 and the CAN egress review, and is not claimed to be
+exhaustive:
+
+| Site | Code | Who provokes it |
+| --- | --- | --- |
+| CAN egress window table | `core/include/libtracer/view_can.hpp:100` — `frames_.push_back` in `view_can_frames_t::split`, reached on every send (`core/src/transport_can.cpp:243`) | the sender: one `push_back` per frame the payload splits into |
+| Label-table binds (#603) | `core/src/route_handle.cpp:82`, `:179`, `:236` — `std::pmr::vector::push_back` and the route copy beside it | a **peer**: an ingress `ADVERTISE` binds a label. `max_label_bindings_per_link` bounds the entry *count*, not the allocation's failure mode |
+| `try_reserve`'s second step (#850) | `core/include/libtracer/mem_heap.hpp:116-121` — the `noexcept` helper probes, frees, then runs the **throwing** `std::vector::reserve` | anything concurrent: the probe-then-reserve is sound only single-threaded, which the code says at `:120`. Every `try_*` helper and every soft-fail leg below inherits this |
+
+The nothrow seams and the status legs described below are real and are what makes each *covered*
+site answer by value. They do not make the three rows above go away, and #848 (the WS/TCP/UDP/CAN
+egress gather) does not close them either.
+
 ## The three injected seams
 
 `graph_t`'s constructor takes all three, each defaulted so an unconfigured host gets the platform
@@ -172,7 +194,7 @@ std::array<std::byte, 4096> stack;
 mem::bump_source_t src(stack, *ctl_);
 ```
 
-(`core/src/graph.cpp:1119-1054`.) Three properties follow, and each closes a different failure mode:
+(`core/src/graph.cpp:1119-1120`.) Three properties follow, and each closes a different failure mode:
 
 - **A bounded node that injected `ctl` gets its own store here too.** The overflow leg draws from
   that injection rather than from the global heap, so the node's memory bound covers **this
@@ -189,7 +211,7 @@ The arena is *structure* storage — a node array and the walk's open-node stack
 independent of the payload's byte count. No node-counting pre-pass exists, and none is needed: the
 seam alone carries the failure. The three draws that make the RX decode path peer-provokable — the
 node array's growth, the sink's open-node stack, and the walk stack's spill past its inline slots —
-are enumerated in the changelog (`core/CHANGELOG.md:906-911`), which is the citation for that leg being
+are enumerated in the changelog (`core/CHANGELOG.md:1433-1438`), which is the citation for that leg being
 closed.
 
 TLV nesting has no depth constant. Depth is bounded by the receiver's decode resources, and
@@ -280,9 +302,19 @@ A dropped fresh ADVERTISE on the COMPACT leg self-heals: the peer answers the un
 an `abort()` under `-fno-exceptions` (`core/include/libtracer/rope.hpp:213-217`). The terminus reply
 egress builds that table on every send, so on a fragmented heap it was a reachable abort. The
 nothrow twin is `rope_t::try_to_iovec(std::vector<std::span<const std::byte>>& out) noexcept`
-(`rope.hpp:230-235`): it clears `out`, nothrow-reserves it to `link_count()`, and returns `false`
-without touching `out` further when the table cannot be grown — the caller drops the reply
-(`rope.hpp:220-228`).
+(`rope.hpp:230-235`): it clears `out`, sizes it to `link_count()` through `tr::detail::try_reserve`,
+and returns `false` without touching `out` further when the table cannot be grown — the caller drops
+the reply (`rope.hpp:220-228`).
+
+Be exact about what that helper buys, because the twin is named for its *signature*, not for an
+absolute guarantee. `tr::detail::try_reserve` probes the target allocation, **frees the probe**, and
+only then runs the ordinary **throwing** `std::vector::reserve` — inside a function declared
+`noexcept` (`core/include/libtracer/mem_heap.hpp:116-121`). It converts the ordinary OOM into a
+`false` the caller can answer with BACKPRESSURE, which is the whole of the improvement over
+`to_iovec`. It does not make the leg unconditionally nothrow: if anything else takes the just-freed
+block first, the `reserve` throws in a `noexcept` frame and the process terminates. That is the
+`try_reserve` row of §"Where the rule is not met today" above — [#850](https://github.com/avatarsd-llc/libtracer/issues/850) —
+and every `try_*` helper on this page inherits it.
 
 Both forms remain. `to_iovec` is correct wherever the caller is on a host build with exceptions or
 holds a table it sized beforehand; any path a peer can drive uses `try_to_iovec`.

@@ -570,8 +570,9 @@ Step 9 — Local recorder consumes (subscriber 1).
 
 Step 10 — UDP transport consumes (subscriber 2).
    transport_udp.send_tlv(rope, peer = multicast_group):
-     - It checks its capability flag wants_flat = false (UDP supports
-       scatter-gather via writev).
+     - There is no capability flag to consult: UDP has native
+       scatter-gather, so it overrides the gathered-span send overload
+       and no flatten copy happens.
      - It calls rope.to_iovec(), yielding one span per link (two here).
      - It calls the kernel's sendmsg() with that iovec.
      - The kernel's UDP stack constructs UDP/IP/Ethernet headers in
@@ -658,9 +659,13 @@ Two libtracer subscribers cloning a `view_pbuf` over the same `pbuf*` create two
 
 ### Rope walk versus flatten
 
-A scatter-gather-capable transport walks the rope at egress (zero-copy). A flat-buffer-only transport must materialize via `rope_t::flatten()` (one copy).
+A scatter-gather-capable transport walks the rope at egress (zero-copy). A flat-buffer-only transport must materialize the spans into one contiguous buffer first (one copy).
 
-**Rule**: each transport declares a `wants_flat` capability. Forwarders and fan-out walk the rope into scatter-gather transports and call `rope_t::flatten()` once at egress for flat-buffer transports.
+**Rule**: there is **no capability flag** — the choice is made by virtual dispatch, at the transport, and the caller never branches on it. The scatter-gather legs hand the rope's spans to the overload `transport_t::send(std::span<const std::span<const std::byte>>)`. A transport with native scatter-gather **overrides** it and writes the spans as one `sendmsg`/`writev` (`transport_udp`, `transport_tcp`, `transport_ws`, `transport_quic`, `transport_webtransport`); a flat-buffer-only transport — `transport_can`, and any embedder's — inherits the base-class default, which gathers the spans into one temporary and re-enters the contiguous `send`, paying exactly one copy ([`core/include/libtracer/transport.hpp:256-287`](https://github.com/avatarsd-llc/libtracer/blob/main/core/include/libtracer/transport.hpp)). That default draws its temporary from the failable `block_source_t` seam and **drops** the frame on an exhausted heap rather than aborting a no-exceptions build (#477/#848) — the forward hot path reaches it.
+
+**Not every egress leg takes that overload.** The COMPACT delivery form wraps a payload the receiver may treat as contiguous, so that leg materializes the value first and calls the *contiguous* `send` (`core/src/fwd_router.cpp:1701`, then `:1705` and `:1707`). The transport's scatter-gather capability is irrelevant there — the frame is already one buffer by the time it is handed over. "Always scatter-gathers" describes the full-route delivery form and the forward hop, not the whole of egress.
+
+`rope_t::flatten()` is the caller-side spelling of the same copy, and the **egress** path does reach it — through `rope_t::materialize` (`core/include/libtracer/rope.hpp:148-151`), which hands back a single-link rope's link untouched and falls back to `flatten` only when the rope has more than one link. The COMPACT leg calls exactly that (`core/src/fwd_router.cpp:1701`), so a multi-link value pays one flatten there while the single-link common case stays a refcount bump. The *direct* `flatten` callers are all ingress/ownership-side (`core/src/tlv_view.cpp:75`, `core/src/op_resolve_view.cpp:136`).
 
 ### DMA cache-coherency races
 

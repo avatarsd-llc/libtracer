@@ -618,7 +618,7 @@ A transport module MAY add module-namespaced settings, e.g. `:settings.transport
 - Module fields MUST appear in the vertex's `:schema` output if they apply to that vertex.
 - Reading a module field on a vertex where that module is not active returns `ERROR{tr::schema::not_found}`.
 
-The namespace is **vertex-level**. `:settings.<module>.<field>` resolves; a *per-subscriber* module setting has no wire surface, because `:subscribers` is addressed whole (§The payload-discriminating `:subscribers[N]` write).
+The namespace is **vertex-level**: `:settings.<module>.<field>` is the resolving form should module fields land. ⚠️ **No module-namespaced field is implemented.** The runtime resolves exactly one subkey below `settings` — the reserved `app` ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §A) — and answers `tr::schema::not_found` for every other second step, on read and on write alike, caller-independently; the `:schema` machinery the rules above describe therefore has nothing to report, since the synthesized core part is empty by construction (§the `:settings` read above). A *per-subscriber* module setting has no wire surface either, because `:subscribers` is addressed whole (§The payload-discriminating `:subscribers[N]` write).
 
 ### Limits the protocol does not impose
 

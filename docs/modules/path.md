@@ -37,9 +37,10 @@ struct path_key_hash_t { /* FNV-1a over the key bytes */ };
 
 The two entry points differ in what failure means. `path_t::parse` is for a string whose
 validity is itself a runtime condition, and returns `status_t::INVALID_PATH`
-(`core/src/path.cpp:107-112,129-130`). The `explicit` constructor is for a compile-site
+(`core/src/path.cpp:96-99,112,117`). The `explicit` constructor is for a compile-site
 literal, where a malformed path is a source bug: it hard-aborts rather than yielding a
-`result_t` the caller would only `*`-deref unchecked (`path.hpp:165-168`). Neither uses
+`result_t` the caller would only `*`-deref unchecked (`path.hpp:156`, defined
+`:227-231`). Neither uses
 exceptions, so both hold under `-fno-exceptions`.
 
 ## String → bytes, once

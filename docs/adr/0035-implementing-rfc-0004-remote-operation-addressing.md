@@ -108,6 +108,20 @@ conformance-validated slices.**
 
 - **No `ROUTER` change.** `FWD` is a sibling frame; `ROUTER`'s dedup/`MAX_HOPS` stay on the
   multi-path delivery side (RFC-0004 §E).
+
+  > **Erratum (2026-08-03) — superseded; there is no ROUTER mechanism left for anything to "stay" on.**
+  > [ADR-0040](0040-net-plane-is-explicit-source-routed-only.md) deleted `bridge_t`
+  > (`bridge.hpp`/`bridge.cpp`), the ROUTER codec helpers (`router.hpp`/`router.cpp`:
+  > `router_wrap`/`router_unwrap`/`router_meta_t`) and the `(origin, ts)` dedup machinery outright;
+  > none of those files exist under `core/`. `0x0D ROUTER` survives only as a **reserved, decodable,
+  > unimplemented** codepoint with no mechanism behind it (ADR-0040 §3/§Consequences; `docs/spec/v1.md:52`).
+  > `MAX_HOPS` never existed in code at all and
+  > was retracted by [ADR-0038](0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md)'s
+  > 2026-07-30 erratum — a bare-FWD route is bounded by `dst`-monotonicity alone.
+  > [ADR-0014](0014-router-cycle-termination-hop-count.md) carries the matching annotation; this
+  > sibling site was missed at the time. **The FWD half of this ADR is untouched** — the bullet's
+  > point (FWD needed no change to the ROUTER plane) was correct and simply outlived its object.
+
 - **Error-reply codes depend on the ERROR registry.** `REPLY{ kind=ERROR }` carries
   `STATUS=ERROR(...)`, whose code set is being pinned by **RFC-0001 §C/E (#8)**. Until #8 lands, use a
   provisional `STATUS` payload; finalize the codes when #8 does. (The only cross-RFC dependency.)

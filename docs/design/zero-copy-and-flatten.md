@@ -82,7 +82,7 @@ identifiers for the rest of this page.
 | ① | Ingress ownership — `flatten` (`core/src/rope.cpp:22`), pull-path `read_exact` into the accepted segment (`core/src/transport_tcp.cpp:243`) | yes (it *is* the recv) | yes | Structural | No — orthogonal; it is the ingress floor |
 | ② | Branch write — `value.materialize(*value_backend_)` (`core/src/graph.cpp:1106`) | no — refcount bump | yes (one flatten to feed the span cursor) | Fallback | Multi-link leg: yes, via a rope-native branch decode |
 | ③ | Field write — the twin of ② (`core/src/graph.cpp:1343`) | no — refcount bump | yes | Fallback | Same as ② |
-| ④ | 4096-byte decode arena (`core/src/graph.cpp:1119-1054`) | yes — paid on every branch write | yes | Structure scratch, not a payload copy | **No** — see §3; the rope cursor is a byte source, not a structure store |
+| ④ | 4096-byte decode arena (`core/src/graph.cpp:1119-1120`) | yes — paid on every branch write | yes | Structure scratch, not a payload copy | **No** — see §3; the rope cursor is a byte source, not a structure store |
 | ⑤ | `own_wire` mutation ownership — `sub.flatten(backend())` (`core/src/op_resolve_view.cpp:136`) | no — a single link is still COPIED, through the same backend (`core/src/op_resolve_view.cpp:146`, #793) | yes — flattens the multi-link subrope | Structural for *mutated* values | No — this step *is* the ownership copy; it still owns |
 | ⑥ | Per-node parse contiguity — `ensure_cache` → `wire().materialize(backend())` (`core/src/op_resolve_view.cpp:248-254`) | no — a single-link node adopts | only per **straddling** node | Fallback, span-node-shaped | Yes — rope-native node accessors remove it |
 | ⑦ | `deliver_rope` span fallback (`core/include/libtracer/receiver_slot.hpp:138`) | no | yes — only when no rope sink is installed | Fallback — the cost of a span-only sink | Yes — installing the rope sink removes it; see §4.1 |
@@ -115,11 +115,11 @@ core/src/graph.cpp:1122   wire::decode_into(head.bytes(), src);
 **Cost A, the flatten (`:1106`)** is zero-copy for a single-link rope — `materialize` returns
 `links()[0]`, a refcount bump (`core/include/libtracer/rope.hpp:148`) — and memcpys only a
 multi-link rope, drawing from the injected `value_backend_`. An exhausted pool yields an empty
-head, which `graph.cpp:1054` surfaces as `BACKPRESSURE` rather than letting the decoder read it back as a
+head, which `graph.cpp:1107` surfaces as `BACKPRESSURE` rather than letting the decoder read it back as a
 malformed value. Because ingress values are single-link until the rope-native branch decode lands,
 Cost A does not fire on single-link traffic. It is a fallback.
 
-**Cost B, the arena (`graph.cpp:1066`)** is the `std::array<std::byte, 4096>` backing `decode_into`'s node
+**Cost B, the arena (`graph.cpp:1119`)** is the `std::array<std::byte, 4096>` backing `decode_into`'s node
 array (`std::pmr::vector<arena_tlv_t>`) plus the grammar walk stack and the open-node stack. It is
 structure-only scratch, allocated on every branch write regardless of link count, on the deepest
 thread — the httpd/WS receive task.
@@ -169,8 +169,9 @@ a flat 4096 bytes — a `std::array` reserves its whole frame slot whether fille
 deep receive task.
 
 A stack budget for that task counts five such buffers, not one. The decode arena is the only one
-this document covers; the other four are transport receive and chunk scratch — `transport_tcp.cpp:201`
-and `:457`, `transport_ws.cpp:371` and `:691`. They are not decode arenas and carry no structure,
+this document covers; the other four are transport receive and chunk scratch, each a 4096-byte
+`std::array` — `transport_tcp.cpp:201` (the backpressure drain) and `:457`,
+`transport_ws.cpp:371` and `:691`. They are not decode arenas and carry no structure,
 but they occupy the same frames and none of the five has a measured per-task high-water.
 
 That receive task is the binding constraint on a single-core, RAM-constrained node. In the ESP-IDF
@@ -185,7 +186,7 @@ path. A 4 KB stack-high-water reclaim is the real saving even though total RAM i
 
 ### 3.4 Arena exhaustion
 
-The overflow leg does not draw from a throwing upstream. `core/src/graph.cpp:1119-1054` reads
+The overflow leg does not draw from a throwing upstream. `core/src/graph.cpp:1119-1120` reads
 
 ```
 std::array<std::byte, 4096> stack;
@@ -196,9 +197,12 @@ mem::bump_source_t src(stack, *ctl_);
 past it, falls back to the graph's injected control seam `ctl_`
 (`core/include/libtracer/graph.hpp:229`, `control_source()`), whose default is the NOTHROW heap
 source. Capability is unchanged — a branch tree larger than the slab still decodes — and
-**exhaustion is a value, not an abort**: the write soft-fails as `BACKPRESSURE`, the injected-resource
-status. A bounded node that injects its own control source gets the arena overflow drawn from that
-store too. No node-counting pre-pass exists, and none is needed ([#477], [#588]).
+**exhaustion is a value, not an abort**: the write soft-fails as `TYPE_MISMATCH`
+(`core/src/graph.cpp:1123`), which is *not* `BACKPRESSURE` — this decode cannot distinguish "the
+value did not parse" from "the arena ran out" and does not try, so the block seam's reject belongs
+to the operation rather than to the seam. A bounded node that injects its own control source gets
+the arena overflow drawn from that store too. No node-counting pre-pass exists, and none is
+needed ([#477], [#588]).
 
 Streaming the decode (§3.2 move 2) changes where the walk stack is drawn from, not whether
 exhaustion is representable. The general failable-allocation contract is

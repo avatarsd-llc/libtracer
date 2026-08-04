@@ -94,6 +94,20 @@ The client's `write(value)`/`subscribe(targetPath)` therefore carry only the **p
 - **`private: true`, version `0.0.0`, clearly "experimental"** — the surface is not ratified (the addressing envelope is deferred), so it MUST NOT be published or imply a stable public API, exactly as `transport-ws` started as a `private` scaffold.
 - **`@avatarsd-llc/libtracer` is a `peerDependency`** (the cross-validated codec the consumer installs — ADR-0033 §3). `@avatarsd-llc/libtracer-ws` is an **optional** peer (structural seam; only needed for the production transport). ESM-only, `type: module`, `sideEffects: false`, `engines.node >= 18`.
 
+> **Erratum (2026-08-03) — §4's `private: true` / `0.0.0` / MUST-NOT-publish clause no longer holds,
+> and the §3 deferral it rested on has been lifted.** `@avatarsd-llc/libtracer-client` carries **no
+> `private` key**, declares `publishConfig.access: public`, and is versioned in lockstep with the
+> rest of the TS workspace (`bindings/typescript/packages/client/package.json:3` — 0.7.0 at the time
+> of writing, alongside `libtracer`, `libtracer-ws` and `libtracer-webtransport`). The ground moved
+> first: the path-addressed envelope §3 deferred is now [RFC-0004](../spec/rfcs/0004-remote-operation-addressing.md)'s
+> remote operations over `FWD`, and the client implements `read` / `readField` / `write` /
+> `writeField` / `await_` / `subscribe` against it (`packages/client/src/client.ts:349-479`). The
+> surface-stability caveat the clause was protecting is now carried by the pre-1.0 semver of the
+> release itself plus the package's own "EXPERIMENTAL … Pre-1.0" description; the §Consequences
+> "Reversible: the package is `private 0.0.0`" bullet is superseded on the same grounds. This ADR's
+> *decision* — a separate client package over the codec + an injected transport seam, deferring
+> anything the spec had not pinned — is what shipped and is untouched.
+
 ### 5. Error model
 
 - Inbound **decode failures** (`CodecError`, carrying `.code`) are routed to `onError`, never thrown back into the transport's `onFrame` callback (a throw there would cross the socket-read boundary).

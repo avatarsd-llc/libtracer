@@ -83,6 +83,17 @@ the **package boundary, name, and `exports` shape**; `packages/transport-ws`
 ships as a `private: true` scaffold with no functional code, so it cannot be
 published until the implementation lands.
 
+> **Erratum (2026-08-03) — §3's scaffold note is historical, not a live constraint.**
+> `@avatarsd-llc/libtracer-ws` is implemented, carries no `private` key, declares
+> `publishConfig.access: public`, and is versioned with the workspace
+> (`bindings/typescript/packages/transport-ws/package.json:3` — 0.7.0 at the time of writing).
+> The transport package set is also larger than this ADR contemplates: a fourth package,
+> `@avatarsd-llc/libtracer-webtransport` ([ADR-0043](0043-quic-webtransport-optional-module-msquic.md)
+> Phase B), ships beside it, and `@avatarsd-llc/libtracer-client`
+> ([ADR-0034](0034-typescript-client-sdk.md)) is the profile package §4's rule predicted. **The
+> decisions this ADR fixes — the package boundary, the names, the `exports` shape, and the core as
+> a `peerDependency` of each transport — are unchanged and are what those four packages implement.**
+
 ### 4. "Per L1–L5 module combination" → **subpath exports**, not many packages
 
 We slice layers with **subpath `exports` entry points** inside the core, *not*

@@ -2,6 +2,8 @@
 
 > **Status**: design proposal (descriptive), 2026-07-11. Feeds the proposed **ADR-0059** (stateless-vertex composition / folded structure-rope, amending [ADR-0057](../adr/0057-graph-composite-vertex-tree.md)). **Not yet normative** — the byte grammar it builds on is normative in [reference/01](../reference/01-data-format.md) + [reference/05](../reference/05-protocol-tlvs.md); where this note and those disagree, they win. This document specifies *how a vertex and the graph fold into TLVs*, the recommended container layout, every scenario, the keystones, and the open inconsistencies to resolve before ADR-0059 is written.
 
+> **Superseded in part (2026-08-04) — `SETTINGS` no longer carries QoS knobs.** Four places below describe the `SETTINGS 0x0B` child as "`:settings` (QoS + app.*)": the child-TLV mermaid, the child-TLV table, the §SETTINGS example-field list (`reliability`, `durability`, `history_keep_last`, `deadline_ns`, `priority`, `queue_max_bytes`), and the "Where LIST is used" row. [RFC-0022](../spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) **deleted `settings_t`** and removed the `:settings.<knob>` write surface whole — a write to any of those six names answers `SCHEMA_NOT_FOUND` (`core/src/graph.cpp:1764`), and the `:settings` READ container keeps its shape while losing every protocol knob: `SETTINGS{ [NAME "app" SETTINGS{…}] }` (`core/src/graph.cpp:1904`). What survives of this note's fold is exactly the reserved `app` subkey and the module-namespaced convention. Reliability, durability and priority moved to the **`SUBSCRIBER`'s own `SETTINGS` child** as a packed `NAME "delivery_policy" VALUE u16` (RFC-0022 §3.A, `core/src/graph.cpp:1404`), which the §SUBSCRIBER section below already anticipates in shape ("target route + QoS"); ring depth became owner-side `graph_t::set_history_depth`; `deadline_ns` and `queue_max_bytes` were deleted as inert. The analysis below is left as written — it is a dated record of the fold as proposed on 2026-07-11.
+
 ---
 
 ## TL;DR — the fold in one sentence
@@ -138,6 +140,8 @@ The **edge is folded bytes** on the *producer* vertex ([CONTEXT.md](../../CONTEX
 ⟨2⟩   NAME "transport_tcp" SETTINGS { … }                  ← module-namespaced
 ```
 The reserved `app` subkey is the owner's half (RFC-0010) — bytes riding the vertex, no per-field vertex, no subscriber list.
+
+*(Superseded 2026-08-04: the six protocol knobs above no longer exist — RFC-0022 deleted them and the `:settings.<knob>` write surface with them. The reserved `app` subkey and the module-namespaced convention are what survived. See the note at the top of this document.)*
 
 ### Schema (`:schema`) — a **synthesized read**, not stored twice
 `read <v>:schema` returns a `POINT` = synthesized protocol part (`SETTINGS`) + (iff a descriptor table exists) an owner `NAME "app" SETTINGS{…}` appended verbatim ([reference/05 §0x07](../reference/05-protocol-tlvs.md)). In the fold, schema is **projected from the vertex's own SETTINGS + descriptor table**, not a stored `/meta` child — this is where the fold *generalizes* RFC-0010 and *conflicts* with the shipping `/meta` interim (inconsistency I1).

@@ -181,6 +181,8 @@ The TLV's wire-time is the **parent's wire-time + offset**. Use for children ins
 - "Parent" means the wrapping structured TLV's `trailer_ts` (if present), or — if the wrapping structured TLV has no `trailer_ts` — the next outermost ancestor that does.
 - A TLV with `TF=1` whose ancestor chain has no `trailer_ts` MUST be rejected with `ERROR{tr::path::invalid}` (the relative timestamp is meaningless without an anchor).
 
+> ⚠️ **Conformance gap — the reference codec does not perform this check.** `tr::frame` records the relative flag and the delta and returns success, so an anchorless `TF=1` frame decodes cleanly instead of being rejected; nothing walks the ancestor chain and no TS path raises `PATH_INVALID`. The requirement above is unchanged — this is a gap in the implementation, and §pitfalls below describes exactly what it produces (timestamps that parse, sort and plot, near the Unix epoch).
+
 ### Use case: 1 GS/s ADC with per-sample timing
 
 Without relative TS, a tight ADC stream would carry an 8-byte timestamp on every slice — bandwidth waste. With relative TS:

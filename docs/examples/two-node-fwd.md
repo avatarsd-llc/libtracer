@@ -19,11 +19,15 @@ two-node test.
 ## What to notice
 
 - **The frame carries its own route** — `fwd_write` builds `FWD{ op, dst, src, payload }`;
-  `dst` shrinks one `NAME` per hop and `src` grows the way back, so the reply route is
-  assembled for free.
-- **The forward hop never touches the heap** — a router reads three headers by offset and
-  scatter-gathers the shrunk-`dst` / grown-`src` heads with untouched views of the inbound
-  frame.
+  `dst` shrinks by a whole `net/<module>/<name>[/<peer>]` **mount run** per hop — a run of
+  NAME segments of any width, not one NAME (RFC-0014 S2a) — and `src` grows the way back by
+  the same run, so the reply route is assembled for free.
+- **The forward hop of a contiguous frame allocates nothing of its own** — a router reads
+  three headers by offset and scatter-gathers the shrunk-`dst` / grown-`src` heads with
+  untouched views of the inbound frame. `bench_forward_heap` CI-gates that arm at zero
+  allocations against a **stub link**; the shipping transport's `iovec` table still spills to
+  the heap above 16 spans, and a multi-link rope frame draws its gather table from the
+  injected (nothrow, not allocation-free) receive source.
 - **Cross-wire latency is measured** — 2,000 sequential FWD writes through the loopback
   channel; the `RESULT` line reports the mean end-to-end delivery time (dispatch + the
   channel's receive-thread hand-off).

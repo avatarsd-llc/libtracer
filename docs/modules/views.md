@@ -48,7 +48,8 @@ struct view_t {                                          // view.hpp
 };
 
 /** Own a copy of borrowed bytes as a view_t; nullopt == allocation failure. */
-std::optional<view_t> over_bytes(std::span<const std::byte>) noexcept;  // mem_heap.hpp:229
+std::optional<view_t> over_bytes(std::span<const std::byte>) noexcept;  // mem_heap.hpp:267
+std::optional<view_t> over_bytes(std::span<const std::byte>, mem::mem_backend_t&) noexcept; // :304
 
 class rope_t {                                           // rope.hpp — ordered chain of views
     rope_t(view_t);                                               // a view is a 1-link rope :53
@@ -92,8 +93,10 @@ heap, which is the chain's only allocation (`rope_t::append`, `rope.hpp:56-71`).
 Bytes handed up by a transport are borrowed: they live in a connection buffer that is
 reused as soon as the callback returns. Keeping them means owning a copy, and the
 canonical way to take one is `tr::view::over_bytes`
-(`core/include/libtracer/mem_heap.hpp:229`) — one call in place of the
-`heap_alloc` + `memcpy` + `view_t::over` triplet.
+(`core/include/libtracer/mem_heap.hpp:267`) — one call in place of the
+`heap_alloc` + `memcpy` + `view_t::over` triplet. A second overload (`:304`) takes the
+backend to draw from, which is what a peer-driven ownership copy uses so the copy lands in
+the node's injected seam rather than the global heap.
 
 ```cpp
 tr::graph::result_t<void> store(tr::graph::graph_t& g, const tr::graph::path_t& path,
@@ -156,8 +159,12 @@ only where the surrounding code has already established that the rope is one lin
 
 **`to_iovec()` allocates and can throw.** It `reserve`s a span table per call, which
 under `-fno-exceptions` turns an out-of-memory into `abort()`. Egress paths that build
-this table per send use `try_to_iovec(out)`, which nothrow-reserves and returns `false`
-instead, leaving `out` empty (`rope.hpp:213-235`).
+this table per send use `try_to_iovec(out)`, which probes the exact allocation first and
+returns `false` instead, leaving `out` empty (`rope.hpp:213-235`). ⚠️ The probe is not a hard
+nothrow guarantee: `tr::detail::try_reserve` frees its probe block and *then* runs the
+throwing `reserve`, so on a multi-threaded node a racing allocation between the two can still
+abort ([#850](https://github.com/avatarsd-llc/libtracer/issues/850)); the header qualifies its
+own comment with "single-threaded" for exactly this reason.
 
 **Treating an empty `over_bytes` result as an empty value loses backpressure.**
 `std::nullopt` and an engaged-but-empty view are different answers; collapsing them

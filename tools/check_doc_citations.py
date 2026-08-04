@@ -232,8 +232,6 @@ ANCHORS = [
     ('core/include/libtracer/frame.hpp:126',
      '[[nodiscard]] inline std::expected<tlv_t, err_t> decode(const view::view_t& v) {'),
     # core/include/libtracer/fwd_frame_view.hpp
-    ('core/include/libtracer/fwd_frame_view.hpp:642',
-     '* @brief A control frame (ADVERTISE / COMPACT / HANDLE_NACK) peeked off any'),
     # core/include/libtracer/fwd_router.hpp
     ('core/include/libtracer/fwd_router.hpp:97',
      "* @param flat  The byte backend EVERY rope flatten on the router's forward AND terminus"),
@@ -261,17 +259,10 @@ ANCHORS = [
      '* already-retired or unregistered vertex succeeds and does nothing. The root cannot be'),
     ('core/include/libtracer/graph.hpp:628',
      '[[nodiscard]] result_t<value_ref_t> read(vertex_handle_t v, std::string_view caller = {}) const;'),
-    ('core/include/libtracer/graph.hpp:682',
-     '* makes host-side after registration — and it has **no wire surface at all**: no peer'),
-    ('core/include/libtracer/graph.hpp:715',
+('core/include/libtracer/graph.hpp:715',
      '[[nodiscard]] result_t<value_ref_t> await(vertex_handle_t v, std::chrono::nanoseconds timeout,'),
     ('core/include/libtracer/graph.hpp:802', '[[nodiscard]] result_t<rope_t> read_subtree_folded(vertex_handle_t v,'),
-    ('core/include/libtracer/graph.hpp:820',
-     '*               into exactly that child here so the two doors stay byte-identical.'),
     ('core/include/libtracer/graph.hpp:858', 'template <typename F>'),
-    ('core/include/libtracer/graph.hpp:972', 'std::function<void(const remote_delivery_t&, const rope_t&)> sink);'),
-    ('core/include/libtracer/graph.hpp:996',
-     '* Called by the FWD resolver on an inbound `:subscribers[]` WRITE (#59/#136); it'),
     ('core/include/libtracer/graph.hpp:1093', 'struct delivery_drops_t {'),
     ('core/include/libtracer/graph.hpp:1095', 'std::uint64_t no_target = 0;'),
     ('core/include/libtracer/graph.hpp:1097', 'std::uint64_t denied = 0;'),
@@ -298,8 +289,6 @@ ANCHORS = [
     ('core/include/libtracer/mem_borrowed.hpp:39',
      'void destroy(view::segment_t* seg) noexcept override { delete seg; }  // control block only'),
     # core/include/libtracer/mem_heap.hpp
-    ('core/include/libtracer/mem_heap.hpp:229',
-     '* An L1 helper (it produces an owning handle), so it lives in `tr::view`, not `tr::mem`'),
     ('core/include/libtracer/mem_heap.hpp:267',
      '[[nodiscard]] inline std::optional<view_t> over_bytes(std::span<const std::byte> bytes) noexcept {'),
     # core/include/libtracer/mem_pool.hpp
@@ -334,7 +323,6 @@ ANCHORS = [
     ('core/include/libtracer/path.hpp:33', 'inline constexpr std::size_t kMaxPathBytes = 1024;'),
     ('core/include/libtracer/path.hpp:35', 'inline constexpr std::size_t kMaxSegments = 255;'),
     ('core/include/libtracer/path.hpp:37', 'inline constexpr std::size_t kMaxFieldDepth = 8;'),
-    ('core/include/libtracer/path.hpp:165', '* constructor instead.'),
     ('core/include/libtracer/path.hpp:248', 'static constexpr std::size_t kInlineBytes = 16;'),
     # core/include/libtracer/receiver_slot.hpp
     ('core/include/libtracer/receiver_slot.hpp:138', 'const view::view_t flat = frame.materialize(backend);'),
@@ -413,7 +401,6 @@ ANCHORS = [
     ('core/include/libtracer/transport_tcp.hpp:151',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'tcp_transport_t& operator=(const tcp_transport_t&) = delete;'),
-    ('core/include/libtracer/transport_tcp.hpp:270', '* @param iov The spans to emit, in order, as a single record.'),
     ('core/include/libtracer/transport_tcp.hpp:277',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'transport_tcp_server& operator=(const transport_tcp_server&) = delete;'),
@@ -437,8 +424,6 @@ ANCHORS = [
     ('core/include/libtracer/transport_ws.hpp:167',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'void send(std::span<const std::span<const std::byte>> iov) override;'),
-    ('core/include/libtracer/transport_ws.hpp:169',
-     '/** @brief The @ref bus_link_t facet (ADR-0044) when constructed `peer_named`,'),
     ('core/include/libtracer/transport_ws.hpp:325',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'transport_ws_client& operator=(const transport_ws_client&) = delete;'),
@@ -473,10 +458,6 @@ ANCHORS = [
     ('core/src/frame.cpp:118', 'std::array<grammar::walk_frame_t<grammar::span_cursor>, 8> slots;'),
     ('core/src/frame.cpp:119', 'grammar::walk_stack_t<grammar::span_cursor> stack(slots, &mem::heap_source());'),
     # core/src/fwd_router.cpp
-    ('core/src/fwd_router.cpp:300',
-     'pre.valid = false;  // nothing to hand over — the rebuild parses for itself',
-     'if (hit.link != nullptr && hit.strip_k > 0) {'),
-    ('core/src/fwd_router.cpp:328', '* the two attributes state the two halves of the same decision.'),
     ('core/src/fwd_router.cpp:522',
      'bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_source_t* rx) {'),
     ('core/src/fwd_router.cpp:903',
@@ -510,7 +491,6 @@ ANCHORS = [
     ('core/src/graph.cpp:990',
      'result_t<std::shared_ptr<const rope_t>> graph_t::store_value(vertex_t* v, rope_t value) {'),
     ('core/src/graph.cpp:1011', 'void graph_t::bubble_up(vertex_t* v, const rope_t& value) {'),
-    ('core/src/graph.cpp:1050', '// a subtree sweep. propagate(v) is the separate accumulate-then-flush primitive.'),
     ('core/src/graph.cpp:1053', '// A handler stores no LKV (the user handler consumes the value), so the'),
     ('core/src/graph.cpp:1069', '// Deliver the just-appended ring entry and advance the drain cursor, so a later'),
     ('core/src/graph.cpp:1074', '// no notify reclone of the rope on the hot write path.'),
@@ -521,7 +501,6 @@ ANCHORS = [
     ('core/src/graph.cpp:1212', 'if (v->listeners_above() > 0) bubble_up(v, value);', 'fan_out(v, value);'),
     ('core/src/graph.cpp:1330',
      'result_t<void> graph_t::write(vertex_handle_t v, rope_t value, std::string_view caller) {'),
-    ('core/src/graph.cpp:1507', 'field_path_t field;'),
     ('core/src/graph.cpp:1767', 'result_t<void> graph_t::create_child(vertex_t* parent, const view_t& spec_value) {'),
     ('core/src/graph.cpp:2364', 'result_t<void> graph_t::write(const path_t& path, rope_t value) {'),
     # core/src/op_resolve_walk.hpp
@@ -534,8 +513,6 @@ ANCHORS = [
     ('core/src/op_resolve_walk.hpp:1059', 'if (!req.dst.spans_intact()) return reply_error(status_t::BACKPRESSURE);'),
     ('core/src/op_resolve_walk.hpp:892', 'if (value.total_length() == 0)'),
     # core/src/path.cpp
-    ('core/src/path.cpp:107', 'std::size_t pos = 0;'),
-    ('core/src/path.cpp:130', '* The 64-bit offset basis and prime'),
     # core/src/posix_endpoint.cpp
     ('core/src/posix_endpoint.cpp:92',
      'void stream_endpoint_t::write_all_iov(int fd, ::iovec* vec, std::size_t count) {'),
@@ -605,6 +582,31 @@ ANCHORS = [
     # integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp
     ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:38',
      '*     apply overflows the 4 KB httpd default — see kHttpdTaskStack).'),
+
+    # --- re-added from the v0.7.1 docs sweep (absent from main's table) ---
+    ('core/include/libtracer/view_can.hpp:100', 'out.frames_.push_back(payload.subview(off, n));'),
+    ('core/include/libtracer/fwd_frame_view.hpp:846', 'inline constexpr std::size_t kFwdMaxIov = 9;'),
+    ('core/include/libtracer/graph.hpp:838', '* @param ctx Caller-owned context; must outlive every possible delivery (edges are'),
+    ('core/include/libtracer/graph.hpp:1019', '[[nodiscard]] result_t<value_ref_t> read(const path_t& path) const;'),
+    ('core/include/libtracer/graph.hpp:1025', '[[nodiscard]] result_t<value_ref_t> await(const path_t& path, std::chrono::nanoseconds timeout);'),
+    ('core/include/libtracer/mem_heap.hpp:116', '[[nodiscard]] bool try_reserve(std::vector<T>& v, std::size_t n) noexcept {'),
+    ('core/include/libtracer/mem_heap.hpp:120', 'v.reserve(n);  // nothrow now'),
+    ('core/include/libtracer/mem_heap.hpp:304', '[[nodiscard]] inline std::optional<view_t> over_bytes(std::span<const std::byte> bytes,'),
+    ('core/include/libtracer/path.hpp:156', 'explicit path_t(std::string_view text);'),
+    ('core/include/libtracer/transport_tcp.hpp:284', '[[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }'),
+    ('core/include/libtracer/transport_ws.hpp:183', '[[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }'),
+    ('core/include/libtracer/edge_pin.hpp:153', 'class pin_t {'),
+    ('core/src/fwd_router.cpp:626', 'link.set_rope_receiver('),
+    ('core/src/fwd_router.cpp:585', 'bus->set_peer_rope_receiver('),
+    ('core/src/graph.cpp:663', 'vertex_t* graph_t::find_ptr(std::span<const std::byte> key) const {'),
+    ('core/src/graph.cpp:664', 'const std::shared_lock lock(map_mutex_);'),
+    ('core/src/graph.cpp:1570', 's.target_key.reset();'),
+    ('core/src/path.cpp:96', 'if (!valid_segment(seg)) return std::unexpected(status_t::INVALID_PATH);'),
+    ('core/src/path.cpp:112', 'if (step.empty()) return std::unexpected(status_t::INVALID_PATH);'),
+    ('core/src/route_handle.cpp:82', 't.ingress.push_back(ingress_entry_t{.label = label, .binding = std::move(binding)});'),
+    ('core/src/route_handle.cpp:179', 't->egress.push_back(egress_entry_t{', 'bool route_handle_t::record_egress(std::string_view out_link, std::uint16_t label,'),
+    ('core/src/route_handle.cpp:236', 't->egress.push_back(egress_entry_t{', 'std::pair<std::uint16_t, bool> route_handle_t::ensure_egress(std::string_view out_link,'),
+    ('core/src/transport_can.cpp:243', 'tr::view::view_can_frames_t::split(*payload, cfg_.mode);'),
 ]
 
 

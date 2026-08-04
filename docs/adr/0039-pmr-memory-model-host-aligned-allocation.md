@@ -127,14 +127,15 @@ resource than seam purity, and the seam buys nothing here."* A host that needs e
 drawn from its own resource is asking for a different ownership model, not a different call site.
 
 **Consequence to carry, so this is not re-derived from the stale wording:** the registration path
-*is* wire-driven and peer-reachable (`transport_vertex.cpp:274` reaches it from a CREATE), so the
-bound on how many vertices a peer can cause to be allocated is **not** supplied by this seam
-(`transport_vertex.cpp:277` reaches `register_vertex_key` from a resolved CREATE). That bound
+*is* wire-driven and peer-reachable (`transport_vertex.cpp:100-106` wires `make_connection` as the
+graph's CREATE factory), so the bound on how many vertices a peer can cause to be allocated is
+**not** supplied by this seam (`transport_vertex.cpp:309` reaches `register_vertex_key` from a
+resolved CREATE, and `:247` registers the module identity vertex on the same path). That bound
 belongs to the connection/creation admission surface RFC-0014 defines, and is where it must be
 enforced.
 
-**Trap for any future attempt.** Do not "just route the root allocation first": `graph.hpp:1104`
-declares `root_`, `graph.hpp:1150` declares `ctl_`, and C++ initialises members in **declaration**
+**Trap for any future attempt.** Do not "just route the root allocation first": `graph.hpp:1328`
+declares `root_`, `graph.hpp:1387` declares `ctl_`, and C++ initialises members in **declaration**
 order regardless of the constructor's init-list — so routing `graph.cpp:268` reads `ctl_` before it
 is constructed. Silent UB that a debug build hides, in a codebase already bitten by "`-Os` deletes a
 null check no test covers".
@@ -182,3 +183,21 @@ Two consequences for the text above:
 - **§3's `decode_into(std::span, std::pmr::memory_resource&)` signature is superseded.** It now takes `tr::mem::block_source_t&` ([#588](https://github.com/avatarsd-llc/libtracer/issues/588)), because the terminus arena is built from a peer's frame behind no ACL and could abort on exhaustion.
 - **The Consequences' "no new `tr::mem` class is needed" no longer holds.** `block_source_t`, `heap_source_t`, `null_source_t`, `bump_source_t` and `block_array_t<T>` are exactly that class of addition. The reasoning it rested on — that object construction is `std::pmr`'s job — survives for allocations that **cannot fail at runtime**; it does not survive for the ones a peer provokes.
 - **Erratum 1's premise moved.** Its advice (inject an `unsynchronized_pool_resource`, not a `monotonic_buffer_resource`, because the terminus arena is the per-frame consumer that never frees) now targets a consumer that has **left `mr_`**. `mr_`'s remaining per-frame consumer is the LKV control block; the arena draws from the block seam, and a bounded node bounds it with a `bump_source_t` over its slab.
+
+## Erratum 7 (2026-08-04) — the "9 allocations / 937 bytes becomes 4 / 153" pair no longer reproduces
+
+§"What the seam does deliver, measured." quotes a before/after pair for the terminus decode. The
+**baseline half is refuted**: `bench_forward_heap` reports `RESULT terminus allocs=6 frees=6
+bytes=601`, and no arm of that bench reports 9 allocations or 937 bytes. Measured on `e058fe04` and
+on `e313f4d` (pre-#848) — identical, so this is carried-forward staleness, not a regression.
+
+The *derived* claims inherit the doubt and are struck: **"84% of the bytes redirected" is not
+re-derivable**, because only the default arm was measured here — the injected-resource arm (the
+`4 / 153` half) was not, so the ratio has no verified pair behind it. What survives untouched is the
+qualitative finding this section exists to record, which does not depend on the arithmetic:
+injecting a resource moves the terminus decode off the global heap, with no decode leg bypassing the
+seam, and the residual legs sit on *other* deliberate seams — so a fully bounded node injects both
+knobs, not one.
+
+Re-establishing the pair means running both arms in one pass and quoting the instrument's own
+output. Until then, quote neither number.

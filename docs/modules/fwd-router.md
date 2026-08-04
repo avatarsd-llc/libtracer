@@ -109,9 +109,15 @@ namespace tr::net {
 class fwd_router_t {
     // graph: terminus op resolution. mr: the route-handle label tables (ADR-0039 §1).
     // rx: the NOTHROW block source the terminus decode arena draws from (ADR-0065).
+    // flat: the byte backend EVERY rope flatten draws from, forward AND terminus (#730/#766).
+    // max_label_bindings_per_link: 0 = unbounded. egress: the reply-egress backend (#795).
+    // FOUR independent memory seams, each defaulting to the global heap on its own.
     explicit fwd_router_t(graph::graph_t& graph,
                           std::pmr::memory_resource* mr = std::pmr::get_default_resource(),
-                          mem::block_source_t* rx = &mem::heap_source());
+                          mem::block_source_t* rx = &mem::heap_source(),
+                          mem::mem_backend_t* flat = &mem::heap_backend(),
+                          std::size_t max_label_bindings_per_link = 0,
+                          mem::mem_backend_t* egress = &mem::heap_backend());
 
     // `name` is this node's mount RUN for `link`: the leading dst segments that route onward
     // through it, and the run prepended to src on the way back. ANY width (#523) -- the
@@ -176,8 +182,8 @@ class child_registry_t {                 // the one NAME -> link demux table (AD
 }  // namespace tr::net
 ```
 
-Signature source: `core/include/libtracer/fwd_router.hpp:176` (constructor), `:235`
-(`add_child`), `:285` (`subscribe_toward`), `:382-393` (the sink function-pointer types);
+Signature source: `core/include/libtracer/fwd_router.hpp:176` (constructor), `:238`
+(`add_child`), `:288` (`subscribe_toward`), `:384-396` (the sink function-pointer types);
 `core/include/libtracer/child_registry.hpp:209` (`add`), `:458` (`resolve_peer`), `:473`
 (`erase`), `:499` (`entry_by_name`), `:520` (`by_name`), `:561`/`:571` (`size`/`live_size`).
 
@@ -239,11 +245,17 @@ flowchart TB
   exhaustion by value, and folding it into `flat` would silently re-scope an injection callers have
   already sized — see
   [failable allocation and backpressure](../design/allocation-and-backpressure.md)).
-- **Delivery is nothrow and drops rather than aborts.** Every per-delivery allocation on the writer
-  thread is failable: a failed flatten, frame build or `iovec` reserve **drops that one delivery**
-  — a subscriber misses a value under exhaustion, which is valid delivery behaviour — instead of
-  raising an exception that `-fno-exceptions` would turn into `abort()`. A dropped fresh
-  `ADVERTISE` self-heals through the peer's `HANDLE_NACK`. See
+- **Delivery drops rather than aborts on the value path — with one named residual.** The flatten,
+  frame build and `iovec` reserve on the writer thread are all failable: each **drops that one
+  delivery** — a subscriber misses a value under exhaustion, which is valid delivery behaviour —
+  instead of raising an exception that `-fno-exceptions` would turn into `abort()`. A dropped fresh
+  `ADVERTISE` self-heals through the peer's `HANDLE_NACK`. The residual is the label store: a
+  **compact-flagged** flow's first delivery on a link resolves its label *before* those three steps
+  (`fwd_router.cpp:1691`), and that allocates its `link_tables_t` and its egress entry from the
+  `std::pmr::memory_resource` (`route_handle.cpp:34-42`, `:236-237`), which reports exhaustion by
+  throwing — so that one leg can still abort under `-fno-exceptions`
+  ([#603](https://github.com/avatarsd-llc/libtracer/issues/603)). A flow that is not
+  compact-flagged never reaches it. See
   [failable allocation and backpressure](../design/allocation-and-backpressure.md).
 - **Per-frame sinks are a function pointer plus a context, not `std::function`**
   ([ADR-0047 — build-time closed module sets and compile-time seams](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md)).
@@ -335,12 +347,14 @@ out of the raw config `SETTINGS` TLV handed to it alongside these settings.
 
 ## Pitfalls
 
-- **A child NAME of four or more segments registers a child that resolves for nothing.** The mount
-  descent matches key widths derived from the `net / <module> / <name> / <peer>` grammar, so a
-  4-segment name silently misroutes: every forward to it misses and falls through to the terminus,
-  while `size()` and `live_size()` report it as healthy. Debug builds assert; release behaviour is
-  unchanged. The bound is derived from the addressing grammar, not chosen, so widening it is an
-  addressing-model change.
+- **`add_child` returning `false` is not advisory.** A mount name of **any** width registers and
+  resolves ([#523](https://github.com/avatarsd-llc/libtracer/issues/523)) — the descent makes one
+  registry pass and matches each slot against the prefix of that slot's own `seg_count` — so there
+  is no width pitfall left. What `add_child` does refuse, always and not only in debug, is a name
+  no address could ever name: empty, containing an empty segment, or wider than
+  `graph::kMaxSegments`; it also refuses when the registry cannot grow. `false` means **nothing**
+  was registered, so a caller that ignores it wires a link that is audible on its transport and
+  resolvable by no `dst`, while `size()` and `live_size()` report the registry as healthy.
 - **`remove_child` is removal; `link_down` is departure.** A link that merely dropped must take
   `link_down`, which evicts subscriber edges and label state but keeps the registry entry. Calling
   `remove_child` on a reconnecting `DIAL` link permanently unroutes it, because under the RFC-0014
