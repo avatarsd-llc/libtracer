@@ -97,6 +97,16 @@ slot. So a test that hammers *new* names against a forward reader will pass and 
 assurance. The test that actually fails must churn **create → remove → create of the same name**, to
 drive the rebind path of Erratum 3 and the writer-vs-writer paths above.
 
+**Erratum 5 (2026-08-04) — the terminus figure in "Considered options" is stale; the rejection it
+supports stands.** "`bench_forward_heap` measures the terminus at 9 allocations / 937 bytes per
+resolve" does not reproduce. The instrument reports `RESULT terminus allocs=6 frees=6 bytes=601`,
+and **no arm of that bench reports 9 allocations or 937 bytes**. Measured on `e058fe04` and again
+on `e313f4d` (pre-#848) — identical, so the egress-nothrow work did not move it and the number was
+simply carried forward. The "roughly 1%" ratio beside it was derived from the retracted figure and
+is **not** re-derived here: no timing was taken, only allocation counts. The rejection is unaffected
+— six allocations still dominate an uncontended 3 ns lock by orders of magnitude — but a reader must
+not quote 937, or the 1%, as measured.
+
 ## Considered options
 
 - **A `std::mutex` control-plane lock.** Originally rejected on embedded cost — an uncontended host lock/unlock is **3 ns**, but ADR-0060 §2 measures a **FreeRTOS semaphore round-trip at ~2 µs**, and a second mechanism beside an established trait looked incoherent. **This rejection is withdrawn (Erratum 1):** the trait was never built, cannot wrap a section that blocks on sockets and `map_mutex_`, and a spinlock there risks unbounded priority inversion. The 2 µs figure is also a data-path number applied to a control plane this ADR calls non-hot — ~0.1% of a multi-millisecond connection setup. **This is now the decision.**

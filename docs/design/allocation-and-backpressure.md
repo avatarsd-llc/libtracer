@@ -29,8 +29,11 @@ pointer, and the caller has no branch to write.
 ### Where the rule is not met today
 
 The rule above is an obligation, not a description of the tree — read it as "must", never as
-"does". Three peer-reachable sites still report exhaustion by throwing, so **"nothing on the
-delivery path can abort" is false as of v0.7.1** and a doc sentence asserting it is wrong. They
+"does". Three sites still report exhaustion by throwing, so **"nothing on the delivery path can
+abort" is false as of v0.7.1** and a doc sentence asserting it is wrong. Only one of the three is
+reached from a *peer's* bytes — read the "who provokes it" column per row rather than treating the
+set as uniformly peer-driven, because the provoker is what decides whether a bound is an
+admission-control problem or a sizing one. They
 are named here so a bounded deployment prices them rather than rediscovers them; this list is the
 sites found by the sweeps behind #603, #850 and the CAN egress review, and is not claimed to be
 exhaustive:

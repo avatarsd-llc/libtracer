@@ -183,3 +183,21 @@ Two consequences for the text above:
 - **§3's `decode_into(std::span, std::pmr::memory_resource&)` signature is superseded.** It now takes `tr::mem::block_source_t&` ([#588](https://github.com/avatarsd-llc/libtracer/issues/588)), because the terminus arena is built from a peer's frame behind no ACL and could abort on exhaustion.
 - **The Consequences' "no new `tr::mem` class is needed" no longer holds.** `block_source_t`, `heap_source_t`, `null_source_t`, `bump_source_t` and `block_array_t<T>` are exactly that class of addition. The reasoning it rested on — that object construction is `std::pmr`'s job — survives for allocations that **cannot fail at runtime**; it does not survive for the ones a peer provokes.
 - **Erratum 1's premise moved.** Its advice (inject an `unsynchronized_pool_resource`, not a `monotonic_buffer_resource`, because the terminus arena is the per-frame consumer that never frees) now targets a consumer that has **left `mr_`**. `mr_`'s remaining per-frame consumer is the LKV control block; the arena draws from the block seam, and a bounded node bounds it with a `bump_source_t` over its slab.
+
+## Erratum 7 (2026-08-04) — the "9 allocations / 937 bytes becomes 4 / 153" pair no longer reproduces
+
+§"What the seam does deliver, measured." quotes a before/after pair for the terminus decode. The
+**baseline half is refuted**: `bench_forward_heap` reports `RESULT terminus allocs=6 frees=6
+bytes=601`, and no arm of that bench reports 9 allocations or 937 bytes. Measured on `e058fe04` and
+on `e313f4d` (pre-#848) — identical, so this is carried-forward staleness, not a regression.
+
+The *derived* claims inherit the doubt and are struck: **"84% of the bytes redirected" is not
+re-derivable**, because only the default arm was measured here — the injected-resource arm (the
+`4 / 153` half) was not, so the ratio has no verified pair behind it. What survives untouched is the
+qualitative finding this section exists to record, which does not depend on the arithmetic:
+injecting a resource moves the terminus decode off the global heap, with no decode leg bypassing the
+seam, and the residual legs sit on *other* deliberate seams — so a fully bounded node injects both
+knobs, not one.
+
+Re-establishing the pair means running both arms in one pass and quoting the instrument's own
+output. Until then, quote neither number.
