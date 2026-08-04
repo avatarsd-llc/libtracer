@@ -263,7 +263,7 @@ sequenceDiagram
     participant H as Forward hop
     participant T as Terminus node
     C->>H: FWD{op, dst=/h/sensor/temp, src=[], payload}
-    Note over H: offset dispatch — read ~3 headers by offset,<br/>no decoded tree; zero heap allocations for a<br/>contiguous frame, injected receive source for a rope
+    Note over H: offset dispatch — read ~3 headers by offset,<br/>no decoded tree, zero heap allocations for a<br/>contiguous frame, injected receive source for a rope
     H->>H: leading dst mount run → transport child<br/>(child-registry demux)
     H->>T: strip leading dst mount run · prepend inbound-link mount run to src<br/>scatter-gather send: stack heads + untouched frame views
     Note over T: leading dst segments name a local vertex → terminus
