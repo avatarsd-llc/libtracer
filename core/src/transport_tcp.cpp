@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/iov_table.hpp"
 #include "libtracer/length_prefix_framer.hpp"
 
 namespace tr::net {
@@ -46,10 +47,14 @@ void set_nodelay(int fd) {
  *        server's broadcast, and the directed peer facade (one copy of the
  *        assembly in flash, not six).  The iovec count is small and bounded (a
  *        FWD forward/reply is ≤ ~6 spans), so the common case uses the fixed
- *        stack array; only an unusually large gather falls back to the heap
- *        vector.  `ok` is false when the record exceeds @p cap — the peer
- *        would reject it as malformed.  The prefix lives inside the struct, so
- *        the assembled iovec stays valid for the struct's (local) lifetime.
+ *        stack array; only an unusually large gather falls back to the shared
+ *        NOTHROW overflow store (`%iov_table.hpp`).  `ok` is false when the
+ *        record exceeds @p cap — the peer would reject it as malformed — or
+ *        when that store is exhausted, which is peer-reachable (a rope's link
+ *        count is chosen by the sending peer) and answered by DROPPING the
+ *        frame, never by truncating it (#848).  The prefix lives inside the
+ *        struct, so the assembled iovec stays valid for the struct's (local)
+ *        lifetime.
  *
  *        MEASURED (`bench_transport_iov`): the fallback fires at exactly **17
  *        caller spans** — `inline_vec` holds `kMaxInlineIov + 1` because the
@@ -60,10 +65,10 @@ void set_nodelay(int fd) {
  *        region further.
  */
 struct prefixed_iov_t {
-    static constexpr std::size_t kMaxInlineIov = 16;
+    static constexpr std::size_t kMaxInlineIov = tr::net::kMaxInlineIov;
     std::array<std::byte, kPrefixBytes> prefix;
     std::array<::iovec, kMaxInlineIov + 1> inline_vec;
-    std::vector<::iovec> heap_vec;
+    iov_table_t<::iovec> table{inline_vec};
     ::iovec* vec = nullptr;
     std::size_t n = 0;
     bool ok = false;
@@ -73,11 +78,8 @@ struct prefixed_iov_t {
         for (const std::span<const std::byte>& s : iov) total += s.size();
         if (total > cap) return;
         detail::store_le(prefix, static_cast<std::uint32_t>(total));
-        vec = inline_vec.data();
-        if (iov.size() + 1 > inline_vec.size()) {
-            heap_vec.resize(iov.size() + 1);
-            vec = heap_vec.data();
-        }
+        vec = table.acquire(iov.size() + 1);
+        if (vec == nullptr) return;  // overflow store exhausted => ok stays false => DROP
         vec[0] = ::iovec{prefix.data(), prefix.size()};
         n = 1;
         for (const std::span<const std::byte>& s : iov) {
@@ -349,15 +351,12 @@ void transport_tcp_server::send(std::span<const std::span<const std::byte>> iov)
     // peers_m_ → write_m_.
     const prefixed_iov_t rec(iov, tcp_transport_t::kMaxFrame);
     if (!rec.ok) return;
+    std::array<::iovec, prefixed_iov_t::kMaxInlineIov + 1> scratch_inline;
+    iov_table_t<::iovec> scratch_table(scratch_inline);
+    ::iovec* scratch = scratch_table.acquire(rec.n);
+    if (scratch == nullptr) return;  // same store, same answer: drop, never truncate
     const std::lock_guard plock(peers_m_);
     const std::lock_guard wlock(write_m_);
-    std::array<::iovec, prefixed_iov_t::kMaxInlineIov + 1> scratch_inline;
-    std::vector<::iovec> scratch_heap;
-    ::iovec* scratch = scratch_inline.data();
-    if (rec.n > scratch_inline.size()) {
-        scratch_heap.resize(rec.n);
-        scratch = scratch_heap.data();
-    }
     for (const std::unique_ptr<session_t>& s : slots_) {
         if (!s->open.load(std::memory_order_relaxed)) continue;
         std::copy_n(rec.vec, rec.n, scratch);

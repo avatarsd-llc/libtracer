@@ -16,11 +16,101 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`graph_t::has_subscribers(vertex_handle_t)` — the demand-driven producer's DELIVERY gate**
+  ([#852](https://github.com/avatarsd-llc/libtracer/issues/852)). True iff a delivery here
+  would reach a subscriber: this vertex's own **or** a subtree subscriber on a strict ancestor
+  (RFC-0005). It joins the two gates `deliver_vertex` applies — `fan_out`'s own self-gate on
+  the own count, then the `listeners_above` gate over `bubble_up` — so a producer that skips
+  a `deliver_vertex` on `false` skips exactly what that call would have found no receiver
+  for. (A decomposing branch write is not one `deliver_vertex`.) Two
+  limits are documented on the declaration and are load-bearing: **`read` pollers and `await`
+  waiters are not counted** (subscription is a field-write to `:subscribers[]`, not one of
+  ADR-0006's three verbs), so a producer that skips the value STORE rather than just the
+  delivery starves them; and a **skipped publish is not recovered by ADR-0049's durability
+  latch** — that argument belongs to the fan-out skip, which stores the LKV *before* loading
+  the count, and the latch is opt-in besides (RFC-0022 §3.A bit 5; a default `policy = {}`
+  latches nothing). The `seq_cst` own half buys only that a landed subscribe is ordered before
+  the producer's next read, so at most one round is skipped; the ancestor half is relaxed and
+  not even that.
+
 - **`graph_t::own_subs(vertex_handle_t)` — the owner-side subscriber-slot count.** Exposes
-  the `own_subs` counter (#635) through the graph so a producer can SKIP its own publish
-  work when nobody is subscribed (a demand-driven publisher) — the app-facing counterpart of
-  the internal fan-out skip. Inline, `noexcept`, relaxed load; a caller that needs the
-  race-ordered read for a single delivery still uses `vertex_t::own_subs_ordered` directly.
+  the `own_subs` counter (#635) through the graph as a sizing/observability read: how many
+  slots a delivery here would feed. Inline, `noexcept`, relaxed load. **It must not be used
+  to gate a publish** — it omits subtree subscribers entirely (they are counted by
+  `listeners_above`, not here), and it is the relaxed load `vertex_t::own_subs_ordered`
+  documents as unfit for a skip decision. Use `has_subscribers` for that.
+
+- **`tr::net::iov_table_t` (`libtracer/iov_table.hpp`) and the nothrow transport egress
+  ([#848](https://github.com/avatarsd-llc/libtracer/issues/848)).** The scatter-gather entry
+  table the three socket transports that build an `::iovec` table — WS, TCP, UDP — gather
+  their egress through: the caller's stack array while the entries fit (`kMaxInlineIov`, 16),
+  else ONE block from a `tr::mem::block_source_t`
+  (ADR-0065) whose exhaustion answer is `nullptr`. It replaces five copies of a *throwing*
+  `std::vector` resize/reserve in `transport_ws.cpp`, `transport_tcp.cpp` and
+  `transport_udp.cpp`. (Not every POSIX transport: `quic` and `webtransport` override
+  `send(iov)` and gather into one owned msquic send buffer, so they build no `::iovec` table
+  and never reach this store.) **Behaviour change:** those growths sized an entry count the SENDING
+  peer chooses (a rope's link count × its region count, uncapped by `ws_assembler_t::on_data`),
+  so exhaustion was a peer-reachable `abort()` under the `-fno-exceptions` MCU profile;
+  a `send` that cannot obtain the table now DROPS the frame — it never truncates one.
+
+- **`transport_t::send(iov)`'s default gather draws from the failable seam.** The base
+  class's scatter-gather fallback — what `transport_can` and any embedder's transport that
+  does not override `send(iov)` lands on, reachable from `route_fwd_forward` — assembled its
+  contiguous temporary with `tr::detail::try_reserve`, i.e. a nothrow probe in front of a
+  THROWING `std::vector::reserve` behind a `noexcept`. It now uses a
+  `tr::mem::block_array_t<std::byte>` and honours the `probe_fail_hook` injection seam
+  explicitly (as `iov_table_t::acquire` does). No signature change; exhaustion still DROPS
+  the frame, but it can no longer `std::terminate` on the way there.
+
+- **RFC 6455 control-frame surface in `tr::net::ws`:** `kMaxControlPayload` (125),
+  `is_control_opcode`, `kMaxServerControlFrame` / `kMaxClientControlFrame`,
+  `encode_server_control` / `encode_client_control` (stack buffers, returning the byte count),
+  and `decode_status_t` / `decode_result_t` / `decode_one` / `decode_frame_checked`.
+  **Behaviour change:** an oversized or non-final control frame now FAILS the connection
+  (§5.5/§7.1.7) instead of being echoed, so the PONG reply is built entirely on the stack and
+  a heap blip can no longer cost a link that an unanswered PING entitles the peer to drop.
+
+- **`tr::net::can::encode_advertise_header(std::array&, const advertise_t&, std::string_view)`.**
+  The one field-encoding locus for a CAN advertise, filling a caller-owned `std::array` and
+  returning `false` past `kAdvertiseMaxPathLen`. The path is a separate parameter because the
+  header is a function of its LENGTH, not of who owns its bytes: `transport_can::emit_advertise`
+  now slices the 18-byte stack header and then `cfg_.path` IN PLACE into 8-byte CAN windows, so
+  the advertise on **every** send costs zero allocations — no contiguous buffer, and no
+  `adv.path = cfg_.path` copy either (an advertise this node emits always announces its own
+  path, so `advertise_t::path` is left empty on egress). The contiguous `encode_advertise` twin
+  is retained for callers that want the whole frame in one buffer (`bench_conn_ram`,
+  `transport_can_peers_test`), and now delegates its header to `encode_advertise_header`.
+  **Behaviour change in that twin:** a path longer than `kAdvertiseMaxPathLen` now yields an
+  empty vector — nothing to emit — where it previously cast the length to `std::uint16_t`
+  unchecked, encoding a frame every decoder rejects (`decode_advertise` bounds `path_len` at
+  `kAdvertiseMaxPathLen`, `core/include/libtracer/can.hpp:361`) — or, past 65535, one whose
+  length field silently truncates. Its bytes are unchanged for every path within the bound.
+  **Scope:** this removes the advertise's allocations only. A CAN `send` still allocates for
+  the owning payload block (`view::over_bytes`, which soft-fails and DROPS) and for
+  `view_can_frames_t::split`'s window vector (still a THROWING `push_back` — the remaining
+  `-fno-exceptions` abort risk on this path, not addressed here).
+
+- **`ws::try_encode_client_frame(mem::block_array_t<std::byte>&, …)`.** The nothrow twin of
+  `encode_client_frame` — a client frame MUST be masked (§5.1), so its wire bytes are not the
+  caller's and it is the one WS egress path that still needs a buffer. Returns the frame's
+  byte count, `0` on refusal. It takes a `tr::mem::block_array_t` rather than a
+  `std::vector` + `tr::detail::try_reserve`: that helper is `noexcept` but only its PROBE is
+  nothrow — it frees the probe block and then runs the THROWING `std::vector::reserve`, so
+  refusing that second allocation crosses a `noexcept` boundary into `std::terminate` (and a
+  bare `abort()` under `-fno-exceptions`). Drawing from the failable seam leaves exactly one
+  refusable allocation and no unguardable second step.
+
+- **`tr::net::detail::ws_peer_published_hook` (`libtracer/transport_ws.hpp`) — a TEST-ONLY
+  seam in a public header.** A null function pointer `transport_ws_server::service_peer`
+  calls at the exact instant a peer's `101 Switching Protocols` response is on the wire and
+  its slot is published open — immediately after (not inside) the `write_m_` critical
+  section that makes those two transitions one step, so a sender racing the hook can still
+  take that lock. A test installs it to HOLD that instant open and send into it;
+  production leaves it null and pays one predictable null-check per accepted peer, on the
+  cold handshake path. Same shape and same rules as `tr::detail::probe_fail_hook` (recorded
+  under #477, below): install it before the peer that should trip it connects, and clear it
+  before the test returns.
 
 - **`tr::graph::kEdgePinSlots` and the edge-pin domain (`libtracer/edge_pin.hpp`,
   [#635](https://github.com/avatarsd-llc/libtracer/issues/635),
@@ -187,6 +277,21 @@ index, whose spelling RFC-0024 §9.2 leaves open. A drop is already the conforma
 without it.
 
 ### Fixed
+
+- **The WS server publishes an accepted peer as OPEN under the write lock** (#848).
+  `transport_ws_server::service_peer` wrote the `101 Switching Protocols` response, released
+  `write_m_`, and only then stored `open = true`. In between, the peer has already read the
+  response — and so believes the connection is up — while every `send` still skips the slot
+  as not-open, so a frame sent in that instant is silently lost rather than queued or
+  refused. The store now sits inside the same `write_m_` critical section as the response
+  write: a sender can only reach the fd through that lock, so anyone who could observe the
+  response also observes the slot as open. (`open` deliberately does NOT move ahead of the
+  response write instead — a concurrent `send` would then be free to put a BINARY frame on
+  the wire in front of the handshake reply.) The window predates this branch: it spans the
+  gap between the `write_m_` scope closing and the `open` store, so a test cannot reliably
+  be inside it by racing for it. `ws_transport_test`'s guard therefore PARKS the server's
+  poll thread at that exact point (`detail::ws_peer_published_hook`) and makes its whole
+  `send` in the parked window. No signature or API change.
 
 - **The owning receiver seam holds no library reference *during* the callback** (#845). The
   UDP, TCP and QUIC/WebTransport receive paths built the delivered frame as

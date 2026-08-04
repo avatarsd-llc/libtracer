@@ -117,7 +117,7 @@ The `std::optional` return exists to separate two outcomes that a bare `view_t` 
 
 The same call is what the RFC 6455 fragment assembler uses to turn each borrowed
 fragment into an owning link before chaining it (`ws_assembler_t::on_data`,
-`core/src/transport_ws.cpp:66`), so the copy out of the connection buffer is the one
+`core/src/transport_ws.cpp:67`), so the copy out of the connection buffer is the one
 legitimate substrate-boundary copy and the chaining that follows is pointer-linking.
 
 ## Consequences
@@ -148,11 +148,11 @@ multi-link value is read as if the first buffer were the whole message — a sil
 truncation, not a diagnostic. This is invisible on a purely local graph, where every
 value is one segment, and appears the moment a real transport is attached: every
 transport whose `transport_t::delivers_ropes()` returns true
-(`core/include/libtracer/transport.hpp:333`; TCP, UDP, WS, QUIC, WebTransport and CAN
+(`core/include/libtracer/transport.hpp:353`; TCP, UDP, WS, QUIC, WebTransport and CAN
 all override it) can hand up a chain. A CAN reassembly group chains one link per slice
 (`can_reassembly_t::assemble`, `core/include/libtracer/can_reassembly.hpp:181-189`), and
 a fragmented WebSocket message chains one link per fragment
-(`ws_assembler_t::on_data`, `core/src/transport_ws.cpp:61-77`). A consumer that cannot
+(`ws_assembler_t::on_data`, `core/src/transport_ws.cpp:62-78`). A consumer that cannot
 promise contiguity calls `materialize()` (`rope.hpp:148`) instead — zero copy when the
 rope happens to be single-link, one `flatten` copy otherwise. `only()` is the right call
 only where the surrounding code has already established that the rope is one link.

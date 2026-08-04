@@ -16,12 +16,14 @@
 #include <atomic>
 #include <concepts>
 #include <cstddef>
+#include <cstring>
 #include <functional>
 #include <span>
 #include <string_view>
 #include <vector>
 
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_source.hpp"
 #include "libtracer/receiver_slot.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/view.hpp"
@@ -252,19 +254,37 @@ class transport_t {
      * @param iov The spans to emit, in order, as a single frame.
      */
     virtual void send(std::span<const std::span<const std::byte>> iov) {
-        // NOTHROW soft-fail (#477): this used a throwing `reserve` + `insert`, which under
-        // `-fno-exceptions` ABORTS the node on an exhausted heap rather than shedding the
-        // frame. That is reachable on the FORWARD hot path today — `route_fwd_forward`
+        // NOTHROW soft-fail (#477/#848): this used a throwing `reserve` + `insert`, which
+        // under `-fno-exceptions` ABORTS the node on an exhausted heap rather than shedding
+        // the frame. That is reachable on the FORWARD hot path today — `route_fwd_forward`
         // scatter-gathers into `send(iov)`, and a transport that does not override this
         // (`transport_can`, and any embedder's) lands here. An egress that cannot allocate
         // must DROP, exactly as every other writer-side allocation on this plane does.
+        //
+        // The store is a `tr::mem::block_array_t`, NOT a `std::vector` + `try_reserve`:
+        // that helper is `noexcept` but only its probe is nothrow — it frees the probe
+        // block and then runs the THROWING `std::vector::reserve`, so refusing that second
+        // allocation crosses a `noexcept` boundary into std::terminate (and a bare
+        // `abort()` under `-fno-exceptions`), which is the very outcome this body exists to
+        // avoid. Drawing from the failable seam (ADR-0065) leaves ONE refusable allocation.
         std::size_t total = 0;
         for (const auto& s : iov) total += s.size();
-        std::vector<std::byte> tmp;
-        if (!detail::try_reserve(tmp, total)) return;  // heap exhausted ⇒ drop, never abort
-        // Reserved exactly, so the appends below cannot reallocate and cannot throw.
-        for (const auto& s : iov) tmp.insert(tmp.end(), s.begin(), s.end());
-        send(std::span<const std::byte>(tmp));
+        mem::block_array_t<std::byte> tmp(mem::heap_source());
+        // Honour the `probe_fail_hook` OOM-injection seam explicitly, exactly as
+        // `iov_table_t::acquire` does: the hook lives inside `probe_bytes`, which the
+        // failable seam does not route through, so a drop leg reached only via
+        // `block_source_t::try_alloc` would otherwise be untestable without genuinely
+        // exhausting the host heap.
+        if (!detail::probe_hook_ok(total)) return;
+        if (!tmp.reserve(total)) return;  // heap exhausted ⇒ drop, never abort
+        // Reserved exactly, so the copies below cannot grow the block and cannot fail.
+        std::byte* out = tmp.data();
+        std::size_t off = 0;
+        for (const auto& s : iov) {
+            if (!s.empty()) std::memcpy(out + off, s.data(), s.size());
+            off += s.size();
+        }
+        send(std::span<const std::byte>(out, total));
     }
 
     /**

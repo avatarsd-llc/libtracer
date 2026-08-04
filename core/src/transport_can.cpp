@@ -5,6 +5,8 @@
 
 #include "libtracer/transport_can.hpp"
 
+#include <algorithm>
+#include <array>
 #include <charconv>
 #include <cstring>
 #include <optional>
@@ -169,20 +171,45 @@ void transport_can::emit_advertise(const can::advertise_t& adv) {
     // The advertise rides the control ID as an in-order byte stream, sliced into
     // CLASSIC (≤8B, exact-length) windows so no CAN-FD DLC padding can perturb the
     // stream decoder on the far side.
-    const std::vector<std::byte> bytes = can::encode_advertise(adv);
+    //
+    // It NEVER needed a contiguous buffer (#848): the slicing below walks the stream 8
+    // bytes at a time, so it walks TWO sources in order — the 18-byte STACK header, then
+    // this node's own `cfg_.path` IN PLACE, with a window free to straddle the join.
+    // `emit_advertise` is unconditional in `send_impl`, so the `std::vector` this replaces
+    // was a per-send abort() risk under `-fno-exceptions`. Zero allocation, zero drop:
+    // 18 bytes of stack and a view of a string this transport already owns for its life.
+    std::array<std::byte, can::kAdvertiseHeaderSize> header{};
+    if (!can::encode_advertise_header(header, adv, cfg_.path)) return;  // over-long: emit nothing
+    const std::span<const std::byte> parts[2] = {
+        std::span<const std::byte>(header),
+        std::as_bytes(std::span<const char>(cfg_.path.data(), cfg_.path.size()))};
+
     const std::uint32_t control_id =
         can::encode_can_id({cfg_.version, cfg_.node, kCanControlEndpoint});
-    std::size_t off = 0;
-    while (off < bytes.size()) {
-        const std::size_t n =
-            std::min<std::size_t>(tr::view::kCanClassicMaxData, bytes.size() - off);
+    std::size_t part = 0;  // which source the next byte comes from
+    std::size_t off = 0;   // read cursor within that source
+    while (part < 2) {
         can_frame_data_t frame;
         frame.id = control_id;
         frame.fd = false;
+        std::size_t n = 0;
+        // Fill one window from as many sources as it takes — the header/path join is not
+        // a frame boundary, so the wire is byte-for-byte what a contiguous encode gives.
+        while (n < tr::view::kCanClassicMaxData && part < 2) {
+            if (off == parts[part].size()) {
+                ++part;
+                off = 0;
+                continue;
+            }
+            const std::size_t take =
+                std::min<std::size_t>(tr::view::kCanClassicMaxData - n, parts[part].size() - off);
+            std::memcpy(frame.data.data() + n, parts[part].data() + off, take);
+            n += take;
+            off += take;
+        }
+        if (n == 0) break;  // the stream ended exactly on a window boundary
         frame.len = static_cast<std::uint8_t>(n);
-        std::memcpy(frame.data.data(), bytes.data() + off, n);
         link_->write_raw(frame);
-        off += n;
     }
 }
 
@@ -194,7 +221,8 @@ void transport_can::emit_hello() {
     hello.group = false;
     hello.group_total_len = 0;
     hello.slice_count = 0;
-    hello.path = cfg_.path;
+    // `hello.path` stays empty on purpose: emit_advertise announces cfg_.path in place, so
+    // filling it here would buy nothing but a per-hello std::string allocation.
     const std::lock_guard lock(tx_m_);
     emit_advertise(hello);
 }
@@ -229,7 +257,8 @@ void transport_can::send_impl(std::span<const std::byte> frame, std::uint16_t ta
     adv.group_total_len = static_cast<std::uint32_t>(frame.size());
     adv.slice_count = static_cast<std::uint16_t>(count);
     adv.target = target;
-    adv.path = cfg_.path;
+    // `adv.path` stays empty: emit_advertise walks cfg_.path in place. Copying it here
+    // would put a std::string allocation back on EVERY send — the very thing #848 removes.
     emit_advertise(adv);
 
     const bool fd = cfg_.mode == tr::view::can_frame_mode_t::FD;

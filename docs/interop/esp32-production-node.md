@@ -200,7 +200,7 @@ Rules that follow:
   [failable allocation and backpressure](../design/allocation-and-backpressure.md).
 - **Size the pool from the transport, not from hope.** `udp_transport_t` sizes RX
   segments to `min(64 KiB, backend->max_segment_size())`
-  (`core/src/transport_udp.cpp:140`; `kMaxDatagram = 65536` at
+  (`core/src/transport_udp.cpp:138`; `kMaxDatagram = 65536` at
   `core/include/libtracer/transport_udp.hpp:55`). Give the pool MTU-sized slots and
   datagrams arrive without a 64 KiB scratch buffer on a small thread stack.
 
@@ -307,7 +307,7 @@ without the project-side symbol, the line is inert.
   reconnect storm.
 - **Egress is gather, not copy.** The rope-to-wire path lowers to an iovec `sendmsg`
   (`core/src/posix_endpoint.cpp:92,98`; the TCP assembly is at
-  `core/src/transport_tcp.cpp:57-73`), and lwIP provides `sendmsg` unmodified. Do not
+  `core/src/transport_tcp.cpp:62-78`), and lwIP provides `sendmsg` unmodified. Do not
   flatten payloads before send; the only legitimate flatten is a substrate boundary
   DMA cannot span.
 - **Backpressure beats buffering.** Where a node buffers for a slow subscriber, the
@@ -329,8 +329,8 @@ itself, described via `:schema` like any other data
 ```
 
 The backpressure counters come from `graph_t::delivery_drops()`
-(`core/include/libtracer/graph.hpp:1058`), which snapshots three per-cause totals —
-`no_target`, `denied`, `out_of_memory` (`graph.hpp:1041-1048`). They are counted and
+(`core/include/libtracer/graph.hpp:1110`), which snapshots three per-cause totals —
+`no_target`, `denied`, `out_of_memory` (`graph.hpp:1093-1100`). They are counted and
 never enforced: nothing in the library reads them, so the deployment decides what to
 alarm on. The three loads are individually relaxed rather than one atomic snapshot,
 so their useful reading is "is this growing", not an instant total.
