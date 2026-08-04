@@ -7,6 +7,8 @@ versioning/publish strategy.
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-08-04
+
 ### Added
 
 - **The RFC-0024 forwarding car's two vectors are pinned** in `packages/client/test/vectors.test.mjs`:
