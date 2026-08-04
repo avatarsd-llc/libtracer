@@ -125,6 +125,19 @@ class esp_ws_client_link_t : public transport_t {
     /** @brief True once the opening handshake has completed (and while connected). */
     [[nodiscard]] bool ok() const noexcept { return connected_.load(std::memory_order_acquire); }
 
+    /**
+     * @brief Set (or clear, with an empty string) extra HTTP header lines appended to the
+     *        opening-handshake request. Each line must be `Name: value\r\n`-terminated
+     *        (`esp_transport_ws` emits them verbatim). Applied on the NEXT dial.
+     *
+     * The client counterpart to @ref httpd_ws_link_t::set_admission_cb: a board-to-board
+     * dial carries no browser session cookie, so a token header here is how a dialing node
+     * authenticates itself to a peer whose graph WS gates admission. NOT synchronized — set
+     * it once at wiring time, before the link first dials; the recv thread reads it when it
+     * (re)builds the transport.
+     */
+    void set_handshake_headers(std::string headers) { handshake_headers_ = std::move(headers); }
+
    private:
     /** @brief The recv thread body: (re)connect, then poll+read+deliver until stopped. */
     void recv_loop();
@@ -137,6 +150,9 @@ class esp_ws_client_link_t : public transport_t {
     const std::string host_;
     const std::uint16_t port_;
     const std::string ws_path_;
+    /** @brief Extra CRLF-terminated handshake header lines, empty = none; read on the recv
+     *         thread when it (re)dials — see @ref set_handshake_headers. */
+    std::string handshake_headers_;
 
     esp_transport_handle_t tcp_ = nullptr;  // parent TCP transport (owned)
     esp_transport_handle_t ws_ = nullptr;   // WS transport over tcp_ (owned)
