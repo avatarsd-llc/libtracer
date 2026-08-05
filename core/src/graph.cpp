@@ -1431,6 +1431,15 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
     // lock; delivery runs OUTSIDE it (the remote sink does transport I/O; a callback /
     // target re-dispatch may re-enter the graph) through the SAME dispatch_edge legs a
     // write fans out with.
+    // The observer's inputs, captured BEFORE `s` is moved into the slot verb below and before
+    // a replace overwrites the slot it displaces. Both are refcount clones of already-owned
+    // segments, so this costs no byte copy — and it is skipped outright unless an observer is
+    // installed AND the door is external, which is what keeps the local doors free.
+    const bool observe = observing_subscriptions(caller);
+    const view_t admitted_tlv = observe ? s.source_view : view_t{};
+    const view_t displaced_tlv =
+        (observe && slot) ? v->edge_source(*slot).value_or(view_t{}) : view_t{};
+
     edge_latch_t latch;
     std::size_t idx = 0;
     // The listener count goes up BEFORE the slot exists, not after (#635). fan_out now SKIPS
@@ -1455,6 +1464,11 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
         if (r != vertex_t::edge_replace_t::FILLED_EMPTY) note_subscriber_removed(v);
         if (r == vertex_t::edge_replace_t::OUT_OF_RANGE)
             return std::unexpected(status_t::INVALID_PATH);
+        // A replace that displaced a LIVE edge is two events, in causal order: the old
+        // subscription ended and a new one began. Reporting only the ADDED would leave an
+        // observer's inventory holding an edge that no longer exists.
+        if (r == vertex_t::edge_replace_t::REPLACED_ACTIVE)
+            notify_subscription(sub_event_t::kind_t::REMOVED, v, caller, displaced_tlv, *slot);
         idx = *slot;
     } else {
         idx = v->add_edge(std::move(s), &latch);
@@ -1470,7 +1484,46 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
     }
 
     if (latch.value) dispatch_edge(latch.edge, *latch.value);
+    // Last, and only on the success path: an edge the caller was told about is an edge that
+    // landed. No graph lock is held here — the slot verb released the vertex stripe lock and
+    // note_subscriber_added released the map lock — and the durability latch has already been
+    // dispatched, so the observer never runs interleaved with this subscription's own replay.
+    notify_subscription(sub_event_t::kind_t::ADDED, v, caller, admitted_tlv, idx);
     return subscription_t{v, idx};
+}
+
+void graph_t::set_subscription_observer(sub_observer_t observer) {
+    subscription_observer_ = std::move(observer);
+}
+
+void graph_t::notify_subscription(sub_event_t::kind_t kind, const vertex_t* v,
+                                  std::string_view caller, const view_t& sub_tlv,
+                                  std::size_t slot) const {
+    // The ONE external/local discrimination in the feature: a non-empty caller context is by
+    // construction the inbound link NAME the FWD resolver drives the op under, and the local
+    // doors (both subscribe() sugars, a field-write from host code) pass the empty context.
+    if (!observing_subscriptions(caller)) return;
+    // Decode the target from the record ITSELF, not from the parsed slot: subscribe_wire
+    // deliberately drops target_key for a remote binding, but the PATH the peer sent is still
+    // what an observer wants to see (sub_event_t::target carries the caveat). A slot with no
+    // stored TLV, or one whose PATH is malformed, reports an EMPTY target rather than
+    // suppressing the event — the mutation happened either way.
+    std::vector<std::byte> target;
+    if (!sub_tlv.empty()) {
+        if (const auto tlv = wire::decode(sub_tlv); tlv && tlv->type == type_t::SUBSCRIBER) {
+            for (const tlv_t& child : tlv->children) {
+                if (child.type != type_t::PATH) continue;
+                if (auto k = wire::path_key(child)) target = *std::move(k);
+                break;
+            }
+        }
+    }
+    const std::vector<std::byte> producer = build_key(v);
+    subscription_observer_(sub_event_t{.kind = kind,
+                                       .producer = wire::key_view_t{producer},
+                                       .target = wire::key_view_t{target},
+                                       .link = caller,
+                                       .slot = slot});
 }
 
 result_t<void> graph_t::subscribe(const path_t& src, const path_t& target,
@@ -1639,8 +1692,20 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
             if (!tlv) return std::unexpected(status_t::TYPE_MISMATCH);
             // The eviction sentinel: an empty STATUS (`09 00 00 00`, the smallest valid TLV).
             if (tlv->type == type_t::STATUS && tlv->payload.empty() && tlv->children.empty()) {
-                if (v->clear_edge(step0.index))
+                // The observer's view of the departing edge must be taken BEFORE the clear —
+                // clear_edge RECLAIMS the slot's stored SUBSCRIBER, so afterwards there is
+                // nothing left to name the target with. Skipped entirely on a local clear or
+                // with no observer installed (observing_subscriptions).
+                const view_t cleared_tlv = observing_subscriptions(caller)
+                                               ? v->edge_source(step0.index).value_or(view_t{})
+                                               : view_t{};
+                if (v->clear_edge(step0.index)) {
                     note_subscriber_removed(v);  // RFC-0005 counter bookkeeping
+                    // Only a slot that WAS active is an unsubscribe; clearing an already-empty
+                    // one changed nothing and must not be reported as a removal.
+                    notify_subscription(sub_event_t::kind_t::REMOVED, v, caller, cleared_tlv,
+                                        step0.index);
+                }
                 return {};
             }
             if (tlv->type != type_t::SUBSCRIBER) return std::unexpected(status_t::TYPE_MISMATCH);

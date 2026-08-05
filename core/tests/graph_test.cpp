@@ -762,6 +762,128 @@ void test_assign_propagate() {
     check(*cw == 1, "write() delivers immediately (assign + targeted propagate)");
 }
 
+/** @brief `/a/b` spelled back from a canonical key, so the enumeration order is asserted on
+ *         something a reader can check by eye rather than on raw NAME records. */
+std::string spell(tr::wire::key_view_t key) {
+    std::string out;
+    const std::span<const std::byte> b = key.bytes();
+    std::size_t i = 0;
+    while (i + 4 <= b.size()) {
+        const std::size_t len = tr::detail::load_le<std::uint16_t>(b.subspan(i + 2, 2));
+        if (i + 4 + len > b.size()) break;
+        out.push_back('/');
+        out.append(reinterpret_cast<const char*>(b.data()) + i + 4, len);
+        i += 4 + len;
+    }
+    return out;
+}
+
+/** @brief Enumerate the graph into a `/a/b|/a/c|` joined string (visit order preserved). */
+std::string enumerate(const graph_t& g) {
+    std::string out;
+    g.for_each_vertex([&out](tr::wire::key_view_t key, tr::graph::vertex_handle_t) {
+        out += spell(key);
+        out.push_back('|');
+    });
+    return out;
+}
+
+void test_for_each_vertex() {
+    std::printf("for_each_vertex — every registered vertex, ascending canonical-key byte order:\n");
+    graph_t g;
+    // Registered out of order, and DEEP: /zone/b's parent /zone is a placeholder created by
+    // the deep register, never declared by an owner.
+    (void)g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/zone/b"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/actuator"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/sensor"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/zone/a"), role_t::STORED_VALUE);
+
+    // Byte order over CANONICAL keys, not over the spelled text: a NAME record is
+    // `02 00 <u16 len> <text>`, so siblings order by name LENGTH first — zone(4), sensor(6),
+    // actuator(8). What the order does promise is that a parent precedes its subtree and the
+    // subtree is contiguous (a parent's key is a byte-prefix of every descendant's).
+    const std::string seen = enumerate(g);
+    check(seen == "/zone/a|/zone/b|/sensor|/sensor/temp|/actuator|",
+          std::string("canonical-key byte order, placeholders skipped (got ") + seen + ")");
+
+    check(enumerate(g) == seen, "the order is STABLE across calls while the graph is unchanged");
+
+    // The root is a vertex once it is REGISTERED, and sorts first (the empty key).
+    (void)g.register_vertex(*path_t::parse("/"), role_t::STORED_VALUE);
+    check(enumerate(g) == "|" + seen, "a registered root is enumerated first (empty key)");
+
+    // Registering the placeholder makes it appear, in place — nothing else moves.
+    (void)g.register_vertex(path_t("/zone"), role_t::STORED_VALUE);
+    check(enumerate(g) == "|/zone|/zone/a|/zone/b|/sensor|/sensor/temp|/actuator|",
+          "a filled placeholder joins the listing at its sorted position, ahead of its subtree");
+
+    // The handle is the real thing: write through it, then read the value back by path.
+    bool found_temp = false;
+    g.for_each_vertex([&](tr::wire::key_view_t key, tr::graph::vertex_handle_t vh) {
+        if (spell(key) != "/sensor/temp") return;
+        found_temp = true;
+        (void)g.write(vh, make_value({0x2A}));
+    });
+    const auto vt = g.find(path_t("/sensor/temp").key());
+    const bool wrote = vt && g.read(*vt).has_value();
+    check(found_temp && wrote,
+          "the visited handle is usable — a write through it lands on that vertex");
+}
+
+void test_for_each_vertex_concurrent_register() {
+    std::printf("for_each_vertex — a concurrent register during the walk is safe:\n");
+    graph_t g;
+    constexpr int kPre = 64;
+    for (int i = 0; i < kPre; ++i) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "/pre/v%03d", i);
+        (void)g.register_vertex(path_t(buf), role_t::STORED_VALUE);
+    }
+    (void)g.register_vertex(path_t("/pre"), role_t::STORED_VALUE);
+
+    // A writer registering NEW vertices while the walk runs. The snapshot is taken under the
+    // shared map hold, so a late arrival may or may not be seen — but every vertex that
+    // existed BEFORE the walk started must be visited exactly once, and nothing may fault.
+    // The writer is BOUNDED (kNew) so the walk's cost stays bounded too; it then idles until
+    // the reader is done, keeping the two overlapped for the whole run.
+    constexpr int kNew = 512;
+    std::atomic<bool> stop{false};
+    std::atomic<int> written{0};
+    std::thread writer([&] {
+        for (int i = 0; i < kNew && !stop.load(std::memory_order_relaxed); ++i) {
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "/new/v%05d", i);
+            (void)g.register_vertex(path_t(buf), role_t::STORED_VALUE);
+            written.store(i + 1, std::memory_order_relaxed);
+        }
+    });
+
+    int pre_seen = 0;
+    bool ordered = true;
+    for (int round = 0; round < 200; ++round) {
+        std::string prev;
+        bool first = true;
+        pre_seen = 0;
+        g.for_each_vertex([&](tr::wire::key_view_t key, tr::graph::vertex_handle_t) {
+            // Compared on the KEY BYTES — the order for_each_vertex actually promises.
+            const std::string raw(reinterpret_cast<const char*>(key.bytes().data()),
+                                  key.bytes().size());
+            if (!first && !(prev < raw)) ordered = false;  // strictly ascending, no dupes
+            first = false;
+            prev = raw;
+            if (spell(key).rfind("/pre/v", 0) == 0) ++pre_seen;
+        });
+        if (pre_seen != kPre || !ordered) break;
+    }
+    stop.store(true, std::memory_order_relaxed);
+    writer.join();
+    check(written.load() > 0, "the writer really did register concurrently with the walks");
+
+    check(pre_seen == kPre, "every vertex registered BEFORE the walk is visited, exactly once");
+    check(ordered, "the visit order stays strictly ascending under concurrent registration");
+}
+
 int main() {
     test_path_parse();
     test_stored_value();
@@ -780,6 +902,8 @@ int main() {
     test_subscribe_never_misses_a_racing_write();
     test_schema_read();
     test_delivery_terminates_at_target();
+    test_for_each_vertex();
+    test_for_each_vertex_concurrent_register();
     test_concurrent_stress();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,

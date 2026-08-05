@@ -143,11 +143,11 @@ So there are **two** independent limits, and the first one was invisible because
 > Beware the near-miss that invites a third bad re-pin: `core/src/graph.cpp:727` today is
 > `graph_t::has_first_level_child`, which *does* take `map_mutex_` shared at `:728` and is *not*
 > the function this bullet names — it is the #373 first-level shadow guard, a public `graph_t`
-> member (`core/include/libtracer/graph.hpp:990`) with **no in-tree caller**, whose retirement
+> member (`core/include/libtracer/graph.hpp:1121`) with **no in-tree caller**, whose retirement
 > [ADR-0061](0061-per-transport-mount-routing-strip-k-l5-demux.md) still lists as open. Pointing
 > this bullet at it would assert a call `graph_t::read` does not make.
 
-**Which points at the next lever, and it is not a reclamation scheme.** Of the four `read_stored()` call sites, only `read_subtree_folded` (`graph.cpp:2096`, its `read_stored()` at `:2151`) keeps the handle; the other three — the leaf read, `deliver_current`, and `await`'s return — are `const shared_ptr sp = v->read_stored(); … use *sp …` and drop it before returning. A **scoped** read that hands back a guard instead of an owning handle would skip the promotion entirely on those three, which is the non-owning contract the `hazard` arm measured at 2,357 M/s. That is an API question, not a slot question, and it is where the rest of this read lives.
+**Which points at the next lever, and it is not a reclamation scheme.** Of the four `read_stored()` call sites, only `read_subtree_folded` (`graph.cpp:2161`, its `read_stored()` at `:2216`) keeps the handle; the other three — the leaf read, `deliver_current`, and `await`'s return — are `const shared_ptr sp = v->read_stored(); … use *sp …` and drop it before returning. A **scoped** read that hands back a guard instead of an owning handle would skip the promotion entirely on those three, which is the non-owning contract the `hazard` arm measured at 2,357 M/s. That is an API question, not a slot question, and it is where the rest of this read lives.
 
 Every other shape — the distinct-vertex read controls (`stripe1`, `spread`), all three write topologies, both fan-outs — landed inside a 1.4–2.2× run-to-run spread in both directions. In particular **§1's predicted 0.64× write penalty is not observable through `graph_t::write`**, partly dilution and partly because the implementation recycles displaced nodes through a per-participant free list, so a steady-state publish allocates nothing at all. §5's "one 16-byte allocation per publish" is a warm-up cost, not a per-write one.
 

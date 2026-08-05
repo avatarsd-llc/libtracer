@@ -735,6 +735,203 @@ void test_out_of_range_index_mode() {
           "ERROR payload == INVALID_PATH (0x0021) — the index is rejected, not dropped");
 }
 
+// ---------------------------------------------------------------------------
+// The external subscription observer (graph_t::set_subscription_observer).
+// ---------------------------------------------------------------------------
+
+/** @brief `/a/b` spelled back from a canonical key, so an event is asserted on readable text. */
+std::string spell(tr::wire::key_view_t key) {
+    std::string out;
+    const std::span<const std::byte> b = key.bytes();
+    std::size_t i = 0;
+    while (i + 4 <= b.size()) {
+        const std::size_t len = tr::detail::load_le<std::uint16_t>(b.subspan(i + 2, 2));
+        if (i + 4 + len > b.size()) break;
+        out.push_back('/');
+        out.append(reinterpret_cast<const char*>(b.data()) + i + 4, len);
+        i += 4 + len;
+    }
+    return out;
+}
+
+/** @brief One observed event, flattened to owned strings (the event's views are call-scoped). */
+struct seen_event_t {
+    tr::graph::sub_event_t::kind_t kind;
+    std::string producer;
+    std::string target;
+    std::string link;
+    std::size_t slot;
+};
+
+/** @brief `ADDED /sensor/temp -> /ui/panel via link-a [0]` — the whole event in one line. */
+std::string render(const seen_event_t& e) {
+    std::string out = e.kind == tr::graph::sub_event_t::kind_t::ADDED ? "ADDED " : "REMOVED ";
+    out += e.producer;
+    out += " -> ";
+    out += e.target.empty() ? "(none)" : e.target;
+    out += " via ";
+    out += e.link;
+    out += " [" + std::to_string(e.slot) + "]";
+    return out;
+}
+
+/** @brief FIELD `:subscribers[]` (append) — NAME + index_mode=ELEMENT, no index. */
+std::vector<std::byte> b_field_subs_append() {
+    std::vector<std::byte> out;
+    std::vector<std::byte> body = b_name("subscribers");
+    append(body, b_value({0x01}));
+    tr::wire::emit_tlv(out, type_t::FIELD, opt_t{.pl = true}, body);
+    return out;
+}
+
+/** @brief FIELD `:subscribers[N]` — NAME + index u32 + index_mode=ELEMENT (RFC-0004 §C). */
+std::vector<std::byte> b_field_subs_at(std::uint32_t n) {
+    std::vector<std::byte> out;
+    std::vector<std::byte> body = b_name("subscribers");
+    append(body, b_value({static_cast<std::uint8_t>(n), static_cast<std::uint8_t>(n >> 8),
+                          static_cast<std::uint8_t>(n >> 16), static_cast<std::uint8_t>(n >> 24)}));
+    append(body, b_value({0x01}));
+    tr::wire::emit_tlv(out, type_t::FIELD, opt_t{.pl = true}, body);
+    return out;
+}
+
+/** @brief The RFC-0009 §D.1 eviction sentinel — an empty STATUS (`09 00 00 00`). */
+std::vector<std::byte> b_evict_sentinel() {
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, type_t::STATUS, opt_t{}, {});
+    return out;
+}
+
+void test_subscription_observer() {
+    std::printf("subscription observer — EXTERNAL :subscribers[] mutations only:\n");
+    graph_t g;
+    op_resolver_t resolver(g);
+    std::vector<seen_event_t> seen;
+    g.set_subscription_observer([&seen](const tr::graph::sub_event_t& e) {
+        seen.push_back(
+            seen_event_t{e.kind, spell(e.producer), spell(e.target), std::string(e.link), e.slot});
+    });
+
+    tr::graph::vertex_handle_t v =
+        g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
+    (void)g.register_vertex(*path_t::parse("/ui/panel"), role_t::STORED_VALUE);
+
+    // --- silence: the local doors ------------------------------------------------------
+    (void)g.subscribe(*path_t::parse("/sensor/temp"), *path_t::parse("/ui/panel"));
+    check(seen.empty(), "a DIRECT graph_t::subscribe(src, target) does NOT fire the observer");
+    auto sink = [](const tr::view::rope_t&) {};
+    const auto sub = g.subscribe(*path_t::parse("/sensor/temp"), sink);
+    check(seen.empty(), "the callback-form subscribe sugar does NOT fire it either");
+    if (sub)
+        check(g.unsubscribe(*sub).has_value() && seen.empty(),
+              "the local unsubscribe() does NOT fire it");
+
+    // An op through the RESOLVER but with an EMPTY inbound link is a LOCAL op by definition
+    // (the ADR-0018 caller context) — still silent.
+    {
+        const auto fwd = b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"reply-ep"}),
+                               b_field_subs_append(), b_subscriber({"ui", "panel"}));
+        (void)resolve_bytes(resolver, fwd);
+    }
+    check(seen.empty(), "a resolver WRITE with an EMPTY inbound_link is local — still silent");
+
+    // --- the external append ------------------------------------------------------------
+    {
+        const auto fwd = b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"reply-ep"}),
+                               b_field_subs_append(), b_subscriber({"ui", "panel"}));
+        auto reply = resolve_bytes(resolver, fwd, "link-a");
+        const auto d = decode_reply(*reply);
+        check(value_u8(d.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::RESULT),
+              "the external subscribe resolved to RESULT");
+    }
+    check(seen.size() == 1, "an external :subscribers[] append fires exactly once");
+    const std::string added = seen.empty() ? std::string{} : render(seen.back());
+    // A wire append binds a REMOTE subscriber (op_resolve_walk's remote_sub branch =>
+    // subscribe_wire), which DROPS target_key — the event still reports the PATH the peer
+    // sent, because that is what the record says.
+    check(added == "ADDED /sensor/temp -> /ui/panel via link-a [2]",
+          std::string("... ADDED, with producer / target / link / slot (got '") + added + "')");
+    check(g.own_subs(v) == 3, "the external append really landed as a third slot");
+
+    // A SUBSCRIBER carrying no PATH at all: the bare remote subscriber => empty target.
+    {
+        std::vector<std::byte> bare;
+        tr::wire::emit_tlv(bare, type_t::SUBSCRIBER, opt_t{.pl = true}, {});
+        const auto fwd = b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"reply-ep"}),
+                               b_field_subs_append(), bare);
+        (void)resolve_bytes(resolver, fwd, "link-b");
+    }
+    check(render(seen.back()) == "ADDED /sensor/temp -> (none) via link-b [3]",
+          "a PATH-less SUBSCRIBER reports an EMPTY target (the bare remote-subscriber case)");
+
+    // --- the external CLEAR (RFC-0009 §D.1 eviction sentinel) ---------------------------
+    {
+        const auto fwd = b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"reply-ep"}),
+                               b_field_subs_at(2), b_evict_sentinel());
+        auto reply = resolve_bytes(resolver, fwd, "link-a");
+        const auto d = decode_reply(*reply);
+        check(value_u8(d.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::RESULT),
+              "the external :subscribers[2] clear resolved to RESULT");
+    }
+    check(render(seen.back()) == "REMOVED /sensor/temp -> /ui/panel via link-a [2]",
+          "the external clear fires REMOVED, naming the DEPARTING edge's target");
+
+    // Clearing an already-empty slot changed nothing and must not be reported.
+    const std::size_t before_noop = seen.size();
+    {
+        const auto fwd = b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"reply-ep"}),
+                               b_field_subs_at(2), b_evict_sentinel());
+        (void)resolve_bytes(resolver, fwd, "link-a");
+    }
+    check(seen.size() == before_noop, "re-clearing an empty slot fires nothing");
+
+    // --- the external REPLACE (§D.1) is two events, in causal order ---------------------
+    const std::size_t before_replace = seen.size();
+    {
+        const auto fwd = b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"reply-ep"}),
+                               b_field_subs_at(0), b_subscriber({"ui", "other"}));
+        (void)resolve_bytes(resolver, fwd, "link-c");
+    }
+    check(seen.size() == before_replace + 2, "a replace of a LIVE slot fires two events");
+    check(seen.size() >= 2 &&
+              render(seen[seen.size() - 2]) == "REMOVED /sensor/temp -> /ui/panel via link-c [0]" &&
+              render(seen.back()) == "ADDED /sensor/temp -> /ui/other via link-c [0]",
+          "... REMOVED (displaced) then ADDED (incoming), same slot");
+
+    // Filling the slot cleared above is an ADD and nothing else.
+    const std::size_t before_refill = seen.size();
+    {
+        const auto fwd = b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"reply-ep"}),
+                               b_field_subs_at(2), b_subscriber({"ui", "panel"}));
+        (void)resolve_bytes(resolver, fwd, "link-c");
+    }
+    check(seen.size() == before_refill + 1 &&
+              render(seen.back()) == "ADDED /sensor/temp -> /ui/panel via link-c [2]",
+          "a replace that FILLS an empty slot is one ADDED, no REMOVED");
+
+    // --- a REFUSED external subscribe reports nothing -----------------------------------
+    const std::size_t before_refused = seen.size();
+    {
+        const auto fwd = b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"reply-ep"}),
+                               b_field_subs_at(9999), b_subscriber({"ui", "panel"}));
+        auto reply = resolve_bytes(resolver, fwd, "link-c");
+        const auto d = decode_reply(*reply);
+        check(value_u8(d.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::ERROR),
+              "a :subscribers[9999] replace is refused (INVALID_PATH)");
+    }
+    check(seen.size() == before_refused, "a REFUSED external subscribe fires nothing");
+
+    // --- link teardown is documented as SILENT ------------------------------------------
+    const std::size_t before_evict = seen.size();
+    // `link-b`'s slot is the one an APPEND made — that is the door (subscribe_wire) that stores
+    // the edge's link NAME; a `[N]` replace stores only the gate context, so its edge carries no
+    // link and eviction never matches it (pre-existing, unrelated to this observer).
+    const std::size_t evicted = g.evict_link_edges("link-b");
+    check(evicted > 0 && seen.size() == before_evict,
+          "evict_link_edges (link teardown) is SILENT by design — the app's link-down is the "
+          "removal signal for the whole link");
+}
+
 int main() {
     test_read_zero_copy();
     test_write();
@@ -748,6 +945,7 @@ int main() {
     test_wildcard_and_not_local();
     test_out_of_range_index_mode();
     test_write_creates_remote();
+    test_subscription_observer();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;
