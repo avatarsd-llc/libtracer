@@ -286,7 +286,7 @@ call sites. The named loci: `fwd_frame_view.hpp` (both `peek_fwd_dst_segs` overl
 (`path_key`), `graph.cpp` (`parse_subscriber_tlv`), `child_registry.hpp` (`encode_mount_name`),
 `path.cpp`, `key_view.hpp`.
 
-**Vertex-map key.** The graph key **is** the `PATH` body (`path.hpp:114,124`; `graph.cpp:1646`;
+**Vertex-map key.** The graph key **is** the `PATH` body (`path.hpp:114,124`; `graph.cpp:1711`;
 `vertex.hpp:536` subscription keys), so it moves with the encoding. A `/sensor/temp` key goes
 18 B → 12 B. **RAM effect: UNMEASURED**, and this project's own record says a static-RAM census
 belongs on rv32, not host — and that `std::vector` has no small-buffer optimisation

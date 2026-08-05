@@ -12,6 +12,7 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <concepts>
@@ -28,8 +29,10 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
+#include "libtracer/key_view.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/path.hpp"
@@ -153,6 +156,70 @@ using subject_token_t = std::vector<std::byte>;
  * (PKI) token slots in later without changing the ACL model.
  */
 using subject_resolver_t = std::function<std::optional<subject_token_t>(std::string_view caller)>;
+
+/**
+ * @brief One EXTERNAL mutation of a producer's `:subscribers[]` — what @ref
+ *        graph_t::set_subscription_observer reports.
+ *
+ * "External" is exactly the ADR-0018 caller context being NON-EMPTY: the op arrived through
+ * `op_resolver_t` carrying an inbound link NAME. It is the same discriminator the SUBSCRIBE
+ * gate already runs under, so an observer sees precisely the set of edges a remote peer
+ * caused and never the ones the owner's own wiring code made. The local doors — both
+ * `subscribe()` sugars, `unsubscribe()`, and a `:subscribers[]` field-write under the empty
+ * context — are deliberately silent: the host that called them already knows.
+ *
+ * Both path fields are CANONICAL KEYS (concatenated NAME records — the `PATH` payload,
+ * docs/reference/03), never a slash-spelled string: that is the form the graph addresses
+ * by, and rendering one is the consumer's choice, not a cost the event imposes. Both are
+ * BORROWED for the duration of the callback only — copy what outlives it.
+ */
+struct sub_event_t {
+    /** @brief Which way the slot moved. */
+    enum class kind_t : std::uint8_t {
+        ADDED,  /**< @brief A slot was appended, or an empty slot filled by a `[N]` replace. */
+        REMOVED /**< @brief An active slot was cleared, or displaced by a `[N]` replace. */
+    };
+
+    /** @brief Whether a slot gained a subscriber or lost one. */
+    kind_t kind = kind_t::ADDED;
+    /** @brief Canonical key of the PRODUCER — the vertex whose `:subscribers[]` changed. */
+    wire::key_view_t producer;
+    /**
+     * @brief Canonical key decoded from the `SUBSCRIBER`'s `PATH` child — WHAT the record
+     *        says, verbatim.
+     *
+     * EMPTY when the record carries no well-formed `PATH` at all (a bare remote subscriber,
+     * whose consumer is named only by its return route over @ref link).
+     *
+     * @warning Read it as the consumer's SPELLING, not as a local vertex. On a wire subscribe
+     *          that binds a REMOTE subscriber this `PATH` names the consumer at ITS OWN root
+     *          and resolves to nothing here — `subscribe_wire` deliberately drops it as a
+     *          re-dispatch target and delivers over the return route instead (RFC-0004 §D).
+     *          On a local-target append it IS a key in this graph. The two are not
+     *          distinguishable from the event alone; @ref link tells the observer which
+     *          transport the op came from, and the app's own wiring says the rest.
+     */
+    wire::key_view_t target;
+    /** @brief This node's NAME for the transport link the op arrived on. Never empty. */
+    std::string_view link;
+    /** @brief The `:subscribers[]` slot index the event concerns (RFC-0009 §D.2 stable). */
+    std::size_t slot = 0;
+};
+
+/**
+ * @brief The app-installable external-subscription observer.
+ *
+ * @warning Runs SYNCHRONOUSLY on the resolver's thread, inside the operation it reports, and
+ *          the reply is not assembled until it returns — so it must be cheap and
+ *          non-blocking, and it MUST NOT re-enter `graph_t`. It is called outside every
+ *          graph lock (the admission door has already released the vertex stripe lock and
+ *          the map lock), so a re-entrant call does not self-deadlock; it is refused on the
+ *          simpler ground that an observer which mutates the graph while a `:subscribers[]`
+ *          write is mid-flight makes the event stream depend on its own side effects.
+ *          Deferral — queueing the event and acting on it from the app's own task — is the
+ *          APP's job, exactly as it is for @ref graph_t::set_remote_delivery_sink.
+ */
+using sub_observer_t = std::function<void(const sub_event_t&)>;
 
 /**
  * @brief The L4 in-process graph runtime: the Composite vertex tree plus the whole data
@@ -588,6 +655,70 @@ class graph_t {
     std::size_t evict_link_edges(std::string_view link_name);
 
     /**
+     * @brief Visit every REGISTERED vertex once, in ascending canonical-key BYTE order —
+     *        the graph's enumeration surface (a census, a directory listing, a paginated
+     *        `/system/…` projection).
+     *
+     * `fn` is invoked as `fn(wire::key_view_t key, vertex_handle_t vh)`. @p key is the
+     * vertex's full canonical key (concatenated NAME records, the `PATH` payload) rendered
+     * on demand — ADR-0057 stores one segment per node, so no such key exists until this
+     * asks for it — and is BORROWED for the duration of that one call. Placeholders (the
+     * unregistered intermediates a deep `register_vertex` creates) are SKIPPED: they are
+     * addressing scaffolding, not vertices an owner declared, and `find` does not answer
+     * for them either.
+     *
+     * **SORTED, and there is no unsorted twin**, deliberately. The tree walk's natural order
+     * is `for_each_descendant`'s, which no caller should encode a dependency on; a consumer
+     * paginating this surface — "give me vertices 40..60" across two operations — needs the
+     * order to be the SAME both times whenever the graph did not change, and byte order over
+     * canonical keys is the only order this container can promise that of. The sort is not
+     * what costs: every visit needs @p key, and rendering the keys is already `O(n)`
+     * allocations, so ordering them is a comparison pass on top of work the unsorted form
+     * would have done anyway. Offering both would buy nothing and invite the wrong one.
+     *
+     * The order is the SAME one the RFC-0008 sweep sets are kept in (`pending_` /
+     * `unconditional_`, byte-keyed `std::set`s), and it earns its keep the same way: the
+     * length-prefixed NAME framing makes a parent's key a byte-prefix of every descendant's,
+     * so a parent always precedes its subtree and that subtree is a CONTIGUOUS run. The
+     * result therefore reads as a stable pre-order tree listing.
+     *
+     * @note It is byte order over the KEY, not alphabetical order over the spelled path. A
+     *       NAME record is `02 00 <u16 len> <text>`, so siblings sort by name LENGTH first
+     *       and only then by text (`/zone` before `/sensor` before `/actuator`). A consumer
+     *       that wants alphabetical DISPLAY order sorts what it collected; what this promises
+     *       is stability and subtree contiguity.
+     *
+     * @warning **CONTROL-PLANE ONLY** and priced as such: it allocates one owned key per
+     *          registered vertex plus the snapshot vector, then sorts. Do not put this on a
+     *          delivery or write path.
+     *
+     * Concurrency: the {key, vertex} snapshot is taken under ONE shared `map_mutex_` hold and
+     * `fn` runs OUTSIDE it — the same two-phase discipline @ref evict_link_edges and the
+     * fan-out sweep use. So `fn` MAY re-enter the graph (read a value, register a vertex,
+     * retire something) without self-deadlocking. What it gets in exchange is a SNAPSHOT:
+     * a vertex registered after the hold is not visited, one retired during the walk is
+     * still visited (handles stay valid — vertices are pointer-stable and never freed,
+     * ADR-0057), and a caller that must distinguish those re-reads under its own lock.
+     * Vertices registered BEFORE the hold are all visited.
+     */
+    template <typename Fn>
+    void for_each_vertex(Fn&& fn) const {
+        std::vector<std::pair<std::vector<std::byte>, vertex_t*>> snap;
+        {
+            const std::shared_lock lock(map_mutex_);
+            vertex_t* const r = root_.get();
+            const auto take = [&snap](vertex_t& c) {
+                if (c.registered()) snap.emplace_back(build_key(&c), &c);
+            };
+            take(*r);
+            r->for_each_descendant(take);
+        }
+        std::sort(snap.begin(), snap.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+        for (const auto& e : snap) fn(wire::key_view_t{e.first}, vertex_handle_t{e.second});
+    }
+
+    /**
      * @brief A child-vertex factory: the device-catalog entry ADR-0017 makes concrete.
      *
      * Given the composed child key (parent key + the SPEC's `name` NAME) and the optional
@@ -990,6 +1121,37 @@ class graph_t {
     void set_subject_resolver(subject_resolver_t resolver);
 
     /**
+     * @brief Install the EXTERNAL subscription observer — a callback fired on every
+     *        `:subscribers[]` mutation that arrived over a transport.
+     *
+     * The app-side answer to "who is watching what, right now": a producer that wants to
+     * spin up a source only while a peer is subscribed, an inventory of live remote
+     * subscriptions, a projection of the fan-out graph. Today that is discoverable only by
+     * polling `read_subscribers` over every vertex; this is the edge-triggered form.
+     *
+     * Fires from the ONE admission door every subscribe lands in (ADR-0049
+     * `admit_subscriber`) and from the `:subscribers[N]` clear, so an append, a `[N]`
+     * replace (a `REMOVED` for the displaced edge then an `ADDED`) and a clear are all
+     * reported, whichever wire shape carried them — the wire `:subscribers[]` APPEND that
+     * binds a REMOTE subscriber (`subscribe_wire`, target empty) and the one that names a
+     * LOCAL target alike.
+     *
+     * **Only EXTERNAL mutations fire it** — see @ref sub_event_t for what that means and
+     * why. Two further silences are by design, not oversight:
+     * - `evict_link_edges` — the transport-plane hook that drops a departed link's edges
+     *   wholesale (RFC-0009 §D) — emits NOTHING. It is a local host API, not an op, and it
+     *   clears k edges of one link in a batch. An app tracking live subscriptions must
+     *   therefore treat its own link-down signal as the removal for every edge of that link.
+     * - `unsubscribe(subscription_t)` is a local door and stays silent like the rest.
+     *
+     * Set ONCE at wiring time, before frames flow — read-only afterwards on the resolver
+     * path, so no lock (the `set_remote_delivery_sink` / `set_subject_resolver` contract).
+     * A null observer (the default) costs one null check on the subscribe path and nothing
+     * anywhere else.
+     */
+    void set_subscription_observer(sub_observer_t observer);
+
+    /**
      * @brief The wire `:subscribers[]` APPEND — the same admission door as the local
      *        sugars and field-writes (ADR-0049), plus the remote delivery binding.
      *
@@ -1190,6 +1352,21 @@ class graph_t {
     // so gate and latch semantics cannot diverge per entry point.
     result_t<subscription_t> admit_subscriber(vertex_t* v, subscriber_t s, std::string_view caller,
                                               std::optional<std::size_t> slot = std::nullopt);
+    // Fire the external-subscription observer for ONE slot mutation (set_subscription_observer).
+    // Returns immediately when no observer is installed or `caller` is EMPTY — the latter is
+    // the whole external/local discrimination, in one place. `sub_tlv` is the slot's stored
+    // SUBSCRIBER TLV (empty for a callback-only slot, which no external door can create);
+    // the event's target key is decoded from its PATH child. Called with NO graph lock held,
+    // after the mutation has landed — see sub_observer_t's re-entrancy warning.
+    void notify_subscription(sub_event_t::kind_t kind, const vertex_t* v, std::string_view caller,
+                             const view_t& sub_tlv, std::size_t slot) const;
+    // True iff a subscription event is worth building at all — an installed observer AND an
+    // external (non-empty) caller context. Guards the pre-reads the observer needs (the
+    // displaced slot's stored SUBSCRIBER on a replace/clear) so an app that installs nothing
+    // pays exactly one null check.
+    [[nodiscard]] bool observing_subscriptions(std::string_view caller) const noexcept {
+        return subscription_observer_ != nullptr && !caller.empty();
+    }
     // Field surface: ":settings.<f>", ":settings.app.<name…>" (RFC-0010),
     // ":subscribers[]" / "[N]", ":children[]".
     result_t<void> field_write(vertex_t* v, const field_path_t& field, const view_t& value,
@@ -1337,6 +1514,10 @@ class graph_t {
     // The pluggable subject resolver (#81, ADR-0018). Null (default) => ACL enforcement
     // disabled. Same set-once-before-frames-flow contract as remote_sink_.
     subject_resolver_t subject_resolver_;
+    // The external-subscription observer (set_subscription_observer). Same
+    // set-once-before-frames-flow contract as subject_resolver_; null by default, so an app
+    // that installs nothing pays one null check on the subscribe/clear path.
+    sub_observer_t subscription_observer_;
     // The NODE's identity record, pre-serialized (#406, RFC-0011 §B): the complete
     // SETTINGS{kind,key} TLV, built once at install so every `:identity` read is a copy
     // of settled bytes rather than a re-emit — the "all vertices return byte-identical

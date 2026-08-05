@@ -50,8 +50,8 @@ This RFC adds a **second, optional normative path form** and changes nothing abo
   **derived** in §4.4, in the discipline [RFC-0023](0023-path-segment-cap-repriced-32-to-255.md)
   set: *from the wire's own widths and the RAM record, not chosen.*
 - Validation is **existing machinery**: a bounds check into the pinned, pointer-stable,
-  insert-only vertex map (`core/include/libtracer/graph.hpp:57`) plus a compare against the
-  validate-on-use stamps that already exist (`core/include/libtracer/graph.hpp:304`,
+  insert-only vertex map (`core/include/libtracer/graph.hpp:60`) plus a compare against the
+  validate-on-use stamps that already exist (`core/include/libtracer/graph.hpp:371`,
   `core/include/libtracer/child_registry.hpp:266-268`). A failed validation **never mis-routes**:
   drop, NACK with the failing hop index, and the origin re-resolves canonically and re-mints.
 - Binding is minted **in-band, in the reply of an ordinary canonical op**, with **zero added
@@ -325,7 +325,7 @@ The generation is the **anti-mis-route guard** — the only thing standing betwe
 and a delivery into whatever now occupies that slot. Its width is not a space decision.
 
 1. **It is the width of the stamp that already exists.** `graph_t::retire_generation` returns
-   `std::uint32_t` (`core/include/libtracer/graph.hpp:304`); `child_registry_t::mount_generation`
+   `std::uint32_t` (`core/include/libtracer/graph.hpp:371`); `child_registry_t::mount_generation`
    likewise (`core/include/libtracer/child_registry.hpp:285`). A narrower wire field would be a
    **truncating** conversion of a live counter — aliasing every 2^width retires by construction,
    with no code anywhere doing anything wrong.
@@ -368,7 +368,7 @@ Little-endian, both fields. This is not a choice: `docs/reference/01-data-format
   forge primitive handed to whoever can put bytes on a link. An index is checkable against a
   cardinality the receiver knows. The reference implementation already refuses this shape
   internally, for the weaker in-process case: `vertex_handle_t` "exposes no `operator*` or
-  raw-pointer accessor" (`core/include/libtracer/graph.hpp:55-56`); putting on the wire what is
+  raw-pointer accessor" (`core/include/libtracer/graph.hpp:58-59`); putting on the wire what is
   not exposed to a local caller is not arguable. It is also 8 B on a host where 4 suffices.
 - **A globally unique vertex id (UUID / node-key + local id).** Rejected as a *different design*:
   it would need a mint authority, a resolution table at every hop, and a global namespace — three
@@ -382,11 +382,11 @@ Little-endian, both fields. This is not a choice: `docs/reference/01-data-format
 On receipt of a `PATH_REF`-addressed op, a host reads element 0 and:
 
 1. **Bounds-check** `index` against its vertex-map cardinality. The map is *pinned,
-   pointer-stable, insert-only* — `core/include/libtracer/graph.hpp:57`, and ADR-0057's
-   never-freed rule (`graph.hpp:110`) — so an in-range index always names a live allocation and
+   pointer-stable, insert-only* — `core/include/libtracer/graph.hpp:60`, and ADR-0057's
+   never-freed rule (`graph.hpp:113`) — so an in-range index always names a live allocation and
    the deref itself cannot fault. Out of range ⇒ **reject** (§5.3).
 2. **Compare the generation** against `graph_t::retire_generation(vh)`
-   (`core/include/libtracer/graph.hpp:304`). Mismatch ⇒ **reject**. That doc comment already
+   (`core/include/libtracer/graph.hpp:371`). Mismatch ⇒ **reject**. That doc comment already
    states the contract this RFC leans on verbatim: a holder "records this alongside it and
    re-reads it before use: a mismatch means the path was retired (and possibly re-created for a
    DIFFERENT owner) since the resolution, so the cached answer must be discarded rather than
@@ -397,7 +397,7 @@ On receipt of a `PATH_REF`-addressed op, a host reads element 0 and:
 4. Egress (or, at the terminus, apply the op).
 
 Generations only ever move **forward** (`retire_generation` is bumped under retirement's own
-ordering, `graph.hpp:300`), so a stale element can only ever compare *lower*. It never becomes
+ordering, `graph.hpp:367`), so a stale element can only ever compare *lower*. It never becomes
 valid again by waiting.
 
 ### 5.2 The three stamps, and which one the wire carries
@@ -408,7 +408,7 @@ slot tombstone (a departed link)". All three remain in force under this RFC; the
 
 | stamp | catches | where it lives under a bound path |
 | --- | --- | --- |
-| `retire_generation` (`graph.hpp:304`) | a retired-and-revived vertex | **on the wire** — the element's second u32 |
+| `retire_generation` (`graph.hpp:371`) | a retired-and-revived vertex | **on the wire** — the element's second u32 |
 | slot tombstone | a departed link | **node-local** — the egress slot the deref'd connection vertex resolves to is checked as it is used today; zero wire bytes |
 | `mount_generation` (`child_registry.hpp:285`) | the *split point* moving — a `dst` prefix starting or stopping resolving to a different mount (#765) | **node-local, and structurally not applicable to the deref**: a bound element names a connection vertex *directly*. There is no cached prefix split to go stale because there is no prefix. The stamp still guards the **mint** (§6.2) and every canonical-form op, unchanged |
 
@@ -464,7 +464,7 @@ handle to it*. A bound path cannot be used to discover a namespace its holder ca
 
 **Normative.** Every operation arriving on a bound path MUST evaluate `acl_allows` at the
 dereferenced vertex, for the operation's own right, exactly as the canonical form does. A
-generation match authorizes nothing (`graph.hpp:300-302`).
+generation match authorizes nothing (`graph.hpp:367-369`).
 
 The evaluation is the shipped one: `graph_t::acl_allows` (`core/src/graph.cpp:700`) walks to the
 nearest **bearing** ancestor lock-free and evaluates that vertex's **cached effective-ACE merge**
@@ -475,7 +475,7 @@ per-operation ancestor rebuild (`graph.cpp:718-727`).
 **Revocation is immediate; there is no snapshot to go stale.** An `:acl` write marks the subtree
 dirty (`graph_t::mark_subtree_acl_dirty`, `core/src/graph.cpp:750`) and the next check rebuilds.
 A bound path holds no ACL state of any kind, so a revoked right takes effect on the very next
-operation over an already-minted binding — the property `graph.hpp:300-302` demands and the reason
+operation over an already-minted binding — the property `graph.hpp:367-369` demands and the reason
 this RFC stores nothing authorization-shaped.
 
 ### 6.3 Equivalence by construction — and a vector pair anyway
@@ -497,8 +497,8 @@ two silent misroutes shipped because no test used the production wiring.
 
 This RFC adds **no wire registry and no per-hop route table**. It does require one node-local
 structure that does not exist today, and the RFC would be dishonest not to name it:
-`graph.hpp:57`'s "vertex map" is *described* as a map but *stored* as the ADR-0057 composite
-vertex tree (`core/include/libtracer/graph.hpp:1225-1236`) — a tree of non-moving `unique_ptr`
+`graph.hpp:60`'s "vertex map" is *described* as a map but *stored* as the ADR-0057 composite
+vertex tree (`core/include/libtracer/graph.hpp:1402-1413`) — a tree of non-moving `unique_ptr`
 allocations with no dense index. A **dense, append-only `vector<vertex_t*>`**, one slot appended
 per registration, is therefore required to give an index meaning.
 
@@ -513,7 +513,7 @@ Its cost and its properties:
   no unpriced headroom — while keeping the index O(1) and its elements non-moving. The cost model
   and the wire surface are unchanged; only the sentence naming a container was wrong.
 - It is **append-only**, which the registration path already is ("vertices are added, never
-  erased", `graph.hpp:1228`), so it introduces no new lifetime rule and no new invalidation event.
+  erased", `graph.hpp:1405`), so it introduces no new lifetime rule and no new invalidation event.
 - It is **node-local** and unobservable on the wire; a peer never learns another node's
   cardinality.
 - It is **not** a route table: its size tracks the graph, not the traffic, so it does not

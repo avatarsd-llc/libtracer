@@ -30,7 +30,7 @@ lock each stage takes, where the buffers come from, and what the delivery legs c
 The handle overload is the whole of `write(vertex_handle_t, rope_t, caller)`
 (`graph.cpp:1330-1332`) — a call straight into `write_impl`. A **path**-addressed write resolves
 first, and `find_ptr` takes `map_mutex_` in shared mode (`graph.cpp:663-664`), so the path overload
-(`graph.cpp:2364`) pays one shared map hold that the handle overload does not.
+(`graph.cpp:2429`) pays one shared map hold that the handle overload does not.
 
 Two allocation-shaped details on the store leg. A `HANDLER`-role write clones the rope before
 storing, because the user handler consumes the value and there is no published pointer to
@@ -100,12 +100,12 @@ Declared in `core/include/libtracer/graph.hpp`, all private:
 
 | function | declaration | role |
 | --- | --- | --- |
-| `deliver_vertex` | `graph.hpp:1162` | the per-vertex delivery unit both `write` and `propagate` build on: `fan_out`, then `bubble_up` if anyone listens above |
-| `fan_out` | `graph.hpp:1142` | return at once if nothing subscribes here; else snapshot under the stripe lock, then `dispatch_edge` per view, outside it |
-| `dispatch_edge` | `graph.hpp:1148` | the one dispatch of an edge's three legs, shared by `fan_out` and the admission durability latch so the legs cannot diverge |
-| `dispatch_edge_target` | `graph.hpp:1154` | the local re-dispatch leg — a delivery into another vertex |
-| `dispatch_edge_remote` | `graph.hpp:1155` | the remote leg — a `FWD{WRITE}` through the injected sink |
-| `bubble_up` | `graph.hpp:1158` | vertical fan-out to every registered ancestor's subscribers |
+| `deliver_vertex` | `graph.hpp:1324` | the per-vertex delivery unit both `write` and `propagate` build on: `fan_out`, then `bubble_up` if anyone listens above |
+| `fan_out` | `graph.hpp:1304` | return at once if nothing subscribes here; else snapshot under the stripe lock, then `dispatch_edge` per view, outside it |
+| `dispatch_edge` | `graph.hpp:1310` | the one dispatch of an edge's three legs, shared by `fan_out` and the admission durability latch so the legs cannot diverge |
+| `dispatch_edge_target` | `graph.hpp:1316` | the local re-dispatch leg — a delivery into another vertex |
+| `dispatch_edge_remote` | `graph.hpp:1317` | the remote leg — a `FWD{WRITE}` through the injected sink |
+| `bubble_up` | `graph.hpp:1320` | vertical fan-out to every registered ancestor's subscribers |
 
 `dispatch_edge` is defined inline (`graph.cpp:911-918`) precisely so its body stays in the
 fan-out loop; the target and remote legs are split into out-of-line helpers to keep that body's
@@ -145,7 +145,7 @@ handler re-emits when it chooses.
 
 The consequence is structural rather than defensive. A dispatch-level subscription cycle cannot
 form, so there is **no depth cap, no dedup, and no drain queue**, and nothing to size. The former
-`kMaxDispatchDepth` is deleted with nothing replacing it (`graph.hpp:79-84`). An application that
+`kMaxDispatchDepth` is deleted with nothing replacing it (`graph.hpp:82-87`). An application that
 wants pure relay subscribes the consumer directly.
 
 Rejected alternative: a depth counter threaded through dispatch. It would bound a recursion that
@@ -204,9 +204,9 @@ the drop:
 
 ```cpp
 struct delivery_drops_t {
-    std::uint64_t no_target = 0;      // graph.hpp:1095
-    std::uint64_t denied = 0;         // graph.hpp:1097
-    std::uint64_t out_of_memory = 0;  // graph.hpp:1099
+    std::uint64_t no_target = 0;      // graph.hpp:1257
+    std::uint64_t denied = 0;         // graph.hpp:1259
+    std::uint64_t out_of_memory = 0;  // graph.hpp:1261
 };
 ```
 
@@ -216,7 +216,7 @@ struct delivery_drops_t {
 | `denied` | the target's `:acl` denied WRITE to the **edge's stored caller**, not the writer's | `graph.cpp:876-879` |
 | `out_of_memory` | the nothrow delivery clone could not be allocated | `graph.cpp:888-891` |
 
-`delivery_drops()` (`graph.hpp:1110`, `graph.cpp:634`) is the only record that any of this
+`delivery_drops()` (`graph.hpp:1272`, `graph.cpp:634`) is the only record that any of this
 happened. Without it, a node whose target was retired, or whose fan-in gate denies the edge's
 stored caller, drops every delivery for the rest of its life with nothing anywhere to say so.
 

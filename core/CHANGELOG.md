@@ -14,6 +14,48 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Added
+
+- **`graph_t::set_subscription_observer(sub_observer_t)` + `sub_event_t` — the EXTERNAL
+  `:subscribers[]` mutation stream ([ADR-0076](../docs/adr/0076-external-subscription-mutations-are-observable-at-the-admission-door.md)).**
+  The edge-triggered counterpart of `read_subscribers`: an app-installed callback fired when
+  a **peer** subscribes to or unsubscribes from one of this node's vertices, so a producer can
+  start a source on demand or project the fan-out graph without polling. The event carries
+  `{kind (ADDED/REMOVED), producer, target, link, slot}`; `producer` and `target` are
+  **canonical keys** (`wire::key_view_t`, borrowed for the call), `target` decoded from the
+  `SUBSCRIBER`'s `PATH` child and EMPTY when the record carries none (the bare
+  remote-subscriber case). Fired from the one ADR-0049 admission door and from the RFC-0009
+  §D.1 `:subscribers[N]` clear, so an append, a `[N]` replace (`REMOVED` then `ADDED`) and a
+  clear all report through one site.
+
+  **"External" is exactly a non-empty ADR-0018 caller context** — the inbound link NAME the
+  FWD resolver drives the op under. Both `subscribe()` sugars, `unsubscribe()`, and a
+  `:subscribers[]` field-write from host code are SILENT by design, as is a resolver op that
+  carries no inbound link. So is **`evict_link_edges`**: link teardown drops *k* edges in a
+  batch with no caller context, so an app maintaining a live subscription inventory must treat
+  its own link-down signal as the removal for every edge of that link. The observer runs
+  **synchronously on the resolver's thread**, outside every graph lock but inside the operation
+  it reports — it must be cheap, non-blocking, and must not re-enter the graph; deferral is the
+  app's job. Set once at wiring time (the `set_remote_delivery_sink` contract). Null by default
+  ⇒ one null check on the subscribe path and no other change.
+
+- **`graph_t::for_each_vertex(Fn)` — the graph's enumeration surface.** Visits every
+  **registered** vertex once as `fn(wire::key_view_t key, vertex_handle_t vh)`, in ascending
+  canonical-key **byte** order. Placeholders (the unregistered intermediates a deep
+  `register_vertex` creates) are skipped, exactly as `find` refuses them. Sorted-only, with no
+  unsorted twin: a consumer paginating this surface needs the order to be the same across calls
+  while the graph is unchanged, and every visit renders `key` anyway (ADR-0057 stores one
+  segment per node), so ordering is a comparison pass on top of work an unsorted form would
+  already have done. It is the same order the RFC-0008 sweep sets use, and it earns its keep the
+  same way: a parent's key is a byte-prefix of every descendant's, so a parent precedes its
+  subtree and that subtree is a contiguous run. Note it is byte order over the KEY, so siblings
+  sort by name LENGTH first (`/zone` before `/sensor` before `/actuator`) — alphabetical
+  *display* order is the consumer's own sort. **Control-plane only:** one owned key per
+  registered vertex plus the snapshot vector, then a sort. The `{key, vertex}` snapshot is taken
+  under one shared `map_mutex_` hold and `fn` runs OUTSIDE it (the `evict_link_edges` two-phase
+  discipline), so `fn` may re-enter the graph — in exchange for a snapshot: every vertex
+  registered before the hold is visited, a later arrival may not be.
+
 ## [0.7.1] — 2026-08-04
 
 ### Added
