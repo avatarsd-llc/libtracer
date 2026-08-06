@@ -514,9 +514,9 @@ ANCHORS = [
     ('core/src/op_resolve_walk.hpp:892', 'if (value.total_length() == 0)'),
     # core/src/path.cpp
     # core/src/posix_endpoint.cpp
-    ('core/src/posix_endpoint.cpp:92',
+    ('core/src/posix_endpoint.cpp:111',
      'void stream_endpoint_t::write_all_iov(int fd, ::iovec* vec, std::size_t count) {'),
-    ('core/src/posix_endpoint.cpp:98', 'const ssize_t n = ::sendmsg(fd, &msg, MSG_NOSIGNAL);'),
+    ('core/src/posix_endpoint.cpp:117', 'const ssize_t n = ::sendmsg(fd, &msg, MSG_NOSIGNAL);'),
     # core/src/rope.cpp
     ('core/src/rope.cpp:15', 'if (!all_host()) return view_t{};'),
     ('core/src/rope.cpp:22', 'if (!b.empty()) std::memcpy(seg->bytes.data() + pos, b.data(), b.size());'),

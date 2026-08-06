@@ -654,6 +654,15 @@ target_link_libraries(tcp_test PRIVATE libtracer)
 libtracer_test_warnings(tcp_test)
 add_test(NAME tcp COMMAND tcp_test)
 
+# #903 — the stream_endpoint_t full-write helpers under a REAL signal storm: a
+# socketpair with a small SO_SNDBUF, a deliberately slow reader, and SIGUSR1
+# (no SA_RESTART) fired at the writer thread, so a blocked send returns EINTR
+# mid-frame. Both write_all and write_all_iov must resume, not truncate.
+add_executable(write_all_eintr_test write_all_eintr_test.cpp)
+target_link_libraries(write_all_eintr_test PRIVATE libtracer)
+libtracer_test_warnings(write_all_eintr_test)
+add_test(NAME write_all_eintr COMMAND write_all_eintr_test)
+
 # #54 — transport_ws server socket layer (TCP accept + RFC6455 handshake + transport_t).
 add_executable(ws_transport_test ws_transport_test.cpp)
 target_link_libraries(ws_transport_test PRIVATE libtracer)

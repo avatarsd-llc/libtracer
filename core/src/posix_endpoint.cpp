@@ -22,6 +22,22 @@ namespace {
 #ifndef MSG_NOSIGNAL
 constexpr int MSG_NOSIGNAL = 0;
 #endif
+
+/**
+ * @brief The ONE interrupted-write policy both full-write helpers share (#903).
+ *
+ * A blocking `send`/`sendmsg` that a signal interrupts BEFORE any byte moved
+ * fails with EINTR — the connection is untouched and healthy, so the write must
+ * resume where it stopped. Abandoning it instead would leave a partial frame on
+ * a live framed stream and desync the peer's framing permanently (every later
+ * byte parses under the wrong length). Every other `n <= 0` (a real error, or
+ * the `n == 0` that a stream write of a non-empty buffer must never return) is
+ * peer-gone: drop the rest silently, link-down is #66 lifecycle.
+ *
+ * @param n The `send(2)` / `sendmsg(2)` return value (must be `<= 0`).
+ * @return true to retry the same write, false to abandon the rest.
+ */
+bool retry_interrupted_write(ssize_t n) { return n < 0 && errno == EINTR; }
 }  // namespace
 
 posix_endpoint_t::~posix_endpoint_t() { stop_and_join(); }
@@ -84,7 +100,10 @@ void stream_endpoint_t::write_all(int fd, std::span<const std::byte> bytes) {
     std::size_t off = 0;
     while (off < bytes.size()) {
         const ssize_t n = ::send(fd, bytes.data() + off, bytes.size() - off, MSG_NOSIGNAL);
-        if (n <= 0) return;  // peer gone / error → drop the rest
+        if (n <= 0) {
+            if (retry_interrupted_write(n)) continue;
+            return;  // peer gone / error → drop the rest
+        }
         off += static_cast<std::size_t>(n);
     }
 }
@@ -96,8 +115,8 @@ void stream_endpoint_t::write_all_iov(int fd, ::iovec* vec, std::size_t count) {
         msg.msg_iov = vec;
         msg.msg_iovlen = count;
         const ssize_t n = ::sendmsg(fd, &msg, MSG_NOSIGNAL);
-        if (n < 0) {
-            if (errno == EINTR) continue;
+        if (n <= 0) {
+            if (retry_interrupted_write(n)) continue;
             return;  // peer gone / error → drop the rest
         }
         std::size_t done = static_cast<std::size_t>(n);
