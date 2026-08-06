@@ -663,6 +663,16 @@ target_link_libraries(write_all_eintr_test PRIVATE libtracer)
 libtracer_test_warnings(write_all_eintr_test)
 add_test(NAME write_all_eintr COMMAND write_all_eintr_test)
 
+# #948 — the write-fault classification: a malformed send/sendmsg call (EOPNOTSUPP,
+# EINVAL) is OUR defect, not a dead socket, so it must be re-attempted and counted
+# rather than swallowed as a disconnect. Driven through the
+# tr::detail::write_fault_inject_hook seam, since a host kernel emits none of those
+# errnos here — a real-socket-only test would classify nothing.
+add_executable(write_fault_class_test write_fault_class_test.cpp)
+target_link_libraries(write_fault_class_test PRIVATE libtracer)
+libtracer_test_warnings(write_fault_class_test)
+add_test(NAME write_fault_class COMMAND write_fault_class_test)
+
 # #54 — transport_ws server socket layer (TCP accept + RFC6455 handshake + transport_t).
 add_executable(ws_transport_test ws_transport_test.cpp)
 target_link_libraries(ws_transport_test PRIVATE libtracer)
