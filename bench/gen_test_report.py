@@ -168,7 +168,7 @@ def _src_link(path: pathlib.Path | None) -> str:
 CATEGORY_RULES: list[tuple[tuple[str, ...], str]] = [
     (("example_",), "Examples"),
     (("transport_can", "transport_conformance", "can_tx_pool", "udp", "tcp",
-      "ws_transport"), "Transport"),
+      "ws_transport", "write_all_eintr"), "Transport"),
     (("fwd_", "op_resolve", "mount_routing", "route_handle", "compact_cache",
       "net_control_plane_race", "transport_vertex", "bridge"), "Net (FWD plane)"),
     (("graph", "acl", "effective_acl", "security_acl", "app_fields", "identity",

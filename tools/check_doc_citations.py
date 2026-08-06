@@ -118,11 +118,11 @@ ANCHORS = [
     ("core/include/libtracer/backend.hpp:40", "enum class io_dir_t"),
     ("core/include/libtracer/backend.hpp:101", "class mem_backend_t"),
     ("core/include/libtracer/backend.hpp:145", "before_io"),
-    ("core/include/libtracer/grammar.hpp:220", "receiver-resource depth bound"),
+    ("core/include/libtracer/grammar.hpp:290", "receiver-resource depth bound"),
     # CONTEXT.md quotes the AMENDED meaning of `nesting_too_deep` twice. Its citation was
     # `:210-216` — right until `24ea6d5` inserted the PATH_REF codec above and shifted the
     # whole block +10, after which it landed on `walk_frame_t` and no doc pinned it.
-    ('core/include/libtracer/grammar.hpp:230',
+    ('core/include/libtracer/grammar.hpp:300',
      '`TLV_NESTING_TOO_DEEP` ("exceeds this receiver'),
     ("core/src/graph.cpp:1130", "!arena"),
     ("core/include/libtracer/segment.hpp:78", "struct segment_t"),
@@ -229,7 +229,7 @@ ANCHORS = [
     # core/include/libtracer/frame.hpp
     ('core/include/libtracer/frame.hpp:25',
      '// Decode failures reuse the RFC-0002 registry codes (error.hpp) directly — the'),
-    ('core/include/libtracer/frame.hpp:126',
+    ('core/include/libtracer/frame.hpp:134',
      '[[nodiscard]] inline std::expected<tlv_t, err_t> decode(const view::view_t& v) {'),
     # core/include/libtracer/fwd_frame_view.hpp
     # core/include/libtracer/fwd_router.hpp
@@ -244,7 +244,7 @@ ANCHORS = [
     ('core/include/libtracer/fwd_router.hpp:834',
      '[[nodiscard]] mem::block_source_t& rx_for(const child_rx_ctx_t* ctx) const noexcept {'),
     # core/include/libtracer/grammar.hpp
-    ('core/include/libtracer/grammar.hpp:318',
+    ('core/include/libtracer/grammar.hpp:388',
      '* call stack, docs/reference/01 §Iterative parsing requirement): the walk keeps'),
     # core/include/libtracer/graph.hpp
     ('core/include/libtracer/graph.hpp:84',
@@ -514,9 +514,9 @@ ANCHORS = [
     ('core/src/op_resolve_walk.hpp:892', 'if (value.total_length() == 0)'),
     # core/src/path.cpp
     # core/src/posix_endpoint.cpp
-    ('core/src/posix_endpoint.cpp:92',
+    ('core/src/posix_endpoint.cpp:111',
      'void stream_endpoint_t::write_all_iov(int fd, ::iovec* vec, std::size_t count) {'),
-    ('core/src/posix_endpoint.cpp:98', 'const ssize_t n = ::sendmsg(fd, &msg, MSG_NOSIGNAL);'),
+    ('core/src/posix_endpoint.cpp:117', 'const ssize_t n = ::sendmsg(fd, &msg, MSG_NOSIGNAL);'),
     # core/src/rope.cpp
     ('core/src/rope.cpp:15', 'if (!all_host()) return view_t{};'),
     ('core/src/rope.cpp:22', 'if (!b.empty()) std::memcpy(seg->bytes.data() + pos, b.data(), b.size());'),

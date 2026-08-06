@@ -86,6 +86,14 @@ target_link_libraries(path_ref_test PRIVATE libtracer)
 libtracer_test_warnings(path_ref_test)
 add_test(NAME path_ref COMMAND path_ref_test)
 
+# The wire grammar's total-encoded-size bound (grammar.hpp, #921) — pinned at
+# 32-bit-`size_t` width, because the truncation it closes is unreachable at the
+# host's 64-bit width and a host-only vector would be a vacuous guard.
+add_executable(grammar_bounds_test grammar_bounds_test.cpp)
+target_link_libraries(grammar_bounds_test PRIVATE libtracer)
+libtracer_test_warnings(grammar_bounds_test)
+add_test(NAME grammar_bounds COMMAND grammar_bounds_test)
+
 # Frame codec — nesting depth cap / iterative-parse contract (reference/01).
 add_executable(frame_test frame_test.cpp)
 target_link_libraries(frame_test PRIVATE libtracer)
@@ -653,6 +661,15 @@ add_executable(tcp_test tcp_test.cpp)
 target_link_libraries(tcp_test PRIVATE libtracer)
 libtracer_test_warnings(tcp_test)
 add_test(NAME tcp COMMAND tcp_test)
+
+# #903 — the stream_endpoint_t full-write helpers under a REAL signal storm: a
+# socketpair with a small SO_SNDBUF, a deliberately slow reader, and SIGUSR1
+# (no SA_RESTART) fired at the writer thread, so a blocked send returns EINTR
+# mid-frame. Both write_all and write_all_iov must resume, not truncate.
+add_executable(write_all_eintr_test write_all_eintr_test.cpp)
+target_link_libraries(write_all_eintr_test PRIVATE libtracer)
+libtracer_test_warnings(write_all_eintr_test)
+add_test(NAME write_all_eintr COMMAND write_all_eintr_test)
 
 # #54 — transport_ws server socket layer (TCP accept + RFC6455 handshake + transport_t).
 add_executable(ws_transport_test ws_transport_test.cpp)

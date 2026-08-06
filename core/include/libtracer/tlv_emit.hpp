@@ -33,9 +33,16 @@ namespace tr::wire {
  *        header byte layout (ADR-0048 §3).
  *
  * Length is u16 LE, or u32 LE when the `opt.ll` bit is set. The width follows `opt.ll`
- * verbatim; the caller owns the LL decision (so `encode`, which respects a `tlv_t`'s
- * existing `opt.ll`, and `emit_tlv`, which auto-widens for an oversize body, share this
- * without either changing behavior).
+ * verbatim — this writes a header, it does not decide one. The LL decision belongs one level
+ * up, in `emit_tlv`, which widens for an oversize body; `frame.cpp`'s `encode` routes through
+ * it (#924 — `encode` used to call this directly and truncated an oversize length to
+ * `size & 0xFFFF`).
+ *
+ * `emit_tlv` is NOT the only home of that rule, and a caller must not assume it is: the
+ * subscribe sugar in `graph.cpp` calls this directly (safe only because `kMaxPathBytes`
+ * bounds the length), `emit_path_ref_into` hand-rolls its own header, and the forward plane's
+ * `fwd_frame_view` / `stack_writer` tiers each carry a separate copy of the widen rule. A
+ * caller reaching for `emit_header` owns the width decision itself.
  */
 inline void emit_header(std::vector<std::byte>& out, type_t type, opt_t opt, std::size_t body_len) {
     out.push_back(static_cast<std::byte>(std::to_underlying(type)));
