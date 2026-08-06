@@ -72,7 +72,7 @@ Against the priority order this also *converges* on the primitive `route_handle_
 stripes already use, rather than adding a second.
 
 **Erratum 2 — `make_connection` mutates two containers, not three.** It writes `conns_`
-(`transport_vertex.cpp:314`) and `pending_links_` (`:317`); it only *reads* `modules_` and
+(`transport_vertex.cpp:314`) and `pending_links_` (`:346`); it only *reads* `modules_` and
 `transport_types_`, both written at setup. The Context paragraph's "three containers
 (`pending_links_`, `conns_`, `modules_`)" is wrong about `modules_`. The exposure is nonetheless
 *wider* than stated: `settings_of` / `link_of` / `remove_connection` all traverse `conns_` unlocked,
