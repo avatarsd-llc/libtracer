@@ -23,6 +23,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -71,16 +72,31 @@ class rope_cursor {
      * O(1) — adjusts the absolute base/end only, sharing the same link chain.
      * Used to descend into a node's children region exactly as `decode_into`
      * `subspan`s the payload.
+     * @note Precondition: `off + len <= size()` (debug-asserted) — the same
+     *       containment contract `span_cursor::region` gets for free from
+     *       `std::span::subspan`, and that @ref view::view_t::subview asserts.
      */
     [[nodiscard]] rope_cursor region(std::size_t off, std::size_t len) const noexcept {
+        // Precondition, enforced in debug builds (zero release cost; fuzz + sanitizer CI
+        // catches a violation): the sub-window must lie within this cursor's window. An
+        // unclamped region would otherwise let a cursor claim bytes that do not exist.
+        assert(off + len <= size());
         rope_cursor c = *this;
         c.base_ += off;
         c.end_ = c.base_ + len;
         return c;
     }
 
-    /** @brief The unsigned byte at offset @p off (walks to its link). */
+    /**
+     * @brief The unsigned byte at offset @p off (walks to its link).
+     * @note Precondition: `off < size()` (debug-asserted). The grammar callers
+     *       bounds-check before every read; this makes that contract visible and
+     *       a violation loud instead of a silent wrong byte.
+     */
     [[nodiscard]] std::uint8_t byte_at(std::size_t off) const noexcept {
+        // Precondition, enforced in debug builds (zero release cost; fuzz + sanitizer CI
+        // catches a violation): the byte must lie inside this cursor's window.
+        assert(off < size());
         const auto [li, intra] = locate(base_ + off);
         return std::to_integer<std::uint8_t>(links_[li].bytes()[intra]);
     }
@@ -103,6 +119,10 @@ class rope_cursor {
      */
     template <class Fn>
     void for_each_span(std::size_t off, std::size_t n, Fn&& fn) const {
+        // An empty feed names no byte, so it must not `locate` one: the grammar's CRC
+        // feed calls this with n == 0 for an absent payload or trailer, at an offset
+        // that is legitimately the end of the window.
+        if (n == 0) return;
         std::size_t remaining = n;
         auto [li, intra] = locate(base_ + off);
         while (remaining > 0 && li < links_.size()) {
@@ -128,7 +148,15 @@ class rope_cursor {
             if (a < acc + len) return {i, a - acc};
             acc += len;
         }
-        return {links_.empty() ? 0 : links_.size() - 1, 0};  // at/after end (never deref'd)
+        // Precondition, enforced in debug builds (zero release cost; fuzz + sanitizer CI
+        // catches a violation): `a` must name a byte the chain actually holds. This used
+        // to fabricate {links_.size() - 1, 0} — byte 0 of the LAST link, a real but wrong
+        // byte that no sanitizer could see (and, on an empty chain, links_[0] on an empty
+        // span: hard UB). Returning the one-past-the-end index instead makes a violation
+        // an out-of-range subscript in byte_at, which the sanitizers do see, while
+        // for_each_span's `li < links_.size()` guard still stops cleanly on it.
+        assert(false && "rope_cursor: offset is past the end of the link chain");
+        return {links_.size(), 0};
     }
 
     std::span<const view::view_t> links_;

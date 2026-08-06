@@ -97,6 +97,78 @@ void test_sbo_gate() {
           "spilled chain preserves link order");
 }
 
+/**
+ * @brief `r.concat(r)` — the self-aliasing gate (#915), in BOTH storage modes.
+ *
+ * `concat` walks `other`'s links while `append` mutates that same storage when
+ * `&other == this`. In INLINE mode the spill blanks every inline slot and zeroes
+ * `inline_n_` mid-walk, so a naive range-for produced `[a,b,a,{}]` — a zero-length
+ * link where `b` should be, i.e. wrong bytes on the wire. In HEAP mode `push_back`
+ * can reallocate the vector the walk points into (a dangling span, UB — the leg an
+ * ASan build reddens on). Both are checked here by the resulting link bytes, so the
+ * inline corruption is caught with no sanitizer at all.
+ */
+void test_self_concat() {
+    std::printf("rope_t self-concat aliasing (#915):\n");
+    std::array<std::byte, 8> buf{std::byte{0xC0}, std::byte{0xC1}, std::byte{0xC2},
+                                 std::byte{0xC3}, std::byte{0xC4}, std::byte{0xC5},
+                                 std::byte{0xC6}, std::byte{0xC7}};
+
+    // INLINE mode, inline_n_ == 2: the first append of the walk spills.
+    rope_t inl(byte_view(buf[0]));
+    inl.append(byte_view(buf[1]));
+    check(links_inline(inl), "precondition: the source chain is INLINE with two links");
+    inl.concat(inl);
+    check(inl.link_count() == 4, "inline self-concat yields four links");
+    check(inl.total_length() == 4, "inline self-concat yields four bytes (no empty link)");
+    bool inl_order = inl.link_count() == 4;
+    if (inl_order) {
+        const int want[4] = {0xC0, 0xC1, 0xC0, 0xC1};
+        for (std::size_t i = 0; i < 4; ++i) {
+            if (inl.links()[i].length != 1 ||
+                std::to_integer<int>(inl.links()[i].bytes()[0]) != want[i]) {
+                inl_order = false;
+            }
+        }
+    }
+    check(inl_order, "inline self-concat is [a,b,a,b], not the corrupted [a,b,a,{}]");
+
+    // HEAP mode: enough links that the push_back walk would outgrow the vector.
+    rope_t hp(byte_view(buf[0]));
+    for (std::size_t i = 1; i < 5; ++i) hp.append(byte_view(buf[i]));
+    check(!links_inline(hp), "precondition: the source chain is SPILLED to the heap");
+    hp.concat(hp);
+    check(hp.link_count() == 10, "heap self-concat yields ten links");
+    check(hp.total_length() == 10, "heap self-concat yields ten bytes");
+    bool hp_order = hp.link_count() == 10;
+    if (hp_order) {
+        for (std::size_t i = 0; i < 10; ++i) {
+            if (hp.links()[i].length != 1 ||
+                std::to_integer<int>(hp.links()[i].bytes()[0]) != 0xC0 + static_cast<int>(i % 5)) {
+                hp_order = false;
+            }
+        }
+    }
+    check(hp_order, "heap self-concat repeats the chain in order (no dangling-span garbage)");
+
+    // The self-concat guard must not disturb the ordinary cross-rope case.
+    rope_t lhs(byte_view(buf[0]));
+    rope_t rhs(byte_view(buf[1]));
+    rhs.append(byte_view(buf[2]));
+    const rope_t sum = lhs + rhs;
+    check(sum.link_count() == 3 && std::to_integer<int>(sum.links()[0].bytes()[0]) == 0xC0 &&
+              std::to_integer<int>(sum.links()[1].bytes()[0]) == 0xC1 &&
+              std::to_integer<int>(sum.links()[2].bytes()[0]) == 0xC2,
+          "cross-rope operator+ is unchanged");
+    const rope_t empty_src;
+    rope_t keep(byte_view(buf[3]));
+    keep.concat(empty_src);
+    check(keep.link_count() == 1, "concat of an empty rope is a no-op");
+    rope_t self_empty;
+    self_empty.concat(self_empty);
+    check(self_empty.link_count() == 0, "self-concat of an empty rope stays empty");
+}
+
 void test_accessors() {
     std::printf("rope_t only()/materialize() (the L4 value consumption accessors):\n");
     std::array<std::byte, 4> buf{std::byte{0xB0}, std::byte{0xB1}, std::byte{0xB2},
@@ -195,6 +267,7 @@ void test_nothrow_growth() {
 
 int main() {
     test_sbo_gate();
+    test_self_concat();
     test_accessors();
     test_nothrow_growth();
     if (g_failures == 0) {
