@@ -56,6 +56,11 @@ PORTABLE_WS_OBJECTS = ("transport_ws.cpp.obj", "builtin_transport_ws.cpp.obj")
 # The IDF-native WS links that replace them on a chip target.
 NATIVE_WS_OBJECTS = ("httpd_ws_link.cpp.obj", "esp_ws_client_link.cpp.obj")
 
+# Floor on the symbol table an nm read must produce before its "no match" counts as
+# evidence. Not a tuned threshold — any real IDF app ELF lists thousands, and the only
+# thing this separates is "searched a populated table" from "searched nothing".
+MIN_PLAUSIBLE_SYMBOLS = 100
+
 
 def find_elf(build_dir: pathlib.Path) -> pathlib.Path | None:
     """Return the project ELF in @p build_dir (the one next to the flashable .bin)."""
@@ -128,8 +133,19 @@ def main() -> int:
                 print(f"ERROR: {nm} failed on {elf}:\n{proc.stderr.strip()}",
                       file=sys.stderr)
             else:
+                symbols = proc.stdout.splitlines()
+                # Non-vacuity: "no match" is only evidence if there was something to
+                # match against. A stripped ELF, or an nm that read the file but
+                # understood nothing, yields an empty table — and a substring search
+                # over an empty table passes every assertion below. Fail instead.
+                if len(symbols) < MIN_PLAUSIBLE_SYMBOLS:
+                    ok = False
+                    print(f"ERROR: {nm} listed only {len(symbols)} symbol(s) in "
+                          f"{elf.name} — too few to have searched. A stripped or "
+                          "unreadable ELF must not read as 'zero portable-WS symbols'.",
+                          file=sys.stderr)
                 pattern = re.compile("|".join(PORTABLE_WS_SYMBOLS))
-                linked = [ln for ln in proc.stdout.splitlines() if pattern.search(ln)]
+                linked = [ln for ln in symbols if pattern.search(ln)]
                 if linked:
                     ok = False
                     print(f"ERROR: {len(linked)} portable-WS symbol(s) linked into "
@@ -140,8 +156,8 @@ def main() -> int:
                         print(f"    {ln}", file=sys.stderr)
                     if len(linked) > 20:
                         print(f"    ... and {len(linked) - 20} more", file=sys.stderr)
-                else:
-                    print(f"ok: 0 portable-WS symbols linked into {elf.name} "
+                elif len(symbols) >= MIN_PLAUSIBLE_SYMBOLS:
+                    print(f"ok: 0 portable-WS symbols among {len(symbols)} in {elf.name} "
                           f"(checked with {nm})")
 
     if ok:
