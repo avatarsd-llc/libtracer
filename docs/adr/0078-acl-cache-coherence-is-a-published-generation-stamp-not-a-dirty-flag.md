@@ -10,7 +10,7 @@ The shipped protocol is a `{acl_gen, acl_cache_dirty}` pair with a lost-update w
 
 - **Invalidator (lock-free):** `e->acl_gen.fetch_add(1, release); e->acl_cache_dirty.store(true, release)` — no stripe lock.
 - **Rebuilder (stripe lock held), `vertex.hpp:1928-1938`:** snapshots `gen = acl_gen`, drops the lock to rebuild, retakes it, then does **two separate** atomic ops — a generation recheck (`if (acl_gen.load() != gen) continue;`, `:1934`) followed by `acl_cache_dirty.store(false)` (`:1937`).
-- **Consumer:** `acl_allows` (`graph.cpp:751-799`) fast-paths on the flag alone, holding no map lock and storing no generation stamp beside the cache.
+- **Consumer:** `acl_allows` (`graph.cpp:751-806`) fast-paths on the flag alone, holding no map lock and storing no generation stamp beside the cache.
 
 The interleaving: the rebuilder passes its gen recheck → an ancestor `:acl` write bumps `acl_gen` and stores `dirty=true` → the rebuilder's `dirty=false` store lands **on top of** that mark and publishes `eff_aces` built from the pre-write ancestor chain. The flag is now clean, the cache is stale, and nothing later detects the mismatch. Every subsequent `acl_allows` on that vertex evaluates the stale merge until the next `:acl` mutation anywhere in the chain — a persistent, silent authorization error whose sign (fail-open or fail-closed) is whatever the pre-write merge happened to encode. Because the consumer is on the security path, a persistent stale-open is the headline risk.
 

@@ -14,6 +14,39 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING — `subject_resolver_t` gains a DENY channel; an unresolvable caller is no
+  longer trusted (#905).** The type in `graph.hpp` changes from
+  `std::function<std::optional<subject_token_t>(std::string_view)>` to
+  `std::function<std::expected<subject_token_t, wire::err_t>(std::string_view)>`. The
+  error arm means **deny**: the operation fails `status_t::PERMISSION_DENIED`
+  (`tr::access::denied`, 0x0050 on the wire).
+
+  Before this, the resolver had exactly one non-token answer — `nullopt` — and the graph
+  read it as *fully trusted*, skipping every ACE check. The natural reading of that value
+  ("I cannot name this caller") therefore granted **every** right on the vertex, including
+  `WRITE_ACL` and `CREATE`, at every gate: READ, WRITE, SUBSCRIBE, CREATE, WRITE_ACL,
+  READ_ACL, and remote-edge fan-in delivery. A resolver bug, a revoked peer, or an unknown
+  remote identity bypassed all ACLs on protected vertices. There was no way for a resolver
+  to say *deny*.
+
+  **The trusted channel moved out of the resolver.** `acl_allows` now settles the EMPTY
+  caller context — the local-API convention — as trusted **before** invoking the resolver,
+  so the resolver is never called with an empty caller and a remote op (which always
+  carries its inbound link NAME) cannot reach the trusted arm.
+
+  *Migration:* a resolver of the form
+  `if (caller.empty()) return std::nullopt; return token;` becomes
+  `return token;` — the empty case is now handled by the graph. Any *other* former
+  `nullopt` return was silently granting everything and should become
+  `return std::unexpected(wire::err_t::ACCESS_DENIED);`. The signature change is
+  deliberately recompile-visible: keeping `std::optional` and inverting `nullopt`'s meaning
+  would have flipped the semantics of every existing resolver in silence.
+
+  No change to the enforcement-disabled path: the `!subject_resolver_` early-out remains
+  the only check when no resolver is installed.
+
 ## [0.8.0] — 2026-08-06
 
 ### Added
