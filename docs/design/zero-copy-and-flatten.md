@@ -180,7 +180,7 @@ WS integration, servicing a graph request in-call was measured overflowing an 8 
 therefore sizes the task at `kHttpdTaskStack = 12288`
 (`integrations/esp-idf/libtracer/httpd_ws_link.cpp:76`, rationale and the 8 KB / ~12 KB figures at
 `:68-70`; the 4 KB platform default is named at
-`integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:38`). Against a 4096-byte
+`integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:48`). Against a 4096-byte
 default the arena is a full half of the frame, and it is the single largest consumer on the write
 path. A 4 KB stack-high-water reclaim is the real saving even though total RAM is flat.
 

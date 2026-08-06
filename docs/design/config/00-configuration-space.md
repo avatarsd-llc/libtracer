@@ -86,7 +86,7 @@ full node.
 | `LIBTRACER_NET_PLANE` | FWD routing plane (`op_resolve`, `route_handle`, `fwd_router`, `transport_vertex`) | none — the component has no counterpart | inter-node forwarding; a pure in-process graph still works |
 | `LIBTRACER_TRANSPORT_TCP` | `tcp_transport_t` | `CONFIG_LIBTRACER_TRANSPORT_TCP` | — |
 | `LIBTRACER_TRANSPORT_UDP` | `udp_transport_t` | `CONFIG_LIBTRACER_TRANSPORT_UDP` | — |
-| `LIBTRACER_TRANSPORT_WS` | `transport_ws_*` | `CONFIG_LIBTRACER_TRANSPORT_WS` | — |
+| `LIBTRACER_TRANSPORT_WS` | `transport_ws_*` | `CONFIG_LIBTRACER_TRANSPORT_WS` — selects a *different implementation* on chips (see below) | — |
 | `LIBTRACER_TRANSPORT_CAN` | `transport_can` + its platform link | `CONFIG_LIBTRACER_TRANSPORT_CAN` | — |
 | `LIBTRACER_WITH_QUIC` | `libtracer_quic` (needs msquic) | none | off by default |
 | `LIBTRACER_WITH_CUDA` | `mem_cuda` GPU backend (needs the CUDA toolkit) | none | off by default |
@@ -96,8 +96,19 @@ graph runtime. See [10-module-catalog.md](../../reference/10-module-catalog.md) 
 responsible for and [12-deployment-profiles.md](../../reference/12-deployment-profiles.md) for the profiles
 these combinations serve.
 
-Two of the three socket transports sharing one dependency (`posix_endpoint`) is handled by
-the build, not by the modules: it compiles when *any* of them is on.
+The socket transports sharing one dependency (`posix_endpoint`) is handled by the build, not
+by the modules: it compiles when *any* of them is on.
+
+**One option, two implementations.** `LIBTRACER_TRANSPORT_WS` names the WebSocket *module*,
+not a fixed pair of types, and on ESP-IDF the target decides which pair it builds. A chip
+target gets the IDF-native links (`httpd_ws_link_t`, `esp_ws_client_link_t`) and does **not**
+compile `transport_ws_*` at all, so no `ws` entry is registered in the built-in catalog there
+and a `kind=ws` SPEC with no staged link answers `SCHEMA_NOT_FOUND`; the `linux` target and
+every non-IDF build get the portable pair. This is still selection-by-which-TU-compiles — the
+same rule as `socketcan_link.cpp` versus its stub — and it is a correctness split, not a size
+one: the portable pair's gather egress asks `sendmsg` for `MSG_NOSIGNAL`, which lwIP rejects
+with `EOPNOTSUPP`, so on silicon it silently drops every data frame. See
+[the ESP-IDF integration README](../../../integrations/esp-idf/README.md).
 
 ### The required-modules footprint ceiling
 

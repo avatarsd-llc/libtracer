@@ -421,10 +421,10 @@ ANCHORS = [
     ('core/include/libtracer/transport_webtransport.hpp:156',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }'),
     # core/include/libtracer/transport_ws.hpp
-    ('core/include/libtracer/transport_ws.hpp:167',
+    ('core/include/libtracer/transport_ws.hpp:181',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'void send(std::span<const std::span<const std::byte>> iov) override;'),
-    ('core/include/libtracer/transport_ws.hpp:325',
+    ('core/include/libtracer/transport_ws.hpp:339',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'transport_ws_client& operator=(const transport_ws_client&) = delete;'),
     # core/include/libtracer/vertex.hpp
@@ -580,7 +580,7 @@ ANCHORS = [
     ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:278',
      'if (len_ != 0) std::memcpy(grown.get(), bytes_.get(), len_);'),
     # integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp
-    ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:38',
+    ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:48',
      '*     apply overflows the 4 KB httpd default — see kHttpdTaskStack).'),
 
     # --- re-added from the v0.7.1 docs sweep (absent from main's table) ---
@@ -594,7 +594,7 @@ ANCHORS = [
     ('core/include/libtracer/mem_heap.hpp:304', '[[nodiscard]] inline std::optional<view_t> over_bytes(std::span<const std::byte> bytes,'),
     ('core/include/libtracer/path.hpp:156', 'explicit path_t(std::string_view text);'),
     ('core/include/libtracer/transport_tcp.hpp:284', '[[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }'),
-    ('core/include/libtracer/transport_ws.hpp:183', '[[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }'),
+    ('core/include/libtracer/transport_ws.hpp:197', '[[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }'),
     ('core/include/libtracer/edge_pin.hpp:153', 'class pin_t {'),
     ('core/src/fwd_router.cpp:626', 'link.set_rope_receiver('),
     ('core/src/fwd_router.cpp:585', 'bus->set_peer_rope_receiver('),
