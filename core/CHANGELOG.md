@@ -16,6 +16,19 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Fixed
 
+- **`stream_endpoint_t::write_all` no longer truncates a frame when a signal interrupts the
+  write (#903).** The two sibling full-write helpers disagreed on interrupted syscalls:
+  `write_all_iov` retried EINTR, while `write_all` treated any `n <= 0` — EINTR included — as
+  peer-gone and abandoned the rest of the buffer. EINTR is reachable (the stream sockets are
+  blocking; `MSG_NOSIGNAL` suppresses SIGPIPE, not EINTR), and every `write_all` call site
+  carries a COMPLETE pre-encoded frame on a persistent framed stream (tcp, and the ws control
+  + data sends), so an interrupt after `off > 0` left a partial frame on a still-live
+  connection and desynced the peer's framing permanently — every later byte parsing under the
+  wrong length. Both helpers now share ONE interrupted-write policy (`retry_interrupted_write`
+  in `posix_endpoint.cpp`): EINTR resumes the write where it stopped; every other `n <= 0`
+  (including the `n == 0` that previously spun `write_all_iov`) is peer-gone and drops the
+  rest silently. Behavior only — no signature change.
+
 - **`wire::encode` no longer truncates the length field for a body over 65535 bytes (#924).**
   `encode` called `emit_header` directly, which writes the length at the width `opt.ll` names —
   so a `tlv_t` built programmatically with a default `opt` (`ll = false`) over an oversize

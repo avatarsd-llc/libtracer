@@ -204,9 +204,12 @@ class stream_endpoint_t : protected posix_endpoint_t {
      * @brief Write @p bytes to @p fd completely, resuming partial writes.
      *
      * A stream write may stop anywhere; loops `send(2)` (MSG_NOSIGNAL — a
-     * vanished peer must not SIGPIPE the process) until done. Peer-gone /
-     * error drops the rest silently (link-down is #66 lifecycle). The caller
-     * holds @ref write_m_ per the write-serialization invariant.
+     * vanished peer must not SIGPIPE the process) until done. A signal that
+     * interrupts the blocked write before any byte moved (EINTR) is RESUMED,
+     * not abandoned — the connection is healthy, and a partial frame left on a
+     * live framed stream would desync the peer's framing permanently (#903).
+     * Peer-gone / error drops the rest silently (link-down is #66 lifecycle).
+     * The caller holds @ref write_m_ per the write-serialization invariant.
      *
      * @param fd    The destination fd; a negative fd is a no-op.
      * @param bytes The bytes to write.
@@ -223,9 +226,10 @@ class stream_endpoint_t : protected posix_endpoint_t {
      * loop advances past fully-written entries and trims a partially-written one
      * and resends. @p vec is CONSUMED (its entries' `iov_base`/`iov_len` are
      * advanced in place) — a caller that fans the same gather to several fds must
-     * pass a fresh copy per fd. Peer-gone / error drops the rest silently
-     * (link-down is #66 lifecycle). The caller holds @ref write_m_ per the
-     * write-serialization invariant.
+     * pass a fresh copy per fd. EINTR is resumed and peer-gone / error drops the
+     * rest silently under the same one interrupted-write policy as
+     * @ref write_all (link-down is #66 lifecycle). The caller holds
+     * @ref write_m_ per the write-serialization invariant.
      *
      * @param fd    The destination fd; a negative fd is a no-op.
      * @param vec   The iovec array to gather (consumed in place).
