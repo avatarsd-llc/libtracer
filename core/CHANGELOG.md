@@ -14,6 +14,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-08-06
+
 ### Added
 
 - **`graph_t::set_subscription_observer(sub_observer_t)` + `sub_event_t` — the EXTERNAL
