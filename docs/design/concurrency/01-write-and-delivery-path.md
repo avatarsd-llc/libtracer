@@ -167,23 +167,23 @@ It has two legs, and only one of them copies payload bytes.
 **The default full-route leg copies nothing.** It emits
 `FWD{ op=WRITE, dst=<stored return route>, src=<empty PATH>, payload=<VALUE> }` as a
 scatter-gather send: a fresh stack header, the stored route, an empty `src`, and one span per
-rope link (`fwd_router.cpp:1725-1732`). The header is a `stack_writer<16>` — the FWD header of at
+rope link (`fwd_router.cpp:1728-1735`). The header is a `stack_writer<16>` — the FWD header of at
 most 6 bytes plus the 5-byte op TLV — and both constant TLVs are `constexpr` arrays with no
-runtime construction (`fwd_router.cpp:1722-1726`). The route bytes were copied once at subscribe
+runtime construction (`fwd_router.cpp:1725-1729`). The route bytes were copied once at subscribe
 time, so a delivery re-uses them by reference; a multi-link value crosses as its own segments,
 with no flatten. The iov vector is sized once up front through `tr::detail::try_reserve`, and a
 refused reserve drops that delivery rather than emitting a truncated frame
-(`fwd_router.cpp:1738-1739`). That helper is not a nothrow reserve: it probes, **frees the probe**,
+(`fwd_router.cpp:1741-1742`). That helper is not a nothrow reserve: it probes, **frees the probe**,
 then runs the *throwing* `std::vector::reserve` inside a `noexcept` frame
 (`core/include/libtracer/mem_heap.hpp:116-121`). So the ordinary OOM becomes a drop, but a lost race
 on the just-freed block still terminates — [#850](https://github.com/avatarsd-llc/libtracer/issues/850),
 tabulated in [`../allocation-and-backpressure.md`](../allocation-and-backpressure.md).
 
 **The COMPACT leg is the one that flattens.** `const view_t flat = value.materialize(*flat_);`
-(`fwd_router.cpp:1701`) precedes the compact encode, because a COMPACT wraps a contiguous
+(`fwd_router.cpp:1704`) precedes the compact encode, because a COMPACT wraps a contiguous
 payload. Single-link — the common case — that materialize is a zero-copy adopt; a multi-link
 value pays one flatten per delivery, out of the router's INJECTED byte backend rather than the
-global heap. A failed flatten drops the delivery (`fwd_router.cpp:1702`).
+global heap. A failed flatten drops the delivery (`fwd_router.cpp:1705`).
 Auto-promotion advertises the label once per flow and then streams
 compact frames; a dropped fresh ADVERTISE self-heals through the peer's `HANDLE_NACK`
 ([RFC-0004 — Remote operation
