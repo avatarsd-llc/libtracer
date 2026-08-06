@@ -80,6 +80,19 @@ tr::net::reassembly_key_t key_of(std::uint16_t node, std::uint16_t base_endpoint
     return tr::net::reassembly_key_t{origin_of(node), static_cast<std::uint64_t>(base_endpoint)};
 }
 
+/**
+ * @brief The monotonic stamp the reassembly buffer ages groups against: steady-clock
+ *        milliseconds, the same unit `rx_ttl` is expressed in.
+ *
+ * The buffer holds no clock of its own (it is a pure framing primitive), so the
+ * transport — which already reads `steady_clock` once per inbound frame for the
+ * ADR-0044 last-heard table — feeds it this.
+ */
+[[nodiscard]] std::uint64_t stamp_ms(std::chrono::steady_clock::time_point t) {
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t.time_since_epoch());
+    return static_cast<std::uint64_t>(ms.count());
+}
+
 // (removed) own_copy — the alloc/copy/over triplet now lives in one audited
 // locus, tr::view::over_bytes (mem_heap.hpp). Call sites use it directly.
 
@@ -91,7 +104,18 @@ tr::net::reassembly_key_t key_of(std::uint16_t node, std::uint16_t base_endpoint
 // the transport talks only to the can_link_t seam.
 
 transport_can::transport_can(std::unique_ptr<can_link_t> link, transport_can_config_t config)
-    : link_(std::move(link)), cfg_(std::move(config)) {
+    : link_(std::move(link)),
+      cfg_(std::move(config)),
+      // The injected-bound seam the reassembly buffer was built around, finally
+      // reached (#912): before this it was default-constructed, so max_groups was
+      // 0 and its evict-oldest never fired. Both RX buffers draw from the same
+      // injected resource — the RX thread never reaches the global heap.
+      reasm_(cfg_.reasm_mr, cfg_.max_groups),
+      pending_(cfg_.reasm_mr) {
+    // The RX staleness window is derived, not invented: left at zero it tracks the
+    // configured peer liveness window, since RX state a peer would have completed
+    // is dead once that peer is itself considered gone.
+    if (cfg_.rx_ttl <= kCanRxTtlFromPeerTtl) cfg_.rx_ttl = cfg_.peer_ttl;
     link_->on_receive([this](const can_frame_data_t& f) { on_rx(f); });
     // Announce presence at join (ADR-0044): a hello advertise (slice_count == 0)
     // seeds every listener's last-heard table before any data flows, so a fresh
@@ -117,10 +141,21 @@ std::optional<can::advertise_t> transport_can::learned_binding(std::uint32_t bas
     return it->second.adv;
 }
 
+std::uint64_t transport_can::dropped_groups() const {
+    // reasm_ is plain (non-atomic) RX-thread state, so its counter is read under
+    // the ingress lock — introspection, never a hot path.
+    const std::lock_guard lock(const_cast<std::mutex&>(rx_m_));
+    return reasm_.dropped_groups();
+}
+
+std::size_t transport_can::pending_slices() const {
+    const std::lock_guard lock(const_cast<std::mutex&>(rx_m_));
+    return pending_.size();
+}
+
 // --- the bus capability (ADR-0044) -------------------------------------------
 
-void transport_can::touch_peer(std::uint16_t node) {
-    const auto now = std::chrono::steady_clock::now();
+void transport_can::touch_peer(std::uint16_t node, std::chrono::steady_clock::time_point now) {
     const std::lock_guard lock(peers_m_);
     // Insert-only, one entry per DISTINCT node id ever heard (the learned_ map's
     // policy): growth tracks the bus population — structurally bounded by the
@@ -179,7 +214,12 @@ void transport_can::emit_advertise(const can::advertise_t& adv) {
     // was a per-send abort() risk under `-fno-exceptions`. Zero allocation, zero drop:
     // 18 bytes of stack and a view of a string this transport already owns for its life.
     std::array<std::byte, can::kAdvertiseHeaderSize> header{};
-    if (!can::encode_advertise_header(header, adv, cfg_.path)) return;  // over-long: emit nothing
+    if (!can::encode_advertise_header(header, adv, cfg_.path)) {
+        // Over-long: emit nothing. Without the manifest no peer can bind the group,
+        // so the whole send is lost — counted, not silent (#912).
+        dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     const std::span<const std::byte> parts[2] = {
         std::span<const std::byte>(header),
         std::as_bytes(std::span<const char>(cfg_.path.data(), cfg_.path.size()))};
@@ -238,11 +278,17 @@ void transport_can::send_impl(std::span<const std::byte> frame, std::uint16_t ta
 
     // Own the bytes so view_can_frames_t can carve zero-copy subviews out of them.
     const auto payload = tr::view::over_bytes(frame);
-    if (!payload) return;  // alloc failure => backpressure drop
+    if (!payload) {
+        dropped_tx_.fetch_add(1, std::memory_order_relaxed);  // alloc failure => backpressure drop
+        return;
+    }
     const tr::view::view_can_frames_t frames =
         tr::view::view_can_frames_t::split(*payload, cfg_.mode);
     const std::size_t count = frames.frame_count();
-    if (count == 0) return;
+    if (count == 0) {
+        dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
 
     const std::uint16_t base_ep = alloc_base(count);
     const can::can_id_fields_t base_fields{cfg_.version, cfg_.node, base_ep};
@@ -291,11 +337,19 @@ void transport_can::on_rx(const can_frame_data_t& frame) {
     // Self-echo guard (e.g. CAN_RAW_RECV_OWN_MSGS, or a second local socket):
     // our own frames neither feed the map nor make us our own peer.
     if (fields->node == cfg_.node) return;
+    // One clock read per inbound frame, shared by the ADR-0044 last-heard table and
+    // the RX age-out below — the RX path's only notion of "now".
+    const auto now = std::chrono::steady_clock::now();
     // ANY valid same-version frame from another node is a liveness signal —
     // the last-heard table (ADR-0044) is refreshed before the payload is parsed.
-    touch_peer(fields->node);
+    touch_peer(fields->node, now);
 
     const std::lock_guard lock(rx_m_);
+    rx_now_ = now;
+    reasm_.set_now(stamp_ms(now));
+    // Age out parked slices on EVERY inbound frame, not just on a park: a bus that
+    // stops emitting unmatched data must still shed what it already parked.
+    expire_pending();
     if (fields->endpoint == kCanControlEndpoint) {
         // Accumulate the per-node advertise byte stream and pop every complete frame.
         std::vector<std::byte>& buf = control_[fields->node];
@@ -327,6 +381,12 @@ void transport_can::on_rx(const can_frame_data_t& frame) {
 }
 
 void transport_can::learn_advertise(const can::advertise_t& adv) {
+    // The on-advertise stale-group sweep (#912). Every group is created by an
+    // advertise, so this is the cadence that sees every group. `erase` is reached
+    // only after `is_complete`, so a group a lost advertise or a lost data slice
+    // left permanently incomplete is pinned until something ages it out — this.
+    reasm_.sweep_stale(static_cast<std::uint64_t>(cfg_.rx_ttl.count()));
+
     // The hello/presence form (slice_count == 0) binds nothing — its liveness
     // effect already landed in touch_peer on the frame that carried it.
     if (adv.slice_count == 0) return;
@@ -339,21 +399,23 @@ void transport_can::learn_advertise(const can::advertise_t& adv) {
     if (deliver) reasm_.set_expected_count(key_of(base->node, base->endpoint), adv.slice_count);
 
     // A data frame may have arrived ahead of its manifest (cross-ID arbitration);
-    // re-drive any now-matchable pending slices.
-    std::vector<can_frame_data_t> still_pending;
-    std::vector<can_frame_data_t> ready;
-    still_pending.reserve(pending_.size());
-    for (auto& f : pending_) {
-        const auto ff = can::decode_can_id(f.id);
+    // re-drive any now-matchable pending slices. Compact in place and lift only the
+    // matches into one batch drawn from the SAME injected resource — the old
+    // two-vector rebuild reallocated the whole queue from the global heap on every
+    // advertise, and a pmr container cannot be move-assigned across resources.
+    std::pmr::vector<pending_slice_t> ready(pending_.get_allocator());
+    auto keep = pending_.begin();
+    for (auto& p : pending_) {
+        const auto ff = can::decode_can_id(p.frame.id);
         if (ff && ff->node == base->node && ff->endpoint >= base->endpoint &&
             ff->endpoint < base->endpoint + adv.slice_count) {
-            ready.push_back(f);
+            ready.push_back(std::move(p));
         } else {
-            still_pending.push_back(f);
+            *keep++ = std::move(p);
         }
     }
-    pending_ = std::move(still_pending);
-    for (const auto& f : ready) process_data(f);
+    pending_.erase(keep, pending_.end());
+    for (const auto& p : ready) process_data(p.frame);
 }
 
 void transport_can::process_data(const can_frame_data_t& frame) {
@@ -374,7 +436,7 @@ void transport_can::process_data(const can_frame_data_t& frame) {
         }
     }
     if (!binding) {
-        pending_.push_back(frame);  // hold until its advertise lands
+        park_pending(frame);  // hold until its advertise lands — bounded and aged
         return;
     }
     // A directed group addressed to another node (ADR-0044): recognized, consumed,
@@ -401,6 +463,46 @@ void transport_can::process_data(const can_frame_data_t& frame) {
     deliver(fields->node, rope->subrope(0, n));
 }
 
+/**
+ * @brief Park a data slice whose advertise has not landed — bounded in count, counted on drop.
+ *
+ * The unbounded park this replaces was reachable by any bus peer: a data frame on a
+ * never-advertised endpoint was appended and, since the only drain is the
+ * covered-range re-drive in @ref learn_advertise, never reclaimed (#912). The count
+ * ceiling is the injected `max_pending`, never a magic number; the age ceiling is
+ * @ref expire_pending.
+ */
+void transport_can::park_pending(const can_frame_data_t& frame) {
+    // Evict the OLDEST parked slices to make room — append order is arrival order,
+    // so the front is oldest. A newly arrived slice is the one most likely to have
+    // its advertise still in flight, so it is the one worth keeping.
+    if (cfg_.max_pending != 0 && pending_.size() >= cfg_.max_pending) {
+        const std::size_t over = pending_.size() + 1 - cfg_.max_pending;
+        pending_.erase(pending_.begin(), pending_.begin() + static_cast<std::ptrdiff_t>(over));
+        dropped_rx_.fetch_add(over, std::memory_order_relaxed);
+    }
+    pending_.push_back(pending_slice_t{frame, rx_now_});
+}
+
+/**
+ * @brief Drop parked slices older than `rx_ttl` — the age-out that holds under the
+ *        shipped default config, where the count caps are opt-in.
+ *
+ * A parked slice waits for an advertise that, on a bus that drops control frames,
+ * may never come. Arrival order is insertion order, so every stale entry is a
+ * contiguous prefix and the scan stops at the first live one.
+ */
+void transport_can::expire_pending() {
+    if (pending_.empty() || cfg_.rx_ttl.count() <= 0) return;
+    const auto cutoff = rx_now_ - cfg_.rx_ttl;
+    auto first_live = pending_.begin();
+    while (first_live != pending_.end() && first_live->arrived < cutoff) ++first_live;
+    const auto stale = static_cast<std::size_t>(first_live - pending_.begin());
+    if (stale == 0) return;
+    pending_.erase(pending_.begin(), first_live);
+    dropped_rx_.fetch_add(stale, std::memory_order_relaxed);
+}
+
 void transport_can::deliver(std::uint16_t src_node, tr::view::rope_t frame) {
     // The sender's bus name becomes the FWD hop's inbound NAME (ADR-0044), so a
     // reply routes back to exactly that peer, directed. The slot performs the
@@ -422,9 +524,10 @@ void transport_can::deliver(std::uint16_t src_node, tr::view::rope_t frame) {
 
 // --- the `can` catalog factory (ADR-0027 / ADR-0043 §5 / ADR-0044) -----------
 
-transport_vertex_t::transport_factory_t can_transport_factory() {
-    return [](const conn_settings_t& /*settings*/,
-              const wire::tlv_t* raw_config) -> graph::result_t<std::unique_ptr<transport_t>> {
+transport_vertex_t::transport_factory_t can_transport_factory(std::pmr::memory_resource* reasm_mr) {
+    return [reasm_mr](
+               const conn_settings_t& /*settings*/,
+               const wire::tlv_t* raw_config) -> graph::result_t<std::unique_ptr<transport_t>> {
         // Every CAN-private key is parsed HERE from the raw config TLV (the
         // ADR-0043 §5 leanness ruling): nothing CAN-shaped lands in the shared
         // conn_settings_t. The shared config_reader_t walk, CAN's own keys.
@@ -442,6 +545,16 @@ transport_vertex_t::transport_factory_t can_transport_factory() {
         if (const auto v = reader.flag("fd"))
             cfg.mode = *v ? tr::view::can_frame_mode_t::FD : tr::view::can_frame_mode_t::CLASSIC;
         if (const auto v = reader.u32("peer_ttl_ms")) cfg.peer_ttl = std::chrono::milliseconds(*v);
+        // The ingress bounds (#912). Without these keys the reassembly buffer's
+        // evict-oldest seam was unreachable from production config at all — the
+        // buffer was default-constructed with max_groups == 0. The pmr resource
+        // cannot ride a config TLV (it is a pointer, not a wire value), so it is
+        // injected at factory-registration time instead.
+        cfg.reasm_mr = reasm_mr != nullptr ? reasm_mr : std::pmr::new_delete_resource();
+        if (const auto v = reader.u32("max_groups")) cfg.max_groups = static_cast<std::size_t>(*v);
+        if (const auto v = reader.u32("max_pending"))
+            cfg.max_pending = static_cast<std::size_t>(*v);
+        if (const auto v = reader.u32("rx_ttl_ms")) cfg.rx_ttl = std::chrono::milliseconds(*v);
         if (ifname.empty() || !have_node || cfg.node > can::kNodeMax ||
             cfg.version > can::kVersionMax) {
             return std::unexpected(graph::status_t::TYPE_MISMATCH);

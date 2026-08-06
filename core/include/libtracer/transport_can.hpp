@@ -33,6 +33,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <memory_resource>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -70,6 +71,16 @@ inline constexpr std::uint16_t kCanFirstDataEndpoint = 1;
 
 /** @brief Default liveness window: a peer silent this long leaves the enumeration. */
 inline constexpr std::chrono::milliseconds kCanDefaultPeerTtl{3000};
+
+/**
+ * @brief Sentinel for `transport_can_config_t::rx_ttl`: track `peer_ttl` instead.
+ *
+ * The RX staleness window is not an independent quantity to invent a number for
+ * (the no-synthetic-limits rule): a peer that has been silent longer than
+ * `peer_ttl` is already considered gone, so RX state it would have completed is
+ * definitively dead by then. Left at zero, `rx_ttl` resolves to `peer_ttl`.
+ */
+inline constexpr std::chrono::milliseconds kCanRxTtlFromPeerTtl{0};
 
 /**
  * @brief One raw CAN frame at the `can_link_t` seam — id + data field, no semantics.
@@ -198,6 +209,32 @@ struct transport_can_config_t {
     std::chrono::milliseconds peer_ttl =
         kCanDefaultPeerTtl; /**< @brief Peer liveness window (ADR-0044): a peer silent
                                  longer than this expires from the enumeration. */
+
+    // --- ingress bounding (#912): the injected-resource / config seam ----------
+
+    std::pmr::memory_resource* reasm_mr =
+        std::pmr::new_delete_resource(); /**< @brief Where the RX buffers (reassembly
+                                              groups/slices and the pending-slice queue)
+                                              draw their structure. A constrained node
+                                              injects a bounded resource; the default is
+                                              the process heap. Must outlive the
+                                              transport. */
+    std::size_t max_groups = 0;          /**< @brief Live reassembly-group ceiling; `0` = unbounded
+                                              (host-bounded per RFC-0006). Overflow evicts the
+                                              oldest group and ticks @ref
+                                              transport_can::dropped_groups. */
+    std::size_t max_pending = 0;         /**< @brief Ceiling on data slices parked awaiting their
+                                              advertise; `0` = unbounded (host-bounded per
+                                              RFC-0006). Overflow evicts the oldest parked slice
+                                              and ticks @ref transport_can::dropped_rx. */
+    std::chrono::milliseconds rx_ttl =
+        kCanRxTtlFromPeerTtl; /**< @brief RX staleness window: a parked slice or an
+                                   incomplete reassembly group untouched this long is
+                                   reclaimed, because a lost advertise/data slice would
+                                   otherwise pin it forever. `0` = track `peer_ttl`
+                                   (@ref kCanRxTtlFromPeerTtl). Unlike the count caps
+                                   this is ALWAYS live — the age-out is the bound that
+                                   holds under the shipped default config. */
 };
 
 /**
@@ -265,6 +302,46 @@ class transport_can : public transport_t, public bus_link_t {
      */
     [[nodiscard]] std::optional<can::advertise_t> learned_binding(std::uint32_t base_can_id) const;
 
+    // --- drop counters (#912) — the sibling-transport convention -----------------
+
+    /**
+     * @brief Inbound frames dropped rather than delivered (the tcp/quic/udp
+     *        `dropped_rx()` convention).
+     *
+     * Ticks once per parked data slice reclaimed because @ref
+     * transport_can_config_t::max_pending was reached or because it aged past
+     * `rx_ttl` — a bounded, counted drop instead of the unbounded park this
+     * replaces. It counts SLICES, not groups; a group's buffered slices reclaimed
+     * as a unit are @ref dropped_groups.
+     */
+    [[nodiscard]] std::uint64_t dropped_rx() const noexcept {
+        return dropped_rx_.load(std::memory_order_relaxed);
+    }
+
+    /**
+     * @brief Outbound frames the caller believed sent that never reached the bus
+     *        (the twai `tx_dropped()` convention, spelled to match `dropped_rx`).
+     *
+     * Ticks when a `send` cannot own its bytes (allocation failure — the
+     * backpressure case), when the payload splits into no window at all, and when
+     * the group's advertise manifest cannot be encoded.
+     */
+    [[nodiscard]] std::uint64_t dropped_tx() const noexcept {
+        return dropped_tx_.load(std::memory_order_relaxed);
+    }
+
+    /**
+     * @brief Reassembly groups reclaimed before delivery — a `max_groups` eviction
+     *        or an `rx_ttl` age-out.
+     *
+     * The accessor the reassembly buffer's own counter never had: it is private
+     * state on the RX thread, so this reads it under the ingress lock.
+     */
+    [[nodiscard]] std::uint64_t dropped_groups() const;
+
+    /** @brief Data slices currently parked awaiting their advertise (introspection). */
+    [[nodiscard]] std::size_t pending_slices() const;
+
     // --- the bus capability (ADR-0044) ------------------------------------------
 
     /** @brief This link IS a bus — expose the @ref bus_link_t facet. */
@@ -321,8 +398,11 @@ class transport_can : public transport_t, public bus_link_t {
     void on_rx(const can_frame_data_t& frame);
     void learn_advertise(const can::advertise_t& adv);  // requires rx_m_ held
     void process_data(const can_frame_data_t& frame);   // requires rx_m_ held
+    void park_pending(const can_frame_data_t& frame);   // requires rx_m_ held
+    void expire_pending();                              // requires rx_m_ held
     void deliver(std::uint16_t src_node, tr::view::rope_t frame);
-    void touch_peer(std::uint16_t node);  // refresh/insert into the last-heard table
+    // Refresh/insert into the last-heard table, using the frame's arrival stamp.
+    void touch_peer(std::uint16_t node, std::chrono::steady_clock::time_point now);
 
     // --- egress helpers ---
     std::uint16_t alloc_base(std::size_t slice_count);  // requires tx_m_ held
@@ -345,11 +425,32 @@ class transport_can : public transport_t, public bus_link_t {
         can::advertise_t adv;
         bool deliver = true;
     };
+    /**
+     * @brief One data slice parked until its advertise lands, with the stamp that
+     *        lets it age out.
+     *
+     * A parked slice whose advertise never lands must not live forever, and the raw
+     * frame alone carries no arrival time to decide that on.
+     */
+    struct pending_slice_t {
+        can_frame_data_t frame{};                        /**< @brief The parked raw frame. */
+        std::chrono::steady_clock::time_point arrived{}; /**< @brief When it was parked. */
+    };
+
     std::mutex rx_m_;                                          // guards the map + buffers
     can_reassembly_t reasm_;                                   // data-slice reassembly
     std::map<std::uint32_t, binding_t> learned_;               // base CAN ID -> binding
     std::map<std::uint16_t, std::vector<std::byte>> control_;  // per-node advertise byte stream
-    std::vector<can_frame_data_t> pending_;  // data frames awaiting their advertise
+    // Data slices awaiting their advertise. Drawn from the injected resource (the
+    // RX thread must not reach the global heap), bounded in COUNT by max_pending
+    // and in AGE by rx_ttl; append-ordered, so both the stale prefix and the
+    // evict-oldest end are the front.
+    std::pmr::vector<pending_slice_t> pending_;
+    std::chrono::steady_clock::time_point rx_now_{};  // current frame's arrival stamp
+
+    // Drop counters (#912). Written on the RX/TX threads, read by anyone.
+    std::atomic<std::uint64_t> dropped_rx_{0};
+    std::atomic<std::uint64_t> dropped_tx_{0};
 
     // the last-heard peer table (ADR-0044) — node id -> entry, insert-only
     mutable std::mutex peers_m_;
@@ -374,13 +475,25 @@ class transport_can : public transport_t, public bus_link_t {
  *  - `version` (VALUE u8) — the protocol-version prefix (default 0);
  *  - `fd` (VALUE u8) — non-zero selects CAN-FD framing (default classic);
  *  - `path` (NAME) — the identity path advertised for this node's groups;
- *  - `peer_ttl_ms` (VALUE u32) — the ADR-0044 peer liveness window.
+ *  - `peer_ttl_ms` (VALUE u32) — the ADR-0044 peer liveness window;
+ *  - `max_groups` (VALUE u32) — the live reassembly-group ceiling (0 = unbounded,
+ *    host-bounded per RFC-0006); this is what makes the reassembly buffer's
+ *    evict-oldest seam reachable in production at all (#912);
+ *  - `max_pending` (VALUE u32) — the ceiling on data slices parked awaiting their
+ *    advertise (0 = unbounded, host-bounded per RFC-0006);
+ *  - `rx_ttl_ms` (VALUE u32) — the RX staleness window (0 = track `peer_ttl_ms`).
  * A missing/invalid `ifname` or `node` fails with `TYPE_MISMATCH`; a socket that
  * cannot bind (no kernel CAN / non-Linux stub) fails with `NOT_FOUND`. The
  * universal `role` is ignored — a bus has no dial/listen asymmetry.
  *
+ * @param reasm_mr Where every constructed transport's RX buffers draw their
+ *                 structure — the injection point for the pmr seam the config TLV
+ *                 cannot carry (a resource is a pointer, not a wire value). A host
+ *                 registers the factory with its own bounded resource; the default
+ *                 is the process heap. Must outlive every transport built here.
  * @return The factory functor for @ref transport_vertex_t::register_transport_type.
  */
-[[nodiscard]] transport_vertex_t::transport_factory_t can_transport_factory();
+[[nodiscard]] transport_vertex_t::transport_factory_t can_transport_factory(
+    std::pmr::memory_resource* reasm_mr = std::pmr::new_delete_resource());
 
 }  // namespace tr::net
