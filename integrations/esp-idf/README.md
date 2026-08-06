@@ -122,9 +122,9 @@ Each of these still reports exhaustion by throwing and is reachable by a peer or
 | ---- | ---- | ----------- | ------------------------- |
 | CAN egress window table | `core/include/libtracer/view_can.hpp:100` — `frames_.push_back` in `view_can_frames_t::split`, reached on **every** send (`core/src/transport_can.cpp:215`) | the sender: one `push_back` per CAN frame the payload splits into | `CONFIG_LIBTRACER_TRANSPORT_CAN` is `default y`, so `transport_can.cpp` is in the archive (`libtracer/CMakeLists.txt:131`) unless you turn CAN off |
 | Label-table binds (#603) | `core/src/route_handle.cpp:82`, `:179`, `:236` — `std::pmr::vector::push_back` and the route copy beside it | a **peer**: an ingress `ADVERTISE` binds a label. `max_label_bindings_per_link` bounds the entry *count*, not the allocation's failure mode | `route_handle.cpp` is unconditional in the source list (`libtracer/CMakeLists.txt:57`) |
-| `try_reserve`'s second step (#850) | `core/include/libtracer/mem_heap.hpp:116-121` — the `noexcept` helper probes, frees, then runs the **throwing** `std::vector::reserve` | anything concurrent: the probe-then-reserve is sound only single-threaded. Every `try_*` helper inherits it | header-only, reached from the graph and every transport |
+| `try_reserve` on `-fno-exceptions` (#923, #850) | `core/include/libtracer/mem_heap.hpp:157-171` — `try_grow` catches the container's own allocation failure on a hosted build; **this component is not one**, so IDF's `-fno-exceptions` build keeps the probe-then-commit fallback | anything concurrent — and single-core is not single-threaded: a FreeRTOS context switch between the probe's free and the `reserve` opens the window. Every `try_*` helper inherits it on this profile | header-only, reached from the graph and every transport |
 
-Turning `CONFIG_LIBTRACER_TRANSPORT_CAN` off sheds the first row outright; the other two are structural until #603 / #850 land.
+Turning `CONFIG_LIBTRACER_TRANSPORT_CAN` off sheds the first row outright; the other two are structural until #603 lands and until the remaining `try_*` sites move to the ADR-0065 failable seam.
 
 ## Security posture
 

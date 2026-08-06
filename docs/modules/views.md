@@ -48,8 +48,8 @@ struct view_t {                                          // view.hpp
 };
 
 /** Own a copy of borrowed bytes as a view_t; nullopt == allocation failure. */
-std::optional<view_t> over_bytes(std::span<const std::byte>) noexcept;  // mem_heap.hpp:267
-std::optional<view_t> over_bytes(std::span<const std::byte>, mem::mem_backend_t&) noexcept; // :304
+std::optional<view_t> over_bytes(std::span<const std::byte>) noexcept;  // mem_heap.hpp:338
+std::optional<view_t> over_bytes(std::span<const std::byte>, mem::mem_backend_t&) noexcept; // :375
 
 class rope_t {                                           // rope.hpp — ordered chain of views
     rope_t(view_t);                                               // a view is a 1-link rope :53
@@ -93,8 +93,8 @@ heap, which is the chain's only allocation (`rope_t::append`, `rope.hpp:56-71`).
 Bytes handed up by a transport are borrowed: they live in a connection buffer that is
 reused as soon as the callback returns. Keeping them means owning a copy, and the
 canonical way to take one is `tr::view::over_bytes`
-(`core/include/libtracer/mem_heap.hpp:267`) — one call in place of the
-`heap_alloc` + `memcpy` + `view_t::over` triplet. A second overload (`:304`) takes the
+(`core/include/libtracer/mem_heap.hpp:338`) — one call in place of the
+`heap_alloc` + `memcpy` + `view_t::over` triplet. A second overload (`:375`) takes the
 backend to draw from, which is what a peer-driven ownership copy uses so the copy lands in
 the node's injected seam rather than the global heap.
 
@@ -148,7 +148,7 @@ multi-link value is read as if the first buffer were the whole message — a sil
 truncation, not a diagnostic. This is invisible on a purely local graph, where every
 value is one segment, and appears the moment a real transport is attached: every
 transport whose `transport_t::delivers_ropes()` returns true
-(`core/include/libtracer/transport.hpp:353`; TCP, UDP, WS, QUIC, WebTransport and CAN
+(`core/include/libtracer/transport.hpp:354`; TCP, UDP, WS, QUIC, WebTransport and CAN
 all override it) can hand up a chain. A CAN reassembly group chains one link per slice
 (`can_reassembly_t::assemble`, `core/include/libtracer/can_reassembly.hpp:181-189`), and
 a fragmented WebSocket message chains one link per fragment
