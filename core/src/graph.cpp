@@ -750,12 +750,12 @@ void graph_t::set_subject_resolver(subject_resolver_t resolver) {
 
 bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right) const {
     if (!subject_resolver_) return true;  // enforcement disabled — the one hot-path check
-    // The trusted channel is the EMPTY caller context — a local API call — and it is settled
-    // HERE, before the resolver runs (#905). It used to be a resolver return value
-    // (`nullopt`), which gave an integrator exactly one non-token answer and mapped its
-    // natural reading ("I cannot name this caller") onto "grant everything", WRITE_ACL and
-    // CREATE included. A remote op always carries the inbound link's NAME (`ensure_remote()
-    // .caller`), so it cannot spell the empty context and cannot reach this arm.
+    // The trusted channel is the EMPTY caller context — a local API call — settled HERE,
+    // before the resolver runs (#905). It used to be a resolver return value (`nullopt`),
+    // whose natural reading ("I cannot name this caller") meant "grant everything", WRITE_ACL
+    // and CREATE included. A FULL-ROUTE remote op carries the inbound link's NAME
+    // (`ensure_remote().caller`) so it cannot spell this arm — but the COMPACT fast path does
+    // not, writing unattributed and landing here (#974). No new write path may omit a caller.
     if (caller.empty()) return true;
     const std::expected<subject_token_t, wire::err_t> subject = subject_resolver_(caller);
     if (!subject) return false;  // the resolver DENIED this caller — PERMISSION_DENIED
