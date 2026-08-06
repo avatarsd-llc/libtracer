@@ -15,6 +15,10 @@
  * re-dispatch is gated by the TARGET's WRITE right under the edge's stored
  * caller context. The remote path (op_resolver_t with an inbound_link) replies
  * kind=ERROR STATUS{ERROR{VALUE 0x0050 tr::access::denied}}.
+ *
+ * The resolver's ERROR arm is a DENY at every one of those gates (#905): the
+ * trusted channel is the EMPTY caller context and nothing else, settled before
+ * the resolver is invoked at all.
  */
 
 #include <algorithm>
@@ -23,6 +27,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <expected>
 #include <initializer_list>
 #include <memory_resource>
 #include <optional>
@@ -122,11 +127,29 @@ std::vector<std::byte> make_acl(std::initializer_list<ace_spec_t> aces) {
 constexpr std::uint32_t bit(acl_right_t r) { return static_cast<std::uint32_t>(r); }
 
 /**
- * @brief The test resolver (ADR-0018): a non-empty caller context resolves to its own bytes as the
- *        subject token; an empty (local) context is trusted (nullopt).
+ * @brief The test resolver (ADR-0018): the caller context IS the subject token.
+ *
+ * The empty (local) context never reaches a resolver — `graph_t::acl_allows` settles it
+ * as trusted before invoking one (#905) — so the error arm here means DENY, nothing else.
  */
-std::optional<subject_token_t> caller_is_subject(std::string_view caller) {
-    if (caller.empty()) return std::nullopt;
+std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(std::string_view caller) {
+    return as_bytes(caller);
+}
+
+/** @brief The one caller @ref resolver_cannot_name_ghost refuses to name (#905). */
+constexpr std::string_view kUnnameable = "ghost";
+
+/**
+ * @brief A resolver whose ERROR arm is reachable: it cannot name @ref kUnnameable.
+ *
+ * The shape an integrator writes for "this caller presented an identity I do not recognise
+ * — a stale link name, a revoked peer, a lookup that failed." Under the predecessor
+ * `std::optional` signature the only spelling for that was `nullopt`, which the graph read
+ * as FULLY TRUSTED and waved through every gate, `WRITE_ACL` and `CREATE` included (#905).
+ */
+std::expected<subject_token_t, tr::wire::err_t> resolver_cannot_name_ghost(
+    std::string_view caller) {
+    if (caller == kUnnameable) return std::unexpected(tr::wire::err_t::ACCESS_DENIED);
     return as_bytes(caller);
 }
 
@@ -145,6 +168,18 @@ std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     for (std::string_view s : segs) tr::wire::emit_name(body, s);
     std::vector<std::byte> out;
     tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
+    return out;
+}
+
+/** @brief A `:children[]` SPEC creating a STORED_VALUE child named @p name (ADR-0017). */
+std::vector<std::byte> child_spec(std::string_view name) {
+    std::vector<std::byte> body;
+    tr::wire::emit_name(body, "type");
+    tr::wire::emit_name(body, "stored_value");
+    tr::wire::emit_name(body, "name");
+    tr::wire::emit_name(body, name);
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
     return out;
 }
 
@@ -353,7 +388,7 @@ void test_open_by_default() {
             path_t("/x:acl"),
             make_value(make_acl({{.subject = "only-peer-z", .mask = bit(acl_right_t::READ)}})));
         check(write_u8(g, v, 1).has_value(),
-              "trusted (nullopt-subject) caller bypasses a non-granting ACL");
+              "the empty-context (local) caller bypasses a non-granting ACL");
     }
 }
 
@@ -801,9 +836,10 @@ void test_remote_path() {
  * outright and every test would still pass. Five were real; this covers them.
  *
  * (The sixth, `history()`'s gate at `graph.cpp:1255`, passes a hardcoded EMPTY caller
- * because it is a local-only helper with no wire path. It cannot deny under any resolver
- * that maps "" to no subject, which is every resolver we ship — correct by design, and
- * deliberately not tested here.)
+ * because it is a local-only helper with no wire path. Since #905 that is STRUCTURALLY
+ * un-deniable — the empty context is the trusted channel, settled before any resolver is
+ * consulted — rather than a property of the resolvers we happen to ship. Correct by
+ * design, and deliberately not tested here.)
  *
  * Each gate is asserted in BOTH directions. A one-sided "denied" check would pass just as
  * well against a gate wired to refuse everyone, which is the failure this file exists to
@@ -894,6 +930,195 @@ void test_gates_no_test_defended() {
     }
 }
 
+/**
+ * @brief The resolver's ERROR arm is a DENY at EVERY gate, not a trusted fallback (#905).
+ *
+ * The vertex here grants `EVERYONE@` every gated right — the most permissive policy the
+ * core subset can express — and the unnameable caller is refused anyway, because the
+ * refusal happens BEFORE any ACE is looked at. That ordering is the whole fix: the
+ * predecessor signature's only non-token answer (`nullopt`) meant "fully trusted", so an
+ * integrator's honest "I cannot name this caller" granted `WRITE_ACL` and `CREATE`.
+ *
+ * Every gate is asserted with an ABLATION on the same door in the same graph — "peer-ok",
+ * which the resolver CAN name, must pass it. Without that half a gate wired to refuse
+ * everyone would score identically, and a 2026-07-31 mutation sweep found most of these
+ * gates carried no test at all. Each is exercised individually: READ, WRITE, SUBSCRIBE,
+ * CREATE (both doors — `:children[]` and write-creates), READ_ACL and WRITE_ACL.
+ */
+void test_resolver_deny_arm_is_denied_at_every_gate() {
+    std::printf("the resolver's ERROR arm DENIES at every gate (#905):\n");
+    graph_t g;
+    g.set_subject_resolver(resolver_cannot_name_ghost);
+    const vertex_handle_t v = g.register_vertex(path_t("/g"), role_t::STORED_VALUE);
+    (void)write_u8(g, v, 7);  // trusted local write seeds an LKV
+
+    const std::vector<std::byte> open_to_everyone =
+        make_acl({{.subject = "EVERYONE@",
+                   .mask = bit(acl_right_t::READ) | bit(acl_right_t::WRITE) |
+                           bit(acl_right_t::SUBSCRIBE) | bit(acl_right_t::CREATE) |
+                           bit(acl_right_t::READ_ACL) | bit(acl_right_t::WRITE_ACL)}});
+    check(g.write(path_t("/g:acl"), make_value(open_to_everyone)).has_value(),
+          "installed an :acl granting EVERYONE@ every gated right");
+
+    // READ (graph.cpp:809)
+    check(g.read(v, "peer-ok").has_value(), "READ: the nameable caller is allowed");
+    check(denied(g.read(v, kUnnameable)), "READ: the UNNAMEABLE caller is DENIED");
+
+    // WRITE (graph.cpp:1045)
+    check(write_u8(g, v, 1, "peer-ok").has_value(), "WRITE: the nameable caller is allowed");
+    check(denied(write_u8(g, v, 2, kUnnameable)), "WRITE: the UNNAMEABLE caller is DENIED");
+
+    // AWAIT rides the READ right, checked before the condvar (graph.cpp:1353).
+    {
+        const auto ok = g.await(v, std::chrono::nanoseconds(1), "peer-ok");
+        check(!denied(ok), "AWAIT: the nameable caller is not denied (it times out instead)");
+        check(denied(g.await(v, std::chrono::nanoseconds(1), kUnnameable)),
+              "AWAIT: the UNNAMEABLE caller is DENIED before it can camp on the condvar");
+    }
+
+    // SUBSCRIBE — the producer-side `:subscribers[]` append gate (graph.cpp:1421).
+    {
+        std::vector<std::byte> sub;
+        tr::wire::emit_tlv(sub, type_t::SUBSCRIBER, opt_t{.pl = true}, b_path({"sink"}));
+        const auto field = path_t::parse("/g:subscribers[]");
+        check(g.write(v, field->field(), make_value(sub), "peer-ok").has_value(),
+              "SUBSCRIBE: the nameable caller may append an edge");
+        check(denied(g.write(v, field->field(), make_value(sub), kUnnameable)),
+              "SUBSCRIBE: the UNNAMEABLE caller is DENIED");
+    }
+
+    // CREATE, door 1 — the in-band `:children[]` append (graph.cpp:1777).
+    {
+        const auto field = path_t::parse("/g:children[]");
+        check(denied(g.write(v, field->field(), make_value(child_spec("ghostkid")), kUnnameable)),
+              "CREATE(:children[]): the UNNAMEABLE caller is DENIED");
+        check(!g.find(path_t{"/g/ghostkid"}.key()).has_value(),
+              "CREATE(:children[]): the denied create made no vertex");
+        check(g.write(v, field->field(), make_value(child_spec("okkid")), "peer-ok").has_value(),
+              "CREATE(:children[]): the nameable caller may create");
+        check(g.find(path_t{"/g/okkid"}.key()).has_value(),
+              "CREATE(:children[]): the allowed create really made the vertex");
+    }
+
+    // CREATE, door 2 — write-creates, gated on the nearest existing ancestor
+    // (graph.cpp:601). A different door from `:children[]`, on the same right.
+    {
+        const path_t ghost_made{"/g/ghostmade"};
+        const path_t ok_made{"/g/okmade"};
+        check(denied(g.ensure_vertex(ghost_made.key(), kUnnameable)),
+              "CREATE(write-creates): the UNNAMEABLE caller is DENIED");
+        check(!g.find(ghost_made.key()).has_value(),
+              "CREATE(write-creates): the denied create made no vertex");
+        check(g.ensure_vertex(ok_made.key(), "peer-ok").has_value(),
+              "CREATE(write-creates): the nameable caller may create");
+    }
+
+    // READ_ACL — its own right, distinct from acting on the vertex (graph.cpp:2313).
+    {
+        const auto acl_field = path_t::parse("/g:acl");
+        check(g.read(v, acl_field->field(), "peer-ok").has_value(),
+              "READ_ACL: the nameable caller may read :acl");
+        check(denied(g.read(v, acl_field->field(), kUnnameable)),
+              "READ_ACL: the UNNAMEABLE caller is DENIED");
+    }
+
+    // WRITE_ACL — the admin right, and the one the fail-open handed out (graph.cpp:1740).
+    // Last, because a successful write REPLACES the policy every check above rode on.
+    {
+        const auto acl_field = path_t::parse("/g:acl");
+        const std::vector<std::byte> hijack =
+            make_acl({{.subject = "ghost", .mask = bit(acl_right_t::WRITE_ACL)}});
+        check(denied(g.write(v, acl_field->field(), make_value(hijack), kUnnameable)),
+              "WRITE_ACL: the UNNAMEABLE caller may NOT rewrite the policy");
+        const auto still = g.read(v, acl_field->field(), "peer-ok");
+        check(still.has_value() && still->flatten().bytes().size() == open_to_everyone.size(),
+              "WRITE_ACL: the denied admin write left the stored ACL in place");
+        check(g.write(v, acl_field->field(), make_value(open_to_everyone), "peer-ok").has_value(),
+              "WRITE_ACL: the nameable caller may rewrite the policy");
+    }
+}
+
+/**
+ * @brief The ERROR arm also stops REMOTE-EDGE FAN-IN delivery (`graph.cpp:876`, #905).
+ *
+ * The seventh gate, and the only one no caller can drive directly: a stored edge carries
+ * the caller context its subscribe ran under, and every delivery it makes is re-gated at
+ * the TARGET under that context. So the interesting moment is an edge that was admitted
+ * while its peer was nameable and keeps delivering after it stops being — a revoked link,
+ * a resolver that lost its session table. Fail-open made that edge MORE trusted than any
+ * live one: it delivered into the target unconditionally.
+ *
+ * The before/after pair inside one graph is the ablation — the same edge, the same
+ * producer write, the only change being the resolver's answer.
+ */
+void test_deny_arm_stops_remote_fan_in() {
+    std::printf("the resolver's ERROR arm stops remote-edge fan-in delivery (#905):\n");
+    graph_t g;
+    bool revoked = false;
+    g.set_subject_resolver(
+        [&revoked](std::string_view caller) -> std::expected<subject_token_t, tr::wire::err_t> {
+            if (revoked && caller == "link-a")
+                return std::unexpected(tr::wire::err_t::ACCESS_DENIED);
+            return as_bytes(caller);
+        });
+    const vertex_handle_t src = g.register_vertex(path_t("/src"), role_t::STORED_VALUE);
+    const vertex_handle_t sink = g.register_vertex(path_t("/sink"), role_t::STORED_VALUE);
+
+    // The edge stores "link-a" as its delivery caller. Neither vertex carries an :acl, so
+    // nothing but the resolver can refuse anything here.
+    std::vector<std::byte> sub;
+    tr::wire::emit_tlv(sub, type_t::SUBSCRIBER, opt_t{.pl = true}, b_path({"sink"}));
+    const auto sub_field = path_t::parse("/src:subscribers[]");
+    check(g.write(src, sub_field->field(), make_value(sub), "link-a").has_value(),
+          "link-a subscribes /src -> /sink while it is still nameable");
+
+    check(write_u8(g, src, 0x11).has_value(), "producer write while link-a is nameable");
+    check(g.read(sink).has_value(), "fan-in: the delivery LANDED (the edge really works)");
+    check(g.delivery_drops().denied == 0, "fan-in: nothing was dropped as denied yet");
+
+    // The peer's identity stops resolving; the edge outlives it.
+    revoked = true;
+    check(write_u8(g, src, 0x22).has_value(),
+          "the producer write itself still succeeds (only the leg drops)");
+    check(g.delivery_drops().denied == 1,
+          "fan-in: the delivery under the now-UNNAMEABLE caller is DROPPED and counted");
+    const auto landed = g.read(sink);
+    check(landed.has_value() && (*landed)->only().bytes().back() != std::byte{0x22},
+          "fan-in: the second value never reached the target");
+}
+
+/**
+ * @brief The EMPTY caller context stays trusted, and is settled WITHOUT the resolver (#905).
+ *
+ * The resolver installed here names nobody at all — every caller it sees is refused. Local
+ * (empty-context) operations must still succeed, which they can only do if `acl_allows`
+ * short-circuits the empty caller BEFORE invoking it. A remote op always carries its
+ * inbound link NAME, so it cannot spell this context.
+ */
+void test_empty_caller_is_trusted_without_the_resolver() {
+    std::printf("the empty (local) caller is trusted without consulting the resolver (#905):\n");
+    graph_t g;
+    g.set_subject_resolver([](std::string_view) -> std::expected<subject_token_t, tr::wire::err_t> {
+        return std::unexpected(tr::wire::err_t::ACCESS_DENIED);
+    });
+    const vertex_handle_t v = g.register_vertex(path_t("/l"), role_t::STORED_VALUE);
+
+    check(write_u8(g, v, 5).has_value(), "local WRITE succeeds under a name-nobody resolver");
+    check(g.read(v).has_value(), "local READ succeeds");
+    check(g.write(path_t("/l:acl"),
+                  make_value(make_acl({{.subject = "peer-a", .mask = bit(acl_right_t::READ)}})))
+              .has_value(),
+          "local WRITE_ACL succeeds");
+    check(g.read(path_t("/l:acl")).has_value(), "local READ_ACL succeeds");
+    check(g.ensure_vertex(path_t{"/l/kid"}.key(), {}).has_value(), "local CREATE succeeds");
+    check(g.subscribe(path_t("/l"), path_t("/l/kid")).has_value(),
+          "local SUBSCRIBE succeeds (the subscribe() sugar runs under the empty context)");
+
+    // The ablation: the very same resolver refuses every ATTRIBUTED caller.
+    check(denied(g.read(v, "peer-a")), "an attributed caller is refused by the same resolver");
+    check(denied(write_u8(g, v, 6, "peer-a")), "…on the WRITE gate too");
+}
+
 }  // namespace
 
 int main() {
@@ -908,6 +1133,9 @@ int main() {
     test_two_acl_fan_in();
     test_remote_path();
     test_gates_no_test_defended();
+    test_resolver_deny_arm_is_denied_at_every_gate();
+    test_deny_arm_stops_remote_fan_in();
+    test_empty_caller_is_trusted_without_the_resolver();
     std::printf(g_failures == 0 ? "\nACL: PASS\n" : "\nACL: FAIL (%d)\n", g_failures);
     return g_failures == 0 ? 0 : 1;
 }
