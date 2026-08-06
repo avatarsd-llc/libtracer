@@ -25,7 +25,11 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   signature change and no wire-grammar change (`LL` was always permitted). Callers see one
   behaviour difference: `decode(encode(t))` on such a tree now returns a tree with `opt.ll`
   set, where before it returned a decode error or a mis-framed tree. Bodies at or under
-  `0xFFFF` are byte-identical, and `opt.ll` is never cleared.
+  `0xFFFF` are byte-identical, and `opt.ll` is never cleared. A body over `0xFFFFFFFF` still
+  truncates modulo 2^32 — the wire grammar has no length form wider than u32, so that residual
+  is a grammar limit, not an `encode` bug, and it is unchanged here.
+
+## [0.8.0] — 2026-08-06
 
 ### Added
 

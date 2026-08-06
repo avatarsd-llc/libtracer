@@ -177,7 +177,7 @@ structural byte-builder in the tree share it instead of each hand-rolling
 | function | what it appends |
 | --- | --- |
 | `emit_header(out, type, opt, body_len)` | the header alone; length is `u16` LE, or `u32` LE when `opt.ll` is set. The width follows `opt.ll` verbatim — this writes a header, it does not decide one |
-| `emit_tlv(out, type, opt, body)` | header + body, auto-setting `opt.ll` when `body` exceeds `0xFFFF`. Every emitter, `encode` included, routes through here |
+| `emit_tlv(out, type, opt, body)` | header + body, auto-setting `opt.ll` when `body` exceeds `0xFFFF`. `encode` routes through here; the forward plane's `fwd_frame_view` / `stack_writer` tiers carry their own copy of the widen rule |
 | `emit_name(out, bytes)` / `emit_name(out, sv)` | a `NAME` TLV with default `opt` — the PATH-segment and metadata-tag workhorse; the `string_view` form needs no temporary buffer |
 | `emit_path_ref(out, elements)` | a `PATH_REF` TLV — the 4-byte envelope plus the bare 8-byte element array (RFC-0024 §4). Returns `false`, emitting nothing, past the 255-element bound: a route that long has no bound spelling and falls back to the canonical `PATH` |
 
