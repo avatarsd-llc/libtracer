@@ -134,10 +134,13 @@ std::vector<std::byte> encode(const tlv_t& tlv) {
     }
 
     std::vector<std::byte> out;
-    // The header byte layout has one home now (ADR-0048 §3) — emit_header respects
-    // tlv.opt.ll verbatim, byte-identical to the hand-rolled push it replaces.
-    wire::emit_header(out, tlv.type, tlv.opt, body.size());
-    out.insert(out.end(), body.begin(), body.end());
+    // The header byte layout has one home (ADR-0048 §3) and now so does the LENGTH-WIDTH
+    // POLICY (#924): emit_tlv widens to the u32 LL form when the body exceeds 0xFFFF, so a
+    // tlv_t built programmatically with a default opt (ll = false) over an oversize body can
+    // no longer serialize a length silently truncated to `size & 0xFFFF`. A body at or under
+    // 0xFFFF — and a tlv_t that already carries opt.ll — emits byte-identical bytes; the widen
+    // costs one predicted-not-taken compare per TLV and allocates nothing.
+    wire::emit_tlv(out, tlv.type, tlv.opt, body);
 
     std::vector<std::byte> ts_bytes;
     if (tlv.opt.ts) {

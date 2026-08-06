@@ -14,7 +14,18 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
-## [0.8.0] — 2026-08-06
+### Fixed
+
+- **`wire::encode` no longer truncates the length field for a body over 65535 bytes (#924).**
+  `encode` called `emit_header` directly, which writes the length at the width `opt.ll` names —
+  so a `tlv_t` built programmatically with a default `opt` (`ll = false`) over an oversize
+  payload or child list serialized a length silently truncated to `size & 0xFFFF`, a frame a
+  peer mis-frames. `encode` now goes through `wire::emit_tlv`, the single home of the
+  length-width policy, which widens to the u32 `LL` form when the body exceeds `0xFFFF`. No
+  signature change and no wire-grammar change (`LL` was always permitted). Callers see one
+  behaviour difference: `decode(encode(t))` on such a tree now returns a tree with `opt.ll`
+  set, where before it returned a decode error or a mis-framed tree. Bodies at or under
+  `0xFFFF` are byte-identical, and `opt.ll` is never cleared.
 
 ### Added
 

@@ -86,6 +86,12 @@ struct tlv_t {
 
 /**
  * @brief Encode a TLV to its wire bytes (recomputing the trailer CRC when `opt.cr` is set).
+ *
+ * The length width is not taken from @p tlv verbatim: a body larger than 0xFFFF widens to the
+ * u32 `LL` form regardless of `tlv.opt.ll`, the same rule `wire::emit_tlv` applies (#924), so a
+ * programmatically built tree cannot serialize a length truncated to `size & 0xFFFF`. A body at
+ * or under 0xFFFF is emitted unchanged; `tlv.opt.ll` is never cleared.
+ *
  * @param tlv The TLV tree to serialize.
  * @return The encoded frame bytes.
  */

@@ -33,9 +33,10 @@ namespace tr::wire {
  *        header byte layout (ADR-0048 §3).
  *
  * Length is u16 LE, or u32 LE when the `opt.ll` bit is set. The width follows `opt.ll`
- * verbatim; the caller owns the LL decision (so `encode`, which respects a `tlv_t`'s
- * existing `opt.ll`, and `emit_tlv`, which auto-widens for an oversize body, share this
- * without either changing behavior).
+ * verbatim — this writes a header, it does not decide one. The LL DECISION has a single
+ * home one level up, in `emit_tlv`, which every emitter goes through: the structural
+ * byte-builders directly, and `frame.cpp`'s `encode` for a whole `tlv_t` (#924 — `encode`
+ * used to call this directly and truncated an oversize length to `size & 0xFFFF`).
  */
 inline void emit_header(std::vector<std::byte>& out, type_t type, opt_t opt, std::size_t body_len) {
     out.push_back(static_cast<std::byte>(std::to_underlying(type)));

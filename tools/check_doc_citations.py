@@ -229,7 +229,7 @@ ANCHORS = [
     # core/include/libtracer/frame.hpp
     ('core/include/libtracer/frame.hpp:25',
      '// Decode failures reuse the RFC-0002 registry codes (error.hpp) directly — the'),
-    ('core/include/libtracer/frame.hpp:126',
+    ('core/include/libtracer/frame.hpp:132',
      '[[nodiscard]] inline std::expected<tlv_t, err_t> decode(const view::view_t& v) {'),
     # core/include/libtracer/fwd_frame_view.hpp
     # core/include/libtracer/fwd_router.hpp
