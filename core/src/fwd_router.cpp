@@ -1193,8 +1193,8 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
     // emitted via `for_each_span`, which yields exactly one sub-span for a contiguous source
     // and one per straddled link for a rope. So the container is the only thing that varies:
     // a stack `std::array` for the span path (ZERO heap, ADR-0038 inv. #2) vs a
-    // `std::pmr::vector` over the injected @ref mr_ for the rope path (a link count is only
-    // known at run time).
+    // `mem::block_array_t` over the failable byte seam (#596) for the rope path (a link
+    // count is only known at run time).
     if constexpr (std::is_same_v<Cursor, wire::grammar::span_cursor>) {
         // Contiguous source: each region is a single sub-span — a stack array sized by
         // kFwdMaxIov, which is COUNTED from gather's emit sequence (see its docs), not a chosen
@@ -1681,10 +1681,13 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const vie
         // A COMPACT wraps a CONTIGUOUS payload (encode_compact), so a multi-link value pays
         // one flatten here — single-link, the common case, is a zero-copy adopt. The
         // scatter-gather win is the default full-route path below (the hot fan-out leg).
-        // Every per-delivery allocation on this writer-thread leg is NOTHROW (#477): a
-        // failed flatten or frame build DROPS the delivery (the subscriber misses one
+        // The flatten/frame-build allocations on this writer-thread leg are NOTHROW (#477):
+        // a failed flatten or frame build DROPS the delivery (the subscriber misses one
         // value under heap exhaustion — valid delivery behavior), never an abort. A
-        // dropped fresh ADVERTISE self-heals via the peer's HANDLE_NACK (§E.1).
+        // dropped fresh ADVERTISE self-heals via the peer's HANDLE_NACK (§E.1). NOT yet
+        // nothrow: ensure_egress below still records the egress binding through a throwing
+        // std::pmr allocation (#603 defect 1) — an ADVERTISE-driven abort under
+        // -fno-exceptions until the label tables migrate to the failable seam.
         // Resolve the label BEFORE flattening: an exhausted label space (#603) falls
         // through to the full-route form below, which gathers the rope's links and needs
         // no flatten at all — so the wasted materialize is skipped rather than discarded.
