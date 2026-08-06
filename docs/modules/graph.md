@@ -548,6 +548,15 @@ a reply already being assembled.
 :members:
 ```
 
+```{doxygenstruct} tr::graph::sub_event_t
+:project: libtracer
+:members:
+```
+
+```{doxygentypedef} tr::graph::sub_observer_t
+:project: libtracer
+```
+
 ### Handlers and delivery policy
 
 ```{doxygenstruct} tr::graph::handlers_t
