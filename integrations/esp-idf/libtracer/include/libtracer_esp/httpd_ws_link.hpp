@@ -76,6 +76,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -85,6 +86,7 @@
 
 #include "esp_http_server.h"
 #include "libtracer/transport.hpp"
+#include "libtracer_esp/link_stats.hpp"
 
 namespace tr::net {
 
@@ -193,6 +195,47 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
 
     /** @brief Visit the currently-open peers' names, `<ip>:<port>`. */
     void enumerate_peers(const peer_visitor_t& visit) const override;
+
+    /**
+     * @brief One open session's identity plus its passive counters, as handed to
+     *        @ref enumerate_peer_stats.
+     *
+     * `slot` is this link's slot index: STABLE for as long as the session is open, and
+     * reused by a later session once it departs — which is exactly why `epoch` is here.
+     * The epoch increments on every CLAIM, so a consumer computing rates from successive
+     * snapshots can tell "same connection, N more frames" from "a different peer landed
+     * on that slot and its counters started over".
+     *
+     * `name` borrows the slot's string and is valid only for the duration of the visit
+     * (it is handed out under `peers_m_`, like @ref enumerate_peers' name).
+     */
+    struct peer_stats_t {
+        std::string_view name;   /**< @brief `<ip>:<port>`, valid during the visit only. */
+        std::size_t slot = 0;    /**< @brief Slot index, stable while the session is open. */
+        std::uint32_t epoch = 0; /**< @brief Bumped on every claim of this slot. */
+        link_counters_t c;       /**< @brief Traffic counters (see link_stats.hpp). */
+    };
+    /** @brief Visitor for @ref enumerate_peer_stats. */
+    using peer_stats_visitor_t = std::function<void(const peer_stats_t&)>;
+
+    /**
+     * @brief Visit every OPEN session's counters, copied out under @ref peers_m_.
+     *
+     * The metrics counterpart of @ref enumerate_peers, same house style and same
+     * contract: brief, no allocation, callable from any task. The visitor runs WITH
+     * `peers_m_` held, so it must not re-enter this link and must not block — the
+     * expected visitor only stores bytes into its own buffer from here.
+     *
+     * NO CALLBACK INTO THE EMBEDDER RUNS UNDER `peers_m_` other than this visitor, and
+     * this one is a pure copy-out by construction. That is what keeps a host's lock
+     * order acyclic when it holds its own mutex across the call.
+     *
+     * "No allocation" includes the VISITOR ITSELF: `std::function`'s inline buffer is
+     * one or two words on a 32-bit target, so a `[&]` closure over a handful of locals
+     * spills to the heap on every call. Callers on a periodic path should capture a
+     * single pointer to their own context struct.
+     */
+    void enumerate_peer_stats(const peer_stats_visitor_t& visit) const;
 
     /** @brief Resolve an open peer's name to its directed sending endpoint (owned by
      *         the peer's slot, pointer-valid for this link's lifetime). */
@@ -353,6 +396,39 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * never to a session — see @ref enqueue_drops.
      */
     void note_enqueue_drop(int fd, std::size_t bytes);
+
+    /**
+     * @brief Count a delivered inbound MESSAGE on @p slot (takes @ref peers_m_ — callers
+     *        must not hold it), at reassembly-complete granularity.
+     *
+     * Message granularity, not WS-fragment granularity, is the whole point: it makes a
+     * sending client's `tx_frames` directly comparable with this side's `rx_frames`.
+     * Called BEFORE the delivery, never after — the delivery runs the app in-call and the
+     * app may destroy this link (#814), after which the slot is gone.
+     */
+    void note_rx_message(session_t* slot, std::size_t bytes);
+
+    /** @brief Count an inbound message discarded before delivery (reassembly cap or a
+     *  failed nothrow growth) on @p slot — takes @ref peers_m_. */
+    void note_rx_drop(session_t* slot);
+
+    /**
+     * @brief Count a queued frame that @ref tx_work skipped rather than attempted
+     *        (takes @ref peers_m_ — callers must not hold it).
+     *
+     * A skip is deliberately NOT evidence for the consecutive-failure streak (see
+     * @ref note_tx_result): the peer departed, or it was already condemned and the
+     * verdict is in. It IS still a frame this connection never received, so it belongs
+     * in the cumulative count — that count answers "did anything get lost toward this
+     * peer?", which the streak (reset on every success) never could.
+     *
+     * @p epoch is the destination session's claim epoch as recorded when the frame was
+     * ENQUEUED, and it must match the slot's current epoch for the charge to land. A
+     * skip fires exactly when a peer just departed, which is exactly when lwIP recycles
+     * its descriptor number, so charging by fd alone would hand the departed peer's
+     * lost frame to whichever fresh session inherited the number.
+     */
+    void note_tx_skip(int fd, std::uint32_t epoch);
 
     /**
      * @brief Bound a freshly-upgraded socket's writes and arm the short-write guard.
