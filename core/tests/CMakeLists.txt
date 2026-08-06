@@ -86,6 +86,14 @@ target_link_libraries(path_ref_test PRIVATE libtracer)
 libtracer_test_warnings(path_ref_test)
 add_test(NAME path_ref COMMAND path_ref_test)
 
+# The wire grammar's total-encoded-size bound (grammar.hpp, #921) — pinned at
+# 32-bit-`size_t` width, because the truncation it closes is unreachable at the
+# host's 64-bit width and a host-only vector would be a vacuous guard.
+add_executable(grammar_bounds_test grammar_bounds_test.cpp)
+target_link_libraries(grammar_bounds_test PRIVATE libtracer)
+libtracer_test_warnings(grammar_bounds_test)
+add_test(NAME grammar_bounds COMMAND grammar_bounds_test)
+
 # Frame codec — nesting depth cap / iterative-parse contract (reference/01).
 add_executable(frame_test frame_test.cpp)
 target_link_libraries(frame_test PRIVATE libtracer)
