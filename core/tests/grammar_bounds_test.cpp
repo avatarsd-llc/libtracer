@@ -62,43 +62,61 @@ template <class Size>
 
 using u32 = std::uint32_t;
 
-// ---------------------------------------------------------------------------
-// The 32-bit-`size_t` leg — the non-vacuous proof. Every constant below is folded
-// at compile time at rv32's width; `check` only reports the verdict.
-// ---------------------------------------------------------------------------
+/**
+ * @brief The 32-bit-`size_t` leg — the non-vacuous proof.
+ *
+ * Every constant below is folded at compile time at rv32's width; `check` only
+ * reports the verdict.
+ */
 
-// The issue's exact vector: header 6 (LL set) + length 0xFFFFFFFF + ts 8 + crc 4.
-// The true sum is 0x1'0000'0011; narrowed to 32 bits it is 0x11 (17), which "fits"
-// any real buffer. Nothing that large fits a 32-byte one.
+/**
+ * @brief The issue's exact vector: header 6 (LL set) + length 0xFFFFFFFF + ts 8 + crc 4.
+ *
+ * The true sum is 0x1'0000'0011; narrowed to 32 bits it is 0x11 (17), which "fits"
+ * any real buffer. Nothing that large fits a 32-byte one.
+ */
 constexpr bool kHostileFits32 = fits<u32>(32u, 6u, 0xFFFFFFFFu, 8u, 4u);
 
-// The trailer step on its own: the body fits the buffer exactly, so only the
-// timestamp + CRC bytes push it over. Pins the third subtraction, which a bound
-// that stopped at `length <= avail - header` would miss.
+/**
+ * @brief The trailer step on its own: the body fits the buffer exactly, so only the
+ *        timestamp + CRC bytes push it over.
+ *
+ * Pins the third subtraction, which a bound that stopped at `length <= avail - header`
+ * would miss.
+ */
 constexpr bool kTrailerOverrunFits32 = fits<u32>(32u, 6u, 26u, 8u, 4u);
-constexpr bool kTrailerExactFits32 = fits<u32>(32u, 6u, 14u, 8u, 4u);
+constexpr bool kTrailerExactFits32 =
+    fits<u32>(32u, 6u, 14u, 8u, 4u); /**< The trailer that exactly reaches the end. */
 
-// The helper establishes `avail >= header` itself rather than trusting the caller,
-// so a short buffer can never make the first subtraction wrap.
+/**
+ * @brief The helper establishes `avail >= header` itself rather than trusting the caller,
+ *        so a short buffer can never make the first subtraction wrap.
+ */
 constexpr bool kShorterThanHeaderFits32 = fits<u32>(4u, 6u, 0u, 0u, 0u);
 
-// The same wrap with no trailer at all: 6 + 0xFFFFFFFA narrows to exactly 0, and
-// `avail < 0` is false for every buffer — the guard degenerates to unconditional
-// acceptance.
+/**
+ * @brief The same wrap with no trailer at all: 6 + 0xFFFFFFFA narrows to exactly 0.
+ *
+ * `avail < 0` is false for every buffer — the guard degenerates to unconditional
+ * acceptance.
+ */
 constexpr bool kWrapToZeroFits32 = fits<u32>(64u, 6u, 0xFFFFFFFAu, 0u, 0u);
 
-// And the wrap-to-one case, to show it is the arithmetic and not one magic constant.
+/** @brief The wrap-to-one case, to show it is the arithmetic and not one magic constant. */
 constexpr bool kWrapToOneFits32 = fits<u32>(1u, 6u, 0xFFFFFFFBu, 0u, 0u);
 
-// The largest frame a 32-bit target can honestly hold must still be ACCEPTED —
-// the fix must reject the wrap, not the boundary.
+/**
+ * @brief The largest frame a 32-bit target can honestly hold must still be ACCEPTED —
+ *        the fix must reject the wrap, not the boundary.
+ */
 constexpr bool kMaxHonestFits32 = fits<u32>(0xFFFFFFFFu, 6u, 0xFFFFFFF9u, 0u, 0u);
-constexpr u32 kMaxHonestTotal32 = fits_total<u32>(0xFFFFFFFFu, 6u, 0xFFFFFFF9u, 0u, 0u);
+constexpr u32 kMaxHonestTotal32 =
+    fits_total<u32>(0xFFFFFFFFu, 6u, 0xFFFFFFF9u, 0u, 0u); /**< ...and its exact total. */
 
-// One byte past it: the true sum is 2^32, which no 32-bit buffer can hold.
+/** @brief One byte past it: the true sum is 2^32, which no 32-bit buffer can hold. */
 constexpr bool kOnePastMaxFits32 = fits<u32>(0xFFFFFFFFu, 6u, 0xFFFFFFFAu, 0u, 0u);
 
-// Ordinary in-range traffic is unaffected at 32-bit width.
+/** @brief Ordinary in-range traffic is unaffected at 32-bit width. */
 constexpr bool kSmallFits32 = fits<u32>(64u, 4u, 8u, 0u, 4u);
 constexpr u32 kSmallTotal32 = fits_total<u32>(64u, 4u, 8u, 0u, 4u);
 constexpr bool kExactFits32 = fits<u32>(16u, 4u, 8u, 0u, 4u);
