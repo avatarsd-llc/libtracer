@@ -12,6 +12,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [0.8.0] — 2026-08-06
 
+### Changed
+
+- No integration-layer changes — the component ships `core` 0.8.0, whose new
+  `for_each_vertex` and subscription-observer APIs are thereby available to
+  component consumers.
+
 ## [0.7.1] — 2026-08-04
 
 ### Added
