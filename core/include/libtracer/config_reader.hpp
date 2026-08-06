@@ -3,7 +3,7 @@
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * config_reader — typed accessors over a SPEC `config` SETTINGS TLV. The
- * positional NAME-key / typed-value walk was copied verbatim by every consumer
+ * positional NAME-key / typed-value PAIR walk was copied verbatim by every consumer
  * of a connection config (transport_vertex's universal keys, the quic factory's
  * cert/key, the can factory's ifname/node/...); this is its one home. Each
  * factory still reads ONLY its own keys from the raw config TLV it receives
@@ -31,11 +31,18 @@ namespace tr::net {
  *
  * The SETTINGS layout is positional NAME-key / value pairs: a `NAME` child
  * carrying the key string, immediately followed by the value child — a `NAME`
- * for string values or a `VALUE` for integers/flags. Unknown keys are ignored
- * (forward-compat), a key whose value child has the wrong type (or an empty
- * `VALUE` payload) is ignored too, and when a key appears more than once the
- * LAST well-formed occurrence wins — exactly the semantics of the single-pass
- * walk this class replaces.
+ * for string values, a `VALUE` for integers/flags, or a nested `SETTINGS` for a
+ * module namespace. Unknown keys are ignored (forward-compat), a key whose value
+ * child has the wrong type (or an empty `VALUE` payload) is ignored too, and when
+ * a key appears more than once the LAST well-formed occurrence wins.
+ *
+ * The walk is **pair-consuming**: it advances a whole pair at a time, so an
+ * unknown key is skipped together with its value and no value child can ever be
+ * re-read as a key (#927). Forward-compat tolerance is deliberate here, and is
+ * the OPPOSITE ruling from the `graph::parse_acl` walk (#906), which is to
+ * REJECT an unknown key: config is where a newer peer legitimately sends more
+ * than a receiver understands, whereas an ACL is a security document in which a
+ * silently dropped attribute widens access.
  *
  * @note The returned string_views (and the reader itself) borrow the decoded
  *       TLV's storage — use them while the `tlv_t` is alive.
@@ -92,19 +99,35 @@ class config_reader_t {
     /**
      * @brief The last well-formed value child for @p key, or nullptr.
      *
-     * Scans every position (the pairs may overlap — a NAME value doubles as
-     * the next position's key candidate, exactly as the original walk saw it):
-     * a `NAME` child whose payload equals @p key, followed by a child of
-     * @p value_type (non-empty when `VALUE`), yields that value child; the
-     * last match wins.
+     * **Pair-consuming** (#927): the walk steps two children at a time over
+     * `(NAME key, value)` pairs and advances past the value it consumed, so a
+     * value child is never re-read as the next position's key. An unknown key
+     * is skipped as a WHOLE pair — which is exactly what lets forward-compat
+     * tolerance coexist with positional pairing. The every-offset scan this
+     * replaces made the grammar ambiguous: a pair whose string value textually
+     * equalled a known key (`link_hint = "addr"`) silently bound the FOLLOWING
+     * child as that key's value, and last-match-wins then overrode a legitimate
+     * earlier occurrence.
+     *
+     * Within the matching pairs the pre-existing semantics are unchanged: a
+     * value child of the wrong type (or an empty `VALUE` payload) is ignored
+     * and does not clobber an earlier well-formed occurrence, and the last
+     * well-formed occurrence wins.
+     *
+     * A child that is not a `NAME` where a key belongs desynchronizes the pair
+     * stream, and the walk stops there rather than guessing a resync —
+     * resynchronizing on every offset is the defect above. A trailing unpaired
+     * key is ignored.
      */
     [[nodiscard]] const wire::tlv_t* find(std::string_view key,
                                           wire::type_t value_type) const noexcept {
         if (config_ == nullptr) return nullptr;
         const std::vector<wire::tlv_t>& ch = config_->children;
         const wire::tlv_t* found = nullptr;
-        for (std::size_t i = 0; i + 1 < ch.size(); ++i) {
-            if (ch[i].type != wire::type_t::NAME) continue;
+        for (std::size_t i = 0; i + 1 < ch.size(); i += 2) {
+            // Key slot. Anything but a NAME means the pairing is lost from here on.
+            if (ch[i].type != wire::type_t::NAME) break;
+            // Not our key: skip the whole pair, value slot included (forward-compat).
             if (detail::as_string_view(ch[i].payload) != key) continue;
             const wire::tlv_t& val = ch[i + 1];
             if (val.type != value_type) continue;

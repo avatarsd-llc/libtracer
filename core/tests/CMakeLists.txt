@@ -48,6 +48,15 @@ target_link_libraries(fwd_frame_view_test PRIVATE libtracer)
 libtracer_test_warnings(fwd_frame_view_test)
 add_test(NAME fwd_frame_view COMMAND fwd_frame_view_test)
 
+# The shared SPEC-config SETTINGS walk (config_reader.hpp) — the pair-consuming scan
+# every transport config parser funnels through (#927): the value-read-as-a-key hijack
+# vectors, the forward-compat tolerance that must SURVIVE the fix (the opposite ruling
+# from the ACL parse), and the representative per-kind configs pinned unchanged.
+add_executable(config_reader_test config_reader_test.cpp)
+target_link_libraries(config_reader_test PRIVATE libtracer)
+libtracer_test_warnings(config_reader_test)
+add_test(NAME config_reader COMMAND config_reader_test)
+
 # Canonical-key NAME navigation (key_view.hpp) — the locus the graph walks funnel through.
 add_executable(key_view_test key_view_test.cpp)
 target_link_libraries(key_view_test PRIVATE libtracer)
