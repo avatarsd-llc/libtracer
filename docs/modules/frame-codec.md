@@ -17,7 +17,12 @@ trailer CRC, and — when `opt.PL=1` (payload-is-structured) — walks child TLV
 **iteratively**, never recursively. The result borrows the input, so holding it
 requires keeping the bytes alive (that is what [views](views.md) provide).
 `encode(tlv)` does the reverse, recomputing the CRC over the body when `opt.CR` is
-set. Decode failure is one of `FRAME_TRUNCATED`, `FRAME_INVALID`, `FRAME_CRC_FAIL`
+set. It does **not** take the length width from the model verbatim: a body over
+`0xFFFF` widens to the u32 `LL` form whatever `tlv.opt.ll` says, because `encode`
+emits through `emit_tlv` (below) — the one home of the length-width policy. A
+programmatically built tree therefore cannot serialize a length truncated to
+`size & 0xFFFF`; bodies at or under `0xFFFF` are unchanged and `opt.ll` is never
+cleared. Decode failure is one of `FRAME_TRUNCATED`, `FRAME_INVALID`, `FRAME_CRC_FAIL`
 or `TLV_NESTING_TOO_DEEP` — the RFC-0002 registry codes, not a decode-only error
 vocabulary (`core/include/libtracer/frame.hpp:25-30`).
 
@@ -165,12 +170,14 @@ it.
 `std::vector<std::byte>`, with no intermediate `tlv_t`. It is the one
 representation of the header byte layout (ADR-0048 §3): `encode` and every
 structural byte-builder in the tree share it instead of each hand-rolling
-`type`/`opt`/little-endian length.
+`type`/`opt`/little-endian length. `emit_tlv` is also the one home of the
+**length-width policy** — `encode` goes through it rather than calling
+`emit_header` itself, so there is no second widen rule to drift (#924).
 
 | function | what it appends |
 | --- | --- |
-| `emit_header(out, type, opt, body_len)` | the header alone; length is `u16` LE, or `u32` LE when `opt.ll` is set. The width follows `opt.ll` verbatim — the caller owns the LL decision |
-| `emit_tlv(out, type, opt, body)` | header + body, auto-setting `opt.ll` when `body` exceeds `0xFFFF` |
+| `emit_header(out, type, opt, body_len)` | the header alone; length is `u16` LE, or `u32` LE when `opt.ll` is set. The width follows `opt.ll` verbatim — this writes a header, it does not decide one |
+| `emit_tlv(out, type, opt, body)` | header + body, auto-setting `opt.ll` when `body` exceeds `0xFFFF`. `encode` routes through here; the forward plane's `fwd_frame_view` / `stack_writer` tiers carry their own copy of the widen rule |
 | `emit_name(out, bytes)` / `emit_name(out, sv)` | a `NAME` TLV with default `opt` — the PATH-segment and metadata-tag workhorse; the `string_view` form needs no temporary buffer |
 | `emit_path_ref(out, elements)` | a `PATH_REF` TLV — the 4-byte envelope plus the bare 8-byte element array (RFC-0024 §4). Returns `false`, emitting nothing, past the 255-element bound: a route that long has no bound spelling and falls back to the canonical `PATH` |
 
