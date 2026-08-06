@@ -16,6 +16,20 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Fixed
 
+- **A `status_t` gained without a wire mapping is now a build error, not a mislabelled error
+  code on the wire (#876).** The L4→wire bridge `error_code(status_t)` ended in
+  `return wire::err_t::PATH_NOT_FOUND;` after an already-exhaustive switch, so the first
+  enumerator anyone added to `status_t` would have been reported to peers as
+  `tr::path::not_found` (0x0020) — telling them their *address* was wrong, and inverting the
+  retry disposition they read off the RFC-0002 registry. Both hand-written maps out of
+  `status_t` (the bridge, and `to_string` in `status.hpp`) lose their fall-through tails, and
+  the library compiles with `-Werror=switch` (MSVC `/we4062`), on the host build and in the
+  ESP-IDF component alike, so the unmapped enumerator reddens the build at both sites. The
+  two enums stay separate — `err_t` is the wire registry, `status_t` is L4 vocabulary — and
+  every existing status maps to exactly the `err_t` it mapped to before; no wire change.
+  `to_string` narrows its contract: its argument must be a `status_t` enumerator (every
+  status the library produces is one), where before an out-of-range cast answered `"unknown"`.
+
 - **`stream_endpoint_t::write_all` no longer truncates a frame when a signal interrupts the
   write (#903).** The two sibling full-write helpers disagreed on interrupted syscalls:
   `write_all_iov` retried EINTR, while `write_all` treated any `n <= 0` — EINTR included — as
