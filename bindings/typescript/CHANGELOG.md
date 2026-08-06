@@ -9,6 +9,11 @@ versioning/publish strategy.
 
 ## [0.8.0] — 2026-08-06
 
+### Changed
+
+- No TypeScript-visible changes — version-lockstep release with `core` 0.8.0 (its new
+  `for_each_vertex` / subscription-observer surface is C++ `core` API only).
+
 ## [0.7.1] — 2026-08-04
 
 ### Added
