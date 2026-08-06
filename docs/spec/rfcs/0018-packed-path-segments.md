@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0018 |
 | **Title** | Packed path segments: a `PATH` body becomes length-prefixed records |
-| **Status** | **draft** (2026-07-30) — *supersedes the 2026-07-30 "Folded path segments" draft of this number* |
+| **Status** | **accepted** (2026-08-06) — *supersedes the 2026-07-30 "Folded path segments" draft of this number* |
 | **Author(s)** | AvatarSD (maintainer) |
 | **Created** | 2026-07-30 |
 | **Comment window** | waived by default while solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"); invoke explicitly if outside input is wanted |
