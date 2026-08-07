@@ -129,6 +129,22 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   reachable at all (a host kernel emits none of those errnos here); it is null in production,
   exactly like its neighbour `probe_fail_hook`.
 
+- **`transport_can_config_t::rx_backend` and `kCanMaxGroupSlices` (#910/#911).**
+  `rx_backend` (a `tr::mem::mem_backend_t*`, default `nullptr` = the process heap) is the
+  byte seam an inbound CAN data slice is copied into before it enters the reassembly
+  buffer — the companion to `reasm_mr`, which bounds the reassembly *structure* while this
+  bounds the slice *bytes*. It is also the second, defaulted parameter of
+  `can_transport_factory`, for the reason `reasm_mr` is: a backend is a pointer, not a wire
+  value, so it cannot ride the config TLV and is injected at registration instead. A
+  bounded backend (`mem::pool_t`) makes ingress exhaustion a by-value refusal on the RX
+  thread rather than a reach into the global heap. `kCanMaxGroupSlices` is the largest
+  address-shift group a node can place, DERIVED from the CAN-ID field widths
+  (`can::kEndpointMax` minus the reserved control slot), not chosen.
+  `can_reassembly_t::discard(key)` joins `erase` as its counted twin: `erase` is the
+  post-delivery release (nothing lost, nothing counted), `discard` is the caller-side
+  abandon of a group that will never complete, and it ticks `dropped_groups`. No wire
+  change.
+
 ### Fixed
 
 - **`fwd_router_t` resolves a re-added child NAME to its current tenancy, and connection
@@ -152,6 +168,41 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   pinned and insert-only) — the defect was a live pointer naming the wrong tenancy, which is
   why ASan reports nothing on either side of the fix. Measured before: 52 contexts after 51
   remove/re-add rounds on one name; after: 1.
+
+- **A CAN group too large for the endpoint window is refused whole instead of advertised
+  and then truncated (#910).** `send_impl` emitted the advertise manifest — promising
+  `slice_count` slices and `group_total_len` bytes — *before* the per-slice loop in which
+  `can::slice_can_id` runs out of endpoint slots and `break`s. Any frame over
+  `kCanMaxGroupSlices` windows (>32 760 B classic, >262 080 B FD) therefore told every
+  listener on the bus to expect N slices and delivered N−1, so each of them created a
+  reassembly group that could never complete and buffered the partial slices until the
+  `rx_ttl` sweep reclaimed them — silent at the sender, with no error and no counter.
+  `alloc_base` is now the RESERVATION: it computes the run of consecutive endpoint slots
+  in `std::size_t` and refuses any group that fits at no base, so the manifest is emitted
+  only for a group that will be delivered in full; a refusal drops the whole frame and
+  ticks `dropped_tx`. The same guard closes the silent `std::uint16_t` narrowing beside
+  it — a >65 535-slice group wrapped both the reservation span and `advertise_t::slice_count`
+  to `0`, which put the HELLO/presence form on the wire and left every data slice that
+  followed unbindable and parked at the receiver. Advertise-then-retract was declined as
+  the alternative shape: a retraction is a second wire concern (a new control-frame
+  semantic every peer must implement, itself lossy on the medium that lost the tail
+  slices), where the capacity is a purely local fact the sender already holds. No wire
+  change.
+
+- **A CAN ingress allocation failure drops and counts instead of fabricating an empty
+  slice (#911).** `process_data` inserted
+  `tr::view::over_bytes(frame.bytes()).value_or(tr::view::view_t{})` into the reassembly
+  buffer. `over_bytes` returns `nullopt` for exactly one reason — the backend refused;
+  an empty input still returns an engaged empty view — so `value_or` converted a
+  backpressure refusal into a fabricated engaged-EMPTY slice. The buffer counts entries
+  without inspecting their length, so the placeholder satisfied `is_complete`, `assemble`
+  chained it, and the `min(total, rope->total_length())` trim quietly shortened the
+  result: a **byte-wrong, short frame was delivered upstream as valid data**, with no
+  counter moving. UDP counts the same condition as a drop. The refusal is now handled as
+  backpressure: the whole group is abandoned (`can_reassembly_t::discard`, ticking
+  `dropped_groups`), the slice ticks `dropped_rx`, and nothing is delivered. The copy
+  draws from the injected `rx_backend` rather than unconditionally from the global heap.
+  No wire change.
 
 - **`wire::encode` no longer mints a `PATH_REF` frame its own `decode` rejects (#886).** The
   grammar has exactly one per-type structural rule — a `PATH_REF` body is a fixed-stride

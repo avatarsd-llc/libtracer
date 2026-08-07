@@ -129,6 +129,10 @@ with its platform's blocking primitive.
 :project: libtracer
 ```
 
+```{doxygenvariable} tr::net::can::kEndpointMax
+:project: libtracer
+```
+
 ```{doxygenfunction} tr::net::can::encode_advertise_header
 :project: libtracer
 ```
@@ -227,6 +231,10 @@ gate rejects — the same rule that forbids `@ref`-ing a private.
 ```
 
 ```{doxygenvariable} tr::net::kCanRxTtlFromPeerTtl
+:project: libtracer
+```
+
+```{doxygenvariable} tr::net::kCanMaxGroupSlices
 :project: libtracer
 ```
 
