@@ -178,13 +178,20 @@ target_link_libraries(transport_can_peers_test PRIVATE libtracer)
 libtracer_test_warnings(transport_can_peers_test)
 add_test(NAME transport_can_peers COMMAND transport_can_peers_test)
 
-# #55 (increment 2) — real-bus smoke test over a kernel vcan0 device. Self-skips
+# #55 (increment 2) — real-bus smoke test over a kernel vcan0 device, plus the #931
+# can_link_t seam-rule vectors (an injected RTR / 11-bit standard frame must not
+# cross ingress; an over-length classic frame must not cross egress). Self-skips
 # (clean exit) when vcan0 cannot bind, so it is harmless in the normal suite; the
 # dedicated can-vcan-e2e CI job sets vcan0 up so the SocketCAN path runs for real.
-add_executable(transport_can_vcan_test transport_can_vcan_test.cpp)
-target_link_libraries(transport_can_vcan_test PRIVATE libtracer)
-libtracer_test_warnings(transport_can_vcan_test)
-add_test(NAME transport_can_vcan COMMAND transport_can_vcan_test)
+# LINUX-ONLY: it speaks <linux/can.h> directly to inject the frames no well-formed
+# link would emit — platform selection is a build-system concern, never an in-source
+# #ifdef (the same doctrine that picks socketcan_link.cpp over its stub).
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_executable(transport_can_vcan_test transport_can_vcan_test.cpp)
+  target_link_libraries(transport_can_vcan_test PRIVATE libtracer)
+  libtracer_test_warnings(transport_can_vcan_test)
+  add_test(NAME transport_can_vcan COMMAND transport_can_vcan_test)
+endif()
 
 # #383 — owned in-flight TX storage for asynchronous can_link_t backends (the
 # TWAI UAF fix's host-testable half): ownership/exhaustion/reuse invariants,
