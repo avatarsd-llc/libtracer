@@ -1171,10 +1171,10 @@ struct vertex_ext_t {
      *         fields and no apply seam keeps this null. Guarded by the vertex mutex,
      *         insert-only. Null ⇒ the closed `ENOTTY` default (pre-RFC `:schema` shape). */
     std::unique_ptr<app_field_group_t> app;
-    /** @brief STREAM drain cursor (RFC-0008 §E): the write seq at the last flush, so a
-     *         propagate drains only the entries appended since; guarded by the vertex
-     *         mutex. */
-    std::uint64_t last_flushed_seq = 0;
+    /** @brief STREAM drain cursor (RFC-0008 §E): ring APPENDS not yet flushed, so a
+     *         propagate drains only what was appended; guarded by the vertex mutex. NOT a
+     *         `write_seq_` delta (#925) — that bumps on a SHED append, fabricating a tail. */
+    std::uint64_t appended_since_flush = 0;
 
     /** @brief Free the live handler block. `handlers` is a raw atomic pointer (for
      *         lock-free reads) so it no longer self-frees; this closes that. Blocks parked
@@ -1574,6 +1574,7 @@ class vertex_t {
                     if (!e->history)  // first append allocates the ring (#388 lazy deque)
                         e->history = std::make_unique<std::deque<std::shared_ptr<const rope_t>>>();
                     e->history->push_back(sp);  // refcount bump — the caller keeps `sp`
+                    ++e->appended_since_flush;  // the drain counts APPENDS, not seq (#925)
                     const std::size_t keep = e->history_keep_last != 0 ? e->history_keep_last : 1;
                     while (e->history->size() > keep) e->history->pop_front();
                 }
@@ -1644,8 +1645,7 @@ class vertex_t {
      */
     void mark_flushed() {
         const std::lock_guard lock(vertex_stripe_of(this).m);
-        if (vertex_ext_t* e = ext_.load(std::memory_order_acquire))
-            e->last_flushed_seq = write_seq_.load(std::memory_order_relaxed);
+        if (vertex_ext_t* e = ext_.load(std::memory_order_acquire)) e->appended_since_flush = 0;
     }
 
     /**
@@ -1657,6 +1657,10 @@ class vertex_t {
      * drain are lost (bounded history). The snapshot growth is NOTHROW (#477): on OOM
      * the drain returns 0 WITHOUT advancing the cursor, so the entries re-drain on the
      * next covering flush — deferred, never lost, never an abort.
+     *
+     * @note Counts ring APPENDS, never a `write_seq_` delta (#925): that sequence is the
+     *       await/readiness cursor and bumps on a SHED append too, so the surplus would
+     *       re-take an ALREADY-FLUSHED entry — a drain removes nothing from the ring.
      * @return The number of entries drained (0 ⇒ nothing appended since the last flush,
      *         or the snapshot could not be allocated — retry on the next flush).
      */
@@ -1664,19 +1668,15 @@ class vertex_t {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         vertex_ext_t* e = ext_.load(std::memory_order_acquire);
         if (e == nullptr) return 0;  // no ring — nothing was ever appended
-        const std::uint64_t now = write_seq_.load(std::memory_order_relaxed);
-        if (now == e->last_flushed_seq) return 0;
-        const std::uint64_t n_new = now - e->last_flushed_seq;
-        if (!e->history) {  // seq advanced but no ring — nothing to drain
-            e->last_flushed_seq = now;
-            return 0;
-        }
-        const auto take =
-            static_cast<std::ptrdiff_t>(std::min<std::uint64_t>(n_new, e->history->size()));
-        // Nothrow-reserve BEFORE the cursor advance: a failed snapshot leaves the ring
+        // A non-zero count implies a ring: the counter is bumped only where the append
+        // lands (which creates it), and `retire` clears the two together.
+        if (e->appended_since_flush == 0 || !e->history) return 0;
+        const auto take = static_cast<std::ptrdiff_t>(
+            std::min<std::uint64_t>(e->appended_since_flush, e->history->size()));
+        // Nothrow-reserve BEFORE the cursor reset: a failed snapshot leaves the appends
         // marked un-flushed (deferred delivery), instead of a throwing assign (#477).
         if (!tr::detail::try_reserve(out, static_cast<std::size_t>(take))) return 0;
-        e->last_flushed_seq = now;
+        e->appended_since_flush = 0;
         out.assign(e->history->end() - take, e->history->end());  // within capacity
         return out.size();
     }
@@ -2090,7 +2090,7 @@ class vertex_t {
             e->history_keep_last = 1;
             e->pin_payload_ratio = 0;
             e->app.reset();
-            e->last_flushed_seq = 0;
+            e->appended_since_flush = 0;  // cleared WITH `history` — the drain's invariant
         }
         // The edge block is stripe-guarded; clear it in its own critical section (both it and
         // the ext block may be absent). The graph has already adjusted descendant

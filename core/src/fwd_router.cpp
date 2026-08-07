@@ -706,13 +706,13 @@ std::uint16_t fwd_router_t::advertise(std::string_view link_name,
                                       std::span<const std::byte> route_path) {
     transport_t* const link = registry_.by_name(link_name);
     if (link == nullptr) return 0;
-    const std::uint16_t label = handles_.alloc_label(link_name);
-    if (label == 0) return 0;  // link's label space exhausted (#603) — no binding, no frame
-    // Never advertise a label this node cannot re-advertise on a NACK: a full egress table
-    // refuses, and the caller stays on the full-route form (#603).
-    if (!handles_.record_egress(link_name, label,
-                                std::vector<std::byte>(route_path.begin(), route_path.end())))
-        return 0;
+    // ONE label per (link, route), never one per CALL (#913): this door IS the documented
+    // self-heal, so a producer calls it on every (re)connect, and minting unconditionally
+    // burned a label and leaked an egress entry per cycle. `ensure_egress` reuses the label
+    // bound to an identical route, mints only for a new one, and returns 0 when the link's
+    // space is exhausted or its egress table is full (#603) — nothing recorded, no frame.
+    const std::uint16_t label = handles_.ensure_egress(link_name, route_path).first;
+    if (label == 0) return 0;  // no label, no binding, no frame — the full-route form instead
     const std::vector<std::byte> adv = encode_advertise(label, route_path);
     link->send(std::span<const std::byte>(adv));
     return label;
@@ -1505,27 +1505,27 @@ void fwd_router_t::on_advertise(std::string_view inbound_name, std::uint16_t lab
         // Sample the downstream link's clear epoch BEFORE minting anything against it (#827).
         // This runs on the INBOUND link's rx thread, so a reconnect of `down_name` on its own
         // thread can land anywhere in the three steps below; the sample is what lets the bind
-        // tell "the tables I minted into" from "the tables that are there now". It must
-        // precede `alloc_label`, which creates those tables: sampling after would name a
-        // post-clear allocator while the label came from the pre-clear one.
+        // tell "the tables I minted into" from "the tables that are there now". It must precede
+        // `ensure_egress`, which creates those tables: sampling after would name a post-clear
+        // allocator while the label came from the pre-clear one.
         const std::uint32_t down_epoch = handles_.link_epoch(down_name);
-        const std::uint16_t out_label = handles_.alloc_label(down_name);
-        // Exhausted downstream label space (#603): bind nothing and re-advertise nothing.
-        // The alternative -- reusing a live label -- would swap this flow onto another
-        // flow's route. The upstream's COMPACTs then draw a HANDLE_NACK, the same signal a
-        // stale label already produces; the uncompacted FWD path is unaffected.
+        // ONE label per (down-link, stripped route), never one per re-advertise (#913). This arm
+        // runs on EVERY upstream re-advertise — a reconnect loop, a flapping link — so an
+        // unconditional mint burned a label out of the saturating 16-bit space AND left another
+        // egress entry behind each cycle, neither reclaimable short of a whole-link `clear_link`.
+        // `ensure_egress` is the primitive `deliver_remote` already uses: under the egress
+        // table's own lock it reuses the label bound to an identical route, mints only for a
+        // genuinely new one, and records in that same critical section — which also retires the
+        // old alloc-then-record pair's split outcome, a label minted then burned for nothing on
+        // a refused record. Egress still precedes ingress and both precede the wire (#603), and
+        // a refused bind below now leaves an entry the NEXT cycle REUSES rather than duplicates.
+        const std::uint16_t out_label = handles_.ensure_egress(down_name, stripped_bytes).first;
+        // 0 ⇒ exhausted label space or a full egress table: bind and advertise nothing, and let
+        // the upstream's COMPACTs draw the HANDLE_NACK a stale label already draws (reusing a
+        // LIVE label would swap this flow onto another's route). An ESTABLISHED flow is never
+        // refused — the reuse scan runs ahead of the bound, so only NEW flows degrade.
         if (out_label == 0) return;
-        // Built field-by-field rather than with a designated-initializer brace: the binding
-        // now carries ADR-0062's memoized resolution too, and an aggregate init that names
-        // only some members trips -Werror=missing-field-initializers on the ESP toolchain.
-        // Egress FIRST, then ingress, then the wire (#603). Both tables can refuse when
-        // full, and the order makes every partial outcome safe: a refused egress means no
-        // swap is bound at all, and a refused ingress leaves an unused egress slot but
-        // sends nothing — never an advertised label with no route to re-advertise, and
-        // never a bound swap pointing at a label the downstream was never told about. The
-        // out-label burned on a refusal is harmless: the allocator is monotonic, so it
-        // simply skips a number.
-        if (!handles_.record_egress(down_name, out_label, stripped_bytes)) return;
+        // Field by field, not a designated-initializer brace: -Werror=missing-field-initializers.
         handle_binding_t fwd;
         fwd.terminus = false;
         fwd.down_link = down_name;
