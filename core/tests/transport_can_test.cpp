@@ -24,6 +24,7 @@
 
 #include "libtracer/transport_can.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -33,6 +34,7 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -79,10 +81,23 @@ class fake_can_bus_t {
         }
     }
     void broadcast(fake_link_t* from, const tr::net::can_frame_data_t& f);
+    /**
+     * @brief Suppress delivery of every frame `pred` accepts — the bus LOSING a frame.
+     *
+     * A real CAN bus drops frames, and a lost data slice is what leaves a receiver
+     * holding an incomplete group. Modelled at the link seam rather than by hand-building
+     * frames, so the sender stays the real `transport_can::send` path throughout.
+     * `nullptr` restores a lossless bus.
+     */
+    void set_drop(std::function<bool(const tr::net::can_frame_data_t&)> pred) {
+        const std::lock_guard lock(m_);
+        drop_ = std::move(pred);
+    }
 
    private:
     std::mutex m_;
     std::vector<fake_link_t*> links_;
+    std::function<bool(const tr::net::can_frame_data_t&)> drop_;
 };
 
 class fake_link_t : public tr::net::can_link_t {
@@ -141,6 +156,7 @@ class fake_link_t : public tr::net::can_link_t {
 
 void fake_can_bus_t::broadcast(fake_link_t* from, const tr::net::can_frame_data_t& f) {
     const std::lock_guard lock(m_);
+    if (drop_ && drop_(f)) return;  // the bus lost this one
     for (auto* l : links_) {
         if (l != from) l->enqueue(f);
     }
@@ -870,6 +886,128 @@ void test_rx_zero_length_slice_drops_the_group_and_counts() {
     check(sink.count() == 1, "exactly ONE frame was ever delivered — nothing short slipped by");
 }
 
+/**
+ * @brief #909 — the endpoint space wraps, a base RECURS, and the stale binding parked on
+ *        that run must not capture the new group's slices.
+ *
+ * The whole vector is driven through the REAL `send` path: the sender's own `alloc_base`
+ * consumes the 12-bit endpoint window and wraps it, and the only thing the harness does by
+ * hand is LOSE two frames on the bus, which is what a real bus does and what leaves a
+ * receiver holding an incomplete group.
+ *
+ * The sequence, all from one node, sized from the ID field widths so it tracks the wire:
+ *
+ *  1. `s1`   — 5 slices at base 1, delivered; the allocator advances to 6.
+ *  2. `trap` — 3 slices at base 6 (`0xA1` throughout). Slices 1 and 2 are LOST, so the
+ *              receiver keeps binding `[6, 9)` and a group holding index 0 only.
+ *  3. filler — one group sized to consume the rest of the window exactly.
+ *  4. `s4`   — 6 slices; the reservation no longer fits, so `alloc_base` **wraps** back to
+ *              the first data slot and the group lands at `[1, 7)`. The allocator is now
+ *              one lap on and about to re-issue slots the trap still claims.
+ *  5. `b`    — 2 slices at base 7 (`0xB2` throughout), inside the trap's stale `[6, 9)`.
+ *
+ * Unfixed, step 5 is silent cross-talk between two unrelated payloads. `process_data`
+ * scans `learned_` in ascending base order and takes the FIRST range containing the
+ * endpoint, so `b`'s slices at endpoints 7 and 8 resolve against the STALE base-6 binding,
+ * not their own: they are filed into group `(n1, 6)` at indices 1 and 2, which the trap's
+ * surviving index 0 completes. The rope assembles as `trap[0] ++ b[0] ++ b[1]`, is trimmed
+ * to the TRAP's advertised total, and is delivered as valid — 8 bytes of `0xA1` with 16
+ * bytes of `0xB2` welded onto them, while `b` itself is never delivered at all.
+ *
+ * The two payloads are deliberately CONSTANT and DIFFERENT rather than index-derived: with
+ * `make_payload`'s pattern a misattributed slice can be byte-identical to the correct one,
+ * so the corruption would be invisible to a byte compare and the test would pass on the
+ * defect it exists to catch.
+ *
+ * `rx_ttl` is parked far out of reach so the reclamation asserted below can only be the
+ * invalidation — never the `#912` age-out, which would reclaim the trap for a reason that
+ * has nothing to do with keying.
+ */
+void test_endpoint_wraparound_does_not_alias_stale_state() {
+    std::printf("transport_can endpoint wraparound does not alias stale bindings (#909):\n");
+
+    fake_can_bus_t bus;
+    sink_t sink;
+    auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
+    auto link_a = std::make_unique<fake_link_t>(bus);
+    auto link_b = std::make_unique<fake_link_t>(bus);
+
+    tr::net::transport_can_config_t cfg_b = rx_test_config();
+    cfg_b.rx_ttl = 60s;  // far out of reach: the age-out must NOT be what reclaims the trap
+    tr::net::transport_can tx_a(std::move(link_a),
+                                {0, 1, tr::view::can_frame_mode_t::CLASSIC, "sensor/temp"});
+    tr::net::transport_can tx_b(std::move(link_b), cfg_b);
+    tx_b.set_receiver(rx);
+
+    constexpr std::size_t kWin = tr::view::kCanClassicMaxData;
+    // Every slot count below is derived from the CAN-ID field widths, never chosen: widen
+    // kEndpointBits and this test follows the wire instead of silently stopping at a
+    // boundary that moved.
+    constexpr std::uint16_t kFirst = tr::net::kCanFirstDataEndpoint;
+    constexpr std::size_t kLeadSlices = 5;
+    constexpr std::uint16_t kTrapBase = static_cast<std::uint16_t>(kFirst + kLeadSlices);
+    constexpr std::size_t kTrapSlices = 3;
+    // What is left of the endpoint window after the lead group and the trap.
+    constexpr std::size_t kFillerSlices = can::kEndpointMax - (kTrapBase + kTrapSlices) + 1;
+    // The post-wrap group ends one slot INTO the trap's run, so the next base lands inside
+    // it — the aliasing geometry, not merely a repeated base.
+    constexpr std::size_t kWrapSlices = (kTrapBase + 1) - kFirst;
+    constexpr std::size_t kBSlices = 2;
+    static_assert(kBSlices + 1 <= kTrapSlices, "b must fit inside the trap's stale run");
+
+    const std::uint32_t trap_id = can::encode_can_id({0, 1, kTrapBase});
+
+    // 1. Lead group — ordinary traffic that moves the allocator off the first slot.
+    tx_a.send(make_payload(kLeadSlices * kWin));
+
+    // 2. The trap: everything but its FIRST slice is lost on the bus. Index 0 is the one
+    //    that survives because it is the index `b` will not overwrite.
+    const std::vector<std::byte> trap_payload(kTrapSlices * kWin, std::byte{0xA1});
+    bus.set_drop([&](const tr::net::can_frame_data_t& f) {
+        const auto fields = can::decode_can_id(f.id);
+        return fields && fields->node == 1 && fields->endpoint > kTrapBase &&
+               fields->endpoint < kTrapBase + kTrapSlices;
+    });
+    tx_a.send(trap_payload);  // write_raw is synchronous, so the loss is complete on return
+    bus.set_drop(nullptr);
+    check(wait_until([&] { return tx_b.learned_binding(trap_id).has_value(); }, 2s),
+          "the trap's binding was learned and its group left incomplete");
+
+    // 3. Consume the rest of the endpoint window, so the next reservation cannot fit.
+    tx_a.send(make_payload(kFillerSlices * kWin));
+
+    // 4. THE WRAP: this reservation runs off the end of the window, so alloc_base resets
+    //    to the first data slot and the allocator starts re-issuing slots the trap holds.
+    tx_a.send(make_payload(kWrapSlices * kWin));
+
+    // Settle before the aliased send, so "the fourth delivery" is unambiguously b's.
+    check(sink.wait_for_count(3, 10s), "the lead, filler and wrapping groups all delivered");
+
+    // 5. The aliased group: base 7, wholly inside the trap's stale [6, 9).
+    const std::vector<std::byte> b_payload(kBSlices * kWin, std::byte{0xB2});
+    tx_a.send(b_payload);
+
+    const bool got = sink.wait_for_count(4, 10s);
+    check(got, "the post-wrap group was delivered");
+    const std::vector<std::byte> delivered = sink.last();
+
+    // The headline: `b` is delivered as ITSELF. Unfixed this is 24 bytes — one slice of the
+    // trap's 0xA1 with b's 16 bytes of 0xB2 welded on — so both the length and the bytes
+    // are wrong, and the first assertion below names the cross-talk directly.
+    const bool clean =
+        std::find(delivered.begin(), delivered.end(), std::byte{0xA1}) == delivered.end();
+    check(clean, "NO byte of the stale group's payload appears in the delivered frame");
+    check(equal_bytes(delivered, b_payload),
+          "the post-wrap group is delivered byte-exact as itself");
+
+    // ...and the stale state it would have been filed under is gone, counted as reclaimed.
+    check(!tx_b.learned_binding(trap_id).has_value(),
+          "the stale binding on the re-issued run was retired, not left to shadow");
+    check(tx_b.dropped_groups() == 1,
+          "the stale group was reclaimed exactly once and counted on dropped_groups()");
+    check(sink.count() == 4, "exactly four groups were ever delivered — nothing extra slipped by");
+}
+
 /** @brief #912 — a healthy exchange reports zero on every drop counter. */
 void test_clean_run_counters_are_zero() {
     std::printf("transport_can drop counters on a clean run:\n");
@@ -967,6 +1105,7 @@ int main() {
     test_u16_slice_count_wrap_cannot_advertise_a_hello();
     test_rx_slice_refusal_drops_the_group_and_counts();
     test_rx_zero_length_slice_drops_the_group_and_counts();
+    test_endpoint_wraparound_does_not_alias_stale_state();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;

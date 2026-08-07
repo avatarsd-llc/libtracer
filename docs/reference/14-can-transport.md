@@ -164,7 +164,10 @@ frame is a **slice**; slices are grouped by the in-flight identity
 delivery-borne producer id, so on this header-elided transport the binding derives
 it from how the slice arrived — the link-local peer identity read off the frame id
 (`can_reassembly_t` keys it as `(node, base-endpoint)`). There is no dedup or
-revisit state anywhere in the stack; the key groups slices, nothing else.
+revisit state anywhere in the stack; the key groups slices, nothing else. The base
+endpoint **recurs** — the 12-bit space wraps — so that key is unambiguous only under the
+binding-lifetime invariant described in *A re-issued endpoint run retires whatever still
+claims it*, which is what stops a reused base from merging two unrelated payloads.
 `assemble()` chains the slices, in index order, into a `rope_t` — zero copies.
 
 This deliberately reuses libtracer's **one reassembly model** rather than bolting
@@ -357,7 +360,8 @@ re-driven when the manifest lands.
   keeps the data plane correct and uniform (single value and multi-frame group are the
   same path) and makes DLC-padding trim unconditional. The steady-state
   *advertise-once-then-reuse* optimization (one binding, many lean values) is not
-  realized; the learned bindings persist and self-heal by overwrite on re-advertise.
+  realized; a learned binding persists past delivery and is retired only when a fresh
+  advertise re-issues its endpoint run (below), which is also how it self-heals.
 - **Ordering.** Correctness relies on per-bus in-order delivery of a group's frames
   (which a single producer gets on CAN); the pending-data buffer covers control/data
   cross-ID reordering.
@@ -372,6 +376,12 @@ have a residue that nothing else frees:
 | --- | --- | --- | --- |
 | pending data slices (awaiting an advertise) | `max_pending` — evict oldest | `rx_ttl`, swept on every inbound frame | `dropped_rx()` |
 | reassembly groups | `max_groups` — evict oldest | `rx_ttl`, swept on every inbound advertise | `dropped_groups()` |
+
+A group is also reclaimed, on the same counter, when a fresh advertise re-issues the
+endpoint run its binding held — see *A re-issued endpoint run retires whatever still
+claims it* below. That one is not a bound at all but a correctness rule; it shares the
+counter because the counter's meaning is "a group's buffered slices were reclaimed before
+delivery", whatever forced it.
 
 The count bounds are **opt-in** — `0` means unbounded, host-bounded per RFC-0006,
 the same policy as the stream servers' `max_peers` — and both, along with the pmr
@@ -410,12 +420,54 @@ declined: it is a second wire concern — a control-frame semantic every peer mu
 implement, itself lossy on the very medium that lost the tail slices — where the
 capacity is a purely local fact the sender already holds.
 
+### A re-issued endpoint run retires whatever still claims it
+
+The endpoint window is not only scarce, it **wraps**: `alloc_base` resets to the first
+data slot when a reservation runs off the end, so a base *recurs* — routine, not
+exceptional. Two receive-side structures key on that base, and both aliased once a run
+was re-issued: the learned-binding map resolves a slice by first-match over `[base,
+base + slice_count)` in ascending base order, so a stale, wider, lower-numbered range
+**shadowed** the live binding; and the reassembly group key is `(node, base-endpoint)`,
+so a recurring base **merged** slices left over from an incomplete group into the fresh
+one. The second is the worse one: `is_complete` could be satisfied by a mix of old and
+new slices, so a byte-corrupted frame was delivered as valid — silent cross-talk between
+two unrelated payloads, not a crash.
+
+Both close on one invariant, enforced when an advertise is learned: **at most one binding
+may claim an endpoint slot of a node, and a reassembly group lives exactly as long as the
+binding that feeds it.** A fresh advertise retires every same-node binding whose run
+overlaps the one it claims, and discards the group each was feeding — reclaimed and
+counted on `dropped_groups()`, exactly as an age-out or an eviction is. Because a group
+is only ever fed through a live binding, and its key is derived from that binding's base,
+two groups can share a key only if two bindings share a base, which this makes impossible.
+The overlap test is arithmetic on the CAN ID's own endpoint field: no epoch, no generation
+counter, and no bound that is not the wire's.
+
+Two residues this does **not** reach, both rooted in the same fact: a data frame carries
+only the CAN ID, so a slice from a previous lap is byte-indistinguishable from one
+belonging to the group now claiming those slots. Both are bounded by the `rx_ttl` age-out
+and neither is a gap of the keying — they are gaps of the header-elided design itself.
+
+1. **A slice parked before its advertise.** It is re-driven into whichever group later
+   claims its slot.
+2. **A stale binding no re-issue overlapped, fed by frames whose own advertises were
+   lost.** The retire-on-re-issue rule fires only when a new run *overlaps* the old one.
+   A binding whose run is skipped over survives; if the advertises for the groups that
+   later occupy nearby slots are themselves lost on the bus, their data slices resolve
+   first-match to that surviving binding, fill its indices, and complete its stale group.
+   Two different payloads are then welded into one frame and delivered upstream as valid.
+   No slice is ever parked, so this is a distinct mechanism from (1) rather than a
+   restatement of it.
+
 ```{admonition} Eviction is not a substitute for correct keying
 :class: warning
-Aging and eviction bound *memory*; they do not make a stale binding safe to reuse.
-The deterministic fix for a recurring base endpoint is the producer **generation** in
-[ADR-0077](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0077-can-advertise-carries-a-producer-generation-keying-reassembly.md),
-and these bounds are complementary to it, never a replacement.
+Aging and eviction bound *memory*; they do not make a stale binding safe to reuse. The
+deterministic property is the invariant above — a binding, and the group it feeds, are
+retired at the moment their run is re-issued, not whenever a timer happens to fire.
+[ADR-0077](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0077-can-advertise-carries-a-producer-generation-keying-reassembly.md)
+records the decision and, in its implementation-status section, why the producer
+**generation** it also proposes has not been implemented: it is redundant against this
+invariant and cannot reach the parked-slice residue either.
 ```
 
 ### Peer enumeration and transparent per-peer forwarding

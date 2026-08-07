@@ -66,8 +66,8 @@ struct peer_name_buf_t {
  * @brief Reassembly identity for a group is derived purely from the CAN ID: the `node` sub-field
  *        becomes the 16-byte origin and the group's base endpoint becomes the `ts`.
  *
- * Both peers compute it the same way from the same id, so no per-frame
- * origin/ts ever rides the constrained bus (header-elided).
+ * Both peers compute it the same way from the same id, so no per-frame origin/ts rides the
+ * bus. The base endpoint RECURS (12-bit wrap): see `invalidate_overlapping`'s rule (#909).
  */
 tr::net::can_origin_id_t origin_of(std::uint16_t node) {
     tr::net::can_origin_id_t o{};
@@ -175,9 +175,9 @@ std::size_t transport_can::pending_slices() const {
 
 void transport_can::touch_peer(std::uint16_t node, std::chrono::steady_clock::time_point now) {
     const std::lock_guard lock(peers_m_);
-    // Insert-only, one entry per DISTINCT node id ever heard (the learned_ map's
-    // policy): growth tracks the bus population — structurally bounded by the
-    // 13-bit id space, never per-frame — and an existing entry only refreshes.
+    // Insert-only, one entry per DISTINCT node id ever heard (unlike learned_, which
+    // retires overlapping runs — #909): growth tracks the bus population, structurally
+    // bounded by the 13-bit id space, never per-frame; an existing entry only refreshes.
     const auto [it, fresh] = peers_.try_emplace(node);
     it->second.last_heard = now;
     if (fresh) {
@@ -438,12 +438,20 @@ void transport_can::learn_advertise(const can::advertise_t& adv) {
     // The hello/presence form (slice_count == 0) binds nothing — its liveness
     // effect already landed in touch_peer on the frame that carried it.
     if (adv.slice_count == 0) return;
+    // Decoded BEFORE the insert, where it used to sit after it. Two reasons: the
+    // endpoint run the invalidation below is computed from lives in these fields,
+    // and an id no CAN frame could carry (>29 bits) binds nothing anyway —
+    // process_data decodes the same id and skips whatever fails, so such an entry
+    // could only ever accumulate in a map that is not otherwise erased per id.
+    const auto base = can::decode_can_id(adv.can_id);
+    if (!base) return;
     // A directed group addressed to another node (ADR-0044) is learned so its
     // data slices are recognized and CONSUMED, but never reassembled/delivered.
     const bool deliver = adv.target == can::kCanBroadcastNode || adv.target == cfg_.node;
+    // The endpoint space wraps by design, so this base has been used before (#909).
+    // Retire whatever still claims these slots BEFORE the fresh binding lands.
+    invalidate_overlapping(*base, adv.slice_count);
     learned_[adv.can_id] = binding_t{adv, deliver};
-    const auto base = can::decode_can_id(adv.can_id);
-    if (!base) return;
     if (deliver) reasm_.set_expected_count(key_of(base->node, base->endpoint), adv.slice_count);
 
     // A data frame may have arrived ahead of its manifest (cross-ID arbitration);
@@ -464,6 +472,75 @@ void transport_can::learn_advertise(const can::advertise_t& adv) {
     }
     pending_.erase(keep, pending_.end());
     for (const auto& p : ready) process_data(p.frame);
+}
+
+/**
+ * @brief Retire every same-node binding whose endpoint run overlaps the one a fresh
+ *        advertise claims — and the reassembly group each was feeding (#909).
+ *
+ * The endpoint sub-field is 12 bits and `alloc_base` wraps it back to
+ * @ref kCanFirstDataEndpoint when the window is exhausted, so a base RECURS after the
+ * space is consumed — routine, not exceptional. Before this, `learned_` was written
+ * only via `operator[]` on the exact base id and never erased, which aliased two ways
+ * once a run was reused:
+ *
+ *  1. **The stale binding shadowed the live one.** `process_data` takes the FIRST
+ *     `learned_` entry (ascending base order) whose `[base, base + slice_count)`
+ *     contains the slice's endpoint, so a wider stale range with a lower base won the
+ *     scan and filed the slice under the wrong group at the wrong index — bytes of one
+ *     payload landing inside another.
+ *  2. **The reassembly key collided.** The group key is `(origin, base endpoint)`, so a
+ *     recurring base merged slices left over from an incomplete group into the fresh
+ *     one. `is_complete` could then be satisfied by a MIX of old and new slices and a
+ *     byte-corrupted frame was delivered as valid — silent, not a crash.
+ *
+ * Both close on one invariant, enforced here: **at most one binding may claim an
+ * endpoint slot of a node, and a reassembly group lives exactly as long as the binding
+ * that feeds it.** A group is only ever fed through a live binding (`process_data`
+ * resolves one before it touches the buffer) and its key is derived from that binding's
+ * base, so two groups can share a key only if two bindings share a base — which this
+ * makes impossible. No epoch, no generation, and no bound that is not the wire's: the
+ * overlap test is arithmetic on the CAN ID's own endpoint field.
+ *
+ * A second advertise over a range is, by construction, a NEW group: this transport
+ * emits one manifest per `send`, so the same run is only re-announced after the
+ * allocator has come round again. The stale group's buffered slices are therefore
+ * unreachable — nothing will ever resolve to them — and @ref can_reassembly_t::discard
+ * reclaims them and counts them on `dropped_groups`, exactly as an `rx_ttl` age-out or
+ * a `max_groups` eviction does.
+ *
+ * @param base        The fields of the fresh binding's base id (its endpoint is slot 0).
+ * @param slice_count The fresh binding's slice count; never 0 (hello returns earlier).
+ * @note Requires `rx_m_` held.
+ */
+void transport_can::invalidate_overlapping(const can::can_id_fields_t& base,
+                                           std::uint16_t slice_count) {
+    // Half-open runs in the endpoint field's own units. Widened to u32 only so the
+    // upper edge of a non-conforming peer's over-long slice_count cannot wrap the u16
+    // it is compared in; the values themselves are the wire's.
+    const std::uint32_t lo = base.endpoint;
+    const std::uint32_t hi = lo + slice_count;
+    for (auto it = learned_.begin(); it != learned_.end();) {
+        const auto stale = can::decode_can_id(it->first);
+        // A different node's slots are a different address space entirely — the node
+        // sub-field is part of the id, so only THIS node's runs can be aliased.
+        if (!stale || stale->node != base.node) {
+            ++it;
+            continue;
+        }
+        const std::uint32_t s_lo = stale->endpoint;
+        const std::uint32_t s_hi = s_lo + it->second.adv.slice_count;
+        if (s_hi <= lo || hi <= s_lo) {  // disjoint runs — untouched
+            ++it;
+            continue;
+        }
+        // Ordered discard-then-erase: the key is derived from the entry being erased.
+        // `discard` is a no-op returning false when the binding never accumulated a
+        // group (a directed group addressed elsewhere, or one whose slices are all
+        // still in flight), so nothing is counted that was not actually reclaimed.
+        reasm_.discard(key_of(stale->node, stale->endpoint));
+        it = learned_.erase(it);
+    }
 }
 
 void transport_can::process_data(const can_frame_data_t& frame) {
@@ -529,8 +606,10 @@ void transport_can::process_data(const can_frame_data_t& frame) {
     const auto rope = reasm_.assemble(key);
     const std::uint32_t total = binding->adv.group_total_len;
     reasm_.erase(key);
-    // The learned binding is kept (the identity↔path map persists and self-heals by
-    // overwrite when the node re-advertises); only the per-group slice buffer is freed.
+    // The learned binding is kept: the identity↔path map persists past delivery and is
+    // retired only when a fresh advertise claims its endpoint run (#909). Here only the
+    // per-group slice buffer is freed — `erase`, not `discard`: the bytes reached the
+    // receiver, so nothing was lost and nothing is counted.
     if (!rope) return;
 
     // Trim back to the advertised total by SHORTENING the tail link (subrope) —
