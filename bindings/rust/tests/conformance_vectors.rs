@@ -111,6 +111,22 @@ fn assert_vector_consistent(name: &str) -> Vec<u8> {
 }
 
 /**
+ * @brief A bare DESCRIPTION (`0x03`) node carrying opaque UTF-8 — the optional human detail a
+ * STATUS or an ERROR may carry (reference/05 §`0x03`). The crate exposes it only as the
+ * `description` argument of `error_code`/`error_string`, so a STATUS-level DESCRIPTION is
+ * spelled out here.
+ */
+fn description_tlv(text: &str) -> Tlv {
+    Tlv {
+        type_code: libtracer::type_code::DESCRIPTION,
+        opt: Opt::default(),
+        payload: text.as_bytes().to_vec(),
+        children: Vec::new(),
+        trailer: None,
+    }
+}
+
+/**
  * @brief Assert a NEGATIVE vector: `hex` == reject.bin, and `decode` fails with the error
  * `expected.json`'s `"reject"` field names.
  */
@@ -1024,6 +1040,57 @@ fn fwd_reply_error() {
         ErrCode::from_code(reply_error_code(&f)),
         Some(ErrCode::PathNotFound)
     );
+}
+
+/**
+ * @brief The cross-core acceptance rule (#878): a reply's ERROR is the FIRST ERROR child of
+ * the STATUS, at whatever position — reference/05 §`0x09` pins no order over a STATUS's
+ * children, and RFC-0002 §C pins position only INSIDE the ERROR. Same frame as
+ * `fwd_reply_error` with the STATUS's optional DESCRIPTION written first.
+ *
+ * The TypeScript binding pins these same bytes in `vectors.test.mjs`; before #878 it demanded
+ * `children[0]` and read this frame as code 0.
+ */
+#[test]
+fn fwd_reply_error_after_description() {
+    let bin = assert_vector_consistent("fwd/fwd-reply-error-after-description");
+    let mut req = FwdRequest::new(
+        fwd_op::REPLY,
+        &["net", "downlink", "a", "net", "downlink", "cli", "reply-ep"],
+        &["sensor", "temp"],
+    );
+    req.kind = Some(fwd_kind::ERROR);
+    // The offending shape is built with this crate's OWN builder: `status_with_errors` takes an
+    // arbitrary `&[Tlv]` and copies it verbatim, so a caller appending the STATUS's optional
+    // DESCRIPTION ahead of the ERROR needs nothing exotic.
+    req.payload = Some(status_with_errors(&[
+        description_tlv("no such vertex"),
+        error_code(ErrCode::PathNotFound, None),
+    ]));
+    assert_eq!(encode(&encode_fwd(&req).unwrap()), bin);
+
+    let f = decode_fwd(&bin).unwrap();
+    assert_eq!(f.kind, Some(fwd_kind::ERROR));
+
+    // The vector is only a gate while its ERROR is genuinely NOT the first child: assert the
+    // shape before asserting the read, so a future re-blessing that reorders it cannot leave
+    // this test silently passing on the easy case.
+    let status = f.payload.as_ref().expect("kind=ERROR carries a STATUS");
+    assert_eq!(status.type_code, libtracer::type_code::STATUS);
+    assert_eq!(status.children.len(), 2);
+    assert_eq!(
+        status.children[0].type_code,
+        libtracer::type_code::DESCRIPTION,
+        "the ERROR must not be child 0 or this vector gates nothing"
+    );
+    assert_eq!(status.children[1].type_code, libtracer::type_code::ERROR);
+
+    assert_eq!(reply_error_code(&f), 0x0020);
+    assert_eq!(
+        ErrCode::from_code(reply_error_code(&f)),
+        Some(ErrCode::PathNotFound)
+    );
+    assert_eq!(libtracer::fwd::reply_error_path(&f).unwrap(), None);
 }
 
 #[test]

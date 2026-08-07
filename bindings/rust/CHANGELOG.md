@@ -8,6 +8,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`fwd/fwd-reply-error-after-description` conformance vector**, shared with the C++ and
+  TypeScript cores and pinned here by `fwd_reply_error_after_description`. No behaviour change to
+  this crate: `reply_error_tlv` already scanned the STATUS's children for the first `ERROR`, which
+  is the ruled rule. What changed is that the rule is now **gated** rather than coincidental — the
+  TypeScript binding required the ERROR at `children[0]` and read this frame as code `0`, so the
+  two cores disagreed on which of a peer's errors were diagnosable at all (#878). Ablating this
+  crate's reader to the positional rule reddens the new test with the same `0 != 32`, so the gate
+  catches the drift whichever core drifts.
+
+  The ruling, recorded on `reply_error_tlv` and in `tests/conformance/HARNESS.md`: a reply's ERROR
+  is the **first `ERROR` child of the STATUS, at whatever position**. reference/05 §`0x09` pins no
+  order over a STATUS's children; RFC-0002 §C pins position only one level down, inside the ERROR.
+  Emitters are unaffected and still write the canonical order.
+
 ### Fixed
 
 - **`structured::spec` emitted a SPEC no terminus accepts.** Both field values — `type` and

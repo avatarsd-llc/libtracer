@@ -21,7 +21,7 @@
 
 import { TYPE, encode, decode } from '@avatarsd-llc/libtracer';
 import type { Opt, Tlv } from '@avatarsd-llc/libtracer';
-import { opt, pathTlv, nameTlv } from './tlv.js';
+import { opt, pathTlv, nameTlv, firstChild } from './tlv.js';
 
 /** @brief FWD `op` discriminant (RFC-0004 §B — the first child, a VALUE u8). */
 export const FWD_OP = Object.freeze({
@@ -377,12 +377,24 @@ export function decodeFwd(bytes: Uint8Array): ParsedFwd {
   return parseFwdTlv(decode(bytes));
 }
 
-/** @brief The ERROR TLV of a `kind=ERROR` reply's STATUS payload, or `null`. */
+/**
+ * @brief The ERROR TLV of a `kind=ERROR` reply's STATUS payload, or `null`.
+ *
+ * The **first ERROR child of the STATUS, at whatever position** — never
+ * `children[0]`. reference/05 §`0x09` gives a STATUS "one or more ERROR TLVs
+ * and optional DESCRIPTION text" and pins no order over them; RFC-0002 §C pins
+ * position only one level down, INSIDE the ERROR ("its first child is the
+ * identity"). Demanding position 0 here therefore refuses a documented STATUS
+ * shape and answers code 0 — indistinguishable from a STATUS carrying no ERROR
+ * at all, so a peer's typed failure reads as no failure information.
+ *
+ * Vector-pinned by `fwd/fwd-reply-error-after-description` (the DESCRIPTION
+ * written first), which the Rust binding pins against the same bytes so the
+ * two cores cannot drift apart on it again (#878).
+ */
 function replyErrorTlv(reply: ParsedFwd): Tlv | null {
   const status = reply.payload;
-  if (status && status.type === TYPE.STATUS && status.children[0]?.type === TYPE.ERROR) {
-    return status.children[0];
-  }
+  if (status && status.type === TYPE.STATUS) return firstChild(status, TYPE.ERROR);
   return null;
 }
 
