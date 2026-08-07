@@ -29,15 +29,42 @@ Historical genres are deliberately NOT enrolled. `docs/adr/`, `docs/spec/` and
 stood, some already point past today's EOF, and pinning them would demand rewriting
 history on every refactor.
 
+`--repin` is the other half (#836): when a source edit HAS moved cited lines, it rewrites
+every citation spelling from a line map instead of leaving a `sed` sweep to find them.
+Three rules are load-bearing there, each paid for:
+
+* **One pass.** A re-pin builds the whole map first and rewrites the ORIGINAL text once.
+  A sequential pass feeds its own output — rewrite `1114 -> 1118` and the next rule in
+  the same sweep sees `1118` and moves it again. That is how one sweep turned 51 stale
+  citations into 60.
+* **Both endpoints, every element.** `file:1113-1118` is two line numbers and
+  `file:181,339` is two more. Mapping only the head is what leaves inverted ranges like
+  `graph.cpp:1118-1114` behind, so a spec that cannot be mapped end to end is reported
+  and left ALONE rather than half-applied.
+* **"Verify by content" is vacuous.** Checking that the new line holds the text the old
+  line held proves nothing under a uniform shift: there, old and new hold identical text
+  for EVERY line, whether or not that line needed moving. The real check is whether the
+  citation ALREADY RESOLVES in the current tree — which is what the anchor table
+  answers, and why an anchor that still resolves contributes a fixed point and is never
+  rewritten.
+* **The dated genres are read-only.** `--repin` writes only the LIVING doc surfaces, for
+  the same reason those genres are not enrolled above: an ADR or an RFC cites the tree as
+  it stood, and moving its citations forward rewrites the record. Their moves are counted
+  and reported, never applied.
+
 Usage:  python3 tools/check_doc_citations.py
+        python3 tools/check_doc_citations.py --repin [--from-rev REV] [--apply]
 Exits non-zero on the first stale citation, listing every one it found.
 Gated by `.github/workflows/doc-citations.yml`; unit tests in
 `tools/tests/test_check_doc_citations.py`.
 """
 
+import argparse
+import difflib
 import functools
 import pathlib
 import re
+import subprocess
 import sys
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
@@ -738,6 +765,350 @@ def cited_locations(context: str, filemap: dict = None) -> tuple:
     return {f"{p}:{n}" for p, lo, hi in spans for n in range(lo, hi + 1)}, errors
 
 
+def citation_index(docs, filemap: dict = None) -> dict:
+    """Map every cited `path:line` to the doc pages that cite it.
+
+    The gate used to report a drifted anchor by its SOURCE location alone, leaving the
+    reader to grep ~200 markdown files for whoever pointed at it — and when the citing
+    spelling was a comma continuation or a bare `:N`, that grep found nothing and the
+    anchor read as orphaned. This is what lets a DRIFT name the stale citation itself.
+
+    `docs` is an iterable of `(name, text)` pairs.
+    """
+    filemap = source_map() if filemap is None else filemap
+    index = {}
+    for name, text in docs:
+        for loc in cited_locations(text, filemap)[0]:
+            index.setdefault(loc, []).append(name)
+    return {loc: sorted(set(names)) for loc, names in index.items()}
+
+
+# --------------------------------------------------------------------------------------
+# Re-pin (#836): rewrite the citations a source edit moved, in every spelling, in one pass
+# --------------------------------------------------------------------------------------
+
+
+def line_map_from_texts(old_text: str, new_text: str) -> dict:
+    """The exact OLD-line -> NEW-line map between two revisions of one file.
+
+    Every line of `old_text` gets an entry; a line the edit deleted maps to None. A
+    replaced block maps 1:1 only when it kept its line COUNT (an in-place reword, where
+    identity is certain); a block that changed length has no line identity and maps to
+    None, so the citations inside it are reported for a human instead of guessed at.
+
+    This is the complete map a re-pin wants: a range's endpoints and a comma list's
+    elements are ordinary lines here, so no spelling can hide a line from it.
+    """
+    old, new = old_text.split("\n"), new_text.split("\n")
+    out = {}
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(a=old, b=new, autojunk=False).get_opcodes():
+        if tag == "equal":
+            for k in range(i2 - i1):
+                out[i1 + k + 1] = j1 + k + 1
+        elif tag == "replace":
+            same_length = (i2 - i1) == (j2 - j1)
+            for k in range(i2 - i1):
+                out[i1 + k + 1] = (j1 + k + 1) if same_length else None
+        elif tag == "delete":
+            for k in range(i2 - i1):
+                out[i1 + k + 1] = None
+    return out
+
+
+def anchor_line_maps(anchors: list = None, root: pathlib.Path = None) -> tuple:
+    """Line maps derived from the ANCHORS table, as ({path: {old: new}}, notes).
+
+    An anchor whose pinned line STILL HOLDS its text contributes a fixed point (old ==
+    new) — not because its text matches something, but because the citation already
+    resolves in the current tree. That distinction is the whole discipline: comparing
+    the old line's text against the new line's is vacuous under a uniform shift, where
+    every line matches whether or not it moved.
+
+    An anchor whose text now sits at exactly one other line yields that move. One that
+    is gone, or ambiguous even after its scope filter, yields a note and NO mapping —
+    a re-pin that guesses is the failure this tool exists to stop.
+    """
+    anchors = ANCHORS if anchors is None else anchors
+    root = root or REPO
+    maps, notes, cache = {}, [], {}
+    for entry in anchors:
+        loc, anchor = entry[0], entry[1]
+        scope = entry[2] if len(entry) > 2 else None
+        path, lineno = loc.rsplit(":", 1)
+        lineno = int(lineno)
+        if path not in cache:
+            src = root / path
+            cache[path] = src.read_text().split("\n") if src.exists() else None
+        lines = cache[path]
+        if lines is None:
+            notes.append(f"{loc}: file does not exist")
+            continue
+        if lineno <= len(lines) and anchor in lines[lineno - 1]:
+            maps.setdefault(path, {})[lineno] = lineno
+            continue
+        hits = [i + 1 for i, ln in enumerate(lines) if anchor in ln]
+        if scope:
+            hits = [h for h in hits if any(scope in x for x in lines[max(0, h - SCOPE_LINES) : h])]
+        if len(hits) == 1:
+            maps.setdefault(path, {})[lineno] = hits[0]
+        else:
+            notes.append(f"{loc}: {'ambiguous ' + str(hits) if hits else 'anchor GONE'} — re-pin by hand")
+    return maps, notes
+
+
+def shift_lookup(known: dict):
+    """Extend a SPARSE old->new map to any line, or to None where the shift is unproven.
+
+    A doc cites lines no anchor pins — the far end of a range, a sibling in a comma list
+    — so the anchored moves have to speak for the lines between them. A line inherits a
+    shift only when the pinned lines on BOTH sides of it agree on that shift: a citation
+    straddling two different edits has no derivable answer and gets None, which the
+    caller reports rather than applies. Before the first pinned line the shift is taken
+    as zero (an edit further down cannot move the head of the file); after the last one
+    the final shift carries, which is the ordinary "everything below moved by N" tail.
+    """
+    points = sorted(known)
+
+    def lookup(line: int):
+        if line in known:
+            return known[line]
+        before = [p for p in points if p < line]
+        after = [p for p in points if p > line]
+        d_before = known[before[-1]] - before[-1] if before and known[before[-1]] is not None else None
+        d_after = known[after[0]] - after[0] if after and known[after[0]] is not None else None
+        if d_before is None and d_after is None:
+            return None
+        if d_before is None:
+            d_before = 0
+        if d_after is None:
+            d_after = d_before
+        return line + d_before if d_before == d_after else None
+
+    return lookup
+
+
+def _repin_spec(spec: str, lookup) -> tuple:
+    """Rewrite one citation's line spec (`12`, `12-20`, `145,153`), as (spec, moves, held).
+
+    BOTH endpoints of a range and EVERY element of a comma list go through `lookup`.
+    Mapping only the head is the defect that leaves inverted ranges like `1118-1114`
+    behind, so a mapping that would invert a range is refused outright. Anything that
+    cannot be mapped end to end comes back VERBATIM and named in `held`: a half-applied
+    re-pin is worse than none, because it reads as done.
+    """
+    parts, moves, held = [], [], []
+    for part in spec.split(","):
+        ends = part.split("-")
+        tail = part[len(ends[0]):]  # `-20`, a bare `-`, or nothing — preserved verbatim
+        if not ends[0].isdigit():
+            parts.append(part)
+            continue
+        lo = int(ends[0])
+        hi = int(ends[1]) if len(ends) > 1 and ends[1].isdigit() else None
+        # Whatever follows the `lo-hi` tokens, preserved verbatim. `[\d,\-]+` is greedy,
+        # so unbackticked prose like `graph.cpp:12-20-style` is captured as the spec
+        # `12-20-`; rebuilding the range as f"{lo}-{hi}" alone DROPS that trailing hyphen
+        # and silently edits the sentence. The single-line branch below already preserves
+        # its `tail`; the range branch has to preserve its own.
+        rest = part[len(ends[0]) + 1 + len(ends[1]):] if hi is not None else ""
+        # The scanner reads an implausible span as a parse artifact (a hyphenated word
+        # beside a citation) and pins only its head. The re-pin cannot tell that apart
+        # from a genuinely wide span, and it must not rewrite prose — so it moves
+        # NEITHER end and says so. Moving the head alone is the half-application that
+        # produced `graph.cpp:755-806` on the first live run: a correct head over a
+        # stale tail, which reads as re-pinned.
+        if hi is not None and (hi < lo or hi - lo > 40):
+            held.append(lo)
+            parts.append(part)
+            continue
+        new_lo = lookup(lo)
+        if new_lo is None:
+            held.append(lo)
+            parts.append(part)
+            continue
+        if hi is None:
+            parts.append(f"{new_lo}{tail}")
+            if new_lo != lo:
+                moves.append((lo, new_lo))
+            continue
+        new_hi = lookup(hi)
+        if new_hi is None or new_hi < new_lo:
+            held.append(hi)
+            parts.append(part)
+            continue
+        parts.append(f"{new_lo}-{new_hi}{rest}")
+        moves += [(a, b) for a, b in ((lo, new_lo), (hi, new_hi)) if a != b]
+    return ",".join(parts), moves, held
+
+
+def repin_document(text: str, maps: dict, filemap: dict = None) -> tuple:
+    """Re-pin one doc's citations, as (new_text, moves, held).
+
+    Reads exactly the spellings the scanner reads — full path, basename shorthand,
+    range, comma list, and the bare `:N` continuation with the same inheritance rules
+    (a cited markdown page still ends the run) — because a spelling the re-pin cannot
+    see is a citation that goes stale silently while the sweep reports success.
+
+    ONE PASS: every rewrite is collected against the ORIGINAL text and spliced in at the
+    end. A sweep that rewrote as it went would re-read its own output and move a
+    citation twice — 51 stale citations became 60 exactly that way.
+    """
+    filemap = source_map() if filemap is None else filemap
+    key = tuple((k, tuple(v)) for k, v in sorted(filemap.items()))
+    lookups = {p: shift_lookup(m) for p, m in maps.items()}
+    edits, moves, held, last = [], [], [], None
+    for m in CITATION_RE.finditer(text):
+        if m.group(1):
+            resolved, _ = _resolve(m.group(1), key)
+            if not resolved:
+                last = None
+                continue
+            last, spec, span = resolved, m.group(2), m.span(2)
+        elif m.group(3):
+            last = None  # a non-source citation ends the inheritance run
+            continue
+        elif last:
+            spec, span = m.group(4), m.span(4)
+        else:
+            continue
+        if last not in lookups:
+            continue
+        new_spec, spec_moves, spec_held = _repin_spec(spec, lookups[last])
+        held += [(last, n) for n in spec_held]
+        if new_spec != spec:
+            edits.append((span[0], span[1], new_spec))
+            moves += [(last, a, b) for a, b in spec_moves]
+    if not edits:
+        return text, moves, held
+    out, prev = [], 0
+    for start, end, repl in edits:
+        out.append(text[prev:start])
+        out.append(repl)
+        prev = end
+    out.append(text[prev:])
+    return "".join(out), moves, held
+
+
+# The anchor table's own citations. It is written in BOTH quote styles — 92 entries in
+# `"..."` and 256 in `'...'`, with `grammar.hpp` split across the two — so a sweep that
+# matched one style silently skipped the other; three `grammar.hpp` anchors survived a
+# re-pin that way. The backreference makes the quote irrelevant, and requiring an
+# opening paren before it keeps the rewrite to element 0 of a tuple, never an anchor's
+# quoted TEXT.
+ANCHOR_ENTRY_RE = re.compile(
+    r"(\(\s*)(['\"])((?:[A-Za-z0-9_./-]*/)?[A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:" + _EXTS + r")):(\d+)\2"
+)
+
+
+def repin_anchor_table(text: str, maps: dict) -> tuple:
+    """Re-pin the ANCHORS table itself, as (new_text, moves, held).
+
+    The table is a citation surface like any doc: it pins `path:line` and rots the same
+    way. `re.sub` walks the ORIGINAL string once, so this cannot feed its own output
+    either.
+    """
+    lookups = {p: shift_lookup(m) for p, m in maps.items()}
+    moves, held = [], []
+
+    def rewrite(m):
+        path, lineno = m.group(3), int(m.group(4))
+        if path not in lookups:
+            return m.group(0)
+        new = lookups[path](lineno)
+        if new is None:
+            held.append((path, lineno))
+            return m.group(0)
+        if new != lineno:
+            moves.append((path, lineno, new))
+        return f"{m.group(1)}{m.group(2)}{path}:{new}{m.group(2)}"
+
+    return ANCHOR_ENTRY_RE.sub(rewrite, text), moves, held
+
+
+def revision_line_maps(rev: str, root: pathlib.Path = None) -> tuple:
+    """Exact line maps for every source file that changed since `rev`, as (maps, notes).
+
+    Plumbing: `git show REV:path` supplies the old text, the worktree the new, and
+    @ref line_map_from_texts does the rest. This is the mode to use when you KNOW which
+    edit moved the lines; the anchor-derived map is the fallback that re-pins only what
+    the gate can prove moved.
+    """
+    root = root or REPO
+    git = ["git", "-C", str(root)]
+    changed = subprocess.run(git + ["diff", "--name-only", rev, "--"],
+                             capture_output=True, text=True, check=True).stdout.split("\n")
+    maps, notes = {}, []
+    for rel in (c.strip() for c in changed if c.strip()):
+        if not rel.endswith(SOURCE_SUFFIXES) or any(d in pathlib.PurePosixPath(rel).parts for d in NON_SOURCE_DIRS):
+            continue
+        old = subprocess.run(git + ["show", f"{rev}:{rel}"], capture_output=True, text=True)
+        if old.returncode != 0:
+            notes.append(f"{rel}: absent at {rev} — nothing to re-pin from")
+            continue
+        new = root / rel
+        if not new.is_file():
+            notes.append(f"{rel}: deleted in the worktree — its citations need a human")
+            continue
+        maps[rel] = line_map_from_texts(old.stdout, new.read_text())
+    return maps, notes
+
+
+# The genres a re-pin must NOT rewrite — the same three the anchor table refuses to
+# enrol, for the same reason. An ADR, an RFC and a research note are DATED records:
+# their citations describe the tree as it stood on the day, some already point past
+# today's EOF, and moving them forward with the code rewrites the record. A re-pin that
+# swept `all_docs()` edited 9 ADRs, 5 RFCs and 2 research notes on its first live run.
+HISTORICAL_GENRES = ("docs/adr/", "docs/spec/", "docs/research/")
+
+
+def is_historical(rel: str) -> bool:
+    """True when `rel` (a repo-relative posix path) is a dated record, not a live doc."""
+    return rel.startswith(HISTORICAL_GENRES)
+
+
+def repin(from_rev: str = None, apply: bool = False) -> int:
+    """The `--repin` driver: build ONE map, rewrite every LIVING surface once, report."""
+    filemap = source_map()
+    if from_rev:
+        maps, notes = revision_line_maps(from_rev)
+    else:
+        maps, notes = anchor_line_maps()
+    targets = [(REPO / "tools" / "check_doc_citations.py", repin_anchor_table)] + [
+        (doc, None) for doc in all_docs()
+    ]
+    total, historical, held_all = 0, 0, list(notes)
+    for path, table_fn in targets:
+        try:
+            text = path.read_text()
+        except (OSError, UnicodeDecodeError):
+            continue
+        rel = path.relative_to(REPO).as_posix()
+        if table_fn:
+            new_text, moves, held = table_fn(text, maps)
+        else:
+            new_text, moves, held = repin_document(text, maps, filemap)
+        if is_historical(rel):
+            # Counted, never written: the number is worth knowing, the edit is not.
+            historical += len(moves)
+            continue
+        held_all += [f"{rel}: {p}:{n} — no derivable shift, re-pin by hand" for p, n in held]
+        if not moves:
+            continue
+        total += len(moves)
+        for p, old, new in moves:
+            print(f"REPIN {rel}: {p}:{old} -> {new}")
+        if apply:
+            path.write_text(new_text)
+    for note in dict.fromkeys(held_all):
+        print(f"HOLD  {note}")
+    verb = "rewritten" if apply else "would move (dry run; pass --apply to write)"
+    print(f"\n{total} citation(s) {verb}; {len(dict.fromkeys(held_all))} held for a human.")
+    if historical:
+        print(f"      {historical} more sit in {', '.join(g.rstrip('/') for g in HISTORICAL_GENRES)} "
+              f"and were left alone — a dated record cites the tree as it stood.")
+    return 0
+
+
 def all_docs() -> list:
     """Every tracked markdown file. `_build` is generated Sphinx output; the
     `.claude/worktrees/fw-pin-*` trees are pinned history. Neither is a source."""
@@ -749,17 +1120,33 @@ def all_docs() -> list:
             if not any(s in p.relative_to(REPO).parts for s in skip)]
 
 
-def main() -> int:
+def main(argv: list = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("--repin", action="store_true",
+                        help="rewrite the citations a source edit moved, in every spelling")
+    parser.add_argument("--from-rev", metavar="REV",
+                        help="derive exact line maps by diffing the tree against REV "
+                             "(default: derive them from the anchors the gate proves drifted)")
+    parser.add_argument("--apply", action="store_true",
+                        help="write the re-pinned files (default: print the plan and change nothing)")
+    args = parser.parse_args(argv)
+    if args.repin:
+        return repin(args.from_rev, args.apply)
+    if args.from_rev or args.apply:
+        parser.error("--from-rev and --apply are only meaningful with --repin")
+
     filemap = source_map()
-    present, failures, drifted = set(), [], []
+    docs, failures, drifted = [], [], []
     for doc in all_docs():
         try:
-            locs, errs = cited_locations(doc.read_text(), filemap)
+            text = doc.read_text()
         except (OSError, UnicodeDecodeError):
             continue
-        present |= locs
         rel = doc.relative_to(REPO).as_posix()
-        failures += [f"{rel}: {e}" for e in dict.fromkeys(errs)]
+        docs.append((rel, text))
+        failures += [f"{rel}: {e}" for e in dict.fromkeys(cited_locations(text, filemap)[1])]
+    index = citation_index(docs, filemap)
+    present = set(index)
 
     for entry in ANCHORS:
         loc, anchor = entry[0], entry[1]
@@ -781,7 +1168,11 @@ def main() -> int:
         if scope:
             hits = [h for h in hits if any(scope in x for x in lines[max(0, h - SCOPE_LINES) : h])]
         where = f" -> now at {hits[0]}" if len(hits) == 1 else f" -> candidates {hits}" if hits else " -> anchor GONE"
-        drifted.append(f"{loc}: expected {anchor!r}{where}\n      actual: {lines[lineno - 1].strip()[:90]}")
+        # Name the pages that cite it. Without this a comma continuation or a bare `:N`
+        # left the reader grepping for a spelling that does not literally appear.
+        citers = index.get(loc, [])
+        by = f"\n      cited by: {', '.join(citers)}" if citers else ""
+        drifted.append(f"{loc}: expected {anchor!r}{where}\n      actual: {lines[lineno - 1].strip()[:90]}{by}")
 
     # An anchor that no longer appears in CONTEXT.md is a dead pin.
     for entry in ANCHORS:
@@ -797,6 +1188,8 @@ def main() -> int:
 
     if failures or drifted:
         print(f"\n{len(failures) + len(drifted)} stale citation(s) in the docs.")
+        if drifted:
+            print("      `--repin` rewrites the moved ones in every spelling; re-run this gate after.")
         return 1
     print(f"OK    {len(ANCHORS)} doc citations verified against source.")
     return 0
