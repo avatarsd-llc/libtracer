@@ -64,6 +64,9 @@ int main() {
 
     // Wire: build "/sensor/temp" as a PATH TLV with NAME children (the addressing
     // shape §3.1.2 places in .rodata on a real node), encode it, key it.
+    // path_key returns an optional since #681 (a PATH child that is not a NAME is
+    // rejected rather than keyed); the branch is what an MCU caller actually links,
+    // so the fixture takes it rather than asserting the value away.
     wire::tlv_t root;
     root.type = wire::type_t::PATH;
     root.opt.pl = true;
@@ -75,7 +78,9 @@ int main() {
     }
     const std::vector<std::byte> bytes = wire::encode(root);
     acc = fold(acc, bytes);
-    acc = fold(acc, wire::path_key(root));
+    if (const auto key = wire::path_key(root); key) {
+        acc = fold(acc, *key);
+    }
 
     // Wire: owning decode (the vector tree) and the terminus arena decode (a flat
     // pre-order array over borrowed spans, drawn from a fixed bump_source_t over a

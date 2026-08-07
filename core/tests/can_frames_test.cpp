@@ -202,6 +202,47 @@ int main() {
               "the two newest groups survive the bound");
     }
 
+    // --- 3c. can_reassembly age-out: sweep_stale reclaims a group that stopped
+    // making progress (#912). A count bound alone never frees a group a lost slice
+    // left permanently incomplete: `erase` is reached only after `is_complete`, so
+    // without this the group's slices are pinned for the process's life. The buffer
+    // holds NO clock — the caller stamps it, so this is fully deterministic.
+    {
+        using tr::view::can_frame_mode_t;
+        using tr::view::view_can_frames_t;
+        const std::vector<std::byte> payload = ramp(20);
+        const auto framed = view_can_frames_t::split(view_over(payload), can_frame_mode_t::CLASSIC);
+        const auto key_ts = [](std::uint64_t ts) {
+            tr::net::reassembly_key_t k;
+            k.ts = ts;
+            return k;
+        };
+
+        tr::net::can_reassembly_t aging;
+        aging.set_now(1000);
+        aging.set_expected_count(key_ts(1), 3);             // an advertise promising 3 slices
+        aging.add_slice(key_ts(1), 0, framed.frames()[0]);  // ... only 1 of which lands
+        check(!aging.is_complete(key_ts(1)), "the group is incomplete (a slice was lost)");
+
+        aging.set_now(1100);
+        check(aging.sweep_stale(500) == 0, "a group inside the age window is not swept");
+        check(aging.contains(key_ts(1)) && aging.dropped_groups() == 0,
+              "no counter tick while the group is young");
+
+        // A live group keeps its place: a touch restamps it, so only groups that
+        // stopped making progress age out.
+        aging.set_now(1400);
+        aging.add_slice(key_ts(1), 1, framed.frames()[1]);
+        aging.set_now(1800);
+        check(aging.sweep_stale(500) == 0,
+              "a group still receiving slices is restamped, not swept");
+
+        aging.set_now(2400);  // 1000 past the last touch, window is 500
+        check(aging.sweep_stale(500) == 1, "the stalled group ages out");
+        check(!aging.contains(key_ts(1)), "the swept group's slices are reclaimed");
+        check(aging.dropped_groups() == 1, "an age-out ticks dropped_groups, like an eviction");
+    }
+
     // --- 4. in-band advertise frame codec. ---
     {
         using namespace tr::net::can;

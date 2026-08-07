@@ -12,7 +12,7 @@ references are integration facts about the transport seam.
 
 On single-link traffic — one recv chunk becoming one ingress segment, which is what every
 unfragmented TCP, UDP and WS producer emits — **no payload flatten fires.** `rope_t::materialize`
-returns the sole link (`core/include/libtracer/rope.hpp:148`), a refcount bump, so the branch
+returns the sole link (`core/include/libtracer/rope.hpp:171`), a refcount bump, so the branch
 write, the field write, the per-node parse cache, span-only delivery and COMPACT remote delivery
 all resolve to reference counting rather than `memcpy`. Every payload flatten in the codebase is a
 multi-link fallback.
@@ -47,7 +47,7 @@ model itself is described implementation-independently in
 where the mechanism lives:
 
 - **Composition shares segments.** `rope_t::subrope(off, len)`
-  (`core/include/libtracer/rope.hpp:184`) trims the covering links with `view_t::subview` and
+  (`core/include/libtracer/rope.hpp:207`) trims the covering links with `view_t::subview` and
   refcounts exactly the segments its window touches. Segment handles clone by a relaxed increment
   (`core/include/libtracer/segment.hpp:124-126`); release is an `acq_rel` decrement that fires the
   backend's `destroy` at zero (`:137-141`). Fan-out to N subscribers is N increments.
@@ -56,7 +56,7 @@ where the mechanism lives:
   (`core/include/libtracer/tlv_arena.hpp:8-9`, node type at `:30`). Decode allocates node
   bookkeeping, never payload, and is zero-copy over its input provided that input is contiguous.
   That contiguity constraint is what §3 and §4 turn on.
-- **Egress scatter-gathers.** `rope_t::to_iovec` (`core/include/libtracer/rope.hpp:213`) emits one
+- **Egress scatter-gathers.** `rope_t::to_iovec` (`core/include/libtracer/rope.hpp:236`) emits one
   span per link into the original segments. The host WS server builds `[header, link0, link1, …]`
   and `sendmsg`s it with "no flatten, no re-copy (server frames are UNMASKED, RFC 6455 §5.1)"
   (`core/src/transport_ws.cpp:237`); TCP prepends a u32-LE length via `prefixed_iov_t`
@@ -113,7 +113,7 @@ core/src/graph.cpp:1129   wire::decode_into(head.bytes(), src);
 ```
 
 **Cost A, the flatten (`:1113`)** is zero-copy for a single-link rope — `materialize` returns
-`links()[0]`, a refcount bump (`core/include/libtracer/rope.hpp:148`) — and memcpys only a
+`links()[0]`, a refcount bump (`core/include/libtracer/rope.hpp:171`) — and memcpys only a
 multi-link rope, drawing from the injected `value_backend_`. An exhausted pool yields an empty
 head, which `graph.cpp:1114` surfaces as `BACKPRESSURE` rather than letting the decoder read it back as a
 malformed value. Because ingress values are single-link until the rope-native branch decode lands,
@@ -132,7 +132,7 @@ correspondingly smaller; that figure has not been compiled here and is not asser
 
 ### 3.2 Why the rope cursor does not remove the arena
 
-`rope_cursor` (`core/include/libtracer/rope_decode.hpp:56`) is a **byte source**. It lets the
+`rope_cursor` (`core/include/libtracer/rope_decode.hpp:57`) is a **byte source**. It lets the
 grammar read fields off a scatter-gather rope by stitching straddling headers a byte at a time and
 feeding the CRC link by link, satisfying the same `Cursor` concept as `span_cursor`. But
 `decode_into` does not only read bytes — it stores structure: a random-accessible `arena_tlv_t`

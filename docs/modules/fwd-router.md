@@ -312,6 +312,18 @@ segment-validity predicate — a reserved-character name answers `INVALID_PATH`.
 transports export *suggested*-name constants (`kWsClientSuggestedModule`, …) an application may
 adopt; `/net` itself is likewise only the recommended root convention (a constructor default).
 
+**Creation is all-or-nothing.** A connection is built in three steps — register the identity
+vertex, insert the `conns_` entry, wire the link into the router's `child_registry_t` — and only
+the last can be refused: `add_child` answers `false` when the registry cannot grow, and it is the
+only place that can say so (`core/include/libtracer/fwd_router.hpp:238`,
+`core/include/libtracer/child_registry.hpp:209`). A refusal unwinds the first two in reverse —
+retire the vertex, then erase the entry, which destroys the config-constructed socket — publishes
+no liveness, and answers `BACKPRESSURE` (`core/src/transport_vertex.cpp:337-340`). Discarding that
+`bool` left a connection reporting `UP` that no `dst` resolved, no inbound frame reached, and
+`remove_child` did not know about — a ghost a peer could mint by creating connections until the
+registry slab exhausted. A `provide_link` staging is consumed only once the wiring has succeeded
+(`core/src/transport_vertex.cpp:346`), so a retry after the pressure clears still finds its link.
+
 **Liveness is the connection vertex's value.** `link_state_t` is six states —
 `DORMANT`, `DIALING`, `RECONNECTING`, `UP`, `LISTENING`, `BIND_FAILED`
 (`core/include/libtracer/transport_vertex.hpp:96-103`). `DIAL` links use the first four; `LISTEN`
@@ -319,7 +331,7 @@ links report listen-socket reachability with the last two, never a per-accepted-
 value is a 1-byte `VALUE` on the vertex, so it is `await`-able and subscribable: `subscribe
 /net/<module>/<name>` streams every transition. The liveness *engine* that would drive these
 automatically is not implemented — the value is set by the caller, and a config-constructed socket
-reports `UP` or `LISTENING` at creation (`core/src/transport_vertex.cpp:327-329`).
+reports `UP` or `LISTENING` at creation (`core/src/transport_vertex.cpp:351-353`).
 
 **The accepted direction, and what is not realised.** RFC-0014 replaces the single global
 `/net:children[]` catalog with a **per-module creator endpoint** at `/net/<module>/conn`, whose own

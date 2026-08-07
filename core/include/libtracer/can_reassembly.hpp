@@ -23,6 +23,14 @@
  * hardcoded magic number). The defaults — the process heap, unbounded — preserve
  * the pre-rehome behavior; a target injects a stack resource + `max_groups` to
  * bound it (the per-connection `:settings` path).
+ *
+ * A count bound alone does not reclaim a group that will NEVER complete — the
+ * exact residue a lost advertise or a lost data slice leaves behind, since
+ * `erase` is reached only after `is_complete` (#912). So the buffer also ages
+ * out: the caller stamps it with its own monotonic clock (`set_now`) and sweeps
+ * (`sweep_stale`) on a cadence it chooses. The stamp is opaque here — the buffer
+ * stays a pure framing primitive with NO clock of its own, exactly as it has no
+ * allocator of its own.
  */
 #pragma once
 
@@ -83,7 +91,9 @@ struct reassembly_key_t {
  * Structure and slices are drawn from the injected memory resource; when
  * `max_groups` is non-zero and a new group would exceed it, the oldest group
  * is evicted (its buffered slices freed) and @ref dropped_groups is incremented —
- * a bounded drop rather than unbounded growth.
+ * a bounded drop rather than unbounded growth. Independently of that count bound,
+ * @ref sweep_stale reclaims groups that stopped making progress, which is the only
+ * thing that frees a group a lost slice left permanently incomplete.
  */
 class can_reassembly_t {
    public:
@@ -191,7 +201,52 @@ class can_reassembly_t {
     /** @brief Drop all buffered state for group @p key (after assembly or timeout). */
     void erase(const reassembly_key_t& key) { drop_group(key); }
 
-    /** @brief Count of groups evicted because `max_groups` was reached (never OOM). */
+    /**
+     * @brief Set the monotonic stamp that subsequent touches mark a group with.
+     *
+     * The buffer holds no clock — the caller feeds one (the CAN binding stamps it
+     * once per inbound frame with `steady_clock` milliseconds). The unit is
+     * whatever the caller uses, and @ref sweep_stale's age is in the same unit.
+     */
+    void set_now(std::uint64_t now) noexcept { now_ = now; }
+
+    /**
+     * @brief Erase every group untouched for longer than @p max_age (the stale sweep).
+     *
+     * A group is "touched" when a slice is added or its expected count is set, so
+     * one that stopped making progress — a lost data slice, or an advertise whose
+     * group never materialized — ages out here. Without this, such a group is never
+     * @ref is_complete, so @ref erase is never reached and its buffered slices are
+     * pinned for the process's life (#912). Each erased group ticks @ref
+     * dropped_groups, exactly as a `max_groups` eviction does: one counter for
+     * "a group's buffered slices were reclaimed before delivery", whatever forced it.
+     *
+     * @return How many groups were erased.
+     * @note Ages against the stamp last given to @ref set_now; a caller that never
+     *       calls it sweeps nothing (every group reads as age 0).
+     */
+    std::size_t sweep_stale(std::uint64_t max_age) {
+        std::size_t swept = 0;
+        for (auto it = groups_.begin(); it != groups_.end();) {
+            // Guard a non-monotonic stamp: an entry from "the future" is not stale.
+            const std::uint64_t touched = it->second.last_touch;
+            if (now_ < touched || now_ - touched <= max_age) {
+                ++it;
+                continue;
+            }
+            const reassembly_key_t key = it->first;
+            ++it;  // advance off the node drop_group is about to erase
+            drop_group(key);
+            ++dropped_groups_;
+            ++swept;
+        }
+        return swept;
+    }
+
+    /**
+     * @brief Count of groups reclaimed before delivery — a `max_groups` eviction
+     *        or a @ref sweep_stale age-out (never an OOM).
+     */
     [[nodiscard]] std::uint64_t dropped_groups() const noexcept { return dropped_groups_; }
 
    private:
@@ -206,14 +261,22 @@ class can_reassembly_t {
     struct group_meta_t {
         std::optional<std::uint32_t> expected;  // totality opt-in.
         std::uint64_t seq = 0;                  // insertion order, for evict-oldest.
+        std::uint64_t last_touch = 0;           // caller's stamp at the last progress.
     };
 
     // Track a group, creating it (bound-enforced) if new; returns its metadata.
+    // Every touch restamps it, so a group still receiving slices never ages out
+    // and one that stopped making progress does.
     group_meta_t& touch_group(const reassembly_key_t& key) {
         const auto it = groups_.find(key);
-        if (it != groups_.end()) return it->second;
+        if (it != groups_.end()) {
+            it->second.last_touch = now_;
+            return it->second;
+        }
         if (max_groups_ != 0 && groups_.size() >= max_groups_) evict_oldest();
-        return groups_.emplace(key, group_meta_t{.expected = std::nullopt, .seq = next_seq_++})
+        return groups_
+            .emplace(key,
+                     group_meta_t{.expected = std::nullopt, .seq = next_seq_++, .last_touch = now_})
             .first->second;
     }
 
@@ -241,6 +304,7 @@ class can_reassembly_t {
     std::size_t max_groups_ = 0;
     std::uint64_t next_seq_ = 0;
     std::uint64_t dropped_groups_ = 0;
+    std::uint64_t now_ = 0;  // the caller's latest stamp (set_now); no clock here.
     std::pmr::map<reassembly_key_t, group_meta_t> groups_;
     std::pmr::map<slice_id_t, tr::view::view_t> slices_;
 };

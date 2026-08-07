@@ -213,6 +213,55 @@ bool equal_bytes(const std::vector<std::byte>& a, const std::vector<std::byte>& 
     return a.size() == b.size() && std::memcmp(a.data(), b.data(), a.size()) == 0;
 }
 
+/** @brief Poll `cond` until it holds or `budget` elapses (the RX path runs off-thread). */
+template <class Fn>
+bool wait_until(Fn cond, std::chrono::milliseconds budget) {
+    const auto deadline = std::chrono::steady_clock::now() + budget;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (cond()) return true;
+        std::this_thread::sleep_for(2ms);
+    }
+    return cond();
+}
+
+/**
+ * @brief Emit `adv` as node `node`'s control-slot byte stream, in CLASSIC ≤8B windows —
+ *        exactly what `transport_can::emit_advertise` puts on the wire.
+ */
+void inject_advertise(fake_link_t& link, std::uint16_t node, const can::advertise_t& adv) {
+    const std::vector<std::byte> bytes = can::encode_advertise(adv);
+    const std::uint32_t control_id = can::encode_can_id({0, node, tr::net::kCanControlEndpoint});
+    for (std::size_t off = 0; off < bytes.size(); off += 8) {
+        tr::net::can_frame_data_t f;
+        f.id = control_id;
+        f.fd = false;
+        const std::size_t n = std::min<std::size_t>(8, bytes.size() - off);
+        std::memcpy(f.data.data(), bytes.data() + off, n);
+        f.len = static_cast<std::uint8_t>(n);
+        link.write_raw(f);
+    }
+}
+
+/** @brief Emit one raw 8-byte data slice from node `node` on `endpoint`. */
+void inject_data(fake_link_t& link, std::uint16_t node, std::uint16_t endpoint) {
+    tr::net::can_frame_data_t f;
+    f.id = can::encode_can_id({0, node, endpoint});
+    f.fd = false;
+    f.len = 8;
+    for (std::size_t i = 0; i < 8; ++i) f.data[i] = static_cast<std::byte>(endpoint + i);
+    link.write_raw(f);
+}
+
+/** @brief The shared shape of the RX-bounding tests: node 2 listening, node 1 injecting raw. */
+tr::net::transport_can_config_t rx_test_config() {
+    tr::net::transport_can_config_t cfg;
+    cfg.version = 0;
+    cfg.node = 2;
+    cfg.mode = tr::view::can_frame_mode_t::CLASSIC;
+    cfg.path = "q";
+    return cfg;
+}
+
 // ---------------------------------------------------------------------------
 // Tests.
 // ---------------------------------------------------------------------------
@@ -371,6 +420,241 @@ void test_single_value() {
     check(equal_bytes(sink.last(), payload), "single-frame bytes byte-exact");
 }
 
+/**
+ * @brief #912 — a flood of data slices on NEVER-ADVERTISED endpoints is capped by the
+ *        injected `max_pending` and every eviction is counted.
+ *
+ * This is the reachable-by-any-bus-peer growth path: a data frame with no matching
+ * binding is parked, and the only drain is `learn_advertise`'s covered-range re-drive,
+ * which a peer that simply never advertises never triggers. `rx_ttl` is set far out of
+ * reach here so the COUNT cap is unambiguously what bounds it.
+ */
+void test_pending_flood_is_capped_and_counted() {
+    std::printf("transport_can pending-slice flood (never-advertised endpoints):\n");
+
+    fake_can_bus_t bus;
+    fake_link_t injector(bus);  // stands in for a peer that floods data, never advertises
+    auto link_b = std::make_unique<fake_link_t>(bus);
+
+    tr::net::transport_can_config_t cfg = rx_test_config();
+    cfg.max_pending = 4;
+    cfg.rx_ttl = 60s;  // far out of reach: the count cap must be what bounds this
+    tr::net::transport_can tx_b(std::move(link_b), cfg);
+
+    constexpr std::uint16_t kFlood = 64;
+    for (std::uint16_t ep = 1; ep <= kFlood; ++ep) inject_data(injector, /*node=*/1, ep);
+
+    const std::uint64_t expect_dropped = kFlood - cfg.max_pending;
+    const bool settled = wait_until([&] { return tx_b.dropped_rx() >= expect_dropped; }, 2s);
+    check(settled, "the flood's evictions were counted on dropped_rx()");
+    check(tx_b.pending_slices() <= cfg.max_pending,
+          "parked slices never exceed the injected max_pending");
+    check(tx_b.dropped_rx() == expect_dropped,
+          "every slice above the cap is counted exactly once (evict-and-count)");
+    check(tx_b.dropped_groups() == 0, "no reassembly group was involved");
+}
+
+/**
+ * @brief #912 — a parked slice whose advertise NEVER lands ages out.
+ *
+ * The count cap is disabled here, so the age-out is the only thing that can reclaim
+ * these: this is the bound that holds under the shipped default config, where the
+ * count caps are opt-in (RFC-0006 host-bounded).
+ */
+void test_pending_slices_age_out() {
+    std::printf("transport_can pending-slice age-out (advertise never lands):\n");
+
+    fake_can_bus_t bus;
+    fake_link_t injector(bus);
+    auto link_b = std::make_unique<fake_link_t>(bus);
+
+    tr::net::transport_can_config_t cfg = rx_test_config();
+    cfg.max_pending = 0;  // count cap OFF — only the age-out can reclaim these
+    cfg.rx_ttl = 30ms;
+    tr::net::transport_can tx_b(std::move(link_b), cfg);
+
+    constexpr std::uint16_t kParked = 6;
+    for (std::uint16_t ep = 1; ep <= kParked; ++ep) inject_data(injector, /*node=*/1, ep);
+    check(wait_until([&] { return tx_b.pending_slices() == kParked; }, 2s),
+          "all slices parked awaiting an advertise that never comes");
+
+    std::this_thread::sleep_for(150ms);                   // >> rx_ttl
+    inject_data(injector, /*node=*/1, /*endpoint=*/100);  // any inbound frame drives the sweep
+
+    check(wait_until([&] { return tx_b.pending_slices() <= 1; }, 2s),
+          "the stale parked slices were swept");
+    check(tx_b.dropped_rx() >= kParked, "every aged-out slice is counted on dropped_rx()");
+}
+
+/**
+ * @brief #912 — a degenerate `peer_ttl` of zero must not DISABLE the age-out.
+ *
+ * `rx_ttl` derives from `peer_ttl` when left at its `kCanRxTtlFromPeerTtl` sentinel,
+ * so `peer_ttl_ms=0` derives `rx_ttl = 0`. Zero already means "instantly expired" to
+ * the peer enumeration (`now - last_heard > 0`) and to the group sweep
+ * (`sweep_stale(0)` retains only what was touched this instant) — but `expire_pending`
+ * read the same zero as "sweep disabled" and returned early. With the shipped default
+ * `max_pending = 0` (count cap off), that left the parked queue with NO bound at all:
+ * exactly the unbounded growth #912 closes, re-opened by one config value.
+ *
+ * The two arms below are what make this non-vacuous. The zero arm must reclaim; the
+ * far-window arm must NOT, or "the sweep ran" would be indistinguishable from "the
+ * sweep runs unconditionally", which would be a different bug wearing this test's
+ * green tick.
+ */
+void test_zero_peer_ttl_does_not_disable_the_age_out() {
+    std::printf("transport_can zero peer_ttl keeps the age-out live (#912):\n");
+
+    {
+        fake_can_bus_t bus;
+        fake_link_t injector(bus);  // a peer that floods data and never advertises
+        auto link_b = std::make_unique<fake_link_t>(bus);
+
+        tr::net::transport_can_config_t cfg = rx_test_config();
+        cfg.max_pending = 0;  // count cap OFF — the age-out is the only bound
+        cfg.peer_ttl = 0ms;   // degenerate: nothing is live
+        cfg.rx_ttl = tr::net::kCanRxTtlFromPeerTtl;  // derive it — this is the vector
+        tr::net::transport_can tx_b(std::move(link_b), cfg);
+
+        // The claim is about GROWTH, so the flood has to be large enough that "it
+        // did not grow" is not just "not much arrived yet".
+        constexpr std::uint16_t kFlood = 64;
+        for (std::uint16_t ep = 1; ep <= kFlood; ++ep) inject_data(injector, /*node=*/1, ep);
+
+        check(wait_until([&] { return tx_b.dropped_rx() >= kFlood - 1; }, 2s),
+              "a derived rx_ttl of 0 reclaims — it is not read as 'sweep disabled'");
+        check(tx_b.pending_slices() <= 1,
+              "the parked queue stays bounded with the count cap off (#912 does not re-open)");
+    }
+
+    {
+        // The other arm: a window that has NOT elapsed must retain, or the assertion
+        // above would pass for a sweep that simply drops everything every time.
+        fake_can_bus_t bus;
+        fake_link_t injector(bus);
+        auto link_b = std::make_unique<fake_link_t>(bus);
+
+        tr::net::transport_can_config_t cfg = rx_test_config();
+        cfg.max_pending = 0;
+        cfg.rx_ttl = 60s;  // far out of reach
+        tr::net::transport_can tx_b(std::move(link_b), cfg);
+
+        constexpr std::uint16_t kParked = 4;
+        for (std::uint16_t ep = 1; ep <= kParked; ++ep) inject_data(injector, /*node=*/1, ep);
+        check(wait_until([&] { return tx_b.pending_slices() == kParked; }, 2s),
+              "slices park under a far window");
+        inject_data(injector, /*node=*/1, /*endpoint=*/100);
+        std::this_thread::sleep_for(50ms);
+        check(tx_b.pending_slices() >= kParked, "a live window retains — the sweep is not blind");
+        check(tx_b.dropped_rx() == 0, "nothing was counted as reclaimed");
+    }
+}
+
+/**
+ * @brief #912 — an incomplete reassembly group (a lost data slice) is erased by the
+ *        on-advertise stale sweep and ticks dropped_groups().
+ *
+ * `erase` is reached only after `is_complete`, so before this a group missing any
+ * slice pinned its buffered slices for the transport's life.
+ */
+void test_incomplete_group_is_swept() {
+    std::printf("transport_can stale incomplete-group sweep (lost data slice):\n");
+
+    fake_can_bus_t bus;
+    fake_link_t injector(bus);
+    auto link_b = std::make_unique<fake_link_t>(bus);
+
+    tr::net::transport_can_config_t cfg = rx_test_config();
+    cfg.rx_ttl = 30ms;
+    tr::net::transport_can tx_b(std::move(link_b), cfg);
+
+    // Node 1 advertises a 2-slice group at base endpoint 1 ...
+    can::advertise_t adv;
+    adv.can_id = can::encode_can_id({0, 1, tr::net::kCanFirstDataEndpoint});
+    adv.group = true;
+    adv.group_total_len = 16;
+    adv.slice_count = 2;
+    adv.path = "sensor/temp";
+    inject_advertise(injector, /*node=*/1, adv);
+    // ... and only the FIRST slice arrives; the second is lost on the bus.
+    inject_data(injector, /*node=*/1, /*endpoint=*/tr::net::kCanFirstDataEndpoint);
+    check(wait_until([&] { return tx_b.learned_binding(adv.can_id).has_value(); }, 2s),
+          "the incomplete group's binding was learned");
+    check(tx_b.dropped_groups() == 0, "nothing swept while the group is young");
+
+    std::this_thread::sleep_for(150ms);  // >> rx_ttl
+
+    // A later, unrelated advertise drives the sweep (every group is born of one).
+    can::advertise_t later = adv;
+    later.can_id = can::encode_can_id({0, 1, 10});
+    later.group = false;
+    later.group_total_len = 8;
+    later.slice_count = 1;
+    inject_advertise(injector, /*node=*/1, later);
+
+    check(wait_until([&] { return tx_b.dropped_groups() >= 1; }, 2s),
+          "the stale incomplete group was swept and counted on dropped_groups()");
+}
+
+/**
+ * @brief #912 — `max_groups` reaches the reassembly buffer at all.
+ *
+ * The buffer was default-constructed, so `max_groups` was 0 and its evict-oldest
+ * could never fire in production however the connection was configured. Three
+ * concurrently-incomplete groups against a ceiling of 2 must evict one.
+ */
+void test_max_groups_reaches_the_reassembly_buffer() {
+    std::printf("transport_can max_groups plumbing (injected group ceiling):\n");
+
+    fake_can_bus_t bus;
+    fake_link_t injector(bus);
+    auto link_b = std::make_unique<fake_link_t>(bus);
+
+    tr::net::transport_can_config_t cfg = rx_test_config();
+    cfg.max_groups = 2;
+    cfg.rx_ttl = 60s;  // far out of reach: the COUNT bound must be what evicts
+    tr::net::transport_can tx_b(std::move(link_b), cfg);
+
+    // Three distinct 2-slice groups, each left one slice short, so none completes
+    // and none is erased by the delivery path.
+    for (std::uint16_t g = 0; g < 3; ++g) {
+        const std::uint16_t base = static_cast<std::uint16_t>(1 + g * 2);
+        can::advertise_t adv;
+        adv.can_id = can::encode_can_id({0, 1, base});
+        adv.group = true;
+        adv.group_total_len = 16;
+        adv.slice_count = 2;
+        adv.path = "sensor/temp";
+        inject_advertise(injector, /*node=*/1, adv);
+        inject_data(injector, /*node=*/1, base);  // only slice 0 of 2
+    }
+
+    check(wait_until([&] { return tx_b.dropped_groups() >= 1; }, 2s),
+          "a 3rd live group against a ceiling of 2 evicted the oldest");
+}
+
+/** @brief #912 — a healthy exchange reports zero on every drop counter. */
+void test_clean_run_counters_are_zero() {
+    std::printf("transport_can drop counters on a clean run:\n");
+    fake_can_bus_t bus;
+    sink_t sink;
+    auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
+    auto link_a = std::make_unique<fake_link_t>(bus);
+    auto link_b = std::make_unique<fake_link_t>(bus);
+    tr::net::transport_can tx_a(std::move(link_a),
+                                {0, 1, tr::view::can_frame_mode_t::CLASSIC, "sensor/temp"});
+    tr::net::transport_can tx_b(std::move(link_b),
+                                {0, 2, tr::view::can_frame_mode_t::CLASSIC, "q"});
+    tx_b.set_receiver(rx);
+    const std::vector<std::byte> payload = make_payload(40);
+    tx_a.send(payload);
+    check(sink.wait_for_count(1, 2s), "frame delivered");
+    check(tx_b.dropped_rx() == 0 && tx_b.dropped_groups() == 0,
+          "receiver reports zero RX drops on a clean run");
+    check(tx_a.dropped_tx() == 0, "sender reports zero TX drops on a clean run");
+    check(tx_b.pending_slices() == 0, "no slices left parked after delivery");
+}
+
 }  // namespace
 
 /**
@@ -436,6 +720,12 @@ int main() {
     test_rope_delivery();
     test_control_stream_resync();
     test_lifecycle();
+    test_clean_run_counters_are_zero();
+    test_pending_flood_is_capped_and_counted();
+    test_pending_slices_age_out();
+    test_zero_peer_ttl_does_not_disable_the_age_out();
+    test_incomplete_group_is_swept();
+    test_max_groups_reaches_the_reassembly_buffer();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;

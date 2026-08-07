@@ -48,6 +48,15 @@ target_link_libraries(fwd_frame_view_test PRIVATE libtracer)
 libtracer_test_warnings(fwd_frame_view_test)
 add_test(NAME fwd_frame_view COMMAND fwd_frame_view_test)
 
+# The shared SPEC-config SETTINGS walk (config_reader.hpp) — the pair-consuming scan
+# every transport config parser funnels through (#927): the value-read-as-a-key hijack
+# vectors, the forward-compat tolerance that must SURVIVE the fix (the opposite ruling
+# from the ACL parse), and the representative per-kind configs pinned unchanged.
+add_executable(config_reader_test config_reader_test.cpp)
+target_link_libraries(config_reader_test PRIVATE libtracer)
+libtracer_test_warnings(config_reader_test)
+add_test(NAME config_reader COMMAND config_reader_test)
+
 # Canonical-key NAME navigation (key_view.hpp) — the locus the graph walks funnel through.
 add_executable(key_view_test key_view_test.cpp)
 target_link_libraries(key_view_test PRIVATE libtracer)
@@ -104,6 +113,16 @@ add_executable(rope_test rope_test.cpp)
 target_link_libraries(rope_test PRIVATE libtracer)
 libtracer_test_warnings(rope_test)
 add_test(NAME rope COMMAND rope_test)
+
+# rope_cursor bounds preconditions (#916) — the debug-assert parity with
+# view_t::subview. The asserts are debug-only, so this TU forces NDEBUG off and
+# observes each abort in a forked child; POSIX-only (fork/waitpid).
+if(UNIX)
+    add_executable(rope_cursor_assert_test rope_cursor_assert_test.cpp)
+    target_link_libraries(rope_cursor_assert_test PRIVATE libtracer)
+    libtracer_test_warnings(rope_cursor_assert_test)
+    add_test(NAME rope_cursor_assert COMMAND rope_cursor_assert_test)
+endif()
 
 add_executable(rope_decode_test rope_decode_test.cpp)
 target_link_libraries(rope_decode_test PRIVATE libtracer)
@@ -275,6 +294,14 @@ add_executable(mount_add_oom_test mount_add_oom_test.cpp)
 target_link_libraries(mount_add_oom_test PRIVATE libtracer)
 libtracer_test_warnings(mount_add_oom_test)
 add_test(NAME mount_add_oom COMMAND mount_add_oom_test)
+
+# `make_connection` under the same REFUSING allocator (#930): a connection whose link cannot
+# be wired into the router is rolled back rather than published as a live-looking dead
+# connection. Its own binary for the same whole-program reason as mount_add_oom_test.
+add_executable(conn_add_oom_test conn_add_oom_test.cpp)
+target_link_libraries(conn_add_oom_test PRIVATE libtracer)
+libtracer_test_warnings(conn_add_oom_test)
+add_test(NAME conn_add_oom COMMAND conn_add_oom_test)
 
 add_executable(mount_width_test mount_width_test.cpp)
 target_link_libraries(mount_width_test PRIVATE libtracer)

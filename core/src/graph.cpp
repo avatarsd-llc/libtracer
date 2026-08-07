@@ -1380,19 +1380,18 @@ namespace {
  * @brief Parse a SUBSCRIBER TLV into slot fields — the ONE parse every admission door shares
  *        (ADR-0049; the resolver's parallel subscriber_compact() parse is retired).
  *
- * Extracts
- * the first PATH child's target key (may stay empty — the wire door ignores it) and, from
- * the SETTINGS child, the `delivery_compact` opt-in (NAME "delivery_compact" VALUE u8,
- * RFC-0004 §E.1 / docs/reference/05) and the packed `delivery_policy` (NAME
- * "delivery_policy" VALUE u16, RFC-0022 §3.A) — the SAME child, so the per-subscription
- * policy introduced no new wire structure. Back-compat: a SUBSCRIBER carrying neither (or
- * an older parser) keeps the full-route delivery path and the all-zero default policy —
- * existing conformance vectors unaffected.
+ * Extracts the first PATH child's target key (may stay empty — the wire door ignores it) and,
+ * from the SETTINGS child, the `delivery_compact` opt-in (NAME "delivery_compact" VALUE u8,
+ * RFC-0004 §E.1 / docs/reference/05) and the packed `delivery_policy` (NAME "delivery_policy"
+ * VALUE u16, RFC-0022 §3.A) — the SAME child, so the per-subscription policy introduced no new
+ * wire structure. Back-compat: a SUBSCRIBER carrying neither (or an older parser) keeps the
+ * full-route delivery path and the all-zero default policy — conformance vectors unaffected.
+ * The SETTINGS walk is pair-consuming, the `net::config_reader_t` rule (#927): a forward-compat
+ * pair whose value reads `"delivery_policy"` must not bind the FOLLOWING child as the policy.
  *
  * The policy's reserved bits (6–15) are stored VERBATIM and never interpreted: §3.A says a
- * sender MUST write 0 and a receiver MUST ignore them, which is an ignore, not a reject —
- * so a future sender's bits round-trip through `:subscribers[]` instead of being refused by
- * a node that predates their meaning.
+ * sender MUST write 0 and a receiver MUST ignore them — an ignore, not a reject — so a future
+ * sender's bits round-trip through `:subscribers[]` rather than being refused by an older node.
  */
 void parse_subscriber_tlv(const tlv_t& sub, subscriber_t& s) {
     for (const tlv_t& child : sub.children) {
@@ -1402,14 +1401,15 @@ void parse_subscriber_tlv(const tlv_t& sub, subscriber_t& s) {
             if (auto k = wire::path_key(child)) s.target_key = try_make_target_key(*std::move(k));
         } else if (child.type == type_t::SETTINGS) {
             const std::vector<tlv_t>& q = child.children;
-            for (std::size_t i = 0; i + 1 < q.size(); ++i) {
-                if (q[i].type != type_t::NAME || q[i + 1].type != type_t::VALUE) continue;
+            for (std::size_t i = 0; i + 1 < q.size(); i += 2) {  // whole pairs, not every offset
+                if (q[i].type != type_t::NAME) break;  // key slot lost: stop, do not resync
                 const std::string_view key = detail::as_string_view(q[i].payload);
-                if (key == "delivery_compact" &&
-                    detail::load_le<std::uint8_t>(q[i + 1].payload) != 0)
+                const tlv_t& val = q[i + 1];
+                if (val.type != type_t::VALUE) continue;
+                if (key == "delivery_compact" && detail::load_le<std::uint8_t>(val.payload) != 0)
                     s.ensure_remote().delivery_compact = true;  // cold half only when opted in
                 else if (key == "delivery_policy")
-                    s.policy.bits = detail::load_le<std::uint16_t>(q[i + 1].payload);
+                    s.policy.bits = detail::load_le<std::uint16_t>(val.payload);
             }
         }
     }
@@ -1839,7 +1839,7 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
 result_t<void> graph_t::create_child(vertex_t* parent, const view_t& spec_value) {
     // Parse SPEC{ NAME "type" <sel>, NAME "name" <seg>, SETTINGS "config"? } — the
     // creation spec of docs/reference/05 §0x0E. The two NAMEs are positional pairs
-    // (NAME key, NAME/SETTINGS value), same shape as the qos_settings parse above.
+    // (NAME key, NAME/SETTINGS value), pair-consuming like net::config_reader_t (#927).
     const auto spec = wire::decode(spec_value);
     if (!spec || spec->type != type_t::SPEC) return std::unexpected(status_t::TYPE_MISMATCH);
 
@@ -1847,8 +1847,8 @@ result_t<void> graph_t::create_child(vertex_t* parent, const view_t& spec_value)
     std::span<const std::byte> child_name;
     const tlv_t* config = nullptr;
     const std::vector<tlv_t>& ch = spec->children;
-    for (std::size_t i = 0; i + 1 < ch.size(); ++i) {
-        if (ch[i].type != type_t::NAME) continue;
+    for (std::size_t i = 0; i + 1 < ch.size(); i += 2) {  // whole pairs, never every offset
+        if (ch[i].type != type_t::NAME) break;  // key slot lost: stop, do not resync (#927)
         const std::string_view key = detail::as_string_view(ch[i].payload);
         if (key == "type" && ch[i + 1].type == type_t::NAME) {
             type_sel = detail::as_string_view(ch[i + 1].payload);
