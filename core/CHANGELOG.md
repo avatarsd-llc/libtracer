@@ -14,6 +14,43 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`net::transport_can` no longer attributes a group's slices to a stale binding when the
+  endpoint space wraps (#909).** The endpoint sub-field is 12 bits and `alloc_base` resets
+  to the first data slot when a reservation runs off the end, so a base **recurs** — routine,
+  not exceptional. Two receive-side structures keyed on that base and both aliased once a run
+  was re-issued, because `learned_` was written only via `operator[]` on the exact base id and
+  never erased:
+  - **The stale binding shadowed the live one.** `process_data` takes the FIRST `learned_`
+    entry (ascending base order) whose `[base, base + slice_count)` contains a slice's
+    endpoint, so a wider stale range with a lower base won the scan and filed the slice under
+    the wrong group at the wrong index.
+  - **The reassembly key collided.** The group key is `(node, base-endpoint)`, so a recurring
+    base merged slices left over from an incomplete group into the fresh one. `is_complete`
+    could then be satisfied by a MIX of old and new slices and a **byte-corrupted frame was
+    delivered as valid** — silent cross-talk between two unrelated payloads, not a crash.
+    `core/tests/transport_can_test.cpp` drives the real `send` path around a real wrap and,
+    unfixed, receives one slice of one payload welded onto another.
+
+  Both close on one invariant, enforced when an advertise is learned: **at most one binding
+  may claim an endpoint slot of a node, and a reassembly group lives exactly as long as the
+  binding that feeds it.** A fresh advertise now retires every same-node binding whose run it
+  overlaps and discards the group each was feeding. No wire change and no new API: the
+  overlap test is arithmetic on the CAN ID's own endpoint field, so the bound stays the
+  wire's, and the reclamation counts on the existing `transport_can::dropped_groups()` —
+  whose meaning widens from "a `max_groups` eviction or an `rx_ttl` age-out" to include a
+  re-issued run, one counter for "a group's buffered slices were reclaimed before delivery".
+  A caller that read `dropped_groups() == 0` as "no wraparound has occurred" will now see it
+  tick. `learned_` is no longer insert-only; `learned_binding()` returns `nullopt` for a
+  base whose run has been re-issued.
+
+  Not implemented: the producer **generation** in the advertise framing that
+  [ADR-0077](../docs/adr/0077-can-advertise-carries-a-producer-generation-keying-reassembly.md)
+  also proposes. Its *Implementation status* section records why — redundant against the
+  invariant above, and unable to reach the one residue neither instrument closes (a slice
+  parked before its advertise, which `rx_ttl` bounds).
+
 ### Changed
 
 - **`graph::parse_acl` rejects the non-canonical width, pairing and key shapes that used to
