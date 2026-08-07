@@ -42,7 +42,10 @@ import type { Opt, Tlv } from '@avatarsd-llc/libtracer';
  * detail child, say, is not the STATUS's error).
  *
  * @param tlv  the structured (`opt.PL=1`) parent to scan
- * @param type the wire type code to match (one of {@link TYPE})
+ * @param type the wire type code to match — a value of the core codec's `TYPE`
+ *             map (`TYPE.ERROR`, `TYPE.PATH`, …), not linked here because it is
+ *             re-exported from `@avatarsd-llc/libtracer` and the docs gate
+ *             refuses a cross-package link
  * @returns the first matching child, or `null` when there is none
  */
 export function firstChild(tlv: Tlv | null | undefined, type: number): Tlv | null {
