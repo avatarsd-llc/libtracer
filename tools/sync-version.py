@@ -13,6 +13,8 @@ everywhere and no registry ever sees a version collision:
     - integrations/esp-idf/libtracer/idf_component.yml (ESP Component Registry)
   TypeScript packages (version + internal @avatarsd-llc/* dep ranges):
     - bindings/typescript/packages/{core,client,transport-ws,transport-webtransport}
+    - bindings/typescript/package-lock.json (npm mirrors each workspace manifest
+      into a `packages/<dir>` entry, so it drifts in lockstep or not at all)
   Rust crate:
     - bindings/rust/Cargo.toml
 
@@ -33,8 +35,11 @@ manifests — is the version every registry sees. ``X.Y.Z --check`` verifies the
 tree (including ``VERSION``) already matches an explicit version.
 
 Substitutions are targeted (only the version substring / dep-range value is
-replaced), so comments, key order, and formatting are preserved.
+replaced), so comments, key order, and formatting are preserved. The lockfile is
+edited the same way — in place, no network, no npm — so a bump needs no registry
+round-trip and the file keeps npm's own byte layout everywhere it was not stamped.
 """
+import json
 import pathlib
 import re
 import sys
@@ -53,12 +58,16 @@ CORE_MANIFESTS = [
 ]
 
 # --- TypeScript packages (non-private): version + internal dep ranges ----------
+TS_ROOT = ROOT / "bindings/typescript"
 TS_PACKAGES = [
-    ROOT / "bindings/typescript/packages/core/package.json",
-    ROOT / "bindings/typescript/packages/client/package.json",
-    ROOT / "bindings/typescript/packages/transport-ws/package.json",
-    ROOT / "bindings/typescript/packages/transport-webtransport/package.json",
+    TS_ROOT / "packages/core/package.json",
+    TS_ROOT / "packages/client/package.json",
+    TS_ROOT / "packages/transport-ws/package.json",
+    TS_ROOT / "packages/transport-webtransport/package.json",
 ]
+# npm mirrors each workspace manifest into the lockfile under its workspace-relative
+# directory, so the same two fields live there too and must move together (#862).
+TS_LOCKFILE = TS_ROOT / "package-lock.json"
 PKG_VERSION = re.compile(r'"version"\s*:\s*"(?P<ver>[^"]*)"')
 # An internal @avatarsd-llc/* dependency line: key is the scoped name, value a range.
 INTERNAL_DEP = re.compile(r'(?P<key>"@avatarsd-llc/[a-z0-9-]+")(?P<sep>\s*:\s*")(?P<val>[^"]*)(?P<end>")')
@@ -91,6 +100,63 @@ def dep_range(version):
     major, minor, _patch = (base.split(".") + ["0", "0", "0"])[:3]
     upper = f"0.{int(minor) + 1}.0" if major == "0" else f"{int(major) + 1}.0.0"
     return f">={version} <{upper}"
+
+
+def ts_edits(text, version, rng):
+    """Every version-bearing span in one TS manifest body — or one lockfile entry.
+
+    npm copies a workspace's manifest fields verbatim into its lockfile entry, so a
+    single definition of "what carries a version here" serves both and the two can
+    never disagree about which spans move. Two shapes qualify: the package's own
+    ``"version"``, and any *concrete* internal ``@avatarsd-llc/*`` range. Workspace
+    links (``*`` / ``workspace:*`` in devDependencies) are not published-facing and
+    are left alone; a span already at the target is not an edit.
+
+    @return ``(start, end, current, replacement, what)`` tuples in text order.
+    """
+    edits = []
+    m = PKG_VERSION.search(text)
+    if m is not None and m.group("ver") != version:
+        edits.append((m.start("ver"), m.end("ver"), m.group("ver"), version, "version"))
+    for m in INTERNAL_DEP.finditer(text):
+        val = m.group("val")
+        if val == rng or val == "*" or val.startswith("workspace:"):
+            continue
+        edits.append((m.start("val"), m.end("val"), val, rng, f"dep {m.group('key')}"))
+    edits.sort()
+    return edits
+
+
+def splice(text, edits):
+    """Apply non-overlapping `edits` (as returned by `ts_edits`, in text order)."""
+    out, last = [], 0
+    for start, end, _cur, new, _what in edits:
+        out.append(text[last:start])
+        out.append(new)
+        last = end
+    out.append(text[last:])
+    return "".join(out)
+
+
+def lock_entry_spans(text, keys):
+    """Locate the ``packages/<workspace-dir>`` objects inside a package-lock.json.
+
+    Only those entries mirror a stamped manifest; every other ``"version"`` in the
+    file belongs to a resolved third-party dependency and must not be touched. The
+    object's end comes from the stdlib JSON decoder rather than brace counting, so a
+    brace inside a string value cannot desynchronise the span.
+
+    @return ``{key: (start, end)}`` — half-open spans into `text`.
+    """
+    decoder = json.JSONDecoder()
+    spans = {}
+    for key in keys:
+        m = re.search(r'(?m)^\s*"' + re.escape(key) + r'"\s*:\s*(?=\{)', text)
+        if m is None:
+            sys.exit(f"error: no {key!r} entry in {TS_LOCKFILE.relative_to(ROOT)} (run: npm install --package-lock-only)")
+        _value, end = decoder.raw_decode(text, m.end())
+        spans[key] = (m.end(), end)
+    return spans
 
 
 def run(check, explicit=None):
@@ -131,31 +197,41 @@ def run(check, explicit=None):
     for path, pattern, label in CORE_MANIFESTS:
         stamp_span(path, pattern, version, label)
 
+    def stamp_ts(path, text, edits, prefix):
+        """Record `edits` as drift, or splice them into `path` and record them as changes."""
+        if not edits:
+            return
+        if check:
+            drift.extend((f"{prefix} {what}", cur, new) for _s, _e, cur, new, what in edits)
+        else:
+            path.write_text(splice(text, edits), encoding="utf-8")
+            changed.extend((f"{prefix} {what}", cur, new) for _s, _e, cur, new, what in edits)
+
     # 2. TS package versions + every internal @avatarsd-llc/* dep range
     for path in TS_PACKAGES:
         if not path.exists():
             sys.exit(f"error: not found: {path.relative_to(ROOT)}")
         label = f"ts/{path.parent.name}"
-        stamp_span(path, PKG_VERSION, version, label + " version")
         text = path.read_text(encoding="utf-8")
-        out, last, touched = [], 0, False
-        for m in INTERNAL_DEP.finditer(text):
-            val = m.group("val")
-            # Only rewrite concrete published-facing ranges; leave workspace links
-            # (`*` / `workspace:*` in devDependencies) alone.
-            if val == rng or val == "*" or val.startswith("workspace:"):
-                continue
-            touched = True
-            if check:
-                drift.append((f"{label} dep {m.group('key')}", m.group("val"), rng))
-            else:
-                out.append(text[last : m.start("val")])
-                out.append(rng)
-                last = m.end("val")
-        if touched and not check:
-            out.append(text[last:])
-            path.write_text("".join(out), encoding="utf-8")
-            changed.append((f"{label} internal dep ranges", "…", rng))
+        if PKG_VERSION.search(text) is None:
+            sys.exit(f"error: no version field in {path.relative_to(ROOT)} ({label})")
+        stamp_ts(path, text, ts_edits(text, version, rng), label)
+
+    # 2b. the npm lockfile mirrors those manifests. It is stamped from the same
+    #     `ts_edits` rule applied inside each `packages/<dir>` object — never
+    #     file-wide, or the resolved third-party versions would be rewritten too.
+    #     Checking it is the load-bearing half: before #862 the gate reported "ok"
+    #     while the lockfile still pinned the previous release.
+    if not TS_LOCKFILE.exists():
+        sys.exit(f"error: not found: {TS_LOCKFILE.relative_to(ROOT)}")
+    lock_text = TS_LOCKFILE.read_text(encoding="utf-8")
+    lock_keys = [p.parent.relative_to(TS_ROOT).as_posix() for p in TS_PACKAGES]
+    lock_edits = []
+    for key, (start, end) in lock_entry_spans(lock_text, lock_keys).items():
+        for s, e, cur, new, what in ts_edits(lock_text[start:end], version, rng):
+            lock_edits.append((start + s, start + e, cur, new, f"{key} {what}"))
+    lock_edits.sort()
+    stamp_ts(TS_LOCKFILE, lock_text, lock_edits, "ts lockfile")
 
     # 3. Rust crate
     stamp_span(RUST_CARGO, CARGO_VERSION, version, "rust Cargo.toml")
