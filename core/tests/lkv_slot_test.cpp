@@ -27,7 +27,10 @@
  *   - **exhaustion** — with every hazard index claimed, readers and writers still agree,
  *     which is the fallback ADR-0069 §3 promised (by a different mechanism; see the header);
  *   - **a declined publish is reported** — the whole point of `store` returning `bool`, driven
- *     here by replacing this binary's nothrow `operator new` rather than by inspection.
+ *     here by replacing this binary's nothrow `operator new` rather than by inspection;
+ *   - **the exit sweep spares live participants** (#898) — driven by an injected
+ *     `final_sweep_t`, since a static-destruction object is otherwise unobservable, once as a
+ *     deterministic snapshot of a blocked worker's lists and once as a race a sanitizer sees.
  */
 
 #include "libtracer/lkv_slot.hpp"
@@ -212,6 +215,94 @@ void exhausted_registry() {
 }
 
 /**
+ * @brief The exit sweep must not free the lists of a participant that is still live (#898).
+ *
+ * The sweep is a static-destruction object, so the honest instrument is an **injected
+ * trigger**: `final_sweep_t`'s destructor *is* the whole of the behaviour under test, and
+ * running one on the stack runs exactly the production path at a moment where a worker thread
+ * is provably still claimed. The worker parks nodes, announces that it has, and then blocks —
+ * so the comparison below reads lists nobody is touching, which makes the check deterministic
+ * rather than a race the test hopes to win.
+ */
+void sweep_spares_a_live_participant() {
+    namespace hp = tr::graph::detail_hp;
+    std::printf("hazard_slot_t — the exit sweep leaves a live participant's lists alone:\n");
+
+    std::atomic<bool> parked{false};
+    std::atomic<bool> resume{false};
+    std::atomic<std::size_t> widx{hp::kNoIndex};
+    std::atomic<bool> reread_ok{false};
+    {
+        hazard_slot_t slot;
+        std::thread worker([&] {
+            for (std::uint64_t i = 0; i < 4; ++i) (void)slot.store(make_tagged(i + 1));
+            widx.store(hp::self().index());
+            parked.store(true);
+            while (!resume.load()) std::this_thread::yield();
+            for (std::uint64_t i = 0; i < 64; ++i) (void)slot.store(make_tagged(i + 100));
+            reread_ok.store(intact(slot.load()));
+        });
+
+        while (!parked.load()) std::this_thread::yield();
+        auto& reg = hp::registry();
+        const std::size_t idx = widx.load();
+        check(idx != hp::kNoIndex, "the worker claimed a domain index");
+        const hp::lists_t& l = reg.lists[idx];
+        const hp::node_t* const retired = l.retired;
+        const hp::node_t* const freelist = l.freelist;
+        const std::size_t retired_n = l.retired_n;
+        const std::size_t freelist_n = l.freelist_n;
+        check(retired != nullptr, "and parked nodes on it, so the sweep has something to take");
+
+        {
+            hp::final_sweep_t sweep;  // exactly what exit runs, while the worker is still live
+            (void)sweep;
+        }
+
+        check(reg.cells[idx].claimed.load(), "the worker still owns its index after the sweep");
+        check(l.retired == retired && l.freelist == freelist && l.retired_n == retired_n &&
+                  l.freelist_n == freelist_n,
+              "and the sweep freed none of the nodes that index owns");
+
+        resume.store(true);
+        worker.join();
+        check(reread_ok.load(), "the worker publishes and reads correctly on the far side");
+    }
+    check(g_live.load() == 0, "and every rope is still reclaimed once the slot dies");
+}
+
+/**
+ * @brief The same defect as a race rather than a snapshot: sweeps against a thread that is
+ *        inside `store()` / `load()`, which is the shape ASan and TSan see.
+ *
+ * A plain build can only report a value that came back wrong; the sanitizer legs are what
+ * name the use-after-free on `l.freelist` between `acquire_node`'s read and its use.
+ */
+void sweep_races_a_live_writer(std::size_t sweeps) {
+    namespace hp = tr::graph::detail_hp;
+    std::printf("hazard_slot_t — %zu exit sweeps against a thread still publishing:\n", sweeps);
+    std::atomic<std::size_t> bad{0};
+    {
+        hazard_slot_t slot;
+        std::atomic<bool> stop{false};
+        std::thread worker([&] {
+            for (std::uint64_t i = 1; !stop.load(relaxed_); ++i) {
+                if (!slot.store(make_tagged(i))) bad.fetch_add(1, relaxed_);
+                if (!intact(slot.load())) bad.fetch_add(1, relaxed_);
+            }
+        });
+        for (std::size_t i = 0; i < sweeps; ++i) {
+            hp::final_sweep_t sweep;
+            (void)sweep;
+        }
+        stop.store(true, relaxed_);
+        worker.join();
+    }
+    check(bad.load() == 0, "every publish took and every read returned an intact value");
+    check(g_live.load() == 0, "and the run freed every rope");
+}
+
+/**
  * @brief Whether nothrow allocation in this binary is currently rigged to fail.
  *
  * Only `hazard_slot_t::store`'s node allocation uses the nothrow form on the paths this test
@@ -319,6 +410,9 @@ int main() {
 
     exhausted_registry();
     check(g_live.load() == 0, "the overflow run freed every rope too");
+
+    sweep_spares_a_live_participant();
+    sweep_races_a_live_writer(200);
 
     sp_atomic_never_declines();
     declined_publish();

@@ -68,6 +68,27 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Fixed
 
+- **The hazard domain's exit sweep no longer frees lists a live thread still owns (#898).**
+  Only builds that bind `hazard_slot_t` (`-DLIBTRACER_LKV_SLOT=hazard_slot_t`) reach this;
+  the default `sp_atomic_slot_t` has no domain. `final_sweep_t::~final_sweep_t` ran at static
+  destruction and unconditionally `delete`d every index's `retired` and `freelist` and then
+  assigned `lists_t{}` over each — with no check of `cells[i].claimed`, the flag that exists
+  precisely to mark live ownership, no scan of the `pinned` announcements, and no lock. The
+  sweep is a function-local static of `registry()`, so it is ordered only against objects
+  constructed *after* it: any static constructed earlier is destroyed after the sweep and may
+  join a worker that ran during it, and no ordering at all covers a thread that has simply not
+  exited. A still-claimed participant inside `store()`/`load()` therefore had its `freelist`
+  and `retired` mutated and freed underneath it — a data race and a use-after-free, reachable
+  without detached threads. The sweep now takes each index through the **same** operation a
+  participant uses to take it (a `compare_exchange_strong` on `claimed`, a `test_and_set` on
+  `overflow_lock`), which makes the check an interlock rather than a sample: either a live
+  thread holds the index and the sweep never touches its lists, or the sweep holds it and no
+  thread can claim it while they are being freed. Nothing blocks — an index the sweep cannot
+  get is skipped, never waited for. It also mirrors `scan`'s `seq_cst` fence and announcement
+  read, so a node a live reader has pinned is left allocated rather than freed. Skipped state
+  leaks, which is the correct report for a thread that outlived the domain; normal teardown is
+  unchanged, since a participant that has run its destructor has already released its index.
+
 - **`transport_vertex_t::set_link_state` and `::module_for` are now thread-safe (#881).** Both
   are public, and both read `ctl_m_`-guarded state with no lock: `set_link_state` did
   `conns_.find` while `make_connection` inserted into and `remove_connection` erased from that
@@ -91,6 +112,7 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   hot-path cost. `net_control_plane_race_test` gained a section that drives both public readers
   against their writers through the production `:children[]` wiring; it is TSan-clean with the
   fix and reports on either wrapper reverted.
+
 - **A connection whose link cannot be wired into the router is now rolled back instead of
   published as a live-looking dead connection (#930).** `transport_vertex_t::make_connection`
   called `fwd_router_t::add_child` as a plain statement and discarded its `bool`. That `bool`
@@ -159,6 +181,20 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   abandoned) — zero re-attempts would truncate silently, an unbounded retry would spin. No
   signature change; nothing on the success path changed (the classification lives entirely
   inside the pre-existing `n <= 0` arm).
+
+- **A `status_t` gained without a wire mapping is now a build error, not a mislabelled error
+  code on the wire (#876).** The L4→wire bridge `error_code(status_t)` ended in
+  `return wire::err_t::PATH_NOT_FOUND;` after an already-exhaustive switch, so the first
+  enumerator anyone added to `status_t` would have been reported to peers as
+  `tr::path::not_found` (0x0020) — telling them their *address* was wrong, and inverting the
+  retry disposition they read off the RFC-0002 registry. Both hand-written maps out of
+  `status_t` (the bridge, and `to_string` in `status.hpp`) lose their fall-through tails, and
+  the library compiles with `-Werror=switch` (MSVC `/we4062`), on the host build and in the
+  ESP-IDF component alike, so the unmapped enumerator reddens the build at both sites. The
+  two enums stay separate — `err_t` is the wire registry, `status_t` is L4 vocabulary — and
+  every existing status maps to exactly the `err_t` it mapped to before; no wire change.
+  `to_string` narrows its contract: its argument must be a `status_t` enumerator (every
+  status the library produces is one), where before an out-of-range cast answered `"unknown"`.
 
 - **`stream_endpoint_t::write_all` no longer truncates a frame when a signal interrupts the
   write (#903).** The two sibling full-write helpers disagreed on interrupted syscalls:

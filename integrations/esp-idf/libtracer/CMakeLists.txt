@@ -291,6 +291,16 @@ idf_component_register(
 # C++ standard; pin it here so the component is correct regardless of project default.
 target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_23)
 
+# -Werror=switch, mirroring core/CMakeLists.txt — the SAME core sources compile here, and the
+# hand-written maps out of closed enums (status_t -> wire::err_t at the L4->wire cast point,
+# status_t -> its wire name) have no `default:` label and no fall-through tail, so an unmapped
+# enumerator must be a red build wherever those TUs are compiled (#876). Set explicitly rather
+# than inherited: a project's warning level is the project's business, and IDF promotes
+# warnings to errors only under CONFIG_COMPILER_WARN_WRITE_STRINGS-style opt-ins and its own CI
+# flag — this guarantee cannot be left to the consumer's build settings. PRIVATE, so a
+# dependent component's switches are untouched.
+target_compile_options(${COMPONENT_LIB} PRIVATE -Werror=switch)
+
 # The vertex lock-stripe count (CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES, see Kconfig) now
 # rides the generated config.hpp above — it reaches every TU as the ordinary constexpr
 # `tr::graph::kVertexLockStripes` through ONE shared header, so the old PUBLIC compile

@@ -173,10 +173,18 @@ target_compile_features(libtracer PUBLIC cxx_std_23)
 # target and are unaffected by the file name. (The ESP-IDF component archive stays
 # `liblibtracer.a` — that name is fixed by the IDF component build, a separate tree.)
 set_target_properties(libtracer PROPERTIES OUTPUT_NAME tracer)
+# -Werror=switch (MSVC C4062) is a HARD error, not a taste warning: the library carries
+# hand-written maps out of closed enums — status_t -> wire::err_t at the L4->wire cast point
+# (op_resolve_walk.hpp), status_t -> its wire name (status.hpp) — and those switches are the
+# only thing keeping a new enumerator from being reported as some OTHER member. None of them
+# carries a `default:` label or a fall-through tail, so the enumerator that nobody mapped is a
+# red build here rather than a mislabelled error code on the wire at a peer (#876). Promoted
+# per switch, not blanket -Werror: a warning that has no wire consequence still must not fail
+# a build on a toolchain nobody has tried yet.
 if(MSVC)
-    target_compile_options(libtracer PRIVATE /W4)
+    target_compile_options(libtracer PRIVATE /W4 /we4062)
 else()
-    target_compile_options(libtracer PRIVATE -Wall -Wextra)
+    target_compile_options(libtracer PRIVATE -Wall -Wextra -Werror=switch)
 endif()
 
 # mem_cuda — the GPU device backend (docs/adr/0024). OFF by default: it needs the
@@ -315,9 +323,9 @@ if(LIBTRACER_WITH_QUIC)
     target_include_directories(libtracer_quic PUBLIC "${MSQUIC_INCLUDE_DIR}")
     target_link_libraries(libtracer_quic PUBLIC libtracer msquic)
     if(MSVC)
-        target_compile_options(libtracer_quic PRIVATE /W4)
+        target_compile_options(libtracer_quic PRIVATE /W4 /we4062)
     else()
-        target_compile_options(libtracer_quic PRIVATE -Wall -Wextra)
+        target_compile_options(libtracer_quic PRIVATE -Wall -Wextra -Werror=switch)
     endif()
 endif()
 

@@ -74,6 +74,26 @@ static_assert(struct_opt(std::byte{0x00}) == std::byte{0x00});
 /**
  * @brief Map an L4 status_t to its registered tr:: error code (RFC-0002 §D registry, wire::err_t) —
  *        the u16 the kind=ERROR reply's ERROR{VALUE} identity carries.
+ *
+ * @section error_code_exhaustive Why there is no fall-through
+ *
+ * This is the L4→wire cast point, and the two enums either side of it are deliberately separate
+ * registries: `err_t` is the WIRE registry (`tr::wire`, L2/L3), `status_t` is L4 graph
+ * vocabulary, and L4 does not bind wire values (STYLE.md — dependencies point up the layers
+ * only). Keeping them apart means the mapping is hand-written, and a hand-written mapping needs
+ * an instrument that notices when it falls behind its input.
+ *
+ * The instrument is the compiler. The switch carries neither a `default:` label nor a
+ * fall-through tail, so `-Wswitch` — an error under the `-Werror=switch` this library compiles
+ * with — names this switch the moment an enumerator is added to `status_t` without an arm here.
+ * The retired tail was `return wire::err_t::PATH_NOT_FOUND;`, which made an unmapped status a
+ * *silent wire mislabel* instead: a future transport-down or version-mismatch status would have
+ * gone out as `tr::path::not_found` (0x0020), telling the peer its ADDRESS was wrong and
+ * inverting the retry disposition it reads off the registry (#876).
+ *
+ * @warning @p s must be a `status_t` enumerator, so the end of this function is unreachable by
+ *          construction: a status is minted from the enumerators alone, and no path casts an
+ *          integer — least of all a wire byte — into one.
  */
 [[nodiscard]] wire::err_t error_code(status_t s) noexcept {
     switch (s) {
@@ -94,7 +114,7 @@ static_assert(struct_opt(std::byte{0x00}) == std::byte{0x00});
         case status_t::PATH_IN_USE:
             return wire::err_t::PATH_IN_USE;
     }
-    return wire::err_t::PATH_NOT_FOUND;
+    std::unreachable();
 }
 
 /**
