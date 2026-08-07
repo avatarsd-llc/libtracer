@@ -16,9 +16,11 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
-- **`graph::parse_acl` rejects every ACE shape the builder never emits (#906).** The
-  `:acl` write gate read its fields leniently, and on a security surface leniency does not
-  lose a field — it changes what the document grants. Four arms are closed, each with its
+- **`graph::parse_acl` rejects the non-canonical width, pairing and key shapes that used to
+  read leniently (#906).** Not *every* shape the builder never emits — a two-byte
+  `access_mask` and a non-canonical key ordering are both unemitted and both still parse, on
+  purpose. The `:acl` write gate read its fields leniently, and on a security surface
+  leniency does not lose a field — it changes what the document grants. Four arms are closed, each with its
   own rejection vector in `core/tests/security_acl_test.cpp`:
   - **Width-tolerant numeric reads inverted a decision.** `detail::load_le` reads the low
     `min(size, sizeof(T))` bytes, so a `type` sent big-endian as `u16` `0x0001` (DENY)
