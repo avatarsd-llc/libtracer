@@ -201,6 +201,18 @@ with its platform's blocking primitive.
 :members:
 ```
 
+The two sentinels its liveness fields default to. They are published because the struct's own
+member docs `@ref` them, and an `@ref` to a symbol no page publishes is a dead link the docs
+gate rejects — the same rule that forbids `@ref`-ing a private.
+
+```{doxygenvariable} tr::net::kCanDefaultPeerTtl
+:project: libtracer
+```
+
+```{doxygenvariable} tr::net::kCanRxTtlFromPeerTtl
+:project: libtracer
+```
+
 ```{doxygenclass} tr::net::transport_can
 :project: libtracer
 :members:
