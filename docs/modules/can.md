@@ -47,7 +47,12 @@ host gets unless it says otherwise.
 **The binding** (`tr::net::transport_can`) joins all of that to a real bus
 through the `can_link_t` seam. `socketcan_link_t` is the production Linux
 implementation, a `PF_CAN` raw socket with a receive thread. A different platform
-implements the same seam.
+implements the same seam — and inherits the same admission rule, because the rule
+lives at the seam rather than in each port: `can_rx_admissible` (29-bit data frames
+only; remote-request, 11-bit standard and error frames are not traffic) and
+`can_tx_admissible` (a declared length must fit the mode's data field). A port
+decodes those flags from its own driver's representation, but does not get to reach
+its own verdict.
 
 **The TX pool** (`tr::net::can_tx_pool_t`) exists for *asynchronous* links only.
 A synchronous link needs none of it — the kernel copies the frame inside the
@@ -189,6 +194,18 @@ with its platform's blocking primitive.
 ```{doxygenclass} tr::net::can_link_t
 :project: libtracer
 :members:
+```
+
+```{doxygenfunction} tr::net::can_max_len
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::can_rx_admissible
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::can_tx_admissible
+:project: libtracer
 ```
 
 ```{doxygenclass} tr::net::socketcan_link_t

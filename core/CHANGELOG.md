@@ -16,6 +16,23 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **The `can_link_t` seam owns its admission rule, so the two ports can no longer disagree
+  about which frames are real (#931).** `twai_link_t` filtered remote-request and 11-bit
+  standard frames on ingress and bounded classic length on egress; `socketcan_link_t` did
+  neither. A `CAN_RAW` socket carries no filter by default, so an RTR frame reached
+  `socketcan_link_t`'s receiver as a data slice whose DLC promised bytes it never carried —
+  and on egress a classic frame declaring 9–64 bytes `memcpy`'d straight past the 8-byte
+  kernel `struct can_frame` on the stack, held back only by the seam's precondition. Rather
+  than copy the twai checks into the sibling, the rule now lives at the seam itself, in
+  `transport_can.hpp`: `tr::net::can_rx_admissible(extended, remote, error)` and
+  `tr::net::can_tx_admissible(frame)`, over `tr::net::can_max_len(fd)` — a thin adapter onto
+  the L1 widths in `tr::view::can_max_data`, so the seam adds no second copy of the numbers
+  (`can_frame_data_t::data` is likewise sized from `tr::view::kCanFdMaxData` now). Both
+  links call them; each still decodes the flags from its own driver's representation, but
+  the verdict is reached in one place. Behaviour change: a `socketcan_link_t` receiver no
+  longer sees RTR / standard / error frames, and an over-length classic frame is dropped
+  rather than emitted.
+
 - **`transport_can` exposes the sibling drop counters, and its RX state is bounded and
   aged (#912).** The CAN ingress buffers grew on the receive thread with nothing expiring
   and nothing counting a drop, unlike every sibling transport. Three parts:
