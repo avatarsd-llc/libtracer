@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <cstring>
 #include <expected>
+#include <limits>
 #include <span>
 #include <type_traits>
 
@@ -40,6 +41,12 @@
 // A dedicated `grammar` sub-namespace (not `detail`) so wire-layer code keeps
 // resolving `detail::` to the layer-free `tr::detail` byte helpers.
 namespace tr::wire::grammar {
+
+// A wire `length` is at most 0xFFFFFFFF (the `LL` width), so every `length ->
+// std::size_t` narrowing in this file is value-preserving on any target with a
+// 32-bit-or-wider `std::size_t`. The one narrowing that runs BEFORE the total-size
+// bound (the PATH_REF shape check) rests on exactly this; the rest run after it.
+static_assert(sizeof(std::size_t) >= 4, "a wire length must narrow to size_t without truncating");
 
 /**
  * @brief The contiguous byte-source cursor — the grammar's only source today.
@@ -84,6 +91,61 @@ struct span_cursor {
         fn(buf.subspan(off, n));
     }
 };
+
+/**
+ * @brief Does the declared TLV's total encoded size fit in @p avail? — the bound
+ *        taken without ever forming a value that can wrap (#921).
+ *
+ * Split out of @ref parse_header, and templated on the *size type* rather than
+ * hard-wired to `std::size_t`, because the defect it closes is invisible at the
+ * host's width: a wire-declared `length` is up to `0xFFFFFFFF` (the `LL` width),
+ * so `header + length + ts_size + crc_size` overflows a **32-bit** `std::size_t`
+ * — the primary embedded target's (ESP32-C6 / rv32). Narrowing that sum before
+ * the compare made a hostile `length = 0xFFFFFFFF` frame present a `total` of 17,
+ * pass `avail < total`, and hand `walk` a payload span far past the buffer.
+ * Templating the width is what makes that reachable — and testable — from a
+ * 64-bit host: a `Size = std::uint32_t` instantiation runs the identical
+ * arithmetic the rv32 build compiles (`grammar_bounds_test`).
+ *
+ * The bound is taken by subtracting FROM @p avail rather than by summing toward
+ * it, so no intermediate can wrap at any `Size` and the whole check stays
+ * single-word on a 32-bit target. Each step is bounded by the one before:
+ *
+ * 1. `avail >= header` is established here, not assumed, so `avail - header` —
+ *    the room a body plus trailer may occupy — cannot wrap;
+ * 2. `length <= room` is then checked, so `room - length` cannot wrap either;
+ * 3. `ts_size + crc_size` is at most 12 and is checked against that remainder.
+ *
+ * Only once all three hold is `total` formed, and every term of it is by then
+ * known to be at or under @p avail — which is why the result cannot wrap.
+ *
+ * Summing into a `std::uint64_t` and comparing there is equally correct and was
+ * the first shape tried; it lost on measurement. On rv32 (`-O2`, esp-15.2.0) the
+ * u64 sum kept the length decode's high word live, cost +27 instructions and
+ * forced a stack frame into a previously leaf, frame-free header parse — ~40% on
+ * the lazy tier's O(header) sibling skip, which is the traffic `DEFER` exists to
+ * keep cheap. This form costs +1 instruction on a trailer-less header and +3
+ * with a trailer. Step 1 repeats @ref parse_header's own minimum-size check,
+ * which cannot move here (the length load must stay behind it) — the compiler
+ * folds the dominated repeat, so being self-contained costs nothing.
+ *
+ * @param total Receives the total encoded size; untouched when the bound fails.
+ * @return False ⇔ the declared TLV does not fit — the caller's FRAME_TRUNCATED.
+ */
+template <class Size>
+[[nodiscard]] constexpr bool total_size_fits(Size avail, Size header, std::uint32_t length,
+                                             Size ts_size, Size crc_size, Size& total) noexcept {
+    static_assert(!std::numeric_limits<Size>::is_signed,
+                  "the bound relies on unsigned subtraction");
+    static_assert(sizeof(Size) >= sizeof(std::uint32_t), "a wire length must fit the size type");
+    if (avail < header) return false;
+    const Size room = static_cast<Size>(avail - header);
+    if (length > room) return false;
+    const Size rest = static_cast<Size>(room - static_cast<Size>(length));
+    if (static_cast<Size>(ts_size + crc_size) > rest) return false;
+    total = static_cast<Size>(header + static_cast<Size>(length) + ts_size + crc_size);
+    return true;
+}
 
 /**
  * @brief When `parse_header` checks a CRC trailer (ADR-0053 §4).
@@ -152,7 +214,9 @@ template <class Cursor>
     const std::size_t header = opt.ll ? 6u : 4u;
     if (avail < header) return std::unexpected(err_t::FRAME_TRUNCATED);
 
-    const std::uint64_t length = cur.load_le(2, opt.ll ? 4u : 2u);
+    // u32, not u64: the `LL` width caps a wire length at 4 bytes, so this narrow is exact
+    // — and saying so is what lets the total-size bound below stay single-word (#921).
+    const std::uint32_t length = static_cast<std::uint32_t>(cur.load_le(2, opt.ll ? 4u : 2u));
     // The one per-type structural rule in the grammar (RFC-0024 §4.2/§4.3): a PATH_REF body is
     // a fixed-stride 8-byte record array, so its shape is not derivable from the header alone
     // the way every other type's is. PL/LL forbidden, length a whole number of elements, count
@@ -163,8 +227,14 @@ template <class Cursor>
     }
     const std::size_t ts_size = opt.ts ? (opt.tf ? 4u : 8u) : 0u;
     const std::size_t crc_size = opt.cr ? (opt.cw ? 2u : 4u) : 0u;
-    const std::size_t total = static_cast<std::size_t>(header + length + ts_size + crc_size);
-    if (avail < total) return std::unexpected(err_t::FRAME_TRUNCATED);
+    // The total-size bound, taken without ever forming a value that can wrap (#921):
+    // a 32-bit `std::size_t` cannot hold `header + 0xFFFFFFFF + trailer`, and the sum
+    // this replaces was narrowed BEFORE the compare — small enough to pass this very
+    // check, after which `walk` read a payload span far past the buffer.
+    std::size_t total = 0;
+    if (!total_size_fits(avail, header, length, ts_size, crc_size, total)) {
+        return std::unexpected(err_t::FRAME_TRUNCATED);
+    }
 
     if (opt.cr && crc_policy == crc_check_t::VERIFY) {
         const std::size_t pay_len = static_cast<std::size_t>(length);
