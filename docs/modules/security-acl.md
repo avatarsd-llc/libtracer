@@ -56,6 +56,23 @@ Parse-time validation is policy-gated: under the ALLOW-only profile a `DENY`
 entry or an unrecognized flag is rejected with `TYPE_MISMATCH` at write time, so
 stored entries never carry a semantic the running policy cannot evaluate.
 
+**Parsing an ACL is strict, and that is a security property, not fussiness**
+([#906](https://github.com/avatarsd-llc/libtracer/issues/906)). A lenient read of
+an access-control document does not lose a field — it changes what the document
+grants. A `type` sent as a big-endian `u16` `0x0001` (DENY) has `0x00` in its low
+byte, so a width-tolerant load turned a refusal into a grant; a dropped
+`expires_ns` turned a time-limited grant permanent; an ignored unknown key
+dropped whatever restriction a newer writer meant to add. So `parse_acl` rejects
+a numeric field whose payload is empty or **wider** than the field, a known key
+whose value TLV is the wrong type, an unknown key, a repeated key, and a body
+whose `(NAME key, value)` pairing does not hold. A payload *narrower* than the
+field is fine: little-endian zero-extension names the same integer, which is why
+the `acl/acl-aces` conformance vector's two-byte `access_mask` keeps parsing.
+
+The walk is pair-consuming, the same mechanics `net::config_reader_t` uses — and
+the exact opposite ruling on unknown keys, deliberately. Config is where a newer
+peer legitimately sends more than the receiver understands; an ACL is not.
+
 ## Pitfalls
 
 - **`NO_MATCH` is not `DENY`.** A policy that collapses the two takes the

@@ -14,9 +14,9 @@
  * `graph_t::create_child` (the creation SPEC) and `parse_subscriber_tlv` (the SUBSCRIBER
  * QoS SETTINGS) read the same positional pairs at L4, where `tr::net` may not be a
  * dependency — dependencies point up the layers only — so they carry the pair-consuming
- * RULE (#927) rather than this type. `graph::parse_acl` is the remaining every-offset
- * scan; it is deliberately left alone here because #906 rewrites that walk whole under
- * the opposite unknown-key ruling (reject, not ignore).
+ * RULE (#927) rather than this type. `graph::parse_acl` carries it too, as of #906, under
+ * the OPPOSITE unknown-key ruling (reject, not ignore): same mechanics, different
+ * disposition, because an ACL is a security document and a connection config is not.
  */
 #pragma once
 
