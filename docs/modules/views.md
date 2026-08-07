@@ -150,7 +150,7 @@ value is one segment, and appears the moment a real transport is attached: every
 transport whose `transport_t::delivers_ropes()` returns true
 (`core/include/libtracer/transport.hpp:354`; TCP, UDP, WS, QUIC, WebTransport and CAN
 all override it) can hand up a chain. A CAN reassembly group chains one link per slice
-(`can_reassembly_t::assemble`, `core/include/libtracer/can_reassembly.hpp:181-189`), and
+(`can_reassembly_t::assemble`, `core/include/libtracer/can_reassembly.hpp:191-199`), and
 a fragmented WebSocket message chains one link per fragment
 (`ws_assembler_t::on_data`, `core/src/transport_ws.cpp:62-78`). A consumer that cannot
 promise contiguity calls `materialize()` (`rope.hpp:171`) instead — zero copy when the

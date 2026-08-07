@@ -40,7 +40,7 @@ exhaustive:
 
 | Site | Code | Who provokes it |
 | --- | --- | --- |
-| CAN egress window table | `core/include/libtracer/view_can.hpp:100` — `frames_.push_back` in `view_can_frames_t::split`, reached on every send (`core/src/transport_can.cpp:243`) | the sender: one `push_back` per frame the payload splits into |
+| CAN egress window table | `core/include/libtracer/view_can.hpp:100` — `frames_.push_back` in `view_can_frames_t::split`, reached on every send (`core/src/transport_can.cpp:300`) | the sender: one `push_back` per frame the payload splits into |
 | Label-table binds (#603) | `core/src/route_handle.cpp:82`, `:179`, `:236` — `std::pmr::vector::push_back` and the route copy beside it | a **peer**: an ingress `ADVERTISE` binds a label. `max_label_bindings_per_link` bounds the entry *count*, not the allocation's failure mode |
 | `try_reserve` on `-fno-exceptions` (#923, #850) | `core/include/libtracer/mem_heap.hpp:157-171` — `try_grow` catches the container's own allocation failure where it can; where it cannot (`-fno-exceptions`, where `reserve` `abort()`s with nothing to catch) it falls back to probe-then-commit | on the MCU profile only, anything concurrent — a FreeRTOS context switch between the probe's free and the `reserve` is enough. The hosted profile no longer has the window; the exception-free one closes it by migrating the site to the ADR-0065 failable seam, not by a better `try_reserve` |
 

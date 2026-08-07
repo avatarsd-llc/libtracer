@@ -14,6 +14,48 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Added
+
+- **`transport_can` exposes the sibling drop counters, and its RX state is bounded and
+  aged (#912).** The CAN ingress buffers grew on the receive thread with nothing expiring
+  and nothing counting a drop, unlike every sibling transport. Three parts:
+  - **The injected-bound seam is reachable at last.** `can_reassembly_t` was
+    *default-constructed* inside the transport, so `max_groups` was `0` and its
+    evict-oldest could never fire however a deployment was configured. It is now
+    constructed from new `transport_can_config_t` fields — `reasm_mr` (a
+    `std::pmr::memory_resource*`, default the process heap), `max_groups`, `max_pending`
+    and `rx_ttl` — and the pending-slice queue draws from the same injected resource, so
+    the RX thread no longer reaches the global heap. The `can` factory parses
+    `max_groups`, `max_pending` and `rx_ttl_ms` from the connection's config SETTINGS
+    TLV (`0` = unbounded, host-bounded per RFC-0006, matching `max_peers`), and
+    `can_transport_factory` takes an optional `std::pmr::memory_resource*` — a resource
+    is a pointer, not a wire value, so it is injected at registration time.
+  - **`pending_` is bounded and aged.** A data frame with no matching binding was parked
+    forever: the only drain is `learn_advertise`'s covered-range re-drive, so a peer that
+    never advertises (or a bus that dropped the advertise — the exact failure CAN
+    produces) grew it without limit. It is now capped by `max_pending` (evict-oldest and
+    count) and swept of entries older than `rx_ttl`.
+  - **An incomplete reassembly group no longer pins its slices forever.** `erase` is
+    reached only after `is_complete`, so any lost data slice left a group buffered for the
+    transport's life. `can_reassembly_t` gains `set_now(std::uint64_t)` and
+    `sweep_stale(std::uint64_t max_age)` — the buffer stays clock-free, the caller stamps
+    it — and `transport_can` sweeps on every inbound advertise.
+
+  New public accessors on `transport_can`: `dropped_rx()` (inbound slices reclaimed by the
+  cap or the age-out), `dropped_tx()` (a send that never reached the bus: allocation
+  failure, an empty split, or an unencodable manifest), `dropped_groups()` (reassembly
+  groups reclaimed before delivery — the accessor the buffer's own counter never had) and
+  `pending_slices()`. `rx_ttl` left at `0` tracks the configured `peer_ttl` rather than
+  introducing a second window: a peer already considered gone cannot complete RX state.
+  Unlike the opt-in count caps the age-out is **always live**, so it is the bound that
+  holds under the shipped default config. That "always" is now literal: a `peer_ttl` of
+  `0` derives an `rx_ttl` of `0`, which the peer enumeration and the reassembly sweep both
+  read as *instantly expired* — the pending age-out used to read the same `0` as *sweep
+  disabled* and return early, so one degenerate config value silently re-opened the
+  unbounded growth this entry closes. Zero now means the same thing to all three, and a
+  negative window (previously cast to `std::uint64_t` and compared against ~1.8e19, so it
+  reclaimed nothing at all) is normalized to zero at construction. No wire change.
+
 ### Fixed
 
 - **A connection whose link cannot be wired into the router is now rolled back instead of

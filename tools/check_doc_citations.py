@@ -200,7 +200,7 @@ ANCHORS = [
     ('core/include/libtracer/backend.hpp:188',
      '* @brief Reclaim @p seg through its backend — the module-set destroy dispatch'),
     # core/include/libtracer/can_reassembly.hpp
-    ('core/include/libtracer/can_reassembly.hpp:181',
+    ('core/include/libtracer/can_reassembly.hpp:191',
      '[[nodiscard]] std::optional<tr::view::rope_t> assemble(const reassembly_key_t& key) const {'),
     # core/include/libtracer/config.hpp
     ('core/include/libtracer/config.hpp:77', '* CMake: `-DLIBTRACER_VERTEX_LOCK_STRIPES=8`; ESP-IDF: menuconfig'),
@@ -395,8 +395,8 @@ ANCHORS = [
      '[[nodiscard]] virtual bool delivers_ropes() const { return false; }',
      'rx_.set_rope([](void* c, view::rope_t f) { (*static_cast<F*>(c))(std::move(f)); }, &sink);'),
     # core/include/libtracer/transport_can.hpp
-    ('core/include/libtracer/transport_can.hpp:271', '[[nodiscard]] bus_link_t* bus() override { return this; }'),
-    ('core/include/libtracer/transport_can.hpp:290',
+    ('core/include/libtracer/transport_can.hpp:352', '[[nodiscard]] bus_link_t* bus() override { return this; }'),
+    ('core/include/libtracer/transport_can.hpp:371',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }'),
     # core/include/libtracer/transport_quic.hpp
     ('core/include/libtracer/transport_quic.hpp:153',
@@ -610,7 +610,7 @@ ANCHORS = [
     ('core/src/route_handle.cpp:82', 't.ingress.push_back(ingress_entry_t{.label = label, .binding = std::move(binding)});'),
     ('core/src/route_handle.cpp:179', 't->egress.push_back(egress_entry_t{', 'bool route_handle_t::record_egress(std::string_view out_link, std::uint16_t label,'),
     ('core/src/route_handle.cpp:236', 't->egress.push_back(egress_entry_t{', 'std::pair<std::uint16_t, bool> route_handle_t::ensure_egress(std::string_view out_link,'),
-    ('core/src/transport_can.cpp:243', 'tr::view::view_can_frames_t::split(*payload, cfg_.mode);'),
+    ('core/src/transport_can.cpp:300', 'tr::view::view_can_frames_t::split(*payload, cfg_.mode);'),
 ]
 
 
