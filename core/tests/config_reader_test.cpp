@@ -15,6 +15,11 @@
  *
  *   - the hijack vectors (an unknown forward-compat key, and a plain value equal to
  *     another queried key) no longer bind anything;
+ *   - the same vector on the `cert` + `key` shape, which is where the defect mattered
+ *     most and where it lived longest: `parse_wt_config` kept a hand-rolled every-offset
+ *     copy of this walk, so a forward-compat `hint = "key"` pair re-pointed a node's
+ *     PRIVATE KEY at an attacker-named file. Both quic and webtransport run this reader
+ *     now, so the walk pinned here is the one they execute;
  *   - forward-compat TOLERANCE survives — unknown pairs are still skipped, now as
  *     WHOLE pairs. This is the deliberate opposite of the ACL parse ruling (#906):
  *     config tolerates what it does not understand because a newer peer legitimately
@@ -365,12 +370,54 @@ void test_desync_stops_the_walk() {
     check(!cfg.u16("port").has_value(), "nothing after the desync is bound (no resync guessing)");
 }
 
+/**
+ * @brief The security-sensitive shape: the quic / webtransport `cert` + `key` pair.
+ *
+ * `parse_wt_config` (`core/src/transport_webtransport.cpp`) kept a hand-rolled
+ * every-offset copy of this walk after the other five parsers were migrated, so the
+ * defect survived on the one shape where it names a **private key file**. The vector
+ * is the issue's own, retargeted at `key`:
+ *
+ * `SETTINGS{ NAME "cert" NAME "/etc/node/cert.pem", NAME "key" NAME "/etc/node/key.pem",
+ *            NAME "hint" NAME "key", NAME "/tmp/attacker-key.pem" NAME "pem" }`
+ *
+ * A newer peer's forward-compat `hint = "key"` put the string `"key"` in a VALUE slot;
+ * the every-offset scan re-read it as a key, bound the FOLLOWING child as the private-key
+ * path, and last-match-wins overrode the legitimate `/etc/node/key.pem`. Observed under
+ * the defect: `key = /tmp/attacker-key.pem`. Both transports now run this reader, so the
+ * walk under test is the one they execute.
+ */
+void test_cert_key_pair_cannot_be_hijacked() {
+    std::printf("the cert/key shape (quic + webtransport) cannot be hijacked:\n");
+    std::vector<std::byte> ch;
+    name_child(ch, "cert");
+    name_child(ch, "/etc/node/cert.pem");
+    name_child(ch, "key");
+    name_child(ch, "/etc/node/key.pem");
+    name_child(ch, "hint");
+    name_child(ch, "key");
+    name_child(ch, "/tmp/attacker-key.pem");
+    name_child(ch, "pem");
+    const auto blob = settings(ch);
+    const config_reader_t cfg(&blob->tlv);
+
+    const std::optional<std::string_view> k = cfg.name("key");
+    std::printf("  (observed key = %.*s)\n", static_cast<int>(k.value_or("<absent>").size()),
+                k.value_or("<absent>").data());
+    check(is(cfg.name("key"), "/etc/node/key.pem"), "the legitimate private-key path survives");
+    check(!is(cfg.name("key"), "/tmp/attacker-key.pem"),
+          "`key` is NOT hijacked to the attacker-controlled following child");
+    check(is(cfg.name("cert"), "/etc/node/cert.pem"), "`cert` is unaffected");
+    check(is(cfg.name("hint"), "key"), "the unknown pair still reads as an ordinary pair");
+}
+
 }  // namespace
 
 int main() {
     std::printf("config_reader_t — the pair-consuming SETTINGS walk (#927)\n\n");
     test_unknown_key_value_cannot_hijack();
     test_known_key_value_cannot_hijack();
+    test_cert_key_pair_cannot_be_hijacked();
     test_unknown_pairs_are_still_tolerated();
     test_universal_keys_unchanged();
     test_kind_private_keys_unchanged();

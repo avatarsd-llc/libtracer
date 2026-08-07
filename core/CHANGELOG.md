@@ -32,6 +32,22 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   belongs now stops the walk instead of resynchronizing on the next offset, and a trailing
   unpaired key is still ignored. Well-formed configs parse identically. No signature change.
 
+- **The same defect is closed on the webtransport cert/key parse and on two graph-layer pair
+  walks (#927).** `parse_wt_config` (`transport_webtransport.cpp`) kept a hand-rolled
+  every-offset copy of the walk, so the defect survived on the one shape that names a **private
+  key file**: a forward-compat `hint = "key"` pair let the string `"key"` be re-read as a key,
+  binding the following child as the private-key path and overriding the legitimate one under
+  last-wins. It now goes through `net::config_reader_t` like the quic factory, leaving all six
+  transport-side consumers on one walk. Two L4 parsers read the same positional grammar and
+  cannot depend on `tr::net` (dependencies point up the layers only), so they carry the
+  pair-consuming *rule* instead: `graph_t::create_child` — where a `hint = "name"` pair created
+  the child at an address the sender never asked for, and the same shape re-bound `type` or
+  `config` — and the SUBSCRIBER QoS `SETTINGS` parse, where it injected a `delivery_policy`
+  (reliability, priority, the durability request) into a subscription that requested none. Both
+  now step whole pairs and stop, rather than resynchronize, on a desynchronized stream.
+  `graph::parse_acl` is the one every-offset scan left; #906 rewrites that walk whole under the
+  opposite unknown-key ruling and owns it. Well-formed frames parse identically throughout.
+
 - **`stream_endpoint_t::write_all` no longer truncates a frame when a signal interrupts the
   write (#903).** The two sibling full-write helpers disagreed on interrupted syscalls:
   `write_all_iov` retried EINTR, while `write_all` treated any `n <= 0` — EINTR included — as

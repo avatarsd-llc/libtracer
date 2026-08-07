@@ -2,13 +2,21 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * config_reader — typed accessors over a SPEC `config` SETTINGS TLV. The
- * positional NAME-key / typed-value PAIR walk was copied verbatim by every consumer
- * of a connection config (transport_vertex's universal keys, the quic factory's
- * cert/key, the can factory's ifname/node/...); this is its one home. Each
- * factory still reads ONLY its own keys from the raw config TLV it receives
- * (ADR-0043 §5 leanness: kind-private keys never land in the shared
- * conn_settings_t) — what is shared is the walk, not the vocabulary.
+ * config_reader — typed accessors over a SPEC `config` SETTINGS TLV. The positional
+ * NAME-key / typed-value PAIR walk was copied verbatim by all SIX consumers of a
+ * connection config — transport_vertex's universal keys, the tcp / ws / can factories,
+ * and the quic and webtransport factories' cert/key — and this is their one home. Each
+ * factory still reads ONLY its own keys from the raw config TLV it receives (ADR-0043 §5
+ * leanness: kind-private keys never land in the shared conn_settings_t) — what is shared
+ * is the walk, not the vocabulary.
+ *
+ * It is NOT the tree's only reader of this grammar, and the claim is scoped on purpose.
+ * `graph_t::create_child` (the creation SPEC) and `parse_subscriber_tlv` (the SUBSCRIBER
+ * QoS SETTINGS) read the same positional pairs at L4, where `tr::net` may not be a
+ * dependency — dependencies point up the layers only — so they carry the pair-consuming
+ * RULE (#927) rather than this type. `graph::parse_acl` is the remaining every-offset
+ * scan; it is deliberately left alone here because #906 rewrites that walk whole under
+ * the opposite unknown-key ruling (reject, not ignore).
  */
 #pragma once
 

@@ -32,8 +32,9 @@ is the API surface.
 
 **Runtime configuration** is `config_reader_t`. A connection's settings arrive as
 a SPEC `config` SETTINGS TLV: positional NAME-key / value pairs, string values as
-`NAME` children and integers as `VALUE` children. Every transport factory used to
-hand-roll the same walk; this class is its one home. Unknown keys are ignored so
+`NAME` children and integers as `VALUE` children. All six transport-side consumers
+used to hand-roll the same walk — the universal keys plus the tcp, ws, can, quic and
+webtransport factories — and this class is their one home. Unknown keys are ignored so
 a newer peer can send more than a receiver understands, a key whose value child
 has the wrong type is ignored, and a repeated key resolves to its last
 well-formed occurrence. Each factory still reads only *its own* keys — what is
@@ -47,6 +48,14 @@ the grammar ambiguous — a pair whose string value textually equalled a known k
 child as `addr` and, under last-wins, destroying a legitimate earlier one. A
 child that is not a `NAME` where a key belongs desynchronizes the stream and the
 walk stops there rather than guessing a resync.
+
+`config_reader_t` is the one home for the *transport* config walk, not for every
+pair walk in the tree — the scope of that claim is deliberate. `graph_t::create_child`
+(the creation SPEC) and the SUBSCRIBER QoS `SETTINGS` parse read the same positional
+grammar at L4, where `tr::net` cannot be a dependency, so they carry the same
+pair-consuming *rule* without sharing the type. `graph::parse_acl` is the one walk
+still scanning every offset; [#906](https://github.com/avatarsd-llc/libtracer/issues/906)
+rewrites it whole under the opposite unknown-key ruling and owns that fix.
 
 ## Declaring your own build configuration
 
