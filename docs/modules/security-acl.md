@@ -21,6 +21,21 @@ token `EVERYONE@` matches any resolved subject. The rights are bits in
 nothing, and the `kAceInherit` flag, which is what makes it visible to
 descendants.
 
+`EVERYONE@` is **reserved**, and the core enforces the reservation rather than
+describing it ([#908](https://github.com/avatarsd-llc/libtracer/issues/908)). The
+wire has one spelling for a subject token — the `acl/acl-aces` vector sends
+`peer-a` and `EVERYONE@` as the same opaque VALUE — so a deployment whose
+resolver passes a caller-supplied identity through (a username, a certificate
+CN, a peer name) could otherwise mint a principal that *is* the wildcard, and an
+entry meant for that one principal would grant everyone. A subject token equal
+to `kEveryoneSubject` therefore matches nothing in either policy, and
+`graph_t::acl_allows` refuses such a caller outright — at every gate, on a
+guarded vertex and on a bare one, the same fail-closed arm the resolver's own
+error return takes. `is_reserved_subject` is public so a resolver can refuse it
+at its own door too. `OWNER@`, the other special subject ADR-0020 names, is *not*
+reserved here: no evaluator special-cases it today, so it is an ordinary opaque
+token until one does.
+
 Evaluation is split in two on purpose:
 
 - **The graph owns the walk.** It collects the vertex's own entries in stored
@@ -87,6 +102,10 @@ peer legitimately sends more than the receiver understands; an ACL is not.
 - **The subject token is opaque.** Comparing it is a byte comparison; the
   protocol never parses it, so an implementation that reads structure into it has
   invented a private extension.
+- **A resolver may not return `EVERYONE@`.** It is the one string carved out of
+  the otherwise opaque token space, and a resolver that hands it back names no
+  principal — the core refuses that caller instead of letting an identity
+  impersonate the wildcard.
 
 ## API reference
 
@@ -104,6 +123,14 @@ peer legitimately sends more than the receiver understands; an ACL is not.
 ```
 
 ```{doxygenvariable} tr::graph::kAceInherit
+:project: libtracer
+```
+
+```{doxygenvariable} tr::graph::kEveryoneSubject
+:project: libtracer
+```
+
+```{doxygenfunction} tr::graph::is_reserved_subject
 :project: libtracer
 ```
 
