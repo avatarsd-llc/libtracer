@@ -35,6 +35,38 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   Not in scope: the shed write still answers `SUCCESS` and moves no `delivery_drops()`
   counter — the other half of the same shed, tracked as #1003.
 
+- **SECURITY — a `net::webtransport_transport_t` LISTENER now pins WHICH `0x41` stream may
+  become its frame channel (#919), and no longer dies on an unknown H3 frame (#920).** Both
+  live in `classify_bidi` and they move strictness in OPPOSITE directions, which is the
+  point: identity must be pinned, unknown extensions must be ignored.
+  - **Adoption is strict (#919).** A bidirectional WEBTRANSPORT_STREAM was adopted as *the*
+    frame channel on nothing but a not-yet-harvested check — the code's own comment said
+    "any id is accepted". So a peer could (a) stream frames with the extended CONNECT never
+    completed (a handshake bypass), (b) name any session id, and (c) open a SECOND `0x41`
+    stream that silently overwrote `frame_stream` while the first context kept feeding the
+    one shared `length_prefix_framer` — two independent streams interleaved into one
+    length-prefix reassembly, i.e. garbled frames delivered upward or a spurious malformed
+    teardown. `PeerBidiStreamCount = 4` made that reachable. Three guards now run under
+    `conn_m`: the session must be established, the session-id varint must name THAT CONNECT
+    stream, and no frame channel may be adopted yet (**first valid one wins**). A refusal
+    aborts **only that stream** (`StreamShutdown(ABORT)`, context parked as `DRAIN`) — a
+    nonconforming stream cannot take down a live session.
+  - **Unknown frame types are ignored (#920).** Any first frame type other than `0x41` or
+    HEADERS shut the whole connection down with `kAppErrBadRequest`. RFC 9114 §7.2.8 requires
+    unknown/reserved types to be IGNORED, and §9 has conformant peers — Chrome included —
+    emit reserved GREASE types (`0x1f * N + 0x21`) precisely to catch endpoints that don't:
+    a **conformant browser could take the node down**. Classification is now a skip loop that
+    reads the unknown frame's length varint, drops that many bytes and continues; a declared
+    length beyond the existing `kMaxHandshakeBytes` handshake cap is still refused (ignoring
+    the type is obligatory, buffering an arbitrary pre-auth payload is not), and skipped bytes
+    leave the accumulator before every "need more" return, so an unbounded GREASE run is
+    bounded memory.
+
+  No wire change, no public API change, and no delivery-path cost: all of it is
+  stream-open/handshake-time classification on the LISTEN side. A peer that opened a second
+  frame stream, or that expected an unknown H3 frame to be fatal, will observe the new
+  behaviour; the well-behaved DIAL client is unaffected.
+
 - **`net::transport_ws_server` / `net::transport_ws_client` take the injected RX seam every
   other framed transport takes, and their ingress is bounded by it (#872).** Both
   constructors gained `mem::mem_backend_t* backend` + `std::size_t max_frame` in the
@@ -133,6 +165,33 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `core/tests/fwd_readvertise_reuse_test.cpp` counts the state: 51 identical re-advertise
   cycles left 51 distinct labels and 51 egress entries at every node of a two-hop chain, and
   now leave 1.
+
+- **A vertex stores its `:acl` as ACEs and NOTHING else: `vertex_t::set_acl` takes only the
+  parsed list, `vertex_t::acl_bytes` is REMOVED, and `vertex_t::with_acl` replaces it (#907).**
+  The vertex used to keep the written TLV bytes *beside* the parsed ACEs, and `:acl` reads
+  served those bytes verbatim while the gates walked the list — two artifacts that could
+  describe different policies. They did: an outer `ACL` TLV whose `opt.PL` bit was clear
+  carried its whole ACE collection as opaque **payload**, so it decoded with zero children,
+  parsed as an **empty** ACE list, and was stored — clearing enforcement — while a read of
+  `:acl` still returned the payload. An auditor saw ACEs present, which under the
+  any-present-ACE-closes rule means *closed*, on a vertex that had just been thrown open.
+  Two changes close it, and only the second is general:
+  - The `:acl` write branch now requires a **structured** outer ACL; a primitive one is
+    `TYPE_MISMATCH`, per the same rule #906 applied inside an ACE — a shape the builder never
+    emits is refused, because leniency in an ACL widens a grant rather than losing a field.
+    An **empty container** (`opt.PL=1`, zero children) remains the sanctioned clear.
+  - `graph_t::read_acl` **re-encodes** the stored ACEs through `encode_acl`, so read-back is
+    canonical by construction and there is no second copy left to disagree with the list
+    `acl_allows` evaluates — for this shape or any future one. A read therefore returns the
+    canonical spelling whichever accepted spelling was written (the two-byte `access_mask` of
+    the `acl/acl-aces` vector comes back as four). Same cost class as the copy it replaces,
+    on a control-plane-rare path.
+
+  `vertex_ext_t::acl` (the byte copy) is gone, replaced by an `acl_present` bit that lands in
+  existing padding: an ACL written **empty** still reads back as an empty container, distinct
+  from the `NOT_FOUND` of a vertex that never had one. `with_acl(f)` hands `f` that bit and
+  the ACE list together under one hold, since a clear landing between two accessors would
+  otherwise be served as an ACL that no longer exists.
 
 - **`vertex_ext_t::acl_cache_dirty` is REMOVED; ACL-cache validity is now the parity of
   `vertex_ext_t::acl_gen` (#880, [ADR-0078](../docs/adr/0078-acl-cache-coherence-is-a-published-generation-stamp-not-a-dirty-flag.md)).**

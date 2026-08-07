@@ -1776,27 +1776,27 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
     }
 
     if (step0.name == "acl") {
-        // Store the :acl (#81, ADR-0018/0020): gate on WRITE_ACL — precisely the `admin`
-        // right — then validate + parse the typed ACEs (ADR-0050 parse_acl; strictness
-        // follows the selected policy — the default ALLOW-only profile rejects DENY /
-        // extra flags with TYPE_MISMATCH) and keep BOTH the raw bytes (served back
-        // verbatim by read_acl) and the parsed list (evaluated by acl_allows).
-        // The ACL is written WHOLE: `:acl` and nothing else. `set_acl` REPLACES, so a
-        // shape this branch does not resolve is not a harmless no-op — before this
-        // bound, `:acl.bogus` / `:acl[0]` / `:acl[]` all reached `set_acl` and silently
-        // replaced the vertex's entire access-control list. There is no member or slot
-        // addressing (an ACE is not separately writable), so any other shape names
-        // nothing: SCHEMA_NOT_FOUND, resolved BEFORE the gate like any unknown field.
+        // Store the :acl (#81, ADR-0018/0020): gate on WRITE_ACL — the `admin` right — then
+        // validate + parse the typed ACEs (ADR-0050 parse_acl) and store THAT LIST ALONE,
+        // no verbatim byte copy beside it (#907): read_acl re-encodes, so read-back cannot
+        // describe a policy other than the one acl_allows walks. The outer SHAPE is checked
+        // too, not just the type code — only `opt.pl` populates children, so a PRIMITIVE
+        // ACL parses as ZERO ACEs and CLEARS enforcement on a write that looks like it
+        // installs one; an EMPTY CONTAINER is the sanctioned clear. `set_acl` REPLACES, so
+        // an unresolved shape is no harmless no-op: before this bound `:acl.bogus` /
+        // `:acl[0]` / `:acl[]` all reached it and silently replaced the whole list. There is
+        // no member or slot addressing (an ACE is not separately writable), so any other
+        // shape names nothing: SCHEMA_NOT_FOUND, resolved BEFORE the gate like any field.
         if (field.steps.size() != 1 || !plain_step(step0))
             return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         if (!acl_allows(v, caller, acl_right_t::WRITE_ACL))
             return std::unexpected(status_t::PERMISSION_DENIED);
         const auto acl = wire::decode(value);
-        if (!acl || acl->type != type_t::ACL) return std::unexpected(status_t::TYPE_MISMATCH);
+        if (!acl || acl->type != type_t::ACL || !acl->opt.pl)
+            return std::unexpected(status_t::TYPE_MISMATCH);
         result_t<std::vector<ace_t>> aces = parse_acl(*acl);
         if (!aces) return std::unexpected(aces.error());
-        v->set_acl(value.bytes(), std::move(*aces));  // storing replaces; empty => no
-                                                      // restrictions
+        v->set_acl(std::move(*aces));  // storing replaces; empty => no restrictions
         {
             // Subtree-precise cache invalidation (ADR-0050 via the ADR-0057 child
             // links): every descendant's effective merge embeds this vertex's
@@ -2062,13 +2062,13 @@ result_t<view_t> graph_t::read_settings_app(vertex_t* v) const {
 }
 
 result_t<view_t> graph_t::read_acl(vertex_t* v) const {
-    // Serve back the raw :acl TLV bytes stored by field_write (heap-alloc + copy, like
-    // read_schema), or NOT_FOUND when none was set. Verbatim — the parsed-ACE evaluation
-    // lives in acl_allows; the READ_ACL gate runs in the caller (read(v, field, caller)).
-    const std::vector<std::byte> acl = v->acl_bytes();
+    // RE-ENCODE the stored ACEs (#907): read-back is a projection of the list acl_allows
+    // walks, never a copy that could disagree with it. An encoded ACL is never empty, so
+    // empty ⇒ no :acl was ever written — NOT_FOUND, distinct from an EMPTY container.
+    const auto acl = v->with_acl([](bool set, const std::vector<ace_t>& aces) {
+        return set ? encode_acl(aces) : std::vector<std::byte>{};
+    });
     if (acl.empty()) return std::unexpected(status_t::NOT_FOUND);
-    // `acl` is non-empty (guarded above); `nullopt` is exactly an alloc failure
-    // → BACKPRESSURE. One audited locus for the alloc/copy/over triplet.
     const auto out = view::over_bytes(acl);
     if (!out) return std::unexpected(status_t::BACKPRESSURE);
     return *out;

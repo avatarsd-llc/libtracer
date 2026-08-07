@@ -1445,8 +1445,8 @@ class graph_t {
     // (ADR-0044 — a transport vertex lists live bus peers, no vertices created);
     // otherwise the direct child vertices registered under v's key are enumerated.
     [[nodiscard]] result_t<view_t> read_children(vertex_t* v) const;
-    // ":acl" read => the raw stored ACL TLV bytes verbatim (#81-A, ADR-0018/0020). The
-    // caller-facing gate (READ_ACL) runs in read(v, field, caller) before reaching here.
+    // ":acl" read => the stored ACEs RE-ENCODED (#81-A, ADR-0018/0020, #907) — a projection
+    // of the list acl_allows walks. The READ_ACL gate runs in read(v, field, caller).
     [[nodiscard]] result_t<view_t> read_acl(vertex_t* v) const;
     // Bare ":settings" read (RFC-0010 §A.4 as amended by RFC-0022 §4) => the settings
     // container: the reserved `app` record iff a descriptor table is installed, and
