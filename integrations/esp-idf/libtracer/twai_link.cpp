@@ -18,6 +18,7 @@
 
 #include "driver/gpio.h"
 #include "esp_thread.hpp"
+#include "freertos/task.h"
 
 namespace tr::net {
 
@@ -35,6 +36,64 @@ TickType_t tx_wait_ticks(std::uint32_t ms) {
     return (ticks == 0 && ms != 0) ? 1 : ticks;
 }
 
+/**
+ * @brief The task-watchdog period, seconds — the ceiling on ONE frame's TX wait.
+ *
+ * Not a number of ours: `CONFIG_ESP_TASK_WDT_TIMEOUT_S` is the system's own
+ * normative statement of how long a task may go unfed. IDF defines it through
+ * `sdkconfig.h` (pulled in by FreeRTOS.h); the fallback is IDF's own Kconfig
+ * default for that symbol, for a build with the task watchdog compiled out and
+ * for the host test build, so the derivation has one provenance on every
+ * target. `httpd_ws_link.cpp` reads the same symbol for its own send bound
+ * (#835) — the two derivations differ (that one divides by a fan-out), so this
+ * is the shared FACT, not a shared formula.
+ */
+#ifdef CONFIG_ESP_TASK_WDT_TIMEOUT_S
+constexpr std::uint32_t kTaskWdtSeconds = CONFIG_ESP_TASK_WDT_TIMEOUT_S;
+#else
+constexpr std::uint32_t kTaskWdtSeconds = 5;
+#endif
+
+/**
+ * @brief Clamp @p want, one frame's backpressure window, to the watchdog period.
+ *
+ * `twai_link_config_t::tx_timeout_ms` is caller-supplied and was previously
+ * taken verbatim, so a config could ask a writing task to park longer than the
+ * watchdog tolerates and reboot the board instead of dropping the frame (#962).
+ * The bound this states is exactly the one it can state: ONE frame's wait fits
+ * inside one watchdog window. A caller that writes a burst on one task still
+ * sums its own frames' waits — that product is the caller's, not this knob's.
+ */
+[[nodiscard]] constexpr std::uint32_t clamp_tx_timeout_ms(std::uint32_t want) noexcept {
+    constexpr std::uint32_t ceiling = kTaskWdtSeconds * 1000U;
+    return want < ceiling ? want : ceiling;
+}
+
+/**
+ * @brief RAII half of the parked-writer tally `write_raw` raises (#962).
+ *
+ * Only the DECREMENT lives here. The raise cannot: it has to share the
+ * destructor's `write_m_` critical section with the `node_ == nullptr` check,
+ * because that pairing is what fixes the set of writers the destructor must
+ * wait out before it deletes `tx_free_sem_`. A writer that raises the tally
+ * under the lock is one the destructor will see; a writer that arrives after
+ * the destructor nulled `node_` takes the same lock, sees the gone node, and
+ * leaves without ever touching the semaphore.
+ */
+class tx_writer_exit_t {
+   public:
+    /** @brief Adopt an ALREADY-raised @p tally; lower it on scope exit. */
+    explicit tx_writer_exit_t(std::atomic<std::uint32_t>& tally) noexcept : tally_(tally) {}
+    /** @brief Lower the tally, releasing anything the destructor's drain observes. */
+    ~tx_writer_exit_t() { tally_.fetch_sub(1, std::memory_order_release); }
+
+    tx_writer_exit_t(const tx_writer_exit_t&) = delete;
+    tx_writer_exit_t& operator=(const tx_writer_exit_t&) = delete;
+
+   private:
+    std::atomic<std::uint32_t>& tally_; /**< @brief twai_link_t::tx_writers_. */
+};
+
 }  // namespace
 
 twai_link_t::twai_link_t(const twai_link_config_t& config)
@@ -42,7 +101,8 @@ twai_link_t::twai_link_t(const twai_link_config_t& config)
     // hardware TX slot. A free pool slot therefore implies driver-side room,
     // so twai_node_transmit below never needs the driver's own (queue-full)
     // wait — the pool semaphore is the ONE backpressure point.
-    : tx_pool_(config.tx_queue_depth + 1), tx_timeout_ms_(config.tx_timeout_ms) {
+    : tx_pool_(config.tx_queue_depth + 1),
+      tx_timeout_ms_(clamp_tx_timeout_ms(config.tx_timeout_ms)) {
     // The ISR→dispatch handoff: fixed-size copies of the seam's frame record.
     rx_queue_ = xQueueCreate(config.rx_queue_depth, sizeof(can_frame_data_t));
     if (rx_queue_ == nullptr) return;
@@ -104,6 +164,19 @@ twai_link_t::~twai_link_t() {
         doomed = node_;
         node_ = nullptr;
     }
+    // Releasing that lock FIXES the set of writers that can still touch
+    // tx_free_sem_ (#962): each of them raised tx_writers_ inside the same
+    // critical section that just saw a live node_, and every later arrival
+    // takes the lock, sees nullptr, and leaves without going near the
+    // semaphore. Wake the ones already parked — node_ is gone, so each returns
+    // immediately — and wait for the tally to empty before the handle they are
+    // waiting ON is deleted. vTaskDelay, not a yield: on a unicore chip a
+    // higher-priority destroying task that only spun would starve exactly the
+    // writers it is waiting for.
+    while (tx_writers_.load(std::memory_order_acquire) != 0) {
+        (void)xSemaphoreGive(tx_free_sem_);
+        vTaskDelay(1);
+    }
     if (doomed != nullptr) {
         // Bounded drain: let queued frames reach the wire (and their tx-done
         // releases fire) before the controller — and the pool slots the
@@ -127,8 +200,20 @@ void twai_link_t::write_raw(const can_frame_data_t& frame) {
     // (#931), the same tr::net::can_tx_admissible socketcan_link_t applies.
     if (frame.fd || !can_tx_admissible(frame)) return;
 
-    const std::lock_guard lock(write_m_);
-    if (node_ == nullptr) return;
+    // Announce this writer while the node is known live, then LEAVE the lock
+    // before parking (#962). write_m_ serializes the submission — the pool's
+    // acquire contract and the node handle — and nothing else; holding it
+    // across the wait made the window per-QUEUE instead of per-frame, so K
+    // writers on a bus-off controller spent K x tx_timeout_ms_ in series and
+    // teardown queued behind all of them. The tally is what lets the
+    // destructor delete tx_free_sem_ without pulling it out from under a
+    // writer parked on it.
+    {
+        const std::lock_guard lock(write_m_);
+        if (node_ == nullptr) return;
+        tx_writers_.fetch_add(1, std::memory_order_relaxed);
+    }
+    const tx_writer_exit_t leaving(tx_writers_);
 
     // FULL policy (#383): bounded backpressure, then a COUNTED drop. A
     // continuation burst deeper than the driver queue parks here until the
@@ -137,6 +222,15 @@ void twai_link_t::write_raw(const can_frame_data_t& frame) {
     // via tx_dropped().
     if (xSemaphoreTake(tx_free_sem_, tx_wait_ticks(tx_timeout_ms_)) != pdTRUE) {
         tx_dropped_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    const std::lock_guard lock(write_m_);
+    // Re-checked, not re-read for tidiness: teardown may have run while this
+    // writer was parked, and the handle it nulled is about to be deleted. Hand
+    // the token back — the destructor's drain is still counting this writer.
+    if (node_ == nullptr) {
+        (void)xSemaphoreGive(tx_free_sem_);
         return;
     }
     tx_slot_t* slot = tx_pool_.try_acquire();

@@ -49,6 +49,10 @@ child as `addr` and, under last-wins, destroying a legitimate earlier one. A
 child that is not a `NAME` where a key belongs desynchronizes the stream and the
 walk stops there rather than guessing a resync.
 
+Which keys those factories actually read — the universal set and each kind's private
+one, with the wire value each takes — is [connection config](connection-config.md).
+This page is the walk; that page is the vocabulary.
+
 `config_reader_t` is the one home for the *transport* config walk, not for every
 pair walk in the tree — the scope of that claim is deliberate. `graph_t::create_child`
 (the creation SPEC) and the SUBSCRIBER QoS `SETTINGS` parse read the same positional

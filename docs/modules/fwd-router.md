@@ -357,6 +357,9 @@ The record carries only the keys **every** transport kind shares. A kind's priva
 a QUIC certificate and key path, for instance — never lands here; that kind's own factory parses it
 out of the raw config `SETTINGS` TLV handed to it alongside these settings.
 
+Both families — the universal keys and every kind's private ones — are tabulated key by key on
+[connection config](connection-config.md).
+
 ## Pitfalls
 
 - **`add_child` returning `false` is not advisory.** A mount name of **any** width registers and

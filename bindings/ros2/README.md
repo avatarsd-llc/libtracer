@@ -73,7 +73,7 @@ What `qos.c` maps onto instead — **three carriers, not one**:
 
 | `rmw_qos_profile_t` field | libtracer carrier | where |
 | --- | --- | --- |
-| `reliability`, `durability` (libtracer packs a third bit-field, `priority`, that ROS has no profile member for) | the **subscription's** packed 16-bit `delivery_policy`, set at `rmw_create_subscription` time and carried in the `SUBSCRIBER`'s existing `SETTINGS` child as `NAME "delivery_policy" VALUE u16` | `core/include/libtracer/vertex.hpp:204`, decoded at `core/src/graph.cpp:1464`, RFC-0022 §3.A |
+| `reliability`, `durability` (libtracer packs a third bit-field, `priority`, that ROS has no profile member for) | the **subscription's** packed 16-bit `delivery_policy`, set at `rmw_create_subscription` time and carried in the `SUBSCRIBER`'s existing `SETTINGS` child as `NAME "delivery_policy" VALUE u16` | `core/include/libtracer/vertex.hpp:227`, decoded at `core/src/graph.cpp:1464`, RFC-0022 §3.A |
 | `history` + `depth` | **owner-side** ring depth — the topic's owner calls `graph_t::set_history_depth`; a remote subscriber cannot set it | `core/include/libtracer/graph.hpp:780` |
 | `deadline`, `liveliness`, `lifespan` | **no mapping at all** | — |
 
@@ -90,7 +90,7 @@ Two consequences `qos.c` has to live with:
   per-subscription `depth` semantics must either enforce them in its own take-side buffer
   or report the owner's depth back through `rmw_get_subscriptions_info_by_topic`.
 - **A libtracer-only delivery mode is `rmw_tracer`-local, not a QoS extension.**
-  `delivery_mode_t` (`vertex.hpp:554` — `IF_NEWER` / `UNCONDITIONAL` / `EXPLICIT`; there is
+  `delivery_mode_t` (`vertex.hpp:577` — `IF_NEWER` / `UNCONDITIONAL` / `EXPLICIT`; there is
   no `ON_CHANGE` member) is owner-side and wiring-time via `graph_t::set_delivery_mode`
   (`core/src/graph.cpp:1373`) with no wire spelling. `rmw_tracer` may set it on vertices it
   owns; it cannot round-trip it to a remote peer.

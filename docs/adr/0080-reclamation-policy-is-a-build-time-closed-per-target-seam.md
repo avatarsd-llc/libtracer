@@ -34,7 +34,7 @@ Reclamation of a user-code seam is a **build-time-closed trait** (per [ADR-0047]
 ### #897 maps onto the same seam
 - **`reclaim_strict` / `reclaim_local` (single-threaded):** the bug is **absent** — no other thread exists, so a parked node sits on the one thread's list and is freed by that thread through a live resource. Zero cross-thread machinery.
 - **`reclaim_qsbr`:** each thread **self-drains its own retired list at its own quiescent point**; the destructor never reaches across a live thread's list (the only thing the current code tried, and failed structurally, to do), and no `store()`-path atomics are added. The parked `shared_ptr<const rope_t>` is freed on its owning thread before that thread's arena is torn down.
-- The `lkv_slot.hpp:434` relaxed-probe check-then-act (an orphan-push that can be missed even in the adoptable case) is a **separate genuine bug**, fixable independently of the policy seam.
+- The `lkv_slot.hpp:527` relaxed-probe check-then-act (an orphan-push that can be missed even in the adoptable case) is a **separate genuine bug**, fixable independently of the policy seam.
 
 ## The theoretical best — shard, don't reclaim
 
