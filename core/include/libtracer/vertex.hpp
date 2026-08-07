@@ -1109,11 +1109,11 @@ struct vertex_ext_t {
     std::vector<ace_t> aces;
     /** @brief The ADR-0050 cached effective-ACE merge (own + INHERIT-flagged ancestor ACEs,
      *         pre-merged in evaluation order); guarded by the vertex mutex, rebuilt lazily
-     *         whenever @ref acl_gen turns ODD. Only the MERGE is cached, never a verdict —
+     *         whenever `acl_gen` turns ODD. Only the MERGE is cached, never a verdict —
      *         expiry evaluates at check time against the caller's now. */
     std::vector<ace_t> eff_aces;
     /** @brief `:acl`-invalidation counter AND cache-validity stamp in ONE word (ADR-0078):
-     *         ODD ⇒ @ref eff_aces is stale, EVEN ⇒ it is the merge published for exactly this
+     *         ODD ⇒ `eff_aces` is stale, EVEN ⇒ it is the merge published for exactly this
      *         value. Every invalidator (@ref vertex_t::set_acl, the placeholder revert,
      *         @ref vertex_t::mark_acl_cache_dirty) advances it lock-free to the next ODD
      *         value; a rebuilder publishes by CAS-ing the value it snapshotted BEFORE its walk
@@ -2168,6 +2168,7 @@ class vertex_t {
         }
     }
 
+   private:
     /**
      * @brief Advance @p e's ACL-cache counter to the next ODD value — the whole of an
      *        invalidation, and the only write to it outside a publish (ADR-0078).
@@ -2185,11 +2186,12 @@ class vertex_t {
         }
     }
 
+   public:
     /**
      * @brief Evaluate against this vertex's cached effective-ACE merge, rebuilding
      *        it first iff it is stale — the ADR-0050 cached-merge verb.
      *
-     * Staleness is ONE bit of ONE word (ADR-0078): @ref vertex_ext_t::acl_gen is odd. When it
+     * Staleness is ONE bit of ONE word (ADR-0078): `%vertex_ext_t::acl_gen` is odd. When it
      * is, that odd value and this vertex's own parsed ACEs are SNAPSHOTTED and @p rebuild runs
      * with the stripe lock RELEASED (#361 §2) — the graph's rebuild walks the immutable parent
      * chain taking each ancestor's @ref with_aces one stripe lock at a time, never nested, so
@@ -2206,7 +2208,7 @@ class vertex_t {
      * landing between them was overwritten by `dirty = false`, pinning a stale merge as clean
      * FOREVER (#880) — a revoked policy still enforced. A failed CAS also discards a `merged`
      * that may be TORN across the write rather than answering from it. The one premise left is
-     * that the counter does not WRAP onto a stale-but-even value (@ref vertex_ext_t::acl_gen).
+     * that the counter does not WRAP onto a stale-but-even value (`%vertex_ext_t::acl_gen`).
      *
      * @param rebuild `std::vector<ace_t>(const std::vector<ace_t>& own)` — the
      *                fresh merge over a snapshot of this vertex's own ACEs; runs
@@ -2919,7 +2921,7 @@ class vertex_t {
      * no second invalidation mechanism exists.
      *
      * Read lock-free off the delivery path while `revert_to_placeholder` writes it, hence
-     * atomic. Placed here rather than in @ref vertex_ext_t deliberately: the ext block is
+     * atomic. Placed here rather than in `%vertex_ext_t` deliberately: the ext block is
      * LAZILY allocated, so a generation living there would be absent for exactly the plain
      * leaves that retire most often. 32-bit wrap needs 2^32 retirements of one vertex.
      */

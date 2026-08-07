@@ -36,7 +36,11 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   was rejected for it (ADR-0078 Erratum 1); the shipped form measures ~1 % *faster* than
   the pre-fix baseline, and `vertex_ext_t` loses 4 bytes. `vertex_t`'s verbs (`set_acl`,
   `mark_acl_cache_dirty`, `with_effective_aces`) keep their names and signatures; the
-  removed `vertex_ext_t` field is the only source-visible change. Regression:
+  removed `vertex_ext_t` field is the only source-visible change. The new
+  `invalidate_acl_cache` helper that carries the counter advance is **private** — the
+  adversarial pass caught it landing in `vertex_t`'s public section, which would have made
+  that sentence false; nothing outside `vertex_t` calls it, and the build confirms it.
+  Regression:
   `core/tests/acl_cache_race_test.cpp`, an ancestor `:acl` rewriter racing a descendant's
   gated evaluation.
 - **`graph::parse_acl` rejects the non-canonical width, pairing and key shapes that used to
