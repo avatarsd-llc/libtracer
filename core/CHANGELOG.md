@@ -14,7 +14,74 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`net::transport_can` no longer attributes a group's slices to a stale binding when the
+  endpoint space wraps (#909).** The endpoint sub-field is 12 bits and `alloc_base` resets
+  to the first data slot when a reservation runs off the end, so a base **recurs** — routine,
+  not exceptional. Two receive-side structures keyed on that base and both aliased once a run
+  was re-issued, because `learned_` was written only via `operator[]` on the exact base id and
+  never erased:
+  - **The stale binding shadowed the live one.** `process_data` takes the FIRST `learned_`
+    entry (ascending base order) whose `[base, base + slice_count)` contains a slice's
+    endpoint, so a wider stale range with a lower base won the scan and filed the slice under
+    the wrong group at the wrong index.
+  - **The reassembly key collided.** The group key is `(node, base-endpoint)`, so a recurring
+    base merged slices left over from an incomplete group into the fresh one. `is_complete`
+    could then be satisfied by a MIX of old and new slices and a **byte-corrupted frame was
+    delivered as valid** — silent cross-talk between two unrelated payloads, not a crash.
+    `core/tests/transport_can_test.cpp` drives the real `send` path around a real wrap and,
+    unfixed, receives one slice of one payload welded onto another.
+
+  Both close on one invariant, enforced when an advertise is learned: **at most one binding
+  may claim an endpoint slot of a node, and a reassembly group lives exactly as long as the
+  binding that feeds it.** A fresh advertise now retires every same-node binding whose run it
+  overlaps and discards the group each was feeding. No wire change and no new API: the
+  overlap test is arithmetic on the CAN ID's own endpoint field, so the bound stays the
+  wire's, and the reclamation counts on the existing `transport_can::dropped_groups()` —
+  whose meaning widens from "a `max_groups` eviction or an `rx_ttl` age-out" to include a
+  re-issued run, one counter for "a group's buffered slices were reclaimed before delivery".
+  A caller that read `dropped_groups() == 0` as "no wraparound has occurred" will now see it
+  tick. `learned_` is no longer insert-only; `learned_binding()` returns `nullopt` for a
+  base whose run has been re-issued.
+
+  Not implemented: the producer **generation** in the advertise framing that
+  [ADR-0077](../docs/adr/0077-can-advertise-carries-a-producer-generation-keying-reassembly.md)
+  also proposes. Its *Implementation status* section records why — redundant against the
+  invariant above, and unable to reach the residues neither instrument closes: a slice
+  parked before its advertise, and a stale binding that no re-issue overlapped being fed by
+  frames whose own advertises were lost. Both are bounded by `rx_ttl`; a generation rides
+  the advertise and a data frame carries none, so it is silent for both.
+
 ### Changed
+
+- **`vertex_ext_t::acl_cache_dirty` is REMOVED; ACL-cache validity is now the parity of
+  `vertex_ext_t::acl_gen` (#880, [ADR-0078](../docs/adr/0078-acl-cache-coherence-is-a-published-generation-stamp-not-a-dirty-flag.md)).**
+  The effective-ACE merge was guarded by a `{acl_gen, acl_cache_dirty}` pair: invalidators
+  bumped the counter and stored the boolean **lock-free**, while the rebuilder cleared that
+  same boolean under the stripe lock. A mark landing between the rebuilder's generation
+  recheck and its clear was therefore **overwritten** — the cache stayed flagged clean over
+  a pre-write ancestor chain, and every later `acl_allows` on that vertex evaluated the
+  stale merge until the next `:acl` mutation anywhere in the chain. On the authorization
+  path that is a revoked policy that keeps being enforced, in whichever direction the stale
+  merge happens to point. Validity is now derived from the counter alone: `acl_gen` **odd**
+  means the merge is stale, **even** means `eff_aces` is the merge published for exactly
+  that value. Every invalidator advances it to the next odd value with one lock-free CAS,
+  and the rebuilder publishes with `compare_exchange_strong(snapshot, snapshot + 1)` — so
+  the recheck and the publish are the SAME atomic operation and there is no second store to
+  lose. `acl_gen` starts at `1` (was `0`), a never-built cache being stale. The evaluation
+  fast path stays at ONE atomic load plus a parity test, which is what the removed boolean
+  cost — a separate stamp word measured ~1 % slower on the `acl-inherit-d4` gate bench and
+  was rejected for it (ADR-0078 Erratum 1); the shipped form measures ~1 % *faster* than
+  the pre-fix baseline, and `vertex_ext_t` loses 4 bytes. `vertex_t`'s verbs (`set_acl`,
+  `mark_acl_cache_dirty`, `with_effective_aces`) keep their names and signatures; the
+  removed `vertex_ext_t` field is the only source-visible change. The new
+  `invalidate_acl_cache` helper that carries the counter advance is **private** — the
+  adversarial pass caught it landing in `vertex_t`'s public section, which would have made
+  that sentence false; nothing outside `vertex_t` calls it, and the build confirms it.
+  Regression:
+  `core/tests/acl_cache_race_test.cpp`, an ancestor `:acl` rewriter racing a descendant's
+  gated evaluation.
 
 - **SECURITY — a SPEC-created `quic` / `webtransport` dialer now VERIFIES the server
   certificate, and two new DIAL-side config keys say how (#918).** Every connection built
@@ -47,7 +114,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   breakage is the fix: a dialer that silently skipped validation because the test suite found
   it convenient is the defect. Hand-constructed transports (`quic_transport_t(host, port,
   tls)`) are unaffected — that constructor always took an explicit trust struct.
-
 - **`graph::parse_acl` rejects the non-canonical width, pairing and key shapes that used to
   read leniently (#906).** Not *every* shape the builder never emits — a two-byte
   `access_mask` and a non-canonical key ordering are both unemitted and both still parse, on

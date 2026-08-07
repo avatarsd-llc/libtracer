@@ -32,7 +32,9 @@ import {
   encodeFwd,
   encodeField,
   decodeFwd,
+  firstChild,
   replyErrorCode,
+  replyErrorPath,
   FWD_OP,
   FWD_OP_FLAG_MINT_REQUEST,
   FWD_KIND,
@@ -252,6 +254,62 @@ test('decodeFwd parses the fwd-reply-error vector and replyErrorCode reads NOT_F
   assert.deepEqual(pathSegs(parsed.dst), REPLY_DST);
   assert.deepEqual(pathSegs(parsed.src), REPLY_SRC);
   assert.equal(replyErrorCode(parsed), FWD_ERROR.NOT_FOUND);
+});
+
+/**
+ * @brief The cross-core acceptance rule (#878): a reply's ERROR is the FIRST ERROR child of
+ * the STATUS, at whatever position — reference/05 §`0x09` pins no order over a STATUS's
+ * children, and RFC-0002 §C pins position only INSIDE the ERROR. Same frame as
+ * `fwd/fwd-reply-error` with the STATUS's optional DESCRIPTION written first.
+ *
+ * The Rust binding pins these same bytes in `tests/conformance_vectors.rs`
+ * (`fwd_reply_error_after_description`); before this, only Rust read the frame correctly and
+ * this core answered code 0 — the same answer it gives for a STATUS carrying no ERROR at all.
+ */
+test('replyErrorCode reads the ERROR at any STATUS child position (fwd-reply-error-after-description)', () => {
+  const bin = vector('fwd/fwd-reply-error-after-description');
+  const parsed = decodeFwd(bin);
+  assert.equal(parsed.op, FWD_OP.REPLY);
+  assert.equal(parsed.kind, FWD_KIND.ERROR);
+  assert.deepEqual(pathSegs(parsed.dst), REPLY_DST);
+  assert.deepEqual(pathSegs(parsed.src), REPLY_SRC);
+
+  // The vector is only a gate while its ERROR is genuinely NOT the first child: assert the
+  // shape before asserting the read, so a future re-blessing that reorders it cannot leave
+  // this test silently passing on the easy case.
+  assert.equal(parsed.payload.type, TYPE.STATUS);
+  assert.equal(parsed.payload.children.length, 2);
+  assert.equal(
+    parsed.payload.children[0].type,
+    TYPE.DESCRIPTION,
+    'the ERROR must not be child 0 or this vector gates nothing',
+  );
+  assert.equal(parsed.payload.children[1].type, TYPE.ERROR);
+
+  assert.equal(replyErrorCode(parsed), FWD_ERROR.NOT_FOUND);
+  assert.equal(replyErrorPath(parsed), null, 'registered identity, not the string form');
+
+  // firstChild is the shared accessor both cores answer "the X child" with; index-0 is not it.
+  assert.equal(firstChild(parsed.payload, TYPE.ERROR), parsed.payload.children[1]);
+  assert.equal(firstChild(parsed.payload, TYPE.PATH), null);
+
+  // And the offending shape is buildable from this package's own surface, so it is a wire a
+  // conformant peer can really send: encodeFwd embeds the STATUS bytes verbatim.
+  const status = encode({
+    type: TYPE.STATUS,
+    opt: { ...parsed.payload.opt },
+    payload: new Uint8Array(0),
+    children: parsed.payload.children,
+    trailer: null,
+  });
+  const built = encodeFwd({
+    op: FWD_OP.REPLY,
+    dst: REPLY_DST,
+    src: REPLY_SRC,
+    kind: FWD_KIND.ERROR,
+    payload: status,
+  });
+  assert.ok(sameBytes(built, bin), hex(built));
 });
 
 /* ----------------------------------------------- RFC-0024 §4 PATH_REF (0x14) --- */

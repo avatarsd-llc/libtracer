@@ -343,7 +343,10 @@ struct transport_can_config_t {
  * can_reassembly_t keyed by `(node, base-endpoint) + slice-index`,
  * trimmed back to the advertised total (undoing FD padding), and delivered
  * byte-exact to the receiver. The map is rebuilt purely from advertise frames, so
- * a rejoining node self-heals with no coordinator (ADR-0030).
+ * a rejoining node self-heals with no coordinator (ADR-0030). The base endpoint
+ * RECURS — the 12-bit space wraps — so that key is only unambiguous because a
+ * fresh advertise retires every binding whose endpoint run it overlaps, and the
+ * group each was feeding with it (#909, `invalidate_overlapping`).
  *
  * **Bus capability (ADR-0044).** The bus reaches many peers over one wire, so the
  * transport also implements @ref bus_link_t — statelessly, from live traffic:
@@ -429,8 +432,15 @@ class transport_can : public transport_t, public bus_link_t {
     }
 
     /**
-     * @brief Reassembly groups reclaimed before delivery — a `max_groups` eviction
-     *        or an `rx_ttl` age-out.
+     * @brief Reassembly groups reclaimed before delivery — a `max_groups` eviction,
+     *        an `rx_ttl` age-out, or a base-endpoint run being re-bound (#909).
+     *
+     * The third form is the wraparound one: the 12-bit endpoint space recurs, so a
+     * fresh advertise over a run that a stale binding still claims retires that
+     * binding and the group it was feeding. That group can never complete (nothing
+     * resolves to it again) and its slices must not merge into the fresh group, so
+     * it is reclaimed here rather than aged out — one counter for "a group's
+     * buffered slices were reclaimed before delivery", whatever forced it.
      *
      * The accessor the reassembly buffer's own counter never had: it is private
      * state on the RX thread, so this reads it under the ingress lock.
@@ -482,7 +492,8 @@ class transport_can : public transport_t, public bus_link_t {
     };
 
     // One entry of the last-heard peer table (ADR-0044), keyed by node id. Entries
-    // are INSERT-ONLY (exactly the learned_ identity-map policy): expiry hides an
+    // are INSERT-ONLY (unlike learned_, which retires overlapping runs — #909; this
+    // table is keyed by node, and a node id never aliases): expiry hides an
     // entry from enumeration/resolution but never frees it, so the endpoint
     // facades peer_link hands out stay pointer-stable for the transport's life
     // (std::map nodes never move). Growth is one entry per DISTINCT node id ever
@@ -495,9 +506,17 @@ class transport_can : public transport_t, public bus_link_t {
     // --- ingress (runs on the link's receive thread) ---
     void on_rx(const can_frame_data_t& frame);
     void learn_advertise(const can::advertise_t& adv);  // requires rx_m_ held
-    void process_data(const can_frame_data_t& frame);   // requires rx_m_ held
-    void park_pending(const can_frame_data_t& frame);   // requires rx_m_ held
-    void expire_pending();                              // requires rx_m_ held
+    // Retire every same-node binding whose endpoint run overlaps the one a fresh
+    // advertise claims, and discard the reassembly group each was feeding (#909).
+    // The 12-bit endpoint space wraps, so a base RECURS; without this a stale run
+    // shadows the live binding in the process_data scan and a recurring key merges
+    // stale slices into the fresh group. Holds the invariant "one binding per slot,
+    // and a group lives exactly as long as the binding that feeds it".
+    void invalidate_overlapping(const can::can_id_fields_t& base,
+                                std::uint16_t slice_count);  // requires rx_m_ held
+    void process_data(const can_frame_data_t& frame);        // requires rx_m_ held
+    void park_pending(const can_frame_data_t& frame);        // requires rx_m_ held
+    void expire_pending();                                   // requires rx_m_ held
     void deliver(std::uint16_t src_node, tr::view::rope_t frame);
     // Refresh/insert into the last-heard table, using the frame's arrival stamp.
     void touch_peer(std::uint16_t node, std::chrono::steady_clock::time_point now);
@@ -538,9 +557,14 @@ class transport_can : public transport_t, public bus_link_t {
         std::chrono::steady_clock::time_point arrived{}; /**< @brief When it was parked. */
     };
 
-    std::mutex rx_m_;                                          // guards the map + buffers
-    can_reassembly_t reasm_;                                   // data-slice reassembly
-    std::map<std::uint32_t, binding_t> learned_;               // base CAN ID -> binding
+    std::mutex rx_m_;         // guards the map + buffers
+    can_reassembly_t reasm_;  // data-slice reassembly
+    // base CAN ID -> binding. NOT insert-only: a fresh advertise retires every
+    // same-node entry whose endpoint run it overlaps (#909), which is what keeps a
+    // recurring base from claiming two bindings at once. Growth is otherwise one
+    // entry per distinct base a node advertises, structurally bounded by the 12-bit
+    // endpoint space per node.
+    std::map<std::uint32_t, binding_t> learned_;
     std::map<std::uint16_t, std::vector<std::byte>> control_;  // per-node advertise byte stream
     // Data slices awaiting their advertise. Drawn from the injected resource (the
     // RX thread must not reach the global heap), bounded in COUNT by max_pending

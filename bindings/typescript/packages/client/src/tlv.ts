@@ -2,16 +2,20 @@
 // SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 /**
- * @brief Pure, side-effect-free TLV builders for the libtracer client SDK
- * (#56, ADR-0034).
+ * @brief Pure, side-effect-free TLV builders — and the one shared child accessor
+ * that reads them back — for the libtracer client SDK (#56, ADR-0034).
  *
- * Each function produces the EXACT wire bytes the shared conformance vectors
+ * Each builder produces the EXACT wire bytes the shared conformance vectors
  * pin (`tests/conformance/vectors/v1/`) via the cross-validated core codec
  * (`@avatarsd-llc/libtracer`) — nothing here invents wire structure:
  *
  *   - encodeValue      -> VALUE TLV (0x01)        : value-bool-true / value-ll-u32 / value-ts-abs
  *   - encodePath       -> PATH TLV (0x06, PL=1)   : path-sensor-temp + spec/v1.md §3.1
  *   - encodeSubscriber -> SUBSCRIBER TLV (0x04)   : subscriber-path  (the subscribe-write payload)
+ *
+ * Reading back, `firstChild` is the package's single child-by-type accessor and
+ * the mirror of the Rust binding's `Tlv::first_child`; it leads the file because
+ * every structured read goes through it rather than indexing a position (#878).
  *
  * These are the payload TLVs. The path-ADDRESSED request envelope (verb +
  * destination vertex:field) is the FWD/FIELD frame RFC-0004 (spec §3) fixes —
@@ -20,6 +24,33 @@
 
 import { TYPE, encode } from '@avatarsd-llc/libtracer';
 import type { Opt, Tlv } from '@avatarsd-llc/libtracer';
+
+/**
+ * @brief The first DIRECT child of `tlv` with the given type code, or `null`.
+ *
+ * The one child-by-type accessor this package reads structure through, and the
+ * mirror of the Rust binding's `Tlv::first_child` — both cores answer a
+ * structured TLV's "the X child" question by scanning direct children for the
+ * first matching TYPE, never by indexing a fixed position. Open-coding
+ * `children[0]?.type === TYPE.X` instead is how the two bindings drifted apart
+ * on `STATUS{ … ERROR … }` (#878): it silently reads a positional rule into a
+ * grammar that pins none, and the reader that indexes reports "no such child"
+ * for a child that is right there.
+ *
+ * Direct children only — a match is never searched for inside a grandchild,
+ * since a nested TLV of the same type is a DIFFERENT thing (an ERROR's own
+ * detail child, say, is not the STATUS's error).
+ *
+ * @param tlv  the structured (`opt.PL=1`) parent to scan
+ * @param type the wire type code to match — a value of the core codec's `TYPE`
+ *             map (`TYPE.ERROR`, `TYPE.PATH`, …), not linked here because it is
+ *             re-exported from `@avatarsd-llc/libtracer` and the docs gate
+ *             refuses a cross-package link
+ * @returns the first matching child, or `null` when there is none
+ */
+export function firstChild(tlv: Tlv | null | undefined, type: number): Tlv | null {
+  return tlv?.children.find((c) => c.type === type) ?? null;
+}
 
 /** @brief Path-segment constraints from reference/03-addressing.md §path syntax. */
 const MAX_SEGMENT_BYTES = 64;
