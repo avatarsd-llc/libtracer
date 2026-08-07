@@ -285,6 +285,14 @@ target_link_libraries(mount_add_oom_test PRIVATE libtracer)
 libtracer_test_warnings(mount_add_oom_test)
 add_test(NAME mount_add_oom COMMAND mount_add_oom_test)
 
+# `make_connection` under the same REFUSING allocator (#930): a connection whose link cannot
+# be wired into the router is rolled back rather than published as a live-looking dead
+# connection. Its own binary for the same whole-program reason as mount_add_oom_test.
+add_executable(conn_add_oom_test conn_add_oom_test.cpp)
+target_link_libraries(conn_add_oom_test PRIVATE libtracer)
+libtracer_test_warnings(conn_add_oom_test)
+add_test(NAME conn_add_oom COMMAND conn_add_oom_test)
+
 add_executable(mount_width_test mount_width_test.cpp)
 target_link_libraries(mount_width_test PRIVATE libtracer)
 libtracer_test_warnings(mount_width_test)

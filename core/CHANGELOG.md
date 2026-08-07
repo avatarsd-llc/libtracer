@@ -16,6 +16,23 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Fixed
 
+- **A connection whose link cannot be wired into the router is now rolled back instead of
+  published as a live-looking dead connection (#930).** `transport_vertex_t::make_connection`
+  called `fwd_router_t::add_child` as a plain statement and discarded its `bool`. That `bool`
+  is `false` exactly when the child registry could not grow, and `add_child` is the only place
+  that can report it — so on an exhausted heap the identity vertex stayed registered, the
+  `conns_` entry stayed inserted, `UP`/`LISTENING` liveness was published, and the create
+  returned success, while the link was in no registry entry: no `dst` could route to it, no
+  inbound frame resolved to it, and `remove_child` did not know it existed. Peer-drivable on a
+  bounded node by creating connections until the registry slab exhausts. `make_connection` now
+  checks the return and unwinds the whole creation in the order `remove_connection` uses —
+  retire the identity vertex, then erase the `conns_` entry (destroying the config-constructed
+  socket) — publishes no liveness, and answers `status_t::BACKPRESSURE`. A `provide_link`
+  staging is likewise consumed only once the wiring has succeeded, so a retry after the
+  pressure clears still finds its link. Callers of a `/net:children[]` create see one new
+  outcome: `BACKPRESSURE` where the call previously reported success. The success path is
+  byte-identical, and no signature changed.
+
 - **`net::config_reader_t` no longer lets a string VALUE be re-read as a key (#927).** The
   SETTINGS walk advanced one child at a time, so the `NAME` child that is the *value* of one
   pair was also tested as the *key* of the next position. Combined with the ignore-unknown-keys
