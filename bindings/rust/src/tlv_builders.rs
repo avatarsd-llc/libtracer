@@ -239,13 +239,42 @@ pub fn value_u64(v: u64) -> Tlv {
  */
 pub fn name(segment: &str) -> Result<Tlv, BuildError> {
     validate_segment(segment)?;
-    Ok(Tlv {
+    Ok(raw_name(segment.as_bytes()))
+}
+
+/**
+ * @brief Build a NAME TLV (`type=0x02`) carrying arbitrary text — the KEY of a
+ * structured record's field, or a string field VALUE that is not an address segment.
+ * Bounded by the 64-byte NAME budget, but NOT by the reserved-character predicate.
+ *
+ * `NAME` is the wire's only string node, so it spells two different things. As an
+ * *address* segment it must satisfy the addressing grammar, and [`name`] enforces
+ * that. As a *string value* inside SETTINGS or SPEC it is just text, and it routinely
+ * contains characters an address may not — most obviously an `addr` dotted quad
+ * (`"127.0.0.1"`), whose `.` [`name`] rejects outright. The reference C++ emitter
+ * draws the same line: `emit_name` writes the bytes and validates nothing.
+ *
+ * # Errors
+ * [`BuildError::SegmentLength`] if the text is empty or over
+ * [`MAX_SEGMENT_BYTES`] UTF-8 bytes.
+ */
+pub fn text_name(text: &str) -> Result<Tlv, BuildError> {
+    let bytes = text.as_bytes();
+    if bytes.is_empty() || bytes.len() > MAX_SEGMENT_BYTES {
+        return Err(BuildError::SegmentLength);
+    }
+    Ok(raw_name(bytes))
+}
+
+/** @brief The NAME node itself, over already-checked bytes. */
+fn raw_name(payload: &[u8]) -> Tlv {
+    Tlv {
         type_code: type_code::NAME,
         opt: Opt::default(),
-        payload: segment.as_bytes().to_vec(),
+        payload: payload.to_vec(),
         children: Vec::new(),
         trailer: None,
-    })
+    }
 }
 
 /**

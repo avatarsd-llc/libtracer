@@ -61,13 +61,13 @@ the callback needs this tier.
 There is deliberately no adapter that wraps a borrowed span into a rope; such a rope's
 refcounts would lie about lifetime. `fwd_router_t::add_child` (`core/src/fwd_router.cpp:522`)
 therefore branches on the link's declared capability and installs exactly one sink —
-the rope form for an owning link, the span form otherwise (`fwd_router.cpp:626,633`, and
-`fwd_router.cpp:585,592` for the peer-named bus equivalent).
+the rope form for an owning link, the span form otherwise (`fwd_router.cpp:629,636`, and
+`fwd_router.cpp:583,590` for the peer-named bus equivalent).
 
 Every socket transport in the tree declares the owning tier: UDP
 (`transport_udp.hpp:91`), TCP client and server (`transport_tcp.hpp:151,277`),
 WebSocket server and client (`transport_ws.hpp:181,339`), CAN
-(`transport_can.hpp:371`), QUIC (`transport_quic.hpp:153`) and WebTransport
+(`transport_can.hpp:432`), QUIC (`transport_quic.hpp:153`) and WebTransport
 (`transport_webtransport.hpp:156`). The borrowed-span path is the base-class default
 and the tier an out-of-tree transport gets for free.
 
@@ -85,7 +85,7 @@ tags each inbound frame with the sending peer's name. No vertex is created for a
 peer and no peer state is stored.
 
 `transport_t::bus()` returns the facet or `nullptr`. CAN always returns it
-(`transport_can.hpp:352`); the TCP and WebSocket **servers** return it when
+(`transport_can.hpp:413`); the TCP and WebSocket **servers** return it when
 configured peer-named (`transport_tcp.hpp:284`, `transport_ws.hpp:197`); every other
 kind keeps the `nullptr` default.
 

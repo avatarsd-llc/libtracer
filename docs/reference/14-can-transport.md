@@ -293,7 +293,19 @@ the byte-exact frame surfaces at the peer's receiver.
 ### The `can_link_t` seam (testable without kernel CAN)
 
 The raw frame I/O sits behind a small seam, `can_link_t` (`write_raw(frame)` + an
-`on_receive` callback), so the transport never touches a socket directly:
+`on_receive` callback), so the transport never touches a socket directly.
+
+**Which frames cross the seam is the seam's rule, not each link's.** Ingress admits
+only 29-bit **data** frames — `can_rx_admissible(extended, remote, error)` — because
+the extended identifier *is* the path, so an 11-bit standard frame carries no
+decodable identity, a remote-transmission request carries a DLC but no data bytes,
+and an error frame is a controller status report. Egress admits only a length that
+fits the mode's data field — `can_tx_admissible(frame)` over `can_max_len(fd)`, the
+seam's adapter onto the L1 widths. Every port of a *physical* bus calls both,
+decoding the flags from its own driver's representation; the verdict is reached in
+one place, so two ports cannot disagree about what is real traffic. (The in-memory
+test links are exempt by construction: their carrier cannot express RTR, an 11-bit
+identifier, or an error flag, so the ingress rule has nothing to judge.)
 
 - **`socketcan_link_t`** — the production impl: `socket(PF_CAN, SOCK_RAW, CAN_RAW)`,
   `CAN_RAW_FD_FRAMES` enabled best-effort (a classic-only controller works unchanged),
@@ -476,14 +488,22 @@ reply completion at the `op_resolver_t` terminus, which resolves synchronously.
   under the sanitizer builds.
 - **Real `vcan0`** — `core/tests/transport_can_vcan_test.cpp` drives two
   `socketcan_link_t` over a kernel virtual-CAN device and asserts a byte-exact frame
-  each way. It **self-skips** when `vcan0` cannot bind, so the required gates never
-  depend on kernel CAN; the dedicated **`can-vcan-e2e`** workflow sets `vcan0` up so the
-  socket path runs for real.
+  each way, and carries the seam-rule vectors that need a real socket to exist: a bare
+  `CAN_RAW` adversary injects an RTR frame and an 11-bit standard frame alongside one
+  admissible data frame, and exactly one crosses; an over-length classic frame handed
+  to `write_raw` is dropped rather than clamped (the stack smash it would otherwise
+  cause is ASan's to see — the kernel refuses the oversized write either way, so no
+  *unguarded* link is distinguishable on the bus; the drop-vs-**clamp** choice is,
+  and the vector pins it by giving the two frames distinct ids and payloads, so a
+  truncated frame would be witnessed under its own id). It **self-skips** when
+  `vcan0` cannot bind, so the required gates never depend on kernel CAN; the dedicated
+  **`can-vcan-e2e`** workflow sets `vcan0` up so the socket path runs for real.
 
 ## Pitfalls
 
 | Rule | Failure mode it prevents |
 | --- | --- |
+| Which frames cross the `can_link_t` seam is decided once, at the seam. | Two ports of the same seam drift on what counts as traffic. This is not hypothetical: `twai_link_t` filtered RTR and bounded classic length while `socketcan_link_t` did neither, so on Linux a remote-request frame reached the reassembler as a data slice whose DLC promised bytes it never carried. |
 | The 29-bit ID carries no bus field. | An implementation that packs a controller index into the ID collides with a deployment that repartitioned the lower 25 bits, and loses the property that one arbitration band belongs to one node. Two buses are two path segments, not two ID layouts. |
 | A slice group is `(origin, ts) + index`, and `origin` is receiver-derived, never read off the wire. | Grouping by `ts` alone merges the slices of two publishers that emit at the same timestamp into one corrupt rope. |
 | Trailing-slice loss is only detectable with a declared count. | An implementation that infers `N` from the highest index observed reports a 100-slice group as complete when index 99 was dropped. The advertise manifest's `slice_count` is what makes the group total. |

@@ -27,6 +27,7 @@ import {
   encodeValue,
   encodePath,
   encodeSubscriber,
+  encodeConnSpec,
   DELIVERY_DURABILITY_REQUEST,
   encodeFwd,
   encodeField,
@@ -488,4 +489,57 @@ test('fwd-bound-forward / fwd-bound-forwarded are one hop apart, byte for byte',
   // Exactly 8 bytes of dst left, and the payload rode through untouched.
   assert.equal(before.length - after.length, PATH_REF_ELEMENT_BYTES - 7 /* src grew by 7 */);
   assert.equal(hex(before.subarray(before.length - 8)), hex(after.subarray(after.length - 8)));
+});
+
+/* -------------------------------- #877 — the creation SPEC's field value TYPE --- */
+
+/**
+ * @brief `spec/conn-client-ws` — `encodeConnSpec` reproduces the shared vector exactly.
+ *
+ * TypeScript is the parity reference for this vector: it already emitted the correct
+ * shape, so this test passing is what confirms the vector encodes the right bytes rather
+ * than merely the bytes one core happens to produce. `test/conn-spec.test.mjs` pins the
+ * same bytes against the C++ emitter's captured output; this pins them against the file
+ * every core now reads.
+ *
+ * The load-bearing detail is the value TYPE of each field. `type`/`name` and the string
+ * settings `kind`/`addr` are NAME (0x02) nodes; only the integer settings `role`/`port`
+ * are VALUE (0x01). The terminus matches each (NAME key, value) pair on the value's type,
+ * so the two are not interchangeable — and since a VALUE-typed SPEC round-trips itself
+ * perfectly, the codec harness cannot tell the difference. This byte pin can.
+ */
+test('encodeConnSpec matches the spec/conn-client-ws vector byte-for-byte', () => {
+  const expected = vector('spec/conn-client-ws');
+  const built = encodeConnSpec({
+    type: 'client',
+    name: 'up',
+    role: 'dial',
+    port: 8080,
+    kind: 'ws',
+    addr: '127.0.0.1',
+  });
+  assert.ok(sameBytes(built, expected), `built ${hex(built)} != ${hex(expected)}`);
+});
+
+/**
+ * @brief `spec/create-child` — the minimal creation SPEC, and the type assertion on both
+ * of its field values.
+ *
+ * The client has no builder for a bare (config-less) creation SPEC, so this decodes the
+ * vector and asserts the shape every emitter must produce: two NAME-keyed pairs whose
+ * VALUES are themselves NAME nodes.
+ */
+test('spec/create-child carries NAME-typed field values, not VALUE-typed ones', () => {
+  const dec = decode(vector('spec/create-child'));
+  assert.equal(dec.type, TYPE.SPEC);
+  assert.equal(dec.opt.pl, true);
+  assert.equal(dec.children.length, 4, 'two (key, value) pairs');
+  const text = (t) => Buffer.from(t.payload).toString('utf8');
+  for (const child of dec.children) {
+    assert.equal(child.type, TYPE.NAME, 'every SPEC child here is a NAME — keys and values alike');
+  }
+  assert.equal(text(dec.children[0]), 'type');
+  assert.equal(text(dec.children[1]), 'stored_value');
+  assert.equal(text(dec.children[2]), 'name');
+  assert.equal(text(dec.children[3]), 'temp');
 });
