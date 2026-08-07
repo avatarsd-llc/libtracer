@@ -183,16 +183,27 @@ class quic_transport_t : public transport_t {
  *
  * Register at setup: `net.register_transport_type("quic", quic_transport_factory())`.
  * A subsequent `:children[]` SPEC whose config carries `kind = quic` then constructs
- * a @ref quic_transport_t from the parsed settings — DIAL: `addr` + `port`, using the
- * DEV-ONLY no-verify TLS mode (the config carries no trust material yet; a CA config
- * key is a follow-on, so config-dialed QUIC is dev-grade); LISTEN: `port` plus the
- * REQUIRED `cert`/`key` PEM-path config keys (QUIC is TLS 1.3 by construction;
- * tools/gen-dev-cert.sh emits a dev pair). `cert`/`key` are quic-PRIVATE config
- * keys: the factory parses them itself from the raw config SETTINGS TLV it receives —
- * they never appear in the shared `conn_settings_t`, which stays lean with only the
- * universal keys (the ADR-0043 §5 leanness ruling). Missing fields fail creation with
- * `TYPE_MISMATCH`; a socket that failed to come up fails with `NOT_FOUND`.
- * `keepalive` is ignored (#66 owns link lifecycle).
+ * a @ref quic_transport_t from the parsed settings — DIAL: `addr` + `port` plus the
+ * OPTIONAL trust keys below; LISTEN: `port` plus the REQUIRED `cert`/`key` PEM-path
+ * config keys (QUIC is TLS 1.3 by construction; tools/gen-dev-cert.sh emits a dev
+ * pair). All four are quic-PRIVATE config keys: the factory parses them itself from
+ * the raw config SETTINGS TLV it receives — they never appear in the shared
+ * `conn_settings_t`, which stays lean with only the universal keys (the ADR-0043 §5
+ * leanness ruling). Missing fields fail creation with `TYPE_MISMATCH`; a socket that
+ * failed to come up fails with `NOT_FOUND`. `keepalive` is ignored (#66 owns link
+ * lifecycle).
+ *
+ * **A SPEC-created dialer verifies the server certificate (#918).** The trust mode is
+ * whatever @ref quic_dial_tls_t defaults to, so with neither DIAL key present the
+ * handshake validates against the system trust store and a certificate that does not
+ * chain to it is REFUSED (creation answers `NOT_FOUND`). Two DIAL-side keys move it:
+ *
+ * - `ca` (NAME, a filesystem path) — verify against this PEM CA bundle instead of the
+ *   system trust store; the way to reach a privately-issued or self-signed peer while
+ *   still authenticating it.
+ * - `insecure` (VALUE, u8; default 0) — `1` skips server-certificate validation
+ *   entirely. DEV ONLY, and deliberately explicit: a deployment that wants an
+ *   unauthenticated dialer has to write it down. Never set it outside dev.
  *
  * @param rx_backend The ADR-0042 §2 receive-segment seam every constructed socket
  *                   draws its inbound frame segments from (default: the process

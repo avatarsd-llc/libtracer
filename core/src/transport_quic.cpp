@@ -229,22 +229,35 @@ namespace {
 /**
  * @brief The quic kind's PRIVATE config keys, parsed module-side from the raw
  *        SPEC config SETTINGS TLV (ADR-0043 §5 leanness: the shared
- *        conn_settings_t carries only the universal keys, so cert/key never
- *        touch it).
+ *        conn_settings_t carries only the universal keys, so the TLS material
+ *        never touches it).
+ *
+ * Two of the four are LISTEN-side (the served credential), two are DIAL-side
+ * (how the server certificate is trusted, #918).
  */
 struct quic_private_cfg_t {
-    std::string cert; /**< @brief PEM server-certificate path (LISTEN). */
-    std::string key;  /**< @brief PEM private-key path matching cert (LISTEN). */
+    std::string cert;      /**< @brief PEM server-certificate path (LISTEN). */
+    std::string key;       /**< @brief PEM private-key path matching cert (LISTEN). */
+    std::string ca;        /**< @brief PEM CA-bundle path the DIAL side verifies the
+                                       server certificate against; empty = the system
+                                       trust store (DIAL). */
+    bool insecure = false; /**< @brief DEV ONLY: skip server-certificate validation on
+                                       the DIAL side entirely. Must be asked for
+                                       explicitly — the default is to verify (DIAL). */
 };
 
 /** @brief The shared config_reader_t walk over the quic-private keys: NAME
- *         "cert" NAME <path>, NAME "key" NAME <path>; unknown pairs ignored
- *         (forward-compat). */
+ *         "cert" NAME <path>, NAME "key" NAME <path>, NAME "ca" NAME <path>,
+ *         NAME "insecure" VALUE <u8>; unknown pairs ignored (forward-compat).
+ *         Pair-consuming (#927) — a forward-compat pair whose string value
+ *         reads `"key"` must not bind the FOLLOWING child as a path. */
 [[nodiscard]] quic_private_cfg_t parse_quic_config(const wire::tlv_t* raw_config) {
     quic_private_cfg_t out;
     const config_reader_t cfg(raw_config);
     if (const auto v = cfg.name("cert")) out.cert = std::string(*v);
     if (const auto v = cfg.name("key")) out.key = std::string(*v);
+    if (const auto v = cfg.name("ca")) out.ca = std::string(*v);
+    if (const auto v = cfg.flag("insecure")) out.insecure = *v;
     return out;
 }
 
@@ -254,17 +267,24 @@ transport_vertex_t::transport_factory_t quic_transport_factory(mem::mem_backend_
     return [rx_backend](
                const conn_settings_t& s,
                const wire::tlv_t* raw_config) -> graph::result_t<std::unique_ptr<transport_t>> {
+        // BOTH roles carry kind-private keys, so the parse precedes the role split:
+        // the DIAL branch used to return before parse_quic_config ever ran, which is
+        // why no SPEC could reach the dial-side trust knobs at all (#918).
+        const quic_private_cfg_t priv = parse_quic_config(raw_config);
         std::unique_ptr<quic_transport_t> t;
         if (s.role == conn_role_t::DIAL) {
             if (s.addr.empty() || s.port == 0)
                 return std::unexpected(graph::status_t::TYPE_MISMATCH);
+            // Secure by default (#918): absent both keys this verifies the server
+            // certificate against the system trust store. `insecure = 1` is the
+            // explicit dev opt-out; `ca` names a bundle to verify against instead.
             t = std::make_unique<quic_transport_t>(
-                s.addr, s.port, quic_dial_tls_t{.ca_file = {}, .insecure_no_verify = true},
+                s.addr, s.port,
+                quic_dial_tls_t{.ca_file = priv.ca, .insecure_no_verify = priv.insecure},
                 rx_backend, s.max_frame);
             if (!t->ok()) return std::unexpected(graph::status_t::NOT_FOUND);  // handshake failed
             return t;
         }
-        const quic_private_cfg_t priv = parse_quic_config(raw_config);
         if (s.port == 0 || priv.cert.empty() || priv.key.empty())
             return std::unexpected(graph::status_t::TYPE_MISMATCH);
         t = std::make_unique<quic_transport_t>(s.port, priv.cert, priv.key, rx_backend,

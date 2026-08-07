@@ -82,6 +82,38 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   Regression:
   `core/tests/acl_cache_race_test.cpp`, an ancestor `:acl` rewriter racing a descendant's
   gated evaluation.
+
+- **SECURITY — a SPEC-created `quic` / `webtransport` dialer now VERIFIES the server
+  certificate, and two new DIAL-side config keys say how (#918).** Every connection built
+  through the `:children[]` SPEC path — `quic_transport_factory` and
+  `webtransport_transport_factory`, i.e. every config-created dialer there is — hardcoded
+  `insecure_no_verify = true` and passed an empty CA bundle, so the handshake accepted **any**
+  server certificate, a MITM's included. The dial side already supported real verification
+  (`quic_dial_tls_t` / `webtransport_dial_tls_t` both default secure, and the msquic
+  credential honours both `ca_file` and the flag); a hand-constructed transport could reach it,
+  the factory could not, and no config key existed to ask for it. Two things change:
+  - **The default is verification.** Both factories now dial with the trust struct's declared
+    defaults, so with no trust key present the handshake validates against the **system trust
+    store** and a certificate that does not chain to it is refused — creation answers
+    `NOT_FOUND`, the existing did-not-come-up status. (Ruled over the issue's
+    refuse-by-omission proposal: msquic with neither the flag nor a CA file performs default
+    platform validation, which is the standard TLS-client convention and costs nothing for the
+    dial-a-publicly-certified-endpoint case.)
+  - **Two new kind-PRIVATE config keys, identical in both kinds**: `ca` (NAME, a PEM CA-bundle
+    path) verifies against that bundle instead of the system store — the way to reach a
+    self-signed or privately-issued peer while still authenticating it; and `insecure` (VALUE
+    u8, default 0) set to `1` skips validation entirely, DEV ONLY and deliberately explicit.
+    Both are read through `net::config_reader_t` (the pair-consuming #927 walk), and both
+    factories now parse the config **before** the role split — the DIAL branch used to return
+    before `parse_quic_config` / `parse_wt_config` ever ran, which is why the dial side had no
+    reachable keys at all. `conn_settings_t` is untouched (ADR-0043 §5 leanness).
+
+  **This is a behaviour break for anything that SPEC-dialed a self-signed peer** — the
+  in-tree `quic_test` / `webtransport_test` e2e vectors did, and now pass `ca = <the dev
+  cert>`; a dev or interop harness doing the same must add `ca` or `insecure = 1`. The
+  breakage is the fix: a dialer that silently skipped validation because the test suite found
+  it convenient is the defect. Hand-constructed transports (`quic_transport_t(host, port,
+  tls)`) are unaffected — that constructor always took an explicit trust struct.
 - **`graph::parse_acl` rejects the non-canonical width, pairing and key shapes that used to
   read leniently (#906).** Not *every* shape the builder never emits — a two-byte
   `access_mask` and a non-canonical key ordering are both unemitted and both still parse, on

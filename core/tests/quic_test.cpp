@@ -31,6 +31,7 @@
 #include <cstring>
 #include <future>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -103,6 +104,10 @@ void check(bool ok, std::string_view what) {
 // Dev cert paths — generated once in main() by tools/gen-dev-cert.sh.
 std::string g_cert;
 std::string g_key;
+/** @brief A SECOND, unrelated self-signed certificate — never served by anything.
+ *         The wrong-CA-bundle vector that proves the `ca` config key is genuinely
+ *         consulted rather than merely accepted and ignored (#918). */
+std::string g_other_cert;
 
 quic_dial_tls_t dev_tls() { return quic_dial_tls_t{.ca_file = {}, .insecure_no_verify = true}; }
 
@@ -598,12 +603,18 @@ view_t owned(std::span<const std::byte> bytes) {
     return view_t::over(std::move(seg));
 }
 
-// SPEC{ NAME "type" <type>, NAME "name" <name>, SETTINGS "config"{ role, port,
-// kind=quic [, addr] [, cert, key] } } — the tcp_test conn_spec shape plus the
-// TLS-carrying `cert`/`key` config keys the quic LISTEN factory requires.
+/**
+ * @brief SPEC{ NAME "type" <type>, NAME "name" <name>, SETTINGS "config"{ role,
+ *        port, kind=quic [, addr] [, cert, key] [, ca] [, insecure] } }.
+ *
+ * The tcp_test conn_spec shape plus the four TLS-carrying quic-private config
+ * keys: `cert`/`key` the LISTEN factory requires, and the DIAL-side trust pair
+ * `ca`/`insecure` (#918).
+ */
 view_t conn_spec(std::string_view type, std::string_view name, tr::net::conn_role_t role,
                  std::uint16_t port, std::string_view addr = {}, std::string_view cert = {},
-                 std::string_view key = {}) {
+                 std::string_view key = {}, std::string_view ca = {},
+                 std::optional<bool> insecure = std::nullopt) {
     std::vector<std::byte> cfg;
     tr::wire::emit_name(cfg, "role");
     const std::byte r{static_cast<std::uint8_t>(role)};
@@ -623,6 +634,15 @@ view_t conn_spec(std::string_view type, std::string_view name, tr::net::conn_rol
         tr::wire::emit_name(cfg, cert);
         tr::wire::emit_name(cfg, "key");
         tr::wire::emit_name(cfg, key);
+    }
+    if (!ca.empty()) {
+        tr::wire::emit_name(cfg, "ca");
+        tr::wire::emit_name(cfg, ca);
+    }
+    if (insecure) {
+        tr::wire::emit_name(cfg, "insecure");
+        const std::byte iv{static_cast<std::uint8_t>(*insecure ? 1 : 0)};
+        tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, std::span<const std::byte>(&iv, 1));
     }
 
     std::vector<std::byte> body;
@@ -688,12 +708,16 @@ void test_config_constructed_quic() {
                                   conn_spec("listener", "bad", tr::net::conn_role_t::LISTEN, 0));
     check(!bad.has_value(), "B: a quic listener without cert/key fails creation");
 
-    // A: a quic CLIENT dialing B's port — a synchronous handshake from config
-    // (the DEV-ONLY no-verify trust mode, documented on the factory).
-    const auto wa =
-        node_a.write(path_t("/net:children[]"),
-                     conn_spec("client", "b", tr::net::conn_role_t::DIAL, 47131, "127.0.0.1"));
-    check(wa.has_value(), "A: SPEC{client, kind=quic, addr, port} constructs the dialing socket");
+    // A: a quic CLIENT dialing B's port — a synchronous handshake from config.
+    // The dial VERIFIES B's certificate (#918): B serves the self-signed dev cert,
+    // which chains to nothing in the system trust store, so this e2e names that very
+    // file as its `ca` bundle. Without a trust key the handshake would be refused —
+    // which is the point of the fix, and is asserted in test_spec_dial_trust_keys.
+    const auto wa = node_a.write(
+        path_t("/net:children[]"),
+        conn_spec("client", "b", tr::net::conn_role_t::DIAL, 47131, "127.0.0.1", {}, {}, g_cert));
+    check(wa.has_value(),
+          "A: SPEC{client, kind=quic, addr, port, ca} constructs the dialing socket");
     const auto* s = net_a.settings_of("net/quic-client/b");
     check(s != nullptr && s->kind == "quic" && s->addr == "127.0.0.1" && s->port == 47131,
           "A: the parsed :settings carry kind/addr/port");
@@ -716,6 +740,83 @@ void test_config_constructed_quic() {
     }
 }
 
+/**
+ * @brief #918 — a SPEC-created dialer AUTHENTICATES its peer.
+ *
+ * The listeners below serve the self-signed dev certificate, which chains to
+ * nothing in the system trust store: exactly the "peer whose certificate does
+ * not validate" case. Every leg asserts the HANDSHAKE outcome, never a
+ * round-tripped config value. Five listeners because a quic listener holds ONE
+ * peer at a time.
+ */
+void test_spec_dial_trust_keys() {
+    std::printf("SPEC dial certificate validation (#918):\n");
+    graph_t node_a;
+    graph_t node_b;
+    tr::net::fwd_router_t router_a(node_a);
+    tr::net::fwd_router_t router_b(node_b);
+    tr::net::transport_vertex_t net_a(node_a, router_a);
+    tr::net::transport_vertex_t net_b(node_b, router_b);
+    net_a.register_transport_type("quic", tr::net::quic_transport_factory());
+    net_b.register_transport_type("quic", tr::net::quic_transport_factory());
+    (void)net_a.register_module("quic-client", "quic", tr::net::conn_role_t::DIAL);
+    (void)net_b.register_module("quic-server", "quic", tr::net::conn_role_t::LISTEN);
+
+    bool listening = true;
+    for (const auto& [nm, port] : {std::pair<const char*, std::uint16_t>{"l1", 47140},
+                                   {"l2", 47141},
+                                   {"l3", 47142},
+                                   {"l4", 47143},
+                                   {"l5", 47144}}) {
+        const auto w = node_b.write(
+            path_t("/net:children[]"),
+            conn_spec("listener", nm, tr::net::conn_role_t::LISTEN, port, {}, g_cert, g_key));
+        listening = listening && w.has_value();
+    }
+    check(listening, "B: five self-signed dev-cert listeners are up");
+
+    // 1. No trust key at all. The default is to verify, the dev cert validates
+    //    against nothing, so the handshake is REFUSED and creation reports the
+    //    socket-did-not-come-up status. This is the write that SUCCEEDED before
+    //    the fix, when the factory hardcoded insecure_no_verify = true.
+    const auto plain =
+        node_a.write(path_t("/net:children[]"),
+                     conn_spec("client", "verify", tr::net::conn_role_t::DIAL, 47140, "127.0.0.1"));
+    check(!plain.has_value() && plain.error() == tr::graph::status_t::NOT_FOUND,
+          "A: a SPEC dial carrying no trust key is REFUSED — the peer cert does not validate");
+    check(router_a.registry().by_name("net/quic-client/verify") == nullptr,
+          "A: the refused dial leaves no connection behind");
+
+    // 2. `insecure = 1` — the explicit DEV-ONLY opt-out reaches the dialer.
+    const auto insec = node_a.write(path_t("/net:children[]"),
+                                    conn_spec("client", "insec", tr::net::conn_role_t::DIAL, 47141,
+                                              "127.0.0.1", {}, {}, {}, true));
+    check(insec.has_value(), "A: `insecure = 1` connects to that same unvalidatable peer");
+
+    // 3. `ca = <the peer's own cert>` — verification stays ON, against a private
+    //    bundle rather than the system trust store. The secure way to reach a
+    //    self-signed or privately-issued peer.
+    const auto with_ca = node_a.write(
+        path_t("/net:children[]"),
+        conn_spec("client", "ca", tr::net::conn_role_t::DIAL, 47142, "127.0.0.1", {}, {}, g_cert));
+    check(with_ca.has_value(), "A: `ca = <the peer's cert>` connects with verification ON");
+
+    // 4. `insecure = 0` is the explicit "verify" spelling, not a weaker opt-out —
+    //    a stale key left at zero must not disable validation by accident.
+    const auto zero = node_a.write(path_t("/net:children[]"),
+                                   conn_spec("client", "zero", tr::net::conn_role_t::DIAL, 47143,
+                                             "127.0.0.1", {}, {}, {}, false));
+    check(!zero.has_value(), "A: `insecure = 0` still verifies — the dial is REFUSED");
+
+    // 5. `ca = <an UNRELATED bundle>` — the bundle is genuinely consulted, not
+    //    merely accepted: one that does not certify this peer still refuses. This
+    //    is what keeps leg 3 from passing for the wrong reason.
+    const auto wrong_ca = node_a.write(
+        path_t("/net:children[]"), conn_spec("client", "wrongca", tr::net::conn_role_t::DIAL, 47144,
+                                             "127.0.0.1", {}, {}, g_other_cert));
+    check(!wrong_ca.has_value(), "A: `ca = <an unrelated CA>` is REFUSED — the bundle is applied");
+}
+
 }  // namespace
 
 int main() {
@@ -734,6 +835,14 @@ int main() {
     }
     g_cert = std::string(dir) + "/cert.pem";
     g_key = std::string(dir) + "/key.pem";
+    // A second, unrelated pair for the wrong-CA-bundle vector (#918).
+    const std::string other_dir = std::string(dir) + "/other";
+    const std::string cmd2 = std::string("sh ") + LIBTRACER_DEV_CERT_SCRIPT + " " + other_dir;
+    if (std::system(cmd2.c_str()) != 0) {
+        std::printf("FAIL: gen-dev-cert.sh (second pair)\n");
+        return 1;
+    }
+    g_other_cert = other_dir + "/cert.pem";
 
     test_raw_frame_duplex();
     test_split_and_coalesced();
@@ -744,6 +853,7 @@ int main() {
     test_scatter_gather();
     test_two_nodes_over_quic();
     test_config_constructed_quic();
+    test_spec_dial_trust_keys();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;

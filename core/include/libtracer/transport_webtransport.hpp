@@ -192,13 +192,20 @@ class webtransport_transport_t : public transport_t {
  * Register at setup:
  * `net.register_transport_type("webtransport", webtransport_transport_factory())`.
  * A `:children[]` SPEC whose config carries `kind = webtransport` then
- * constructs a @ref webtransport_transport_t — DIAL: `addr` + `port` (the
- * DEV-ONLY no-verify TLS mode, exactly the config-dialed `quic` caveat);
- * LISTEN: `port` plus the REQUIRED `cert`/`key` PEM-path config keys.
- * `cert`/`key` are kind-PRIVATE config keys parsed by this factory from the
- * raw SPEC config TLV — they never appear on the shared `conn_settings_t`
- * (the ADR-0043 §5 leanness ruling). Missing fields fail with
+ * constructs a @ref webtransport_transport_t — DIAL: `addr` + `port` plus the
+ * OPTIONAL trust keys below; LISTEN: `port` plus the REQUIRED `cert`/`key`
+ * PEM-path config keys. All four are kind-PRIVATE config keys parsed by this
+ * factory from the raw SPEC config TLV — they never appear on the shared
+ * `conn_settings_t` (the ADR-0043 §5 leanness ruling). Missing fields fail with
  * `TYPE_MISMATCH`; a session that failed to come up fails with `NOT_FOUND`.
+ *
+ * **A SPEC-created dialer verifies the server certificate (#918)** — the trust
+ * mode is whatever @ref webtransport_dial_tls_t defaults to, so with neither
+ * DIAL key present a certificate that does not chain to the system trust store
+ * is REFUSED (creation answers `NOT_FOUND`). The same two DIAL-side keys as the
+ * `quic` kind move it: `ca` (NAME, a PEM CA-bundle path) verifies against that
+ * bundle instead, and `insecure` (VALUE u8, default 0) set to `1` skips
+ * validation entirely — DEV ONLY, and explicit on purpose.
  *
  * @param rx_backend The ADR-0042 §2 receive-segment seam every constructed
  *                   endpoint draws inbound frame segments from (default: the
