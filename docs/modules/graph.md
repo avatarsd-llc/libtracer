@@ -299,11 +299,18 @@ remote-delivery sink, which is a `tr::net` concern. See
 
 ## Status codes
 
-`status_t` (`core/include/libtracer/status.hpp:24-33`) is the error side of every
+`status_t` (`core/include/libtracer/status.hpp:25-34`) is the error side of every
 `result_t`. When the operation arrived over the wire, the FWD resolver maps it to the
 registered `tr::` error code the `kind=ERROR` reply carries (`error_code(status_t)`,
-`core/src/op_resolve_walk.hpp:76-95` — a private header under `src/`, not part of the
+`core/src/op_resolve_walk.hpp:76-115` — a private header under `src/`, not part of the
 public API).
+
+The table below is a **total** map, and the compiler keeps it that way: `error_code` is a
+`switch` with no `default:` label and no fall-through tail, compiled under `-Werror=switch`,
+so a `status_t` gained without a row here is a red build rather than a status that goes out
+under some other member's wire code. It reads as a formality only until you notice that the
+two enums are deliberately separate registries — `status_t` is L4 vocabulary, `err_t` is the
+wire's — which is what makes the mapping hand-written and therefore losable.
 
 | `status_t` | Wire error | What produces it |
 | --- | --- | --- |

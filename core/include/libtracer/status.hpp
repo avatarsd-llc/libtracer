@@ -11,6 +11,7 @@
 #pragma once
 
 #include <expected>
+#include <utility>
 
 namespace tr::graph {
 
@@ -41,7 +42,21 @@ enum class status_t {
 template <class T>
 using result_t = std::expected<T, status_t>;
 
-/** @brief The stable lower-case wire name of a `status_t` (e.g. `"not_found"`). */
+/**
+ * @brief The stable lower-case wire name of a `status_t` (e.g. `"not_found"`).
+ *
+ * Structurally exhaustive, and deliberately so (#876): the switch carries neither a `default:`
+ * label nor a fall-through tail, so `-Wswitch` — an error under the `-Werror=switch` the library
+ * compiles with — names this switch the moment an enumerator is added to `status_t` without a
+ * name here. The retired `return "unknown";` tail turned that into a nameless status at
+ * *runtime*, the reporting twin of the wire mislabel the `error_code` bridge carried.
+ *
+ * @warning @p s must be a `status_t` enumerator. Every status the library produces is one — a
+ *          status is minted from the enumerators and is never cast in from wire bytes (the
+ *          wire's own registry is `wire::err_t`) — so the end of this function is unreachable
+ *          by construction, and a call that reaches it in a constant expression is a
+ *          compile error.
+ */
 [[nodiscard]] constexpr const char* to_string(status_t s) noexcept {
     switch (s) {
         case status_t::NOT_FOUND:
@@ -61,7 +76,7 @@ using result_t = std::expected<T, status_t>;
         case status_t::PATH_IN_USE:
             return "path_in_use";
     }
-    return "unknown";
+    std::unreachable();
 }
 
 }  // namespace tr::graph
