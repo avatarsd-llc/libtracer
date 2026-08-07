@@ -14,6 +14,42 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Changed
+
+- **`graph::parse_acl` rejects the non-canonical width, pairing and key shapes that used to
+  read leniently (#906).** Not *every* shape the builder never emits — a two-byte
+  `access_mask` and a non-canonical key ordering are both unemitted and both still parse, on
+  purpose. The `:acl` write gate read its fields leniently, and on a security surface
+  leniency does not lose a field — it changes what the document grants. Four arms are closed, each with its
+  own rejection vector in `core/tests/security_acl_test.cpp`:
+  - **Width-tolerant numeric reads inverted a decision.** `detail::load_le` reads the low
+    `min(size, sizeof(T))` bytes, so a `type` sent big-endian as `u16` `0x0001` (DENY)
+    read as its low byte `0x00` — **ALLOW** — and passed the `t > 1` gate, while a `u64`
+    `access_mask` was truncated to `u32` with its high bytes dropped and `has_mask` still
+    set. A numeric field's payload must now be non-empty and no **wider** than the field
+    (`type`/`flags` u8, `access_mask` u32, `expires_ns` u64); anything wider is
+    `TYPE_MISMATCH`. A **narrower** payload is still accepted — little-endian
+    zero-extension is exact, and it is the canonical spelling: reference/05 §`0x0A`
+    declares `access_mask` as `u16` and the `acl/acl-aces` conformance vector (and the
+    Rust core's builder) emit two bytes where `encode_acl` emits four.
+  - **A known key carrying the wrong value TLV type was silently skipped**, so an
+    `expires_ns` paired with a non-`VALUE` child left `expires_ns = 0` and a time-limited
+    grant became permanent. It is now `TYPE_MISMATCH`.
+  - **Unknown keys were ignored**, dropping whatever restriction a newer writer meant to
+    add. They are now `TYPE_MISMATCH` — the deliberate OPPOSITE of `net::config_reader_t`
+    (#927), which skips them: config is where a newer peer legitimately sends more than
+    the receiver understands, an ACL is not.
+  - **The field scan visited every offset**, so a `NAME`-typed value (the legal
+    `OWNER@`/`EVERYONE@` subject spelling) was re-read as the next key and bound the
+    *following* key's name as the subject. The walk is now **pair-consuming**, the
+    mechanics of `config_reader_t`: a non-`NAME` in a key slot, an odd child count (a
+    trailing key with no value), and a repeated key within one ACE are all
+    `TYPE_MISMATCH`.
+
+  Not a wire change: `encode_acl`'s output and the published `acl/acl-aces` vector both
+  still parse. Callers that hand-built a non-canonical `:acl` blob now get `TYPE_MISMATCH`
+  at write time instead of a grant that differs from what they wrote.
+
 ### Added
 
 - **The `can_link_t` seam owns its admission rule, so the two ports can no longer disagree
@@ -36,6 +72,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   covered by the same predicate but were never a behaviour that existed here: the socket
   requests no `CAN_RAW_ERR_FILTER`, so the kernel's default zero mask has always withheld
   them. The check is the seam's rule holding for a port that does ask, not a change.
+
+- **`fwd_router_t::receiver_ctx_count()` (#884).** How many per-child receiver contexts the
+  router holds — one per NAME ever registered, live or tombstoned. The twin of
+  `child_registry_t::size()` and introduced for the same reason: it is the length of the chain
+  every name-keyed and slot-keyed lookup walks, so "create/remove churn does not grow it" is
+  assertable rather than merely intended. Takes the control lock; never a per-frame call.
 
 - **`transport_can` exposes the sibling drop counters, and its RX state is bounded and
   aged (#912).** The CAN ingress buffers grew on the receive thread with nothing expiring
@@ -88,6 +130,28 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   exactly like its neighbour `probe_fail_hook`.
 
 ### Fixed
+
+- **`fwd_router_t` resolves a re-added child NAME to its current tenancy, and connection
+  churn no longer grows its receiver chain (#884).** `remove_child` left the child's
+  `child_rx_ctx_t` on the published receiver chain and `add_child` of the same NAME appended
+  a second one, while the name-keyed walk answers with the FIRST match. Name reuse is a
+  supported flow — `remove_connection` retires the vertex so a later connection may take the
+  name, and the registry rebinds its tombstone — so after one create/remove/create cycle every
+  name-keyed consumer (`connection_ref`, `hop_mint`, and through them `adopt_binding` and the
+  reply-mint contribution) resolved the DEAD context, whose `conn_slot` names the retired
+  tenancy: a re-created child could be permanently unbindable on the bound path while its
+  canonical spelling worked, and a NAME re-added as a bus mount kept answering with the
+  point-to-point slot it no longer had. The chain also grew by one `child_rx_ctx_t` (plus its
+  mount run) per cycle, unboundedly, lengthening the per-bound-frame `ctx_by_conn_slot` walk —
+  on a bounded node, a reboot. A ctx is now TOMBSTONED in place on removal (it stays linked,
+  because a lock-free reader may be standing on it, but every walk skips it) and a re-add of
+  the same NAME REBINDS that ctx instead of appending, which is the one-slot-per-name rule
+  `child_registry_t::add` has followed since #494/#521. `conn_slot` is re-resolved per
+  registration rather than inherited. Not a use-after-free: every pointer involved stays live
+  (the deque is never popped, registry chunks are never freed, and the graph's slot table is
+  pinned and insert-only) — the defect was a live pointer naming the wrong tenancy, which is
+  why ASan reports nothing on either side of the fix. Measured before: 52 contexts after 51
+  remove/re-add rounds on one name; after: 1.
 
 - **`wire::encode` no longer mints a `PATH_REF` frame its own `decode` rejects (#886).** The
   grammar has exactly one per-type structural rule — a `PATH_REF` body is a fixed-stride

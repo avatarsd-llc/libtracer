@@ -105,8 +105,10 @@ class esp_ws_client_link_t : public transport_t {
      * @param rx_bytes Reusable receive-buffer size (one inbound message must fit); our
      *                 control TLVs are small, so the default is modest.
      * @param tx_bytes Reusable send-scratch size (one outbound frame must fit).
-     * @param recv_stack Recv-thread stack (0 = the pthread default, which the node sizes
-     *                   for in-call delivery through the graph's on_write seam).
+     * @param recv_stack Recv-thread stack in bytes, HONORED (#900): the recv thread runs
+     *                   in-call delivery through the graph's on_write seam, which is the
+     *                   deep path, so a node that knows its delivery depth sizes it here.
+     *                   0 = the platform pthread default.
      */
     explicit esp_ws_client_link_t(std::string host, std::uint16_t port, std::string ws_path = "/ws",
                                   std::size_t rx_bytes = 2048, std::size_t tx_bytes = 2048,
@@ -131,6 +133,20 @@ class esp_ws_client_link_t : public transport_t {
 
     /** @brief True once the opening handshake has completed (and while connected). */
     [[nodiscard]] bool ok() const noexcept { return connected_.load(std::memory_order_acquire); }
+
+    /**
+     * @brief Inbound MESSAGES dropped by the receive path since construction — the
+     *        `dropped_rx()` convention core's transports already spell this way.
+     *
+     * Two causes, both of which used to be logs-only (#953): a message that does not fit
+     * `rx_bytes` (dropped whole, never truncated — its remaining fragments are consumed
+     * and discarded too, #901), and a stray CONTINUATION arriving with no message open.
+     * A frame lost to a connection drop is NOT counted: that is the link going down, not
+     * the receive path refusing a message.
+     */
+    [[nodiscard]] std::uint64_t dropped_rx() const noexcept {
+        return dropped_rx_.load(std::memory_order_relaxed);
+    }
 
     /**
      * @brief Set (or clear, with an empty string) extra HTTP header lines appended to the
@@ -170,6 +186,9 @@ class esp_ws_client_link_t : public transport_t {
     std::mutex write_m_;  // serializes all esp_transport handle access (syscall-brief)
     std::atomic<bool> connected_{false};
     std::atomic<bool> stop_{false};
+    /** @brief Receive-path message drops — see @ref dropped_rx. Written only by the recv
+     *         thread, read by anyone, so relaxed is enough (it is a statistic). */
+    std::atomic<std::uint64_t> dropped_rx_{0};
     std::thread recv_thread_;
 };
 

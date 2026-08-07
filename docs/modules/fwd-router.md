@@ -182,8 +182,8 @@ class child_registry_t {                 // the one NAME -> link demux table (AD
 }  // namespace tr::net
 ```
 
-Signature source: `core/include/libtracer/fwd_router.hpp:176` (constructor), `:238`
-(`add_child`), `:288` (`subscribe_toward`), `:384-396` (the sink function-pointer types);
+Signature source: `core/include/libtracer/fwd_router.hpp:176` (constructor), `:245`
+(`add_child`), `:301` (`subscribe_toward`), `:397-409` (the sink function-pointer types);
 `core/include/libtracer/child_registry.hpp:209` (`add`), `:458` (`resolve_peer`), `:473`
 (`erase`), `:499` (`entry_by_name`), `:520` (`by_name`), `:561`/`:571` (`size`/`live_size`).
 
@@ -212,15 +212,15 @@ flowchart TB
   address size grows with hop count, which is what `ADVERTISE`/`COMPACT` route handles exist to
   amortise on a steady flow.
 - **A reply is delivered as a rope, never flattened by the router**
-  (`core/include/libtracer/fwd_router.hpp:398-407`). A sink that wants contiguous bytes holds
+  (`core/include/libtracer/fwd_router.hpp:411-420`). A sink that wants contiguous bytes holds
   `const view_t m = reply.materialize()` and reads `m.bytes()`; a **single-link reply — the common
   case — is returned zero-copy, no allocation and no copy**, and only a multi-link reply pays one
   flatten, on demand. The escape hatch sits at the consumer, so the router never pays for a
   consumer that did not need contiguity. `m` must stay alive while its span is read.
 - **The default delivery leg copies nothing.** A full-route `FWD{WRITE}` fan-out scatter-gathers a
   fresh stack head, the stored return-route bytes, an empty `src`, and one span per link of the
-  stored value (`core/src/fwd_router.cpp:1729`). The `COMPACT` leg is the one that flattens,
-  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:1692`) — single-link, that
+  stored value (`core/src/fwd_router.cpp:1809`). The `COMPACT` leg is the one that flattens,
+  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:1772`) — single-link, that
   flatten is a zero-copy adopt, and multi-link it draws from the router's injected `flat` backend
   (#730), not the global heap.
 - **All rope flattens on the forward AND terminus paths draw from the injected seam.** `flat`
@@ -251,7 +251,7 @@ flowchart TB
   instead of raising an exception that `-fno-exceptions` would turn into `abort()`. A dropped fresh
   `ADVERTISE` self-heals through the peer's `HANDLE_NACK`. The residual is the label store: a
   **compact-flagged** flow's first delivery on a link resolves its label *before* those three steps
-  (`fwd_router.cpp:1694`), and that allocates its `link_tables_t` and its egress entry from the
+  (`fwd_router.cpp:1774`), and that allocates its `link_tables_t` and its egress entry from the
   `std::pmr::memory_resource` (`route_handle.cpp:34-42`, `:236-237`), which reports exhaustion by
   throwing — so that one leg can still abort under `-fno-exceptions`
   ([#603](https://github.com/avatarsd-llc/libtracer/issues/603)). A flow that is not
@@ -315,7 +315,7 @@ adopt; `/net` itself is likewise only the recommended root convention (a constru
 **Creation is all-or-nothing.** A connection is built in three steps — register the identity
 vertex, insert the `conns_` entry, wire the link into the router's `child_registry_t` — and only
 the last can be refused: `add_child` answers `false` when the registry cannot grow, and it is the
-only place that can say so (`core/include/libtracer/fwd_router.hpp:238`,
+only place that can say so (`core/include/libtracer/fwd_router.hpp:245`,
 `core/include/libtracer/child_registry.hpp:209`). A refusal unwinds the first two in reverse —
 retire the vertex, then erase the entry, which destroys the config-constructed socket — publishes
 no liveness, and answers `BACKPRESSURE` (`core/src/transport_vertex.cpp:347-350`). Discarding that
@@ -372,6 +372,16 @@ out of the raw config `SETTINGS` TLV handed to it alongside these settings.
   `remove_child` on a reconnecting `DIAL` link permanently unroutes it, because under the RFC-0014
   model a connection's *vertex* outlives its *socket*. Conversely, call `remove_child` **before**
   destroying the `transport_t`, or a forward can resolve a freed object.
+- **A NAME owns one receiver context, for the router's life (#884).** `remove_child` tombstones
+  the child's `child_rx_ctx_t` where it stands — it stays on the lock-free published chain,
+  because a receive thread may be walking it, but it answers no lookup — and `add_child` of that
+  same NAME revives it rather than appending a second. Two consequences callers rely on: a
+  re-added child resolves to its *current* tenancy on the bound path (`connection_ref` /
+  `hop_mint` re-resolve `conn_slot` per registration, so a child that gained a connection vertex
+  between registrations becomes bindable, and one re-added as a bus mount stops being), and
+  create/remove churn on a stable name set neither leaks a context nor lengthens the chain the
+  bound hop walks. `receiver_ctx_count()` is the assertable form of the second, the twin of
+  `child_registry_t::size()` — which has had this rule since #494/#521.
 - **A sink's `ctx` must outlive every possible delivery.** Sinks fire on transport receive threads,
   possibly several concurrently, and clearing a sink is the only thing that stops future calls.
 - **`materialize()` returns an owner, not a span.** Holding `reply.materialize().bytes()` past the
