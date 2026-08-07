@@ -44,22 +44,36 @@ namespace tr::esp {
  *
  * @note Callable from any thread. The surrounding `esp_pthread` config of the CALLING
  *       thread is saved and restored around the spawn, so this never leaks @p stack
- *       onto a later `std::thread` created by the same caller. Starting from
- *       `esp_pthread_get_default_config()` makes `saved` valid to restore to even when
- *       the caller had no config set (`esp_pthread_get_cfg` leaves it untouched then,
- *       and restoring the default clears ours).
+ *       onto a later `std::thread` created by the same caller.
+ *
+ * @note The had-a-config distinction is load-bearing, not defensive coding.
+ *       `esp_pthread_get_cfg` does **not** leave its out-param untouched when the
+ *       calling thread has no config: on `ESP_ERR_NOT_FOUND` it `memset`s the struct to
+ *       ZERO (IDF `components/pthread/pthread.c`). Seeding from
+ *       `esp_pthread_get_default_config()` and calling straight through therefore
+ *       *destroys* the seed and leaves `stack_size == 0`, which `esp_pthread_set_cfg`
+ *       rejects with `ESP_ERR_INVALID_ARG` (it requires `>= PTHREAD_STACK_MIN`). The
+ *       restore then silently does nothing and this link's `stack_size` / `thread_name`
+ *       stay armed on the caller — leaking onto every later `std::thread` it spawns.
+ *       That is the common case, not a corner: a thread has no config until someone
+ *       sets one, and `app_main` typically spawns every link without ever doing so.
+ *       So the return code is CHECKED, and the no-config case restores the platform
+ *       default explicitly. IDF exposes no way to return a thread to "unset", but the
+ *       default config carries exactly the `stack_size` / `prio` / `pin_to_core` an
+ *       unset thread would have used, so the observable behaviour is the same.
  */
 template <typename body_t>
 [[nodiscard]] std::thread spawn_thread(std::size_t stack, const char* name, body_t&& body) {
     if (stack == 0) return std::thread(std::forward<body_t>(body));
-    esp_pthread_cfg_t saved = esp_pthread_get_default_config();
-    (void)esp_pthread_get_cfg(&saved);
-    esp_pthread_cfg_t cfg = saved;
+    esp_pthread_cfg_t saved{};
+    const bool had_cfg = esp_pthread_get_cfg(&saved) == ESP_OK;
+    esp_pthread_cfg_t cfg = had_cfg ? saved : esp_pthread_get_default_config();
     cfg.stack_size = stack;
     cfg.thread_name = name;
     (void)esp_pthread_set_cfg(&cfg);
     std::thread spawned(std::forward<body_t>(body));
-    (void)esp_pthread_set_cfg(&saved);
+    const esp_pthread_cfg_t restore = had_cfg ? saved : esp_pthread_get_default_config();
+    (void)esp_pthread_set_cfg(&restore);
     return spawned;
 }
 

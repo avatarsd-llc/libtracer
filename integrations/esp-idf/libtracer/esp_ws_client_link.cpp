@@ -174,11 +174,19 @@ void esp_ws_client_link_t::recv_loop() {
     // mistaken for a message of its own. This is what makes the drop-don't-truncate
     // contract actually hold (#901).
     bool discarding = false;
+    // Set while a MESSAGE is open — i.e. a BINARY/TEXT frame arrived without FIN and its
+    // CONT frames are still expected. This cannot be inferred from `off`: a message whose
+    // first fragment carries a zero-length payload (legal per RFC 6455 §5.4, and what a
+    // peer emits when it starts a message before its first chunk is ready) leaves `off`
+    // at 0, so an `off == 0` test reads its CONT frames as strays and drops the whole
+    // message. Assembly is a property of the FIN flags seen, not of the byte count.
+    bool assembling = false;
     while (!stop_.load(std::memory_order_relaxed)) {
         if (!connected_.load(std::memory_order_acquire)) {
             off = 0;
             frame_left = 0;
             discarding = false;
+            assembling = false;
             if (!connect_once()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(kReconnectBackoffMs));
             }
@@ -191,6 +199,7 @@ void esp_ws_client_link_t::recv_loop() {
             off = 0;
             frame_left = 0;
             discarding = false;
+            assembling = false;
             continue;
         }
         if (pr == 0) continue;  // no data this turn; re-check stop_
@@ -213,6 +222,7 @@ void esp_ws_client_link_t::recv_loop() {
             off = 0;
             frame_left = 0;
             discarding = false;
+            assembling = false;
             continue;
         }
         // A control frame (PING/PONG/CLOSE-ack) was consumed internally — keep `off`. IDF
@@ -229,6 +239,7 @@ void esp_ws_client_link_t::recv_loop() {
             off = 0;
             frame_left = 0;
             discarding = false;
+            assembling = false;
             continue;
         }
         if (op != WS_TRANSPORT_OPCODES_BINARY && op != WS_TRANSPORT_OPCODES_TEXT &&
@@ -255,7 +266,10 @@ void esp_ws_client_link_t::recv_loop() {
             if (message_done) discarding = false;
             continue;
         }
-        if (op == WS_TRANSPORT_OPCODES_CONT && off == 0) {
+        if (op != WS_TRANSPORT_OPCODES_CONT) {
+            assembling = !message_done;  // a data opcode opens a message unless it ends it
+        }
+        if (op == WS_TRANSPORT_OPCODES_CONT && !assembling) {
             // A CONTINUATION with no assembly open — the peer's stream is out of step and
             // this is a mid-payload tail, not a message. Drop it rather than start a
             // message from the middle; the server sibling drops exactly this
@@ -273,6 +287,7 @@ void esp_ws_client_link_t::recv_loop() {
             // EXACT FIT and delivers — it used to take the overflow branch (#901).
             if (off > 0) rx_.deliver_borrowed(std::span<const std::byte>(rx_buf_.data(), off));
             off = 0;
+            assembling = false;
         } else if (off == rx_buf_.size()) {
             // The buffer is full and the message is NOT over: it cannot fit. Drop it
             // rather than deliver a partial TLV (never silently truncate) — and discard
@@ -283,6 +298,7 @@ void esp_ws_client_link_t::recv_loop() {
                      static_cast<unsigned>(rx_buf_.size()));
             dropped_rx_.fetch_add(1, std::memory_order_relaxed);
             off = 0;
+            assembling = false;
             discarding = true;
         }
         // else (!message_done && off < size): keep accumulating the fragmented message.
