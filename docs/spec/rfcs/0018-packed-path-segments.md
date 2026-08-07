@@ -189,7 +189,7 @@ enforcement note at `docs/reference/05-protocol-tlvs.md:279-299` and the conform
 `path/path-value-children-illegal` exist because of it.
 
 **A second, still-unfixed locus of that same bug is closed by this RFC.** `wire::path_key`
-(`core/src/frame.cpp:166-178`) emits **every** child's payload through `wire::emit_name`
+(`core/src/frame.cpp:193-215`) emits **every** child's payload through `wire::emit_name`
 with no type check — the #436 fix landed only in the arena tier. Its wire-facing caller
 `resolve_route_vertex` (`core/src/fwd_router.cpp:1196-1198`) resolves an ADVERTISE route, so a peer
 sending `PATH{VALUE "sensor"}` binds a label to `/sensor` today while the arena tier correctly

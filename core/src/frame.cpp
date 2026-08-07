@@ -129,8 +129,12 @@ std::vector<std::byte> encode(const tlv_t& tlv) {
     // consulted it; this door did not, so a caller-built PATH_REF with `opt.pl`, `opt.ll`, or a
     // body that is not a whole number of 8-byte elements serialized to bytes this very library
     // answers with `tr::frame::invalid`. The guarded emitters (`emit_path_ref`) satisfy the rule
-    // by construction — they take a typed element array — which left `encode` as the only door
-    // that could mint a self-rejected frame. A PATH_REF body is never structured, so `payload`
+    // by construction — they take a typed element array — which left `encode` as the door a
+    // CALLER-BUILT tlv_t reaches. It is not the last unguarded write of the 0x14 type byte:
+    // `wire::emit_tlv` is public and generic, so `emit_tlv(out, type_t::PATH_REF, opt_t{.pl=true},
+    // body)` still mints a self-rejected frame. No in-tree caller does, and `emit_header`'s own
+    // doc makes shape the caller's problem, so that is a documented raw seam rather than a hole
+    // — but it is a seam, not an absence. A PATH_REF body is never structured, so `payload`
     // IS the body length here: an `opt.pl` PATH_REF fails the PL clause before the children
     // branch below ever runs. Refusing costs one predicted-not-taken compare per TLV.
     if (tlv.type == type_t::PATH_REF &&
