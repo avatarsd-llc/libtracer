@@ -652,14 +652,18 @@ transport_ws_client::transport_ws_client(const std::string& host, std::uint16_t 
         return;
     }
 
-    if (!handshake(fd, host, port)) {
+    // Bytes the server pipelined behind its 101 — carried out of the handshake and into
+    // the recv loop's buffer, never re-read from the socket (they are already off it).
+    std::vector<std::byte> pipelined;
+    if (!handshake(fd, host, port, pipelined)) {
         ::close(fd);
         return;
     }
 
     conn_fd_.store(fd, std::memory_order_relaxed);
     connected_ = true;
-    start([this, fd] { serve(fd); }, recv_stack);
+    start([this, fd, pre = std::move(pipelined)]() mutable { serve(fd, std::move(pre)); },
+          recv_stack);
 }
 
 transport_ws_client::~transport_ws_client() {
@@ -696,7 +700,9 @@ void transport_ws_client::send(std::span<const std::byte> frame) {
               std::span<const std::byte>(tx_buf_.data(), n));
 }
 
-bool transport_ws_client::handshake(int fd, const std::string& host, std::uint16_t port) {
+bool transport_ws_client::handshake(int fd, const std::string& host, std::uint16_t port,
+                                    std::vector<std::byte>& pipelined) {
+    pipelined.clear();
     // A fresh 16-byte nonce (RFC 6455 §4.1) base64'd into Sec-WebSocket-Key.
     std::array<std::byte, 16> nonce{};
     std::uint64_t s = mask_state_.load(std::memory_order_relaxed) ^ 0xD1B54A32D192ED03ull;
@@ -728,7 +734,8 @@ bool transport_ws_client::handshake(int fd, const std::string& host, std::uint16
     // hang construction forever.
     std::string resp;
     std::array<char, 1024> chunk;
-    while (resp.find("\r\n\r\n") == std::string::npos) {
+    std::size_t hdr_end = std::string::npos;
+    while (hdr_end == std::string::npos) {
         if (stop_.load(std::memory_order_relaxed)) return false;
         const int pr = poll_readable(fd);  // one bounded 100 ms readability wait
         if (pr < 0) return false;
@@ -736,32 +743,42 @@ bool transport_ws_client::handshake(int fd, const std::string& host, std::uint16
         const ssize_t n = ::recv(fd, chunk.data(), chunk.size(), 0);
         if (n <= 0) return false;  // peer closed / error
         resp.append(chunk.data(), static_cast<std::size_t>(n));
-        if (resp.size() > 16384) return false;  // runaway response guard
+        hdr_end = resp.find("\r\n\r\n");
+        // Runaway-response guard: it bounds the HEADER scan only. Once CRLFCRLF is in hand
+        // everything past it is frame bytes, and a large frame pipelined behind the 101
+        // must not be read as a header block that never ends.
+        if (hdr_end == std::string::npos && resp.size() > 16384) return false;
     }
 
-    if (resp.find("101") == std::string::npos) return false;
-    const std::string accept = header_value(resp, "sec-websocket-accept");
-    return !accept.empty() && accept == ws::accept_key(key);
+    // Validate against the HEADER BLOCK alone: the tail may be arbitrary frame bytes, and
+    // neither the `101` search nor the header scan may take a match out of them.
+    const std::string_view header(resp.data(), hdr_end + 4);
+    if (header.find("101") == std::string_view::npos) return false;
+    const std::string accept = header_value(header, "sec-websocket-accept");
+    if (accept.empty() || accept != ws::accept_key(key)) return false;
+
+    // Bytes pipelined past the header are the start of the frame stream — they are already
+    // off the socket, so `serve` can never read them again. Carry them over, exactly as
+    // `transport_ws_server::service_peer` does on the accept side.
+    const auto* rest = reinterpret_cast<const std::byte*>(resp.data()) + hdr_end + 4;
+    pipelined.assign(rest, rest + (resp.size() - hdr_end - 4));
+    return true;
 }
 
-void transport_ws_client::serve(int fd) {
+void transport_ws_client::serve(int fd, std::vector<std::byte> pipelined) {
     ws_assembler_t asm_state;  // per-connection fragment assembly (recv thread only)
-    std::vector<std::byte> buf;
+    std::vector<std::byte> buf = std::move(pipelined);
     std::array<std::byte, 4096> chunk;
     // The ingress bound, resolved from the injected backend and `max_frame` exactly as the
     // server resolves it — a dialled peer gets no more credit than an accepted one.
     const std::size_t cap = length_prefix_framer::effective_cap(*backend_, max_frame_);
 
-    while (!stop_.load(std::memory_order_relaxed)) {
-        const int pr = poll_readable(fd);  // one bounded 100 ms readability wait
-        if (pr < 0) break;
-        if (pr == 0) continue;  // timeout → re-check stop_
-
-        const ssize_t n = ::recv(fd, chunk.data(), chunk.size(), 0);
-        if (n <= 0) break;  // peer closed / error
-        buf.insert(buf.end(), chunk.data(), chunk.data() + n);
-
-        // Drain every complete frame; leftover partial bytes stay for next read.
+    while (true) {
+        // Drain BEFORE touching the socket: the loop starts with whatever the server
+        // pipelined behind its 101 already in `buf`, and a peer that pushes its state on
+        // connect and then goes quiet must still get that message delivered — a
+        // poll-first loop would sit on a complete frame until the peer spoke again.
+        // Leftover partial bytes stay for the next read.
         while (true) {
             ws::decode_result_t decoded = ws::decode_frame_checked(buf, cap);
             if (decoded.status == ws::decode_status_t::NEED_MORE) break;
@@ -824,6 +841,15 @@ void transport_ws_client::serve(int fd) {
                     break;  // TEXT / PONG: ignored
             }
         }
+
+        if (stop_.load(std::memory_order_relaxed)) break;
+        const int pr = poll_readable(fd);  // one bounded 100 ms readability wait
+        if (pr < 0) break;
+        if (pr == 0) continue;  // timeout → re-check stop_
+
+        const ssize_t n = ::recv(fd, chunk.data(), chunk.size(), 0);
+        if (n <= 0) break;  // peer closed / error
+        buf.insert(buf.end(), chunk.data(), chunk.data() + n);
     }
 
 teardown:

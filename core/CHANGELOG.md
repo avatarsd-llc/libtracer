@@ -16,6 +16,30 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Fixed
 
+- **A `net::transport_ws_client` no longer drops the frames a server pipelines behind its
+  `101` (#1020).** `transport_ws_client::handshake` accumulated the HTTP response into a
+  buffer of its own until `\r\n\r\n`, validated the `101`, and returned a bare `bool` — so
+  everything the same `recv` returned *after* the header block died with that buffer. Those
+  bytes are already off the socket, so the recv loop could never read them back: a server
+  that pushes state the instant the handshake completes (legal, and what any push-on-connect
+  server does) lost its first message with no counter moving and the connection looking
+  healthy. Timing-dependent — it needs the `101` and the frame to coalesce into one `recv` —
+  so it presented as flakiness rather than a clean failure. The handshake now hands the
+  post-header remainder to `serve`, which seeds its receive buffer with it and drains before
+  polling, so a complete pipelined frame is decoded even when nothing further arrives. This
+  is the DIAL half of a rule the accept half already followed
+  (`transport_ws_server::service_peer`'s carry-over). Two adjacent corrections come with it.
+  The 16 KiB runaway-response guard now bounds the HEADER scan only: it used to be applied on
+  the same pass that completed the header, so a response whose header block plus the bytes
+  pipelined behind it crossed 16 KiB was refused as runaway even though its header had ended
+  (a latent edge rather than the reported failure — the read chunk is 1 KiB, so reaching it
+  needs a header block already near 16 KiB). And the `101` / `Sec-WebSocket-Accept` checks now
+  scan the header block rather than the whole buffer, so neither can take a match out of the
+  frame bytes behind it. No public signature changed — `handshake` and `serve` are private.
+  `core/tests/ws_transport_test.cpp` writes the `101`, a PING, and the first fragment of a
+  BINARY message in ONE `send`, and asserts both the PONG and the assembled message; the
+  100 ms pause that masked this in `core/tests/ws_rx_bound_test.cpp` is removed.
+
 - **An over-capacity `hazard_slot_t` thread no longer CAS-sweeps every reader's announcement
   line on every operation (#899).** `detail_hp::cell_t` packed the claim flag into the same
   `kDomainAlign`-aligned struct as `pinned`, the announcement a reader writes on every

@@ -802,6 +802,153 @@ void test_close_peer() {
     b.reset();
 }
 
+/** @brief Append one UNMASKED server→client frame (payload < 126) to @p out. */
+void append_server_frame(std::vector<std::byte>& out, ws::opcode_t op,
+                         std::span<const std::byte> payload, bool fin = true) {
+    out.push_back(static_cast<std::byte>((fin ? 0x80u : 0x00u) | static_cast<std::uint8_t>(op)));
+    out.push_back(static_cast<std::byte>(payload.size()));  // MASK=0: a server frame
+    out.insert(out.end(), payload.begin(), payload.end());
+}
+
+/**
+ * @brief #1020 — bytes the server pipelines behind its `101` reach the frame stream.
+ *
+ * `transport_ws_client::handshake` reads the response into a buffer of its own until
+ * CRLFCRLF, and a single `recv` routinely returns the `101` AND whatever the server sent
+ * straight after it — which is what a server that pushes state on connect does. Those
+ * bytes are off the socket; if the handshake drops them nothing can ever read them back,
+ * and the frame vanishes with no counter moving. The accept side has carried them over
+ * since it grew a second peer (`service_peer`); this is the DIAL side of that rule.
+ *
+ * The peer here writes the `101`, a complete PING, and the FIRST fragment of a BINARY
+ * message in ONE `::send`, so all three land in one `recv` on the client — the shape the
+ * defect needs. Then it goes quiet. Two independent observables follow:
+ *
+ *  - the PONG. A complete pipelined control frame must be answered even though NOTHING
+ *    more arrives on the socket — that fails both if the handshake discards the bytes and
+ *    if the recv loop polls before draining what it was handed.
+ *  - the message BYTES. The closing CONT is only written after the test has installed its
+ *    receiver, so the delivery is not racing the recv thread's start; a dropped first
+ *    fragment leaves that CONT stray (the assembler drops it) and NO message arrives.
+ */
+void test_frame_pipelined_behind_the_101() {
+    std::printf("transport_ws client — a frame pipelined behind the 101 is not dropped (#1020):\n");
+
+    const int lfd = ::socket(AF_INET, SOCK_STREAM, 0);
+    check(lfd >= 0, "raw listener created");
+    const int one = 1;
+    ::setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    sockaddr_in local{};
+    local.sin_family = AF_INET;
+    local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    local.sin_port = 0;
+    check(::bind(lfd, reinterpret_cast<sockaddr*>(&local), sizeof(local)) == 0, "listener bound");
+    check(::listen(lfd, 1) == 0, "listener listening");
+    sockaddr_in bound{};
+    socklen_t blen = sizeof(bound);
+    ::getsockname(lfd, reinterpret_cast<sockaddr*>(&bound), &blen);
+
+    const std::array<std::byte, 4> ping_payload{std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE},
+                                                std::byte{0xEF}};
+    const std::array<std::byte, 4> head_bytes{std::byte{0x01}, std::byte{0x02}, std::byte{0xF0},
+                                              std::byte{0x0D}};
+    const std::array<std::byte, 2> tail_bytes{std::byte{0xC0}, std::byte{0xDE}};
+
+    std::promise<bool> one_write_done;  // the combined blob went out as ONE send
+    std::promise<bool> pong_seen;       // the pipelined PING was answered
+    std::promise<void> receiver_ready;  // the test has installed its sink
+    std::promise<void> test_done;       // safe to close the peer socket
+    auto one_write_fut = one_write_done.get_future();
+    auto pong_fut = pong_seen.get_future();
+    auto ready_fut = receiver_ready.get_future();
+    auto done_fut = test_done.get_future();
+
+    std::thread pusher([&] {
+        const int cfd = ::accept(lfd, nullptr, nullptr);
+        if (cfd < 0) {
+            one_write_done.set_value(false);
+            pong_seen.set_value(false);
+            return;
+        }
+        const auto req = read_until(
+            cfd,
+            [](const std::vector<std::byte>& b) {
+                return std::string_view(reinterpret_cast<const char*>(b.data()), b.size())
+                           .find("\r\n\r\n") != std::string_view::npos;
+            },
+            2s);
+        const std::string_view text(reinterpret_cast<const char*>(req.data()), req.size());
+        const std::size_t kpos = text.find("Sec-WebSocket-Key: ");
+        if (kpos == std::string_view::npos) {
+            one_write_done.set_value(false);
+            pong_seen.set_value(false);
+            ::close(cfd);
+            return;
+        }
+        const std::size_t vstart = kpos + std::string_view("Sec-WebSocket-Key: ").size();
+        const std::string key(text.substr(vstart, text.find("\r\n", vstart) - vstart));
+
+        std::string head =
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            "Sec-WebSocket-Accept: ";
+        head += ws::accept_key(key);
+        head += "\r\n\r\n";
+        std::vector<std::byte> blob;
+        for (const char c : head) blob.push_back(static_cast<std::byte>(c));
+        append_server_frame(blob, ws::opcode_t::PING, ping_payload);
+        append_server_frame(blob, ws::opcode_t::BINARY, head_bytes, /*fin=*/false);
+        // ONE syscall: the handshake reply and the frames behind it coalesce into a single
+        // segment, so the client's first `recv` returns all of them together. A test that
+        // paused here would prove nothing — that pause is the mask this case removes.
+        const ssize_t sent = ::send(cfd, blob.data(), blob.size(), 0);
+        one_write_done.set_value(sent == static_cast<ssize_t>(blob.size()));
+
+        // Nothing else is written until the PONG comes back: the client must decode the
+        // pipelined PING with no further bytes arriving on the socket.
+        const auto pong = read_until(
+            cfd, [](const std::vector<std::byte>& b) { return ws::decode_frame(b).has_value(); },
+            3s);
+        const auto dec = ws::decode_frame(pong);
+        pong_seen.set_value(
+            dec.has_value() && dec->first.op == ws::opcode_t::PONG &&
+            dec->first.payload.size() == ping_payload.size() &&
+            std::memcmp(dec->first.payload.data(), ping_payload.data(), ping_payload.size()) == 0);
+
+        ready_fut.wait();
+        std::vector<std::byte> cont;
+        append_server_frame(cont, ws::opcode_t::CONT, tail_bytes, /*fin=*/true);
+        write_bytes(cfd, cont);
+        done_fut.wait();
+        ::close(cfd);
+    });
+
+    // The sink outlives the transport that delivers to it (this file's destruction idiom).
+    frame_sink_t sink;
+    {
+        tr::net::transport_ws_client client("127.0.0.1", ntohs(bound.sin_port));
+        check(client.ok(), "the client completed its opening handshake");
+        client.set_receiver(sink);
+        receiver_ready.set_value();
+
+        check(one_write_fut.wait_for(3s) == std::future_status::ready && one_write_fut.get(),
+              "the peer put the 101 and the frames behind it in ONE write");
+        check(pong_fut.wait_for(4s) == std::future_status::ready && pong_fut.get(),
+              "the PING pipelined behind the 101 was answered with a matching PONG");
+        check(sink.wait_count(1, 4s), "the pipelined BINARY fragment completed into a message");
+        std::vector<std::byte> got;
+        {
+            const std::lock_guard lock(sink.m);
+            if (!sink.frames.empty()) got = sink.frames.front();
+        }
+        std::vector<std::byte> want(head_bytes.begin(), head_bytes.end());
+        want.insert(want.end(), tail_bytes.begin(), tail_bytes.end());
+        check(got == want, "and it carried the PIPELINED fragment's bytes, not just the CONT's");
+        test_done.set_value();
+    }
+    pusher.join();
+    ::close(lfd);
+}
+
 }  // namespace
 
 int main() {
@@ -814,6 +961,7 @@ int main() {
     test_multi_peer_bus();
     test_max_peers_cap();
     test_close_peer();
+    test_frame_pipelined_behind_the_101();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;

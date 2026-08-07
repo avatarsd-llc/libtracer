@@ -432,8 +432,21 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
     }
 
    private:
-    bool handshake(int fd, const std::string& host, std::uint16_t port);  // GET Upgrade, verify 101
-    void serve(int fd);                                                   // frame recv loop
+    /**
+     * @brief Send the GET Upgrade, verify the 101, and hand back what came after it.
+     *
+     * The response `recv` routinely returns the 101 AND the bytes the server pipelined
+     * behind it — a server that pushes state the instant the handshake completes puts its
+     * first frame in that same segment. Those bytes are the start of the frame stream, so
+     * they are moved into @p pipelined (cleared first, empty in the common case) for
+     * `serve` to decode; dropping them loses that frame silently. The server half has
+     * carried them over since it grew a second peer (`service_peer`'s `s.buf.assign`) —
+     * this is the DIAL half of the same rule (#1020).
+     */
+    bool handshake(int fd, const std::string& host, std::uint16_t port,
+                   std::vector<std::byte>& pipelined);
+    /** @brief Frame recv loop, seeded with the bytes `handshake` found behind the 101. */
+    void serve(int fd, std::vector<std::byte> pipelined);
     std::uint32_t next_mask_key();  // per-frame masking key (varied, not crypto)
 
     // conn_fd_ + write_m_ (and their teardown discipline) live in stream_endpoint_t.
