@@ -506,6 +506,15 @@ struct httpd_ws_link_t::tx_work_t {
  * task owns this slot outright", so neither a claim, nor a reap, nor a token can touch a
  * slot another is inside. ARMED is the only state either a token or the reaper may take.
  *
+ * MACHINE-WORD underlying type, deliberately, and the reason is codegen rather than range.
+ * The chip targets are rv32imac, whose reservations are word-granular (`lr.w`/`sc.w`), so a
+ * BYTE-sized compare-exchange is still lock-free but has to read-modify-write the
+ * containing word behind a shift/mask: 23 instructions against 9 for the same CAS at 32
+ * bits (measured, riscv32-esp-elf-g++ 15.1, -Os, rv32imac). This protocol adds a second CAS
+ * per send — the token's — on a hot publish path, so at a byte it would have cost more than
+ * the `std::atomic<bool>` it replaces, and at a word two CASes still cost less than that one
+ * did. The three extra bytes are free: the slot is already 8-byte aligned for @ref armed_at.
+ *
  * @note This says NOTHING about #1013, and must not be read as if it did. A payload and
  *       the @ref httpd_ws_link_t::session_ref_t it was gathered for are written into the
  *       slot together and armed by the same release, so a token always sends a frame to
@@ -514,7 +523,7 @@ struct httpd_ws_link_t::tx_work_t {
  *       is already closed, or already lost, before a slot is ever claimed) and is neither
  *       widened nor narrowed by any of this.
  */
-enum class tx_state_t : std::uint8_t {
+enum class tx_state_t : std::uint32_t {
     FREE,    /**< @brief Unclaimed — the one state @ref claim_tx_slot may take. */
     CLAIMED, /**< @brief Owned outright by one task: filling it, or reaping it. */
     ARMED,   /**< @brief Payload complete, a token enqueued for it. Runnable, reapable. */
