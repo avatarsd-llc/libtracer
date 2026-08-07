@@ -307,7 +307,7 @@ connection is addressed under `/net/<module>/`, a first-level local vertex canno
 transport registers no module name, and an undeclared `(kind, role)` pair fails creation with
 `SCHEMA_NOT_FOUND` (`core/src/transport_vertex.cpp:167`). The application declares each module
 under a name it chooses through `register_module` (`core/src/transport_vertex.cpp:133`,
-`core/include/libtracer/transport_vertex.hpp:266`), a minting boundary gated by the shared
+`core/include/libtracer/transport_vertex.hpp:267`), a minting boundary gated by the shared
 segment-validity predicate — a reserved-character name answers `INVALID_PATH`. The built-in
 transports export *suggested*-name constants (`kWsClientSuggestedModule`, …) an application may
 adopt; `/net` itself is likewise only the recommended root convention (a constructor default).

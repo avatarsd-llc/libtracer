@@ -59,10 +59,10 @@ where the mechanism lives:
 - **Egress scatter-gathers.** `rope_t::to_iovec` (`core/include/libtracer/rope.hpp:236`) emits one
   span per link into the original segments. The host WS server builds `[header, link0, link1, …]`
   and `sendmsg`s it with "no flatten, no re-copy (server frames are UNMASKED, RFC 6455 §5.1)"
-  (`core/src/transport_ws.cpp:237`); TCP prepends a u32-LE length via `prefixed_iov_t`
-  (`core/src/transport_tcp.cpp:59`). With `kMaxServerIov = 16` (`core/src/transport_ws.cpp:117`),
+  (`core/src/transport_ws.cpp:272`); TCP prepends a u32-LE length via `prefixed_iov_t`
+  (`core/src/transport_tcp.cpp:59`). With `kMaxServerIov = 16` (`core/src/transport_ws.cpp:150`),
   the common reply (≤ ~6 spans) fits the stack `std::array<::iovec, kMaxServerIov + 1>`
-  (`core/src/transport_ws.cpp:245`) — zero heap, zero payload copy. The only host TX copy is the
+  (`core/src/transport_ws.cpp:280`) — zero heap, zero payload copy. The only host TX copy is the
   kernel skb copy every BSD socket pays.
 - **Flatten refuses a heterogeneous rope.** A DEVICE link is not CPU-addressable, so a host memcpy
   would fault; `flatten` checks `all_host()` up front and returns an empty view
@@ -171,7 +171,7 @@ deep receive task.
 A stack budget for that task counts five such buffers, not one. The decode arena is the only one
 this document covers; the other four are transport receive and chunk scratch, each a 4096-byte
 `std::array` — `transport_tcp.cpp:201` (the backpressure drain) and `:457`,
-`transport_ws.cpp:371` and `:691`. They are not decode arenas and carry no structure,
+`transport_ws.cpp:406` and `:750`. They are not decode arenas and carry no structure,
 but they occupy the same frames and none of the five has a measured per-task high-water.
 
 That receive task is the binding constraint on a single-core, RAM-constrained node. In the ESP-IDF
