@@ -75,7 +75,7 @@ factory receives the parsed record alongside the raw config TLV.
 | `port` | `VALUE` u16 | both | `0` | Peer port on a DIAL, bind port on a LISTEN. `0` answers `TYPE_MISMATCH` in the same five socket factories, on both roles. `can` never reads it. |
 | `role` | `VALUE` u8 | both | the child type's default | `0` = DIAL, non-zero = LISTEN. Overrides the default the catalog type carries (`client` = DIAL, `listener` = LISTEN), and selects which declared module the connection mounts under. |
 | `keepalive` | `VALUE` u32 | both | `0` | Keepalive interval in ms. **Nothing reads it**: `conn_settings_t::keepalive_ms` has no consumer outside the parse that fills it. UDP is connectionless, TCP has its own, WS handles PING/PONG at the protocol layer. |
-| `max_frame` | `VALUE` u32 | both | `0` | Per-connection inbound frame cap in bytes, honoured by the four framed kinds — `tcp`, `quic` and `webtransport` read it off their u32 length prefix, `ws` off the RFC 6455 header. `0` = the 16 MiB protocol default. It only ever **tightens**: a value above the default does not raise the cap. `udp` (datagram) and `can` (its own fragmentation) do not read it. |
+| `max_frame` | `VALUE` u32 | both | `0` | Per-connection inbound frame cap in bytes, honoured by the four framed kinds — `tcp`, `quic` and `webtransport` read it off their u32 length prefix, `ws` off the RFC 6455 header. `0` = the 16 MiB protocol default. The effective cap is `min(configured value, the injected backend's `max_segment_size()`)` — it does **not** only tighten: the default heap backend reports `SIZE_MAX`, so on a host a value above 16 MiB genuinely RAISES the ingress bound. `udp` (datagram) and `can` (its own fragmentation) do not read it. |
 | `backoff` | `VALUE` u32 | DIAL | `0` | Self-heal retry interval in ms (RFC-0014 §4). **Parsed but dormant** — the liveness engine that would consume it is not implemented. |
 | `connect_timeout` | `VALUE` u32 | DIAL | `0` | How long one dial attempt waits for `UP`, in ms (RFC-0014 §4). **Parsed but dormant**, same reason. |
 
@@ -243,8 +243,11 @@ out of the raw config TLV it already receives, and in a block on this page. Not 
   transport in the tree reads the field.
 - **`backoff` and `connect_timeout` are dormant.** They parse, they land in
   `conn_settings_t`, and nothing reads them yet.
-- **`max_frame` only tightens.** A value larger than the 16 MiB default does not
-  raise the cap; it is further bounded by the injected backend's real capacity.
+- **`max_frame` does not only tighten.** Each framed transport REPLACES the 16 MiB
+  default with whatever non-zero value it is given, and the only other bound is the
+  injected backend's `max_segment_size()` — `SIZE_MAX` on the default heap backend. So
+  on a host, `max_frame = 32 MiB` accepts a 20 MiB frame the default tears down as
+  malformed. Treat it as an ingress bound you can loosen, not just clamp (#1035).
 - **`peer_named` is off by default**, so a SPEC-created `tcp`/`ws` listener is a
   broadcast link and one request over it draws one reply *per peer*.
 - **There is no public builder for this grammar yet.** Every emitter hand-writes
