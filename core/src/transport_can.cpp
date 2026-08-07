@@ -130,6 +130,10 @@ transport_can::transport_can(std::unique_ptr<can_link_t> link, transport_can_con
     if (cfg_.rx_ttl < std::chrono::milliseconds::zero()) {
         cfg_.rx_ttl = std::chrono::milliseconds::zero();
     }
+    // Resolve the slice-byte seam ONCE (#911). `nullptr` means the process heap, which
+    // is what this path used unconditionally before; resolving here rather than
+    // branching per slice keeps the RX path at one indirect call either way.
+    rx_backend_ = cfg_.rx_backend != nullptr ? cfg_.rx_backend : &tr::mem::heap_backend();
     link_->on_receive([this](const can_frame_data_t& f) { on_rx(f); });
     // Announce presence at join (ADR-0044): a hello advertise (slice_count == 0)
     // seeds every listener's last-heard table before any data flows, so a fresh
@@ -206,13 +210,22 @@ void transport_can::peer_endpoint_t::send(std::span<const std::byte> frame) {
     owner_->send_impl(frame, node_.load(std::memory_order_relaxed));
 }
 
-std::uint16_t transport_can::alloc_base(std::size_t slice_count) {
-    const auto span = static_cast<std::uint16_t>(slice_count == 0 ? 1 : slice_count);
-    if (static_cast<std::size_t>(next_base_) + span > can::kEndpointMax) {
+std::optional<std::uint16_t> transport_can::alloc_base(std::size_t slice_count) {
+    // Everything here stays in std::size_t. The u16 this used to narrow to was the
+    // silent half of #910: a >65535-slice group wrapped `span` (65536 became 0), the
+    // reservation then trivially "fit", and the manifest advertised the same wrapped
+    // count — a group of 65536 slices announced as a hello. The width the endpoint
+    // field can actually hold is asserted below, not assumed by a cast.
+    const std::size_t span = slice_count == 0 ? 1 : slice_count;
+    // A group occupies CONSECUTIVE slots [base, base+span-1], so one wider than the
+    // whole data-endpoint window fits at no base and no wrap rescues it. Refuse it
+    // here so the caller never advertises a count it cannot deliver.
+    if (span > kCanMaxGroupSlices) return std::nullopt;
+    if (static_cast<std::size_t>(next_base_) + span - 1u > can::kEndpointMax) {
         next_base_ = kCanFirstDataEndpoint;  // wrap, leaving the control slot free
     }
     const std::uint16_t base = next_base_;
-    next_base_ = static_cast<std::uint16_t>(next_base_ + span);
+    next_base_ = static_cast<std::uint16_t>(static_cast<std::size_t>(base) + span);
     return base;
 }
 
@@ -304,8 +317,21 @@ void transport_can::send_impl(std::span<const std::byte> frame, std::uint16_t ta
         return;
     }
 
-    const std::uint16_t base_ep = alloc_base(count);
-    const can::can_id_fields_t base_fields{cfg_.version, cfg_.node, base_ep};
+    // RESERVE FIRST, then advertise (#910). The manifest is a promise of `slice_count`
+    // slices, and it used to be emitted before the loop that discovers the endpoint
+    // window is too small — so a group over the window advertised N and sent N-1, and
+    // every receiver on the bus pinned a reassembly group that could never complete.
+    // Reserving here makes the promise checkable before it is made. The alternative
+    // shape — advertise, then retract — was declined: a retraction is a SECOND wire
+    // concern (a new control-frame semantic every peer must implement, and one that
+    // is itself lossy on the medium that lost the tail slices), where the capacity is
+    // a purely local fact the sender already holds.
+    const std::optional<std::uint16_t> base_ep = alloc_base(count);
+    if (!base_ep) {
+        dropped_tx_.fetch_add(1, std::memory_order_relaxed);  // whole group refused, nothing said
+        return;
+    }
+    const can::can_id_fields_t base_fields{cfg_.version, cfg_.node, *base_ep};
     const std::uint32_t base_id = can::encode_can_id(base_fields);
 
     // The manifest carries the exact total length (so the peer trims FD padding),
@@ -326,7 +352,15 @@ void transport_can::send_impl(std::span<const std::byte> frame, std::uint16_t ta
         const tr::view::view_t& window = frames.frames()[i];
         const std::span<const std::byte> wb = window.bytes();
         const auto slice_id = can::slice_can_id(base_fields, i);
-        if (!slice_id) break;  // endpoint overflow — group too large for this node
+        if (!slice_id) {
+            // Unreachable by construction: alloc_base reserved [base, base+count) inside
+            // the endpoint window before the manifest went out, so every index here is in
+            // range. Kept as a hard, COUNTED stop rather than the silent `break` it was —
+            // if the reservation invariant is ever broken the group is reported lost, not
+            // half-delivered against a manifest that promised all of it.
+            dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+            break;
+        }
 
         can_frame_data_t out;
         out.id = *slice_id;
@@ -459,7 +493,22 @@ void transport_can::process_data(const can_frame_data_t& frame) {
 
     const tr::net::reassembly_key_t key = key_of(fields->node, base_ep);
     const std::uint32_t index = static_cast<std::uint32_t>(fields->endpoint - base_ep);
-    reasm_.add_slice(key, index, tr::view::over_bytes(frame.bytes()).value_or(tr::view::view_t{}));
+    // `over_bytes` has exactly two outcomes and nullopt means ONE thing: the backend
+    // refused (empty input still returns an engaged empty view). The `value_or(view_t{})`
+    // this replaces converted that refusal into a fabricated engaged-EMPTY slice (#911):
+    // the reassembly buffer counts entries without inspecting their length, so the
+    // placeholder satisfied `is_complete`, `assemble` chained it, and the trim below
+    // shortened the rope to whatever did arrive — a byte-wrong, short frame delivered
+    // upstream as valid. A refusal is backpressure, so it drops like backpressure: the
+    // whole group goes (the surviving slices can never be completed into anything true),
+    // the slice ticks dropped_rx, and `discard` ticks dropped_groups. Never fabricate.
+    std::optional<tr::view::view_t> slice = tr::view::over_bytes(frame.bytes(), *rx_backend_);
+    if (!slice) {
+        reasm_.discard(key);
+        dropped_rx_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    reasm_.add_slice(key, index, *std::move(slice));
 
     if (!reasm_.is_complete(key)) return;
     const auto rope = reasm_.assemble(key);
@@ -543,8 +592,9 @@ void transport_can::deliver(std::uint16_t src_node, tr::view::rope_t frame) {
 
 // --- the `can` catalog factory (ADR-0027 / ADR-0043 §5 / ADR-0044) -----------
 
-transport_vertex_t::transport_factory_t can_transport_factory(std::pmr::memory_resource* reasm_mr) {
-    return [reasm_mr](
+transport_vertex_t::transport_factory_t can_transport_factory(std::pmr::memory_resource* reasm_mr,
+                                                              mem::mem_backend_t* rx_backend) {
+    return [reasm_mr, rx_backend](
                const conn_settings_t& /*settings*/,
                const wire::tlv_t* raw_config) -> graph::result_t<std::unique_ptr<transport_t>> {
         // Every CAN-private key is parsed HERE from the raw config TLV (the
@@ -570,6 +620,9 @@ transport_vertex_t::transport_factory_t can_transport_factory(std::pmr::memory_r
         // cannot ride a config TLV (it is a pointer, not a wire value), so it is
         // injected at factory-registration time instead.
         cfg.reasm_mr = reasm_mr != nullptr ? reasm_mr : std::pmr::new_delete_resource();
+        // Same reasoning one seam over (#911): the slice-byte backend is a pointer, so
+        // it rides the factory registration, not the config TLV. nullptr = process heap.
+        cfg.rx_backend = rx_backend;
         if (const auto v = reader.u32("max_groups")) cfg.max_groups = static_cast<std::size_t>(*v);
         if (const auto v = reader.u32("max_pending"))
             cfg.max_pending = static_cast<std::size_t>(*v);

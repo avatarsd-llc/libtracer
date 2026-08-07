@@ -69,6 +69,22 @@ inline constexpr std::uint16_t kCanControlEndpoint = 0;
 /** @brief The first `endpoint` slot usable for header-elided data groups (control is 0). */
 inline constexpr std::uint16_t kCanFirstDataEndpoint = 1;
 
+/**
+ * @brief The largest address-shift group this node can place: every data endpoint slot.
+ *
+ * Address-shift slicing spreads a group across CONSECUTIVE endpoint slots of one node
+ * (`endpoint[base .. base+count-1]`), so a group of more slices than the data-endpoint
+ * window holds can never be placed at any base — no wrap helps. DERIVED from the CAN-ID
+ * field widths (`can::kEndpointMax`) minus the reserved control slot, never a chosen
+ * number: the bound is the wire's, so widening `kEndpointBits` widens this with it.
+ *
+ * A group over this bound is refused WHOLE, before its manifest is emitted (#910) —
+ * advertising `slice_count` slices and then running out of slots mid-loop leaves every
+ * receiver holding a reassembly group that can never complete.
+ */
+inline constexpr std::size_t kCanMaxGroupSlices =
+    static_cast<std::size_t>(can::kEndpointMax) - kCanFirstDataEndpoint + 1u;
+
 /** @brief Default liveness window: a peer silent this long leaves the enumeration. */
 inline constexpr std::chrono::milliseconds kCanDefaultPeerTtl{3000};
 
@@ -239,6 +255,18 @@ struct transport_can_config_t {
                                    Unlike the count caps this is ALWAYS live — the
                                    age-out is the bound that holds under the shipped
                                    default config. */
+    mem::mem_backend_t* rx_backend =
+        nullptr; /**< @brief The byte seam an inbound data slice is COPIED into before it
+                      enters the reassembly buffer (`tr::view::over_bytes`'s injected
+                      form, #793). `nullptr` = the process heap, which is what this path
+                      used unconditionally before #911. A constrained node injects a
+                      bounded backend (`mem::pool_t`) so ingress exhaustion is a
+                      by-value refusal on the RX thread instead of a reach into the
+                      global heap; a refusal drops the whole group and ticks @ref
+                      transport_can::dropped_rx. Must outlive the transport — the
+                      segments it hands out are released by it. Companion to @ref
+                      reasm_mr: that one bounds the reassembly STRUCTURE, this one the
+                      slice BYTES. */
 };
 
 /**
@@ -315,8 +343,11 @@ class transport_can : public transport_t, public bus_link_t {
      * Ticks once per parked data slice reclaimed because @ref
      * transport_can_config_t::max_pending was reached or because it aged past
      * `rx_ttl` — a bounded, counted drop instead of the unbounded park this
-     * replaces. It counts SLICES, not groups; a group's buffered slices reclaimed
-     * as a unit are @ref dropped_groups.
+     * replaces — and once per inbound slice whose bytes could not be owned
+     * (@ref transport_can_config_t::rx_backend refused, #911). It counts SLICES,
+     * not groups; a group's buffered slices reclaimed as a unit are @ref
+     * dropped_groups, which the refusal also ticks because the group it belonged
+     * to is abandoned rather than completed with a fabricated slice.
      */
     [[nodiscard]] std::uint64_t dropped_rx() const noexcept {
         return dropped_rx_.load(std::memory_order_relaxed);
@@ -327,8 +358,10 @@ class transport_can : public transport_t, public bus_link_t {
      *        (the twai `tx_dropped()` convention, spelled to match `dropped_rx`).
      *
      * Ticks when a `send` cannot own its bytes (allocation failure — the
-     * backpressure case), when the payload splits into no window at all, and when
-     * the group's advertise manifest cannot be encoded.
+     * backpressure case), when the payload splits into no window at all, when the
+     * group needs more consecutive endpoint slots than @ref kCanMaxGroupSlices
+     * (refused WHOLE, before any manifest goes out — #910), and when the group's
+     * advertise manifest cannot be encoded.
      */
     [[nodiscard]] std::uint64_t dropped_tx() const noexcept {
         return dropped_tx_.load(std::memory_order_relaxed);
@@ -409,7 +442,10 @@ class transport_can : public transport_t, public bus_link_t {
     void touch_peer(std::uint16_t node, std::chrono::steady_clock::time_point now);
 
     // --- egress helpers ---
-    std::uint16_t alloc_base(std::size_t slice_count);  // requires tx_m_ held
+    // RESERVE the group's run of consecutive endpoint slots (#910). Fallible on
+    // purpose: a group over kCanMaxGroupSlices fits at no base, and the caller must
+    // learn that BEFORE it advertises a slice_count it cannot deliver.
+    std::optional<std::uint16_t> alloc_base(std::size_t slice_count);  // requires tx_m_ held
     // Slices adv's 18-byte header and cfg_.path (in place, never copied — this node only
     // ever advertises its OWN path, so adv.path is left empty) into CLASSIC windows.
     void emit_advertise(const can::advertise_t& adv);  // requires tx_m_ held
@@ -451,6 +487,10 @@ class transport_can : public transport_t, public bus_link_t {
     // evict-oldest end are the front.
     std::pmr::vector<pending_slice_t> pending_;
     std::chrono::steady_clock::time_point rx_now_{};  // current frame's arrival stamp
+    // Where an inbound slice's bytes are copied (cfg_.rx_backend, resolved to the
+    // process heap once in the constructor). Resolved rather than branched so the
+    // per-slice path has one indirect call either way.
+    mem::mem_backend_t* rx_backend_ = nullptr;
 
     // Drop counters (#912). Written on the RX/TX threads, read by anyone.
     std::atomic<std::uint64_t> dropped_rx_{0};
@@ -495,9 +535,16 @@ class transport_can : public transport_t, public bus_link_t {
  *                 cannot carry (a resource is a pointer, not a wire value). A host
  *                 registers the factory with its own bounded resource; the default
  *                 is the process heap. Must outlive every transport built here.
+ * @param rx_backend Where every constructed transport COPIES an inbound data slice's
+ *                 bytes (@ref transport_can_config_t::rx_backend). Injected here for
+ *                 the same reason as @p reasm_mr — a backend is a pointer, not a wire
+ *                 value — so the seam is reachable from production registration and
+ *                 not only from a unit test. `nullptr` = the process heap. Must
+ *                 outlive every transport built here.
  * @return The factory functor for @ref transport_vertex_t::register_transport_type.
  */
 [[nodiscard]] transport_vertex_t::transport_factory_t can_transport_factory(
-    std::pmr::memory_resource* reasm_mr = std::pmr::new_delete_resource());
+    std::pmr::memory_resource* reasm_mr = std::pmr::new_delete_resource(),
+    mem::mem_backend_t* rx_backend = nullptr);
 
 }  // namespace tr::net

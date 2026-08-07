@@ -24,6 +24,7 @@
 
 #include "libtracer/transport_can.hpp"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -41,6 +42,8 @@
 #include <vector>
 
 #include "libtracer/can.hpp"
+#include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_pool.hpp"
 #include "libtracer/view_can.hpp"
 
 namespace {
@@ -194,6 +197,11 @@ class sink_t {
     [[nodiscard]] std::vector<std::byte> last() {
         const std::lock_guard lock(m_);
         return last_;
+    }
+    /** @brief How many frames have been delivered so far (an EXACT count, not a floor). */
+    [[nodiscard]] std::size_t count() {
+        const std::lock_guard lock(m_);
+        return count_;
     }
 
    private:
@@ -633,6 +641,170 @@ void test_max_groups_reaches_the_reassembly_buffer() {
           "a 3rd live group against a ceiling of 2 evicted the oldest");
 }
 
+/**
+ * @brief #910 — a group needing more endpoint slots than exist is refused WHOLE, before
+ *        its manifest is emitted, so no receiver is left holding an uncompleteable group.
+ *
+ * The defect: `emit_advertise` ran BEFORE the per-slice loop that discovers
+ * `slice_can_id` has run out of endpoint slots, so the manifest promised `slice_count`
+ * slices and the loop `break`ed after delivering fewer. Every listener created a
+ * reassembly group keyed on that promise and buffered the partial slices forever.
+ *
+ * The receiver-side assertion is the load-bearing one, and it is made two ways: no
+ * binding was ever learned (nothing reached the bus), and — after a window longer than
+ * `rx_ttl`, with a real later advertise driving the stale sweep — `dropped_groups()` is
+ * still zero, i.e. there was no pinned group for the sweep to find. A test that only
+ * checked `dropped_tx()` would pass against a fix that advertised and then retracted.
+ */
+void test_oversized_group_is_refused_before_advertising() {
+    std::printf("transport_can oversized group refused before the advertise (#910):\n");
+
+    fake_can_bus_t bus;
+    sink_t sink;
+    auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
+    auto link_a = std::make_unique<fake_link_t>(bus);
+    auto link_b = std::make_unique<fake_link_t>(bus);
+
+    tr::net::transport_can_config_t cfg_b = rx_test_config();
+    cfg_b.rx_ttl = 30ms;  // short, so any pinned group is provably sweepable below
+    tr::net::transport_can tx_a(std::move(link_a),
+                                {0, 1, tr::view::can_frame_mode_t::CLASSIC, "sensor/temp"});
+    tr::net::transport_can tx_b(std::move(link_b), cfg_b);
+    tx_b.set_receiver(rx);
+
+    // Exactly one slice more than the data-endpoint window holds. Sized from the
+    // constants, not from 32768: the bound is the CAN ID's, and if kEndpointBits ever
+    // widens this test must follow it rather than silently stop testing the boundary.
+    const std::vector<std::byte> huge =
+        make_payload((tr::net::kCanMaxGroupSlices + 1) * tr::view::kCanClassicMaxData);
+    tx_a.send(huge);
+
+    check(wait_until([&] { return tx_a.dropped_tx() >= 1; }, 2s),
+          "the oversized frame was refused whole and counted on dropped_tx()");
+
+    const std::uint32_t base_id = can::encode_can_id({0, 1, tr::net::kCanFirstDataEndpoint});
+    std::this_thread::sleep_for(150ms);  // >> rx_ttl, and past anything the bus could carry
+    check(!tx_b.learned_binding(base_id).has_value(),
+          "no manifest reached the bus — the receiver bound nothing");
+
+    // A real, small group now drives the receiver's stale sweep (every group is born of
+    // an advertise, which is the sweep's cadence). Nothing to reclaim => the counter
+    // stays at zero; an advertise-then-break leaves a group here and it gets swept.
+    const std::vector<std::byte> small = make_payload(24);
+    tx_a.send(small);
+    check(sink.wait_for_count(1, 2s), "the node is LIVE: the next frame is delivered");
+    check(equal_bytes(sink.last(), small), "and its bytes are byte-exact");
+    check(tx_b.dropped_groups() == 0,
+          "no never-completing group was ever buffered at the receiver");
+    check(tx_b.pending_slices() == 0, "and no orphan data slices were parked");
+}
+
+/**
+ * @brief #910, the silent half — a group over 65535 slices no longer wraps its advertised
+ *        count into a different message.
+ *
+ * `alloc_base` narrowed the slice count to `std::uint16_t` and `adv.slice_count` cast the
+ * same `std::size_t`, so 65536 slices became `0` in both places: the reservation trivially
+ * "fit", and the manifest went out as the HELLO form (`slice_count == 0`), which binds
+ * nothing. The data slices that followed matched no binding at all and every one of them
+ * parked in the pending queue. The reservation is now computed in `std::size_t` and any
+ * count over `kCanMaxGroupSlices` is refused, which closes the wrap as a special case of
+ * the same bound.
+ */
+void test_u16_slice_count_wrap_cannot_advertise_a_hello() {
+    std::printf("transport_can >65535-slice group cannot wrap into a hello (#910):\n");
+
+    fake_can_bus_t bus;
+    auto link_a = std::make_unique<fake_link_t>(bus);
+    auto link_b = std::make_unique<fake_link_t>(bus);
+    tr::net::transport_can tx_a(std::move(link_a),
+                                {0, 1, tr::view::can_frame_mode_t::CLASSIC, "sensor/temp"});
+    tr::net::transport_can tx_b(std::move(link_b), rx_test_config());
+
+    // One slice past the u16 range — the count that used to narrow to zero.
+    const std::size_t slices = std::size_t{0xFFFF} + 1;
+    const std::vector<std::byte> huge = make_payload(slices * tr::view::kCanClassicMaxData);
+    tx_a.send(huge);
+
+    check(wait_until([&] { return tx_a.dropped_tx() >= 1; }, 2s),
+          "the wrapping frame was refused whole and counted on dropped_tx()");
+    std::this_thread::sleep_for(150ms);  // let anything that DID reach the bus arrive
+    check(tx_b.pending_slices() == 0,
+          "no unbindable data slices were emitted, so none parked at the receiver");
+    check(tx_b.dropped_groups() == 0, "and no group was created at the receiver");
+}
+
+/**
+ * @brief #911 — an inbound slice whose bytes cannot be OWNED drops the whole group and
+ *        counts it; it is never fabricated into an empty placeholder and delivered short.
+ *
+ * `tr::view::over_bytes` has two outcomes and `nullopt` means exactly one thing: the
+ * backend refused. `.value_or(view_t{})` turned that into an engaged EMPTY view, which
+ * the reassembly buffer counts like any other slice — so `is_complete` was satisfied,
+ * `assemble` chained the placeholder, and the `min(total, rope->total_length())` trim
+ * quietly shortened the result. A byte-wrong, SHORT frame was delivered upstream as
+ * valid data.
+ *
+ * The refusal here comes from a REAL injected backend, not a stub: a `mem::sync_pool_t`
+ * over a caller-owned slab, drained to exactly as many free slots as the group needs
+ * minus one. That is the production backpressure shape (`alloc` answering `nullptr` on a
+ * bounded node), reached through the config seam an embedder actually sets.
+ */
+void test_rx_slice_refusal_drops_the_group_and_counts() {
+    std::printf("transport_can ingress slice refusal drops + counts, never fabricates (#911):\n");
+
+    // The injected byte seam. Slots are one CLASSIC data field wide — the exact size an
+    // inbound slice copy asks for.
+    alignas(std::max_align_t) std::array<std::byte, 8192> slab{};
+    tr::mem::sync_pool_t pool(slab, tr::view::kCanClassicMaxData);
+
+    // Drain to a KNOWN free-slot count so the refusing slice index is exact rather than
+    // whatever the slab arithmetic happened to yield. The 3-window group below gets two
+    // slots: slices 0 and 1 are owned, slice 2 is refused.
+    constexpr std::size_t kKeepFree = 2;
+    std::vector<tr::view::segment_ptr_t> held;
+    while (tr::view::segment_ptr_t s =
+               tr::view::segment_alloc(pool, tr::view::kCanClassicMaxData)) {
+        held.push_back(std::move(s));
+    }
+    check(held.size() > kKeepFree, "the injected pool holds more slots than the group needs");
+    held.resize(held.size() - kKeepFree);  // hand exactly kKeepFree slots back
+
+    fake_can_bus_t bus;
+    sink_t sink;
+    auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
+    auto link_a = std::make_unique<fake_link_t>(bus);
+    auto link_b = std::make_unique<fake_link_t>(bus);
+
+    tr::net::transport_can_config_t cfg_b = rx_test_config();
+    cfg_b.rx_backend = &pool;
+    tr::net::transport_can tx_a(std::move(link_a),
+                                {0, 1, tr::view::can_frame_mode_t::CLASSIC, "sensor/temp"});
+    tr::net::transport_can tx_b(std::move(link_b), cfg_b);
+    tx_b.set_receiver(rx);
+
+    // 24 bytes => 3 CLASSIC windows against 2 free slots: the third copy is refused.
+    const std::vector<std::byte> three_windows = make_payload(24);
+    tx_a.send(three_windows);
+
+    check(!sink.wait_for_count(1, 500ms),
+          "NOTHING was delivered for the refused group (no short frame)");
+    check(wait_until([&] { return tx_b.dropped_rx() >= 1; }, 2s),
+          "the refused slice ticked dropped_rx()");
+    check(tx_b.dropped_groups() >= 1,
+          "and the dead group was reclaimed, counted on dropped_groups()");
+
+    // Reclaiming the group returned its slots, so the node is live again. A DIFFERENT
+    // byte pattern on purpose: make_payload is index-derived, so a 16-byte prefix of the
+    // refused group's payload would be indistinguishable from a legitimate 16-byte frame
+    // and the liveness check could pass on the very corruption it is meant to exclude.
+    const std::vector<std::byte> two_windows(2 * tr::view::kCanClassicMaxData, std::byte{0xC3});
+    tx_a.send(two_windows);
+    check(sink.wait_for_count(1, 2s), "the node is LIVE: the next group is delivered");
+    check(equal_bytes(sink.last(), two_windows), "and its bytes are byte-exact");
+    check(sink.count() == 1, "exactly ONE frame was ever delivered — nothing short slipped by");
+}
+
 /** @brief #912 — a healthy exchange reports zero on every drop counter. */
 void test_clean_run_counters_are_zero() {
     std::printf("transport_can drop counters on a clean run:\n");
@@ -726,6 +898,9 @@ int main() {
     test_zero_peer_ttl_does_not_disable_the_age_out();
     test_incomplete_group_is_swept();
     test_max_groups_reaches_the_reassembly_buffer();
+    test_oversized_group_is_refused_before_advertising();
+    test_u16_slice_count_wrap_cannot_advertise_a_hello();
+    test_rx_slice_refusal_drops_the_group_and_counts();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;
