@@ -26,6 +26,7 @@
 #include <cstring>
 #include <future>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -60,6 +61,10 @@ void check(bool ok, std::string_view what) {
 /** @brief Dev cert paths — generated once in main() by tools/gen-dev-cert.sh. */
 std::string g_cert;
 std::string g_key;
+/** @brief A SECOND, unrelated self-signed certificate — never served by anything.
+ *         The wrong-CA-bundle vector that proves the `ca` config key is genuinely
+ *         consulted rather than merely accepted and ignored (#918). */
+std::string g_other_cert;
 
 webtransport_dial_tls_t dev_tls() {
     return webtransport_dial_tls_t{.ca_file = {}, .insecure_no_verify = true};
@@ -420,10 +425,12 @@ void test_fwd_read_round_trip() {
 }
 
 // SPEC{ NAME "type" <type>, NAME "name" <name>, SETTINGS "config"{ role, port,
-// kind=webtransport [, addr] [, cert, key] } } — the quic_test conn_spec shape.
+// kind=webtransport [, addr] [, cert, key] [, ca] [, insecure] } } — the quic_test
+// conn_spec shape, including the DIAL-side trust pair `ca`/`insecure` (#918).
 view_t conn_spec(std::string_view type, std::string_view name, tr::net::conn_role_t role,
                  std::uint16_t port, std::string_view addr = {}, std::string_view cert = {},
-                 std::string_view key = {}, std::string_view hijack_key = {}) {
+                 std::string_view key = {}, std::string_view hijack_key = {},
+                 std::string_view ca = {}, std::optional<bool> insecure = std::nullopt) {
     std::vector<std::byte> cfg;
     tr::wire::emit_name(cfg, "role");
     const std::byte r{static_cast<std::uint8_t>(role)};
@@ -453,6 +460,15 @@ view_t conn_spec(std::string_view type, std::string_view name, tr::net::conn_rol
         tr::wire::emit_name(cfg, "key");
         tr::wire::emit_name(cfg, hijack_key);
         tr::wire::emit_name(cfg, "pem");
+    }
+    if (!ca.empty()) {
+        tr::wire::emit_name(cfg, "ca");
+        tr::wire::emit_name(cfg, ca);
+    }
+    if (insecure) {
+        tr::wire::emit_name(cfg, "insecure");
+        const std::byte iv{static_cast<std::uint8_t>(*insecure ? 1 : 0)};
+        tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, std::span<const std::byte>(&iv, 1));
     }
 
     std::vector<std::byte> body;
@@ -517,16 +533,85 @@ void test_config_constructed_webtransport() {
     check(router_b.registry().by_name("net/webtransport-server/hj") != nullptr,
           "B: the hijack-vector listener is wired in — it loaded the REAL dev key");
 
-    // A: a webtransport CLIENT dialing B — a synchronous session from config
-    // (the DEV-ONLY no-verify trust mode, documented on the factory).
+    // A: a webtransport CLIENT dialing B — a synchronous session from config.
+    // The dial VERIFIES B's certificate (#918): B serves the self-signed dev cert,
+    // so this names that very file as its `ca` bundle. Without a trust key the
+    // session would be refused — asserted in test_spec_dial_trust_keys.
     const auto wa =
-        node_a.write(path_t("/net:children[]"),
-                     conn_spec("client", "b", tr::net::conn_role_t::DIAL, 47133, "127.0.0.1"));
+        node_a.write(path_t("/net:children[]"), conn_spec("client", "b", tr::net::conn_role_t::DIAL,
+                                                          47133, "127.0.0.1", {}, {}, {}, g_cert));
     check(wa.has_value(),
-          "A: SPEC{client, kind=webtransport, addr, port} constructs the dialing endpoint");
+          "A: SPEC{client, kind=webtransport, addr, port, ca} constructs the dialing endpoint");
     const auto* s = net_a.settings_of("net/webtransport-client/b");
     check(s != nullptr && s->kind == "webtransport" && s->addr == "127.0.0.1" && s->port == 47133,
           "A: the parsed :settings carry kind/addr/port");
+}
+
+// #918 — the webtransport mirror of the quic trust-key gate. The listeners serve
+// the self-signed dev certificate (it chains to nothing in the system trust store),
+// and each dial asserts the HANDSHAKE outcome, not a round-tripped config value.
+// Four listeners because a webtransport listener holds ONE session at a time.
+void test_spec_dial_trust_keys() {
+    std::printf("SPEC dial certificate validation (#918):\n");
+    graph_t node_a;
+    graph_t node_b;
+    tr::net::fwd_router_t router_a(node_a);
+    tr::net::fwd_router_t router_b(node_b);
+    tr::net::transport_vertex_t net_a(node_a, router_a);
+    tr::net::transport_vertex_t net_b(node_b, router_b);
+    net_a.register_transport_type("webtransport", tr::net::webtransport_transport_factory());
+    net_b.register_transport_type("webtransport", tr::net::webtransport_transport_factory());
+    (void)net_a.register_module("webtransport-client", "webtransport", tr::net::conn_role_t::DIAL);
+    (void)net_b.register_module("webtransport-server", "webtransport",
+                                tr::net::conn_role_t::LISTEN);
+
+    bool listening = true;
+    for (const auto& [nm, port] : {std::pair<const char*, std::uint16_t>{"l1", 47150},
+                                   {"l2", 47151},
+                                   {"l3", 47152},
+                                   {"l4", 47153},
+                                   {"l5", 47154}}) {
+        const auto w = node_b.write(
+            path_t("/net:children[]"),
+            conn_spec("listener", nm, tr::net::conn_role_t::LISTEN, port, {}, g_cert, g_key));
+        listening = listening && w.has_value();
+    }
+    check(listening, "B: five self-signed dev-cert listeners are up");
+
+    // 1. No trust key: verification is the default, the dev cert validates against
+    //    nothing, the session is REFUSED. This write SUCCEEDED before the fix.
+    const auto plain =
+        node_a.write(path_t("/net:children[]"),
+                     conn_spec("client", "verify", tr::net::conn_role_t::DIAL, 47150, "127.0.0.1"));
+    check(!plain.has_value() && plain.error() == tr::graph::status_t::NOT_FOUND,
+          "A: a SPEC dial carrying no trust key is REFUSED — the peer cert does not validate");
+    check(router_a.registry().by_name("net/webtransport-client/verify") == nullptr,
+          "A: the refused dial leaves no endpoint behind");
+
+    // 2. `insecure = 1` — the explicit DEV-ONLY opt-out reaches the dialer.
+    const auto insec = node_a.write(path_t("/net:children[]"),
+                                    conn_spec("client", "insec", tr::net::conn_role_t::DIAL, 47151,
+                                              "127.0.0.1", {}, {}, {}, {}, true));
+    check(insec.has_value(), "A: `insecure = 1` connects to that same unvalidatable peer");
+
+    // 3. `ca = <the peer's own cert>` — verification stays ON, against a private bundle.
+    const auto with_ca = node_a.write(path_t("/net:children[]"),
+                                      conn_spec("client", "ca", tr::net::conn_role_t::DIAL, 47152,
+                                                "127.0.0.1", {}, {}, {}, g_cert));
+    check(with_ca.has_value(), "A: `ca = <the peer's cert>` connects with verification ON");
+
+    // 4. `insecure = 0` is the explicit "verify" spelling, not a weaker opt-out.
+    const auto zero = node_a.write(path_t("/net:children[]"),
+                                   conn_spec("client", "zero", tr::net::conn_role_t::DIAL, 47153,
+                                             "127.0.0.1", {}, {}, {}, {}, false));
+    check(!zero.has_value(), "A: `insecure = 0` still verifies — the dial is REFUSED");
+
+    // 5. `ca = <an UNRELATED bundle>` — the bundle is genuinely consulted, not
+    //    merely accepted: one that does not certify this peer still refuses.
+    const auto wrong_ca = node_a.write(
+        path_t("/net:children[]"), conn_spec("client", "wrongca", tr::net::conn_role_t::DIAL, 47154,
+                                             "127.0.0.1", {}, {}, {}, g_other_cert));
+    check(!wrong_ca.has_value(), "A: `ca = <an unrelated CA>` is REFUSED — the bundle is applied");
 }
 
 }  // namespace
@@ -547,6 +632,14 @@ int main() {
     }
     g_cert = std::string(dir) + "/cert.pem";
     g_key = std::string(dir) + "/key.pem";
+    // A second, unrelated pair for the wrong-CA-bundle vector (#918).
+    const std::string other_dir = std::string(dir) + "/other";
+    const std::string cmd2 = std::string("sh ") + LIBTRACER_DEV_CERT_SCRIPT + " " + other_dir;
+    if (std::system(cmd2.c_str()) != 0) {
+        std::printf("FAIL: gen-dev-cert.sh (second pair)\n");
+        return 1;
+    }
+    g_other_cert = other_dir + "/cert.pem";
 
     test_wt_h3_varint();
     test_wt_h3_huffman();
@@ -556,6 +649,7 @@ int main() {
     test_view_delivery_and_backpressure();
     test_fwd_read_round_trip();
     test_config_constructed_webtransport();
+    test_spec_dial_trust_keys();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;
