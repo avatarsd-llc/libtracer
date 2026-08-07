@@ -28,6 +28,20 @@
  * the latter sending MASKED client frames per RFC 6455 §5.1. POSIX sockets;
  * mirrors transport_udp's lifecycle (a recv thread polled for a clean shutdown).
  * The framing itself is never reimplemented here — it all goes through tr::net::ws.
+ *
+ * SCOPE — this is the HOST/POSIX WebSocket, and ESP-IDF is NOT in it (#947 ruling).
+ * The single-thread-multiplexes-every-peer design above is stated in FreeRTOS terms
+ * because stacks are the scarce resource wherever this runs, but do not read that as
+ * an invitation to run it on an MCU: on ESP-IDF the supported plane is the IDF-native
+ * pair (tr::net::httpd_ws_link_t on esp_http_server, tr::net::esp_ws_client_link_t on
+ * esp_transport_ws), and these two types are NOT COMPILED into an ESP-IDF chip build
+ * at all. That is not a footprint preference — it is a correctness one: the
+ * scatter-gather egress underneath (posix_endpoint_t::write_all_iov) asks sendmsg for
+ * MSG_NOSIGNAL, a flag lwIP defines but lwip_sendmsg rejects with EOPNOTSUPP, and the
+ * failure is read as peer-gone, so on lwIP every data frame is silently dropped while
+ * the opening handshake and PING/PONG keep working (#948). Nothing here needs a
+ * platform #ifdef: the ESP-IDF component simply does not list this TU on a chip
+ * target, exactly as socketcan_link.cpp is swapped for its stub.
  */
 #pragma once
 

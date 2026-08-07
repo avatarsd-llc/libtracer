@@ -34,14 +34,32 @@ dependencies:
 | L0/L1 substrate | `mem_heap`, `mem_pool`, `rope` | `pool_t` = the bounded MCU backend |
 | L4 graph runtime | `path`, `graph` | read / write / await, `:children[]`, `:subscribers[]` |
 | net plane | `op_resolve`, `route_handle`, `fwd_router`, `transport_vertex`, `loopback` | explicit-source-routed FWD (ADR-0040); `child_registry` is header-only |
-| socket transports | `transport_udp`, `transport_tcp`, `transport_ws` | lwIP BSD sockets on chips, glibc on the `linux` target |
+| socket transports | `transport_udp`, `transport_tcp` | lwIP BSD sockets on chips, glibc on the `linux` target |
+| WebSocket | **`httpd_ws_link.cpp`**, **`esp_ws_client_link.cpp`** (this component) on chips; `transport_ws` on `linux` | ESP-IDF WebSocket is IDF-native and never POSIX — see below |
 | CAN transport | `transport_can` + **`twai_link.cpp`** (this component) | framing/advertise/reassembly are portable & host-tested; the TWAI link is the on-chip `can_link_t` |
 
-**Platform TU selection is a build-system concern** (the no-feature-macro ruling — no `#ifdef`s in shared sources): chip targets compile `socketcan_link_stub.cpp` (SocketCAN is Linux-only) plus `twai_link.cpp`; the `linux` host target compiles the real `socketcan_link.cpp` and no TWAI.
+**Platform TU selection is a build-system concern** (the no-feature-macro ruling — no `#ifdef`s in shared sources): chip targets compile `socketcan_link_stub.cpp` (SocketCAN is Linux-only) plus `twai_link.cpp`; the `linux` host target compiles the real `socketcan_link.cpp` and no TWAI. The WebSocket plane follows the same rule (next section).
+
+### The WebSocket plane: IDF-native on chips, portable on `linux`
+
+**ESP-IDF WebSocket never uses POSIX sockets** ([#947](https://github.com/avatarsd-llc/libtracer/issues/947) ruling). Core's `transport_ws_server` / `transport_ws_client` are the **host** implementation, and a chip build does not compile them at all — not as a footprint preference but as a correctness one. Their scatter-gather egress (`posix_endpoint_t::write_all_iov`) asks `sendmsg` for `MSG_NOSIGNAL`; lwIP *defines* that flag but `lwip_sendmsg` rejects any flag outside `MSG_DONTWAIT|MSG_MORE` with `EOPNOTSUPP`, which `write_all_iov` reads as peer-gone. On silicon the portable server therefore accepts connections, completes the RFC 6455 handshake, answers PINGs — and silently discards **every** data frame ([#948](https://github.com/avatarsd-llc/libtracer/issues/948)).
+
+So on a chip target the plane is:
+
+| Role | Type | Backed by | Gated on |
+| --- | --- | --- | --- |
+| serve | `tr::net::httpd_ws_link_t` | `esp_http_server` (stand up its own, or adopt the running SPA server) | `CONFIG_LIBTRACER_TRANSPORT_WS` **and** `CONFIG_HTTPD_WS_SUPPORT` |
+| dial | `tr::net::esp_ws_client_link_t` | `esp_transport_ws` over `tcp_transport` | `CONFIG_LIBTRACER_TRANSPORT_WS` |
+
+Neither is a factory entry: the application constructs the link and hands it in with `transport_vertex_t::provide_link`. Consequently a chip build registers **no** `ws` kind in the built-in catalog, and a `:children[]` SPEC carrying `kind=ws` with no staged link answers `SCHEMA_NOT_FOUND`. The `linux` target keeps the portable pair — it has glibc's `sendmsg` and no `esp_http_server`.
+
+`tools/check_esp_ws_plane.py` is the gate: zero `transport_ws_server` / `transport_ws_client` symbols in the linked chip ELF (`nm`), the portable TUs uncompiled, and both native links still built.
 
 ### lwIP portability audit (what the socket transports use)
 
-The transports compile against lwIP's BSD-socket layer **unmodified — no shim was needed**: `SO_RCVTIMEO` (the recv-loop stop-poll idiom; on by default in ESP-IDF's lwIP), `sendmsg`/`iovec` gather writes (the rope-to-wire path), `MSG_NOSIGNAL` (defined by lwIP; no SIGPIPE exists there anyway), `getsockname`, `poll`, `TCP_NODELAY`, `inet_pton`. The one MCU-relevant behavior fix landed in core (macro-free): `udp_transport_t` sizes its RX segments to `min(64 KiB, backend->max_segment_size())`, so a `pool_t` with MTU-sized slots receives datagrams instead of dropping them, and the recv thread no longer carries a 64 KiB scratch frame on its (small) pthread stack.
+The transports compile against lwIP's BSD-socket layer **unmodified — no shim was needed**: `SO_RCVTIMEO` (the recv-loop stop-poll idiom; on by default in ESP-IDF's lwIP), `sendmsg`/`iovec` gather writes (the rope-to-wire path), `getsockname`, `poll`, `TCP_NODELAY`, `inet_pton`. The one MCU-relevant behavior fix landed in core (macro-free): `udp_transport_t` sizes its RX segments to `min(64 KiB, backend->max_segment_size())`, so a `pool_t` with MTU-sized slots receives datagrams instead of dropping them, and the recv thread no longer carries a 64 KiB scratch frame on its (small) pthread stack.
+
+**One audited item was wrong, and is now known-wrong:** this list used to claim `MSG_NOSIGNAL` was fine because lwIP defines it and has no SIGPIPE. It defines it and then *refuses* it — `lwip_sendmsg` returns `EOPNOTSUPP` for it. `lwip_send` ignores unknown flags, so single-buffer writes are unaffected and only the **gather** path breaks. That is what removed WebSocket from this list; `transport_tcp` still rides the same `write_all_iov` and remains on ESP-IDF pending a separate ruling ([#948](https://github.com/avatarsd-llc/libtracer/issues/948)).
 
 ### TWAI `can_link_t` (`include/libtracer_esp/twai_link.hpp`)
 
@@ -57,7 +75,7 @@ The transports compile against lwIP's BSD-socket layer **unmodified — no shim 
 
 ### full_node (the #183 readiness example)
 
-The device node wires the **one-slab recipe (ADR-0039/0042) concretely**: one static slab, front region → `pool_t` (RX datagram segments; exhaustion = backpressure, never OOM), back region → `monotonic_buffer_resource` + `synchronized_pool_resource` (the router's **label tables**). Since #588 the terminus **arena** is not among them — it draws from the router's nothrow `rx` block source, which this example leaves at the default heap, as are the graph's own three seams (the example default-constructs the graph). So the slab bounds the RX segments and the label tables, not yet the whole steady state. The **recycling** `block_source_t` that bounds the rest now exists — `tr::mem::pool_source_t` (#597 / ADR-0067) — and wiring it into this example is a follow-on: it wants a per-child source on the router rather than one shared across receive threads (ADR-0067 §3). See `docs/reference/09-memory-substrate.md`. Connections are **config-created**: `write /net:children[] SPEC{listener, kind=udp, port}` constructs and owns the real socket (ADR-0027) — same for `tcp`/`ws` kinds via the built-in catalog.
+The device node wires the **one-slab recipe (ADR-0039/0042) concretely**: one static slab, front region → `pool_t` (RX datagram segments; exhaustion = backpressure, never OOM), back region → `monotonic_buffer_resource` + `synchronized_pool_resource` (the router's **label tables**). Since #588 the terminus **arena** is not among them — it draws from the router's nothrow `rx` block source, which this example leaves at the default heap, as are the graph's own three seams (the example default-constructs the graph). So the slab bounds the RX segments and the label tables, not yet the whole steady state. The **recycling** `block_source_t` that bounds the rest now exists — `tr::mem::pool_source_t` (#597 / ADR-0067) — and wiring it into this example is a follow-on: it wants a per-child source on the router rather than one shared across receive threads (ADR-0067 §3). See `docs/reference/09-memory-substrate.md`. Connections are **config-created**: `write /net:children[] SPEC{listener, kind=udp, port}` constructs and owns the real socket (ADR-0027) — same for the `tcp` kind via the built-in catalog. `ws` is not in that catalog on a chip target (see [the WebSocket plane](#the-websocket-plane-idf-native-on-chips-portable-on-linux)); it is staged with `provide_link`.
 
 On the `linux` target CI also **runs** it: an in-process host-peer node dials the device node over **real loopback datagrams** and drives `FWD{READ}` → reply, `:subscribers[]` subscribe carrying a `durability_request` → latch (RFC-0022 §3.A), and device write → remote fan-out observed via `graph.await`. On a chip it parks in the publish loop; set Wi-Fi credentials via `idf.py menuconfig` (*full_node example*) to make the same listener reachable from a LAN host (the on-silicon e2e).
 

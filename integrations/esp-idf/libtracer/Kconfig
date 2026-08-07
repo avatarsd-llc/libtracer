@@ -32,9 +32,30 @@ menu "libtracer"
         bool "Build the WebSocket transport"
         default y
         help
-            Compile the built-in `ws` transport (transport_ws.cpp + its factory glue,
-            and the esp_http_server-backed httpd_ws_link_t on chip targets). ON by
-            default. Turn OFF on a node that neither serves nor dials a WebSocket link.
+            Compile the WebSocket plane. ON by default. Turn OFF on a node that
+            neither serves nor dials a WebSocket link.
+
+            WHICH plane you get is decided by the TARGET, not by this bool (#947):
+
+              * chip targets get the IDF-NATIVE links only — esp_ws_client_link_t
+                (on esp_transport_ws) and, with CONFIG_HTTPD_WS_SUPPORT=y,
+                httpd_ws_link_t (adopts your running esp_http_server). ESP-IDF
+                WebSocket never uses POSIX sockets: core's portable
+                transport_ws_server / transport_ws_client are the HOST
+                implementation and are NOT compiled here. They are not merely
+                unreachable on lwIP, they are unusable — their scatter-gather
+                egress asks sendmsg for MSG_NOSIGNAL, which lwip_sendmsg rejects
+                with EOPNOTSUPP, and every data frame is then silently discarded
+                while the handshake and PING/PONG still work.
+              * the `linux` (POSIX host) target gets the portable pair, which is
+                the right implementation there and the only one available (that
+                target has no esp_http_server).
+
+            Consequence on a chip target: no `ws` entry is registered in the
+            built-in transport catalog, so a `:children[]` SPEC carrying `kind=ws`
+            with no staged link answers SCHEMA_NOT_FOUND. Serve or dial WebSocket
+            on silicon by constructing an IDF-native link and handing it to
+            transport_vertex_t::provide_link.
 
     config LIBTRACER_TRANSPORT_CAN
         bool "Build the CAN transport"
