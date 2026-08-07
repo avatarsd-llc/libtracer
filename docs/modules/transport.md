@@ -50,7 +50,7 @@ A transport that can hand up *owning* frames implements the rope-receiver seam
 view delivery](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md),
 generalized to ropes by [ADR-0053 — lazy rope-backed decode, view partial-path
 routing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0053-lazy-rope-backed-decode-view-partial-path-routing.md)):
-it overrides `delivers_ropes()` (`core/include/libtracer/transport.hpp:353`) and
+it overrides `delivers_ropes()` (`core/include/libtracer/transport.hpp:354`) and
 delivers each inbound frame as a `rope_t` of refcounted links over segments drawn
 from a host-injected `mem_backend_t`. A contiguous frame is the single-link case; a
 scattered one — a CAN reassembly group, a fragmented WebSocket message — crosses the

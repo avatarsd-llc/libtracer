@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <expected>
 #include <optional>
 #include <span>
 #include <string>
@@ -62,9 +63,13 @@ std::vector<std::byte> as_bytes(std::string_view s) {
     return out;
 }
 
-/** @brief The test resolver (ADR-0018): caller bytes are the subject; empty = trusted/local. */
-std::optional<subject_token_t> caller_is_subject(std::string_view caller) {
-    if (caller.empty()) return std::nullopt;
+/**
+ * @brief The test resolver (ADR-0018): the caller context IS the subject token.
+ *
+ * The empty (local) context never reaches a resolver — `graph_t::acl_allows` settles it
+ * as trusted before invoking one (#905) — so the error arm here means DENY, nothing else.
+ */
+std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(std::string_view caller) {
     return as_bytes(caller);
 }
 

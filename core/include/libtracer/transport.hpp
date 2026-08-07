@@ -262,11 +262,12 @@ class transport_t {
         // must DROP, exactly as every other writer-side allocation on this plane does.
         //
         // The store is a `tr::mem::block_array_t`, NOT a `std::vector` + `try_reserve`:
-        // that helper is `noexcept` but only its probe is nothrow — it frees the probe
-        // block and then runs the THROWING `std::vector::reserve`, so refusing that second
-        // allocation crosses a `noexcept` boundary into std::terminate (and a bare
-        // `abort()` under `-fno-exceptions`), which is the very outcome this body exists to
-        // avoid. Drawing from the failable seam (ADR-0065) leaves ONE refusable allocation.
+        // `std::vector::reserve` reports exhaustion by throwing, and under
+        // `-fno-exceptions` that is a bare `abort()` inside `reserve` that no wrapper can
+        // intercept — so on the profile this body exists for, `try_reserve` can only guess
+        // ahead with a nothrow probe and hope nothing takes the block in between (#923).
+        // Drawing from the failable seam (ADR-0065) leaves ONE refusable allocation on both
+        // profiles.
         std::size_t total = 0;
         for (const auto& s : iov) total += s.size();
         mem::block_array_t<std::byte> tmp(mem::heap_source());

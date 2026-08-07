@@ -18,6 +18,7 @@
 #include <concepts>
 #include <cstdint>
 #include <deque>
+#include <expected>
 #include <functional>
 #include <map>
 #include <memory>
@@ -32,6 +33,7 @@
 #include <utility>
 #include <vector>
 
+#include "libtracer/error.hpp"
 #include "libtracer/key_view.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
@@ -147,15 +149,24 @@ using subject_token_t = std::vector<std::byte>;
 /**
  * @brief The pluggable subject resolver (ADR-0018, #81): caller context → subject token.
  *
- * Maps an operation's caller context — this node's NAME for the inbound link a
- * remote FWD arrived on, or empty for a local API call — to the subject token ACL
- * evaluation matches against ACE subjects. Returning `std::nullopt` marks the
- * caller trusted (no subject — the operation is allowed unchecked), which is the
- * natural mapping for empty (local) contexts. The token is identity-provenance:
- * v1 typically returns the transport-authenticated peer id for a link; a stronger
- * (PKI) token slots in later without changing the ACL model.
+ * Maps an operation's caller context — this node's NAME for the inbound link a remote FWD
+ * arrived on — to the subject token ACL evaluation matches against ACE subjects. The token
+ * is identity-provenance: v1 typically returns the transport-authenticated peer id for a
+ * link; a stronger (PKI) token slots in later without changing the ACL model.
+ *
+ * @warning The ERROR arm is a **deny**, not a fallback (#905). A resolver that cannot name
+ *          the caller returns `std::unexpected(wire::err_t::ACCESS_DENIED)` and the
+ *          operation fails `status_t::PERMISSION_DENIED` at every gate — READ, WRITE,
+ *          SUBSCRIBE, CREATE, WRITE_ACL, READ_ACL, and remote-edge fan-in delivery. It is
+ *          never invoked with an empty caller: the empty (local API) context is the
+ *          trusted-by-convention channel and `graph_t::acl_allows` short-circuits it
+ *          BEFORE the resolver, so a remote identity — which always carries a non-empty
+ *          inbound link NAME — cannot reach the trusted arm. The predecessor of this type
+ *          returned `std::optional`, whose `nullopt` meant "fully trusted": an
+ *          unresolvable caller was granted everything, `WRITE_ACL` and `CREATE` included.
  */
-using subject_resolver_t = std::function<std::optional<subject_token_t>(std::string_view caller)>;
+using subject_resolver_t =
+    std::function<std::expected<subject_token_t, wire::err_t>(std::string_view caller)>;
 
 /**
  * @brief One EXTERNAL mutation of a producer's `:subscribers[]` — what @ref
@@ -1107,13 +1118,18 @@ class graph_t {
      *
      * No resolver (the default) ⇒ enforcement is DISABLED: every operation is allowed,
      * exactly today's behavior, and the hot path pays one null check. With a resolver
-     * installed, each gated operation maps its caller context through it and — when a
-     * subject token comes back — evaluates the target vertex's *effective* ACL (own
-     * ACEs + ancestor ACEs carrying INHERIT, ADR-0020): allowed iff some non-expired
-     * ACE with a matching subject (or `"EVERYONE@"`) grants the operation's right bit;
-     * a vertex whose effective ACL is empty stays open (enforcement is opt-in per
-     * vertex via ACL presence). Denial returns status_t::PERMISSION_DENIED
+     * installed, each gated operation with a NON-EMPTY caller context maps it through the
+     * resolver and — when a subject token comes back — evaluates the target vertex's
+     * *effective* ACL (own ACEs + ancestor ACEs carrying INHERIT, ADR-0020): allowed iff
+     * some non-expired ACE with a matching subject (or `"EVERYONE@"`) grants the
+     * operation's right bit; a vertex whose effective ACL is empty stays open (enforcement
+     * is opt-in per vertex via ACL presence). Denial returns status_t::PERMISSION_DENIED
      * (`tr::access::denied` on the wire, RFC-0002).
+     *
+     * The EMPTY caller context is the local-API convention and is trusted WITHOUT consulting
+     * the resolver (#905) — a remote op always carries its inbound link NAME, so it cannot
+     * spell the trusted context. The resolver's own error arm is therefore free to mean
+     * DENY: an unresolvable caller is refused, not waved through.
      *
      * Set once at wiring time, before frames flow — read-only afterwards on the op
      * paths, so no lock (the remote-sink / child-catalog contract).
@@ -1372,9 +1388,10 @@ class graph_t {
     result_t<void> field_write(vertex_t* v, const field_path_t& field, const view_t& value,
                                std::string_view caller);
     // The ACL gate (#81, ADR-0018/0020): true iff `caller` may exercise `right` on
-    // `v`. True with no resolver installed (one null check — enforcement off), for a
-    // trusted caller (resolver returns nullopt), or when the effective ACL (own ACEs
-    // + INHERIT-flagged ancestor ACEs) is empty; otherwise the verdict of the pure
+    // `v`. True with no resolver installed (one null check — enforcement off), for the
+    // trusted EMPTY (local) caller — settled before the resolver runs, #905 — or when
+    // the effective ACL (own ACEs + INHERIT-flagged ancestor ACEs) is empty. FALSE
+    // outright when the resolver refuses to name the caller; otherwise the verdict of the pure
     // per-target policy over the CACHED effective-ACE merge (ADR-0050
     // effective_acl_t — own list before ancestors, pre-merged per vertex). Runs on
     // EVERY gated data op (read/write/await), and evaluates ONE list under one

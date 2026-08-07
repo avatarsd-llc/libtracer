@@ -19,9 +19,11 @@
  * `grow` — an INTERLEAVED A/B of the two guard shapes for a growable array of trivially-copyable
  * elements, which is what the 29 `detail::try_reserve` / `try_push_back` sites and the ADR-0065
  * destination respectively are:
- *   - `base`  `std::vector<T>` + `tr::detail::try_push_back` — today. Each growth probes the
- *             GLOBAL heap with a throwaway `operator new` + `operator delete`, then runs the real
- *             (throwing) reserve: THREE allocator round trips per growth.
+ *   - `base`  `std::vector<T>` + `tr::detail::try_push_back` — today. Growth is the vector's own
+ *             (throwing) reserve with its failure caught: ONE allocator round trip per growth on
+ *             a hosted build. Under `-fno-exceptions` the helper cannot catch, so it still
+ *             probes the GLOBAL heap with a throwaway `operator new` + `operator delete` first
+ *             and that arm costs THREE round trips (#923).
  *   - `cand`  `tr::mem::block_array_t<T>` over an injected `block_source_t` — ADR-0065. ONE
  *             `try_alloc` (a virtual call) per growth, `memcpy` relocation, no probe.
  *   - `ctrl`  a raw `std::vector<T>::push_back` with no guard at all — the unguarded floor, a
@@ -97,9 +99,10 @@ std::size_t g_bytes = 0;
  * vacuously at exactly the sites this gate exists to catch.
  *
  * @par Why a size threshold and not "fail the k-th allocation"
- * `tr::detail::try_reserve` PROBES with a nothrow allocation of exactly n bytes, frees it,
- * and then runs the throwing `reserve(n)` that the just-freed block satisfies. An
- * index-based injector refuses that second call even though a real heap that served the
+ * Under `-fno-exceptions` — the profile the gate speaks for — `tr::detail::try_reserve`
+ * PROBES with a nothrow allocation of exactly n bytes, frees it, and then runs the throwing
+ * `reserve(n)` that the just-freed block satisfies (a hosted build catches instead, #923).
+ * An index-based injector refuses that second call even though a real heap that served the
  * probe would always serve it — and because the `try_*` seams are `noexcept`, the
  * fabricated throw `terminate`s the process instead of proving anything. A size threshold
  * cannot fabricate it: the probe and its `reserve` ask for the SAME number of bytes, so
@@ -376,7 +379,7 @@ int run_blocks() {
         c.heap_blocks = g_allocs;
         c.heap_bytes = g_bytes;
         print_census("try_encode_advertise_guarded", c, kN,
-                     "reused_out_buffer:probe+reserve_per_call");
+                     "reused_out_buffer:one_refusable_alloc_per_call");
     }
     {
         census_t c;
