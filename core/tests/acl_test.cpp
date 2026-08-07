@@ -5,10 +5,11 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * The graph stores the raw ACL TLV bytes verbatim AND parses them
- * into ALLOW-only ACEs at write time (a DENY ACE or unsupported flag bits are
- * rejected with TYPE_MISMATCH so subset evaluation never silently weakens the
- * written semantics). Enforcement is opt-in twice over: no subject resolver =>
+ * The graph parses an ACL TLV into ALLOW-only ACEs at write time and stores THAT
+ * LIST ALONE (a DENY ACE or unsupported flag bits are rejected with TYPE_MISMATCH
+ * so subset evaluation never silently weakens the written semantics; a read
+ * re-encodes the list, so it cannot describe a different policy — #907).
+ * Enforcement is opt-in twice over: no subject resolver =>
  * everything allowed (today's behavior); an empty effective ACL => open. With a
  * resolver installed the gates are READ / WRITE / SUBSCRIBE (producer fan-out) /
  * CREATE / READ_ACL / WRITE_ACL, denial = PERMISSION_DENIED, and fan-in
@@ -125,6 +126,67 @@ std::vector<std::byte> make_acl(std::initializer_list<ace_spec_t> aces) {
 }
 
 constexpr std::uint32_t bit(acl_right_t r) { return static_cast<std::uint32_t>(r); }
+
+/** @brief Bytes of a TLV's outer envelope `<type><opt><u16 length>` — what @ref primitive_acl
+ *         strips off an `encode_acl` result to recover the ACE collection alone. */
+constexpr std::size_t kTlvEnvelope = 4;
+
+/**
+ * @brief @p canonical's ACE collection re-headed as a PRIMITIVE ACL — `opt.pl` cleared (#907).
+ *
+ * The decoder populates children only under `opt.pl`, so every one of those ACE bytes lands in
+ * the node's opaque `payload` and the tree has ZERO children — which `parse_acl` reads as an
+ * empty ACE list. One bit apart from a real ACL, and the whole difference between "this vertex
+ * is closed to everyone but peer-a" and "this vertex is wide open".
+ */
+std::vector<std::byte> primitive_acl(std::span<const std::byte> canonical) {
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, type_t::ACL, opt_t{}, canonical.subspan(kTlvEnvelope));
+    return out;
+}
+
+/** @brief A container ACL whose single child is a VALUE, not an ACE — the outer is structured,
+ *         but what it collects is not an ACE collection. */
+std::vector<std::byte> acl_with_non_ace_child() {
+    const std::byte junk[1] = {std::byte{0x01}};
+    std::vector<std::byte> body;
+    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, junk);
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, type_t::ACL, opt_t{.pl = true}, body);
+    return out;
+}
+
+/**
+ * @brief One ALLOW ACE with `access_mask` spelled in TWO bytes and no `flags` child at all.
+ *
+ * Both are legal: `parse_acl` accepts a payload narrower than the parsed width (little-endian
+ * zero-extension is exact — the `acl/acl-aces` conformance vector spells the mask this way) and
+ * `flags` is optional. Neither is what `encode_acl` emits, which makes this the witness that an
+ * `:acl` read RE-ENCODES the parsed ACEs rather than echoing the written bytes (#907).
+ */
+std::vector<std::byte> acl_narrow_mask(std::string_view subject, std::uint32_t mask) {
+    std::vector<std::vector<std::byte>> keep;
+    tlv_t ace{.type = type_t::ACL, .opt = opt_t{.pl = true}};
+    ace.children.push_back(name_tlv("type", keep));
+    ace.children.push_back(u_value(0, 1, keep));
+    ace.children.push_back(name_tlv("subject", keep));
+    keep.push_back(as_bytes(subject));
+    ace.children.push_back(tlv_t{.type = type_t::VALUE, .payload = keep.back()});
+    ace.children.push_back(name_tlv("access_mask", keep));
+    ace.children.push_back(u_value(mask, 2, keep));
+    tlv_t acl{.type = type_t::ACL, .opt = opt_t{.pl = true}};
+    acl.children.push_back(std::move(ace));
+    return tr::wire::encode(acl);
+}
+
+/** @brief The bytes an `:acl` read served under the trusted local context, or `nullopt` if the
+ *         read failed (which for `:acl` means NOT_FOUND — no ACL was ever written). */
+std::optional<std::vector<std::byte>> acl_readback(graph_t& g, const path_t& p) {
+    const auto r = g.read(p);
+    if (!r) return std::nullopt;
+    const std::span<const std::byte> b = (*r)->only().bytes();
+    return std::vector<std::byte>(b.begin(), b.end());
+}
 
 /**
  * @brief The test resolver (ADR-0018): the caller context IS the subject token.
@@ -269,7 +331,7 @@ void test_storage_roundtrip() {
         const auto r = g.read(path_t("/x:acl"));
         const bool eq = r.has_value() && (*r)->only().bytes().size() == acl.size() &&
                         std::equal(acl.begin(), acl.end(), (*r)->only().bytes().begin());
-        check(eq, "read :acl returns the stored bytes verbatim");
+        check(eq, "read :acl returns the written bytes (they are already canonical)");
     }
 
     {  // a non-ACL TLV is rejected; storage unchanged
@@ -283,6 +345,103 @@ void test_storage_roundtrip() {
                                std::equal(acl.begin(), acl.end(), (*r)->only().bytes().begin());
         check(unchanged, "rejected write leaves the stored ACL unchanged");
     }
+}
+
+// ---------------------------------------------------------------------------
+/**
+ * @brief The OUTER `:acl` container's shape, and a read-back that cannot misdescribe it (#907).
+ *
+ * The severe direction of a lenient ACL parse is not a rejected write — it is an ACCEPTED one
+ * that enforces nothing. A PRIMITIVE ACL carries its whole ACE collection as opaque payload, so
+ * it decoded with zero children and stored as an EMPTY ACE list: enforcement CLEARED, the most
+ * permissive outcome the field has, on a write that reads like it installs a policy. And
+ * because the raw bytes were kept beside the parsed list and served back verbatim, an auditor
+ * reading `:acl` saw a non-empty ACL — ACEs present, which under the any-present-ACE-closes
+ * rule means CLOSED — on a vertex that was wide open. Stored and evaluated disagreed.
+ *
+ * Both halves are closed here, and the second is the one that generalises: read-back is a
+ * RE-ENCODE of the stored ACEs, so there is no second copy left to disagree with the list
+ * `acl_allows` walks — not for this shape, and not for the next one.
+ */
+void test_outer_acl_shape() {
+    std::printf("outer :acl container shape + canonical read-back (#907):\n");
+    graph_t g;
+    g.set_subject_resolver(caller_is_subject);
+    const vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
+    const auto acl_field = path_t::parse("/x:acl");
+    // A stored value, so a READ that is ALLOWED answers OK rather than NOT_FOUND — the gate
+    // rows below distinguish permitted from denied, which an empty vertex cannot show.
+    check(write_u8(g, v, 7).has_value(), "the target holds a value (local write, no ACL yet)");
+
+    // A CLOSING policy: peer-a reads the vertex and administers the ACL; peer-b gets nothing.
+    const std::vector<std::byte> closed = make_acl({{
+        .subject = "peer-a",
+        .mask = bit(acl_right_t::READ) | bit(acl_right_t::READ_ACL) | bit(acl_right_t::WRITE_ACL),
+    }});
+    check(g.write(*acl_field, make_value(closed)).has_value(), "installed a closing :acl");
+    check(g.read(v, "peer-a").has_value(), "peer-a may read under it");
+    check(denied(g.read(v, "peer-b")), "peer-b may not — the vertex is CLOSED");
+
+    {  // The body's repro: the same ACE collection under a primitive outer header.
+        const auto w = g.write(v, acl_field->field(), make_value(primitive_acl(closed)), "peer-a");
+        check(fails_with(w, status_t::TYPE_MISMATCH),
+              "a PRIMITIVE outer ACL is rejected with TYPE_MISMATCH");
+        check(denied(g.read(v, "peer-b")),
+              "…enforcement is UNCHANGED — the rejected write did not open the vertex");
+        check(acl_readback(g, *acl_field) == closed,
+              "…and :acl still reads back exactly the policy that is enforced");
+    }
+    {  // An empty primitive decodes to the same zero children — same clearing, no payload.
+        std::vector<std::byte> bare;
+        tr::wire::emit_tlv(bare, type_t::ACL, opt_t{}, std::span<const std::byte>{});
+        check(fails_with(g.write(v, acl_field->field(), make_value(bare), "peer-a"),
+                         status_t::TYPE_MISMATCH),
+              "an EMPTY primitive ACL is rejected too — the builder never emits a primitive one");
+        check(denied(g.read(v, "peer-b")), "…enforcement unchanged");
+    }
+    {  // A STRUCTURED outer whose child is not an ACE. #906's per-entry rule already refuses
+       // this, and the row is here because the outer-shape guard must not be mistaken for the
+       // whole of the collection's validity — it stays green with that rule in place.
+        check(fails_with(
+                  g.write(v, acl_field->field(), make_value(acl_with_non_ace_child()), "peer-a"),
+                  status_t::TYPE_MISMATCH),
+              "a container ACL whose child is not an ACE is rejected");
+        check(acl_readback(g, *acl_field) == closed, "…storage untouched by all three");
+    }
+    {  // Read-back is a re-encode, not an echo: a legal-but-non-canonical write comes back
+       // CANONICAL, which is only possible if the read projects the parsed ACE list.
+        const std::uint32_t mask = bit(acl_right_t::READ) | bit(acl_right_t::READ_ACL);
+        const std::vector<std::byte> narrow = acl_narrow_mask("peer-a", mask);
+        const std::vector<std::byte> canonical = make_acl({{.subject = "peer-a", .mask = mask}});
+        check(narrow != canonical, "the narrow spelling differs from encode_acl's, byte-wise");
+        check(g.write(*acl_field, make_value(narrow)).has_value(),
+              "a narrower-but-legal ACE spelling is accepted");
+        const auto back = acl_readback(g, *acl_field);
+        check(back == canonical, ":acl reads back CANONICAL — the parsed ACEs re-encoded");
+        bool reparses = false;
+        if (back) {
+            if (const auto dec = tr::wire::decode(*back); dec) {
+                const auto aces = tr::graph::parse_acl(*dec);
+                reparses = aces && aces->size() == 1 && (*aces)[0].access_mask == mask;
+            }
+        }
+        check(reparses, "…and re-parsing it yields exactly the ACE list evaluation walks");
+        check(g.read(v, "peer-a").has_value() && denied(g.read(v, "peer-b")),
+              "…which is the policy actually enforced");
+    }
+    {  // The sanctioned clear: a container with zero children. Enforcement goes off, and the
+       // field keeps reading back as an ACL that grants nothing — NOT the same fact as a
+       // vertex that never had one, which is why the presence bit outlives the ACE list.
+        const std::vector<std::byte> empty = tr::graph::encode_acl({});
+        check(g.write(*acl_field, make_value(empty)).has_value(),
+              "an EMPTY CONTAINER :acl is accepted — clearing stays expressible");
+        check(g.read(v, "peer-b").has_value(), "…enforcement is off (no ACE ⇒ open)");
+        check(acl_readback(g, *acl_field) == empty,
+              "…and :acl reads back as the empty container, not NOT_FOUND");
+    }
+    (void)g.register_vertex(path_t("/never"), role_t::STORED_VALUE);
+    check(fails_with(g.read(path_t("/never:acl")), status_t::NOT_FOUND),
+          "a vertex that never had an :acl still reads NOT_FOUND — the two stay distinct");
 }
 
 void test_subset_rejections() {
@@ -1123,6 +1282,7 @@ void test_empty_caller_is_trusted_without_the_resolver() {
 
 int main() {
     test_storage_roundtrip();
+    test_outer_acl_shape();
     test_subset_rejections();
     test_open_by_default();
     test_gated_ops();

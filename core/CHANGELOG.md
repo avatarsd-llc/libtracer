@@ -129,6 +129,33 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   cycles left 51 distinct labels and 51 egress entries at every node of a two-hop chain, and
   now leave 1.
 
+- **A vertex stores its `:acl` as ACEs and NOTHING else: `vertex_t::set_acl` takes only the
+  parsed list, `vertex_t::acl_bytes` is REMOVED, and `vertex_t::with_acl` replaces it (#907).**
+  The vertex used to keep the written TLV bytes *beside* the parsed ACEs, and `:acl` reads
+  served those bytes verbatim while the gates walked the list — two artifacts that could
+  describe different policies. They did: an outer `ACL` TLV whose `opt.PL` bit was clear
+  carried its whole ACE collection as opaque **payload**, so it decoded with zero children,
+  parsed as an **empty** ACE list, and was stored — clearing enforcement — while a read of
+  `:acl` still returned the payload. An auditor saw ACEs present, which under the
+  any-present-ACE-closes rule means *closed*, on a vertex that had just been thrown open.
+  Two changes close it, and only the second is general:
+  - The `:acl` write branch now requires a **structured** outer ACL; a primitive one is
+    `TYPE_MISMATCH`, per the same rule #906 applied inside an ACE — a shape the builder never
+    emits is refused, because leniency in an ACL widens a grant rather than losing a field.
+    An **empty container** (`opt.PL=1`, zero children) remains the sanctioned clear.
+  - `graph_t::read_acl` **re-encodes** the stored ACEs through `encode_acl`, so read-back is
+    canonical by construction and there is no second copy left to disagree with the list
+    `acl_allows` evaluates — for this shape or any future one. A read therefore returns the
+    canonical spelling whichever accepted spelling was written (the two-byte `access_mask` of
+    the `acl/acl-aces` vector comes back as four). Same cost class as the copy it replaces,
+    on a control-plane-rare path.
+
+  `vertex_ext_t::acl` (the byte copy) is gone, replaced by an `acl_present` bit that lands in
+  existing padding: an ACL written **empty** still reads back as an empty container, distinct
+  from the `NOT_FOUND` of a vertex that never had one. `with_acl(f)` hands `f` that bit and
+  the ACE list together under one hold, since a clear landing between two accessors would
+  otherwise be served as an ACL that no longer exists.
+
 - **`vertex_ext_t::acl_cache_dirty` is REMOVED; ACL-cache validity is now the parity of
   `vertex_ext_t::acl_gen` (#880, [ADR-0078](../docs/adr/0078-acl-cache-coherence-is-a-published-generation-stamp-not-a-dirty-flag.md)).**
   The effective-ACE merge was guarded by a `{acl_gen, acl_cache_dirty}` pair: invalidators
