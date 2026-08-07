@@ -228,9 +228,16 @@ that could say so — read zero while a whole fan-out evaporated. The unit of ev
 therefore a **delivery**, not an event: a shed fan-out of N counts N, which is why the two
 snapshot sheds are tallied inside `vertex_t::snapshot_edges` (`vertex.hpp:1917`, its
 `snapshot_drops_t`) and folded by `fan_out` (`graph.cpp:1008`, `:1023`) through
-`count_snapshot_drops` (`:661`) rather than counted as one at the caller. Every site goes
-through one door, `count_drop` (`:641`), so a path that abandons an admitted delivery without
-counting it is a visible omission.
+`count_snapshot_drops` (`:661`) rather than counted as one at the caller. Every site **on
+this plane** goes through one door, `count_drop` (`:641`), so a path here that abandons an
+admitted delivery without counting it is a visible omission.
+
+The plane boundary is real, not a hedge. A shed that happens *before* the fan-out — a STREAM
+ring-append refused under allocation pressure, or a `mark_pending` OOM leg dropping a
+deferred `IF_NEWER` mark — abandons the write's deliveries without ever reaching this door,
+and the write still answers `SUCCESS`. Those sites are pre-existing and tracked separately;
+read `delivery_drops()` as *what the dispatch plane shed*, not yet as *everything the vertex
+shed*.
 
 `delivery_drops()` (`graph.hpp:1299`, `graph.cpp:634`) is the only record that any of this
 happened. Without it, a node whose target was retired, or whose fan-in gate denies the edge's

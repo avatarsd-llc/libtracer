@@ -34,8 +34,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     (new nested type), reporting what the snapshot shed; `graph_t::fan_out` folds it into
     the graph's counters. The parameter is a required reference, not an optional pointer:
     a caller that cannot see the shed count is the defect being fixed.
-  - Every drop now goes through one internal counting door, so a path that abandons an
-    admitted delivery without counting it is a visible omission.
+  - Every drop **on the fan-out / dispatch plane** now goes through one internal counting
+    door, so a path there that abandons an admitted delivery without counting it is a
+    visible omission. That scope is deliberate and not yet the whole vertex: a STREAM
+    ring-append shed under allocation pressure still abandons the write's entire fan-out
+    uncounted, and `mark_pending`'s OOM legs shed a deferred IF_NEWER delivery the same
+    way. Both are pre-existing, outside this change's sites, and tracked separately.
 
   Counts are **deliveries, not events**: a shed fan-out of N counts N. Nothing is added to
   the delivering path — the fold is one predicted-not-taken test per snapshot and the
