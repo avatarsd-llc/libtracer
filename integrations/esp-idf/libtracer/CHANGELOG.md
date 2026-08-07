@@ -10,6 +10,43 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`esp_ws_client_link_t::dropped_rx()`** — inbound messages the receive path refused,
+  spelled the way core's transports already spell it (`transport_can::dropped_rx()`).
+  It counts the two refusals that were previously logs-only (#953): a message that does
+  not fit `rx_bytes`, and a stray WebSocket CONTINUATION arriving with no message open.
+  A frame lost to a connection drop is not counted — that is the link going down, not
+  the receive path refusing a message.
+
+### Fixed
+
+- **`esp_ws_client_link_t` now HONORS its `recv_stack` argument** (#900). The constructor
+  accepted the knob and discarded it, spawning a plain `std::thread` — which on ESP-IDF
+  takes the global `CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT`, since a pthread's stack can
+  only be set by arming `esp_pthread_set_cfg` for the next `pthread_create`. That thread
+  runs in-call graph delivery through the `on_write` seam (the deep path the sibling
+  *server* link sizes at 12288 bytes), so a caller who sized the stack for its delivery
+  path silently got the default and a stack-overflow reboot. The save/set/spawn/restore
+  recipe `twai_link_t` already carried is now one shared helper (`tr::esp::spawn_thread`,
+  component-private) used by both links; the restore is what keeps the size from leaking
+  onto later threads spawned by the same caller. `recv_stack = 0` still means "platform
+  default" and arms nothing, so callers passing nothing are unchanged.
+
+- **An over-sized inbound message is now dropped WHOLE** (#901). The receive loop reset
+  its accumulator on overflow but kept reading the same message, so the remainder
+  re-accumulated from offset zero and was handed to the router as a bogus standalone
+  frame — the peer's stream desynchronised and nothing reported it. This never required
+  fragmentation: `esp_transport_read` caps each read at the space offered and IDF
+  re-reports the frame's `fin` on every one of them, so one over-sized *unfragmented*
+  frame split across reads and its tail was delivered. The loop now tracks the current
+  frame's unread bytes (from `esp_transport_ws_get_read_payload_len`), so "the message
+  ended" is distinguishable from "the buffer ran out", and consumes the remainder of a
+  dropped message without delivering it. Two adjacent gaps close with it: a stray
+  CONTINUATION arriving with no message open is dropped (the rule `httpd_ws_link_t`
+  already applies), and an **exact-fit** message — `off == rx_bytes` with `fin` — is
+  delivered instead of being swept into the overflow branch.
+
 ### Changed
 
 - **BREAKING (chip targets): the portable `ws` transport is no longer built, and no `ws`

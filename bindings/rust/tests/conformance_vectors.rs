@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use libtracer::error_registry::ErrorId;
 use libtracer::field::FieldMode;
 use libtracer::fwd::{fwd_kind, fwd_op, FieldSel};
-use libtracer::structured::{self, Ace, DeliveryPolicy};
+use libtracer::structured::{self, Ace, DeliveryPolicy, SettingValue};
 use libtracer::{
     decode, decode_fwd, encode, encode_field, encode_fwd, error_code, parse_error, parse_field_tlv,
     path_ref, path_ref_element, reply_error_code, status_ok, status_with_errors, subscriber, value,
@@ -781,6 +781,135 @@ fn ace_builder_matches_manual() {
     ];
     let bin = assert_vector_consistent("acl/acl-aces");
     assert_eq!(encode(&structured::acl(&aces)), bin);
+}
+
+/* ------------------------------------------------------------- Unit 6 — SPEC --- */
+
+/**
+ * @brief `spec/create-child` — the minimal creation SPEC, byte-for-byte.
+ *
+ * The gate on the value TYPE of the two fields (#877): both are `NAME` (`0x02`). The
+ * terminus pairs a `NAME` key with a `NAME` value and skips any other type, so a
+ * `VALUE`-typed `type`/`name` leaves the catalog selector empty and the create is
+ * refused with `INVALID_PATH`. That spelling round-trips its own bytes perfectly, so
+ * only a byte pin against the shared vector can catch it — the assertion below is the
+ * one that reddens if `spec()` goes back to wrapping the fields in `value()`.
+ */
+#[test]
+fn spec_create_child() {
+    let bin = assert_vector_consistent("spec/create-child");
+    assert_eq!(
+        encode(&structured::spec("stored_value", "temp", None).unwrap()),
+        bin,
+        "the SPEC builder must emit the vector's bytes — NAME field values, not VALUE"
+    );
+
+    let t = decode(&bin).unwrap();
+    assert_eq!(t.type_code, libtracer::type_code::SPEC);
+    assert_eq!(
+        structured::spec_type_name(&t).unwrap(),
+        (Some("stored_value".to_string()), Some("temp".to_string()))
+    );
+    // Every field value in the vector is a NAME node, keys and values alike.
+    let fields = structured::named_fields(&t).unwrap();
+    let keys: Vec<&str> = fields.iter().map(|f| f.key.as_str()).collect();
+    assert_eq!(keys, vec!["type", "name"]);
+    for f in &fields {
+        assert_eq!(
+            f.value.type_code,
+            libtracer::type_code::NAME,
+            "SPEC field {} must carry a NAME value",
+            f.key
+        );
+    }
+}
+
+/**
+ * @brief The refused spelling, stated as an ablation: a SPEC whose `type`/`name` values
+ * are `VALUE` nodes is NOT the vector, and the reader declines to read it.
+ *
+ * This is the shape the Rust builder emitted before #877. It decodes cleanly and
+ * re-encodes to itself — a codec-only harness cannot tell it from the real thing — so
+ * the difference has to be asserted here, against the golden bytes.
+ */
+#[test]
+fn spec_value_typed_fields_are_not_the_vector() {
+    let bin = assert_vector_consistent("spec/create-child");
+    let drifted = Tlv {
+        type_code: libtracer::type_code::SPEC,
+        opt: Opt::structured(),
+        payload: Vec::new(),
+        children: vec![
+            libtracer::name("type").unwrap(),
+            value(b"stored_value"),
+            libtracer::name("name").unwrap(),
+            value(b"temp"),
+        ],
+        trailer: None,
+    };
+    let drifted_bytes = encode(&drifted);
+    assert_ne!(
+        drifted_bytes, bin,
+        "a VALUE-typed SPEC must not equal the golden bytes"
+    );
+    // It still round-trips itself — which is exactly why the codec harness misses it.
+    assert_eq!(encode(&decode(&drifted_bytes).unwrap()), drifted_bytes);
+    // And the reader reports both fields absent, as the terminus does.
+    assert_eq!(
+        structured::spec_type_name(&decode(&drifted_bytes).unwrap()).unwrap(),
+        (None, None)
+    );
+}
+
+/**
+ * @brief `spec/conn-client-ws` — a connection-formation SPEC whose `config` mixes both
+ * value types: `role`/`port` as opaque `VALUE`, `kind`/`addr` as textual `NAME`.
+ *
+ * Before #877 the Rust settings builder could emit only the `VALUE` form, so the
+ * string-valued keys were inexpressible — a link this core described was never formed.
+ */
+#[test]
+fn spec_conn_client_ws() {
+    let bin = assert_vector_consistent("spec/conn-client-ws");
+    let config = structured::settings_typed(&[
+        ("role", SettingValue::Value(&[0])),
+        ("port", SettingValue::Value(&8080u16.to_le_bytes())),
+        ("kind", SettingValue::Name("ws")),
+        ("addr", SettingValue::Name("127.0.0.1")),
+    ])
+    .unwrap();
+    assert_eq!(
+        encode(&structured::spec("client", "up", Some(config)).unwrap()),
+        bin,
+        "the conn SPEC builder must reproduce the shared vector byte-for-byte"
+    );
+
+    let t = decode(&bin).unwrap();
+    assert_eq!(
+        structured::spec_type_name(&t).unwrap(),
+        (Some("client".to_string()), Some("up".to_string()))
+    );
+    let cfg = structured::named_field(&t, "config").unwrap().unwrap();
+    assert_eq!(cfg.type_code, libtracer::type_code::SETTINGS);
+    // The string keys read back only through the NAME-typed accessor …
+    assert_eq!(
+        structured::settings_str(&cfg, "kind").unwrap(),
+        Some("ws".to_string())
+    );
+    assert_eq!(
+        structured::settings_str(&cfg, "addr").unwrap(),
+        Some("127.0.0.1".to_string())
+    );
+    // … and the integer keys are NOT strings, so the typed accessor declines them.
+    assert_eq!(structured::settings_str(&cfg, "port").unwrap(), None);
+    assert_eq!(
+        structured::settings_get(&cfg, "port").unwrap(),
+        Some(vec![0x90, 0x1f])
+    );
+    assert_eq!(
+        structured::settings_get(&cfg, "role").unwrap(),
+        Some(vec![0])
+    );
 }
 
 /* --------------------------------------------------------------- Unit 4 — FWD --- */

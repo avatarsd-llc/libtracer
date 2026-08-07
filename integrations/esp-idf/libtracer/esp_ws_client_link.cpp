@@ -18,6 +18,7 @@
 #include <utility>
 
 #include "esp_log.h"
+#include "esp_thread.hpp"
 #include "esp_transport.h"
 #include "esp_transport_tcp.h"
 #include "esp_transport_ws.h"
@@ -49,10 +50,10 @@ esp_ws_client_link_t::esp_ws_client_link_t(std::string host, std::uint16_t port,
       rx_buf_(rx_bytes),
       tx_buf_(tx_bytes) {
     // The recv thread owns dialing + the read loop; the ctor never blocks on the
-    // network. recv_stack==0 uses the pthread default (the node sizes it for the
-    // in-call delivery depth through the graph's on_write seam).
-    (void)recv_stack;  // std::thread uses the platform pthread default stack
-    recv_thread_ = std::thread([this] { recv_loop(); });
+    // network. recv_stack==0 uses the pthread default; any other value is APPLIED —
+    // this thread runs in-call delivery through the graph's on_write seam, so a node
+    // that knows its delivery depth must be able to size it (#900).
+    recv_thread_ = esp::spawn_thread(recv_stack, "ws_cli_rx", [this] { recv_loop(); });
 }
 
 esp_ws_client_link_t::~esp_ws_client_link_t() {
@@ -159,9 +160,33 @@ void esp_ws_client_link_t::recv_loop() {
     // fragmented message (spread over reads/polls, possibly interleaved with control
     // frames) reassembles correctly. Reset only on delivery, overflow, or a drop.
     std::size_t off = 0;
+    // Unread bytes of the WS FRAME currently being consumed. esp_transport_read caps
+    // every read at the space we offer it and, when a frame does not fit, keeps serving
+    // the rest of that SAME frame on later reads (transport_ws.c: a new header is parsed
+    // only once `bytes_remaining` hits 0) — while still reporting that frame's opcode and
+    // fin flag on every one of them. So `fin` alone cannot say a message ended: without
+    // this counter a partial read of a big frame is indistinguishable from a complete
+    // small message, which is how the tail of a dropped message got delivered (#901).
+    // The frame's total length comes from esp_transport_ws_get_read_payload_len.
+    std::size_t frame_left = 0;
+    // Set when the message being assembled has already overflowed rx_buf_: its remaining
+    // bytes are read and thrown away until the fin that ends it, so the tail is never
+    // mistaken for a message of its own. This is what makes the drop-don't-truncate
+    // contract actually hold (#901).
+    bool discarding = false;
+    // Set while a MESSAGE is open — i.e. a BINARY/TEXT frame arrived without FIN and its
+    // CONT frames are still expected. This cannot be inferred from `off`: a message whose
+    // first fragment carries a zero-length payload (legal per RFC 6455 §5.4, and what a
+    // peer emits when it starts a message before its first chunk is ready) leaves `off`
+    // at 0, so an `off == 0` test reads its CONT frames as strays and drops the whole
+    // message. Assembly is a property of the FIN flags seen, not of the byte count.
+    bool assembling = false;
     while (!stop_.load(std::memory_order_relaxed)) {
         if (!connected_.load(std::memory_order_acquire)) {
             off = 0;
+            frame_left = 0;
+            discarding = false;
+            assembling = false;
             if (!connect_once()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(kReconnectBackoffMs));
             }
@@ -172,6 +197,9 @@ void esp_ws_client_link_t::recv_loop() {
         if (pr < 0) {
             drop();
             off = 0;
+            frame_left = 0;
+            discarding = false;
+            assembling = false;
             continue;
         }
         if (pr == 0) continue;  // no data this turn; re-check stop_
@@ -183,7 +211,8 @@ void esp_ws_client_link_t::recv_loop() {
                 n = -1;
             } else {
                 // Server→client frames are unmasked, so this reads the payload directly
-                // into rx_buf_ at `off` — a zero-copy fill.
+                // into rx_buf_ at `off` — a zero-copy fill. While discarding, `off` is 0
+                // and the whole buffer is offered as a sink for bytes we then throw away.
                 n = esp_transport_read(ws_, reinterpret_cast<char*>(rx_buf_.data()) + off,
                                        static_cast<int>(rx_buf_.size() - off), kReadTimeoutMs);
             }
@@ -191,15 +220,26 @@ void esp_ws_client_link_t::recv_loop() {
         if (n < 0) {
             drop();
             off = 0;
+            frame_left = 0;
+            discarding = false;
+            assembling = false;
             continue;
         }
-        if (n == 0) continue;  // a control frame (PING/PONG/CLOSE-ack) was consumed — keep `off`
+        // A control frame (PING/PONG/CLOSE-ack) was consumed internally — keep `off`. IDF
+        // reports a ZERO-PAYLOAD data frame the same way (transport_ws.c returns 0 for
+        // both, and for a poll timeout), so a message ended by an empty final fragment is
+        // invisible here. That is pre-existing and symmetric: such a message never
+        // delivered either, because `off` was likewise left standing.
+        if (n == 0) continue;
 
         const ws_transport_opcodes_t op = esp_transport_ws_get_read_opcode(ws_);
         const bool fin = esp_transport_ws_get_fin_flag(ws_);
         if (op == WS_TRANSPORT_OPCODES_CLOSE) {
             drop();
             off = 0;
+            frame_left = 0;
+            discarding = false;
+            assembling = false;
             continue;
         }
         if (op != WS_TRANSPORT_OPCODES_BINARY && op != WS_TRANSPORT_OPCODES_TEXT &&
@@ -207,20 +247,61 @@ void esp_ws_client_link_t::recv_loop() {
             continue;  // a leaked control/NONE opcode: not a data frame — keep `off`
         }
 
-        off += static_cast<std::size_t>(n);
-        if (fin && off < rx_buf_.size()) {
+        // Frame bookkeeping. A read with nothing outstanding starts a new frame, so its
+        // length is the one to latch; a length that does not exceed this read (or an
+        // absent one) falls back to "this read was the whole frame" — the historical
+        // assumption, kept as the conservative answer.
+        const std::size_t consumed = static_cast<std::size_t>(n);
+        if (frame_left == 0) {
+            const int plen = esp_transport_ws_get_read_payload_len(ws_);
+            frame_left = plen > n ? static_cast<std::size_t>(plen) : consumed;
+        }
+        frame_left -= consumed < frame_left ? consumed : frame_left;
+        // The MESSAGE is over only when the final frame has been consumed WHOLE.
+        const bool message_done = fin && frame_left == 0;
+
+        if (discarding) {
+            // These bytes belong to the message already dropped: consume, never deliver.
+            // The discard ends with that message, not with this frame.
+            if (message_done) discarding = false;
+            continue;
+        }
+        if (op != WS_TRANSPORT_OPCODES_CONT) {
+            assembling = !message_done;  // a data opcode opens a message unless it ends it
+        }
+        if (op == WS_TRANSPORT_OPCODES_CONT && !assembling) {
+            // A CONTINUATION with no assembly open — the peer's stream is out of step and
+            // this is a mid-payload tail, not a message. Drop it rather than start a
+            // message from the middle; the server sibling drops exactly this
+            // (httpd_ws_link_t::on_data_frame).
+            ESP_LOGW(kTag, "stray CONT with no message open — dropped");
+            dropped_rx_.fetch_add(1, std::memory_order_relaxed);
+            if (!message_done) discarding = true;  // swallow the rest of that stray message
+            continue;
+        }
+
+        off += consumed;
+        if (message_done) {
             // A complete message that fit in the buffer: deliver borrowed, serviced
-            // in-call by the router on this recv thread.
+            // in-call by the router on this recv thread. `off == rx_buf_.size()` is an
+            // EXACT FIT and delivers — it used to take the overflow branch (#901).
             if (off > 0) rx_.deliver_borrowed(std::span<const std::byte>(rx_buf_.data(), off));
             off = 0;
-        } else if (off >= rx_buf_.size()) {
-            // The buffer filled: the message is at least this big and may be truncated —
-            // drop it rather than deliver a partial TLV (never silently truncate).
+            assembling = false;
+        } else if (off == rx_buf_.size()) {
+            // The buffer is full and the message is NOT over: it cannot fit. Drop it
+            // rather than deliver a partial TLV (never silently truncate) — and discard
+            // the rest of it, or the remainder would re-accumulate from 0 and be handed
+            // up as a bogus standalone frame while the peer's stream desynchronised in
+            // silence (#901).
             ESP_LOGW(kTag, "inbound message exceeds %u B rx buffer — dropped",
                      static_cast<unsigned>(rx_buf_.size()));
+            dropped_rx_.fetch_add(1, std::memory_order_relaxed);
             off = 0;
+            assembling = false;
+            discarding = true;
         }
-        // else (!fin && off < size): keep accumulating the fragmented message.
+        // else (!message_done && off < size): keep accumulating the fragmented message.
     }
 }
 

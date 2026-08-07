@@ -53,9 +53,9 @@ walk stops there rather than guessing a resync.
 pair walk in the tree — the scope of that claim is deliberate. `graph_t::create_child`
 (the creation SPEC) and the SUBSCRIBER QoS `SETTINGS` parse read the same positional
 grammar at L4, where `tr::net` cannot be a dependency, so they carry the same
-pair-consuming *rule* without sharing the type. `graph::parse_acl` is the one walk
-still scanning every offset; [#906](https://github.com/avatarsd-llc/libtracer/issues/906)
-rewrites it whole under the opposite unknown-key ruling and owns that fix.
+pair-consuming *rule* without sharing the type. `graph::parse_acl` carries it as well
+([#906](https://github.com/avatarsd-llc/libtracer/issues/906)) — the same mechanics
+under the opposite unknown-key ruling, which is to reject.
 
 ## Declaring your own build configuration
 

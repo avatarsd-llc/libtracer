@@ -178,13 +178,20 @@ target_link_libraries(transport_can_peers_test PRIVATE libtracer)
 libtracer_test_warnings(transport_can_peers_test)
 add_test(NAME transport_can_peers COMMAND transport_can_peers_test)
 
-# #55 (increment 2) — real-bus smoke test over a kernel vcan0 device. Self-skips
+# #55 (increment 2) — real-bus smoke test over a kernel vcan0 device, plus the #931
+# can_link_t seam-rule vectors (an injected RTR / 11-bit standard frame must not
+# cross ingress; an over-length classic frame must not cross egress). Self-skips
 # (clean exit) when vcan0 cannot bind, so it is harmless in the normal suite; the
 # dedicated can-vcan-e2e CI job sets vcan0 up so the SocketCAN path runs for real.
-add_executable(transport_can_vcan_test transport_can_vcan_test.cpp)
-target_link_libraries(transport_can_vcan_test PRIVATE libtracer)
-libtracer_test_warnings(transport_can_vcan_test)
-add_test(NAME transport_can_vcan COMMAND transport_can_vcan_test)
+# LINUX-ONLY: it speaks <linux/can.h> directly to inject the frames no well-formed
+# link would emit — platform selection is a build-system concern, never an in-source
+# #ifdef (the same doctrine that picks socketcan_link.cpp over its stub).
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_executable(transport_can_vcan_test transport_can_vcan_test.cpp)
+  target_link_libraries(transport_can_vcan_test PRIVATE libtracer)
+  libtracer_test_warnings(transport_can_vcan_test)
+  add_test(NAME transport_can_vcan COMMAND transport_can_vcan_test)
+endif()
 
 # #383 — owned in-flight TX storage for asynchronous can_link_t backends (the
 # TWAI UAF fix's host-testable half): ownership/exhaustion/reuse invariants,
@@ -257,6 +264,28 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     # teardown suite pins); every case here constructs an adopting link, so LeakSanitizer
     # would flag that deliberate leak. ASan's use-after-free detection stays on.
     set_tests_properties(httpd_ws_send_stall PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+
+    # #900 + #901 — the WS *CLIENT* link's receive path, on the same construction: the
+    # chip TU (integrations/esp-idf/libtracer/esp_ws_client_link.cpp) compiled against a
+    # host fake of esp_transport_ws's frame stream and esp_pthread's stack-sizing seam.
+    # Those are the two IDF facilities the contracts rest on — a `recv_stack` that never
+    # reaches esp_pthread_set_cfg never reaches the FreeRTOS task, and a read capped at
+    # the offered buffer is what splits ONE oversized frame across reads that each report
+    # the same fin. NO socket is interposed or opened here (contrast the httpd targets
+    # above, which wrap ::send): the fake's esp_transport_get_socket answers -1, keeping
+    # the suite faithful to the ruling that this plane never uses POSIX sockets (#947).
+    add_executable(esp_ws_client_recv_test
+        "${LIBTRACER_ESP_DIR}/tests/host/esp_ws_client_recv_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_esp_transport.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/esp_ws_client_link.cpp")
+    target_include_directories(esp_ws_client_recv_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(esp_ws_client_recv_test PRIVATE libtracer)
+    libtracer_test_warnings(esp_ws_client_recv_test)
+    add_test(NAME esp_ws_client_recv COMMAND esp_ws_client_recv_test)
 else()
     message(STATUS "httpd_ws_teardown_test skipped: integrations/esp-idf is not in this tree")
 endif()
@@ -339,6 +368,15 @@ target_link_libraries(registry_teardown_test PRIVATE libtracer)
 libtracer_test_warnings(registry_teardown_test)
 add_test(NAME registry_teardown COMMAND registry_teardown_test)
 
+# #884 — the router's OWN per-child table under create/remove churn: the twin of the
+# registry teardown contract above, one layer out. Every pointer involved stays live, so the
+# failures this pins are wrong-tenancy resolutions and unbounded growth, NOT memory errors —
+# which is why it is an ordinary host test and its ASan value is the report it does NOT make.
+add_executable(child_rx_churn_test child_rx_churn_test.cpp)
+target_link_libraries(child_rx_churn_test PRIVATE libtracer)
+libtracer_test_warnings(child_rx_churn_test)
+add_test(NAME child_rx_churn COMMAND child_rx_churn_test)
+
 add_executable(retire_test retire_test.cpp)
 target_link_libraries(retire_test PRIVATE libtracer)
 libtracer_test_warnings(retire_test)
@@ -355,10 +393,13 @@ target_link_libraries(collect_test PRIVATE libtracer Threads::Threads)
 libtracer_test_warnings(collect_test)
 add_test(NAME collect COMMAND collect_test)
 
-# #82 — in-band :children[] SPEC vertex creation (ADR-0017).
+# #82 — in-band :children[] SPEC vertex creation (ADR-0017). Reads the shared `spec/`
+# conformance vectors (#877), so it needs LIBTRACER_VECTORS_DIR.
 add_executable(children_test children_test.cpp)
 target_link_libraries(children_test PRIVATE libtracer)
 libtracer_test_warnings(children_test)
+target_compile_definitions(children_test PRIVATE
+    LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 add_test(NAME children COMMAND children_test)
 
 # L4 fold, Slice 0 — folded :children projection is byte-identical to the materialized

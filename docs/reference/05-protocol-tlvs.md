@@ -667,6 +667,8 @@ ACL (PL=1) {                                ; outer = ACE collection
 
 **Enforcement (core subset).** A core implementing the MCU subset enforces **ALLOW-only** — an `:acl` write carrying a DENY ACE, or any flag bit beyond the single `INHERIT`, is rejected with `TYPE_MISMATCH`, so stored ACEs never carry semantics the subset evaluator would silently weaken — and is **open by default** twice over: enforcement is off until a **subject resolver** is installed (the pluggable-subject-token seam of [ADR-0018](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0018-access-control-authorization-pluggable-subject-token.md): caller context → subject token; the FWD terminus passes the inbound link as the caller context, local API calls are trusted by default), and a vertex whose *effective* ACL is empty stays unrestricted. With a resolver set, an operation is allowed iff some non-expired ACE with a matching subject (byte-equal, or the special `EVERYONE@`) grants the operation's bit: data/field read and `await` need `READ`, data/field writes need `WRITE`, the `:subscribers[]` append needs `SUBSCRIBE` on the *producer* and delivery needs `WRITE` on the *target* (the two-ACL gate of [ADR-0026](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0026-consumer-initiated-subscription-client-write.md)), creation needs `CREATE`, and `:acl` read/write need `READ_ACL`/`WRITE_ACL`. The one named exemption is `:identity`, which resolves above the READ gate (§`0x0B`). Denial is `ERROR{tr::access::denied}` (`0x0050`). The effective ACL is computed at check time by walking the ancestor keys — control-plane frequency; the data hot path pays one null check when no resolver is installed.
 
+**Non-canonical ACE shapes are rejected at write time.** An ACE's fields are positional `(NAME key, value)` pairs, and a reference core reads them as *pairs* rather than scanning every offset — so a `NAME`-typed value (the `OWNER@` / `EVERYONE@` subject spelling) is never re-read as the following key. It answers `TYPE_MISMATCH` for: a numeric field whose `VALUE` payload is empty or **wider** than the width that field is *parsed* at — `type` and `flags` u8, `access_mask` u32, `expires_ns` u64 (a big-endian `u16` `type` of `0x0001` would otherwise read as its low byte, `ALLOW` — leniency here inverts a refusal into a grant); a known key carrying the wrong value TLV type (a skipped `expires_ns` would make a time-limited grant permanent); an **unknown** key; a **repeated** key; and a body whose pairing does not hold (a non-`NAME` where a key belongs, or a trailing key with no value). A payload **narrower** than the parsed width is accepted and zero-extends — little-endian narrowing is exact, so the two-byte `access_mask` of the `acl/acl-aces` vector and a four-byte one name the same rights. Parsed width is deliberately the bound rather than the layout above, which declares `access_mask` as `u16` while this core's `encode_acl` emits four bytes; that divergence is [#993](https://github.com/avatarsd-llc/libtracer/issues/993) and is not settled here. Gating on the narrower declared width would reject this core's own output. Unknown-key tolerance is deliberately *not* granted here, unlike `SETTINGS` (§`0x0B`): an ACL is a security document, and an attribute dropped in silence widens access.
+
 ### Header settings
 
 - `opt.PL = 1`.
@@ -878,11 +880,31 @@ Structured (`opt.PL=1`):
 
 ```
 SPEC (0x0E, PL=1) {
-  NAME "type"     <catalog selector — required only where the catalog is global>
-  NAME "name"     <the new child's path component>
-  SETTINGS "config"   ; optional — instantiation params
+  NAME "type"    NAME <catalog selector — required only where the catalog is global>
+  NAME "name"    NAME <the new child's path component>
+  NAME "config"  SETTINGS { … }   ; optional — instantiation params
 }
 ```
+
+The body is a run of positional **pairs**: a `NAME` key followed by its value child. Both
+halves are typed, and the value's type is part of the grammar, not a stylistic choice —
+`type` and `name` are carried by a **`NAME` (`0x02`)** child, `config` by a `SETTINGS`
+(`0x0B`). A receiver matches each pair on the value's type and skips any other, so a
+`VALUE` (`0x01`) in a `type`/`name` slot is not a lenient spelling of the same thing: the
+field is dropped, the catalog selector comes up empty, and the create is refused
+(`INVALID_PATH`). The distinction is invisible to a round-trip — such a SPEC decodes and
+re-encodes to itself perfectly — so it is pinned by the `spec/` conformance vectors
+instead.
+
+The same typing rule governs `config`'s own key/value pairs: an integer or flag is a
+`VALUE` (little-endian), a string is a `NAME`. A string-valued key is found *only* as a
+`NAME` child. Note that such a string is not an address segment and need not satisfy the
+addressing grammar — a `addr` dotted quad contains `.`, which an address segment may not
+— it is simply the wire's string node.
+
+The walk is **pair-consuming**: an unrecognised key is skipped together with its value, so
+a value child is never re-read as the next position's key. That is what lets forward-compat
+tolerance coexist with positional pairing.
 
 ### Where it appears
 

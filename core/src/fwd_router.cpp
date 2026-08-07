@@ -572,9 +572,7 @@ bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_sou
         // all, so there is nothing an element could name here. A bound route over a bus fails
         // validation at this hop and the origin falls back to canonical, which is exactly what
         // the canonical spelling already does with the bus link's own name.
-        child_rx_ctx_t& bctx =
-            child_rx_.emplace_back(this, name, registry_.mount_run_for(name), rx);
-        bctx.entry = registry_.entry_by_name(name);
+        child_rx_ctx_t& bctx = acquire_ctx(name, rx);
         publish_ctx(bctx);
         bus->set_peer_down_notifier(
             [](void* c, std::string_view peer) {
@@ -600,16 +598,21 @@ bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_sou
     }
     // Point-to-point: the inbound NAME is fixed per child, carried by a stable
     // per-child ctx (child_rx_ holds the address for the transport's lifetime).
-    child_rx_ctx_t& ctx = child_rx_.emplace_back(this, name, registry_.mount_run_for(name), rx);
-    ctx.entry = registry_.entry_by_name(name);
-    // The bound-path join (RFC-0024 §5.1), resolved ONCE here: the child's mount run IS the
-    // canonical key of its connection vertex, so this is one map lookup of bytes already in
-    // hand. A child whose vertex does not exist yet keeps `kNoConnSlot` and is simply not
-    // bindable — a bound route through it fails validation and the origin falls back, which
-    // is the degrade every other refusal in this design takes.
+    child_rx_ctx_t& ctx = acquire_ctx(name, rx);
+    // The bound-path join (RFC-0024 §5.1), resolved ONCE per registration: the child's mount
+    // run IS the canonical key of its connection vertex, so this is one map lookup of bytes
+    // already in hand. A child whose vertex does not exist yet keeps `kNoConnSlot` and is
+    // simply not bindable — a bound route through it fails validation and the origin falls
+    // back, which is the degrade every other refusal in this design takes.
+    //
+    // Re-resolved on a re-add and not inherited (#884): the vertex a name denotes is a
+    // property of the CURRENT tenancy. A child registered before its connection vertex
+    // existed and re-added after it exists must come back bindable, and the reverse
+    // direction — a name re-added as a BUS mount, which takes no `conn_slot` at all — must
+    // not keep answering with the point-to-point slot it used to have.
     if (const std::optional<graph::vertex_handle_t> v = graph_.find(ctx.mount_tlv)) {
         if (const std::optional<graph::vertex_slot_t> slot = graph_.vertex_slot(*v))
-            ctx.conn_slot = slot->index;
+            ctx.conn_slot.store(slot->index, std::memory_order_relaxed);
     }
     // LAST: every field a lock-free reader may look at is written above, and this is the
     // release edge that makes the node visible to one (see `child_rx_ctx_t::next`).
@@ -647,10 +650,17 @@ bool fwd_router_t::remove_child(std::string_view name) {
     // ordinary departure eviction reclaims the graph edges and label state — the same
     // work link_down does, reused rather than duplicated.
     if (!registry_.erase(name)) return false;
+    // TOMBSTONE the receiver ctx (#884) — it stays on the published chain, because a lock-free
+    // reader may be standing on it right now and the transport still holds its address, but it
+    // stops answering `ctx_by_name`/`ctx_by_conn_slot`. Leaving it RESOLVING was the defect:
+    // `add_child` of the same name appended a second ctx, and the name-keyed lookups answer
+    // with the FIRST match, so every `connection_ref`/`hop_mint`/`adopt_binding` after a
+    // re-add resolved the DEAD context — bound routes for the re-created child were minted
+    // against the retired tenancy and never validated. A `release` store, paired with the
+    // acquire each walk performs, so a reader either skips this node or has already passed it.
+    if (child_rx_ctx_t* const ctx = ctl_ctx_by_name(name))
+        ctx->retired.store(true, std::memory_order_release);
     link_down(name);
-    // NOTE: the point-to-point receiver ctx in child_rx_ is intentionally left in place.
-    // The transport held its address, and the deque never invalidates, so the slot is
-    // inert once the link is gone; reclaiming it needs the S5 mutation contract.
     return true;
 }
 
@@ -717,20 +727,72 @@ void fwd_router_t::send_compact(std::string_view link_name, std::uint16_t label,
 
 // --- bound paths (RFC-0024) --------------------------------------------------
 
+fwd_router_t::child_rx_ctx_t* fwd_router_t::ctl_ctx_by_name(std::string_view name) {
+    // The owning deque, not the chain: this is the control plane, it holds `ctl_m_`, and it
+    // must see a TOMBSTONE — which is exactly what the published walks refuse to return.
+    for (child_rx_ctx_t& c : child_rx_)
+        if (c.name == name) return &c;
+    return nullptr;
+}
+
+fwd_router_t::child_rx_ctx_t& fwd_router_t::acquire_ctx(const std::string& name,
+                                                        mem::block_source_t* rx) {
+    if (child_rx_ctx_t* const hit = ctl_ctx_by_name(name)) {
+        // One ctx per NAME, for the router's life — `child_registry_t::add`'s rule, one layer
+        // out and for its two reasons (#884). A second ctx SHADOWS the first on every
+        // name-keyed lookup (first match wins, and the first match is the older tenancy), and
+        // churn on a stable name set would grow the chain every walk pays for, unboundedly.
+        //
+        // Hide it FIRST, so the rewrite below is never half-visible: a reader either sees the
+        // outgoing tenancy whole, skips the node, or sees the incoming one whole. Relaxed —
+        // nothing is being published here, and the publication edge is `publish_ctx`'s
+        // release-store of `false`.
+        hit->retired.store(true, std::memory_order_relaxed);
+        // Rewound to "no connection vertex": the caller re-resolves it for the new tenancy,
+        // and a BUS re-add of a formerly point-to-point name deliberately leaves it here.
+        hit->conn_slot.store(kNoConnSlot, std::memory_order_relaxed);
+        hit->rx.store(rx, std::memory_order_relaxed);
+        // `entry` is NOT rewritten, because it cannot have changed: a registry slot is keyed
+        // by name and reused for that name forever (`erase` tombstones in place, `add`
+        // rebinds the tombstone), and `add_child` has already re-added by the time we run.
+        // The assert is where that coupling is pinned rather than assumed.
+        assert(hit->entry == registry_.entry_by_name(name));
+        // `name` and `mount_tlv` are immutable after the first publish, for the reason
+        // `child_registry_t::add` gives about its own `mount_tlv`: a reader on a receive
+        // thread may be holding either right now, and the bytes a rewrite would store are
+        // identical anyway — the mount run is a pure function of the name.
+        return *hit;
+    }
+    child_rx_ctx_t& fresh = child_rx_.emplace_back(this, name, registry_.mount_run_for(name), rx);
+    fresh.entry = registry_.entry_by_name(name);
+    return fresh;
+}
+
 void fwd_router_t::publish_ctx(child_rx_ctx_t& ctx) noexcept {
-    // Append-only, release-published: a reader that acquires the link sees a fully built node.
+    // Release-published either way: a reader that reaches the node sees a fully built one.
+    if (ctx.linked) {
+        // A revived tombstone is already reachable, so clearing the flag IS the publish —
+        // linking it a second time would splice the chain onto itself and lose every node
+        // between here and the tail.
+        ctx.retired.store(false, std::memory_order_release);
+        return;
+    }
     if (rx_tail_ == nullptr) {
         rx_head_.store(&ctx, std::memory_order_release);
     } else {
         rx_tail_->next.store(&ctx, std::memory_order_release);
     }
     rx_tail_ = &ctx;
+    ctx.linked = true;
 }
 
 const fwd_router_t::child_rx_ctx_t* fwd_router_t::ctx_by_name(std::string_view link_name) const {
+    // The tombstone test comes FIRST and acquires: it is the edge that orders this node's
+    // `conn_slot`/`rx` against the control thread's rewrite, so reading them before it would
+    // be reading a tenancy that may already be half-replaced (#884).
     for (const child_rx_ctx_t* c = rx_head_.load(std::memory_order_acquire); c != nullptr;
          c = c->next.load(std::memory_order_acquire))
-        if (c->name == link_name) return c;
+        if (!c->retired.load(std::memory_order_acquire) && c->name == link_name) return c;
     return nullptr;
 }
 
@@ -743,18 +805,30 @@ const fwd_router_t::child_rx_ctx_t* fwd_router_t::ctx_by_conn_slot(std::uint32_t
     // Walked over the PUBLISHED chain, never the owning deque: `add_child` appends from a
     // control thread while this runs on a receive thread, and iterating the deque under no
     // lock is a race on its chunk map (ADR-0063 erratum 3's ruling, applied to a container).
+    //
+    // A TOMBSTONED node is skipped before its slot is even compared (#884), and the acquire on
+    // that test is what orders the compare against a concurrent rebind. Skipping is not
+    // belt-and-braces here: it is what keeps this walk's length the LIVE child count under
+    // create/remove churn, which is the property RFC-0024 §3.4 prices the bound hop against.
     if (index == kNoConnSlot) return nullptr;
     for (const child_rx_ctx_t* c = rx_head_.load(std::memory_order_acquire); c != nullptr;
          c = c->next.load(std::memory_order_acquire))
-        if (c->conn_slot == index) return c;
+        if (!c->retired.load(std::memory_order_acquire) &&
+            c->conn_slot.load(std::memory_order_relaxed) == index)
+            return c;
     return nullptr;
 }
 
 std::optional<wire::path_ref_element_t> fwd_router_t::connection_ref(
     std::string_view link_name) const {
+    // The walk skips tombstones (#884), so a removed child has no reference to give and a
+    // re-added one gives its CURRENT tenancy's — never the dead context's, which is what made
+    // a re-created child permanently unbindable.
     const child_rx_ctx_t* const ctx = ctx_by_name(link_name);
-    if (ctx == nullptr || ctx->conn_slot == kNoConnSlot) return std::nullopt;
-    const std::optional<graph::vertex_slot_t> slot = graph_.vertex_slot_at(ctx->conn_slot);
+    if (ctx == nullptr) return std::nullopt;
+    const std::uint32_t conn = ctx->conn_slot.load(std::memory_order_relaxed);
+    if (conn == kNoConnSlot) return std::nullopt;
+    const std::optional<graph::vertex_slot_t> slot = graph_.vertex_slot_at(conn);
     if (!slot) return std::nullopt;  // saturated ⇒ permanently unbindable (§4.4 rule 3)
     return wire::path_ref_element_t{.index = slot->index, .generation = slot->generation};
 }
@@ -766,8 +840,14 @@ std::optional<wire::path_ref_element_t> fwd_router_t::hop_mint(
     // read from the frame's own arrival, never from a per-flow table (there is none).
     const child_rx_ctx_t* const ctx =
         inbound_ctx != nullptr ? inbound_ctx : ctx_by_name(inbound_name);
-    if (ctx == nullptr || ctx->conn_slot == kNoConnSlot) return std::nullopt;
-    const std::optional<graph::vertex_slot_t> slot = graph_.vertex_slot_at(ctx->conn_slot);
+    // The tombstone is tested HERE as well as inside the walk, because a frame can still
+    // arrive through the ctx a removed child left behind — the transport holds its address
+    // and may not have been torn down yet. Minting for it would answer the origin with a
+    // route through a link this node no longer has (#884).
+    if (ctx == nullptr || ctx->retired.load(std::memory_order_acquire)) return std::nullopt;
+    const std::uint32_t conn = ctx->conn_slot.load(std::memory_order_relaxed);
+    if (conn == kNoConnSlot) return std::nullopt;
+    const std::optional<graph::vertex_slot_t> slot = graph_.vertex_slot_at(conn);
     if (!slot) return std::nullopt;
     return wire::path_ref_element_t{.index = slot->index, .generation = slot->generation};
 }
