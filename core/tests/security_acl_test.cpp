@@ -379,6 +379,82 @@ int main() {
             add_pair(e, "access_mask", type_t::VALUE, mask4);
             rejects<allow_only_policy_t>(one_ace(e), "an empty `subject` token is rejected");
         }
+
+        // 8m. The key-slot type check, ISOLATED. 8i's key-slot VALUE spells nothing, so
+        //     the unknown-key arm rejects it too and the row cannot tell the two checks
+        //     apart — deleting the key-slot check leaves 8i green. Here the VALUE in the
+        //     key slot spells a KNOWN key, so the unknown-key arm would wave it through:
+        //     only `ch[i].type != NAME` stands between this blob and a parsed ACE.
+        {
+            std::vector<std::byte> e;
+            add_val(e, type_t::VALUE,
+                    std::span<const std::byte>(reinterpret_cast<const std::byte*>("subject"), 7));
+            add_val(e, type_t::VALUE, subject);
+            add_pair(e, "type", type_t::VALUE, le(0, 1));
+            add_pair(e, "access_mask", type_t::VALUE, mask4);
+            rejects<allow_only_policy_t>(one_ace(e),
+                                         "a VALUE key slot spelling a KNOWN key is still rejected");
+        }
+
+        // 8n. The wrong-value-type rule, per numeric key. 8f pins it for `expires_ns`
+        //     only; ablating the same check in the `access_mask` arm left the suite
+        //     green. A NAME-typed value would be load_le'd as though it were a VALUE.
+        {
+            std::vector<std::byte> e;
+            add_pair(e, "type", type_t::VALUE, le(0, 1));
+            add_pair(e, "subject", type_t::VALUE, subject);
+            add_pair(e, "access_mask", type_t::NAME, mask4);
+            rejects<allow_only_policy_t>(one_ace(e),
+                                         "an `access_mask` paired with a NAME is rejected");
+        }
+
+        // 8o. Same rule, `type` — the key whose mis-read INVERTS the ACE.
+        {
+            std::vector<std::byte> e;
+            add_pair(e, "type", type_t::NAME, le(0, 1));
+            add_pair(e, "subject", type_t::VALUE, subject);
+            add_pair(e, "access_mask", type_t::VALUE, mask4);
+            rejects<allow_only_policy_t>(one_ace(e), "a `type` paired with a NAME is rejected");
+        }
+
+        // 8p. Same rule, `flags`.
+        {
+            std::vector<std::byte> e;
+            add_pair(e, "type", type_t::VALUE, le(0, 1));
+            add_pair(e, "flags", type_t::NAME, le(0, 1));
+            add_pair(e, "subject", type_t::VALUE, subject);
+            add_pair(e, "access_mask", type_t::VALUE, mask4);
+            rejects<allow_only_policy_t>(one_ace(e), "a `flags` paired with a NAME is rejected");
+        }
+
+        // 8q. Duplicate detection for the three keys 8j/8k do not cover. Each `has_*`
+        //     flag is its own guard, so pinning two of five leaves three ablatable.
+        {
+            std::vector<std::byte> e;
+            add_pair(e, "type", type_t::VALUE, le(0, 1));
+            add_pair(e, "flags", type_t::VALUE, le(kAceInherit, 1));
+            add_pair(e, "flags", type_t::VALUE, le(0, 1));
+            add_pair(e, "subject", type_t::VALUE, subject);
+            add_pair(e, "access_mask", type_t::VALUE, mask4);
+            rejects<allow_only_policy_t>(one_ace(e), "a duplicate `flags` is rejected");
+        }
+        {
+            std::vector<std::byte> e;
+            add_pair(e, "type", type_t::VALUE, le(0, 1));
+            add_pair(e, "subject", type_t::VALUE, subject);
+            add_pair(e, "subject", type_t::VALUE, subject);
+            add_pair(e, "access_mask", type_t::VALUE, mask4);
+            rejects<allow_only_policy_t>(one_ace(e), "a duplicate `subject` is rejected");
+        }
+        {
+            std::vector<std::byte> e;
+            add_pair(e, "type", type_t::VALUE, le(0, 1));
+            add_pair(e, "subject", type_t::VALUE, subject);
+            add_pair(e, "access_mask", type_t::VALUE, mask4);
+            add_pair(e, "expires_ns", type_t::VALUE, le(1, 8));
+            add_pair(e, "expires_ns", type_t::VALUE, le(0, 8));
+            rejects<allow_only_policy_t>(one_ace(e), "a duplicate `expires_ns` is rejected");
+        }
     }
 
     // 9. What the strict walk must still ACCEPT — the shapes the wire genuinely carries.
