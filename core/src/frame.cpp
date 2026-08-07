@@ -14,6 +14,7 @@
 #include "libtracer/byteorder.hpp"
 #include "libtracer/crc.hpp"
 #include "libtracer/grammar.hpp"
+#include "libtracer/path_ref.hpp"
 #include "libtracer/tlv_emit.hpp"
 
 namespace tr::wire {
@@ -123,10 +124,29 @@ std::expected<tlv_t, err_t> decode(std::span<const std::byte> input) {
 }
 
 std::vector<std::byte> encode(const tlv_t& tlv) {
+    // Symmetry with decode (#886). `path_ref_body_valid` is the ONE home of the grammar's only
+    // per-type structural rule (RFC-0024 §4.2/§4.3) and `grammar::parse_header` has always
+    // consulted it; this door did not, so a caller-built PATH_REF with `opt.pl`, `opt.ll`, or a
+    // body that is not a whole number of 8-byte elements serialized to bytes this very library
+    // answers with `tr::frame::invalid`. The guarded emitters (`emit_path_ref`) satisfy the rule
+    // by construction — they take a typed element array — which left `encode` as the only door
+    // that could mint a self-rejected frame. A PATH_REF body is never structured, so `payload`
+    // IS the body length here: an `opt.pl` PATH_REF fails the PL clause before the children
+    // branch below ever runs. Refusing costs one predicted-not-taken compare per TLV.
+    if (tlv.type == type_t::PATH_REF &&
+        !path_ref_body_valid(tlv.opt.pl, tlv.opt.ll, tlv.payload.size())) {
+        return {};
+    }
+
     std::vector<std::byte> body;
     if (tlv.opt.pl) {
         for (const tlv_t& child : tlv.children) {
             const std::vector<std::byte> cb = encode(child);
+            // A refused child refuses the parent. Dropping it instead would emit a frame that
+            // DOES decode, one component short — a silent truncation, worse than emitting
+            // nothing. An accepted TLV is never empty (`emit_tlv` always writes its 4-byte
+            // header), so an empty result is an unambiguous refusal, never a legal encoding.
+            if (cb.empty()) return {};
             body.insert(body.end(), cb.begin(), cb.end());
         }
     } else {

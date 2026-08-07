@@ -68,6 +68,30 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Fixed
 
+- **`wire::encode` no longer mints a `PATH_REF` frame its own `decode` rejects (#886).** The
+  grammar has exactly one per-type structural rule — a `PATH_REF` body is a fixed-stride
+  8-byte record array, so `opt.PL` and `opt.LL` are both forbidden and the length is a
+  bounded multiple of 8 (RFC-0024 §4.2/§4.3) — and `grammar::parse_header` has always
+  enforced it. The generic `encode` did not: it serialized any `tlv_t` verbatim, so a
+  `PATH_REF` built with `opt.pl` even took the children branch and emitted per-child TLV
+  framing. All four ill-formed shapes produced bytes this library answers with
+  `tr::frame::invalid` — the codec round-tripped into a frame it would not accept. `encode`
+  now applies `wire::path_ref_body_valid`, the same single predicate the decoder and the
+  lazy forward tier call, so the rule keeps one home rather than gaining an encoder copy.
+
+  **API note — the failure mode is a new `encode` postcondition.** `encode` has no error
+  channel, and an assert was declined: `NDEBUG` is set in exactly the Release /
+  RelWithDebInfo profiles that put bytes on a wire, so a debug-only check would leave the
+  shipped defect intact. `encode` instead **emits nothing** — the contract
+  `emit_path_ref` already carries — and returns an empty vector. Empty is unambiguous: an
+  accepted TLV always carries at least its 4-byte header, so no well-formed `tlv_t` encodes
+  to nothing. A refused TLV refuses its ancestors too, rather than being dropped into a
+  frame that decodes one component short. Well-formed input is untouched and stays
+  byte-identical to `emit_path_ref`'s output; the guard costs one predicted-not-taken
+  compare per TLV and allocates nothing. The conformance suite gains the standing property
+  that every `encode` success must `decode`, so a future decoder rule forgotten in the
+  encoder fails there.
+
 - **The hazard domain's exit sweep no longer frees lists a live thread still owns (#898).**
   Only builds that bind `hazard_slot_t` (`-DLIBTRACER_LKV_SLOT=hazard_slot_t`) reach this;
   the default `sp_atomic_slot_t` has no domain. `final_sweep_t::~final_sweep_t` ran at static

@@ -94,8 +94,16 @@ struct tlv_t {
  * 0xFFFFFFFF still truncates modulo 2^32 — the grammar has no wider length form, so that
  * residual is a wire-format limit rather than something `encode` can express.
  *
+ * Encoding is SYMMETRIC with @ref decode: the grammar's one per-type structural rule — a
+ * `PATH_REF` body is a fixed-stride 8-byte record array, so `opt.PL` and `opt.LL` are both
+ * forbidden and the length is bounded (RFC-0024 §4.2/§4.3, `wire::path_ref_body_valid`) — is
+ * applied here too, so this codec cannot mint a frame it would itself reject (#886). A refused
+ * TLV anywhere in the tree refuses the whole tree rather than silently dropping a component.
+ *
  * @param tlv The TLV tree to serialize.
- * @return The encoded frame bytes.
+ * @return The encoded frame bytes, or an EMPTY vector when @p tlv (or any descendant) is an
+ *         ill-formed `PATH_REF`. Empty is unambiguous: a serialized TLV always carries at
+ *         least its 4-byte header, so no well-formed @p tlv encodes to nothing.
  */
 [[nodiscard]] std::vector<std::byte> encode(const tlv_t& tlv);
 

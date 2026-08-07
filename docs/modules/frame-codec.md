@@ -107,7 +107,7 @@ them:
 
 | decoder | inline slots | spill source | the depth bound is |
 | --- | --- | --- | --- |
-| `decode` → owning `tlv_t` | 8 (`core/src/frame.cpp:118`) | the nothrow heap source (`frame.cpp:119`) | the heap — an owning-tree decode allocates there regardless |
+| `decode` → owning `tlv_t` | 8 (`core/src/frame.cpp:119`) | the nothrow heap source (`frame.cpp:120`) | the heap — an owning-tree decode allocates there regardless |
 | `decode_into` → `tlv_arena_t` | 8 (`core/src/tlv_arena.cpp:130`) | the caller's `mem::block_source_t` (`tlv_arena.cpp:131`) | whatever resource the caller injected |
 
 The 8 is the typical FWD nesting (three to four levels) with headroom, not a
