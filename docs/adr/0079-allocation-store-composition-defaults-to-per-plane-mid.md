@@ -6,7 +6,7 @@ The failable/placement allocation store (the `block_source_t` seam of [ADR-0065]
 
 ## Context
 
-#873 found one concern — "give me bytes, fail by value / with controlled placement" — served through **four** channels with four conventions: `std::pmr` (throws — `graph.hpp:206`), `mem_backend_t` (refcounted segment), `block_source_t` (raw block, fails by value — ADR-0065), and the **un-injected global heap** (hazard nodes, child-registry chunks, every `try_reserve`/`try_push_back`). Injecting bounded sources at three seams still does not bound the process, because channel four bypasses all of them.
+#873 found one concern — "give me bytes, fail by value / with controlled placement" — served through **four** channels with four conventions: `std::pmr` (throws — `graph.hpp:217`), `mem_backend_t` (refcounted segment), `block_source_t` (raw block, fails by value — ADR-0065), and the **un-injected global heap** (hazard nodes, child-registry chunks, every `try_reserve`/`try_push_back`). Injecting bounded sources at three seams still does not bound the process, because channel four bypasses all of them.
 
 There is no nothrow `std::pmr` to reach for — the `memory_resource` interface throws by contract in C++23 and C++26 alike, which is why ADR-0065 built `block_source_t` in the first place. So the substrate is a **custom failable store**, not a `memory_resource` wrapper.
 
@@ -36,12 +36,12 @@ The figures behind the ✗/✓ (measured = this repo's own benches; est = alloca
 
 1. **Default composition is MID (per-plane):** a graph **placement** store (need B, plus the graph's own failable growth), a net-plane **failable** store (need A), and `mem_backend_t` segments (need C) separate. MID is the default because it is the one point where **neither target pays the other's cost**, and it draws the isolation boundary exactly where the peer-provoked risk lives.
 2. **Composition is injected, build-time.** MCU folds the graph and net-plane stores into one (§289's "one slab") — recovering the ~14 KB and a single cap. Host fans the net-plane store **per receive thread** — recovering the contention win — with the graph never contending with transports.
-3. **Both stray channels are removed from hot paths.** The throwing `std::pmr` at `graph.hpp:206` and the un-injected global heap (`graph.cpp`, `fwd_router.cpp`, `route_handle.cpp`, `lkv_slot.hpp`, `child_registry.hpp`) draw from the substrate instead. `std::pmr` survives only as a thin adapter for std-container interop on **non-failable** paths.
+3. **Both stray channels are removed from hot paths.** The throwing `std::pmr` at `graph.hpp:217` and the un-injected global heap (`graph.cpp`, `fwd_router.cpp`, `route_handle.cpp`, `lkv_slot.hpp`, `child_registry.hpp`) draw from the substrate instead. `std::pmr` survives only as a thin adapter for std-container interop on **non-failable** paths.
 4. **"Bounded node" is a property the deployer injects,** not one the library fixes — it is delivered by sizing the injected store(s), and it is now actually deliverable because no allocation escapes to the global heap.
 
 ## Building each configuration
 
-Composition is chosen entirely by **which `block_source_t` instances the deployer constructs and wires** — into `graph_t`'s `ctl` seam (`core/include/libtracer/graph.hpp:283`, the third ctor argument) and into each transport factory. No core edit selects a configuration; it is deployment wiring, closed at build time. The `std::pmr::memory_resource* mr` ctor argument is demoted to the std-container adapter role on non-failable paths (or dropped); `ctl` is the primary failable seam.
+Composition is chosen entirely by **which `block_source_t` instances the deployer constructs and wires** — into `graph_t`'s `ctl` seam (`core/include/libtracer/graph.hpp:294`, the third ctor argument) and into each transport factory. No core edit selects a configuration; it is deployment wiring, closed at build time. The `std::pmr::memory_resource* mr` ctor argument is demoted to the std-container adapter role on non-failable paths (or dropped); `ctl` is the primary failable seam.
 
 The block-source flavours are the tuning surface: `heap_source_t` (unbounded, wraps global `new` — hosts that accept an unbounded seam), `pool_source_t` (recycling, the long-lived bounded seam), `bump_source_t` (a hard buffer bound). Sketches (illustrative — exact transport-factory argument lands with the implementation):
 

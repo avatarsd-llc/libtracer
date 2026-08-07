@@ -15,6 +15,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -57,10 +58,14 @@ inline bool (*probe_fail_hook)(std::size_t bytes) noexcept = nullptr;
  *        locus of the nothrow `operator new` probe.
  *
  * Factored out of the `try_*` growth templates so the `new`/`delete` pair is emitted ONCE,
- * not duplicated into every `T` instantiation (the esp32c6 footprint sentinel). A throwing
- * `std::vector::reserve` would `abort()` under the MCU profile's `-fno-exceptions`; the
- * caller probes here first, then runs the throwing grow only once it is known to succeed —
- * on the single-threaded reply build the just-freed probe block is what the grow reclaims.
+ * not duplicated into every `T` instantiation (the esp32c6 footprint sentinel).
+ *
+ * @warning A probe is an ANSWER ABOUT THE PAST. The block it tests is freed before this
+ *          returns, so "the following allocation will succeed" is only true while nothing
+ *          else can take it — see @ref try_grow, which is why the growth helpers no longer
+ *          rely on that inference on a profile that can catch (#923). Remaining callers use
+ *          it as a *pressure gauge* ahead of work they are willing to skip, not as a
+ *          guarantee for an allocation they cannot fail.
  * @retval false The allocation would fail (OOM) — nothing was allocated.
  */
 [[nodiscard]] inline bool probe_bytes(std::size_t bytes) noexcept {
@@ -75,16 +80,17 @@ inline bool (*probe_fail_hook)(std::size_t bytes) noexcept = nullptr;
  * @brief DO NOT generalize the `try_*` helpers below to `std::pmr::vector`.
  *
  * It is the obvious next step — the templates differ only in the allocator parameter — and
- * it is wrong, because @ref probe_bytes tests the **global heap** while a `std::pmr` container
- * allocates from its **injected resource**. The probe would answer "yes" about memory the
- * container will never touch, the real allocation would still throw, and on `-fno-exceptions`
- * that is the `abort()` these helpers exist to prevent.
+ * it is wrong. On the `-fno-exceptions` profile the reason is the probe: @ref probe_bytes
+ * tests the **global heap** while a `std::pmr` container allocates from its **injected
+ * resource**, so it would answer "yes" about memory the container will never touch, the real
+ * allocation would still throw, and that is the `abort()` these helpers exist to prevent.
  *
  * The failure mode is worse than a plain bug because it hides: under the default resource the
  * two allocators ARE the global heap, so the generalization looks correct in most tests. It
  * breaks only on a node whose resource is a slab with a null upstream — the configuration
  * `route_handle_test`'s "slab resource (null upstream — zero global heap)" case exists to
- * cover, and the one an MCU actually ships.
+ * cover, and the one an MCU actually ships. The `probe_fail_hook` seam is equally misdirected
+ * there: it gates the global-heap probe, not the injected resource.
  *
  * A `std::pmr` container cannot be made failable this way at all: `polymorphic_allocator`
  * reports exhaustion by throwing, which is the whole reason
@@ -103,12 +109,73 @@ inline bool (*probe_fail_hook)(std::size_t bytes) noexcept = nullptr;
 }
 
 /**
+ * @brief True on a build whose growth failures are reported by a throw this header can
+ *        catch (every hosted profile); false under the MCU profile's `-fno-exceptions`.
+ */
+#if defined(__cpp_exceptions) && __cpp_exceptions
+#define LIBTRACER_GROWTH_IS_CATCHABLE 1
+#else
+#define LIBTRACER_GROWTH_IS_CATCHABLE 0
+#endif
+
+/**
+ * @brief Run a THROWING container growth @p grow and answer its failure by value — the ONE
+ *        locus that turns an allocation failure into `false` for the `try_*` helpers (#923).
+ *
+ * @par Why this is not a probe
+ * The helpers used to `probe_bytes(bytes)` and then run the throwing grow, on the argument
+ * that "the just-freed probe block satisfies it." That inference is single-threaded. The
+ * probe block is freed BEFORE the grow allocates, and this library's own concurrency model
+ * puts other threads on the same global heap (a segment self-routes its reclaim on whatever
+ * thread drops the last ref; transport receive threads run concurrent with writers). Near
+ * exhaustion — the regime these helpers exist for — a racer takes the block in the window and
+ * the grow throws `bad_alloc` out of a `noexcept` function: `std::terminate`, measured (#850,
+ * #923). Nor does it need SMP: a FreeRTOS context switch between the `operator delete` and
+ * the `reserve` opens the same window on one core.
+ *
+ * So the grow's OWN allocation is the one whose failure is handled — there is no second
+ * allocation, hence no window to lose. The `catch` sits inside a `noexcept` caller by
+ * design: the exception is consumed here, and nothing crosses the boundary.
+ *
+ * @par The `-fno-exceptions` profile
+ * There the failure has no representation at all — libstdc++ turns the `bad_alloc` into a
+ * bare `abort()` inside `reserve`, and no wrapper can intercept it. The probe is retained as
+ * the only available guard, and it is sound only to the extent that profile is single-
+ * threaded. A path on that profile that must genuinely survive exhaustion does not get a
+ * better `try_reserve`: it migrates to the failable seam (`tr::mem::block_source_t` /
+ * `block_array_t`, ADR-0065), whose growth is ONE refusable `try_alloc` with no second step
+ * — the move `transport_t::send(iov)` and `ws::try_encode_client_frame` already made.
+ *
+ * @param bytes The byte count the growth will request; the subject of @ref probe_fail_hook
+ *              (so the OOM-injection seam still reaches these paths) and of the probe on the
+ *              exception-free profile.
+ * @param grow  The throwing growth. It must leave its container UNCHANGED when it throws —
+ *              `std::vector::reserve` and `std::basic_string::assign` both do.
+ * @retval false The growth allocation failed — the container is unchanged.
+ */
+template <class F>
+[[nodiscard]] inline bool try_grow(std::size_t bytes, F&& grow) noexcept {
+#if LIBTRACER_GROWTH_IS_CATCHABLE
+    if (!probe_hook_ok(bytes)) return false;  // test-only OOM injection
+    try {
+        grow();
+    } catch (...) {
+        return false;  // bad_alloc / length_error — consumed here, never crosses the noexcept
+    }
+    return true;
+#else
+    if (!probe_bytes(bytes)) return false;
+    grow();
+    return true;
+#endif
+}
+
+/**
  * @brief Nothrow `std::vector::reserve`: grow @p v to hold at least @p n elements
  *        WITHOUT ever aborting.
  *
- * Probes the exact target allocation via @ref probe_bytes first; if it fails (or @p n
- * exceeds `max_size()`) the call soft-fails, and only on success is the throwing `reserve`
- * run (which cannot throw — the just-freed probe block satisfies it).
+ * Routes the throwing `reserve` through @ref try_grow, so the allocation whose failure is
+ * reported is the one the vector actually performs — no probe-then-commit window (#923).
  * @retval false Allocation would fail / @p n is impossible — nothing changed.
  * @retval true  @p v now has capacity for at least @p n elements.
  */
@@ -116,9 +183,7 @@ template <class T>
 [[nodiscard]] bool try_reserve(std::vector<T>& v, std::size_t n) noexcept {
     if (n <= v.capacity()) return true;
     if (n > v.max_size()) return false;  // impossible count — the reserve would throw length_error
-    if (!probe_bytes(n * sizeof(T))) return false;
-    v.reserve(n);  // nothrow now: the just-freed probe block satisfies it (single-threaded)
-    return true;
+    return try_grow(n * sizeof(T), [&v, n] { v.reserve(n); });
 }
 
 /**
@@ -128,11 +193,14 @@ template <class T>
  * For a vector whose element count is not known up front (the composed-read pre-order
  * collection stacks) — where @ref try_reserve cannot be called once with the final
  * count. @p x is appended only when the growth (if any) succeeds; the just-reserved
- * capacity guarantees the `push_back` itself never reallocates.
+ * capacity guarantees the `push_back` itself never reallocates, so the only allocation in
+ * play is @ref try_reserve's — which reports its failure by value (#923).
  * @retval false The growth allocation failed — @p x was NOT appended.
  */
 template <class T>
 [[nodiscard]] bool try_push_back(std::vector<T>& v, T&& x) noexcept {
+    static_assert(std::is_nothrow_move_constructible_v<T>,
+                  "the in-capacity push_back must not be able to throw out of this noexcept");
     if (v.size() == v.capacity() && !try_reserve(v, grow_capacity(v.capacity()))) return false;
     v.push_back(std::move(x));  // guaranteed no reallocation now
     return true;
@@ -157,14 +225,17 @@ template <class T>
  * @brief Nothrow string copy-assign: replace @p dst's contents with @p src WITHOUT ever
  *        aborting.
  *
- * A fitting copy (SSO or existing capacity) assigns directly; a growing one probes the
- * `size + 1` (NUL) buffer via @ref probe_bytes first and soft-fails instead of throwing.
+ * A fitting copy (SSO or existing capacity) assigns directly; a growing one routes the
+ * throwing `assign` through @ref try_grow and soft-fails instead. `basic_string` has the
+ * strong guarantee, so a refused growth leaves @p dst exactly as it was.
  * @retval false The growth allocation failed — @p dst is unchanged.
  */
 [[nodiscard]] inline bool try_assign(std::string& dst, std::string_view src) noexcept {
-    if (src.size() > dst.capacity() && !probe_bytes(src.size() + 1)) return false;
-    dst.assign(src);  // fits capacity, or the just-freed probe block satisfies the grow
-    return true;
+    if (src.size() <= dst.capacity()) {
+        dst.assign(src);  // fits — no allocation, nothing to fail
+        return true;
+    }
+    return try_grow(src.size() + 1, [&dst, src] { dst.assign(src); });  // +1: the NUL
 }
 
 }  // namespace tr::detail

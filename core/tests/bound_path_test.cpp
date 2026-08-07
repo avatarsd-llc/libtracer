@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <expected>
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
@@ -179,9 +180,13 @@ reply_facts_t reply_facts(const tr::view::rope_t& reply) {
     return out;
 }
 
-/** @brief The subject resolver every ACL case here uses: the inbound link name IS the subject. */
-std::optional<subject_token_t> caller_is_subject(std::string_view caller) {
-    if (caller.empty()) return std::nullopt;  // trusted local caller
+/**
+ * @brief The test resolver (ADR-0018): the caller context IS the subject token.
+ *
+ * The empty (local) context never reaches a resolver — `graph_t::acl_allows` settles it
+ * as trusted before invoking one (#905) — so the error arm here means DENY, nothing else.
+ */
+std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(std::string_view caller) {
     const auto* p = reinterpret_cast<const std::byte*>(caller.data());
     return subject_token_t(p, p + caller.size());
 }
