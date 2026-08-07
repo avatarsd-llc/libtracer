@@ -68,6 +68,27 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Fixed
 
+- **The hazard domain's exit sweep no longer frees lists a live thread still owns (#898).**
+  Only builds that bind `hazard_slot_t` (`-DLIBTRACER_LKV_SLOT=hazard_slot_t`) reach this;
+  the default `sp_atomic_slot_t` has no domain. `final_sweep_t::~final_sweep_t` ran at static
+  destruction and unconditionally `delete`d every index's `retired` and `freelist` and then
+  assigned `lists_t{}` over each — with no check of `cells[i].claimed`, the flag that exists
+  precisely to mark live ownership, no scan of the `pinned` announcements, and no lock. The
+  sweep is a function-local static of `registry()`, so it is ordered only against objects
+  constructed *after* it: any static constructed earlier is destroyed after the sweep and may
+  join a worker that ran during it, and no ordering at all covers a thread that has simply not
+  exited. A still-claimed participant inside `store()`/`load()` therefore had its `freelist`
+  and `retired` mutated and freed underneath it — a data race and a use-after-free, reachable
+  without detached threads. The sweep now takes each index through the **same** operation a
+  participant uses to take it (a `compare_exchange_strong` on `claimed`, a `test_and_set` on
+  `overflow_lock`), which makes the check an interlock rather than a sample: either a live
+  thread holds the index and the sweep never touches its lists, or the sweep holds it and no
+  thread can claim it while they are being freed. Nothing blocks — an index the sweep cannot
+  get is skipped, never waited for. It also mirrors `scan`'s `seq_cst` fence and announcement
+  read, so a node a live reader has pinned is left allocated rather than freed. Skipped state
+  leaks, which is the correct report for a thread that outlived the domain; normal teardown is
+  unchanged, since a participant that has run its destructor has already released its index.
+
 - **A connection whose link cannot be wired into the router is now rolled back instead of
   published as a live-looking dead connection (#930).** `transport_vertex_t::make_connection`
   called `fwd_router_t::add_child` as a plain statement and discarded its `bool`. That `bool`

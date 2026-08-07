@@ -220,7 +220,7 @@ inline constexpr std::size_t kOverflowIndex = kHazardReaderSlots;
  */
 inline constexpr std::size_t kRetireBatch = kHazardReaderSlots;
 
-/** @brief Frees whatever the domain still owns at process exit, so a leak checker stays quiet. */
+/** @brief Frees what the domain still owns at exit — never a live participant's (#898). */
 struct final_sweep_t {
     ~final_sweep_t();
 };
@@ -507,21 +507,91 @@ inline participant_t::~participant_t() {
     idx_ = kNoIndex;
 }
 
+/**
+ * @brief Free what no live participant owns, and leave everything else exactly where it is.
+ *
+ * ## When this runs, and why that is not "after everything"
+ *
+ * The sweep is a function-local static of `registry()`, so the only ordering it gets for
+ * free is against objects constructed *after* it: the main thread's `thread_local`
+ * participant, which `self()` deliberately constructs later (see its comment) and which is
+ * therefore destroyed **before** this. Nothing orders it against a static constructed
+ * *earlier* — such an object is destroyed after the sweep and may legitimately join a worker
+ * that was running during it — nor against any thread that has simply not exited yet. So
+ * "every participant is gone by now" is false, and the previous unconditional
+ * `delete`-everything-and-assign-`lists_t{}` was a data race and a use-after-free against a
+ * live thread's `store()` / `load()` (#898).
+ *
+ * ## Interlock, not a sample
+ *
+ * `claimed` and `overflow_lock` are already the two mechanisms that mean "a live participant
+ * owns this index", so the sweep takes an index through the **same operation** a participant
+ * uses — a `compare_exchange_strong` on `claimed`, a `test_and_set` on the flag. Either a
+ * thread holds the index and the sweep never touches its lists, or the sweep holds it and no
+ * thread can claim it while they are being freed. Merely *reading* `claimed` would narrow the
+ * window rather than close it. Nothing here blocks: an index the sweep cannot get is skipped,
+ * never waited for, so a worker still running cannot wedge process exit.
+ *
+ * A skipped index leaks whatever it is holding, and that is the correct answer — leak-checker
+ * noise attributable to a thread that outlived the domain is a true report, whereas freeing a
+ * list under its owner is a fault. Normal teardown is unaffected: every participant that has
+ * run its destructor has already released its index, so a program whose threads have all been
+ * joined still reclaims in full.
+ */
 inline final_sweep_t::~final_sweep_t() {
     registry_t& r = registry();
-    auto drop = [](node_t* n) {
+
+    std::array<bool, kHazardReaderSlots + 1> mine{};
+    for (std::size_t i = 0; i < kHazardReaderSlots; ++i) {
+        bool expected = false;
+        mine[i] = r.cells[i].claimed.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel, std::memory_order_relaxed);
+    }
+    mine[kOverflowIndex] = !r.overflow_lock.test_and_set(std::memory_order_acquire);
+
+    // Adopt the orphans, then read the announcements behind `scan`'s `seq_cst` fence and for
+    // `scan`'s reason: a live reader can be mid-`load()`, announcing a node that has just been
+    // displaced, and the fence is what makes "not announced here" mean "cannot become
+    // announced". An announced node is deliberately left allocated — memory a live thread is
+    // reading is memory this must not free, and at process exit leaking it costs nothing.
+    node_t* orphans = r.orphans.exchange(nullptr, std::memory_order_acq_rel);
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    std::array<node_t*, kHazardReaderSlots + 1> pinned{};
+    std::size_t np = 0;
+    for (const cell_t& c : r.cells) {
+        node_t* p = c.pinned.load(std::memory_order_seq_cst);
+        if (p != nullptr) pinned[np++] = p;
+    }
+
+    // A kept node is unlinked from every list by the time this returns, so the `next` it is
+    // left holding is unreachable — a reader only ever dereferences `sp`.
+    auto drop = [&pinned, np](node_t* n) {
         while (n != nullptr) {
             node_t* next = n->next;
-            delete n;
+            bool held = false;
+            for (std::size_t i = 0; i < np && !held; ++i) held = pinned[i] == n;
+            if (!held) delete n;
             n = next;
         }
     };
-    for (lists_t& l : r.lists) {
-        drop(l.retired);
-        drop(l.freelist);
-        l = lists_t{};
+
+    drop(orphans);
+    for (std::size_t i = 0; i < r.lists.size(); ++i) {
+        if (!mine[i]) continue;
+        drop(r.lists[i].retired);
+        drop(r.lists[i].freelist);
+        r.lists[i] = lists_t{};
     }
-    drop(r.orphans.exchange(nullptr, std::memory_order_acq_rel));
+
+    // Hand the indices back. The registry is `constinit` and never destroyed, so a thread born
+    // after the sweep can still reach it and must still find a claimable, clean index.
+    for (std::size_t i = 0; i < kHazardReaderSlots; ++i) {
+        if (mine[i]) r.cells[i].claimed.store(false, std::memory_order_release);
+    }
+    if (mine[kOverflowIndex]) {
+        r.overflow_lock.clear(std::memory_order_release);
+        r.overflow_lock.notify_one();
+    }
 }
 
 }  // namespace detail_hp
