@@ -68,12 +68,12 @@ again (`op_resolve_walk.hpp:1031` and `fwd_router.cpp:781` → `deref_vertex_slo
 `map_mutex_` on both ends of the round trip that bound paths exist to make cheap. The two are not
 the same cost: `vertex_slot` **scans `vertex_slots_` linearly** inside the hold, while
 `deref_vertex_slot` and `vertex_slot_at` are a bounds check and one compare — the asymmetry
-`graph.hpp:424` states in the header. The hold is not incidental in either: one shared
+`graph.hpp:435` states in the header. The hold is not incidental in either: one shared
 acquisition is what stops the slot index and the retire generation straddling a concurrent
 `retire`, which is how an element gets stamped with the successor tenant's number.
 
 The leaf/branch fork reads a per-vertex bit (`vertex_t::has_registered_child`,
-`core/include/libtracer/vertex.hpp:1378`), called from `core/src/graph.cpp:831`, and takes no
+`core/include/libtracer/vertex.hpp:1378`), called from `core/src/graph.cpp:838`, and takes no
 lock. The symbol exists on the vertex rather than on the graph, so a reader grepping for it finds
 a flag test rather than a lock acquisition.
 
@@ -166,7 +166,7 @@ Two limits, and the second hides the first:
    There the limit is the value's own reference count, and the `sp-load` calibration arm —
    1.4 M/s at T=24 — accounts for nearly all of the 1.74 M/s stock rate.
 
-The write path takes no map lock (`write_impl`, `graph.cpp:1044`), which is the entire "writes
+The write path takes no map lock (`write_impl`, `graph.cpp:1051`), which is the entire "writes
 scale 5×, reads do not" asymmetry.
 
 **A caution on the calibration arms.** `sp-load` measures 710 ns/op at T=24 against a whole real

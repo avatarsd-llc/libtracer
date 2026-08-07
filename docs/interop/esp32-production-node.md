@@ -65,7 +65,7 @@ std::pmr::synchronized_pool_resource shared{&arena};
 
 Those are the three injection points of `graph_t`'s constructor — the pmr resource,
 the value backend and the failable control source
-(`core/include/libtracer/graph.hpp:283-285`) — and the **four** of
+(`core/include/libtracer/graph.hpp:294-296`) — and the **four** of
 `fwd_router_t`: the pmr resource, the failable `rx` source, the `flat` byte backend
 its rope flattens draw from, and the `egress` byte backend the terminus reply head
 draws from (`core/include/libtracer/fwd_router.hpp:176-181`; `egress` is #795 /
@@ -306,7 +306,7 @@ without the project-side symbol, the line is inert.
   fan-out payload did not fit. A session drop turns one slow subscriber into a
   reconnect storm.
 - **Egress is gather, not copy.** The rope-to-wire path lowers to an iovec `sendmsg`
-  (`core/src/posix_endpoint.cpp:92,98`; the TCP assembly is at
+  (`core/src/posix_endpoint.cpp:111,117`; the TCP assembly is at
   `core/src/transport_tcp.cpp:62-78`), and lwIP provides `sendmsg` unmodified. Do not
   flatten payloads before send; the only legitimate flatten is a substrate boundary
   DMA cannot span.
@@ -329,8 +329,8 @@ itself, described via `:schema` like any other data
 ```
 
 The backpressure counters come from `graph_t::delivery_drops()`
-(`core/include/libtracer/graph.hpp:1272`), which snapshots three per-cause totals —
-`no_target`, `denied`, `out_of_memory` (`graph.hpp:1255-1262`). They are counted and
+(`core/include/libtracer/graph.hpp:1288`), which snapshots three per-cause totals —
+`no_target`, `denied`, `out_of_memory` (`graph.hpp:1271-1278`). They are counted and
 never enforced: nothing in the library reads them, so the deployment decides what to
 alarm on. The three loads are individually relaxed rather than one atomic snapshot,
 so their useful reading is "is this growing", not an instant total.
