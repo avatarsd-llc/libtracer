@@ -232,9 +232,13 @@ struct transport_can_config_t {
                                    incomplete reassembly group untouched this long is
                                    reclaimed, because a lost advertise/data slice would
                                    otherwise pin it forever. `0` = track `peer_ttl`
-                                   (@ref kCanRxTtlFromPeerTtl). Unlike the count caps
-                                   this is ALWAYS live — the age-out is the bound that
-                                   holds under the shipped default config. */
+                                   (@ref kCanRxTtlFromPeerTtl); if `peer_ttl` is itself
+                                   `0` the window stays `0`, which retains only what
+                                   arrived this instant — the same reading the peer
+                                   enumeration gives that value, never "disabled".
+                                   Unlike the count caps this is ALWAYS live — the
+                                   age-out is the bound that holds under the shipped
+                                   default config. */
 };
 
 /**

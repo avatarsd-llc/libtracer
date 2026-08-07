@@ -487,6 +487,70 @@ void test_pending_slices_age_out() {
 }
 
 /**
+ * @brief #912 — a degenerate `peer_ttl` of zero must not DISABLE the age-out.
+ *
+ * `rx_ttl` derives from `peer_ttl` when left at its `kCanRxTtlFromPeerTtl` sentinel,
+ * so `peer_ttl_ms=0` derives `rx_ttl = 0`. Zero already means "instantly expired" to
+ * the peer enumeration (`now - last_heard > 0`) and to the group sweep
+ * (`sweep_stale(0)` retains only what was touched this instant) — but `expire_pending`
+ * read the same zero as "sweep disabled" and returned early. With the shipped default
+ * `max_pending = 0` (count cap off), that left the parked queue with NO bound at all:
+ * exactly the unbounded growth #912 closes, re-opened by one config value.
+ *
+ * The two arms below are what make this non-vacuous. The zero arm must reclaim; the
+ * far-window arm must NOT, or "the sweep ran" would be indistinguishable from "the
+ * sweep runs unconditionally", which would be a different bug wearing this test's
+ * green tick.
+ */
+void test_zero_peer_ttl_does_not_disable_the_age_out() {
+    std::printf("transport_can zero peer_ttl keeps the age-out live (#912):\n");
+
+    {
+        fake_can_bus_t bus;
+        fake_link_t injector(bus);  // a peer that floods data and never advertises
+        auto link_b = std::make_unique<fake_link_t>(bus);
+
+        tr::net::transport_can_config_t cfg = rx_test_config();
+        cfg.max_pending = 0;  // count cap OFF — the age-out is the only bound
+        cfg.peer_ttl = 0ms;   // degenerate: nothing is live
+        cfg.rx_ttl = tr::net::kCanRxTtlFromPeerTtl;  // derive it — this is the vector
+        tr::net::transport_can tx_b(std::move(link_b), cfg);
+
+        // The claim is about GROWTH, so the flood has to be large enough that "it
+        // did not grow" is not just "not much arrived yet".
+        constexpr std::uint16_t kFlood = 64;
+        for (std::uint16_t ep = 1; ep <= kFlood; ++ep) inject_data(injector, /*node=*/1, ep);
+
+        check(wait_until([&] { return tx_b.dropped_rx() >= kFlood - 1; }, 2s),
+              "a derived rx_ttl of 0 reclaims — it is not read as 'sweep disabled'");
+        check(tx_b.pending_slices() <= 1,
+              "the parked queue stays bounded with the count cap off (#912 does not re-open)");
+    }
+
+    {
+        // The other arm: a window that has NOT elapsed must retain, or the assertion
+        // above would pass for a sweep that simply drops everything every time.
+        fake_can_bus_t bus;
+        fake_link_t injector(bus);
+        auto link_b = std::make_unique<fake_link_t>(bus);
+
+        tr::net::transport_can_config_t cfg = rx_test_config();
+        cfg.max_pending = 0;
+        cfg.rx_ttl = 60s;  // far out of reach
+        tr::net::transport_can tx_b(std::move(link_b), cfg);
+
+        constexpr std::uint16_t kParked = 4;
+        for (std::uint16_t ep = 1; ep <= kParked; ++ep) inject_data(injector, /*node=*/1, ep);
+        check(wait_until([&] { return tx_b.pending_slices() == kParked; }, 2s),
+              "slices park under a far window");
+        inject_data(injector, /*node=*/1, /*endpoint=*/100);
+        std::this_thread::sleep_for(50ms);
+        check(tx_b.pending_slices() >= kParked, "a live window retains — the sweep is not blind");
+        check(tx_b.dropped_rx() == 0, "nothing was counted as reclaimed");
+    }
+}
+
+/**
  * @brief #912 — an incomplete reassembly group (a lost data slice) is erased by the
  *        on-advertise stale sweep and ticks dropped_groups().
  *
@@ -659,6 +723,7 @@ int main() {
     test_clean_run_counters_are_zero();
     test_pending_flood_is_capped_and_counted();
     test_pending_slices_age_out();
+    test_zero_peer_ttl_does_not_disable_the_age_out();
     test_incomplete_group_is_swept();
     test_max_groups_reaches_the_reassembly_buffer();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,

@@ -48,7 +48,13 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `pending_slices()`. `rx_ttl` left at `0` tracks the configured `peer_ttl` rather than
   introducing a second window: a peer already considered gone cannot complete RX state.
   Unlike the opt-in count caps the age-out is **always live**, so it is the bound that
-  holds under the shipped default config. No wire change.
+  holds under the shipped default config. That "always" is now literal: a `peer_ttl` of
+  `0` derives an `rx_ttl` of `0`, which the peer enumeration and the reassembly sweep both
+  read as *instantly expired* — the pending age-out used to read the same `0` as *sweep
+  disabled* and return early, so one degenerate config value silently re-opened the
+  unbounded growth this entry closes. Zero now means the same thing to all three, and a
+  negative window (previously cast to `std::uint64_t` and compared against ~1.8e19, so it
+  reclaimed nothing at all) is normalized to zero at construction. No wire change.
 
 ### Fixed
 

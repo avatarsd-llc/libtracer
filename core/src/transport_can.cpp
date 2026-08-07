@@ -116,6 +116,20 @@ transport_can::transport_can(std::unique_ptr<can_link_t> link, transport_can_con
     // configured peer liveness window, since RX state a peer would have completed
     // is dead once that peer is itself considered gone.
     if (cfg_.rx_ttl <= kCanRxTtlFromPeerTtl) cfg_.rx_ttl = cfg_.peer_ttl;
+    // ...and a window that is still non-positive after the derivation means the
+    // peer window is itself zero, i.e. NOTHING is live. Normalize it to zero here
+    // so all three consumers read one value and read it the same way: the peer
+    // enumeration (`now - last_heard > peer_ttl`), the group sweep
+    // (`sweep_stale(0)`), and `expire_pending` each then retain only what arrived
+    // this instant. Before this, zero meant "instantly expired" to the enumeration
+    // and "never expire" to the pending age-out, so a configured `peer_ttl_ms=0`
+    // silently disabled the one bound that holds under the default `max_pending=0`
+    // — the exact unbounded growth #912 exists to close. A negative window was
+    // worse than inconsistent: `static_cast<std::uint64_t>` of it made
+    // `sweep_stale` compare against ~1.8e19 and reclaim nothing at all.
+    if (cfg_.rx_ttl < std::chrono::milliseconds::zero()) {
+        cfg_.rx_ttl = std::chrono::milliseconds::zero();
+    }
     link_->on_receive([this](const can_frame_data_t& f) { on_rx(f); });
     // Announce presence at join (ADR-0044): a hello advertise (slice_count == 0)
     // seeds every listener's last-heard table before any data flows, so a fresh
@@ -493,7 +507,12 @@ void transport_can::park_pending(const can_frame_data_t& frame) {
  * contiguous prefix and the scan stops at the first live one.
  */
 void transport_can::expire_pending() {
-    if (pending_.empty() || cfg_.rx_ttl.count() <= 0) return;
+    // No `rx_ttl <= 0` early-out. The constructor normalized the window to
+    // non-negative, and zero here means the same thing it means to the peer
+    // enumeration and to `sweep_stale(0)`: nothing but this instant is retained.
+    // Disabling the sweep on zero was how a configured `peer_ttl_ms=0` re-opened
+    // unbounded RX growth under the default `max_pending=0`.
+    if (pending_.empty()) return;
     const auto cutoff = rx_now_ - cfg_.rx_ttl;
     auto first_live = pending_.begin();
     while (first_live != pending_.end() && first_live->arrived < cutoff) ++first_live;
