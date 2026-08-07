@@ -94,7 +94,7 @@ struct tlv_t {
  * 0xFFFFFFFF still truncates modulo 2^32 — the grammar has no wider length form, so that
  * residual is a wire-format limit rather than something `encode` can express.
  *
- * Encoding is SYMMETRIC with @ref decode: the grammar's one per-type structural rule — a
+ * Encoding is SYMMETRIC with `decode`: the grammar's one per-type structural rule — a
  * `PATH_REF` body is a fixed-stride 8-byte record array, so `opt.PL` and `opt.LL` are both
  * forbidden and the length is bounded (RFC-0024 §4.2/§4.3, `wire::path_ref_body_valid`) — is
  * applied here too, so this codec cannot mint a frame it would itself reject (#886). A refused
