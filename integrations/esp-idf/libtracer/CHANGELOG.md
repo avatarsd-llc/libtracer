@@ -29,6 +29,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`twai_link_t`'s TX backpressure window is spent PER FRAME again, and teardown no
+  longer queues behind it** (#962). `write_raw` took `write_m_` and only then parked on
+  the free-slot semaphore that *is* the FULL policy's backpressure point, so the window
+  was per queue rather than per frame: on a controller whose tx-done never fires (a
+  bus-off or stalled node), K concurrent writers spent `K * tx_timeout_ms` in series
+  rather than one window each, and the destructor — which takes the same lock — inherited
+  the whole series, so a link removal during a bus fault blocked the destroying task for
+  the same multiple. `tx_dropped()` kept moving throughout, so the symptom read as "we're
+  dropping, as designed" right up to the watchdog reboot. The semaphore is now taken
+  OUTSIDE the lock, which leaves the lock covering only the submission (the node handle
+  and the pool's serialized acquire); a writer parked across teardown re-checks the node
+  under the lock and hands its token back rather than submitting to a deleted controller,
+  and the destructor releases parked writers and waits for them to leave before deleting
+  the semaphore they are waiting on. No API change.
+
+- **`twai_link_config_t::tx_timeout_ms` is clamped to the task-watchdog period**
+  (`CONFIG_ESP_TASK_WDT_TIMEOUT_S`, #962). It was taken verbatim, so a config could park
+  a writing task longer than a task may go unfed and reboot the board instead of dropping
+  the frame — the same class of footgun `derive_send_timeout_ms` exists for on the WS
+  server link (#835). The bound is one FRAME's wait; a caller writing a burst on one task
+  still sums its own frames' waits. Configs at or under the watchdog period — including
+  the 20 ms default — are unaffected.
+
 - **`httpd_ws_link_t`'s TX slot pool no longer dies four dropped datagrams into a boot**
   (#944). `httpd_queue_work` on the default non-blocking path is a bare `sendto` to a
   loopback UDP control socket, so an enqueue past the receiver's mbox is discarded inside

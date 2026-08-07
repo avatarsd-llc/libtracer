@@ -18,7 +18,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#include "esp_transport.h"  // esp_err_t / ESP_OK
+#include "esp_err.h"  // esp_err_t / ESP_OK
 
 /** @brief IDF's per-thread pthread configuration. */
 typedef struct {
