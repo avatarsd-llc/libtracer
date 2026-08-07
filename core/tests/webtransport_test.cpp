@@ -752,11 +752,10 @@ std::vector<std::uint8_t> grease_frame(std::uint64_t n, std::size_t body) {
 struct raw_wt_client_t {
     /** @brief One client-opened stream and what the server did with it. */
     struct wt_stream_t {
-        HQUIC h = nullptr;    /**< @brief The msquic handle. */
-        std::uint64_t id = 0; /**< @brief Its QUIC stream id (the session id). */
-        std::atomic<bool> aborted{
-            false};                     /**< @brief Server refusal: RESET_STREAM / STOP_SENDING. */
-        std::atomic<std::size_t> rx{0}; /**< @brief Bytes the server wrote back. */
+        HQUIC h = nullptr;                /**< @brief The msquic handle. */
+        std::uint64_t id = 0;             /**< @brief Its QUIC stream id (the session id). */
+        std::atomic<bool> aborted{false}; /**< @brief Refused (RESET / STOP_SENDING). */
+        std::atomic<std::size_t> rx{0};   /**< @brief Bytes the server wrote back. */
     };
 
     /** @brief One in-flight StreamSend and the bytes msquic borrows for it. */
@@ -966,6 +965,17 @@ struct raw_wt_client_t {
         if (QUIC_FAILED(api->StreamSend(s->h, &sb->buf, 1, QUIC_SEND_FLAG_NONE, sb))) delete sb;
     }
 
+    /** @brief Block until the server wrote at least @p n bytes back on @p s. */
+    [[nodiscard]] static bool wait_rx(wt_stream_t* s, std::size_t n,
+                                      std::chrono::milliseconds budget) {
+        const auto deadline = std::chrono::steady_clock::now() + budget;
+        while (s->rx.load(std::memory_order_relaxed) < n) {
+            if (std::chrono::steady_clock::now() > deadline) return false;
+            std::this_thread::sleep_for(5ms);
+        }
+        return true;
+    }
+
     /** @brief Block until the server refused @p s (stream-scoped abort). */
     [[nodiscard]] static bool wait_aborted(wt_stream_t* s, std::chrono::milliseconds budget) {
         const auto deadline = std::chrono::steady_clock::now() + budget;
@@ -1127,6 +1137,8 @@ void test_unknown_h3_frames_skipped() {
         check(wait_session(listener, 3000ms),
               "GREASE frames before the extended CONNECT are skipped — the session establishes");
         check(!cli.shut.load(std::memory_order_relaxed), "the connection was NOT torn down");
+        check(raw_wt_client_t::wait_rx(connect, 1, 3000ms),
+              "the 200 response really came back on the wire (not just a flipped flag)");
 
         // A post-CONNECT GREASE frame on the request stream changes nothing.
         cli.write(connect, grease_frame(3, 7));
