@@ -606,13 +606,14 @@ inline std::size_t put_client_frame(std::span<std::byte> out, opcode_t op,
  * DROPS the frame — the same answer the delivery path already gives under exhaustion.
  *
  * @par Why a `tr::mem::block_array_t` and not a `std::vector` + `tr::detail::try_reserve`
- * `try_reserve` is `noexcept`, but only its PROBE is nothrow: it frees the probe block and
- * then runs the throwing `std::vector::reserve`, on the argument that the just-freed block
- * satisfies it. Refuse that second allocation and the `bad_alloc` crosses a `noexcept`
- * boundary — `std::terminate`, not a soft failure, and a bare `abort()` under
- * `-fno-exceptions`. That is the very outcome #848 exists to remove, so this path draws from
- * the failable seam instead (ADR-0065): growth is ONE `block_source_t::try_alloc` that
- * answers `nullptr`, with no unguardable second step.
+ * On the profile this encoder ships to, `try_reserve` cannot express a refusal at all.
+ * `std::vector::reserve` reports exhaustion by throwing, and under `-fno-exceptions` that is
+ * a bare `abort()` inside `reserve` that no wrapper can intercept — so there `try_reserve`
+ * still has to guess ahead with a nothrow probe and hope nothing takes the block in between
+ * (#923; on a hosted build it catches instead, which is sound but is not the MCU profile).
+ * That is the very outcome #848 exists to remove, so this path draws from the failable seam
+ * instead (ADR-0065): growth is ONE `block_source_t::try_alloc` that answers `nullptr`, on
+ * both profiles, with no unguardable second step.
  *
  * @param out      The reusable frame buffer; its capacity is retained across calls.
  * @param op       The frame opcode.

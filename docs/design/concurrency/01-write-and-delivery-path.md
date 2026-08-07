@@ -173,10 +173,12 @@ runtime construction (`fwd_router.cpp:1725-1729`). The route bytes were copied o
 time, so a delivery re-uses them by reference; a multi-link value crosses as its own segments,
 with no flatten. The iov vector is sized once up front through `tr::detail::try_reserve`, and a
 refused reserve drops that delivery rather than emitting a truncated frame
-(`fwd_router.cpp:1741-1742`). That helper is not a nothrow reserve: it probes, **frees the probe**,
-then runs the *throwing* `std::vector::reserve` inside a `noexcept` frame
-(`core/include/libtracer/mem_heap.hpp:116-121`). So the ordinary OOM becomes a drop, but a lost race
-on the just-freed block still terminates — [#850](https://github.com/avatarsd-llc/libtracer/issues/850),
+(`fwd_router.cpp:1741-1742`). That helper runs the *throwing* `std::vector::reserve` through
+`try_grow` and answers its failure by value (`core/include/libtracer/mem_heap.hpp:157-171`), so on
+a hosted build the OOM becomes a drop with no probe-then-commit window left to lose
+([#923](https://github.com/avatarsd-llc/libtracer/issues/923), which folded in
+[#850](https://github.com/avatarsd-llc/libtracer/issues/850)). Under `-fno-exceptions` there is
+nothing to catch and the helper still probes first, so the window survives on that profile —
 tabulated in [`../allocation-and-backpressure.md`](../allocation-and-backpressure.md).
 
 **The COMPACT leg is the one that flattens.** `const view_t flat = value.materialize(*flat_);`
