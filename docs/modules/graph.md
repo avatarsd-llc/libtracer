@@ -26,7 +26,7 @@ write.
 The slot is not free of serializing instructions. `std::atomic<std::shared_ptr<T>>` is
 not lock-free on libstdc++, so both load and store take its internal pointer-lock bit —
 "lock-free by contract, spin-locked in practice" (`sp_atomic_slot_t`,
-`core/include/libtracer/lkv_slot.hpp:99-104`). The claim the code supports is the mutex
+`core/include/libtracer/lkv_slot.hpp:100-105`). The claim the code supports is the mutex
 one, not an absence of contention; the cost of that spin and the policy that replaces it
 on a host are in [design/concurrency](../design/concurrency/README.md).
 

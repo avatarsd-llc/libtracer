@@ -16,6 +16,26 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Fixed
 
+- **An over-capacity `hazard_slot_t` thread no longer CAS-sweeps every reader's announcement
+  line on every operation (#899).** `detail_hp::cell_t` packed the claim flag into the same
+  `kDomainAlign`-aligned struct as `pinned`, the announcement a reader writes on every
+  `load()`. A thread that found every index taken keeps `kNoIndex` forever, so each `ticket_t`
+  — one per load, store and clear — re-ran `participant_t::claim()`, which
+  `compare_exchange_strong`ed all `kHazardReaderSlots` flags with no prefilter; a failed CAS
+  still takes its line exclusive, so one over-capacity thread invalidated the hot line of
+  every in-capacity reader, which is precisely the false sharing `kDomainAlign` is spent to
+  prevent. The claim state moves into `detail_hp::claims_t` — a packed bitmap on its own
+  padded line, with `try_claim` / `release_claim` the one operation participants and the exit
+  sweep share — and `claim()` prefilters each word with a relaxed load, so probing a full
+  table is `kClaimWords` shared reads and **no** read-modify-write at all (measured through
+  the guard: 32,000 claim RMWs over 500 reads before, 0 after). The prefilter is deliberately
+  allowed to read stale: a slot freed a moment ago is picked up on the thread's next
+  operation, where a permanent "claim failed" flag would strand it on the overflow index for
+  life. `participant_t::claim_probes()` is new — a plain per-thread count of claim-table RMWs,
+  which is the only thing that distinguishes one probe from sixty-four. No behaviour change
+  for a thread that holds an index, and none at all for the default `sp_atomic_slot_t`
+  binding, which emits none of this.
+
 - **A STREAM whose ring append was SHED under pressure no longer re-delivers the previous
   entry (#925).** `vertex_t::drain_unflushed` derived "how many ring entries are new" from a
   `write_seq_` delta, but `vertex_t::store` bumps that sequence **unconditionally** — and it

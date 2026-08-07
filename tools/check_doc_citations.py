@@ -318,8 +318,8 @@ ANCHORS = [
      '*         LAST on purpose: no hot path reads it, so declaring it here keeps'),
     ('core/include/libtracer/graph.hpp:1611', 'mem::block_source_t* ctl_ = &mem::heap_source();'),
     # core/include/libtracer/lkv_slot.hpp
-    ('core/include/libtracer/lkv_slot.hpp:99', '* **Lock-free BY CONTRACT, and spin-locked in practice.**'),
-    ('core/include/libtracer/lkv_slot.hpp:100',
+    ('core/include/libtracer/lkv_slot.hpp:100', '* **Lock-free BY CONTRACT, and spin-locked in practice.**'),
+    ('core/include/libtracer/lkv_slot.hpp:101',
      '* `std::atomic<std::shared_ptr<T>>::is_lock_free()` returns 0 on libstdc++, so both load'),
     # core/include/libtracer/mem_borrowed.hpp
     ('core/include/libtracer/mem_borrowed.hpp:39',

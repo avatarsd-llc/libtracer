@@ -245,7 +245,7 @@ which is where they belong rather than repeated here.
 
 The default binding, `sp_atomic_slot_t`, is **lock-free by contract and spin-locked in
 practice**: `std::atomic<std::shared_ptr<T>>::is_lock_free()` returns 0 on libstdc++, so both
-load and store take its internal pointer-lock bit (`core/include/libtracer/lkv_slot.hpp:100-102`).
+load and store take its internal pointer-lock bit (`core/include/libtracer/lkv_slot.hpp:101-103`).
 Its reclamation is the refcount, so there is no scheme to implement and no registry to size —
 which is why a raw `-I` consumer and the stock ESP-IDF component build what they would have
 built without the policy seam

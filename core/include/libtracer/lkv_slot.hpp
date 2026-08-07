@@ -81,6 +81,7 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <limits>
 #include <memory>
 
 #include "libtracer/config.hpp"
@@ -176,14 +177,56 @@ struct node_t {
 inline constexpr std::size_t kDomainAlign =
     std::max({graph::kCacheLineBytes, alignof(std::atomic<node_t*>), alignof(std::size_t)});
 
-/** @brief One participant's announcement, cache-line isolated so a scan does not false-share. */
+/**
+ * @brief One participant's announcement, cache-line isolated so a scan does not false-share.
+ *
+ * **Nothing else may live here.** The announcement is written by its owner on every `load()`,
+ * so any other atomic sharing this line turns a write to that atomic into an invalidation of a
+ * reader's hot line — which is the whole cost `kDomainAlign` was spent to avoid. The claim
+ * state used to sit in this struct and did exactly that (#899); see `%claims_t`.
+ */
 struct alignas(kDomainAlign) cell_t {
     std::atomic<node_t*> pinned{nullptr}; /**< @brief The node this thread is reading, or null. */
-    std::atomic<bool> claimed{false};     /**< @brief Whether a live thread owns this index. */
 };
 
 static_assert(alignof(cell_t) == kDomainAlign,
               "the cell's alignas was silently dropped — see kDomainAlign's derivation");
+
+/**
+ * @brief The claim table's word — `size_t` so the bitmap is lock-free on a 32-bit target too.
+ *
+ * `uint64_t` would have been the obvious width and is the wrong one: `std::atomic<uint64_t>` is
+ * not lock-free on rv32, so the table would acquire a libatomic lock to claim an index.
+ */
+using claim_word_t = std::size_t;
+
+/** @brief Claimable indices per `%claim_word_t`. */
+inline constexpr std::size_t kClaimBitsPerWord =
+    static_cast<std::size_t>(std::numeric_limits<claim_word_t>::digits);
+
+/** @brief Words the claim bitmap needs to cover `kHazardReaderSlots` indices. */
+inline constexpr std::size_t kClaimWords =
+    (kHazardReaderSlots + kClaimBitsPerWord - 1) / kClaimBitsPerWord;
+
+/**
+ * @brief Which indices are owned — one bit each, on a line no announcement shares (#899).
+ *
+ * Separate storage, not tidiness. A thread that failed to claim re-probes this table on every
+ * single operation, and a probe is a read-modify-write: with the flag inside `%cell_t`, each
+ * probe took an in-capacity reader's announcement line exclusive, so one over-capacity thread
+ * degraded every reader that was inside its budget — the opposite of what `%kOverflowIndex`
+ * promises. Packed rather than padded on purpose: the bits are read as a **prefilter**, so the
+ * fewer lines they span the cheaper a probe of a full table is (one load per 64 indices), and
+ * claiming is a once-per-thread event that contention cannot matter to.
+ */
+struct alignas(kDomainAlign) claims_t {
+    std::array<std::atomic<claim_word_t>, kClaimWords> words{}; /**< @brief One bit per index. */
+};
+
+static_assert(alignof(claims_t) == kDomainAlign,
+              "the claim table's alignas was silently dropped — it must not share a cell's line");
+static_assert(kClaimWords == 0 || std::atomic<claim_word_t>::is_always_lock_free,
+              "the claim table must not take a lock to claim an index — see claim_word_t");
 
 /** @brief One participant's private node lists — touched only by its owner, so never atomic. */
 struct alignas(kDomainAlign) lists_t {
@@ -205,8 +248,14 @@ inline constexpr std::size_t kNoIndex = static_cast<std::size_t>(-1);
  * that holds no pin cannot safely touch `node_t::sp` at all, so there is no unpinned read to
  * fall back to. What replaces it keeps the same guarantee — correctness never depends on the
  * bound being right — by a different mechanism: overflow threads share this one extra index
- * under a spin lock, so they serialize with each other and with nobody else. A misconfigured
- * `kHazardReaderSlots` therefore costs throughput on the overflow threads and nothing else.
+ * under a spin lock, so they serialize with each other and with nobody else.
+ *
+ * The containment is a property of the **layout**, not just of the algorithm, and it was broken
+ * once: an over-capacity thread re-probes the claim table on every operation, and while that
+ * table lived inside `%cell_t` each probe took an in-capacity reader's announcement line
+ * exclusive (#899). The two are separate storage now, and the probe is a load — but read the
+ * claim as scoped to what it says: the claim table and the announcement cells. An overflow
+ * thread still shares `overflow_lock`'s line with `orphans`, which in-capacity threads read.
  */
 inline constexpr std::size_t kOverflowIndex = kHazardReaderSlots;
 
@@ -231,15 +280,39 @@ struct final_sweep_t {
  * `constinit` and trivially destructible on purpose. It lands in `.bss` with no guard
  * variable and is never destroyed, so a `thread_local` participant unwinding at process
  * exit can always reach it — the ordering hazard that a `std::vector` or a `std::mutex`
- * in here would create. Cost: `(kHazardReaderSlots + 1) * 128` bytes, and **zero** for a
- * target that does not bind this slot, since nothing then references `registry()`.
+ * in here would create. Cost: `(kHazardReaderSlots + 1) * 128` bytes plus one padded claim
+ * table, and **zero** for a target that does not bind this slot, since nothing then
+ * references `registry()`.
  */
 struct registry_t {
     std::array<cell_t, kHazardReaderSlots + 1> cells{};  /**< @brief Announcements. */
     std::array<lists_t, kHazardReaderSlots + 1> lists{}; /**< @brief Parked + recycled nodes. */
+    claims_t claims{};                     /**< @brief Which indices are owned (#899). */
     std::atomic<node_t*> orphans{nullptr}; /**< @brief Left by exited threads; adopted by scans. */
     std::atomic_flag overflow_lock{};      /**< @brief Serializes users of `kOverflowIndex`. */
 };
+
+/**
+ * @brief Take index @p i, if nobody else holds it.
+ * @return `true` iff **this call** took it; `false` means a live participant (or the exit
+ *         sweep) owns it and this call changed nothing — the bit was already set.
+ *
+ * The one operation every owner of an index goes through, participants and the exit sweep
+ * alike, which is what makes "held" an interlock rather than a sample (see `~final_sweep_t`).
+ * `acq_rel` pairs with `%release_claim` so a claimant sees the previous owner's cleanup.
+ */
+[[nodiscard]] inline bool try_claim(registry_t& r, std::size_t i) {
+    const claim_word_t bit = claim_word_t{1} << (i % kClaimBitsPerWord);
+    return (r.claims.words[i / kClaimBitsPerWord].fetch_or(bit, std::memory_order_acq_rel) & bit) ==
+           0;
+}
+
+/** @brief Give index @p i back, publishing everything its owner did with it. */
+inline void release_claim(registry_t& r, std::size_t i) {
+    const claim_word_t bit = claim_word_t{1} << (i % kClaimBitsPerWord);
+    r.claims.words[i / kClaimBitsPerWord].fetch_and(static_cast<claim_word_t>(~bit),
+                                                    std::memory_order_acq_rel);
+}
 
 /** @brief The one domain. Emitted only in a build that actually binds @ref hazard_slot_t. */
 [[nodiscard]] inline registry_t& registry() {
@@ -264,12 +337,32 @@ class participant_t {
     /**
      * @brief Claim an index once per thread.
      * @return The claimed index, or `kNoIndex` when every index is taken.
+     *
+     * A thread that fails calls this again on its **next** operation, so the failing path is
+     * the one that has to be cheap: see the implementation for the prefilter that makes a
+     * probe of a full table a shared read rather than a sweep of read-modify-writes (#899).
      */
     std::size_t claim();
+
+    /**
+     * @brief How many read-modify-writes this thread has issued against the claim table.
+     *
+     * The pathology #899 named is a **count** — an over-capacity thread re-probing every index
+     * on every operation — and nothing else about the domain distinguishes one probe from
+     * sixty-four, so this is what a guard can assert on. Plain and `thread_local`-resident,
+     * never atomic: the RFC-0022 §6 instrument that shared one cache line cost more than the
+     * effect it was measuring (`%pin_instrument.hpp`). It is not `#ifdef`-gated because these
+     * are header-inline functions — a macro that only one translation unit defined would make
+     * the counted and uncounted `claim()` two definitions of one function, and the guard would
+     * silently measure whichever the linker kept. It costs one non-atomic increment on a path
+     * that runs once per thread when it succeeds.
+     */
+    [[nodiscard]] std::size_t claim_probes() const { return probes_; }
 
    private:
     registry_t& reg_;
     std::size_t idx_ = kNoIndex;
+    std::size_t probes_ = 0;
 };
 
 /**
@@ -462,15 +555,37 @@ inline void retire_and_flush(node_t* n) {
     return new (std::nothrow) node_t;
 }
 
+/**
+ * @brief Take the first index the claim table shows free.
+ *
+ * **Prefiltered, because the failing case repeats.** A thread that finds the table full runs
+ * this again on every operation for the rest of its life (`ticket_t`), so a probe per index
+ * would be `kHazardReaderSlots` read-modify-writes per read or publish — each one taking a line
+ * exclusive, which is what #899 measured as an over-capacity thread degrading readers that were
+ * inside the budget. One relaxed load per word answers "are any of these 64 free?" as a shared
+ * read that invalidates nothing, so a full table costs `kClaimWords` loads and no RMW at all.
+ *
+ * The load may be stale — a slot freed a moment ago can read as taken — and that is deliberate:
+ * a stale read only defers the claim to this thread's next operation, whereas a permanent
+ * "claiming failed" flag would strand a thread on the overflow index for the rest of its life
+ * even once the table emptied.
+ */
 inline std::size_t participant_t::claim() {
     registry_t& r = reg_;
-    for (std::size_t i = 0; i < kHazardReaderSlots; ++i) {
-        bool expected = false;
-        if (r.cells[i].claimed.compare_exchange_strong(expected, true, std::memory_order_acq_rel,
-                                                       std::memory_order_relaxed)) {
-            r.lists[i].scan_at = kRetireBatch;
-            idx_ = i;
-            return i;
+    for (std::size_t w = 0; w < kClaimWords; ++w) {
+        claim_word_t taken = r.claims.words[w].load(std::memory_order_relaxed);
+        const std::size_t base = w * kClaimBitsPerWord;
+        const std::size_t n = std::min(kHazardReaderSlots - base, kClaimBitsPerWord);
+        for (std::size_t b = 0; b < n; ++b) {
+            if (((taken >> b) & 1) != 0) continue;  // owned as far as this thread can tell
+            ++probes_;
+            if (try_claim(r, base + b)) {
+                const std::size_t i = base + b;
+                r.lists[i].scan_at = kRetireBatch;
+                idx_ = i;
+                return i;
+            }
+            taken = r.claims.words[w].load(std::memory_order_relaxed);  // lost a race; re-read
         }
     }
     return kNoIndex;
@@ -503,7 +618,7 @@ inline participant_t::~participant_t() {
     }
     l.scan_at = 0;
 
-    r.cells[idx_].claimed.store(false, std::memory_order_release);
+    release_claim(r, idx_);
     idx_ = kNoIndex;
 }
 
@@ -524,11 +639,11 @@ inline participant_t::~participant_t() {
  *
  * ## Interlock, not a sample
  *
- * `claimed` and `overflow_lock` are already the two mechanisms that mean "a live participant
- * owns this index", so the sweep takes an index through the **same operation** a participant
- * uses — a `compare_exchange_strong` on `claimed`, a `test_and_set` on the flag. Either a
- * thread holds the index and the sweep never touches its lists, or the sweep holds it and no
- * thread can claim it while they are being freed. Merely *reading* `claimed` would narrow the
+ * The claim table and `overflow_lock` are already the two mechanisms that mean "a live
+ * participant owns this index", so the sweep takes an index through the **same operation** a
+ * participant uses — the `fetch_or` behind `%try_claim`, a `test_and_set` on the flag. Either
+ * a thread holds the index and the sweep never touches its lists, or the sweep holds it and no
+ * thread can claim it while they are being freed. Merely *reading* the table would narrow the
  * window rather than close it. Nothing here blocks: an index the sweep cannot get is skipped,
  * never waited for, so a worker still running cannot wedge process exit.
  *
@@ -542,11 +657,7 @@ inline final_sweep_t::~final_sweep_t() {
     registry_t& r = registry();
 
     std::array<bool, kHazardReaderSlots + 1> mine{};
-    for (std::size_t i = 0; i < kHazardReaderSlots; ++i) {
-        bool expected = false;
-        mine[i] = r.cells[i].claimed.compare_exchange_strong(
-            expected, true, std::memory_order_acq_rel, std::memory_order_relaxed);
-    }
+    for (std::size_t i = 0; i < kHazardReaderSlots; ++i) mine[i] = try_claim(r, i);
     mine[kOverflowIndex] = !r.overflow_lock.test_and_set(std::memory_order_acquire);
 
     // Adopt the orphans, then read the announcements behind `scan`'s `seq_cst` fence and for
@@ -586,7 +697,7 @@ inline final_sweep_t::~final_sweep_t() {
     // Hand the indices back. The registry is `constinit` and never destroyed, so a thread born
     // after the sweep can still reach it and must still find a claimable, clean index.
     for (std::size_t i = 0; i < kHazardReaderSlots; ++i) {
-        if (mine[i]) r.cells[i].claimed.store(false, std::memory_order_release);
+        if (mine[i]) release_claim(r, i);
     }
     if (mine[kOverflowIndex]) {
         r.overflow_lock.clear(std::memory_order_release);
