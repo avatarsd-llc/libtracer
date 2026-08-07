@@ -104,9 +104,9 @@ void check(bool ok, std::string_view what) {
 // Dev cert paths — generated once in main() by tools/gen-dev-cert.sh.
 std::string g_cert;
 std::string g_key;
-// A SECOND, unrelated self-signed certificate — never served by anything. It is
-// the wrong-CA-bundle vector that proves the `ca` config key is genuinely
-// consulted rather than merely accepted and ignored (#918).
+/** @brief A SECOND, unrelated self-signed certificate — never served by anything.
+ *         The wrong-CA-bundle vector that proves the `ca` config key is genuinely
+ *         consulted rather than merely accepted and ignored (#918). */
 std::string g_other_cert;
 
 quic_dial_tls_t dev_tls() { return quic_dial_tls_t{.ca_file = {}, .insecure_no_verify = true}; }
@@ -603,10 +603,14 @@ view_t owned(std::span<const std::byte> bytes) {
     return view_t::over(std::move(seg));
 }
 
-// SPEC{ NAME "type" <type>, NAME "name" <name>, SETTINGS "config"{ role, port,
-// kind=quic [, addr] [, cert, key] [, ca] [, insecure] } } — the tcp_test conn_spec
-// shape plus the four TLS-carrying quic-private config keys: `cert`/`key` the LISTEN
-// factory requires, and the DIAL-side trust pair `ca`/`insecure` (#918).
+/**
+ * @brief SPEC{ NAME "type" <type>, NAME "name" <name>, SETTINGS "config"{ role,
+ *        port, kind=quic [, addr] [, cert, key] [, ca] [, insecure] } }.
+ *
+ * The tcp_test conn_spec shape plus the four TLS-carrying quic-private config
+ * keys: `cert`/`key` the LISTEN factory requires, and the DIAL-side trust pair
+ * `ca`/`insecure` (#918).
+ */
 view_t conn_spec(std::string_view type, std::string_view name, tr::net::conn_role_t role,
                  std::uint16_t port, std::string_view addr = {}, std::string_view cert = {},
                  std::string_view key = {}, std::string_view ca = {},
@@ -736,11 +740,15 @@ void test_config_constructed_quic() {
     }
 }
 
-// #918 — a SPEC-created dialer AUTHENTICATES its peer. The listeners below serve
-// the self-signed dev certificate, which chains to nothing in the system trust
-// store: it is exactly the "peer whose certificate does not validate" case, and
-// each dial below asserts the HANDSHAKE outcome, never a round-tripped config
-// value. Three listeners because a quic listener holds ONE peer at a time.
+/**
+ * @brief #918 — a SPEC-created dialer AUTHENTICATES its peer.
+ *
+ * The listeners below serve the self-signed dev certificate, which chains to
+ * nothing in the system trust store: exactly the "peer whose certificate does
+ * not validate" case. Every leg asserts the HANDSHAKE outcome, never a
+ * round-tripped config value. Five listeners because a quic listener holds ONE
+ * peer at a time.
+ */
 void test_spec_dial_trust_keys() {
     std::printf("SPEC dial certificate validation (#918):\n");
     graph_t node_a;
