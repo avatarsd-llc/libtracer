@@ -343,8 +343,11 @@ void test_oversize_declared_length_is_refused_and_bounded() {
  */
 void test_partial_frame_under_the_cap_is_held_then_delivered() {
     std::printf("ws server — a slow-loris frame at the cap is held, bounded, and delivered:\n");
-    tr::net::transport_ws_server server(0, &tr::mem::heap_backend(), /*max_frame=*/kSmallCap);
+    // The sink is declared BEFORE the transport, so it OUTLIVES it: a transport's recv
+    // thread is joined by its destructor, and a sink destroyed first would be delivered
+    // into during that window.
     frame_sink_t sink;
+    tr::net::transport_ws_server server(0, &tr::mem::heap_backend(), /*max_frame=*/kSmallCap);
     server.set_receiver(sink);
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
@@ -399,8 +402,11 @@ void test_the_cap_is_the_configured_one() {
     const std::vector<std::byte> frame = masked_client_frame(ws::opcode_t::BINARY, payload);
 
     {
-        tr::net::transport_ws_server tight(0, &tr::mem::heap_backend(), /*max_frame=*/4096);
+        // The sink is declared BEFORE the transport, so it OUTLIVES it: a transport's recv
+        // thread is joined by its destructor, and a sink destroyed first would be delivered
+        // into during that window.
         frame_sink_t sink;
+        tr::net::transport_ws_server tight(0, &tr::mem::heap_backend(), /*max_frame=*/4096);
         tight.set_receiver(sink);
         const int cfd = tcp_connect(tight.local_port());
         check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken (4 KiB cap)");
@@ -411,8 +417,8 @@ void test_the_cap_is_the_configured_one() {
         ::close(cfd);
     }
     {
-        tr::net::transport_ws_server wide(0);  // the default cap (kMaxFrame, 16 MiB)
         frame_sink_t sink;
+        tr::net::transport_ws_server wide(0);  // the default cap (kMaxFrame, 16 MiB)
         wide.set_receiver(sink);
         const int cfd = tcp_connect(wide.local_port());
         check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken (default cap)");
@@ -435,8 +441,11 @@ void test_the_cap_is_the_configured_one() {
 void test_fragments_cannot_walk_past_the_cap() {
     std::printf("ws server — fragments summing past the cap fail the connection:\n");
     constexpr std::size_t kCap = 4096;
-    tr::net::transport_ws_server server(0, &tr::mem::heap_backend(), /*max_frame=*/kCap);
+    // The sink is declared BEFORE the transport, so it OUTLIVES it: a transport's recv
+    // thread is joined by its destructor, and a sink destroyed first would be delivered
+    // into during that window.
     frame_sink_t sink;
+    tr::net::transport_ws_server server(0, &tr::mem::heap_backend(), /*max_frame=*/kCap);
     server.set_receiver(sink);
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
@@ -502,8 +511,11 @@ void test_backend_exhaustion_is_counted_backpressure() {
     tr::mem::pool_t pool(slab, /*slot_payload=*/4096);
     check(pool.capacity() >= 4, "the pool carved at least four slots");
 
-    tr::net::transport_ws_server server(0, &pool);
+    // Both the sink and the POOL are declared before the transport, so both outlive it:
+    // the recv thread allocates from `pool` and delivers to `sink` right up until the
+    // destructor joins it.
     frame_sink_t sink;
+    tr::net::transport_ws_server server(0, &pool);
     server.set_receiver(sink);
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
