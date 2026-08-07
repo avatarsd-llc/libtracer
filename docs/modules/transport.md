@@ -347,6 +347,10 @@ computation — is pure and lives in `tr::net::ws`:
 :project: libtracer
 ```
 
+```{doxygenvariable} tr::net::ws::kNoPayloadCap
+:project: libtracer
+```
+
 ```{doxygenfunction} tr::net::ws::encode_frame
 :project: libtracer
 ```

@@ -59,7 +59,7 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
   New public API: `transport_ws_server::kMaxFrame` (the shared
   `length_prefix_framer::kDefaultMaxFrame`, 16 MiB), and on both roles `dropped_rx()` /
-  `malformed_rx()` — the same two counter names tcp/quic/webtransport/udp expose, with the
+  `malformed_rx()` — the same two counter names tcp/quic/webtransport expose, with the
   same meanings (backend exhaustion sheds the message and keeps the link; a protocol or cap
   breach fails it) — plus `effective_max_frame()`. `:settings max_frame` now reaches `ws`:
   the built-in factory forwards `conn_settings_t::max_frame` and the process `rx_backend`,
