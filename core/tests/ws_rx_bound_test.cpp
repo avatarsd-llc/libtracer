@@ -509,7 +509,11 @@ void test_backend_exhaustion_is_counted_backpressure() {
     // 512-byte pieces stays legal on total length while outrunning the slot count.
     std::vector<std::byte> slab(4u * (4096u + 512u));
     tr::mem::pool_t pool(slab, /*slot_payload=*/4096);
-    check(pool.capacity() >= 4, "the pool carved at least four slots");
+    // Read the slot count ONCE, here, while this is the only thread that can touch the pool:
+    // `pool_t` declares "single-threaded reclamation" and from the line below the recv thread
+    // owns it, so the loop bound must not re-query it.
+    const std::size_t slots = pool.capacity();
+    check(slots >= 4, "the pool carved at least four slots");
 
     // Both the sink and the POOL are declared before the transport, so both outlive it:
     // the recv thread allocates from `pool` and delivers to `sink` right up until the
@@ -523,7 +527,7 @@ void test_backend_exhaustion_is_counted_backpressure() {
     const std::vector<std::byte> piece(512, std::byte{0x11});
     check(write_bytes(cfd, masked_client_frame(ws::opcode_t::BINARY, piece, /*fin=*/false)),
           "fragment 1 written");
-    for (std::size_t i = 1; i < pool.capacity() + 1; ++i)
+    for (std::size_t i = 1; i < slots + 1; ++i)
         check(write_bytes(cfd, masked_client_frame(ws::opcode_t::CONT, piece, /*fin=*/false)),
               "another fragment written");
 
