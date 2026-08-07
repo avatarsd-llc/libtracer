@@ -36,7 +36,7 @@ subscribing *is* writing a `SUBSCRIBER` TLV into `:subscribers[]`. On each write
 dispatcher clones the value to every subscriber's target vertex and in-process callback.
 A delivery **terminates at its target** — store and notify, never a re-dispatch to the
 target's own `:subscribers[]` — so a dispatch-level cycle cannot form and there is no
-depth cap to tune (`core/include/libtracer/graph.hpp:82-87`;
+depth cap to tune (`core/include/libtracer/graph.hpp:84-89`;
 [ADR-0051 — delivery terminates at target, no dispatch limits](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0051-delivery-terminates-at-target-no-dispatch-limits.md),
 [RFC-0007 — delivery terminates at target](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0007-delivery-terminates-at-target.md)).
 Propagation past a target is exclusively the target's own logic — a controller
@@ -142,8 +142,8 @@ Subscription edges are never destroyed while the graph lives. `unsubscribe` only
 **deactivates** the slot; an in-flight delivery has already snapshotted the edge and
 completes. The caller-owned `ctx` (or, for the templated overload, the callable itself)
 must therefore stay alive past any delivery that may still be running, not merely past
-the `unsubscribe` call (`core/include/libtracer/graph.hpp:969-970`, `:989` for the
-callable-by-address form, `:1002`).
+the `unsubscribe` call (`core/include/libtracer/graph.hpp:980-981`, `:1000` for the
+callable-by-address form, `:1013`).
 ```
 
 ```{admonition} No strings on the hot path
@@ -193,7 +193,7 @@ for (...) g.write(v, p.field(), setpoint_tlv);           // hot loop — zero st
 ## What a read hands back
 
 `read` and `await` return `result_t<value_ref_t>`, not `result_t<rope_t>`
-(`core/include/libtracer/graph.hpp:759,846` by handle, `:1181,1187` by path;
+(`core/include/libtracer/graph.hpp:770,857` by handle, `:1197,1203` by path;
 `value_ref_t` at `core/include/libtracer/vertex.hpp:147`). A `value_ref_t` is an **owning
 reference** to the value the vertex published: the LKV slot holds it as a
 `std::shared_ptr<const rope_t>`, so handing that reference back costs a refcount clone of
