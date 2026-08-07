@@ -152,6 +152,33 @@ int main() {
               "an expired ACE grants nothing (now == expires_ns)");
     }
 
+    // 2b. The wildcard spelling is RESERVED in the SUBJECT space too (#908). The wire has one
+    //     spelling for a subject token, so a principal that could BE "EVERYONE@" would be
+    //     indistinguishable from the wildcard; a subject that spells it is therefore not a
+    //     principal at all and matches NOTHING — not even the wildcard ACE it spells.
+    {
+        const std::vector<std::byte> everyone = as_bytes("EVERYONE@");
+        const std::vector<ace_t> wildcard{ace("EVERYONE@", bit(acl_right_t::READ))};
+        check(allow_only_policy_t::allows(everyone, bit(acl_right_t::READ), wildcard, kNow) ==
+                  acl_verdict_t::NO_MATCH,
+              "allow_only: a SUBJECT spelling EVERYONE@ matches nothing (#908)");
+        check(full_acl_policy_t::allows(everyone, bit(acl_right_t::READ), wildcard, kNow) ==
+                  acl_verdict_t::NO_MATCH,
+              "full: a SUBJECT spelling EVERYONE@ matches nothing (#908)");
+        // Ablation: the very same ACE list still grants an ordinary subject, so the two
+        // checks above measure the reserved SUBJECT and not a wildcard ACE that stopped
+        // working. A DENY ACE naming an ordinary subject is likewise still decisive.
+        check(allow_only_policy_t::allows(bob, bit(acl_right_t::READ), wildcard, kNow) ==
+                  acl_verdict_t::ALLOW,
+              "…while the same wildcard ACE still grants an ordinary subject");
+        const std::vector<ace_t> deny_bob{ace("bob", bit(acl_right_t::READ), ace_type_t::DENY)};
+        check(full_acl_policy_t::allows(bob, bit(acl_right_t::READ), deny_bob, kNow) ==
+                  acl_verdict_t::DENY,
+              "…and an ordinary subject still reaches a DENY ACE");
+        check(tr::graph::is_reserved_subject(everyone) && !tr::graph::is_reserved_subject(bob),
+              "is_reserved_subject names EVERYONE@ and nothing else tested here");
+    }
+
     // 3. required_flags: an ancestor list only contributes INHERIT-flagged ACEs.
     {
         const std::vector<ace_t> aces{

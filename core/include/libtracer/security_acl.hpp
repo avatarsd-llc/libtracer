@@ -56,6 +56,40 @@ enum class acl_verdict_t : std::uint8_t {
     NO_MATCH, /**< @brief No applicable ACE decided — keep walking / default. */
 };
 
+/**
+ * @brief The wildcard subject spelling (ADR-0020): an ACE carrying exactly these bytes as its
+ *        subject applies to every resolved subject.
+ *
+ * It is RESERVED, not merely magic (#908). The wire has one spelling for a subject token —
+ * the `acl/acl-aces` conformance vector sends `peer-a` and this string as the same opaque
+ * VALUE — so a principal that could BE these bytes would be indistinguishable from the
+ * wildcard, and the deployments at risk are exactly the ones whose resolver passes a
+ * caller-supplied identity through (usernames, cert CNs, peer names). The core therefore
+ * refuses to let a resolved subject spell it (see @ref is_reserved_subject), rather than
+ * leaving every integrator to know to blacklist it.
+ *
+ * @note `OWNER@`, the other special subject named in ADR-0020, is deliberately NOT reserved
+ *       here: no evaluator in this core special-cases it, so it is an ordinary opaque token
+ *       today and reserving it belongs to whatever change gives it its meaning.
+ */
+inline constexpr std::string_view kEveryoneSubject = "EVERYONE@";
+
+/**
+ * @brief True iff @p subject spells a RESERVED subject token — today exactly @ref
+ *        kEveryoneSubject — and so may never be a resolved principal (#908).
+ *
+ * Checked in the two places a subject reaches an ACE comparison in `core/`: once per policy
+ * evaluation (`allow_only_policy_t::allows` / `full_acl_policy_t::allows` — between them the
+ * only callers of `%detail_acl::ace_applies`, and what `effective_acl_t::allows` drives),
+ * where a reserved subject matches nothing; and once per resolver return in
+ * `graph_t::acl_allows` — the only site that invokes a resolver — which is decisive: that
+ * caller is refused at every gate, like the resolver's own error arm (#905). Public so an
+ * integrator's resolver can reject the token at its own door too.
+ */
+[[nodiscard]] inline bool is_reserved_subject(std::span<const std::byte> subject) noexcept {
+    return tr::detail::as_string_view(subject) == kEveryoneSubject;
+}
+
 namespace detail_acl {
 
 /** @brief True iff @p ace applies to @p subject right @p now for @p bit under @p required_flags. */
@@ -65,8 +99,7 @@ namespace detail_acl {
     if ((ace.flags & required_flags) != required_flags) return false;
     if ((ace.access_mask & bit) == 0) return false;
     if (ace.expires_ns != 0 && ace.expires_ns <= now) return false;
-    static constexpr std::string_view kEveryone = "EVERYONE@";
-    if (tr::detail::as_string_view(ace.subject) == kEveryone) return true;
+    if (is_reserved_subject(ace.subject)) return true;  // the wildcard ACE matches everyone
     return std::ranges::equal(ace.subject, subject);
 }
 
@@ -119,6 +152,10 @@ struct allow_only_policy_t {
     [[nodiscard]] static acl_verdict_t allows(std::span<const std::byte> subject, std::uint32_t bit,
                                               std::span<const ace_t> aces, std::uint64_t now,
                                               std::uint8_t required_flags = 0) noexcept {
+        // The wildcard spelling is reserved (#908): a subject that spells it is not a
+        // principal, so it matches nothing here. Hoisted out of the loop — one compare per
+        // evaluation, not per ACE.
+        if (is_reserved_subject(subject)) return acl_verdict_t::NO_MATCH;
         for (const ace_t& ace : aces) {
             if (detail_acl::ace_applies(ace, subject, bit, now, required_flags))
                 return acl_verdict_t::ALLOW;
@@ -144,6 +181,7 @@ struct full_acl_policy_t {
     [[nodiscard]] static acl_verdict_t allows(std::span<const std::byte> subject, std::uint32_t bit,
                                               std::span<const ace_t> aces, std::uint64_t now,
                                               std::uint8_t required_flags = 0) noexcept {
+        if (is_reserved_subject(subject)) return acl_verdict_t::NO_MATCH;  // #908, as above
         for (const ace_t& ace : aces) {
             if (!detail_acl::ace_applies(ace, subject, bit, now, required_flags)) continue;
             return ace.type == ace_type_t::DENY ? acl_verdict_t::DENY : acl_verdict_t::ALLOW;

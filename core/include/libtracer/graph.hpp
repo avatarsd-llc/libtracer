@@ -1131,6 +1131,12 @@ class graph_t {
      * spell the trusted context. The resolver's own error arm is therefore free to mean
      * DENY: an unresolvable caller is refused, not waved through.
      *
+     * The wildcard spelling is RESERVED against the resolver's OUTPUT (#908): a token equal to
+     * `tr::graph::kEveryoneSubject` is not a principal — that caller is refused at every gate,
+     * guarded vertex or not — because the wire has one spelling for a subject token, so a
+     * resolver that passes a caller-supplied identity through could otherwise mint a principal
+     * indistinguishable from the wildcard ACE.
+     *
      * Set once at wiring time, before frames flow — read-only afterwards on the op
      * paths, so no lock (the remote-sink / child-catalog contract).
      */

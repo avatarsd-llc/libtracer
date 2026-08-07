@@ -16,6 +16,27 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Fixed
 
+- **SECURITY — `EVERYONE@` is now a RESERVED subject token, enforced on the resolver's output
+  (#908).** `detail_acl::ace_applies` special-cased an ACE whose subject bytes spell
+  `"EVERYONE@"` to match every resolved subject, but nothing reserved that string: `parse_acl`
+  accepts any non-empty subject bytes, and no check constrained what a `subject_resolver_t`
+  returned. Since the wire has ONE spelling for a subject token — the `acl/acl-aces`
+  conformance vector sends `peer-a` and `EVERYONE@` as the same opaque VALUE — a deployment
+  whose resolver passes a caller-supplied identity through (a username, a certificate CN, a
+  peer name) could mint a principal that IS the wildcard, and an ACE meant for that one
+  principal would grant everyone. The reservation lived only in prose, so every integrator had
+  to know to blacklist it. `graph_t::acl_allows` now refuses a resolved subject equal to the
+  reserved token — at every gate, on a guarded vertex and on a bare one, the same fail-closed
+  arm the resolver's own error return takes (#905) — and both policies' `allows` return
+  `NO_MATCH` for such a subject, so the pure seam cannot be fooled either. **New public API:**
+  `tr::graph::kEveryoneSubject` (the spelling) and `tr::graph::is_reserved_subject` (the
+  predicate, so an integrator's resolver can refuse the token at its own door). No wire change:
+  an ACE still names the wildcard exactly as the vector spells it. `OWNER@` is deliberately not
+  reserved — no evaluator in this core special-cases it, so it stays an ordinary opaque token
+  until one does. Moving the wildcard out of the value space entirely (a distinguished wire
+  encoding plus an `ace_t` flag, the issue's other proposal) would change the wire surface and
+  needs an RFC.
+
 - **A STREAM whose ring append was SHED under pressure no longer re-delivers the previous
   entry (#925).** `vertex_t::drain_unflushed` derived "how many ring entries are new" from a
   `write_seq_` delta, but `vertex_t::store` bumps that sequence **unconditionally** — and it

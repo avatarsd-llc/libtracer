@@ -785,6 +785,14 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
     if (caller.empty()) return true;
     const std::expected<subject_token_t, wire::err_t> subject = subject_resolver_(caller);
     if (!subject) return false;  // the resolver DENIED this caller — PERMISSION_DENIED
+    // The wildcard spelling is RESERVED in the subject-token space (#908): the wire has one
+    // spelling for a subject, so a principal that could BE `EVERYONE@` is indistinguishable
+    // from the wildcard ACE. Enforced HERE, which is the only site that invokes
+    // `subject_resolver_` at all, rather than left to every integrator to blacklist — and
+    // BEFORE the bearing-ancestor walk,
+    // so a misconfigured resolver is refused at an unguarded vertex too. Fail closed, exactly
+    // like the resolver's own error arm above.
+    if (is_reserved_subject(*subject)) return false;
     const auto bit = static_cast<std::uint32_t>(right);
     const std::uint64_t now = now_ns();
     // #361 §3: ACL state lives only on BEARING vertices (those with own ACEs). A bare

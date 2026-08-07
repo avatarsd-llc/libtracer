@@ -1278,6 +1278,53 @@ void test_empty_caller_is_trusted_without_the_resolver() {
     check(denied(write_u8(g, v, 6, "peer-a")), "…on the WRITE gate too");
 }
 
+/**
+ * @brief The wildcard spelling is RESERVED in the subject-token space (#908): a caller whose
+ *        resolver returns `EVERYONE@` is refused, at a guarded vertex and at a bare one.
+ *
+ * The wire carries ONE spelling for a subject token — the `acl/acl-aces` vector sends `peer-a`
+ * and `EVERYONE@` as the same opaque VALUE — so a deployment whose resolver passes a
+ * caller-supplied identity through (a username, a cert CN, a peer name) could mint a principal
+ * that IS the wildcard, and an ACE meant for that one principal would grant everyone. Nothing
+ * used to stop it: `parse_acl` accepts any non-empty subject bytes and no check constrained what
+ * a resolver returned, so the reservation existed only in prose. `graph_t::acl_allows` now
+ * refuses the token itself — fail closed, like the resolver's own error arm (#905) — so an
+ * integrator does not have to know to blacklist it.
+ *
+ * Two ablations keep the refusals honest: an ORDINARY caller still reads and writes the guarded
+ * vertex through the very same wildcard ACE (so this is not a wildcard that stopped working),
+ * and an ordinary caller still reads the BARE vertex (so it is not open-by-default breaking).
+ */
+void test_reserved_wildcard_subject_is_refused() {
+    std::printf("the EVERYONE@ spelling is reserved against a resolved subject (#908):\n");
+    graph_t g;
+    g.set_subject_resolver(caller_is_subject);
+    const vertex_handle_t guarded = g.register_vertex(path_t("/w"), role_t::STORED_VALUE);
+    const vertex_handle_t bare = g.register_vertex(path_t("/o"), role_t::STORED_VALUE);
+    (void)write_u8(g, guarded, 7);  // trusted local writes seed both LKVs
+    (void)write_u8(g, bare, 7);
+    check(
+        g.write(path_t("/w:acl"),
+                make_value(make_acl({{.subject = "EVERYONE@",
+                                      .mask = bit(acl_right_t::READ) | bit(acl_right_t::WRITE)}})))
+            .has_value(),
+        "installed a wildcard :acl granting EVERYONE@ READ|WRITE");
+
+    // Ablations: the wildcard ACE still grants, and the bare vertex is still open by default.
+    check(g.read(guarded, "peer-a").has_value(),
+          "an ordinary caller READS the guarded vertex through the wildcard ACE");
+    check(write_u8(g, guarded, 1, "peer-a").has_value(), "…and WRITES it");
+    check(g.read(bare, "peer-a").has_value(),
+          "an ordinary caller READS the bare vertex (open by default)");
+
+    // The reserved token itself, at both gates and at both vertices.
+    check(denied(g.read(guarded, "EVERYONE@")),
+          "a caller resolving to EVERYONE@ is DENIED READ on the guarded vertex");
+    check(denied(write_u8(g, guarded, 2, "EVERYONE@")), "…DENIED WRITE on it too");
+    check(denied(g.read(bare, "EVERYONE@")),
+          "…and DENIED on the BARE vertex, before the bearing-ancestor walk");
+}
+
 }  // namespace
 
 int main() {
@@ -1296,6 +1343,7 @@ int main() {
     test_resolver_deny_arm_is_denied_at_every_gate();
     test_deny_arm_stops_remote_fan_in();
     test_empty_caller_is_trusted_without_the_resolver();
+    test_reserved_wildcard_subject_is_refused();
     std::printf(g_failures == 0 ? "\nACL: PASS\n" : "\nACL: FAIL (%d)\n", g_failures);
     return g_failures == 0 ? 0 : 1;
 }
