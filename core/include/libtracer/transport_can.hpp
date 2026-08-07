@@ -94,7 +94,7 @@ struct can_frame_data_t {
     std::uint32_t id = 0; /**< @brief The 29-bit extended CAN identifier. */
     bool fd = false;      /**< @brief True ⇒ a CAN-FD frame; false ⇒ classic CAN 2.0. */
     std::uint8_t len = 0; /**< @brief Data-field length on the wire (post-DLC-pad for FD). */
-    std::array<std::byte, 64>
+    std::array<std::byte, tr::view::kCanFdMaxData>
         data{}; /**< @brief The data field; only the first @ref len bytes are live. */
 
     /** @brief The live data-field bytes as a read-only span. */
@@ -104,6 +104,59 @@ struct can_frame_data_t {
 };
 
 /**
+ * @brief The largest data field a frame of this mode may declare, as a @ref
+ *        can_frame_data_t::len.
+ *
+ * The widths themselves are the L1 framing layer's (@ref tr::view::can_max_data —
+ * 8 classic, 64 FD, facts of the wire rather than chosen bounds). This is only the
+ * seam's adapter to them: the carrier spells its mode as a `bool` and its length as
+ * a `std::uint8_t`, so the bound arrives in the same width as the field it bounds and
+ * no second copy of the numbers lives here.
+ */
+[[nodiscard]] constexpr std::uint8_t can_max_len(bool fd) noexcept {
+    return static_cast<std::uint8_t>(tr::view::can_max_data(
+        fd ? tr::view::can_frame_mode_t::FD : tr::view::can_frame_mode_t::CLASSIC));
+}
+
+/**
+ * @brief Is an inbound raw frame admissible at the @ref can_link_t seam?
+ *
+ * The ONE ingress admission rule, so the platform links cannot drift on which
+ * frames they let through (#931). Each link decodes the three flags from its own
+ * driver's representation — `socketcan_link_t` from the `CAN_EFF_FLAG` /
+ * `CAN_RTR_FLAG` / `CAN_ERR_FLAG` bits of `can_id`, the ESP-IDF component's
+ * `twai_link_t` from `twai_frame_t::header.ide` / `.rtr` — and the verdict is
+ * decided here, once.
+ *
+ * The binding is header-elided: the 29-bit **extended** identifier IS the path
+ * (ADR-0022), so a standard 11-bit frame carries no decodable identity. A
+ * remote-transmission request carries a DLC but **no** data bytes, and an error
+ * frame is a controller status report rather than bus payload — admitting either
+ * hands the reassembler a slice whose length is a lie, and the flags that told it
+ * apart are stripped by the time the id reaches @ref can_frame_data_t::id.
+ *
+ * @param extended The frame uses a 29-bit extended identifier, not 11-bit standard.
+ * @param remote   The frame is a remote-transmission request (RTR).
+ * @param error    The frame is a controller error/status frame, not bus traffic.
+ */
+[[nodiscard]] constexpr bool can_rx_admissible(bool extended, bool remote, bool error) noexcept {
+    return extended && !remote && !error;
+}
+
+/**
+ * @brief Is @p frame emittable at the @ref can_link_t seam?
+ *
+ * The egress half of the same shared rule: a declared length must fit the data
+ * field the frame's mode actually has. A link that skipped it would `memcpy`
+ * @ref can_frame_data_t::len bytes out of a 64-byte carrier into an 8-byte kernel
+ * `struct can_frame::data` — a stack smash the seam precondition alone was
+ * holding back (#931).
+ */
+[[nodiscard]] constexpr bool can_tx_admissible(const can_frame_data_t& frame) noexcept {
+    return frame.len <= can_max_len(frame.fd);
+}
+
+/**
  * @brief The raw-frame seam between @ref transport_can and a physical CAN bus.
  *
  * Abstracting the socket here is what makes @ref transport_can testable without
@@ -111,6 +164,14 @@ struct can_frame_data_t {
  * in-memory paired link. A link is single-owner (held by one transport) and
  * delivers inbound frames through the registered @ref rx_fn_t, which may fire on
  * an internal receive thread.
+ *
+ * **Which frames cross the seam is the seam's own rule, not each link's.** Every
+ * port of a *physical* bus gates ingress on @ref can_rx_admissible and egress on
+ * @ref can_tx_admissible, so a bus-visible divergence between two ports is a
+ * compile-unit-local bug rather than a design choice (#931). In-memory test links
+ * are exempt by construction — their carrier cannot express RTR, an 11-bit
+ * identifier, or an error flag, so the ingress rule has no input to judge, and one
+ * of them injects raw fragments deliberately.
  */
 class can_link_t {
    public:

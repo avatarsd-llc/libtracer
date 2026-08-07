@@ -21,6 +21,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include <cstdint>
 #include <cstring>
 #include <utility>
 
@@ -94,6 +95,12 @@ void socketcan_link_t::on_receive(rx_fn_t rx) {
 }
 
 void socketcan_link_t::write_raw(const can_frame_data_t& frame) {
+    // The seam's egress rule (#931), checked BEFORE the memcpy below: a classic
+    // frame declaring more bytes than classic CAN has would overrun the on-stack
+    // struct can_frame. Dropped best-effort, the same verdict twai_link_t reaches
+    // at its own write_raw.
+    if (!can_tx_admissible(frame)) return;
+
     const std::lock_guard lock(write_m_);
     if (fd_ < 0) return;
     // A CAN_RAW write is all-or-nothing per frame: on error (or a short write,
@@ -123,11 +130,25 @@ void socketcan_link_t::run() {
             n != static_cast<ssize_t>(sizeof(canfd_frame)))
             continue;
 
+        // The seam's ingress rule (#931). A CAN_RAW socket carries no filter by
+        // default, so 11-bit standard, remote-request and error frames all land
+        // here — and the masking below strips the very flags that told them apart,
+        // so an RTR frame would reach the reassembler as a data slice whose DLC
+        // promises bytes it never carried. Decode the flags, let the shared rule
+        // judge; twai_link_t asks the same question of its driver's header bits.
+        if (!can_rx_admissible((f.can_id & CAN_EFF_FLAG) != 0, (f.can_id & CAN_RTR_FLAG) != 0,
+                               (f.can_id & CAN_ERR_FLAG) != 0))
+            continue;
+
         can_frame_data_t out;
         out.id = f.can_id & CAN_EFF_MASK;  // strip EFF/RTR/ERR flags → 29-bit id
         out.fd = (n == static_cast<ssize_t>(sizeof(canfd_frame)));
         out.len = f.len;
-        if (out.len > 64) out.len = 64;
+        // Classic and FD share this union-shaped read, so the length is capped at
+        // the width the frame's OWN mode has — a classic read only filled
+        // sizeof(can_frame) bytes, and its tail is not payload.
+        const std::uint8_t cap = can_max_len(out.fd);
+        if (out.len > cap) out.len = cap;
         std::memcpy(out.data.data(), f.data, out.len);
 
         rx_fn_t rx;

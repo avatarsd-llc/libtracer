@@ -52,9 +52,9 @@ pub use fwd::{
     FieldSel, FwdRequest, ParsedFwd,
 };
 pub use tlv_builders::{
-    name, path_ref, path_ref_element, subscriber, validate_segment, value, value_opts, value_u16,
-    value_u32, value_u64, value_u8, BuildError, PathRefElement, ValueOptions, MAX_PATH_BYTES,
-    MAX_SEGMENTS, MAX_SEGMENT_BYTES,
+    name, path_ref, path_ref_element, subscriber, text_name, validate_segment, value, value_opts,
+    value_u16, value_u32, value_u64, value_u8, BuildError, PathRefElement, ValueOptions,
+    MAX_PATH_BYTES, MAX_SEGMENTS, MAX_SEGMENT_BYTES,
 };
 
 /**
