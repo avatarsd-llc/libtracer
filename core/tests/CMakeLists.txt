@@ -86,6 +86,14 @@ target_link_libraries(path_ref_test PRIVATE libtracer)
 libtracer_test_warnings(path_ref_test)
 add_test(NAME path_ref COMMAND path_ref_test)
 
+# The wire grammar's total-encoded-size bound (grammar.hpp, #921) — pinned at
+# 32-bit-`size_t` width, because the truncation it closes is unreachable at the
+# host's 64-bit width and a host-only vector would be a vacuous guard.
+add_executable(grammar_bounds_test grammar_bounds_test.cpp)
+target_link_libraries(grammar_bounds_test PRIVATE libtracer)
+libtracer_test_warnings(grammar_bounds_test)
+add_test(NAME grammar_bounds COMMAND grammar_bounds_test)
+
 # Frame codec — nesting depth cap / iterative-parse contract (reference/01).
 add_executable(frame_test frame_test.cpp)
 target_link_libraries(frame_test PRIVATE libtracer)
@@ -735,6 +743,34 @@ target_compile_definitions(substrate_test_no_atomic PRIVATE
     LIBTRACER_NO_ATOMIC
     LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 add_test(NAME substrate_no_atomic COMMAND substrate_test_no_atomic)
+
+# #922 — the SINGLE-MEMBER module-set dispatch (LIBTRACER_BACKEND_SET_POOL_ONLY, the MCU
+# profile). Nothing else in the suite compiles that fold, which is how its destroy leg
+# shipped with an unconditional static_cast<pool_t*> while the `transfer` two lines below
+# it checked the tag. Like substrate_test_no_atomic this compiles the (few) library
+# sources it needs directly rather than linking libtracer.a — the library's own
+# backend_set.o carries the MULTI-member dispatch, so linking both would be a duplicate
+# definition of destroy_dispatch/transfer.
+add_executable(pool_only_dispatch_test
+    pool_only_dispatch_test.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/backend_set.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/mem_pool.cpp
+)
+target_include_directories(pool_only_dispatch_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_features(pool_only_dispatch_test PRIVATE cxx_std_23)
+libtracer_test_warnings(pool_only_dispatch_test)
+target_compile_definitions(pool_only_dispatch_test PRIVATE LIBTRACER_BACKEND_SET_POOL_ONLY)
+add_test(NAME pool_only_dispatch COMMAND pool_only_dispatch_test)
+
+# #923 — the nothrow try_* growth helpers must never let an allocation failure cross their
+# `noexcept` boundary. This TU OWNS global operator new (it must refuse specific
+# allocations, which `probe_fail_hook` cannot do — the hook gates the probe, not the
+# vector's own reserve), so it links the library like any other consumer but its
+# replacement operators bind process-wide. Threads: the race leg.
+add_executable(try_grow_race_test try_grow_race_test.cpp)
+target_link_libraries(try_grow_race_test PRIVATE libtracer Threads::Threads)
+libtracer_test_warnings(try_grow_race_test)
+add_test(NAME try_grow_race COMMAND try_grow_race_test)
 
 # ADR-0043 Phase A — the libtracer_quic MODULE harness (a consumer that talks QUIC
 # links the module target; nothing quic-related exists in a default configure):

@@ -75,11 +75,25 @@ bool transfer_generic(view::segment_t* seg, std::span<std::byte> host, io_dir_t 
 #ifdef LIBTRACER_BACKEND_SET_POOL_ONLY
 
 // Single-member module set (the MCU profile): the target links only mem_pool, so
-// the dispatch folds to one direct call — no switch, no other backends' destroy
-// code pulled in. This is the ADR-0047 §2 fold: on a single-backend target the
-// seam compiles to nothing more than the direct release. `-D` this per target.
+// the dispatch folds to one predicted direct call — no switch, no other backends'
+// destroy code pulled in. This is the ADR-0047 §2 fold: on a single-backend target
+// the seam compiles to nothing more than the tag compare and the direct release.
+// `-D` this per target.
+//
+// The tag compare is NOT optional here, exactly as in the `transfer` sibling below
+// (#922). A POOL_ONLY target still sees segments whose backend is not a `pool_t`:
+// `synchronized_pool_t` re-points every segment it hands out to ITSELF with an
+// UNKNOWN tag (mem_pool.hpp) precisely so reclaim takes the locked virtual
+// `destroy` — and it is a `mem_backend_t` holding a `pool_t` MEMBER, not a
+// `pool_t`, so reinterpreting it reads `slab_`/`stride_` from the wrong offsets
+// and bypasses the critical section. Any `tr::view::borrow()`ed segment is the
+// same story. The tag stays a fast path, never a correctness dependency.
 void destroy_dispatch(view::segment_t* seg) noexcept {
-    static_cast<pool_t*>(seg->backend)->pool_t::destroy(seg);
+    if (seg->btag == backend_tag::POOL) {
+        static_cast<pool_t*>(seg->backend)->pool_t::destroy(seg);
+        return;
+    }
+    seg->backend->destroy(seg);  // virtual fallback: synchronized/borrowed/any other backend.
 }
 
 // Single-backend set: only mem_pool is linked, so the transfer dispatch folds too.

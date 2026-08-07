@@ -19,6 +19,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <expected>
 #include <memory>
 #include <memory_resource>
 #include <mutex>
@@ -735,12 +736,14 @@ namespace acl_bench {
 
 /** @brief Install a subject resolver mapping a non-empty caller to its own bytes. */
 void install_resolver(graph_t& g) {
-    g.set_subject_resolver([](std::string_view caller) -> std::optional<std::vector<std::byte>> {
-        if (caller.empty()) return std::nullopt;  // trusted local (the setup writes)
-        std::vector<std::byte> token(caller.size());
-        std::memcpy(token.data(), caller.data(), caller.size());
-        return token;
-    });
+    g.set_subject_resolver(
+        [](std::string_view caller) -> std::expected<std::vector<std::byte>, tr::wire::err_t> {
+            // The empty (local) context is settled as trusted before the resolver runs (#905),
+            // so the setup writes never arrive here.
+            std::vector<std::byte> token(caller.size());
+            std::memcpy(token.data(), caller.data(), caller.size());
+            return token;
+        });
 }
 
 /** @brief Write a single INHERIT ALLOW ACE for subject "peer" onto `path`:acl. */
