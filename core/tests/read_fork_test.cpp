@@ -23,6 +23,7 @@
  * is what makes the lock-free read carry its weight under ThreadSanitizer.
  */
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -73,6 +74,45 @@ void check(bool ok, std::string_view what) {
         flat.insert(flat.end(), s.begin(), s.end());
     }
     return flat.size() == 1 && flat[0] == std::byte{expect};
+}
+
+/** @brief What one read of the forking vertex came back as. */
+enum class shape_t : std::uint8_t {
+    NONE,   /**< @brief The read returned no value at all. */
+    LEAF,   /**< @brief The vertex's own one-byte scalar. */
+    FORKED, /**< @brief A composed reply that CARRIES the child. */
+    OTHER,  /**< @brief Composed but childless, or a scalar that is not the expected byte. */
+};
+
+/**
+ * @brief Classify one read of @p p as leaf, forked, or neither, reusing @p scratch.
+ *
+ * The composed branch read emits, per included node below the root, that node's canonical
+ * NAME record verbatim (ADR-0057), so the child's segment text appears literally in the
+ * reply exactly when the subtree walk included the child. Reply SIZE cannot say that: the
+ * retirement transient — the fork bit still set when the walk takes the map lock, the child
+ * already gone — composes the ROOT ALONE, which is bigger than a scalar and carries no
+ * child. Distinguishing the two is what lets the concurrent case assert that a reader saw
+ * the vertex *forked* rather than merely saw the bit set.
+ *
+ * @p scratch is caller-owned so the reader loop keeps its capacity across millions of
+ * reads instead of allocating inside the race.
+ */
+[[nodiscard]] shape_t classify_read(graph_t& g, const char* p, std::uint8_t leaf_byte,
+                                    std::string_view child_name, std::vector<std::byte>& scratch) {
+    const auto r = g.read(path_t(p));
+    if (!r.has_value()) return shape_t::NONE;
+    scratch.clear();
+    for (const tr::view::view_t& l : (*r)->links()) {
+        const auto s = l.bytes();
+        scratch.insert(scratch.end(), s.begin(), s.end());
+    }
+    if (scratch.size() == 1)
+        return scratch[0] == std::byte{leaf_byte} ? shape_t::LEAF : shape_t::OTHER;
+    const auto hit =
+        std::search(scratch.begin(), scratch.end(), child_name.begin(), child_name.end(),
+                    [](std::byte b, char c) { return b == static_cast<std::byte>(c); });
+    return hit != scratch.end() ? shape_t::FORKED : shape_t::OTHER;
 }
 
 /** @brief Whether a read of @p p came back as something bigger than a bare scalar. */
@@ -173,62 +213,156 @@ void test_idempotent_retire() {
  *
  * The fork read is lock-free while `fill` and `mark_unregistered` mutate the bit under the
  * graph's unique lock. Which side of a concurrent registration a reader lands on was never
- * ordered by anything a caller can observe, so the assertion is that every read is
- * WELL-FORMED — never that it saw a particular side.
+ * ordered by anything a caller can observe, so the assertion over the free-running reads is
+ * that every one is WELL-FORMED — never that it saw a particular side.
  *
- * The overlap is asserted, not hoped for. A first version of this test ran 300 rounds against
- * four readers, finished in 5 ms, and asserted only `reads > 0` — which four freshly-spawned
- * threads satisfy before the writer has finished starting them. It passed while racing almost
- * nothing. `kMinReadsPerRound` is the fix: if the readers do not keep up with the writer by a
- * wide margin, the shape under test did not happen and the test says so instead of passing.
+ * The overlap is asserted, not hoped for, and it is asserted by OBSERVATION rather than by
+ * rate. Two earlier versions got that wrong. The first ran 300 rounds against four readers
+ * and asserted only `reads > 0`, which four freshly-spawned threads satisfy before the writer
+ * has finished starting them — it passed while racing almost nothing. Its replacement
+ * asserted `reads >= kRounds * 2`, a wall-clock throughput floor: the reader loop spun for
+ * however long the writer took, so the count measured how much CPU a shared runner handed the
+ * readers, not anything about the code. It went red on CI for a branch that touched nothing
+ * on this path (#1021), and it would have gone GREEN on a fast runner whose millions of reads
+ * all landed on the same side of the fork.
+ *
+ * What replaces it makes the interleaving structural. The writer publishes a phase counter
+ * AFTER each mutation and does not advance until every reader has acknowledged that phase; a
+ * reader acknowledges by classifying its first read taken in that phase. Because the writer
+ * cannot move on before the acknowledgement lands, that read both started and finished while
+ * the phase held, so its shape is DETERMINED — forked while the child is registered, leaf
+ * after it is retired — on any machine, at any speed. Between the handshakes the readers keep
+ * hammering unsynchronised reads straight across the register/write/retire, so the race TSan
+ * is here for is unchanged; only the evidence that it happened is.
  */
 void test_concurrent_fork() {
     constexpr std::size_t kRounds = 4000;
     constexpr std::size_t kReaders = 4;
-    // Each round is a register + write + retire, all three taking the graph's UNIQUE lock; a
-    // lock-free read is orders of magnitude cheaper, so anything below this means the readers
-    // were starved or never scheduled and the interleaving was not exercised.
-    constexpr std::size_t kMinReadsPerRound = 2;
+    constexpr const char* kRoot = "/r";
+    constexpr const char* kChildPath = "/r/kid";
+    constexpr std::string_view kChildName = "kid";
+    constexpr std::uint8_t kRootByte = 0xDD;
+    constexpr std::uint8_t kChildByte = 0xEE;
 
     std::printf("readers forking while a writer registers and retires:\n");
     graph_t g;
-    const auto p = g.register_vertex(path_t("/r"), role_t::STORED_VALUE);
-    (void)g.write(p, val_u8(0xDD));
+    const auto p = g.register_vertex(path_t(kRoot), role_t::STORED_VALUE);
+    (void)g.write(p, val_u8(kRootByte));
+
+    // Prove the classifier can tell the two shapes apart BEFORE the race leans on it. A
+    // both-shapes-seen guard built on a classifier that answers the same thing either way
+    // would be vacuous in exactly the manner this case is meant to stop being.
+    std::vector<std::byte> probe;
+    check(classify_read(g, kRoot, kRootByte, kChildName, probe) == shape_t::LEAF,
+          "the shape classifier calls the childless vertex a LEAF");
+    const auto seed = g.register_vertex(path_t(kChildPath), role_t::STORED_VALUE);
+    (void)g.write(seed, val_u8(kChildByte));
+    check(classify_read(g, kRoot, kRootByte, kChildName, probe) == shape_t::FORKED,
+          "and calls it FORKED once the child is registered and written — the reply carries "
+          "the child's name record, which a root-only compose does not");
+    check(g.retire(seed).has_value(), "retire the seed child");
+    check(classify_read(g, kRoot, kRootByte, kChildName, probe) == shape_t::LEAF,
+          "and a LEAF again once the child is gone");
+
+    /** @brief One reader's private tally, plus the slot the writer's handshake waits on. */
+    struct alignas(64) reader_tally_t {
+        std::atomic<std::size_t> acked{0}; /**< @brief Highest phase this reader has answered. */
+        std::size_t reads = 0;             /**< @brief Reads completed, free-running included. */
+        std::size_t bad = 0;               /**< @brief Reads that returned no value. */
+        std::size_t forked = 0;            /**< @brief Phase-contained reads that saw the child. */
+        std::size_t leaf = 0;              /**< @brief Phase-contained reads that saw the scalar. */
+        std::size_t wrong = 0;             /**< @brief Phase-contained reads of the wrong shape. */
+    };
+    std::vector<reader_tally_t> tally(kReaders);
 
     std::atomic<bool> stop{false};
-    std::atomic<std::size_t> bad{0};
-    std::atomic<std::size_t> reads{0};
     std::atomic<std::size_t> ready{0};
+    // Odd phases are "the child is registered and written", even ones "the child is retired".
+    // Phase 0 is the pre-start state and is never acknowledged.
+    std::atomic<std::size_t> phase{0};
     std::vector<std::thread> pool;
     for (std::size_t i = 0; i < kReaders; ++i) {
-        pool.emplace_back([&] {
+        pool.emplace_back([&, i] {
+            reader_tally_t& t = tally[i];
+            std::vector<std::byte> scratch;
+            std::size_t answered = 0;
             ready.fetch_add(1, std::memory_order_release);
-            std::size_t n = 0;
             while (!stop.load(std::memory_order_relaxed)) {
-                if (!g.read(path_t("/r")).has_value()) bad.fetch_add(1, std::memory_order_relaxed);
-                ++n;
+                const std::size_t seq = phase.load(std::memory_order_acquire);
+                const shape_t s = classify_read(g, kRoot, kRootByte, kChildName, scratch);
+                ++t.reads;
+                if (s == shape_t::NONE) ++t.bad;
+                if (seq != answered) {
+                    // This read STARTED after `seq` was published and finished before the
+                    // acknowledgement below, which the writer is still waiting on — so the
+                    // whole read ran inside phase `seq` and its shape is the phase's, not a
+                    // transient's. Acknowledge once per phase: the store is the only shared
+                    // write the reader makes, and keeping it off the per-read path leaves the
+                    // free-running reads uncontended.
+                    const shape_t want = (seq % 2 == 1) ? shape_t::FORKED : shape_t::LEAF;
+                    if (s != want) {
+                        ++t.wrong;
+                    } else if (want == shape_t::FORKED) {
+                        ++t.forked;
+                    } else {
+                        ++t.leaf;
+                    }
+                    answered = seq;
+                    t.acked.store(seq, std::memory_order_release);
+                }
+                // A scheduling hint, not a knob any assertion reads. The loop is otherwise a
+                // pure spin, so on ONE core a reader would hold the CPU for a whole time slice
+                // and the handshake would crawl: measured 27.7 s under TSan on `taskset -c 0`
+                // without this, 0.30 s with it, at an unchanged read count on a free machine.
+                std::this_thread::yield();
             }
-            reads.fetch_add(n, std::memory_order_relaxed);
         });
     }
     // Do not start the writer until every reader is in its loop, or the early rounds race
     // nothing but thread start-up.
     while (ready.load(std::memory_order_acquire) < kReaders) { /* spin to a common start */
     }
+    /** @brief Block until every reader has answered phase @p want. */
+    const auto await_phase = [&](std::size_t want) {
+        for (reader_tally_t& t : tally)
+            while (t.acked.load(std::memory_order_acquire) < want) std::this_thread::yield();
+    };
+    std::size_t seq = 0;
     for (std::size_t round = 0; round < kRounds; ++round) {
-        const auto kid = g.register_vertex(path_t("/r/kid"), role_t::STORED_VALUE);
-        (void)g.write(kid, val_u8(0xEE));
+        const auto kid = g.register_vertex(path_t(kChildPath), role_t::STORED_VALUE);
+        (void)g.write(kid, val_u8(kChildByte));
+        phase.store(++seq, std::memory_order_release);
+        await_phase(seq);
         (void)g.retire(kid);
+        phase.store(++seq, std::memory_order_release);
+        await_phase(seq);
     }
     stop.store(true, std::memory_order_relaxed);
     for (auto& t : pool) t.join();
 
-    std::printf("    %zu rounds x %zu readers -> %zu reads, %zu malformed\n", kRounds, kReaders,
-                reads.load(), bad.load());
-    check(bad.load() == 0, "every concurrent read of the forking vertex was well-formed");
-    check(reads.load() >= kRounds * kMinReadsPerRound,
-          "the readers kept up with the writer, so the interleaving actually happened");
-    check(reads_as_leaf_scalar(g, "/r", 0xDD), "and the vertex settles back to a leaf");
+    std::size_t reads = 0, bad = 0, forked = 0, leaf = 0, wrong = 0;
+    for (const reader_tally_t& t : tally) {
+        reads += t.reads;
+        bad += t.bad;
+        forked += t.forked;
+        leaf += t.leaf;
+        wrong += t.wrong;
+    }
+    // A reader cannot skip a phase (the writer will not publish the next one until this reader
+    // has answered) and cannot answer one twice, so each of the two counts below is exactly one
+    // observation per reader per round when the fork behaves.
+    const std::size_t want_each = kRounds * kReaders;
+
+    std::printf(
+        "    %zu rounds x %zu readers -> %zu reads, %zu malformed; %zu forked + %zu leaf "
+        "phase observations, %zu wrong\n",
+        kRounds, kReaders, reads, bad, forked, leaf, wrong);
+    check(bad == 0, "every concurrent read of the forking vertex was well-formed");
+    check(wrong == 0, "every read the handshake pinned inside a phase saw that phase's shape");
+    check(forked == want_each,
+          "each reader observed the vertex FORKED — child in the reply — once per round");
+    check(leaf == want_each, "and observed it back as a bare LEAF once per round");
+    check(reads_as_leaf_scalar(g, kRoot, kRootByte), "and the vertex settles back to a leaf");
 }
 
 }  // namespace
