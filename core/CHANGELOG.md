@@ -48,8 +48,10 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   Not implemented: the producer **generation** in the advertise framing that
   [ADR-0077](../docs/adr/0077-can-advertise-carries-a-producer-generation-keying-reassembly.md)
   also proposes. Its *Implementation status* section records why — redundant against the
-  invariant above, and unable to reach the one residue neither instrument closes (a slice
-  parked before its advertise, which `rx_ttl` bounds).
+  invariant above, and unable to reach the residues neither instrument closes: a slice
+  parked before its advertise, and a stale binding that no re-issue overlapped being fed by
+  frames whose own advertises were lost. Both are bounded by `rx_ttl`; a generation rides
+  the advertise and a data frame carries none, so it is silent for both.
 
 ### Changed
 

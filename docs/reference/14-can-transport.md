@@ -443,10 +443,21 @@ two groups can share a key only if two bindings share a base, which this makes i
 The overlap test is arithmetic on the CAN ID's own endpoint field: no epoch, no generation
 counter, and no bound that is not the wire's.
 
-The residue this does **not** reach is a slice parked before its advertise: a data frame
-carries only the CAN ID, so a slice from a previous lap is byte-indistinguishable from
-one belonging to the group now claiming those slots, and the `rx_ttl` age-out is what
-bounds it. That is a genuine gap of the header-elided design, not of the keying.
+Two residues this does **not** reach, both rooted in the same fact: a data frame carries
+only the CAN ID, so a slice from a previous lap is byte-indistinguishable from one
+belonging to the group now claiming those slots. Both are bounded by the `rx_ttl` age-out
+and neither is a gap of the keying — they are gaps of the header-elided design itself.
+
+1. **A slice parked before its advertise.** It is re-driven into whichever group later
+   claims its slot.
+2. **A stale binding no re-issue overlapped, fed by frames whose own advertises were
+   lost.** The retire-on-re-issue rule fires only when a new run *overlaps* the old one.
+   A binding whose run is skipped over survives; if the advertises for the groups that
+   later occupy nearby slots are themselves lost on the bus, their data slices resolve
+   first-match to that surviving binding, fill its indices, and complete its stale group.
+   Two different payloads are then welded into one frame and delivered upstream as valid.
+   No slice is ever parked, so this is a distinct mechanism from (1) rather than a
+   restatement of it.
 
 ```{admonition} Eviction is not a substitute for correct keying
 :class: warning
