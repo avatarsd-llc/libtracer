@@ -68,6 +68,29 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Fixed
 
+- **`transport_vertex_t::set_link_state` and `::module_for` are now thread-safe (#881).** Both
+  are public, and both read `ctl_m_`-guarded state with no lock: `set_link_state` did
+  `conns_.find` while `make_connection` inserted into and `remove_connection` erased from that
+  same `std::map` under the mutex, and `module_for` walked the module-declaration vector while
+  `register_module` `push_back`'d it. The deployment shape makes it reachable rather than
+  theoretical — `set_link_state` is the documented liveness door for a *provided* link, so it is
+  called from a transport thread, while connection create/remove is wire-driven on a receive
+  thread. The unguarded `find` could walk the map mid-rebalance or be handed the very node the
+  erase was destroying (its `vertex` handle then read after free); the unguarded walk could be
+  invalidated outright by the vector's reallocation.
+  The lock could not simply be added in place: `make_connection` holds the same **non-recursive**
+  `std::mutex` when it calls both, so taking it again would self-deadlock. Each is therefore
+  split into a private already-holding-the-lock body plus a public locking wrapper —
+  `make_connection` calls the bodies, external callers get the locked surface, and every call
+  still takes at most one acquisition. The vertex write stays inside the locked section, in the
+  order the class declares (this → `fwd_router_t` → `graph_t` → the vertex stripe).
+  **Contract change:** `module_for`'s documented "this read takes no lock, so declare every
+  module before other threads touch this object" restriction is **withdrawn** — it is now safe
+  concurrently with `register_module`. No signature changed. The lock is control-plane only
+  (create / remove / liveness); nothing on the forward or delivery path takes it, so there is no
+  hot-path cost. `net_control_plane_race_test` gained a section that drives both public readers
+  against their writers through the production `:children[]` wiring; it is TSan-clean with the
+  fix and reports on either wrapper reverted.
 - **A connection whose link cannot be wired into the router is now rolled back instead of
   published as a live-looking dead connection (#930).** `transport_vertex_t::make_connection`
   called `fwd_router_t::add_child` as a plain statement and discarded its `bool`. That `bool`

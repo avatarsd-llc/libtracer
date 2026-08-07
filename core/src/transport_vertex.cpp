@@ -148,6 +148,16 @@ result_t<void> transport_vertex_t::register_module(std::string module, std::stri
 
 result_t<std::string> transport_vertex_t::module_for(std::string_view kind,
                                                      conn_role_t role) const {
+    // The PUBLIC entry locks (#881); `make_connection` already holds `ctl_m_` — a plain,
+    // NON-RECURSIVE std::mutex (ADR-0063 erratum 1) — so it calls the body directly. The
+    // fix is a split precisely because a lock added in place would self-deadlock there.
+    const std::lock_guard ctl(ctl_m_);  // ADR-0063 §3 control-plane serialization
+    return module_for_locked(kind, role);
+}
+
+/** @brief `module_for`'s body, for a caller that already holds `ctl_m_`. */
+result_t<std::string> transport_vertex_t::module_for_locked(std::string_view kind,
+                                                            conn_role_t role) const {
     for (const module_decl_t& d : modules_) {
         if (d.kind == kind && d.role == role) return d.module;
     }
@@ -203,7 +213,7 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::b
         // Neither a staged link nor a construction kind — nothing can carry the bytes
         // (checked before module resolution: a kind-less SPEC has no module to look up).
         if (settings.kind.empty()) return std::unexpected(status_t::NOT_FOUND);
-        auto declared = module_for(settings.kind, settings.role);
+        auto declared = module_for_locked(settings.kind, settings.role);
         // Declared-only (ADR-0073 §4): a kind the application never mapped to a module
         // fails creation explicitly instead of mounting under a library-derived name.
         if (!declared) return std::unexpected(declared.error());
@@ -349,7 +359,7 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::b
     // is `LISTENING` (a bind failure returns an error from the factory above, so a
     // constructed LISTEN is always bound). Provided links report via set_link_state.
     if (constructed)
-        (void)set_link_state(
+        (void)set_link_state_locked(
             qualified, role == conn_role_t::LISTEN ? link_state_t::LISTENING : link_state_t::UP);
     return v;
 }
@@ -384,10 +394,26 @@ result_t<void> transport_vertex_t::remove_connection(std::string_view name) {
 }
 
 result_t<void> transport_vertex_t::set_link_state(std::string_view name, link_state_t state) {
+    // The PUBLIC entry locks (#881). This is the liveness door a TRANSPORT thread knocks
+    // on for a provided link, while create/remove is wire-driven on a receive thread — so
+    // the unguarded find here walked `conns_` mid-rebalance and could return a node
+    // `remove_connection` was erasing. `make_connection` publishes creation liveness from
+    // inside its own locked section via `set_link_state_locked`, which is why the fix is a
+    // split: `ctl_m_` is non-recursive, so it cannot re-enter through this wrapper.
+    const std::lock_guard ctl(ctl_m_);  // ADR-0063 §3 control-plane serialization
+    return set_link_state_locked(name, state);
+}
+
+/** @brief `set_link_state`'s body, for a caller that already holds `ctl_m_`. */
+result_t<void> transport_vertex_t::set_link_state_locked(std::string_view name,
+                                                         link_state_t state) {
     const auto it = conns_.find(name);
     if (it == conns_.end()) return std::unexpected(status_t::NOT_FOUND);
     // A write to the vertex value bumps write_seq_ + delivers to subscribers (RFC-0008
-    // §D) — so await(/net/<name>) fires and a subscribe streams the transition.
+    // §D) — so await(/net/<name>) fires and a subscribe streams the transition. Reached
+    // under `ctl_m_`, which is the head of the declared lock order (this → fwd_router_t
+    // ctl_m_ → graph_t map_mutex_ → the vertex stripe), so descending into the graph from
+    // here takes the locks in that order and never against it.
     return graph_.write(it->second.vertex, link_state_value(state));
 }
 
