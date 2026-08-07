@@ -573,12 +573,20 @@ void test_spec_dial_trust_keys() {
     (void)net_b.register_module("webtransport-server", "webtransport",
                                 tr::net::conn_role_t::LISTEN);
 
+    // 4716x, not 4715x: 47151 is bound wildcard by transport_vertex_test.cpp's udp listener,
+    // and both bind INADDR_ANY, so under `ctest -j` in a LIBTRACER_WITH_QUIC=ON build whichever
+    // lost the race reddened. 47155-47199 carry no other hardcoded port in the tree.
+    // The hardcoded pattern itself is the weaker shape — transport_alloc_softfail_test.cpp:729
+    // records why it moved to EPHEMERAL ports (a hardcoded pair makes the binary non-reentrant,
+    // so two concurrent copies cross-deliver). These five need a port the dialer can name up
+    // front, so they stay fixed for now; moving them to bind-then-read-back is tracked
+    // separately.
     bool listening = true;
-    for (const auto& [nm, port] : {std::pair<const char*, std::uint16_t>{"l1", 47150},
-                                   {"l2", 47151},
-                                   {"l3", 47152},
-                                   {"l4", 47153},
-                                   {"l5", 47154}}) {
+    for (const auto& [nm, port] : {std::pair<const char*, std::uint16_t>{"l1", 47160},
+                                   {"l2", 47161},
+                                   {"l3", 47162},
+                                   {"l4", 47163},
+                                   {"l5", 47164}}) {
         const auto w = node_b.write(
             path_t("/net:children[]"),
             conn_spec("listener", nm, tr::net::conn_role_t::LISTEN, port, {}, g_cert, g_key));
@@ -590,7 +598,7 @@ void test_spec_dial_trust_keys() {
     //    nothing, the session is REFUSED. This write SUCCEEDED before the fix.
     const auto plain =
         node_a.write(path_t("/net:children[]"),
-                     conn_spec("client", "verify", tr::net::conn_role_t::DIAL, 47150, "127.0.0.1"));
+                     conn_spec("client", "verify", tr::net::conn_role_t::DIAL, 47160, "127.0.0.1"));
     check(!plain.has_value() && plain.error() == tr::graph::status_t::NOT_FOUND,
           "A: a SPEC dial carrying no trust key is REFUSED — the peer cert does not validate");
     check(router_a.registry().by_name("net/webtransport-client/verify") == nullptr,
@@ -598,26 +606,26 @@ void test_spec_dial_trust_keys() {
 
     // 2. `insecure = 1` — the explicit DEV-ONLY opt-out reaches the dialer.
     const auto insec = node_a.write(path_t("/net:children[]"),
-                                    conn_spec("client", "insec", tr::net::conn_role_t::DIAL, 47151,
+                                    conn_spec("client", "insec", tr::net::conn_role_t::DIAL, 47161,
                                               "127.0.0.1", {}, {}, {}, {}, true));
     check(insec.has_value(), "A: `insecure = 1` connects to that same unvalidatable peer");
 
     // 3. `ca = <the peer's own cert>` — verification stays ON, against a private bundle.
     const auto with_ca = node_a.write(path_t("/net:children[]"),
-                                      conn_spec("client", "ca", tr::net::conn_role_t::DIAL, 47152,
+                                      conn_spec("client", "ca", tr::net::conn_role_t::DIAL, 47162,
                                                 "127.0.0.1", {}, {}, {}, g_cert));
     check(with_ca.has_value(), "A: `ca = <the peer's cert>` connects with verification ON");
 
     // 4. `insecure = 0` is the explicit "verify" spelling, not a weaker opt-out.
     const auto zero = node_a.write(path_t("/net:children[]"),
-                                   conn_spec("client", "zero", tr::net::conn_role_t::DIAL, 47153,
+                                   conn_spec("client", "zero", tr::net::conn_role_t::DIAL, 47163,
                                              "127.0.0.1", {}, {}, {}, {}, false));
     check(!zero.has_value(), "A: `insecure = 0` still verifies — the dial is REFUSED");
 
     // 5. `ca = <an UNRELATED bundle>` — the bundle is genuinely consulted, not
     //    merely accepted: one that does not certify this peer still refuses.
     const auto wrong_ca = node_a.write(
-        path_t("/net:children[]"), conn_spec("client", "wrongca", tr::net::conn_role_t::DIAL, 47154,
+        path_t("/net:children[]"), conn_spec("client", "wrongca", tr::net::conn_role_t::DIAL, 47164,
                                              "127.0.0.1", {}, {}, {}, g_other_cert));
     check(!wrong_ca.has_value(), "A: `ca = <an unrelated CA>` is REFUSED — the bundle is applied");
 }
