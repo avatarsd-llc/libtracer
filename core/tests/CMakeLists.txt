@@ -288,6 +288,28 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     set_tests_properties(httpd_ws_session_identity
         PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
+    # #944 — the TX WORK SLOT's lifetime, on the same fake. The event the three suites
+    # above never spend is the one the fake already models: an enqueue DROPPED inside
+    # lwIP while httpd_queue_work still returns ESP_OK (set_queue_capacity). The work
+    # item never runs, and it used to be the only thing that could release the slot it
+    # had claimed — four of those and the pool was dead for the rest of the boot.
+    add_executable(httpd_ws_tx_strand_test
+        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_tx_strand_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
+    target_include_directories(httpd_ws_tx_strand_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(httpd_ws_tx_strand_test PRIVATE libtracer)
+    target_link_options(httpd_ws_tx_strand_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    libtracer_test_warnings(httpd_ws_tx_strand_test)
+    add_test(NAME httpd_ws_tx_strand COMMAND httpd_ws_tx_strand_test)
+    # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
+    # every case here constructs an adopting link — same exemption as the suites above.
+    set_tests_properties(httpd_ws_tx_strand
+        PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+
     # #900 + #901 — the WS *CLIENT* link's receive path, on the same construction: the
     # chip TU (integrations/esp-idf/libtracer/esp_ws_client_link.cpp) compiled against a
     # host fake of esp_transport_ws's frame stream and esp_pthread's stack-sizing seam.

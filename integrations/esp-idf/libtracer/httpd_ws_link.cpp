@@ -479,15 +479,87 @@ struct httpd_ws_link_t::tx_work_t {
 };
 
 /**
- * @brief One pre-allocated TX work slot: claimed lock-free (a CAS on @ref busy) by
+ * @brief The lifecycle of one TX pool slot — and the whole of why a stranded work item
+ *        cannot corrupt anything (#944).
+ *
+ * A single `busy` flag could not express this. `httpd_queue_work` on the default
+ * non-blocking path is a bare `sendto` to the loopback control socket, so an enqueue past
+ * the receiver's UDP mbox is DROPPED inside lwIP while `sendto` — and therefore
+ * `httpd_queue_work` — still returns ESP_OK (httpd_main.c; the same fact the close path
+ * was routed around with `shutdown`, see @ref httpd_ws_link_t::condemn). The work item
+ * then never runs, and `busy` was cleared ONLY by the work item: the slot was pinned for
+ * the rest of the boot, and four such drops killed the pool outright.
+ *
+ * Reclaiming a pinned slot is only safe if a work item that arrives AFTER the reclaim is
+ * harmless, and the state machine is what makes it so — WITHOUT any identity token. A
+ * pooled work item lives INSIDE its slot (@ref httpd_ws_link_t::tx_slot_t::work), so it
+ * cannot carry a generation the way @ref httpd_ws_link_t::session_ref_t does for its
+ * destination: a re-claim overwrites the very field the check would read. So the item
+ * carries no identity at all and is treated as a bare TOKEN meaning "go send whatever is
+ * armed in slot i". A token that arrives late either finds nothing armed (it returns,
+ * touching nothing) or finds a LATER frame armed and sends that one — correctly, because
+ * a payload and the destination it was gathered for are armed together and travel
+ * together. Every armed payload is therefore sent by exactly one token, and no token can
+ * ever observe a half-written slot.
+ *
+ * The two exclusive states are the load-bearing ones: CLAIMED and RUNNING both mean "one
+ * task owns this slot outright", so neither a claim, nor a reap, nor a token can touch a
+ * slot another is inside. ARMED is the only state either a token or the reaper may take.
+ *
+ * @note This says NOTHING about #1013, and must not be read as if it did. A payload and
+ *       the @ref httpd_ws_link_t::session_ref_t it was gathered for are written into the
+ *       slot together and armed by the same release, so a token always sends a frame to
+ *       the destination THAT frame was resolved for — a reclaim never crosses the two. The
+ *       [resolve -> mint] window on the directed path is upstream of every state here (it
+ *       is already closed, or already lost, before a slot is ever claimed) and is neither
+ *       widened nor narrowed by any of this.
+ */
+enum class tx_state_t : std::uint8_t {
+    FREE,    /**< @brief Unclaimed — the one state @ref claim_tx_slot may take. */
+    CLAIMED, /**< @brief Owned outright by one task: filling it, or reaping it. */
+    ARMED,   /**< @brief Payload complete, a token enqueued for it. Runnable, reapable. */
+    RUNNING  /**< @brief A token is inside the send. Never claimable, never reapable. */
+};
+
+/**
+ * @brief One pre-allocated TX work slot: claimed lock-free (a CAS on @ref state) by
  *        any sending task in @ref claim_tx_slot, released by the httpd task once
  *        its send drains (@ref release_tx_work) — so a steady-state send allocates
  *        nothing. The pool (kTxPoolSlots of these) is allocated once per link.
  */
 struct httpd_ws_link_t::tx_slot_t {
-    std::atomic<bool> busy{false};        /**< @brief Claimed flag (acquire/release). */
+    std::atomic<tx_state_t> state{tx_state_t::FREE}; /**< @brief See @ref tx_state_t. */
+    /**
+     * @brief When @ref arm published this slot's payload — the reaper's only input.
+     *
+     * Written while the slot is CLAIMED (owned outright, so no atomic is needed) and
+     * read only after a CAS has taken it back to CLAIMED, so it is never read by a task
+     * that does not own the slot and an ABA between the read and the decision is
+     * impossible by construction.
+     */
+    std::chrono::steady_clock::time_point armed_at{};
     tx_work_t work;                       /**< @brief The slot's embedded work item. */
     std::byte inline_buf[kTxInlineBytes]; /**< @brief Inline payload storage. */
+
+    /** @brief Publish the filled payload and open the slot to tokens (CLAIMED -> ARMED). */
+    void arm() noexcept {
+        armed_at = std::chrono::steady_clock::now();
+        state.store(tx_state_t::ARMED, std::memory_order_release);
+    }
+    /**
+     * @brief Take an armed payload back for the owning task (ARMED -> CLAIMED).
+     *
+     * @retval false  A token got there first and is inside the send — the slot is its
+     *                property now, and the caller must NOT recycle it. Rare but real:
+     *                a token stranded by an earlier claim of this same slot can fire in
+     *                the window between @ref arm and a refused enqueue, and releasing
+     *                the slot under it would hand a live send's buffer to a new claimant.
+     */
+    [[nodiscard]] bool disarm() noexcept {
+        tx_state_t expected = tx_state_t::ARMED;
+        return state.compare_exchange_strong(expected, tx_state_t::CLAIMED,
+                                             std::memory_order_acquire);
+    }
 };
 
 /**
@@ -640,6 +712,13 @@ void httpd_ws_link_t::alloc_buffers() {
     // link still works — every frame just takes the per-frame heap fallback path.
     rx_scratch_.reset(new (std::nothrow) std::byte[kRxScratchBytes]);
     tx_pool_.reset(new (std::nothrow) tx_slot_t[kTxPoolSlots]);
+    // Bind each slot to its embedded work item ONCE, here, and never again. A claim must
+    // not write this field: a token that arrives late reads `work->slot` before it has
+    // proved anything (that is how it finds the state word to prove it WITH), so a
+    // concurrent claimer storing the same value into it would be a plain data race for no
+    // gain. The back-pointer is a property of the slot, not of the claim.
+    if (tx_pool_ != nullptr)
+        for (std::size_t i = 0; i < kTxPoolSlots; ++i) tx_pool_[i].work.slot = &tx_pool_[i];
 }
 
 httpd_ws_link_t::tx_slot_t* httpd_ws_link_t::claim_tx_slot() {
@@ -648,18 +727,76 @@ httpd_ws_link_t::tx_slot_t* httpd_ws_link_t::claim_tx_slot() {
     // pushers keep sending until the router detaches the transport). The heap fallback
     // they get instead never touches the pool, so it is safe to run past the dtor.
     if (tx_pool_ == nullptr || stopping_.load(std::memory_order_relaxed)) return nullptr;
-    for (std::size_t i = 0; i < kTxPoolSlots; ++i) {
-        bool expected = false;
-        if (tx_pool_[i].busy.compare_exchange_strong(expected, true, std::memory_order_acquire))
-            return &tx_pool_[i];
+    for (int pass = 0; pass < 2; ++pass) {
+        for (std::size_t i = 0; i < kTxPoolSlots; ++i) {
+            tx_state_t expected = tx_state_t::FREE;
+            if (tx_pool_[i].state.compare_exchange_strong(expected, tx_state_t::CLAIMED,
+                                                          std::memory_order_acquire))
+                return &tx_pool_[i];
+        }
+        // Exhausted. THIS is the reclaim trigger, and deliberately the only one: a strand
+        // costs nothing until the pool runs out, and reclaiming on demand needs no timer
+        // task, no periodic wakeup, and not one instruction in the steady state. A second
+        // pass then re-scans whatever the sweep freed; if it frees nothing the caller
+        // heap-falls-back exactly as before, so a genuinely busy pool is unaffected.
+        if (pass == 0) sweep_tx_slots();
     }
     return nullptr;  // every slot in flight this instant — caller heap-falls-back
+}
+
+/**
+ * @brief Reclaim TX pool slots whose work item the control socket silently binned (#944).
+ *
+ * @note Unrelated to @ref httpd_ws_link_t::reclaim_slot despite the shared verb: that one
+ *       recycles a departed PEER's session slot and fires the routing plane's eviction
+ *       notifier (the lock-ordering question #960 raises about it is untouched here). This
+ *       one recycles a TX work slot, holds no mutex, and notifies nothing.
+ */
+void httpd_ws_link_t::sweep_tx_slots() {
+    // The window: every OTHER slot in the pool ahead of you, each stalled to this link's
+    // full per-socket send bound. Both factors are facts already in hand — the pool size
+    // caps how many items of ours can precede one in the control queue, and
+    // send_timeout_ms_ (itself derived, see derive_send_timeout_ms) caps how long the
+    // httpd task can spend on any one of them — so there is no millisecond literal and no
+    // knob. At the default peer cap the product is exactly one kTaskWdtSeconds window,
+    // which is the system's own statement of how long a task may go unserviced.
+    //
+    // A link with no send bound of its own has nothing to derive a drain latency FROM, so
+    // it declares nothing stranded rather than inventing a number.
+    if (send_timeout_ms_ == 0) return;
+    const auto window = std::chrono::milliseconds(kTxPoolSlots * send_timeout_ms_);
+    const auto now = std::chrono::steady_clock::now();
+    for (std::size_t i = 0; i < kTxPoolSlots; ++i) {
+        tx_slot_t& slot = tx_pool_[i];
+        // Take the slot OUT of ARMED before looking at its clock, never the other way
+        // round: after this CAS wins the slot is ours outright, so the timestamp cannot
+        // belong to a different arm than the one being judged. Reading the clock first and
+        // reaping second is the ABA that would drop a freshly armed frame. A slot that is
+        // FREE, being filled, or inside a send fails the CAS and is not the sweep's
+        // business — RUNNING especially: that token is reading this payload right now.
+        if (!slot.disarm()) continue;
+        if (now - slot.armed_at < window) {
+            slot.arm();  // young: put it back exactly as its claimer left it
+            continue;
+        }
+        // Past every drain latency this link can itself produce, and still armed: the
+        // token was enqueued with ESP_OK and silently binned by lwIP. Recycle the slot.
+        // A token that turns up afterwards is harmless by construction (see tx_state_t) —
+        // it finds this slot FREE, or armed with a LATER frame it will send correctly.
+        const std::size_t lost = slot.work.len;  // read while the slot is still OURS
+        slot.work.owned.reset();
+        slot.work.payload = nullptr;
+        slot.state.store(tx_state_t::FREE, std::memory_order_release);
+        const std::uint32_t total = tx_strands_.fetch_add(1, std::memory_order_relaxed) + 1;
+        ESP_LOGW(kTag, "tx slot reclaimed: work item never ran (len=%u total=%u)", (unsigned)lost,
+                 (unsigned)total);
+    }
 }
 
 void httpd_ws_link_t::release_tx_work(tx_work_t* work) {
     if (work->slot != nullptr) {
         work->owned.reset();  // drop an overflow heap payload before the slot recycles
-        work->slot->busy.store(false, std::memory_order_release);
+        work->slot->state.store(tx_state_t::FREE, std::memory_order_release);
     } else {
         delete work;
     }
@@ -698,11 +835,16 @@ httpd_ws_link_t::~httpd_ws_link_t() {
     // Owning mode needs no wait: httpd_stop has halted the task, so nothing can touch
     // the pool afterwards (an undrained work item is simply never run).
     if (!owns_httpd_ && tx_pool_ != nullptr) {
+        // Deliberately NOT swept: the sweep recycles a stranded slot for REUSE, which is
+        // sound only while the pool stays allocated. Here the pool is about to be freed,
+        // and a token arriving afterwards would read freed memory rather than a recycled
+        // slot — so the expiry below keeps the leak-instead-of-free answer it always had.
         bool busy = true;
         for (int turn = 0; turn < kDrainTurns && busy; ++turn) {
             busy = false;
             for (std::size_t i = 0; i < kTxPoolSlots; ++i)
-                if (tx_pool_[i].busy.load(std::memory_order_acquire)) busy = true;
+                if (tx_pool_[i].state.load(std::memory_order_acquire) != tx_state_t::FREE)
+                    busy = true;
             if (busy) std::this_thread::sleep_for(std::chrono::milliseconds(kDrainSliceMs));
         }
         if (busy) {
@@ -1236,7 +1378,6 @@ void httpd_ws_link_t::queue_send(const session_ref_t& to,
         work->gate = gate_;
         work->to = to;
         work->len = total;
-        work->slot = slot;
         if (total <= kTxInlineBytes) {
             dst = slot->inline_buf;
         } else {
@@ -1265,8 +1406,22 @@ void httpd_ws_link_t::queue_send(const session_ref_t& to,
             if (!part.empty()) std::memcpy(p, part.data(), part.size());
             p += part.size();
         }
+        // Publish the filled payload BEFORE the enqueue: the token may run the instant
+        // httpd_queue_work posts it, and a token that finds the slot still CLAIMED would
+        // conclude it has nothing to send. Everything the token reads was written above,
+        // so the release here is what makes it visible (see tx_state_t).
+        if (work->slot != nullptr) work->slot->arm();
         queued = httpd_queue_work(handle_, &httpd_ws_link_t::tx_work, work) == ESP_OK;
-        if (!queued) release_tx_work(work);  // could not enqueue — recycle/free, no leak
+        if (!queued) {
+            // A REFUSED enqueue — visible, and the one this path always handled. Take the
+            // payload back before recycling: disarm failing means a token stranded by an
+            // earlier claim of this slot fired in the window just above and is inside the
+            // send, so the frame IS going out and the slot belongs to that token.
+            if (work->slot == nullptr || work->slot->disarm())
+                release_tx_work(work);  // could not enqueue — recycle/free, no leak
+            else
+                queued = true;
+        }
     }
     // A frame that never reached the queue is charged to the LINK, not to this peer: a
     // refused enqueue is evidence about the shared control queue, and under #835's shape
@@ -1280,6 +1435,16 @@ void httpd_ws_link_t::queue_send(const session_ref_t& to, std::span<const std::b
     const std::span<const std::byte> one[] = {frame};
     queue_send(to, std::span<const std::span<const std::byte>>(one));
 }
+
+std::size_t httpd_ws_link_t::tx_slots_busy() const noexcept {
+    if (tx_pool_ == nullptr) return 0;
+    std::size_t busy = 0;
+    for (std::size_t i = 0; i < kTxPoolSlots; ++i)
+        if (tx_pool_[i].state.load(std::memory_order_relaxed) != tx_state_t::FREE) ++busy;
+    return busy;
+}
+
+std::size_t httpd_ws_link_t::tx_slot_capacity() noexcept { return kTxPoolSlots; }
 
 void httpd_ws_link_t::note_enqueue_drop(int fd, std::size_t bytes) {
     const std::uint32_t total = enqueue_drops_.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -1475,6 +1640,21 @@ void httpd_ws_link_t::note_send_desync(session_t* slot, std::size_t written, std
 
 void httpd_ws_link_t::tx_work(void* arg) {
     auto* const work = static_cast<tx_work_t*>(arg);
+    // Take ownership of the slot's armed payload, or do nothing at all. A pooled item is a
+    // TOKEN, not a frame: it says "send whatever slot i has armed", because it lives inside
+    // that slot and cannot carry an identity a re-claim would not overwrite (see
+    // tx_state_t). Winning this CAS is what makes every field below safe to read — it pairs
+    // with the release in tx_slot_t::arm — and losing it is the whole reason a reclaimed
+    // slot is harmless: the token simply has no work, and returns without touching one
+    // byte of a slot that is now somebody else's. `work->slot` is stable for the link's
+    // life (bound once in alloc_buffers; the abandon path leaks the pool rather than
+    // freeing it, exactly so this stays true).
+    if (work->slot != nullptr) {
+        tx_state_t expected = tx_state_t::ARMED;
+        if (!work->slot->state.compare_exchange_strong(expected, tx_state_t::RUNNING,
+                                                       std::memory_order_acquire))
+            return;
+    }
     // Resolve the destination SESSION back to a socket, and refuse to invent one. This is
     // the checkpoint the old bare-fd path had no way to pass: it asked
     // `httpd_ws_get_fd_info(handle, fd)`, which answers "some websocket lives at this
