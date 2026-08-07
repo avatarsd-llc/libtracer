@@ -614,8 +614,8 @@ ANCHORS = [
      'listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);'),
     ('core/src/transport_ws.cpp:406', 'std::array<std::byte, 4096> chunk;',
      'void transport_ws_server::service_peer(session_t& s) {'),
-    ('core/src/transport_ws.cpp:750', 'std::array<std::byte, 4096> chunk;',
-     'void transport_ws_client::serve(int fd) {'),
+    ('core/src/transport_ws.cpp:771', 'std::array<std::byte, 4096> chunk;',
+     'void transport_ws_client::serve(int fd, std::vector<std::byte> pipelined) {'),
     # core/tests/registry_teardown_test.cpp
     ('core/tests/registry_teardown_test.cpp:289', 'void test_digest_paths_agree() {'),
     # core/tests/tlv_arena_test.cpp
