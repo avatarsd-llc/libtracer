@@ -16,6 +16,33 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **`vertex_ext_t::acl_cache_dirty` is REMOVED; ACL-cache validity is now the parity of
+  `vertex_ext_t::acl_gen` (#880, [ADR-0078](../docs/adr/0078-acl-cache-coherence-is-a-published-generation-stamp-not-a-dirty-flag.md)).**
+  The effective-ACE merge was guarded by a `{acl_gen, acl_cache_dirty}` pair: invalidators
+  bumped the counter and stored the boolean **lock-free**, while the rebuilder cleared that
+  same boolean under the stripe lock. A mark landing between the rebuilder's generation
+  recheck and its clear was therefore **overwritten** — the cache stayed flagged clean over
+  a pre-write ancestor chain, and every later `acl_allows` on that vertex evaluated the
+  stale merge until the next `:acl` mutation anywhere in the chain. On the authorization
+  path that is a revoked policy that keeps being enforced, in whichever direction the stale
+  merge happens to point. Validity is now derived from the counter alone: `acl_gen` **odd**
+  means the merge is stale, **even** means `eff_aces` is the merge published for exactly
+  that value. Every invalidator advances it to the next odd value with one lock-free CAS,
+  and the rebuilder publishes with `compare_exchange_strong(snapshot, snapshot + 1)` — so
+  the recheck and the publish are the SAME atomic operation and there is no second store to
+  lose. `acl_gen` starts at `1` (was `0`), a never-built cache being stale. The evaluation
+  fast path stays at ONE atomic load plus a parity test, which is what the removed boolean
+  cost — a separate stamp word measured ~1 % slower on the `acl-inherit-d4` gate bench and
+  was rejected for it (ADR-0078 Erratum 1); the shipped form measures ~1 % *faster* than
+  the pre-fix baseline, and `vertex_ext_t` loses 4 bytes. `vertex_t`'s verbs (`set_acl`,
+  `mark_acl_cache_dirty`, `with_effective_aces`) keep their names and signatures; the
+  removed `vertex_ext_t` field is the only source-visible change. The new
+  `invalidate_acl_cache` helper that carries the counter advance is **private** — the
+  adversarial pass caught it landing in `vertex_t`'s public section, which would have made
+  that sentence false; nothing outside `vertex_t` calls it, and the build confirms it.
+  Regression:
+  `core/tests/acl_cache_race_test.cpp`, an ancestor `:acl` rewriter racing a descendant's
+  gated evaluation.
 - **`graph::parse_acl` rejects the non-canonical width, pairing and key shapes that used to
   read leniently (#906).** Not *every* shape the builder never emits — a two-byte
   `access_mask` and a non-canonical key ordering are both unemitted and both still parse, on

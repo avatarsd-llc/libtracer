@@ -53,7 +53,7 @@ lock at all** (#635): it copies the vertex's PUBLISHED, immutable-after-publish 
 every vertex that merely hashed to the same stripe — ×16.6 at twenty-four threads
 ([ADR-0075](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0075-a-vertexs-edges-are-published-and-read-under-an-edge-pin.md)). It
 still serializes writer-vs-writer on the control plane, where a mutation builds the new array
-and swaps it in (`vertex.hpp:2625`); the displaced array is scanned and freed on the mutator's
+and swaps it in (`vertex.hpp:2627`); the displaced array is scanned and freed on the mutator's
 own thread, outside the lock, once no participant announces it (`vertex.hpp:952`).
 
 It reaches that call only when something subscribes here. `fan_out` opens on
@@ -79,7 +79,7 @@ thread-local vector's capacity and so allocates nothing either.
 
 `own_subs()` is read without the lock, so the width it reports can be stale.
 That costs nothing but a re-read: **`snapshot_edges` re-checks the width against the published
-array** (`graph.cpp:987-988`, `vertex.hpp:2678`), so a subscriber added between the count and
+array** (`graph.cpp:987-988`, `vertex.hpp:2680`), so a subscriber added between the count and
 the copy costs at most one fallback allocation on the small path and never a wrong answer. Re-entrancy is
 handled by a `tls_busy` flag: a subscriber callback that re-publishes takes the local-buffer
 path, so the outer fan-out's thread-local buffer is never aliased, and the flag resets on scope
@@ -87,7 +87,7 @@ exit (`graph.cpp:994-1018`).
 
 Both allocations inside the snapshot are nothrow. An unreservable overflow vector degrades the
 snapshot to the first `kInlineFanout` views and drops the rest of that delivery; an edge whose
-owning copies cannot be cloned is skipped, dropping that one delivery (`vertex.hpp:2684-2699`).
+owning copies cannot be cloned is skipped, dropping that one delivery (`vertex.hpp:2686-2701`).
 Neither can abort. A thread that cannot claim a pin cell — more concurrent publishers than
 `kEdgePinSlots` — copies the current array under the stripe mutex instead, which is the
 pre-#635 path for those threads and nobody else; correctness never depends on the constant.
@@ -219,8 +219,8 @@ struct delivery_drops_t {
 | `denied` | the target's `:acl` denied WRITE to the **edge's stored caller**, not the writer's | `graph.cpp:909-912` |
 | `out_of_memory` | the nothrow delivery clone could not be allocated | `graph.cpp:921-924` |
 | `out_of_memory` | a HANDLER write's notify clone failed — the WHOLE fan-out is shed, one count per subscriber | `graph.cpp:1113` |
-| `out_of_memory` | an edge's owning copies (link NAME / stored caller) could not be allocated, so the snapshot skipped it | `vertex.hpp:2695` |
-| `fan_out_truncated` | the wide-fan-out overflow buffer could not be reserved, so every edge past the inline prefix was abandoned | `vertex.hpp:2690` |
+| `out_of_memory` | an edge's owning copies (link NAME / stored caller) could not be allocated, so the snapshot skipped it | `vertex.hpp:2697` |
+| `fan_out_truncated` | the wide-fan-out overflow buffer could not be reserved, so every edge past the inline prefix was abandoned | `vertex.hpp:2692` |
 
 The last three were **uncounted until #896**, and the handler one is why that mattered: it sheds
 every subscriber of the vertex and still returns success, so `delivery_drops()` — the only thing
