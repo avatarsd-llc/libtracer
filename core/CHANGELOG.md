@@ -74,6 +74,29 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **`fwd_router_t::advertise` now REUSES the label already bound to an identical route
+  instead of minting a fresh one per call (#913).** Both of the router's label-minting sites
+  — this producer door and `on_advertise`'s mid-chain forwarding arm — called
+  `route_handle_t::alloc_label` + `record_egress` unconditionally, with no reuse scan. Since
+  re-advertising *is* the RFC-0004 §E.1 self-heal, a peer drives that path as often as its
+  link flaps, and every cycle consumed one more of the link's 16-bit labels and appended one
+  more egress entry. Neither is reclaimed individually: only a whole-link `clear_link` gives
+  them back, so a reconnect loop walked a long-lived node to label exhaustion (permanent loss
+  of compaction) and its egress table to `max_bindings_per_link`. Both sites now go through
+  `route_handle_t::ensure_egress`, the primitive `deliver_remote` already used, which finds
+  the label for an identical route under the egress table's own lock and mints only for a
+  genuinely new route. The bound therefore comes from the route set the peer actually
+  advertises, not from a cap on how often it may re-advertise. **Observable change:** repeated
+  `advertise(link, route)` calls for the same route return the SAME label rather than
+  successive ones; a new route still mints. The ADVERTISE frame still goes out on every call,
+  so no peer sees a behaviour change and the wire is untouched. Minting and recording in one
+  critical section also retires the old pair's split outcome — a label minted, then burned for
+  nothing when the record was refused — and, because the reuse scan runs ahead of the table
+  bound, a re-advertise of an ESTABLISHED flow now survives a full egress table.
+  `core/tests/fwd_readvertise_reuse_test.cpp` counts the state: 51 identical re-advertise
+  cycles left 51 distinct labels and 51 egress entries at every node of a two-hop chain, and
+  now leave 1.
+
 - **`vertex_ext_t::acl_cache_dirty` is REMOVED; ACL-cache validity is now the parity of
   `vertex_ext_t::acl_gen` (#880, [ADR-0078](../docs/adr/0078-acl-cache-coherence-is-a-published-generation-stamp-not-a-dirty-flag.md)).**
   The effective-ACE merge was guarded by a `{acl_gen, acl_cache_dirty}` pair: invalidators

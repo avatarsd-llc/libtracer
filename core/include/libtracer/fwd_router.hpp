@@ -480,15 +480,15 @@ class fwd_router_t {
     /**
      * @brief Advertise a `label ↔ route` binding over link @p link_name (producer side).
      *
-     * Allocates a fresh per-link label, sends an ADVERTISE carrying it and @p route,
-     * and records the egress binding (so a NACK can re-advertise). Call when a
-     * compact-flagged flow starts or on (re)connect — re-advertising is the self-heal.
+     * Sends an ADVERTISE carrying @p route and records the egress binding (so a NACK can
+     * re-advertise). Call when a compact-flagged flow starts or on (re)connect — re-advertising
+     * IS the self-heal, and the label is minted once per `(link, route)` then REUSED (#913): the
+     * frame goes out on every call, but a re-advertise loop grows no label or table state.
      * @param link_name  This node's NAME for the downstream link to advertise over.
      * @param route_path A complete PATH TLV's bytes — the delivery route to alias.
-     * @return The allocated label (to stamp on subsequent @ref send_compact), or 0 if
-     *         @p link_name names no child, or if that link's 16-bit label space is
-     *         exhausted (`route_handle_t::alloc_label` saturates rather than wrapping onto
-     *         a live label — #603). No ADVERTISE is sent in either case.
+     * @return The label to stamp on subsequent @ref send_compact, or 0 if @p link_name names no
+     *         child, or that link's label space is exhausted / its egress table full (#603 —
+     *         see `route_handle_t::ensure_egress`). No ADVERTISE is sent in either case.
      */
     std::uint16_t advertise(std::string_view link_name, std::span<const std::byte> route_path);
 
