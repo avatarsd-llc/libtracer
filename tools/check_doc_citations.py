@@ -905,6 +905,12 @@ def _repin_spec(spec: str, lookup) -> tuple:
             continue
         lo = int(ends[0])
         hi = int(ends[1]) if len(ends) > 1 and ends[1].isdigit() else None
+        # Whatever follows the `lo-hi` tokens, preserved verbatim. `[\d,\-]+` is greedy,
+        # so unbackticked prose like `graph.cpp:12-20-style` is captured as the spec
+        # `12-20-`; rebuilding the range as f"{lo}-{hi}" alone DROPS that trailing hyphen
+        # and silently edits the sentence. The single-line branch below already preserves
+        # its `tail`; the range branch has to preserve its own.
+        rest = part[len(ends[0]) + 1 + len(ends[1]):] if hi is not None else ""
         # The scanner reads an implausible span as a parse artifact (a hyphenated word
         # beside a citation) and pins only its head. The re-pin cannot tell that apart
         # from a genuinely wide span, and it must not rewrite prose — so it moves
@@ -930,7 +936,7 @@ def _repin_spec(spec: str, lookup) -> tuple:
             held.append(hi)
             parts.append(part)
             continue
-        parts.append(f"{new_lo}-{new_hi}")
+        parts.append(f"{new_lo}-{new_hi}{rest}")
         moves += [(a, b) for a, b in ((lo, new_lo), (hi, new_hi)) if a != b]
     return ",".join(parts), moves, held
 

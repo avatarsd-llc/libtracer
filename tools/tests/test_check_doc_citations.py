@@ -304,6 +304,18 @@ class RepinRangeTest(unittest.TestCase):
         self.assertEqual(repinned("`graph.cpp:12-900`", {GRAPH: {12: 16}}), "`graph.cpp:12-900`")
         self.assertEqual(held("`graph.cpp:12-900`", {GRAPH: {12: 16}}), [(GRAPH, 12)])
 
+    def test_a_trailing_hyphen_fragment_survives_the_rewrite(self):
+        # `[\d,\-]+` is greedy, so unbackticked prose like `graph.cpp:12-20-style` is
+        # captured with the spec `12-20-`. Rebuilding the range as f"{lo}-{hi}" alone
+        # drops that trailing hyphen and silently edits the sentence to `16-24style`.
+        # The single-line branch already preserves its tail; the range branch must too.
+        m = {GRAPH: {12: 16, 20: 24}}
+        self.assertEqual(repinned("graph.cpp:12-20-style", m), "graph.cpp:16-24-style")
+
+    def test_a_bare_trailing_hyphen_survives_the_rewrite(self):
+        m = {GRAPH: {12: 16, 20: 24}}
+        self.assertEqual(repinned("graph.cpp:12-20-", m), "graph.cpp:16-24-")
+
 
 class RepinCommaContinuationTest(unittest.TestCase):
     """`transport_ws.hpp:181,339` — a second line number after a comma."""
