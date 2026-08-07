@@ -298,11 +298,18 @@ add_test(NAME security_acl COMMAND security_acl_test)
 
 # ADR-0050 — the effective-ACL merge semantics (effective_acl_t, pure, synthetic ACE
 # lists) + the graph's cached merge: subtree-precise invalidation (ADR-0057 child
-# links) and the dirty-flag protocol under concurrent :acl rewrites (a TSan target).
+# links) and the ADR-0078 stamp protocol under concurrent :acl rewrites (a TSan target).
 add_executable(effective_acl_test effective_acl_test.cpp)
 target_link_libraries(effective_acl_test PRIVATE libtracer)
 libtracer_test_warnings(effective_acl_test)
 add_test(NAME effective_acl COMMAND effective_acl_test)
+
+# ADR-0078 (#880) — the ACL cache's published-generation stamp under a LOCK-FREE subtree
+# invalidation: an ancestor :acl rewriter racing a descendant's gated eval. A TSan target.
+add_executable(acl_cache_race_test acl_cache_race_test.cpp)
+target_link_libraries(acl_cache_race_test PRIVATE libtracer Threads::Threads)
+libtracer_test_warnings(acl_cache_race_test)
+add_test(NAME acl_cache_race COMMAND acl_cache_race_test)
 
 # #81-A — per-endpoint :acl structural storage (store/serve raw ACL TLV; no enforcement).
 add_executable(acl_test acl_test.cpp)

@@ -1109,21 +1109,21 @@ struct vertex_ext_t {
     std::vector<ace_t> aces;
     /** @brief The ADR-0050 cached effective-ACE merge (own + INHERIT-flagged ancestor ACEs,
      *         pre-merged in evaluation order); guarded by the vertex mutex, rebuilt lazily
-     *         when @ref acl_cache_dirty is raised. Only the MERGE is cached, never a
-     *         verdict — expiry evaluates at check time against the caller's now. */
+     *         whenever @ref acl_gen turns ODD. Only the MERGE is cached, never a verdict —
+     *         expiry evaluates at check time against the caller's now. */
     std::vector<ace_t> eff_aces;
-    /** @brief Raised ⇒ @ref eff_aces is stale (rebuild lazily; ADR-0050 cache protocol). */
-    std::atomic<bool> acl_cache_dirty{true};
-    /** @brief Monotonic `:acl`-mutation counter — bumped (ahead of @ref acl_cache_dirty) by
-     *         every writer that invalidates the merge (@ref vertex_t::set_acl,
-     *         @ref vertex_t::mark_acl_cache_dirty, placeholder revert). A lazy rebuild
-     *         (@ref vertex_t::with_effective_aces) snapshots it before the unlocked walk and,
-     *         back under the lock, publishes AND clears the dirty flag ONLY if the counter is
-     *         unchanged — so a rebuilder never publishes a stale/torn merge or clears over a
-     *         newer mark. 32-bit: wrapping needs 2^32 `:acl` writes DURING one rebuild walk
-     *         (physically impossible), and it packs into the padding after @ref
-     *         acl_cache_dirty so the merge cache costs no extra per-vertex bytes. */
-    std::atomic<std::uint32_t> acl_gen{0};
+    /** @brief `:acl`-invalidation counter AND cache-validity stamp in ONE word (ADR-0078):
+     *         ODD ⇒ @ref eff_aces is stale, EVEN ⇒ it is the merge published for exactly this
+     *         value. Every invalidator (@ref vertex_t::set_acl, the placeholder revert,
+     *         @ref vertex_t::mark_acl_cache_dirty) advances it lock-free to the next ODD
+     *         value; a rebuilder publishes by CAS-ing the value it snapshotted BEFORE its walk
+     *         to that value + 1, so an invalidation landing anywhere in the rebuild defeats
+     *         the CAS — there is no second word whose store could be lost. Folding the stamp
+     *         into the counter keeps the gate's fast path at ONE atomic load, exactly what the
+     *         retired dirty flag cost; a separate stamp word measured ~1% on `acl-inherit-d4`.
+     *         32-bit: a wrap onto a stale-but-EVEN value needs 2^31 `:acl` writes on ONE
+     *         vertex, unreachable at control-plane rates. Starts at 1 — never built ⇒ stale. */
+    std::atomic<std::uint32_t> acl_gen{1};
     /**
      * @brief STREAM ring depth — how many entries @ref history retains (RFC-0022 §3.C).
      *
@@ -2076,8 +2076,7 @@ class vertex_t {
             e->acl.clear();
             e->aces.clear();
             e->eff_aces.clear();
-            e->acl_gen.fetch_add(1, std::memory_order_release);
-            e->acl_cache_dirty.store(true, std::memory_order_release);
+            invalidate_acl_cache(*e);  // ADR-0078: nothing here a rebuilder can clobber
             e->history_keep_last = 1;
             e->pin_payload_ratio = 0;
             e->app.reset();
@@ -2112,15 +2111,15 @@ class vertex_t {
         e.aces = std::move(aces);
         // Lock-free bearing flag (#361 §3): the graph's nearest-bearing-ancestor walk
         // reads it without touching any stripe. Publish under the lock, before the
-        // dirty flag, same ordering discipline as the ACE list itself.
+        // generation bump, same ordering discipline as the ACE list itself.
         set_flag(flag_t::OWN_ACES, !e.aces.empty());
-        // Publish-then-mark (ADR-0050 cache protocol): the new ACEs are visible
-        // under m_ BEFORE the generation bump and dirty flag are raised, so a rebuild
-        // that observes the flag always reads the new list (or leaves the flag set for
-        // the next one). Bump the generation ahead of the flag so a rebuild in flight
-        // over the OLD list detects the write at publish and declines to clear.
-        e.acl_gen.fetch_add(1, std::memory_order_release);
-        e.acl_cache_dirty.store(true, std::memory_order_release);
+        // Publish-then-invalidate (ADR-0050 cache protocol, ADR-0078 counter): the new ACEs
+        // are visible under m_ BEFORE the counter turns odd, so a rebuild that observes the
+        // new value always reads the new list. Turning it odd is the WHOLE invalidation —
+        // there is no second flag a concurrent rebuilder could clear over it — and it also
+        // defeats the publish CAS of any rebuild already in flight over the OLD list, which
+        // is what stops a stale merge being stamped current.
+        invalidate_acl_cache(e);
     }
 
     /** @brief A copy of the stored raw `:acl` TLV bytes (empty ⇒ no `:acl` set). */
@@ -2148,24 +2147,41 @@ class vertex_t {
     }
 
     /**
-     * @brief Mark this vertex's cached effective-ACE merge stale (ADR-0050).
+     * @brief Mark this vertex's cached effective-ACE merge stale (ADR-0050/0078).
      *
      * Raised by the graph on every `:acl` write for the WRITTEN vertex's whole
      * subtree (subtree-precise invalidation via the ADR-0057 child links —
      * wiring-frequency); @ref set_acl raises it for the written vertex itself.
      * The next @ref with_effective_aces on a marked vertex rebuilds lazily.
-     * @note Lock-free (a release store) — callable under the graph's map lock
+     * @note Lock-free (one uncontended CAS) — callable under the graph's map lock
      *       during the subtree walk without touching any vertex mutex.
      */
     void mark_acl_cache_dirty() noexcept {
         // No extension block ⇒ no cached merge exists to invalidate; a block created
-        // later starts dirty, so a concurrent first-gated-op cannot miss this mark
+        // later starts stale, so a concurrent first-gated-op cannot miss this mark
         // (its rebuild reads ancestor ACEs already published before this walk).
         if (vertex_ext_t* e = ext_.load(std::memory_order_acquire)) {
-            // Bump the generation ahead of the flag (release), so a lazy rebuild racing
-            // this mark from an ancestor :acl write detects the change at publish.
-            e->acl_gen.fetch_add(1, std::memory_order_release);
-            e->acl_cache_dirty.store(true, std::memory_order_release);
+            // ADR-0078: advancing the counter is the ENTIRE mark. The
+            // `acl_cache_dirty.store(true)` that used to follow it could be clobbered by a
+            // rebuilder clearing that same flag, pinning a stale merge as clean FOREVER (#880).
+            invalidate_acl_cache(*e);
+        }
+    }
+
+    /**
+     * @brief Advance @p e's ACL-cache counter to the next ODD value — the whole of an
+     *        invalidation, and the only write to it outside a publish (ADR-0078).
+     * @note Lock-free and callable with NO vertex mutex held; that is the point, since the
+     *       subtree fan-out from an ancestor `:acl` write runs under only the graph's map lock.
+     */
+    static void invalidate_acl_cache(vertex_ext_t& e) noexcept {
+        // ALWAYS advance, even when the counter is already odd (already stale): a rebuilder
+        // that snapshotted the current odd value would otherwise still win its publish CAS and
+        // stamp a merge assembled BEFORE this mark as current. +1 from even, +2 from odd.
+        for (std::uint32_t g = e.acl_gen.load(std::memory_order_relaxed);;) {
+            if (e.acl_gen.compare_exchange_weak(g, g + 1 + (g & 1u), std::memory_order_release,
+                                                std::memory_order_relaxed))
+                break;
         }
     }
 
@@ -2173,26 +2189,24 @@ class vertex_t {
      * @brief Evaluate against this vertex's cached effective-ACE merge, rebuilding
      *        it first iff it is stale — the ADR-0050 cached-merge verb.
      *
-     * When the dirty flag is raised the generation is SNAPSHOTTED, this vertex's own
-     * parsed ACEs are SNAPSHOTTED, and @p rebuild runs with the stripe lock RELEASED
-     * (#361 §2): the graph's rebuild walks the immutable parent chain taking each
-     * ancestor's @ref with_aces — one stripe lock at a time, never nested — so an
-     * ancestor sharing this vertex's stripe cannot self-deadlock, and no cross-stripe
-     * ordering exists at all. The merge is then stored under a re-acquired lock, the
-     * flag is lowered only if the generation is unchanged, and @p eval runs over the
-     * cached list.
+     * Staleness is ONE bit of ONE word (ADR-0078): @ref vertex_ext_t::acl_gen is odd. When it
+     * is, that odd value and this vertex's own parsed ACEs are SNAPSHOTTED and @p rebuild runs
+     * with the stripe lock RELEASED (#361 §2) — the graph's rebuild walks the immutable parent
+     * chain taking each ancestor's @ref with_aces one stripe lock at a time, never nested, so
+     * an ancestor sharing this vertex's stripe cannot self-deadlock. Back under the lock the
+     * rebuilder publishes by CAS-ing that snapshot to snapshot + 1 (even), then @p eval runs.
      *
-     * Race resolution (rebuild vs concurrent `:acl` write): the writer publishes ACEs
-     * and BUMPS the generation BEFORE raising the flag (@ref set_acl / graph subtree
-     * mark). The flag is lowered AFTER the fresh merge is published and only when the
-     * generation is unchanged (#425): so `dirty == false` under the lock always means a
-     * published merge — a concurrent reader that still sees the flag raised rebuilds
-     * rather than evaluating a not-yet-populated (empty, open-by-default) cache, which
-     * would transiently allow a denied caller. A write landing during the unlocked
-     * rebuild window advances the generation, so the rebuilder declines to clear and the
-     * possibly-stale merge is rebuilt on the NEXT check; a stale-forever cache is
-     * impossible. Concurrent rebuilds may interleave; each stores a valid merge of some
-     * recent state, and the flag/generation protocol converges the cache.
+     * Race resolution (rebuild vs concurrent `:acl` write): every invalidator — @ref set_acl,
+     * the placeholder revert, the subtree mark an ancestor `:acl` write fans out (@ref
+     * mark_acl_cache_dirty) — advances that one counter via @ref invalidate_acl_cache after
+     * publishing its ACEs, lock-free, and does NOTHING else. The recheck and the publish are
+     * therefore the SAME atomic operation, so an invalidation landing anywhere in the rebuild
+     * defeats the CAS. That is the whole of the coherence argument, and it is what the retired
+     * `{acl_gen, acl_cache_dirty}` pair could not give: there they were two ops, and a mark
+     * landing between them was overwritten by `dirty = false`, pinning a stale merge as clean
+     * FOREVER (#880) — a revoked policy still enforced. A failed CAS also discards a `merged`
+     * that may be TORN across the write rather than answering from it. The one premise left is
+     * that the counter does not WRAP onto a stale-but-even value (@ref vertex_ext_t::acl_gen).
      *
      * @param rebuild `std::vector<ace_t>(const std::vector<ace_t>& own)` — the
      *                fresh merge over a snapshot of this vertex's own ACEs; runs
@@ -2208,39 +2222,25 @@ class vertex_t {
     template <typename Rebuild, typename Eval>
     auto with_effective_aces(Rebuild&& rebuild, Eval&& eval)
         -> decltype(eval(std::declval<const std::vector<ace_t>&>())) {
-        vertex_ext_t& e = ensure_ext();  // gated eval caches its merge here (fresh ⇒ dirty)
+        vertex_ext_t& e = ensure_ext();  // gated eval caches its merge here (fresh ⇒ stale)
         std::unique_lock lock(vertex_stripe_of(this).m);
-        // Generation-gated rebuild (#425). `acl_gen` is bumped — ahead of the dirty flag,
-        // lock-free — by every invalidator of THIS vertex's merge: its own `set_acl`, the
-        // placeholder revert, and the subtree mark an ancestor `:acl` write fans out
-        // (`mark_acl_cache_dirty`). A rebuild snapshots the generation BEFORE the UNLOCKED
-        // ancestor walk (#361 §2 releases the stripe lock so an ancestor sharing this stripe
-        // cannot self-deadlock) and, back under the lock, verifies it is UNCHANGED. That one
-        // guard gates BOTH the publish and the clear:
-        //   - unchanged ⇒ no `:acl` write touched this merge across the walk, so `merged` is a
-        //     clean, current snapshot: publish it, then lower the flag. `dirty == false` under
-        //     the lock therefore ALWAYS means eff_aces holds a CURRENT published merge — closing
-        //     the original #425 window where a loser read the empty (open-by-default) cache
-        //     after the winner cleared the flag (a transient fail-open).
-        //   - changed ⇒ a write landed during the walk, so `merged` may be stale or torn:
-        //     DISCARD it and retry with the new generation. Publishing it would let a slow
-        //     rebuilder CLOBBER a fresh merge a faster one already published, and — since a
-        //     mismatched clear is a no-op, not a re-raise — leave `dirty == false` over a stale
-        //     merge: a PERSISTENT fail-open. Never publishing or clearing across a generation
-        //     change also means no `:acl` mark is ever lost (no stale-forever cache).
-        // A reader that finds the flag already clear takes the fast path — evaluate the current
-        // cached merge, no rebuild — and a rebuilder whose flag a peer clears mid-retry likewise
-        // falls through to that fresh cache.
-        while (e.acl_cache_dirty.load(std::memory_order_acquire)) {
+        while (true) {
+            // The fast path is ONE acquire load and a parity test — what the retired dirty
+            // flag cost, which is why the published stamp lives in this word rather than
+            // beside it (a second load measured ~1% on the acl-inherit-d4 gate bench).
             const std::uint32_t gen = e.acl_gen.load(std::memory_order_acquire);
+            if ((gen & 1u) == 0) break;             // even ⇒ the cached merge is current
             const std::vector<ace_t> own = e.aces;  // snapshot; rebuild runs unlocked
             lock.unlock();
             std::vector<ace_t> merged = rebuild(static_cast<const std::vector<ace_t>&>(own));
             lock.lock();
-            if (e.acl_gen.load(std::memory_order_acquire) != gen)
-                continue;  // an :acl write raced the walk — drop the stale merge, rebuild
+            std::uint32_t expected = gen;
+            if (!e.acl_gen.compare_exchange_strong(expected, gen + 1, std::memory_order_release,
+                                                   std::memory_order_relaxed))
+                continue;  // an :acl write raced the walk — drop the possibly-torn merge
+            // The word says FRESH before the merge lands, but the stripe lock spans both and
+            // every reader of eff_aces holds it, so no one can observe the gap.
             e.eff_aces = std::move(merged);
-            e.acl_cache_dirty.store(false, std::memory_order_release);
             break;
         }
         return eval(static_cast<const std::vector<ace_t>&>(e.eff_aces));
