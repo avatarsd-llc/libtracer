@@ -202,6 +202,29 @@ class can_reassembly_t {
     void erase(const reassembly_key_t& key) { drop_group(key); }
 
     /**
+     * @brief Abandon group @p key as one that will NEVER complete — erase it AND count it.
+     *
+     * The counted twin of @ref erase. `erase` is the post-delivery release: the group's
+     * bytes already reached the receiver, so nothing was lost and nothing is counted.
+     * This is the caller-side abandon — the ingress path could not own a slice's bytes
+     * (allocation refusal), so the group is dead and its buffered slices are reclaimed
+     * BEFORE delivery. That is exactly what @ref dropped_groups counts, whatever forced
+     * it: a `max_groups` eviction, a @ref sweep_stale age-out, or this.
+     *
+     * Silence is the alternative this exists to remove: without it a caller either
+     * fabricates a placeholder slice (delivering a byte-wrong short frame as valid) or
+     * calls @ref erase and loses a whole group with no counter moving (#911).
+     *
+     * @retval false Nothing was tracked under @p key — no group, so no drop to count.
+     */
+    bool discard(const reassembly_key_t& key) {
+        if (groups_.find(key) == groups_.end()) return false;
+        drop_group(key);
+        ++dropped_groups_;
+        return true;
+    }
+
+    /**
      * @brief Set the monotonic stamp that subsequent touches mark a group with.
      *
      * The buffer holds no clock — the caller feeds one (the CAN binding stamps it

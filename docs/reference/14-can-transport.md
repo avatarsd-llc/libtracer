@@ -383,9 +383,32 @@ an independently invented number: left at `0`, `rx_ttl` tracks the configured
 `peer_ttl`, on the reasoning that RX state a peer would have completed is dead once
 that peer is itself considered gone.
 
+A third reclamation shares those counters: an inbound slice whose bytes the ingress
+backend refuses (`rx_backend`, the companion injection to the pmr resource — that one
+bounds the reassembly *structure*, this one the slice *bytes*) drops the **whole**
+group, ticking `dropped_rx()` for the slice and `dropped_groups()` for the group.
+Never a placeholder: the reassembly buffer counts entries without inspecting their
+length, so an empty stand-in would satisfy `is_complete`, chain into the rope, and be
+trimmed to a byte-wrong short frame that the receiver could not tell from good data.
+
 Egress has the matching counter, `dropped_tx()`: a send that never reached the bus
-(no storage for the payload, a payload that split into no window, or a manifest that
-could not be encoded) is counted rather than silently discarded.
+(no storage for the payload, a payload that split into no window, a group needing more
+consecutive endpoint slots than `kCanMaxGroupSlices`, or a manifest that could not be
+encoded) is counted rather than silently discarded.
+
+### A group is reserved before it is advertised
+
+The endpoint window is the scarce resource, and a group occupies a *run* of
+consecutive slots in it. The manifest is a promise of `slice_count` slices, so the run
+is reserved **before** the manifest goes out: a group that fits at no base is refused
+whole and counted, and nothing is said on the bus. Advertising first and discovering
+the shortfall mid-loop is what leaves every listener holding a group that can never
+complete. The bound is derived from the ID field widths (`kCanMaxGroupSlices` =
+`kEndpointMax` minus the reserved control slot), so it moves with the wire and is never
+a chosen number. Retracting an already-emitted manifest was the alternative and was
+declined: it is a second wire concern — a control-frame semantic every peer must
+implement, itself lossy on the very medium that lost the tail slices — where the
+capacity is a purely local fact the sender already holds.
 
 ```{admonition} Eviction is not a substitute for correct keying
 :class: warning
