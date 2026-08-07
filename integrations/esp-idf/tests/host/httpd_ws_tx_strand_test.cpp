@@ -352,6 +352,59 @@ void test_concurrent_claims_reclaims_and_drains_wedge_nothing() {
     reset(link);
 }
 
+// ---------------------------------------------------------------------------
+// 5 — a sweep that lands mid-window does not restart the age clock.
+// ---------------------------------------------------------------------------
+/**
+ * @brief The reclaim must fire under PACED traffic, not only after one idle window.
+ *
+ * Every case above expires the window in a single uninterrupted sleep, so exactly one
+ * sweep ever inspects a stranded slot. Production does the opposite: the sweep's only
+ * trigger is an exhausted claim, so a link that keeps being written to sweeps far more
+ * often than the window is long, and every one of those sweeps takes each young slot to
+ * CLAIMED and puts it back. If putting it back restamps `armed_at`, the slot's age is
+ * measured from the LAST SWEEP instead of from its arm and can never reach the window —
+ * the pool stays dead for the rest of the boot while `tx_strands()` reads 0, which is the
+ * failure the counter exists to make visible.
+ *
+ * So: strand the whole pool, then offer one frame every quarter-window for two full
+ * windows. Each offer finds the pool exhausted and sweeps. A correct reclaim fires on the
+ * first sweep past the window; a restamping one never fires at all.
+ */
+void test_a_paced_sweep_does_not_restart_the_age_clock() {
+    std::printf("a sweep landing mid-window does not restart the age clock:\n");
+    auto link = make_link();
+    check(link->ok(), "the adopting link registered its URI");
+    claim(kFd);
+    tr::net::transport_t* const peer = only_peer(*link);
+    check(peer != nullptr, "the peer resolved to a directed endpoint");
+    if (peer == nullptr) return;
+    drain();
+
+    const std::size_t capacity = httpd_ws_link_t::tx_slot_capacity();
+    fake_httpd::instance().set_queue_capacity(1);
+    fake_httpd::instance().post([] {});
+    for (std::size_t i = 0; i < capacity; ++i) peer->send(std::span<const std::byte>(kBody));
+    check_eq(link->tx_slots_busy(), capacity, "the whole pool is pinned by items that never ran");
+    check_eq(link->tx_strands(), 0, "nothing reclaimed yet — the window has not passed");
+
+    // Paced offers, a quarter-window apart. Eight of them span two full windows, so a
+    // reclaim that measures age from the arm has four chances to fire.
+    const auto step = std::chrono::milliseconds(kStrandWindowMs / 4);
+    int rounds = 0;
+    for (; rounds < 8 && link->tx_strands() == 0; ++rounds) {
+        std::this_thread::sleep_for(step);
+        peer->send(std::span<const std::byte>(kBody));  // exhausted claim -> sweeps
+    }
+
+    check(link->tx_strands() > 0,
+          "the paced sweep reclaimed the stranded slots (age is measured from the arm, "
+          "not from the last sweep)");
+    check(rounds <= 6, "and it fired within about one window, not at the very last offer");
+
+    reset(link);
+}
+
 }  // namespace
 
 int main() {
@@ -360,6 +413,7 @@ int main() {
     test_a_busy_pool_is_never_reclaimed();
     test_a_late_token_sends_the_current_frame_exactly_once();
     test_concurrent_claims_reclaims_and_drains_wedge_nothing();
+    test_a_paced_sweep_does_not_restart_the_age_clock();
     std::printf(g_failures == 0 ? "\nALL PASS\n" : "\n%d FAILURE(S)\n", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

@@ -556,6 +556,20 @@ struct httpd_ws_link_t::tx_slot_t {
         state.store(tx_state_t::ARMED, std::memory_order_release);
     }
     /**
+     * @brief Reopen a slot the sweep judged young, WITHOUT restamping @ref armed_at.
+     *
+     * The sweep has to take a slot to CLAIMED to read its clock safely, so it must put
+     * every young slot back. Putting it back through @ref arm would restamp `armed_at`,
+     * which measures the slot's age from the LAST SWEEP rather than from its arm — and
+     * since the sweep's only trigger is an exhausted claim, ordinary traffic sweeps far
+     * more often than the window is long. A permanently stranded slot would then never
+     * reach the window and never be reclaimed, with `tx_strands()` reading 0 the whole
+     * time: the instrument added to make the strand visible would report healthy while
+     * the pool stayed dead. The age must belong to the arm being judged, so the state
+     * store is the only thing that may be repeated.
+     */
+    void rearm() noexcept { state.store(tx_state_t::ARMED, std::memory_order_release); }
+    /**
      * @brief Take an armed payload back for the owning task (ARMED -> CLAIMED).
      *
      * @retval false  A token got there first and is inside the send — the slot is its
@@ -785,7 +799,7 @@ void httpd_ws_link_t::sweep_tx_slots() {
         // business — RUNNING especially: that token is reading this payload right now.
         if (!slot.disarm()) continue;
         if (now - slot.armed_at < window) {
-            slot.arm();  // young: put it back exactly as its claimer left it
+            slot.rearm();  // young: put it back exactly as its claimer left it, clock and all
             continue;
         }
         // Past every drain latency this link can itself produce, and still armed: the
