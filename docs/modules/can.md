@@ -42,7 +42,10 @@ address-shift slicing, not ISO-TP. Its storage comes from an injected
 `std::pmr::memory_resource` and its group count is bounded by configuration, so
 exhaustion on a constrained node is a bounded evict-oldest drop with a counter,
 never an allocation failure. The defaults — process heap, unbounded — are what a
-host gets unless it says otherwise.
+host gets unless it says otherwise. The in-band spelling of those bounds — the
+`can`-private `max_groups` / `max_pending` / `rx_ttl_ms` keys a `:children[]`
+creation SPEC carries, alongside the bus identity `ifname` / `node` — is
+[connection config](connection-config.md).
 
 **The binding** (`tr::net::transport_can`) joins all of that to a real bus
 through the `can_link_t` seam. `socketcan_link_t` is the production Linux

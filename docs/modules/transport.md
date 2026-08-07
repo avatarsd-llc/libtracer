@@ -113,6 +113,12 @@ under kind `webtransport`.
 One msquic dependency serves both, because QUIC is the substrate WebTransport
 requires.
 
+Both kinds read four kind-private config keys off a `:children[]` creation SPEC —
+`cert`/`key` on the LISTEN side and the DIAL-side trust pair `ca`/`insecure`. A
+SPEC-created dialer **verifies its peer's certificate by default**, so reaching a
+self-signed peer takes one of those two keys explicitly; the key-by-key reference is
+[connection config](connection-config.md).
+
 ## Interface
 
 ```cpp
