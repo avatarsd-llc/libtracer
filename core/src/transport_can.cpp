@@ -502,6 +502,21 @@ void transport_can::process_data(const can_frame_data_t& frame) {
     // upstream as valid. A refusal is backpressure, so it drops like backpressure: the
     // whole group goes (the surviving slices can never be completed into anything true),
     // the slice ticks dropped_rx, and `discard` ticks dropped_groups. Never fabricate.
+    //
+    // A zero-length data field takes the SAME disposition, and for the same reason.
+    // `over_bytes` returns an ENGAGED empty view for empty input, so a DLC-0 data frame
+    // walks the success path and inserts exactly the placeholder the paragraph above
+    // exists to prevent — the buffer counts it, `is_complete` fires early, and the trim
+    // delivers a short frame. A conforming sender never emits one (every slice of a
+    // group is a fragment of a non-empty frame, and the last is full or partial, never
+    // absent), so this is the non-conforming-peer door onto the identical corruption.
+    // Guarding on the frame rather than on the view's length keeps the check at the
+    // seam where the wire fact lives.
+    if (frame.len == 0) {
+        reasm_.discard(key);
+        dropped_rx_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     std::optional<tr::view::view_t> slice = tr::view::over_bytes(frame.bytes(), *rx_backend_);
     if (!slice) {
         reasm_.discard(key);

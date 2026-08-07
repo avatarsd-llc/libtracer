@@ -265,7 +265,7 @@ struct transport_can_config_t {
                       global heap; a refusal drops the whole group and ticks @ref
                       transport_can::dropped_rx. Must outlive the transport — the
                       segments it hands out are released by it. Companion to @ref
-                      reasm_mr: that one bounds the reassembly STRUCTURE, this one the
+                      reasm_mr — that one bounds the reassembly STRUCTURE, this one the
                       slice BYTES. */
 };
 

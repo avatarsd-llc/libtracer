@@ -805,6 +805,71 @@ void test_rx_slice_refusal_drops_the_group_and_counts() {
     check(sink.count() == 1, "exactly ONE frame was ever delivered — nothing short slipped by");
 }
 
+/**
+ * @brief #911, the second door — a DLC-0 data slice reaches the SAME corruption by the
+ *        success path, so it takes the same disposition.
+ *
+ * The refusal guard above turns on `over_bytes` answering `nullopt`. A zero-length data
+ * field never gets there: `over_bytes` returns an ENGAGED empty view for empty input, so
+ * a DLC-0 frame walks the success path and inserts exactly the placeholder that guard
+ * exists to prevent. The buffer counts entries without inspecting length, `is_complete`
+ * fires one slice early, and the `min(total, rope->total_length())` trim delivers a
+ * SHORT frame as valid — byte-for-byte the #911 outcome, from a different direction.
+ *
+ * A conforming sender never emits one, so the vector is a hand-built non-conforming peer:
+ * a manifest promising two 8-byte slices, one real slice, and a DLC-0 second.
+ */
+void test_rx_zero_length_slice_drops_the_group_and_counts() {
+    std::printf("transport_can ingress DLC-0 slice drops + counts, never completes (#911):\n");
+
+    fake_can_bus_t bus;
+    sink_t sink;
+    auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
+    fake_link_t injector(bus);
+    auto link_b = std::make_unique<fake_link_t>(bus);
+    tr::net::transport_can tx_b(std::move(link_b), rx_test_config());
+    tx_b.set_receiver(rx);
+
+    can::advertise_t adv;
+    adv.can_id = can::encode_can_id({0, 1, tr::net::kCanFirstDataEndpoint});
+    adv.group = true;
+    adv.group_total_len = 16;  // two full CLASSIC windows
+    adv.slice_count = 2;
+    adv.path = "sensor/temp";
+    inject_advertise(injector, /*node=*/1, adv);
+
+    inject_data(injector, /*node=*/1, /*endpoint=*/tr::net::kCanFirstDataEndpoint);
+
+    // The second slice, declaring no data field at all.
+    tr::net::can_frame_data_t empty;
+    empty.id = can::encode_can_id({0, 1, tr::net::kCanFirstDataEndpoint + 1});
+    empty.fd = false;
+    empty.len = 0;
+    injector.write_raw(empty);
+
+    check(!sink.wait_for_count(1, 500ms),
+          "no SHORT frame was delivered for the group the DLC-0 slice completed");
+    check(wait_until([&] { return tx_b.dropped_rx() >= 1; }, 2s),
+          "the zero-length slice ticked dropped_rx()");
+    check(tx_b.dropped_groups() >= 1,
+          "and the group it would have falsely completed was reclaimed on dropped_groups()");
+
+    // Liveness, on a distinct byte pattern so a truncated remnant of the group above
+    // could not masquerade as this delivery. The wait is RELATIVE to whatever already
+    // arrived: an absolute `wait_for_count(1)` passes instantly in a build that shipped
+    // the short frame, so it would report liveness on the very corruption above — the
+    // guard has to be able to fail for the reason it names.
+    const std::size_t before = sink.count();
+    auto link_a = std::make_unique<fake_link_t>(bus);
+    tr::net::transport_can tx_a(std::move(link_a),
+                                {0, 3, tr::view::can_frame_mode_t::CLASSIC, "sensor/other"});
+    const std::vector<std::byte> live(2 * tr::view::kCanClassicMaxData, std::byte{0xA7});
+    tx_a.send(live);
+    check(sink.wait_for_count(before + 1, 2s), "the node is LIVE: a later group is delivered");
+    check(equal_bytes(sink.last(), live), "and its bytes are byte-exact");
+    check(sink.count() == 1, "exactly ONE frame was ever delivered — nothing short slipped by");
+}
+
 /** @brief #912 — a healthy exchange reports zero on every drop counter. */
 void test_clean_run_counters_are_zero() {
     std::printf("transport_can drop counters on a clean run:\n");
@@ -901,6 +966,7 @@ int main() {
     test_oversized_group_is_refused_before_advertising();
     test_u16_slice_count_wrap_cannot_advertise_a_hello();
     test_rx_slice_refusal_drops_the_group_and_counts();
+    test_rx_zero_length_slice_drops_the_group_and_counts();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;
