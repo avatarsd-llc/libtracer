@@ -314,12 +314,36 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::b
     conns_.insert_or_assign(
         qualified,
         conn_t{.vertex = *v, .settings = std::move(settings), .owned = std::move(owned)});
-    if (pl != pending_links_.end()) pending_links_.erase(pl);
 
     // Wire the link into the router's child_registry_t — the single owner of the
     // NAME→link demux table (Brick 3a). The `/net/<name>` NAME is exactly the router
     // child name a `dst` routes through.
-    router_.add_child(qualified, *link);
+    //
+    // Its `bool` is the WHOLE creation's verdict (#930), not advice. `add_child` answers
+    // false when the registry could not grow, and it is the only place that can tell anyone
+    // so — the refusal is TOTAL there, so nothing is registered and no receiver is wired.
+    // Discarding it published the vertex anyway: a connection reporting UP liveness that no
+    // `dst` resolves, no inbound frame lands on, and no `remove_child` can take down. Peer-
+    // drivable on a bounded node, by creating connections until the slab exhausts.
+    //
+    // Roll the creation back in the reverse order it was built — the same order
+    // `remove_connection` uses, and for the same reason: retire the identity vertex FIRST so
+    // the address stops resolving (and its `:children[]` seam stops naming the link) before
+    // erasing the `conns_` entry, which destroys the config-constructed socket. There is
+    // nothing to un-route: the registry holds no entry to remove. BACKPRESSURE is the
+    // exhausted-resource status the rest of the failable seam answers with (ADR-0065), so a
+    // wiring refusal surfaces as an error the peer can retry rather than as a live-looking
+    // dead connection.
+    if (!router_.add_child(qualified, *link)) {
+        (void)graph_.retire(*v);
+        conns_.erase(qualified);
+        return std::unexpected(status_t::BACKPRESSURE);
+    }
+    // The staged link is CONSUMED only once the connection is fully wired. Erasing it before
+    // the registry call would make the rollback above lossy: the caller's provide_link
+    // staging would be gone, so a retry once the pressure clears would no longer find its
+    // link and would fail NOT_FOUND instead of succeeding.
+    if (pl != pending_links_.end()) pending_links_.erase(pl);
     // A config-constructed socket is live once built: publish its liveness so an awaiter
     // on /net/<name> sees the bring-up. A DIAL socket is `UP`; a LISTEN socket that bound
     // is `LISTENING` (a bind failure returns an error from the factory above, so a
