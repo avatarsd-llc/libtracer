@@ -149,12 +149,15 @@ void test_the_backpressure_window_is_per_frame_not_per_queue() {
     const std::size_t accepted_before = fake_twai::transmits_accepted();
     const unsigned peak_before = fake_twai::peak_tx_waiters();
 
+    // Held as a raw pointer for the same reason as the teardown case below: the
+    // writers must touch the link, never the owning smart pointer.
+    twai_link_t* const under_test = link.get();
     std::vector<std::thread> writers;
     writers.reserve(kWriters);
     const auto start = std::chrono::steady_clock::now();
     for (int i = 0; i < kWriters; ++i) {
         writers.emplace_back(
-            [&link, i] { link->write_raw(frame(static_cast<std::uint8_t>(10 + i))); });
+            [under_test, i] { under_test->write_raw(frame(static_cast<std::uint8_t>(10 + i))); });
     }
     for (auto& w : writers) w.join();
     const long long elapsed = ms_since(start);
@@ -194,12 +197,20 @@ void test_teardown_does_not_queue_behind_parked_writers() {
     fill_the_pool(*link);
     const std::size_t accepted_before = fake_twai::transmits_accepted();
 
+    // The writers hold the LINK, not the owning `unique_ptr`. `link.reset()` writes
+    // that smart pointer's stored address while a `link->` in a writer thread would
+    // be reading it — a race on the test's own bookkeeping that TSan flags and that
+    // has nothing to do with the contract under test. The link object itself is
+    // safe to hold: every writer is already inside write_raw before teardown starts
+    // (asserted below), and the destructor does not return until they have left.
+    twai_link_t* const under_test = link.get();
+
     std::atomic<int> returned{0};
     std::vector<std::thread> writers;
     writers.reserve(kWriters);
     for (int i = 0; i < kWriters; ++i) {
-        writers.emplace_back([&link, &returned, i] {
-            link->write_raw(frame(static_cast<std::uint8_t>(20 + i)));
+        writers.emplace_back([under_test, &returned, i] {
+            under_test->write_raw(frame(static_cast<std::uint8_t>(20 + i)));
             returned.fetch_add(1, std::memory_order_relaxed);
         });
     }
