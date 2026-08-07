@@ -45,8 +45,10 @@ costs a `find` over a handful of direct children and cannot put a wrong byte on 
 
 ## Byte breakdown
 
-`0x0F FWD`, `opt.PL=1`, `length=0x0082` (130), 134 bytes total. Offsets 0–101 are
-`fwd/fwd-reply-error` verbatim (see its table); only the STATUS differs.
+`0x0F FWD`, `opt.PL=1`, `length=0x0082` (130), 134 bytes total. Offsets **4–101** are
+`fwd/fwd-reply-error` verbatim (see its table); only the STATUS differs. The 4-byte
+header is not shared — this vector's outer FWD length is `0x0082` where that one's is
+`0x0070`, so the two `input.bin` files first differ at offset 2.
 
 | Offset | Bytes | Meaning |
 | --- | --- | --- |
