@@ -35,6 +35,38 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   Not in scope: the shed write still answers `SUCCESS` and moves no `delivery_drops()`
   counter — the other half of the same shed, tracked as #1003.
 
+- **SECURITY — a `net::webtransport_transport_t` LISTENER now pins WHICH `0x41` stream may
+  become its frame channel (#919), and no longer dies on an unknown H3 frame (#920).** Both
+  live in `classify_bidi` and they move strictness in OPPOSITE directions, which is the
+  point: identity must be pinned, unknown extensions must be ignored.
+  - **Adoption is strict (#919).** A bidirectional WEBTRANSPORT_STREAM was adopted as *the*
+    frame channel on nothing but a not-yet-harvested check — the code's own comment said
+    "any id is accepted". So a peer could (a) stream frames with the extended CONNECT never
+    completed (a handshake bypass), (b) name any session id, and (c) open a SECOND `0x41`
+    stream that silently overwrote `frame_stream` while the first context kept feeding the
+    one shared `length_prefix_framer` — two independent streams interleaved into one
+    length-prefix reassembly, i.e. garbled frames delivered upward or a spurious malformed
+    teardown. `PeerBidiStreamCount = 4` made that reachable. Three guards now run under
+    `conn_m`: the session must be established, the session-id varint must name THAT CONNECT
+    stream, and no frame channel may be adopted yet (**first valid one wins**). A refusal
+    aborts **only that stream** (`StreamShutdown(ABORT)`, context parked as `DRAIN`) — a
+    nonconforming stream cannot take down a live session.
+  - **Unknown frame types are ignored (#920).** Any first frame type other than `0x41` or
+    HEADERS shut the whole connection down with `kAppErrBadRequest`. RFC 9114 §7.2.8 requires
+    unknown/reserved types to be IGNORED, and §9 has conformant peers — Chrome included —
+    emit reserved GREASE types (`0x1f * N + 0x21`) precisely to catch endpoints that don't:
+    a **conformant browser could take the node down**. Classification is now a skip loop that
+    reads the unknown frame's length varint, drops that many bytes and continues; a declared
+    length beyond the existing `kMaxHandshakeBytes` handshake cap is still refused (ignoring
+    the type is obligatory, buffering an arbitrary pre-auth payload is not), and skipped bytes
+    leave the accumulator before every "need more" return, so an unbounded GREASE run is
+    bounded memory.
+
+  No wire change, no public API change, and no delivery-path cost: all of it is
+  stream-open/handshake-time classification on the LISTEN side. A peer that opened a second
+  frame stream, or that expected an unknown H3 frame to be fatal, will observe the new
+  behaviour; the well-behaved DIAL client is unaffected.
+
 - **`net::transport_can` no longer attributes a group's slices to a stale binding when the
   endpoint space wraps (#909).** The endpoint sub-field is 12 bits and `alloc_base` resets
   to the first data slot when a reservation runs off the end, so a base **recurs** — routine,
