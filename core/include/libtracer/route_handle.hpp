@@ -312,9 +312,9 @@ class route_handle_t {
      * recorded as egress, and returned with `fresh == true` (the caller must send the
      * ADVERTISE once); subsequent deliveries find the same label and return `fresh ==
      * false` (send only the COMPACT). @ref clear_link drops the binding so a post-reconnect
-     * delivery re-advertises — the self-heal, with no transport "up" event. Distinct from
-     * @ref alloc_label + @ref record_egress (which always mint a new label, used by the
-     * forwarding-hop swap).
+     * delivery re-advertises — the self-heal, with no transport "up" event. Since #913 the
+     * forwarding-hop swap and `fwd_router_t::advertise` mint here too: @ref alloc_label +
+     * @ref record_egress mint unconditionally, burning one per re-advertise cycle.
      *
      * @param out_link This node's NAME for the downstream link.
      * @param route    A complete PATH TLV's bytes — the delivery route the label aliases.

@@ -16,6 +16,25 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Fixed
 
+- **A STREAM whose ring append was SHED under pressure no longer re-delivers the previous
+  entry (#925).** `vertex_t::drain_unflushed` derived "how many ring entries are new" from a
+  `write_seq_` delta, but `vertex_t::store` bumps that sequence **unconditionally** — and it
+  is right to: the sequence is the await/readiness cursor, the LKV publish above the append
+  already landed, so a shed append must still wake `wait_for_change` and still move
+  `current_seq()`. What it must not do is imply a ring entry. Because a drain removes nothing
+  from the ring, the surplus delta re-took the newest **already-flushed** entry, and the
+  subscriber observed the same stream element twice — a duplicate on machinery whose whole
+  point is an in-order queue rather than a coalesce (RFC-0008 §E). The drain now counts ring
+  APPENDS: `vertex_ext_t::last_flushed_seq` is replaced by `vertex_ext_t::appended_since_flush`,
+  incremented only inside the probe-success append branch under the stripe lock both sides
+  already hold, and reset by `drain_unflushed` / `mark_flushed` / retirement. No new lock, no
+  new allocation, no field-width change, and `write_seq_` semantics are untouched everywhere
+  else. `core/tests/graph_oom_softfail_test.cpp` drives a shed append through the real store
+  path with an injected allocator failure and asserts each element is delivered exactly once.
+
+  Not in scope: the shed write still answers `SUCCESS` and moves no `delivery_drops()`
+  counter — the other half of the same shed, tracked as #1003.
+
 - **`net::transport_ws_server` / `net::transport_ws_client` take the injected RX seam every
   other framed transport takes, and their ingress is bounded by it (#872).** Both
   constructors gained `mem::mem_backend_t* backend` + `std::size_t max_frame` in the
@@ -91,6 +110,29 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   the advertise and a data frame carries none, so it is silent for both.
 
 ### Changed
+
+- **`fwd_router_t::advertise` now REUSES the label already bound to an identical route
+  instead of minting a fresh one per call (#913).** Both of the router's label-minting sites
+  — this producer door and `on_advertise`'s mid-chain forwarding arm — called
+  `route_handle_t::alloc_label` + `record_egress` unconditionally, with no reuse scan. Since
+  re-advertising *is* the RFC-0004 §E.1 self-heal, a peer drives that path as often as its
+  link flaps, and every cycle consumed one more of the link's 16-bit labels and appended one
+  more egress entry. Neither is reclaimed individually: only a whole-link `clear_link` gives
+  them back, so a reconnect loop walked a long-lived node to label exhaustion (permanent loss
+  of compaction) and its egress table to `max_bindings_per_link`. Both sites now go through
+  `route_handle_t::ensure_egress`, the primitive `deliver_remote` already used, which finds
+  the label for an identical route under the egress table's own lock and mints only for a
+  genuinely new route. The bound therefore comes from the route set the peer actually
+  advertises, not from a cap on how often it may re-advertise. **Observable change:** repeated
+  `advertise(link, route)` calls for the same route return the SAME label rather than
+  successive ones; a new route still mints. The ADVERTISE frame still goes out on every call,
+  so no peer sees a behaviour change and the wire is untouched. Minting and recording in one
+  critical section also retires the old pair's split outcome — a label minted, then burned for
+  nothing when the record was refused — and, because the reuse scan runs ahead of the table
+  bound, a re-advertise of an ESTABLISHED flow now survives a full egress table.
+  `core/tests/fwd_readvertise_reuse_test.cpp` counts the state: 51 identical re-advertise
+  cycles left 51 distinct labels and 51 egress entries at every node of a two-hop chain, and
+  now leave 1.
 
 - **`vertex_ext_t::acl_cache_dirty` is REMOVED; ACL-cache validity is now the parity of
   `vertex_ext_t::acl_gen` (#880, [ADR-0078](../docs/adr/0078-acl-cache-coherence-is-a-published-generation-stamp-not-a-dirty-flag.md)).**

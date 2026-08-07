@@ -85,6 +85,16 @@ struct hook_guard_t {
 void count_cb(void* ctx, const rope_t& /*value*/) { ++*static_cast<int*>(ctx); }
 
 /**
+ * @brief The delivered-SEQUENCE callback: appends each single-link value's first byte to
+ *        the vector behind @p ctx — a count alone cannot tell a duplicate from a fresh
+ *        entry, which is exactly what #925 is about.
+ */
+void record_cb(void* ctx, const rope_t& value) {
+    static_cast<std::vector<std::uint8_t>*>(ctx)->push_back(
+        std::to_integer<std::uint8_t>(value.only().bytes()[0]));
+}
+
+/**
  * @brief A 3-link (SPILLED) rope: its delivery clone must grow a heap chain, which is the
  *        one allocation `try_clone_rope` can be made to fail.
  *
@@ -381,6 +391,47 @@ void test_stream_ring_shed() {
           "the ring accepts entries again once memory returns");
 }
 
+/**
+ * @brief A SHED ring append must not make the next drain re-deliver the previous entry
+ *        (#925) — the drain counts APPENDS, not write-sequence bumps.
+ *
+ * `store` bumps `write_seq_` unconditionally (it is the await/readiness cursor, and the
+ * LKV publish above it DID land), so a drain that derives "how many entries are new" from
+ * a sequence delta claims a tail entry the shed never appended. Nothing is ever removed
+ * from the ring on a drain, so it re-takes the newest ALREADY-FLUSHED entry and the
+ * subscriber observes the same stream element twice — on machinery whose whole point is
+ * an in-order queue rather than a coalesce (RFC-0008 §E).
+ *
+ * The write still answering SUCCESS with no drop counted is the OTHER half of this shed
+ * and is deliberately not asserted here (#1003 owns making it visible).
+ */
+void test_stream_shed_append_no_redelivery() {
+    std::printf("stream drain — a shed ring append re-delivers NOTHING (#925):\n");
+    graph_t g;
+    auto v = g.register_vertex(path_t("/s/shed"), role_t::STREAM);
+    g.set_history_depth(v, 4);
+    std::vector<std::uint8_t> seen;
+    (void)g.subscribe(path_t("/s/shed"), record_cb, &seen);
+
+    check(g.write(v, make_value({0x10})).has_value(), "the first stream write succeeds");
+    check(seen.size() == 1 && seen[0] == 0x10, "the subscriber saw 0x10 exactly once");
+
+    {
+        const hook_guard_t frag(fail_big);  // the ring-append probe exceeds 512 B
+        check(g.write(v, make_value({0x11})).has_value(), "the shed stream write still succeeds");
+    }
+    check(g.history(v).has_value() && g.history(v)->size() == 1,
+          "the shed entry never entered the ring");
+    check(seen.size() == 1, "the shed append delivered NOTHING — no phantom tail entry");
+    check(seen.size() == 1 && seen.back() == 0x10, "0x10 was NOT re-delivered as 0x11's entry");
+
+    // A queue, not a coalesce: the next real append still delivers, exactly once.
+    check(g.write(v, make_value({0x12})).has_value(), "the ring accepts entries again");
+    check(seen.size() == 2 && seen.back() == 0x12, "the next real append delivers once");
+    g.propagate(v);
+    check(seen.size() == 2, "a covering sweep after the shed re-delivers nothing");
+}
+
 /** @brief A stream drain under OOM DEFERS (cursor kept) and catches up afterwards. */
 void test_stream_drain_defer() {
     std::printf("stream drain — an OOM propagate defers the batch, never loses it:\n");
@@ -482,6 +533,7 @@ int main() {
     test_handler_notify_clone_sheds_fan_out();
     test_remote_edge_copy_drop();
     test_stream_ring_shed();
+    test_stream_shed_append_no_redelivery();
     test_stream_drain_defer();
     test_composed_read_reply_backpressure();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,

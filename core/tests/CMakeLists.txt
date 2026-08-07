@@ -671,6 +671,15 @@ target_link_libraries(fwd_reconnect_selfheal_test PRIVATE libtracer)
 libtracer_test_warnings(fwd_reconnect_selfheal_test)
 add_test(NAME fwd_reconnect_selfheal COMMAND fwd_reconnect_selfheal_test)
 
+# #913 — a re-advertise cycle grows NOTHING: both ADVERTISE-emitting sites (the producer door
+# and the mid-chain forwarding swap) reuse the label already bound to an identical route, so a
+# reconnect loop cannot walk a link's 16-bit label space or its egress table. Counts distinct
+# labels and table entries across 51 cycles at every node of a two-hop chain.
+add_executable(fwd_readvertise_reuse_test fwd_readvertise_reuse_test.cpp)
+target_link_libraries(fwd_readvertise_reuse_test PRIVATE libtracer)
+libtracer_test_warnings(fwd_readvertise_reuse_test)
+add_test(NAME fwd_readvertise_reuse COMMAND fwd_readvertise_reuse_test)
+
 # RFC-0004 / ADR-0035 slice 4 (#136) — the PRODUCER auto fan-out: a plain graph.write to a
 # vertex with a remote subscriber delivers a full-route FWD{WRITE} (or auto-promoted COMPACT)
 # with no explicit advertise/send. Covers the transient-local latch, the compact byte-delta,
