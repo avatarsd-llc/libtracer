@@ -17,6 +17,7 @@ tests/conformance/
         ├── framing/                header, opt bits, length widths, minimum frame
         ├── fwd/                    FWD ops, labels, compaction, rejection cases
         ├── path/                   PATH TLVs, path handles, segment limits
+        ├── spec/                   creation SPECs — the `:children[]` vertex/link formation write
         └── tlv-types/              per-type-code payloads (VALUE, NAME, SUBSCRIBER, …)
             └── <case-name>/
                 ├── input.bin       raw bytes the parser receives
