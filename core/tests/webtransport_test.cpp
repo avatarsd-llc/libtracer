@@ -711,6 +711,13 @@ std::vector<std::uint8_t> payload(std::size_t len, std::uint8_t seed) {
     return p;
 }
 
+/** @brief A delivered frame against the raw octets that were sent — BYTE
+ *         identity, not just length: interleaving two streams into one
+ *         reassembler can produce a same-length frame of the wrong bytes. */
+[[nodiscard]] bool same(const std::vector<std::byte>& got, const std::vector<std::uint8_t>& want) {
+    return got.size() == want.size() && std::memcmp(got.data(), want.data(), want.size()) == 0;
+}
+
 /** @brief The extended CONNECT request frame (HEADERS) a browser-shaped client sends. */
 std::vector<std::uint8_t> connect_frame(std::string_view authority) {
     std::vector<std::uint8_t> out;
@@ -1036,7 +1043,7 @@ void test_frame_stream_adoption_gate() {
         const auto good = payload(7, 0x31);
         cli.write(frames, record(good));
         check(sink.wait_for_count(1, 3000ms), "guard 1: the legitimate frame channel is adopted");
-        check(sink.count() == 1 && sink.at(0).size() == good.size(),
+        check(sink.count() == 1 && same(sink.at(0), good),
               "guard 1: exactly the legitimate frame arrived — the refused stream fed nothing");
     }
 
@@ -1063,7 +1070,7 @@ void test_frame_stream_adoption_gate() {
         const auto good = payload(9, 0x44);
         cli.write(frames, record(good));
         check(sink.wait_for_count(1, 3000ms), "guard 2: the correctly-addressed stream IS adopted");
-        check(sink.count() == 1 && sink.at(0).size() == good.size(),
+        check(sink.count() == 1 && same(sink.at(0), good),
               "guard 2: only the correctly-addressed stream's frame arrived");
     }
 
@@ -1100,9 +1107,9 @@ void test_frame_stream_adoption_gate() {
         check(sink.wait_for_count(3, 3000ms), "guard 3: the adopted stream keeps delivering");
         std::this_thread::sleep_for(250ms);  // let any injected record land if it were adopted
         check(sink.count() == 3, "guard 3: exactly three frames — the refused stream fed nothing");
-        check(sink.count() == 3 && sink.at(0).size() == r1.size() &&
-                  sink.at(1).size() == r2.size() && sink.at(2).size() == r3.size(),
-              "guard 3: the three frames are the first stream's, in order");
+        check(sink.count() == 3 && same(sink.at(0), r1) && same(sink.at(1), r2) &&
+                  same(sink.at(2), r3),
+              "guard 3: the three frames are the first stream's, byte-identical and in order");
         check(listener.malformed_rx() == 0,
               "guard 3: the length-prefix reassembler never desynced (no interleaving)");
     }
@@ -1147,7 +1154,7 @@ void test_unknown_h3_frames_skipped() {
         const auto good = payload(12, 0x61);
         cli.write(frames, record(good));
         check(sink.wait_for_count(1, 3000ms), "frames flow across the skipped GREASE frames");
-        check(sink.count() == 1 && sink.at(0).size() == good.size(), "the frame is intact");
+        check(sink.count() == 1 && same(sink.at(0), good), "the frame is byte-identical");
         check(listener.session_up(), "a post-CONNECT GREASE frame leaves the session alone");
     }
 
