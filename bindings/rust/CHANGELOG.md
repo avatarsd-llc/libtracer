@@ -46,14 +46,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 
 - **`structured::spec_type_name` now reads the value TYPE, not just the payload.** A `type` /
-  `name` field whose value child is not a `NAME` reads as `None`, exactly as the terminus
-  treats it. Previously any payload was accepted, which is what let this crate round-trip its
-  own malformed SPEC green.
+  `name` field whose value child is not a `NAME` reads as `None`, matching the terminus's
+  typed lookup. Previously any payload was accepted, which is what let this crate round-trip
+  its own malformed SPEC green.
 
 - **`structured::spec` validates its two fields the way the terminus does:** `name` must be a
   legal address segment (it becomes a path component), `type` need only be non-empty and
   within the 64-byte budget (a catalog selector is never addressed). A `child_name` that no
   terminus would accept is now refused at build time instead of on the wire.
+
+  Two divergences from the C++ terminus remain, both pre-existing and both disclosed in the
+  rustdoc rather than papered over — this release closes the **type** half of the parity, not
+  all of it. (1) The readers' **walk** differs: the terminus consumes strict `(NAME key,
+  value)` pairs, breaks at the first non-`NAME` key slot, and lets a later well-formed pair
+  win, while `named_fields` resynchronises at every offset and `named_field` takes the first
+  match — so a stray leading `VALUE` in a SPEC is fatal there and survivable here, and a
+  re-stated SETTINGS key resolves to opposite values. (2) `name`'s segment predicate rejects
+  `[` and `]`, which `valid_segment` deliberately admits as the address-index suffix form, so
+  the builder refuses a `child_name` a terminus would accept.
 
 ## [0.8.0] — 2026-08-06
 

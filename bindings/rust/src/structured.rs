@@ -164,7 +164,15 @@ pub fn settings_get(tlv: &Tlv, key: &str) -> Result<Option<Vec<u8>>, BuildError>
 /**
  * @brief The string value of a SETTINGS key — present only when the value child is a
  * `NAME` (`0x02`), the one form a string-valued key is read back from. A key whose
- * value is an opaque `VALUE` reads as `None` here, exactly as it does at the terminus.
+ * value is an opaque `VALUE` reads as `None` here, matching the terminus's **type**
+ * check (`config_reader_t`).
+ *
+ * @note The **walk** is not yet in parity, and this is the narrower reader. The
+ *       terminus consumes strict `(NAME key, value)` pairs, stops at the first slot
+ *       where a key is not a `NAME`, and lets a later well-formed pair win; this
+ *       resynchronises at every offset and takes the first match. So `SETTINGS{ NAME
+ *       "kind" VALUE …, NAME "kind" NAME "ws" }` reads `"ws"` at the terminus and
+ *       `None` here. Tracked separately — see the walk-parity follow-up.
  *
  * # Errors
  * [`BuildError::TypeMismatch`] if the TLV is not a SETTINGS; [`BuildError::InvalidUtf8`]
@@ -535,9 +543,15 @@ pub fn acl_aces(tlv: &Tlv) -> Result<Vec<Ace>, BuildError> {
  *
  * The two fields are checked differently because the terminus checks them
  * differently: `name` becomes a path component, so it must satisfy the addressing
- * grammar ([`name`], the same predicate the terminus runs before answering
- * `INVALID_PATH`), while `type` is a catalog selector that is never addressed and
- * only has to be non-empty ([`text_name`]).
+ * grammar ([`name`]), while `type` is a catalog selector that is never addressed
+ * and only has to be non-empty ([`text_name`]).
+ *
+ * @note [`name`] is *stricter* than the C++ `valid_segment` it mirrors: it rejects
+ *       `[` and `]`, which that predicate deliberately admits as the address-index
+ *       suffix form (`frame[7]`, reference/03 §Index forms). So this builder refuses
+ *       a `child_name` a terminus would accept. Erring strict is safe — no wrong
+ *       bytes are emitted — but it is a real cross-tier drift against ADR-0073 §1,
+ *       tracked separately.
  *
  * # Errors
  * A segment error from a NAME key, from a `type` outside the 64-byte budget, or
@@ -568,8 +582,15 @@ pub fn spec(type_sel: &str, child_name: &str, config: Option<Tlv>) -> Result<Tlv
  * @brief The `type` (catalog selector) and `name` (child component) of a SPEC, as a
  * pair of UTF-8 strings; either is `None` when its field is absent — or present
  * with a value child that is not a `NAME`, which the terminus likewise treats as
- * absent. Reading the type as well as the bytes is what keeps this reader from
- * accepting a spelling no terminus does.
+ * absent. Reading the type as well as the bytes is what stops this reader from
+ * accepting the `VALUE`-typed spelling the terminus refuses.
+ *
+ * @note The **walk** is not in parity, and here this reader is the *looser* one.
+ *       `create_child` consumes strict pairs and stops at the first non-`NAME` key
+ *       slot; this resynchronises at every offset. So a SPEC whose children begin
+ *       with a stray `VALUE` answers `INVALID_PATH` at the terminus while this
+ *       reader still finds the fields that follow. Tracked separately — see the
+ *       walk-parity follow-up.
  *
  * # Errors
  * [`BuildError::TypeMismatch`] if the TLV is not a SPEC, or a non-UTF-8 field.
