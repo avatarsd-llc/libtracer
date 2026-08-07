@@ -580,14 +580,12 @@ void hostile_ws_server(int lfd, std::uint64_t declared_len) {
     (void)write_bytes(cfd, std::span<const std::byte>(
                                reinterpret_cast<const std::byte*>(resp.data()), resp.size()));
 
-    // Let the 101 land in its own TCP segment before the frame starts. This is a TEST
-    // requirement, not a protocol one, and it is here because of a SEPARATE defect it would
-    // otherwise mask: `transport_ws_client::handshake` reads the response into a local
-    // `resp` string and drops whatever followed the CRLFCRLF in the same `recv`, so a frame
-    // pipelined behind the 101 is swallowed instead of decoded. (The SERVER half does carry
-    // those bytes over — `service_peer`'s `s.buf.assign(rest, ...)`.) Without this pause the
-    // case below would pass or fail on segment boundaries rather than on the bound it tests.
-    std::this_thread::sleep_for(100ms);
+    // No pause here. This used to sleep 100 ms so the 101 landed in its own TCP segment,
+    // because the client's handshake dropped whatever followed the CRLFCRLF in the same
+    // `recv` and the case would then pass or fail on segment boundaries rather than on the
+    // bound it tests. That defect is fixed (#1020 — the handshake hands the pipelined bytes
+    // to the recv loop), so the mask is gone and this case now runs against BOTH segment
+    // layouts: the frame header is free to coalesce with the 101.
 
     // A SERVER frame is unmasked (RFC 6455 §5.1): FIN|BINARY, the 64-bit length marker,
     // then the declared length — and then nothing like that many bytes.
