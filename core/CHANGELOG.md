@@ -33,6 +33,38 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   outcome: `BACKPRESSURE` where the call previously reported success. The success path is
   byte-identical, and no signature changed.
 
+- **`net::config_reader_t` no longer lets a string VALUE be re-read as a key (#927).** The
+  SETTINGS walk advanced one child at a time, so the `NAME` child that is the *value* of one
+  pair was also tested as the *key* of the next position. Combined with the ignore-unknown-keys
+  forward-compat rule, any pair whose string value textually equalled a known key silently bound
+  the FOLLOWING child as that key's value — and last-match-wins then overrode a legitimate
+  earlier occurrence: a newer peer's `link_hint = "addr"` made an older node parse an `addr` it
+  was never sent, and it needed no unknown key at all (an ordinary `kind = "addr"` mis-bound the
+  same way). The walk is now **pair-consuming** — it steps over `(NAME key, value)` pairs and
+  advances past the value it consumed — so an unknown key is skipped as a WHOLE pair and a value
+  can never be re-read as a key. Forward-compat tolerance is unchanged and deliberate (the
+  opposite ruling from the ACL parse, where an unknown key is rejected because a dropped
+  attribute widens access); so are wrong-type-ignored, empty-`VALUE`-ignored and repeat-key
+  last-wins. Two behaviour differences beyond the fix: a child that is not a `NAME` where a key
+  belongs now stops the walk instead of resynchronizing on the next offset, and a trailing
+  unpaired key is still ignored. Well-formed configs parse identically. No signature change.
+
+- **The same defect is closed on the webtransport cert/key parse and on two graph-layer pair
+  walks (#927).** `parse_wt_config` (`transport_webtransport.cpp`) kept a hand-rolled
+  every-offset copy of the walk, so the defect survived on the one shape that names a **private
+  key file**: a forward-compat `hint = "key"` pair let the string `"key"` be re-read as a key,
+  binding the following child as the private-key path and overriding the legitimate one under
+  last-wins. It now goes through `net::config_reader_t` like the quic factory, leaving all six
+  transport-side consumers on one walk. Two L4 parsers read the same positional grammar and
+  cannot depend on `tr::net` (dependencies point up the layers only), so they carry the
+  pair-consuming *rule* instead: `graph_t::create_child` — where a `hint = "name"` pair created
+  the child at an address the sender never asked for, and the same shape re-bound `type` or
+  `config` — and the SUBSCRIBER QoS `SETTINGS` parse, where it injected a `delivery_policy`
+  (reliability, priority, the durability request) into a subscription that requested none. Both
+  now step whole pairs and stop, rather than resynchronize, on a desynchronized stream.
+  `graph::parse_acl` is the one every-offset scan left; #906 rewrites that walk whole under the
+  opposite unknown-key ruling and owns it. Well-formed frames parse identically throughout.
+
 - **`stream_endpoint_t::write_all` no longer truncates a frame when a signal interrupts the
   write (#903).** The two sibling full-write helpers disagreed on interrupted syscalls:
   `write_all_iov` retried EINTR, while `write_all` treated any `n <= 0` — EINTR included — as

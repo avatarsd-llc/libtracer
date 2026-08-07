@@ -766,6 +766,74 @@ void test_replace_door_latches() {
 }
 
 /**
+ * @brief `SUBSCRIBER{ PATH(/client), SETTINGS{ NAME "hint" NAME "delivery_policy",
+ *        VALUE u16 @p word, NAME "pad" } }` — the #927 vector on the QoS SETTINGS.
+ *
+ * The record names NO `delivery_policy` key of its own. It carries one forward-compat pair
+ * an older node is meant to skip whole, `hint = "delivery_policy"` — and the string
+ * `"delivery_policy"` therefore sits in a VALUE slot, immediately followed by a `VALUE`
+ * child. The every-offset scan re-read that string as a key and adopted the following
+ * `VALUE` as this subscription's packed policy word, so a newer peer's opaque hint silently
+ * set reliability, priority and the durability request on a subscription that requested
+ * none of them.
+ */
+std::vector<std::byte> b_hijack_subscriber(std::uint16_t word) {
+    std::vector<std::byte> q;
+    tr::wire::emit_name(q, "hint");
+    tr::wire::emit_name(q, "delivery_policy");  // a VALUE slot that spells a known key
+    std::vector<std::byte> w(2);
+    tr::detail::store_le(w, word, 2);
+    tr::wire::emit_tlv(q, type_t::VALUE, opt_t{}, w);  // the child the old scan bound to it
+    tr::wire::emit_name(q, "pad");
+
+    std::vector<std::byte> body = b_path({"client"});
+    tr::wire::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true}, q);
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, type_t::SUBSCRIBER, opt_t{.pl = true}, body);
+    return out;
+}
+
+/**
+ * @brief A forward-compat SUBSCRIBER pair cannot inject a delivery policy (#927).
+ *
+ * The oracle is the durability latch, the same one `test_replace_door_latches` uses: a
+ * subscription whose policy carries `kDurabilityRequest` is delivered the producer's held
+ * value ON JOIN. The producer holds `0x5A` before the subscribe, so the injected word — if
+ * it became the policy — buys exactly one delivery. Zero deliveries is the fix.
+ */
+void test_qos_settings_pair_scan_cannot_be_hijacked() {
+    std::printf("a forward-compat SUBSCRIBER SETTINGS pair cannot inject a policy (#927):\n");
+    graph_t g;
+    const vertex_handle_t src = g.register_vertex(path_t("/hj/src"), role_t::STORED_VALUE);
+    (void)g.write(src, byte_value(0x5A));  // the producer's LKV, held before the subscribe
+    register_client(g);
+
+    tr::graph::field_path_t field;
+    field.steps.push_back(
+        tr::graph::field_step_t{.name = "subscribers", .indexed = true, .append = true});
+    const std::optional<vertex_handle_t> v = g.find(path_t("/hj/src").key());
+    const bool admitted =
+        v.has_value() &&
+        g.write(*v, field, make_value(b_hijack_subscriber(delivery_policy_t::kDurabilityRequest)))
+            .has_value();
+    check(admitted, "the SUBSCRIBER carrying only a forward-compat `hint` pair is admitted");
+    std::printf("  (observed join deliveries = %d)\n", g_client_writes);
+    check(g_client_writes == 0,
+          "no durability latch — the injected VALUE never became this subscription's policy");
+
+    // Positive control: the SAME door, the SAME producer, a subscriber that genuinely
+    // names `delivery_policy`, still latches. Without this the zero above would also be
+    // satisfied by a latch that stopped working for every subscriber.
+    graph_t g2;
+    const vertex_handle_t src2 = g2.register_vertex(path_t("/rep/src"), role_t::STORED_VALUE);
+    (void)g2.write(src2, byte_value(0x5A));
+    register_client(g2);
+    check(append_vector(g2, path_t("/rep/src"), "subscriber/policy-durability") &&
+              g_client_writes == 1,
+          "control: a SUBSCRIBER that really names delivery_policy still latches on join");
+}
+
+/**
  * @brief The `settings/removed-knob` and `stream/history-depth-host-only` vectors are the
  *        bytes the RESOLVER builds — not a shape a document declared.
  *
@@ -834,6 +902,7 @@ int main() {
     test_nothing_is_inherited();
     test_conformance_vectors();
     test_replace_door_latches();
+    test_qos_settings_pair_scan_cannot_be_hijacked();
     test_removed_knob_reply_bytes();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");

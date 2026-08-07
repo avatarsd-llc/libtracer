@@ -62,6 +62,34 @@ view_t spec(std::string_view type, std::string_view name) {
     return owned(out);
 }
 
+/**
+ * @brief `SPEC{ type, name, <forward-compat pair whose VALUE spells @p hijacked_key>,
+ *        <@p follower and its value> }` — the #927 pair-consuming vector on the creation spec.
+ *
+ * The creation spec is the same positional `(NAME key, value)` grammar as the transport
+ * SETTINGS, and `create_child` walked it at every offset too. So a pair an older node is
+ * meant to skip — `hint = "name"` from a newer peer — put the string `"name"` in a VALUE
+ * slot, where the scan re-read it as a key and bound the FOLLOWING child as the child's
+ * name. The vertex was then created at an address the sender never asked for, and the same
+ * shape re-binds `type` (wrong factory) or `config` (a different SETTINGS reaches the
+ * transport module — the `cert`/`key` blob among them).
+ */
+view_t spec_hijack(std::string_view type, std::string_view name, std::string_view hijacked_key,
+                   std::string_view follower) {
+    std::vector<std::byte> body;
+    tr::wire::emit_name(body, "type");
+    tr::wire::emit_name(body, type);
+    tr::wire::emit_name(body, "name");
+    tr::wire::emit_name(body, name);
+    tr::wire::emit_name(body, "hint");
+    tr::wire::emit_name(body, hijacked_key);  // a VALUE that spells a known key
+    tr::wire::emit_name(body, follower);      // the child the old scan bound to it
+    tr::wire::emit_name(body, "ignored");
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
+    return owned(out);
+}
+
 /** @brief A bare VALUE TLV (not a SPEC) — for the TYPE_MISMATCH case. */
 view_t bare_value() {
     std::vector<std::byte> out;
@@ -220,6 +248,38 @@ void test_wire_name_predicate() {
           "and the created child is addressable via path_t::parse");
 }
 
+/**
+ * @brief A forward-compat pair in the creation SPEC cannot re-bind `name` or `type` (#927).
+ *
+ * `create_child`'s walk is now pair-consuming, so an unknown key is skipped together with
+ * its value and no value child is ever tested as the next position's key.
+ */
+void test_spec_pair_scan_cannot_be_hijacked() {
+    std::printf("a forward-compat SPEC pair cannot re-bind name or type (#927):\n");
+    {
+        graph_t g;
+        (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
+        const auto w =
+            g.write(path_t("/dev:children[]"), spec_hijack("stored_value", "good", "name", "evil"));
+        check(w.has_value(), "SPEC{stored_value, good, hint=\"name\", evil} is accepted");
+        check(g.find(path_t::parse("/dev/good")->key()).has_value(),
+              "the child is created at the name the sender ASKED for");
+        check(!g.find(path_t::parse("/dev/evil")->key()).has_value(),
+              "and NOT at the attacker-chosen following child");
+    }
+    {
+        // The same shape against `type`: "no_such_type" is unregistered, so a hijack
+        // would turn an accepted create into SCHEMA_NOT_FOUND (and, where a second type
+        // IS registered, would silently build the wrong kind of vertex).
+        graph_t g;
+        (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
+        const auto w = g.write(path_t("/dev:children[]"),
+                               spec_hijack("stored_value", "temp", "type", "no_such_type"));
+        check(w.has_value() && g.find(path_t::parse("/dev/temp")->key()).has_value(),
+              "`type` keeps the sender's selector, so the create still succeeds");
+    }
+}
+
 int main() {
     test_create_and_resolve();
     test_unknown_type();
@@ -228,6 +288,7 @@ int main() {
     test_non_spec_value();
     test_custom_factory();
     test_wire_name_predicate();
+    test_spec_pair_scan_cannot_be_hijacked();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
