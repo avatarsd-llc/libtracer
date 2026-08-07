@@ -423,7 +423,7 @@ void test_fwd_read_round_trip() {
 // kind=webtransport [, addr] [, cert, key] } } — the quic_test conn_spec shape.
 view_t conn_spec(std::string_view type, std::string_view name, tr::net::conn_role_t role,
                  std::uint16_t port, std::string_view addr = {}, std::string_view cert = {},
-                 std::string_view key = {}) {
+                 std::string_view key = {}, std::string_view hijack_key = {}) {
     std::vector<std::byte> cfg;
     tr::wire::emit_name(cfg, "role");
     const std::byte r{static_cast<std::uint8_t>(role)};
@@ -443,6 +443,16 @@ view_t conn_spec(std::string_view type, std::string_view name, tr::net::conn_rol
         tr::wire::emit_name(cfg, cert);
         tr::wire::emit_name(cfg, "key");
         tr::wire::emit_name(cfg, key);
+    }
+    if (!hijack_key.empty()) {
+        // #927: a forward-compat pair a node that predates `hint` must skip WHOLE. Its
+        // string VALUE spells `key`, so the every-offset scan re-read it as a key and
+        // bound the FOLLOWING child as the private-key path, last-match-wins overriding
+        // the legitimate one above.
+        tr::wire::emit_name(cfg, "hint");
+        tr::wire::emit_name(cfg, "key");
+        tr::wire::emit_name(cfg, hijack_key);
+        tr::wire::emit_name(cfg, "pem");
     }
 
     std::vector<std::byte> body;
@@ -490,6 +500,22 @@ void test_config_constructed_webtransport() {
     const auto bad = node_b.write(path_t("/net:children[]"),
                                   conn_spec("listener", "bad", tr::net::conn_role_t::LISTEN, 0));
     check(!bad.has_value(), "B: a webtransport listener without cert/key fails creation");
+
+    // #927 against the REAL parse_wt_config, over the REAL wire path (`:children[]` SPEC →
+    // graph_t::create_child → webtransport_transport_factory). `parse_wt_config` kept a
+    // hand-rolled every-offset copy of the SETTINGS walk after the other parsers moved to
+    // net::config_reader_t, so this — the one shape that names a PRIVATE KEY FILE — was the
+    // last place the defect lived. The hijack target does not exist on disk, so a listener
+    // that adopted it could not load credentials and the write would be refused; the
+    // observable is that the listener still comes up on the REAL dev key.
+    const auto hj =
+        node_b.write(path_t("/net:children[]"),
+                     conn_spec("listener", "hj", tr::net::conn_role_t::LISTEN, 47134, {}, g_cert,
+                               g_key, "/nonexistent/libtracer-attacker-key.pem"));
+    check(hj.has_value(),
+          "B: a forward-compat `hint=\"key\"` pair does NOT re-point the private key (#927)");
+    check(router_b.registry().by_name("net/webtransport-server/hj") != nullptr,
+          "B: the hijack-vector listener is wired in — it loaded the REAL dev key");
 
     // A: a webtransport CLIENT dialing B — a synchronous session from config
     // (the DEV-ONLY no-verify trust mode, documented on the factory).

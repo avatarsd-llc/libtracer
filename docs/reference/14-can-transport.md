@@ -195,6 +195,14 @@ resource: structure is drawn from an injected resource, the live group count is
 bounded by configuration, and overflow evicts the oldest group and increments a
 `dropped_groups` counter. A constrained node therefore degrades by a bounded drop
 rather than by unbounded growth, and no magic number appears anywhere in the buffer.
+
+A count bound alone does not reclaim a group that will **never** complete, which is
+what a lost data slice leaves behind: `erase()` is reached only after `is_complete()`.
+So the buffer also **ages out**. It holds no clock of its own — the caller stamps it
+(`set_now`) and sweeps on a cadence it chooses (`sweep_stale`), keeping the buffer a
+pure framing primitive exactly as it has no allocator of its own. An age-out ticks the
+same `dropped_groups` counter an eviction does: one counter for "a group's buffered
+slices were reclaimed before delivery", whatever forced it.
 ```
 
 ## The in-band advertise frame and the dynamic map
@@ -341,6 +349,38 @@ re-driven when the manifest lands.
 - **Ordering.** Correctness relies on per-bus in-order delivery of a group's frames
   (which a single producer gets on CAN); the pending-data buffer covers control/data
   cross-ID reordering.
+```
+
+### Ingress is bounded in count and in age
+
+Both receive-side buffers are reclaimable, because on a bus that drops frames both
+have a residue that nothing else frees:
+
+| Buffer | Count bound | Age bound | Counter |
+| --- | --- | --- | --- |
+| pending data slices (awaiting an advertise) | `max_pending` — evict oldest | `rx_ttl`, swept on every inbound frame | `dropped_rx()` |
+| reassembly groups | `max_groups` — evict oldest | `rx_ttl`, swept on every inbound advertise | `dropped_groups()` |
+
+The count bounds are **opt-in** — `0` means unbounded, host-bounded per RFC-0006,
+the same policy as the stream servers' `max_peers` — and both, along with the pmr
+resource the buffers draw from, arrive through the connection's own config door
+(`max_groups`, `max_pending`, `rx_ttl_ms`; the resource is injected at
+factory-registration time, since a pointer cannot ride a config TLV). The **age**
+bound is always live, so it is what holds under the default configuration. It is not
+an independently invented number: left at `0`, `rx_ttl` tracks the configured
+`peer_ttl`, on the reasoning that RX state a peer would have completed is dead once
+that peer is itself considered gone.
+
+Egress has the matching counter, `dropped_tx()`: a send that never reached the bus
+(no storage for the payload, a payload that split into no window, or a manifest that
+could not be encoded) is counted rather than silently discarded.
+
+```{admonition} Eviction is not a substitute for correct keying
+:class: warning
+Aging and eviction bound *memory*; they do not make a stale binding safe to reuse.
+The deterministic fix for a recurring base endpoint is the producer **generation** in
+[ADR-0077](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0077-can-advertise-carries-a-producer-generation-keying-reassembly.md),
+and these bounds are complementary to it, never a replacement.
 ```
 
 ### Peer enumeration and transparent per-peer forwarding

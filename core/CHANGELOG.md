@@ -14,6 +14,48 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Added
+
+- **`transport_can` exposes the sibling drop counters, and its RX state is bounded and
+  aged (#912).** The CAN ingress buffers grew on the receive thread with nothing expiring
+  and nothing counting a drop, unlike every sibling transport. Three parts:
+  - **The injected-bound seam is reachable at last.** `can_reassembly_t` was
+    *default-constructed* inside the transport, so `max_groups` was `0` and its
+    evict-oldest could never fire however a deployment was configured. It is now
+    constructed from new `transport_can_config_t` fields — `reasm_mr` (a
+    `std::pmr::memory_resource*`, default the process heap), `max_groups`, `max_pending`
+    and `rx_ttl` — and the pending-slice queue draws from the same injected resource, so
+    the RX thread no longer reaches the global heap. The `can` factory parses
+    `max_groups`, `max_pending` and `rx_ttl_ms` from the connection's config SETTINGS
+    TLV (`0` = unbounded, host-bounded per RFC-0006, matching `max_peers`), and
+    `can_transport_factory` takes an optional `std::pmr::memory_resource*` — a resource
+    is a pointer, not a wire value, so it is injected at registration time.
+  - **`pending_` is bounded and aged.** A data frame with no matching binding was parked
+    forever: the only drain is `learn_advertise`'s covered-range re-drive, so a peer that
+    never advertises (or a bus that dropped the advertise — the exact failure CAN
+    produces) grew it without limit. It is now capped by `max_pending` (evict-oldest and
+    count) and swept of entries older than `rx_ttl`.
+  - **An incomplete reassembly group no longer pins its slices forever.** `erase` is
+    reached only after `is_complete`, so any lost data slice left a group buffered for the
+    transport's life. `can_reassembly_t` gains `set_now(std::uint64_t)` and
+    `sweep_stale(std::uint64_t max_age)` — the buffer stays clock-free, the caller stamps
+    it — and `transport_can` sweeps on every inbound advertise.
+
+  New public accessors on `transport_can`: `dropped_rx()` (inbound slices reclaimed by the
+  cap or the age-out), `dropped_tx()` (a send that never reached the bus: allocation
+  failure, an empty split, or an unencodable manifest), `dropped_groups()` (reassembly
+  groups reclaimed before delivery — the accessor the buffer's own counter never had) and
+  `pending_slices()`. `rx_ttl` left at `0` tracks the configured `peer_ttl` rather than
+  introducing a second window: a peer already considered gone cannot complete RX state.
+  Unlike the opt-in count caps the age-out is **always live**, so it is the bound that
+  holds under the shipped default config. That "always" is now literal: a `peer_ttl` of
+  `0` derives an `rx_ttl` of `0`, which the peer enumeration and the reassembly sweep both
+  read as *instantly expired* — the pending age-out used to read the same `0` as *sweep
+  disabled* and return early, so one degenerate config value silently re-opened the
+  unbounded growth this entry closes. Zero now means the same thing to all three, and a
+  negative window (previously cast to `std::uint64_t` and compared against ~1.8e19, so it
+  reclaimed nothing at all) is normalized to zero at construction. No wire change.
+
 ### Fixed
 
 - **A connection whose link cannot be wired into the router is now rolled back instead of
@@ -32,6 +74,38 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   pressure clears still finds its link. Callers of a `/net:children[]` create see one new
   outcome: `BACKPRESSURE` where the call previously reported success. The success path is
   byte-identical, and no signature changed.
+
+- **`net::config_reader_t` no longer lets a string VALUE be re-read as a key (#927).** The
+  SETTINGS walk advanced one child at a time, so the `NAME` child that is the *value* of one
+  pair was also tested as the *key* of the next position. Combined with the ignore-unknown-keys
+  forward-compat rule, any pair whose string value textually equalled a known key silently bound
+  the FOLLOWING child as that key's value — and last-match-wins then overrode a legitimate
+  earlier occurrence: a newer peer's `link_hint = "addr"` made an older node parse an `addr` it
+  was never sent, and it needed no unknown key at all (an ordinary `kind = "addr"` mis-bound the
+  same way). The walk is now **pair-consuming** — it steps over `(NAME key, value)` pairs and
+  advances past the value it consumed — so an unknown key is skipped as a WHOLE pair and a value
+  can never be re-read as a key. Forward-compat tolerance is unchanged and deliberate (the
+  opposite ruling from the ACL parse, where an unknown key is rejected because a dropped
+  attribute widens access); so are wrong-type-ignored, empty-`VALUE`-ignored and repeat-key
+  last-wins. Two behaviour differences beyond the fix: a child that is not a `NAME` where a key
+  belongs now stops the walk instead of resynchronizing on the next offset, and a trailing
+  unpaired key is still ignored. Well-formed configs parse identically. No signature change.
+
+- **The same defect is closed on the webtransport cert/key parse and on two graph-layer pair
+  walks (#927).** `parse_wt_config` (`transport_webtransport.cpp`) kept a hand-rolled
+  every-offset copy of the walk, so the defect survived on the one shape that names a **private
+  key file**: a forward-compat `hint = "key"` pair let the string `"key"` be re-read as a key,
+  binding the following child as the private-key path and overriding the legitimate one under
+  last-wins. It now goes through `net::config_reader_t` like the quic factory, leaving all six
+  transport-side consumers on one walk. Two L4 parsers read the same positional grammar and
+  cannot depend on `tr::net` (dependencies point up the layers only), so they carry the
+  pair-consuming *rule* instead: `graph_t::create_child` — where a `hint = "name"` pair created
+  the child at an address the sender never asked for, and the same shape re-bound `type` or
+  `config` — and the SUBSCRIBER QoS `SETTINGS` parse, where it injected a `delivery_policy`
+  (reliability, priority, the durability request) into a subscription that requested none. Both
+  now step whole pairs and stop, rather than resynchronize, on a desynchronized stream.
+  `graph::parse_acl` is the one every-offset scan left; #906 rewrites that walk whole under the
+  opposite unknown-key ruling and owns it. Well-formed frames parse identically throughout.
 
 - **A `status_t` gained without a wire mapping is now a build error, not a mislabelled error
   code on the wire (#876).** The L4→wire bridge `error_code(status_t)` ended in
@@ -110,6 +184,42 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   the inner pool's slot count overwritten with a wild index). The same cast fired for every
   `tr::view::borrow()`ed segment and for any user backend. The tag is a fast path again, never
   a correctness dependency.
+
+- **`view::rope_t::concat` is self-aliasing-safe (#915).** `r.concat(r)` walked `other`'s
+  links while `append` mutated that very storage. In INLINE mode the `kInline+1`-th append
+  spills the chain, which zeroes `inline_n_` and overwrites every inline slot with `view_t{}`
+  mid-walk — so a two-link `r.concat(r)` produced `[a, b, a, {}]` instead of `[a, b, a, b]`:
+  **silent data corruption, wrong bytes on the wire**. In HEAP mode `push_back` could
+  reallocate the vector the walk pointed into (a dangling span — undefined behaviour, now
+  reproduced under ASan). `concat` now `try_reserve`s the joined link count before touching
+  anything, so none of its appends spills or reallocates, and walks the source **by index**,
+  re-reading it each step so a link is fetched from wherever the chain currently lives. The
+  reservation is a no-op while the joined chain still fits inline, so the hot 1–2-link case
+  still allocates nothing (ADR-0053 §6); for a long cross-rope concat it replaces the
+  geometric `push_back` ladder with one sized growth. Cross-rope `concat` and `operator+`
+  are otherwise unchanged.
+- **`wire::grammar::rope_cursor` asserts its bounds preconditions instead of hiding a
+  violation (#916).** `region(off, len)` clamped nothing, so a cursor could claim bytes the
+  chain does not hold; `locate` answered any at/past-end offset with `{last_link, 0}`, so
+  `byte_at` returned **byte 0 of the last link — a real but wrong byte** that no sanitizer
+  could see (the sibling `span_cursor`'s out-of-range read is span UB that ASan/fuzz CI
+  catches), and on an empty chain it was hard UB. `region`, `byte_at` and `locate` now carry
+  the same debug-only preconditions `view::view_t::subview` has had — **zero release cost, no
+  new branch on the hot read path** — and `locate` returns the one-past-the-end link index
+  rather than fabricating a valid one, so a release-build violation is an out-of-range
+  subscript a sanitizer reports. `for_each_span` — the one bulk reader — carries the same
+  `off + n <= size()` containment precondition, and returns early on an empty feed, which the
+  grammar's CRC path legitimately issues at the window end. Its own guards (chain-end, and
+  `locate`'s past-chain assert) do not see a feed that overshoots a **narrowed** window while
+  staying inside the chain, so without the precondition a two-link 3+2 rope narrowed to
+  `region(0, 3)` fed `for_each_span(0, 5, …)` handed the caller chain bytes 3 and 4 and
+  reported success — while the identical slip through `byte_at(3)` on that cursor aborts.
+  Note the asymmetry: `byte_at`'s release-build violation still degrades to a sanitizer-visible
+  out-of-range subscript, but an overshooting feed reads bytes the chain genuinely holds, so in
+  a release (`NDEBUG`) build it stays silent and unsanitizable — **in release this contract is
+  the caller's to keep.** No signature changed; every in-bounds caller is unaffected. Giving
+  `byte_at` a **release** guarantee (an `optional` or a poisoned flag mapped to
+  `FRAME_TRUNCATED`) is a separate design decision, not taken here.
 
 ### Changed
 
