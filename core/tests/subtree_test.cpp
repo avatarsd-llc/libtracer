@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <expected>
 #include <initializer_list>
 #include <optional>
 #include <span>
@@ -325,8 +326,9 @@ void test_write_creates_acl_gate() {
     std::printf("write-creates CREATE-ACL gate (denied => PERMISSION_DENIED):\n");
     graph_t g;
     (void)g.register_vertex(path_t("/p"), role_t::STORED_VALUE);
-    // Every caller (including local) resolves to a subject — enforcement is on.
-    g.set_subject_resolver([](std::string_view) -> std::optional<subject_token_t> {
+    // Enforcement is on for the ATTRIBUTED caller "peer"; the empty (local) context stays
+    // trusted without consulting the resolver (#905), which is what the setup writes use.
+    g.set_subject_resolver([](std::string_view) -> std::expected<subject_token_t, tr::wire::err_t> {
         return subject_token_t{std::byte{'u'}};
     });
 
@@ -342,13 +344,17 @@ void test_write_creates_acl_gate() {
     check(g.write(path_t("/p:acl"), make_value(acl)).has_value(),
           "install a WRITE-only (no CREATE) ACL on /p");
 
-    const auto denied = g.write(path_t("/p/child"), make_value({0x01, 0, 1, 0, 9}));
+    // The write-create door, under an ATTRIBUTED caller — the empty context is the local
+    // owner's and is trusted by convention, so the gate is only meaningful for a named one.
+    const path_t child{"/p/child"};
+    const auto denied = g.ensure_vertex(child.key(), "peer");
     check(!denied.has_value() && denied.error() == status_t::PERMISSION_DENIED,
           "write-create under /p without the CREATE right => PERMISSION_DENIED");
-    check(!g.find(path_t::parse("/p/child")->key()).has_value(), "denied create made no vertex");
+    check(!g.find(child.key()).has_value(), "denied create made no vertex");
 
     // Writing to the existing /p itself is still allowed (WRITE granted).
-    check(g.write(path_t("/p"), make_value({0x01, 0, 1, 0, 9})).has_value(),
+    const vertex_handle_t p = *g.find(path_t{"/p"}.key());
+    check(g.write(p, make_value({0x01, 0, 1, 0, 9}), "peer").has_value(),
           "plain write to /p still allowed by the WRITE grant");
 }
 
@@ -358,7 +364,7 @@ void test_branch_write_acl_admission() {
     vertex_handle_t s = g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
     vertex_handle_t st = g.register_vertex(path_t("/s/t"), role_t::STORED_VALUE);
     vertex_handle_t su = g.register_vertex(path_t("/s/u"), role_t::STORED_VALUE);
-    g.set_subject_resolver([](std::string_view) -> std::optional<subject_token_t> {
+    g.set_subject_resolver([](std::string_view) -> std::expected<subject_token_t, tr::wire::err_t> {
         return subject_token_t{std::byte{'u'}};
     });
     // Close /s/u to writes (an ACL granting only READ — any present ACE closes it),
@@ -372,7 +378,7 @@ void test_branch_write_acl_admission() {
 
     const std::vector<std::byte> branch =
         point_tlv("s", cat({point_tlv("t", value_tlv({0x11})), point_tlv("u", value_tlv({0x22}))}));
-    const auto denied = g.write(s, make_value(branch));
+    const auto denied = g.write(s, make_value(branch), "peer");
     check(!denied.has_value() && denied.error() == status_t::PERMISSION_DENIED,
           "one denied landing site rejects the whole branch");
     check(!g.read(st).has_value() && !g.read(su).has_value(),

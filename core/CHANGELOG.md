@@ -74,6 +74,77 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   truncates modulo 2^32 — the wire grammar has no length form wider than u32, so that residual
   is a grammar limit, not an `encode` bug, and it is unchanged here.
 
+- **`tr::detail::try_reserve` / `try_push_back` / `try_assign` no longer probe-then-commit
+  (#923, #850).** They performed a nothrow `operator new`/`delete` probe and then ran the
+  THROWING `std::vector::reserve` behind it, on the argument that "the just-freed probe block
+  satisfies it". That inference is single-threaded, and this library's own concurrency model
+  is not: a segment self-routes its reclaim on whatever thread drops the last ref, and
+  transport receive threads run concurrent with writers. A racer taking the block inside the
+  window made `reserve` throw `bad_alloc` out of a `noexcept` function — `std::terminate`,
+  measured (`exit=134`). A single-core FreeRTOS context switch between the `operator delete`
+  and the `reserve` opens the same window without SMP.
+
+  The growth now runs through a new `tr::detail::try_grow(bytes, grow)`: on any profile that
+  has exceptions the container's OWN allocation is the one whose failure is reported (caught
+  and returned as `false`), so there is no second allocation and no window. Under
+  `-fno-exceptions` a `bad_alloc` has no representation at all — libstdc++ turns it into a
+  bare `abort()` inside `reserve` that no wrapper can intercept — so the probe is retained
+  there unchanged; a path on that profile that must genuinely survive exhaustion migrates to
+  the ADR-0065 failable seam (`block_source_t` / `block_array_t`), as
+  `transport_t::send(iov)` and `ws::try_encode_client_frame` already did.
+
+  Behaviour is unchanged for callers (`false` still means "nothing changed"), the
+  `probe_fail_hook` OOM-injection seam still gates every one of these paths, and the hosted
+  profile gets **one fewer allocator round trip per growth** (measured on
+  `bench_failable_census`: `try_encode_advertise_guarded` heap blocks/call 2.01 → 1.00;
+  `probe` mode `try_reserve` median 18.90 → 7.52 ns/growth against an unchanged `try_alloc`
+  control arm at 13.42 → 10.81). `try_push_back` now `static_assert`s that `T` is
+  nothrow-move-constructible.
+
+- **`LIBTRACER_BACKEND_SET_POOL_ONLY` `destroy_dispatch` honours the segment's `backend_tag`
+  (#922).** The single-member (MCU) fold of the ADR-0047 §2 dispatch reinterpreted every
+  segment's backend as `pool_t*` with no tag check — unlike the `transfer` beside it. A
+  `synchronized_pool_t` is a `mem_backend_t` holding a `pool_t` **member** and re-points its
+  segments to itself with an `UNKNOWN` tag precisely so reclaim takes the locked virtual
+  `destroy`; reinterpreting it read `slab_`/`stride_` from the wrong offsets and skipped the
+  critical section (measured on the new POOL_ONLY target: 1 lock acquisition instead of 2, and
+  the inner pool's slot count overwritten with a wild index). The same cast fired for every
+  `tr::view::borrow()`ed segment and for any user backend. The tag is a fast path again, never
+  a correctness dependency.
+
+### Changed
+
+- **BREAKING — `subject_resolver_t` gains a DENY channel; an unresolvable caller is no
+  longer trusted (#905).** The type in `graph.hpp` changes from
+  `std::function<std::optional<subject_token_t>(std::string_view)>` to
+  `std::function<std::expected<subject_token_t, wire::err_t>(std::string_view)>`. The
+  error arm means **deny**: the operation fails `status_t::PERMISSION_DENIED`
+  (`tr::access::denied`, 0x0050 on the wire).
+
+  Before this, the resolver had exactly one non-token answer — `nullopt` — and the graph
+  read it as *fully trusted*, skipping every ACE check. The natural reading of that value
+  ("I cannot name this caller") therefore granted **every** right on the vertex, including
+  `WRITE_ACL` and `CREATE`, at every gate: READ, WRITE, SUBSCRIBE, CREATE, WRITE_ACL,
+  READ_ACL, and remote-edge fan-in delivery. A resolver bug, a revoked peer, or an unknown
+  remote identity bypassed all ACLs on protected vertices. There was no way for a resolver
+  to say *deny*.
+
+  **The trusted channel moved out of the resolver.** `acl_allows` now settles the EMPTY
+  caller context — the local-API convention — as trusted **before** invoking the resolver,
+  so the resolver is never called with an empty caller and a remote op (which always
+  carries its inbound link NAME) cannot reach the trusted arm.
+
+  *Migration:* a resolver of the form
+  `if (caller.empty()) return std::nullopt; return token;` becomes
+  `return token;` — the empty case is now handled by the graph. Any *other* former
+  `nullopt` return was silently granting everything and should become
+  `return std::unexpected(wire::err_t::ACCESS_DENIED);`. The signature change is
+  deliberately recompile-visible: keeping `std::optional` and inverting `nullopt`'s meaning
+  would have flipped the semantics of every existing resolver in silence.
+
+  No change to the enforcement-disabled path: the `!subject_resolver_` early-out remains
+  the only check when no resolver is installed.
+
 ## [0.8.0] — 2026-08-06
 
 ### Added
