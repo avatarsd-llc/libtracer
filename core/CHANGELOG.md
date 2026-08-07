@@ -73,6 +73,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   requests no `CAN_RAW_ERR_FILTER`, so the kernel's default zero mask has always withheld
   them. The check is the seam's rule holding for a port that does ask, not a change.
 
+- **`fwd_router_t::receiver_ctx_count()` (#884).** How many per-child receiver contexts the
+  router holds — one per NAME ever registered, live or tombstoned. The twin of
+  `child_registry_t::size()` and introduced for the same reason: it is the length of the chain
+  every name-keyed and slot-keyed lookup walks, so "create/remove churn does not grow it" is
+  assertable rather than merely intended. Takes the control lock; never a per-frame call.
+
 - **`transport_can` exposes the sibling drop counters, and its RX state is bounded and
   aged (#912).** The CAN ingress buffers grew on the receive thread with nothing expiring
   and nothing counting a drop, unlike every sibling transport. Three parts:
@@ -124,6 +130,28 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   exactly like its neighbour `probe_fail_hook`.
 
 ### Fixed
+
+- **`fwd_router_t` resolves a re-added child NAME to its current tenancy, and connection
+  churn no longer grows its receiver chain (#884).** `remove_child` left the child's
+  `child_rx_ctx_t` on the published receiver chain and `add_child` of the same NAME appended
+  a second one, while the name-keyed walk answers with the FIRST match. Name reuse is a
+  supported flow — `remove_connection` retires the vertex so a later connection may take the
+  name, and the registry rebinds its tombstone — so after one create/remove/create cycle every
+  name-keyed consumer (`connection_ref`, `hop_mint`, and through them `adopt_binding` and the
+  reply-mint contribution) resolved the DEAD context, whose `conn_slot` names the retired
+  tenancy: a re-created child could be permanently unbindable on the bound path while its
+  canonical spelling worked, and a NAME re-added as a bus mount kept answering with the
+  point-to-point slot it no longer had. The chain also grew by one `child_rx_ctx_t` (plus its
+  mount run) per cycle, unboundedly, lengthening the per-bound-frame `ctx_by_conn_slot` walk —
+  on a bounded node, a reboot. A ctx is now TOMBSTONED in place on removal (it stays linked,
+  because a lock-free reader may be standing on it, but every walk skips it) and a re-add of
+  the same NAME REBINDS that ctx instead of appending, which is the one-slot-per-name rule
+  `child_registry_t::add` has followed since #494/#521. `conn_slot` is re-resolved per
+  registration rather than inherited. Not a use-after-free: every pointer involved stays live
+  (the deque is never popped, registry chunks are never freed, and the graph's slot table is
+  pinned and insert-only) — the defect was a live pointer naming the wrong tenancy, which is
+  why ASan reports nothing on either side of the fix. Measured before: 52 contexts after 51
+  remove/re-add rounds on one name; after: 1.
 
 - **The hazard domain's exit sweep no longer frees lists a live thread still owns (#898).**
   Only builds that bind `hazard_slot_t` (`-DLIBTRACER_LKV_SLOT=hazard_slot_t`) reach this;

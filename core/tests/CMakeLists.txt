@@ -346,6 +346,15 @@ target_link_libraries(registry_teardown_test PRIVATE libtracer)
 libtracer_test_warnings(registry_teardown_test)
 add_test(NAME registry_teardown COMMAND registry_teardown_test)
 
+# #884 — the router's OWN per-child table under create/remove churn: the twin of the
+# registry teardown contract above, one layer out. Every pointer involved stays live, so the
+# failures this pins are wrong-tenancy resolutions and unbounded growth, NOT memory errors —
+# which is why it is an ordinary host test and its ASan value is the report it does NOT make.
+add_executable(child_rx_churn_test child_rx_churn_test.cpp)
+target_link_libraries(child_rx_churn_test PRIVATE libtracer)
+libtracer_test_warnings(child_rx_churn_test)
+add_test(NAME child_rx_churn COMMAND child_rx_churn_test)
+
 add_executable(retire_test retire_test.cpp)
 target_link_libraries(retire_test PRIVATE libtracer)
 libtracer_test_warnings(retire_test)
