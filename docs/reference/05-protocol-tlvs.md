@@ -878,11 +878,31 @@ Structured (`opt.PL=1`):
 
 ```
 SPEC (0x0E, PL=1) {
-  NAME "type"     <catalog selector — required only where the catalog is global>
-  NAME "name"     <the new child's path component>
-  SETTINGS "config"   ; optional — instantiation params
+  NAME "type"    NAME <catalog selector — required only where the catalog is global>
+  NAME "name"    NAME <the new child's path component>
+  NAME "config"  SETTINGS { … }   ; optional — instantiation params
 }
 ```
+
+The body is a run of positional **pairs**: a `NAME` key followed by its value child. Both
+halves are typed, and the value's type is part of the grammar, not a stylistic choice —
+`type` and `name` are carried by a **`NAME` (`0x02`)** child, `config` by a `SETTINGS`
+(`0x0B`). A receiver matches each pair on the value's type and skips any other, so a
+`VALUE` (`0x01`) in a `type`/`name` slot is not a lenient spelling of the same thing: the
+field is dropped, the catalog selector comes up empty, and the create is refused
+(`INVALID_PATH`). The distinction is invisible to a round-trip — such a SPEC decodes and
+re-encodes to itself perfectly — so it is pinned by the `spec/` conformance vectors
+instead.
+
+The same typing rule governs `config`'s own key/value pairs: an integer or flag is a
+`VALUE` (little-endian), a string is a `NAME`. A string-valued key is found *only* as a
+`NAME` child. Note that such a string is not an address segment and need not satisfy the
+addressing grammar — a `addr` dotted quad contains `.`, which an address segment may not
+— it is simply the wire's string node.
+
+The walk is **pair-consuming**: an unrecognised key is skipped together with its value, so
+a value child is never re-read as the next position's key. That is what lets forward-compat
+tolerance coexist with positional pairing.
 
 ### Where it appears
 

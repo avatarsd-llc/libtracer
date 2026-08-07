@@ -139,9 +139,10 @@ void twai_link_t::on_receive(rx_fn_t rx) {
 }
 
 void twai_link_t::write_raw(const can_frame_data_t& frame) {
-    // TWAI is classic CAN only: an FD frame (or an over-8-byte payload) is
-    // dropped best-effort, mirroring the RX side's skip-and-continue policy.
-    if (frame.fd || frame.len > 8) return;
+    // TWAI is classic CAN only, so an FD frame is dropped best-effort here; the
+    // LENGTH bound is not this port's opinion but the seam's shared egress rule
+    // (#931), the same tr::net::can_tx_admissible socketcan_link_t applies.
+    if (frame.fd || !can_tx_admissible(frame)) return;
 
     const std::lock_guard lock(write_m_);
     if (node_ == nullptr) return;
@@ -191,18 +192,25 @@ bool twai_link_t::on_rx_done_isr(twai_node_handle_t node, const twai_rx_done_eve
 
     // Copy the frame out of the driver inside the ISR window (required by the
     // node API), then queue it for the dispatch thread — no user code here.
-    std::uint8_t buf[8] = {};
+    std::uint8_t buf[tr::view::kCanClassicMaxData] = {};
     twai_frame_t rx = {};
     rx.buffer = buf;
     rx.buffer_len = sizeof(buf);
     if (twai_node_receive_from_isr(node, &rx) != ESP_OK) return false;
-    if (!rx.header.ide || rx.header.rtr) return false;  // 29-bit data frames only
+    // The seam's shared ingress rule (#931): 29-bit data frames only. The node
+    // driver surfaces no error-frame flag on this path, so that leg is false by
+    // construction — a bus-off/error condition arrives as a state callback, not
+    // as a frame.
+    if (!can_rx_admissible(rx.header.ide != 0, rx.header.rtr != 0, /*error=*/false)) return false;
 
     can_frame_data_t out;
     out.id = rx.header.id & 0x1FFFFFFFu;
     out.fd = false;
     out.len = static_cast<std::uint8_t>(twaifd_dlc2len(rx.header.dlc));
-    if (out.len > 8) out.len = 8;
+    // The same cap the socketcan sibling applies, phrased identically: the width
+    // this frame's own mode carries (classic here, since TWAI has no other).
+    const std::uint8_t cap = can_max_len(out.fd);
+    if (out.len > cap) out.len = cap;
     std::memcpy(out.data.data(), buf, out.len);
 
     BaseType_t hp_task_woken = pdFALSE;

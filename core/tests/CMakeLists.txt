@@ -178,13 +178,20 @@ target_link_libraries(transport_can_peers_test PRIVATE libtracer)
 libtracer_test_warnings(transport_can_peers_test)
 add_test(NAME transport_can_peers COMMAND transport_can_peers_test)
 
-# #55 (increment 2) — real-bus smoke test over a kernel vcan0 device. Self-skips
+# #55 (increment 2) — real-bus smoke test over a kernel vcan0 device, plus the #931
+# can_link_t seam-rule vectors (an injected RTR / 11-bit standard frame must not
+# cross ingress; an over-length classic frame must not cross egress). Self-skips
 # (clean exit) when vcan0 cannot bind, so it is harmless in the normal suite; the
 # dedicated can-vcan-e2e CI job sets vcan0 up so the SocketCAN path runs for real.
-add_executable(transport_can_vcan_test transport_can_vcan_test.cpp)
-target_link_libraries(transport_can_vcan_test PRIVATE libtracer)
-libtracer_test_warnings(transport_can_vcan_test)
-add_test(NAME transport_can_vcan COMMAND transport_can_vcan_test)
+# LINUX-ONLY: it speaks <linux/can.h> directly to inject the frames no well-formed
+# link would emit — platform selection is a build-system concern, never an in-source
+# #ifdef (the same doctrine that picks socketcan_link.cpp over its stub).
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_executable(transport_can_vcan_test transport_can_vcan_test.cpp)
+  target_link_libraries(transport_can_vcan_test PRIVATE libtracer)
+  libtracer_test_warnings(transport_can_vcan_test)
+  add_test(NAME transport_can_vcan COMMAND transport_can_vcan_test)
+endif()
 
 # #383 — owned in-flight TX storage for asynchronous can_link_t backends (the
 # TWAI UAF fix's host-testable half): ownership/exhaustion/reuse invariants,
@@ -364,10 +371,13 @@ target_link_libraries(collect_test PRIVATE libtracer Threads::Threads)
 libtracer_test_warnings(collect_test)
 add_test(NAME collect COMMAND collect_test)
 
-# #82 — in-band :children[] SPEC vertex creation (ADR-0017).
+# #82 — in-band :children[] SPEC vertex creation (ADR-0017). Reads the shared `spec/`
+# conformance vectors (#877), so it needs LIBTRACER_VECTORS_DIR.
 add_executable(children_test children_test.cpp)
 target_link_libraries(children_test PRIVATE libtracer)
 libtracer_test_warnings(children_test)
+target_compile_definitions(children_test PRIVATE
+    LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 add_test(NAME children COMMAND children_test)
 
 # L4 fold, Slice 0 — folded :children projection is byte-identical to the materialized
