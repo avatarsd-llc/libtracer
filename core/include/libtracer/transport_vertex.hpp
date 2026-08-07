@@ -273,11 +273,12 @@ class transport_vertex_t {
      * @ref register_module answers `SCHEMA_NOT_FOUND` — the unsupported-catalog-entry
      * convention an unknown SPEC `type` uses — instead of a library-derived name.
      *
-     * **Setup-time contract.** This read takes no lock: it is safe concurrently with
-     * frame flow and with creation (whose caller holds the control mutex), but NOT
-     * concurrently with @ref register_module itself. Declare every module at wiring
-     * time, before other threads touch this object — the same read-only-once-frames-flow
-     * contract the transport-factory catalog documents.
+     * @note Thread-safe (#881): this takes the control mutex, so it may run concurrently
+     *       with @ref register_module and with wire-driven connection creation. It used to
+     *       read the declaration vector with no lock, which a concurrent
+     *       @ref register_module could reallocate out from under the walk — the
+     *       declare-only-at-setup contract that papered over the gap is WITHDRAWN. The
+     *       lock is control-plane; nothing on the forward or delivery path takes it.
      */
     [[nodiscard]] graph::result_t<std::string> module_for(std::string_view kind,
                                                           conn_role_t role) const;
@@ -308,6 +309,13 @@ class transport_vertex_t {
      * creation; this remains the seam for later link events (and the only source for
      * provided links). Until the RFC-0014 S5 liveness engine lands, callers drive this
      * manually — the engine will become the sole writer of the DIAL transitions.
+     *
+     * @note Thread-safe (#881): this takes the control mutex, so the transport thread
+     *       reporting a provided link's liveness may run concurrently with the wire-driven
+     *       create/remove that inserts into and erases from the connection table. It used
+     *       to look the connection up with no lock, racing that map's rebalance and the
+     *       erase of the very node it returned. The vertex write happens inside the locked
+     *       section, in the order the class documents (this → router → graph → stripe).
      * @param name  The connection's **qualified** key `net/<module>/<name>` (#605).
      * @param state The link-liveness state to publish (see link_state_t).
      * @return NotFound if @p name names no created connection vertex.
@@ -374,6 +382,27 @@ class transport_vertex_t {
     graph::result_t<graph::vertex_handle_t> make_connection(std::vector<std::byte> child_key,
                                                             const wire::tlv_t* config,
                                                             conn_role_t role);
+
+    /**
+     * @brief `module_for`'s body, for a caller that ALREADY holds `ctl_m_`.
+     *
+     * `make_connection` resolves a module from inside its own locked section, and `ctl_m_`
+     * is a plain, NON-RECURSIVE `std::mutex` — so it cannot reach the public entry, which
+     * would self-deadlock. That constraint is why #881 is a split rather than a lock added
+     * in place: one body, two surfaces, exactly one acquisition per call.
+     */
+    [[nodiscard]] graph::result_t<std::string> module_for_locked(std::string_view kind,
+                                                                 conn_role_t role) const;
+
+    /**
+     * @brief `set_link_state`'s body, for a caller that ALREADY holds `ctl_m_`.
+     *
+     * Creation publishes `UP`/`LISTENING` for a config-constructed socket from inside the
+     * locked section and calls this; every external liveness report goes through the
+     * locking public entry. Same non-recursive-mutex constraint as `module_for_locked`.
+     */
+    [[nodiscard]] graph::result_t<void> set_link_state_locked(std::string_view name,
+                                                              link_state_t state);
 
     /**
      * @brief Serializes every CONTROL-PLANE mutation here (ADR-0063 §3).
