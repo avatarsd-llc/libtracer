@@ -848,7 +848,7 @@ class fwd_router_t {
      * @brief The receiver ctx of @p name whatever its state — live OR tombstoned (#884).
      *
      * The CONTROL-PLANE half of the name → ctx direction, and deliberately a different
-     * function from @ref ctx_by_name: this one walks the owning deque under `ctl_m_` and
+     * function from `ctx_by_name`: this one walks the owning deque under `ctl_m_` and
      * matches a tombstone, because both of its callers exist to change one. A frame path must
      * use `ctx_by_name`, which walks the published chain and skips the dead.
      */
@@ -858,7 +858,7 @@ class fwd_router_t {
      *
      * The one-ctx-per-NAME rule, enforced where it can be: an existing ctx for @p name (live
      * or tombstoned) is HIDDEN and rebound; only a name this router has never seen appends.
-     * The returned ctx is not visible to a reader until @ref publish_ctx, so the caller may
+     * The returned ctx is not visible to a reader until `publish_ctx`, so the caller may
      * finish filling it (`conn_slot`) first.
      *
      * Control plane, under `ctl_m_` — it walks the OWNING deque, which no frame path may.
@@ -876,7 +876,7 @@ class fwd_router_t {
      *         and a re-added one resolves to its CURRENT tenancy (#884). */
     [[nodiscard]] const child_rx_ctx_t* ctx_by_name(std::string_view link_name) const;
     /** @brief The registered LIVE child whose CONNECTION vertex sits at slot @p index, or
-     *         nullptr — tombstoned nodes are skipped, as in @ref ctx_by_name. */
+     *         nullptr — tombstoned nodes are skipped, as in `ctx_by_name`. */
     [[nodiscard]] const child_rx_ctx_t* ctx_by_conn_slot(std::uint32_t index) const;
     /** @brief This node's element for the link a REPLY arrived on — the forwarder's mint
      *         contribution (RFC-0024 §7.1 step 2); nullopt when it has none to give. */
