@@ -512,7 +512,7 @@ inline participant_t::~participant_t() {
  *
  * ## When this runs, and why that is not "after everything"
  *
- * The sweep is a function-local static of @ref registry(), so the only ordering it gets for
+ * The sweep is a function-local static of `registry()`, so the only ordering it gets for
  * free is against objects constructed *after* it: the main thread's `thread_local`
  * participant, which `self()` deliberately constructs later (see its comment) and which is
  * therefore destroyed **before** this. Nothing orders it against a static constructed
