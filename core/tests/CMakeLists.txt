@@ -331,6 +331,34 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     target_link_libraries(esp_ws_client_recv_test PRIVATE libtracer)
     libtracer_test_warnings(esp_ws_client_recv_test)
     add_test(NAME esp_ws_client_recv COMMAND esp_ws_client_recv_test)
+
+    # #962 — the TWAI link's TX BACKPRESSURE window, on the same construction: the chip
+    # TU (integrations/esp-idf/libtracer/twai_link.cpp) compiled against a host fake of
+    # esp_driver_twai's node API plus the FreeRTOS counting semaphore and queue it is
+    # built on (fake_twai.hpp). This is the first host target to compile that TU at all,
+    # leaving the TWAI link's own FULL policy untested on any host until now. It is NOT
+    # the first host coverage of the CAN plane: transport_can_vcan_test drives real
+    # socketcan_link_t instances over kernel vcan0 and has its own CI leg
+    # (.github/workflows/can-vcan-e2e.yml). The gap this closes is the TWAI link, not CAN.
+    #
+    # The fake's semaphore counts callers parked in xSemaphoreTake AT ONCE, which is what
+    # makes "the wait was serialized behind the write lock" observable rather than a code
+    # reading. No socket is interposed and none is opened: the TWAI plane has none.
+    add_executable(twai_backpressure_test
+        "${LIBTRACER_ESP_DIR}/tests/host/twai_backpressure_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_twai.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/twai_link.cpp")
+    target_include_directories(twai_backpressure_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(twai_backpressure_test PRIVATE libtracer)
+    libtracer_test_warnings(twai_backpressure_test)
+    add_test(NAME twai_backpressure COMMAND twai_backpressure_test)
+    # Wall-clock separations of 3-5x, on a suite that also parks threads on purpose.
+    # Generous against a loaded runner, and still far under CTest's default.
+    set_tests_properties(twai_backpressure PROPERTIES TIMEOUT 60)
 else()
     message(STATUS "httpd_ws_teardown_test skipped: integrations/esp-idf is not in this tree")
 endif()

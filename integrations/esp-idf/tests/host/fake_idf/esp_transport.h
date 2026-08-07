@@ -19,14 +19,7 @@
  */
 #pragma once
 
-/** @brief IDF's error type. */
-typedef int esp_err_t;
-#ifndef ESP_OK
-#define ESP_OK 0 /**< @brief Success. */
-#endif
-#ifndef ESP_FAIL
-#define ESP_FAIL (-1) /**< @brief Generic failure. */
-#endif
+#include "esp_err.h"
 
 /** @brief Opaque transport handle (IDF's incomplete-struct pointer). */
 typedef struct esp_transport_item_t* esp_transport_handle_t;
