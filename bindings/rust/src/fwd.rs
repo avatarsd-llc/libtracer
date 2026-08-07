@@ -327,7 +327,20 @@ pub fn fwd_src_path(fwd: &ParsedFwd) -> Result<String, BuildError> {
 
 /* ------------------------------------------------------------- reply errors --- */
 
-/** @brief The ERROR TLV of a `kind=ERROR` reply's `STATUS{ ERROR }` payload, or `None`. */
+/**
+ * @brief The ERROR TLV of a `kind=ERROR` reply's `STATUS{ ERROR }` payload, or `None`.
+ *
+ * The **first ERROR child of the STATUS, at whatever position** — never `children[0]`.
+ * reference/05 §`0x09` gives a STATUS "one or more ERROR TLVs and optional DESCRIPTION
+ * text" and pins no order over them; RFC-0002 §C pins position only one level down,
+ * INSIDE the ERROR ("its first child is the identity"). A reader that demands position 0
+ * refuses a documented STATUS shape and answers code 0, which is what it also answers for
+ * a STATUS carrying no ERROR at all.
+ *
+ * Vector-pinned by `fwd/fwd-reply-error-after-description` (the DESCRIPTION written
+ * first), which the TypeScript binding pins against the same bytes so the two cores
+ * cannot drift apart on it again (#878).
+ */
 fn reply_error_tlv(reply: &ParsedFwd) -> Option<&Tlv> {
     let status = reply.payload.as_ref()?;
     if status.type_code == type_code::STATUS {

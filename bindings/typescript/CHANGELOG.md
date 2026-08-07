@@ -7,6 +7,35 @@ versioning/publish strategy.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A peer's error was invisible to this core whenever its STATUS carried anything before the
+  ERROR** (`@avatarsd-llc/libtracer-client`, `src/fwd.ts`). `replyErrorTlv` required the ERROR
+  to be the STATUS's `children[0]`; a `kind=ERROR` reply whose STATUS leads with its optional
+  DESCRIPTION — a child type reference/05 §`0x09` names explicitly — read back as
+  `FwdError` code `0`, the same answer given for a STATUS carrying no ERROR at all. The typed
+  code and its `tr::…` path were lost, so a diagnosable failure surfaced as `UNKNOWN(0x0)`.
+
+  The rule is now the one the Rust binding already applied: **the first `ERROR` child of the
+  STATUS, at whatever position**. reference/05 §`0x09` pins no order over a STATUS's children,
+  and RFC-0002 §C pins position only one level down, inside the ERROR ("its first child is the
+  identity") — a doc that states a positional rule exactly where it means one, and states none
+  here. Emitters are unchanged and still write the canonical order (ERROR first); this is an
+  acceptance rule, not a licence to emit. No wire bytes change, and every first-position ERROR
+  reads exactly as before.
+
+  Pinned by the new shared vector `fwd/fwd-reply-error-after-description`, asserted from **both**
+  bindings — a divergence in either core's reader now fails that core's own suite. A test private
+  to one language could not have caught this, which is why the drift survived (#878).
+
+### Added
+
+- **`firstChild(tlv, type)`** (`@avatarsd-llc/libtracer-client`, `src/tlv.ts`) — the package's one
+  child-by-type accessor, and the mirror of the Rust binding's `Tlv::first_child`: the first
+  **direct** child with the given type code, or `null`. Both cores now answer "the X child of this
+  structured TLV" the same way, so the open-coded `children[0]?.type === TYPE.X` that produced the
+  divergence above has a named replacement.
+
 ## [0.8.0] — 2026-08-06
 
 ### Changed
