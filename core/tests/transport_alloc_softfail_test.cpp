@@ -497,7 +497,8 @@ void test_ws_server_send_iov_overflow_drops() {
 void test_ws_peer_endpoint_send_iov_overflow_drops() {
     std::printf(
         "ws peer_endpoint send — directed span allocates nothing, gather drops (A2/A3/B1):\n");
-    tr::net::transport_ws_server server(0, /*max_peers=*/0, /*peer_named=*/true);
+    tr::net::transport_ws_server server(0, &tr::mem::heap_backend(), /*max_frame=*/0,
+                                        /*max_peers=*/0, /*peer_named=*/true);
     check(server.ok(), "peer-named server bound");
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");

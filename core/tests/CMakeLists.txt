@@ -816,6 +816,14 @@ target_link_libraries(ws_transport_test PRIVATE libtracer)
 libtracer_test_warnings(ws_transport_test)
 add_test(NAME ws_transport COMMAND ws_transport_test)
 
+# #872 — the WS DATA path is bounded by the injected (backend, max_frame) seam: an over-cap
+# declared length is refused off the frame HEADER (measured against the process peak RSS, not
+# inferred), fragments cannot sum past the cap, and backend exhaustion is counted backpressure.
+add_executable(ws_rx_bound_test ws_rx_bound_test.cpp)
+target_link_libraries(ws_rx_bound_test PRIVATE libtracer)
+libtracer_test_warnings(ws_rx_bound_test)
+add_test(NAME ws_rx_bound COMMAND ws_rx_bound_test)
+
 # transport_t seam conformance — ONE parameterized contract (send/receive, byte-identity,
 # scatter-gather, bidirectional, multi-frame, ADR-0042 owning view) over every
 # point-to-point adapter: in-process loopback + real localhost udp / tcp / ws.

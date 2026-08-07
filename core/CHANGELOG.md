@@ -67,6 +67,43 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   frame stream, or that expected an unknown H3 frame to be fatal, will observe the new
   behaviour; the well-behaved DIAL client is unaffected.
 
+- **`net::transport_ws_server` / `net::transport_ws_client` take the injected RX seam every
+  other framed transport takes, and their ingress is bounded by it (#872).** Both
+  constructors gained `mem::mem_backend_t* backend` + `std::size_t max_frame` in the
+  **same positions** `tcp_transport_t` / `transport_tcp_server` use — a **source-breaking
+  reorder** for the server, whose signature is now
+  `(bind_port, backend, max_frame, max_peers, peer_named, recv_stack)`. A call that passed
+  `max_peers`/`peer_named` positionally must be updated; `transport_ws_server(port)` and
+  `transport_ws_client(host, port)` are unchanged.
+
+  What it fixes: inbound bytes accumulated in a plain `std::vector` with no size check while
+  `ws::decode_frame` decoded the full announced 64-bit length and simply waited for that many
+  bytes. An unauthenticated peer therefore named the receiver's memory budget, and on the
+  `-fno-exceptions` profile the failed growth is a peer-triggered `abort()`. The declared
+  length is now checked against the effective cap — `min(max_frame,
+  backend.max_segment_size())`, resolved through the shared
+  `length_prefix_framer::effective_cap`, so the bound is the injected resources' and never a
+  literal — **off the frame HEADER, before a body byte is buffered**; and against the
+  **reassembled total** of a fragmented message, so the CONT route is not a way around it.
+  Either breach fails the connection (RFC 6455 §7.1.7). Message fragments are now copied into
+  segments drawn from `backend` (`view::over_bytes`'s seam-taking overload) instead of the
+  global heap.
+
+  New public API: `transport_ws_server::kMaxFrame` (the shared
+  `length_prefix_framer::kDefaultMaxFrame`, 16 MiB), and on both roles `dropped_rx()` /
+  `malformed_rx()` — the same two counter names tcp/quic/webtransport expose, with the
+  same meanings (backend exhaustion sheds the message and keeps the link; a protocol or cap
+  breach fails it) — plus `effective_max_frame()`. `:settings max_frame` now reaches `ws`:
+  the built-in factory forwards `conn_settings_t::max_frame` and the process `rx_backend`,
+  which it previously discarded.
+
+  **`ws::decode_frame_checked` gained a required `std::size_t max_payload` parameter**
+  (deliberately not defaulted — a transport that forgets to name its bound is the defect
+  being closed). `ws::decode_frame`, the decoder held byte-for-byte against the TypeScript
+  core by `tests/conformance/ws_diff_fuzz.py`, is **unchanged**: it applies neither the §5.5
+  control rules nor a length cap (`ws::kNoPayloadCap`), because it never buffers on the
+  caller's behalf. The RFC 6455 §5.5 control-frame limits shipped in #856 are untouched.
+
 - **`net::transport_can` no longer attributes a group's slices to a stale binding when the
   endpoint space wraps (#909).** The endpoint sub-field is 12 bits and `alloc_base` resets
   to the first data slot when a reservation runs off the end, so a base **recurs** — routine,

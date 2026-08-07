@@ -599,7 +599,8 @@ void test_multi_peer_bus() {
     frame_sink_t a_sink;
     frame_sink_t b_sink;
 
-    tr::net::transport_ws_server server(0, /*max_peers=*/0, /*peer_named=*/true);
+    tr::net::transport_ws_server server(0, &tr::mem::heap_backend(), /*max_frame=*/0,
+                                        /*max_peers=*/0, /*peer_named=*/true);
     check(server.ok(), "listen socket bound");
     const std::uint16_t port = server.local_port();
     check(server.bus() != nullptr, "peer_named server exposes the bus_link_t facet (ADR-0044)");
@@ -705,7 +706,8 @@ void test_multi_peer_bus() {
 void test_max_peers_cap() {
     std::printf("transport_ws server — max_peers admission cap (#362):\n");
 
-    tr::net::transport_ws_server server(0, /*max_peers=*/1);
+    tr::net::transport_ws_server server(0, &tr::mem::heap_backend(), /*max_frame=*/0,
+                                        /*max_peers=*/1);
     check(server.ok(), "capped server bound");
     const std::uint16_t port = server.local_port();
 
@@ -737,7 +739,8 @@ void test_close_peer() {
     frame_sink_t a_sink;
     frame_sink_t b_sink;
 
-    tr::net::transport_ws_server server(0, /*max_peers=*/2, /*peer_named=*/true);
+    tr::net::transport_ws_server server(0, &tr::mem::heap_backend(), /*max_frame=*/0,
+                                        /*max_peers=*/2, /*peer_named=*/true);
     check(server.ok(), "listen socket bound");
     const std::uint16_t port = server.local_port();
     server.bus()->set_peer_receiver(srv_sink);

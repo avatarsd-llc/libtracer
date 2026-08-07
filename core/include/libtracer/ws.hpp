@@ -236,6 +236,18 @@ inline constexpr std::size_t kMaxControlPayload = 125;
     return (static_cast<std::uint8_t>(op) & 0x08u) != 0;
 }
 
+/**
+ * @brief The `max_payload` argument that imposes NO length bound — every representable
+ *        length passes the DATA-frame check.
+ *
+ * Not a limit but the ABSENCE of one: the largest value a `std::size_t` can hold, so
+ * `len > kNoPayloadCap` is false for every decodable length. It exists for the pure
+ * decoder (@ref decode_frame), which by contract collapses outcomes and owns no connection
+ * to fail; a TRANSPORT never passes it — it passes its effective receive cap, which comes
+ * from the injected backend and `:settings max_frame`, never from a literal.
+ */
+inline constexpr std::size_t kNoPayloadCap = ~std::size_t{0};
+
 /** @brief The three outcomes of decoding one frame off a peer's byte stream. */
 enum class decode_status_t : std::uint8_t {
     OK,             /**< @brief A complete, well-formed frame was decoded. */
@@ -254,13 +266,17 @@ namespace detail {
 
 /**
  * @brief The ONE RFC 6455 frame-decode implementation, shared by @ref ws::decode_frame and
- *        @ref ws::decode_frame_checked — they differ only in @p enforce_control_rules.
+ *        @ref ws::decode_frame_checked — they differ only in @p enforce_control_rules and
+ *        the DATA-frame bound @p max_payload.
  *
  * @param buf                   The peer's byte stream.
  * @param enforce_control_rules Apply RFC 6455 §5.5 (see @ref ws::decode_frame_checked).
+ * @param max_payload           The receive cap a declared payload length may not exceed
+ *                              (@ref ws::kNoPayloadCap = unbounded).
  */
 [[nodiscard]] inline decode_result_t decode_one(std::span<const std::byte> buf,
-                                                bool enforce_control_rules) {
+                                                bool enforce_control_rules,
+                                                std::size_t max_payload) {
     if (buf.size() < 2) return {};
 
     const std::uint8_t b0 = std::to_integer<std::uint8_t>(buf[0]);
@@ -291,6 +307,14 @@ namespace detail {
     // buffering (or echoing) the payload it claims.
     if (enforce_control_rules && is_control_opcode(op) && (len > kMaxControlPayload || !fin))
         return {decode_status_t::PROTOCOL_ERROR, {}, 0};
+
+    // The DATA-path twin of the §5.5 rule above, diagnosed at the same place and for the
+    // same reason (#872): `max_payload` is the caller's effective receive cap — the injected
+    // backend's real capacity, tightened by `:settings max_frame` — so a frame announcing
+    // more can never be delivered whatever arrives next. Rejecting it off the HEADER is what
+    // bounds ingress: the alternative is to answer NEED_MORE and let the caller accumulate
+    // the announced 64-bit length, which is a peer naming the receiver's memory budget.
+    if (len > max_payload) return {decode_status_t::PROTOCOL_ERROR, {}, 0};
 
     std::array<std::uint8_t, 4> mask_key{};
     if (masked) {
@@ -341,26 +365,40 @@ namespace detail {
  * and (because the echo was a `std::vector`) a peer-triggered `abort()` on the
  * `-fno-exceptions` profile.
  *
+ * **The DATA path is bounded the same way** (#872): a frame whose declared length exceeds
+ * @p max_payload is `PROTOCOL_ERROR` off the HEADER too. The two rules are separate — §5.5
+ * is a fixed RFC constant about CONTROL frames, @p max_payload is the deployment's injected
+ * receive cap about every frame — and neither substitutes for the other.
+ *
  * @param buf A byte stream that may contain a partial or whole frame, possibly
  *            followed by more frames.
+ * @param max_payload The transport's effective receive cap: `min(max_frame,
+ *            backend.max_segment_size())` (`length_prefix_framer::effective_cap` — the
+ *            no-synthetic-limits doctrine). Deliberately NOT defaulted: a transport that
+ *            forgets to name its bound is exactly the defect this parameter closes, so
+ *            omitting it must not compile.
  * @return `NEED_MORE` while @p buf is short of a whole frame, `PROTOCOL_ERROR` on an
- *         RFC 6455 violation (the caller must fail the connection, RFC 6455 §7.1.7),
- *         else `OK` with the frame and the bytes consumed.
+ *         RFC 6455 violation or an over-cap declared length (the caller must fail the
+ *         connection, RFC 6455 §7.1.7), else `OK` with the frame and the bytes consumed.
  */
-[[nodiscard]] inline decode_result_t decode_frame_checked(std::span<const std::byte> buf) {
-    return detail::decode_one(buf, /*enforce_control_rules=*/true);
+[[nodiscard]] inline decode_result_t decode_frame_checked(std::span<const std::byte> buf,
+                                                          std::size_t max_payload) {
+    return detail::decode_one(buf, /*enforce_control_rules=*/true, max_payload);
 }
 
 /**
  * @brief Decode exactly one RFC 6455 frame from the front of @p buf — the pure
  *        outcome-collapsing decoder, byte-for-byte the behaviour it has always had.
  *
- * Deliberately does NOT apply the §5.5 control-frame rules: this is the function
- * `tests/conformance/ws_diff_fuzz.py` holds against the TypeScript `decodeFrame`, and the
- * two cores must answer identically on every input. §5.5 is a CONNECTION-FAILURE policy,
- * not a decode outcome — it belongs to whoever owns the socket. Every transport in this
- * repository therefore uses @ref decode_frame_checked; only a caller that has no connection
- * to fail should use this one.
+ * Deliberately does NOT apply the §5.5 control-frame rules, and imposes no length cap
+ * (@ref kNoPayloadCap): this is the function `tests/conformance/ws_diff_fuzz.py` holds
+ * against the TypeScript `decodeFrame`, and the two cores must answer identically on every
+ * input. Both rules are CONNECTION-FAILURE policy, not decode outcomes — they belong to
+ * whoever owns the socket and can shed it. Every transport in this repository therefore
+ * uses @ref decode_frame_checked; only a caller that has no connection to fail should use
+ * this one. It is safe to leave uncapped precisely because it never buffers on the caller's
+ * behalf: a declared length past the end of @p buf answers "need more" and allocates
+ * nothing.
  *
  * @param buf A byte stream that may contain a partial or whole frame, possibly
  *            followed by more frames.
@@ -369,7 +407,7 @@ namespace detail {
  */
 [[nodiscard]] inline std::optional<std::pair<frame_t, std::size_t>> decode_frame(
     std::span<const std::byte> buf) {
-    decode_result_t r = detail::decode_one(buf, /*enforce_control_rules=*/false);
+    decode_result_t r = detail::decode_one(buf, /*enforce_control_rules=*/false, kNoPayloadCap);
     if (r.status != decode_status_t::OK) return std::nullopt;
     return std::make_pair(std::move(r.frame), r.consumed);
 }

@@ -378,7 +378,12 @@ sample_t arm_tcp(std::size_t k, std::size_t big) {
 
 sample_t arm_ws(std::size_t k, std::size_t big) {
     return run_stream_arm<tr::net::transport_ws_server>(
-        k, big, [] { return new tr::net::transport_ws_server(0, 0, true, 0); },
+        k, big,
+        [] {
+            return new tr::net::transport_ws_server(0, &tr::mem::heap_backend(),
+                                                    /*max_frame=*/0, /*max_peers=*/0,
+                                                    /*peer_named=*/true);
+        },
         [](std::uint16_t p) {
             const int fd = dial_tcp(p);
             if (fd < 0) return -1;

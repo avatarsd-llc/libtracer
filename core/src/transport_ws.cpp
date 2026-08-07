@@ -33,6 +33,23 @@ namespace tr::net {
 
 namespace {
 
+/** @brief What feeding one data frame to @ref ws_assembler_t produced. */
+enum class assemble_status_t : std::uint8_t {
+    PENDING,  /**< @brief Mid-message (or a stray CONT) — nothing to deliver yet. */
+    COMPLETE, /**< @brief @ref assemble_result_t::message holds the finished message. */
+    DROPPED,  /**< @brief The RX backend refused a fragment — the message is shed
+                          (backpressure); the connection lives and re-syncs at the next
+                          BINARY. Count it as `dropped_rx`. */
+    OVERSIZE, /**< @brief The reassembled message grew past the receive cap — FAIL the
+                          connection (§7.1.7) and count it as `malformed_rx`. */
+};
+
+/** @brief One @ref ws_assembler_t::on_data outcome: a status, and (on `COMPLETE`) the rope. */
+struct assemble_result_t {
+    assemble_status_t status = assemble_status_t::PENDING; /**< @brief Which outcome. */
+    tr::view::rope_t message; /**< @brief The finished message — meaningful only on `COMPLETE`. */
+};
+
 /**
  * @brief RFC 6455 fragmented-message reassembly as ROPE CHAINING (ADR-0053 §5): each data fragment
  *        becomes one owning link (the copy out of the reused connection buffer is the legitimate
@@ -54,25 +71,41 @@ struct ws_assembler_t {
      * @brief Feed one data frame (BINARY or CONT).
      *
      * Returns the completed message as a
-     * rope when this frame finishes one, std::nullopt otherwise. A BINARY that
+     * rope when this frame finishes one, `PENDING` otherwise. A BINARY that
      * arrives mid-assembly is an RFC 6455 protocol error: the stale assembly is
      * dropped and the new message starts. A stray CONT (no assembly open) is
      * dropped. An allocation failure drops the whole message (backpressure).
+     *
+     * @param backend Where each fragment's owning link is drawn from (ADR-0042 §2) — the
+     *                transport's injected seam, never the global heap, so a bounded host
+     *                bounds reassembly by its own pool.
+     * @param cap     The effective receive cap the REASSEMBLED total may not exceed. The
+     *                per-frame header check bounds one fragment; without this one a peer
+     *                walks past the cap 125 bytes at a time across a million CONTs (#872).
      */
-    std::optional<tr::view::rope_t> on_data(ws::opcode_t op, bool fin,
-                                            std::span<const std::byte> payload) {
-        if (op == ws::opcode_t::BINARY && assembling) reset();             // protocol error
-        if (op == ws::opcode_t::CONT && !assembling) return std::nullopt;  // stray
+    assemble_result_t on_data(ws::opcode_t op, bool fin, std::span<const std::byte> payload,
+                              mem::mem_backend_t& backend, std::size_t cap) {
+        if (op == ws::opcode_t::BINARY && assembling) reset();   // protocol error
+        if (op == ws::opcode_t::CONT && !assembling) return {};  // stray
 
-        const std::optional<tr::view::view_t> link = tr::view::over_bytes(payload);
-        if (!link) {  // allocation failure => drop the message (backpressure)
+        // Checked BEFORE the fragment is copied, and written as a subtraction because
+        // `total_length() + payload.size()` can wrap. `total_length() <= cap` holds by
+        // induction (every earlier fragment passed this same test), so the difference is
+        // well-defined.
+        if (payload.size() > cap - partial.total_length()) {
             reset();
-            return std::nullopt;
+            return {assemble_status_t::OVERSIZE, {}};
+        }
+
+        const std::optional<tr::view::view_t> link = tr::view::over_bytes(payload, backend);
+        if (!link) {  // backend refused => drop the message (backpressure)
+            reset();
+            return {assemble_status_t::DROPPED, {}};
         }
         partial.append(*link);
         assembling = true;
-        if (!fin) return std::nullopt;
-        tr::view::rope_t done = std::move(partial);
+        if (!fin) return {};
+        assemble_result_t done{assemble_status_t::COMPLETE, std::move(partial)};
         reset();
         return done;
     }
@@ -183,9 +216,11 @@ struct transport_ws_server::session_t {
     peer_endpoint_t endpoint;   /**< @brief The directed facade `peer_link` returns. */
 };
 
-transport_ws_server::transport_ws_server(std::uint16_t bind_port, std::size_t max_peers,
+transport_ws_server::transport_ws_server(std::uint16_t bind_port, mem::mem_backend_t* backend,
+                                         std::size_t max_frame, std::size_t max_peers,
                                          bool peer_named, std::size_t recv_stack)
-    : max_peers_(max_peers), peer_named_(peer_named) {
+    : max_peers_(max_peers), peer_named_(peer_named), backend_(backend) {
+    if (max_frame != 0) max_frame_ = max_frame;
     listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd_ < 0) return;
 
@@ -438,10 +473,20 @@ bool transport_ws_server::drain_frames(session_t& s) {
     // Drain every complete frame currently buffered; leftover partial bytes stay
     // for the next read. Returns false when the peer sent CLOSE — or broke RFC 6455,
     // which fails the connection through the exact same teardown (§7.1.7).
+    //
+    // The cap resolves from the two INJECTED resources on every pass (one virtual call, the
+    // tcp_transport_t::serve idiom) rather than being cached: it is what stops `s.buf` from
+    // following a declared 64-bit length, so it must be the live answer, not a snapshot.
+    const std::size_t cap = length_prefix_framer::effective_cap(*backend_, max_frame_);
     while (true) {
-        ws::decode_result_t decoded = ws::decode_frame_checked(s.buf);
+        ws::decode_result_t decoded = ws::decode_frame_checked(s.buf, cap);
         if (decoded.status == ws::decode_status_t::NEED_MORE) return true;
-        if (decoded.status == ws::decode_status_t::PROTOCOL_ERROR) return false;
+        if (decoded.status == ws::decode_status_t::PROTOCOL_ERROR) {
+            // An over-cap declared length or a §5.5 control breach: a stream we refuse to
+            // keep reading. Count it, then tear down through the one teardown path.
+            malformed_rx_.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
         ws::frame_t frame = std::move(decoded.frame);
         s.buf.erase(s.buf.begin(), s.buf.begin() + static_cast<std::ptrdiff_t>(decoded.consumed));
 
@@ -464,15 +509,26 @@ bool transport_ws_server::drain_frames(session_t& s) {
                         rx_.deliver_borrowed(payload);
                     break;
                 }
-                auto msg = s.assembler.on_data(frame.op, frame.fin, frame.payload);
-                if (!msg) break;  // mid-message (or dropped)
+                auto msg = s.assembler.on_data(frame.op, frame.fin, frame.payload, *backend_, cap);
+                if (msg.status == assemble_status_t::DROPPED) {
+                    // Backpressure: the message is shed, the connection lives.
+                    dropped_rx_.fetch_add(1, std::memory_order_relaxed);
+                    break;
+                }
+                if (msg.status == assemble_status_t::OVERSIZE) {
+                    // Fragments summing past the cap — the same answer a single over-cap
+                    // frame gets, so the fragmented route is not a way around the bound.
+                    malformed_rx_.fetch_add(1, std::memory_order_relaxed);
+                    return false;
+                }
+                if (msg.status != assemble_status_t::COMPLETE) break;  // mid-message
                 // The reassembled message IS a rope — one owning link per
                 // fragment (ADR-0053 §5): the rope sink takes it as-is; only
                 // a span-only sink pays the one materialize (in the slot).
                 if (peer_named)
-                    peer_rx_.deliver_rope(s.name, std::move(*msg));
+                    peer_rx_.deliver_rope(s.name, std::move(msg.message));
                 else
-                    rx_.deliver_rope(std::move(*msg));
+                    rx_.deliver_rope(std::move(msg.message));
                 break;
             }
             case ws::opcode_t::PING: {
@@ -572,7 +628,10 @@ void transport_ws_server::run() {
 // ---------------------------------------------------------------------------
 
 transport_ws_client::transport_ws_client(const std::string& host, std::uint16_t port,
-                                         std::size_t recv_stack) {
+                                         mem::mem_backend_t* backend, std::size_t max_frame,
+                                         std::size_t recv_stack)
+    : backend_(backend) {
+    if (max_frame != 0) max_frame_ = max_frame;
     // Seed the per-frame masking-key stream with something that varies between
     // connections (steady_clock + this address). Not crypto-strong — RFC 6455
     // masking exists for proxy/cache safety, not to defend against a peer.
@@ -689,6 +748,9 @@ void transport_ws_client::serve(int fd) {
     ws_assembler_t asm_state;  // per-connection fragment assembly (recv thread only)
     std::vector<std::byte> buf;
     std::array<std::byte, 4096> chunk;
+    // The ingress bound, resolved from the injected backend and `max_frame` exactly as the
+    // server resolves it — a dialled peer gets no more credit than an accepted one.
+    const std::size_t cap = length_prefix_framer::effective_cap(*backend_, max_frame_);
 
     while (!stop_.load(std::memory_order_relaxed)) {
         const int pr = poll_readable(fd);  // one bounded 100 ms readability wait
@@ -701,11 +763,16 @@ void transport_ws_client::serve(int fd) {
 
         // Drain every complete frame; leftover partial bytes stay for next read.
         while (true) {
-            ws::decode_result_t decoded = ws::decode_frame_checked(buf);
+            ws::decode_result_t decoded = ws::decode_frame_checked(buf, cap);
             if (decoded.status == ws::decode_status_t::NEED_MORE) break;
             // RFC 6455 §7.1.7: a protocol violation FAILS the connection — the same
-            // teardown a peer CLOSE takes, not an unbounded wait for legal bytes.
-            if (decoded.status == ws::decode_status_t::PROTOCOL_ERROR) goto teardown;
+            // teardown a peer CLOSE takes, not an unbounded wait for legal bytes. That
+            // now covers a declared length past the receive cap, which is what stops the
+            // server we dialled from naming our memory budget (#872).
+            if (decoded.status == ws::decode_status_t::PROTOCOL_ERROR) {
+                malformed_rx_.fetch_add(1, std::memory_order_relaxed);
+                goto teardown;
+            }
             ws::frame_t frame = std::move(decoded.frame);
             buf.erase(buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(decoded.consumed));
 
@@ -722,12 +789,21 @@ void transport_ws_client::serve(int fd) {
                         rx_.deliver_borrowed(std::span<const std::byte>(frame.payload));
                         break;
                     }
-                    auto msg = asm_state.on_data(frame.op, frame.fin, frame.payload);
-                    if (!msg) break;  // mid-message (or dropped)
+                    auto msg =
+                        asm_state.on_data(frame.op, frame.fin, frame.payload, *backend_, cap);
+                    if (msg.status == assemble_status_t::DROPPED) {
+                        dropped_rx_.fetch_add(1, std::memory_order_relaxed);
+                        break;  // backpressure: shed the message, keep the connection
+                    }
+                    if (msg.status == assemble_status_t::OVERSIZE) {
+                        malformed_rx_.fetch_add(1, std::memory_order_relaxed);
+                        goto teardown;  // fragments summing past the cap fail the connection
+                    }
+                    if (msg.status != assemble_status_t::COMPLETE) break;  // mid-message
                     // The reassembled message IS a rope — one owning link per
                     // fragment (ADR-0053 §5): the rope sink takes it as-is; only
                     // a span-only sink pays the one materialize (in the slot).
-                    rx_.deliver_rope(std::move(*msg));
+                    rx_.deliver_rope(std::move(msg.message));
                     break;
                 }
                 case ws::opcode_t::PING: {
