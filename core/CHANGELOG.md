@@ -129,6 +129,42 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `tr::view::borrow()`ed segment and for any user backend. The tag is a fast path again, never
   a correctness dependency.
 
+- **`view::rope_t::concat` is self-aliasing-safe (#915).** `r.concat(r)` walked `other`'s
+  links while `append` mutated that very storage. In INLINE mode the `kInline+1`-th append
+  spills the chain, which zeroes `inline_n_` and overwrites every inline slot with `view_t{}`
+  mid-walk — so a two-link `r.concat(r)` produced `[a, b, a, {}]` instead of `[a, b, a, b]`:
+  **silent data corruption, wrong bytes on the wire**. In HEAP mode `push_back` could
+  reallocate the vector the walk pointed into (a dangling span — undefined behaviour, now
+  reproduced under ASan). `concat` now `try_reserve`s the joined link count before touching
+  anything, so none of its appends spills or reallocates, and walks the source **by index**,
+  re-reading it each step so a link is fetched from wherever the chain currently lives. The
+  reservation is a no-op while the joined chain still fits inline, so the hot 1–2-link case
+  still allocates nothing (ADR-0053 §6); for a long cross-rope concat it replaces the
+  geometric `push_back` ladder with one sized growth. Cross-rope `concat` and `operator+`
+  are otherwise unchanged.
+- **`wire::grammar::rope_cursor` asserts its bounds preconditions instead of hiding a
+  violation (#916).** `region(off, len)` clamped nothing, so a cursor could claim bytes the
+  chain does not hold; `locate` answered any at/past-end offset with `{last_link, 0}`, so
+  `byte_at` returned **byte 0 of the last link — a real but wrong byte** that no sanitizer
+  could see (the sibling `span_cursor`'s out-of-range read is span UB that ASan/fuzz CI
+  catches), and on an empty chain it was hard UB. `region`, `byte_at` and `locate` now carry
+  the same debug-only preconditions `view::view_t::subview` has had — **zero release cost, no
+  new branch on the hot read path** — and `locate` returns the one-past-the-end link index
+  rather than fabricating a valid one, so a release-build violation is an out-of-range
+  subscript a sanitizer reports. `for_each_span` — the one bulk reader — carries the same
+  `off + n <= size()` containment precondition, and returns early on an empty feed, which the
+  grammar's CRC path legitimately issues at the window end. Its own guards (chain-end, and
+  `locate`'s past-chain assert) do not see a feed that overshoots a **narrowed** window while
+  staying inside the chain, so without the precondition a two-link 3+2 rope narrowed to
+  `region(0, 3)` fed `for_each_span(0, 5, …)` handed the caller chain bytes 3 and 4 and
+  reported success — while the identical slip through `byte_at(3)` on that cursor aborts.
+  Note the asymmetry: `byte_at`'s release-build violation still degrades to a sanitizer-visible
+  out-of-range subscript, but an overshooting feed reads bytes the chain genuinely holds, so in
+  a release (`NDEBUG`) build it stays silent and unsanitizable — **in release this contract is
+  the caller's to keep.** No signature changed; every in-bounds caller is unaffected. Giving
+  `byte_at` a **release** guarantee (an `optional` or a poisoned flag mapped to
+  `FRAME_TRUNCATED`) is a separate design decision, not taken here.
+
 ### Changed
 
 - **BREAKING — `subject_resolver_t` gains a DENY channel; an unresolvable caller is no
