@@ -352,7 +352,24 @@ struct httpd_ws_link_t::session_t {
      * object guaranteed to still be there to say so.
      */
     gate_t* gate = nullptr;
-    int fd = -1;               /**< @brief Peer socket; -1 => free slot. */
+    int fd = -1; /**< @brief Peer socket; -1 => free slot. */
+    /**
+     * @brief Bumped every time this slot is CLAIMED — the half of a session's identity a
+     *        descriptor number cannot supply (peers_m_).
+     *
+     * A socket NUMBER does not identify a session over time and neither does this slot's
+     * ADDRESS: lwIP hands a closed descriptor's number straight back to the next accept,
+     * and both claim sites reuse the first slot with `fd < 0`, so the departed peer's slot
+     * object is exactly the one the new peer lands in. A queued send that resolved its
+     * destination before the swap would therefore match on fd AND on slot pointer, and be
+     * written to a stranger — which is why the identity carried through the TX path is the
+     * pair (slot, gen) and not either half alone (#954). Compared, never interpreted.
+     *
+     * Wrapping is not a hazard worth spending a wider counter on: aliasing would need
+     * 2^32 reconnections onto this one slot while a single work item sits in the control
+     * queue, and that item drains within one pass of the httpd task's loop.
+     */
+    std::uint32_t gen = 0;
     bool open = false;         /**< @brief True between handshake and close. */
     std::string name;          /**< @brief `<ip>:<port>` of the peer. */
     asm_buf_t asm_buf;         /**< @brief RFC 6455 fragment reassembly (nothrow). */
@@ -375,6 +392,48 @@ struct httpd_ws_link_t::session_t {
      */
     bool dead = false;
     peer_endpoint_t endpoint; /**< @brief The directed facade `peer_link` returns. */
+};
+
+/**
+ * @brief A destination the TX path can still verify when it finally runs: WHICH session,
+ *        not which descriptor.
+ *
+ * The whole reason the TX path stopped carrying a bare `int fd` (#954). `send()` snapshots
+ * its destinations under @ref peers_m_ and releases the lock before enqueueing, and
+ * `httpd_queue_work` runs the item later still — one control message per pass of the
+ * server loop, while accept and close proceed at full speed in that same pass. So between
+ * resolving a destination and writing to it, the peer can hang up and an unrelated client
+ * can be accepted onto the recycled descriptor. Everything the old path could ask at that
+ * point answered the wrong question: `httpd_ws_get_fd_info` says only "SOME websocket
+ * lives at this number", and a slots_ scan for `s->fd == fd` finds whoever holds it now.
+ * The result was one peer's frames written into another peer's socket, and one peer's send
+ * failures charged to a stranger's strike counter.
+ *
+ * The pair is minted under @ref peers_m_ at the instant the sender resolves the peer, and
+ * both halves are load-bearing:
+ *   - `slot` alone is NOT enough. Slots are recycled IN PLACE, so the address a departed
+ *     peer's send recorded is the address the next peer is handed — which is also why
+ *     comparing the server's session ctx pointer (what @ref detach_req_t does, correctly,
+ *     for a teardown that admits no new peers) does not close this hole on the live path.
+ *   - `gen` alone is NOT enough: two different slots are routinely at the same generation.
+ *
+ * Together they are unique for as long as any work item can run, because slot addresses
+ * are stable for the link's life (grown, never shrunk; the abandon path leaks rather than
+ * frees precisely so that stays true) and a claim always bumps the generation. Validated
+ * at every TX site through @ref httpd_ws_link_t::live_fd, and a reference that has gone
+ * stale SINCE IT WAS MINTED always FAILS the check rather than resolving to whoever now
+ * holds the descriptor.
+ *
+ * @note That is the guarantee, and it is narrower than "this endpoint is peer X". The
+ *       reference is only as good as the moment of minting: a caller that resolves a peer,
+ *       is preempted, and sends afterwards mints from the slot's CURRENT generation, so the
+ *       check is self-satisfying for whoever holds the slot then. Closing that needs an
+ *       identity captured at RESOLVE time, which the shared per-slot endpoint cannot carry.
+ *       Tracked as #1013; do not read this type as making the directed path safe.
+ */
+struct httpd_ws_link_t::session_ref_t {
+    session_t* slot = nullptr; /**< @brief The peer slot; compared, never dereferenced blind. */
+    std::uint32_t gen = 0;     /**< @brief @ref session_t::gen at the moment of minting. */
 };
 
 /**
@@ -403,7 +462,16 @@ struct httpd_ws_link_t::tx_work_t {
      * shut it and the outcome has nobody left to inform.
      */
     gate_t* gate = nullptr;
-    int fd = -1;                  /**< @brief Destination peer socket. */
+    /**
+     * @brief Destination SESSION — re-validated at drain time, never a bare descriptor.
+     *
+     * The item is enqueued on one task and written on another, arbitrarily later, so the
+     * fd it was gathered for may by then belong to somebody else entirely. Carrying the
+     * session reference is what makes a late item skippable instead of misdeliverable;
+     * @ref httpd_ws_link_t::tx_work resolves it back to a socket through
+     * @ref httpd_ws_link_t::live_fd and sends nothing when that fails (#954).
+     */
+    session_ref_t to;
     std::byte* payload = nullptr; /**< @brief Gathered frame bytes (slot-inline or `owned`). */
     std::size_t len = 0;          /**< @brief Frame length, bytes. */
     tx_slot_t* slot = nullptr;    /**< @brief Owning pool slot; nullptr => heap shell. */
@@ -921,6 +989,10 @@ esp_err_t httpd_ws_link_t::on_handshake(httpd_req_t* req) {
         slot->name = peer_name(fd);
         slot->asm_buf.clear();
         slot->fd = fd;
+        // A NEW session begins here, in a slot the previous one may still be addressed by:
+        // bump the generation before the slot goes live, so every reference minted for the
+        // departed peer fails its check instead of resolving onto this one (#954).
+        ++slot->gen;
         slot->open = true;
     }
     // Reclaim the slot when httpd tears this session down (the free_ctx_fn fires on the
@@ -1018,6 +1090,7 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
             slot->name = peer_name(fd);
             slot->asm_buf.clear();
             slot->fd = fd;
+            ++slot->gen;  // the other claim edge — see on_handshake (#954)
             slot->open = true;
             newly_claimed = true;
         }
@@ -1129,17 +1202,20 @@ void httpd_ws_link_t::deliver(std::string_view peer, std::span<const std::byte> 
 // TX — every send is marshalled onto the httpd task (the async-send pattern).
 // ---------------------------------------------------------------------------
 
-void httpd_ws_link_t::queue_send(int fd, std::span<const std::span<const std::byte>> iov) {
-    if (handle_ == nullptr || fd < 0) return;
-    // A condemned peer takes no more frames, and is refused HERE rather than at the far
-    // end of the queue. Queueing to it would be worse than useless: the control socket is
-    // the scarce resource under this failure (one small UDP mbox, shared with the close
-    // the link is trying to land), so every frame accepted for a doomed fd is a slot the
-    // rest of the node does not get. Both production callers below already skip dead slots
-    // from the lock they were holding anyway; this is the locus that makes it a property
-    // of the seam rather than of its callers, and it costs one uncontended mutex on a path
-    // that is about to memcpy a frame and do a syscall.
-    if (fd_is_dead(fd)) return;
+void httpd_ws_link_t::queue_send(const session_ref_t& to,
+                                 std::span<const std::span<const std::byte>> iov) {
+    if (handle_ == nullptr) return;
+    // Re-resolve the destination HERE rather than trusting the fd the caller looked at:
+    // a departed or condemned peer takes no more frames, and is refused at this end of the
+    // queue rather than the far one. Queueing to it would be worse than useless: the
+    // control socket is the scarce resource under this failure (one small UDP mbox, shared
+    // with the close the link is trying to land), so every frame accepted for a doomed
+    // session is a slot the rest of the node does not get. Both production callers below
+    // already skip dead slots from the lock they were holding anyway; this is the locus
+    // that makes it a property of the seam rather than of its callers, and it costs one
+    // uncontended mutex on a path that is about to memcpy a frame and do a syscall.
+    const int fd = live_fd(to);
+    if (fd < 0) return;
     // Gather-copy the payload ONCE: httpd_queue_work is asynchronous, so the caller's
     // spans are gone by the time the httpd task runs tx_work. Fast path: claim a
     // pre-allocated pool slot (lock-free CAS) and gather straight into its inline
@@ -1158,7 +1234,7 @@ void httpd_ws_link_t::queue_send(int fd, std::span<const std::span<const std::by
         work = &slot->work;
         work->handle = handle_;
         work->gate = gate_;
-        work->fd = fd;
+        work->to = to;
         work->len = total;
         work->slot = slot;
         if (total <= kTxInlineBytes) {
@@ -1179,7 +1255,7 @@ void httpd_ws_link_t::queue_send(int fd, std::span<const std::span<const std::by
             // If the shell allocation fails the initializer never runs, so `buf` is not
             // moved-from and frees itself on return — no leak either way.
             work = new (std::nothrow)
-                tx_work_t{handle_, gate_, fd, dst, total, nullptr, std::move(buf)};
+                tx_work_t{handle_, gate_, to, dst, total, nullptr, std::move(buf)};
         }
     }
     bool queued = false;
@@ -1199,10 +1275,10 @@ void httpd_ws_link_t::queue_send(int fd, std::span<const std::span<const std::by
     if (!queued) note_enqueue_drop(fd, total);
 }
 
-void httpd_ws_link_t::queue_send(int fd, std::span<const std::byte> frame) {
+void httpd_ws_link_t::queue_send(const session_ref_t& to, std::span<const std::byte> frame) {
     // One-span sugar over the gather form — the single copy/backpressure locus.
     const std::span<const std::byte> one[] = {frame};
-    queue_send(fd, std::span<const std::span<const std::byte>>(one));
+    queue_send(to, std::span<const std::span<const std::byte>>(one));
 }
 
 void httpd_ws_link_t::note_enqueue_drop(int fd, std::size_t bytes) {
@@ -1211,11 +1287,18 @@ void httpd_ws_link_t::note_enqueue_drop(int fd, std::size_t bytes) {
              (unsigned)total);
 }
 
-bool httpd_ws_link_t::fd_is_dead(int fd) const {
+int httpd_ws_link_t::live_fd(const session_ref_t& to) const {
     const std::lock_guard lock(peers_m_);
-    for (const auto& s : slots_)
-        if (s->fd == fd) return s->dead;
-    return false;
+    if (to.slot == nullptr) return -1;
+    // The identity test, and the reason this function exists rather than a slots_ scan for
+    // `s->fd == fd`: that scan finds whoever holds the descriptor NOW, which under reuse is
+    // a different peer than the one this frame was gathered for. Dereferencing the slot is
+    // safe without any further proof — slots are recycled in place and never freed while
+    // the link lives (the abandon path leaks them for exactly this reason), and every
+    // caller reached us through the gate, which is what establishes that the link does.
+    if (to.slot->gen != to.gen) return -1;  // the session departed; this slot has moved on
+    if (!to.slot->open || to.slot->dead) return -1;
+    return to.slot->fd;
 }
 
 void httpd_ws_link_t::condemn(int fd) {
@@ -1253,19 +1336,21 @@ void httpd_ws_link_t::condemn(int fd) {
         ESP_LOGD(kTag, "trigger_close not queued fd=%d (the shutdown carries the close)", fd);
 }
 
-void httpd_ws_link_t::note_tx_result(int fd, bool sent, std::size_t bytes) {
+void httpd_ws_link_t::note_tx_result(const session_ref_t& to, bool sent, std::size_t bytes) {
     bool close_now = false;
     std::string peer;
+    int fd = -1;
     {
         const std::lock_guard lock(peers_m_);
-        session_t* slot = nullptr;
-        for (const auto& s : slots_)
-            if (s->open && s->fd == fd) {
-                slot = s.get();
-                break;
-            }
-        if (slot == nullptr) return;  // peer departed between the fd snapshot and now
-        if (slot->dead) return;       // already condemned — no further evidence is wanted
+        session_t* const slot = to.slot;
+        if (slot == nullptr) return;
+        // The result belongs to the session the frame was gathered for or to nobody. The
+        // old fd-keyed scan handed it to whichever session held the descriptor by the time
+        // the send drained, so a departed peer's failures accrued against a stranger and
+        // kMaxConsecutiveTxDrops of them closed a session that had failed nothing (#954).
+        if (slot->gen != to.gen) return;  // that session is gone; this is not its successor's
+        if (!slot->open) return;          // departed between the snapshot and now
+        if (slot->dead) return;           // already condemned — no further evidence is wanted
         if (sent) {
             slot->tx_drops = 0;  // a failure streak is CONSECUTIVE — any success resets it
             return;
@@ -1273,6 +1358,7 @@ void httpd_ws_link_t::note_tx_result(int fd, bool sent, std::size_t bytes) {
         if (slot->tx_drops < kMaxConsecutiveTxDrops) ++slot->tx_drops;
         close_now = slot->tx_drops >= kMaxConsecutiveTxDrops;
         peer = slot->name;
+        fd = slot->fd;
         // Condemn UNDER the same lock that reached the verdict. Any later moment is a
         // window in which the fan-out enqueues more frames for a peer already known to be
         // broken, and each of those costs the httpd task a whole send bound.
@@ -1353,26 +1439,26 @@ int httpd_ws_link_t::send_guarded(httpd_handle_t handle, int fd, const char* buf
     if (slot != nullptr && slot->gate != nullptr) {
         const std::lock_guard lock(slot->gate->m);
         if (httpd_ws_link_t* const owner = slot->gate->link; owner != nullptr)
-            owner->note_send_desync(fd, static_cast<std::size_t>(ret), len);
+            owner->note_send_desync(slot, static_cast<std::size_t>(ret), len);
     }
     return HTTPD_SOCK_ERR_FAIL;  // and report the failure IDF would otherwise have missed
 }
 
-void httpd_ws_link_t::note_send_desync(int fd, std::size_t written, std::size_t len) {
+void httpd_ws_link_t::note_send_desync(session_t* slot, std::size_t written, std::size_t len) {
     std::string peer;
-    bool condemned = false;
+    int fd = -1;
     {
         const std::lock_guard lock(peers_m_);
-        for (const auto& s : slots_)
-            if (s->open && s->fd == fd) {
-                if (s->dead) return;  // already condemned — this stream is going
-                s->dead = true;
-                condemned = true;
-                peer = s->name;
-                break;
-            }
+        // The slot came from the server's own session table, resolved inside the write on
+        // the httpd task, so it IS the current owner of that socket — no fd scan (which
+        // would ask the aliasing question again) and no generation check (there is no
+        // elapsed time for a swap to happen in). Not open => not a peer of ours to condemn.
+        if (slot == nullptr || !slot->open) return;
+        if (slot->dead) return;  // already condemned — this stream is going
+        slot->dead = true;
+        peer = slot->name;
+        fd = slot->fd;
     }
-    if (!condemned) return;  // no slot for this fd: not a peer of ours to condemn
     // Named from the slot, not from the socket — see note_tx_result.
     ESP_LOGE(kTag, "short write peer=%s fd=%d (%u of %u bytes) - closing: stream desynchronised",
              peer.c_str(), fd, (unsigned)written, (unsigned)len);
@@ -1389,32 +1475,39 @@ void httpd_ws_link_t::note_send_desync(int fd, std::size_t written, std::size_t 
 
 void httpd_ws_link_t::tx_work(void* arg) {
     auto* const work = static_cast<tx_work_t*>(arg);
-    // Runs on the httpd task, sequenced with accept/close — so a peer that departed
-    // between enqueue and now is a clean skip (no cross-thread send to a dead/reused fd).
-    const bool live = httpd_ws_get_fd_info(work->handle, work->fd) == HTTPD_WS_CLIENT_WEBSOCKET;
-    // The second skip, and the one that unblocks the task: this frame may have been
-    // queued BEFORE the link condemned its destination. Attempting it would cost the full
-    // send bound on a socket already known to be broken, and the queue behind it holds
-    // the close. Skipping releases the slot at queue speed, so a backlog that would have
-    // taken minutes to grind through drains in microseconds. The gate is taken briefly
-    // and released before the send: holding it across the write would block a concurrent
+    // Resolve the destination SESSION back to a socket, and refuse to invent one. This is
+    // the checkpoint the old bare-fd path had no way to pass: it asked
+    // `httpd_ws_get_fd_info(handle, fd)`, which answers "some websocket lives at this
+    // number" and cannot answer "the session this frame was gathered for" — IDF's session
+    // lookup is purely fd-keyed. A frame queued for a peer that hung up was therefore
+    // written into whichever client had since been accepted onto the recycled descriptor
+    // (#954). live_fd fails that reference instead, and the same call carries the two
+    // skips that were already here: a departed peer, and one condemned after this frame
+    // was queued (attempting that costs the full send bound on a socket already known to
+    // be broken, while the queue behind it holds the close). The gate is taken briefly and
+    // released before the send: holding it across the write would block a concurrent
     // destructor for the whole bound. Lock order is gate->m then peers_m_, the same order
     // on_session_closed and the accounting below use.
-    bool doomed = false;
-    if (live && work->gate != nullptr) {
+    int fd = -1;
+    if (work->gate != nullptr) {
         const std::lock_guard lock(work->gate->m);
         if (httpd_ws_link_t* const owner = work->gate->link; owner != nullptr)
-            doomed = owner->fd_is_dead(work->fd);
+            fd = owner->live_fd(work->to);
     }
+    // The server's own verdict, on the socket the LINK just vouched for — kept as the
+    // second opinion it always was (a peer mid-CLOSE is a websocket the link still has
+    // open), never as the identity test it was being asked to be.
+    const bool live =
+        fd >= 0 && httpd_ws_get_fd_info(work->handle, fd) == HTTPD_WS_CLIENT_WEBSOCKET;
     esp_err_t err = ESP_OK;
-    if (live && !doomed) {
+    if (live) {
         httpd_ws_frame_t f = {};
         f.final = true;
         f.fragmented = false;
         f.type = HTTPD_WS_TYPE_BINARY;
         f.payload = reinterpret_cast<std::uint8_t*>(work->payload);
         f.len = work->len;
-        err = httpd_ws_send_frame_async(work->handle, work->fd, &f);
+        err = httpd_ws_send_frame_async(work->handle, fd, &f);
         if (err != ESP_OK) {
             // DROP the frame; do NOT close the session on THIS failure alone (#481). One
             // failed async send means the peer missed ONE frame it can retry — not that
@@ -1434,24 +1527,25 @@ void httpd_ws_link_t::tx_work(void* arg) {
             // the refused ENQUEUES that closed sessions, and those name the shared control
             // queue rather than any peer (see note_enqueue_drop).
             ESP_LOGW(kTag, "ws send failed (%s) fd=%d len=%u - frame dropped", esp_err_to_name(err),
-                     work->fd, (unsigned)work->len);
+                     fd, (unsigned)work->len);
         }
     }
     // Copy out everything the accounting needs BEFORE the slot goes back to the pool:
     // once released, another task may claim it and overwrite the work item.
     gate_t* const gate = work->gate;
-    const int fd = work->fd;
+    const session_ref_t to = work->to;
     const std::size_t len = work->len;
     release_tx_work(work);  // recycle the pool slot, or free the heap-fallback shell
-    // A skipped send is not evidence about anyone: no result. Both skips qualify — the
-    // peer departed, or it was condemned and the verdict is already in.
-    if (!live || doomed || gate == nullptr) return;
+    // A skipped send is not evidence about anyone: no result. Every skip qualifies — the
+    // peer departed, a different session now holds its slot, or it was condemned and the
+    // verdict is already in.
+    if (!live || gate == nullptr) return;
     // Resolve the link through the gate — the same contract on_session_closed uses. Held
     // for the whole call, so a concurrent destructor either waits here or finds the gate
     // already shut and this outcome has nobody to inform.
     const std::lock_guard lock(gate->m);
     if (httpd_ws_link_t* const owner = gate->link; owner != nullptr)
-        owner->note_tx_result(fd, err == ESP_OK, len);
+        owner->note_tx_result(to, err == ESP_OK, len);
 }
 
 void httpd_ws_link_t::send(std::span<const std::byte> frame) {
@@ -1460,22 +1554,27 @@ void httpd_ws_link_t::send(std::span<const std::byte> frame) {
 }
 
 void httpd_ws_link_t::send(std::span<const std::span<const std::byte>> iov) {
-    // Broadcast: snapshot the open fds under the lock, then enqueue unlocked — the
+    // Broadcast: snapshot the destinations under the lock, then enqueue unlocked — the
     // per-session drop accounting inside queue_send takes peers_m_ itself. Overriding
     // the iovec entry point means a rope reply is gathered ONCE per peer, straight
     // into the queued work buffer — the base default's gather-into-a-temporary would
     // double-buffer a large reply (flatten temp + tx copy live simultaneously), the
     // heap spike behind the on-device OOM abort.
-    std::vector<int> fds;
+    //
+    // What the snapshot holds is a SESSION reference per peer, not a bare fd: the lock is
+    // released before the first enqueue and the frames are written later still, so a
+    // descriptor read here can belong to somebody else by the time it is used (#954). The
+    // reference is minted here, under the same lock that read the peer's liveness.
+    std::vector<session_ref_t> targets;
     {
         const std::lock_guard lock(peers_m_);
-        fds.reserve(slots_.size());
+        targets.reserve(slots_.size());
         // A condemned peer is skipped from the lock the snapshot already holds, so the
         // fan-out never even offers it a frame (queue_send would refuse it anyway).
         for (const auto& s : slots_)
-            if (s->open && !s->dead) fds.push_back(s->fd);
+            if (s->open && !s->dead) targets.push_back(session_ref_t{s.get(), s->gen});
     }
-    for (const int fd : fds) queue_send(fd, iov);
+    for (const session_ref_t& to : targets) queue_send(to, iov);
 }
 
 void httpd_ws_link_t::peer_endpoint_t::send(std::span<const std::byte> frame) {
@@ -1487,13 +1586,18 @@ void httpd_ws_link_t::peer_endpoint_t::send(std::span<const std::span<const std:
     // The directed reply path (fwd_router hands the reply rope's iovec here): one
     // nothrow gather into the tx work item, no intermediate flatten temporary.
     if (owner_ == nullptr || slot_ == nullptr) return;
-    int fd = -1;
+    // The endpoint is bound to a SLOT for the link's life, and slots outlive the sessions
+    // they carry — so "which peer is this endpoint for" is only answered together with the
+    // generation. A directed FWD reply resolved against a stale one would be delivered to
+    // whichever tab reconnected onto the slot, on a link whose whole point is that a reply
+    // reaches only the tab that asked (#954).
+    session_ref_t to;
     {
         const std::lock_guard lock(owner_->peers_m_);
         if (!slot_->open || slot_->dead) return;  // departed or condemned => no-op
-        fd = slot_->fd;
+        to = session_ref_t{slot_, slot_->gen};
     }
-    owner_->queue_send(fd, iov);
+    owner_->queue_send(to, iov);
 }
 
 // ---------------------------------------------------------------------------

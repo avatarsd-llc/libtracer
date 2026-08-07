@@ -265,6 +265,29 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     # would flag that deliberate leak. ASan's use-after-free detection stays on.
     set_tests_properties(httpd_ws_send_stall PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
+    # #954 — SESSION IDENTITY on the TX path, on the same fake. The event neither suite
+    # above stages is a DESCRIPTOR being reused: the fake hands one socket number to two
+    # unrelated sessions in turn, while the first one's frames are still in the control
+    # queue. That is what makes "the send resolved its destination by bare fd" observable
+    # as a cross-session misdelivery rather than a code reading.
+    add_executable(httpd_ws_session_identity_test
+        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_session_identity_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
+    target_include_directories(httpd_ws_session_identity_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(httpd_ws_session_identity_test PRIVATE libtracer)
+    target_link_options(httpd_ws_session_identity_test PRIVATE
+        "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    libtracer_test_warnings(httpd_ws_session_identity_test)
+    add_test(NAME httpd_ws_session_identity COMMAND httpd_ws_session_identity_test)
+    # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
+    # every case here constructs an adopting link — same exemption as the two suites above.
+    set_tests_properties(httpd_ws_session_identity
+        PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+
     # #900 + #901 — the WS *CLIENT* link's receive path, on the same construction: the
     # chip TU (integrations/esp-idf/libtracer/esp_ws_client_link.cpp) compiled against a
     # host fake of esp_transport_ws's frame stream and esp_pthread's stack-sizing seam.

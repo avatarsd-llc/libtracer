@@ -21,6 +21,40 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`httpd_ws_link_t`'s queued TX no longer delivers one peer's frames to another after a
+  descriptor is reused** (#954, partial — the directed-resolve residue is #1013). The
+  whole TX path identified its destination by bare fd: `send()`
+  snapshotted fds under the peer lock and released it before enqueueing, the queued work
+  item stored only `int fd`, and the drain asked `httpd_ws_get_fd_info(handle, fd)` —
+  which reports "some websocket lives at this number", never "the session this frame was
+  gathered for", because IDF's session lookup is purely fd-keyed with no generation. The
+  residency window is wide: `httpd_server` handles ONE control message per `select()`
+  pass while close, accept and handshake proceed in that same pass, so a peer can hang up
+  and an unrelated client be accepted onto the recycled descriptor while the first peer's
+  frames still sit in the queue. Those frames were then written to the new peer — a
+  **cross-session data leak** on a peer-named server, where a directed FWD reply or a
+  subscription push produced for one authenticated session was delivered to a different
+  one — and their failures were charged to the newcomer's strike counter, closing a
+  session that had failed nothing. The TX path now carries a `session_ref_t` (the peer
+  slot plus a generation stamped at every claim) and re-validates it at each site through
+  `live_fd`; a stale reference FAILS and the frame is dropped rather than misdelivered.
+
+  **Scope: the enqueue → drain gap, not every gap.** The generation protects a reference
+  from the moment it is MINTED. It does not protect the window BEFORE that: on the directed
+  path a caller resolves a peer's endpoint via `peer_link` and sends later in the same
+  forward hop, and `peer_endpoint_t::send` mints the reference from the slot's CURRENT
+  generation — so whichever session occupies the slot at send time satisfies the downstream
+  check. Under preemption that window is unbounded, and the misdelivery is still
+  constructible. It is narrower than the window this closes and it predates this change,
+  but it is the same consequence, so it is tracked as **#1013** rather than described as
+  fixed. Closing it needs a per-resolution identity, which is an API-shape decision the
+  shared per-slot endpoint object cannot absorb silently.
+
+  Both halves of the shipped reference are needed: slots are recycled IN PLACE, so the departed peer's slot — and
+  therefore the server's session ctx POINTER — is exactly what the next peer is handed,
+  which is why the pointer comparison the teardown detach path uses does not close this
+  hole on the live path. No public API change.
+
 - **`esp_ws_client_link_t` now HONORS its `recv_stack` argument** (#900). The constructor
   accepted the knob and discarded it, spawning a plain `std::thread` — which on ESP-IDF
   takes the global `CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT`, since a pthread's stack can
