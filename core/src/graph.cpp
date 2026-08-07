@@ -634,7 +634,33 @@ std::uint64_t graph_t::ancestor_walks() const noexcept {
 graph_t::delivery_drops_t graph_t::delivery_drops() const noexcept {
     return {.no_target = drops_no_target_.load(std::memory_order_relaxed),
             .denied = drops_denied_.load(std::memory_order_relaxed),
-            .out_of_memory = drops_oom_.load(std::memory_order_relaxed)};
+            .out_of_memory = drops_oom_.load(std::memory_order_relaxed),
+            .fan_out_truncated = drops_truncated_.load(std::memory_order_relaxed)};
+}
+
+void graph_t::count_drop(drop_reason_t why, std::uint64_t n) noexcept {
+    // The one counting door (#896). Exhaustive on purpose — no default: a new reason
+    // must choose a counter here, it cannot fall through into silence, which is the
+    // exact failure this centralization is fixing.
+    switch (why) {
+        case drop_reason_t::NO_TARGET:
+            drops_no_target_.fetch_add(n, std::memory_order_relaxed);
+            return;
+        case drop_reason_t::DENIED:
+            drops_denied_.fetch_add(n, std::memory_order_relaxed);
+            return;
+        case drop_reason_t::OUT_OF_MEMORY:
+            drops_oom_.fetch_add(n, std::memory_order_relaxed);
+            return;
+        case drop_reason_t::FAN_OUT_TRUNCATED:
+            drops_truncated_.fetch_add(n, std::memory_order_relaxed);
+            return;
+    }
+}
+
+void graph_t::count_snapshot_drops(const vertex_t::snapshot_drops_t& drops) noexcept {
+    if (drops.out_of_memory != 0) count_drop(drop_reason_t::OUT_OF_MEMORY, drops.out_of_memory);
+    if (drops.truncated != 0) count_drop(drop_reason_t::FAN_OUT_TRUNCATED, drops.truncated);
 }
 
 void graph_t::bump_subtree_listeners(vertex_t* v, std::int32_t delta) {
@@ -874,14 +900,14 @@ void graph_t::dispatch_edge_target(const edge_view_t& e, const rope_t& value) {
     // an UNCOUNTED drop is indistinguishable from a delivery that never had to happen, for
     // an operator and for a benchmark alike.
     if (target == nullptr) {
-        drops_no_target_.fetch_add(1, std::memory_order_relaxed);
+        count_drop(drop_reason_t::NO_TARGET, 1);
         return;
     }
     // Fan-in gate (#81, ADR-0026): the delivery is an ordinary write to the target,
     // gated by the TARGET's :acl WRITE right under the edge's stored caller context.
     // Denial drops this delivery.
     if (!acl_allows(target, e.caller, acl_right_t::WRITE)) {
-        drops_denied_.fetch_add(1, std::memory_order_relaxed);
+        count_drop(drop_reason_t::DENIED, 1);
         return;
     }
     // Delivery TERMINATES at the target (ADR-0051 / RFC-0007): apply exactly the
@@ -893,7 +919,7 @@ void graph_t::dispatch_edge_target(const edge_view_t& e, const rope_t& value) {
     // no dedup, no drain queue. An app wanting pure relay subscribes the consumer directly.
     rope_t clone;  // the NOTHROW delivery clone (#477) — on OOM this one leg drops
     if (!try_clone_rope(clone, value)) {
-        drops_oom_.fetch_add(1, std::memory_order_relaxed);
+        count_drop(drop_reason_t::OUT_OF_MEMORY, 1);
         return;
     }
     (void)store_value(target, std::move(clone));
@@ -974,7 +1000,12 @@ void graph_t::fan_out(vertex_t* v, const rope_t& value) {
                 ~reset_t() noexcept { b = false; }
             } reset{tls_busy};
             tls_buf.clear();  // keeps capacity — the amortised-zero-alloc reuse
-            const std::size_t n = v->snapshot_edges(inline_buf, tls_buf);
+            vertex_t::snapshot_drops_t drops;
+            const std::size_t n = v->snapshot_edges(inline_buf, tls_buf, drops);
+            // Fold BEFORE dispatching: these deliveries were abandoned inside the
+            // snapshot, and dispatch re-enters the graph (a callback may publish, and a
+            // nested publish must not be able to swallow this tally).
+            if (drops.any()) count_snapshot_drops(drops);
             if (tls_buf.empty())
                 for (std::size_t i = 0; i < n; ++i) dispatch_edge(inline_buf[i], value);
             else
@@ -987,7 +1018,9 @@ void graph_t::fan_out(vertex_t* v, const rope_t& value) {
     // Small fan-out (or a nested wide fan-out): fill the stack buffer; the empty local vector
     // never allocates unless the overflow path above genuinely spilled.
     std::vector<edge_view_t> heap_buf;
-    const std::size_t n = v->snapshot_edges(inline_buf, heap_buf);
+    vertex_t::snapshot_drops_t drops;
+    const std::size_t n = v->snapshot_edges(inline_buf, heap_buf, drops);
+    if (drops.any()) count_snapshot_drops(drops);
     if (heap_buf.empty())
         for (std::size_t i = 0; i < n; ++i) dispatch_edge(inline_buf[i], value);
     else  // count race (a subscriber was added between own_subs() and the lock): one alloc
@@ -1066,7 +1099,19 @@ result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, std::string_view c
         const bool can_notify = try_clone_rope(notify, value);
         const result_t<std::shared_ptr<const rope_t>> stored = store_value(v, std::move(value));
         if (!stored) return std::unexpected(stored.error());
-        if (can_notify) deliver_vertex(v, notify);
+        if (can_notify) {
+            deliver_vertex(v, notify);
+        } else {
+            // A failed clone sheds the ENTIRE fan-out, not one leg: no edge of this
+            // vertex is dispatched, and the write still returns success. Keeping the
+            // write successful is right (the handler ran; un-running it is impossible),
+            // but the drop is the widest one in the graph, so it is counted at the width
+            // it sheds — one per subscriber, never one per event. Counted here, at the
+            // frame that abandons the delivery, because no inner frame is entered at all.
+            // The ancestor legs a bubble would also have served are deliberately not
+            // counted: that axis and its instrumentation are #854's.
+            count_drop(drop_reason_t::OUT_OF_MEMORY, v->own_subs());
+        }
         clear_pending(v);  // eager delivery flushes any pending mark a prior assign left
         return {};
     }

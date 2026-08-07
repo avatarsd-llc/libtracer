@@ -329,10 +329,12 @@ itself, described via `:schema` like any other data
 ```
 
 The backpressure counters come from `graph_t::delivery_drops()`
-(`core/include/libtracer/graph.hpp:1288`), which snapshots three per-cause totals —
-`no_target`, `denied`, `out_of_memory` (`graph.hpp:1271-1278`). They are counted and
+(`core/include/libtracer/graph.hpp:1299`), which snapshots four per-cause totals —
+`no_target`, `denied`, `out_of_memory`, `fan_out_truncated` (`graph.hpp:1277-1289`). Each
+counts shed **deliveries**, not events, so a fan-out shed whole under memory pressure moves
+them by its width. They are counted and
 never enforced: nothing in the library reads them, so the deployment decides what to
-alarm on. The three loads are individually relaxed rather than one atomic snapshot,
+alarm on. The loads are individually relaxed rather than one atomic snapshot,
 so their useful reading is "is this growing", not an instant total.
 
 The `min_free` trend under stress is the most predictive health signal a fleet

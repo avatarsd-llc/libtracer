@@ -1898,6 +1898,34 @@ class vertex_t {
     }
 
     /**
+     * @brief What a snapshot DECLINED to hand back: the deliveries a vertex shed before
+     *        the graph could dispatch them (#896).
+     *
+     * `snapshot_edges` is allowed to come back short, and both ways it can are specified
+     * drops rather than aborts (#477). A drop nobody counts, though, is indistinguishable
+     * from a delivery that never had to happen — which is how a whole fan-out could be
+     * shed under memory pressure while `graph_t::delivery_drops()`, the one observable,
+     * read zero. `vertex_t` owns no counters (it is the storage layer, not the
+     * instrumentation layer): it reports the tally by reference and `graph_t::fan_out`
+     * folds it into the graph's per-cause counters at the frame that owns them.
+     *
+     * The two causes stay separate all the way out: an operator reading a rising
+     * `truncated` is looking at a fan-out wider than the inline snapshot on a heap that
+     * would not lend it a buffer, which is a capacity story, not the per-edge allocation
+     * failure `out_of_memory` reports.
+     */
+    struct snapshot_drops_t {
+        /** @brief Edges skipped because an owning copy (target key / link / caller) could
+         *         not be allocated — one delivery each. */
+        std::uint32_t out_of_memory = 0;
+        /** @brief Edges past the inline prefix, abandoned because the overflow buffer for a
+         *         wide fan-out could not be reserved — the capacity degrade. */
+        std::uint32_t truncated = 0;
+        /** @brief Did this snapshot shed anything? The ONE test a clean fan-out pays. */
+        [[nodiscard]] bool any() const noexcept { return (out_of_memory | truncated) != 0; }
+    };
+
+    /**
      * @brief Snapshot every ACTIVE edge's dispatch view into caller storage — the
      *        snapshot-under-pin half of the snapshot/dispatch-after-release discipline.
      *
@@ -1911,6 +1939,8 @@ class vertex_t {
      * unreservable @p overflow degrades the snapshot to the first `kInlineFanout`
      * views in @p inline_buf (the rest of this delivery is dropped), and an edge
      * whose owning copies cannot be cloned is skipped (that one delivery dropped).
+     * Both are TALLIED into @p drops (@ref snapshot_drops_t) so the caller can report
+     * them; neither is silent any more (#896).
      * The small local fan-out (empty target/link/caller strings) stays allocation-
      * free end to end, so the hot path cannot even reach a probe.
      * **NO LOCK (#635).** The source is the vertex's PUBLISHED, immutable-after-publish edge
@@ -1929,19 +1959,25 @@ class vertex_t {
      * constant; only scaling does.
      * @param inline_buf The caller's raw stack buffer (cleared on entry).
      * @param overflow   The heap fallback for large fan-out (cleared on entry).
+     * @param drops      Out: what this snapshot SHED (@ref snapshot_drops_t), zeroed on
+     *                   entry. By reference, not optional — a caller that may not see the
+     *                   shed count is the #896 defect itself.
      * @return The number of views snapshotted (into whichever buffer was used).
      */
-    std::size_t snapshot_edges(edge_snapshot_t& inline_buf, std::vector<edge_view_t>& overflow) {
+    std::size_t snapshot_edges(edge_snapshot_t& inline_buf, std::vector<edge_view_t>& overflow,
+                               snapshot_drops_t& drops) {
         inline_buf.clear();
         overflow.clear();
+        drops = snapshot_drops_t{};
         edge_block_t* b = edges_.load(std::memory_order_acquire);
         if (b == nullptr) return 0;  // never subscribed: no block was ever allocated
         detail_ep::pin_t pin;
         if (!pin.valid()) {  // domain exhausted: the pre-#635 path, for these threads only
             const std::lock_guard lock(vertex_stripe_of(this).m);
-            return copy_published(b->pub.load(std::memory_order_acquire), inline_buf, overflow);
+            return copy_published(b->pub.load(std::memory_order_acquire), inline_buf, overflow,
+                                  drops);
         }
-        const std::size_t n = copy_published(pin.acquire(b->pub), inline_buf, overflow);
+        const std::size_t n = copy_published(pin.acquire(b->pub), inline_buf, overflow, drops);
         pin.release();  // BEFORE the caller dispatches — the invariant `pin_t` asserts
         return n;
     }
@@ -2629,10 +2665,15 @@ class vertex_t {
      * Bounded, allocation-light and provably non-re-entrant: every allocation here is NOTHROW
      * (#477), and the small local fan-out (empty target/link/caller strings) reaches no probe
      * at all — it is refcount clones and POD copies, exactly what it was under the lock.
+     *
+     * Both shed legs TALLY into @p drops at the site the delivery is actually abandoned —
+     * not at the caller's frame, which cannot tell a truncated snapshot from a short
+     * subscriber list (#896).
      */
     [[nodiscard]] static std::size_t copy_published(const edge_pub_t* p,
                                                     edge_snapshot_t& inline_buf,
-                                                    std::vector<edge_view_t>& overflow) noexcept {
+                                                    std::vector<edge_view_t>& overflow,
+                                                    snapshot_drops_t& drops) noexcept {
         if (p == nullptr) return 0;
         const bool use_heap =
             p->count > edge_snapshot_t::kCapacity && tr::detail::try_reserve(overflow, p->count);
@@ -2641,10 +2682,19 @@ class vertex_t {
         for (std::uint32_t i = 0; i < p->count; ++i) {
             if (!src[i].active.load(std::memory_order_acquire)) continue;
             // OOM fallback (reserve failed on a wide list): the inline prefix delivers,
-            // the remainder of this fan-out is dropped — never an abort.
-            if (!use_heap && n == edge_snapshot_t::kCapacity) break;
+            // the remainder of this fan-out is dropped — never an abort. Walk the tail
+            // rather than breaking blind: the abandoned edges are N deliveries, and a
+            // counter that said "1" for a truncated fan-out of N would be its own defect.
+            if (!use_heap && n == edge_snapshot_t::kCapacity) {
+                for (; i < p->count; ++i)
+                    if (src[i].active.load(std::memory_order_acquire)) ++drops.truncated;
+                break;
+            }
             edge_view_t e;
-            if (!try_copy_published(src[i], e)) continue;  // OOM: drop this one edge's delivery
+            if (!try_copy_published(src[i], e)) {
+                ++drops.out_of_memory;  // OOM: drop this one edge's delivery
+                continue;
+            }
             if (use_heap)
                 overflow.push_back(std::move(e));  // reserved above — no reallocation
             else

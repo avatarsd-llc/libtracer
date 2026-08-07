@@ -360,15 +360,21 @@ record of it:
 
 ```cpp
 struct delivery_drops_t {
-    std::uint64_t no_target;      // the target PATH resolved to no live vertex
-    std::uint64_t denied;         // the target's :acl denied WRITE to the edge's stored caller
-    std::uint64_t out_of_memory;  // the nothrow delivery clone could not be allocated
+    std::uint64_t no_target;          // the target PATH resolved to no live vertex
+    std::uint64_t denied;             // the target's :acl denied WRITE to the edge's stored caller
+    std::uint64_t out_of_memory;      // a nothrow delivery clone / edge-view copy could not allocate
+    std::uint64_t fan_out_truncated;  // a wide fan-out's snapshot could not be widened past the
+                                      // inline prefix — the capacity degrade, kept apart from OOM
 };
 ```
 
+The unit is a **delivery, not an event**: a write whose notify clone fails sheds every
+subscriber of the vertex, and a truncated snapshot sheds every edge past the inline prefix, so
+each counts once per shed delivery (`1` never stands in for `N`).
+
 Counted, never enforced: nothing in the library reads them, so a deployment chooses
 whether to alarm. They are relaxed monotonic and incremented only **on** a drop, so the
-delivering path pays nothing when nothing is dropped. The three loads are individually
+delivering path pays nothing when nothing is dropped. The loads are individually
 relaxed rather than one atomic snapshot — making them coherent would put a lock on the
 delivery path to serve a diagnostic, and the useful reading of a monotonic counter is "is
 this growing", not an instant.

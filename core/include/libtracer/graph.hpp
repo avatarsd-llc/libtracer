@@ -1264,6 +1264,12 @@ class graph_t {
      * fan-in gate denies the edge's stored caller, otherwise drops every delivery for the
      * rest of its life with nothing anywhere to say so.
      *
+     * The drop is not always ONE delivery, and the counters say so by counting deliveries
+     * rather than events (#896): a fan-out truncated by an unreservable overflow buffer
+     * sheds every edge past the inline prefix, and a handler write whose notify clone
+     * cannot be allocated sheds the vertex's WHOLE subscriber set — each shed delivery is
+     * one increment, so `1` never stands in for `N`.
+     *
      * Counted, never enforced: nothing in the library reads them, so a deployment chooses
      * whether to alarm. Relaxed monotonic, incremented only ON a drop — the delivering path
      * pays nothing when nothing is dropped, exactly like @ref ancestor_walks.
@@ -1273,14 +1279,19 @@ class graph_t {
         std::uint64_t no_target = 0;
         /** @brief The target's `:acl` denied WRITE to the edge's stored caller (#81). */
         std::uint64_t denied = 0;
-        /** @brief The nothrow delivery clone could not be allocated (#477). */
+        /** @brief The nothrow delivery clone / edge-view copy could not be allocated
+         *         (#477) — one count per delivery shed, whatever the fan-out width. */
         std::uint64_t out_of_memory = 0;
+        /** @brief Deliveries shed because a wide fan-out's snapshot could not be widened
+         *         past the inline prefix — a capacity degrade, not an allocation failure
+         *         on the delivery itself (`vertex_t::snapshot_drops_t::truncated`). */
+        std::uint64_t fan_out_truncated = 0;
     };
 
     /**
      * @brief Snapshot the per-cause delivery-drop counters (@ref delivery_drops_t).
      *
-     * The three loads are individually relaxed and not one atomic snapshot, so a reader
+     * The loads are individually relaxed and not one atomic snapshot, so a reader
      * racing a delivering thread may see a torn total. That is deliberate: making it
      * coherent would put a lock on the drop path to serve a diagnostic, and these are
      * monotonic counters whose useful reading is "is this growing", not an instant.
@@ -1331,6 +1342,20 @@ class graph_t {
     // target's own logic; a dispatch cycle is impossible by construction (no depth cap).
     void dispatch_edge_target(const edge_view_t& e, const rope_t& value);
     void dispatch_edge_remote(const edge_view_t& e, const rope_t& value);
+    // The cause a delivery was declined for — the argument of the ONE counting door
+    // below. Kept private: the enum names the internal drop sites, while the public
+    // surface is delivery_drops_t, whose fields are what an operator reads.
+    enum class drop_reason_t : std::uint8_t { NO_TARGET, DENIED, OUT_OF_MEMORY, FAN_OUT_TRUNCATED };
+    // Count `n` declined deliveries against `why` — the SINGLE door every drop site goes
+    // through (#896). It exists because the three sites that forgot to count were the
+    // three that incremented nothing rather than the wrong thing: a path that abandons an
+    // admitted delivery and does not call this is now the visible omission it should be.
+    // `n` is a delivery count, never an event count — a shed fan-out of N counts N.
+    void count_drop(drop_reason_t why, std::uint64_t n) noexcept;
+    // Fold one snapshot's shed tally (vertex_t::snapshot_drops_t, reported by
+    // snapshot_edges) into the per-cause counters. Called on the fan-out path, so it
+    // early-outs on the clean case in one test.
+    void count_snapshot_drops(const vertex_t::snapshot_drops_t& drops) noexcept;
     // Vertical bubbling (RFC-0005): fan `value` out to every registered ancestor's
     // subscribers. Called only when v->listeners_above_ says someone is listening.
     void bubble_up(vertex_t* v, const rope_t& value);
@@ -1549,6 +1574,7 @@ class graph_t {
     mutable std::atomic<std::uint64_t> drops_no_target_{0};
     mutable std::atomic<std::uint64_t> drops_denied_{0};
     mutable std::atomic<std::uint64_t> drops_oom_{0};
+    mutable std::atomic<std::uint64_t> drops_truncated_{0};
 
     // The propagate-sweep selection sets (RFC-0008 §B), keyed on canonical PATH-payload
     // bytes and ORDERED so a subtree is a contiguous prefix range (a parent's key is a
