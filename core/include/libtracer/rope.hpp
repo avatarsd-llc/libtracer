@@ -69,9 +69,32 @@ class rope_t {
         inline_n_ = 0;
         for (view_t& s : inline_) s = view_t{};  // drop the moved-from links' refcounts eagerly
     }
-    /** @brief Chain @p other's links onto this rope (no copy). */
+    /**
+     * @brief Chain @p other's links onto this rope (no copy).
+     *
+     * **Self-concat safe by construction** (`r.concat(r)`): @ref append mutates the very
+     * storage `other.links()` spans when `&other == this` — the inline→heap spill blanks
+     * every inline slot and zeroes `inline_n_` mid-walk (so a naive range-for yielded
+     * `[a,b,a,{}]` instead of `[a,b,a,b]`), and a heap `push_back` can reallocate the
+     * vector the walk points into (a dangling span). Two independent guards close that:
+     * @ref try_reserve pins the final link count up front, so none of the appends below
+     * spills or reallocates; and the walk indexes the source afresh each step, so link
+     * `i` is re-read from wherever the chain now lives even if the reservation
+     * soft-failed. `append` only ever adds a link at the end — it never reorders or drops
+     * one, and the spill migrates link `i` to heap index `i` — so index `i` names the same
+     * link for the whole walk.
+     *
+     * The reservation is also a strict win for a long cross-rope concat: one sized growth
+     * instead of the geometric `push_back` ladder. It is a no-op while the joined chain
+     * still fits the inline small-buffer storage, so the hot 1–2-link case still allocates
+     * nothing (ADR-0053 §6).
+     */
     rope_t& concat(const rope_t& other) {
-        for (const view_t& l : other.links()) append(l);
+        const std::size_t add = other.link_count();
+        // Best effort: on soft-fail the indexed walk below is still correct, it just pays
+        // the ordinary spill/growth path that concat paid before.
+        static_cast<void>(try_reserve(add));
+        for (std::size_t i = 0; i < add; ++i) append(other.links()[i]);
         return *this;
     }
 

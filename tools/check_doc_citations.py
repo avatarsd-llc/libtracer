@@ -200,7 +200,7 @@ ANCHORS = [
     ('core/include/libtracer/backend.hpp:188',
      '* @brief Reclaim @p seg through its backend — the module-set destroy dispatch'),
     # core/include/libtracer/can_reassembly.hpp
-    ('core/include/libtracer/can_reassembly.hpp:181',
+    ('core/include/libtracer/can_reassembly.hpp:191',
      '[[nodiscard]] std::optional<tr::view::rope_t> assemble(const reassembly_key_t& key) const {'),
     # core/include/libtracer/config.hpp
     ('core/include/libtracer/config.hpp:77', '* CMake: `-DLIBTRACER_VERTEX_LOCK_STRIPES=8`; ESP-IDF: menuconfig'),
@@ -332,24 +332,24 @@ ANCHORS = [
     ('core/include/libtracer/receiver_slot.hpp:138', 'const view::view_t flat = frame.materialize(backend);'),
     # core/include/libtracer/rope.hpp
     ('core/include/libtracer/rope.hpp:56', 'void append(view_t v) {'),
-    ('core/include/libtracer/rope.hpp:129',
+    ('core/include/libtracer/rope.hpp:152',
      '* @brief The single contiguous link — the consumer\'s explicit "this value is'),
-    ('core/include/libtracer/rope.hpp:131',
+    ('core/include/libtracer/rope.hpp:154',
      '* @note Precondition: `link_count() == 1` (debug-asserted). A consumer that'),
-    ('core/include/libtracer/rope.hpp:148',
+    ('core/include/libtracer/rope.hpp:171',
      '[[nodiscard]] view_t materialize(mem::mem_backend_t& backend = mem::heap_backend()) const {'),
-    ('core/include/libtracer/rope.hpp:184', '[[nodiscard]] rope_t subrope(std::size_t off, std::size_t len) const {'),
-    ('core/include/libtracer/rope.hpp:213',
+    ('core/include/libtracer/rope.hpp:207', '[[nodiscard]] rope_t subrope(std::size_t off, std::size_t len) const {'),
+    ('core/include/libtracer/rope.hpp:236',
      '[[nodiscard]] std::vector<std::span<const std::byte>> to_iovec() const {'),
-    ('core/include/libtracer/rope.hpp:221',
+    ('core/include/libtracer/rope.hpp:244',
      '* @brief Nothrow @ref to_iovec — fill @p out with one span per link (no copy),'),
-    ('core/include/libtracer/rope.hpp:230',
+    ('core/include/libtracer/rope.hpp:253',
      '[[nodiscard]] bool try_to_iovec(std::vector<std::span<const std::byte>>& out) const noexcept {'),
-    ('core/include/libtracer/rope.hpp:253', 'static constexpr std::size_t kInline = 2;'),
+    ('core/include/libtracer/rope.hpp:276', 'static constexpr std::size_t kInline = 2;'),
     # core/include/libtracer/rope_decode.hpp
     ('core/include/libtracer/rope_decode.hpp:17',
      '* SINK NOTE: this validates STRUCTURE + CRC over a rope; it does not yet'),
-    ('core/include/libtracer/rope_decode.hpp:56', 'class rope_cursor {'),
+    ('core/include/libtracer/rope_decode.hpp:57', 'class rope_cursor {'),
     # core/include/libtracer/segment.hpp
     ('core/include/libtracer/segment.hpp:21', '#ifndef LIBTRACER_NO_ATOMIC'),
     ('core/include/libtracer/segment.hpp:44', '#ifdef LIBTRACER_NO_ATOMIC'),
@@ -395,8 +395,8 @@ ANCHORS = [
      '[[nodiscard]] virtual bool delivers_ropes() const { return false; }',
      'rx_.set_rope([](void* c, view::rope_t f) { (*static_cast<F*>(c))(std::move(f)); }, &sink);'),
     # core/include/libtracer/transport_can.hpp
-    ('core/include/libtracer/transport_can.hpp:271', '[[nodiscard]] bus_link_t* bus() override { return this; }'),
-    ('core/include/libtracer/transport_can.hpp:290',
+    ('core/include/libtracer/transport_can.hpp:352', '[[nodiscard]] bus_link_t* bus() override { return this; }'),
+    ('core/include/libtracer/transport_can.hpp:371',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }'),
     # core/include/libtracer/transport_quic.hpp
     ('core/include/libtracer/transport_quic.hpp:153',
@@ -610,7 +610,7 @@ ANCHORS = [
     ('core/src/route_handle.cpp:82', 't.ingress.push_back(ingress_entry_t{.label = label, .binding = std::move(binding)});'),
     ('core/src/route_handle.cpp:179', 't->egress.push_back(egress_entry_t{', 'bool route_handle_t::record_egress(std::string_view out_link, std::uint16_t label,'),
     ('core/src/route_handle.cpp:236', 't->egress.push_back(egress_entry_t{', 'std::pair<std::uint16_t, bool> route_handle_t::ensure_egress(std::string_view out_link,'),
-    ('core/src/transport_can.cpp:243', 'tr::view::view_can_frames_t::split(*payload, cfg_.mode);'),
+    ('core/src/transport_can.cpp:300', 'tr::view::view_can_frames_t::split(*payload, cfg_.mode);'),
 ]
 
 

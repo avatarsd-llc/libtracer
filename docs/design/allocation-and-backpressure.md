@@ -40,7 +40,7 @@ exhaustive:
 
 | Site | Code | Who provokes it |
 | --- | --- | --- |
-| CAN egress window table | `core/include/libtracer/view_can.hpp:100` — `frames_.push_back` in `view_can_frames_t::split`, reached on every send (`core/src/transport_can.cpp:243`) | the sender: one `push_back` per frame the payload splits into |
+| CAN egress window table | `core/include/libtracer/view_can.hpp:100` — `frames_.push_back` in `view_can_frames_t::split`, reached on every send (`core/src/transport_can.cpp:300`) | the sender: one `push_back` per frame the payload splits into |
 | Label-table binds (#603) | `core/src/route_handle.cpp:82`, `:179`, `:236` — `std::pmr::vector::push_back` and the route copy beside it | a **peer**: an ingress `ADVERTISE` binds a label. `max_label_bindings_per_link` bounds the entry *count*, not the allocation's failure mode |
 | `try_reserve` on `-fno-exceptions` (#923, #850) | `core/include/libtracer/mem_heap.hpp:157-171` — `try_grow` catches the container's own allocation failure where it can; where it cannot (`-fno-exceptions`, where `reserve` `abort()`s with nothing to catch) it falls back to probe-then-commit | on the MCU profile only, anything concurrent — a FreeRTOS context switch between the probe's free and the `reserve` is enough. The hosted profile no longer has the window; the exception-free one closes it by migrating the site to the ADR-0065 failable seam, not by a better `try_reserve` |
 
@@ -299,12 +299,12 @@ A dropped fresh ADVERTISE on the COMPACT leg self-heals: the peer answers the un
 ## Legs that throw, and their nothrow twins
 
 `rope_t::to_iovec` builds the scatter-gather span table by value, and its `reserve` throws on OOM —
-an `abort()` under `-fno-exceptions` (`core/include/libtracer/rope.hpp:213-217`). The terminus reply
+an `abort()` under `-fno-exceptions` (`core/include/libtracer/rope.hpp:236-240`). The terminus reply
 egress builds that table on every send, so on a fragmented heap it was a reachable abort. The
 nothrow twin is `rope_t::try_to_iovec(std::vector<std::span<const std::byte>>& out) noexcept`
-(`rope.hpp:230-235`): it clears `out`, sizes it to `link_count()` through `tr::detail::try_reserve`,
+(`rope.hpp:253-258`): it clears `out`, sizes it to `link_count()` through `tr::detail::try_reserve`,
 and returns `false` without touching `out` further when the table cannot be grown — the caller drops
-the reply (`rope.hpp:220-228`).
+the reply (`rope.hpp:243-251`).
 
 Be exact about what that helper buys, because the twin is named for its *signature*, not for an
 absolute guarantee. `tr::detail::try_reserve` (`core/include/libtracer/mem_heap.hpp:183`) routes

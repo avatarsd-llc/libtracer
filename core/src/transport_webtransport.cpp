@@ -49,6 +49,7 @@
 #include <vector>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/config_reader.hpp"
 #include "libtracer/frame.hpp"
 #include "msquic_endpoint.hpp"
 #include "wt_h3.hpp"
@@ -650,21 +651,16 @@ struct wt_private_cfg_t {
     std::string key;  /**< @brief PEM private-key path matching cert (LISTEN). */
 };
 
-/** @brief The positional NAME-key / value-pair walk over the raw config TLV. */
+/** @brief The shared config_reader_t walk over the webtransport-private keys: NAME
+ *         "cert" NAME <path>, NAME "key" NAME <path>; unknown pairs ignored
+ *         (forward-compat). Pair-consuming (#927), like every other config parse:
+ *         a forward-compat pair whose string value reads `"key"` must not bind the
+ *         FOLLOWING child as the private-key path. */
 [[nodiscard]] wt_private_cfg_t parse_wt_config(const wire::tlv_t* raw_config) {
     wt_private_cfg_t out;
-    if (raw_config == nullptr) return out;
-    const std::vector<wire::tlv_t>& ch = raw_config->children;
-    for (std::size_t i = 0; i + 1 < ch.size(); ++i) {
-        if (ch[i].type != wire::type_t::NAME) continue;
-        const std::string_view key = detail::as_string_view(ch[i].payload);
-        const wire::tlv_t& val = ch[i + 1];
-        if (key == "cert" && val.type == wire::type_t::NAME) {
-            out.cert = std::string(detail::as_string_view(val.payload));
-        } else if (key == "key" && val.type == wire::type_t::NAME) {
-            out.key = std::string(detail::as_string_view(val.payload));
-        }
-    }
+    const config_reader_t cfg(raw_config);
+    if (const auto v = cfg.name("cert")) out.cert = std::string(*v);
+    if (const auto v = cfg.name("key")) out.key = std::string(*v);
     return out;
 }
 
