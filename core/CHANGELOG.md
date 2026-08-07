@@ -28,10 +28,14 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `tr::net::can_tx_admissible(frame)`, over `tr::net::can_max_len(fd)` — a thin adapter onto
   the L1 widths in `tr::view::can_max_data`, so the seam adds no second copy of the numbers
   (`can_frame_data_t::data` is likewise sized from `tr::view::kCanFdMaxData` now). Both
-  links call them; each still decodes the flags from its own driver's representation, but
-  the verdict is reached in one place. Behaviour change: a `socketcan_link_t` receiver no
-  longer sees RTR / standard / error frames, and an over-length classic frame is dropped
-  rather than emitted.
+  *bus* ports call them; each still decodes the flags from its own driver's representation,
+  but the verdict is reached in one place. (The in-memory test links are exempt by
+  construction — their carrier cannot express RTR, an 11-bit identifier, or an error flag.)
+  Behaviour change: a `socketcan_link_t` receiver no longer sees RTR or 11-bit standard
+  frames, and an over-length classic frame is dropped rather than emitted. Error frames are
+  covered by the same predicate but were never a behaviour that existed here: the socket
+  requests no `CAN_RAW_ERR_FILTER`, so the kernel's default zero mask has always withheld
+  them. The check is the seam's rule holding for a port that does ask, not a change.
 
 - **`transport_can` exposes the sibling drop counters, and its RX state is bounded and
   aged (#912).** The CAN ingress buffers grew on the receive thread with nothing expiring

@@ -301,9 +301,11 @@ the extended identifier *is* the path, so an 11-bit standard frame carries no
 decodable identity, a remote-transmission request carries a DLC but no data bytes,
 and an error frame is a controller status report. Egress admits only a length that
 fits the mode's data field — `can_tx_admissible(frame)` over `can_max_len(fd)`, the
-seam's adapter onto the L1 widths. Every implementation calls both, decoding the
-flags from its own driver's representation; the verdict is reached in one place, so
-two ports cannot disagree about what is real traffic:
+seam's adapter onto the L1 widths. Every port of a *physical* bus calls both,
+decoding the flags from its own driver's representation; the verdict is reached in
+one place, so two ports cannot disagree about what is real traffic. (The in-memory
+test links are exempt by construction: their carrier cannot express RTR, an 11-bit
+identifier, or an error flag, so the ingress rule has nothing to judge.)
 
 - **`socketcan_link_t`** — the production impl: `socket(PF_CAN, SOCK_RAW, CAN_RAW)`,
   `CAN_RAW_FD_FRAMES` enabled best-effort (a classic-only controller works unchanged),
@@ -490,8 +492,10 @@ reply completion at the `op_resolver_t` terminus, which resolves synchronously.
   `CAN_RAW` adversary injects an RTR frame and an 11-bit standard frame alongside one
   admissible data frame, and exactly one crosses; an over-length classic frame handed
   to `write_raw` is dropped rather than clamped (the stack smash it would otherwise
-  cause is ASan's to see — the kernel refuses the oversized write either way, so the
-  bus alone cannot tell a guarded link from an unguarded one). It **self-skips** when
+  cause is ASan's to see — the kernel refuses the oversized write either way, so no
+  *unguarded* link is distinguishable on the bus; the drop-vs-**clamp** choice is,
+  and the vector pins it by giving the two frames distinct ids and payloads, so a
+  truncated frame would be witnessed under its own id). It **self-skips** when
   `vcan0` cannot bind, so the required gates never depend on kernel CAN; the dedicated
   **`can-vcan-e2e`** workflow sets `vcan0` up so the socket path runs for real.
 

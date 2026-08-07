@@ -166,9 +166,12 @@ struct can_frame_data_t {
  * an internal receive thread.
  *
  * **Which frames cross the seam is the seam's own rule, not each link's.** Every
- * implementation gates ingress on @ref can_rx_admissible and egress on @ref
- * can_tx_admissible, so a bus-visible divergence between two ports is a
- * compile-unit-local bug rather than a design choice (#931).
+ * port of a *physical* bus gates ingress on @ref can_rx_admissible and egress on
+ * @ref can_tx_admissible, so a bus-visible divergence between two ports is a
+ * compile-unit-local bug rather than a design choice (#931). In-memory test links
+ * are exempt by construction — their carrier cannot express RTR, an 11-bit
+ * identifier, or an error flag, so the ingress rule has no input to judge, and one
+ * of them injects raw fragments deliberately.
  */
 class can_link_t {
    public:

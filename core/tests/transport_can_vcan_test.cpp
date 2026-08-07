@@ -311,30 +311,41 @@ int main() {
     // the drop-vs-clamp choice: a clamping link would put a truncated frame out
     // first, so asserting the legal frame is the NEXT thing on the wire pins the
     // policy this seam actually chose.
+    //
+    // For that assertion to discriminate, the clamped form of the over-length frame
+    // must be WITNESSABLY different from the legal one. Two zero-payload frames on
+    // the same id are wire-identical once one is truncated to 8 bytes, so a clamping
+    // link would satisfy a naive "first frame has dlc 8" check and the guard would
+    // pin nothing. The two frames therefore carry distinct ids and distinct payloads.
     // ------------------------------------------------------------------------
     raw_can_socket_t observer("vcan0");
     check(observer.ok(), "observer CAN_RAW socket bound to vcan0");
     auto tx_link = std::make_unique<tr::net::socketcan_link_t>("vcan0");
     check(tx_link->ok(), "egress-vector link bound to vcan0");
 
-    constexpr std::uint32_t kTxId = 0x1BADBEu;
+    constexpr std::uint32_t kOverId = 0x1BADBEu;
+    constexpr std::uint32_t kLegalId = 0x0C0FFEu;
     tr::net::can_frame_data_t over;
-    over.id = kTxId;
+    over.id = kOverId;
     over.fd = false;
     over.len = 20;  // legal for the 64-byte carrier, impossible for classic CAN
+    over.data.fill(std::byte{0xAB});
     tx_link->write_raw(over);
 
     tr::net::can_frame_data_t legal;
-    legal.id = kTxId;
+    legal.id = kLegalId;
     legal.fd = false;
     legal.len = tr::net::can_max_len(/*fd=*/false);
+    legal.data.fill(std::byte{0x5C});
     tx_link->write_raw(legal);
 
     const auto witnessed = observer.recv();
-    check(witnessed.has_value() && (witnessed->can_id & CAN_EFF_MASK) == kTxId &&
-              witnessed->can_dlc == tr::net::can_max_len(/*fd=*/false),
+    check(witnessed.has_value() && (witnessed->can_id & CAN_EFF_MASK) == kLegalId,
           "the over-length classic frame was DROPPED, not clamped — the bus's first "
-          "sight of this link is the legal 8-byte frame");
+          "sight of this link is the legal frame, not a truncated one on the over id");
+    check(witnessed.has_value() && witnessed->can_dlc == tr::net::can_max_len(/*fd=*/false) &&
+              witnessed->data[0] == 0x5Cu,
+          "and it is the legal frame's own payload, not the over-length frame's first 8 bytes");
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
