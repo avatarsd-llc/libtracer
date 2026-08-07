@@ -267,7 +267,7 @@ class effective_acl_t {
  *   today; richer NFSv4 flags gate on the graph's merge honoring them first;
  * - a missing `type` / `subject` / `access_mask`, or an empty `subject` token;
  * - a numeric field whose payload is empty or wider than the field
- *   (@ref detail_acl::ace_field_ok — `type`/`flags` u8, `access_mask` u32,
+ *   (`%detail_acl::ace_field_ok` — `type`/`flags` u8, `access_mask` u32,
  *   `expires_ns` u64), which is where a big-endian u16 `type` of `0x0001` used to
  *   truncate from DENY to ALLOW;
  * - a KNOWN key carrying the wrong value TLV type — rejected, never skipped: a
