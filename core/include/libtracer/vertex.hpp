@@ -2200,7 +2200,7 @@ class vertex_t {
      *
      * Race resolution (rebuild vs concurrent `:acl` write): every invalidator — @ref set_acl,
      * the placeholder revert, the subtree mark an ancestor `:acl` write fans out (@ref
-     * mark_acl_cache_dirty) — advances that one counter via @ref invalidate_acl_cache after
+     * mark_acl_cache_dirty) — advances that one counter via `%invalidate_acl_cache` after
      * publishing its ACEs, lock-free, and does NOTHING else. The recheck and the publish are
      * therefore the SAME atomic operation, so an invalidation landing anywhere in the rebuild
      * defeats the CAS. That is the whole of the coherence argument, and it is what the retired
