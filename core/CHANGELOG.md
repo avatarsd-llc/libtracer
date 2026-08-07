@@ -16,6 +16,31 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`delivery_drops()` counts the three drop sites it was missing, and counts them by
+  DELIVERY (#896).** `graph_t::delivery_drops()` promised drop observability while three
+  paths shed deliveries invisibly, so a node under memory pressure reported zero drops
+  while an arbitrary number were shed. The worst read success on a write that delivered
+  nothing at all: `write_impl`'s handler branch skips the whole fan-out when its notify
+  clone cannot be allocated — every subscriber of the vertex, not one edge — and
+  incremented nothing. The other two live in the fan-out snapshot: an edge whose owning
+  copies (link NAME / stored caller) cannot be allocated is skipped, and a wide fan-out
+  whose overflow buffer cannot be reserved is truncated to the inline prefix.
+
+  Three changes to the public surface:
+  - `delivery_drops_t` gains **`fan_out_truncated`** — deliveries shed by the capacity
+    degrade, kept apart from `out_of_memory` so an operator can tell a buffer that could
+    not be widened from a delivery whose clone failed.
+  - `vertex_t::snapshot_edges` takes a third argument, **`vertex_t::snapshot_drops_t&`**
+    (new nested type), reporting what the snapshot shed; `graph_t::fan_out` folds it into
+    the graph's counters. The parameter is a required reference, not an optional pointer:
+    a caller that cannot see the shed count is the defect being fixed.
+  - Every drop now goes through one internal counting door, so a path that abandons an
+    admitted delivery without counting it is a visible omission.
+
+  Counts are **deliveries, not events**: a shed fan-out of N counts N. Nothing is added to
+  the delivering path — the fold is one predicted-not-taken test per snapshot and the
+  counters are touched only on a drop. No wire change.
+
 - **`transport_can` exposes the sibling drop counters, and its RX state is bounded and
   aged (#912).** The CAN ingress buffers grew on the receive thread with nothing expiring
   and nothing counting a drop, unlike every sibling transport. Three parts:

@@ -158,19 +158,23 @@ void test_edges_snapshot_clear_latch() {
 
     edge_snapshot_t buf;
     std::vector<edge_view_t> heap;
-    check(v.snapshot_edges(buf, heap) == 3 && heap.empty(),
+    vertex_t::snapshot_drops_t drops;
+    check(v.snapshot_edges(buf, heap, drops) == 3 && heap.empty(),
           "3 active edges snapshot into the inline buffer (no heap)");
+    check(!drops.any(), "an unpressured snapshot sheds nothing (#896)");
     buf[0].callback(buf[0].callback_ctx, *v.read_stored());
     check(hits == 1, "a snapshotted edge dispatches through its {fn, ctx} pair");
 
     check(v.clear_edge(0), "clearing an active slot reports true");
     check(!v.clear_edge(0), "re-clearing the same slot reports false");
     check(!v.clear_edge(99), "clearing an out-of-range slot reports false");
-    check(v.snapshot_edges(buf, heap) == 2, "a cleared edge vanishes from the snapshot");
+    check(v.snapshot_edges(buf, heap, drops) == 2, "a cleared edge vanishes from the snapshot");
+    check(!drops.any(), "a cleared edge is not a DROPPED delivery — nothing shed");
 
     for (int i = 0; i < 11; ++i) (void)v.add_edge(mk_edge());
-    const std::size_t n = v.snapshot_edges(buf, heap);
+    const std::size_t n = v.snapshot_edges(buf, heap, drops);
     check(n == 13 && heap.size() == 13, "a >kInlineFanout subscriber list overflows to the heap");
+    check(!drops.any(), "a heap-backed wide snapshot sheds nothing either");
 }
 
 void test_snapshot_under_concurrent_add() {
@@ -203,14 +207,15 @@ void test_snapshot_under_concurrent_add() {
     go.store(true, std::memory_order_release);
     edge_snapshot_t buf;
     std::vector<edge_view_t> heap;
+    vertex_t::snapshot_drops_t drops;
     for (int i = 0; i < 2000; ++i) {
-        const std::size_t n = v.snapshot_edges(buf, heap);
+        const std::size_t n = v.snapshot_edges(buf, heap, drops);
         if (n < last) monotonic = false;
         last = n;
     }
     for (std::thread& t : adders) t.join();
     check(monotonic, "concurrent snapshots see a monotonically growing active-edge count");
-    check(v.snapshot_edges(buf, heap) == kThreads * kPerThread,
+    check(v.snapshot_edges(buf, heap, drops) == kThreads * kPerThread,
           "every concurrently added edge is snapshotted after the storm");
 }
 

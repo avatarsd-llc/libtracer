@@ -21,12 +21,14 @@
  * zero, which is the real regression risk — an increment accidentally moved onto the
  * delivering path would be invisible in behaviour and would make the counters lie.
  *
- * `out_of_memory` is exercised in `graph_oom_softfail_test`, not here — that file already owns
- * the allocator-failure harness (`tr::detail::probe_fail_hook`), so the assertion lives beside
- * the injection rather than duplicating it. This file's own header used to say the counter was
- * unreachable "which no test harness in this tree provides"; that stopped being true when the
- * hook landed, and the path had in fact been exercised there for some time with the counter
- * simply never checked.
+ * `out_of_memory` and `fan_out_truncated` are exercised in `graph_oom_softfail_test`, not here —
+ * that file already owns the allocator-failure harness (`tr::detail::probe_fail_hook`), so the
+ * assertions live beside the injection rather than duplicating it. This file's own header used
+ * to say the counter was unreachable "which no test harness in this tree provides"; that stopped
+ * being true when the hook landed, and the path had in fact been exercised there for some time
+ * with the counter simply never checked. #896 found three more paths in that same state — a
+ * delivery abandoned with no counter at all — which is why the zero-assertions below are
+ * whole-struct: a cause that stops being counted must fail something.
  */
 
 #include <cstddef>
@@ -126,7 +128,7 @@ void test_delivering_edge_drops_nothing() {
     check(g.read(path_t("/sink")).has_value(), "and the delivery reached the target");
 
     const auto d = g.delivery_drops();
-    check(d.no_target == 0 && d.denied == 0 && d.out_of_memory == 0,
+    check(d.no_target == 0 && d.denied == 0 && d.out_of_memory == 0 && d.fan_out_truncated == 0,
           "every drop counter is still zero on the delivering path");
 }
 
@@ -143,7 +145,8 @@ void test_missing_target_is_counted() {
           "the write SUCCEEDS — one leg dropping is not a write failure");
     const auto d1 = g.delivery_drops();
     check(d1.no_target == 1, "the no_target drop is counted once");
-    check(d1.denied == 0 && d1.out_of_memory == 0, "and is not confused with another cause");
+    check(d1.denied == 0 && d1.out_of_memory == 0 && d1.fan_out_truncated == 0,
+          "and is not confused with another cause");
 
     check(g.write(src, value_u8(0x23)).has_value(), "a second write also succeeds");
     check(g.delivery_drops().no_target == 2, "counting is monotonic, once per dropped delivery");
