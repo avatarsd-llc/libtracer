@@ -355,10 +355,13 @@ target_link_libraries(collect_test PRIVATE libtracer Threads::Threads)
 libtracer_test_warnings(collect_test)
 add_test(NAME collect COMMAND collect_test)
 
-# #82 — in-band :children[] SPEC vertex creation (ADR-0017).
+# #82 — in-band :children[] SPEC vertex creation (ADR-0017). Reads the shared `spec/`
+# conformance vectors (#877), so it needs LIBTRACER_VECTORS_DIR.
 add_executable(children_test children_test.cpp)
 target_link_libraries(children_test PRIVATE libtracer)
 libtracer_test_warnings(children_test)
+target_compile_definitions(children_test PRIVATE
+    LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 add_test(NAME children COMMAND children_test)
 
 # L4 fold, Slice 0 — folded :children projection is byte-identical to the materialized

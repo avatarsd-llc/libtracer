@@ -1,0 +1,22 @@
+{
+  "name": "conn-client-ws",
+  "category": "spec",
+  "hex": "0e406c00020004007479706502000600636c69656e74020004006e616d6502000200757002000600636f6e6669670b403e0002000400726f6c65010001000002000400706f727401000200901f020004006b696e640200020077730200040061646472020009003132372e302e302e31",
+  "total_bytes": 112,
+  "decoded": {
+    "type": "0x0E SPEC",
+    "structured": true,
+    "meaning": "SPEC{NAME \"type\" NAME \"client\", NAME \"name\" NAME \"up\", NAME \"config\" SETTINGS{NAME \"role\" VALUE u8=0, NAME \"port\" VALUE u16=8080, NAME \"kind\" NAME \"ws\", NAME \"addr\" NAME \"127.0.0.1\"}} — a DIAL connection-formation spec",
+    "fields": {
+      "type": "client",
+      "name": "up",
+      "config": {
+        "role": 0,
+        "port": 8080,
+        "kind": "ws",
+        "addr": "127.0.0.1"
+      }
+    },
+    "note": "The two value TYPES inside `config` are load-bearing and mixed on purpose: `role`/`port` are integers in a VALUE (0x01, little-endian), `kind`/`addr` are strings in a NAME (0x02). A core whose settings builder can only emit VALUE cannot express `kind`/`addr` at all — the config reader finds a string key only as a NAME child. Bytes emitted by the libtracer reference encoder."
+  }
+}

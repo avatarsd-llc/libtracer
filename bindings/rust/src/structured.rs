@@ -15,7 +15,9 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::path::tlv_to_path;
-use crate::tlv_builders::{name, subscriber, value, value_u16, value_u64, value_u8, BuildError};
+use crate::tlv_builders::{
+    name, subscriber, text_name, value, value_u16, value_u64, value_u8, BuildError,
+};
 use crate::{type_code, Opt, Tlv};
 
 fn named_value(key: &str, val: Tlv) -> Result<[Tlv; 2], BuildError> {
@@ -78,8 +80,56 @@ pub fn named_field(tlv: &Tlv, key: &str) -> Result<Option<Tlv>, BuildError> {
 /* ---------------------------------------------------------------- SETTINGS --- */
 
 /**
- * @brief Build a SETTINGS TLV (`type=0x0B`, `PL=1`) from `NAME`→opaque-VALUE pairs.
- * Vector-pinned: `settings-reliability` (`SETTINGS{ NAME "reliability", VALUE u8=1 }`).
+ * @brief The value a SETTINGS key carries — and, inseparably, the TLV **type** that
+ * spells it. The two forms are not interchangeable: a reader looks a key up BY type,
+ * so a string written as [`SettingValue::Value`] is invisible where a string is
+ * expected, and vice versa. Vector-pinned: `spec/conn-client-ws` carries both in one
+ * record (`role`/`port` opaque, `kind`/`addr` textual).
+ */
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingValue<'a> {
+    /** @brief An opaque `VALUE` child (`0x01`): integers (little-endian), flags, blobs. */
+    Value(&'a [u8]),
+    /** @brief A UTF-8 `NAME` child (`0x02`): the form a string-valued key MUST take. */
+    Name(&'a str),
+}
+
+/** @brief The SETTINGS container around an already-built run of key/value children. */
+fn settings_of(children: Vec<Tlv>) -> Tlv {
+    Tlv {
+        type_code: type_code::SETTINGS,
+        opt: Opt::structured(),
+        payload: Vec::new(),
+        children,
+        trailer: None,
+    }
+}
+
+/**
+ * @brief Build a SETTINGS TLV (`type=0x0B`, `PL=1`) from `NAME` key → typed value pairs,
+ * choosing the value TLV type per key. Vector-pinned: `spec/conn-client-ws`.
+ *
+ * # Errors
+ * A per-key or per-value segment error from [`name`] / [`text_name`].
+ */
+pub fn settings_typed(pairs: &[(&str, SettingValue<'_>)]) -> Result<Tlv, BuildError> {
+    let mut children = Vec::with_capacity(pairs.len() * 2);
+    for (key, val) in pairs {
+        let node = match val {
+            SettingValue::Value(bytes) => value(bytes),
+            SettingValue::Name(text) => text_name(text)?,
+        };
+        let [k, v] = named_value(key, node)?;
+        children.push(k);
+        children.push(v);
+    }
+    Ok(settings_of(children))
+}
+
+/**
+ * @brief Build a SETTINGS TLV (`type=0x0B`, `PL=1`) from `NAME`→opaque-VALUE pairs — the
+ * all-[`SettingValue::Value`] case of [`settings_typed`]. Vector-pinned:
+ * `settings-reliability` (`SETTINGS{ NAME "reliability", VALUE u8=1 }`).
  *
  * # Errors
  * A per-key segment error from [`name`].
@@ -91,17 +141,15 @@ pub fn settings(pairs: &[(&str, &[u8])]) -> Result<Tlv, BuildError> {
         children.push(k);
         children.push(v);
     }
-    Ok(Tlv {
-        type_code: type_code::SETTINGS,
-        opt: Opt::structured(),
-        payload: Vec::new(),
-        children,
-        trailer: None,
-    })
+    Ok(settings_of(children))
 }
 
 /**
  * @brief The opaque value bytes of a SETTINGS key, or `None`.
+ *
+ * @note Type-agnostic by design — it hands back whatever payload the value child holds.
+ *       Use [`settings_str`] for a key a reader looks up as a string, so the value TYPE
+ *       is checked and not merely the bytes.
  *
  * # Errors
  * [`BuildError::TypeMismatch`] if the TLV is not a SETTINGS, or a non-UTF-8 key.
@@ -111,6 +159,25 @@ pub fn settings_get(tlv: &Tlv, key: &str) -> Result<Option<Vec<u8>>, BuildError>
         return Err(BuildError::TypeMismatch);
     }
     Ok(named_field(tlv, key)?.map(|v| v.payload))
+}
+
+/**
+ * @brief The string value of a SETTINGS key — present only when the value child is a
+ * `NAME` (`0x02`), the one form a string-valued key is read back from. A key whose
+ * value is an opaque `VALUE` reads as `None` here, exactly as it does at the terminus.
+ *
+ * # Errors
+ * [`BuildError::TypeMismatch`] if the TLV is not a SETTINGS; [`BuildError::InvalidUtf8`]
+ * on a non-UTF-8 key or value.
+ */
+pub fn settings_str(tlv: &Tlv, key: &str) -> Result<Option<String>, BuildError> {
+    if tlv.type_code != type_code::SETTINGS {
+        return Err(BuildError::TypeMismatch);
+    }
+    match named_field(tlv, key)? {
+        Some(v) if v.type_code == type_code::NAME => Ok(Some(v.payload_str()?.to_string())),
+        _ => Ok(None),
+    }
 }
 
 /* -------------------------------------------------------------- SUBSCRIBER --- */
@@ -457,16 +524,31 @@ pub fn acl_aces(tlv: &Tlv) -> Result<Vec<Ace>, BuildError> {
  * @brief Build a SPEC TLV (`type=0x0E`, `PL=1`) for in-band vertex creation
  * (reference/05 §0x0E): NAME-tagged `type` (catalog selector) and `name` (the
  * new child's path component), plus an optional `config` SETTINGS child.
+ * Vector-pinned: `spec/create-child`, `spec/conn-client-ws`.
+ *
+ * Both field VALUES are `NAME` (`0x02`) nodes, not `VALUE` (`0x01`): the terminus
+ * matches each `(NAME key, value)` pair on the value's TYPE and skips any other,
+ * so a `VALUE`-typed `type`/`name` leaves the selector empty and the create is
+ * refused outright with `INVALID_PATH`. The two spellings are not interchangeable
+ * — and a core that emits the wrong one round-trips its own bytes green, which is
+ * why the vectors above exist.
+ *
+ * The two fields are checked differently because the terminus checks them
+ * differently: `name` becomes a path component, so it must satisfy the addressing
+ * grammar ([`name`], the same predicate the terminus runs before answering
+ * `INVALID_PATH`), while `type` is a catalog selector that is never addressed and
+ * only has to be non-empty ([`text_name`]).
  *
  * # Errors
- * A segment error from a NAME key.
+ * A segment error from a NAME key, from a `type` outside the 64-byte budget, or
+ * from a `child_name` that is not a legal address segment.
  */
 pub fn spec(type_sel: &str, child_name: &str, config: Option<Tlv>) -> Result<Tlv, BuildError> {
     let mut children = Vec::new();
-    let [k1, v1] = named_value("type", value(type_sel.as_bytes()))?;
+    let [k1, v1] = named_value("type", text_name(type_sel)?)?;
     children.push(k1);
     children.push(v1);
-    let [k2, v2] = named_value("name", value(child_name.as_bytes()))?;
+    let [k2, v2] = named_value("name", name(child_name)?)?;
     children.push(k2);
     children.push(v2);
     if let Some(cfg) = config {
@@ -484,7 +566,10 @@ pub fn spec(type_sel: &str, child_name: &str, config: Option<Tlv>) -> Result<Tlv
 
 /**
  * @brief The `type` (catalog selector) and `name` (child component) of a SPEC, as a
- * pair of UTF-8 strings; either is `None` when its field is absent.
+ * pair of UTF-8 strings; either is `None` when its field is absent — or present
+ * with a value child that is not a `NAME`, which the terminus likewise treats as
+ * absent. Reading the type as well as the bytes is what keeps this reader from
+ * accepting a spelling no terminus does.
  *
  * # Errors
  * [`BuildError::TypeMismatch`] if the TLV is not a SPEC, or a non-UTF-8 field.
@@ -493,11 +578,11 @@ pub fn spec_type_name(tlv: &Tlv) -> Result<(Option<String>, Option<String>), Bui
     if tlv.type_code != type_code::SPEC {
         return Err(BuildError::TypeMismatch);
     }
-    let type_sel = named_field(tlv, "type")?
-        .map(|v| v.payload_str().map(|s| s.to_string()))
-        .transpose()?;
-    let child_name = named_field(tlv, "name")?
-        .map(|v| v.payload_str().map(|s| s.to_string()))
-        .transpose()?;
-    Ok((type_sel, child_name))
+    let named_str = |key: &str| -> Result<Option<String>, BuildError> {
+        match named_field(tlv, key)? {
+            Some(v) if v.type_code == type_code::NAME => Ok(Some(v.payload_str()?.to_string())),
+            _ => Ok(None),
+        }
+    };
+    Ok((named_str("type")?, named_str("name")?))
 }

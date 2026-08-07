@@ -1,0 +1,16 @@
+{
+  "name": "create-child",
+  "category": "spec",
+  "hex": "0e402800020004007479706502000c0073746f7265645f76616c7565020004006e616d650200040074656d70",
+  "total_bytes": 44,
+  "decoded": {
+    "type": "0x0E SPEC",
+    "structured": true,
+    "meaning": "SPEC{NAME \"type\", NAME \"stored_value\", NAME \"name\", NAME \"temp\"} — the minimal in-band vertex-creation spec, the payload of a `:children[]` append",
+    "fields": {
+      "type": "stored_value",
+      "name": "temp"
+    },
+    "note": "BOTH field values are NAME (0x02), never VALUE (0x01): the terminus pairs a NAME key with a NAME value and skips any other value type, so a VALUE-typed `type`/`name` leaves the selector empty and the create answers INVALID_PATH. Bytes emitted by the libtracer reference encoder."
+  }
+}
