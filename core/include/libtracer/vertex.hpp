@@ -258,9 +258,10 @@ enum class app_access_t : std::uint8_t {
  *        remote-writability, self-description, and current value of ONE application field
  *        under `:settings.app.` — one record, so the schema can never drift from the gate.
  *
- * The value and descriptor bytes are OPAQUE to the runtime (stored and served verbatim,
- * the `set_acl`/`acl_bytes` store-verbatim pattern): dtype/range validation is the
- * owner's, in its apply seam (@ref handlers_t::on_app_field_write) — the runtime
+ * The value and descriptor bytes are OPAQUE to the runtime (stored and served verbatim —
+ * the last store-verbatim control surface, now that `:acl` re-encodes from its parsed
+ * projection, #907): dtype/range validation is the owner's, in its apply seam
+ * (@ref handlers_t::on_app_field_write) — the runtime
  * validates only addressing (declared / undeclared, writability): one table lookup.
  */
 struct app_field_t {
@@ -1101,11 +1102,13 @@ struct vertex_ext_t {
      *         STREAM
      *         role ever appends. Null ⇒ empty ring. Guarded by the vertex mutex. */
     std::unique_ptr<std::deque<std::shared_ptr<const rope_t>>> history;
-    /** @brief Raw `:acl` TLV bytes, served back verbatim (#81-A, ADR-0018/0020); guarded by
-     *         the vertex mutex. Empty ⇒ no `:acl` set. */
-    std::vector<std::byte> acl;
-    /** @brief The `:acl` bytes parsed into core-subset ACEs at write time (#81); guarded by
-     *         the vertex mutex. `graph_t::acl_allows` evaluates these. */
+    /** @brief The `:acl` parsed into core-subset ACEs at write time (#81) — the ONLY stored
+     *         ACL state (#907); guarded by the vertex mutex. `graph_t::acl_allows` evaluates
+     *         this list and `graph_t::read_acl` RE-ENCODES it, so read-back is canonical by
+     *         construction and cannot describe something other than what is enforced. The
+     *         retired verbatim byte copy could: a shape that parsed to no ACEs cleared
+     *         enforcement while still reading back as a payload — ACEs apparently present
+     *         (⇒ closed) on an open vertex. */
     std::vector<ace_t> aces;
     /** @brief The ADR-0050 cached effective-ACE merge (own + INHERIT-flagged ancestor ACEs,
      *         pre-merged in evaluation order); guarded by the vertex mutex, rebuilt lazily
@@ -1124,6 +1127,13 @@ struct vertex_ext_t {
      *         32-bit: a wrap onto a stale-but-EVEN value needs 2^31 `:acl` writes on ONE
      *         vertex, unreachable at control-plane rates. Starts at 1 — never built ⇒ stale. */
     std::atomic<std::uint32_t> acl_gen{1};
+    /** @brief True once an `:acl` has been written here; guarded by the vertex mutex and read
+     *         only by the `:acl` read-back (#907). The one fact @ref aces cannot carry: an
+     *         EMPTY container ACL is the sanctioned clear-enforcement write, and it must keep
+     *         reading back as an empty ACL rather than as the NOT_FOUND of a vertex that was
+     *         never given one — a distinction the retired byte copy drew implicitly, by being
+     *         non-empty. Lands in the padding beside `%acl_gen`: zero extra bytes. */
+    bool acl_present = false;
     /**
      * @brief STREAM ring depth — how many entries @ref history retains (RFC-0022 §3.C).
      *
@@ -1188,7 +1198,7 @@ struct vertex_ext_t {
  * The public surface is a VERB interface — storage (@ref store / @ref read_stored),
  * readiness (@ref note_write / @ref wait_for_change / the seq cursors), edges
  * (@ref add_edge / @ref clear_edge / @ref snapshot_edges), and ACL state (@ref set_acl /
- * @ref with_aces / @ref with_effective_aces) — each verb taking the vertex mutex
+ * @ref with_acl / @ref with_aces / @ref with_effective_aces) — each verb taking the vertex mutex
  * internally (the LKV slot stays
  * lock-free). `graph_t` keeps what SPANS vertices: routing, ancestor walks, fan-out
  * dispatch legs, the effective-ACL walk, admission, and the field surface.
@@ -2073,7 +2083,7 @@ class vertex_t {
             detached = e->handlers.exchange(nullptr, std::memory_order_acq_rel);
             const std::lock_guard lock(vertex_stripe_of(this).m);
             e->history.reset();
-            e->acl.clear();
+            e->acl_present = false;
             e->aces.clear();
             e->eff_aces.clear();
             invalidate_acl_cache(*e);  // ADR-0078: nothing here a rebuilder can clobber
@@ -2100,15 +2110,19 @@ class vertex_t {
     }
 
     /**
-     * @brief Store this vertex's `:acl`: the raw TLV bytes (served back verbatim by an
-     *        `:acl` read) plus the same bytes parsed into typed ACEs (what evaluation
-     *        walks). Storing replaces; empty ⇒ no restrictions.
+     * @brief Store this vertex's `:acl` as typed ACEs — the ONLY stored ACL state (#907).
+     *
+     * Storing replaces, and marks the ACL PRESENT: an empty list is the sanctioned
+     * clear-enforcement write (⇒ no restrictions) and still reads back as an empty ACL,
+     * not as the NOT_FOUND of a vertex that never had one. Takes no raw bytes, because
+     * there is no second copy to fall out of step with the list evaluation walks — an
+     * `:acl` read re-encodes from here.
      */
-    void set_acl(std::span<const std::byte> raw, std::vector<ace_t> aces) {
+    void set_acl(std::vector<ace_t> aces) {
         vertex_ext_t& e = ensure_ext();
         const std::lock_guard lock(vertex_stripe_of(this).m);
-        e.acl.assign(raw.begin(), raw.end());
         e.aces = std::move(aces);
+        e.acl_present = true;
         // Lock-free bearing flag (#361 §3): the graph's nearest-bearing-ancestor walk
         // reads it without touching any stripe. Publish under the lock, before the
         // generation bump, same ordering discipline as the ACE list itself.
@@ -2122,11 +2136,26 @@ class vertex_t {
         invalidate_acl_cache(e);
     }
 
-    /** @brief A copy of the stored raw `:acl` TLV bytes (empty ⇒ no `:acl` set). */
-    [[nodiscard]] std::vector<std::byte> acl_bytes() {
+    /**
+     * @brief Run @p f over this vertex's whole `:acl` state — the presence bit and the
+     *        parsed ACE list, read together under ONE hold — the read-back accessor (#907).
+     *
+     * The caller re-encodes the list it is handed (`graph::encode_acl` lives a layer up and
+     * cannot be named from here), which is what makes an `:acl` read canonical: it serves a
+     * projection of the SAME list `acl_allows` evaluates, so the two can no longer disagree.
+     * Presence and list travel together because a clear that landed between two accessors
+     * would otherwise be served as an ACL that no longer exists.
+     *
+     * @p f must not re-enter this vertex — the lock is held.
+     * @return Whatever @p f returns.
+     */
+    template <typename F>
+    auto with_acl(F&& f) -> decltype(f(false, std::declval<const std::vector<ace_t>&>())) {
+        static const std::vector<ace_t> kNoAces{};
         const std::lock_guard lock(vertex_stripe_of(this).m);
         const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
-        return e != nullptr ? e->acl : std::vector<std::byte>{};
+        if (e == nullptr) return f(false, kNoAces);
+        return f(e->acl_present, e->aces);
     }
 
     /**
