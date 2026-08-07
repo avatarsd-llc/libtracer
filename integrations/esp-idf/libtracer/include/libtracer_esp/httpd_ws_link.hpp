@@ -21,6 +21,16 @@
  * `esp_http_server` (it uses glibc sockets); the two are picked by which TU the
  * build compiles, never an in-source `#ifdef`.
  *
+ * Since #947 that split is EXCLUSIVE, not a coexistence: on a chip target
+ * `core/src/transport_ws.cpp` is not compiled at all, so this link (with
+ * @ref esp_ws_client_link_t) is the whole ESP-IDF WebSocket plane. ESP-IDF
+ * WebSocket must never use POSIX sockets — the portable server's scatter-gather
+ * egress asks `sendmsg` for `MSG_NOSIGNAL`, which `lwip_sendmsg` rejects with
+ * `EOPNOTSUPP`, so on lwIP it silently discards every data frame while its
+ * handshake and PING/PONG still answer (#948). An application that wants THIS
+ * server therefore needs `CONFIG_HTTPD_WS_SUPPORT=y`: there is no portable
+ * fallback behind it.
+ *
  * It presents the SAME `transport_t` + `bus_link_t` contract `transport_ws_server`
  * does — one inbound BINARY WebSocket frame is one libtracer TLV; a peer-named
  * server tags each frame with the sending peer's `<ip>:<port>` so a directed FWD

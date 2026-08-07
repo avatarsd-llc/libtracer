@@ -18,9 +18,16 @@
  * mirror of @ref httpd_ws_link_t (the esp_http_server-backed *server* link) — the
  * same "platform link picked by which TU compiles, never an in-source #ifdef"
  * split as `twai_link_t` is for CAN. The portable `transport_ws_client` stays for
- * the linux virtual board (glibc sockets); the two are selected by the build, and
- * a chip node that binds this link leaves the portable one unreferenced for
- * `--gc-sections` to drop.
+ * the linux virtual board (glibc sockets); the two are selected by the build.
+ *
+ * Since #947 the selection is EXCLUSIVE and nothing rests on `--gc-sections`: on a
+ * chip target `core/src/transport_ws.cpp` is not compiled, so this link is the only
+ * `ws` dialer there. Relying on the collector never worked anyway — the built-in
+ * transport catalog REGISTERED the portable factory, which kept 46 of its symbols
+ * reachable in a measured chip image. Excluding the TU is the fix, because on lwIP
+ * the portable pair is not just unreachable but unusable: its scatter-gather egress
+ * asks `sendmsg` for `MSG_NOSIGNAL`, `lwip_sendmsg` rejects it with `EOPNOTSUPP`,
+ * and every data frame is dropped in silence (#948).
  *
  * It presents the same `transport_t` contract as `transport_ws_client`: one
  * inbound BINARY WebSocket message is one libtracer TLV, delivered borrowed

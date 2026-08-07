@@ -22,6 +22,7 @@ on:
       - "core/src/**"
       - "core/include/**"
       - "tools/check_esp_srcs.py"
+      - "tools/check_esp_ws_plane.py"
       - ".github/workflows/esp-idf.yml"
   pull_request:
     paths:
@@ -29,6 +30,7 @@ on:
       - "core/src/**"
       - "core/include/**"
       - "tools/check_esp_srcs.py"
+      - "tools/check_esp_ws_plane.py"
       - ".github/workflows/esp-idf.yml"
   workflow_dispatch:
 
@@ -111,10 +113,11 @@ jobs:
           ls -la build/*.bin build/*.elf 2>/dev/null || true
 
   # Full-node gate (#183): build the full_node example — the FULL component
-  # (net plane: fwd_router / transport_vertex / udp / tcp / ws / transport_can
-  # + the TWAI can_link_t) — for both RISC-V targets. A clean `idf.py build`
-  # proves the whole net plane compiles and links against lwIP BSD sockets and
-  # esp_driver_twai on single-core FreeRTOS; the runtime proof is the linux-
+  # (net plane: fwd_router / transport_vertex / udp / tcp / transport_can + the
+  # TWAI can_link_t + the IDF-NATIVE WS links, which since #947 are the chip
+  # WebSocket plane) — for both RISC-V targets. A clean `idf.py build` proves the
+  # whole net plane compiles and links against lwIP BSD sockets, esp_http_server
+  # and esp_driver_twai on single-core FreeRTOS; the runtime proof is the linux-
   # target run below (full-node-host), and bus-/radio-level validation is the
   # on-silicon checklist on #183.
   full-node:
@@ -135,6 +138,22 @@ jobs:
           . "${IDF_PATH}/export.sh"
           idf.py set-target ${{ matrix.target }}
           idf.py build
+
+      # WS-plane gate (#947 ruling): ESP-IDF WebSocket must never use POSIX sockets.
+      # Asserts the linked chip ELF carries ZERO transport_ws_server /
+      # transport_ws_client symbols (nm), that their TUs were not compiled, and that
+      # the IDF-native links that replace them (httpd_ws_link_t / esp_ws_client_link_t)
+      # ARE built — so an over-trim that sheds WebSocket entirely cannot pass as a fix.
+      # A build alone proves nothing here: the portable pair COMPILES fine against
+      # lwIP, which is exactly how it shipped into images, and --gc-sections cannot
+      # drop it while the built-in catalog registers its factory (the measured
+      # before-figure on this very example was 46 linked symbols).
+      - name: Assert the WS plane is IDF-native only (no POSIX transport_ws)
+        shell: bash
+        working-directory: integrations/esp-idf/examples/full_node
+        run: |
+          . "${IDF_PATH}/export.sh"
+          python3 "${GITHUB_WORKSPACE}/tools/check_esp_ws_plane.py" --build-dir build
 
       # Footprint report (docs/reference/00-overview.md §"build-size profiles";
       # numbers described by integrations/esp-idf/README.md §Memory budget).
@@ -184,10 +203,15 @@ jobs:
   # translation units and still link on-target. Builds full_node for esp32c6 with TCP +
   # WS trimmed off (the self-proof only creates a `kind=udp` connection, so UDP + CAN
   # stay on) — exercising the CMake-generated register_builtin_transports dispatcher
-  # (udp-only) and dropping transport_tcp / transport_ws / their factory glue /
-  # httpd_ws_link from libtracer.a. A clean build proves a role-composed node links with
-  # a partial transport set; the object-file assertions prove the trim REALLY happened
-  # (a broken gate would still build — just fatter — so build-success alone is not proof).
+  # (udp-only) and dropping transport_tcp + its factory glue and the IDF-native WS links
+  # from libtracer.a. A clean build proves a role-composed node links with a partial
+  # transport set; the object-file assertions prove the trim REALLY happened (a broken
+  # gate would still build — just fatter — so build-success alone is not proof).
+  #
+  # NB what the WS half asserts, post-#947: on a chip target the portable transport_ws
+  # TUs are NEVER compiled, so asserting their absence here would be vacuous — it would
+  # pass with the knob broken. The chip WS TUs are httpd_ws_link / esp_ws_client_link,
+  # so those are what LIBTRACER_TRANSPORT_WS=n has to shed, and those are what is checked.
   full-node-trimmed:
     needs: srcs-drift
     runs-on: ubuntu-24.04
@@ -210,7 +234,10 @@ jobs:
         working-directory: integrations/esp-idf/examples/full_node
         run: |
           fail=0
-          for dropped in transport_tcp transport_ws builtin_transport_tcp builtin_transport_ws; do
+          # transport_tcp + glue is the TCP half; httpd_ws_link / esp_ws_client_link are
+          # the chip WS plane (#947) — the portable transport_ws TUs are absent on a chip
+          # target regardless of this knob, so naming them here would prove nothing.
+          for dropped in transport_tcp builtin_transport_tcp httpd_ws_link esp_ws_client_link; do
             if find build -name "${dropped}.cpp.obj" | grep -q .; then
               echo "ERROR: ${dropped}.cpp.obj was compiled — the transport trim did not shed it"
               fail=1

@@ -6,8 +6,11 @@
 # connection, so UDP + CAN stay on) to exercise:
 #   * the per-transport Kconfig gating (LIBTRACER_TRANSPORT_{TCP,WS}=n),
 #   * the CMake-generated register_builtin_transports dispatcher (udp-only), and
-#   * a clean on-target link with transport_tcp / transport_ws / their factory
-#     glue / httpd_ws_link shed from libtracer.a.
+#   * a clean on-target link with transport_tcp + its factory glue and BOTH
+#     IDF-native WS links (httpd_ws_link / esp_ws_client_link) shed from
+#     libtracer.a. Those two are the chip WS plane since #947 — core's portable
+#     transport_ws is not compiled on a chip target with the knob ON either, so
+#     it is not what this overlay proves anything about.
 # NOT a default overlay — only the `full-node-trimmed` CI job passes it via
 # SDKCONFIG_DEFAULTS. A stock build (sdkconfig.defaults alone) keeps all four
 # transports on and is byte-identical to before #393.

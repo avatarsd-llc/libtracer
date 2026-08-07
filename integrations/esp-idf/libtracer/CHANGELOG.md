@@ -10,6 +10,43 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING (chip targets): the portable `ws` transport is no longer built, and no `ws`
+  entry is registered in the built-in transport catalog.** ESP-IDF WebSocket must never
+  use POSIX sockets (#947 ruling). Core's `transport_ws_server` / `transport_ws_client`
+  are the HOST implementation; on lwIP they are not merely unreachable but *unusable* —
+  their scatter-gather egress asks `sendmsg` for `MSG_NOSIGNAL`, `lwip_sendmsg` rejects
+  any flag outside `MSG_DONTWAIT|MSG_MORE` with `EOPNOTSUPP`, and `write_all_iov` reads
+  that as peer-gone, so every data frame is silently discarded while the opening
+  handshake and PING/PONG still answer (#948). They are therefore **absent**, not fixed.
+  The sanctioned plane is the IDF-native links this component already ships:
+  `httpd_ws_link_t` (on `esp_http_server`, needs `CONFIG_HTTPD_WS_SUPPORT=y`) and
+  `esp_ws_client_link_t` (on `esp_transport_ws`), both bound by the application through
+  `transport_vertex_t::provide_link`.
+
+  Selection is by **which TU compiles**, not a feature macro — the rule
+  `socketcan_link.cpp` vs. `socketcan_link_stub.cpp` already follows. The `linux` (POSIX
+  host) target is unchanged and keeps the portable pair; it has glibc's `sendmsg` and no
+  `esp_http_server`.
+
+  **What breaks:** a `:children[]` SPEC carrying `kind=ws` with no staged link now
+  answers `SCHEMA_NOT_FOUND` on a chip target instead of constructing a portable
+  socket server that could not deliver anyway. Nodes already staging an IDF-native link
+  with `provide_link` are unaffected. `CONFIG_LIBTRACER_TRANSPORT_WS` keeps its meaning
+  ("build the WebSocket plane") — only *which* plane it builds is now target-decided.
+
+  Measured on `examples/full_node`, esp32c6, `-Os`, ESP-IDF v6.0-dev: `nm` on the linked
+  ELF went from **46** `transport_ws_server`/`transport_ws_client` symbols to **0**, and
+  flash fell 394,146 → 381,098 B (**−13,048 B**; `libtracer.a` −12,769 B, image `.bin`
+  −13,040 B). Flash here is tracked, never gated. `tools/check_esp_ws_plane.py` is the
+  standing gate.
+
+- **`examples/full_node` now sets `CONFIG_HTTPD_WS_SUPPORT=y`,** so `httpd_ws_link.cpp`
+  — the sanctioned chip WebSocket *server* — is compiled by CI. It previously had no
+  compile coverage anywhere: the config it is gated on defaults to `n`, and the portable
+  server it replaces was silently filling in.
+
 ## [0.8.0] — 2026-08-06
 
 ### Changed
