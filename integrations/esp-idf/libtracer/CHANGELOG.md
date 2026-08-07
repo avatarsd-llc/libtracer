@@ -12,6 +12,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`httpd_ws_link_t::tx_strands()` / `tx_slots_busy()` / `tx_slot_capacity()`** — TX work
+  slot observability (#944). `tx_strands()` counts slots reclaimed from a work item the
+  control socket accepted and then silently binned; `tx_slots_busy()` is the pool's live
+  occupancy and `tx_slot_capacity()` its size, so a caller can see the pool being starved
+  rather than infer it from allocation pressure. The existing `enqueue_drops()` could not
+  cover this: it counts the enqueue failures that are *observable* (`ESP_FAIL`), and the
+  binned ones are, by construction, not.
+
 - **`esp_ws_client_link_t::dropped_rx()`** — inbound messages the receive path refused,
   spelled the way core's transports already spell it (`transport_can::dropped_rx()`).
   It counts the two refusals that were previously logs-only (#953): a message that does
@@ -20,6 +28,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the receive path refusing a message.
 
 ### Fixed
+
+- **`httpd_ws_link_t`'s TX slot pool no longer dies four dropped datagrams into a boot**
+  (#944). `httpd_queue_work` on the default non-blocking path is a bare `sendto` to a
+  loopback UDP control socket, so an enqueue past the receiver's mbox is discarded inside
+  lwIP while `sendto` — and therefore `httpd_queue_work` — still returns `ESP_OK`. The
+  close path was routed around that fact with `shutdown`; the TX path still trusted the
+  return value. A binned work item never ran, and the work item was the *only* thing that
+  released the pool slot it had claimed: four of them and the pool was gone for the rest
+  of the boot, after which every outbound frame took two global-heap allocations on a hot
+  publish path. There was no counter for it — `enqueue_drops()` covers the *refused*
+  enqueue, which already recycled correctly.
+
+  A TX slot now carries a four-state lifetime (free / claimed / armed / running) instead
+  of a single `busy` flag, and an exhausted claim sweeps the pool before giving up:
+  a slot armed for longer than `kTxPoolSlots * send_timeout_ms()` — every other slot ahead
+  of it, each stalled to this link's full per-socket send bound — is presumed lost and
+  recycled. **Safety does not rest on that window.** A pooled work item lives inside its
+  slot and so cannot carry an identity a re-claim would not overwrite; it is therefore a
+  bare token meaning "send whatever slot *i* has armed", and a token that arrives after a
+  reclaim either finds nothing armed or sends the later frame that is — correctly, since a
+  payload and the destination it was gathered for are armed together. A window chosen too
+  short costs a dropped frame (counted, and droppable by contract), never a torn one.
+  Reclaiming happens only on the exhausted-claim path: no timer, no task, and nothing at
+  all in the steady state. The **heap-fallback** work item (taken when the pool is
+  exhausted) is *not* reclaimable by this or any timeout — the token holds a raw pointer
+  to the shell, so freeing it on a guess is a use-after-free rather than a leak; what the
+  fix removes is the driver that made those leaks unbounded, since a pool that cannot die
+  is no longer permanently bypassed.
 
 - **`httpd_ws_link_t`'s queued TX no longer delivers one peer's frames to another after a
   descriptor is reused** (#954, partial — the directed-resolve residue is #1013). The

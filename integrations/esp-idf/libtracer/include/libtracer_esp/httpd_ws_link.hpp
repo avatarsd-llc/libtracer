@@ -242,6 +242,30 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     }
 
     /**
+     * @brief TX work slots reclaimed because the control socket silently binned their
+     *        work item, for this link's life (#944).
+     *
+     * The failure @ref enqueue_drops does NOT cover, and could not: a refused enqueue is
+     * observable and already recycles its slot, whereas `httpd_queue_work` on the default
+     * path is a bare `sendto` to a loopback UDP socket, so an enqueue past the receiver's
+     * mbox is dropped by lwIP while the call still reports ESP_OK. That work item never
+     * runs and used to pin its slot for the rest of the boot — four of them killed the
+     * pool, after which every frame took two global-heap allocations. Non-zero here means
+     * the control queue is being overrun; the link recovers, but the node is losing
+     * frames somewhere.
+     */
+    [[nodiscard]] std::uint32_t tx_strands() const noexcept {
+        return tx_strands_.load(std::memory_order_relaxed);
+    }
+
+    /** @brief TX work slots claimed RIGHT NOW (filling, queued, or sending) — the pool
+     *         occupancy a strand used to raise permanently. */
+    [[nodiscard]] std::size_t tx_slots_busy() const noexcept;
+
+    /** @brief Total TX work slots in the per-link pool; a send past it heap-falls-back. */
+    [[nodiscard]] static std::size_t tx_slot_capacity() noexcept;
+
+    /**
      * @brief Admission predicate: given the opening-handshake request, return true to
      *        admit the peer or false to refuse it — a clean refusal that closes the
      *        socket, exactly as the @ref max_peers cap does. @p ctx is the opaque
@@ -314,8 +338,15 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *         the link still works — every frame takes the per-frame heap fallback). */
     void alloc_buffers();
     /** @brief Claim a free TX work slot lock-free (a CAS scan); nullptr when the pool
-     *         is exhausted or absent — the caller falls back to a heap work item. */
+     *         is exhausted or absent — the caller falls back to a heap work item. Sweeps
+     *         once (@ref sweep_tx_slots) before giving up. */
     [[nodiscard]] tx_slot_t* claim_tx_slot();
+    /**
+     * @brief Reclaim every slot whose work item was silently binned by the control socket
+     *        (#944). Called ONLY from @ref claim_tx_slot's exhausted path — a strand costs
+     *        nothing until the pool runs out, so this needs no timer and no steady-state work.
+     */
+    void sweep_tx_slots();
     /** @brief Return a drained/failed work item: recycle its pool slot (dropping any
      *         overflow heap payload) or delete the heap-fallback shell. */
     static void release_tx_work(tx_work_t* work);
@@ -499,6 +530,9 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     /** @brief Frames the control queue refused, for this link's life — see @ref
      *         enqueue_drops. Relaxed: a diagnostic count, ordered against nothing. */
     std::atomic<std::uint32_t> enqueue_drops_{0};
+    /** @brief TX slots reclaimed from a silently-binned work item — see @ref tx_strands.
+     *         Relaxed for the same reason: the slot's own state word carries the ordering. */
+    std::atomic<std::uint32_t> tx_strands_{0};
     bool peer_named_;
     bool owns_httpd_ = true;  // false when adopting an external server (dtor must not httpd_stop)
     /** @brief Set at destructor entry: refuses new TX slot claims so the pool drain
