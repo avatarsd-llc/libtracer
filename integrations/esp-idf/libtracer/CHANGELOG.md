@@ -21,6 +21,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`httpd_ws_link_t` no longer delivers one peer's frames to another after a descriptor
+  is reused** (#954). The whole TX path identified its destination by bare fd: `send()`
+  snapshotted fds under the peer lock and released it before enqueueing, the queued work
+  item stored only `int fd`, and the drain asked `httpd_ws_get_fd_info(handle, fd)` —
+  which reports "some websocket lives at this number", never "the session this frame was
+  gathered for", because IDF's session lookup is purely fd-keyed with no generation. The
+  residency window is wide: `httpd_server` handles ONE control message per `select()`
+  pass while close, accept and handshake proceed in that same pass, so a peer can hang up
+  and an unrelated client be accepted onto the recycled descriptor while the first peer's
+  frames still sit in the queue. Those frames were then written to the new peer — a
+  **cross-session data leak** on a peer-named server, where a directed FWD reply or a
+  subscription push produced for one authenticated session was delivered to a different
+  one — and their failures were charged to the newcomer's strike counter, closing a
+  session that had failed nothing. The TX path now carries a `session_ref_t` (the peer
+  slot plus a generation stamped at every claim) and re-validates it at each site through
+  `live_fd`; a stale reference FAILS and the frame is dropped rather than misdelivered.
+  Both halves are needed: slots are recycled IN PLACE, so the departed peer's slot — and
+  therefore the server's session ctx POINTER — is exactly what the next peer is handed,
+  which is why the pointer comparison the teardown detach path uses does not close this
+  hole on the live path. No public API change.
+
 - **`esp_ws_client_link_t` now HONORS its `recv_stack` argument** (#900). The constructor
   accepted the knob and discarded it, spawning a plain `std::thread` — which on ESP-IDF
   takes the global `CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT`, since a pthread's stack can

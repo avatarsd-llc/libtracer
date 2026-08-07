@@ -266,11 +266,12 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     }
 
    private:
-    struct gate_t;        // the handler-admission gate + teardown barrier (in the .cpp)
-    struct session_t;     // one peer slot's connection state (defined in the .cpp)
-    struct tx_work_t;     // one queued outbound frame (defined in the .cpp)
-    struct tx_slot_t;     // one pre-allocated TX work slot (defined in the .cpp)
-    struct detach_req_t;  // the teardown session-detach work item (defined in the .cpp)
+    struct gate_t;         // the handler-admission gate + teardown barrier (in the .cpp)
+    struct session_t;      // one peer slot's connection state (defined in the .cpp)
+    struct session_ref_t;  // a session identity that survives fd reuse (defined in the .cpp)
+    struct tx_work_t;      // one queued outbound frame (defined in the .cpp)
+    struct tx_slot_t;      // one pre-allocated TX work slot (defined in the .cpp)
+    struct detach_req_t;   // the teardown session-detach work item (defined in the .cpp)
 
     /**
      * @brief The directed per-peer sending endpoint @ref peer_link hands out:
@@ -303,9 +304,11 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     void reclaim_slot(session_t* slot);
     void deliver(std::string_view peer, std::span<const std::byte> frame);
     // ONE gather-copy (into a pool slot, else a nothrow heap item) + httpd_queue_work;
-    // drops the frame on OOM (never aborts)
-    void queue_send(int fd, std::span<const std::span<const std::byte>> iov);
-    void queue_send(int fd, std::span<const std::byte> frame);  // one-span sugar over the gather
+    // drops the frame on OOM (never aborts). The destination is a SESSION, never a bare
+    // fd — see @ref session_ref_t.
+    void queue_send(const session_ref_t& to, std::span<const std::span<const std::byte>> iov);
+    void queue_send(const session_ref_t& to,
+                    std::span<const std::byte> frame);  // one-span sugar over the gather
 
     /** @brief Allocate the once-per-link RX scratch + TX slot pool (nothrow; on failure
      *         the link still works — every frame takes the per-frame heap fallback). */
@@ -325,20 +328,29 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *        missing frames silently.
      *
      * Fed from @ref tx_work only — the one result that names a peer. It is the peer's
-     * OWN socket that did not accept the bytes within its bound, so the destination fd
-     * is the culprit by construction (#835).
+     * OWN socket that did not accept the bytes within its bound, so the destination is
+     * the culprit by construction (#835). Keyed by @ref session_ref_t and not by fd: a
+     * result carried back for a session that has since departed must strike NOBODY, and
+     * charging it to whoever inherited the descriptor condemns a stranger (#954).
      */
-    void note_tx_result(int fd, bool sent, std::size_t bytes);
+    void note_tx_result(const session_ref_t& to, bool sent, std::size_t bytes);
 
     /**
-     * @brief Has @p fd been condemned? (takes @ref peers_m_ — callers must not hold it.)
+     * @brief Resolve @p to to the socket it may be sent on RIGHT NOW, or refuse it
+     *        (takes @ref peers_m_ — callers must not hold it).
      *
      * The one question every producer and every queued send asks before spending anything
-     * on a socket: the link's OWN verdict about the session, reached and readable the
-     * instant it was reached, rather than the server's — which only becomes true once a
-     * queued close it may never run has run.
+     * on a socket, and the single checkpoint the fd-reuse hazard is closed at (#954). It
+     * answers three at once, all of which must hold: the reference still names the session
+     * it was minted for (@ref session_ref_t::gen), that session is still open, and the link
+     * has not condemned it — the link's OWN verdict, readable the instant it was reached,
+     * rather than the server's, which only becomes true once a queued close it may never
+     * run has run.
+     *
+     * @retval -1  Do not send. The session departed, a DIFFERENT session now holds the
+     *             slot (and possibly the same descriptor), or this one is condemned.
      */
-    [[nodiscard]] bool fd_is_dead(int fd) const;
+    [[nodiscard]] int live_fd(const session_ref_t& to) const;
 
     /**
      * @brief Force @p fd's session closed without asking the control queue for anything
@@ -387,9 +399,16 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     static int send_guarded(httpd_handle_t handle, int fd, const char* buf, std::size_t len,
                             int flags);
 
-    /** @brief Handle a detected short write on @p fd: log it and close that session
-     *         immediately, bypassing the streak (takes @ref peers_m_). */
-    void note_send_desync(int fd, std::size_t written, std::size_t len);
+    /**
+     * @brief Handle a detected short write on @p slot's socket: log it and close that
+     *        session immediately, bypassing the streak (takes @ref peers_m_).
+     *
+     * Takes the SLOT, not the fd. @ref send_guarded is inside the write when it calls
+     * this, on the httpd task, so the server's own session table is authoritative about
+     * who owns that descriptor at that instant and hands the slot over directly — no
+     * generation check is needed here, and no fd-keyed rescan either (#954).
+     */
+    void note_send_desync(session_t* slot, std::size_t written, std::size_t len);
 
     /**
      * @brief Allocate the handler-admission gate and point it at this link; false when
