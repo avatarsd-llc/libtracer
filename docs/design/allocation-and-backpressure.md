@@ -42,7 +42,7 @@ exhaustive:
 | --- | --- | --- |
 | CAN egress window table | `core/include/libtracer/view_can.hpp:100` — `frames_.push_back` in `view_can_frames_t::split`, reached on every send (`core/src/transport_can.cpp:300`) | the sender: one `push_back` per frame the payload splits into |
 | Label-table binds (#603) | `core/src/route_handle.cpp:82`, `:179`, `:236` — `std::pmr::vector::push_back` and the route copy beside it | a **peer**: an ingress `ADVERTISE` binds a label. `max_label_bindings_per_link` bounds the entry *count*, not the allocation's failure mode |
-| `try_reserve`'s second step (#850) | `core/include/libtracer/mem_heap.hpp:116-121` — the `noexcept` helper probes, frees, then runs the **throwing** `std::vector::reserve` | anything concurrent: the probe-then-reserve is sound only single-threaded, which the code says at `:120`. Every `try_*` helper and every soft-fail leg below inherits this |
+| `try_reserve` on `-fno-exceptions` (#923, #850) | `core/include/libtracer/mem_heap.hpp:157-171` — `try_grow` catches the container's own allocation failure where it can; where it cannot (`-fno-exceptions`, where `reserve` `abort()`s with nothing to catch) it falls back to probe-then-commit | on the MCU profile only, anything concurrent — a FreeRTOS context switch between the probe's free and the `reserve` is enough. The hosted profile no longer has the window; the exception-free one closes it by migrating the site to the ADR-0065 failable seam, not by a better `try_reserve` |
 
 The nothrow seams and the status legs described below are real and are what makes each *covered*
 site answer by value. They do not make the three rows above go away, and #848 (the WS/TCP/UDP/CAN
@@ -307,14 +307,19 @@ and returns `false` without touching `out` further when the table cannot be grow
 the reply (`rope.hpp:220-228`).
 
 Be exact about what that helper buys, because the twin is named for its *signature*, not for an
-absolute guarantee. `tr::detail::try_reserve` probes the target allocation, **frees the probe**, and
-only then runs the ordinary **throwing** `std::vector::reserve` — inside a function declared
-`noexcept` (`core/include/libtracer/mem_heap.hpp:116-121`). It converts the ordinary OOM into a
-`false` the caller can answer with BACKPRESSURE, which is the whole of the improvement over
-`to_iovec`. It does not make the leg unconditionally nothrow: if anything else takes the just-freed
-block first, the `reserve` throws in a `noexcept` frame and the process terminates. That is the
-`try_reserve` row of §"Where the rule is not met today" above — [#850](https://github.com/avatarsd-llc/libtracer/issues/850) —
-and every `try_*` helper on this page inherits it.
+absolute guarantee. `tr::detail::try_reserve` (`core/include/libtracer/mem_heap.hpp:183`) routes
+the ordinary **throwing** `std::vector::reserve` through `try_grow` (`:157-171`), which
+converts its failure into a `false` the caller answers with BACKPRESSURE — the whole of the
+improvement over `to_iovec`. The allocation whose failure is reported is the one the vector
+actually performs, so there is no probe-then-commit window to lose on a hosted build
+([#923](https://github.com/avatarsd-llc/libtracer/issues/923), which folded in
+[#850](https://github.com/avatarsd-llc/libtracer/issues/850)).
+
+Under `-fno-exceptions` there is nothing to catch — libstdc++ turns the `bad_alloc` into a bare
+`abort()` inside `reserve` — so there the helper still probes first and the window survives. That
+is the `try_reserve` row of §"Where the rule is not met today" above, and every `try_*` helper on
+this page inherits it *on that profile*. The fix for a site that must survive exhaustion there is
+the ADR-0065 failable seam, not a better `try_reserve`.
 
 Both forms remain. `to_iovec` is correct wherever the caller is on a host build with exceptions or
 holds a table it sized beforehand; any path a peer can drive uses `try_to_iovec`.
