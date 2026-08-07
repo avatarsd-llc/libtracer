@@ -36,20 +36,20 @@ typedef int twai_clock_source_t;
 
 /** @brief Bitrate timing config, basic (simple) mode. */
 typedef struct {
-    uint32_t bitrate;    /**< @brief Bus bitrate in bits/second. */
-    uint16_t sp_permill; /**< @brief Sampling point, permill of the bit time. */
+    uint32_t bitrate;     /**< @brief Bus bitrate in bits/second. */
+    uint16_t sp_permill;  /**< @brief Sampling point, permill of the bit time. */
     uint16_t ssp_permill; /**< @brief Secondary sampling point, permill of the bit time. */
 } twai_timing_basic_config_t;
 
 /** @brief TWAI frame header / format. */
 typedef struct {
-    uint32_t id;  /**< @brief Arbitration identifier. */
-    uint16_t dlc; /**< @brief Data length code (FD coding; see twaifd_dlc2len). */
-    uint32_t ide : 1; /**< @brief Extended frame format (29-bit ID). */
-    uint32_t rtr : 1; /**< @brief Remote frame. */
-    uint32_t fdf : 1; /**< @brief FD format. */
-    uint32_t brs : 1; /**< @brief Bit-rate switch. */
-    uint32_t esi : 1; /**< @brief Error-state indicator. */
+    uint32_t id;        /**< @brief Arbitration identifier. */
+    uint16_t dlc;       /**< @brief Data length code (FD coding; see twaifd_dlc2len). */
+    uint32_t ide : 1;   /**< @brief Extended frame format (29-bit ID). */
+    uint32_t rtr : 1;   /**< @brief Remote frame. */
+    uint32_t fdf : 1;   /**< @brief FD format. */
+    uint32_t brs : 1;   /**< @brief Bit-rate switch. */
+    uint32_t esi : 1;   /**< @brief Error-state indicator. */
     uint64_t timestamp; /**< @brief RX timestamp / TX trigger time (a union in IDF). */
 } twai_frame_header_t;
 

@@ -335,10 +335,11 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     # #962 — the TWAI link's TX BACKPRESSURE window, on the same construction: the chip
     # TU (integrations/esp-idf/libtracer/twai_link.cpp) compiled against a host fake of
     # esp_driver_twai's node API plus the FreeRTOS counting semaphore and queue it is
-    # built on (fake_twai.hpp). This is the first host target to compile that TU at all
-    # — until now the CAN plane was proved only ABOVE the can_link_t seam
-    # (transport_can_test, over a fake link) and by can_tx_pool_test below the FULL
-    # policy, leaving the link's own policy untested on any host.
+    # built on (fake_twai.hpp). This is the first host target to compile that TU at all,
+    # leaving the TWAI link's own FULL policy untested on any host until now. It is NOT
+    # the first host coverage of the CAN plane: transport_can_vcan_test drives real
+    # socketcan_link_t instances over kernel vcan0 and has its own CI leg
+    # (.github/workflows/can-vcan-e2e.yml). The gap this closes is the TWAI link, not CAN.
     #
     # The fake's semaphore counts callers parked in xSemaphoreTake AT ONCE, which is what
     # makes "the wait was serialized behind the write lock" observable rather than a code
