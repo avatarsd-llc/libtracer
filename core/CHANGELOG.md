@@ -16,6 +16,25 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Fixed
 
+- **A STREAM whose ring append was SHED under pressure no longer re-delivers the previous
+  entry (#925).** `vertex_t::drain_unflushed` derived "how many ring entries are new" from a
+  `write_seq_` delta, but `vertex_t::store` bumps that sequence **unconditionally** — and it
+  is right to: the sequence is the await/readiness cursor, the LKV publish above the append
+  already landed, so a shed append must still wake `wait_for_change` and still move
+  `current_seq()`. What it must not do is imply a ring entry. Because a drain removes nothing
+  from the ring, the surplus delta re-took the newest **already-flushed** entry, and the
+  subscriber observed the same stream element twice — a duplicate on machinery whose whole
+  point is an in-order queue rather than a coalesce (RFC-0008 §E). The drain now counts ring
+  APPENDS: `vertex_ext_t::last_flushed_seq` is replaced by `vertex_ext_t::appended_since_flush`,
+  incremented only inside the probe-success append branch under the stripe lock both sides
+  already hold, and reset by `drain_unflushed` / `mark_flushed` / retirement. No new lock, no
+  new allocation, no field-width change, and `write_seq_` semantics are untouched everywhere
+  else. `core/tests/graph_oom_softfail_test.cpp` drives a shed append through the real store
+  path with an injected allocator failure and asserts each element is delivered exactly once.
+
+  Not in scope: the shed write still answers `SUCCESS` and moves no `delivery_drops()`
+  counter — the other half of the same shed, tracked as #1003.
+
 - **`net::transport_can` no longer attributes a group's slices to a stale binding when the
   endpoint space wraps (#909).** The endpoint sub-field is 12 bits and `alloc_base` resets
   to the first data slot when a reservation runs off the end, so a base **recurs** — routine,
