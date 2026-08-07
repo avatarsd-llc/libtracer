@@ -10,14 +10,22 @@
 # gate stays green (it catches vtable/erasure bloat AND template-instantiation
 # bloat). Complements the ESP-IDF whole-image sentinel in esp-idf.yml.
 #
-# Mode is `warn` today: the measured node is ~4.5 KiB over 16 KiB (20,937 B,
-# re-measured 2026-07-27). The old note blamed std::pmr soft-float reaching the
-# image via the arena decoder's `memory_resource&` seam; #588 removed that seam,
-# so that attribution no longer holds and the remaining overage has not been
-# re-attributed. NOTE the gate had silently stopped LINKING between #593 and this
-# commit — REQUIRED_MODULES omitted `mem_source`, and warn mode swallowed the
-# undefined reference, so it measured nothing. Flip `--mode fail` only after the
-# overage is understood.
+# `--mode warn` governs the BUDGET VERDICT only. Today the measured node is
+# 20,977 B — 4.49 KiB over the 16 KiB bound (re-measured 2026-08-07 at 3935d4e;
+# 20,937 B on 2026-07-27 and 21,025 B at v0.8.0, so +40 B over the blind window).
+# The old note blamed std::pmr soft-float reaching the image via the arena
+# decoder's `memory_resource&` seam; #588 removed that seam, so that attribution
+# no longer holds and the remaining overage has not been re-attributed. Flip
+# `--mode fail` only after the overage is understood.
+#
+# A failure to MEASURE is not a budget verdict and warn mode no longer answers
+# for it (#982): a missing toolchain, compile error, link error, or unparsable
+# `size` output reds this job in either mode. It had to, because the gate has
+# reported success while measuring nothing twice — once when REQUIRED_MODULES
+# omitted `mem_source` and the link failed with an undefined reference, and again
+# for the seven days after #681 gave `path_key` an optional return the fixture
+# never adapted to. Nothing else in the tree compiles that fixture, so this job
+# is the only thing standing between an API change and a dead sentinel.
 name: footprint-cortexm0
 
 on:
