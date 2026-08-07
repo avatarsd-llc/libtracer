@@ -257,6 +257,28 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     # teardown suite pins); every case here constructs an adopting link, so LeakSanitizer
     # would flag that deliberate leak. ASan's use-after-free detection stays on.
     set_tests_properties(httpd_ws_send_stall PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+
+    # #900 + #901 — the WS *CLIENT* link's receive path, on the same construction: the
+    # chip TU (integrations/esp-idf/libtracer/esp_ws_client_link.cpp) compiled against a
+    # host fake of esp_transport_ws's frame stream and esp_pthread's stack-sizing seam.
+    # Those are the two IDF facilities the contracts rest on — a `recv_stack` that never
+    # reaches esp_pthread_set_cfg never reaches the FreeRTOS task, and a read capped at
+    # the offered buffer is what splits ONE oversized frame across reads that each report
+    # the same fin. NO socket is interposed or opened here (contrast the httpd targets
+    # above, which wrap ::send): the fake's esp_transport_get_socket answers -1, keeping
+    # the suite faithful to the ruling that this plane never uses POSIX sockets (#947).
+    add_executable(esp_ws_client_recv_test
+        "${LIBTRACER_ESP_DIR}/tests/host/esp_ws_client_recv_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_esp_transport.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/esp_ws_client_link.cpp")
+    target_include_directories(esp_ws_client_recv_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(esp_ws_client_recv_test PRIVATE libtracer)
+    libtracer_test_warnings(esp_ws_client_recv_test)
+    add_test(NAME esp_ws_client_recv COMMAND esp_ws_client_recv_test)
 else()
     message(STATUS "httpd_ws_teardown_test skipped: integrations/esp-idf is not in this tree")
 endif()

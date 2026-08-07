@@ -17,7 +17,7 @@
 #include <utility>
 
 #include "driver/gpio.h"
-#include "esp_pthread.h"
+#include "esp_thread.hpp"
 
 namespace tr::net {
 
@@ -86,28 +86,11 @@ twai_link_t::twai_link_t(const twai_link_config_t& config)
 
     node_ = node;
 
-    // Right-size the dispatch thread's FreeRTOS task stack without inflating the
-    // global CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT (libtracer #486). esp_pthread_set_cfg
-    // applies to the NEXT pthread_create on THIS thread — which std::thread's ctor
-    // performs — so save the surrounding cfg and restore it afterward, or we would
-    // leak our stack size onto later thread spawns from this same thread.
-    if (config.stack_size != 0) {
-        // Start from the compile-time default; get_cfg overwrites it with the
-        // thread-local cfg if one is already set (leaves it untouched if not) —
-        // so `saved` is always valid to restore to (the default clears our cfg).
-        esp_pthread_cfg_t saved = esp_pthread_get_default_config();
-        (void)esp_pthread_get_cfg(&saved);
-        esp_pthread_cfg_t cfg = saved;
-        cfg.stack_size = config.stack_size;
-        cfg.thread_name = "twai_rx";
-        (void)esp_pthread_set_cfg(&cfg);
-
-        thread_ = std::thread([this] { run(); });
-
-        (void)esp_pthread_set_cfg(&saved);
-    } else {
-        thread_ = std::thread([this] { run(); });
-    }
+    // Right-size the dispatch thread's FreeRTOS task stack without inflating the global
+    // CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT (libtracer #486). The save/set/spawn/restore
+    // recipe this used to spell out in place now lives in esp_thread.hpp, shared with the
+    // WS client link — which accepted the same knob and discarded it (#900).
+    thread_ = esp::spawn_thread(config.stack_size, "twai_rx", [this] { run(); });
 }
 
 twai_link_t::~twai_link_t() {
