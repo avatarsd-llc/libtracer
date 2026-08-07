@@ -193,10 +193,21 @@ static_assert(alignof(cell_t) == kDomainAlign,
               "the cell's alignas was silently dropped — see kDomainAlign's derivation");
 
 /**
- * @brief The claim table's word — `size_t` so the bitmap is lock-free on a 32-bit target too.
+ * @brief The claim table's word — `size_t`, so the bitmap is never WIDER than the target's
+ *        pointer and cannot be the reason a claim takes a lock.
  *
- * `uint64_t` would have been the obvious width and is the wrong one: `std::atomic<uint64_t>` is
- * not lock-free on rv32, so the table would acquire a libatomic lock to claim an index.
+ * `uint64_t` would have been the obvious width and is the wrong one: on every 32-bit target
+ * this library binds `%hazard_slot_t` on, a 64-bit atomic is not lock-free, so the table would
+ * acquire a libatomic lock to claim an index. `size_t` removes the WIDTH as a cause.
+ *
+ * It does not, and cannot, make the table lock-free on a target that has no atomics at all:
+ * esp32c3 is `rv32imc` — no A extension — so nothing of any width is always-lock-free there.
+ * That is why the lock-free requirement is asserted where the slot BINDING is visible
+ * (`%vertex.hpp`, beside `%lkv_slot_t`) rather than here: this header is included by every
+ * consumer of a vertex, including targets that never bind `%hazard_slot_t` and for which the
+ * requirement is vacuous. A namespace-scope assert here fires for all of them — it broke both
+ * esp32c3 CI legs — because "the domain is emitted only in a build that binds `%hazard_slot_t`"
+ * is a statement about CODEGEN, and a `static_assert` is not codegen.
  */
 using claim_word_t = std::size_t;
 
@@ -225,8 +236,11 @@ struct alignas(kDomainAlign) claims_t {
 
 static_assert(alignof(claims_t) == kDomainAlign,
               "the claim table's alignas was silently dropped — it must not share a cell's line");
-static_assert(kClaimWords == 0 || std::atomic<claim_word_t>::is_always_lock_free,
-              "the claim table must not take a lock to claim an index — see claim_word_t");
+static_assert(sizeof(claim_word_t) <= sizeof(void*),
+              "the claim word must not be wider than the target's pointer — a wider one is not "
+              "lock-free on a 32-bit target and would take a libatomic lock to claim an index; "
+              "the lock-free requirement itself is asserted beside lkv_slot_t in vertex.hpp, "
+              "where the binding that needs it is visible");
 
 /** @brief One participant's private node lists — touched only by its owner, so never atomic. */
 struct alignas(kDomainAlign) lists_t {

@@ -29,6 +29,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -41,6 +42,28 @@
 #include "libtracer/view.hpp"
 
 namespace tr::graph {
+
+/**
+ * @brief A build that binds `%hazard_slot_t` must be on a target whose claim table is
+ *        lock-free (#899).
+ *
+ * This is the one place both halves of the question are visible: `%lkv_slot_t` (the binding,
+ * from the generated `%config.hpp`) and `detail_hp::claim_word_t` (the table's word, from
+ * `%lkv_slot.hpp`). Asserting it inside `%lkv_slot.hpp` instead is what broke both esp32c3
+ * legs — that header is pulled in by every consumer of a vertex, including `rv32imc` targets
+ * that have no atomic instructions at all and never bind `%hazard_slot_t`, and a
+ * `static_assert` is evaluated when the header is PARSED, not when the domain is emitted.
+ *
+ * A thread that failed to claim re-probes this table on every operation, so a probe that took
+ * a libatomic lock would serialize the very readers `%hazard_slot_t` exists to keep
+ * lock-free — the binding would be actively worse than the `sp_atomic_slot_t` default rather
+ * than merely no better.
+ */
+static_assert(!std::is_same_v<lkv_slot_t, hazard_slot_t> || detail_hp::kClaimWords == 0 ||
+                  std::atomic<detail_hp::claim_word_t>::is_always_lock_free,
+              "this target binds hazard_slot_t but cannot claim a hazard index without taking "
+              "a lock — bind sp_atomic_slot_t here, or build for a target with lock-free "
+              "atomics of pointer width");
 
 /**
  * @brief The terminal value of a vertex's retirement generation (RFC-0024 §4.4 rule 3).
