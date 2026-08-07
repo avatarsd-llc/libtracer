@@ -52,20 +52,26 @@ it, so the number cannot drift inside the tree:
   | [`integrations/arduino/library.properties`](../integrations/arduino/library.properties) | Arduino |
   | [`integrations/esp-idf/libtracer/idf_component.yml`](../integrations/esp-idf/libtracer/idf_component.yml) | ESP Component Registry |
   | `bindings/typescript/packages/*/package.json` (×4) | npm (`@avatarsd-llc/*`) |
+  | [`bindings/typescript/package-lock.json`](../bindings/typescript/package-lock.json) | npm (mirrors the four above) |
   | [`bindings/rust/Cargo.toml`](../bindings/rust/Cargo.toml) | crates.io |
 
   The stamper also rewrites the TS packages' internal `@avatarsd-llc/*` dependency
-  **ranges** (leaving `*`/`workspace:` dev links alone). The ROS 2 stub is
-  unreleased and intentionally excluded.
+  **ranges** (leaving `*`/`workspace:` dev links alone). npm copies each workspace
+  manifest into a `packages/<dir>` lockfile entry, so the stamper rewrites those
+  entries in place — no `npm install`, no network — leaving every resolved
+  third-party pin byte-for-byte untouched. The ROS 2 stub is unreleased and
+  intentionally excluded.
 
 - **CI enforces it.** [`version-consistency.yml`](workflows/version-consistency.yml)
   runs `python3 tools/sync-version.py --check` and fails any PR where an artifact
-  has drifted from `VERSION`, so a bump can never land half-applied.
+  has drifted from `VERSION`, so a bump can never land half-applied. Its `paths:`
+  filter is an allowlist — a new stamped artifact must be added there too, or the
+  gate simply will not run on the PR that breaks it.
 
 To reconcile the tree to a version: run `python3 tools/sync-version.py X.Y.Z`
-(stamps `VERSION` **and** every manifest), refresh the lockfiles
-(`cd bindings/typescript && npm install --package-lock-only`;
-`cd bindings/rust && cargo update -p libtracer`), and commit them together.
+(stamps `VERSION`, every manifest **and** the npm lockfile), refresh the Rust
+lockfile (`cd bindings/rust && cargo update -p libtracer`), and commit them
+together.
 
 **One consumer bypasses the pipeline:** the Arduino Library Registry indexes
 [`library.properties`](../integrations/arduino/library.properties) directly
@@ -122,9 +128,9 @@ git tag over `VERSION`).
    `[Unreleased]`. `--check` is the read-only form; omit `--write` to preview on
    stdout. Read the diff before committing — the tool moves text, it does not
    judge it. Recommended in the same PR (required only for the Arduino registry,
-   see "Source of truth" above): `python3 tools/sync-version.py X.Y.Z` and
-   refresh the lockfiles (`npm install --package-lock-only`,
-   `cargo update -p libtracer`). Merge it (signed, per DCO).
+   see "Source of truth" above): `python3 tools/sync-version.py X.Y.Z` (which now
+   carries `bindings/typescript/package-lock.json` with it) and refresh the Rust
+   lockfile (`cargo update -p libtracer`). Merge it (signed, per DCO).
 2. **Tag + push — this triggers the whole release.** On the merge commit:
    ```sh
    git tag -s vX.Y.Z -m "libtracer vX.Y.Z"
