@@ -21,8 +21,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- **`httpd_ws_link_t` no longer delivers one peer's frames to another after a descriptor
-  is reused** (#954). The whole TX path identified its destination by bare fd: `send()`
+- **`httpd_ws_link_t`'s queued TX no longer delivers one peer's frames to another after a
+  descriptor is reused** (#954, partial — the directed-resolve residue is #1013). The
+  whole TX path identified its destination by bare fd: `send()`
   snapshotted fds under the peer lock and released it before enqueueing, the queued work
   item stored only `int fd`, and the drain asked `httpd_ws_get_fd_info(handle, fd)` —
   which reports "some websocket lives at this number", never "the session this frame was
@@ -37,7 +38,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   session that had failed nothing. The TX path now carries a `session_ref_t` (the peer
   slot plus a generation stamped at every claim) and re-validates it at each site through
   `live_fd`; a stale reference FAILS and the frame is dropped rather than misdelivered.
-  Both halves are needed: slots are recycled IN PLACE, so the departed peer's slot — and
+
+  **Scope: the enqueue → drain gap, not every gap.** The generation protects a reference
+  from the moment it is MINTED. It does not protect the window BEFORE that: on the directed
+  path a caller resolves a peer's endpoint via `peer_link` and sends later in the same
+  forward hop, and `peer_endpoint_t::send` mints the reference from the slot's CURRENT
+  generation — so whichever session occupies the slot at send time satisfies the downstream
+  check. Under preemption that window is unbounded, and the misdelivery is still
+  constructible. It is narrower than the window this closes and it predates this change,
+  but it is the same consequence, so it is tracked as **#1013** rather than described as
+  fixed. Closing it needs a per-resolution identity, which is an API-shape decision the
+  shared per-slot endpoint object cannot absorb silently.
+
+  Both halves of the shipped reference are needed: slots are recycled IN PLACE, so the departed peer's slot — and
   therefore the server's session ctx POINTER — is exactly what the next peer is handed,
   which is why the pointer comparison the teardown detach path uses does not close this
   hole on the live path. No public API change.

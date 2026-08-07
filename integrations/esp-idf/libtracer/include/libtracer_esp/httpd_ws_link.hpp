@@ -340,12 +340,17 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *        (takes @ref peers_m_ — callers must not hold it).
      *
      * The one question every producer and every queued send asks before spending anything
-     * on a socket, and the single checkpoint the fd-reuse hazard is closed at (#954). It
-     * answers three at once, all of which must hold: the reference still names the session
-     * it was minted for (@ref session_ref_t::gen), that session is still open, and the link
-     * has not condemned it — the link's OWN verdict, readable the instant it was reached,
-     * rather than the server's, which only becomes true once a queued close it may never
-     * run has run.
+     * on a socket, and the checkpoint the fd-reuse hazard is closed at for everything that
+     * happens AFTER a reference is minted (#954). It answers three at once, all of which
+     * must hold: the reference still names the session it was minted for (@ref
+     * session_ref_t::gen), that session is still open, and the link has not condemned it — the
+     * link's OWN verdict, readable the instant it was reached, rather than the server's, which only
+     * becomes true once a queued close it may never run has run.
+     *
+     * It cannot answer for the window BEFORE the mint: a caller that resolved a peer's
+     * endpoint and is preempted before sending mints from the slot's generation as it is
+     * THEN, so this check passes for whoever holds the slot at that moment. See
+     * @ref session_ref_t and #1013.
      *
      * @retval -1  Do not send. The session departed, a DIFFERENT session now holds the
      *             slot (and possibly the same descriptor), or this one is condemned.

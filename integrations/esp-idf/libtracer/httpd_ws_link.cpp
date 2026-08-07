@@ -420,8 +420,16 @@ struct httpd_ws_link_t::session_t {
  * Together they are unique for as long as any work item can run, because slot addresses
  * are stable for the link's life (grown, never shrunk; the abandon path leaks rather than
  * frees precisely so that stays true) and a claim always bumps the generation. Validated
- * at every TX site through @ref httpd_ws_link_t::live_fd, and a stale reference always
- * FAILS the check rather than resolving to whoever now holds the descriptor.
+ * at every TX site through @ref httpd_ws_link_t::live_fd, and a reference that has gone
+ * stale SINCE IT WAS MINTED always FAILS the check rather than resolving to whoever now
+ * holds the descriptor.
+ *
+ * @note That is the guarantee, and it is narrower than "this endpoint is peer X". The
+ *       reference is only as good as the moment of minting: a caller that resolves a peer,
+ *       is preempted, and sends afterwards mints from the slot's CURRENT generation, so the
+ *       check is self-satisfying for whoever holds the slot then. Closing that needs an
+ *       identity captured at RESOLVE time, which the shared per-slot endpoint cannot carry.
+ *       Tracked as #1013; do not read this type as making the directed path safe.
  */
 struct httpd_ws_link_t::session_ref_t {
     session_t* slot = nullptr; /**< @brief The peer slot; compared, never dereferenced blind. */
