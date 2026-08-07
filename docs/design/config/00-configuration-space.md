@@ -108,7 +108,7 @@ every non-IDF build get the portable pair. This is still selection-by-which-TU-c
 same rule as `socketcan_link.cpp` versus its stub — and it is a correctness split, not a size
 one: the portable pair's gather egress asks `sendmsg` for `MSG_NOSIGNAL`, which lwIP rejects
 with `EOPNOTSUPP`, so on silicon it silently drops every data frame. See
-[the ESP-IDF integration README](../../../integrations/esp-idf/README.md).
+[the ESP-IDF integration README](https://github.com/avatarsd-llc/libtracer/blob/main/integrations/esp-idf/README.md).
 
 ### The required-modules footprint ceiling
 
