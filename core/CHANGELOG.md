@@ -56,6 +56,16 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   negative window (previously cast to `std::uint64_t` and compared against ~1.8e19, so it
   reclaimed nothing at all) is normalized to zero at construction. No wire change.
 
+- **`tr::net::write_fault_stats()` / `write_fault_stats_t` — the malformed-call write-fault
+  tally (#948).** Process-wide (the full-write helpers are static and shared by every stream
+  transport, and what it counts is a defect in libtracer's OWN syscall arguments, not a
+  property of a connection): how many `send`/`sendmsg` attempts were rejected with an errno
+  that means "this call was malformed" rather than "this socket is dead", and the errno of the
+  most recent one. **Non-zero is always a bug** — on a supported host it stays 0 forever.
+  `tr::detail::write_fault_inject_hook` accompanies it as the test seam that makes those arms
+  reachable at all (a host kernel emits none of those errnos here); it is null in production,
+  exactly like its neighbour `probe_fail_hook`.
+
 ### Fixed
 
 - **A connection whose link cannot be wired into the router is now rolled back instead of
@@ -106,6 +116,26 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   now step whole pairs and stop, rather than resynchronize, on a desynchronized stream.
   `graph::parse_acl` is the one every-offset scan left; #906 rewrites that walk whole under the
   opposite unknown-key ruling and owns it. Well-formed frames parse identically throughout.
+
+- **The full-write helpers no longer mistake a malformed call for a dead socket (#948).**
+  `write_all_iov` (and `write_all`) treated EVERY non-EINTR failure as peer-gone and dropped
+  the rest of the frame in silence. `EOPNOTSUPP`/`EINVAL` do not mean the peer left — they mean
+  libtracer handed the kernel arguments it rejected, on a socket that is still perfectly alive
+  with the bytes still deliverable. That conflation is what let ONE unimplemented `sendmsg`
+  flag on one platform become an invisible TOTAL data outage: the connection stayed up, the
+  handshake and pings (single-buffer `send`, a different syscall) kept working, and every
+  scatter-gather data frame vanished with nothing recorded anywhere. The shared policy is now
+  three-way (`classify_write_fault` in `posix_endpoint.cpp`): EINTR resumes (#903, unchanged);
+  a socket-dead errno — `EPIPE`, `ECONNRESET`, `ENOTCONN`, the unreachable/down family, and
+  `EBADF`/`ENOTSOCK`, whose recycled-fd shape must not fabricate a defect report — drops the
+  rest silently as before (link-down is #66 lifecycle); anything else is booked in
+  `write_fault_stats()` with its errno and the write is re-attempted once, so a single spurious
+  rejection can no longer truncate a framed stream. The re-attempt allowance is one per stretch
+  of progress and is a proof rather than a tunable: a call malformed in its arguments is
+  deterministic, so the second identical result establishes the defect is real (counted, then
+  abandoned) — zero re-attempts would truncate silently, an unbounded retry would spin. No
+  signature change; nothing on the success path changed (the classification lives entirely
+  inside the pre-existing `n <= 0` arm).
 
 - **`stream_endpoint_t::write_all` no longer truncates a frame when a signal interrupts the
   write (#903).** The two sibling full-write helpers disagreed on interrupted syscalls:
