@@ -264,7 +264,7 @@ ANCHORS = [
     # core/include/libtracer/frame.hpp
     ('core/include/libtracer/frame.hpp:25',
      '// Decode failures reuse the RFC-0002 registry codes (error.hpp) directly — the'),
-    ('core/include/libtracer/frame.hpp:134',
+    ('core/include/libtracer/frame.hpp:142',
      '[[nodiscard]] inline std::expected<tlv_t, err_t> decode(const view::view_t& v) {'),
     # core/include/libtracer/fwd_frame_view.hpp
     # core/include/libtracer/fwd_router.hpp
@@ -495,8 +495,8 @@ ANCHORS = [
     ('core/include/libtracer/vertex.hpp:2997',
      'static_assert(sizeof(void*) != 4 || sizeof(vertex_t) <= config_t::kMaxVertexBytes32,'),
     # core/src/frame.cpp
-    ('core/src/frame.cpp:118', 'std::array<grammar::walk_frame_t<grammar::span_cursor>, 8> slots;'),
-    ('core/src/frame.cpp:119', 'grammar::walk_stack_t<grammar::span_cursor> stack(slots, &mem::heap_source());'),
+    ('core/src/frame.cpp:119', 'std::array<grammar::walk_frame_t<grammar::span_cursor>, 8> slots;'),
+    ('core/src/frame.cpp:120', 'grammar::walk_stack_t<grammar::span_cursor> stack(slots, &mem::heap_source());'),
     # core/src/fwd_router.cpp
     ('core/src/fwd_router.cpp:522',
      'bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_source_t* rx) {'),

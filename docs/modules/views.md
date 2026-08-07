@@ -68,7 +68,7 @@ class rope_t {                                           // rope.hpp — ordered
 
 }  // namespace tr::view
 
-std::expected<tlv_t, err_t> tr::wire::decode(const view_t&);   // the L1 → L2 cast  frame.hpp:134
+std::expected<tlv_t, err_t> tr::wire::decode(const view_t&);   // the L1 → L2 cast  frame.hpp:142
 ```
 
 ## Rope = one message, many buffers

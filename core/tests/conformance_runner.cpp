@@ -30,6 +30,8 @@
 #include <utility>
 #include <vector>
 
+#include "libtracer/path_ref.hpp"
+#include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 
 namespace {
@@ -191,6 +193,69 @@ tlv_t value_crc(std::span<const std::byte> p) {
     return t;
 }
 
+// --- encode/decode symmetry (#886) -----------------------------------------
+
+/** @brief A `PATH_REF` over @p body, with the raw structural bits a caller could set. */
+tlv_t path_ref(std::span<const std::byte> body, bool pl = false, bool ll = false) {
+    tlv_t t{.type = type_t::PATH_REF};
+    t.opt.pl = pl;
+    t.opt.ll = ll;
+    // PL routes the body through `children`, exactly as a caller who mistook a PATH_REF for a
+    // structured type would build it; otherwise the body is the opaque element array.
+    if (pl) {
+        t.children.push_back(name(body));
+    } else {
+        t.payload = body;
+    }
+    return t;
+}
+
+/** @brief A structured `FWD` wrapping one child — the nesting case for the symmetry property. */
+tlv_t fwd_wrapping(const tlv_t& child) {
+    tlv_t t{.type = type_t::FWD};
+    t.opt.pl = true;
+    t.children.push_back(child);
+    return t;
+}
+
+/**
+ * @brief One symmetry case: a tree, and whether `encode` is required to accept it.
+ *
+ * `accepted == false` is not "this is untestable" — it is the assertion that `encode` REFUSES,
+ * which is the half of the property that was missing before #886.
+ */
+struct symmetry_case_t {
+    std::string what; /**< @brief The shape, as it appears on the PASS/FAIL line. */
+    tlv_t tlv;        /**< @brief The tree to serialize. */
+    bool accepted;    /**< @brief Whether `encode` must emit bytes rather than refuse. */
+};
+
+/**
+ * @brief The standing codec property: every `encode()` SUCCESS must `decode()` (#886).
+ *
+ * This is the durable instrument, not a regression test for one shape. `encode` and
+ * `grammar::parse_header` are two spellings of one grammar, and nothing but this property
+ * keeps them honest: before #886 an ill-formed `PATH_REF` `tlv_t` serialized happily and
+ * `decode` answered `tr::frame::invalid`, so the library round-tripped into a frame it
+ * would not accept. Any future per-type rule added to the decoder and forgotten in the
+ * encoder fails here.
+ *
+ * Refusal is spelled "emits nothing" — an accepted TLV always carries at least its 4-byte
+ * header, so an empty result cannot be confused with a legal encoding.
+ */
+void check_symmetry(const symmetry_case_t& c) {
+    const std::vector<std::byte> bytes = tr::wire::encode(c.tlv);
+    check(bytes.empty() != c.accepted,
+          c.what + (c.accepted ? " — encode emits" : " — encode refuses (emits nothing)"));
+    // The property proper. Guarded on non-empty so a refusal does not score a vacuous pass:
+    // decode() of an empty buffer fails, which would read as "the property holds" for every
+    // rejected case. The acceptance check above is what makes this non-vacuous.
+    if (!bytes.empty()) {
+        const auto dec = tr::wire::decode(bytes);
+        check(dec.has_value(), c.what + " — and the emitted bytes decode");
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -266,6 +331,54 @@ int main(int argc, char** argv) {
     golden("tlv-types/value-bool-true", value(b_true));
     golden("path/path-sensor-temp", path2(s_sensor, s_temp));
     golden("crc/value-crc32c", value_crc(b_val));
+
+    std::printf("Encode/decode symmetry (every encode() success must decode()):\n");
+    {
+        // Two well-formed PATH_REF elements, little-endian: (index 7, gen 3), (index 9, gen 1).
+        static constexpr std::array<tr::wire::path_ref_element_t, 2> els{
+            tr::wire::path_ref_element_t{.index = 7, .generation = 3},
+            tr::wire::path_ref_element_t{.index = 9, .generation = 1}};
+        std::vector<std::byte> ref_body;
+        (void)tr::wire::emit_path_ref(ref_body, els);
+        // Drop the emitter's envelope, keep the bare element array — sized from the emitter's
+        // own size function so the split cannot drift from the format.
+        ref_body.erase(ref_body.begin(), ref_body.begin() + static_cast<std::ptrdiff_t>(
+                                                                tr::wire::path_ref_wire_bytes(0)));
+
+        // Bodies are owned here because tlv_t::payload BORROWS. Sizes, not magic numbers: the
+        // §4.3 bound and the element stride both come from path_ref.hpp.
+        const std::vector<std::byte> odd_body(tr::wire::kPathRefElementBytes + 1, std::byte{0});
+        const std::vector<std::byte> over_body(
+            tr::wire::kMaxPathRefBodyBytes + tr::wire::kPathRefElementBytes, std::byte{0});
+        const std::vector<std::byte> at_bound_body(tr::wire::kMaxPathRefBodyBytes, std::byte{0});
+        const std::vector<std::byte> empty_body;
+
+        const symmetry_case_t cases[] = {
+            {"empty STATUS", status_ok(), true},
+            {"VALUE over opaque bytes", value(b_val), true},
+            {"structured PATH of two NAMEs", path2(s_sensor, s_temp), true},
+            {"VALUE with a CRC32C trailer", value_crc(b_val), true},
+            {"PATH_REF, two elements", path_ref(ref_body), true},
+            {"PATH_REF, zero elements", path_ref(empty_body), true},
+            {"PATH_REF at the RFC-0024 §4.3 bound", path_ref(at_bound_body), true},
+            {"PATH_REF with opt.PL set", path_ref(ref_body, /*pl=*/true), false},
+            {"PATH_REF with opt.LL set", path_ref(ref_body, /*pl=*/false, /*ll=*/true), false},
+            {"PATH_REF whose length % 8 != 0", path_ref(odd_body), false},
+            {"PATH_REF past the RFC-0024 §4.3 bound", path_ref(over_body), false},
+            {"FWD carrying a well-formed PATH_REF", fwd_wrapping(path_ref(ref_body)), true},
+            {"FWD carrying an ill-formed PATH_REF", fwd_wrapping(path_ref(ref_body, /*pl=*/true)),
+             false},
+        };
+        for (const symmetry_case_t& c : cases) check_symmetry(c);
+
+        // The accepted spelling must not have drifted either: the generic encode() of a
+        // well-formed PATH_REF is byte-identical to the guarded emitter's output, so applying
+        // the rule on this door changed nothing a caller already had.
+        std::vector<std::byte> via_emitter;
+        (void)tr::wire::emit_path_ref(via_emitter, els);
+        check(tr::wire::encode(path_ref(ref_body)) == via_emitter,
+              "a well-formed PATH_REF encodes byte-identically to emit_path_ref");
+    }
 
     std::printf("Targeted asserts:\n");
     check(tr::crc::crc32c(b_val) == 0x2312C9B6u, "crc32c(AABBCCDDEE) == 0x2312C9B6");
