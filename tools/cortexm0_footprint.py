@@ -18,23 +18,30 @@ codebase serves ESP32-class MCUs and 128-core hosts, and this referee cuts both
 ways, catching vtable/erasure bloat AND template-instantiation bloat. When the
 module-set work (Waves 1-3) lands, the delta on this number is the evidence.
 
-Gate modes (the ESP-IDF footprint in tools/esp_size_gate.py is reported only —
-it carries no ceiling; this Cortex-M0 budget is the one footprint gate):
+`--mode` governs the BUDGET VERDICT and nothing else (the ESP-IDF footprint in
+tools/esp_size_gate.py is reported only — it carries no ceiling; this Cortex-M0
+budget is the one footprint gate):
   * warn — over budget prints `::warning::` and exits 0. The default *today*:
-    the measured full send+receive P0 node is ~0.9 KiB over the 16 KiB bound
-    (`std::pmr` drags ~2.7 KiB of soft-float via the ADR-0041 arena decoder's
-    `memory_resource&` interface; ~1.5 KiB more is CRC lookup tables), so a hard
-    gate would red main. Per the PR #193 precedent, no over-budget number reds
-    main until the required modules are genuinely under the ceiling.
+    the measured full send+receive P0 node is 20,977 B, i.e. **4.49 KiB over**
+    the 16 KiB bound (re-measured 2026-08-07 at `3935d4e`; 21,025 B at
+    `v0.8.0`), so a hard gate would red main. Per the PR #193 precedent, no
+    over-budget number reds main until the required modules are genuinely under
+    the ceiling. The overage is NOT attributed: the old note blamed `std::pmr`
+    soft-float reaching the image through the ADR-0041 arena decoder's
+    `memory_resource&` seam, but #588 removed that seam and the remainder has
+    not been re-attributed since.
   * fail — over budget prints `::error::` and exits 1. Flip the workflow to this
-    once the Wave 2 arena/codec rework (narrowing the decoder's allocator seam
-    off full `std::pmr`, dropping the vector-tree codec) brings the required
-    modules under 16 KiB — then the doctrine's hard gate (ADR-0047 §5) is in
-    force and this referee catches any regression.
+    once the overage is understood and closed — then the doctrine's hard gate
+    (ADR-0047 §5) is in force and this referee catches any regression.
 
-A toolchain-missing or size-parse failure is an `::error::` + exit 1 in fail
-mode (a broken gate must never masquerade as green) and a warning + exit 0 in
-warn mode. Stdlib only.
+**A failure to MEASURE is not a budget verdict and `--mode` does not speak for
+it.** A missing toolchain, a compile error, a link error, or an unparsable
+`size` output is `::error::` + exit 1 in *either* mode. This gate reported
+success while measuring nothing twice — once when `REQUIRED_MODULES` lost
+`mem_source` and the link failed with an undefined reference, and again for the
+seven days after #681 gave `path_key` an optional return that the fixture never
+adapted to (#982). Both hid because one flag answered for the instrument as well
+as for the budget. Stdlib only.
 """
 from __future__ import annotations
 
@@ -52,8 +59,9 @@ import tempfile
 # (path). No graph runtime, no transports, no threads — the surface v1.md §3.1
 # guarantees an MCU can carry. Keep in sync with sentinel_node.cpp's includes.
 # mem_source is required since #588: frame.cpp's decode and the fixture both call
-# tr::mem::heap_source(). Without it the link fails with an undefined reference, and
-# because this gate runs in `warn` mode that failure is SILENT — it measured nothing.
+# tr::mem::heap_source(). Without it the link fails with an undefined reference —
+# which used to be SILENT, because warn mode also answered for the instrument. It
+# no longer does (#982): an unlinkable sentinel reds the job in either mode.
 REQUIRED_MODULES = ("frame", "tlv_arena", "backend_set", "mem_pool", "mem_source", "rope", "path")
 FIXTURE = "core/tests/footprint/sentinel_node.cpp"
 DEFAULT_BUDGET = 16 * 1024  # 16 KiB — the ADR-0016 §3 / ADR-0047 §5 Cortex-M0 bound.
@@ -167,15 +175,22 @@ def main() -> int:
     cxx = shutil.which(args.cxx) or args.cxx
     size_tool = shutil.which(args.size) or args.size
 
-    def _fail(msg: str) -> int:
-        if args.mode == "fail":
-            print(f"::error::{msg}")
-            return 1
-        print(f"::warning::{msg} (warn mode: not failing the job)")
-        return 0
+    def _broken(msg: str) -> int:
+        """A gate that cannot measure is BROKEN, and that is never a warning.
+
+        `--mode` governs the budget verdict — whether being over 16 KiB reds the job.
+        It has nothing to say about whether the instrument works. Routing both through
+        one flag is what let this gate report success while measuring nothing twice
+        (#593-era: `REQUIRED_MODULES` lost `mem_source` and the link failed; #681: the
+        fixture stopped compiling when `path_key` gained its optional). Both were
+        invisible for days because warn mode answered for the instrument as well as
+        for the budget. It answers only for the budget now.
+        """
+        print(f"::error::{msg}")
+        return 1
 
     if not (shutil.which(args.cxx) or pathlib.Path(cxx).is_file()):
-        return _fail(f"Cortex-M0 sentinel: cross-compiler {args.cxx!r} not found on PATH")
+        return _broken(f"Cortex-M0 sentinel: cross-compiler {args.cxx!r} not found on PATH")
 
     try:
         with tempfile.TemporaryDirectory(prefix="cortexm0_sentinel_") as tmp:
@@ -183,7 +198,7 @@ def main() -> int:
             elf = _compile_and_link(cxx, args.mcpu, root, workdir)
             text, data, bss = _measure(size_tool, elf, root)
     except RuntimeError as exc:
-        return _fail(f"Cortex-M0 sentinel could not build/measure the required modules: {exc}")
+        return _broken(f"Cortex-M0 sentinel could not build/measure the required modules: {exc}")
 
     flash = text + data
     ram = data + bss
