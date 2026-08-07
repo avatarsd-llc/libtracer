@@ -73,7 +73,7 @@ acquisition is what stops the slot index and the retire generation straddling a 
 `retire`, which is how an element gets stamped with the successor tenant's number.
 
 The leaf/branch fork reads a per-vertex bit (`vertex_t::has_registered_child`,
-`core/include/libtracer/vertex.hpp:1388`), called from `core/src/graph.cpp:864`, and takes no
+`core/include/libtracer/vertex.hpp:1411`), called from `core/src/graph.cpp:864`, and takes no
 lock. The symbol exists on the vertex rather than on the graph, so a reader grepping for it finds
 a flag test rather than a lock acquisition.
 
@@ -87,10 +87,10 @@ kind, not only in degree.
 
 The stripe count is an ordinary config constant shared through one header
 ([ADR-0068 — build configuration is plain C++](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0068-build-configuration-is-plain-cpp-config-header.md);
-default 16, the sharing rationale at `vertex.hpp:974-978`). The stripe is selected by
-`vertex_stripe_of` (`:1056`) from the vertex address, hashed `(h >> 6) % kVertexLockStripes`
-(`:1052`). The stripes guard the fan-out edge list, the STREAM ring, the write-sequence bump and
-the ACL state. `add_edge`, `clear_edge` and `set_acl` take one; **`snapshot_edges` (`:1977`) no
+default 16, the sharing rationale at `vertex.hpp:997-1001`). The stripe is selected by
+`vertex_stripe_of` (`:1079`) from the vertex address, hashed `(h >> 6) % kVertexLockStripes`
+(`:1075`). The stripes guard the fan-out edge list, the STREAM ring, the write-sequence bump and
+the ACL state. `add_edge`, `clear_edge` and `set_acl` take one; **`snapshot_edges` (`:2000`) no
 longer does.** Delivery reads a published, immutable edge array under a bounded edge pin
 instead — the stripe mutex left the publish path and kept the control plane
 ([ADR-0075](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0075-a-vertexs-edges-are-published-and-read-under-an-edge-pin.md)),
@@ -107,8 +107,8 @@ stripe-lock cost looks in this section:
 
 | platform | table | cost |
 | --- | --- | --- |
-| host libstdc++ / libc++ | `inline constinit std::array<vertex_stripe_t, kVertexLockStripes> vertex_stripes` (`vertex.hpp:1034`) | none — constant-initialized |
-| a target without a constexpr `std::mutex` | guarded function-local `static` (`:1042`) | one predicted branch per control-plane verb |
+| host libstdc++ / libc++ | `inline constinit std::array<vertex_stripe_t, kVertexLockStripes> vertex_stripes` (`vertex.hpp:1057`) | none — constant-initialized |
+| a target without a constexpr `std::mutex` | guarded function-local `static` (`:1065`) | one predicted branch per control-plane verb |
 
 Two vertices that hash to the same stripe contend even though they share nothing else — which is
 what the `stripe1` bench topology exists to measure.
@@ -317,7 +317,7 @@ re-measurement — never by further reasoning about a curve.
 
 | A plausible claim | What checking shows | The check that decides it |
 | --- | --- | --- |
-| The read-path residual is `snapshot_edges`' stripe lock | `snapshot_edges` (`vertex.hpp:1977`) is on the **delivery** path; `read` never calls it — and since ADR-0075 it takes no stripe lock at all | reading the call graph |
+| The read-path residual is `snapshot_edges`' stripe lock | `snapshot_edges` (`vertex.hpp:2000`) is on the **delivery** path; `read` never calls it — and since ADR-0075 it takes no stripe lock at all | reading the call graph |
 | "Nothing process-wide is serializing — not the map lock" | Every read acquired `map_mutex_` shared through the fork check — the one lock the claim named | the §3 ablation |
 | Distinct-vertex reads "retain 94%/91% of their T=1 rate", read as healthy | The arithmetic used the wrong shape's denominator — real figures 106%/96% — and retention of a T=1 *aggregate* is a serializer signature, not a health signature | recomputing it |
 | Only a config traits template can recover the stripe table's 896 B, "because the alignment is part of the type" | The *count* cannot reach the alignment; the **alignment itself is a config constant**. One `constexpr` and one token recover the identical 896 B, zero templates | building it both ways on rv32 |
