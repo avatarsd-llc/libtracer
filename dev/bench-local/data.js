@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786099489267,
+  "lastUpdate": 1786099492894,
   "repoUrl": "https://github.com/avatarsd-llc/libtracer",
   "entries": {
     "libtracer bench-local latency (ns, smaller is better, fixed pinned host)": [
@@ -113496,6 +113496,702 @@ window.BENCHMARK_DATA = {
           {
             "name": "zenoh inproc-path 64B/fan1/8192ep throughput",
             "value": 4001225,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "15184545+AvatarSD@users.noreply.github.com",
+            "name": "avatarsd",
+            "username": "AvatarSD"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "487a62f56538df4e6b684f6113b1d5fbeaf1876b",
+          "message": "Merge pull request #1000 from avatarsd-llc/fix/900-901-esp-ws-client-recv\n\nfix(esp-idf): ws client link — honor recv_stack, drop over-sized messages whole (#900, #901)",
+          "timestamp": "2026-08-07T13:43:14+03:00",
+          "tree_id": "58661d4726147bf9e504db821306709421fd0bc6",
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/487a62f56538df4e6b684f6113b1d5fbeaf1876b"
+        },
+        "date": 1786099491880,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "inproc 64B/fan1/1ep throughput",
+            "value": 8975400,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc 64B/fan8/1ep throughput",
+            "value": 35092727,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc 64B/fan128/1ep throughput",
+            "value": 77377270,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc 64B/fan1024/1ep throughput",
+            "value": 83255332,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc 64B/fan8192/1ep throughput",
+            "value": 81376574,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc 1B/fan1/1ep throughput",
+            "value": 8640893,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc 8B/fan1/1ep throughput",
+            "value": 8660473,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc 1024B/fan1/1ep throughput",
+            "value": 8168875,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc 8192B/fan1/1ep throughput",
+            "value": 5698680,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-borrow 1B/fan1/1ep throughput",
+            "value": 9317577,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-borrow 8B/fan1/1ep throughput",
+            "value": 9312197,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-borrow 64B/fan1/1ep throughput",
+            "value": 9378638,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-borrow 1024B/fan1/1ep throughput",
+            "value": 9288622,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-borrow 8192B/fan1/1ep throughput",
+            "value": 9393050,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-path 64B/fan1/1ep throughput",
+            "value": 7434018,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-path 64B/fan1/8ep throughput",
+            "value": 6491957,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-path 64B/fan1/128ep throughput",
+            "value": 5758618,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-path 64B/fan1/1024ep throughput",
+            "value": 5553286,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-path 64B/fan1/8192ep throughput",
+            "value": 5109566,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "mixed 0B/fan6/128ep throughput",
+            "value": 29142135,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "path-parse 2B/fan1/1ep throughput",
+            "value": 53706955,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "path-parse 12B/fan2/1ep throughput",
+            "value": 35133260,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "path-parse 23B/fan4/1ep throughput",
+            "value": 24372388,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "path-parse 16B/fan8/1ep throughput",
+            "value": 18612968,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-mt1 64B/fan1/1ep throughput",
+            "value": 10197093,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-mt2 64B/fan1/2ep throughput",
+            "value": 10417778,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-mt4 64B/fan1/4ep throughput",
+            "value": 10455957,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-mt8 64B/fan1/8ep throughput",
+            "value": 10387240,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "eptype-lean 64B/fan1/1ep throughput",
+            "value": 7957208,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "eptype-lean-cached 64B/fan1/1ep throughput",
+            "value": 8577854,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "eptype-stream 64B/fan1/1ep throughput",
+            "value": 5471014,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "acl-inherit-d4 64B/fan1/1ep throughput",
+            "value": 14643885,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "acl-inherit-d4-mt4 64B/fan1/4ep throughput",
+            "value": 13835865,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "fold-b1 512B/fan1/1ep throughput",
+            "value": 431644180,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "fold-b2 512B/fan1/1ep throughput",
+            "value": 264116638,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "fold-b4 512B/fan1/1ep throughput",
+            "value": 167424570,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "fold-b8 512B/fan1/1ep throughput",
+            "value": 102384745,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-deliver 64B/fan1/1ep throughput",
+            "value": 13698250,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-deliver 64B/fan8/1ep throughput",
+            "value": 42371287,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-deliver 64B/fan128/1ep throughput",
+            "value": 79813635,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-deliver 64B/fan1024/1ep throughput",
+            "value": 82766988,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-deliver 64B/fan8192/1ep throughput",
+            "value": 81938733,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "lkv-alloc-heap 64B/fan1/1ep throughput",
+            "value": 50772169,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "lkv-alloc-pool 64B/fan1/1ep throughput",
+            "value": 136329120,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "lkv-store-heap 64B/fan1/1ep throughput",
+            "value": 39552386,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "lkv-store-pool 64B/fan1/1ep throughput",
+            "value": 86952061,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "lkv-alloc-heap 1024B/fan1/1ep throughput",
+            "value": 50943914,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "lkv-alloc-pool 1024B/fan1/1ep throughput",
+            "value": 136366302,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "lkv-store-heap 1024B/fan1/1ep throughput",
+            "value": 27750825,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "lkv-store-pool 1024B/fan1/1ep throughput",
+            "value": 67696855,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-pool 1B/fan1/1ep throughput",
+            "value": 7982954,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-pool 8B/fan1/1ep throughput",
+            "value": 7952604,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-pool 64B/fan1/1ep throughput",
+            "value": 7936878,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-pool 1024B/fan1/1ep throughput",
+            "value": 7533242,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-pool 8192B/fan1/1ep throughput",
+            "value": 4757370,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-pool-borrow 1B/fan1/1ep throughput",
+            "value": 8747247,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-pool-borrow 8B/fan1/1ep throughput",
+            "value": 8745820,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-pool-borrow 64B/fan1/1ep throughput",
+            "value": 8748529,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-pool-borrow 1024B/fan1/1ep throughput",
+            "value": 8736548,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-pool-borrow 8192B/fan1/1ep throughput",
+            "value": 8726237,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "poolalloc-mt1 64B/fan1/1ep throughput",
+            "value": 14218384,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "heapalloc-mt1 64B/fan1/1ep throughput",
+            "value": 14184039,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "poolalloc-mt2 64B/fan1/1ep throughput",
+            "value": 12775268,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "heapalloc-mt2 64B/fan1/1ep throughput",
+            "value": 13800103,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "poolalloc-mt4 64B/fan1/1ep throughput",
+            "value": 11238119,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "heapalloc-mt4 64B/fan1/1ep throughput",
+            "value": 13547731,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "poolalloc-mt8 64B/fan1/1ep throughput",
+            "value": 7530747,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "heapalloc-mt8 64B/fan1/1ep throughput",
+            "value": 13689826,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-target-stored 64B/fan1/1ep throughput",
+            "value": 4912936,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-target-stored 64B/fan8/1ep throughput",
+            "value": 8184102,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-target-stored 64B/fan128/1ep throughput",
+            "value": 8274178,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-target-stored 64B/fan1024/1ep throughput",
+            "value": 7604021,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-target-stored 64B/fan8192/1ep throughput",
+            "value": 6940350,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-target-handler 64B/fan1/1ep throughput",
+            "value": 5806979,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-target-handler 64B/fan8/1ep throughput",
+            "value": 11363016,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-target-handler 64B/fan128/1ep throughput",
+            "value": 13037708,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-target-handler 64B/fan1024/1ep throughput",
+            "value": 9622762,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "inproc-target-handler 64B/fan8192/1ep throughput",
+            "value": 8606719,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "fwd-demux-fixed 79B/fan1/1ep throughput",
+            "value": 7230295,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "fwd-demux-fixed 79B/fan2/1ep throughput",
+            "value": 7165324,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "fwd-demux-fixed 79B/fan4/1ep throughput",
+            "value": 6812096,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "fwd-demux-fixed 79B/fan8/1ep throughput",
+            "value": 6738792,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "fwd-demux-fixed 79B/fan16/1ep throughput",
+            "value": 6425277,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "fwd-demux-fixed 79B/fan32/1ep throughput",
+            "value": 5812382,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "fwd-demux-fixed 79B/fan64/1ep throughput",
+            "value": 4841395,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "fwd-demux-scan 79B/fan1/1ep throughput",
+            "value": 6974212,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "fwd-demux-scan 79B/fan2/2ep throughput",
+            "value": 7170715,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "fwd-demux-scan 79B/fan4/4ep throughput",
+            "value": 6823855,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "fwd-demux-scan 79B/fan8/8ep throughput",
+            "value": 6649218,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "fwd-demux-scan 79B/fan16/16ep throughput",
+            "value": 6377141,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "fwd-demux-scan 79B/fan32/32ep throughput",
+            "value": 5856469,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "fwd-demux-scan 79B/fan64/64ep throughput",
+            "value": 4783900,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "compact-terminus 4B/fan1/1ep throughput",
+            "value": 6831468,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "compact-forward 4B/fan1/1ep throughput",
+            "value": 11792387,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "compact-terminus 64B/fan1/1ep throughput",
+            "value": 6542280,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "compact-forward 64B/fan1/1ep throughput",
+            "value": 9552409,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "compact-terminus 512B/fan1/1ep throughput",
+            "value": 6697464,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "compact-forward 512B/fan1/1ep throughput",
+            "value": 14652073,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "zenoh inproc 64B/fan1/1ep throughput",
+            "value": 5330426.5,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "zenoh inproc 64B/fan8/1ep throughput",
+            "value": 10353203,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "zenoh inproc 64B/fan128/1ep throughput",
+            "value": 12867039,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "zenoh inproc 64B/fan1024/1ep throughput",
+            "value": 13482609,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "zenoh inproc 64B/fan8192/1ep throughput",
+            "value": 13398741,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "zenoh inproc 1B/fan1/1ep throughput",
+            "value": 5057248,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "zenoh inproc 8B/fan1/1ep throughput",
+            "value": 5300903,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "zenoh inproc 1024B/fan1/1ep throughput",
+            "value": 5261867,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "zenoh inproc 8192B/fan1/1ep throughput",
+            "value": 3603595,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "zenoh inproc-path 64B/fan1/1ep throughput",
+            "value": 5362850,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "zenoh inproc-path 64B/fan1/8ep throughput",
+            "value": 5281162,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "zenoh inproc-path 64B/fan1/128ep throughput",
+            "value": 5306425,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "zenoh inproc-path 64B/fan1/1024ep throughput",
+            "value": 5308239,
+            "unit": "deliveries/s",
+            "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
+          },
+          {
+            "name": "zenoh inproc-path 64B/fan1/8192ep throughput",
+            "value": 3929657,
             "unit": "deliveries/s",
             "extra": "studio · pinned cpu2 · AMD EPYC 9115 16-Core Processor · 31 cpus · governor not-exposed · 7.0.11-76070011-generic"
           }
