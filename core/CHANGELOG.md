@@ -38,10 +38,19 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   the same debug-only preconditions `view::view_t::subview` has had — **zero release cost, no
   new branch on the hot read path** — and `locate` returns the one-past-the-end link index
   rather than fabricating a valid one, so a release-build violation is an out-of-range
-  subscript a sanitizer reports. `for_each_span` returns early on an empty feed, which the
-  grammar's CRC path legitimately issues at the window end. No signature changed; every
-  in-bounds caller is unaffected. Giving `byte_at` a **release** guarantee (an `optional` or a
-  poisoned flag mapped to `FRAME_TRUNCATED`) is a separate design decision, not taken here.
+  subscript a sanitizer reports. `for_each_span` — the one bulk reader — carries the same
+  `off + n <= size()` containment precondition, and returns early on an empty feed, which the
+  grammar's CRC path legitimately issues at the window end. Its own guards (chain-end, and
+  `locate`'s past-chain assert) do not see a feed that overshoots a **narrowed** window while
+  staying inside the chain, so without the precondition a two-link 3+2 rope narrowed to
+  `region(0, 3)` fed `for_each_span(0, 5, …)` handed the caller chain bytes 3 and 4 and
+  reported success — while the identical slip through `byte_at(3)` on that cursor aborts.
+  Note the asymmetry: `byte_at`'s release-build violation still degrades to a sanitizer-visible
+  out-of-range subscript, but an overshooting feed reads bytes the chain genuinely holds, so in
+  a release (`NDEBUG`) build it stays silent and unsanitizable — **in release this contract is
+  the caller's to keep.** No signature changed; every in-bounds caller is unaffected. Giving
+  `byte_at` a **release** guarantee (an `optional` or a poisoned flag mapped to
+  `FRAME_TRUNCATED`) is a separate design decision, not taken here.
 
 ## [0.8.0] — 2026-08-06
 

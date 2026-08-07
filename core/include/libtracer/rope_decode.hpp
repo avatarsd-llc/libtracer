@@ -116,9 +116,28 @@ class rope_cursor {
      * The CRC-feed seam: a range wholly inside one link yields a single span; a
      * straddling range yields one span per link it crosses, so the grammar's
      * incremental CRC crosses a link boundary with no concatenation buffer.
+     * @note Precondition: `off + n <= size()` (debug-asserted) — the same window
+     *       containment @ref region and @ref byte_at carry, and that the sibling
+     *       `span_cursor::for_each_span` gets for free from `std::span::subspan`.
+     *       The walk's own guards are chain-end and `locate`'s past-chain assert,
+     *       neither of which sees a feed that overshoots a NARROWED window while
+     *       staying inside the chain — without this the caller would be handed
+     *       real-but-wrong bytes and told it succeeded.
+     * @warning Unlike @ref byte_at there is NO release backstop: `byte_at`'s
+     *          out-of-window read degrades to an out-of-range subscript (`locate`
+     *          returns the one-past-the-end index) that a sanitizer reports, but
+     *          an overshooting feed reads bytes the chain genuinely holds, so a
+     *          release (NDEBUG) build walks past the window silently and no
+     *          sanitizer can see it. In release this contract is the CALLER's to
+     *          keep; the assert closes the defect class for debug and CI only.
      */
     template <class Fn>
     void for_each_span(std::size_t off, std::size_t n, Fn&& fn) const {
+        // Precondition, enforced in debug builds (zero release cost): the whole feed must
+        // lie inside this cursor's window. Unlike byte_at, a violation is NOT sanitizer-
+        // visible in a release build — the overshot bytes really are in the chain, just
+        // outside the window — so this assert is the only guard there is.
+        assert(off + n <= size());
         // An empty feed names no byte, so it must not `locate` one: the grammar's CRC
         // feed calls this with n == 0 for an absent payload or trailer, at an offset
         // that is legitimately the end of the window.

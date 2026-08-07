@@ -12,6 +12,13 @@
  * sibling `span_cursor`, whose out-of-range read is span UB that ASan/fuzz CI catches).
  * On an empty chain it was hard UB.
  *
+ * `for_each_span`, the one BULK reader, had the same hole and none of the backstop: its
+ * only guards are chain-end and `locate`'s past-chain assert, neither of which sees a feed
+ * that overshoots a NARROWED window while staying inside the chain, so it fed the caller
+ * real-but-wrong bytes and reported success. Unlike `byte_at` there is no release fallback
+ * either — the overshot bytes really are in the chain, so a release build's violation is
+ * silent AND unsanitizable. Its precondition is therefore the only guard there is.
+ *
  * The fix is the discipline `view_t::subview` already has: debug-only preconditions,
  * zero release cost. This file is the gate for them. It is compiled with `NDEBUG`
  * forced OFF (the repo's default test build is RelWithDebInfo, which defines it), and
@@ -133,6 +140,13 @@ void test_in_bounds_unaffected() {
     std::size_t empty_spans = 0;
     cur.for_each_span(5, 0, [&](std::span<const std::byte>) { ++empty_spans; });
     check(empty_spans == 0, "a zero-length feed at the window end yields nothing and is legal");
+
+    // An exactly-fitting feed on a NARROWED window is the case the containment
+    // precondition must NOT over-fire on: off + n == size() is in contract.
+    std::size_t narrow_bytes = 0;
+    cur.region(0, 3).for_each_span(0, 3,
+                                   [&](std::span<const std::byte> s) { narrow_bytes += s.size(); });
+    check(narrow_bytes == 3, "a feed that exactly fills a narrowed window is legal");
 }
 
 /** @brief Each out-of-range access trips its debug precondition (the #916 gate). */
@@ -190,6 +204,22 @@ void test_out_of_range_aborts() {
           }),
           "a non-empty feed starting past the end aborts in locate (was: the fabricated "
           "{last, 0})");
+
+    // The one the chain-end and past-chain-locate guards both miss: the feed STARTS
+    // in-chain, so `locate` is happy, and it ends in-chain, so `li < links_.size()`
+    // never trips — the overshoot is only past the cursor's NARROWED window. Without
+    // the containment precondition the walk hands bytes 3 and 4 to `fn` and reports
+    // success, while the identical slip through `byte_at(3)` on this cursor aborts.
+    check(aborts([&] {
+              rope_t r(borrowed_view(a));
+              r.append(borrowed_view(b));
+              const rope_cursor cur = rope_cursor{r}.region(0, 3);
+              cur.for_each_span(0, 5, [&](std::span<const std::byte> s) {
+                  g_sink = static_cast<std::uint8_t>(s.size());
+              });
+          }),
+          "a feed past a NARROWED window aborts even though every byte it walks is in "
+          "the chain");
 }
 
 }  // namespace
