@@ -801,6 +801,40 @@ class fwd_router_t {
      */
     void resolve_terminus_rope(std::string_view inbound_name, view::rope_t frame);
     /**
+     * @brief Classify ONE inbound FWD frame and dispatch it — the ingress driver, once.
+     *
+     * The whole top-level sequence a frame arriving on either tier goes through: the FWD
+     * type gate, the `dst` peek, the mount descent, and the five dispositions that come out
+     * of it — forward / rejected / bound-forward / terminus / reply. Templated over the
+     * grammar `Cursor` (ADR-0053 ④b) exactly as `route_fwd_forward` and
+     * `route_bound_forward` below already are, so the contiguous and the scatter-gather tier
+     * run the SAME classification instead of two hand-written copies of it. The copies had
+     * already drifted: a FWD-classified frame whose op VALUE is empty resolved at the
+     * terminus contiguously and was dropped as a non-control frame when the identical bytes
+     * arrived as a multi-link rope.
+     *
+     * The four genuinely tier-specific actions are passed in, so the shared body holds no
+     * `if constexpr` of its own:
+     *
+     * @tparam Cursor   A grammar byte-source cursor (span or rope).
+     * @param  observe  The read-only inbound observer (tests/ACL seam), which wants a decoded
+     *                  tree and so exists only on the contiguous tier; a no-op on the rope
+     *                  tier, where nothing contiguous is in hand to give it.
+     * @param  reject   Reply to a bus NAME + residual hop (ADR-0073 §3 / RFC-0020). Needs
+     *                  contiguous bytes, which the rope tier buys with its one COLD flatten.
+     * @param  terminus Resolve here: the arena decode on the contiguous tier, the lazy
+     *                  view-tier resolve straight off the rope on the other.
+     * @param  reply    Hand a FWD{REPLY} that reached its originator to the reply sink.
+     *
+     * @pre `cur.size() >= 4` — the callers' own runt-frame gate has already run.
+     * @retval true  The frame was FWD-classified and is fully handled; the caller returns.
+     * @retval false Not a FWD frame at all — the caller continues to its control arm.
+     */
+    template <class Cursor, class Observe, class Reject, class Terminus, class Reply>
+    bool route_fwd_ingress(std::string_view inbound_name, const Cursor& cur,
+                           const child_rx_ctx_t* inbound_ctx, bool from_peer, Observe&& observe,
+                           Reject&& reject, Terminus&& terminus, Reply&& reply);
+    /**
      * @brief The forward hop, read entirely by OFFSET — no decoded tree (ADR-0038 inv. #1).
      *
      * Strips the leading `dst` segment, prepends the inbound-link NAME to `src` (unless a
@@ -889,6 +923,24 @@ class fwd_router_t {
      *         contribution (RFC-0024 §7.1 step 2); nullopt when it has none to give. */
     [[nodiscard]] std::optional<wire::path_ref_element_t> hop_mint(
         std::string_view inbound_name, const child_rx_ctx_t* inbound_ctx) const;
+    /**
+     * @brief The control switch (ADVERTISE / COMPACT / HANDLE_NACK), once, over either tier.
+     *
+     * Reads the outer type + `u16` label by OFFSET through @p cur — no owning decode of the
+     * frame on either tier — and routes the three control types to their handlers. The one
+     * thing the two tiers genuinely do differently is how they hand a handler the CHILD
+     * window it needs contiguous, so that is the parameter: @p contig maps
+     * `(off, total)` to a span, and owns whatever that costs on its tier for the duration
+     * of the call. A `HANDLE_NACK` acts on the label alone and never calls it.
+     *
+     * @tparam Cursor A grammar byte-source cursor (span or rope).
+     * @param  contig `std::span<const std::byte>(std::size_t off, std::size_t total)` — the
+     *                child window made contiguous, or EMPTY when that was not possible (a
+     *                rope materialize that OOM'd or hit a DEVICE link). A contiguous source
+     *                subspans, so it never answers empty for a non-empty window.
+     */
+    template <class Cursor, class Contig>
+    void dispatch_control(std::string_view inbound_name, const Cursor& cur, Contig&& contig);
     /**
      * @brief Dispatch a multi-link control frame (ADVERTISE / COMPACT / HANDLE_NACK)
      *        rope-native (ADR-0055 §2).
