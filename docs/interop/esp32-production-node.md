@@ -347,11 +347,11 @@ JTAG session.
   resolve before Kconfig runs. Gate **SRCS** on `CONFIG_*`, keep REQUIRES
   unconditional, and keep a CI job building each Kconfig-gated TU.
 - **Every new core source is also appended to the component's `LIBTRACER_SRCS`**
-  (`integrations/esp-idf/libtracer/CMakeLists.txt:41`) or the chip build fails to
+  (`integrations/esp-idf/libtracer/CMakeLists.txt:44`) or the chip build fails to
   link while host builds stay green.
 - **Platform TU selection is a build-system concern, not an `#ifdef`.** Chip targets
   compile `twai_link.cpp` plus a SocketCAN stub; the `linux` target compiles real
-  SocketCAN and no TWAI (`integrations/esp-idf/libtracer/CMakeLists.txt:127-137`).
+  SocketCAN and no TWAI (`integrations/esp-idf/libtracer/CMakeLists.txt:171-180`).
   Extend that pattern rather than adding macros.
 - Build with `-fno-exceptions -fno-rtti` and treat any throwing construct on the
   delivery path as a defect (§1).

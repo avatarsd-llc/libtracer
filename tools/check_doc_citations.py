@@ -28,8 +28,16 @@ Coverage is the pin list, not the doc set: a citation with no entry below is NOT
 so `OK N verified` counts the pins, never "every citation in the docs". Build and tooling
 files are not sources and used to be unreadable here at all, which is how two rotted
 `LIBTRACER_NO_ATOMIC` citations sat beside a verified one in the same sentence (#1052).
-@ref CITABLE_BUILD_PATHS enrols the few whose citations ARE pinned — an explicit
-allowlist, because covering build files wholesale is a maintainer's call.
+@ref CITABLE_NON_SOURCE_PATHS enrols the ones whose citations ARE pinned — an explicit
+allowlist, because covering non-source files wholesale is a maintainer's call.
+
+What #1052 left open, and #1095 closed: everything OUTSIDE that allowlist was a FALSE
+GREEN, not merely unchecked. A line-numbered citation of a `.yml`, a `.txt` or a `.mjs`
+matched nothing here, so the gate exited 0 whether it resolved or not — and a PR read that
+silence as "no cited file shifted lines" while its own diff had moved a cited workflow 18
+lines. @ref unverifiable_citations makes that class an ERROR: a citation carrying a line
+number is verified, or the author must enrol the file or drop the line number. A token
+naming no file in the tree stays ignored — `127.0.0.1:47301` is not a citation.
 
 Historical genres are deliberately NOT enrolled. `docs/adr/`, `docs/spec/` and
 `docs/research/` are dated records of a decision: their citations describe the tree as it
@@ -679,7 +687,7 @@ ANCHORS = [
     ('core/src/route_handle.cpp:179', 't->egress.push_back(egress_entry_t{', 'bool route_handle_t::record_egress(std::string_view out_link, std::uint16_t label,'),
     ('core/src/route_handle.cpp:236', 't->egress.push_back(egress_entry_t{', 'std::pair<std::uint16_t, bool> route_handle_t::ensure_egress(std::string_view out_link,'),
     ('core/src/transport_can.cpp:313', 'tr::view::view_can_frames_t::split(*payload, cfg_.mode);'),
-    # --- #1052: the build/tooling citations, now readable (@ref CITABLE_BUILD_PATHS).
+    # --- #1052: the build/tooling citations, now readable (@ref CITABLE_NON_SOURCE_PATHS).
     # `LIBTRACER_NO_ATOMIC` is spelled in three places outside `segment.hpp`, and the two
     # in build files had both rotted: the footprint script's citation (`:93`) had landed on
     # its include-directory assignment, and the test CMake's (`:927,940-941`) on three
@@ -698,6 +706,54 @@ ANCHORS = [
     # The leading indent is load-bearing: the bare token also appears in the comment
     # three lines above the executable, and an anchor that matches both is not an anchor.
     ('core/tests/CMakeLists.txt:1093', '    LIBTRACER_NO_ATOMIC'),
+
+    # --- #1095: the rest of the non-source citations, now that a line-numbered citation
+    # of an unverifiable file is an ERROR rather than a false green.
+    #
+    # 26 line-numbered citations of non-C++ files were live outside the two paths #1052
+    # enrolled. Reading each target line against the prose that cites it found SIXTEEN
+    # already pointing at unrelated text, none of which any gate could have caught: two
+    # landed on a BLANK line and two on a bare `endif()`. Every entry below is pinned to
+    # the line the prose actually names, and the citing doc was re-pinned to match.
+    #
+    # `--repin` does NOT move these (see @ref repin_document): the ANCHORS table is
+    # rewritten by source suffix only, so a doc citation that moved without its table
+    # entry would leave the two out of step. The gate reds on both and names the page.
+    ('.github/workflows/core-ci.yml:113', 'matrix:', '  tsan:'),
+    # The flag the prose QUOTES verbatim ("-fsanitize=thread -g -O1"). The range head at
+    # 113 is `matrix:`, which the asan job carries too — hence the scope above; this one
+    # needs none and is the stronger guard of the two.
+    ('.github/workflows/core-ci.yml:122', '-DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"'),
+    ('.github/workflows/footprint-cortexm0.yml:13', '`--mode warn` governs the BUDGET VERDICT only'),
+    ('bench/CMakeLists.txt:30', 'bench_libtracer_net (two-process ROUTER-flood bench) was retired'),
+    ('bindings/typescript/packages/client/test/mesh-testbed.test.mjs:24',
+     "ADDRESSING: a connection's routing key IS its vertex path"),
+    ('core/CMakeLists.txt:63', 'option(LIBTRACER_NET_PLANE'),
+    ('core/CMakeLists.txt:276', 'option(LIBTRACER_WITH_CUDA "Build the mem_cuda GPU backend'),
+    ('core/CMakeLists.txt:299', 'option(LIBTRACER_WITH_QUIC "Configure the libtracer_quic transport module'),
+    ('core/CMakeLists.txt:385', 'write_basic_package_version_file('),
+    ('core/CMakeLists.txt:396', 'if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND EXISTS'),
+    ('core/CMakeLists.txt:403', 'option(LIBTRACER_BUILD_EXAMPLES "Build the core examples"'),
+    # `docs/examples/index.md` cited the two `if(LIBTRACER_NET_PLANE)` lines (58, 73). That
+    # text appears THREE times in this file and the scope filter cannot separate 58 from 73
+    # — a scope must sit ABOVE its candidate, and everything above 58 is also above 73. The
+    # citation was re-pinned one line down onto the `add_executable` calls, which is what
+    # "declared inside `if(LIBTRACER_NET_PLANE)` blocks" actually names anyway.
+    ('core/examples/CMakeLists.txt:59', 'add_executable(two_node_fwd two_node_fwd.cpp)'),
+    ('core/examples/CMakeLists.txt:74', 'add_executable(tree_of_ropes tree_of_ropes.cpp)'),
+    ('core/examples/CMakeLists.txt:87', 'if(BUILD_TESTING)'),
+    ('core/examples/CMakeLists.txt:92', 'add_test(NAME example_wire_codec COMMAND wire_codec)'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:44', 'set(LIBTRACER_SRCS'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:60',
+     '"${LIBTRACER_ROOT}/core/src/route_handle.cpp"'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:171', 'if(CONFIG_LIBTRACER_TRANSPORT_CAN)'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:172',
+     'list(APPEND LIBTRACER_SRCS "${LIBTRACER_ROOT}/core/src/transport_can.cpp")'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:245', 'set(LIBTRACER_ACL_POLICY allow_only_policy_t)'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:246', 'set(LIBTRACER_LKV_SLOT sp_atomic_slot_t)'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:247', 'set(LIBTRACER_HAZARD_READER_SLOTS 64)'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:257', 'set(LIBTRACER_EDGE_PIN_SLOTS 8)'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:262', 'if(CONFIG_FREERTOS_UNICORE)'),
 ]
 
 
@@ -748,19 +804,124 @@ def source_map(root: pathlib.Path = None) -> dict:
 # running file — so the knob table's bare `:109` / `:136` continuations keep walking the
 # header they name, exactly as before. That also means a doc citing an enrolled path
 # must spell it out every time; there is no bare continuation into one.
-CITABLE_BUILD_PATHS = (
-    "tools/cortexm0_footprint.py",
+#
+# #1095 widened the list from two paths to nine, and renamed it: a GitHub workflow and a
+# `.mjs` test driver are not "build" files. What forced the widening is that enrolment was
+# the ONLY way a non-source citation could be checked, and everything outside it was a
+# FALSE GREEN — see @ref unverifiable_citations, which now makes that class an error
+# instead of silence.
+CITABLE_NON_SOURCE_PATHS = (
+    ".github/workflows/core-ci.yml",
+    ".github/workflows/footprint-cortexm0.yml",
+    "bench/CMakeLists.txt",
+    "bindings/typescript/packages/client/test/mesh-testbed.test.mjs",
+    "core/CMakeLists.txt",
+    "core/examples/CMakeLists.txt",
     "core/tests/CMakeLists.txt",
+    "integrations/esp-idf/libtracer/CMakeLists.txt",
+    "tools/cortexm0_footprint.py",
 )
 _EXTS = "|".join(re.escape(s[1:]) for s in SOURCE_SUFFIXES)
 DOC_EXTS = "md|rst"
-_BUILD_PATHS = "|".join(re.escape(p) for p in CITABLE_BUILD_PATHS)
+# Any `path.ext` at all. The NON-SOURCE branch below matches this and classifies AFTER
+# resolving, rather than matching an exact enrolled path: docs spell a non-source citation
+# in the same three ways they spell a source one, and two of them are not the full path —
+# `integrations/esp-idf/README.md` writes the partial `libtracer/CMakeLists.txt:131` and
+# `tests/testbed/README.md` writes the bare basename `mesh-testbed.test.mjs:24-25`. An
+# exact-path alternation reads neither, so both would fall through as unverifiable.
+_ANY_PATH = r"(?:[A-Za-z0-9_./-]*/)?[A-Za-z0-9_][A-Za-z0-9_.-]*\.[A-Za-z0-9_]+"
+# The leading `` `? `` on the DOCUMENT branch is load-bearing, and was not needed until the
+# catch-all branch existed. `finditer` takes the EARLIEST match, and only then the earliest
+# alternative: with a backtick the catch-all could start one character before the document
+# branch could, so `` `docs/reference/07-host-embedding.md:79` `` matched the catch-all
+# instead — and a cited page silently stopped BREAKING the inheritance run. Measured on the
+# real doc set: five RFCs then dragged ~90 bare `:N` continuations onto stale source files.
 CITATION_RE = re.compile(
     r"`?((?:[A-Za-z0-9_./-]*/)?[A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:" + _EXTS + r")):([\d,\-]+)`?"
-    r"|((?:[A-Za-z0-9_./-]*/)?[A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:" + DOC_EXTS + r")):[\d,\-]+"
+    r"|`?((?:[A-Za-z0-9_./-]*/)?[A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:" + DOC_EXTS + r")):[\d,\-]+"
     r"|`:([\d,\-]+)`"
-    r"|`?(?P<build>" + _BUILD_PATHS + r"):(?P<buildspec>[\d,\-]+)`?"
+    r"|`?(?P<other>" + _ANY_PATH + r"):(?P<otherspec>[\d,\-]+)`?"
 )
+
+
+@functools.lru_cache(maxsize=None)
+def enrolled_map() -> dict:
+    """Map each enrolled basename to the enrolled paths carrying it.
+
+    Built from @ref CITABLE_NON_SOURCE_PATHS alone, never from the filesystem: enrolment
+    is the maintainer's allowlist, so a file that merely exists must not resolve here.
+    """
+    out = {}
+    for path in CITABLE_NON_SOURCE_PATHS:
+        out.setdefault(path.rsplit("/", 1)[-1], []).append(path)
+    return {name: sorted(paths) for name, paths in out.items()}
+
+
+def resolve_enrolled(spelling: str) -> str:
+    """Resolve a non-source spelling to an ENROLLED path, or None.
+
+    Reads the same three spellings @ref _resolve reads, over the allowlist instead of the
+    source tree: the full path, a partial path that singles out one carrier, and a bare
+    basename. A spelling that names two enrolled paths resolves to neither — the doc must
+    spell enough of the path to pick one.
+    """
+    hits = enrolled_map().get(spelling.rsplit("/", 1)[-1], ())
+    if "/" in spelling:
+        hits = [h for h in hits if h == spelling or h.endswith("/" + spelling)]
+    return hits[0] if len(hits) == 1 else None
+
+
+@functools.lru_cache(maxsize=None)
+def tree_index() -> dict:
+    """Map every basename in the tree to its repo-relative paths (build output excluded).
+
+    Only @ref unverifiable_citations reads this. It answers one question — "does this
+    `name:123` token name a REAL FILE?" — which is what separates a citation the gate
+    cannot check from a host:port pair. `tests/testbed/README.md` writes
+    `127.0.0.1:47301` and `bindings/.../README.md` writes `wss://robot.local:9000`; both
+    parse as `path.ext:digits` and neither is a citation. Nothing in the tree is named
+    `127.0.0.1` or `robot.local`, and that is the whole discriminator.
+    """
+    out = {}
+    for path in REPO.rglob("*"):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(REPO)
+        if any(_is_non_source_part(p) for p in rel.parts):
+            continue
+        out.setdefault(path.name, []).append(rel.as_posix())
+    return {name: sorted(paths) for name, paths in out.items()}
+
+
+def unverifiable_citations(text: str) -> list:
+    """Line-numbered citations of files this gate cannot verify — the #1095 false green.
+
+    `SOURCE_SUFFIXES` is what the gate can read, so a line number in anything else was
+    invisible: the tool exited 0 whether the anchor resolved or not. #1088 shifted
+    `.github/workflows/core-ci.yml` by 18 lines while a design page cited `:95-106` for the
+    ThreadSanitizer configuration; after the shift that range named a DIFFERENT job's
+    matrix, the gate stayed green, and the PR concluded "no cited file shifted lines" FROM
+    THAT SILENCE. A false green is worse than a false red, because nobody goes looking.
+
+    So: a citation carrying a line number is verified, or it is refused. A token naming a
+    real file that is neither a source nor enrolled is reported here, and the author must
+    enrol the file (@ref CITABLE_NON_SOURCE_PATHS, then pin it in @ref ANCHORS) or drop the
+    line number. A token that names no file in the tree is NOT reported — it is an address
+    or a file outside the repo, and this tool has never claimed those.
+    """
+    out = []
+    for m in CITATION_RE.finditer(text):
+        spelling = m.group("other")
+        if not spelling or resolve_enrolled(spelling):
+            continue
+        hits = tree_index().get(spelling.rsplit("/", 1)[-1], ())
+        if "/" in spelling:
+            hits = [h for h in hits if h == spelling or h.endswith("/" + spelling)]
+        if len(hits) == 1:
+            out.append(f"`{spelling}:{m.group('otherspec')}` cites a line in a file this gate "
+                       f"cannot verify ({hits[0]}) — enrol it in CITABLE_NON_SOURCE_PATHS and "
+                       f"pin it in ANCHORS, or drop the line number")
+    return out
 
 
 @functools.lru_cache(maxsize=None)
@@ -799,7 +960,7 @@ def citation_spans(context: str, filemap: dict = None) -> tuple:
     Every span is normalised to its full repo-relative path, so the ANCHORS table has
     exactly one spelling regardless of how the prose says it.
 
-    An enrolled build/tooling path (@ref CITABLE_BUILD_PATHS) anchors its own lines
+    An enrolled non-source path (@ref CITABLE_NON_SOURCE_PATHS) anchors its own lines
     without becoming the running file, so it can be pinned without disturbing the bare
     `:N` runs that walk a header down a table.
     """
@@ -818,10 +979,17 @@ def citation_spans(context: str, filemap: dict = None) -> tuple:
                 continue
             last, path, spec = resolved, resolved, m.group(2)
         elif m.group(3):
-            last = None  # a non-source citation ends the inheritance run
+            last = None  # a cited DOCUMENT ends the inheritance run
             continue
-        elif m.group("build"):
-            path, spec = m.group("build"), m.group("buildspec")
+        elif m.group("other"):
+            # An enrolled non-source path anchors its own lines and leaves `last` alone,
+            # so it stays an ASIDE. Anything else here names no enrolled file and pins
+            # nothing — @ref unverifiable_citations is what decides whether that silence
+            # is legitimate (an address, an out-of-repo file) or a refused citation.
+            path = resolve_enrolled(m.group("other"))
+            if path is None:
+                continue
+            spec = m.group("otherspec")
         elif last:
             path, spec = last, m.group(4)
         else:
@@ -1050,13 +1218,21 @@ def repin_document(text: str, maps: dict, filemap: dict = None) -> tuple:
                 continue
             last, spec, span = resolved, m.group(2), m.span(2)
         elif m.group(3):
-            last = None  # a non-source citation ends the inheritance run
+            last = None  # a cited DOCUMENT ends the inheritance run
             continue
-        elif m.group("build"):
-            # An enrolled build/tooling path is pinned by HAND: `revision_line_maps`
-            # derives its maps from source files only, so there is no line map to move
-            # this citation by. Leaving it alone keeps doc and anchor in step — the gate
-            # then reds on both and names the page that cites them.
+        elif m.group("other"):
+            # An enrolled non-source path is re-pinned by HAND, and is REPORTED as held
+            # rather than skipped in silence (#1095). Two independent reasons, both still
+            # true after the list grew to nine paths: `revision_line_maps` derives its maps
+            # from source files only, so `--from-rev` has no map to move these by; and
+            # `ANCHOR_ENTRY_RE` matches source suffixes only, so even under the
+            # anchor-derived map the TABLE entry would stay put while the doc citation
+            # moved. Half-applying it that way puts doc and anchor out of step, which is
+            # strictly worse than leaving both — the gate then reds on both and names the
+            # page that cites them.
+            enrolled = resolve_enrolled(m.group("other"))
+            if enrolled:
+                held.append((enrolled, m.group("otherspec")))
             continue
         elif last:
             spec, span = m.group(4), m.span(4)
@@ -1123,6 +1299,11 @@ def revision_line_maps(rev: str, root: pathlib.Path = None) -> tuple:
     @ref line_map_from_texts does the rest. This is the mode to use when you KNOW which
     edit moved the lines; the anchor-derived map is the fallback that re-pins only what
     the gate can prove moved.
+
+    An ENROLLED non-source path gets a map here too, and it is never used to rewrite one:
+    @ref repin_document declines those before it consults a lookup. It exists so the
+    driver can tell a shifted enrolled file from an untouched one and report only the
+    former — 32 identical "held" lines on every clean run is how a report gets ignored.
     """
     root = root or REPO
     git = ["git", "-C", str(root)]
@@ -1130,7 +1311,7 @@ def revision_line_maps(rev: str, root: pathlib.Path = None) -> tuple:
                              capture_output=True, text=True, check=True).stdout.split("\n")
     maps, notes = {}, []
     for rel in (c.strip() for c in changed if c.strip()):
-        if not rel.endswith(SOURCE_SUFFIXES) or any(
+        if (not rel.endswith(SOURCE_SUFFIXES) and rel not in CITABLE_NON_SOURCE_PATHS) or any(
                 _is_non_source_part(p) for p in pathlib.PurePosixPath(rel).parts):
             continue
         old = subprocess.run(git + ["show", f"{rev}:{rel}"], capture_output=True, text=True)
@@ -1168,7 +1349,12 @@ def repin(from_rev: str = None, apply: bool = False) -> int:
     targets = [(REPO / "tools" / "check_doc_citations.py", repin_anchor_table)] + [
         (doc, None) for doc in all_docs()
     ]
-    total, historical, held_all = 0, 0, list(notes)
+    # An enrolled path whose anchors all still resolve has not moved, so its citations
+    # need no attention and saying otherwise is noise. Only a path with a MOVED anchor is
+    # reported below.
+    shifted = {p for p, m in maps.items()
+               if any(new is not None and new != old for old, new in m.items())}
+    total, historical, held_all, enrolled_held = 0, 0, list(notes), []
     for path, table_fn in targets:
         try:
             text = path.read_text()
@@ -1183,7 +1369,14 @@ def repin(from_rev: str = None, apply: bool = False) -> int:
             # Counted, never written: the number is worth knowing, the edit is not.
             historical += len(moves)
             continue
-        held_all += [f"{rel}: {p}:{n} — no derivable shift, re-pin by hand" for p, n in held]
+        # Two different reasons a citation is held, and saying "no derivable shift" for
+        # both would misreport the enrolled one as a map gap the tool could close (#1095).
+        for p, n in held:
+            if p in CITABLE_NON_SOURCE_PATHS:
+                if p in shifted:
+                    enrolled_held.append(f"{rel}: {p}:{n}")
+            else:
+                held_all.append(f"{rel}: {p}:{n} — no derivable shift, re-pin by hand")
         if not moves:
             continue
         total += len(moves)
@@ -1193,8 +1386,15 @@ def repin(from_rev: str = None, apply: bool = False) -> int:
             path.write_text(new_text)
     for note in dict.fromkeys(held_all):
         print(f"HOLD  {note}")
+    # Said plainly rather than skipped in silence (#1095): --repin will not move these,
+    # and the reason is structural, not a gap it could close on a later run.
+    for note in dict.fromkeys(enrolled_held):
+        print(f"MANUAL {note} — enrolled non-source path; --repin does not move these "
+              f"(ANCHOR_ENTRY_RE matches source suffixes only, so the table entry would "
+              f"stay put while the doc moved). Re-pin the doc AND its anchor, by hand.")
     verb = "rewritten" if apply else "would move (dry run; pass --apply to write)"
-    print(f"\n{total} citation(s) {verb}; {len(dict.fromkeys(held_all))} held for a human.")
+    print(f"\n{total} citation(s) {verb}; {len(dict.fromkeys(held_all))} held for a human"
+          f"; {len(dict.fromkeys(enrolled_held))} in enrolled non-source paths need a hand re-pin.")
     if historical:
         print(f"      {historical} more sit in {', '.join(g.rstrip('/') for g in HISTORICAL_GENRES)} "
               f"and were left alone — a dated record cites the tree as it stood.")
@@ -1237,6 +1437,12 @@ def main(argv: list = None) -> int:
         rel = doc.relative_to(REPO).as_posix()
         docs.append((rel, text))
         failures += [f"{rel}: {e}" for e in dict.fromkeys(cited_locations(text, filemap)[1])]
+        # The dated genres are exempt for the same reason they are never anchored: an ADR
+        # or an RFC cites the tree AS IT STOOD, so demanding that its citations be
+        # verifiable today would demand rewriting the record. 28 of them name a Rust or
+        # TypeScript binding file by line, and every one is a description of history.
+        if not is_historical(rel):
+            failures += [f"{rel}: {e}" for e in dict.fromkeys(unverifiable_citations(text))]
     index = citation_index(docs, filemap)
     present = set(index)
 

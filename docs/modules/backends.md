@@ -31,7 +31,7 @@ because many substrates — MMIO, hardware FIFOs — cannot allocate at all.
 | `mem_pool` | a caller slab | returns the slot to a free list | bounded / MCU / deterministic |
 
 A fourth, `mem_cuda`, is compiled only when `LIBTRACER_WITH_CUDA` is set
-(`core/CMakeLists.txt:268-273`); it needs the CUDA toolkit and is not built in CI.
+(`core/CMakeLists.txt:276-281`); it needs the CUDA toolkit and is not built in CI.
 
 `mem_pool` is the bounded "custom allocator": it carves a **caller-owned** slab
 into fixed slots with the free list threaded *through the slab* (no auxiliary
