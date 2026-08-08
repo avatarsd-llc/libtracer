@@ -484,6 +484,30 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     # Wall-clock separations of 3-5x, on a suite that also parks threads on purpose.
     # Generous against a loaded runner, and still far under CTest's default.
     set_tests_properties(twai_backpressure PROPERTIES TIMEOUT 60)
+
+    # #1029 — the same chip TU and the same fake, driven from the OTHER direction. The
+    # fake modelled TX only: twai_node_receive_from_isr failed unconditionally and the
+    # registered rx-done callback was never invoked, so twai_link_t::on_rx_done_isr ran
+    # only on silicon. With script_rx/deliver_one_rx (the mirror of complete_one_tx) this
+    # pins what that body decides: the seam's shared ingress rule (can_rx_admissible, #931
+    # — the rule the two platform links diverged on once), the DLC decode capped at the
+    # classic width, and the ISR->dispatch handoff DROPPING rather than blocking when
+    # rx_queue_ is full. Production behaviour is unchanged by that issue; this is coverage.
+    add_executable(twai_rx_ingress_test
+        "${LIBTRACER_ESP_DIR}/tests/host/twai_rx_ingress_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_twai.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/twai_link.cpp")
+    target_include_directories(twai_rx_ingress_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(twai_rx_ingress_test PRIVATE libtracer)
+    libtracer_test_warnings(twai_rx_ingress_test)
+    add_test(NAME twai_rx_ingress COMMAND twai_rx_ingress_test)
+    # One case parks the dispatch thread on purpose and then waits out a stragglers'
+    # window; the rest are sub-second. Generous against a loaded runner.
+    set_tests_properties(twai_rx_ingress PROPERTIES TIMEOUT 60)
 else()
     message(STATUS "httpd_ws_teardown_test skipped: integrations/esp-idf is not in this tree")
 endif()
