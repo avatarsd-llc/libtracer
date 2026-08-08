@@ -87,11 +87,14 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   now one `write_m_` critical section with the fd stored first, so "open ⇒ fd valid" holds for
   every sender. Accept is cold — once per connection, off the delivery path — and the
   disassembly confirms the price: in both `transport_tcp.cpp` and `transport_ws.cpp` the
-  functions a peer's traffic runs through are instruction-identical to the byte — both `send`
+  functions a peer's traffic runs through carry identical INSTRUCTION STREAMS — both `send`
   overloads, `peer_endpoint_t::send`, `teardown_slot`, `service_peer`, `run`, `peer_link`,
-  `close_peer`, `enumerate_peers` and the destructor — and `accept_peer` is the only body that
-  changed (each server's constructor moves by one rip-relative displacement, because
-  `accept_peer` grew). `transport_ws_server`
+  `close_peer`, `enumerate_peers` and the destructor — and `accept_peer` is the only body whose
+  instructions changed. Not byte-identical, and the difference is worth stating precisely: an
+  independent rebuild found three of those functions differ in alignment-padding NOPs and the
+  intra-function jump offsets that follow from them, because `accept_peer` grew and moved what
+  sits after it. No executed instruction changes, which is what carries the claim that
+  `acq_rel → relaxed` on the exchange and `release → relaxed` on the stores cost nothing here. `transport_ws_server`
   had the safer order already (it publishes a slot NOT-open and flips `open` past the 101
   under the same lock) and now takes the same lock around its publish, so **one rule covers
   both servers**: `open`/`fd` are mutated only under `write_m_`, `name` only under `peers_m_`
