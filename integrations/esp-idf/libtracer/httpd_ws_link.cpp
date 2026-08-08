@@ -183,6 +183,28 @@ constexpr std::size_t kTxPoolSlots = 4;
 constexpr std::size_t kTxInlineBytes = 1600;
 
 /**
+ * @brief Destinations one fan-out chunk holds — the ON-STACK snapshot a broadcast walks
+ *        its peer set through, and the reason a broadcast allocates nothing.
+ *
+ * The snapshot must not be a `std::vector`, and for the reason
+ * @ref httpd_ws_link_t::tx_work_t already records: under `-fno-exceptions` the vector's
+ * THROWING allocator turns a failed growth into `abort()` via the bad_alloc stub, which
+ * is the same defeat of a nothrow guard that once crashed this link on a reply-sized
+ * copy. Here it sat on the FAN-OUT path (#961) — reached by every broadcast, and reached
+ * BEFORE any nothrow fallback could apply, so a fan-out landing in a heap trough rebooted
+ * the node instead of dropping a frame. Nothing counted it and nothing logged it.
+ *
+ * A fixed chunk plus a RESUMABLE scan removes the allocation rather than moving it: there
+ * is no heap arm left to fail, so no drop to account for and no sizing policy for the
+ * unbounded-`max_peers` case. @ref kDefaultPeerCap is the size because it is already this
+ * file's answer to "how many peers does a link budget for" — the finite socket budget an
+ * unbounded link is given, and the divisor @ref derive_send_timeout_ms uses. At or under
+ * it a broadcast takes exactly the one `peers_m_` hold it always did; past it the scan
+ * resumes where it stopped, costing one more uncontended acquisition per chunk.
+ */
+constexpr std::size_t kFanoutChunk = kDefaultPeerCap;
+
+/**
  * @brief `<ip>:<port>` of the far side of @p fd — the peer name (bus tag / census),
  *        byte-compatible with transport_ws_server's naming. Falls back to `fd<n>`.
  *
@@ -1768,16 +1790,35 @@ void httpd_ws_link_t::send(std::span<const std::span<const std::byte>> iov) {
     // released before the first enqueue and the frames are written later still, so a
     // descriptor read here can belong to somebody else by the time it is used (#954). The
     // reference is minted here, under the same lock that read the peer's liveness.
-    std::vector<session_ref_t> targets;
-    {
-        const std::lock_guard lock(peers_m_);
-        targets.reserve(slots_.size());
-        // A condemned peer is skipped from the lock the snapshot already holds, so the
-        // fan-out never even offers it a frame (queue_send would refuse it anyway).
-        for (const auto& s : slots_)
-            if (s->open && !s->dead) targets.push_back(session_ref_t{s.get(), s->gen});
+    //
+    // And it is a FIXED on-stack chunk with a resumable scan, never a container sized to
+    // the peer set (#961) — see kFanoutChunk for why a `std::vector` here was an abort
+    // waiting for a heap trough. Resuming at `next` after releasing the lock is sound
+    // because a slot's INDEX never moves while the link is serving: the only in-service
+    // mutation of `slots_` is the APPEND at the two admission sites (the push_back in
+    // on_handshake and the one in on_data_frame), and the two sites that remove entries —
+    // abandon_sessions' clear() and abandon_session's erase() — are reachable only through
+    // detach_sessions(), which nothing but the destructor calls. So no peer can be visited
+    // twice, and a departed slot is a hole the scan steps over. A peer that ARRIVES
+    // mid-fan-out lands past `next` and is simply included, which a broadcast (already
+    // non-atomic: every enqueue happens outside the lock, and the writes later still) has
+    // never promised either way.
+    session_ref_t targets[kFanoutChunk];
+    std::size_t next = 0;
+    for (bool more = true; more;) {
+        std::size_t n = 0;
+        {
+            const std::lock_guard lock(peers_m_);
+            // A condemned peer is skipped from the lock the snapshot already holds, so the
+            // fan-out never even offers it a frame (queue_send would refuse it anyway).
+            while (next < slots_.size() && n < kFanoutChunk) {
+                const auto& s = slots_[next++];
+                if (s->open && !s->dead) targets[n++] = session_ref_t{s.get(), s->gen};
+            }
+            more = next < slots_.size();
+        }
+        for (std::size_t i = 0; i < n; ++i) queue_send(targets[i], iov);
     }
-    for (const session_ref_t& to : targets) queue_send(to, iov);
 }
 
 void httpd_ws_link_t::peer_endpoint_t::send(std::span<const std::byte> frame) {

@@ -78,8 +78,14 @@
  *     takes a nothrow heap payload; a momentarily exhausted pool falls back to a
  *     fully heap work item. Every fallback is `new (std::nothrow)` with
  *     drop-on-OOM backpressure — never an abort.
+ *   - FAN-OUT: a broadcast (`send()` — the path a subscription push takes) snapshots
+ *     its destinations into a FIXED on-stack chunk and resumes the scan for the next
+ *     one, so the peer set is walked with no container of its own. Until #961 that
+ *     snapshot was a `std::vector`, whose THROWING allocator put an abort ahead of
+ *     every nothrow fallback on this exact path.
  * Peer slots remain heap, grown on demand and RECYCLED in place (never shrunk), so
- * the endpoint `peer_link` hands out stays pointer-valid for the link's life.
+ * the endpoint `peer_link` hands out stays pointer-valid for the link's life. Their
+ * allocation is per SESSION (a new peer past the high-water mark), never per frame.
  */
 #pragma once
 

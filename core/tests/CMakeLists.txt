@@ -310,6 +310,29 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     set_tests_properties(httpd_ws_tx_strand
         PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
+    # #961 — the FAN-OUT path's allocation, on the same fake. The instrument is what is
+    # new: the suite replaces the WHOLE global operator new/delete family (whole because a
+    # subset makes ASan abort on a mismatched pair), so "a broadcast allocates" is a number
+    # rather than a code reading. The destination snapshot used to be a std::vector, whose
+    # throwing allocator put an abort() ahead of every nothrow fallback on the push path.
+    add_executable(httpd_ws_fanout_alloc_test
+        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_fanout_alloc_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
+    target_include_directories(httpd_ws_fanout_alloc_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(httpd_ws_fanout_alloc_test PRIVATE libtracer)
+    target_link_options(httpd_ws_fanout_alloc_test PRIVATE
+        "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    libtracer_test_warnings(httpd_ws_fanout_alloc_test)
+    add_test(NAME httpd_ws_fanout_alloc COMMAND httpd_ws_fanout_alloc_test)
+    # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
+    # every case here constructs an adopting link — same exemption as the suites above.
+    set_tests_properties(httpd_ws_fanout_alloc
+        PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+
     # #900 + #901 — the WS *CLIENT* link's receive path, on the same construction: the
     # chip TU (integrations/esp-idf/libtracer/esp_ws_client_link.cpp) compiled against a
     # host fake of esp_transport_ws's frame stream and esp_pthread's stack-sizing seam.
