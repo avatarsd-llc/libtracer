@@ -21,7 +21,12 @@
  *     driver that never calls it. That is the default here: frames pile up in
  *     @ref frames_in_flight until a test calls @ref complete_one_tx;
  *   - `twai_node_transmit_wait_all_done` returns without completing anything, the
- *     bounded-drain answer a stalled controller gives.
+ *     bounded-drain answer a stalled controller gives;
+ *   - on the inbound side the driver reports a frame through the rx-done callback
+ *     and the callback fetches it with `twai_node_receive_from_isr`, which fills
+ *     the header it parsed and copies the data field under the CALLER's
+ *     `buffer_len`. A test scripts the frames that report arrives for (@ref
+ *     script_rx) and says when (@ref deliver_one_rx); nothing arrives on its own.
  *
  * The counting semaphore is INSTRUMENTED, and that is the point: @ref
  * peak_tx_waiters records how many callers were parked in `xSemaphoreTake` AT
@@ -29,14 +34,16 @@
  * never show more than one, however many writers are queued behind it — which is
  * what makes the #962 serialization an observable rather than a code reading.
  *
- * There is no bus, no controller and no interrupt: `complete_one_tx` runs the
- * tx-done callback on the CALLING thread, which is faithful in the one dimension
- * that matters here (it runs concurrently with a writer, and it may not block).
+ * There is no bus, no controller and no interrupt: `complete_one_tx` and
+ * `deliver_one_rx` run the driver's callbacks on the CALLING thread, which is
+ * faithful in the one dimension that matters here (they run concurrently with the
+ * link's own threads, and they may not block).
  */
 #pragma once
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 #include "esp_twai.h"
 #include "freertos/FreeRTOS.h"
@@ -76,5 +83,41 @@ bool complete_one_tx();
 
 /** @brief The tick budget the most recent `xSemaphoreTake` was given. */
 [[nodiscard]] TickType_t last_take_ticks();
+
+/**
+ * @brief One scripted inbound frame — the DRIVER's view of it, not the seam's.
+ *
+ * Deliberately spelt in the fields `twai_frame_header_t` carries rather than in a
+ * `tr::net::can_frame_data_t`, because the contracts under test ARE the
+ * conversion between the two: the seam's ingress admissibility rule and the
+ * DLC-to-length decode with its classic-width clamp. A script written in the
+ * seam's own carrier could not express the inputs that exercise them — it has no
+ * way to say "11-bit identifier", "remote-transmission request", or "a DLC coding
+ * more bytes than classic CAN carries".
+ */
+struct scripted_rx_frame_t {
+    std::uint32_t id = 0;  /**< @brief Arbitration identifier, as the controller reports it. */
+    bool extended = true;  /**< @brief The identifier-extension bit: a 29-bit ID when true. */
+    bool remote = false;   /**< @brief The remote-transmission-request bit. */
+    std::uint16_t dlc = 0; /**< @brief The RAW data-length CODE, not a byte count. */
+    std::vector<std::uint8_t> data; /**< @brief The data field the controller latched. */
+};
+
+/** @brief Queue @p frame for the node to report on a later @ref deliver_one_rx. */
+void script_rx(const scripted_rx_frame_t& frame);
+
+/** @brief Scripted inbound frames the node has not reported yet. */
+[[nodiscard]] std::size_t rx_scripted();
+
+/**
+ * @brief Report the OLDEST scripted inbound frame, as the rx-done ISR would.
+ *
+ * The mirror of @ref complete_one_tx: it runs the registered rx-done callback on
+ * the CALLING thread, and that callback is what fetches the frame back through
+ * `twai_node_receive_from_isr`.
+ *
+ * @return false when nothing is scripted (or no callback is registered).
+ */
+bool deliver_one_rx();
 
 }  // namespace fake_twai
