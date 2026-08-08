@@ -36,6 +36,10 @@ on:
       - "examples/**"
       - "tools/check_doc_citations.py"
       - "tools/tests/test_check_doc_citations.py"
+      # An anchor may now name a tooling script (#1052). `tools/**` is deliberately NOT
+      # the entry — most of this tree cannot move a cited line — so every enrolled path
+      # is listed one by one, and `EnrolledPathsArePinnedTest` fails if one is missed.
+      - "tools/cortexm0_footprint.py"
       - "tools/check_config_keys.py"
       - "tools/tests/test_check_config_keys.py"
       - ".github/workflows/doc-citations.yml"
@@ -51,6 +55,7 @@ on:
       - "examples/**"
       - "tools/check_doc_citations.py"
       - "tools/tests/test_check_doc_citations.py"
+      - "tools/cortexm0_footprint.py"
       - "tools/check_config_keys.py"
       - "tools/tests/test_check_config_keys.py"
       - ".github/workflows/doc-citations.yml"

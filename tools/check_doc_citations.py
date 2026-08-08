@@ -24,6 +24,13 @@ every source basename in the tree; a basename carried by two files is an ERROR,
 not a guess — the doc must spell the full path. Generated headers (`config.hpp.in`)
 count as sources, so the configuration pages' knob citations are pinnable too.
 
+Coverage is the pin list, not the doc set: a citation with no entry below is NOT checked,
+so `OK N verified` counts the pins, never "every citation in the docs". Build and tooling
+files are not sources and used to be unreadable here at all, which is how two rotted
+`LIBTRACER_NO_ATOMIC` citations sat beside a verified one in the same sentence (#1052).
+@ref CITABLE_BUILD_PATHS enrols the few whose citations ARE pinned — an explicit
+allowlist, because covering build files wholesale is a maintainer's call.
+
 Historical genres are deliberately NOT enrolled. `docs/adr/`, `docs/spec/` and
 `docs/research/` are dated records of a decision: their citations describe the tree as it
 stood, some already point past today's EOF, and pinning them would demand rewriting
@@ -665,6 +672,23 @@ ANCHORS = [
     ('core/src/route_handle.cpp:179', 't->egress.push_back(egress_entry_t{', 'bool route_handle_t::record_egress(std::string_view out_link, std::uint16_t label,'),
     ('core/src/route_handle.cpp:236', 't->egress.push_back(egress_entry_t{', 'std::pair<std::uint16_t, bool> route_handle_t::ensure_egress(std::string_view out_link,'),
     ('core/src/transport_can.cpp:313', 'tr::view::view_can_frames_t::split(*payload, cfg_.mode);'),
+    # --- #1052: the build/tooling citations, now readable (@ref CITABLE_BUILD_PATHS).
+    # `LIBTRACER_NO_ATOMIC` is spelled in three places outside `segment.hpp`, and the two
+    # in build files had both rotted: the footprint script's citation had landed on its
+    # include-directory assignment, the test CMake's on a blank line and an unrelated WS
+    # block. Neither file carried a pin, so the gate verified the `segment.hpp` half of
+    # that sentence and read as if it had verified the whole of it. These pin the lines
+    # the prose actually names, in the two pages that name them: the segment module page
+    # and the configuration-space design page.
+    ('tools/cortexm0_footprint.py:65', 'REQUIRED_MODULES = ('),
+    ('tools/cortexm0_footprint.py:94', 'cxx_flags = ['),
+    ('tools/cortexm0_footprint.py:101', '"-DLIBTRACER_NO_ATOMIC",'),
+    ('tools/cortexm0_footprint.py:115', '"--specs=nano.specs",'),
+    ('core/tests/CMakeLists.txt:1055', 'add_executable(substrate_test_no_atomic'),
+    ('core/tests/CMakeLists.txt:1068', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
+    # The leading indent is load-bearing: the bare token also appears in the comment
+    # three lines above the executable, and an anchor that matches both is not an anchor.
+    ('core/tests/CMakeLists.txt:1069', '    LIBTRACER_NO_ATOMIC'),
 ]
 
 
@@ -702,12 +726,31 @@ def source_map(root: pathlib.Path = None) -> dict:
 # `config.hpp.in` once and then walks down it in bare `:109` / `:136` refs, with each
 # row's CMake column citing a `CMakeLists.txt` line in between. The running citation
 # there is the header; the build file is an aside.
+#
+# #1052: a build or tooling file is not a source, so a citation into one was invisible
+# here and therefore unpinnable — `docs/modules/segment.md`'s `LIBTRACER_NO_ATOMIC`
+# sentence carried two of them, both rotted onto unrelated lines, sitting beside a
+# `segment.hpp` citation the gate DID verify. Enrolment is an explicit ALLOWLIST rather
+# than an extension suffix: whether the pin list should cover build and tooling files
+# wholesale is a maintainer's call, and every path listed here is one whose citations
+# are pinned in ANCHORS below.
+#
+# An enrolled path is still an ASIDE — it anchors its own lines and never becomes the
+# running file — so the knob table's bare `:109` / `:136` continuations keep walking the
+# header they name, exactly as before. That also means a doc citing an enrolled path
+# must spell it out every time; there is no bare continuation into one.
+CITABLE_BUILD_PATHS = (
+    "tools/cortexm0_footprint.py",
+    "core/tests/CMakeLists.txt",
+)
 _EXTS = "|".join(re.escape(s[1:]) for s in SOURCE_SUFFIXES)
 DOC_EXTS = "md|rst"
+_BUILD_PATHS = "|".join(re.escape(p) for p in CITABLE_BUILD_PATHS)
 CITATION_RE = re.compile(
     r"`?((?:[A-Za-z0-9_./-]*/)?[A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:" + _EXTS + r")):([\d,\-]+)`?"
     r"|((?:[A-Za-z0-9_./-]*/)?[A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:" + DOC_EXTS + r")):[\d,\-]+"
     r"|`:([\d,\-]+)`"
+    r"|`?(?P<build>" + _BUILD_PATHS + r"):(?P<buildspec>[\d,\-]+)`?"
 )
 
 
@@ -746,6 +789,10 @@ def citation_spans(context: str, filemap: dict = None) -> tuple:
 
     Every span is normalised to its full repo-relative path, so the ANCHORS table has
     exactly one spelling regardless of how the prose says it.
+
+    An enrolled build/tooling path (@ref CITABLE_BUILD_PATHS) anchors its own lines
+    without becoming the running file, so it can be pinned without disturbing the bare
+    `:N` runs that walk a header down a table.
     """
     filemap = source_map() if filemap is None else filemap
     key = tuple((k, tuple(v)) for k, v in sorted(filemap.items()))
@@ -760,12 +807,14 @@ def citation_spans(context: str, filemap: dict = None) -> tuple:
                 # file that lives outside the repo); it just cannot anchor a line.
                 last = None
                 continue
-            last, spec = resolved, m.group(2)
+            last, path, spec = resolved, resolved, m.group(2)
         elif m.group(3):
             last = None  # a non-source citation ends the inheritance run
             continue
+        elif m.group("build"):
+            path, spec = m.group("build"), m.group("buildspec")
         elif last:
-            spec = m.group(4)
+            path, spec = last, m.group(4)
         else:
             continue
         for part in spec.split(","):
@@ -778,7 +827,7 @@ def citation_spans(context: str, filemap: dict = None) -> tuple:
             # parse artifact (a hyphenated word), so ignore it rather than flood.
             if hi < lo or hi - lo > 40:
                 hi = lo
-            spans.append((last, lo, hi))
+            spans.append((path, lo, hi))
     return spans, errors
 
 
@@ -993,6 +1042,12 @@ def repin_document(text: str, maps: dict, filemap: dict = None) -> tuple:
             last, spec, span = resolved, m.group(2), m.span(2)
         elif m.group(3):
             last = None  # a non-source citation ends the inheritance run
+            continue
+        elif m.group("build"):
+            # An enrolled build/tooling path is pinned by HAND: `revision_line_maps`
+            # derives its maps from source files only, so there is no line map to move
+            # this citation by. Leaving it alone keeps doc and anchor in step — the gate
+            # then reds on both and names the page that cites them.
             continue
         elif last:
             spec, span = m.group(4), m.span(4)
