@@ -548,6 +548,22 @@ class NonSourceDirTest(unittest.TestCase):
         )
         self.assertEqual(m["config.hpp"], ["core/include/libtracer/config.hpp"])
 
+    def test_a_bench_agent_copy_does_not_make_a_basename_ambiguous(self):
+        """The `bench-` half of NON_SOURCE_DIR_PREFIXES (#1050).
+
+        Sibling of the `build-agent` case above. A `cmake -S bench -B bench-agent` renders
+        the same generated `config.hpp` one level deeper than a core build does, so the
+        nesting differs from the `build-` case and is worth its own case rather than a
+        parametrisation. Without this, reverting `NON_SOURCE_DIR_PREFIXES` to
+        `("build-",)` leaves the whole suite green — the prefix was added with no
+        mechanized guard, and a real `bench-*` tree never exists in CI.
+        """
+        m = self._tree_with(
+            "core/include/libtracer/config.hpp",
+            "bench-agent/core/generated/include/libtracer/config.hpp",
+        )
+        self.assertEqual(m["config.hpp"], ["core/include/libtracer/config.hpp"])
+
     def test_a_genuine_second_copy_IS_still_ambiguous(self):
         """The exclusions must not be so broad that real ambiguity stops being reported."""
         m = self._tree_with("examples/a/app_main.cpp", "examples/b/app_main.cpp")
