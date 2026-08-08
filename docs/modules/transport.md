@@ -59,10 +59,10 @@ the borrowed span dies when the callback returns, so a receiver that must outliv
 the callback needs this tier.
 
 There is deliberately no adapter that wraps a borrowed span into a rope; such a rope's
-refcounts would lie about lifetime. `fwd_router_t::add_child` (`core/src/fwd_router.cpp:522`)
+refcounts would lie about lifetime. `fwd_router_t::add_child` (`core/src/fwd_router.cpp:553`)
 therefore branches on the link's declared capability and installs exactly one sink —
-the rope form for an owning link, the span form otherwise (`fwd_router.cpp:629,636`, and
-`fwd_router.cpp:583,590` for the peer-named bus equivalent).
+the rope form for an owning link, the span form otherwise (`fwd_router.cpp:660,667`, and
+`fwd_router.cpp:614,621` for the peer-named bus equivalent).
 
 Every socket transport in the tree declares the owning tier: UDP
 (`transport_udp.hpp:111`), TCP client and server (`transport_tcp.hpp:205,336`),
@@ -92,7 +92,7 @@ kind keeps the `nullptr` default.
 ## QUIC and WebTransport
 
 Both live in the separate `libtracer_quic` target, configured by
-`LIBTRACER_WITH_QUIC` (`core/CMakeLists.txt:299`, default `OFF` because msquic must
+`LIBTRACER_WITH_QUIC` (`core/CMakeLists.txt:300`, default `OFF` because msquic must
 be installed). Core itself contains no `#ifdef` and no msquic reference: the module
 extends the transport catalog through `register_transport_type`, registering
 `quic_transport_factory()` under kind `quic` and `webtransport_transport_factory()`

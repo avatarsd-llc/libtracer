@@ -69,6 +69,24 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **A refused bus-NAME hop's error reply now carries TRAILER-LESS route bytes, like every
+  other addressed error this library emits (#887).** `fwd_router_t`'s rejection built its
+  `FWD{REPLY, kind=ERROR, STATUS{ERROR{tr::path::invalid}}}` with a hand-rolled encoder that
+  re-serialized the request's two `PATH` nodes through `wire::encode` — which REBUILDS a
+  trailer when the node carries one. The terminus resolver's error reply, from the same
+  logical inputs, copies its routes trailer-sliced (ADR-0041 §4). A peer that timestamped or
+  CRC'd its `src` therefore got those trailer bytes echoed back inside the reply's address
+  from one path and not the other. Both paths now go through one assembler, so a refused hop
+  answers with a route byte-identical to the terminus's: the trailer bytes are gone and the
+  opt byte's TS/CR/CW/TF bits are clear. **Frames whose routes carry no trailer — every frame
+  this library emits, and the ordinary case on the wire — are byte-identical to before.** No
+  header signature changed; `assemble_reply` / `assemble_error_reply` live in `core/src`, not
+  in `include/libtracer/`. The rejection reply's head segment is also now drawn from the
+  router's injected `egress` backend (#795, ADR-0074) instead of the global heap, so a bounded
+  node bounds this reply too — the same seam the terminus reply head already used. This
+  does **not** make the rejection path nothrow: the owning `wire::decode` that opens it still
+  allocates through a throwing `std::vector` (#885 owns the allocation policy).
+
 - **The `webtransport` factory refuses a DIAL `path` that is not origin-form (#1039).** A
   config whose `path` key is non-empty and does not begin with `/` — `path = "tracer"` — used
   to construct a dialer and emit that string as the extended CONNECT `:path`; it now answers

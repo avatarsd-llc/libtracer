@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "fwd_reply.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/error.hpp"
 #include "libtracer/fwd_frame_view.hpp"
@@ -412,6 +413,32 @@ void emit_compact(transport_t& down, std::uint16_t label, std::span<const std::b
 }
 
 /**
+ * @brief The trailer-EXCLUDED whole-TLV wire bytes of a decoded route node — the span shape
+ *        @ref tr::graph::assemble_error_reply copies into the reply head (ADR-0041 §4).
+ *
+ * `wire::encode` re-emits a trailer whenever the node carries one, so a peer that timestamped
+ * or CRC'd its route TLV had those bytes echoed back INSIDE the reply's address. That is
+ * exactly where the router's retired hand-rolled encoder diverged from the resolver, whose
+ * route copies are trailer-sliced at rest (#887). Clearing the trailer BITS and dropping the
+ * trailer VALUES is one operation, never two: a copy whose opt byte claims bytes the copy no
+ * longer carries is unparseable.
+ *
+ * The trailer-less fast path is not a guard — both arms produce the same bytes — it is the
+ * universal case answered without deep-copying a peer-sized subtree.
+ *
+ * @param route A decoded route node (a `PATH`).
+ * @return Its whole-TLV bytes with the OUTER trailer removed, or an EMPTY vector when
+ *         `wire::encode` refuses the node (an ill-formed `PATH_REF` descendant).
+ */
+[[nodiscard]] std::vector<std::byte> route_wire_trailer_less(const tlv_t& route) {
+    if (!route.opt.ts && !route.opt.cr) return wire::encode(route);
+    tlv_t sliced = route;
+    sliced.opt = sliced.opt.without_trailer();
+    sliced.trailer.reset();
+    return wire::encode(sliced);
+}
+
+/**
  * @brief Answer a bus-NAME-hop rejection (ADR-0073 §3 / RFC-0020) with an ADDRESSED
  *        `FWD{REPLY, kind=ERROR, STATUS{ERROR{tr::path::invalid}}}` over the inbound link.
  *
@@ -423,13 +450,26 @@ void emit_compact(transport_t& down, std::uint16_t label, std::span<const std::b
  * (the resolver's own rule), and this is a COLD path, so the owning `wire::decode` is
  * within the ADR-0039 allocation budget exactly as the control-frame decodes above are.
  *
- * The reply mirrors the resolver's assembled-error grammar byte for byte:
+ * The reply bytes are not mirrored from the resolver's grammar — they ARE the resolver's
+ * grammar (#887): @ref tr::graph::assemble_error_reply is the one definition of
  * `FWD{ VALUE op=REPLY, PATH dst=req.src, PATH src=req.dst, VALUE kind=ERROR,
  * STATUS{ ERROR{ VALUE u16 LE code } } }` (RFC-0004 §D with the RFC-0002 §C registered-code
- * identity, `tr::path::invalid` = 0x0021).
+ * identity, `tr::path::invalid` = 0x0021). This function's job is reduced to the two things
+ * only it knows: which frame earns a rejection, and where the two route TLVs come from.
+ *
+ * @warning Sharing the encoder does NOT make this path nothrow. The owning `wire::decode`
+ *          on the first line still allocates through a throwing `std::vector` on the same
+ *          peer-provoked path; the RX-thread allocation policy is #885's, not this
+ *          function's. What is now shared is the SHAPE.
+ *
+ * @param registry     The child registry the answer is routed back through.
+ * @param inbound_name This node's name for the link the refused frame arrived on.
+ * @param frame        The refused frame's bytes.
+ * @param egress       The byte backend the reply head draws from (#795, ADR-0074) — the
+ *                     router's own egress seam, so a bounded node bounds this reply too.
  */
 void reject_bus_name_hop(const child_registry_t& registry, std::string_view inbound_name,
-                         std::span<const std::byte> frame) {
+                         std::span<const std::byte> frame, mem::mem_backend_t& egress) {
     const auto dec = wire::decode(frame);
     if (!dec) return;  // malformed ⇒ drop by value
     const tlv_t* op = nullptr;
@@ -460,34 +500,25 @@ void reject_bus_name_hop(const child_registry_t& registry, std::string_view inbo
     if (static_cast<fwd_op_t>(u8(op->payload[0]) & graph::kFwdOpcodeMask) == fwd_op_t::REPLY)
         return;
 
-    const std::uint16_t code = std::to_underlying(wire::err_t::PATH_INVALID);
-    const std::array<std::byte, 2> le{static_cast<std::byte>(code & 0xFFu),
-                                      static_cast<std::byte>(code >> 8)};
-    std::vector<std::byte> err_body;
-    wire::emit_tlv(err_body, type_t::VALUE, opt_t{}, std::span<const std::byte>(le));
-    std::vector<std::byte> status_body;
-    wire::emit_tlv(status_body, type_t::ERROR, opt_t{.pl = true}, err_body);
-
-    std::vector<std::byte> body;
-    const std::byte opb{static_cast<std::uint8_t>(fwd_op_t::REPLY)};
-    wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&opb, 1));
     // Reply routes swapped, as the resolver assembles them: reply dst = request src (the
     // accumulated return route), reply src = request dst (the refused spelling — what the
     // peer asked for, echoed so it can correlate).
-    const std::vector<std::byte> rdst = wire::encode(*src);
-    const std::vector<std::byte> rsrc = wire::encode(*dst);
-    body.insert(body.end(), rdst.begin(), rdst.end());
-    body.insert(body.end(), rsrc.begin(), rsrc.end());
-    const std::byte kind{static_cast<std::uint8_t>(graph::reply_kind_t::ERROR)};
-    wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&kind, 1));
-    wire::emit_tlv(body, type_t::STATUS, opt_t{.pl = true}, status_body);
-    std::vector<std::byte> out;
-    wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
+    const std::vector<std::byte> rdst = route_wire_trailer_less(*src);
+    const std::vector<std::byte> rsrc = route_wire_trailer_less(*dst);
+    // A route `wire::encode` refuses is no address at all, and a head sized around an empty
+    // span would announce a body length no bytes occupy. Drop by value, as for a missing src.
+    if (rdst.empty() || rsrc.empty()) return;
+    const view::rope_t reply =
+        graph::assemble_error_reply(rdst, rsrc, graph::status_t::INVALID_PATH, egress);
+    // Exactly one link by construction: an error reply carries no shared payload and no mint
+    // trailer, so `assemble_error_reply` yields the head segment alone and it egresses
+    // contiguously — the single `send(span)` this path has always made. A zero-link rope is
+    // the egress refusal; drop rather than emit a headerless frame.
+    if (reply.link_count() != 1) return;
     // `by_name` includes the bus-peer fallback, so a frame that arrived FROM a peer (whose
     // inbound_name is the peer's own name) answers back over that peer's directed endpoint —
     // the same lookup resolve_terminus uses for its replies.
-    if (transport_t* const up = registry.by_name(inbound_name))
-        up->send(std::span<const std::byte>(out));
+    if (transport_t* const up = registry.by_name(inbound_name)) up->send(reply.links()[0].bytes());
 }
 
 /**
@@ -1102,7 +1133,7 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
                     // the codec's leniency. The SEAM on the line above is the testable part,
                     // and `fwd_flatten_backend_test` pins it.
                     if (flat.empty()) return;
-                    reject_bus_name_hop(registry_, inbound_name, flat.bytes());
+                    reject_bus_name_hop(registry_, inbound_name, flat.bytes(), *egress_);
                 },
                 /* terminus */
                 [&] {
@@ -1148,7 +1179,7 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
                         sink.fn(sink.ctx, inbound_name, *dec);
                 }
             },
-            /* reject */ [&] { reject_bus_name_hop(registry_, inbound_name, frame); },
+            /* reject */ [&] { reject_bus_name_hop(registry_, inbound_name, frame, *egress_); },
             /* terminus */ [&] { resolve_terminus(inbound_name, frame, frame_view, inbound_ctx); },
             /* reply */
             [&] {
