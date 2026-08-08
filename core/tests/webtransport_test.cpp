@@ -792,8 +792,9 @@ void test_spec_dial_connect_path() {
     //
     //    THIS LISTENER CANNOT SEE THE DEFECT: its accept arm validates
     //    `:method`/`:protocol` and serves every resource, so before the fix the
-    //    malformed CONNECT SUCCEEDED here — the write returned a value and
-    //    `session_path()` read "tracer". Both of those are what redden.
+    //    malformed CONNECT SUCCEEDED here — measured on unmodified main, the
+    //    write returned a value and the listener reported `session_path` =
+    //    "tracer", `session_up` = 1. All three checks below redden there.
     //
     //    The "no socket was opened" observable is the listener's: a dialer that
     //    was never constructed cannot handshake, so this fresh listener has
