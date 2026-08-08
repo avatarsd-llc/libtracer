@@ -37,9 +37,24 @@ default — add them explicitly per deployment.
 enforcement are post-MVP). Run on a trusted link until the matching `security_*` module
 for your transport lands.
 
+## ESP32 CAN (TWAI)
+
+On an `espressif32` target the build hook below also compiles the ESP-IDF TWAI
+`can_link_t` and exposes its header, so `transport_can` gets a real on-chip CAN 2.0
+bus. Construct a `tr::net::twai_link_t{{tx_gpio, rx_gpio, bitrate}}`, hand it to a
+**CLASSIC** `transport_can` (TWAI is classic-only, no CAN-FD), and register
+`can_transport_factory()`. On every other platform the hook is a no-op.
+
+This glue is gated at **compile + link** by the `pio-esp32-can` workflow, which packs
+the package and `pio run`s the `framework = espidf` consumer in
+[`tests/packaging/pio_esp32_can/`](../../tests/packaging/pio_esp32_can/). Moving frames
+on a real bus is a separate, still-open sign-off — the job energises no pin.
+
 ## Files
 
-- `library.json` — PlatformIO manifest (points at `core/include/` and `core/src/`).
+- `library.json` (repo root) — PlatformIO manifest (points at `core/include/` and
+  `core/src/`, and lists what `pio pkg publish` ships in `export.include`).
+- `pio_esp32_can.py` — the `build.extraScript` hook described above.
 
 ## Releasing
 

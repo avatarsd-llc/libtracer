@@ -42,6 +42,30 @@
 
 namespace tr::net {
 
+namespace detail {
+
+/**
+ * @brief TEST SEAM: run by `transport_tcp_server::accept_peer` at the exact instant a new
+ *        peer's fd has been published and its slot is ONE store away from open — inside the
+ *        `write_m_` hold that makes the two stores atomic to senders.
+ *
+ * A slot's two sender-visible fields are published under `write_m_`, fd first, so
+ * "open ⇒ fd valid" holds for every sender: a broadcast holding that lock runs either
+ * entirely before the slot goes live or entirely after it. Publish them unlocked with `open`
+ * first and a broadcast can read `open == true` alongside `fd == -1` and write the frame to a
+ * closed descriptor. That is not observable from the outside by racing: the window is two
+ * instructions wide. This hook is where a test HOLDS the mid-publish instant open, broadcasts
+ * into it, and checks the frame arrives at the peer being accepted; with the stores unlocked
+ * and reordered the identical test reads an empty socket. Null in production — the cost is
+ * one predictable null-check, once per accepted connection, on the (cold) accept path.
+ *
+ * Same shape and same rules as `ws_peer_published_hook`: install it before the peer that
+ * should trip it connects, and clear it before the test returns.
+ */
+inline void (*tcp_peer_publishing_hook)() = nullptr;
+
+}  // namespace detail
+
 /**
  * @brief Suggested module name for a DIAL `tcp` connection (ADR-0073 §4).
  *
@@ -365,9 +389,16 @@ class transport_tcp_server : public transport_t, public bus_link_t, private stre
     /**
      * @brief Guards the slot vector and every slot's NAME (cross-thread reads:
      *        enumerate_peers / peer_link vs the poll thread's accept/teardown).
-     *        Per-slot fds are atomics read under `write_m_` by senders; each
-     *        slot's framer is poll-thread-only.  Lock order where nested:
-     *        peers_m_ → write_m_.
+     *
+     *        ONE rule for a slot's mutable state, both halves of its lifecycle:
+     *        `open`/`fd` are mutated ONLY under `write_m_` (accept publishes them,
+     *        teardown resets them; the destructor's closing sweep is the single
+     *        exception and runs after the poll thread is joined) and read by
+     *        senders under the same lock, so a sender sees a slot either fully
+     *        live or not live at all; `name` is guarded by peers_m_; each slot's
+     *        framer is poll-thread-only.  The two atomics carry `relaxed` on
+     *        every access — the lock, not the memory order, is what orders them.
+     *        Lock order where nested: peers_m_ → write_m_.
      */
     mutable std::mutex peers_m_;
     std::vector<std::unique_ptr<session_t>> slots_;  // insert-only; recycled in place

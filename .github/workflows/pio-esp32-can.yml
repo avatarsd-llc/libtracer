@@ -1,0 +1,102 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# Packaging gate for the PlatformIO espressif32 CAN glue (#965), no hardware.
+#
+# The ESP-IDF TWAI can_link_t (twai_link.cpp) is CI-built by esp-idf.yml, but
+# through the ESP-IDF *managed component* path. The PlatformIO path is a different
+# mechanism end to end — library.json's `build.extraScript` and `export.include`,
+# plus integrations/platformio/pio_esp32_can.py's CPPPATH and env.BuildSources —
+# and nothing built it. This job does: it packs the package exactly as `pio pkg
+# publish` would and `pio run`s a `framework = espidf` consumer that names
+# `tr::net::twai_link_t`, a CLASSIC `transport_can` over it, and
+# `can_transport_factory()`. A clean compile+link IS the gate.
+#
+# The link is the assertion, and it is not vacuous — measured by ablation on the
+# fixture before this landed, each of these reddens the job on its own:
+#   - deriving the package root from `__file__` in the hook  -> NameError, no build;
+#   - dropping the compat/include CPPPATH                    -> posix_endpoint.cpp,
+#                                                               "poll.h: No such file";
+#   - dropping the twai include CPPPATH                      -> main.cpp, "twai_link.hpp:
+#                                                               No such file";
+#   - dropping the env.BuildSources call                     -> "undefined reference to
+#                                                               twai_link_t::twai_link_t";
+#   - dropping its once-per-run guard                        -> "multiple definition" x10;
+#   - dropping esp_thread.hpp or compat/include from
+#     library.json's export.include                          -> "No such file" in the
+#                                                               packed consumer.
+#
+# SEPARATE workflow, like esp-idf.yml and can-vcan-e2e.yml: the required core
+# gates must never depend on a multi-GB embedded toolchain download.
+#
+# OUT OF SCOPE: frames moving on a real TWAI bus. That is the on-bus sign-off and
+# it still needs a transceiver and a second node; nothing here energises a pin.
+name: pio-esp32-can
+
+# The two path lists are duplicated rather than shared through a YAML anchor: `on:`
+# is parsed before any anchor a job could define, and this file needs no other
+# sharing, so the duplication costs one edit and avoids depending on how the parser
+# treats anchors here. `core/include/**` + `core/src/**` are in both: the packaged
+# srcFilter compiles the whole core, so a shared-header change can break this build
+# without touching a single platformio/ file (the trap quic.yml's allowlist fell into).
+on:
+  push:
+    branches: [main]
+    paths:
+      - "library.json"
+      - "integrations/platformio/**"
+      - "integrations/esp-idf/libtracer/twai_link.cpp"
+      - "integrations/esp-idf/libtracer/esp_thread.hpp"
+      - "integrations/esp-idf/libtracer/include/**"
+      - "integrations/esp-idf/libtracer/compat/**"
+      - "core/include/**"
+      - "core/src/**"
+      - "tests/packaging/pio_esp32_can/**"
+      - ".github/workflows/pio-esp32-can.yml"
+  pull_request:
+    paths:
+      - "library.json"
+      - "integrations/platformio/**"
+      - "integrations/esp-idf/libtracer/twai_link.cpp"
+      - "integrations/esp-idf/libtracer/esp_thread.hpp"
+      - "integrations/esp-idf/libtracer/include/**"
+      - "integrations/esp-idf/libtracer/compat/**"
+      - "core/include/**"
+      - "core/src/**"
+      - "tests/packaging/pio_esp32_can/**"
+      - ".github/workflows/pio-esp32-can.yml"
+  workflow_dispatch:
+
+jobs:
+  pio-run:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # PINNED on purpose. The hook reads `pio_lib_builder.path` — a PlatformIO
+      # builder internal, and the handle this hook uses to reach the package root
+      # (`__file__` is undefined in an SCons SConscript, so dirname arithmetic is
+      # out; piolib does chdir into the package, so a relative path would work too,
+      # but it would depend on that behaviour rather than on an exported value). A floating core could
+      # move that under us and red main for a reason outside this repo; bumping
+      # this pin is the visible, reviewable act that re-validates the assumption.
+      - name: Install PlatformIO Core
+        run: pip install --quiet "platformio==6.1.18"
+
+      # Pack the package the way the release job publishes it, so the consumer
+      # below compiles the file set `export.include` really ships — not the
+      # working tree. Reads the working tree, so the change under test is built.
+      - name: Pack the PlatformIO package (export.include as published)
+        run: pio pkg pack -o tests/packaging/pio_esp32_can/libtracer-pkg.tar.gz
+
+      - name: Build the espressif32 TWAI consumer (compile + link)
+        working-directory: tests/packaging/pio_esp32_can
+        run: pio run
+
+      - name: Show build artifacts
+        if: always()
+        working-directory: tests/packaging/pio_esp32_can
+        run: ls -la .pio/build/esp32c6/firmware.elf .pio/build/esp32c6/firmware.bin || true
