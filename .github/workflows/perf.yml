@@ -72,6 +72,15 @@ jobs:
       # against the recorded false-failure and true-regression sample sets.
       - name: Perf-gate decision-rule tests
         run: python3 bench/test_perf_gate.py
+      # The bench's ARGV contract (#1040), also before anything is timed. An unrecognised
+      # mode used to fall through into the full default sweep and exit 0, which in a
+      # cross-commit A/B silently joins one axis against every axis on the same row keys.
+      # LIBTRACER_BENCH is spelled explicitly so a binary that failed to build FAILS this
+      # step instead of skipping it.
+      - name: Bench argv-contract tests (an unknown mode must refuse to run)
+        env:
+          LIBTRACER_BENCH: bench/build/bench_libtracer
+        run: python3 bench/test_bench_cli.py
       - name: Performance gate (INTERLEAVED same-runner A/B vs main)
         run: |
           python3 bench/perf_gate.py \
