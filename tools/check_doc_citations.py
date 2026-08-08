@@ -468,10 +468,10 @@ ANCHORS = [
     ('core/include/libtracer/transport_quic.hpp:153',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }'),
     # core/include/libtracer/transport_tcp.hpp
-    ('core/include/libtracer/transport_tcp.hpp:175',
+    ('core/include/libtracer/transport_tcp.hpp:205',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'tcp_transport_t& operator=(const tcp_transport_t&) = delete;'),
-    ('core/include/libtracer/transport_tcp.hpp:301',
+    ('core/include/libtracer/transport_tcp.hpp:336',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'transport_tcp_server& operator=(const transport_tcp_server&) = delete;'),
     # core/include/libtracer/transport_udp.hpp
@@ -609,15 +609,15 @@ ANCHORS = [
      '*        MEASURED (`bench_transport_iov`): the fallback fires at exactly **17'),
     ('core/src/transport_tcp.cpp:62',
      "*        `bench_forward_heap`'s `allocs=0` gate cannot see it: that bench drives"),
-    ('core/src/transport_tcp.cpp:181', 'bool tcp_transport_t::read_exact(int fd, std::byte* dst, std::size_t len) {'),
-    ('core/src/transport_tcp.cpp:201', 'std::array<std::byte, 4096> scratch;'),
+    ('core/src/transport_tcp.cpp:207', 'bool tcp_transport_t::read_exact(int fd, std::byte* dst, std::size_t len) {'),
+    ('core/src/transport_tcp.cpp:227', 'std::array<std::byte, 4096> scratch;'),
     # zero-copy-and-flatten.md quotes this comment's tail verbatim, so the anchor carries the
     # QUOTED line — pinning `serve()`'s signature two constructs up passed while the citation
     # pointed at code the doc never quotes.
-    ('core/src/transport_tcp.cpp:223',
+    ('core/src/transport_tcp.cpp:249',
      '// buffer, no copy; feeding recv chunks through feed() would add one).'),
-    ('core/src/transport_tcp.cpp:243', 'if (!read_exact(fd, seg->bytes.data(), len)) return;'),
-    ('core/src/transport_tcp.cpp:482', 'std::array<std::byte, 4096> chunk;',
+    ('core/src/transport_tcp.cpp:269', 'if (!read_exact(fd, seg->bytes.data(), len)) return;'),
+    ('core/src/transport_tcp.cpp:508', 'std::array<std::byte, 4096> chunk;',
      'void transport_tcp_server::service_peer(session_t& s) {'),
     # core/src/transport_udp.cpp
     ('core/src/transport_udp.cpp:132',
@@ -673,7 +673,7 @@ ANCHORS = [
     ('core/include/libtracer/mem_heap.hpp:183', '[[nodiscard]] bool try_reserve(std::vector<T>& v, std::size_t n) noexcept {'),
     ('core/include/libtracer/mem_heap.hpp:375', '[[nodiscard]] inline std::optional<view_t> over_bytes(std::span<const std::byte> bytes,'),
     ('core/include/libtracer/path.hpp:156', 'explicit path_t(std::string_view text);'),
-    ('core/include/libtracer/transport_tcp.hpp:308', '[[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }'),
+    ('core/include/libtracer/transport_tcp.hpp:343', '[[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }'),
     ('core/include/libtracer/transport_ws.hpp:233', '[[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }'),
     ('core/include/libtracer/edge_pin.hpp:153', 'class pin_t {'),
     ('core/src/fwd_router.cpp:629', 'link.set_rope_receiver('),

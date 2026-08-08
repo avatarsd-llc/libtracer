@@ -211,7 +211,7 @@ The arena is *structure* storage — a node array and the walk's open-node stack
 independent of the payload's byte count. No node-counting pre-pass exists, and none is needed: the
 seam alone carries the failure. The three draws that make the RX decode path peer-provokable — the
 node array's growth, the sink's open-node stack, and the walk stack's spill past its inline slots —
-are enumerated in the changelog (`core/CHANGELOG.md:2495-2499`), which is the citation for that leg being
+are enumerated in the changelog (`core/CHANGELOG.md:2512-2516`), which is the citation for that leg being
 closed.
 
 TLV nesting has no depth constant. Depth is bounded by the receiver's decode resources, and

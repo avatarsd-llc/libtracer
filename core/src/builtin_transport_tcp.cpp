@@ -10,6 +10,8 @@
  * generated register_builtin_transports() calls register_tcp_transport only then, so a
  * TCP-less build carries no reference to tcp_transport_t. See builtin_transports.hpp.
  */
+#include <cstddef>
+
 #include "libtracer/builtin_transports.hpp"
 #include "libtracer/config_reader.hpp"
 #include "libtracer/transport_tcp.hpp"
@@ -36,19 +38,31 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
     // library registers NEITHER (ADR-0073 §4): the application declares each module under a
     // name IT chooses via register_module (kTcpClientSuggestedModule /
     // kTcpServerSuggestedModule in transport_tcp.hpp are the suggested defaults).
-    vertex.register_transport_type("tcp", [rx_backend](const conn_settings_t& s,
-                                                       const wire::tlv_t* raw_config) {
-        const config_reader_t cfg(raw_config);
-        const bool peer_named = cfg.flag("peer_named").value_or(false);
-        const auto max_peers = static_cast<std::size_t>(cfg.u32("max_peers").value_or(0));
-        return dial_or_listen(
-            s,
-            [&] { return make_checked<tcp_transport_t>(s.addr, s.port, rx_backend, s.max_frame); },
-            [&] {
-                return make_checked<transport_tcp_server>(s.port, rx_backend, s.max_frame,
-                                                          max_peers, peer_named);
-            });
-    });
+    vertex.register_transport_type(
+        "tcp", [rx_backend](const conn_settings_t& s, const wire::tlv_t* raw_config) {
+            const config_reader_t cfg(raw_config);
+            const bool peer_named = cfg.flag("peer_named").value_or(false);
+            const auto max_peers = static_cast<std::size_t>(cfg.u32("max_peers").value_or(0));
+            return dial_or_listen(
+                s,
+                [&] {
+                    // DEFERRED recv thread (#1045, the `ws` factory's shape): the connection is
+                    // dialled here, but `transport_vertex_t::make_connection` only wires the
+                    // receiver a few steps later (register the vertex, then
+                    // `fwd_router_t::add_child`). A peer that pushes the instant our connect
+                    // completes has that frame in flight through that whole window, and a recv
+                    // thread running inside it would decode it into an empty sink and drop it
+                    // with no counter moving. The vertex calls `start_receiving()` once the link
+                    // is fully wired.
+                    return make_checked<tcp_transport_t>(s.addr, s.port, rx_backend, s.max_frame,
+                                                         /*recv_stack=*/std::size_t{0},
+                                                         /*defer_recv=*/true);
+                },
+                [&] {
+                    return make_checked<transport_tcp_server>(s.port, rx_backend, s.max_frame,
+                                                              max_peers, peer_named);
+                });
+        });
 }
 
 }  // namespace tr::net

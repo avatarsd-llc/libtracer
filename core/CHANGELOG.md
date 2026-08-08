@@ -43,10 +43,29 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   frames flow", and for a DIAL transport that spawns its receive thread inside its own
   constructor that contract is unsatisfiable from the outside: the thread is already draining
   the socket while the owner is still installing its sinks. Outside the tests,
-  `transport_ws_client` is the only override under `core/include` + `core/src` +
-  `integrations/` + `bindings/` today (`grep -rn start_receiving`); it takes effect only when
-  the client is constructed with the new trailing
+  `transport_ws_client` and (since #1045) `tcp_transport_t` are the overrides under
+  `core/include` + `core/src` + `integrations/` + `bindings/` today
+  (`grep -rn start_receiving`); each takes effect only when constructed with its trailing
   `defer_recv` flag, so a direct `transport_ws_client(host, port)` behaves exactly as before.
+
+- **`net::tcp_transport_t` takes the two-phase bring-up: a trailing `defer_recv` DIAL
+  constructor flag and a `start_receiving()` override (#1045).** The `transport_ws_client`
+  shape (#1025) applied to the transport this issue is scoped to, and nothing else — quic,
+  webtransport, the ESP-IDF-native WS client link and CAN are untouched, and each has its own
+  follow-up issue. `defer_recv` defaults to `false`, so a direct
+  `tcp_transport_t(host, port)` behaves exactly as before and no existing call site HAS to
+  change to keep compiling; the one that does change is the built-in `tcp` DIAL factory
+  (`core/src/builtin_transport_tcp.cpp`), deliberately, so a SPEC-created dialer gets the
+  deferred form. The LISTEN constructor is untouched. With `true` the connect still happens in the
+  constructor and `ok()` still answers for it, but no receive thread exists and no byte is
+  read until the owner calls `start_receiving()`. The override is idempotent and inert
+  wherever there is nothing to arm — a second call, a one-phase link, a LISTEN link, and a
+  link whose dial failed — because `transport_vertex_t::make_connection` calls it
+  unconditionally on every link it wires. The built-in `tcp` kind's DIAL factory
+  (`core/src/builtin_transport_tcp.cpp`) now constructs the deferred form, so a connection
+  created by the in-band creating write is armed only once its receiver is installed and a
+  peer's push-on-connect frame is delivered instead of being decoded into an empty sink and
+  dropped with no counter moving.
 
 ### Changed
 

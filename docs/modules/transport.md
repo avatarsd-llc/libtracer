@@ -65,7 +65,7 @@ the rope form for an owning link, the span form otherwise (`fwd_router.cpp:629,6
 `fwd_router.cpp:583,590` for the peer-named bus equivalent).
 
 Every socket transport in the tree declares the owning tier: UDP
-(`transport_udp.hpp:111`), TCP client and server (`transport_tcp.hpp:175,301`),
+(`transport_udp.hpp:111`), TCP client and server (`transport_tcp.hpp:205,336`),
 WebSocket server and client (`transport_ws.hpp:217,439`), CAN
 (`transport_can.hpp:475`), QUIC (`transport_quic.hpp:153`) and WebTransport
 (`transport_webtransport.hpp:158`). The borrowed-span path is the base-class default
@@ -86,7 +86,7 @@ peer and no peer state is stored.
 
 `transport_t::bus()` returns the facet or `nullptr`. CAN always returns it
 (`transport_can.hpp:456`); the TCP and WebSocket **servers** return it when
-configured peer-named (`transport_tcp.hpp:308`, `transport_ws.hpp:233`); every other
+configured peer-named (`transport_tcp.hpp:343`, `transport_ws.hpp:233`); every other
 kind keeps the `nullptr` default.
 
 ## QUIC and WebTransport
@@ -231,9 +231,14 @@ flowchart LR
   next statement runs, and an empty sink drops it with no counter moving
   ([#1025](https://github.com/avatarsd-llc/libtracer/issues/1025)). `start_receiving()`
   is the second phase that opens the window — a no-op default, so an owner calls it
-  unconditionally as its last wiring step; `transport_ws_client` honors it when
-  constructed with `defer_recv`, which is how `transport_vertex_t` builds a SPEC-created
-  `ws` dialer.
+  unconditionally as its last wiring step; `transport_ws_client` and `tcp_transport_t`
+  honor it when constructed with `defer_recv`
+  ([#1045](https://github.com/avatarsd-llc/libtracer/issues/1045)), which is how
+  `transport_vertex_t` builds a SPEC-created `ws` or `tcp` dialer. `quic`,
+  `webtransport` and the ESP-IDF-native WS client link still take the no-op default;
+  whether the window is reachable on each has its own follow-up (#1100–#1103). `udp` has
+  no DIAL constructor of this shape — it binds an ephemeral port, never `::connect`s and
+  sends nothing in the constructor, so no peer can learn its source port to push to.
 - **The callable sugar binds by address.** `set_receiver(F& sink)` and
   `set_rope_receiver(F& sink)` take an lvalue; a temporary lambda does not compile,
   and a callable destroyed early dangles exactly like a stale `ctx`.

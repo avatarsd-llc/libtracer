@@ -94,8 +94,8 @@ struct prefixed_iov_t {
 
 tcp_transport_t::tcp_transport_t(const std::string& peer_host, std::uint16_t peer_port,
                                  mem::mem_backend_t* backend, std::size_t max_frame,
-                                 std::size_t recv_stack)
-    : backend_(backend) {
+                                 std::size_t recv_stack, bool defer_recv)
+    : backend_(backend), recv_stack_(recv_stack) {
     if (max_frame != 0) max_frame_ = max_frame;
     const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return;
@@ -113,6 +113,32 @@ tcp_transport_t::tcp_transport_t(const std::string& peer_host, std::uint16_t pee
     set_rcv_timeout(fd);
     set_nodelay(fd);
     conn_fd_.store(fd, std::memory_order_relaxed);
+    // Two-phase bring-up (#1045). Spawning the recv thread HERE is the historical shape and
+    // stays the default, but it makes the base's "install the sinks before frames flow"
+    // contract unsatisfiable: this thread can decode and deliver a frame the peer pushed on
+    // connect before the caller's next statement installs a sink, and the empty slot drops it
+    // silently — no dropped_rx(), no malformed_rx(). `defer_recv` hands that ordering back to
+    // the owner: the socket is up and its bytes are left on it until `start_receiving()`.
+    //
+    // Qualified deliberately (the transport_ws_client spelling): dispatching a virtual from a
+    // constructor would reach THIS class's override anyway (the derived part does not exist
+    // yet), so spelling it out is the honest form — a subclass cannot substitute its own
+    // bring-up here, and nothing in this call should look as if it could.
+    if (!defer_recv) tcp_transport_t::start_receiving();
+}
+
+void tcp_transport_t::start_receiving() {
+    // A LISTEN link's accept loop IS its one `start`, spawned in its constructor. Without
+    // this arm an owner arming every link it wires would spawn a SECOND thread onto an
+    // already-accepted peer's fd — two `serve` loops splitting one stream, over a `body_`
+    // the second `start` reassigns while the first is running it.
+    if (listen_) return;
+    const int fd = conn_fd_.load(std::memory_order_relaxed);
+    if (fd < 0) return;  // the dial failed: there is no socket to serve
+    // One-shot: `posix_endpoint_t::start` may be called at most once per endpoint, and this
+    // is reachable both from the one-phase constructor and from an owner that calls it
+    // unconditionally on every link it wires.
+    if (recv_started_.exchange(true, std::memory_order_relaxed)) return;
     start(
         [this, fd] {
             serve(fd);
@@ -121,7 +147,7 @@ tcp_transport_t::tcp_transport_t(const std::string& peer_host, std::uint16_t pee
             // not a local stop — so report the link down (no locks held here).
             if (!stop_.load(std::memory_order_relaxed)) notify_down();
         },
-        recv_stack);
+        recv_stack_);
 }
 
 tcp_transport_t::tcp_transport_t(std::uint16_t bind_port, mem::mem_backend_t* backend,
