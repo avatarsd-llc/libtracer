@@ -949,6 +949,164 @@ void test_frame_pipelined_behind_the_101() {
     ::close(lfd);
 }
 
+/**
+ * @brief #1025 — a `defer_recv` client decodes NOTHING until start_receiving(), so a message
+ *        the server pushes ON CONNECT cannot be dropped into an empty sink.
+ *
+ * The one-phase constructor dials, handshakes AND spawns the recv thread before it returns,
+ * so `set_receiver` can only ever run afterwards. A server that pushes its state the instant
+ * the handshake completes has that message in flight before the constructor returns, and
+ * whether it beats the caller's next statement is decided by nothing but scheduling: the
+ * recv thread reaching its first drain versus the calling thread performing one store. Lose
+ * that race and `receiver_slot_t`'s empty slot drops the message — no counter, no queue, a
+ * healthy-looking connection.
+ *
+ * The guard does not race it. The peer writes the `101`, a PING and a COMPLETE BINARY
+ * message in ONE `::send` (so all of it is in the client's first `recv`) and then goes
+ * quiet, and the client is constructed with `defer_recv`. Three observables, in order:
+ *
+ *  - SILENCE. For a generous window after the handshake the client sends back NOTHING — the
+ *    pipelined PING is not answered, because nothing has been decoded at all. A client that
+ *    started its recv thread in the constructor answers it well inside that window.
+ *  - the PONG, once `start_receiving()` runs — the positive control that keeps the silence
+ *    above from being vacuous: the bytes were really there, and really decodable.
+ *  - the MESSAGE, delivered to a sink installed while the thread was still held. In the
+ *    one-phase shape this is exactly the frame that vanishes.
+ */
+void test_push_on_connect_waits_for_start_receiving() {
+    std::printf("transport_ws client — a push-on-connect message waits for the sink (#1025):\n");
+
+    const int lfd = ::socket(AF_INET, SOCK_STREAM, 0);
+    check(lfd >= 0, "raw listener created");
+    const int one = 1;
+    ::setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    sockaddr_in local{};
+    local.sin_family = AF_INET;
+    local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    local.sin_port = 0;
+    check(::bind(lfd, reinterpret_cast<sockaddr*>(&local), sizeof(local)) == 0, "listener bound");
+    check(::listen(lfd, 1) == 0, "listener listening");
+    sockaddr_in bound{};
+    socklen_t blen = sizeof(bound);
+    ::getsockname(lfd, reinterpret_cast<sockaddr*>(&bound), &blen);
+
+    const std::array<std::byte, 3> ping_payload{std::byte{0xA1}, std::byte{0xB2}, std::byte{0xC3}};
+    const std::array<std::byte, 5> pushed{std::byte{0x50}, std::byte{0x55}, std::byte{0x53},
+                                          std::byte{0x48}, std::byte{0x21}};
+
+    std::promise<bool> one_write_done;  // the combined blob went out as ONE send
+    std::promise<bool> stayed_quiet;    // nothing came back while the recv thread was held
+    std::promise<bool> pong_seen;       // ...and the PING was answered once it was released
+    std::promise<void> armed;           // sink installed + start_receiving() called
+    std::promise<void> test_done;       // safe to close the peer socket
+    auto one_write_fut = one_write_done.get_future();
+    auto quiet_fut = stayed_quiet.get_future();
+    auto pong_fut = pong_seen.get_future();
+    auto armed_fut = armed.get_future();
+    auto done_fut = test_done.get_future();
+
+    std::thread pusher([&] {
+        const int cfd = ::accept(lfd, nullptr, nullptr);
+        if (cfd < 0) {
+            one_write_done.set_value(false);
+            stayed_quiet.set_value(false);
+            pong_seen.set_value(false);
+            return;
+        }
+        const auto req = read_until(
+            cfd,
+            [](const std::vector<std::byte>& b) {
+                return std::string_view(reinterpret_cast<const char*>(b.data()), b.size())
+                           .find("\r\n\r\n") != std::string_view::npos;
+            },
+            2s);
+        const std::string_view text(reinterpret_cast<const char*>(req.data()), req.size());
+        const std::size_t kpos = text.find("Sec-WebSocket-Key: ");
+        if (kpos == std::string_view::npos) {
+            one_write_done.set_value(false);
+            stayed_quiet.set_value(false);
+            pong_seen.set_value(false);
+            ::close(cfd);
+            return;
+        }
+        const std::size_t vstart = kpos + std::string_view("Sec-WebSocket-Key: ").size();
+        const std::string key(text.substr(vstart, text.find("\r\n", vstart) - vstart));
+
+        std::string head =
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            "Sec-WebSocket-Accept: ";
+        head += ws::accept_key(key);
+        head += "\r\n\r\n";
+        std::vector<std::byte> blob;
+        for (const char c : head) blob.push_back(static_cast<std::byte>(c));
+        append_server_frame(blob, ws::opcode_t::PING, ping_payload);
+        append_server_frame(blob, ws::opcode_t::BINARY, pushed);  // COMPLETE, FIN=1
+        // ONE syscall: the 101 and the push behind it coalesce into a single segment, so the
+        // client's first `recv` holds the whole message. This is the push-on-connect shape.
+        const ssize_t sent = ::send(cfd, blob.data(), blob.size(), 0);
+        one_write_done.set_value(sent == static_cast<ssize_t>(blob.size()));
+
+        // The held window. `read_until` with a predicate that never fires burns the whole
+        // budget, so this is a full 500 ms of listening — orders of magnitude more than the
+        // recv thread needs to drain what it was handed and reply, which is why a client
+        // that spawned that thread in its constructor fails here deterministically rather
+        // than flakily.
+        auto early = read_until(cfd, [](const std::vector<std::byte>&) { return false; }, 500ms);
+        stayed_quiet.set_value(early.empty());
+
+        armed_fut.wait();
+        auto back = read_until(
+            cfd, [](const std::vector<std::byte>& b) { return ws::decode_frame(b).has_value(); },
+            3s);
+        // Anything that leaked into the held window still counts as sent: the PONG check must
+        // stay a POSITIVE control (the bytes survived and decode) in both states, so that the
+        // silence assertion above is the only thing the deferral is on the hook for.
+        back.insert(back.begin(), early.begin(), early.end());
+        const auto dec = ws::decode_frame(back);
+        pong_seen.set_value(
+            dec.has_value() && dec->first.op == ws::opcode_t::PONG &&
+            dec->first.payload.size() == ping_payload.size() &&
+            std::memcmp(dec->first.payload.data(), ping_payload.data(), ping_payload.size()) == 0);
+
+        done_fut.wait();
+        ::close(cfd);
+    });
+
+    // The sink outlives the transport that delivers to it (this file's destruction idiom).
+    frame_sink_t sink;
+    {
+        tr::net::transport_ws_client client("127.0.0.1", ntohs(bound.sin_port),
+                                            &tr::mem::heap_backend(), /*max_frame=*/0,
+                                            /*recv_stack=*/0, /*defer_recv=*/true);
+        check(client.ok(), "the deferred client completed its opening handshake");
+        check(one_write_fut.wait_for(3s) == std::future_status::ready && one_write_fut.get(),
+              "the peer put the 101 and a COMPLETE pushed message in ONE write");
+        check(quiet_fut.wait_for(3s) == std::future_status::ready && quiet_fut.get(),
+              "the client decoded NOTHING before start_receiving(): the pipelined PING went "
+              "unanswered for the whole held window");
+
+        // The install the one-phase shape cannot make in time.
+        client.set_receiver(sink);
+        client.start_receiving();
+        armed.set_value();
+
+        check(pong_fut.wait_for(4s) == std::future_status::ready && pong_fut.get(),
+              "after start_receiving() the pipelined PING was answered with a matching PONG");
+        check(sink.wait_count(1, 4s),
+              "and the message the server pushed on connect was DELIVERED, not dropped");
+        std::vector<std::byte> got;
+        {
+            const std::lock_guard lock(sink.m);
+            if (!sink.frames.empty()) got = sink.frames.front();
+        }
+        check(got == std::vector<std::byte>(pushed.begin(), pushed.end()),
+              "carrying the pushed message's own bytes");
+        test_done.set_value();
+    }
+    pusher.join();
+    ::close(lfd);
+}
+
 }  // namespace
 
 int main() {
@@ -962,6 +1120,7 @@ int main() {
     test_max_peers_cap();
     test_close_peer();
     test_frame_pipelined_behind_the_101();
+    test_push_on_connect_waits_for_start_receiving();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;

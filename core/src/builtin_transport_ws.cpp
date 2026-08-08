@@ -57,7 +57,16 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
         return dial_or_listen(
             s,
             [&] {
-                return make_checked<transport_ws_client>(s.addr, s.port, rx_backend, s.max_frame);
+                // DEFERRED recv thread (#1025): the connection is dialled and handshaken here,
+                // but `transport_vertex_t::make_connection` only wires the receiver a few
+                // steps later (register the vertex, then `fwd_router_t::add_child`). A server
+                // that pushes its state the instant our connect completes has that message in
+                // flight through that whole window, and a recv thread running inside it would
+                // decode it into an empty sink and drop it with no counter moving. The vertex
+                // calls `start_receiving()` once the link is fully wired.
+                return make_checked<transport_ws_client>(s.addr, s.port, rx_backend, s.max_frame,
+                                                         /*recv_stack=*/std::size_t{0},
+                                                         /*defer_recv=*/true);
             },
             [&] {
                 return make_checked<transport_ws_server>(s.port, rx_backend, s.max_frame, max_peers,

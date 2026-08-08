@@ -50,7 +50,7 @@ A transport that can hand up *owning* frames implements the rope-receiver seam
 view delivery](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md),
 generalized to ropes by [ADR-0053 — lazy rope-backed decode, view partial-path
 routing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0053-lazy-rope-backed-decode-view-partial-path-routing.md)):
-it overrides `delivers_ropes()` (`core/include/libtracer/transport.hpp:354`) and
+it overrides `delivers_ropes()` (`core/include/libtracer/transport.hpp:373`) and
 delivers each inbound frame as a `rope_t` of refcounted links over segments drawn
 from a host-injected `mem_backend_t`. A contiguous frame is the single-link case; a
 scattered one — a CAN reassembly group, a fragmented WebSocket message — crosses the
@@ -66,7 +66,7 @@ the rope form for an owning link, the span form otherwise (`fwd_router.cpp:629,6
 
 Every socket transport in the tree declares the owning tier: UDP
 (`transport_udp.hpp:91`), TCP client and server (`transport_tcp.hpp:151,277`),
-WebSocket server and client (`transport_ws.hpp:217,412`), CAN
+WebSocket server and client (`transport_ws.hpp:217,439`), CAN
 (`transport_can.hpp:475`), QUIC (`transport_quic.hpp:153`) and WebTransport
 (`transport_webtransport.hpp:158`). The borrowed-span path is the base-class default
 and the tier an out-of-tree transport gets for free.
@@ -222,6 +222,15 @@ flowchart LR
   when the connection opens, so a sink whose context is a local — or whose context
   is destroyed before `shutdown()` — races a frame already in flight. Both sinks and
   both notifiers must be installed before frames flow.
+- **"Before frames flow" is not free on a DIAL link.** A transport that connects and
+  spawns its receive thread in one constructor leaves no such window: the peer's push
+  is provoked by our own connect, so its first message can be decoded before the owner's
+  next statement runs, and an empty sink drops it with no counter moving
+  ([#1025](https://github.com/avatarsd-llc/libtracer/issues/1025)). `start_receiving()`
+  is the second phase that opens the window — a no-op default, so an owner calls it
+  unconditionally as its last wiring step; `transport_ws_client` honors it when
+  constructed with `defer_recv`, which is how `transport_vertex_t` builds a SPEC-created
+  `ws` dialer.
 - **The callable sugar binds by address.** `set_receiver(F& sink)` and
   `set_rope_receiver(F& sink)` take an lvalue; a temporary lambda does not compile,
   and a callable destroyed early dangles exactly like a stale `ctx`.

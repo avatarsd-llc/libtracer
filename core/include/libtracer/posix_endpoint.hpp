@@ -118,10 +118,13 @@ class posix_endpoint_t {
     /**
      * @brief Spawn the receive thread running @p body.
      *
-     * Call at most once, from the derived constructor, after the socket is up
-     * and every resource @p body touches is initialized. @p body must poll
-     * @ref stop_ (directly or via the bounded waits below) and return promptly
-     * once it is set.
+     * Call at most once, after the socket is up and every resource @p body
+     * touches is initialized. @p body must poll @ref stop_ (directly or via the
+     * bounded waits below) and return promptly once it is set. Usually that is
+     * the derived constructor; a transport offering the two-phase bring-up
+     * (`%transport_t::start_receiving` — the owner installs its sinks BEFORE any
+     * frame can be decoded) calls it from there instead, and owns the one-shot
+     * latch that keeps "at most once" true.
      *
      * Spawns via `pthread_create` (not `std::thread`): the constructor of the
      * latter THROWS on failure, which under `-fno-exceptions` (the MCU build)

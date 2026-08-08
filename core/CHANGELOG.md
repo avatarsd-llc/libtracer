@@ -14,7 +14,40 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Added
+
+- **`net::transport_t::start_receiving()` — the second half of a two-phase link bring-up
+  (#1025).** A virtual whose default is a no-op, so every existing transport and every
+  embedder's is unaffected and an owner may call it unconditionally. It exists because
+  `set_receiver` / `set_rope_receiver` / `set_down_notifier` all document "must be set before
+  frames flow", and for a DIAL transport that spawns its receive thread inside its own
+  constructor that contract is unsatisfiable from the outside: the thread is already draining
+  the socket while the owner is still installing its sinks. Outside the tests,
+  `transport_ws_client` is the only override under `core/include` + `core/src` +
+  `integrations/` + `bindings/` today (`grep -rn start_receiving`); it takes effect only when
+  the client is constructed with the new trailing
+  `defer_recv` flag, so a direct `transport_ws_client(host, port)` behaves exactly as before.
+
 ### Fixed
+
+- **A SPEC-created `ws` DIAL connection no longer drops a message the server pushes on
+  connect (#1025).** `transport_ws_client`'s constructor dials, runs the opening handshake
+  AND spawns the recv thread before it returns, so nothing the owner does can run first.
+  `transport_vertex_t::make_connection` only wires the receiver several steps later
+  (register the identity vertex, insert the connection, then `fwd_router_t::add_child`) —
+  and for a DIAL link the peer's push is triggered by our own connect, so its first message
+  is in flight through that whole window. Decoded before the sink exists, it hit
+  `receiver_slot_t`'s empty-slot path and was dropped silently: no `dropped_rx()`, no
+  `malformed_rx()`, a healthy connection. This is the door #1020's frame goes out of once
+  the handshake stops eating it. The built-in `ws` factory now constructs its DIAL client
+  with `defer_recv`, and creation arms the link with `start_receiving()` as its last wiring
+  step, so the ordering the base class documents is the ordering that actually happens. A
+  directly-constructed `transport_ws_client` keeps the historical one-phase shape unless it
+  opts in. Guarded from both ends: `core/tests/ws_transport_test.cpp` has a peer write the
+  `101`, a PING and a COMPLETE pushed message in ONE `send` and asserts the deferred client
+  answers nothing at all until `start_receiving()`, then delivers the message; and
+  `core/tests/transport_vertex_test.cpp` pins that creation arms the link only once its
+  receiver is already installed.
 
 - **A `net::transport_ws_client` no longer drops the frames a server pipelines behind its
   `101` (#1020).** `transport_ws_client::handshake` accumulated the HTTP response into a

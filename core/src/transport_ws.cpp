@@ -629,8 +629,8 @@ void transport_ws_server::run() {
 
 transport_ws_client::transport_ws_client(const std::string& host, std::uint16_t port,
                                          mem::mem_backend_t* backend, std::size_t max_frame,
-                                         std::size_t recv_stack)
-    : backend_(backend) {
+                                         std::size_t recv_stack, bool defer_recv)
+    : backend_(backend), recv_stack_(recv_stack) {
     if (max_frame != 0) max_frame_ = max_frame;
     // Seed the per-frame masking-key stream with something that varies between
     // connections (steady_clock + this address). Not crypto-strong — RFC 6455
@@ -662,8 +662,30 @@ transport_ws_client::transport_ws_client(const std::string& host, std::uint16_t 
 
     conn_fd_.store(fd, std::memory_order_relaxed);
     connected_ = true;
-    start([this, fd, pre = std::move(pipelined)]() mutable { serve(fd, std::move(pre)); },
-          recv_stack);
+    pipelined_ = std::move(pipelined);
+    // Two-phase bring-up (#1025). Spawning the recv thread HERE is the historical shape and
+    // stays the default, but it makes the base's "install the sinks before frames flow"
+    // contract unsatisfiable: this thread can decode and deliver a message the server pushed
+    // on connect before the caller's next statement installs a sink, and the empty slot drops
+    // it silently. `defer_recv` hands that ordering back to the owner — the socket is up and
+    // the pipelined bytes are parked, but nothing is read until `start_receiving()`.
+    //
+    // Qualified deliberately: dispatching a virtual from a constructor would reach THIS
+    // class's override anyway (the derived part does not exist yet), so spelling it out is
+    // the honest form — a subclass cannot substitute its own bring-up here, and nothing in
+    // this call should look as if it could.
+    if (!defer_recv) transport_ws_client::start_receiving();
+}
+
+void transport_ws_client::start_receiving() {
+    if (!connected_) return;  // handshake failed: there is nothing to serve
+    // One-shot: `posix_endpoint_t::start` may be called at most once per endpoint, and this
+    // is reachable both from the constructor (one-phase) and from an owner that calls it
+    // unconditionally on every link it wires.
+    if (recv_started_.exchange(true, std::memory_order_relaxed)) return;
+    const int fd = conn_fd_.load(std::memory_order_relaxed);
+    start([this, fd, pre = std::move(pipelined_)]() mutable { serve(fd, std::move(pre)); },
+          recv_stack_);
 }
 
 transport_ws_client::~transport_ws_client() {
