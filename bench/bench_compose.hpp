@@ -95,6 +95,7 @@
  */
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -231,7 +232,7 @@ class sub_counter_t {
      * @return false once the publisher's END_OF_POINT record has been seen.
      */
     bool on_message(std::span<const std::byte> d) {
-        if (done_) return false;
+        if (done_.load(std::memory_order_relaxed)) return false;
         const std::uint64_t now = now_ns();
         std::size_t off = 0;
         bool counted_message = false;
@@ -253,7 +254,7 @@ class sub_counter_t {
             }
             const auto phase = static_cast<phase_t>(std::to_integer<std::uint8_t>(r[kOffPhase]));
             if (phase == phase_t::END_OF_POINT) {
-                done_ = true;
+                done_.store(true, std::memory_order_release);
                 return false;
             }
             if (!counted_message) {
@@ -278,9 +279,23 @@ class sub_counter_t {
         return true;
     }
 
-    /** @brief Has the publisher's END_OF_POINT record arrived? */
-    [[nodiscard]] bool done() const { return done_; }
-    /** @brief Values observed so far — the liveness signal the wait loop watches. */
+    /**
+     * @brief Has the publisher's END_OF_POINT record arrived?
+     *
+     * THE ONLY member either subscriber may touch while the receive path is live — both wait
+     * loops poll it — and therefore the only one that is atomic. ThreadSanitizer found the
+     * plain `bool` version racing here (write in `on_message` on the transport's recv thread
+     * against the poll on the main thread) even after the counter's READ was moved behind
+     * teardown, which is why it is `std::atomic` and not a comment saying it is fine.
+     */
+    [[nodiscard]] bool done() const { return done_.load(std::memory_order_acquire); }
+
+    // The three below are plain counters, read only AFTER the receive path has been torn down
+    // (bench_compose_net.cpp / bench_zenoh_compose.cpp scope the transport / the session for
+    // exactly that) or, in test_compose_record.cpp, on a single thread. They are deliberately
+    // not atomic: they are incremented per RECORD in the receive path, which is the thing being
+    // measured, and making them atomic would put a read-modify-write inside it for no reader.
+    /** @brief Values observed. */
     [[nodiscard]] std::uint64_t values() const { return values_; }
     /** @brief Records rejected by the magic / width / run-id check. */
     [[nodiscard]] std::uint64_t bad() const { return bad_; }
@@ -391,7 +406,7 @@ class sub_counter_t {
     std::uint64_t group_ts_ = 0;
     std::uint64_t messages_ = 0, values_ = 0, bad_ = 0;
     std::uint64_t thru_messages_ = 0, thru_values_ = 0, thru_first_ = 0, thru_last_ = 0;
-    bool done_ = false;
+    std::atomic<bool> done_{false}; /**< @brief See @ref done — the one cross-thread member. */
 };
 
 }  // namespace bench::compose
