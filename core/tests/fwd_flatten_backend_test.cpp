@@ -59,6 +59,7 @@
 #include <utility>
 #include <vector>
 
+#include "fwd_frame_builder.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/route_handle.hpp"
 #include "libtracer/tlv_emit.hpp"
@@ -236,21 +237,7 @@ std::vector<std::byte> b_subscriber(const std::vector<std::byte>& target, bool c
     return out;
 }
 
-/** @brief A `FWD` frame with the RFC-0004 §B child order. */
-std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
-                             const std::vector<std::byte>& src,
-                             const std::vector<std::byte>& field = {},
-                             const std::vector<std::byte>& payload = {}) {
-    std::vector<std::byte> body;
-    append(body, b_value_u8(static_cast<std::uint8_t>(op)));
-    append(body, dst);
-    if (!field.empty()) append(body, field);
-    append(body, src);
-    if (!payload.empty()) append(body, payload);
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
-    return out;
-}
+using tr::testing::b_fwd;
 
 /**
  * @brief A rope over @p bytes split into @p links links — the multi-link shape is what
