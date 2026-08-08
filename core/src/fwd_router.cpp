@@ -423,8 +423,13 @@ void emit_compact(transport_t& down, std::uint16_t label, std::span<const std::b
  * trailer VALUES is one operation, never two: a copy whose opt byte claims bytes the copy no
  * longer carries is unparseable.
  *
- * The trailer-less fast path is not a guard — both arms produce the same bytes — it is the
- * universal case answered without deep-copying a peer-sized subtree.
+ * The trailer-less fast path is not a guard: it is the universal case answered without
+ * deep-copying a peer-sized subtree. The two arms are not byte-identical in general — the
+ * fast arm gates on `!ts && !cr` and returns the opt byte as-is, while `without_trailer()`
+ * also clears CW and TF — so a route with opt `0x44` (PL|CW) and no trailer bytes takes the
+ * fast arm and keeps the CW bit the slow arm would drop. That difference is unobservable
+ * downstream because the assembler re-slices the route before it reaches the wire, but the
+ * arms must not be described as interchangeable.
  *
  * @param route A decoded route node (a `PATH`).
  * @return Its whole-TLV bytes with the OUTER trailer removed, or an EMPTY vector when

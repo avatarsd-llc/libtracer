@@ -78,8 +78,14 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   CRC'd its `src` therefore got those trailer bytes echoed back inside the reply's address
   from one path and not the other. Both paths now go through one assembler, so a refused hop
   answers with a route byte-identical to the terminus's: the trailer bytes are gone and the
-  opt byte's TS/CR/CW/TF bits are clear. **Frames whose routes carry no trailer — every frame
-  this library emits, and the ordinary case on the wire — are byte-identical to before.** No
+  opt byte's TS/CR/CW/TF bits are clear. **Every frame this library emits is byte-identical to
+  before**, because nothing here sets CW or TF on a route. A route that carries no trailer
+  bytes but *does* set CW (`0x04`) or TF (`0x02`) is the one shape that changes: the retired
+  encoder echoed those bits back, and the shared assembler clears them along with TS/CR, so
+  such a reply's opt byte differs (measured: `06 44 …` before, `06 40 …` after, same 14-byte
+  route). That is the intended correction — the reply's address must describe the bytes it
+  actually carries — but it is a wire-visible difference and a conformance reader should not
+  be told the trailer-less case is universally unchanged. No
   header signature changed; `assemble_reply` / `assemble_error_reply` live in `core/src`, not
   in `include/libtracer/`. The rejection reply's head segment is also now drawn from the
   router's injected `egress` backend (#795, ADR-0074) instead of the global heap, so a bounded

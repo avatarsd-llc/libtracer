@@ -207,18 +207,18 @@ ANCHORS = [
     ("core/src/graph.cpp:1416", "value.materialize(*value_backend_)", "field_write read it back"),
     ("core/src/graph.cpp:1711", "result_t<void> graph_t::field_write"),
     ("core/src/graph.cpp:1868", "acl_right_t::CREATE", 'step0.name == "children"'),
-    ("core/src/fwd_router.cpp:1793", "fwd_router_t::deliver_remote"),
-    ("core/src/fwd_router.cpp:1825", "value.materialize(*flat_)"),
-    ("core/src/fwd_router.cpp:1826", "flatten OOM"),
-    ("core/src/fwd_router.cpp:1830", "try_encode_compact", "fwd_router_t::deliver_remote"),
-    ("core/src/fwd_router.cpp:1862", "std::vector<std::span<const std::byte>> iov;", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:1798", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:1830", "value.materialize(*flat_)"),
+    ("core/src/fwd_router.cpp:1831", "flatten OOM"),
+    ("core/src/fwd_router.cpp:1835", "try_encode_compact", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:1867", "std::vector<std::span<const std::byte>> iov;", "fwd_router_t::deliver_remote"),
     # #730 — the two INGRESS flatten guards. Anchored because the whole point of the
     # seam is that these are testable; a citation to them silently rotting would be the
     # first step back to "the guard nobody can prove still works".
-    ("core/src/fwd_router.cpp:1429", "if (route.empty() && head->child1_total != 0) return;"),
-    ("core/src/fwd_router.cpp:1448", "if (payload.empty() && head->child1_total != 0) return;"),
-    ("core/src/fwd_router.cpp:1441", "const std::span<const std::byte> payload = contig(head->child1_off, head->child1_total);"),
-    ("core/src/fwd_router.cpp:1128", "frame.subrope(0, frame.total_length()).materialize"),
+    ("core/src/fwd_router.cpp:1434", "if (route.empty() && head->child1_total != 0) return;"),
+    ("core/src/fwd_router.cpp:1453", "if (payload.empty() && head->child1_total != 0) return;"),
+    ("core/src/fwd_router.cpp:1446", "const std::span<const std::byte> payload = contig(head->child1_off, head->child1_total);"),
+    ("core/src/fwd_router.cpp:1133", "frame.subrope(0, frame.total_length()).materialize"),
     # #766/#793 — the terminus resolver's three rope-tier draws, and the two allocations the
     # seam docs name as NOT covered by `flat`. These were cited by four doc pages and anchored
     # by none, so #793's own edits to `op_resolve_view.cpp` shifted every one of them without
@@ -230,7 +230,7 @@ ANCHORS = [
     ("core/src/op_resolve_view.cpp:254", "wire().materialize(backend())"),
     ("core/src/fwd_reply.cpp:104", "view::segment_alloc(egress, head_len)"),
     ("core/src/op_resolve_walk.hpp:494", "rope_t or_backpressure"),
-    ("core/src/fwd_router.cpp:1347", "decode_into(frame, rx_for(inbound_ctx))"),
+    ("core/src/fwd_router.cpp:1352", "decode_into(frame, rx_for(inbound_ctx))"),
     # `vertex.hpp:<parent_>` was pinned here TWICE, and the only doc that cites it is
     # `docs/spec/rfcs/0019` — a historical genre this tool's own header excludes from
     # pinning ("dated records of a decision ... pinning them would demand rewriting
@@ -541,19 +541,19 @@ ANCHORS = [
     ('core/src/frame.cpp:119', 'std::array<grammar::walk_frame_t<grammar::span_cursor>, 8> slots;'),
     ('core/src/frame.cpp:120', 'grammar::walk_stack_t<grammar::span_cursor> stack(slots, &mem::heap_source());'),
     # core/src/fwd_router.cpp
-    ('core/src/fwd_router.cpp:553',
+    ('core/src/fwd_router.cpp:558',
      'bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_source_t* rx) {'),
-    ('core/src/fwd_router.cpp:1097',
+    ('core/src/fwd_router.cpp:1102',
      'void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_t frame,'),
-    ('core/src/fwd_router.cpp:1103', 'if (frame.link_count() == 1) {'),
-    ('core/src/fwd_router.cpp:1146', '// A REPLY that reaches its originator here is handed to the sink'),
-    ('core/src/fwd_router.cpp:1457',
+    ('core/src/fwd_router.cpp:1108', 'if (frame.link_count() == 1) {'),
+    ('core/src/fwd_router.cpp:1151', '// A REPLY that reaches its originator here is handed to the sink'),
+    ('core/src/fwd_router.cpp:1462',
      'void fwd_router_t::on_control_rope(std::string_view inbound_name, view::rope_t frame) {'),
-    ('core/src/fwd_router.cpp:1408', 'const auto head = peek_control(cur, wire::grammar::crc_check_t::VERIFY);'),
-    ('core/src/fwd_router.cpp:1422', 'const std::span<const std::byte> route = contig(head->child1_off, head->child1_total);'),
-    ('core/src/fwd_router.cpp:1468', 'hold = frame.subrope(off, total).materialize(*flat_);'),
-    ('core/src/fwd_router.cpp:1808', "// dropped fresh ADVERTISE self-heals via the peer's HANDLE_NACK (§E.1)."),
-    ('core/src/fwd_router.cpp:1846',
+    ('core/src/fwd_router.cpp:1413', 'const auto head = peek_control(cur, wire::grammar::crc_check_t::VERIFY);'),
+    ('core/src/fwd_router.cpp:1427', 'const std::span<const std::byte> route = contig(head->child1_off, head->child1_total);'),
+    ('core/src/fwd_router.cpp:1473', 'hold = frame.subrope(off, total).materialize(*flat_);'),
+    ('core/src/fwd_router.cpp:1813', "// dropped fresh ADVERTISE self-heals via the peer's HANDLE_NACK (§E.1)."),
+    ('core/src/fwd_router.cpp:1851',
      'constexpr std::array<std::byte, 5> op_tlv{std::byte{0x01}, std::byte{0x00}, std::byte{0x01},'),
     # core/src/graph.cpp
     ('core/src/graph.cpp:163', 'const view_t& frame_view, std::vector<std::byte> key,'),
@@ -684,8 +684,8 @@ ANCHORS = [
     ('core/include/libtracer/transport_tcp.hpp:343', '[[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }'),
     ('core/include/libtracer/transport_ws.hpp:233', '[[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }'),
     ('core/include/libtracer/edge_pin.hpp:153', 'class pin_t {'),
-    ('core/src/fwd_router.cpp:660', 'link.set_rope_receiver('),
-    ('core/src/fwd_router.cpp:614', 'bus->set_peer_rope_receiver('),
+    ('core/src/fwd_router.cpp:665', 'link.set_rope_receiver('),
+    ('core/src/fwd_router.cpp:619', 'bus->set_peer_rope_receiver('),
     ('core/src/graph.cpp:689', 'vertex_t* graph_t::find_ptr(std::span<const std::byte> key) const {'),
     ('core/src/graph.cpp:690', 'const std::shared_lock lock(map_mutex_);'),
     ('core/src/graph.cpp:1696', 's.target_key.reset();'),

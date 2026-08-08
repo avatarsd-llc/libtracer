@@ -510,6 +510,22 @@ std::vector<std::byte> reply_dst_bytes(std::span<const std::byte> frame) {
 }
 
 /**
+ * @brief The reply's `kind` byte, or `0xFF` if the frame has no readable one.
+ *
+ * A reply's children are `op`, `dst`, `src`, then the `kind` VALUE (RFC-0004 §D), so this
+ * reads child 3. Used to assert that a case named for a REFUSAL actually got `kind=ERROR`
+ * rather than a `RESULT` — the two leave through the same assembler, so a differential over
+ * the route bytes alone cannot tell them apart.
+ */
+std::uint8_t reply_kind_byte(std::span<const std::byte> frame) {
+    const auto dec = tr::wire::decode(frame);
+    if (!dec || dec->type != type_t::FWD || dec->children.size() < 4) return 0xFFu;
+    const auto& kind = dec->children[3];
+    if (kind.type != type_t::VALUE || kind.payload.size() != 1) return 0xFFu;
+    return std::to_integer<std::uint8_t>(kind.payload[0]);
+}
+
+/**
  * @brief An FWD routed THROUGH a bus link's own NAME is rejected, never broadcast (#741).
  *
  * ADR-0073 §3 / RFC-0020, amending RFC-0004 §B for multi-peer links: a `dst` is a directed
@@ -787,24 +803,37 @@ void test_reject_and_terminus_agree_on_trailered_routes() {
     check(src_wire.size() == 4 + 4 + origin.size() + 2,
           "the request's src really does carry a 2-byte CRC trailer (the ablation)");
 
-    const auto framed = [&](std::initializer_list<std::string_view> dst) {
+    const auto framed = [&](tr::graph::fwd_op_t operation,
+                            std::initializer_list<std::string_view> dst) {
         std::vector<std::byte> body;
-        const std::byte op{static_cast<std::uint8_t>(tr::graph::fwd_op_t::WRITE)};
+        const std::byte op{static_cast<std::uint8_t>(operation)};
         tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
         emit_path(body, dst);
         body.insert(body.end(), src_wire.begin(), src_wire.end());
-        const std::byte payload[2] = {std::byte{0x01}, std::byte{0x02}};
-        tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(payload, 2));
+        if (operation == tr::graph::fwd_op_t::WRITE) {
+            const std::byte payload[2] = {std::byte{0x01}, std::byte{0x02}};
+            tr::wire::emit_tlv(body, type_t::VALUE, opt_t{},
+                               std::span<const std::byte>(payload, 2));
+        }
         std::vector<std::byte> frame;
         tr::wire::emit_tlv(frame, type_t::FWD, opt_t{.pl = true}, body);
         return frame;
     };
 
-    // Arm 1: the bus-NAME hop the router rejects. Arm 2: an unknown LOCAL dst, which the
-    // terminus resolver refuses. Different refusals, same route to answer back on.
-    router.on_frame("net/ws-client/in", framed({"net", "ws-server", "srv", "zzz"}));
-    router.on_frame("net/ws-client/in", framed({"nosuch"}));
+    // Arm 1: the bus-NAME hop the router rejects. Arm 2: a READ of an unknown LOCAL dst, which
+    // the terminus resolver refuses NOT_FOUND. Different refusals, same route to answer on.
+    //
+    // Arm 2 is a READ on purpose. A WRITE with no field takes `resolve_node`'s
+    // `op == WRITE && !has_field` branch, where `graph.ensure_vertex` CREATES the vertex and
+    // the reply comes back `kind=RESULT` — so the case would still guard (both replies leave
+    // through the same assembler) while advertising terminus-refusal coverage it never ran.
+    router.on_frame("net/ws-client/in",
+                    framed(tr::graph::fwd_op_t::WRITE, {"net", "ws-server", "srv", "zzz"}));
+    router.on_frame("net/ws-client/in", framed(tr::graph::fwd_op_t::READ, {"nosuch"}));
     check(in.sent.size() == 2, "both refusals are answered");
+    check(in.sent.size() == 2 && reply_kind_byte(in.sent[1]) ==
+                                     static_cast<std::uint8_t>(tr::graph::reply_kind_t::ERROR),
+          "arm 2 really is a terminus REFUSAL (kind=ERROR), not a RESULT");
     if (in.sent.size() != 2) return;
 
     const std::vector<std::byte> rejected = reply_dst_bytes(in.sent[0]);
