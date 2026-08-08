@@ -154,13 +154,26 @@ struct conn_settings_t {
  * a connection vertex at `/net/<name>` and wires its transport into the router's
  * @ref child_registry_t — the single NAME→link demux table.
  *
- * The transport for a connection comes from one of two sources, in precedence order:
- *  1. a link staged via @ref provide_link (borrowed; the caller owns it) — the
- *     test/manual seam for loopback channels and transports the catalog doesn't cover;
+ * Creation resolves the MODULE first, then the transport — because the mount, the routing
+ * key and the staging key are all `<module>/<name>`, and a NAME alone names none of them
+ * (#883). A config `kind` decides the module, through the (kind, role) declaration
+ * @ref register_module minted; a kind-less SPEC — the @ref provide_link spelling — takes it
+ * from the staged set, and only when exactly one staging carries that leaf NAME (two do and
+ * the SPEC carries no `kind` to tell them apart ⇒ creation is refused `TYPE_MISMATCH`,
+ * rather than one of them being picked by map order).
+ *
+ * The transport then comes from one of two sources, in precedence order **within that
+ * module**:
+ *  1. a link staged via @ref provide_link under exactly this `<module>/<name>` (borrowed;
+ *     the caller owns it) — the test/manual seam for loopback channels and transports the
+ *     catalog doesn't cover;
  *  2. otherwise, the transport-factory catalog: the config's `kind` selects a factory
  *     (built-in `udp`/`tcp`/`ws`, or any registered via @ref register_transport_type), which
  *     CONSTRUCTS the real socket from the parsed @ref conn_settings_t; the connection
  *     vertex OWNS it, and its link state is written up on successful construction.
+ *
+ * A staging under some OTHER module that happens to share the leaf NAME is a different
+ * connection: it is neither used nor consumed here.
  *
  * Destruction semantics (honest): there is no child-removal / connection-teardown
  * model yet (#66), so an owned transport lives as long as this `transport_vertex_t` —
@@ -298,10 +311,17 @@ class transport_vertex_t {
      * The test/manual seam: the link is not constructed from the config — it is handed
      * in here (a loopback endpoint, a test channel, a transport the catalog doesn't
      * cover) and wired into the router when the matching `:children[]` SPEC is created.
-     * Takes precedence over config construction (`kind` is ignored when a link is
-     * staged). The caller keeps ownership. Call at setup, before the SPEC write.
+     * The caller keeps ownership. Call at setup, before the SPEC write.
+     *
+     * The staging key is `<module>/<name>` in BOTH halves (#883). A creating SPEC reaches
+     * this staging when it resolves to the same module — i.e. it carries no `kind` (and no
+     * second staging shares @p name), or it carries a `kind` whose @ref register_module
+     * declaration for the creation's role names @p module. Then the staged link takes
+     * precedence over config construction, and the `kind`'s factory does not run. A `kind`
+     * declared under a DIFFERENT module builds its own socket there and leaves this staging
+     * untouched — it no longer captures the creation by leaf NAME alone.
      * @param module The module the connection mounts under (`/net/<module>/<name>`). Required
-     *               because a staged link bypasses the transport factory, so there is no
+     *               because a staged link may bypass the transport factory, so there is no
      *               `kind` to derive one from — the caller staging the link says where it
      *               mounts (RFC-0014 §1).
      * @param name The connection's NAME (the `/net/<module>/<name>` leaf segment).

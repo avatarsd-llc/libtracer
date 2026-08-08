@@ -143,6 +143,30 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Fixed
 
+- **A connection SPEC now resolves its MODULE before its link, so a `provide_link` staging can
+  no longer be picked by leaf NAME alone (#883).** `provide_link` keys its staging
+  `<module>/<name>`, but `make_connection` scanned the whole staged map comparing only the
+  substring after the last `/`, took the first hit in the map's lexicographic order, and read
+  the module half back **out of that hit** — the half was never compared against anything. Two
+  consequences, both silent: with `mod-a/x` and `mod-b/x` staged, a SPEC meaning `mod-b`
+  mounted at `/net/mod-a/x` wired to `mod-a`'s transport (wrong module *and* wrong link); and
+  because the scan ran *before* the `(kind, role) → module` declaration, a SPEC naming a
+  `kind` was captured by any staged link sharing its leaf NAME — the kind's factory never ran.
+  Creation now resolves the module first (a `kind` names its declared module per ADR-0073 §4;
+  a kind-less SPEC takes it from the staged set) and then looks the staging up **directly**,
+  by the exact key the map is keyed with.
+
+  **Contract change, two parts.** (1) `kind` is no longer "ignored when a link is staged": a
+  staged link takes precedence over construction only **within the module the SPEC resolves
+  to**. A SPEC whose `kind` is declared under a different module now builds that kind's socket
+  there and leaves the staging untouched — previously the staging captured it. An application
+  that relied on a leaf-NAME match across modules must stage under the module its `kind`
+  declares (or omit the `kind`, which is the staged-link spelling). (2) A kind-less SPEC whose
+  leaf NAME matches **two or more** stagings is refused with `status_t::TYPE_MISMATCH` (wire
+  `SCHEMA_TYPE_MISMATCH`, PERMANENT) instead of binding one by map order; the SPEC must carry
+  a `kind` whose declared module says which staging it meant. The refusal is total — neither
+  staging is consumed. Single-module staging, the overwhelmingly common shape, is unchanged.
+
 - **`graph_t::evict_link_edges("")` / `vertex_t::evict_link_edges("")` now match nothing and
   return 0, instead of reclaiming local `delivery_compact` edges (#1056).** The predicate keys
   a slot on the link it was **admitted over** — `subscriber_remote_t::link` when the cold half

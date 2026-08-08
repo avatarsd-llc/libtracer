@@ -33,6 +33,7 @@
 #include <cstdio>
 #include <cstring>
 #include <future>
+#include <memory>
 #include <memory_resource>
 #include <mutex>
 #include <set>
@@ -465,18 +466,180 @@ void test_provide_link_wins() {
     graph_t node;
     fwd_router_t router(node);
     transport_vertex_t net(node, router);
+    declare_builtin_modules(net);  // kind=udp + DIAL is declared to mount under udp-client
     tr::net::loopback_channel_t channel;
-    net.provide_link("ws-client", "up", channel.a());  // staged first — must win over kind=udp
+    // Staged under the module `kind=udp` + DIAL resolves to. Precedence is a WITHIN-module
+    // question (#883): the SPEC and the staging have to be talking about the same mount
+    // before "which one wins" is even a question. A staging under some other module is a
+    // different connection — `test_kind_module_beats_unrelated_staging` covers that.
+    net.provide_link(std::string(tr::net::kUdpClientSuggestedModule), "up", channel.a());
 
     const auto w =
         node.write(path_t("/net:children[]"),
                    conn_spec("client", "up", conn_role_t::DIAL, 47121, "udp", "127.0.0.1"));
     check(w.has_value(), "SPEC with kind=udp still creates the connection");
-    check(router.registry().by_name("net/ws-client/up") == &channel.a(),
+    check(router.registry().by_name("net/udp-client/up") == &channel.a(),
           "the staged provide_link transport is the wired one (no socket constructed)");
-    const auto* s = net.settings_of("net/ws-client/up");
+    const auto* s = net.settings_of("net/udp-client/up");
     check(s != nullptr && s->kind == "udp", "the config kind is still parsed into :settings");
     channel.shutdown();
+}
+
+/** @brief A link that carries nothing — enough to be staged, wired and looked up by identity. */
+struct stub_link_t : tr::net::transport_t {
+    /** @brief Egress is not what these tests measure. */
+    void send(std::span<const std::byte> /*frame*/) override {}
+};
+
+/** @brief How many links the `stub_link_t` factory below has constructed. */
+int g_stub_built = 0;
+
+/**
+ * @brief Declare @p kind for @p role under module @p module, with a factory that builds a
+ *        `stub_link_t` and counts itself.
+ *
+ * Registering the module and registering the factory are two different registries: a create
+ * that binds a STAGED link never reaches the factory, so a test that only needs the module
+ * declaration can skip the type. Here both are present so "the factory ran" is observable.
+ */
+void declare_stub_kind(transport_vertex_t& net, std::string module, std::string kind,
+                       conn_role_t role) {
+    (void)net.register_module(std::move(module), kind, role);
+    net.register_transport_type(
+        std::move(kind),
+        [](const tr::net::conn_settings_t&,
+           const tr::wire::tlv_t*) -> tr::graph::result_t<std::unique_ptr<tr::net::transport_t>> {
+            ++g_stub_built;
+            return std::make_unique<stub_link_t>();
+        });
+}
+
+/**
+ * @brief #883 — two stagings sharing a leaf NAME each bind their OWN module.
+ *
+ * `provide_link` keys its staging `<module>/<name>`; the creation path used to match only the
+ * substring after the last `/`, adopt the module of whichever key came first in the map's
+ * lexicographic order, and never compare the module half against anything.
+ *
+ * The order below is what makes this non-vacuous. `mod-a/x` sorts first, so the SPEC created
+ * FIRST here is the one meaning `mod-b` — under the old scan it mounted at `/net/mod-a/x`
+ * wired to `mod-a`'s link, i.e. the wrong module AND the wrong transport, silently. (The
+ * creating SPEC's own intent was the only thing that knew better, and the scan never looked
+ * at it.) The assertions therefore land BETWEEN the two creates: a successful create consumes
+ * its staging, so by the time the second one runs only one staging is left and the wrong
+ * answer has become indistinguishable from the right one.
+ */
+void test_same_leaf_name_under_two_modules() {
+    std::printf("#883: two links staged under different modules, same leaf NAME:\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    declare_stub_kind(net, "mod-a", "stub-a", conn_role_t::DIAL);
+    declare_stub_kind(net, "mod-b", "stub-b", conn_role_t::DIAL);
+
+    stub_link_t link_a;
+    stub_link_t link_b;
+    net.provide_link("mod-a", "x", link_a);
+    net.provide_link("mod-b", "x", link_b);
+    g_stub_built = 0;
+
+    // Each SPEC names the kind whose declared module says WHICH staging it means.
+    const auto wb = node.write(path_t("/net:children[]"),
+                               conn_spec("client", "x", conn_role_t::DIAL, 0, "stub-b"));
+    check(wb.has_value(), "SPEC{name=x, kind=stub-b} creates");
+    check(node.find(path_t::parse("/net/mod-b/x")->key()).has_value(),
+          "it mounts at /net/mod-b/x — the module its kind declares");
+    check(router.registry().by_name("net/mod-b/x") == &link_b,
+          "and is wired to the link staged under mod-b, not to mod-a's by map order");
+    check(!node.find(path_t::parse("/net/mod-a/x")->key()).has_value(),
+          "mod-a gained nothing — its staging is untouched and still stageable");
+
+    const auto wa = node.write(path_t("/net:children[]"),
+                               conn_spec("client", "x", conn_role_t::DIAL, 0, "stub-a"));
+    check(wa.has_value(), "SPEC{name=x, kind=stub-a} then creates too — mod-a/x is not stranded");
+    check(router.registry().by_name("net/mod-a/x") == &link_a,
+          "net/mod-a/x is wired to the link staged under mod-a");
+    check(g_stub_built == 0, "and neither factory ran — both creates found their own staging");
+}
+
+/**
+ * @brief #883 — a kind-less SPEC that two stagings answer to is REFUSED, not bound by map order.
+ *
+ * The map's iteration order is lexicographic and carries no intent, so with `mod-a/x` and
+ * `mod-b/x` staged and nothing in the SPEC to tell them apart, a clear error beats a silent
+ * wrong bind. The refusal must also be total: neither staging is consumed, so naming the
+ * kind afterwards still reaches each one.
+ */
+void test_ambiguous_leaf_name_refused() {
+    std::printf("#883: a kind-less SPEC matching two stagings is refused, not guessed:\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    declare_stub_kind(net, "mod-a", "stub-a", conn_role_t::DIAL);
+    declare_stub_kind(net, "mod-b", "stub-b", conn_role_t::DIAL);
+
+    stub_link_t link_a;
+    stub_link_t link_b;
+    net.provide_link("mod-a", "x", link_a);
+    net.provide_link("mod-b", "x", link_b);
+
+    const auto w =
+        node.write(path_t("/net:children[]"), conn_spec("client", "x", conn_role_t::DIAL, 0));
+    check(!w.has_value() && w.error() == status_t::TYPE_MISMATCH,
+          "an ambiguous kind-less SPEC answers TYPE_MISMATCH");
+    check(!node.find(path_t::parse("/net/mod-a/x")->key()).has_value() &&
+              !node.find(path_t::parse("/net/mod-b/x")->key()).has_value(),
+          "and NEITHER module gained a connection");
+    check(router.registry().live_size() == 0, "nothing entered the router registry");
+
+    // Total refusal: both stagings survive, and the disambiguating SPEC still binds them.
+    const auto wa = node.write(path_t("/net:children[]"),
+                               conn_spec("client", "x", conn_role_t::DIAL, 0, "stub-a"));
+    const auto wb = node.write(path_t("/net:children[]"),
+                               conn_spec("client", "x", conn_role_t::DIAL, 0, "stub-b"));
+    check(wa.has_value() && wb.has_value(), "naming the kind afterwards creates both");
+    check(router.registry().by_name("net/mod-a/x") == &link_a &&
+              router.registry().by_name("net/mod-b/x") == &link_b,
+          "so the refusal consumed neither staging");
+}
+
+/**
+ * @brief #883 — a SPEC's kind decides the module; an unrelated staging cannot capture it.
+ *
+ * The staged scan used to run BEFORE the (kind, role) → module declaration, so a link staged
+ * under `mod-a` swallowed a SPEC naming a kind declared under `mod-b` — the kind's factory
+ * never ran and the connection mounted in the wrong place. The staging is not merely
+ * outvoted here: it is untouched, and still binds its own module afterwards.
+ */
+void test_kind_module_beats_unrelated_staging() {
+    std::printf("#883: a SPEC naming a kind is not captured by an unrelated staging:\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    declare_stub_kind(net, "mod-a", "stub-a", conn_role_t::DIAL);
+    declare_stub_kind(net, "mod-b", "stub-b", conn_role_t::DIAL);
+
+    stub_link_t staged;
+    net.provide_link("mod-a", "x", staged);  // staged under mod-a; the SPEC below names mod-b's
+    g_stub_built = 0;
+
+    const auto w = node.write(path_t("/net:children[]"),
+                              conn_spec("client", "x", conn_role_t::DIAL, 0, "stub-b"));
+    check(w.has_value(), "SPEC{name=x, kind=stub-b} creates");
+    check(node.find(path_t::parse("/net/mod-b/x")->key()).has_value(),
+          "it mounts under mod-b — the kind's declared module");
+    check(g_stub_built == 1, "the kind's FACTORY ran (the staging did not capture the create)");
+    check(router.registry().by_name("net/mod-b/x") != nullptr &&
+              router.registry().by_name("net/mod-b/x") != &staged,
+          "and the wired link is the constructed one, not the staged one");
+    check(!node.find(path_t::parse("/net/mod-a/x")->key()).has_value(),
+          "nothing was mounted under the staging's own module");
+
+    // Untouched: a kind-less SPEC (now the only staging for that leaf NAME) still binds it.
+    const auto w2 =
+        node.write(path_t("/net:children[]"), conn_spec("client", "x", conn_role_t::DIAL, 0));
+    check(w2.has_value() && router.registry().by_name("net/mod-a/x") == &staged,
+          "the staging survived and still binds mod-a/x");
 }
 
 /**
@@ -1588,6 +1751,9 @@ int main() {
     test_local_path_untouched();
     test_config_constructed_udp();
     test_provide_link_wins();
+    test_same_leaf_name_under_two_modules();
+    test_ambiguous_leaf_name_refused();
+    test_kind_module_beats_unrelated_staging();
     test_link_is_armed_after_wiring();
     test_factory_built_ws_dial_delivers_push_on_connect();
     test_factory_built_tcp_dial_delivers_push_on_connect();
