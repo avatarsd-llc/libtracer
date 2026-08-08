@@ -360,6 +360,56 @@ void test_fragmented_message_span() {
     ::close(cfd);
 }
 
+/**
+ * @brief #1060 — a RESERVED data frame injected BETWEEN two fragments FAILS the connection
+ *        instead of being stepped over while the assembler stitches around it.
+ *
+ * The consequence the transports' `default:` arm hid. Reassembly state is touched only in the
+ * `BINARY`/`CONT` arm, so a reserved frame — sorted as DATA by `is_control_opcode`, hence
+ * subject to no decoder rule at all before this — was dropped with `assembling` untouched and
+ * the two halves were joined as though nothing had arrived between them. RFC 6455 §5.4 permits
+ * exactly one thing to be interleaved into a fragmented message, a CONTROL frame, and
+ * `test_fragmented_message_rope` above pins that a PING still may be.
+ *
+ * The second assertion is what makes this vector about FRAGMENTATION rather than a third copy
+ * of the plain reserved-opcode case: with the §5.2 clause ablated the connection stays up AND
+ * `12` + `345` is delivered as one 5-byte message, so both assertions redden together.
+ */
+void test_reserved_frame_between_fragments_fails_the_connection() {
+    std::printf("transport_ws server — a reserved frame between two fragments fails it (#1060):\n");
+
+    std::promise<std::vector<std::byte>> got;
+    auto fut = got.get_future();
+    auto rx = [&](std::span<const std::byte> f) {
+        got.set_value(std::vector<std::byte>(f.begin(), f.end()));
+    };
+    tr::net::transport_ws_server server(0);
+    check(server.ok(), "server up");
+    server.set_receiver(rx);
+
+    const int cfd = tcp_connect(server.local_port());
+    check(cfd >= 0 && raw_handshake(cfd), "raw client connected + 101 handshake");
+
+    const std::array<std::uint8_t, 4> mask{0x11, 0x22, 0x33, 0x44};
+    const std::array<std::byte, 2> head{std::byte{1}, std::byte{2}};
+    const std::array<std::byte, 3> tail{std::byte{3}, std::byte{4}, std::byte{5}};
+    const std::array<std::byte, 2> junk{std::byte{0x5A}, std::byte{0x5A}};
+    write_bytes(cfd, masked_client_frame(ws::opcode_t::BINARY, head, mask, /*fin=*/false));
+    // Opcode 0x3: reserved, non-control, and otherwise IMPECCABLE — FIN set, masked, two
+    // payload bytes, far inside both §5.5's bound and the receive cap.
+    write_bytes(cfd, masked_client_frame(static_cast<ws::opcode_t>(0x3), junk, mask));
+    write_bytes(cfd, masked_client_frame(ws::opcode_t::CONT, tail, mask, /*fin=*/true));
+
+    bool closed = false;
+    const auto back =
+        read_until(cfd, [](const std::vector<std::byte>& b) { return !b.empty(); }, 2s, &closed);
+    check(back.empty() && closed, "nothing came back, and the server FAILED the connection");
+    check(fut.wait_for(500ms) != std::future_status::ready,
+          "the fragments were NOT stitched around the reserved frame");
+    check(server.malformed_rx() == 1, "the reserved frame was COUNTED as malformed, exactly once");
+    ::close(cfd);
+}
+
 void test_handshake_and_frames() {
     std::printf("transport_ws server — handshake + masked recv + server send:\n");
 
@@ -1527,6 +1577,47 @@ void test_client_fails_the_connection_on_a_fragmented_control_frame() {
           "the §5.5 breach was COUNTED as malformed, not silently tolerated");
 }
 
+/**
+ * @brief #1060 — a RESERVED opcode from the server we dialled fails the connection (§5.2).
+ *
+ * @param op    The raw opcode nibble to send. A `std::uint8_t` on purpose: these are exactly
+ *              the values `ws::opcode_t` does not name.
+ * @param label How the case prints.
+ *
+ * The frame is otherwise IMPECCABLE — FIN set, an 8-byte payload well inside both §5.5's
+ * bound and the receive cap — so neither existing rule can be what rejects it. Driven for
+ * both halves of the reserved space, which reach the rule from opposite sides: `0x3`-`0x7`
+ * are sorted as DATA by `is_control_opcode` and so met no opcode-shape rule, while
+ * `0xB`-`0xF` are control frames a peer can shape perfectly legally and slide past §5.5.
+ */
+void drive_client_reserved_opcode(std::uint8_t op, const char* label) {
+    std::printf("transport_ws client — a reserved opcode %s fails the connection (#1060):\n",
+                label);
+    const std::array<std::byte, 8> payload{std::byte{0x01}, std::byte{0x02}, std::byte{0x03},
+                                           std::byte{0x04}, std::byte{0x05}, std::byte{0x06},
+                                           std::byte{0x07}, std::byte{0x08}};
+    std::vector<std::byte> frame;
+    append_server_frame(frame, static_cast<ws::opcode_t>(op), payload);
+
+    const auto got = drive_control_breach(frame);
+    check(got.handshaken, "the client completed its opening handshake");
+    check(got.reply.empty(), "the client wrote nothing back");
+    check(got.peer_closed, "the client FAILED the connection: its end of the socket went away");
+    check(got.link_down, "and it reported the link down through the departure seam");
+    check(got.malformed_after > got.malformed_before,
+          "the §5.2 breach was COUNTED as malformed, not silently ignored");
+}
+
+/** @brief #1060 — the reserved NON-CONTROL half (`0x3`), at the client. */
+void test_client_fails_the_connection_on_a_reserved_data_opcode() {
+    drive_client_reserved_opcode(0x3, "0x3 (reserved non-control)");
+}
+
+/** @brief #1060 — the reserved CONTROL half (`0xB`), legal-shaped, at the client. */
+void test_client_fails_the_connection_on_a_reserved_control_opcode() {
+    drive_client_reserved_opcode(0xB, "0xB, legal-shaped (reserved control)");
+}
+
 }  // namespace
 
 int main() {
@@ -1534,6 +1625,7 @@ int main() {
     test_peer_open_before_response_is_readable();
     test_fragmented_message_rope();
     test_fragmented_message_span();
+    test_reserved_frame_between_fragments_fails_the_connection();
     test_scatter_gather_send();
     test_client_server_roundtrip();
     test_multi_peer_bus();
@@ -1544,6 +1636,8 @@ int main() {
     test_client_answers_a_control_frame_at_the_bound_masked();
     test_client_fails_the_connection_on_an_oversize_control_frame();
     test_client_fails_the_connection_on_a_fragmented_control_frame();
+    test_client_fails_the_connection_on_a_reserved_data_opcode();
+    test_client_fails_the_connection_on_a_reserved_control_opcode();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;

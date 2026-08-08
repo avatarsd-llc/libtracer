@@ -20,6 +20,7 @@
 #include <deque>
 #include <mutex>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "driver/gpio.h"
@@ -74,11 +75,13 @@ struct fake_queue_t {
 
 /** @brief A TWAI node: its callbacks and the frame POINTERS the driver is holding. */
 struct twai_node_base {
-    std::mutex m;                           /**< @brief Guards the queue and callbacks. */
+    std::mutex m;                           /**< @brief Guards the queues and callbacks. */
     bool enabled = false;                   /**< @brief Set by twai_node_enable. */
     twai_event_callbacks_t cbs{};           /**< @brief What the link registered. */
     void* ctx = nullptr;                    /**< @brief Its user context (the link). */
     std::deque<const twai_frame_t*> queued; /**< @brief Frames not yet completed. */
+    std::deque<fake_twai::scripted_rx_frame_t>
+        inbound; /**< @brief Scripted frames not yet reported. */
 };
 
 namespace {
@@ -272,11 +275,41 @@ esp_err_t twai_node_transmit_wait_all_done(twai_node_handle_t node, int timeout_
 }
 
 esp_err_t twai_node_receive_from_isr(twai_node_handle_t node, twai_frame_t* rx_frame) {
-    // No inbound path is modelled yet: the RX-done callback is never invoked, so
-    // this is unreachable. It exists so the TU links.
-    (void)node;
-    (void)rx_frame;
-    return ESP_FAIL;
+    if (node == nullptr || rx_frame == nullptr) return ESP_ERR_INVALID_ARG;
+
+    fake_twai::scripted_rx_frame_t got;
+    {
+        const std::lock_guard lock(node->m);
+        // The failure IDF gives when the callback fetches with nothing pending.
+        if (node->inbound.empty()) return ESP_FAIL;
+        got = std::move(node->inbound.front());
+        node->inbound.pop_front();
+    }
+
+    // The header the HAL parsed, exactly as it parsed it: the DLC is the RAW code
+    // off the wire, not a byte count. Checked in ESP-IDF's esp32/ and esp32c3/
+    // hal/twai_ll.h: twai_ll_parse_frame_header does `header->dlc = rx_frame->dlc`,
+    // the untouched 4-bit field, and only the separate DATA copy is clamped to 8.
+    // A bus frame coding 9..15 therefore does reach the link as a code
+    // twaifd_dlc2len expands past the classic width — the input the link's own
+    // clamp is there for. Only the fields the TU reads are carried; the rest zeroed.
+    rx_frame->header = {};
+    rx_frame->header.id = got.id;
+    rx_frame->header.dlc = got.dlc;
+    rx_frame->header.ide = got.extended ? 1U : 0U;
+    rx_frame->header.rtr = got.remote ? 1U : 0U;
+
+    // twai_hal_parse_frame copies NOTHING for a remote frame — an RTR carries a DLC
+    // but no data field — and otherwise fills the caller's buffer under its own
+    // buffer_len. The v2 HAL's extra MIN against the mode's width is subsumed here:
+    // the link hands in an 8-byte buffer, which is the classic width already.
+    if (!got.remote && rx_frame->buffer != nullptr) {
+        std::size_t n = twaifd_dlc2len(got.dlc);
+        if (n > rx_frame->buffer_len) n = rx_frame->buffer_len;
+        if (n > got.data.size()) n = got.data.size();
+        if (n != 0) std::memcpy(rx_frame->buffer, got.data.data(), n);
+    }
+    return ESP_OK;
 }
 
 // --- The levers ------------------------------------------------------------------
@@ -337,5 +370,43 @@ bool complete_one_tx() {
 unsigned peak_tx_waiters() { return g_peak_waiters.load(std::memory_order_relaxed); }
 
 TickType_t last_take_ticks() { return g_last_take_ticks.load(std::memory_order_relaxed); }
+
+void script_rx(const scripted_rx_frame_t& frame) {
+    const std::lock_guard lock(g_node_m);
+    if (g_node == nullptr) return;
+    const std::lock_guard node_lock(g_node->m);
+    g_node->inbound.push_back(frame);
+}
+
+std::size_t rx_scripted() {
+    const std::lock_guard lock(g_node_m);
+    if (g_node == nullptr) return 0;
+    const std::lock_guard node_lock(g_node->m);
+    return g_node->inbound.size();
+}
+
+bool deliver_one_rx() {
+    twai_node_base* node = nullptr;
+    {
+        const std::lock_guard lock(g_node_m);
+        node = g_node;
+    }
+    if (node == nullptr) return false;
+
+    twai_event_callbacks_t cbs{};
+    void* ctx = nullptr;
+    {
+        const std::lock_guard lock(node->m);
+        if (node->inbound.empty() || node->cbs.on_rx_done == nullptr) return false;
+        cbs = node->cbs;
+        ctx = node->ctx;
+    }
+    twai_rx_done_event_data_t edata{};
+    // Outside the node lock, exactly as the driver's ISR is: the callback reaches
+    // straight back in through twai_node_receive_from_isr to take the frame, and
+    // then hands it to the link's ISR->dispatch queue.
+    (void)cbs.on_rx_done(node, &edata, ctx);
+    return true;
+}
 
 }  // namespace fake_twai

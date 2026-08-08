@@ -190,10 +190,15 @@ std::pair<::iovec*, std::size_t> build_server_iov(
  *
  * Slots are recycled in place across connections (the header's bounded-steady-state
  * contract) and never freed before the server, so the @ref endpoint facade
- * `peer_link` hands out stays pointer-valid for the server's lifetime. Threading:
- * @ref fd / @ref open are atomics (senders read them under `write_m_`); @ref name
- * is guarded by `peers_m_` (cross-thread reads from `peer_link`/`enumerate_peers`);
- * the buffers and the assembler are recv-thread-only.
+ * `peer_link` hands out stays pointer-valid for the server's lifetime. Threading, ONE
+ * rule for every half of the lifecycle: @ref fd / @ref open are atomics MUTATED only
+ * under `write_m_` — accept publishes them, the 101 flips `open`, teardown resets them
+ * — and read by senders under that same lock, so a sender never sees a half-published
+ * slot; the destructor's closing sweep is the single mutation outside it, and runs
+ * after the recv thread is joined. @ref name is guarded by `peers_m_` (cross-thread
+ * reads from `peer_link`/`enumerate_peers`, which read @ref open too and never touch
+ * the fd); the buffers and the assembler are recv-thread-only. Every access to the two
+ * atomics is `relaxed`: the lock, not the memory order, is what orders them.
  */
 struct transport_ws_server::session_t {
     std::atomic<int> fd{-1};       /**< @brief The peer socket; -1 ⇒ free slot. */
@@ -251,7 +256,7 @@ transport_ws_server::~transport_ws_server() {
     stop_and_join();  // FIRST: the run() thread touches the fds closed below
     if (listen_fd_ >= 0) ::close(listen_fd_);
     for (const std::unique_ptr<session_t>& s : slots_) {  // thread joined — nothing races
-        const int fd = s->fd.exchange(-1, std::memory_order_acq_rel);
+        const int fd = s->fd.exchange(-1, std::memory_order_relaxed);
         if (fd >= 0) ::close(fd);
     }
 }
@@ -396,8 +401,17 @@ void transport_ws_server::accept_peer() {
     slot->hs_buf.clear();
     slot->buf.clear();
     slot->assembler.reset();
-    slot->open.store(false, std::memory_order_relaxed);
-    slot->fd.store(fd, std::memory_order_release);  // publish LAST — the slot is now live
+    // The accept-side half of the slot rule (#891): `open`/`fd` are mutated only under
+    // write_m_ — the lock teardown_slot resets them under, and the lock `service_peer` holds
+    // when it flips `open` true past the 101.  A WS slot is published NOT-open (its 101 has
+    // not been written yet), so the hold is what keeps the pair one step for a broadcast
+    // holding write_m_, not the order of the two stores.  Accept is cold; relaxed stores
+    // because the lock is what orders them.
+    {
+        const std::lock_guard lock(write_m_);
+        slot->open.store(false, std::memory_order_relaxed);
+        slot->fd.store(fd, std::memory_order_relaxed);
+    }
 }
 
 void transport_ws_server::service_peer(session_t& s) {
@@ -447,8 +461,8 @@ void transport_ws_server::service_peer(session_t& s) {
             // store inside it means anyone who could observe the response also observes the
             // slot as open. (`open` must NOT move ahead of the response write instead: a
             // concurrent send would then be free to put a BINARY frame on the wire in front
-            // of the handshake reply.)
-            s.open.store(true, std::memory_order_release);
+            // of the handshake reply.)  Relaxed: the lock is what orders this store.
+            s.open.store(true, std::memory_order_relaxed);
         }
         // The seam that makes the line above testable: here the response is out AND the slot
         // is published, so a send that lands in this instant must reach the peer. Move the
@@ -482,8 +496,8 @@ bool transport_ws_server::drain_frames(session_t& s) {
         ws::decode_result_t decoded = ws::decode_frame_checked(s.buf, cap);
         if (decoded.status == ws::decode_status_t::NEED_MORE) return true;
         if (decoded.status == ws::decode_status_t::PROTOCOL_ERROR) {
-            // An over-cap declared length or a §5.5 control breach: a stream we refuse to
-            // keep reading. Count it, then tear down through the one teardown path.
+            // An over-cap length, a §5.5 control breach or a §5.2 reserved opcode: a stream
+            // we refuse to keep reading. Count it, then tear down through the one teardown.
             malformed_rx_.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
@@ -548,7 +562,7 @@ bool transport_ws_server::drain_frames(session_t& s) {
             case ws::opcode_t::CLOSE:
                 return false;  // tear this one connection down
             default:
-                break;  // TEXT / PONG: ignored
+                break;  // TEXT / PONG: ignored (a RESERVED opcode never gets here: #1060)
         }
     }
 }
@@ -568,11 +582,12 @@ void transport_ws_server::teardown_slot(session_t& s) {
     {
         // The stream teardown-under-write-lock invariant, per slot: reset the fd
         // and the open flag under write_m_ BEFORE ::close, so an in-flight send
-        // either finished against the still-open fd or observes the reset.
+        // either finished against the still-open fd or observes the reset.  The
+        // mirror image of the accept-side publish — same lock, same relaxed stores.
         const std::lock_guard lock(write_m_);
         was_open = s.open.load(std::memory_order_relaxed);
         s.open.store(false, std::memory_order_relaxed);
-        fd = s.fd.exchange(-1, std::memory_order_acq_rel);
+        fd = s.fd.exchange(-1, std::memory_order_relaxed);
     }
     if (fd >= 0) ::close(fd);
     s.buf.clear();
@@ -807,7 +822,7 @@ void transport_ws_client::serve(int fd, std::vector<std::byte> pipelined) {
             // RFC 6455 §7.1.7: a protocol violation FAILS the connection — the same
             // teardown a peer CLOSE takes, not an unbounded wait for legal bytes. That
             // now covers a declared length past the receive cap, which is what stops the
-            // server we dialled from naming our memory budget (#872).
+            // server we dialled from naming our memory budget (#872), and §5.2 (#1060).
             if (decoded.status == ws::decode_status_t::PROTOCOL_ERROR) {
                 malformed_rx_.fetch_add(1, std::memory_order_relaxed);
                 goto teardown;
@@ -860,7 +875,7 @@ void transport_ws_client::serve(int fd, std::vector<std::byte> pipelined) {
                 case ws::opcode_t::CLOSE:
                     goto teardown;  // peer asked to close
                 default:
-                    break;  // TEXT / PONG: ignored
+                    break;  // TEXT / PONG: ignored (a RESERVED opcode dies at decode: #1060)
             }
         }
 

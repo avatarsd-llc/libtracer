@@ -618,6 +618,203 @@ fn path_ref_empty() {
     assert_eq!(path_ref_element(&t.payload, 0), None);
 }
 
+/* ------------------------------- encode/decode symmetry on PATH_REF (#1004) --- */
+
+/**
+ * @brief A raw `PATH_REF` node as a caller can spell one — `Tlv`'s fields are all public, so
+ * this bypasses the guarded `path_ref` builder, which is the door #1004 is about.
+ */
+fn raw_path_ref(pl: bool, ll: bool, payload: Vec<u8>, children: Vec<Tlv>) -> Tlv {
+    Tlv {
+        type_code: libtracer::type_code::PATH_REF,
+        opt: Opt {
+            pl,
+            ll,
+            ..Opt::default()
+        },
+        payload,
+        children,
+        trailer: None,
+    }
+}
+
+/** @brief A structured `FWD` wrapping @p children — the nesting case for the property. */
+fn fwd_wrapping(children: Vec<Tlv>) -> Tlv {
+    Tlv {
+        type_code: libtracer::type_code::FWD,
+        opt: Opt::structured(),
+        payload: Vec::new(),
+        children,
+        trailer: None,
+    }
+}
+
+/**
+ * @brief Each ill-formed `PATH_REF` shape encodes to NOTHING, and the bytes this crate used
+ * to mint for it are `FRAME_INVALID` (#1004).
+ *
+ * The property being closed, in both halves. Before the fix `encode` serialized every one of
+ * these verbatim; the second assertion in each pair is what those bytes were worth — this
+ * core's own `decode` refuses them, and so does every conformant node. Three of the four
+ * pre-fix encodings ARE the published negative vectors, byte-for-byte, which is why those
+ * are read from disk rather than written out as literals here.
+ */
+#[test]
+fn path_ref_ill_formed_encodes_to_nothing() {
+    // (index 7, generation 3), little-endian — one well-formed element, reused below.
+    let one = vec![7u8, 0, 0, 0, 3, 0, 0, 0];
+
+    // opt.LL = 1. Pre-fix output: `1408080000000700000003000000` — `ref-ll-set` exactly.
+    assert!(encode(&raw_path_ref(false, true, one.clone(), Vec::new())).is_empty());
+    assert_eq!(
+        hex(&assert_vector_rejected("path-ref/ref-ll-set")),
+        "1408080000000700000003000000"
+    );
+
+    // A length that is not a whole number of elements. Pre-fix output:
+    // `14000c000700000003000000aabbccdd` — `ref-len-not-multiple-of-8` exactly.
+    let mut ragged = one.clone();
+    ragged.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd]);
+    assert!(encode(&raw_path_ref(false, false, ragged, Vec::new())).is_empty());
+    assert_eq!(
+        hex(&assert_vector_rejected(
+            "path-ref/ref-len-not-multiple-of-8"
+        )),
+        "14000c000700000003000000aabbccdd"
+    );
+
+    // One element over the §4.3 bound. Pre-fix output: the 2052-byte `ref-256-elements`,
+    // whose elements are `(index = i, generation = 0)` — rebuilt here so the pin is the
+    // published bytes rather than a length.
+    let over: Vec<u8> = (0..=libtracer::MAX_PATH_REF_ELEMENTS as u32)
+        .flat_map(|i| {
+            let mut e = i.to_le_bytes().to_vec();
+            e.extend_from_slice(&0u32.to_le_bytes());
+            e
+        })
+        .collect();
+    assert_eq!(
+        over.len(),
+        (libtracer::MAX_PATH_REF_ELEMENTS + 1) * libtracer::PATH_REF_ELEMENT_BYTES
+    );
+    assert!(encode(&raw_path_ref(false, false, over.clone(), Vec::new())).is_empty());
+    let vector_256 = assert_vector_rejected("path-ref/ref-256-elements");
+    assert_eq!(
+        vector_256[4..],
+        over,
+        "the pre-fix encoding IS this vector's body"
+    );
+
+    // opt.PL = 1 — a caller who mistook PATH_REF for a structured type. This shape has no
+    // published vector (a PL body is child TLVs, not an element array), so its pre-fix
+    // encoding is written out: a PATH_REF whose body is one NAME TLV.
+    let pl_set = raw_path_ref(true, false, Vec::new(), name_child_body(&one));
+    assert!(encode(&pl_set).is_empty());
+    let pre_fix_pl = from_hex("14400c00020008000700000003000000");
+    assert_eq!(
+        decode(&pre_fix_pl).unwrap_err(),
+        libtracer::Error::FrameInvalid
+    );
+}
+
+/** @brief One NAME child carrying @p payload — the body a `PL = 1` PATH_REF would frame. */
+fn name_child_body(payload: &[u8]) -> Vec<Tlv> {
+    vec![Tlv {
+        type_code: libtracer::type_code::NAME,
+        opt: Opt::default(),
+        payload: payload.to_vec(),
+        children: Vec::new(),
+        trailer: None,
+    }]
+}
+
+/**
+ * @brief A refused TLV refuses its ANCESTORS — never a shorter frame that decodes (#1004).
+ *
+ * The counterfactual is the point: dropping the bad child would have emitted `0f4005000200010061`,
+ * a 9-byte FWD that decodes cleanly one component short. Silent truncation is worse than
+ * emitting nothing, so the parent refuses too.
+ */
+#[test]
+fn path_ref_refusal_propagates_to_ancestors() {
+    let mut ragged = vec![7u8, 0, 0, 0, 3, 0, 0, 0];
+    ragged.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd]);
+    let leading_name = name_child_body(&[0x61]);
+    let mut children = leading_name.clone();
+    children.push(raw_path_ref(false, false, ragged, Vec::new()));
+
+    // The sibling alone still encodes — the parent is refused for the PATH_REF, not for being
+    // structured, so this is not a vacuous "everything is empty now" pass.
+    assert_eq!(
+        hex(&encode(&fwd_wrapping(leading_name))),
+        "0f4005000200010061"
+    );
+    assert!(encode(&fwd_wrapping(children.clone())).is_empty());
+    // Two levels up refuses as well.
+    assert!(encode(&fwd_wrapping(vec![fwd_wrapping(children)])).is_empty());
+}
+
+/**
+ * @brief The guard does not over-refuse: every WELL-FORMED `PATH_REF` still encodes to the
+ * bytes it did before, including the two ends of the §4.3 range (#1004).
+ *
+ * Built by struct literal rather than through `path_ref`, so this covers the door the guard
+ * sits on rather than the builder that satisfies the rule by construction.
+ */
+#[test]
+fn path_ref_well_formed_is_untouched_by_the_guard() {
+    for name in [
+        "ref-empty",
+        "ref-1host",
+        "ref-2host",
+        "ref-3host",
+        "ref-255-elements",
+    ] {
+        let bin = assert_vector_consistent(&format!("path-ref/{name}"));
+        let body = bin[4..].to_vec();
+        assert_eq!(
+            encode(&raw_path_ref(false, false, body, Vec::new())),
+            bin,
+            "{name}: byte-identical to the published vector"
+        );
+    }
+}
+
+/**
+ * @brief `encode_fwd_bytes` surfaces the refusal instead of answering `Ok(vec![])` (#1004).
+ *
+ * `FwdRequest::payload` is embedded verbatim, so a caller-built ill-formed `PATH_REF` reaches
+ * the codec through this `Result`-returning door; a success carrying an empty frame would be
+ * the worst of the two answers.
+ */
+#[test]
+fn encode_fwd_bytes_refuses_an_ill_formed_path_ref_payload() {
+    let dst = ["sensor", "temp"];
+    let src = ["client"];
+    let mut req = FwdRequest::new(fwd_op::WRITE, &dst, &src);
+    assert!(libtracer::encode_fwd_bytes(&req).is_ok());
+
+    req.payload = Some(raw_path_ref(false, false, vec![0u8; 9], Vec::new()));
+    assert_eq!(
+        libtracer::encode_fwd_bytes(&req).unwrap_err(),
+        BuildError::InvalidPathRef
+    );
+
+    // A well-formed PATH_REF payload still builds — the wrapper refuses the shape, not the type.
+    req.payload = Some(
+        path_ref(&[PathRefElement {
+            index: 7,
+            generation: 3,
+        }])
+        .unwrap(),
+    );
+    let bytes = libtracer::encode_fwd_bytes(&req).unwrap();
+    assert_eq!(
+        decode_fwd(&bytes).unwrap().payload.unwrap().type_code,
+        libtracer::type_code::PATH_REF
+    );
+}
+
 /* -------------------------------------------------- Unit 3 — ERROR + STATUS --- */
 
 #[test]
@@ -1293,7 +1490,10 @@ fn fwd_mint_request_is_one_bit() {
     assert_eq!(mf.op, libtracer::fwd::fwd_op::READ);
     assert_eq!(mf.op, pf.op);
     assert!(mf.mint_request && !pf.mint_request);
-    assert!(!mf.dst_bound, "the mint REQUEST is canonically addressed — it is the key");
+    assert!(
+        !mf.dst_bound,
+        "the mint REQUEST is canonically addressed — it is the key"
+    );
 }
 
 /**
@@ -1342,7 +1542,10 @@ fn fwd_mint_reply_carries_the_binding_last() {
 fn acl_bound_vs_canonical_allow() {
     let bound = assert_vector_consistent("acl/bound-vs-canonical-allow");
     let canonical = assert_vector_consistent("fwd/fwd-read");
-    assert_eq!(hex(&bound), "0f402100010001000014000800020000000000000006400c00020008007265706c792d6570");
+    assert_eq!(
+        hex(&bound),
+        "0f402100010001000014000800020000000000000006400c00020008007265706c792d6570"
+    );
     assert!(
         bound.len() < canonical.len(),
         "the bound spelling is the shorter one — {} vs {}",
@@ -1434,12 +1637,18 @@ fn fwd_bound_forward_is_one_hop_from_forwarded() {
     let bin_dst = &bt.children[1];
     let out_dst = &at.children[1];
     assert_eq!(bin_dst.type_code, libtracer::type_code::PATH_REF);
-    assert!(!out_dst.opt.pl, "the re-headed PATH_REF keeps PL clear — a record array");
+    assert!(
+        !out_dst.opt.pl,
+        "the re-headed PATH_REF keeps PL clear — a record array"
+    );
     assert_eq!(bin_dst.payload.len() / libtracer::PATH_REF_ELEMENT_BYTES, 2);
     assert_eq!(out_dst.payload.len() / libtracer::PATH_REF_ELEMENT_BYTES, 1);
     assert_eq!(
         path_ref_element(&bin_dst.payload, 0),
-        Some(PathRefElement { index: 1, generation: 0 })
+        Some(PathRefElement {
+            index: 1,
+            generation: 0
+        })
     );
     assert_eq!(
         path_ref_element(&out_dst.payload, 0),
@@ -1455,5 +1664,8 @@ fn fwd_bound_forward_is_one_hop_from_forwarded() {
     assert_eq!(at.children[2].children.len(), 2, "src = /cli/reply-ep");
 
     // The payload rode through untouched.
-    assert_eq!(hex(&before[before.len() - 8..]), hex(&after[after.len() - 8..]));
+    assert_eq!(
+        hex(&before[before.len() - 8..]),
+        hex(&after[after.len() - 8..])
+    );
 }

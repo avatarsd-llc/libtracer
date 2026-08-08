@@ -8,7 +8,39 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`encode` no longer mints a `PATH_REF` frame this crate's own `decode` rejects (#1004).** The
+  grammar has exactly one per-type structural rule — a `PATH_REF` body is a fixed-stride 8-byte
+  record array, so `opt.PL` and `opt.LL` are both forbidden and the length is a bounded multiple
+  of 8 (RFC-0024 §4.2/§4.3) — and `parse_one` has always enforced it. The generic `encode` did
+  not: it serialized any `Tlv` verbatim, so a `PATH_REF` built with `opt.pl` even took the
+  children branch and emitted per-child TLV framing. All four ill-formed shapes produced bytes
+  this crate answers with `Error::FrameInvalid`. The guarded `path_ref` builder satisfies the
+  rule by construction, which left a `Tlv` STRUCT LITERAL as the door — `Tlv`'s fields are all
+  public, so that is the ordinary way to build one here. The four clauses now live in one
+  private predicate that `parse_one` and `encode` share, rather than the encoder gaining a copy.
+
+  The C++ core closed the same asymmetry in #886 and this crate did not, so the three cores
+  diverged on one input tree; that divergence is now closed on this side. No wire change, and no
+  well-formed tree encodes differently.
+
+  **API note — the failure mode is a new `encode` postcondition.** `encode` returns a `Vec<u8>`
+  and has no error channel, so refusal is spelled **emits nothing**: an ill-formed `PATH_REF`
+  anywhere in the tree makes the whole call return an EMPTY `Vec`, and a refused TLV refuses its
+  ancestors rather than being dropped into a frame that DOES decode, one component short. Empty
+  is unambiguous — an accepted TLV always carries at least its 4-byte header, so no well-formed
+  tree encodes to nothing. This matches the C++ core's `wire::encode` exactly.
+
 ### Added
+
+- **`BuildError::InvalidPathRef`** — a new variant, so `encode_fwd_bytes` can surface the
+  refusal above instead of answering `Ok` over an empty `Vec`. `FwdRequest::payload` is a
+  caller-supplied `Tlv` embedded verbatim, so an ill-formed `PATH_REF` reaches that
+  `Result`-returning wrapper; a success carrying a frame that is silently nothing is the worst
+  of the two answers. **Breaking for an exhaustive `match` on `BuildError`** (the enum is not
+  `#[non_exhaustive]`); every existing variant keeps its meaning and no existing error changes.
+  `encode` itself is unaffected — it still has no error channel (#1004).
 
 - **`fwd/fwd-reply-error-after-description` conformance vector**, shared with the C++ and
   TypeScript cores and pinned here by `fwd_reply_error_after_description`. No behaviour change to

@@ -83,7 +83,14 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 SOURCE_SUFFIXES = (".hpp.in", ".hpp", ".cpp", ".cc", ".hh", ".h")
 
 # Directories that hold no citable source: build output, vendored deps, worktrees.
-NON_SOURCE_DIRS = ("_build", "build", "node_modules", ".claude", ".git", "target", "dist")
+# `.pio` is PlatformIO's per-project cache: `pio run` in the packaging fixture unpacks the
+# library UNDER TEST into `.pio/libdeps/<env>/libtracer/`, which is a second copy of every
+# core source. Without this the gate turns red the moment anyone runs that fixture locally,
+# for the same reason `build-` is here — a basename with two paths is ambiguous, and the
+# gate must not depend on which builds someone happens to have run in the tree.
+NON_SOURCE_DIRS = (
+    "_build", "build", "node_modules", ".claude", ".git", "target", "dist", ".pio",
+)
 # ...and the same, for any `build-<something>` sibling. The exact name "build" is not the
 # only one that appears: this repo's agent workflow mandates `build-agent` (`.gitignore`
 # covers `build-*/`), and a generated `build-agent/generated/include/libtracer/config.hpp`
@@ -453,10 +460,10 @@ ANCHORS = [
     ('core/include/libtracer/transport_quic.hpp:153',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }'),
     # core/include/libtracer/transport_tcp.hpp
-    ('core/include/libtracer/transport_tcp.hpp:151',
+    ('core/include/libtracer/transport_tcp.hpp:175',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'tcp_transport_t& operator=(const tcp_transport_t&) = delete;'),
-    ('core/include/libtracer/transport_tcp.hpp:277',
+    ('core/include/libtracer/transport_tcp.hpp:301',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'transport_tcp_server& operator=(const transport_tcp_server&) = delete;'),
     # core/include/libtracer/transport_udp.hpp
@@ -602,7 +609,7 @@ ANCHORS = [
     ('core/src/transport_tcp.cpp:223',
      '// buffer, no copy; feeding recv chunks through feed() would add one).'),
     ('core/src/transport_tcp.cpp:243', 'if (!read_exact(fd, seg->bytes.data(), len)) return;'),
-    ('core/src/transport_tcp.cpp:457', 'std::array<std::byte, 4096> chunk;',
+    ('core/src/transport_tcp.cpp:482', 'std::array<std::byte, 4096> chunk;',
      'void transport_tcp_server::service_peer(session_t& s) {'),
     # core/src/transport_udp.cpp
     ('core/src/transport_udp.cpp:132',
@@ -625,13 +632,13 @@ ANCHORS = [
     ('core/src/transport_ws.cpp:100',
      'const std::optional<tr::view::view_t> link = tr::view::over_bytes(payload, backend);'),
     ('core/src/transport_ws.cpp:150', 'constexpr std::size_t kMaxServerIov = kMaxInlineIov;'),
-    ('core/src/transport_ws.cpp:272', '// no flatten, no re-copy (server frames are UNMASKED, RFC 6455 §5.1). Lock'),
-    ('core/src/transport_ws.cpp:280',
+    ('core/src/transport_ws.cpp:277', '// no flatten, no re-copy (server frames are UNMASKED, RFC 6455 §5.1). Lock'),
+    ('core/src/transport_ws.cpp:285',
      'std::array<::iovec, kMaxServerIov + 1> inline_vec;',
      'listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);'),
-    ('core/src/transport_ws.cpp:406', 'std::array<std::byte, 4096> chunk;',
+    ('core/src/transport_ws.cpp:420', 'std::array<std::byte, 4096> chunk;',
      'void transport_ws_server::service_peer(session_t& s) {'),
-    ('core/src/transport_ws.cpp:793', 'std::array<std::byte, 4096> chunk;',
+    ('core/src/transport_ws.cpp:808', 'std::array<std::byte, 4096> chunk;',
      'void transport_ws_client::serve(int fd, std::vector<std::byte> pipelined) {'),
     # core/tests/registry_teardown_test.cpp
     ('core/tests/registry_teardown_test.cpp:289', 'void test_digest_paths_agree() {'),
@@ -658,7 +665,7 @@ ANCHORS = [
     ('core/include/libtracer/mem_heap.hpp:183', '[[nodiscard]] bool try_reserve(std::vector<T>& v, std::size_t n) noexcept {'),
     ('core/include/libtracer/mem_heap.hpp:375', '[[nodiscard]] inline std::optional<view_t> over_bytes(std::span<const std::byte> bytes,'),
     ('core/include/libtracer/path.hpp:156', 'explicit path_t(std::string_view text);'),
-    ('core/include/libtracer/transport_tcp.hpp:284', '[[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }'),
+    ('core/include/libtracer/transport_tcp.hpp:308', '[[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }'),
     ('core/include/libtracer/transport_ws.hpp:233', '[[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }'),
     ('core/include/libtracer/edge_pin.hpp:153', 'class pin_t {'),
     ('core/src/fwd_router.cpp:629', 'link.set_rope_receiver('),
@@ -674,9 +681,11 @@ ANCHORS = [
     ('core/src/transport_can.cpp:313', 'tr::view::view_can_frames_t::split(*payload, cfg_.mode);'),
     # --- #1052: the build/tooling citations, now readable (@ref CITABLE_BUILD_PATHS).
     # `LIBTRACER_NO_ATOMIC` is spelled in three places outside `segment.hpp`, and the two
-    # in build files had both rotted: the footprint script's citation had landed on its
-    # include-directory assignment, the test CMake's on a blank line and an unrelated WS
-    # block. Neither file carried a pin, so the gate verified the `segment.hpp` half of
+    # in build files had both rotted: the footprint script's citation (`:93`) had landed on
+    # its include-directory assignment, and the test CMake's (`:927,940-941`) on three
+    # registrations belonging to entirely different suites — `add_test(NAME
+    # fwd_flatten_backend ...)` and the `terminus_egress_backend_test` executable and its
+    # link line. Neither file carried a pin, so the gate verified the `segment.hpp` half of
     # that sentence and read as if it had verified the whole of it. These pin the lines
     # the prose actually names, in the two pages that name them: the segment module page
     # and the configuration-space design page.
@@ -684,11 +693,11 @@ ANCHORS = [
     ('tools/cortexm0_footprint.py:94', 'cxx_flags = ['),
     ('tools/cortexm0_footprint.py:101', '"-DLIBTRACER_NO_ATOMIC",'),
     ('tools/cortexm0_footprint.py:115', '"--specs=nano.specs",'),
-    ('core/tests/CMakeLists.txt:1055', 'add_executable(substrate_test_no_atomic'),
-    ('core/tests/CMakeLists.txt:1068', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
+    ('core/tests/CMakeLists.txt:1079', 'add_executable(substrate_test_no_atomic'),
+    ('core/tests/CMakeLists.txt:1092', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
     # The leading indent is load-bearing: the bare token also appears in the comment
     # three lines above the executable, and an anchor that matches both is not an anchor.
-    ('core/tests/CMakeLists.txt:1069', '    LIBTRACER_NO_ATOMIC'),
+    ('core/tests/CMakeLists.txt:1093', '    LIBTRACER_NO_ATOMIC'),
 ]
 
 

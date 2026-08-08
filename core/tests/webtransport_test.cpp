@@ -742,6 +742,9 @@ void test_spec_dial_trust_keys() {
  * to HOLD the server object to interrogate it; the dialer — the thing under
  * test — goes through the real `:children[]` SPEC wire path every time. One
  * listener per leg: a webtransport endpoint carries one session at a time.
+ *
+ * Legs 4 and 5 are #1039: the value the key carries must be origin-form, and
+ * one that is not is refused at creation instead of put on the wire.
  */
 void test_spec_dial_connect_path() {
     std::printf("SPEC dial extended-CONNECT :path (#1023):\n");
@@ -780,6 +783,44 @@ void test_spec_dial_connect_path() {
     webtransport_transport_t dialer("127.0.0.1", empty_path.local_port(), "", dev_tls());
     check(dialer.ok(), "a direct dial with an EMPTY path establishes its session");
     check(empty_path.session_path() == "/", "an empty path is normalised to / before the CONNECT");
+
+    // 4. #1039 — a non-empty `path` that is not origin-form. RFC 9114 §4.3.1 /
+    //    RFC 9113 §8.3.1: an `https` request's `:path` is non-empty and, in
+    //    origin-form, begins with "/". `"tracer"` therefore cannot be right,
+    //    and the factory refuses it at creation beside the empty-`addr` /
+    //    zero-`port` preconditions instead of emitting it.
+    //
+    //    THIS LISTENER CANNOT SEE THE DEFECT: its accept arm validates
+    //    `:method`/`:protocol` and serves every resource, so before the fix the
+    //    malformed CONNECT SUCCEEDED here — measured on unmodified main, the
+    //    write returned a value and the listener reported `session_path` =
+    //    "tracer", `session_up` = 1. All three checks below redden there.
+    //
+    //    The "no socket was opened" observable is the listener's: a dialer that
+    //    was never constructed cannot handshake, so this fresh listener has
+    //    accepted no CONNECT and reports no session.
+    webtransport_transport_t untouched(std::uint16_t{0}, g_cert, g_key);
+    check(untouched.ok(), "a fresh listener for the refusal leg is up");
+    const auto bare =
+        node_a.write(path_t("/net:children[]"),
+                     conn_spec("client", "bare", tr::net::conn_role_t::DIAL, untouched.local_port(),
+                               "127.0.0.1", {}, {}, {}, g_cert, std::nullopt, "tracer"));
+    check(!bare.has_value() && bare.error() == tr::graph::status_t::TYPE_MISMATCH,
+          "A: SPEC{client, ..., path=\"tracer\"} is REFUSED with TYPE_MISMATCH");
+    check(untouched.session_path().empty() && !untouched.session_up(),
+          "the refused creation dialled nothing — the listener accepted no CONNECT");
+    check(router_a.registry().by_name("net/webtransport-client/bare") == nullptr,
+          "A: the refused creation leaves no endpoint behind");
+
+    // 5. The rule is the leading "/", not the spelling of leg 1: a deeper
+    //    origin-form path still reaches the wire untouched.
+    webtransport_transport_t deep(std::uint16_t{0}, g_cert, g_key);
+    const auto nested =
+        node_a.write(path_t("/net:children[]"),
+                     conn_spec("client", "deep", tr::net::conn_role_t::DIAL, deep.local_port(),
+                               "127.0.0.1", {}, {}, {}, g_cert, std::nullopt, "/a/b"));
+    check(nested.has_value(), "A: SPEC{client, ..., path=\"/a/b\"} still constructs the dialer");
+    check(deep.session_path() == "/a/b", "the origin-form path reached the server verbatim");
 }
 
 // ---- a raw msquic H3 client: the test's hand on the LISTEN-side classifier ----

@@ -1019,6 +1019,48 @@ void test_ws_fragmented_control_fails_the_connection() {
     ::close(cfd);
 }
 
+/**
+ * @brief #1060 — a RESERVED opcode fails the connection too (RFC 6455 §5.2), at the SERVER.
+ *
+ * @param op    The raw opcode nibble to send. A `std::uint8_t` on purpose: these are exactly
+ *              the values `ws::opcode_t` does not name.
+ * @param label How the case prints.
+ *
+ * The frame is otherwise IMPECCABLE — FIN set, masked as a client frame must be, an 8-byte
+ * payload well inside both §5.5's bound and the receive cap — so neither of the two rules the
+ * decoder already had can be what rejects it. Both halves of the reserved space are driven,
+ * because they reach the rule from opposite sides: `0x3`-`0x7` are sorted as DATA by
+ * `is_control_opcode` and so met no opcode-shape rule, while `0xB`-`0xF` are control frames
+ * a peer can shape perfectly legally and slide straight past §5.5.
+ */
+void drive_ws_reserved_opcode(std::uint8_t op, const char* label) {
+    std::printf("ws server — a reserved opcode %s fails the connection (#1060):\n", label);
+    tr::net::transport_ws_server server(0);
+    const int cfd = tcp_connect(server.local_port());
+    check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
+
+    const std::vector<std::byte> payload(8, std::byte{0x5A});
+    write_bytes(cfd, masked_client_frame(static_cast<ws::opcode_t>(op), payload));
+
+    bool closed = false;
+    const auto got =
+        read_until(cfd, [](const std::vector<std::byte>& b) { return !b.empty(); }, 2s, &closed);
+    check(got.empty(), "the server wrote nothing back");
+    check(closed, "the server FAILED the connection");
+    check(server.malformed_rx() == 1, "and COUNTED it as malformed, exactly once");
+    ::close(cfd);
+}
+
+/** @brief #1060 — the reserved NON-CONTROL half (`0x3`), at the server. */
+void test_ws_reserved_data_opcode_fails_the_connection() {
+    drive_ws_reserved_opcode(0x3, "0x3 (reserved non-control)");
+}
+
+/** @brief #1060 — the reserved CONTROL half (`0xB`), legal-shaped, at the server. */
+void test_ws_reserved_control_opcode_fails_the_connection() {
+    drive_ws_reserved_opcode(0xB, "0xB, legal-shaped (reserved control)");
+}
+
 /** @brief The stack control encoders emit exactly what the contiguous encoders do — the split
  *         changed where the bytes are built, never what they are. */
 void test_control_encoders_are_byte_identical() {
@@ -1107,6 +1149,8 @@ int main() {
     test_ws_ping_at_the_bound_is_answered();
     test_ws_oversized_ping_fails_the_connection();
     test_ws_fragmented_control_fails_the_connection();
+    test_ws_reserved_data_opcode_fails_the_connection();
+    test_ws_reserved_control_opcode_fails_the_connection();
     test_control_encoders_are_byte_identical();
     test_try_encode_client_frame();
     std::printf("%s (%d failure(s))\n", g_failures == 0 ? "OK" : "FAILED", g_failures);

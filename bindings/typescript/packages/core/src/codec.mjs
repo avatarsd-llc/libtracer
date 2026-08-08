@@ -75,6 +75,37 @@ export const ERROR = Object.freeze({
   TLV_NESTING_TOO_DEEP: 'TLV_NESTING_TOO_DEEP',
 });
 
+/**
+ * @brief The purely STRUCTURAL PATH_REF rules of RFC-0024 §4.2/§4.3 — the grammar's only
+ * per-type check, and the ONE home of it in this module: both {@link decode} and
+ * {@link encode} call this rather than spelling the four clauses twice.
+ *
+ * A PATH_REF header that fails this is FRAME_INVALID, exactly as a set reserved bit is. All
+ * four clauses are shape, not meaning — what an element MEANS is node-scoped, so no codec
+ * can validate one:
+ *
+ * - `opt.PL` MUST be 0 — the body is a fixed-stride record array, not child TLVs; a generic
+ *   PL=1 walker would read the first four body bytes as a TLV header and mis-frame the body.
+ * - `opt.LL` MUST be 0 — the u32 length width buys nothing under a 2040-byte cap, so it is
+ *   forbidden rather than merely unused.
+ * - `length % 8 == 0` — a body that is not a whole number of elements has no reading, because
+ *   the element count is not on the wire at all: it IS `length / 8`.
+ * - `length <= 2040` — the §4.3 element-count bound, in bytes.
+ *
+ * @param {boolean} pl       opt.PL
+ * @param {boolean} ll       opt.LL
+ * @param {number} bodyLen   the body length in bytes
+ * @returns {boolean} true if the header is structurally a well-formed PATH_REF
+ */
+function pathRefBodyValid(pl, ll, bodyLen) {
+  return (
+    !pl &&
+    !ll &&
+    bodyLen % PATH_REF_ELEMENT_BYTES === 0 &&
+    bodyLen <= MAX_PATH_REF_ELEMENTS * PATH_REF_ELEMENT_BYTES
+  );
+}
+
 /** @brief Reserved bits 7 and 0; non-zero => FRAME_INVALID. */
 const RESERVED_MASK = 0b1000_0001;
 
@@ -318,17 +349,10 @@ function parseOne(buf) {
   if (buf.length < header) throw new CodecError(ERROR.FRAME_TRUNCATED);
 
   const length = readLe(buf, 2, opt.ll ? 4 : 2);
-  // The one per-type structural rule (RFC-0024 §4.2/§4.3): a PATH_REF body is a bare
-  // fixed-stride 8-byte record array, so PL/LL are forbidden, the length is a whole number
-  // of elements, and the count is bounded at 255. Shape only — an element's MEANING is
-  // node-scoped and no codec can check it.
-  if (
-    typeB === TYPE.PATH_REF &&
-    (opt.pl ||
-      opt.ll ||
-      length % PATH_REF_ELEMENT_BYTES !== 0 ||
-      length > MAX_PATH_REF_ELEMENTS * PATH_REF_ELEMENT_BYTES)
-  ) {
+  // The one per-type structural rule (RFC-0024 §4.2/§4.3), through the single predicate
+  // encode() now shares — see pathRefBodyValid for the four clauses and why they are shape
+  // rather than meaning.
+  if (typeB === TYPE.PATH_REF && !pathRefBodyValid(opt.pl, opt.ll, length)) {
     throw new CodecError(ERROR.FRAME_INVALID);
   }
   const tsSize = opt.ts ? (opt.tf ? 4 : 8) : 0;
@@ -430,15 +454,42 @@ export function decode(input) {
  * @brief Encode a TLV tree back to wire bytes, recomputing the trailer CRC from
  * the body (+ timestamp bytes) when opt.CR is set. Mirrors `encode` in frame.cpp.
  *
+ * Encoding is SYMMETRIC with {@link decode}: the grammar's one per-type structural rule — a
+ * PATH_REF body is a fixed-stride 8-byte record array, so opt.PL and opt.LL are both
+ * forbidden and the length is a bounded multiple of 8 (RFC-0024 §4.2/§4.3) — is applied here
+ * through the same predicate the decoder calls, so this core cannot mint a frame it would
+ * itself answer with FRAME_INVALID (#1004; the C++ core closed the same asymmetry in #886).
+ * This package exports no PATH_REF builder, so a caller composes the object literal directly
+ * and this is the only door.
+ *
+ * **Postcondition.** This function has no error channel, so refusal is spelled *emits
+ * nothing*: an ill-formed PATH_REF anywhere in the tree makes the whole call return an EMPTY
+ * `Uint8Array`. A refused TLV refuses its ancestors rather than being dropped into a frame
+ * that DOES decode, one component short. Empty is unambiguous — an accepted TLV always
+ * carries at least its 4-byte header, so no well-formed tree encodes to nothing. Well-formed
+ * input is untouched and stays byte-identical to what it produced before.
+ *
  * @param {Tlv} tlv
- * @returns {Uint8Array}
+ * @returns {Uint8Array} the frame bytes, or an EMPTY array when the tree is refused
  */
 export function encode(tlv) {
+  // The emitted type byte is `type & 0xff` (below), so the guard reads the byte the wire will
+  // actually carry. A PATH_REF body is never structured, so `payload` IS the body length: an
+  // opt.PL PATH_REF fails the PL clause before the children branch below ever runs.
+  if (
+    (tlv.type & 0xff) === TYPE.PATH_REF &&
+    !pathRefBodyValid(tlv.opt.pl, tlv.opt.ll, tlv.payload.length)
+  ) {
+    return new Uint8Array(0);
+  }
+
   /** @type {number[]} */
   let body = [];
   if (tlv.opt.pl) {
     for (const child of tlv.children) {
       const cb = encode(child);
+      // A refused child refuses the parent (see the postcondition above).
+      if (cb.length === 0) return new Uint8Array(0);
       for (let i = 0; i < cb.length; i++) body.push(cb[i]);
     }
   } else {

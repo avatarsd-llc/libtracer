@@ -18,9 +18,11 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -131,6 +133,29 @@ std::vector<std::byte> test_frame(std::size_t len, std::uint8_t seed) {
     std::vector<std::byte> f(len);
     for (std::size_t i = 0; i < len; ++i) f[i] = static_cast<std::byte>(seed + i);
     return f;
+}
+
+/**
+ * @brief Read up to @p want bytes off @p fd within @p budget — the raw client's eye on the
+ *        wire, returning whatever arrived when the budget expires (so "nothing arrived" is an
+ *        answer the caller can check, not a hang).
+ */
+std::vector<std::byte> read_within(int fd, std::size_t want, std::chrono::milliseconds budget) {
+    std::vector<std::byte> got;
+    const auto deadline = std::chrono::steady_clock::now() + budget;
+    while (got.size() < want) {
+        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now());
+        if (left.count() <= 0) break;
+        pollfd p{fd, POLLIN, 0};
+        if (::poll(&p, 1, static_cast<int>(left.count())) <= 0) break;
+        std::array<std::byte, 256> chunk;
+        const std::size_t take = std::min(chunk.size(), want - got.size());
+        const ssize_t n = ::recv(fd, chunk.data(), take, 0);
+        if (n <= 0) break;
+        got.insert(got.end(), chunk.begin(), chunk.begin() + n);
+    }
+    return got;
 }
 
 void test_raw_frame_duplex() {
@@ -789,6 +814,90 @@ void test_server_max_peers_cap() {
     check(readmitted, "...and the next dialer is admitted into the recycled slot");
 }
 
+/**
+ * @brief A broadcast that lands INSIDE the accept publish reaches the peer being accepted —
+ *        `open ⇒ fd valid`, proven by holding that instant open rather than by racing for it.
+ *
+ * `accept_peer` publishes a slot's two sender-visible fields under `write_m_` (the lock
+ * `teardown_slot` resets them under), fd FIRST. Store them unlocked with `open` first — what
+ * this server did before #891 — and a broadcast holding `write_m_` can read `open == true`
+ * next to `fd == -1` and hand the record to `write_all_iov(-1)`, which drops it on the floor.
+ * In production that window is two instructions wide, so a racing test cannot pin it.
+ *
+ * So this test does not race: `detail::tcp_peer_publishing_hook` PARKS the poll thread at the
+ * mid-publish instant, the whole broadcast happens inside that parked window, and only then
+ * is the park released. With the pair published under the lock the sender blocks, wakes to a
+ * whole slot, and the client reads the record; with the two stores unlocked and reordered the
+ * identical sequence writes to fd -1 and the client's socket stays empty until the budget
+ * expires. Deterministic in both directions.
+ */
+void test_accept_publish_is_atomic_to_senders() {
+    std::printf("TCP transport — a broadcast inside the accept publish reaches the new peer:\n");
+
+    tr::net::transport_tcp_server server(0);
+    check(server.ok(), "listen socket bound");
+
+    // The parked window. `reached` is set on the server's poll thread; `released` by this
+    // thread once the broadcast has been made.
+    std::mutex m;
+    std::condition_variable cv;
+    bool reached = false;
+    bool released = false;
+    bool armed = true;  // one-shot: a later accept (none here) must not park
+    struct hook_state_t {
+        std::mutex* m;
+        std::condition_variable* cv;
+        bool* reached;
+        bool* released;
+        bool* armed;
+    };
+    static hook_state_t s_state{};  // the hook is a plain function pointer: no capture
+    s_state = hook_state_t{&m, &cv, &reached, &released, &armed};
+
+    /** @brief Clears the seam however this test leaves. */
+    struct hook_guard_t {
+        ~hook_guard_t() { tr::net::detail::tcp_peer_publishing_hook = nullptr; }
+    } const guard;
+
+    tr::net::detail::tcp_peer_publishing_hook = [] {
+        std::unique_lock lock(*s_state.m);
+        if (!*s_state.armed) return;
+        *s_state.armed = false;
+        *s_state.reached = true;
+        s_state.cv->notify_all();
+        // Park the publish here until the test has broadcast. Bounded so a broken build
+        // fails the assertions rather than hanging the suite.
+        s_state.cv->wait_for(lock, 5s, [] { return *s_state.released; });
+    };
+
+    const raw_client_t client(server.local_port());
+    check(client.fd >= 0, "raw client connected");
+
+    {
+        std::unique_lock lock(m);
+        check(cv.wait_for(lock, 2s, [&] { return reached; }),
+              "the poll thread reached the instant mid-publish");
+    }
+
+    // The whole broadcast happens INSIDE the parked window: under the fix it blocks on
+    // write_m_ and lands on a published slot; without it, it reads the half-published one.
+    const auto payload = test_frame(6, 0x5A);
+    std::thread sender([&] { server.send(payload); });
+    // Give the sender time to reach the send path inside the window. Generous either way:
+    // with the publish locked the send merely waits longer for write_m_ and still lands.
+    std::this_thread::sleep_for(200ms);
+    {
+        const std::lock_guard lock(m);
+        released = true;
+    }
+    cv.notify_all();
+    sender.join();
+
+    const auto want = record(payload);
+    const auto got = read_within(client.fd, want.size(), 2s);
+    check(got == want, "the frame broadcast in that instant REACHED the accepted peer");
+}
+
 }  // namespace
 
 // Proves the recv_stack knob (libtracer #486): a transport constructed with an
@@ -828,6 +937,7 @@ int main() {
     test_config_constructed_tcp();
     test_server_multi_peer_bus();
     test_server_max_peers_cap();
+    test_accept_publish_is_atomic_to_senders();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;

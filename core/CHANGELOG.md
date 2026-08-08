@@ -16,6 +16,16 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`tr::net::detail::tcp_peer_publishing_hook` (`libtracer/transport_tcp.hpp`) — a TEST-ONLY
+  seam, null in production (#891).** Run by `transport_tcp_server::accept_peer` at the instant
+  a new peer's fd is published and its slot is one store from open, inside the `write_m_`
+  hold. The window a racing test would have to hit is two instructions wide; the hook lets a
+  test HOLD that instant open, broadcast into it, and check the frame arrives at the peer
+  being accepted (`tcp_test`). Same shape and same rules as `ws_peer_published_hook`: install
+  it before the peer that should trip it connects, clear it before the test returns. The
+  production cost is one predictable null-check per accepted connection on the cold accept
+  path.
+
 - **`graph::status_t::TRANSPORT_DOWN` — a link that could not come up now has its own status
   (#929).** The L4 status set had eight members and no transport member, so every
   dial/bind/handshake failure was reported as `NOT_FOUND` and `error_code(status_t)` — the
@@ -39,6 +49,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `defer_recv` flag, so a direct `transport_ws_client(host, port)` behaves exactly as before.
 
 ### Changed
+
+- **The `webtransport` factory refuses a DIAL `path` that is not origin-form (#1039).** A
+  config whose `path` key is non-empty and does not begin with `/` — `path = "tracer"` — used
+  to construct a dialer and emit that string as the extended CONNECT `:path`; it now answers
+  `graph::status_t::TYPE_MISMATCH` from `net::webtransport_transport_factory`'s DIAL branch,
+  beside the existing empty-`addr` / zero-`port` preconditions, so no socket or TLS work
+  happens. An `https` request's `:path` is non-empty and, in origin-form, `/`-prefixed (RFC
+  9114 §4.3.1 / RFC 9113 §8.3.1), so such a value could only ever draw a `400` from a
+  conformant server — which this side reports as a failed session, indistinguishable from a
+  rejected certificate. Absent and empty still normalise to `/`, a `/`-prefixed value is
+  passed through unchanged, and nothing beyond the leading `/` is judged (no percent-encoding,
+  control-character or length rules). The `webtransport_transport_t` constructors, the CONNECT
+  field-section encoder and the LISTEN-side accept arm are untouched — a direct
+  `webtransport_transport_t(host, port, "tracer", …)` still dials as before, and this
+  library's listener still serves every resource it is asked for.
 
 - **`view::rope_t::try_reserve` keeps only its no-op arm in the inlinable body; the spilling
   arm moved to an out-of-line private member (#1065).** Signature, return values and
@@ -80,6 +105,22 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `push_back` ladder again unless the caller reserves. Callers that know their final link
   count still call `try_reserve` themselves — the delivery clone and the composed-read reply
   builder already did, and `read_children_folded` now does at its own call site.
+
+- **`ws::decode_frame_checked` fails the connection on a RESERVED opcode (RFC 6455 §5.2), and
+  the new `ws::is_defined_opcode(opcode_t)` predicate names the six defined ones (#1060).**
+  This changes what a WS peer observes: a frame whose opcode is outside
+  `{CONT, TEXT, BINARY, CLOSE, PING, PONG}` was decoded and then silently dropped by both
+  transports' `default:` arm; it is now `PROTOCOL_ERROR` off the first header byte, so both
+  halves tick `malformed_rx()` and tear the connection down through the path they already
+  used for a §5.5 breach. `0x3`–`0x7` are the half that met no OPCODE-SHAPE rule
+  before — `is_control_opcode` is `& 0x08`, which sorts them with the DATA frames, so no
+  rule a LEGAL-SHAPED one could fail applied to them; the #872 `max_payload` bound did
+  still reject an over-cap reserved frame — and one of those
+  arriving between two fragments was skipped without disturbing the assembler, so the
+  continuations were stitched around it. `TEXT` and `PONG` are unaffected: they are DEFINED
+  opcodes, they still decode, and each transport still ignores them. The UNCHECKED
+  `ws::decode_frame` is unchanged and still decodes reserved opcodes — it owns no connection
+  to fail, and `tests/conformance/ws_diff_fuzz.py` holds it against the TypeScript decoder.
 
 ### Fixed
 
@@ -128,6 +169,33 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `vertex_t::set_delivery_mode()` keep their signatures, `sizeof(vertex_t)` is unchanged (the
   atomic is byte-wide, and the `#361` ceilings still hold), and the sweep's delivery semantics
   across `IF_NEWER` / `UNCONDITIONAL` / `EXPLICIT` are unchanged.
+
+- **`transport_tcp_server` publishes an accepted peer's `open`/`fd` under `write_m_`, fd
+  first (#891).** The two halves of a slot's lifecycle used different disciplines on the same
+  two fields: `teardown_slot` reset them under `write_m_` — so an in-flight send either
+  finished against the still-open fd or observed the reset — while `accept_peer` stored them
+  with no lock at all, and stored `open = true` *before* the fd. A broadcast holding
+  `write_m_` mid-accept could therefore read `open == true` next to `fd == -1` and hand the
+  record to `write_all_iov(-1)`, which drops it: the frame reached no peer, silently, and any
+  future per-fd state would have been read in the same half-published instant. The publish is
+  now one `write_m_` critical section with the fd stored first, so "open ⇒ fd valid" holds for
+  every sender. Accept is cold — once per connection, off the delivery path — and the
+  disassembly confirms the price: in both `transport_tcp.cpp` and `transport_ws.cpp` the
+  functions a peer's traffic runs through carry identical INSTRUCTION STREAMS — both `send`
+  overloads, `peer_endpoint_t::send`, `teardown_slot`, `service_peer`, `run`, `peer_link`,
+  `close_peer`, `enumerate_peers` and the destructor — and `accept_peer` is the only body whose
+  instructions changed. Not byte-identical, and the difference is worth stating precisely: an
+  independent rebuild found three of those functions differ in alignment-padding NOPs and the
+  intra-function jump offsets that follow from them, because `accept_peer` grew and moved what
+  sits after it. No executed instruction changes, which is what carries the claim that
+  `acq_rel → relaxed` on the exchange and `release → relaxed` on the stores cost nothing here. `transport_ws_server`
+  had the safer order already (it publishes a slot NOT-open and flips `open` past the 101
+  under the same lock) and now takes the same lock around its publish, so **one rule covers
+  both servers**: `open`/`fd` are mutated only under `write_m_`, `name` only under `peers_m_`
+  — the rule [#871](https://github.com/avatarsd-llc/libtracer/issues/871)'s shared slot server
+  should lift rather than re-fork. With the lock doing the ordering, both fields drop to
+  uniform `relaxed` on every access; the `release`/`acq_rel` they carried before paired only
+  with relaxed loads and ordered nothing.
 
 - **A transport that could not come up is no longer reported to a peer as a permanent
   wrong-address (#929).** `make_checked` (the shared `!ok()` check behind the built-in
@@ -814,10 +882,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   now applies `wire::path_ref_body_valid`, the same single predicate the decoder and the
   lazy forward tier call, so the rule keeps one home rather than gaining an encoder copy.
 
-  **Scope: this core only.** The same asymmetry is alive in the Rust and TypeScript cores —
-  their generic `encode` serializes an ill-formed `PATH_REF` verbatim while their own
-  decoders reject those bytes — so the three cores now *diverge* on the same input tree.
-  Fixing them is not this change's ruled scope and is tracked separately.
+  **Scope: this core only** — and the divergence it opened is now **closed**. The same
+  asymmetry was alive in the Rust and TypeScript cores, whose generic `encode` serialized an
+  ill-formed `PATH_REF` verbatim while their own decoders rejected those bytes, so the three
+  cores diverged on the same input tree. #1004 applied the same rule and the same
+  emits-nothing postcondition in both bindings; all three cores now refuse identically. See
+  `bindings/rust/CHANGELOG.md` and `bindings/typescript/CHANGELOG.md`.
 
   **API note — the failure mode is a new `encode` postcondition.** `encode` has no error
   channel, and an assert was declined: `NDEBUG` is set in exactly the Release /

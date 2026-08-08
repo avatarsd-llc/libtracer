@@ -426,6 +426,92 @@ test('an empty PATH_REF body is well-formed — the §4.3 bound is an upper one'
   assert.ok(sameBytes(encodePathRef([]), empty), 'ref-empty');
 });
 
+/* -------------------------- encode/decode symmetry on PATH_REF (#1004) --- */
+
+/** @brief The all-clear opt byte, with `over` applied — the raw bits a caller can set. */
+function opt(over = {}) {
+  return { pl: false, ts: false, cr: false, ll: false, cw: false, tf: false, ...over };
+}
+
+/**
+ * @brief A raw PATH_REF node as a caller composes one. The core package exports no PATH_REF
+ * builder, so the object literal IS the normal way to build one and `encode` is the only door.
+ */
+function rawPathRef(bits, payload, children = []) {
+  return { type: TYPE.PATH_REF, opt: opt(bits), payload, children, trailer: null };
+}
+
+/** @brief A bare opaque node of `type` — a NAME child, or a FWD's leading sibling. */
+function bare(type, payload) {
+  return { type, opt: opt(), payload, children: [], trailer: null };
+}
+
+/** @brief A structured FWD wrapping `children`. */
+function fwdWrapping(children) {
+  return { type: TYPE.FWD, opt: opt({ pl: true }), payload: new Uint8Array(0), children, trailer: null };
+}
+
+test('each ill-formed PATH_REF encodes to NOTHING, and its pre-fix bytes are FRAME_INVALID', () => {
+  // The property being closed (#1004), in both halves. Before the fix `encode` serialized
+  // every one of these verbatim; the second assertion in each pair is what those bytes were
+  // worth — this core's own decode refuses them, and so does every conformant node. Three of
+  // the four pre-fix encodings ARE the published negative vectors, byte-for-byte.
+  const one = pathRefBody([[7, 3]]);
+
+  // opt.LL = 1. Pre-fix output: `1408080000000700000003000000` — ref-ll-set exactly.
+  assert.equal(encode(rawPathRef({ ll: true }, one)).length, 0);
+  assert.equal(hex(rejectVector('path-ref/ref-ll-set')), '1408080000000700000003000000');
+
+  // A length that is not a whole number of elements. Pre-fix output:
+  // `14000c000700000003000000aabbccdd` — ref-len-not-multiple-of-8 exactly.
+  const ragged = Uint8Array.from([...one, 0xaa, 0xbb, 0xcc, 0xdd]);
+  assert.equal(encode(rawPathRef({}, ragged)).length, 0);
+  assert.equal(
+    hex(rejectVector('path-ref/ref-len-not-multiple-of-8')),
+    '14000c000700000003000000aabbccdd',
+  );
+
+  // One element over the §4.3 bound. Pre-fix output: the 2052-byte ref-256-elements, whose
+  // elements are (index = i, generation = 0) — rebuilt so the pin is the published bytes.
+  const over = pathRefBody(Array.from({ length: MAX_PATH_REF_ELEMENTS + 1 }, (_, i) => [i, 0]));
+  assert.equal(over.length, (MAX_PATH_REF_ELEMENTS + 1) * PATH_REF_ELEMENT_BYTES);
+  assert.equal(encode(rawPathRef({}, over)).length, 0);
+  assert.ok(
+    sameBytes(rejectVector('path-ref/ref-256-elements').subarray(4), over),
+    'the pre-fix encoding IS this vector body',
+  );
+
+  // opt.PL = 1 — a caller who mistook PATH_REF for a structured type. No published vector
+  // (a PL body is child TLVs, not an element array), so its pre-fix encoding is written out.
+  assert.equal(encode(rawPathRef({ pl: true }, new Uint8Array(0), [bare(TYPE.NAME, one)])).length, 0);
+  const preFixPl = Uint8Array.from(
+    '14400c00020008000700000003000000'.match(/../g).map((b) => parseInt(b, 16)),
+  );
+  assert.throws(() => decode(preFixPl), (e) => e.code === ERROR.FRAME_INVALID);
+});
+
+test('a refused PATH_REF refuses its ancestors — never a shorter frame that decodes', () => {
+  // The counterfactual is the point: dropping the bad child would emit `0f4005000200010061`,
+  // a 9-byte FWD that decodes cleanly one component short. Silent truncation is worse than
+  // emitting nothing, so the parent refuses too.
+  const ragged = Uint8Array.from([...pathRefBody([[7, 3]]), 0xaa, 0xbb, 0xcc, 0xdd]);
+  const sibling = bare(TYPE.NAME, Uint8Array.from([0x61]));
+  const children = [sibling, rawPathRef({}, ragged)];
+
+  // The sibling alone still encodes — the parent is refused for the PATH_REF, not for being
+  // structured, so this is not a vacuous "everything is empty now" pass.
+  assert.equal(hex(encode(fwdWrapping([sibling]))), '0f4005000200010061');
+  assert.equal(encode(fwdWrapping(children)).length, 0);
+  assert.equal(encode(fwdWrapping([fwdWrapping(children)])).length, 0, 'two levels up too');
+});
+
+test('the guard does not over-refuse: every well-formed PATH_REF encodes as it always did', () => {
+  for (const name of ['ref-empty', 'ref-1host', 'ref-2host', 'ref-3host', 'ref-255-elements']) {
+    const bin = vector(`path-ref/${name}`);
+    assert.ok(sameBytes(encode(rawPathRef({}, bin.subarray(4))), bin), name);
+  }
+});
+
 /* --------------------------------- RFC-0024 §5-§7 — the bound-path routing car --- */
 
 test('fwd-mint-request is fwd-read with ONE bit changed — a mint ask costs no bytes', () => {

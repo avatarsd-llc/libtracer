@@ -25,7 +25,9 @@
       "core/src/**",
       "integrations/platformio/**",
       "integrations/esp-idf/libtracer/twai_link.cpp",
+      "integrations/esp-idf/libtracer/esp_thread.hpp",
       "integrations/esp-idf/libtracer/include/**",
+      "integrations/esp-idf/libtracer/compat/include/**",
       "library.json",
       "LICENSE",
       "README.md"
