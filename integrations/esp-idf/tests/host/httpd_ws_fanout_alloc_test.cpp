@@ -11,8 +11,10 @@
  * tx-strand suites: the REAL chip translation unit
  * (`integrations/esp-idf/libtracer/httpd_ws_link.cpp`) compiled against the host fake of
  * `esp_http_server` (fake_httpd.hpp). What is new here is the INSTRUMENT — this file
- * replaces the global `operator new`, so an allocation anywhere under `send()` is a
- * number the test can read rather than a code reading.
+ * replaces the global `operator new`/`delete` family, so an allocation anywhere under
+ * `send()` is a number the test can read rather than a code reading. The family is
+ * replaced WHOLE, and under a sanitizer that is not a nicety; see the block above
+ * `operator new` below for the abort a subset replacement produces.
  *
  * The defect it pins: `httpd_ws_link_t::send` opened by building a `std::vector` of
  * destinations. That is the one container shape the rest of the TU is written to avoid —
@@ -62,21 +64,81 @@
  */
 std::atomic<std::size_t> g_allocs{0};
 
-/** @brief Replacement global allocator: counts, then defers to `malloc`. Replacing the
- *         scalar pair is enough — libstdc++'s array and nothrow forms both route through
- *         it, so `new (std::nothrow) T[n]` is counted too. */
-void* operator new(std::size_t n) {
-    void* const p = std::malloc(n != 0 ? n : 1);
-    if (p == nullptr) throw std::bad_alloc();
-    g_allocs.fetch_add(1, std::memory_order_relaxed);
+namespace {
+
+/** @brief `malloc`, but counted — the one routine every replaced `new` form funnels into. */
+void* counted_alloc(std::size_t size, std::size_t align) {
+    const std::size_t n = size != 0 ? size : 1;
+    // aligned_alloc requires a size that is a whole multiple of the alignment.
+    void* const p = align <= alignof(std::max_align_t)
+                        ? std::malloc(n)
+                        : std::aligned_alloc(align, ((n + align - 1) / align) * align);
+    if (p != nullptr) g_allocs.fetch_add(1, std::memory_order_relaxed);
     return p;
 }
 
-/** @brief The matching deallocation. */
-void operator delete(void* p) noexcept { std::free(p); }
+}  // namespace
 
-/** @brief The sized form, so a sized delete does not fall through to a different free. */
+/**
+ * @brief The counting allocator, replaced as the WHOLE family — every `new` and `delete`
+ *        form the standard defines, never a subset.
+ *
+ * A partial replacement is not merely incomplete here, it is *wrong under a sanitizer*.
+ * ASan serves every form a TU leaves undefined from its own runtime and tags the block
+ * `operator new`; a `new (std::nothrow) T` allocated there and released through a replaced
+ * `delete` (which calls `free`) aborts the process with
+ * `alloc-dealloc-mismatch (operator new vs free)`. That is not hypothetical for this
+ * suite: the link's `detach_sessions()` takes exactly that pair on the teardown of case 1
+ * (`httpd_ws_link.cpp` — `new (std::nothrow) detach_req_t`, then `delete raw`), so a
+ * subset replacement kills the run on the sanitizer legs before case 2 is reached.
+ * Defining all of them keeps every pair `malloc`/`free`, which is consistent under ASan
+ * and counted here. Same family, for the same reason, as
+ * `core/tests/transport_alloc_softfail_test.cpp`.
+ */
+void* operator new(std::size_t size) {
+    void* const p = counted_alloc(size, alignof(std::max_align_t));
+    if (p == nullptr) throw std::bad_alloc();
+    return p;
+}
+void* operator new[](std::size_t size) {
+    void* const p = counted_alloc(size, alignof(std::max_align_t));
+    if (p == nullptr) throw std::bad_alloc();
+    return p;
+}
+void* operator new(std::size_t size, const std::nothrow_t&) noexcept {
+    return counted_alloc(size, alignof(std::max_align_t));
+}
+void* operator new[](std::size_t size, const std::nothrow_t&) noexcept {
+    return counted_alloc(size, alignof(std::max_align_t));
+}
+void* operator new(std::size_t size, std::align_val_t a) {
+    void* const p = counted_alloc(size, static_cast<std::size_t>(a));
+    if (p == nullptr) throw std::bad_alloc();
+    return p;
+}
+void* operator new[](std::size_t size, std::align_val_t a) {
+    void* const p = counted_alloc(size, static_cast<std::size_t>(a));
+    if (p == nullptr) throw std::bad_alloc();
+    return p;
+}
+void* operator new(std::size_t size, std::align_val_t a, const std::nothrow_t&) noexcept {
+    return counted_alloc(size, static_cast<std::size_t>(a));
+}
+void* operator new[](std::size_t size, std::align_val_t a, const std::nothrow_t&) noexcept {
+    return counted_alloc(size, static_cast<std::size_t>(a));
+}
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete[](void* p) noexcept { std::free(p); }
 void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
+void operator delete(void* p, std::align_val_t) noexcept { std::free(p); }
+void operator delete[](void* p, std::align_val_t) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t, std::align_val_t) noexcept { std::free(p); }
+void operator delete[](void* p, std::size_t, std::align_val_t) noexcept { std::free(p); }
+void operator delete(void* p, const std::nothrow_t&) noexcept { std::free(p); }
+void operator delete[](void* p, const std::nothrow_t&) noexcept { std::free(p); }
+void operator delete(void* p, std::align_val_t, const std::nothrow_t&) noexcept { std::free(p); }
+void operator delete[](void* p, std::align_val_t, const std::nothrow_t&) noexcept { std::free(p); }
 
 namespace {
 

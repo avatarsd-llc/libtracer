@@ -311,10 +311,10 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
         PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
     # #961 — the FAN-OUT path's allocation, on the same fake. The instrument is what is
-    # new: this suite replaces the global operator new, so "a broadcast allocates" is a
-    # number rather than a code reading. The snapshot send() built its destinations in
-    # used to be a std::vector, whose throwing allocator put an abort() ahead of every
-    # nothrow fallback on the one path every subscription push takes.
+    # new: the suite replaces the WHOLE global operator new/delete family (whole because a
+    # subset makes ASan abort on a mismatched pair), so "a broadcast allocates" is a number
+    # rather than a code reading. The destination snapshot used to be a std::vector, whose
+    # throwing allocator put an abort() ahead of every nothrow fallback on the push path.
     add_executable(httpd_ws_fanout_alloc_test
         "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_fanout_alloc_test.cpp"
         "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
