@@ -77,6 +77,18 @@ SOURCE_SUFFIXES = (".hpp.in", ".hpp", ".cpp", ".cc", ".hh", ".h")
 
 # Directories that hold no citable source: build output, vendored deps, worktrees.
 NON_SOURCE_DIRS = ("_build", "build", "node_modules", ".claude", ".git", "target", "dist")
+# ...and the same, for any `build-<something>` sibling. The exact name "build" is not the
+# only one that appears: this repo's agent workflow mandates `build-agent` (`.gitignore`
+# covers `build-*/`), and a generated `build-agent/generated/include/libtracer/config.hpp`
+# makes `config.hpp` an AMBIGUOUS basename, which the gate reports as stale citations that
+# do not exist. Green-vs-red then depended on whether someone had configured a build in the
+# tree, which is exactly the kind of environment-sensitivity a gate must not have.
+NON_SOURCE_DIR_PREFIXES = ("build-",)
+
+
+def _is_non_source_part(part: str) -> bool:
+    """@brief True if a path component names a directory holding no citable source."""
+    return part in NON_SOURCE_DIRS or part.startswith(NON_SOURCE_DIR_PREFIXES)
 
 # (cited location, substring the target line must contain[, scope])
 #
@@ -670,7 +682,7 @@ def source_map(root: pathlib.Path = None) -> dict:
         if not path.is_file() or not path.name.endswith(SOURCE_SUFFIXES):
             continue
         rel = path.relative_to(root)
-        if any(d in rel.parts for d in NON_SOURCE_DIRS):
+        if any(_is_non_source_part(p) for p in rel.parts):
             continue
         out.setdefault(path.name, []).append(rel.as_posix())
     return {name: sorted(paths) for name, paths in out.items()}
@@ -1056,7 +1068,8 @@ def revision_line_maps(rev: str, root: pathlib.Path = None) -> tuple:
                              capture_output=True, text=True, check=True).stdout.split("\n")
     maps, notes = {}, []
     for rel in (c.strip() for c in changed if c.strip()):
-        if not rel.endswith(SOURCE_SUFFIXES) or any(d in pathlib.PurePosixPath(rel).parts for d in NON_SOURCE_DIRS):
+        if not rel.endswith(SOURCE_SUFFIXES) or any(
+                _is_non_source_part(p) for p in pathlib.PurePosixPath(rel).parts):
             continue
         old = subprocess.run(git + ["show", f"{rev}:{rel}"], capture_output=True, text=True)
         if old.returncode != 0:
