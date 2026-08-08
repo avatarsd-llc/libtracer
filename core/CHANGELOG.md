@@ -117,6 +117,28 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   empty was silently dropped on the rope tier and now draws the addressed terminus reply
   (measured: 0 of 35 interior splits answered before, 35 of 35 after).
 
+- **`graph_t::set_delivery_mode` concurrent with an `assign` no longer double-delivers, and
+  `vertex_t::delivery_mode_` is atomic (#895).** `graph_t::mark_pending` chose which RFC-0008
+  sweep set a vertex belonged in by reading `vertex_t::delivery_mode()` with NO lock, then
+  rendering the vertex's key (an O(depth) parent walk plus an allocation), and only then
+  taking `sweep_mutex_` to insert into `pending_`. `set_delivery_mode` holds that same lock
+  across the mode store and both set edits, so a flip to `UNCONDITIONAL` landing inside that
+  window ran to completion first and the marker's insert then put the key into `pending_` as
+  well — the vertex sat in BOTH sets, and the next covering `propagate` collected it from
+  each and **delivered it twice in one sweep**. The same window could leave a now-`EXPLICIT`
+  vertex in `pending_`, which an ancestor sweep must never include at all. `mark_pending` now
+  re-reads the mode under `sweep_mutex_` before inserting, which makes the two sets mutually
+  exclusive by construction; the unlocked read is kept only as the fast path it always was.
+  Separately, that unlocked read against `set_delivery_mode`'s store was a **data race** on a
+  plain `delivery_mode_t` byte — UB. (An earlier draft called it "the one member of its
+  four-byte field group that was not atomic while `own_subs_`, `listeners_above_` and `flags_`
+  were"; that is wrong twice over — `role_` and `registered_` are also plain members of that
+  group, and `own_subs_` / `listeners_above_` are 4-byte atomics outside it.) The member is now
+  `std::atomic<delivery_mode_t>` with relaxed accessors. `vertex_t::delivery_mode()` and
+  `vertex_t::set_delivery_mode()` keep their signatures, `sizeof(vertex_t)` is unchanged (the
+  atomic is byte-wide, and the `#361` ceilings still hold), and the sweep's delivery semantics
+  across `IF_NEWER` / `UNCONDITIONAL` / `EXPLICIT` are unchanged.
+
 - **`transport_tcp_server` publishes an accepted peer's `open`/`fd` under `write_m_`, fd
   first (#891).** The two halves of a slot's lifecycle used different disciplines on the same
   two fields: `teardown_slot` reset them under `write_m_` — so an in-flight send either
