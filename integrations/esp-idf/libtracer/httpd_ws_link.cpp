@@ -1641,14 +1641,16 @@ void httpd_ws_link_t::bound_socket(int fd) const {
     // Notice a peer that vanishes WITHOUT a FIN — a Wi-Fi drop, a power cut, a killed
     // browser tab, a NAT rebind (#957). Enumerating the ways an inbound session can end
     // gives peer CLOSE/FIN, a handler returning ESP_FAIL, the TX failure streak, the
-    // short-write condemn, and httpd_stop — there is no timer among them, and
-    // `lru_purge_enable = false` (the admission contract in both constructors) removes
-    // the one reclaim esp_http_server has for an idle socket. The TX streak cannot stand
-    // in: `note_tx_result` is fed only from `tx_work`, so a session this link never sends
-    // to accrues no evidence at all. Without keepalive probes such a peer holds its slot
-    // and one unit of `max_peers` for the life of the process; with them the stack fails
-    // the socket, httpd closes the session, and the ordinary free_ctx → reclaim_slot →
-    // notify_peer_down path runs.
+    // short-write condemn, and httpd_stop — there is no timer among them. Nor does
+    // esp_http_server's LRU purge stand in for one: the owning ctor sets
+    // `lru_purge_enable = false` outright, and in adopting mode the flag belongs to the
+    // server's owner and IDF exposes no reader for it — but a purge fires on socket
+    // exhaustion, never on idleness, so an idle peer is not reclaimed either way while
+    // sockets remain. The TX streak cannot stand in: `note_tx_result` is fed only from
+    // `tx_work`, so a session this link never sends to accrues no evidence at all.
+    // Without keepalive probes such a peer holds its slot and one unit of `max_peers` for
+    // the life of the process; with them the stack fails the socket, httpd closes the
+    // session, and the ordinary free_ctx → reclaim_slot → notify_peer_down path runs.
     //
     // Applied HERE and not left to the server's own `keep_alive_enable`, for the same
     // reason the send bound is: an adopted server's config belongs to its owner and this
