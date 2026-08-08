@@ -214,8 +214,26 @@ thresholds, one hard invariant:
 
 Details that make these trustworthy:
 
-- The per-PR gate watches **six canonical points** (a representative slice of the
-  fan-out / payload / topic sweeps plus a fold-width point). The two binaries are run
+- The per-PR gate watches **six canonical points** — a representative slice of the
+  fan-out / payload / topic sweeps plus a fold-width point, one per *gated* family
+  (`inproc` and `inproc-borrow` share one), so a pullback on any of those legs is caught and
+  not just the 1:1 write. They are **not** the whole dispatch surface, and this page should
+  not be read as claiming they are: the path-target delivery legs
+  (`inproc-target-stored` / `inproc-target-handler`) are measured and charted but **ungated**,
+  as are `inproc-deliver`, the `eptype-*` sweep and the `-batch` twins. A pullback confined to
+  those ships without the gate objecting. They are
+  `perf_gate.py`'s `POINTS`, named here in full because this page is hand-written and a
+  bare count says nothing about what is covered; each is keyed
+  `mode/payload/fan-out/endpoints`: `inproc/64/1/1` — the canonical 1:1 write;
+  `inproc-borrow/64/1/1` — its zero-copy twin, the same write handed a *borrowed* view
+  instead of an owned copy; `inproc/64/1024/1` — the
+  1024-subscriber fan-out loop; `inproc-path/64/1/8192` — the resolver canary, one
+  registry lookup per write across 8192 registered vertices; `mixed/0/6/128` — the
+  composed topology, 128 topics whose fan-out varies 1–16 (mean 6) over payloads of
+  1 B–8 KiB, which is why its payload column reads 0; and `fold-b4/512/1/1` — the L0
+  fold walk, 512 bytes held constant across four rope links and timed over a batch. The
+  points are `mode` values of the in-process bench described above, and the numbers are
+  its `size` / `fan-out` / `endpoint` columns. The two binaries are run
   **interleaved** — `A B / B A / A B / B A`, four pairs, alternating which one starts —
   so a slow window in the machine is shared by both arms rather than donated to
   whichever one holds it. Because the baseline is *the same PR's `main` rebuilt on the
