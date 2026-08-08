@@ -213,22 +213,23 @@ class webtransport_transport_t : public transport_t {
  * parsed by this factory from the raw SPEC config TLV — they never appear on
  * the shared `conn_settings_t` (the ADR-0043 §5 leanness ruling). Missing
  * fields fail with `TYPE_MISMATCH`; a session that failed to come up fails with
- * `NOT_FOUND`.
+ * `TRANSPORT_DOWN` — the TRANSIENT status, because the address resolved and it
+ * was the link that did not come up (#929).
  *
  * **The DIAL `path` key (#1023)** carries the extended CONNECT `:path` — the
  * resource the WebTransport session is opened on. NAME, default `/`, so a SPEC
  * that omits it dials the same `/` this factory used to hard-code. Reaching a
  * server that serves its session elsewhere needs it: this DIAL side treats any
  * non-`200` answer to the extended CONNECT as a failed session, so a wrong
- * resource surfaces as `NOT_FOUND` from creation — the same status a rejected
- * certificate gives. The key is kind-private, so it does not collide with the
- * `can` kind's unrelated `path` key (an advertised group path).
+ * resource surfaces as `TRANSPORT_DOWN` from creation — the same status a
+ * rejected certificate gives. The key is kind-private, so it does not collide
+ * with the `can` kind's unrelated `path` key (an advertised group path).
  *
  * **A SPEC-created dialer verifies the server certificate (#918)** — the trust
  * mode is whatever @ref webtransport_dial_tls_t defaults to, so with neither
  * DIAL key present a certificate that does not chain to the system trust store
- * is REFUSED (creation answers `NOT_FOUND`). The same two DIAL-side keys as the
- * `quic` kind move it: `ca` (NAME, a PEM CA-bundle path) verifies against that
+ * is REFUSED (creation answers `TRANSPORT_DOWN`). The same two DIAL-side keys as
+ * the `quic` kind move it: `ca` (NAME, a PEM CA-bundle path) verifies against that
  * bundle instead, and `insecure` (VALUE u8, default 0) set to `1` skips
  * validation entirely — DEV ONLY, and explicit on purpose.
  *

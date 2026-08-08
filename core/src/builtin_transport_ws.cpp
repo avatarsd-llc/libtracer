@@ -22,7 +22,7 @@ namespace tr::net {
 void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_backend) {
     // Built-in `ws`: DIAL = transport_ws_client(addr, port) — a SYNCHRONOUS TCP connect +
     // RFC 6455 opening handshake at creation time (the peer's server must be up, or the
-    // SPEC write fails NOT_FOUND); LISTEN = transport_ws_server(port), serving MANY
+    // SPEC write fails TRANSPORT_DOWN); LISTEN = transport_ws_server(port), serving MANY
     // concurrent inbound peers (#362). `keepalive` is ignored by both (PING/PONG is
     // handled at the ws protocol layer).
     //

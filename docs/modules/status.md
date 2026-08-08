@@ -83,6 +83,13 @@ carries is an `opt`-bit decision described in
   are not transmitted, so a node is free to treat a `TRANSIENT` code as fatal.
 - **`result_t<void>` is the success-only shape.** A call that returns nothing on
   success still returns a `result_t` — discarding it discards the failure.
+- **A link that did not come up is `TRANSPORT_DOWN`, not `NOT_FOUND`.** The two
+  read alike locally and diverge on the wire: `NOT_FOUND` becomes
+  `tr::path::not_found`, whose registry disposition is PERMANENT, while
+  `tr::transport::down` is TRANSIENT. Spending `NOT_FOUND` on a refused dial or a
+  listener that could not bind therefore tells a correct peer to stop retrying a
+  link that would have come back — which is what the built-in transport factories
+  did until [#929](https://github.com/avatarsd-llc/libtracer/issues/929).
 
 ## API reference
 

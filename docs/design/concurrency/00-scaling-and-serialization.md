@@ -63,8 +63,8 @@ hold and recurses under it. The doc comment at `:535` states the same contract f
 `evict_link_edges` snapshot helper — it documents a required hold, it is not an acquisition.
 
 **The RFC-0024 bound-path slot API is on this list, and it is not control plane.** Minting an
-element takes the lock (`op_resolve_walk.hpp:801` → `vertex_slot`) and honouring one takes it
-again (`op_resolve_walk.hpp:1051` and `fwd_router.cpp:865` → `deref_vertex_slot`), so a bound-path hop pays
+element takes the lock (`op_resolve_walk.hpp:803` → `vertex_slot`) and honouring one takes it
+again (`op_resolve_walk.hpp:1053` and `fwd_router.cpp:865` → `deref_vertex_slot`), so a bound-path hop pays
 `map_mutex_` on both ends of the round trip that bound paths exist to make cheap. The two are not
 the same cost: `vertex_slot` **scans `vertex_slots_` linearly** inside the hold, while
 `deref_vertex_slot` and `vertex_slot_at` are a bounds check and one compare — the asymmetry
@@ -90,7 +90,7 @@ The stripe count is an ordinary config constant shared through one header
 default 16, the sharing rationale at `vertex.hpp:997-1001`). The stripe is selected by
 `vertex_stripe_of` (`:1079`) from the vertex address, hashed `(h >> 6) % kVertexLockStripes`
 (`:1075`). The stripes guard the fan-out edge list, the STREAM ring, the write-sequence bump and
-the ACL state. `add_edge`, `clear_edge` and `set_acl` take one; **`snapshot_edges` (`:2000`) no
+the ACL state. `add_edge`, `clear_edge` and `set_acl` take one; **`snapshot_edges` (`:2020`) no
 longer does.** Delivery reads a published, immutable edge array under a bounded edge pin
 instead — the stripe mutex left the publish path and kept the control plane
 ([ADR-0075](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0075-a-vertexs-edges-are-published-and-read-under-an-edge-pin.md)),
@@ -317,7 +317,7 @@ re-measurement — never by further reasoning about a curve.
 
 | A plausible claim | What checking shows | The check that decides it |
 | --- | --- | --- |
-| The read-path residual is `snapshot_edges`' stripe lock | `snapshot_edges` (`vertex.hpp:2000`) is on the **delivery** path; `read` never calls it — and since ADR-0075 it takes no stripe lock at all | reading the call graph |
+| The read-path residual is `snapshot_edges`' stripe lock | `snapshot_edges` (`vertex.hpp:2020`) is on the **delivery** path; `read` never calls it — and since ADR-0075 it takes no stripe lock at all | reading the call graph |
 | "Nothing process-wide is serializing — not the map lock" | Every read acquired `map_mutex_` shared through the fork check — the one lock the claim named | the §3 ablation |
 | Distinct-vertex reads "retain 94%/91% of their T=1 rate", read as healthy | The arithmetic used the wrong shape's denominator — real figures 106%/96% — and retention of a T=1 *aggregate* is a serializer signature, not a health signature | recomputing it |
 | Only a config traits template can recover the stripe table's 896 B, "because the alignment is part of the type" | The *count* cannot reach the alignment; the **alignment itself is a config constant**. One `constexpr` and one token recover the identical 896 B, zero templates | building it both ways on rv32 |

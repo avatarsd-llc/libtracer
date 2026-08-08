@@ -113,6 +113,8 @@ static_assert(struct_opt(std::byte{0x00}) == std::byte{0x00});
             return wire::err_t::SCHEMA_NOT_FOUND;
         case status_t::PATH_IN_USE:
             return wire::err_t::PATH_IN_USE;
+        case status_t::TRANSPORT_DOWN:
+            return wire::err_t::TRANSPORT_DOWN;
     }
     std::unreachable();
 }

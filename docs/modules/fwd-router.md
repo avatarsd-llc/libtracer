@@ -286,7 +286,7 @@ the role default. Extra transport kinds join the catalog through `register_trans
 file ever learning about it.
 
 **The write is ACL-gated.** The `:children[]` append is gated on the parent vertex's `CREATE`
-right and denied with `PERMISSION_DENIED` otherwise (`core/src/graph.cpp:1841-1843`). Under
+right and denied with `PERMISSION_DENIED` otherwise (`core/src/graph.cpp:1859-1861`). Under
 [RFC-0014 — creator endpoint, connection lifecycle and link liveness](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)
 that gate relocates onto the creator endpoint's own ACL and gains its removal counterpart: a `NAME`
 write is gated on `WRITE` — **not** `DELETE` — per
@@ -307,7 +307,7 @@ connection is addressed under `/net/<module>/`, a first-level local vertex canno
 transport registers no module name, and an undeclared `(kind, role)` pair fails creation with
 `SCHEMA_NOT_FOUND` (`core/src/transport_vertex.cpp:167`). The application declares each module
 under a name it chooses through `register_module` (`core/src/transport_vertex.cpp:133`,
-`core/include/libtracer/transport_vertex.hpp:267`), a minting boundary gated by the shared
+`core/include/libtracer/transport_vertex.hpp:275`), a minting boundary gated by the shared
 segment-validity predicate — a reserved-character name answers `INVALID_PATH`. The built-in
 transports export *suggested*-name constants (`kWsClientSuggestedModule`, …) an application may
 adopt; `/net` itself is likewise only the recommended root convention (a constructor default).
