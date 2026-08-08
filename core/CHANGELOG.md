@@ -66,6 +66,30 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Fixed
 
+- **A FWD frame the router could classify but whose op VALUE it could not read is now
+  resolved at the terminus on BOTH cursor tiers, instead of vanishing on the rope one
+  (#870).** Router ingress classification was written twice — `on_frame_rope_impl` for the
+  scatter-gather tier and `on_frame_impl` for the contiguous one — and the two copies had
+  drifted at their tails. The span arm concluded "type byte says FWD ⇒ terminus"; the rope
+  arm asked `peek_fwd_op` once more and, on `nullopt`, fell through to the control sink,
+  where `peek_control` refuses a FWD and the frame was dropped with no reply and no
+  diagnosable drop. Among the frames reaching that tail, the one with an OBSERVABLE reply is a
+  bound (`PATH_REF`) `dst` that `peek_fwd_dst_any` accepts carrying an EMPTY op VALUE, which
+  the terminus resolver reads as `fwd_op_t::READ` — so a resolvable bound READ was answered
+  when it arrived contiguously and disappeared when the identical bytes arrived fragmented.
+  That is the observable instance, not the whole set: any FWD with an unreadable op reached
+  that tail, including ones whose `dst` the peek REFUSES, and the rope tier's disposition of
+  all of them now matches the span arm's. The
+  span arm's disposition is the one kept (a FWD-classified frame is data-plane, never
+  control), and both tiers now run ONE templated classification driver over the grammar
+  `Cursor` seam, parameterised on the four genuinely per-tier actions. The
+  ADVERTISE / COMPACT / HANDLE_NACK control switch is likewise one function now, taking the
+  make-contiguous seam as its parameter. **No public signature changes** — the new
+  `route_fwd_ingress` / `dispatch_control` members are private. The wire-observable change is
+  broader than the bound-READ case above: a FWD whose `dst` the peek refuses and whose op is
+  empty was silently dropped on the rope tier and now draws the addressed terminus reply
+  (measured: 0 of 35 interior splits answered before, 35 of 35 after).
+
 - **A transport that could not come up is no longer reported to a peer as a permanent
   wrong-address (#929).** `make_checked` (the shared `!ok()` check behind the built-in
   udp/tcp/ws factories) and the five hand-rolled `!ok()` sites in `transport_quic.cpp`,

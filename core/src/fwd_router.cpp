@@ -984,6 +984,85 @@ void fwd_router_t::on_frame_rope_bus(const child_rx_ctx_t& ctx, std::string_view
     on_frame_rope_impl(peer, std::move(frame), &ctx, true);
 }
 
+template <class Cursor, class Observe, class Reject, class Terminus, class Reply>
+bool fwd_router_t::route_fwd_ingress(std::string_view inbound_name, const Cursor& cur,
+                                     const child_rx_ctx_t* inbound_ctx, bool from_peer,
+                                     Observe&& observe, Reject&& reject, Terminus&& terminus,
+                                     Reply&& reply) {
+    // The classification gate is the frame's own TYPE byte, and that is the whole of it: a
+    // FWD frame is data-plane, and no peek failure below can turn it back into a control
+    // frame. The rope arm used to gate on `peek_fwd_dst_any` and then on `peek_fwd_op`
+    // answering, and fell through to the control sink when either refused — where
+    // `peek_control` rejects a FWD outright, so the frame was dropped. The span arm reached
+    // its terminus instead. The two peeks do not agree on an EMPTY op VALUE (`peek_fwd_dst_any`
+    // accepts it — see `fwd_pre_t::op_body_len`, which records that reading deliberately —
+    // and `peek_fwd_op` answers nullopt), so a bound-`dst` FWD carrying one was resolved
+    // contiguously and vanished when the same bytes arrived as a multi-link rope. The span
+    // arm's disposition is the one kept: FWD-classified ⇒ terminus, never control.
+    if (static_cast<type_t>(cur.byte_at(0)) != type_t::FWD) return false;
+    // Read-only observer (tests/ACL seam) — wants the tree. Span-only: no rope caller has
+    // a contiguous frame to decode here, so its instantiation of this driver passes a no-op.
+    observe();
+    // ONE peek classifies the `dst` and opens its window: canonical PATH, bound PATH_REF, or
+    // neither. Its verdict is kept, because `resolve_mount_at` overwrites `pre.valid` to mean
+    // something else entirely once the descent has run ("nothing to hand the rebuild"), and
+    // only the peek says which form the `dst` was.
+    //
+    // It also serves both jobs at once on the rope tier: deciding the frame carries a
+    // descendable address, and opening the `dst` window the mount descent then walks. It used
+    // to be two there — the gate peeked and threw the result away, then `resolve_mount` walked
+    // the same TLV headers again, and on a multi-link rope those headers may straddle links,
+    // so the second walk was the expensive kind.
+    fwd_pre_t pre;
+    std::size_t ref_count = 0;
+    const fwd_dst_kind_t kind = peek_fwd_dst_any(cur, pre, ref_count);
+    {
+        // The reader outlives the forward hop on purpose: a resolved bus PEER name is a view
+        // into its retained stitch slot and is referenced right through the egress `gather`.
+        seg_reader_t<Cursor> rd{cur};
+        // Resolve the mount prefix (ADR-0061 strip-K, single-pass since #523). Segments are
+        // walked lazily and read in place when the source keeps them contiguous, stitched
+        // into the reader's slot when they straddle a rope link; an over-long segment is not
+        // routable ⇒ fall to the terminus.
+        const mount_hit_t hit = kind == fwd_dst_kind_t::PATH
+                                    ? resolve_mount_at(registry_, cur, rd, pre)
+                                    : mount_hit_t{};
+        if (hit.link != nullptr) {
+            route_fwd_forward(inbound_name, inbound_ctx, from_peer, hit.strip_k, cur, *hit.link,
+                              &pre);
+            return true;
+        }
+        if (hit.rejected) {  // bus NAME + residual: never broadcast, never terminus
+            reject();
+            return true;
+        }
+        // A BOUND `dst` with a residual longer than one element: this node is a FORWARDER for
+        // it (RFC-0024 §4.1). Tried before the terminus conclusion below, because a bound
+        // forward and a bound terminus are told apart by the element COUNT and by nothing
+        // else — and getting that wrong the other way would apply a passing operation here.
+        //
+        // Gated on the PEEK's verdict, and the gate is a cost decision as much as a
+        // correctness one: a frame whose `dst` is a canonical PATH of NAMEs cannot be a bound
+        // hop, and the classification the peek already made is what says so — the hop re-reads
+        // no header to find out, which is what keeps a bound terminus from costing more than
+        // the canonical terminus it is supposed to beat.
+        if (kind == fwd_dst_kind_t::PATH_REF &&
+            route_bound_forward(inbound_name, inbound_ctx, from_peer, cur, pre, ref_count))
+            return true;
+    }
+    // The `dst` names no mount here and no bound hop took it ⇒ this node is its terminus.
+    // The `PATH` arm above is the mount descent's gate, not a frame classifier: it says "this
+    // frame has an address this node can descend", and a BOUND dst (`PATH_REF`, RFC-0024 §5)
+    // has no NAME to descend on.
+    if (peek_fwd_op(cur) == fwd_op_t::REPLY) {
+        // The accumulated return route is fully consumed — this node is the originator.
+        reply();
+        return true;
+    }
+    terminus();
+    return true;
+}
+
 void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_t frame,
                                       const child_rx_ctx_t* inbound_ctx, bool from_peer) {
     // Single-link (every current producer): the link's bytes span feeds the SAME
@@ -1006,87 +1085,40 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
     // fallback (flatten drops it, as before).
     if (frame.total_length() >= 4 && frame.all_host()) {
         const wire::grammar::rope_cursor cur{frame};
-        // Only a structured FWD enters the routing arm; ADVERTISE / COMPACT / HANDLE_NACK
-        // fall through to the control path below, exactly as they did when this was gated on
-        // peek_fwd_first_dst_seg.
-        // ONE peek serves both jobs: deciding that this is a structured FWD at all (the gate),
-        // and opening the `dst` window the mount descent then walks. It used to be two — the
-        // gate peeked and threw the result away, then `resolve_mount` walked the same TLV
-        // headers again. On a multi-link rope those headers may straddle links, so the second
-        // walk was the expensive kind. The span arm never had the duplicate.
-        fwd_pre_t pre;
-        std::size_t ref_count = 0;
-        const fwd_dst_kind_t kind = peek_fwd_dst_any(cur, pre, ref_count);
-        if (kind == fwd_dst_kind_t::PATH) {
-            // Resolve the mount prefix (ADR-0061 strip-K, single-pass since #523). Segments
-            // are walked lazily and read in place when the rope keeps them contiguous,
-            // stitched into the reader's slot when they straddle a link; an over-long segment
-            // is not routable ⇒ fall to the terminus.
-            seg_reader_t<wire::grammar::rope_cursor> rd{cur};
-            const mount_hit_t hit = resolve_mount_at(registry_, cur, rd, pre);
-            if (hit.link != nullptr) {
-                route_fwd_forward(inbound_name, inbound_ctx, from_peer, hit.strip_k, cur, *hit.link,
-                                  &pre);
-                return;
-            }
-            if (hit.rejected) {
-                // Bus NAME + residual: never broadcast, never terminus. The rejection reply
-                // needs a contiguous decode; this is a COLD error path, so the one flatten
-                // is the ADR-0052 legitimate kind (exactly the control-plane precedent).
-                // Through the injected byte backend (#730), so a bounded node's memory bound
-                // covers this flatten too.
-                const view_t flat = frame.subrope(0, frame.total_length()).materialize(*flat_);
-                // Flatten OOM ⇒ drop the frame. A REDUNDANT EARLY-OUT, like the ADVERTISE
-                // arm's: `reject_bus_name_hop` opens with a `wire::decode`, an empty span
-                // does not decode, and it returns without replying — so deleting this line
-                // changes no observable behaviour. Kept so the reason is the OOM and not
-                // the codec's leniency. The SEAM on the line above is the testable part,
-                // and `fwd_flatten_backend_test` pins it.
-                if (flat.empty()) return;
-                reject_bus_name_hop(registry_, inbound_name, flat.bytes());
-                return;
-            }
-            // No child (or over-long segment) ⇒ this node is the terminus for the frame.
-            // A request FWD is resolved straight off the rope (ADR-0053 3c-iii — NO
-            // flatten, verify-at-access §4).
-            if (peek_fwd_op(cur) != fwd_op_t::REPLY) {
-                resolve_terminus_rope(inbound_name, std::move(frame));
-                return;
-            }
-            // A REPLY that reaches its originator here is handed to the sink rope-native
-            // (ADR-0055): NO flatten — the sink materializes on demand. Absent sink ⇒
-            // dropped (as the flatten path would, into a no-op decode).
-            if (const auto sink = reply_.get(); sink.fn != nullptr) sink.fn(sink.ctx, frame);
+        if (route_fwd_ingress(
+                inbound_name, cur, inbound_ctx, from_peer,
+                /* observe */ [] {},
+                /* reject */
+                [&] {
+                    // The rejection reply needs a contiguous decode; this is a COLD error
+                    // path, so the one flatten is the ADR-0052 legitimate kind (exactly the
+                    // control-plane precedent). Through the injected byte backend (#730), so
+                    // a bounded node's memory bound covers this flatten too.
+                    const view_t flat = frame.subrope(0, frame.total_length()).materialize(*flat_);
+                    // Flatten OOM ⇒ drop the frame. A REDUNDANT EARLY-OUT, like the ADVERTISE
+                    // arm's: `reject_bus_name_hop` opens with a `wire::decode`, an empty span
+                    // does not decode, and it returns without replying — so deleting this line
+                    // changes no observable behaviour. Kept so the reason is the OOM and not
+                    // the codec's leniency. The SEAM on the line above is the testable part,
+                    // and `fwd_flatten_backend_test` pins it.
+                    if (flat.empty()) return;
+                    reject_bus_name_hop(registry_, inbound_name, flat.bytes());
+                },
+                /* terminus */
+                [&] {
+                    // A request FWD is resolved straight off the rope (ADR-0053 3c-iii — NO
+                    // flatten, verify-at-access §4).
+                    resolve_terminus_rope(inbound_name, std::move(frame));
+                },
+                /* reply */
+                [&] {
+                    // A REPLY that reaches its originator here is handed to the sink
+                    // rope-native (ADR-0055): NO flatten — the sink materializes on demand.
+                    // Absent sink ⇒ dropped (as the flatten path would, into a no-op decode).
+                    if (const auto sink = reply_.get(); sink.fn != nullptr)
+                        sink.fn(sink.ctx, frame);
+                }))
             return;
-        }
-        // A BOUND `dst` with a residual longer than one element: this node is a FORWARDER for
-        // it (RFC-0024 §4.1). Tried before the terminus conclusion below, because a bound
-        // forward and a bound terminus are told apart by the element COUNT and by nothing
-        // else — and getting that wrong the other way would apply a passing operation here.
-        // The peek above already classified the `dst` and filled `pre` for this arm, so the
-        // hop starts from the element count rather than re-reading the headers.
-        if (kind == fwd_dst_kind_t::PATH_REF &&
-            route_bound_forward(inbound_name, inbound_ctx, from_peer, cur, pre, ref_count))
-            return;
-        // A structured FWD whose `dst` is NOT a canonical PATH of NAMEs, and not a bound hop
-        // either. The `PATH` arm is the mount descent's gate, not a frame classifier: it says
-        // "this frame has an address this node can descend", and a BOUND dst (`PATH_REF`,
-        // RFC-0024 §5) has no NAME to descend on. Such a frame names no mount here, so this
-        // node is its terminus — exactly the conclusion the span arm below reaches.
-        //
-        // Falling through to `on_control_rope` instead is how a bound operation VANISHED on
-        // any transport that scatter-delivers (ADR-0053 ④b): `peek_control` rejects a FWD,
-        // so the frame was dropped before the resolver ever validated element 0 — not the
-        // §5.3 validation drop, just a disappearance, and a silent one. The router's own
-        // invariant forbids it: fragmenting a frame must not change whether it is applied.
-        if (const std::optional<fwd_op_t> op = peek_fwd_op(cur)) {
-            if (*op != fwd_op_t::REPLY) {
-                resolve_terminus_rope(inbound_name, std::move(frame));
-                return;
-            }
-            if (const auto sink = reply_.get(); sink.fn != nullptr) sink.fn(sink.ctx, frame);
-            return;
-        }
     }
     // Control frame (or a device/short rope): served rope-native (ADR-0055 §2/§3). The
     // route-handle sinks read the label off the rope and materialize only the sub-rope
@@ -1106,69 +1138,37 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
     // the pmr arena. Only the originator REPLY sink and the control frames below
     // keep the owning wire::decode (test/SDK-facing and flow-setup paths, allowed
     // to allocate per ADR-0039).
-    if (static_cast<type_t>(u8(frame[0])) == type_t::FWD) {
-        // Read-only observer (tests/ACL seam) — wants the tree.
-        if (const auto sink = inbound_.get(); sink.fn != nullptr) {
-            if (const auto dec = wire::decode(frame); dec && dec->opt.pl)
-                sink.fn(sink.ctx, inbound_name, *dec);
-        }
-        const wire::grammar::span_cursor cur{frame};
-        {
-            seg_reader_t<wire::grammar::span_cursor> rd{cur};
-            fwd_pre_t pre;
-            // ONE peek classifies the `dst` and opens its window: canonical PATH, bound
-            // PATH_REF, or neither. Its verdict is kept, because `resolve_mount_at` overwrites
-            // `pre.valid` to mean something else entirely once the descent has run ("nothing
-            // to hand the rebuild"), and only the peek says which form the `dst` was.
-            std::size_t ref_count = 0;
-            const fwd_dst_kind_t kind = peek_fwd_dst_any(cur, pre, ref_count);
-            const mount_hit_t hit = kind == fwd_dst_kind_t::PATH
-                                        ? resolve_mount_at(registry_, cur, rd, pre)
-                                        : mount_hit_t{};
-            if (hit.link != nullptr) {
-                route_fwd_forward(inbound_name, inbound_ctx, from_peer, hit.strip_k, cur, *hit.link,
-                                  &pre);
-                return;
-            }
-            if (hit.rejected) {  // bus NAME + residual: never broadcast, never terminus
-                reject_bus_name_hop(registry_, inbound_name, frame);
-                return;
-            }
-            // The dst names no mount ⇒ this node is the terminus — unless the dst is BOUND
-            // with more than one element left, in which case this node is a forwarder for it
-            // (RFC-0024 §4.1) and the descent above never had an address it could read.
-            //
-            // Gated on the PEEK's verdict, and the gate is a cost decision as much as a
-            // correctness one: a frame whose `dst` is a canonical PATH of NAMEs cannot be a
-            // bound hop, and the classification the peek already made is what says so — the
-            // hop re-reads no header to find out, which is what keeps a bound terminus from
-            // costing more than the canonical terminus it is supposed to beat.
-            if (kind == fwd_dst_kind_t::PATH_REF &&
-                route_bound_forward(inbound_name, inbound_ctx, from_peer, cur, pre, ref_count))
-                return;
-        }
-        if (peek_fwd_op(cur) == fwd_op_t::REPLY) {
-            // The accumulated return route is fully consumed — this node is the
-            // originator. Hand the FWD{REPLY} to the sink rope-native (ADR-0055): NO
-            // decode. A view-delivered frame ropes zero-copy off its owning view; a
-            // borrowed span is copied once into an owned segment (the copy the old
-            // decode-then-consumer-encode round-trip already paid).
-            if (const auto sink = reply_.get(); sink.fn != nullptr) {
-                if (frame_view != nullptr) {
-                    sink.fn(sink.ctx, view::rope_t(*frame_view));
-                } else if (view_t owned = view::over_bytes(frame).value_or(view_t{});
-                           !owned.empty()) {
-                    sink.fn(sink.ctx, view::rope_t(std::move(owned)));
+    const wire::grammar::span_cursor cur{frame};
+    if (route_fwd_ingress(
+            inbound_name, cur, inbound_ctx, from_peer,
+            /* observe */
+            [&] {
+                if (const auto sink = inbound_.get(); sink.fn != nullptr) {
+                    if (const auto dec = wire::decode(frame); dec && dec->opt.pl)
+                        sink.fn(sink.ctx, inbound_name, *dec);
                 }
-            }
-            return;
-        }
-        resolve_terminus(inbound_name, frame, frame_view, inbound_ctx);
+            },
+            /* reject */ [&] { reject_bus_name_hop(registry_, inbound_name, frame); },
+            /* terminus */ [&] { resolve_terminus(inbound_name, frame, frame_view, inbound_ctx); },
+            /* reply */
+            [&] {
+                // Hand the FWD{REPLY} to the sink rope-native (ADR-0055): NO decode. A
+                // view-delivered frame ropes zero-copy off its owning view; a borrowed span is
+                // copied once into an owned segment (the copy the old decode-then-consumer-
+                // encode round-trip already paid).
+                if (const auto sink = reply_.get(); sink.fn != nullptr) {
+                    if (frame_view != nullptr) {
+                        sink.fn(sink.ctx, view::rope_t(*frame_view));
+                    } else if (view_t owned = view::over_bytes(frame).value_or(view_t{});
+                               !owned.empty()) {
+                        sink.fn(sink.ctx, view::rope_t(std::move(owned)));
+                    }
+                }
+            }))
         return;
-    }
 
-    // Control frames are read BY OFFSET, exactly as `on_control_rope` already does — the
-    // span arm was the last reader in the ingress plane still building an owning `tlv_t`.
+    // Control frames are read BY OFFSET — the span arm was the last reader in the ingress
+    // plane still building an owning `tlv_t`.
     //
     // That owning decode was justified by ADR-0041 §5 / ADR-0055 §3 as a flow-setup cost,
     // "allowed to allocate per ADR-0039". ADR-0062 invalidated that premise: a warm COMPACT
@@ -1176,40 +1176,12 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
     // the tree spine plus 5 more re-encoding a payload that is ALREADY contiguous in
     // `frame` — together ~55-63% of a warm terminus frame.
     //
-    // `crc_check_t::VERIFY` is passed explicitly and is load-bearing. `peek_control`
-    // defaults to DEFER for the forward-hop callers (byte-for-byte unchanged), but the
-    // owning `wire::decode` this replaces verified every node's CRC, so deferring here
-    // would silently start ACCEPTING a COMPACT whose root trailer says its payload is
-    // corrupt — verify-before-apply (CONTEXT.md §Frame integrity, ADR-0041 §1). The cost is
-    // zero allocations and, on our own traffic, zero cycles: `encode_compact` emits no CR
-    // bit. A peer may legally set one, which is exactly why the check must be explicit.
-    const wire::grammar::span_cursor ccur{frame};
-    const auto head = peek_control(ccur, wire::grammar::crc_check_t::VERIFY);
-    if (!head) return;  // malformed / not a control frame / CRC failure ⇒ drop
-    switch (head->type) {
-        case type_t::ADVERTISE: {
-            if (head->child1_off == 0) return;
-            // The route is the one child that genuinely needs a tree: on_advertise walks its
-            // NAME segments and re-encodes a stripped copy. Decode ONLY that sub-span, as
-            // the rope arm does — never the whole frame.
-            const auto route = wire::decode(frame.subspan(head->child1_off, head->child1_total));
-            if (!route) return;
-            on_advertise(inbound_name, head->label, *route);
-            return;
-        }
-        case type_t::COMPACT:
-            if (head->child1_off == 0) return;
-            // The payload TLV is already contiguous here — hand over the span. The old path
-            // decoded it into a tree and then `wire::encode`d it straight back.
-            on_compact(inbound_name, head->label,
-                       frame.subspan(head->child1_off, head->child1_total));
-            return;
-        case type_t::HANDLE_NACK:
-            on_nack(inbound_name, head->label);  // acts on the label alone — no child needed
-            return;
-        default:
-            return;  // drop anything else
-    }
+    // The child window is ALREADY contiguous on this tier, so the make-contiguous seam the
+    // switch takes is a plain `subspan` — no copy, and the rope tier's OOM arms are inert
+    // here because a subspan of a non-empty window cannot come back empty.
+    dispatch_control(inbound_name, cur, [frame](std::size_t off, std::size_t total) {
+        return frame.subspan(off, total);
+    });
 }
 
 template <class Cursor>
@@ -1389,67 +1361,82 @@ void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::ro
 
 // --- route-handle (ws delivery-compaction, RFC-0004 §E.1) --------------------
 
-void fwd_router_t::on_control_rope(std::string_view inbound_name, view::rope_t frame) {
-    // Only a MULTI-link control frame reaches here — a contiguous (single-link) one
-    // decodes eagerly in on_frame_impl. A control frame is never a DEVICE payload, so a
-    // non-all-host rope is not one; drop it (as the old flatten→failed-decode path did).
-    if (!frame.all_host()) return;
-    const wire::grammar::rope_cursor cur{frame};
-    // `crc_check_t::VERIFY` is passed explicitly, for the same reason and with the same
-    // weight as the span arm above: a control frame MUTATES routing state, so it is applied
-    // only after the trailer proves the bytes intact (CONTEXT.md §Frame integrity,
-    // ADR-0041 §1). `peek_control` defaults to DEFER because every forward-hop caller wants
-    // that — a hop relays bytes it never interprets — so the default is right and the
-    // explicit argument is what carries the policy. Fragmenting a frame must not change
-    // whether it is applied.
+template <class Cursor, class Contig>
+void fwd_router_t::dispatch_control(std::string_view inbound_name, const Cursor& cur,
+                                    Contig&& contig) {
+    // `crc_check_t::VERIFY` is passed explicitly and is load-bearing on BOTH tiers: a control
+    // frame MUTATES routing state, so it is applied only after the trailer proves the bytes
+    // intact (CONTEXT.md §Frame integrity, ADR-0041 §1). `peek_control` defaults to DEFER
+    // because every forward-hop caller wants that — a hop relays bytes it never interprets —
+    // so the default is right and the explicit argument is what carries the policy. On the
+    // span tier the owning `wire::decode` this replaced verified every node's CRC, so
+    // deferring here would silently start ACCEPTING a COMPACT whose root trailer says its
+    // payload is corrupt. The cost is zero allocations and, on our own traffic, zero cycles:
+    // `encode_compact` emits no CR bit. A peer may legally set one, which is exactly why the
+    // check must be explicit. Fragmenting a frame must not change whether it is applied.
     const auto head = peek_control(cur, wire::grammar::crc_check_t::VERIFY);
     if (!head) return;  // malformed / not a control frame / CRC failure ⇒ drop
     switch (head->type) {
         case type_t::HANDLE_NACK:
-            // Label only — no materialize at all.
-            on_nack(inbound_name, head->label);
+            on_nack(inbound_name, head->label);  // label only — no materialize at all
             return;
         case type_t::ADVERTISE: {
             if (head->child1_off == 0) return;
-            // Materialize ONLY the route sub-rope: on_advertise strips its leading segment
-            // and re-encodes, which needs a contiguous tree (ADR-0052 legitimate flatten).
-            // Through the injected byte backend (#730) — an ingress flatten is peer-provoked,
-            // so a bounded node's bound must cover it.
-            const view_t route_flat =
-                frame.subrope(head->child1_off, head->child1_total).materialize(*flat_);
+            // The route is the one child that genuinely needs a tree: on_advertise walks its
+            // NAME segments and re-encodes a stripped copy. Make ONLY that child contiguous —
+            // never the whole frame. A span source subspans it; a rope source materializes
+            // the sub-rope through the injected byte backend (#730), since an ingress flatten
+            // is peer-provoked and a bounded node's bound must cover it (ADR-0052 legitimate
+            // flatten).
+            const std::span<const std::byte> route = contig(head->child1_off, head->child1_total);
             // Flatten OOM ⇒ bind NOTHING. This is a REDUNDANT EARLY-OUT, not a guard: the
             // `wire::decode` on the next line is what actually answers an OOM'd flatten (an
             // empty span does not decode), and deleting this line changes no observable
             // behaviour — verified by ablation, twice. It is kept only so the REASON the
             // binding failed is the flatten and not the codec's leniency. Nothing may cite
-            // it as a proven guard; the seam on the line above is what the test pins.
-            if (route_flat.empty() && head->child1_total != 0) return;
-            const auto route = wire::decode(route_flat.bytes());
-            if (!route) return;
-            on_advertise(inbound_name, head->label, *route);
+            // it as a proven guard; the SEAM above is what the test pins.
+            if (route.empty() && head->child1_total != 0) return;
+            const auto dec = wire::decode(route);
+            if (!dec) return;
+            on_advertise(inbound_name, head->label, *dec);
             return;
         }
         case type_t::COMPACT: {
             if (head->child1_off == 0) return;
-            // Materialize ONLY the payload sub-rope: it is stored (deliver_local) or
-            // re-wrapped (encode_compact) as contiguous bytes — a transport-egress / local-
-            // store boundary (ADR-0055 §2). Hold the owning view while reading its span.
-            // Through the injected byte backend (#730), as the ADVERTISE arm above.
-            const view_t payload_flat =
-                frame.subrope(head->child1_off, head->child1_total).materialize(*flat_);
+            // The payload is stored (deliver_local) or re-wrapped (encode_compact) as
+            // contiguous bytes — a transport-egress / local-store boundary (ADR-0055 §2). The
+            // caller's seam holds whatever ownership that costs on its tier for the duration
+            // of this call.
+            const std::span<const std::byte> payload = contig(head->child1_off, head->child1_total);
             // Flatten OOM ⇒ DROP the delivery (#730). Nothing downstream catches it: an
             // empty span is an engaged-empty `view::over_bytes` BY DESIGN, `graph_t::write`
             // stores it and reports success — so without this line a heap exhaustion here
             // REPLACES the subscriber's last-known value with nothing and calls it a
             // delivery. Missing one value under exhaustion is valid; corrupting the stored
             // one is not.
-            if (payload_flat.empty() && head->child1_total != 0) return;
-            on_compact(inbound_name, head->label, payload_flat.bytes());
+            if (payload.empty() && head->child1_total != 0) return;
+            on_compact(inbound_name, head->label, payload);
             return;
         }
         default:
-            return;
+            return;  // drop anything else
     }
+}
+
+void fwd_router_t::on_control_rope(std::string_view inbound_name, view::rope_t frame) {
+    // Only a MULTI-link control frame reaches here — a contiguous (single-link) one
+    // decodes eagerly in on_frame_impl. A control frame is never a DEVICE payload, so a
+    // non-all-host rope is not one; drop it (as the old flatten→failed-decode path did).
+    if (!frame.all_host()) return;
+    const wire::grammar::rope_cursor cur{frame};
+    // The materialized child sub-rope, held across the handler call: the switch reads it as a
+    // span, so its owner has to outlive the arm that asked for it.
+    view_t hold;
+    dispatch_control(inbound_name, cur,
+                     [&](std::size_t off, std::size_t total) -> std::span<const std::byte> {
+                         hold = frame.subrope(off, total).materialize(*flat_);
+                         return hold.bytes();
+                     });
 }
 
 void fwd_router_t::on_advertise(std::string_view inbound_name, std::uint16_t label,
