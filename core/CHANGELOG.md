@@ -81,6 +81,22 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   count still call `try_reserve` themselves — the delivery clone and the composed-read reply
   builder already did, and `read_children_folded` now does at its own call site.
 
+- **`ws::decode_frame_checked` fails the connection on a RESERVED opcode (RFC 6455 §5.2), and
+  the new `ws::is_defined_opcode(opcode_t)` predicate names the six defined ones (#1060).**
+  This changes what a WS peer observes: a frame whose opcode is outside
+  `{CONT, TEXT, BINARY, CLOSE, PING, PONG}` was decoded and then silently dropped by both
+  transports' `default:` arm; it is now `PROTOCOL_ERROR` off the first header byte, so both
+  halves tick `malformed_rx()` and tear the connection down through the path they already
+  used for a §5.5 breach. `0x3`–`0x7` are the half that met no OPCODE-SHAPE rule
+  before — `is_control_opcode` is `& 0x08`, which sorts them with the DATA frames, so no
+  rule a LEGAL-SHAPED one could fail applied to them; the #872 `max_payload` bound did
+  still reject an over-cap reserved frame — and one of those
+  arriving between two fragments was skipped without disturbing the assembler, so the
+  continuations were stitched around it. `TEXT` and `PONG` are unaffected: they are DEFINED
+  opcodes, they still decode, and each transport still ignores them. The UNCHECKED
+  `ws::decode_frame` is unchanged and still decodes reserved opcodes — it owns no connection
+  to fail, and `tests/conformance/ws_diff_fuzz.py` holds it against the TypeScript decoder.
+
 ### Fixed
 
 - **A FWD frame the router could classify but whose op VALUE it could not read is now

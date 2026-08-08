@@ -237,6 +237,29 @@ inline constexpr std::size_t kMaxControlPayload = 125;
 }
 
 /**
+ * @brief True when @p op is one of the six opcodes RFC 6455 DEFINES — every other value the
+ *        4-bit opcode field can hold is RESERVED (§5.2).
+ *
+ * The reserved ranges are `0x3`–`0x7` (non-control) and `0xB`–`0xF` (control), and §5.2 makes
+ * receiving either a *Fail the WebSocket Connection* condition. @ref is_control_opcode cannot
+ * stand in for this: its `& 0x08` test sorts `0x3`–`0x7` with the DATA frames, so before
+ * #1060 no OPCODE-SHAPE rule reached them — nothing a legal-shaped one could fail. (The
+ * #872 `max_payload` bound did apply, so an OVER-CAP reserved frame was already refused.)
+ */
+[[nodiscard]] constexpr bool is_defined_opcode(opcode_t op) noexcept {
+    switch (op) {
+        case opcode_t::CONT:
+        case opcode_t::TEXT:
+        case opcode_t::BINARY:
+        case opcode_t::CLOSE:
+        case opcode_t::PING:
+        case opcode_t::PONG:
+            return true;
+    }
+    return false;
+}
+
+/**
  * @brief The `max_payload` argument that imposes NO length bound — every representable
  *        length passes the DATA-frame check.
  *
@@ -266,17 +289,20 @@ namespace detail {
 
 /**
  * @brief The ONE RFC 6455 frame-decode implementation, shared by @ref ws::decode_frame and
- *        @ref ws::decode_frame_checked — they differ only in @p enforce_control_rules and
+ *        @ref ws::decode_frame_checked — they differ only in @p fail_on_violation and
  *        the DATA-frame bound @p max_payload.
  *
- * @param buf                   The peer's byte stream.
- * @param enforce_control_rules Apply RFC 6455 §5.5 (see @ref ws::decode_frame_checked).
- * @param max_payload           The receive cap a declared payload length may not exceed
- *                              (@ref ws::kNoPayloadCap = unbounded).
+ * @param buf                The peer's byte stream.
+ * @param fail_on_violation  Diagnose the RFC 6455 breaches whose remedy is *Fail the
+ *                           WebSocket Connection* — §5.5's control-frame bounds and §5.2's
+ *                           reserved opcodes — as `PROTOCOL_ERROR` rather than decoding the
+ *                           frame (see @ref ws::decode_frame_checked). Only a caller that
+ *                           owns a connection it can shed passes true.
+ * @param max_payload        The receive cap a declared payload length may not exceed
+ *                           (@ref ws::kNoPayloadCap = unbounded).
  */
 [[nodiscard]] inline decode_result_t decode_one(std::span<const std::byte> buf,
-                                                bool enforce_control_rules,
-                                                std::size_t max_payload) {
+                                                bool fail_on_violation, std::size_t max_payload) {
     if (buf.size() < 2) return {};
 
     const std::uint8_t b0 = std::to_integer<std::uint8_t>(buf[0]);
@@ -286,6 +312,17 @@ namespace detail {
     const auto op = static_cast<opcode_t>(b0 & 0x0Fu);
     const bool masked = (b1 & 0x80u) != 0;
     std::uint64_t len = b1 & 0x7Fu;
+
+    // RFC 6455 §5.2: "If an unknown opcode is received, the receiving endpoint MUST Fail the
+    // WebSocket Connection." Diagnosed off the FIRST header byte — before the extended-length
+    // ladder, before the masking key, before any payload — because no number of further bytes
+    // can make a reserved opcode legal. The `0x3`-`0x7` half is the one that met no rule at
+    // all: `is_control_opcode` sorts those five with the DATA frames, so they decoded as
+    // ordinary frames and were dropped by each transport's `default:` arm — which kept a
+    // stream that had already broken the protocol alive, and let a reserved frame slip
+    // BETWEEN two fragments without the assembler seeing it (#1060).
+    if (fail_on_violation && !is_defined_opcode(op))
+        return {decode_status_t::PROTOCOL_ERROR, {}, 0};
 
     std::size_t pos = 2;
     if (len == 126) {
@@ -305,7 +342,7 @@ namespace detail {
     // RFC 6455 §5.5: a control frame is at most 125 bytes and is never fragmented.
     // Checked off the HEADER, so an absurd declared length is rejected without ever
     // buffering (or echoing) the payload it claims.
-    if (enforce_control_rules && is_control_opcode(op) && (len > kMaxControlPayload || !fin))
+    if (fail_on_violation && is_control_opcode(op) && (len > kMaxControlPayload || !fin))
         return {decode_status_t::PROTOCOL_ERROR, {}, 0};
 
     // The DATA-path twin of the §5.5 rule above, diagnosed at the same place and for the
@@ -370,6 +407,13 @@ namespace detail {
  * is a fixed RFC constant about CONTROL frames, @p max_payload is the deployment's injected
  * receive cap about every frame — and neither substitutes for the other.
  *
+ * **§5.2's OPCODE half is enforced here too** (#1060; the RSV-bit half of §5.2 is not —
+ * nothing here examines `b0 & 0x70`): an opcode outside the six @ref opcode_t
+ * names is RESERVED, and receiving one is a *Fail the WebSocket Connection* condition — so
+ * it is `PROTOCOL_ERROR` off the first header byte, ahead of both length rules. `TEXT` and
+ * `PONG` are unaffected: they are DEFINED opcodes, they still decode, and what a transport
+ * does with them (ignore them) stays the transport's policy.
+ *
  * @param buf A byte stream that may contain a partial or whole frame, possibly
  *            followed by more frames.
  * @param max_payload The transport's effective receive cap: `min(max_frame,
@@ -383,21 +427,22 @@ namespace detail {
  */
 [[nodiscard]] inline decode_result_t decode_frame_checked(std::span<const std::byte> buf,
                                                           std::size_t max_payload) {
-    return detail::decode_one(buf, /*enforce_control_rules=*/true, max_payload);
+    return detail::decode_one(buf, /*fail_on_violation=*/true, max_payload);
 }
 
 /**
  * @brief Decode exactly one RFC 6455 frame from the front of @p buf — the pure
  *        outcome-collapsing decoder, byte-for-byte the behaviour it has always had.
  *
- * Deliberately does NOT apply the §5.5 control-frame rules, and imposes no length cap
- * (@ref kNoPayloadCap): this is the function `tests/conformance/ws_diff_fuzz.py` holds
- * against the TypeScript `decodeFrame`, and the two cores must answer identically on every
- * input. Both rules are CONNECTION-FAILURE policy, not decode outcomes — they belong to
- * whoever owns the socket and can shed it. Every transport in this repository therefore
- * uses @ref decode_frame_checked; only a caller that has no connection to fail should use
- * this one. It is safe to leave uncapped precisely because it never buffers on the caller's
- * behalf: a declared length past the end of @p buf answers "need more" and allocates
+ * Deliberately does NOT apply the §5.5 control-frame rules or the §5.2 reserved-opcode rule
+ * (a reserved opcode decodes here, carried through as-is in @ref frame_t::op), and imposes no
+ * length cap (@ref kNoPayloadCap): this is the function `tests/conformance/ws_diff_fuzz.py`
+ * holds against the TypeScript `decodeFrame`, and the two cores must answer identically on
+ * every input. All three rules are CONNECTION-FAILURE policy, not decode outcomes — they
+ * belong to whoever owns the socket and can shed it. Every transport in this repository
+ * therefore uses @ref decode_frame_checked; only a caller that has no connection to fail
+ * should use this one. It is safe to leave uncapped precisely because it never buffers on the
+ * caller's behalf: a declared length past the end of @p buf answers "need more" and allocates
  * nothing.
  *
  * @param buf A byte stream that may contain a partial or whole frame, possibly
@@ -407,7 +452,7 @@ namespace detail {
  */
 [[nodiscard]] inline std::optional<std::pair<frame_t, std::size_t>> decode_frame(
     std::span<const std::byte> buf) {
-    decode_result_t r = detail::decode_one(buf, /*enforce_control_rules=*/false, kNoPayloadCap);
+    decode_result_t r = detail::decode_one(buf, /*fail_on_violation=*/false, kNoPayloadCap);
     if (r.status != decode_status_t::OK) return std::nullopt;
     return std::make_pair(std::move(r.frame), r.consumed);
 }
