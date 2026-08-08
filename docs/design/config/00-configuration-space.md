@@ -142,13 +142,13 @@ type-erasure bloat and template-instantiation bloat alike.
 | knob | kind | default | CMake | ESP-IDF |
 | --- | --- | --- | --- | --- |
 | `kVertexLockStripes` (`config.hpp.in:86`) | count | 16 | `-DLIBTRACER_VERTEX_LOCK_STRIPES` | menuconfig `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` |
-| `kCacheLineBytes` (`:109`) | padding width | 64 | `-DLIBTRACER_CACHE_LINE_BYTES` | derived from `CONFIG_FREERTOS_UNICORE`, not exposed (`integrations/esp-idf/libtracer/CMakeLists.txt:220-224`) |
-| `kHazardReaderSlots` (`:136`) | count | 64 | `-DLIBTRACER_HAZARD_READER_SLOTS` | hardcoded to 64 (`integrations/esp-idf/libtracer/CMakeLists.txt:205`) |
-| `kEdgePinSlots` (`:159`) | count | 32 | `-DLIBTRACER_EDGE_PIN_SLOTS` | hardcoded to 8 (`integrations/esp-idf/libtracer/CMakeLists.txt:215`) |
+| `kCacheLineBytes` (`:109`) | padding width | 64 | `-DLIBTRACER_CACHE_LINE_BYTES` | derived from `CONFIG_FREERTOS_UNICORE`, not exposed (`integrations/esp-idf/libtracer/CMakeLists.txt:262-265`) |
+| `kHazardReaderSlots` (`:136`) | count | 64 | `-DLIBTRACER_HAZARD_READER_SLOTS` | hardcoded to 64 (`integrations/esp-idf/libtracer/CMakeLists.txt:247`) |
+| `kEdgePinSlots` (`:159`) | count | 32 | `-DLIBTRACER_EDGE_PIN_SLOTS` | hardcoded to 8 (`integrations/esp-idf/libtracer/CMakeLists.txt:257`) |
 | `kMaxVertexBytes64` / `kMaxVertexBytes32` (`:176` / `:188`) | RAM ceiling | 120 / 80 | the preset — deliberately not a CMake variable | the preset |
 | `kPinPayloadRatio` (`:212`) | ratio | 0 — the `kPinNever` sentinel | no variable — a preset member | not exposed |
-| `acl_policy_t` (`:221`) | policy type | `allow_only_policy_t` | `-DLIBTRACER_ACL_FULL=ON` | hardcoded to `allow_only_policy_t` (`integrations/esp-idf/libtracer/CMakeLists.txt:203`) — the full policy is not selectable |
-| `lkv_slot_t` (`:237`) | policy type | `sp_atomic_slot_t` | `-DLIBTRACER_LKV_SLOT=<type>` | hardcoded to `sp_atomic_slot_t` (`integrations/esp-idf/libtracer/CMakeLists.txt:204`) — the hazard slot is not selectable |
+| `acl_policy_t` (`:221`) | policy type | `allow_only_policy_t` | `-DLIBTRACER_ACL_FULL=ON` | hardcoded to `allow_only_policy_t` (`integrations/esp-idf/libtracer/CMakeLists.txt:245`) — the full policy is not selectable |
+| `lkv_slot_t` (`:237`) | policy type | `sp_atomic_slot_t` | `-DLIBTRACER_LKV_SLOT=<type>` | hardcoded to `sp_atomic_slot_t` (`integrations/esp-idf/libtracer/CMakeLists.txt:246`) — the hazard slot is not selectable |
 
 Each is documented at its declaration with what it costs and when to move it; that header is
 the reference, not this table. What matters here is the shape: **eight knobs, all named, all

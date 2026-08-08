@@ -45,6 +45,14 @@ on:
       - "tools/check_config_keys.py"
       - "tools/tests/test_check_config_keys.py"
       - ".github/workflows/doc-citations.yml"
+      # #1095 enrolled seven more non-source paths. Four sit under `core/**`, `bench/**`
+      # or `integrations/**` and are already covered above; these three are not, and an
+      # anchor that no job fires on is not a gate. Listed exactly rather than as
+      # `.github/workflows/**` and `bindings/**`, for the same reason `tools/**` is not
+      # the entry: most of those trees cannot move a cited line.
+      - ".github/workflows/core-ci.yml"
+      - ".github/workflows/footprint-cortexm0.yml"
+      - "bindings/typescript/packages/client/test/mesh-testbed.test.mjs"
   pull_request:
     # Duplicated rather than a YAML anchor: GitHub Actions does not expand aliases.
     paths:
@@ -61,6 +69,9 @@ on:
       - "tools/check_config_keys.py"
       - "tools/tests/test_check_config_keys.py"
       - ".github/workflows/doc-citations.yml"
+      - ".github/workflows/core-ci.yml"
+      - ".github/workflows/footprint-cortexm0.yml"
+      - "bindings/typescript/packages/client/test/mesh-testbed.test.mjs"
   workflow_dispatch:
 
 permissions:
