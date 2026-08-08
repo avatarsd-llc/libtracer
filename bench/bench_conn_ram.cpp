@@ -422,7 +422,9 @@ sample_t arm_udp(std::size_t big, udp_mode_t mode) {
                                           ? static_cast<tr::mem::mem_backend_t*>(&pool)
                                           : &tr::mem::heap_backend();
     const long long pre = live();
-    auto srv = std::make_unique<tr::net::udp_transport_t>(0, std::string{}, 0, backend, 0);
+    auto srv = std::make_unique<tr::net::udp_transport_t>(0, std::string{}, 0, backend,
+                                                          /*max_frame=*/std::size_t{0},
+                                                          /*recv_stack=*/std::size_t{0});
     if (mode != udp_mode_t::SPAN) srv->set_rope_receiver(&drop_rope, nullptr);
     quiesce();
     const long long t0 = live();

@@ -44,6 +44,8 @@ struct state_t {
     bool connected = false; /**< @brief Between connect and close. */
     int connects = 0;       /**< @brief Dial count. */
     std::string ws_path;    /**< @brief The last dial's requested path. */
+    /** @brief What esp_transport_get_socket answers — see fake_ws::set_socket_fd. */
+    int socket_fd = -1;
 
     /** @name Handle liveness and the blocking levers (#952). */
     /** @{ */
@@ -137,6 +139,7 @@ void reset() {
     st().connected = false;
     st().connects = 0;
     st().ws_path.clear();
+    st().socket_fd = -1;
     st().armed_stack = 0;
     st().armed_name.clear();
     st().restored = false;
@@ -164,6 +167,11 @@ int connect_count() {
 std::string last_ws_path() {
     const std::lock_guard<std::mutex> lk(st().m);
     return st().ws_path;
+}
+
+void set_socket_fd(int fd) {
+    const std::lock_guard<std::mutex> lk(st().m);
+    st().socket_fd = fd;
 }
 
 std::size_t armed_stack() {
@@ -294,7 +302,15 @@ int esp_transport_close(esp_transport_handle_t t) {
 
 int esp_transport_get_socket(esp_transport_handle_t t) {
     (void)t;
-    return -1;  // no POSIX socket anywhere in this plane (#947)
+    // A NUMBER, never a socket. -1 unless a test opted in with set_socket_fd, which is
+    // the historical answer and keeps the suites that do not care about the option seam
+    // byte-identical. Opting in does not open, read or write anything: it makes the
+    // link's best-effort setsockopt block REACHABLE, and the opting-in target interposes
+    // `setsockopt` so no option reaches the kernel either. Still no POSIX socket anywhere
+    // in this plane (#947) — that ruling is about the transport, and this fake continues
+    // to serve every byte from its own script.
+    const std::lock_guard<std::mutex> lk(st().m);
+    return st().socket_fd;
 }
 
 int esp_transport_poll_read(esp_transport_handle_t t, int timeout_ms) {

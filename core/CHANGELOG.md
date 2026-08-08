@@ -61,6 +61,23 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `dispatch_edge_target`: 0x19f → 0x2df, and the `call rope_t::try_reserve` is gone). Callers
   that actually reserve now pay one extra `call` on the arm that allocates.
 
+- **`net::udp_transport_t` honours the universal `:settings max_frame` key (#926).** The
+  constructor takes a new `max_frame` parameter **between `backend` and `recv_stack`** — a
+  source-breaking change for any caller that passed `recv_stack` positionally as the fifth
+  argument (in this tree, `bench/bench_conn_ram.cpp` was the only one). `0` keeps the
+  previous behaviour exactly. A non-zero value is the largest datagram the connection
+  accepts: a longer one is never delivered, the new `malformed_rx()` counter ticks, and the
+  socket serves the next datagram normally — so long as the injected backend can furnish
+  `max_frame + 1` bytes, since a segment bounded below that truncates the datagram before
+  its length can be judged (#1074); the RX segment is drawn at the cap instead of at
+  `kMaxDatagram`, so a tight cap is a RAM lever as well as an admission rule. Two new
+  accessors, `malformed_rx()` and `effective_max_frame()`, mirror the names `tcp_transport_t`
+  and the `ws` transports already carry. The `udp` factory threads `conn_settings_t::max_frame`
+  into both the DIAL and the LISTEN shape, so the key now reaches the socket from a plain
+  `/net:children[]` SPEC write — before this it was parsed, readable back from `:settings`,
+  and ignored. Unlike the four framed kinds (see #1035), the key can only *tighten* here: a
+  UDP payload cannot exceed `kMaxDatagram`, so a larger configured value is inert.
+
 - **`view::rope_t::concat` no longer reserves on the cross-rope path — the self-concat
   guards are charged to the aliasing case alone (#1022).** The `r.concat(r)` safety added in
   #971 (an up-front `try_reserve` plus an indexed re-read of the source each step) was paid
@@ -75,6 +92,30 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   builder already did, and `read_children_folded` now does at its own call site.
 
 ### Fixed
+
+- **A FWD frame the router could classify but whose op VALUE it could not read is now
+  resolved at the terminus on BOTH cursor tiers, instead of vanishing on the rope one
+  (#870).** Router ingress classification was written twice — `on_frame_rope_impl` for the
+  scatter-gather tier and `on_frame_impl` for the contiguous one — and the two copies had
+  drifted at their tails. The span arm concluded "type byte says FWD ⇒ terminus"; the rope
+  arm asked `peek_fwd_op` once more and, on `nullopt`, fell through to the control sink,
+  where `peek_control` refuses a FWD and the frame was dropped with no reply and no
+  diagnosable drop. Among the frames reaching that tail, the one with an OBSERVABLE reply is a
+  bound (`PATH_REF`) `dst` that `peek_fwd_dst_any` accepts carrying an EMPTY op VALUE, which
+  the terminus resolver reads as `fwd_op_t::READ` — so a resolvable bound READ was answered
+  when it arrived contiguously and disappeared when the identical bytes arrived fragmented.
+  That is the observable instance, not the whole set: any FWD with an unreadable op reached
+  that tail, including ones whose `dst` the peek REFUSES, and the rope tier's disposition of
+  all of them now matches the span arm's. The
+  span arm's disposition is the one kept (a FWD-classified frame is data-plane, never
+  control), and both tiers now run ONE templated classification driver over the grammar
+  `Cursor` seam, parameterised on the four genuinely per-tier actions. The
+  ADVERTISE / COMPACT / HANDLE_NACK control switch is likewise one function now, taking the
+  make-contiguous seam as its parameter. **No public signature changes** — the new
+  `route_fwd_ingress` / `dispatch_control` members are private. The wire-observable change is
+  broader than the bound-READ case above: a FWD whose `dst` the peek refuses and whose op is
+  empty was silently dropped on the rope tier and now draws the addressed terminus reply
+  (measured: 0 of 35 interior splits answered before, 35 of 35 after).
 
 - **`transport_tcp_server` publishes an accepted peer's `open`/`fd` under `write_m_`, fd
   first (#891).** The two halves of a slot's lifecycle used different disciplines on the same

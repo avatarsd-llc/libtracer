@@ -90,6 +90,28 @@ std::vector<std::byte> b_value_u32(std::uint32_t v) {
 void append(std::vector<std::byte>& dst, const std::vector<std::byte>& src) {
     dst.insert(dst.end(), src.begin(), src.end());
 }
+/**
+ * @brief A FWD whose op VALUE is present but EMPTY — the frame the two ingress arms
+ *        classified differently (#870).
+ *
+ * The two peeks that drove ingress disagree about it ON PURPOSE:
+ * `peek_fwd_dst_any` accepts a zero-length op VALUE (`fwd_pre_t::op_body_len` documents that
+ * reading: "the peek does NOT reject an empty op — such a frame falls through to the terminus
+ * decode"), while `peek_fwd_op` answers `nullopt` for it. The terminus resolver reads the
+ * opcode with `load_le`, which yields 0 from an empty body — `fwd_op_t::READ` — so the frame
+ * is a resolvable READ and its disposition is OBSERVABLE as a reply, not merely as a drop by
+ * one road or another.
+ */
+std::vector<std::byte> b_fwd_empty_op(const std::vector<std::byte>& dst,
+                                      const std::vector<std::byte>& src) {
+    std::vector<std::byte> body;
+    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>{});
+    append(body, dst);
+    append(body, src);
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
+    return out;
+}
 std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
                              const std::vector<std::byte>& src,
                              const std::vector<std::byte>& payload = {}) {
@@ -460,6 +482,68 @@ int main() {
         // bug would survive the 2-link sweep to break.
         const std::array<std::size_t, 2> mid{6, 12};
         check(reply_count(bound, mid) == 1, "a 3-link split through the element array answers");
+    }
+
+    // The EMPTY-op FWD (#870): the last frame the two hand-written ingress arms disposed of
+    // differently, and the reason they are now ONE templated driver.
+    //
+    // Ingress classification was written twice — once for each cursor shape — and the copies
+    // had drifted at their tails. The span arm concluded "FWD ⇒ terminus" unconditionally;
+    // the rope arm asked `peek_fwd_op` one more time and fell through to the CONTROL sink
+    // when it answered nullopt, where `peek_control` refuses a FWD and the frame was dropped.
+    // Among the frames that reach that tail, the one with an OBSERVABLE reply is a BOUND
+    // `dst` the peek accepts carrying an op VALUE `peek_fwd_op` refuses — an empty one — so a
+    // resolvable bound READ was answered contiguously and VANISHED when the identical bytes
+    // arrived as a multi-link rope. It is NOT the whole set: a FWD whose `dst` the peek
+    // REFUSES (a PATH whose first child is not a NAME, or a kind-NONE `dst`) with an empty op
+    // reached the same tail and was dropped there too, and now shares the span arm's
+    // disposition. The disposition kept is the span arm's: a FWD-classified frame is
+    // data-plane, so it goes to the terminus and never to the control switch — for every
+    // frame that reaches the tail, not only the resolvable one.
+    //
+    // Stated, as the bound block above states it, as an equality over splits — the router's
+    // own invariant: FRAGMENTING A FRAME MUST NOT CHANGE WHETHER IT IS APPLIED.
+    {
+        std::printf("A FWD with an EMPTY op VALUE (#870) — one disposition on both arms:\n");
+        const auto reply_count = [](const std::vector<std::byte>& f,
+                                    std::span<const std::size_t> cuts) {
+            graph_t g;
+            const auto temp = path_t::parse("/sensor/temp");
+            tr::graph::vertex_handle_t v = g.register_vertex(*temp, role_t::STORED_VALUE);
+            (void)g.write(v, make_value(b_value_u32(0x04D2u)));
+            fwd_router_t router(g);
+            fake_rope_link_t in;
+            router.add_child("in", in);
+            in.inject(rope_split(f, cuts));
+            return in.sent().size();
+        };
+        graph_t shape;
+        const auto temp = path_t::parse("/sensor/temp");
+        tr::graph::vertex_handle_t sv = shape.register_vertex(*temp, role_t::STORED_VALUE);
+        const std::optional<tr::graph::vertex_slot_t> slot = shape.vertex_slot(sv);
+        check(slot.has_value(), "the target vertex is bindable (the mint side answers)");
+        // A BOUND dst, because that is the only `dst` form whose classification reaches the
+        // divergent tail: a canonical PATH concludes "terminus" one branch earlier, on both
+        // arms, and so never showed the split.
+        const std::vector<std::byte> empty_op =
+            b_fwd_empty_op(b_path_ref_one(slot->index, slot->generation), b_path({"reply-ep"}));
+
+        check(reply_count(empty_op, std::span<const std::size_t>{}) == 1,
+              "contiguous: an empty-op bound READ is resolved at the terminus and answers");
+        int silent = 0;
+        int swept = 0;
+        for (std::size_t cut = 1; cut < empty_op.size(); ++cut) {
+            const std::array<std::size_t, 1> cuts{cut};
+            ++swept;
+            if (reply_count(empty_op, cuts) != 1) ++silent;
+        }
+        check(swept > 0, "swept every interior split boundary of the empty-op frame");
+        check(silent == 0,
+              "and EVERY multi-link split answers it too — no arm sends it to the "
+              "control switch");
+        std::vector<std::size_t> every_byte;
+        for (std::size_t i = 1; i < empty_op.size(); ++i) every_byte.push_back(i);
+        check(reply_count(empty_op, every_byte) == 1, "one link per byte answers identically");
     }
 
     // A bound FORWARDER hop over a multi-link rope (RFC-0024 §3.4/§5, car 3). The terminus

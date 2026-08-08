@@ -75,7 +75,7 @@ factory receives the parsed record alongside the raw config TLV.
 | `port` | `VALUE` u16 | both | `0` | Peer port on a DIAL, bind port on a LISTEN. `0` answers `TYPE_MISMATCH` in the same five socket factories, on both roles. `can` never reads it. |
 | `role` | `VALUE` u8 | both | the child type's default | `0` = DIAL, non-zero = LISTEN. Overrides the default the catalog type carries (`client` = DIAL, `listener` = LISTEN), and selects which declared module the connection mounts under. |
 | `keepalive` | `VALUE` u32 | both | `0` | Keepalive interval in ms. **Nothing reads it**: `conn_settings_t::keepalive_ms` has no consumer outside the parse that fills it. UDP is connectionless, TCP has its own, WS handles PING/PONG at the protocol layer. |
-| `max_frame` | `VALUE` u32 | both | `0` | Per-connection inbound frame cap in bytes, honoured by the four framed kinds — `tcp`, `quic` and `webtransport` read it off their u32 length prefix, `ws` off the RFC 6455 header. `0` = the 16 MiB protocol default. The effective cap is `min(configured value, the injected backend's `max_segment_size()`)` — it does **not** only tighten: the default heap backend reports `SIZE_MAX`, so on a host a value above 16 MiB genuinely RAISES the ingress bound. `udp` (datagram) and `can` (its own fragmentation) do not read it. |
+| `max_frame` | `VALUE` u32 | both | `0` | Per-connection inbound frame cap in bytes, honoured by five of the six kinds — `tcp`, `quic` and `webtransport` read it off their u32 length prefix, `ws` off the RFC 6455 header, `udp` off the received datagram's length (one datagram = one frame). `0` = the 16 MiB protocol default on the framed kinds, and `udp_transport_t::kMaxDatagram` (64 KiB) on `udp`. On the four framed kinds the effective cap is `min(configured value, the injected backend's `max_segment_size()`)` and it does **not** only tighten: the default heap backend reports `SIZE_MAX`, so on a host a value above 16 MiB genuinely RAISES the ingress bound (#1035). On `udp` it can only tighten — a datagram cannot exceed 64 KiB, so a larger configured value is inert. `can` (its own fragmentation) does not read it. |
 | `backoff` | `VALUE` u32 | DIAL | `0` | Self-heal retry interval in ms (RFC-0014 §4). **Parsed but dormant** — the liveness engine that would consume it is not implemented. |
 | `connect_timeout` | `VALUE` u32 | DIAL | `0` | How long one dial attempt waits for `UP`, in ms (RFC-0014 §4). **Parsed but dormant**, same reason. |
 
@@ -114,9 +114,9 @@ Both are ignored on a DIAL: a client has exactly one peer, itself.
 
 <!-- config-keys:begin core/src/builtin_transport_udp.cpp -->
 
-The `udp` factory constructs no config reader at all: `addr`/`port`/`role` from the
-universal set are the whole of its configuration. A DIAL binds an ephemeral local
-port and targets `addr:port`; a LISTEN binds `port` and learns its peer from the
+The `udp` factory constructs no config reader at all: `addr`/`port`/`role`/`max_frame`
+from the universal set are the whole of its configuration. A DIAL binds an ephemeral
+local port and targets `addr:port`; a LISTEN binds `port` and learns its peer from the
 first inbound datagram's source.
 
 <!-- config-keys:end -->
@@ -254,11 +254,14 @@ out of the raw config TLV it already receives, and in a block on this page. Not 
   transport in the tree reads the field.
 - **`backoff` and `connect_timeout` are dormant.** They parse, they land in
   `conn_settings_t`, and nothing reads them yet.
-- **`max_frame` does not only tighten.** Each framed transport REPLACES the 16 MiB
-  default with whatever non-zero value it is given, and the only other bound is the
-  injected backend's `max_segment_size()` — `SIZE_MAX` on the default heap backend. So
-  on a host, `max_frame = 32 MiB` accepts a 20 MiB frame the default tears down as
-  malformed. Treat it as an ingress bound you can loosen, not just clamp (#1035).
+- **`max_frame` does not only tighten *on the four framed kinds*.** Each of `tcp`,
+  `quic`, `webtransport` and `ws` REPLACES the 16 MiB default with whatever non-zero
+  value it is given, and the only other bound is the injected backend's
+  `max_segment_size()` — `SIZE_MAX` on the default heap backend. So on a host,
+  `max_frame = 32 MiB` accepts a 20 MiB frame the default tears down as malformed.
+  Treat it as an ingress bound you can loosen, not just clamp (#1035). `udp` is the
+  exception, and not by policy: a datagram cannot exceed 64 KiB, so a value above that
+  is simply inert there.
 - **`peer_named` is off by default**, so a SPEC-created `tcp`/`ws` listener is a
   broadcast link and one request over it draws one reply *per peer*.
 - **There is no public builder for this grammar yet.** Every emitter hand-writes
