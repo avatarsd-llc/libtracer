@@ -645,15 +645,19 @@ ANCHORS = [
     # core/tests/tlv_arena_test.cpp
     ('core/tests/tlv_arena_test.cpp:293', 'const std::vector<std::byte> deep_bytes = encode(nested(100));'),
     # integrations/esp-idf/libtracer/httpd_ws_link.cpp
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:70',
-     '* reply, and (the deep path) the whole /unit batch-apply transaction. The device'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:77', 'constexpr std::size_t kHttpdTaskStack = 12288;'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:319', 'if (chunk.empty()) return true;'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:325',
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:333', 'if (chunk.empty()) return true;'),
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:339',
      'if (len_ != 0) std::memcpy(grown.get(), bytes_.get(), len_);'),
     # integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp
+    # The required-stack figure and its measurement moved OUT of the .cpp's anonymous
+    # namespace and into the class (#955), so the two anchors that pinned them in the .cpp
+    # are re-pinned here rather than shifted — `--repin` reports them GONE, by design.
     ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:48',
-     '*     apply overflows the 4 KB httpd default — see kHttpdTaskStack).'),
+     'apply overflows the 4 KB httpd default'),
+    ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:131',
+     'measured that transaction overflowing an 8 KB stack and needing ~12 KB'),
+    ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:147',
+     'static constexpr std::size_t kRequiredHttpdStack = 12288;'),
 
     # --- re-added from the v0.7.1 docs sweep (absent from main's table) ---
     ('core/include/libtracer/view_can.hpp:100', 'out.frames_.push_back(payload.subview(off, n));'),
@@ -693,11 +697,11 @@ ANCHORS = [
     ('tools/cortexm0_footprint.py:94', 'cxx_flags = ['),
     ('tools/cortexm0_footprint.py:101', '"-DLIBTRACER_NO_ATOMIC",'),
     ('tools/cortexm0_footprint.py:115', '"--specs=nano.specs",'),
-    ('core/tests/CMakeLists.txt:1079', 'add_executable(substrate_test_no_atomic'),
-    ('core/tests/CMakeLists.txt:1092', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
+    ('core/tests/CMakeLists.txt:1103', 'add_executable(substrate_test_no_atomic'),
+    ('core/tests/CMakeLists.txt:1116', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
     # The leading indent is load-bearing: the bare token also appears in the comment
     # three lines above the executable, and an anchor that matches both is not an anchor.
-    ('core/tests/CMakeLists.txt:1093', '    LIBTRACER_NO_ATOMIC'),
+    ('core/tests/CMakeLists.txt:1117', '    LIBTRACER_NO_ATOMIC'),
 ]
 
 
