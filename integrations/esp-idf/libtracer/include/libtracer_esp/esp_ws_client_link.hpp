@@ -60,12 +60,22 @@
  *   - Teardown is a BARRIER, not an assumption. The destructor disarms the link
  *     (`stop_`), wakes the recv thread's backoff, joins it, then destroys the handles
  *     UNDER the same mutex a sender holds across its write, and finally waits out
- *     every sender that had already entered `send()`. Before #952 it destroyed the
+ *     every sender that had already ANNOUNCED itself on the in-flight tally — raised at
+ *     the top of `send()`, before it queues on that mutex. Before #952 it destroyed the
  *     handles with that mutex held nowhere, on the false premise that the joined recv
  *     thread was the only handle user — so a sender queued behind a stalled write woke
- *     up owning a destroyed handle. What this cannot cover, because no barrier inside
- *     an object can, is a `send()` that STARTS after the destructor returns: the
- *     embedder still owns the link's lifetime against its own callers.
+ *     up owning a destroyed handle. The tally, not `send()`'s first instruction, is the
+ *     covered boundary, and it is drawn there because no barrier inside an object can
+ *     draw it earlier: a caller that has not reached the tally when the destructor reads
+ *     it for the last time is NOT waited out — whether it is a `send()` that STARTS
+ *     after the destructor returns, or one that entered `send()` and is still short of
+ *     the tally (a few instructions). The embedder owns the link's lifetime against its
+ *     own callers; this type bounds what happens once a caller is on the tally.
+ *   - The handles themselves are published by `connected_`, not by the mutex: the recv
+ *     thread rebuilds `ws_`/`tcp_` on every re-dial holding NO lock, and releases them
+ *     with the `connected_` store. So a handle is only ever read behind an ACQUIRE that
+ *     observed `true` — a check ahead of that gate races the rebuild, whatever lock it
+ *     holds.
  *   - `send()` COPIES the frame into a reusable tx scratch before writing, because
  *     `esp_transport_write` masks IN-PLACE (RFC 6455 client rule) and a delivered
  *     frame may be shared with the concurrent server link — so the caller's (const,
@@ -132,10 +142,16 @@ class esp_ws_client_link_t : public transport_t {
      *
      * Bounded and ordered (#952): the link is disarmed first, the recv thread's
      * reconnect backoff is woken rather than waited out, the handles are destroyed
-     * under the send serializer, and every sender already inside `send()` is waited
-     * out before this object's own members go. A teardown that lands mid-dial still
-     * costs one dial timeout — `esp_transport_connect` takes no cancellation — which
-     * is why that timeout is derived from the task-watchdog period.
+     * under the send serializer, and every sender that has ANNOUNCED itself on the
+     * in-flight tally is waited out before this object's own members go. The tally is
+     * raised at the top of `send()`, before it queues on that serializer — so what is
+     * guaranteed is "a caller on the tally finishes first", NOT "a caller that has
+     * entered `send()` finishes first": a caller between `send()`'s entry checks and
+     * that raise is not waited out, exactly as a `send()` starting after this
+     * destructor returns is not. Both are the embedder's lifetime problem; nothing
+     * inside the object can close them. A teardown that lands mid-dial still costs one
+     * dial timeout — `esp_transport_connect` takes no cancellation — which is why that
+     * timeout is derived from the task-watchdog period.
      */
     ~esp_ws_client_link_t() override;
 
@@ -207,16 +223,23 @@ class esp_ws_client_link_t : public transport_t {
      *         thread when it (re)dials — see @ref set_handshake_headers. */
     std::string handshake_headers_;
 
+    // Both handles are written ONLY by the recv thread (connect_once rebuilds them on
+    // every dial, holding no lock) and PUBLISHED by the connected_ release store below;
+    // any other thread must observe that store before it may read either one.
     esp_transport_handle_t tcp_ = nullptr;  // parent TCP transport (owned)
     esp_transport_handle_t ws_ = nullptr;   // WS transport over tcp_ (owned)
 
     std::vector<std::byte> rx_buf_;  // reusable RX fill (zero-copy read target)
     std::vector<std::byte> tx_buf_;  // reusable TX scratch (masked in-place under write_m_)
 
-    std::mutex write_m_;  // serializes all esp_transport handle access (bounded write)
-    /** @brief Senders past @ref send's entry checks and not yet returned from it. Raised
-     *         BEFORE the sender queues on `write_m_`, so the destructor's drain covers
-     *         exactly the callers that could still be parked on that mutex (#952). */
+    // Serializes the esp_transport read/write SYSCALLS (the write is bounded). It does
+    // NOT cover the re-dial's rebuild of the handles above — assuming it did is the
+    // premise the pre-#952 destructor was written on.
+    std::mutex write_m_;
+    /** @brief Senders that have RAISED this tally and not yet returned from @ref send.
+     *         Raised BEFORE the sender queues on `write_m_`, so the destructor's drain
+     *         covers exactly the callers that could already be parked on that mutex —
+     *         and, by the same token, no earlier than the raise itself (#952). */
     std::atomic<std::uint32_t> senders_{0};
     /** @brief Guards nothing but the reconnect backoff wait — a sleep the destructor has
      *         to be able to cut short, hence a condition variable rather than

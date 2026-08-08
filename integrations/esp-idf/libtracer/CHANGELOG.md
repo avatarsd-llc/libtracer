@@ -51,10 +51,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   own contract contradicts (`send()` may be called from any task), so a sender queued
   behind a stalled write woke up owning a destroyed handle. Teardown now disarms the
   link, destroys the handles under `write_m_`, and waits out every sender that had
-  already entered `send()`. What it still cannot cover, because no barrier inside an
-  object can, is a `send()` that *starts* after the destructor returns. No API change;
-  a teardown that lands mid-dial still costs one dial bound, since
-  `esp_transport_connect` takes no cancellation.
+  already *announced itself on the in-flight tally* — raised at the top of `send()`,
+  before it queues on that mutex. That tally is the covered boundary, and it is the most
+  a barrier inside the object can cover: a caller that has not reached it when the
+  destructor reads it for the last time is not waited out, whether it is a `send()` that
+  *starts* after the destructor returns or one that entered `send()` and is still short
+  of the raise. Both stay the embedder's lifetime problem. A sender also reads the
+  transport handle only behind the `connected_` acquire gate that pairs with the recv
+  thread's release store: the re-dial rebuilds the handles holding no lock, so `write_m_`
+  alone does not order that rewrite against a sender's read. No API change; a teardown
+  that lands mid-dial still costs one dial bound, since `esp_transport_connect` takes no
+  cancellation.
 
 - **`twai_link_t`'s TX backpressure window is spent PER FRAME again, and teardown no
   longer queues behind it** (#962). `write_raw` took `write_m_` and only then parked on

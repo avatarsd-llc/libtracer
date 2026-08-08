@@ -109,9 +109,15 @@ constexpr int kDrainSliceMs = 1;
  *
  * Only the DECREMENT lives here. The raise cannot: it has to happen BEFORE the sender
  * queues on `write_m_`, because the window being closed is precisely "queued on a mutex
- * a returning destructor is about to destroy". A sender that raised the tally is one
- * the destructor waits out; a sender that has not entered `send()` at all is the
- * caller's own lifetime problem, which no barrier inside the object can answer.
+ * a returning destructor is about to destroy".
+ *
+ * The tally is therefore the exact boundary of what teardown covers: a sender whose
+ * raise landed before the destructor's last drain load is waited out; one that has not
+ * raised it yet is not — whether it has not called `send()` at all, or is between
+ * `send()`'s entry checks and the `fetch_add` a few instructions below. That residual is
+ * the caller's own lifetime problem, which no barrier inside the object can answer: the
+ * raise would have to be atomic with the call, and a member cannot outlive the object it
+ * is a member of.
  */
 class sender_exit_t {
    public:
@@ -167,7 +173,8 @@ esp_ws_client_link_t::~esp_ws_client_link_t() {
         // pre-#952 destructor destroyed the handles with `write_m_` held nowhere. A
         // sender inside esp_transport_write holds this lock for the whole call, so
         // acquiring it means no sender is inside — and every sender that acquires it
-        // afterwards finds the null handle (and `stop_`) and leaves.
+        // afterwards finds `stop_` set (and `connected_` cleared, both stored above,
+        // before this lock was taken) and leaves without reading either handle.
         // esp_transport_ws_init(parent) does NOT take ownership of the parent, so both
         // handles are destroyed here (ws first, then tcp) — mirrors IDF's own teardown.
         const std::lock_guard<std::mutex> lk(write_m_);
@@ -181,13 +188,17 @@ esp_ws_client_link_t::~esp_ws_client_link_t() {
             tcp_ = nullptr;
         }
     }
-    // Drain the senders that announced themselves before the lock above was taken.
-    // Holding `write_m_` for this would deadlock — that is the lock they are queued on
-    // — so the wait is here, after it. Each one wakes, sees the disarmed link, and
-    // leaves; only then is it safe for `write_m_` itself (and the buffers) to be
-    // destroyed under them. The wait is bounded by one write budget: the sender that
-    // was INSIDE the transport is the only one that can be slow, and its call is now
-    // bounded by kWriteBudgetMs.
+    // Drain the senders that ANNOUNCED themselves on the tally. Holding `write_m_` for
+    // this would deadlock — that is the lock they are queued on — so the wait is here,
+    // after it. Each one wakes, sees the disarmed link, and leaves; only then is it safe
+    // for `write_m_` itself (and the buffers) to be destroyed under them. The wait is
+    // bounded by one write budget: the sender that was INSIDE the transport is the only
+    // one that can be slow, and its call is now bounded by kWriteBudgetMs.
+    //
+    // The tally, not `send()`'s first instruction, is the boundary — see sender_exit_t.
+    // A caller that entered `send()` but whose raise lands after the last load below is
+    // NOT waited out, and neither is one that has yet to call at all; both are the same
+    // embedder-owned lifetime residual, not something this loop can widen its way into.
     while (senders_.load(std::memory_order_acquire) != 0)
         std::this_thread::sleep_for(std::chrono::milliseconds(kDrainSliceMs));
 }
@@ -198,6 +209,13 @@ bool esp_ws_client_link_t::connect_once() {
     // etc.) — ws_connect() does not reset it, only ws_init() zero-allocates it — so a
     // reconnect mid-fragment would mis-parse the first frame of the new connection.
     // Rebuilding is the only way to guarantee a clean frame state.
+    //
+    // This rewrite runs with NO lock — deliberately: taking `write_m_` here would put the
+    // whole dial bound in front of every sender, which is the stall #952 is about. What
+    // makes it safe is that the handles are PUBLISHED by the `connected_` release store
+    // at the end of this function, and nothing off this thread may read them without
+    // first observing that store (see send()). `connected_` is false for the whole of
+    // this rewrite, so a sender racing it turns back at the gate instead of reading.
     if (ws_ != nullptr) {
         esp_transport_close(ws_);
         esp_transport_destroy(ws_);
@@ -285,8 +303,19 @@ void esp_ws_client_link_t::send(std::span<const std::byte> frame) {
     const sender_exit_t leaving(senders_);
     const std::lock_guard<std::mutex> lk(write_m_);
     // Re-checked, not re-read for tidiness: teardown may have run while this sender was
-    // queued, and it disarms `stop_` first and nulls the handles under this very lock.
-    if (stop_.load(std::memory_order_acquire) || ws_ == nullptr) return;
+    // queued, and it disarms `stop_` BEFORE it takes this very lock to null the handles,
+    // so a sender that wakes to a set `stop_` leaves without touching either handle.
+    if (stop_.load(std::memory_order_acquire)) return;
+    // THE handle gate, and the reason nothing above it may read `ws_`. `write_m_` does
+    // NOT order a handle read against a re-dial: connect_once() destroys and rewrites
+    // ws_/tcp_ holding no lock at all. What orders them is this acquire pairing with the
+    // release store connect_once makes only AFTER the rebuild — and `connected_` is
+    // cleared only under this lock (drop(), a failed write) or by the destructor, whose
+    // store the recv loop answers by breaking rather than re-dialing. So an observed
+    // `true` here is a happens-before edge with the writes that built the handle this
+    // call is about to use, and a handle check placed AHEAD of this line is read against
+    // an unsynchronised rewrite — the same unsynchronised handle read #952 is about,
+    // seen from the sender's side (TSan: send() vs connect_once, on a failing re-dial).
     if (!connected_.load(std::memory_order_acquire)) return;  // best-effort, like UDP
     // Copy into the reusable scratch: esp_transport_write masks IN-PLACE and unmasks
     // back (RFC 6455 client rule), but a delivered frame may be shared with the
@@ -337,7 +366,10 @@ void esp_ws_client_link_t::recv_loop() {
             // Teardown clears `connected_` too, so re-check `stop_` here or a link
             // destroyed while connected would answer by starting a fresh dial — and
             // the destructor would join THAT (#952). This is also the general case: a
-            // stop seen during the poll turn below costs no dial at all.
+            // stop seen during the poll turn below costs no dial at all. It carries a
+            // second load: a fresh dial REWRITES ws_/tcp_ with no lock held, so this
+            // break is what keeps the destructor's `connected_` store from re-opening
+            // the handle rewrite underneath a sender that observed the previous `true`.
             if (stop_.load(std::memory_order_acquire)) break;
             if (!connect_once()) {
                 // Interruptible backoff. `sleep_for` was not: the destructor's join

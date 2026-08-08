@@ -340,7 +340,10 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     # every defect here is a wait nobody bounded. The use-after-free observable is the
     # fake's handle LIVENESS: its parked write re-checks it on the way out, which is what
     # makes "the handles were destroyed under a sender" a measurement rather than a code
-    # reading. Still no socket anywhere (#947).
+    # reading. Still no socket anywhere (#947). Its last case has a second oracle: it
+    # sends straight through a failing-dial cycle, where the recv thread rewrites the
+    # transport handles with no lock held, so the `tsan` leg judges whether the sender's
+    # handle read is behind the `connected_` acquire gate that publishes them.
     add_executable(esp_ws_client_teardown_test
         "${LIBTRACER_ESP_DIR}/tests/host/esp_ws_client_teardown_test.cpp"
         "${LIBTRACER_ESP_DIR}/tests/host/fake_esp_transport.cpp"
@@ -353,7 +356,8 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     target_link_libraries(esp_ws_client_teardown_test PRIVATE libtracer)
     libtracer_test_warnings(esp_ws_client_teardown_test)
     add_test(NAME esp_ws_client_teardown COMMAND esp_ws_client_teardown_test)
-    # Two cases spend a real wait on purpose (a 600 ms held write, a 2.5 s hung dial).
+    # Three cases spend a real wait on purpose (a 600 ms held write, a 2.5 s hung dial,
+    # and two 1.5 s reconnect backoffs to straddle a pair of handle rebuilds).
     # Generous against a loaded runner, and still far under CTest's default.
     set_tests_properties(esp_ws_client_teardown PROPERTIES TIMEOUT 60)
 

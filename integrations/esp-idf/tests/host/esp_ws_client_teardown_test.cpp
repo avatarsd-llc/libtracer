@@ -37,9 +37,17 @@
  * live on entry — `fake_ws::handle_misuse()` counts exactly that, plus every call made
  * on a null or already-destroyed handle.
  *
+ * A fourth case guards the seam the FIX itself has to respect: the transport handles are
+ * published by the `connected_` release store, not by the send serializer, because the
+ * recv thread rebuilds them on every re-dial holding no lock. A sender that reads a
+ * handle ahead of that acquire gate races the rebuild whatever lock it holds — so that
+ * case drives sends straight through a failing-dial cycle, for the `tsan` leg to judge.
+ *
  * What this suite does NOT claim: that a `send()` STARTING after the destructor has
- * returned is safe. No barrier inside an object can answer that, and the fix does not
- * pretend to — the embedder owns the link's lifetime against its own callers.
+ * returned is safe, nor that one which entered `send()` but has not yet raised the
+ * in-flight tally is. The tally is the boundary the destructor drains, and no barrier
+ * inside an object can draw it earlier — the embedder owns the link's lifetime against
+ * its own callers.
  */
 
 #include <atomic>
@@ -264,6 +272,68 @@ void test_a_teardown_that_lands_mid_dial_is_bounded() {
 }
 
 /**
+ * @brief The handle read is behind the `connected_` GATE, not merely behind the mutex.
+ *
+ * With every dial failing, the recv thread lives in `connect_once()`: it destroys and
+ * rewrites `ws_`/`tcp_` on every turn holding NO lock, and `connected_` stays false the
+ * whole time — so no release/acquire edge ever forms between that rewrite and a sender.
+ * A `send()` that reads the handle AHEAD of the `connected_` acquire gate is therefore an
+ * unsynchronised read of a live rewrite no matter what it holds `write_m_` for, because
+ * the rewriting thread does not take `write_m_`. That is the same unsynchronised handle
+ * read #952 is about, seen from the sender's side.
+ *
+ * This case drives exactly the interleaving a subscription push produces against an
+ * unreachable peer: senders on foreign tasks calling into a link that is cycling failed
+ * dials. TSan is the oracle for the ordering itself (this suite is in the ctest set the
+ * `tsan` leg runs, and the read is reported against `connect_once`'s previous write even
+ * when the two do not overlap in time — there is no edge either way). What the case pins
+ * WITHOUT a sanitizer: the gate turns every sender back, so a down link admits nothing to
+ * the transport at all, and nothing reaches a null or destroyed handle.
+ */
+void test_send_during_a_redial_reads_no_handle() {
+    std::printf("a send during a re-dial reads no handle:\n");
+    fake_ws::reset();
+    fake_ws::fail_connects(true);  // the recv thread cycles connect_once() + backoff
+
+    auto link = dialing_link();
+    check(!link->ok(), "the link is down and re-dialing");
+    const int dials_before = fake_ws::connect_count();
+
+    // Two foreign tasks pushing at a link that is rebuilding its handles underneath them.
+    std::atomic<bool> run{true};
+    std::atomic<int> sent{0};
+    const std::vector<std::byte> frame = payload();
+    esp_ws_client_link_t* const under_test = link.get();
+    std::vector<std::thread> senders;
+    for (int i = 0; i < 2; ++i) {
+        senders.emplace_back([&] {
+            while (run.load(std::memory_order_acquire)) {
+                under_test->send(frame);
+                sent.fetch_add(1, std::memory_order_relaxed);
+                std::this_thread::sleep_for(1ms);
+            }
+        });
+    }
+    // Run until the recv thread has rebuilt the handles at least twice MORE, so the
+    // senders straddle real rewrites rather than a single quiet window. The backoff is
+    // 1500 ms, so this is a few seconds; the ceiling only stops a wedged run.
+    const bool redialed =
+        wait_until([&] { return fake_ws::connect_count() >= dials_before + 2; }, 12s);
+    run.store(false, std::memory_order_release);
+    for (std::thread& s : senders) s.join();
+
+    const int dials = fake_ws::connect_count() - dials_before;
+    std::printf("       %d sends across %d further dials\n", sent.load(std::memory_order_relaxed),
+                dials);
+    check(redialed && dials >= 2, "the handles were rebuilt under the senders, repeatedly");
+    check(sent.load(std::memory_order_relaxed) > 0, "and the senders actually called send()");
+    check(fake_ws::writes_started() == 0,
+          "no send reached the transport while the link was down — the gate turned them back");
+    check(fake_ws::handle_misuse() == 0, "and none touched a null or destroyed handle");
+    link.reset();
+}
+
+/**
  * @brief Defect 1: both blocking bounds are derived from the task-watchdog period.
  *
  * The numbers the link hands IDF are the whole observable — no wait has to be spent to
@@ -271,8 +341,8 @@ void test_a_teardown_that_lands_mid_dial_is_bounded() {
  * closed TCP window) and 5000 ms per dial, against a 5 s watchdog.
  *
  * The ordinary send is the control: bounding the write must not stop the bytes getting
- * out, and the entry checks the fix added (`stop_`, a null handle) must not swallow a
- * frame on a live link.
+ * out, and the re-check the fix added after the lock (`stop_`, then the `connected_`
+ * gate) must not swallow a frame on a live link.
  */
 void test_the_blocking_bounds_are_derived_from_the_watchdog() {
     std::printf("the blocking bounds are derived from the watchdog period:\n");
@@ -308,6 +378,7 @@ int main() {
     test_teardown_does_not_destroy_handles_under_a_sender();
     test_teardown_does_not_wait_out_the_reconnect_backoff();
     test_a_teardown_that_lands_mid_dial_is_bounded();
+    test_send_during_a_redial_reads_no_handle();
     test_the_blocking_bounds_are_derived_from_the_watchdog();
     std::printf(g_failures == 0 ? "\nALL PASS\n" : "\n%d FAILURE(S)\n", g_failures);
     return g_failures == 0 ? 0 : 1;
