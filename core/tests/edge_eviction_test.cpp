@@ -18,6 +18,9 @@
  *     the freed slots before `subs_` grows, and the reused slot delivers;
  *   - `fwd_router_t::link_down` evicts AND drops the link's route-handle label
  *     state (reusing clear_link), so a compact flow's egress binding dies with it;
+ *   - an edge admitted through `graph_t::field_write` (the RFC-0009 §D.1
+ *     `:subscribers[N]` replace, which stores the inbound link only as the gate
+ *     context) is reclaimed by that link's teardown too (#943);
  *   - the `add_child`-installed departure notifiers (point-to-point down, bus
  *     peer-down) reach the same hook — the seam every transport teardown fires;
  *   - eviction racing a writer thread is crash/TSan-clean (the concurrency gate);
@@ -115,6 +118,15 @@ std::vector<std::byte> b_value_u8(std::uint8_t v) {
     return out;
 }
 
+/** @brief A VALUE TLV over a little-endian u32 (the FIELD `[N]` index child). */
+std::vector<std::byte> b_value_u32(std::uint32_t v) {
+    std::byte b[4];
+    for (std::size_t i = 0; i < 4; ++i) b[i] = static_cast<std::byte>((v >> (8 * i)) & 0xFFU);
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, type_t::VALUE, opt_t{}, std::span<const std::byte>(b, 4));
+    return out;
+}
+
 /**
  * @brief A SUBSCRIBER TLV whose PATH child carries @p marker — byte-distinguishable
  *        per edge, so an indexed `:subscribers[N]` read identifies WHICH edge occupies
@@ -133,6 +145,20 @@ std::vector<std::byte> b_field_subscribers_append() {
     std::vector<std::byte> body;
     append(body, b_name("subscribers"));
     append(body, b_value_u8(1));  // index_mode = ELEMENT (append)
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, type_t::FIELD, opt_t{.pl = true}, body);
+    return out;
+}
+
+/**
+ * @brief FIELD{ NAME "subscribers", VALUE u32 @p n, VALUE u8 ELEMENT } — the
+ *        ":subscribers[N]" indexed selector (RFC-0004 §C: index then index_mode).
+ */
+std::vector<std::byte> b_field_subscribers_index(std::uint32_t n) {
+    std::vector<std::byte> body;
+    append(body, b_name("subscribers"));
+    append(body, b_value_u32(n));
+    append(body, b_value_u8(1));  // index_mode = ELEMENT, with an index ⇒ "[N]"
     std::vector<std::byte> out;
     tr::wire::emit_tlv(out, type_t::FIELD, opt_t{.pl = true}, body);
     return out;
@@ -440,6 +466,72 @@ void test_departure_notifier_seam() {
     check(bus.peer("10.0.0.8:51002").count() == 1, "the OTHER bus peer still delivers");
 }
 
+/**
+ * @brief #943 — a FIELD-WRITE-admitted subscriber edge is reclaimed by its link's teardown.
+ *
+ * `graph_t::field_write`'s `:subscribers[N]` arm (RFC-0009 §D.1 replace) admits an edge whose
+ * cold half stores ONLY the gate context: the edge re-dispatches to a LOCAL target, so it has
+ * no return route and no delivery link. `vertex_t::evict_link_edges` matched on the delivery
+ * link alone, so this edge was never reclaimed — boot-lifetime, still `active`, still holding
+ * its slot against `add_edge` reuse, and still writing into its target under a departed
+ * session's context.
+ *
+ * Driven through the PRODUCTION wiring (a `fwd_router_t` child fed real `FWD` frames), because
+ * the whole question is which door the wire actually enters. The oracle is the re-dispatch
+ * TARGET's stored value, not a callback on it: delivery terminates at the target (ADR-0051),
+ * so the target's own subscribers never fire.
+ */
+void test_evict_reaches_field_write_admitted_edges() {
+    std::printf("link teardown reclaims a FIELD-WRITE-admitted edge (#943):\n");
+    graph_t g;
+    fwd_router_t router(g);
+    fake_link_t cli;
+    router.add_child("cli", cli);
+
+    (void)g.register_vertex(path_t("/p"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/t"), role_t::STORED_VALUE);
+
+    /** @brief The flat stored bytes at @p p (empty on error). */
+    const auto value_of = [&](const char* p) -> std::vector<std::byte> {
+        const auto r = g.read(path_t(p));
+        return r ? rope_bytes(**r) : std::vector<std::byte>{};
+    };
+
+    // A `[N]` replace needs slot N to EXIST (admit_subscriber refuses OUT_OF_RANGE), so seed
+    // slot 0 the ordinary way: a wire `:subscribers[]` append, which the resolver diverts to
+    // subscribe_wire — that door stores the link and has always been evictable.
+    cli.inject(b_fwd(fwd_op_t::WRITE, b_path({"p"}), b_path({"cli"}), b_field_subscribers_append(),
+                     b_subscriber("seed")));
+    cli.drain();
+
+    // The door under test: a REMOTE `:subscribers[0]` REPLACE bearing a SUBSCRIBER whose PATH
+    // names the local vertex /t. This one lands in graph_t::field_write, not subscribe_wire.
+    cli.inject(b_fwd(fwd_op_t::WRITE, b_path({"p"}), b_path({"cli"}), b_field_subscribers_index(0),
+                     b_subscriber("t")));
+    cli.drain();
+
+    check(g.write(path_t("/p"), rope_t{make_value(b_value_u8(0x51))}).has_value(),
+          "write /p while the session is up");
+    check(value_of("/t") == b_value_u8(0x51),
+          "the field-write-admitted edge IS delivering into /t (the test is not vacuous)");
+    // The edge carries no return route, so it must take the LOCAL leg only. This is why the
+    // fix is in the eviction predicate and not an `r.link.assign(caller)` at the admission
+    // door: a non-empty link there would make dispatch_edge add a phantom remote leg here.
+    check(cli.count() == 0, "no phantom remote delivery for a local-target edge");
+
+    cli.die();  // the transport observes its one connection dead → fwd_router_t::link_down
+
+    check(g.write(path_t("/p"), rope_t{make_value(b_value_u8(0x52))}).has_value(),
+          "write /p after the session departed");
+    check(value_of("/p") == b_value_u8(0x52), "the producer itself still took the write");
+    check(value_of("/t") == b_value_u8(0x51),
+          "the departed session's edge delivered NOTHING after teardown");
+    const auto slot0 = g.read(path_t("/p:subscribers[0]"));
+    check(!slot0.has_value() || rope_bytes(**slot0).empty(),
+          "slot 0 was RECLAIMED, not just left active (free for add_edge reuse)");
+    check(g.evict_link_edges("cli") == 0, "a second eviction for 'cli' finds nothing left");
+}
+
 /** @brief Eviction concurrent with writes: no crash, no deadlock, coherent finish (TSan gate). */
 void test_concurrent_evict_vs_writes() {
     std::printf("concurrent writer x evict/re-subscribe (TSan gate):\n");
@@ -575,6 +667,7 @@ int main() {
     test_clear_edge_releases_the_slot_pin();
     test_slot_reuse_and_index_stability();
     test_router_link_down();
+    test_evict_reaches_field_write_admitted_edges();
     test_departure_notifier_seam();
     test_concurrent_evict_vs_writes();
     if (g_failures != 0) {

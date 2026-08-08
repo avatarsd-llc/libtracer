@@ -71,6 +71,27 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   documents `TRANSPORT_DOWN`, so a factory written outside the library answers as the built-ins
   do; the `quic`, `webtransport` and `can` factory docs are corrected at each site.
 
+- **`graph_t::evict_link_edges` / `vertex_t::evict_link_edges` now reclaim an edge admitted
+  through the `:subscribers[N]` field-write door (#943).** They matched a slot on
+  `subscriber_remote_t::link` alone. `graph_t::subscribe_wire` — the `SUBSCRIBE` op and the
+  wire `:subscribers[]` append — stores that, but `graph_t::field_write`'s `:subscribers[]` /
+  `:subscribers[N]` arms store the inbound link **only** as the gate context
+  (`subscriber_remote_t::caller`), because such an edge re-dispatches to a *local* target and
+  owns no return route to deliver over. The RFC-0009 §D.1 replace arm is reached from the
+  wire (the resolver diverts only an *append* bearing a `SUBSCRIBER` to `subscribe_wire`), so
+  a remote `FWD WRITE` to `/v:subscribers[N]` produced an edge no link teardown could ever
+  match: permanently `active`, permanently counted in `own_subs`, holding its slot against
+  `add_edge` reuse, and still writing into its target under a departed session's context —
+  boot-lifetime, one per occurrence, and the reason RFC-0009 §D.5's "evicts every subscriber
+  edge that named that link" was not true of every such edge. Eviction now matches the link
+  an edge was **admitted over**: the delivery link when it carries one, the stored caller
+  context otherwise (ADR-0018 defines that context as this node's NAME for the inbound link,
+  i.e. the same name space). Edges with no cold half and edges under other links are
+  unaffected, and the wire is untouched — this is entirely host-side, exactly as §D.5 says.
+  The fix is deliberately *not* an `r.link.assign(caller)` at the admission door:
+  `graph_t::dispatch_edge` gates its remote leg on a non-empty link, so that would have added
+  a phantom `FWD{WRITE}` per publish carrying an empty return route.
+
 - **A SPEC-created `ws` DIAL connection no longer drops a message the server pushes on
   connect (#1025).** `transport_ws_client`'s constructor dials, runs the opening handshake
   AND spawns the recv thread before it returns, so nothing the owner does can run first.

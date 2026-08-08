@@ -135,7 +135,7 @@ Creation is not a new verb. It is an **append of a `SPEC` TLV to a parent's
 The SPEC's `type` member names one of the device's registered child types and its
 optional `config` SETTINGS carries the instantiation parameters; an unregistered
 `type` answers `SCHEMA_NOT_FOUND`, the `ENOTTY` of an unsupported field
-(`graph_t::create_child`, `core/src/graph.cpp:1892-1919`). Reading `:children[]`
+(`graph_t::create_child`, `core/src/graph.cpp:1910-1937`). Reading `:children[]`
 returns the parent's **members**, never SPECs.
 
 On the `/net` plane the registered child types are `client` and `listener`
