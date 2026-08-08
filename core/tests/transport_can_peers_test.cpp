@@ -206,14 +206,7 @@ view_t owned(std::span<const std::byte> bytes) {
 
 /** @brief SPEC{ type, name } with no config — the provide_link-staged connection form. */
 view_t conn_spec(std::string_view type, std::string_view name) {
-    std::vector<std::byte> body;
-    tr::wire::emit_name(body, "type");
-    tr::wire::emit_name(body, type);
-    tr::wire::emit_name(body, "name");
-    tr::wire::emit_name(body, name);
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
-    return owned(out);
+    return tr::net::conn_spec_t(type, name).view();
 }
 
 /** @brief The peer names inside a members POINT (POINT{ POINT{NAME}... }) view/TLV. */

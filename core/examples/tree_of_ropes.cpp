@@ -55,7 +55,6 @@
 #include <vector>
 
 #include "libtracer/loopback.hpp"
-#include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 
 namespace {
@@ -65,12 +64,11 @@ using tr::graph::path_t;
 using tr::graph::role_t;
 using tr::graph::status_t;
 using tr::net::conn_role_t;
+using tr::net::conn_spec;
 using tr::net::fwd_router_t;
 using tr::net::transport_vertex_t;
 using tr::view::rope_t;
 using tr::view::view_t;
-using tr::wire::opt_t;
-using tr::wire::type_t;
 
 int g_failures = 0;
 
@@ -82,38 +80,6 @@ void check(bool ok, std::string_view what) {
 
 /** @brief Parse a known-valid path literal (deref is safe for these constants). */
 path_t P(std::string_view s) { return *path_t::parse(s); }
-
-/**
- * @brief A connection-creation SPEC, byte-identical to the one in
- *        transport_vertex_test.cpp — the in-band payload a `/net:children[]`
- *        write carries to mount a transport (ADR-0027, reference/05).
- */
-view_t conn_spec(std::string_view type, std::string_view name, conn_role_t role,
-                 std::uint16_t port) {
-    std::vector<std::byte> cfg;
-    tr::wire::emit_name(cfg, "role");
-    const std::byte r{static_cast<std::uint8_t>(role)};
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, std::span<const std::byte>(&r, 1));
-    tr::wire::emit_name(cfg, "port");
-    std::vector<std::byte> pb(2);
-    tr::detail::store_le(pb, port, 2);
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, pb);
-
-    std::vector<std::byte> body;
-    tr::wire::emit_name(body, "type");
-    tr::wire::emit_name(body, type);
-    tr::wire::emit_name(body, "name");
-    tr::wire::emit_name(body, name);
-    tr::wire::emit_name(body, "config");
-    tr::wire::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true}, cfg);
-
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
-
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(out.size());
-    std::memcpy(seg->bytes.data(), out.data(), out.size());
-    return view_t::over(std::move(seg));
-}
 
 /**
  * @brief Axis 1 — one rope, two backends, zero byte copies.

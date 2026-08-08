@@ -664,7 +664,7 @@ ANCHORS = [
     ('core/src/transport_ws.cpp:808', 'std::array<std::byte, 4096> chunk;',
      'void transport_ws_client::serve(int fd, std::vector<std::byte> pipelined) {'),
     # core/tests/registry_teardown_test.cpp
-    ('core/tests/registry_teardown_test.cpp:289', 'void test_digest_paths_agree() {'),
+    ('core/tests/registry_teardown_test.cpp:279', 'void test_digest_paths_agree() {'),
     # core/tests/tlv_arena_test.cpp
     ('core/tests/tlv_arena_test.cpp:293', 'const std::vector<std::byte> deep_bytes = encode(nested(100));'),
     # integrations/esp-idf/libtracer/httpd_ws_link.cpp
