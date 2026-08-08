@@ -243,6 +243,14 @@ ANCHORS = [
     # DATED records of a decision — their citations describe the tree as it stood, and
     # some already point past today's EOF. Pinning them would demand rewriting history
     # every time the code moves, which is the opposite of what a record is for.
+    # bench/bench_libtracer.cpp — bench/README.md's "neither retired mode is emitted today"
+    # pair. Enrolled because it HAD rotted: the second citation was written against the
+    # tree of the day, a later change to `main` moved it 38 lines, and nothing noticed —
+    # the same silence #725/#726 found in the module pages, in a file the gate could read
+    # all along but had no pin for.
+    ('bench/bench_libtracer.cpp:16', '(The `loopback` /'),
+    ('bench/bench_libtracer.cpp:1235',
+     '// (The `loopback` and n-routers `routers-hN` modes benchmarked the ROUTER-flood'),
     # bench/bench_lkv_slot.cpp
     ('bench/bench_lkv_slot.cpp:193', 'class model_sp_atomic_t {'),
     ('bench/bench_lkv_slot.cpp:342', 'class model_hazard_t {'),
