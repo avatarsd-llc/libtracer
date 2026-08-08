@@ -333,6 +333,31 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     set_tests_properties(httpd_ws_fanout_alloc
         PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
+    # #960 — the peer-departure eviction notifier's LOCK DISCIPLINE, on the same fake. The
+    # event none of the suites above stages is a departure notification held OPEN: the
+    # notifier parks the server task while another task tries to acquire the handler gate.
+    # That is what turns "an unbounded foreign callback runs under gate_t::m" into a number
+    # instead of a code reading, and it pins the other half at the same time — the
+    # destructor must still join a notification in flight, now through the gate's barrier
+    # rather than its mutex.
+    add_executable(httpd_ws_eviction_lock_test
+        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_eviction_lock_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
+    target_include_directories(httpd_ws_eviction_lock_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(httpd_ws_eviction_lock_test PRIVATE libtracer)
+    target_link_options(httpd_ws_eviction_lock_test PRIVATE
+        "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    libtracer_test_warnings(httpd_ws_eviction_lock_test)
+    add_test(NAME httpd_ws_eviction_lock COMMAND httpd_ws_eviction_lock_test)
+    # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
+    # every case here constructs an adopting link — same exemption as the suites above.
+    set_tests_properties(httpd_ws_eviction_lock
+        PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+
     # #900 + #901 — the WS *CLIENT* link's receive path, on the same construction: the
     # chip TU (integrations/esp-idf/libtracer/esp_ws_client_link.cpp) compiled against a
     # host fake of esp_transport_ws's frame stream and esp_pthread's stack-sizing seam.

@@ -331,7 +331,24 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     // --- instance handlers (run on the httpd task) ---
     esp_err_t on_handshake(httpd_req_t* req);   // admit or refuse a new peer
     esp_err_t on_data_frame(httpd_req_t* req);  // recv one WS frame, (reassemble,) deliver
-    void reclaim_slot(session_t* slot);
+    /**
+     * @brief Recycle a departed peer's slot and report what the routing plane is still
+     *        owed — the departed peer's NAME, or an empty string for nothing.
+     *
+     * Deliberately does NOT fire the departure notifier itself (#960). The caller holds
+     * the handler gate to reach this at all, and the notifier is an unbounded foreign
+     * callback into router → graph; firing it here would run it under that mutex. The
+     * name comes back instead and @ref on_session_closed fires it with the gate released.
+     */
+    [[nodiscard]] std::string reclaim_slot(session_t* slot);
+    /**
+     * @brief Fire the routing plane's eviction hook for the departed @p peer.
+     *
+     * MUST be called with neither `peers_m_` nor the handler gate's mutex held — the
+     * precondition `bus_link_t::notify_peer_down` documents. The caller keeps the link
+     * alive across it by registering on the gate's barrier, not by holding its lock.
+     */
+    void notify_departed(std::string_view peer);
     void deliver(std::string_view peer, std::span<const std::byte> frame);
     // ONE gather-copy (into a pool slot, else a nothrow heap item) + httpd_queue_work;
     // drops the frame on OOM (never aborts). The destination is a SESSION, never a bare
