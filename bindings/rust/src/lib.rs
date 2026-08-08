@@ -110,6 +110,33 @@ pub const PATH_REF_ELEMENT_BYTES: usize = 8;
  */
 pub const MAX_PATH_REF_ELEMENTS: usize = 255;
 
+/**
+ * @brief The purely STRUCTURAL `PATH_REF` rules of RFC-0024 §4.2/§4.3 — the grammar's only
+ * per-type check, and the ONE home of it in this crate: both [`decode`] and [`encode`] call
+ * this rather than spelling the four clauses twice.
+ *
+ * A `PATH_REF` header that fails this is [`Error::FrameInvalid`], exactly as a set reserved
+ * bit is. All four clauses are shape, not meaning — what an element MEANS is node-scoped, so
+ * no codec can validate one:
+ *
+ * - **`opt.PL` MUST be 0** — the body is a fixed-stride record array, not child TLVs; a
+ *   generic `PL = 1` walker would read the first four body bytes as a TLV header and
+ *   mis-frame the whole body.
+ * - **`opt.LL` MUST be 0** — the u32 length width buys nothing under a 2040-byte cap, so it
+ *   is forbidden rather than merely unused.
+ * - **`length % 8 == 0`** — a body that is not a whole number of elements has no reading,
+ *   because the element count is not on the wire at all: it IS `length / 8`.
+ * - **`length <= 2040`** — the §4.3 element-count bound, in bytes.
+ *
+ * @p body_len is a `u64` because [`parse_one`] holds the wire length as one, before any
+ * `usize` narrowing; [`encode`] widens its `payload.len()`, which is lossless everywhere.
+ */
+fn path_ref_body_valid(pl: bool, ll: bool, body_len: u64) -> bool {
+    !pl && !ll
+        && body_len.is_multiple_of(PATH_REF_ELEMENT_BYTES as u64)
+        && body_len <= (MAX_PATH_REF_ELEMENTS * PATH_REF_ELEMENT_BYTES) as u64
+}
+
 /** @brief Reserved bits 7 and 0; a set reserved bit makes a frame invalid. */
 const RESERVED_MASK: u8 = 0b1000_0001;
 
@@ -336,16 +363,10 @@ fn parse_one(buf: &[u8]) -> Result<(Tlv, usize, &[u8]), Error> {
     }
 
     let length = read_le(buf, 2, if opt.ll { 4 } else { 2 });
-    // The one per-type structural rule (RFC-0024 §4.2/§4.3): a PATH_REF body is a bare
-    // fixed-stride 8-byte record array, so PL/LL are forbidden, the length is a whole
-    // number of elements, and the count is bounded at 255. Shape only — an element's
-    // MEANING is node-scoped and no codec can check it.
-    if type_b == type_code::PATH_REF
-        && (opt.pl
-            || opt.ll
-            || !length.is_multiple_of(PATH_REF_ELEMENT_BYTES as u64)
-            || length > (MAX_PATH_REF_ELEMENTS * PATH_REF_ELEMENT_BYTES) as u64)
-    {
+    // The one per-type structural rule (RFC-0024 §4.2/§4.3), through the single predicate
+    // `encode` now shares — see `path_ref_body_valid` for the four clauses and why they are
+    // shape rather than meaning.
+    if type_b == type_code::PATH_REF && !path_ref_body_valid(opt.pl, opt.ll, length) {
         return Err(Error::FrameInvalid);
     }
     let ts_size = if opt.ts {
@@ -513,12 +534,42 @@ pub fn decode(input: &[u8]) -> Result<Tlv, Error> {
 /**
  * @brief Encode a TLV tree back to wire bytes, recomputing the trailer CRC from the body
  * (+ timestamp bytes) when `opt.cr` is set. Mirrors `encode` in `frame.cpp`.
+ *
+ * Encoding is SYMMETRIC with [`decode`]: the grammar's one per-type structural rule — a
+ * `PATH_REF` body is a fixed-stride 8-byte record array, so `opt.PL` and `opt.LL` are both
+ * forbidden and the length is a bounded multiple of 8 (RFC-0024 §4.2/§4.3) — is applied here
+ * through the same [`path_ref_body_valid`] the decoder calls, so this core cannot mint a
+ * frame it would itself answer with [`Error::FrameInvalid`] (#1004; the C++ core closed the
+ * same asymmetry in #886). The guarded [`path_ref`] builder satisfies the rule by
+ * construction, so the door this closes is a [`Tlv`] built by struct literal — [`Tlv`]'s
+ * fields are public, which is the ordinary way to build one here.
+ *
+ * # Postcondition
+ * This function has no error channel, so refusal is spelled **emits nothing**: an ill-formed
+ * `PATH_REF` anywhere in the tree makes the whole call return an EMPTY `Vec`. A refused TLV
+ * refuses its ancestors rather than being dropped into a frame that DOES decode, one
+ * component short. Empty is unambiguous — an accepted TLV always carries at least its 4-byte
+ * header, so no well-formed tree encodes to nothing. Well-formed input is untouched and
+ * stays byte-identical to what it produced before.
  */
 pub fn encode(tlv: &Tlv) -> Vec<u8> {
+    // A PATH_REF body is never structured, so `payload` IS the body length here: an `opt.pl`
+    // PATH_REF fails the PL clause before the children branch below ever runs.
+    if tlv.type_code == type_code::PATH_REF
+        && !path_ref_body_valid(tlv.opt.pl, tlv.opt.ll, tlv.payload.len() as u64)
+    {
+        return Vec::new();
+    }
+
     let mut body: Vec<u8> = Vec::new();
     if tlv.opt.pl {
         for child in &tlv.children {
-            body.extend_from_slice(&encode(child));
+            let cb = encode(child);
+            // A refused child refuses the parent (see the postcondition above).
+            if cb.is_empty() {
+                return Vec::new();
+            }
+            body.extend_from_slice(&cb);
         }
     } else {
         body.extend_from_slice(&tlv.payload);

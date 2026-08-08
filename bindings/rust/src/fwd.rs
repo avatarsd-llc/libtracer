@@ -177,10 +177,18 @@ pub fn encode_fwd(req: &FwdRequest) -> Result<Tlv, BuildError> {
  * @brief Convenience: build a FWD frame directly to encoded bytes.
  *
  * # Errors
- * Any error from [`encode_fwd`].
+ * Any error from [`encode_fwd`], or [`BuildError::InvalidPathRef`] when the codec refused the
+ * tree. [`FwdRequest::payload`] is a caller-supplied [`Tlv`] embedded verbatim, so a request
+ * whose payload node is an ill-formed `PATH_REF` reaches [`crate::encode`]'s refusal — which
+ * is an empty `Vec`, and this wrapper has a `Result`, so it says so rather than answering
+ * `Ok` over a frame that is silently nothing.
  */
 pub fn encode_fwd_bytes(req: &FwdRequest) -> Result<Vec<u8>, BuildError> {
-    Ok(crate::encode(&encode_fwd(req)?))
+    let bytes = crate::encode(&encode_fwd(req)?);
+    if bytes.is_empty() {
+        return Err(BuildError::InvalidPathRef);
+    }
+    Ok(bytes)
 }
 
 /* --------------------------------------------------------------- FWD parse --- */

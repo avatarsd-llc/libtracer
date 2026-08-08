@@ -851,10 +851,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   now applies `wire::path_ref_body_valid`, the same single predicate the decoder and the
   lazy forward tier call, so the rule keeps one home rather than gaining an encoder copy.
 
-  **Scope: this core only.** The same asymmetry is alive in the Rust and TypeScript cores —
-  their generic `encode` serializes an ill-formed `PATH_REF` verbatim while their own
-  decoders reject those bytes — so the three cores now *diverge* on the same input tree.
-  Fixing them is not this change's ruled scope and is tracked separately.
+  **Scope: this core only** — and the divergence it opened is now **closed**. The same
+  asymmetry was alive in the Rust and TypeScript cores, whose generic `encode` serialized an
+  ill-formed `PATH_REF` verbatim while their own decoders rejected those bytes, so the three
+  cores diverged on the same input tree. #1004 applied the same rule and the same
+  emits-nothing postcondition in both bindings; all three cores now refuse identically. See
+  `bindings/rust/CHANGELOG.md` and `bindings/typescript/CHANGELOG.md`.
 
   **API note — the failure mode is a new `encode` postcondition.** `encode` has no error
   channel, and an assert was declined: `NDEBUG` is set in exactly the Release /
