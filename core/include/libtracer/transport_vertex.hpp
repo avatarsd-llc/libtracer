@@ -180,8 +180,16 @@ class transport_vertex_t {
      * kind-private keys (e.g. quic's `cert`/`key`) — the factory's business, module-side.
      *
      * Returns the live transport, or a status: `TYPE_MISMATCH` for a config missing
-     * the fields the kind requires (e.g. a DIAL without `addr`/`port`), `NOT_FOUND`
-     * for a socket that failed to come up (bind/dial/handshake failure).
+     * the fields the kind requires (e.g. a DIAL without `addr`/`port`),
+     * `TRANSPORT_DOWN` for a socket that failed to come up (bind/dial/handshake
+     * failure).
+     *
+     * The did-not-come-up status is `TRANSPORT_DOWN`, not `NOT_FOUND` (#929), and a
+     * factory written outside the library owes the same answer: the address the SPEC
+     * named RESOLVED — the failure is the LINK — and `NOT_FOUND` goes out as
+     * `tr::path::not_found`, which the RFC-0002 registry marks PERMANENT, telling a
+     * peer to stop retrying a link that may well come back. `TRANSPORT_DOWN` carries
+     * the TRANSIENT disposition the condition actually has.
      */
     using transport_factory_t = std::function<graph::result_t<std::unique_ptr<transport_t>>(
         const conn_settings_t&, const wire::tlv_t* raw_config)>;

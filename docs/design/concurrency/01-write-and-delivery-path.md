@@ -308,7 +308,7 @@ read side of the same table is in [`00-scaling-and-serialization.md`](00-scaling
 `bench/bench_forward_demux`, 8 alternating rounds across two builds. The scan's marginal cost
 over a fixed-position hop falls **35 ns to ~0 at 8 links, 86 to 2 at 16, and 333 to 17 at 64
 links (95% removed)**, with the fixed-position hop itself unchanged within ±2 ns
-(`core/CHANGELOG.md:430-435`). The digest is a filter and never a decision — `live()` and the full
+(`core/CHANGELOG.md:1492-1496`). The digest is a filter and never a decision — `live()` and the full
 compare still gate every answer — and the two digest functions are pinned against each other
 directly by `test_digest_paths_agree`
 (`core/tests/registry_teardown_test.cpp:289`), because a disagreement would throw nothing and

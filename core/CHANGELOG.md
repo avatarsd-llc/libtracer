@@ -50,7 +50,11 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   now answer `status_t::TRANSPORT_DOWN` ⇒ `tr::transport::down` (0x0060). Wire-visible: a
   `SPEC` create over the wire whose link fails now replies with 0x0060 in the ERROR TLV where
   it replied 0x0020 before. The graph address the create named is unaffected — it resolved,
-  which is why `NOT_FOUND` was the wrong word for it.
+  which is why `NOT_FOUND` was the wrong word for it. **The contract an embedder implements
+  moved with it:** `transport_vertex_t::transport_factory_t` — the signature
+  `register_transport_type` takes — documented `NOT_FOUND` as the did-not-come-up answer and now
+  documents `TRANSPORT_DOWN`, so a factory written outside the library answers as the built-ins
+  do; the `quic`, `webtransport` and `can` factory docs are corrected at each site.
 
 - **A SPEC-created `ws` DIAL connection no longer drops a message the server pushes on
   connect (#1025).** `transport_ws_client`'s constructor dials, runs the opening handshake
@@ -370,10 +374,11 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   - **The default is verification.** Both factories now dial with the trust struct's declared
     defaults, so with no trust key present the handshake validates against the **system trust
     store** and a certificate that does not chain to it is refused — creation answers
-    `NOT_FOUND`, the existing did-not-come-up status. (Ruled over the issue's
-    refuse-by-omission proposal: msquic with neither the flag nor a CA file performs default
-    platform validation, which is the standard TLS-client convention and costs nothing for the
-    dial-a-publicly-certified-endpoint case.)
+    `TRANSPORT_DOWN`, the did-not-come-up status (this bullet said `NOT_FOUND` when #918
+    landed; #929, later in this same unreleased cycle, gave the condition its own member).
+    (Ruled over the issue's refuse-by-omission proposal: msquic with neither the flag nor a
+    CA file performs default platform validation, which is the standard TLS-client convention
+    and costs nothing for the dial-a-publicly-certified-endpoint case.)
   - **Two new kind-PRIVATE config keys, identical in both kinds**: `ca` (NAME, a PEM CA-bundle
     path) verifies against that bundle instead of the system store — the way to reach a
     self-signed or privately-issued peer while still authenticating it; and `insecure` (VALUE
