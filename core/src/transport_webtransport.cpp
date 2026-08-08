@@ -118,7 +118,13 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
     };
 
     std::string authority; /**< @brief DIAL: the CONNECT :authority. */
-    std::string path;      /**< @brief DIAL: the CONNECT :path. */
+    /**
+     * @brief The session's CONNECT :path — DIAL: the one this endpoint
+     *        requests (written in the constructor, before any callback exists);
+     *        LISTEN: the one the accepted CONNECT named (written on the stream
+     *        callback under conn_m, a derived slot of the live session).
+     */
+    std::string path;
 
     /** @brief Every stream context of the live session (guarded by conn_m). */
     std::vector<stream_ctx_t*> ctxs;
@@ -318,10 +324,12 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
                     wt_h3::decode_field_section(rest.first(static_cast<std::size_t>(len->value)));
                 std::string_view method;
                 std::string_view protocol;
+                std::string_view req_path;
                 if (headers) {
                     for (const auto& h : *headers) {
                         if (h.name == ":method") method = h.value;
                         if (h.name == ":protocol") protocol = h.value;
+                        if (h.name == ":path") req_path = h.value;
                     }
                 }
                 if (method != "CONNECT" || protocol != "webtransport") {
@@ -329,7 +337,13 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
                     return false;
                 }
                 // Accept: 200 on this stream, which stays open as the session
-                // handle (its closure ends the session). Any path is served.
+                // handle (its closure ends the session). Any path is served —
+                // the resource is RECORDED for session_path(), never used to
+                // admit or refuse.
+                {
+                    const std::lock_guard lock(conn_m);
+                    path = std::string(req_path);
+                }
                 std::vector<std::uint8_t> resp;
                 wt_h3::append_h3_frame(resp, wt_h3::kFrameHeaders,
                                        wt_h3::encode_status_200_field_section());
@@ -715,6 +729,11 @@ bool webtransport_transport_t::session_up() const noexcept {
     return impl_->session.load(std::memory_order_relaxed);
 }
 
+std::string webtransport_transport_t::session_path() const {
+    const std::lock_guard lock(impl_->conn_m);
+    return impl_->path;
+}
+
 std::uint64_t webtransport_transport_t::dropped_rx() const noexcept {
     return impl_->dropped_rx.load(std::memory_order_relaxed);
 }
@@ -728,12 +747,14 @@ namespace {
 /**
  * @brief The webtransport kind's PRIVATE config keys, parsed module-side from
  *        the raw SPEC config SETTINGS TLV (ADR-0043 §5 leanness — identical to
- *        the quic kind): NAME "cert" NAME <path>, NAME "key" NAME <path>,
- *        NAME "ca" NAME <path>, NAME "insecure" VALUE <u8>; unknown pairs
- *        ignored.
+ *        the quic kind, plus one of its own): NAME "cert" NAME <file>, NAME
+ *        "key" NAME <file>, NAME "ca" NAME <file>, NAME "insecure" VALUE <u8>,
+ *        NAME "path" NAME <resource>; unknown pairs ignored.
  *
- * Two of the four are LISTEN-side (the served credential), two are DIAL-side
- * (how the server certificate is trusted, #918).
+ * Two of the five are LISTEN-side (the served credential), two are DIAL-side
+ * (how the server certificate is trusted, #918), and one is the DIAL-side
+ * extended CONNECT `:path` (#1023) — the only key not shared with `quic`, which
+ * has no HTTP layer to carry a resource.
  */
 struct wt_private_cfg_t {
     std::string cert;      /**< @brief PEM server-certificate path (LISTEN). */
@@ -744,14 +765,16 @@ struct wt_private_cfg_t {
     bool insecure = false; /**< @brief DEV ONLY: skip server-certificate validation on
                                        the DIAL side entirely. Must be asked for
                                        explicitly — the default is to verify (DIAL). */
+    std::string path;      /**< @brief The extended CONNECT `:path` the dial requests;
+                                       empty = the "/" default (DIAL, #1023). */
 };
 
 /** @brief The shared config_reader_t walk over the webtransport-private keys: NAME
- *         "cert" NAME <path>, NAME "key" NAME <path>, NAME "ca" NAME <path>, NAME
- *         "insecure" VALUE <u8>; unknown pairs ignored (forward-compat).
- *         Pair-consuming (#927), like every other config parse: a forward-compat
- *         pair whose string value reads `"key"` must not bind the FOLLOWING child
- *         as the private-key path. */
+ *         "cert" NAME <file>, NAME "key" NAME <file>, NAME "ca" NAME <file>, NAME
+ *         "insecure" VALUE <u8>, NAME "path" NAME <resource>; unknown pairs ignored
+ *         (forward-compat). Pair-consuming (#927), like every other config parse: a
+ *         forward-compat pair whose string value reads `"key"` must not bind the
+ *         FOLLOWING child as the private-key path. */
 [[nodiscard]] wt_private_cfg_t parse_wt_config(const wire::tlv_t* raw_config) {
     wt_private_cfg_t out;
     const config_reader_t cfg(raw_config);
@@ -759,6 +782,7 @@ struct wt_private_cfg_t {
     if (const auto v = cfg.name("key")) out.key = std::string(*v);
     if (const auto v = cfg.name("ca")) out.ca = std::string(*v);
     if (const auto v = cfg.flag("insecure")) out.insecure = *v;
+    if (const auto v = cfg.name("path")) out.path = std::string(*v);
     return out;
 }
 
@@ -780,8 +804,11 @@ transport_vertex_t::transport_factory_t webtransport_transport_factory(
             // Secure by default (#918): absent both keys this verifies the server
             // certificate against the system trust store. `insecure = 1` is the
             // explicit dev opt-out; `ca` names a bundle to verify against instead.
+            // The `:path` came from a hard-coded "/" until #1023, so a SPEC could
+            // only ever reach a server that serves its session at the root; an
+            // absent (or empty) `path` key still normalises to "/" in the ctor.
             t = std::make_unique<webtransport_transport_t>(
-                s.addr, s.port, "/",
+                s.addr, s.port, priv.path,
                 webtransport_dial_tls_t{.ca_file = priv.ca, .insecure_no_verify = priv.insecure},
                 rx_backend, s.max_frame);
             if (!t->ok()) return std::unexpected(graph::status_t::NOT_FOUND);  // handshake failed

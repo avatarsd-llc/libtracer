@@ -139,7 +139,7 @@ the vertex mounts under.)
 | `ifname` | `NAME` utf-8 | both | — (required) | The SocketCAN interface (`can0`, `vcan0`). Empty answers `TYPE_MISMATCH`; an interface the kernel will not open answers `NOT_FOUND`. |
 | `node` | `VALUE` u16 | both | — (required) | This node's id, the `node` band of the 29-bit CAN ID. Required — an absent key answers `TYPE_MISMATCH`, and so does a value above `8191` (13 bits). |
 | `version` | `VALUE` u8 | both | `0` | Protocol-version prefix, the top 4 bits of the CAN ID, so distinct versions occupy disjoint arbitration bands. Above `15` answers `TYPE_MISMATCH`. |
-| `path` | `NAME` utf-8 | both | empty | The path advertised for this node's groups. |
+| `path` | `NAME` utf-8 | both | empty | The path advertised for this node's groups. Same spelling as the `webtransport` kind's `path`, unrelated meaning — that one is an HTTP URL path. Kind-private keys cannot collide at parse time; the collision is in the reader's head. |
 | `fd` | `VALUE` u8 (flag) | both | `0` | Non-zero selects CAN-FD framing (≤64 B data fields) instead of classic (≤8 B). |
 | `peer_ttl_ms` | `VALUE` u32 | both | `3000` | Peer liveness window (ADR-0044): a peer silent longer than this leaves the enumeration. |
 | `max_groups` | `VALUE` u32 | both | `0` | Live reassembly-group ceiling. `0` = uncapped by this key; overflow evicts the oldest group and ticks `dropped_groups`. |
@@ -168,7 +168,9 @@ decision.
 
 <!-- config-keys:end -->
 
-`webtransport` reads the same four, with the same meanings:
+`webtransport` reads the same four, with the same meanings, plus one key `quic`
+has no use for — it is the only kind here with an HTTP layer, so it is the only
+one with a resource to name:
 
 <!-- config-keys:begin core/src/transport_webtransport.cpp -->
 
@@ -178,10 +180,19 @@ decision.
 | `key` | `NAME` utf-8 | LISTEN | — (required) | PEM private-key path matching `cert`. |
 | `ca` | `NAME` utf-8 | DIAL | empty ⇒ the system trust store | PEM CA-bundle to verify the peer against. |
 | `insecure` | `VALUE` u8 (flag) | DIAL | `0` | **DEV ONLY.** Skips server-certificate validation. |
+| `path` | `NAME` utf-8 | DIAL | `/` | The extended CONNECT `:path` — which resource the WebTransport session is opened on (`new WebTransport("https://host:port/here")`). Empty is normalised to `/`. **This is an HTTP URL path, not a libtracer graph path**, and it is *not* the `can` kind's `path` key (an advertised group path): kind-private namespaces do not collide, but the two spellings are identical, so read the section heading before copying a row. The LISTEN side of this kind serves every path — it validates `:method`/`:protocol` only — so the key matters when dialing someone else's server (#1023). |
 
 <!-- config-keys:end -->
 
 `tools/gen-dev-cert.sh` emits a self-signed pair for the LISTEN side.
+
+A dial to the wrong resource is not a distinguishable failure: the server refuses
+the CONNECT, the session never establishes, and creation answers `NOT_FOUND` — the
+same status a certificate rejection gives. Before [#1023] there was no key at all
+and the factory hard-coded `/`, so a SPEC could reach only a root-served session
+and any other server needed the direct constructor plus `provide_link`. On the
+LISTEN side, `webtransport_transport_t::session_path()` reports the `:path` the
+accepted CONNECT named — an observation, never an admission decision.
 
 ## Certificate trust on a SPEC-created dialer
 
@@ -278,3 +289,4 @@ tools/check_config_keys.py --list     # the derived inventory, one key per line
 
 [#902]: https://github.com/avatarsd-llc/libtracer/issues/902
 [#918]: https://github.com/avatarsd-llc/libtracer/issues/918
+[#1023]: https://github.com/avatarsd-llc/libtracer/issues/1023

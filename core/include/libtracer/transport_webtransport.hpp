@@ -90,7 +90,9 @@ class webtransport_transport_t : public transport_t {
      *                  `:authority` host part).
      * @param peer_port Server UDP port (host byte order).
      * @param path      The CONNECT `:path` (a server-side namespace knob;
-     *                  this server accepts any path — default "/").
+     *                  this server accepts any path — default "/"). Empty is
+     *                  normalised to "/". A SPEC-created dialer reaches this
+     *                  through the kind-private `path` config key (#1023).
      * @param tls       Server-certificate trust (see @ref webtransport_dial_tls_t).
      * @param backend   The host-injected RX memory seam (ADR-0042 §2); each
      *                  inbound frame lands in a fresh exactly-sized segment
@@ -171,6 +173,19 @@ class webtransport_transport_t : public transport_t {
      *         DIAL: 200 received). */
     [[nodiscard]] bool session_up() const noexcept;
 
+    /**
+     * @brief The extended CONNECT `:path` of this endpoint's session — DIAL:
+     *        the path this endpoint requests (known from construction); LISTEN:
+     *        the path the peer's ACCEPTED CONNECT named, empty until one is
+     *        accepted.
+     *
+     * The listener serves every path (it validates `:method`/`:protocol`, never
+     * the resource), so this is an observation, not an admission decision: it
+     * is how a host sees which resource a session asked for. Returns a copy —
+     * thread-safe, and not on any frame path.
+     */
+    [[nodiscard]] std::string session_path() const;
+
     /** @brief Frames dropped because the RX backend was exhausted (backpressure,
      *         ADR-0042 §2) — drained off the stream, never an OOM. */
     [[nodiscard]] std::uint64_t dropped_rx() const noexcept;
@@ -193,11 +208,21 @@ class webtransport_transport_t : public transport_t {
  * `net.register_transport_type("webtransport", webtransport_transport_factory())`.
  * A `:children[]` SPEC whose config carries `kind = webtransport` then
  * constructs a @ref webtransport_transport_t — DIAL: `addr` + `port` plus the
- * OPTIONAL trust keys below; LISTEN: `port` plus the REQUIRED `cert`/`key`
- * PEM-path config keys. All four are kind-PRIVATE config keys parsed by this
- * factory from the raw SPEC config TLV — they never appear on the shared
- * `conn_settings_t` (the ADR-0043 §5 leanness ruling). Missing fields fail with
- * `TYPE_MISMATCH`; a session that failed to come up fails with `NOT_FOUND`.
+ * OPTIONAL `path` and trust keys below; LISTEN: `port` plus the REQUIRED
+ * `cert`/`key` PEM-path config keys. All five are kind-PRIVATE config keys
+ * parsed by this factory from the raw SPEC config TLV — they never appear on
+ * the shared `conn_settings_t` (the ADR-0043 §5 leanness ruling). Missing
+ * fields fail with `TYPE_MISMATCH`; a session that failed to come up fails with
+ * `NOT_FOUND`.
+ *
+ * **The DIAL `path` key (#1023)** carries the extended CONNECT `:path` — the
+ * resource the WebTransport session is opened on. NAME, default `/`, so a SPEC
+ * that omits it dials the same `/` this factory used to hard-code. Reaching a
+ * server that serves its session elsewhere needs it: this DIAL side treats any
+ * non-`200` answer to the extended CONNECT as a failed session, so a wrong
+ * resource surfaces as `NOT_FOUND` from creation — the same status a rejected
+ * certificate gives. The key is kind-private, so it does not collide with the
+ * `can` kind's unrelated `path` key (an advertised group path).
  *
  * **A SPEC-created dialer verifies the server certificate (#918)** — the trust
  * mode is whatever @ref webtransport_dial_tls_t defaults to, so with neither
