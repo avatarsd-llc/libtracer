@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <thread>
 #include <utility>
 
 #include "esp_pthread.h"
@@ -44,6 +45,22 @@ struct state_t {
     int connects = 0;       /**< @brief Dial count. */
     std::string ws_path;    /**< @brief The last dial's requested path. */
 
+    /** @name Handle liveness and the blocking levers (#952). */
+    /** @{ */
+    bool tcp_live = false;      /**< @brief tcp handle created and not yet destroyed. */
+    bool ws_live = false;       /**< @brief ws handle created and not yet destroyed. */
+    int misuse = 0;             /**< @brief Ops on a null/destroyed handle — see handle_misuse. */
+    bool fail_connect = false;  /**< @brief Every dial fails at once. */
+    bool hang_connect = false;  /**< @brief Every dial blocks for its timeout, then fails. */
+    int connect_timeout_ms = 0; /**< @brief The last dial's requested bound. */
+    bool hold_write = false;    /**< @brief Park writers instead of completing them. */
+    std::condition_variable write_cv;  /**< @brief Wakes parked writers. */
+    int writers = 0;                   /**< @brief Writers parked right now. */
+    int writes = 0;                    /**< @brief Writes entered since the reset. */
+    int write_timeout_ms = 0;          /**< @brief The last write's requested bound. */
+    std::vector<std::byte> last_write; /**< @brief The last completed write's payload. */
+    /** @} */
+
     std::size_t armed_stack = 0; /**< @brief Last arming set_cfg's stack_size. */
     std::string armed_name;      /**< @brief Its thread_name. */
     bool restored = false;       /**< @brief A zero-stack set_cfg followed it. */
@@ -70,6 +87,22 @@ esp_transport_handle_t ws_handle() {
 /** @brief True with `m` held iff an unread scripted byte (or frame) remains. */
 bool pending(const state_t& s) { return s.cur < s.frames.size(); }
 
+/**
+ * @brief With `m` held: is @p t a handle that may legally be operated on right now?
+ *
+ * Counts a misuse and answers false otherwise. This is the whole use-after-free
+ * observable — on silicon each of these dereferences freed transport state.
+ */
+bool handle_usable(esp_transport_handle_t t) {
+    if (t == ws_handle()) {
+        if (st().ws_live) return true;
+    } else if (t == tcp_handle()) {
+        if (st().tcp_live) return true;
+    }
+    ++st().misuse;  // null, foreign, or already destroyed
+    return false;
+}
+
 }  // namespace
 
 namespace fake_ws {
@@ -84,6 +117,17 @@ frame_t make_frame(ws_transport_opcodes_t op, bool fin, std::size_t len, std::ui
 
 void reset() {
     const std::lock_guard<std::mutex> lk(st().m);
+    st().tcp_live = false;
+    st().ws_live = false;
+    st().misuse = 0;
+    st().fail_connect = false;
+    st().hang_connect = false;
+    st().connect_timeout_ms = 0;
+    st().hold_write = false;
+    st().writers = 0;
+    st().writes = 0;
+    st().write_timeout_ms = 0;
+    st().last_write.clear();
     st().frames.clear();
     st().cur = 0;
     st().cur_off = 0;
@@ -137,15 +181,70 @@ bool cfg_restored() {
     return st().restored;
 }
 
+void fail_connects(bool on) {
+    const std::lock_guard<std::mutex> lk(st().m);
+    st().fail_connect = on;
+}
+
+void hang_connects(bool on) {
+    const std::lock_guard<std::mutex> lk(st().m);
+    st().hang_connect = on;
+}
+
+int last_connect_timeout_ms() {
+    const std::lock_guard<std::mutex> lk(st().m);
+    return st().connect_timeout_ms;
+}
+
+void hold_writes(bool on) {
+    {
+        const std::lock_guard<std::mutex> lk(st().m);
+        st().hold_write = on;
+    }
+    if (!on) st().write_cv.notify_all();  // the peer started accepting again
+}
+
+int writers_inside() {
+    const std::lock_guard<std::mutex> lk(st().m);
+    return st().writers;
+}
+
+int writes_started() {
+    const std::lock_guard<std::mutex> lk(st().m);
+    return st().writes;
+}
+
+int last_write_timeout_ms() {
+    const std::lock_guard<std::mutex> lk(st().m);
+    return st().write_timeout_ms;
+}
+
+int handle_misuse() {
+    const std::lock_guard<std::mutex> lk(st().m);
+    return st().misuse;
+}
+
+std::vector<std::byte> last_write_payload() {
+    const std::lock_guard<std::mutex> lk(st().m);
+    return st().last_write;
+}
+
 }  // namespace fake_ws
 
 /** @name The `esp_transport` C surface the chip TU links against. */
 /** @{ */
 
-esp_transport_handle_t esp_transport_tcp_init(void) { return tcp_handle(); }
+esp_transport_handle_t esp_transport_tcp_init(void) {
+    const std::lock_guard<std::mutex> lk(st().m);
+    st().tcp_live = true;
+    return tcp_handle();
+}
 
 esp_transport_handle_t esp_transport_ws_init(esp_transport_handle_t parent_handle) {
-    return parent_handle == tcp_handle() ? ws_handle() : nullptr;
+    const std::lock_guard<std::mutex> lk(st().m);
+    if (parent_handle != tcp_handle() || !st().tcp_live) return nullptr;
+    st().ws_live = true;
+    return ws_handle();
 }
 
 esp_err_t esp_transport_ws_set_config(esp_transport_handle_t t,
@@ -157,24 +256,38 @@ esp_err_t esp_transport_ws_set_config(esp_transport_handle_t t,
 }
 
 esp_err_t esp_transport_destroy(esp_transport_handle_t t) {
-    (void)t;
+    const std::lock_guard<std::mutex> lk(st().m);
+    if (!handle_usable(t)) return ESP_FAIL;
+    if (t == ws_handle())
+        st().ws_live = false;
+    else
+        st().tcp_live = false;
     return ESP_OK;
 }
 
 int esp_transport_connect(esp_transport_handle_t t, const char* host, int port, int timeout_ms) {
-    (void)t;
     (void)host;
     (void)port;
-    (void)timeout_ms;
-    const std::lock_guard<std::mutex> lk(st().m);
-    st().connected = true;
+    std::unique_lock<std::mutex> lk(st().m);
+    if (!handle_usable(t)) return -1;
     ++st().connects;
+    st().connect_timeout_ms = timeout_ms;
+    if (st().hang_connect) {
+        // What an unreachable peer does: spend the whole bound, then fail. Nothing
+        // wakes it early — `esp_transport_connect` takes no cancellation, which is the
+        // residual the link's derived dial bound is sized against.
+        lk.unlock();
+        std::this_thread::sleep_for(std::chrono::milliseconds(timeout_ms));
+        return -1;
+    }
+    if (st().fail_connect) return -1;
+    st().connected = true;
     return 0;
 }
 
 int esp_transport_close(esp_transport_handle_t t) {
-    (void)t;
     const std::lock_guard<std::mutex> lk(st().m);
+    if (!handle_usable(t)) return -1;
     st().connected = false;
     return 0;
 }
@@ -185,16 +298,16 @@ int esp_transport_get_socket(esp_transport_handle_t t) {
 }
 
 int esp_transport_poll_read(esp_transport_handle_t t, int timeout_ms) {
-    (void)t;
     std::unique_lock<std::mutex> lk(st().m);
+    if (!handle_usable(t)) return -1;
     st().cv.wait_for(lk, std::chrono::milliseconds(timeout_ms), [] { return pending(st()); });
     return pending(st()) ? 1 : 0;
 }
 
 int esp_transport_read(esp_transport_handle_t t, char* buffer, int len, int timeout_ms) {
-    (void)t;
     (void)timeout_ms;
     const std::lock_guard<std::mutex> lk(st().m);
+    if (!handle_usable(t)) return -1;
     if (!pending(st())) return 0;  // nothing queued: a timeout, exactly as ws_read reports it
     const fake_ws::frame_t& f = st().frames[st().cur];
     // The header is (re-)reported for as long as this frame is being drained.
@@ -214,9 +327,27 @@ int esp_transport_read(esp_transport_handle_t t, char* buffer, int len, int time
 }
 
 int esp_transport_write(esp_transport_handle_t t, const char* buffer, int len, int timeout_ms) {
-    (void)t;
-    (void)buffer;
-    (void)timeout_ms;
+    std::unique_lock<std::mutex> lk(st().m);
+    ++st().writes;  // counted on ENTRY, before the handle check: a call on a dead
+                    // handle is still a call the link decided to make
+    st().write_timeout_ms = timeout_ms;
+    if (!handle_usable(t)) return -1;
+    if (st().hold_write) {
+        // A peer whose TCP window has closed. The caller is holding the link's send
+        // serializer for the whole of this, which is the state the pre-#952 destructor
+        // ignored. Bounded by the timeout the caller asked for, as the real write is.
+        ++st().writers;
+        st().write_cv.wait_for(lk, std::chrono::milliseconds(timeout_ms),
+                               [] { return !st().hold_write; });
+        --st().writers;
+        // Re-checked on the way out, not on the way in: the real esp_transport_write
+        // dereferences the handle throughout the call, so a handle destroyed while a
+        // writer was parked here is a use-after-free even though it was live on entry.
+        if (!handle_usable(t)) return -1;
+        if (st().hold_write) return -1;  // the wait expired: a torn connection
+    }
+    st().last_write.assign(reinterpret_cast<const std::byte*>(buffer),
+                           reinterpret_cast<const std::byte*>(buffer) + (len > 0 ? len : 0));
     return len;
 }
 
