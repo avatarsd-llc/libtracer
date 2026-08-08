@@ -32,16 +32,21 @@
 namespace tr::net {
 
 /**
- * @brief Construct concrete transport `T`, mapping a failed `ok()` to `NOT_FOUND`.
+ * @brief Construct concrete transport `T`, mapping a failed `ok()` to `TRANSPORT_DOWN`.
  *
- * The dial/bind/handshake-failure → `NOT_FOUND` mapping every built-in stream factory
- * shares, in one locus (`ok()` is a concrete, non-virtual method, so the check is
+ * The dial/bind/handshake-failure → `TRANSPORT_DOWN` mapping the built-in udp/tcp/ws
+ * factories share, in one locus (`ok()` is a concrete, non-virtual method, so the check is
  * templated on `T`, not called through `transport_t`).
+ *
+ * It was `NOT_FOUND` until #929, which sent a refused connect out as
+ * `tr::path::not_found` — a PERMANENT "that address does not exist", when the address the
+ * SPEC named resolved fine and it was the LINK that did not come up. A peer reading the
+ * registry disposition off the code stopped retrying a link that would have come back.
  */
 template <class T, class... Args>
 [[nodiscard]] graph::result_t<std::unique_ptr<transport_t>> make_checked(Args&&... args) {
     auto t = std::make_unique<T>(std::forward<Args>(args)...);
-    if (!t->ok()) return std::unexpected(graph::status_t::NOT_FOUND);
+    if (!t->ok()) return std::unexpected(graph::status_t::TRANSPORT_DOWN);
     return t;  // unique_ptr<T> => unique_ptr<transport_t> (upcast move)
 }
 

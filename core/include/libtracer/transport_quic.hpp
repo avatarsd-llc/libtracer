@@ -190,13 +190,14 @@ class quic_transport_t : public transport_t {
  * the raw config SETTINGS TLV it receives — they never appear in the shared
  * `conn_settings_t`, which stays lean with only the universal keys (the ADR-0043 §5
  * leanness ruling). Missing fields fail creation with `TYPE_MISMATCH`; a socket that
- * failed to come up fails with `NOT_FOUND`. `keepalive` is ignored (#66 owns link
- * lifecycle).
+ * failed to come up fails with `TRANSPORT_DOWN` — the TRANSIENT status, because the
+ * address resolved and it was the link that did not come up (#929). `keepalive` is
+ * ignored (#66 owns link lifecycle).
  *
  * **A SPEC-created dialer verifies the server certificate (#918).** The trust mode is
  * whatever @ref quic_dial_tls_t defaults to, so with neither DIAL key present the
  * handshake validates against the system trust store and a certificate that does not
- * chain to it is REFUSED (creation answers `NOT_FOUND`). Two DIAL-side keys move it:
+ * chain to it is REFUSED (creation answers `TRANSPORT_DOWN`). Two DIAL-side keys move it:
  *
  * - `ca` (NAME, a filesystem path) — verify against this PEM CA bundle instead of the
  *   system trust store; the way to reach a privately-issued or self-signed peer while
