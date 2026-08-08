@@ -72,29 +72,40 @@ class rope_t {
     /**
      * @brief Chain @p other's links onto this rope (no copy).
      *
-     * **Self-concat safe by construction** (`r.concat(r)`): @ref append mutates the very
-     * storage `other.links()` spans when `&other == this` — the inline→heap spill blanks
-     * every inline slot and zeroes `inline_n_` mid-walk (so a naive range-for yielded
-     * `[a,b,a,{}]` instead of `[a,b,a,b]`), and a heap `push_back` can reallocate the
-     * vector the walk points into (a dangling span). Two independent guards close that:
-     * @ref try_reserve pins the final link count up front, so none of the appends below
-     * spills or reallocates; and the walk indexes the source afresh each step, so link
-     * `i` is re-read from wherever the chain now lives even if the reservation
+     * **Self-concat safe by construction** (`r.concat(r)`), and the safety is charged only
+     * to the case that needs it. Source and destination storage can overlap in exactly one
+     * way — `&other == this`; two distinct `rope_t`s own disjoint chains — so the aliasing
+     * case gets its own arm and the cross-rope arm pays for none of its guards.
+     *
+     * On the ALIASING arm, @ref append mutates the very storage `other.links()` spans: the
+     * inline→heap spill blanks every inline slot and zeroes `inline_n_` mid-walk (so a
+     * naive range-for yielded `[a,b,a,{}]` instead of `[a,b,a,b]`), and a heap `push_back`
+     * can reallocate the vector the walk points into (a dangling span). Two independent
+     * guards close that: @ref try_reserve pins the final link count up front, so none of
+     * the appends spills or reallocates; and the walk indexes the source afresh each step,
+     * so link `i` is re-read from wherever the chain now lives even if the reservation
      * soft-failed. `append` only ever adds a link at the end — it never reorders or drops
      * one, and the spill migrates link `i` to heap index `i` — so index `i` names the same
      * link for the whole walk.
      *
-     * The reservation is also a strict win for a long cross-rope concat: one sized growth
-     * instead of the geometric `push_back` ladder. It is a no-op while the joined chain
-     * still fits the inline small-buffer storage, so the hot 1–2-link case still allocates
-     * nothing (ADR-0053 §6).
+     * The CROSS-ROPE arm walks the source span once and appends: `other`'s storage is
+     * disjoint from ours, so nothing this loop does can invalidate it, and neither guard
+     * buys anything. Charging them there cost path-target delivery +3.5% / +10.1%
+     * (`inproc-target-*`, #1022) for the hot 1–2-link clone. A caller that wants one sized
+     * growth instead of the geometric `push_back` ladder for a long cross-rope join calls
+     * @ref try_reserve itself with the count it already holds — which is what the delivery
+     * clone, the composed-read reply builder and the folded child listing do.
      */
     rope_t& concat(const rope_t& other) {
-        const std::size_t add = other.link_count();
+        if (&other != this) {
+            for (const view_t& l : other.links()) append(l);  // disjoint storage — walk once
+            return *this;
+        }
+        const std::size_t add = link_count();
         // Best effort: on soft-fail the indexed walk below is still correct, it just pays
         // the ordinary spill/growth path that concat paid before.
         static_cast<void>(try_reserve(add));
-        for (std::size_t i = 0; i < add; ++i) append(other.links()[i]);
+        for (std::size_t i = 0; i < add; ++i) append(links()[i]);
         return *this;
     }
 

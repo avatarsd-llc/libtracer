@@ -28,6 +28,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   the client is constructed with the new trailing
   `defer_recv` flag, so a direct `transport_ws_client(host, port)` behaves exactly as before.
 
+### Changed
+
+- **`view::rope_t::concat` no longer reserves on the cross-rope path — the self-concat
+  guards are charged to the aliasing case alone (#1022).** The `r.concat(r)` safety added in
+  #971 (an up-front `try_reserve` plus an indexed re-read of the source each step) was paid
+  by *every* call, including the 1–2-link delivery clone on the path-target dispatch leg;
+  that cost `inproc-target-handler` +3.5% and `inproc-target-stored` +10.1%. Source and
+  destination storage can overlap in exactly one way — `&other == this` — so `concat` now
+  branches on that: the aliasing arm keeps both guards verbatim, and the cross-rope arm
+  walks the source span once, as it did before #971. The resulting chain is identical in
+  both arms; what changes is that a *long* cross-rope `concat` takes the geometric
+  `push_back` ladder again unless the caller reserves. Callers that know their final link
+  count still call `try_reserve` themselves — the delivery clone and the composed-read reply
+  builder already did, and `read_children_folded` now does at its own call site.
+
 ### Fixed
 
 - **A SPEC-created `ws` DIAL connection no longer drops a message the server pushes on
@@ -48,6 +63,40 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   answers nothing at all until `start_receiving()`, then delivers the message; and
   `core/tests/transport_vertex_test.cpp` pins that creation arms the link only once its
   receiver is already installed.
+
+- **A `net::fwd_router_t` sink can be installed or cleared while frames flow without
+  handing the new callback the old context (#914).** The router's five observer/terminus
+  sinks — `on_reply`, `on_inbound`, `on_raw`, `on_compact_delivery`, `on_stale_label` —
+  were ten plain non-atomic members. Each setter stored `fn` and then `ctx` with no lock
+  or atomics while the frame path read them with check-then-call on the transports'
+  receive threads (`on_frame_impl`, `on_frame_rope_impl`, `on_compact`). That is a data
+  race by the C++ memory model, and it has an observable failure beyond the formal one: a
+  reader whose pointer load lands after the `fn` store and whose context load lands before
+  the `ctx` store calls the NEW sink with the PREVIOUS sink's context, which every sink
+  then casts. The documented runtime clear ("passing nullptr clears a sink") is the path
+  that invites it. The five pairs now live in **`tr::net::sink_slot_t`** (new public header
+  `libtracer/sink_slot.hpp`) — the observer-shaped sibling of `receiver_slot_t`, which owns
+  the same publish-and-snapshot discipline for the transport delivery seam plus the tier
+  select a plain observer has no use for. A slot is three words — a generation counter and
+  the pair: it publishes through the counter and reads with plain atomic loads, so the frame
+  path takes **no lock and never spins**. A reader that lands inside a publish reports *no
+  sink* for that frame rather than waiting, which is also what keeps a single-core RTOS out
+  of the unbounded-priority-inversion corner ADR-0063 erratum 1 rejected a spinlock over. An
+  unset slot costs ONE load — exactly what the plain member it replaced cost — and
+  `fwd_router_t` serializes the five setters against each other with one mutex that no
+  reader ever takes. No signature changed: the five setters keep their `(fn, ctx)` shape and
+  the sinks keep their fn-pointer types. Two behaviours are worth stating. Installing or
+  clearing a sink leaves a window of a few instructions in which the slot reads as empty, so
+  a frame landing exactly there is dispatched to neither the old sink nor the new one —
+  deliberate, and strictly better than the wrong-context call it replaces. And a clear still
+  does not stop a dispatch already in flight, so a context must outlive every possible
+  dispatch exactly as it must for `receiver_slot_t`. `core/tests/fwd_sink_race_test.cpp`
+  flips a sink between two self-identifying contexts on one thread while another pumps
+  frames, and fails if any sink is ever handed the other's context — with the production
+  change reverted it failed both of its two scenarios on all 10 runs. Costs `fwd_router_t`
+  80 bytes of per-instance state on x86-64 (`sizeof` 440 → 520: five 24-byte slots and one
+  mutex in place of ten pointers); the router is a per-node object, not a per-frame or
+  per-link one.
 
 - **A `net::transport_ws_client` no longer drops the frames a server pipelines behind its
   `101` (#1020).** `transport_ws_client::handshake` accumulated the HTTP response into a
