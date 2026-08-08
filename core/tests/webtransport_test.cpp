@@ -311,6 +311,48 @@ void test_big_frame_chunking() {
     check(sink.count() == 3 && sink.at(2) == small2, "small frame after the big one intact");
 }
 
+/**
+ * @brief Both send overloads produce the SAME on-wire record (#890).
+ *
+ * `send(span)` and `send(iov)` differ only in how they FILL the one owned send
+ * buffer — the length prefix, the locked frame-stream read and the
+ * ownership-transfer hand-off to msquic are one shared submit path
+ * (msquic_endpoint_t::submit_frame / ::submit). This pins that: the same
+ * payload delivered whole and delivered as three gathered spans must arrive as
+ * two byte-identical frames, so a prefix or gather-offset that only one
+ * overload got right cannot pass. quic_test covers the gather for the `quic`
+ * kind; the `webtransport` kind had no iov coverage at all.
+ */
+void test_send_overload_parity() {
+    std::printf("WebTransport — span and scatter-gather sends agree on the wire:\n");
+    sink_t sink;
+    auto rx = [&](std::span<const std::byte> f) { sink.push(f); };
+    webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key);
+    listener.set_receiver(rx);
+    webtransport_transport_t dialer("127.0.0.1", listener.local_port(), "/", dev_tls());
+
+    // One 9-byte payload, sent twice: whole, then split 2 + 0 + 7 (the empty
+    // span is skipped by the gather, never by the length).
+    const auto whole = test_frame(9, 0x30);
+    const std::span<const std::byte> p0(whole.data(), 2);
+    const std::span<const std::byte> p1(whole.data() + 2, 0);
+    const std::span<const std::byte> p2(whole.data() + 2, 7);
+    const std::array<std::span<const std::byte>, 3> iov{p0, p1, p2};
+
+    dialer.send(whole);
+    check(sink.wait_for_count(1, 3000ms), "the single-span frame arrived");
+    dialer.send(std::span<const std::span<const std::byte>>(iov));
+    check(sink.wait_for_count(2, 3000ms), "the gathered frame arrived");
+    check(sink.count() == 2 && sink.at(0) == whole,
+          "single-span send delivers the payload byte-identically");
+    check(sink.count() == 2 && sink.at(1) == whole,
+          "gathered send delivers the SAME payload byte-identically");
+    check(sink.count() == 2 && sink.at(0) == sink.at(1),
+          "both overloads framed the record identically");
+    check(listener.malformed_rx() == 0 && listener.dropped_rx() == 0,
+          "neither record desynced the length-prefix reassembler");
+}
+
 // A heap-delegating backend that RECORDS every segment it hands out (segment
 // identity) and can FAIL its first `fail_first` allocations (backpressure).
 class recording_backend_t final : public tr::mem::mem_backend_t {
@@ -1298,6 +1340,7 @@ int main() {
     test_wt_h3_field_sections();
     test_session_and_raw_duplex();
     test_big_frame_chunking();
+    test_send_overload_parity();
     test_view_delivery_and_backpressure();
     test_fwd_read_round_trip();
     test_config_constructed_webtransport();
