@@ -1895,9 +1895,22 @@ class vertex_t {
      *        link @p link — the per-vertex half of peer-departure eviction (RFC-0009
      *        §D, extended to link teardown).
      *
-     * Matches each active slot whose cold half stores @p link as the link the
-     * subscribe arrived on (`subscriber_remote_t::link`); a local edge (no cold
-     * half, or an empty link) never matches. Unlike @ref clear_edge, a matched slot
+     * Matches each active slot on the link it was ADMITTED over: the cold half's
+     * `subscriber_remote_t::link` when it carries one, and otherwise its
+     * `subscriber_remote_t::caller` — the two spellings the two admission doors
+     * leave behind for the SAME fact. `subscribe_wire` (the `SUBSCRIBE` op and the
+     * wire `:subscribers[]` append) stores both; `graph_t::field_write`'s
+     * `:subscribers[]` / `:subscribers[N]` arms store ONLY the context, because
+     * those edges deliver to a LOCAL target and have no return route to send over.
+     * Matching `link` alone therefore left a field-write-admitted edge permanently
+     * un-evictable — active, counted, and still fanning out to its target under a
+     * gate context whose session had departed (#943). ADR-0018 defines that context
+     * as this node's NAME for the inbound link a remote `FWD` arrived on, i.e. the
+     * same name space @p link is spelled in, so the fallback compares like with
+     * like. A local edge still never matches a real link name: a local door passes
+     * the EMPTY context and stores no cold half at all (the one exception,
+     * `parse_subscriber_tlv`'s `delivery_compact` opt-in, leaves both spellings
+     * empty). Unlike @ref clear_edge, a matched slot
      * is RECLAIMED, not just flagged: the stored SUBSCRIBER view, the return-route
      * refcount pin, the target key, and the whole `subscriber_remote_t` block are
      * released in place (the slot shell stays — §D.2 index stability — and
@@ -1917,7 +1930,14 @@ class vertex_t {
             std::vector<subscriber_t>& subs = b->slots;
             for (std::size_t i = 0; i < subs.size(); ++i) {
                 subscriber_t& s = subs[i];
-                if (!s.active || s.remote == nullptr || s.remote->link != link) continue;
+                if (!s.active || s.remote == nullptr) continue;
+                // The link this edge was ADMITTED over — see the declaration comment. Not
+                // `link` alone: a `graph_t::field_write` admission stores the inbound link
+                // ONLY as the gate context, so keying on the delivery link skipped it
+                // forever (#943). No copy: both members are `std::string`.
+                const std::string& admitted_over =
+                    s.remote->link.empty() ? s.remote->caller : s.remote->link;
+                if (admitted_over != link) continue;
                 subscriber_t reclaimed;       // an inert shell: no view, no route, no cold half
                 reclaimed.active = false;     // the slot is free for add_edge reuse
                 s = std::move(reclaimed);     // frees the old slot's retained state in place

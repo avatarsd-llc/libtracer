@@ -221,3 +221,21 @@ distinct act); and creation remains ACL-gated.
   *executed*, not *assigned*, so it neither stores nor propagates under RFC-0008) are all **byte
   claims** and are deferred. This ADR records a doctrine and supersedes three others; it deliberately
   specifies no wire layout, and no reference or spec document should assert one until it exists.
+
+## Erratum (2026-08-08) — `TRANSPORT_DOWN` is emitted now; the option it helped reject stays rejected
+
+The fourth rejected option above rests on an observation about the tree: *"`TRANSPORT_DOWN` appears
+only in `error.hpp`'s enum and switches, never emitted."* That was true when this ADR was written
+and is **no longer true**. [#929](https://github.com/avatarsd-llc/libtracer/issues/929) gave
+`graph::status_t` a `TRANSPORT_DOWN` member and mapped it to `wire::err_t::TRANSPORT_DOWN` (0x0060),
+so a `SPEC` create whose dial, bind or handshake failed now replies `kind=ERROR` carrying that code
+instead of `tr::path::not_found`.
+
+**The rejection is unaffected, and it is worth being precise about why.** What that option proposed
+was a `STATUS=ERROR` **delivered in place of a VALUE** on a subscription edge, and the phantom it
+generalised from was the claim that the transport plane already did that. The transport plane still
+does not: it emits a `VALUE` (`transport_vertex.cpp`'s `link_state_value`), exactly as this ADR
+found. #929 changed a **reply** — the FWD terminus's `kind=ERROR` answer to an operation — which is
+where an error code has always belonged and is not the delivery pattern in question. So the sentence
+above should now be read as "never delivered in place of a VALUE," which remains the load-bearing
+half.

@@ -612,8 +612,10 @@ class transport_can : public transport_t, public bus_link_t {
  *    advertise (0 = unbounded, host-bounded per RFC-0006);
  *  - `rx_ttl_ms` (VALUE u32) — the RX staleness window (0 = track `peer_ttl_ms`).
  * A missing/invalid `ifname` or `node` fails with `TYPE_MISMATCH`; a socket that
- * cannot bind (no kernel CAN / non-Linux stub) fails with `NOT_FOUND`. The
- * universal `role` is ignored — a bus has no dial/listen asymmetry.
+ * cannot bind (no kernel CAN / non-Linux stub) fails with `TRANSPORT_DOWN` — the
+ * TRANSIENT status, because the address resolved and it was the link that did not
+ * come up (#929). The universal `role` is ignored — a bus has no dial/listen
+ * asymmetry.
  *
  * @param reasm_mr Where every constructed transport's RX buffers draw their
  *                 structure — the injection point for the pmr seam the config TLV

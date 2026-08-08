@@ -385,7 +385,9 @@ on." The grill rejected that on evidence:
   `type_t::STATUS` emit in `core/` (`op_resolve_walk.hpp`) is the FWD error-**reply**
   wrapper, not a delivery. The pattern the draft generalised from does not exist —
   `reference/02:411` is itself a phantom, and building a new normative surface on
-  it would have made a second one.
+  it would have made a second one. (The middle clause — *"is never emitted"* — stopped
+  being true on 2026-08-08; see the **Erratum** at the end of this document. The
+  bullet's conclusion is unaffected: what does not exist is the *delivery*.)
 - **A distinct code is not free.** It obliges every implementation to distinguish
   states the reference cannot yet produce, and pins an error identity — which, per
   the clause-kind rule, MUST be code-pinned before acceptance. Nothing pins it.
@@ -589,11 +591,12 @@ what option 1 meant.
 `tr::path::retired = 0x0023`.** **This was the first draft's proposal, and it is
 now rejected** — see §C.4. Two reasons, either sufficient: the pattern it
 generalised from is a phantom (the transport plane emits a `VALUE`, not a
-`STATUS`; `TRANSPORT_DOWN` is never emitted), and a minted error identity must be
-code-pinned before acceptance under the clause-kind rule, with nothing to pin it
-to. Kept here, as the option that lost, because the reasoning is the most
-instructive thing this RFC contains: **a draft that cites a doc claim without
-grepping for its implementation will manufacture a phantom of its own.**
+`STATUS`; `TRANSPORT_DOWN` is never emitted — see the **Erratum** at the end of this
+document, which corrects that second clause without disturbing the rejection), and a
+minted error identity must be code-pinned before acceptance under the clause-kind
+rule, with nothing to pin it to. Kept here, as the option that lost, because the
+reasoning is the most instructive thing this RFC contains: **a draft that cites a doc
+claim without grepping for its implementation will manufacture a phantom of its own.**
 
 **Option 3 — snapshot-diff only** (#66's third option: removals observable solely by
 comparing successive `:children[]` reads). Rejected as a *specified mechanism*: it
@@ -709,3 +712,36 @@ Open points the author wants comment on:
    and letting peer Y re-create it would leave Y's connection governed by X's stale
    ACEs — Y's write authorized against `/net`'s policy but enforced under X's. §B.6
    closes it.
+
+## Erratum (2026-08-08) — `TRANSPORT_DOWN` is emitted now; §C.4's conclusion and Option 2's rejection both stand
+
+Two sentences in this document assert, in the present tense, that `TRANSPORT_DOWN` is never
+emitted:
+
+- **§C.4**, in the *"the delivery rested on a phantom"* bullet — *"`TRANSPORT_DOWN` appears only
+  in `error.hpp`'s enum and switches and **is never emitted**"*;
+- **§Alternatives considered, Option 2** — *"the transport plane emits a `VALUE`, not a `STATUS`;
+  `TRANSPORT_DOWN` is never emitted"*.
+
+Both were true when this RFC was written and are **no longer true**.
+[#929](https://github.com/avatarsd-llc/libtracer/issues/929) gave `graph::status_t` a
+`TRANSPORT_DOWN` member and mapped it to `wire::err_t::TRANSPORT_DOWN` (0x0060), so a `SPEC`
+create whose dial, bind or handshake failed now replies `kind=ERROR` carrying that code where it
+previously replied `tr::path::not_found` (0x0020). The identical sentence in
+[ADR-0059](../../adr/0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md) carries
+the same correction; this erratum settles the two copies that live here.
+
+**Nothing this RFC decides moves.** What §C.4 and Option 2 rejected was a `STATUS=ERROR`
+**delivered in place of a VALUE** along a subscription edge, and the phantom was the claim that
+the transport plane already did that. It still does not: link state is delivered as a **`VALUE`**
+(`transport_vertex.cpp`'s `link_state_value`), exactly as this RFC found. #929 changed a
+**reply** — the FWD terminus's `kind=ERROR` answer to an operation, which is the *other* thing the
+same §C.4 bullet already distinguishes (*"the sole `type_t::STATUS` emit in `core/`
+(`op_resolve_walk.hpp`) is the FWD error-**reply** wrapper, not a delivery"*). Read the two
+sentences as *"never delivered in place of a VALUE"* and they remain accurate — that is the
+load-bearing half, and it is the half the rejection rests on.
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). It
+corrects descriptive text that contradicts shipped behaviour, touches no normative clause, mints no
+registry code, and changes no wire surface. §C.2 still pins a retired path's answer to
+`tr::path::not_found` (0x0020) — retirement is not a link failure — and `0x0023` still stays free.

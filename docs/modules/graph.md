@@ -299,10 +299,10 @@ remote-delivery sink, which is a `tr::net` concern. See
 
 ## Status codes
 
-`status_t` (`core/include/libtracer/status.hpp:25-34`) is the error side of every
+`status_t` (`core/include/libtracer/status.hpp:25-44`) is the error side of every
 `result_t`. When the operation arrived over the wire, the FWD resolver maps it to the
 registered `tr::` error code the `kind=ERROR` reply carries (`error_code(status_t)`,
-`core/src/op_resolve_walk.hpp:76-115` — a private header under `src/`, not part of the
+`core/src/op_resolve_walk.hpp:76-117` — a private header under `src/`, not part of the
 public API).
 
 The table below is a **total** map, and the compiler keeps it that way: `error_code` is a
@@ -322,9 +322,19 @@ wire's — which is what makes the mapping hand-written and therefore losable.
 | `TIMEOUT` | `FLOW_TIMEOUT` | an `await` deadline expired |
 | `SCHEMA_NOT_FOUND` | `SCHEMA_NOT_FOUND` | a field read or write on a vertex that exposes no such field — an undeclared app field, `:identity` on a node with no key installed, a `:children[]` `SPEC` whose `type` is unregistered |
 | `PATH_IN_USE` | `PATH_IN_USE` | `try_register_vertex` collided with a live vertex at that address |
+| `TRANSPORT_DOWN` | `TRANSPORT_DOWN` | a transport-construction failure: a dial refused, a TLS/WebTransport handshake rejected, a listener that could not bind, a CAN interface the kernel would not open |
 
 `BACKPRESSURE` is the allocation-failure and flow-control answer. It is not a
 dispatch-depth signal: no depth cap exists.
+
+`TRANSPORT_DOWN` is the only member of this table whose point is the **disposition**, not
+the name. Its wire code is TRANSIENT in the registry — *retry may succeed* — while every
+other row here is PERMANENT or (for `BACKPRESSURE` / `TIMEOUT`) transient for a reason the
+caller can already see. Until #929 the built-in transport factories spent `NOT_FOUND` on a
+link that did not come up, so a refused connect went out as `tr::path::not_found` and a
+peer reading the disposition off the code stopped retrying a link that would have come
+back. Nothing before #929 could reach `err_t::TRANSPORT_DOWN` from this side: the map was
+total over a `status_t` that had no member for it.
 
 ## Setup-time seams
 

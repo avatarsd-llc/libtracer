@@ -16,6 +16,16 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`graph::status_t::TRANSPORT_DOWN` — a link that could not come up now has its own status
+  (#929).** The L4 status set had eight members and no transport member, so every
+  dial/bind/handshake failure was reported as `NOT_FOUND` and `error_code(status_t)` — the
+  total L4→wire map — could never emit `wire::err_t::TRANSPORT_DOWN` (0x0060). The new member
+  maps to it. **Source-compatible in the direction that matters** (a caller comparing against
+  the existing members still compiles), but a `switch` over `status_t` with no `default:` —
+  the shape this library uses on purpose — gains an unhandled enumerator and, under
+  `-Werror=switch`, will name itself at compile time. `to_string(status_t)` answers
+  `"transport_down"`.
+
 - **`net::transport_t::start_receiving()` — the second half of a two-phase link bring-up
   (#1025).** A virtual whose default is a no-op, so every existing transport and every
   embedder's is unaffected and an owner may call it unconditionally. It exists because
@@ -29,6 +39,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `defer_recv` flag, so a direct `transport_ws_client(host, port)` behaves exactly as before.
 
 ### Changed
+
+- **`view::rope_t::try_reserve` keeps only its no-op arm in the inlinable body; the spilling
+  arm moved to an out-of-line private member (#1065).** Signature, return values and
+  observable effects are unchanged — the spilling arm is the previous body verbatim, and
+  `try_reserve` now filters out only the inputs for which that body's `max_size` guard cannot
+  fire. What changes is code shape: on `v0.8.0` gcc inlined the whole check into
+  `graph_t::dispatch_edge_target`'s nothrow delivery clone, and on `main` it does not, so
+  every path-target delivery paid a real `call` for a test that folds to one compare at a
+  fresh 1-link rope. With the arms split, the no-op test inlines again (`nm -S`
+  `dispatch_edge_target`: 0x19f → 0x2df, and the `call rope_t::try_reserve` is gone). Callers
+  that actually reserve now pay one extra `call` on the arm that allocates.
 
 - **`view::rope_t::concat` no longer reserves on the cross-rope path — the self-concat
   guards are charged to the aliasing case alone (#1022).** The `r.concat(r)` safety added in
@@ -44,6 +65,67 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   builder already did, and `read_children_folded` now does at its own call site.
 
 ### Fixed
+
+- **A transport that could not come up is no longer reported to a peer as a permanent
+  wrong-address (#929).** `make_checked` (the shared `!ok()` check behind the built-in
+  udp/tcp/ws factories) and the five hand-rolled `!ok()` sites in `transport_quic.cpp`,
+  `transport_webtransport.cpp` and `transport_can.cpp` returned `status_t::NOT_FOUND`, which
+  the terminus maps to `tr::path::not_found` (0x0020) — PERMANENT in the RFC-0002 registry,
+  *don't retry*. A refused connect, a rejected TLS/WebTransport handshake, a listener that
+  could not bind and a CAN interface the kernel would not open are all TRANSIENT, and they
+  now answer `status_t::TRANSPORT_DOWN` ⇒ `tr::transport::down` (0x0060). Wire-visible: a
+  `SPEC` create over the wire whose link fails now replies with 0x0060 in the ERROR TLV where
+  it replied 0x0020 before. The graph address the create named is unaffected — it resolved,
+  which is why `NOT_FOUND` was the wrong word for it. **The contract an embedder implements
+  moved with it:** `transport_vertex_t::transport_factory_t` — the signature
+  `register_transport_type` takes — documented `NOT_FOUND` as the did-not-come-up answer and now
+  documents `TRANSPORT_DOWN`, so a factory written outside the library answers as the built-ins
+  do; the `quic`, `webtransport` and `can` factory docs are corrected at each site.
+
+- **`graph_t::evict_link_edges` / `vertex_t::evict_link_edges` now reclaim an edge admitted
+  through the `:subscribers[N]` field-write door (#943).** They matched a slot on
+  `subscriber_remote_t::link` alone. `graph_t::subscribe_wire` — the `SUBSCRIBE` op and the
+  wire `:subscribers[]` append — stores that, but `graph_t::field_write`'s `:subscribers[]` /
+  `:subscribers[N]` arms store the inbound link **only** as the gate context
+  (`subscriber_remote_t::caller`), because such an edge re-dispatches to a *local* target and
+  owns no return route to deliver over. The RFC-0009 §D.1 replace arm is reached from the
+  wire (the resolver diverts only an *append* bearing a `SUBSCRIBER` to `subscribe_wire`), so
+  a remote `FWD WRITE` to `/v:subscribers[N]` produced an edge no link teardown could ever
+  match: permanently `active`, permanently counted in `own_subs`, holding its slot against
+  `add_edge` reuse, and still writing into its target under a departed session's context —
+  boot-lifetime, one per occurrence, and the reason RFC-0009 §D.5's "evicts every subscriber
+  edge that named that link" was not true of every such edge. Eviction now matches the link
+  an edge was **admitted over**: the delivery link when it carries one, the stored caller
+  context otherwise (ADR-0018 defines that context as this node's NAME for the inbound link,
+  i.e. the same name space). Edges with no cold half and edges under other links are
+  unaffected, and the wire is untouched — this is entirely host-side, exactly as §D.5 says.
+  The fix is deliberately *not* an `r.link.assign(caller)` at the admission door:
+  `graph_t::dispatch_edge` gates its remote leg on a non-empty link, so that would have added
+  a phantom `FWD{WRITE}` per publish carrying an empty return route.
+
+- **A label-compacted (`COMPACT`) delivery is ACL-gated under the inbound link's name, like
+  the full-route `FWD{WRITE}` it compacts (#974).** `graph_t::acl_allows` settles the EMPTY
+  caller context as fully trusted before it invokes the subject resolver (#905) — that arm is
+  the local API call. Both terminus write arms of `fwd_router_t::on_compact` reached the graph
+  with the DEFAULT caller, so a peer whose flow was auto-promoted to `COMPACT` (RFC-0004 §E.1)
+  wrote an ACL-protected vertex with no ACE evaluated at all, while the same peer's full-route
+  `FWD{WRITE}` to the same vertex was denied — two forms of one delivery disagreeing about
+  whether a policy applies. Both arms now pass `inbound_name`, which is the same string
+  `op_resolver_t` presents as `inbound_link`, so RFC-0004 §F's "the target vertex's `:acl`
+  authorizes the actual WRITE at the final hop" holds for either form. **No wire surface
+  changes**: a denied `COMPACT` is dropped exactly as an unwritable one always was, and the
+  authorization is re-evaluated per frame rather than memoized with the resolution — which is
+  [ADR-0062](../docs/adr/0062-resolve-once-label-bindings-hold-resolutions-not-names.md)'s
+  own rule, "a binding caches the address, never the authorization", restored rather than
+  invented: an ACL written after a flow warmed applies to that flow's very next frame. The private
+  `fwd_router_t::deliver_local` now takes its caller as a REQUIRED parameter — an omitted one
+  is what inherited full trust here. Enforcement remains opt-in: with no subject resolver
+  installed, `acl_allows` returns true on its first line and nothing is gated, whatever the
+  caller — the added argument is the whole cost, and `bench_compact_delivery`'s
+  `compact-terminus` rows do not move outside the noise its untouched `compact-forward`
+  control shows on the same host. Guarded by
+  `core/tests/fwd_compact_acl_test.cpp`, which proves the cold (`deliver_local`) and warm
+  (memoized-handle) arms separately, each against a positive control.
 
 - **A SPEC-created `ws` DIAL connection no longer drops a message the server pushes on
   connect (#1025).** `transport_ws_client`'s constructor dials, runs the opening handshake
@@ -397,10 +479,11 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   - **The default is verification.** Both factories now dial with the trust struct's declared
     defaults, so with no trust key present the handshake validates against the **system trust
     store** and a certificate that does not chain to it is refused — creation answers
-    `NOT_FOUND`, the existing did-not-come-up status. (Ruled over the issue's
-    refuse-by-omission proposal: msquic with neither the flag nor a CA file performs default
-    platform validation, which is the standard TLS-client convention and costs nothing for the
-    dial-a-publicly-certified-endpoint case.)
+    `TRANSPORT_DOWN`, the did-not-come-up status (this bullet said `NOT_FOUND` when #918
+    landed; #929, later in this same unreleased cycle, gave the condition its own member).
+    (Ruled over the issue's refuse-by-omission proposal: msquic with neither the flag nor a
+    CA file performs default platform validation, which is the standard TLS-client convention
+    and costs nothing for the dial-a-publicly-certified-endpoint case.)
   - **Two new kind-PRIVATE config keys, identical in both kinds**: `ca` (NAME, a PEM CA-bundle
     path) verifies against that bundle instead of the system store — the way to reach a
     self-signed or privately-issued peer while still authenticating it; and `insecure` (VALUE

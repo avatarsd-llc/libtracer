@@ -128,25 +128,23 @@ class rope_t {
      * (an empty rope that still spills keeps the reserved capacity, making even that one
      * spill `reserve` a no-op). On failure the rope is unchanged and the caller drops the
      * reply (BACKPRESSURE) instead of aborting.
+     *
+     * The no-op arm is the ONLY thing this function body holds, so it stays cheap enough for
+     * the compiler to inline (#1065). The spilling arm — the `max_size` guard, the allocator
+     * call and the inline→heap migration — lives in a separate out-of-line member. Charging
+     * the delivery clone a real `call` for a check that folds to one compare at a fresh
+     * 1-link rope is a fixed per-dispatch cost on the hottest leg the rope has.
      * @retval false Reservation failed (OOM / impossible count) — the rope is untouched.
      */
     [[nodiscard]] bool try_reserve(std::size_t links) noexcept {
-        const std::size_t have = link_count();
-        if (links > heap_.max_size() - have) return false;  // impossible count (also guards +)
-        // Inline fast path: a chain that fits the small-buffer storage never allocates
-        // and never throws on append, so no reservation is needed (the +12% delivery tax
-        // was forcing heap_ here for every small reply). `have + links` cannot overflow —
-        // the max_size guard above bounds it below SIZE_MAX.
-        if (have + links <= kInline) return true;
-        if (!tr::detail::try_reserve(heap_, have + links)) return false;
-        // Force heap_ mode: migrate the inline links so subsequent append()s take the
-        // push_back fast path and never re-enter the inline→heap spill reserve.
-        for (std::size_t i = 0; i < inline_n_; ++i) heap_.push_back(std::move(inline_[i]));
-        if (inline_n_ > 0) {
-            inline_n_ = 0;
-            for (view_t& s : inline_) s = view_t{};
-        }
-        return true;
+        // `heap_.empty()` is exactly "the chain is still inline", so `link_count()` is
+        // `inline_n_` here and `kInline - inline_n_` cannot underflow (`inline_n_ <= kInline`
+        // is the small-buffer invariant). The condition is therefore the same
+        // `have + links <= kInline` no-op test as before, spelled without the addition so no
+        // overflow guard is needed to reach it — and a caller holding a fresh empty rope
+        // constant-folds `inline_n_` to 0.
+        if (heap_.empty() && links <= kInline - inline_n_) return true;
+        return reserve_spilled(links);
     }
 
     /** @brief Number of links in the chain. */
@@ -281,6 +279,34 @@ class rope_t {
     [[nodiscard]] view_t flatten(mem::mem_backend_t& backend = mem::heap_backend()) const;
 
    private:
+    // The SPILLING arm of try_reserve, kept OUT OF LINE so the no-op arm stays inlinable:
+    // this half calls the allocator and migrates the small buffer. Carrying it in the same
+    // body is what kept the whole check out of line at the path-target delivery clone on
+    // this toolchain — v0.8.0 inlined try_reserve into `dispatch_edge_target`, `main` emits a
+    // `call`, and lifting ONLY this arm out (nothing else changed) restores the inline
+    // (#1065). Reached only when the chain has already spilled or the reservation will spill
+    // it, so the `call` is charged to the case that allocates. Body-identical to the
+    // pre-#1065 try_reserve, including the max_size guard: try_reserve now filters out only
+    // inputs for which that guard cannot fire (links <= kInline).
+    [[gnu::noinline]] [[nodiscard]] bool reserve_spilled(std::size_t links) noexcept {
+        const std::size_t have = link_count();
+        if (links > heap_.max_size() - have) return false;  // impossible count (also guards +)
+        // A chain that fits the small-buffer storage never allocates and never throws on
+        // append, so no reservation is needed (the +12% delivery tax was forcing heap_ here
+        // for every small reply). `have + links` cannot overflow — the max_size guard above
+        // bounds it below SIZE_MAX.
+        if (have + links <= kInline) return true;
+        if (!tr::detail::try_reserve(heap_, have + links)) return false;
+        // Force heap_ mode: migrate the inline links so subsequent append()s take the
+        // push_back fast path and never re-enter the inline→heap spill reserve.
+        for (std::size_t i = 0; i < inline_n_; ++i) heap_.push_back(std::move(inline_[i]));
+        if (inline_n_ > 0) {
+            inline_n_ = 0;
+            for (view_t& s : inline_) s = view_t{};
+        }
+        return true;
+    }
+
     // Inline small-buffer storage for the first two links (the ADR-0053 §6 cost
     // guard). `heap_` is empty iff the chain is inline; the kInline+1-th append
     // spills the whole chain there and `inline_n_` goes to 0 (see @ref append).

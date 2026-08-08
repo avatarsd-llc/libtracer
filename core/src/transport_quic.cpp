@@ -282,14 +282,16 @@ transport_vertex_t::transport_factory_t quic_transport_factory(mem::mem_backend_
                 s.addr, s.port,
                 quic_dial_tls_t{.ca_file = priv.ca, .insecure_no_verify = priv.insecure},
                 rx_backend, s.max_frame);
-            if (!t->ok()) return std::unexpected(graph::status_t::NOT_FOUND);  // handshake failed
+            // A refused handshake is TRANSIENT, not a bad address (#929).
+            if (!t->ok()) return std::unexpected(graph::status_t::TRANSPORT_DOWN);
             return t;
         }
         if (s.port == 0 || priv.cert.empty() || priv.key.empty())
             return std::unexpected(graph::status_t::TYPE_MISMATCH);
         t = std::make_unique<quic_transport_t>(s.port, priv.cert, priv.key, rx_backend,
                                                s.max_frame);
-        if (!t->ok()) return std::unexpected(graph::status_t::NOT_FOUND);  // bind/cred failed
+        // bind/cred failed — the listener did not come up (#929).
+        if (!t->ok()) return std::unexpected(graph::status_t::TRANSPORT_DOWN);
         return t;
     };
 }

@@ -117,6 +117,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   one `peers_m_` hold; past it, one more uncontended acquisition per chunk. No API change;
   the header's steady-state allocation contract now covers fan-out explicitly.
 
+- **`httpd_ws_link_t` fires the peer-departure eviction notifier with the handler gate
+  RELEASED, not held across it** (#960). `reclaim_slot` scoped `peers_m_` to the field
+  clears and fired the routing plane's eviction hook outside it — but its only caller held
+  the handler gate's mutex for the whole call, so `fwd_router_t::link_down` (a walk of
+  every subscribed vertex under the graph's own locks, bounded by nothing this link owns)
+  ran under the one mutex every dispatch into the link takes and a destructor blocks on.
+  `bus_link_t::notify_peer_down` documents the opposite precondition outright ("with none
+  of its internal locks held"), and both core reference servers
+  (`transport_ws_server::teardown_slot`, `transport_tcp_server::teardown_slot`) honour it;
+  this link was the exception, and it established an undocumented `gate → router → graph`
+  ordering edge that nothing recorded. `reclaim_slot` now returns the departed peer's name
+  and `on_session_closed` fires the notification after the lock scope ends; the order it
+  no longer has is written down on `gate_t`. What does **not** change is the lifetime
+  guarantee holding the mutex supplied: the notification registers on the gate's existing
+  `depth`/`cv` barrier — the same one a URI-handler frame uses — so `close_gate` still
+  cannot return while one is in flight, and the notifier still cannot outlive the link.
+  Scope, stated because both are easy to over-read into this: (1) the mutex-order edge is
+  gone, so a thread holding a graph lock can always take the gate — but destroying a link
+  while holding a lock its in-flight work needs still deadlocks on the barrier, exactly as
+  it already did through the URI-handler join and as it does in `transport_ws_server`,
+  whose destructor joins its poll thread for the same reason; (2) the eviction still runs
+  synchronously on the httpd task from inside `free_ctx`, so a departing peer still costs
+  that task the walk — moving it off is a separate design question (#1071). No API change.
+
 - **`twai_link_t`'s TX backpressure window is spent PER FRAME again, and teardown no
   longer queues behind it** (#962). `write_raw` took `write_m_` and only then parked on
   the free-slot semaphore that *is* the FULL policy's backpressure point, so the window

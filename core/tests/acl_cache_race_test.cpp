@@ -17,7 +17,7 @@
  *
  * This is a race, so the instrument is a genuine racer, not a sequence of calls:
  *
- * - **Thread A (writer)** rewrites the TOP ancestor's `:acl` epoch by epoch, alternating
+ * - **Thread A (writer)** rewrites ONE chain ancestor's `:acl` epoch by epoch, alternating
  *   which subject its one inheritable grant names, and brackets each write with `pending`
  *   (stored BEFORE) and `committed` (stored AFTER).
  * - **Thread B (prober, the main thread)** evaluates `graph_t::read` — i.e. `acl_allows` —
@@ -40,6 +40,26 @@
  * least @ref kRaceEpochsMin epochs), never when a clock runs out — @ref kQuietEpochStride
  * has A hold still until B can bank one. The wall clock survives only as
  * @ref kRunCeilingMs, whose expiry is a FAILURE.
+ *
+ * A fourth decides WHICH lost update is reachable, and it is the level A rewrites (#1043).
+ * `graph_t::acl_allows`'s rebuild lambda walks the parent chain from the bearer UPWARD, so
+ * that level fixes where in the walk the rewritten ACEs are read, and therefore which side of
+ * the read gets all the filler work:
+ *
+ * - **TOP** (`/anc`, read LAST) puts the whole walk BEFORE the read, leaving the interval
+ *   AFTER the publish decision — `eff_aces = std::move(merged)` — as the wide one. That is
+ *   exactly the predecessor `{acl_gen, acl_cache_dirty}` protocol's lost-update window, which
+ *   is the shape ADR-0078 measured (~4–5 k stale verdicts per run against it).
+ * - **NEAREST** (the bearer's own parent, read FIRST) puts the filler walk, the merge release
+ *   and the stripe re-acquire BETWEEN the read and the publish. That is the SHIPPED CAS's
+ *   window. A lost-update mutant of the publish (`compare_exchange_strong` → an unconditional
+ *   `store`) reported 0 stale on TOP in every run measured for #1043, and reddens NEAREST on
+ *   every one of them — 1 089–2 575 stale per run over 10 RelWithDebInfo runs, 3 420 on the
+ *   TSan/`hazard_slot_t` leg, both pinned to two cores.
+ *
+ * Both shapes are run, because neither subsumes the other. And because a racer's exposure is
+ * still the host's to grant, @ref test_mark_inside_rebuild_defeats_the_publish pins that same
+ * interleaving deterministically on `vertex_t` itself first.
  */
 
 #include <algorithm>
@@ -58,6 +78,7 @@
 
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tracer.hpp"
+#include "libtracer/vertex.hpp"
 
 namespace {
 
@@ -65,10 +86,12 @@ using tr::graph::ace_t;
 using tr::graph::ace_type_t;
 using tr::graph::acl_right_t;
 using tr::graph::graph_t;
+using tr::graph::path_key_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
 using tr::graph::subject_token_t;
 using tr::graph::vertex_handle_t;
+using tr::graph::vertex_t;
 
 int g_failures = 0;
 
@@ -105,17 +128,19 @@ constexpr std::string_view kOther = "other";
 constexpr std::string_view kKeeper = "keeper";
 
 /**
- * @brief Intermediate vertices between the rewritten ancestor and the bearer, each loaded
- *        with @ref kFillerAces inheritable ACEs.
+ * @brief Chain vertices between `/anc` and the bearer. Every level EXCEPT the one the writer
+ *        rewrites is loaded with @ref kFillerAces inheritable ACEs.
  *
- * The asymmetry is the whole instrument. The lost update is a mark landing between the
- * rebuilder's generation recheck and its clear, an interval dominated by
- * `eff_aces = std::move(merged)` — destroying a vector of ACEs that each own a subject
- * allocation. If the invalidating WRITE costs as much as the rebuild it invalidates, the
- * next mark always arrives long after that interval has closed and the window is simply
- * never sampled. Loading the INTERMEDIATE ancestors (which the writer never touches) makes
- * the rebuild and its publish expensive while the top ancestor's rewrite stays a
- * single-ACE write, so consecutive marks straddle the window instead of overshooting it.
+ * The asymmetry is the whole instrument. A lost update is a mark landing inside the
+ * rebuilder's vulnerable interval; if the invalidating WRITE costs as much as the rebuild it
+ * invalidates, the next mark always arrives long after that interval has closed and the
+ * window is simply never sampled. Loading the levels the writer never touches makes the
+ * rebuild expensive while the rewrite stays a single-ACE write, so consecutive marks straddle
+ * the window instead of overshooting it.
+ *
+ * WHICH interval gets the load is decided by the rewritten level, because the walk reads the
+ * chain bearer-first — see the file header's TOP / NEAREST split (#1043). The filler levels
+ * always number @ref kChainDepth whichever shape runs, so the two are comparable.
  */
 constexpr std::size_t kChainDepth = 4;
 /** @brief Inheritable ACEs each intermediate carries — see @ref kChainDepth. */
@@ -210,7 +235,11 @@ ace_t grant(std::string_view subject, acl_right_t right, bool inherit) {
                  .expires_ns = 0};
 }
 
-/** @brief `/anc` followed by @p depth intermediate segments (`/anc/m0/m1/…`). */
+/**
+ * @brief `/anc` followed by @p depth intermediate segments (`/anc/m0/m1/…`) — also how a
+ *        chain LEVEL is spelled: 0 is `/anc` (read LAST by the rebuild's upward walk) and
+ *        @ref kChainDepth is the bearer's own parent (read FIRST).
+ */
 std::string chain_path(std::size_t depth) {
     std::string p = "/anc";
     for (std::size_t i = 0; i < depth; ++i) {
@@ -233,7 +262,7 @@ std::vector<std::byte> filler_acl(std::size_t level) {
 }
 
 /**
- * @brief The top ancestor's `:acl` for @p epoch: ONE inheritable READ grant, naming
+ * @brief The rewritten ancestor's `:acl` for @p epoch: ONE inheritable READ grant, naming
  *        @ref kProbe on an EVEN epoch and @ref kOther on an ODD one.
  */
 std::vector<std::byte> ancestor_acl(std::uint32_t epoch) {
@@ -264,11 +293,11 @@ struct calibration_t {
  * release one; the first draft of this test hard-coded the delay and completed FIVE probes
  * under TSan, every guard vacuous.
  */
-calibration_t calibrate(graph_t& g, vertex_handle_t bearer, std::span<const std::byte> acl_a,
-                        std::span<const std::byte> acl_b) {
+calibration_t calibrate(graph_t& g, vertex_handle_t bearer, std::string_view rewritten_acl,
+                        std::span<const std::byte> acl_a, std::span<const std::byte> acl_b) {
     const auto cycle_start = std::chrono::steady_clock::now();
     for (int i = 0; i < kCalibrationCycles; ++i) {
-        (void)g.write(path_t("/anc:acl"), make_value((i % 2) == 0 ? acl_a : acl_b));
+        (void)g.write(path_t(rewritten_acl), make_value((i % 2) == 0 ? acl_a : acl_b));
         (void)g.read(bearer, kProbe);
     }
     const std::int64_t cycle_ns =
@@ -281,15 +310,100 @@ calibration_t calibrate(graph_t& g, vertex_handle_t bearer, std::span<const std:
                              std::max<std::int64_t>(1, (cycle_ns * kSpinCalibration) / spin_ns))};
 }
 
+/** @brief The subject the first ACE of @p merged names, or empty when there is none. */
+std::vector<std::byte> merged_subject(const std::vector<ace_t>& merged) {
+    return merged.empty() ? std::vector<std::byte>{} : merged.front().subject;
+}
+
 /**
- * @brief One thread rewrites an ancestor's `:acl`; another evaluates a descendant's gate.
+ * @brief An invalidation landing INSIDE the rebuild is never lost — the ADR-0078 publish CAS
+ *        itself, pinned rather than sampled (#1043).
+ *
+ * The racer below leaves that interleaving to the host, and against the SHIPPED encoding it
+ * is narrow: the vulnerable interval runs from the rebuild's read of the rewritten ancestor's
+ * ACEs to its publish, so a lost-update mutant of the CAS (an unconditional `store`) went
+ * undetected across 39 293 bracketed claims until the chain shape was fixed. Here the order
+ * is not hoped for. `vertex_t::with_effective_aces` takes the rebuild as a CALLABLE and runs
+ * it with the stripe lock RELEASED, and `mark_acl_cache_dirty` is lock-free and takes no
+ * vertex lock — so firing the mark from inside the rebuild reproduces exactly what a
+ * concurrent `:acl` write's subtree mark does to the protocol. Thread identity is not part of
+ * that protocol; only the ORDER is, and this fixes it, which is what makes the guard hold on
+ * a loaded CI host too.
+ *
+ * The rebuild answers a PRE-mark merge the first time and the POST-mark one after, so the
+ * published merge names which side of the mark it was built on. Correct: the publish CAS
+ * fails, the loop re-runs the rebuild, and the merge evaluated is the post-mark one. Under an
+ * unconditional store the pre-mark merge is stamped CURRENT, the mark is lost, and nothing
+ * later re-raises it — so the stale merge is served forever, which the follow-up call checks.
+ */
+void test_mark_inside_rebuild_defeats_the_publish() {
+    std::printf("an invalidation inside the rebuild defeats the publish (ADR-0078, #1043):\n");
+    vertex_t v{role_t::STORED_VALUE, path_key_t{as_bytes("bearer")}, {}};
+    // Allocates the extension block and leaves the counter ODD, so the next gated evaluation
+    // rebuilds — the state a first-ever `acl_allows` on a freshly written vertex is in.
+    v.set_acl({grant(kKeeper, acl_right_t::WRITE, false)});
+
+    const std::vector<ace_t> pre_mark = {grant(kOther, acl_right_t::READ, true)};
+    const std::vector<ace_t> post_mark = {grant(kProbe, acl_right_t::READ, true)};
+
+    int rebuilds = 0;
+    int rebuilds_at_mark = 0;
+    std::vector<std::byte> published;
+    (void)v.with_effective_aces(
+        [&](const std::vector<ace_t>&) {
+            if (rebuilds++ != 0) return post_mark;
+            // The ancestor ACEs this walk read are now one `:acl` write out of date, and the
+            // mark that write fans out lands HERE — after the read, before the publish.
+            rebuilds_at_mark = rebuilds;
+            v.mark_acl_cache_dirty();
+            return pre_mark;
+        },
+        [&](const std::vector<ace_t>& merged) {
+            published = merged_subject(merged);
+            return 0;
+        });
+
+    check(rebuilds > rebuilds_at_mark,
+          "the rebuild re-ran after an invalidation landed inside it (the publish CAS failed)");
+    check(published == as_bytes(kProbe),
+          "the merge evaluated is the one built AFTER that invalidation, not the pre-mark one");
+
+    // Persistence — the severe half, and the same claim the racer's post-join check makes: a
+    // lost mark leaves the counter EVEN over a pre-mark merge and nothing re-raises it.
+    std::vector<std::byte> served;
+    int later_rebuilds = 0;
+    (void)v.with_effective_aces(
+        [&](const std::vector<ace_t>&) {
+            ++later_rebuilds;
+            return post_mark;
+        },
+        [&](const std::vector<ace_t>& merged) {
+            served = merged_subject(merged);
+            return 0;
+        });
+    check(served == as_bytes(kProbe),
+          "a later evaluation still sees the post-mark merge (no lost mark pinned it stale)");
+    check(later_rebuilds == 0, "and answers it from the cache — the publish stamped it current");
+}
+
+/**
+ * @brief One thread rewrites the chain vertex at @p rewritten_level; another evaluates a
+ *        descendant's gate.
  *
  * Fails on either signature of #880: a stale verdict observed inside a quiescent bracket,
  * or — the severe form — a stale verdict that SURVIVES the writer, which is what a lost
  * invalidation produces (nothing later re-raises the flag the rebuilder cleared).
+ *
+ * @param rewritten_level Chain level the writer rewrites (0 = `/anc`, @ref kChainDepth = the
+ *                        bearer's own parent) — the TOP / NEAREST choice the file header
+ *                        explains. Every OTHER level carries the filler load.
+ * @param shape           What to call that choice in the run's output.
  */
-void test_ancestor_rewrite_vs_descendant_eval() {
-    std::printf("ACL cache vs lock-free subtree invalidation (#880, ADR-0078):\n");
+void test_ancestor_rewrite_vs_descendant_eval(std::size_t rewritten_level, std::string_view shape) {
+    std::printf(
+        "ACL cache vs lock-free subtree invalidation, %.*s ancestor rewritten"
+        " (#880, ADR-0078, #1043):\n",
+        static_cast<int>(shape.size()), shape.data());
     graph_t g;
     g.set_subject_resolver(caller_is_subject);
     (void)g.register_vertex(path_t("/anc"), role_t::STORED_VALUE);
@@ -304,10 +418,11 @@ void test_ancestor_rewrite_vs_descendant_eval() {
     tr::wire::emit_tlv(datum, tr::wire::type_t::VALUE, tr::wire::opt_t{}, payload);
     (void)g.write(bearer, make_value(datum));
 
-    // The intermediates' static load — never rewritten, so it costs the WRITER nothing and
-    // the rebuilder everything.
-    for (std::size_t d = 1; d <= kChainDepth; ++d)
-        (void)g.write(path_t(chain_path(d) + ":acl"), make_value(filler_acl(d)));
+    // Every level except the rewritten one carries the static load — never rewritten, so it
+    // costs the WRITER nothing and the rebuilder everything.
+    for (std::size_t d = 0; d <= kChainDepth; ++d)
+        if (d != rewritten_level)
+            (void)g.write(path_t(chain_path(d) + ":acl"), make_value(filler_acl(d)));
 
     // The bearer's OWN, never-rewritten ACL. It is load-bearing for the instrument: with it,
     // the bearing vertex IS the descendant, so the only thing that invalidates the merge
@@ -317,10 +432,11 @@ void test_ancestor_rewrite_vs_descendant_eval() {
 
     const std::vector<std::byte> even_acl = ancestor_acl(0);
     const std::vector<std::byte> odd_acl = ancestor_acl(1);
+    const std::string rewritten_acl = chain_path(rewritten_level) + ":acl";
 
     // The sweep's step is derived from one timed cycle; the RUN LENGTH is derived from the
     // prober (kClaimsPerParity) and the exposure floor (kRaceEpochsMin), never from a clock.
-    const calibration_t cal = calibrate(g, bearer, even_acl, odd_acl);
+    const calibration_t cal = calibrate(g, bearer, rewritten_acl, even_acl, odd_acl);
     const std::uint32_t step_spins = (cal.cycle_spins * kSweepCycles) / kSweepSteps + 1;
 
     std::atomic<std::uint32_t> pending{0};      // epoch whose write may be IN FLIGHT
@@ -331,7 +447,7 @@ void test_ancestor_rewrite_vs_descendant_eval() {
     std::thread writer([&] {
         for (std::uint32_t e = 1; !prober_done.load(std::memory_order_acquire); ++e) {
             pending.store(e, std::memory_order_release);
-            (void)g.write(path_t("/anc:acl"), make_value(grants_probe(e) ? even_acl : odd_acl));
+            (void)g.write(path_t(rewritten_acl), make_value(grants_probe(e) ? even_acl : odd_acl));
             committed.store(e, std::memory_order_release);
             if ((e % kQuietEpochStride) == 0) {
                 // Rendezvous (see kQuietEpochStride): hold epoch e until the prober has run a
@@ -418,7 +534,12 @@ void test_ancestor_rewrite_vs_descendant_eval() {
 }  // namespace
 
 int main() {
-    test_ancestor_rewrite_vs_descendant_eval();
+    test_mark_inside_rebuild_defeats_the_publish();
+    // Both shapes, because neither subsumes the other — see the file header. TOP is the one
+    // ADR-0078 measured against the predecessor protocol; NEAREST is the one that reaches the
+    // shipped CAS's window (#1043).
+    test_ancestor_rewrite_vs_descendant_eval(0, "TOP");
+    test_ancestor_rewrite_vs_descendant_eval(kChainDepth, "NEAREST");
     std::printf("%s\n", g_failures == 0 ? "OK" : "FAILURES");
     return g_failures == 0 ? 0 : 1;
 }

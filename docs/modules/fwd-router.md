@@ -219,8 +219,8 @@ flowchart TB
   consumer that did not need contiguity. `m` must stay alive while its span is read.
 - **The default delivery leg copies nothing.** A full-route `FWD{WRITE}` fan-out scatter-gathers a
   fresh stack head, the stored return-route bytes, an empty `src`, and one span per link of the
-  stored value (`core/src/fwd_router.cpp:1817`). The `COMPACT` leg is the one that flattens,
-  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:1780`) — single-link, that
+  stored value (`core/src/fwd_router.cpp:1832`). The `COMPACT` leg is the one that flattens,
+  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:1795`) — single-link, that
   flatten is a zero-copy adopt, and multi-link it draws from the router's injected `flat` backend
   (#730), not the global heap.
 - **All rope flattens on the forward AND terminus paths draw from the injected seam.** `flat`
@@ -251,7 +251,7 @@ flowchart TB
   instead of raising an exception that `-fno-exceptions` would turn into `abort()`. A dropped fresh
   `ADVERTISE` self-heals through the peer's `HANDLE_NACK`. The residual is the label store: a
   **compact-flagged** flow's first delivery on a link resolves its label *before* those three steps
-  (`fwd_router.cpp:1782`), and that allocates its `link_tables_t` and its egress entry from the
+  (`fwd_router.cpp:1797`), and that allocates its `link_tables_t` and its egress entry from the
   `std::pmr::memory_resource` (`route_handle.cpp:34-42`, `:236-237`), which reports exhaustion by
   throwing — so that one leg can still abort under `-fno-exceptions`
   ([#603](https://github.com/avatarsd-llc/libtracer/issues/603)). A flow that is not
@@ -286,7 +286,7 @@ the role default. Extra transport kinds join the catalog through `register_trans
 file ever learning about it.
 
 **The write is ACL-gated.** The `:children[]` append is gated on the parent vertex's `CREATE`
-right and denied with `PERMISSION_DENIED` otherwise (`core/src/graph.cpp:1837-1839`). Under
+right and denied with `PERMISSION_DENIED` otherwise (`core/src/graph.cpp:1859-1861`). Under
 [RFC-0014 — creator endpoint, connection lifecycle and link liveness](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)
 that gate relocates onto the creator endpoint's own ACL and gains its removal counterpart: a `NAME`
 write is gated on `WRITE` — **not** `DELETE` — per
@@ -307,7 +307,7 @@ connection is addressed under `/net/<module>/`, a first-level local vertex canno
 transport registers no module name, and an undeclared `(kind, role)` pair fails creation with
 `SCHEMA_NOT_FOUND` (`core/src/transport_vertex.cpp:167`). The application declares each module
 under a name it chooses through `register_module` (`core/src/transport_vertex.cpp:133`,
-`core/include/libtracer/transport_vertex.hpp:267`), a minting boundary gated by the shared
+`core/include/libtracer/transport_vertex.hpp:275`), a minting boundary gated by the shared
 segment-validity predicate — a reserved-character name answers `INVALID_PATH`. The built-in
 transports export *suggested*-name constants (`kWsClientSuggestedModule`, …) an application may
 adopt; `/net` itself is likewise only the recommended root convention (a constructor default).
