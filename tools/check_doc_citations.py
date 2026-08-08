@@ -77,6 +77,18 @@ SOURCE_SUFFIXES = (".hpp.in", ".hpp", ".cpp", ".cc", ".hh", ".h")
 
 # Directories that hold no citable source: build output, vendored deps, worktrees.
 NON_SOURCE_DIRS = ("_build", "build", "node_modules", ".claude", ".git", "target", "dist")
+# ...and the same, for any `build-<something>` sibling. The exact name "build" is not the
+# only one that appears: this repo's agent workflow mandates `build-agent` (`.gitignore`
+# covers `build-*/`), and a generated `build-agent/generated/include/libtracer/config.hpp`
+# makes `config.hpp` an AMBIGUOUS basename, which the gate reports as stale citations that
+# do not exist. Green-vs-red then depended on whether someone had configured a build in the
+# tree, which is exactly the kind of environment-sensitivity a gate must not have.
+NON_SOURCE_DIR_PREFIXES = ("build-",)
+
+
+def _is_non_source_part(part: str) -> bool:
+    """@brief True if a path component names a directory holding no citable source."""
+    return part in NON_SOURCE_DIRS or part.startswith(NON_SOURCE_DIR_PREFIXES)
 
 # (cited location, substring the target line must contain[, scope])
 #
@@ -101,13 +113,13 @@ ANCHORS = [
     # silently (they cited the pre-#739 header). Anchored so they cannot rot again.
     # zero-copy-and-flatten.md's rope-tier citations and ADR-0072's stale-comment pointer —
     # all four had rotted on main and were re-asserted by a mechanical +24 shift (#768 verify).
-    ("core/include/libtracer/fwd_router.hpp:779", "Terminus over a MULTI-LINK rope"),
-    ("core/include/libtracer/fwd_router.hpp:785", "64 KB / 2 links"),
-    ("core/include/libtracer/fwd_router.hpp:797", "The forward hop, read entirely by OFFSET"),
-    ("core/include/libtracer/fwd_router.hpp:597", "Slot addresses are NOT stable"),
-    ("core/include/libtracer/fwd_router.hpp:176", "explicit fwd_router_t"),
-    ("core/include/libtracer/fwd_router.hpp:245", "bool add_child"),
-    ("core/include/libtracer/fwd_router.hpp:398", "using reply_fn_t"),
+    ("core/include/libtracer/fwd_router.hpp:786", "Terminus over a MULTI-LINK rope"),
+    ("core/include/libtracer/fwd_router.hpp:792", "64 KB / 2 links"),
+    ("core/include/libtracer/fwd_router.hpp:804", "The forward hop, read entirely by OFFSET"),
+    ("core/include/libtracer/fwd_router.hpp:604", "Slot addresses are NOT stable"),
+    ("core/include/libtracer/fwd_router.hpp:177", "explicit fwd_router_t"),
+    ("core/include/libtracer/fwd_router.hpp:246", "bool add_child"),
+    ("core/include/libtracer/fwd_router.hpp:405", "using reply_fn_t"),
     ("core/include/libtracer/child_registry.hpp:209", "bool add(std::string name"),
     ("core/include/libtracer/child_registry.hpp:458", "resolve_peer"),
     ("core/include/libtracer/child_registry.hpp:473", "bool erase"),
@@ -172,18 +184,18 @@ ANCHORS = [
     ("core/src/graph.cpp:1403", "value.materialize(*value_backend_)", "field_write read it back"),
     ("core/src/graph.cpp:1698", "result_t<void> graph_t::field_write"),
     ("core/src/graph.cpp:1855", "acl_right_t::CREATE", 'step0.name == "children"'),
-    ("core/src/fwd_router.cpp:1752", "fwd_router_t::deliver_remote"),
-    ("core/src/fwd_router.cpp:1784", "value.materialize(*flat_)"),
-    ("core/src/fwd_router.cpp:1785", "flatten OOM"),
-    ("core/src/fwd_router.cpp:1789", "try_encode_compact", "fwd_router_t::deliver_remote"),
-    ("core/src/fwd_router.cpp:1821", "std::vector<std::span<const std::byte>> iov;", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:1760", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:1792", "value.materialize(*flat_)"),
+    ("core/src/fwd_router.cpp:1793", "flatten OOM"),
+    ("core/src/fwd_router.cpp:1797", "try_encode_compact", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:1829", "std::vector<std::span<const std::byte>> iov;", "fwd_router_t::deliver_remote"),
     # #730 — the two INGRESS flatten guards. Anchored because the whole point of the
     # seam is that these are testable; a citation to them silently rotting would be the
     # first step back to "the guard nobody can prove still works".
-    ("core/src/fwd_router.cpp:1421", "route_flat.empty()"),
-    ("core/src/fwd_router.cpp:1441", "payload_flat.empty()"),
-    ("core/src/fwd_router.cpp:1434", "frame.subrope(head->child1_off, head->child1_total).materialize", "case type_t::COMPACT"),
-    ("core/src/fwd_router.cpp:1034", "frame.subrope(0, frame.total_length()).materialize"),
+    ("core/src/fwd_router.cpp:1426", "route_flat.empty()"),
+    ("core/src/fwd_router.cpp:1446", "payload_flat.empty()"),
+    ("core/src/fwd_router.cpp:1439", "frame.subrope(head->child1_off, head->child1_total).materialize", "case type_t::COMPACT"),
+    ("core/src/fwd_router.cpp:1038", "frame.subrope(0, frame.total_length()).materialize"),
     # #766/#793 — the terminus resolver's three rope-tier draws, and the two allocations the
     # seam docs name as NOT covered by `flat`. These were cited by four doc pages and anchored
     # by none, so #793's own edits to `op_resolve_view.cpp` shifted every one of them without
@@ -195,7 +207,7 @@ ANCHORS = [
     ("core/src/op_resolve_view.cpp:254", "wire().materialize(backend())"),
     ("core/src/op_resolve_walk.hpp:600", "view::segment_alloc(egress, head_len)"),
     ("core/src/op_resolve_walk.hpp:703", "rope_t or_backpressure"),
-    ("core/src/fwd_router.cpp:1339", "decode_into(frame, rx_for(inbound_ctx))"),
+    ("core/src/fwd_router.cpp:1344", "decode_into(frame, rx_for(inbound_ctx))"),
     # `vertex.hpp:<parent_>` was pinned here TWICE, and the only doc that cites it is
     # `docs/spec/rfcs/0019` — a historical genre this tool's own header excludes from
     # pinning ("dated records of a decision ... pinning them would demand rewriting
@@ -268,15 +280,15 @@ ANCHORS = [
      '[[nodiscard]] inline std::expected<tlv_t, err_t> decode(const view::view_t& v) {'),
     # core/include/libtracer/fwd_frame_view.hpp
     # core/include/libtracer/fwd_router.hpp
-    ('core/include/libtracer/fwd_router.hpp:97',
+    ('core/include/libtracer/fwd_router.hpp:98',
      "* @param flat  The byte backend EVERY rope flatten on the router's forward AND terminus"),
-    ('core/include/libtracer/fwd_router.hpp:177',
+    ('core/include/libtracer/fwd_router.hpp:178',
      'std::pmr::memory_resource* mr = std::pmr::get_default_resource(),'),
-    ('core/include/libtracer/fwd_router.hpp:178', 'mem::block_source_t* rx = &mem::heap_source(),'),
-    ('core/include/libtracer/fwd_router.hpp:179', 'mem::mem_backend_t* flat = &mem::heap_backend(),'),
-    ('core/include/libtracer/fwd_router.hpp:414',
+    ('core/include/libtracer/fwd_router.hpp:179', 'mem::block_source_t* rx = &mem::heap_source(),'),
+    ('core/include/libtracer/fwd_router.hpp:180', 'mem::mem_backend_t* flat = &mem::heap_backend(),'),
+    ('core/include/libtracer/fwd_router.hpp:421',
      "* Invoked (with the `FWD{REPLY}` frame as a @ref view::rope_t) when a REPLY's first"),
-    ('core/include/libtracer/fwd_router.hpp:936',
+    ('core/include/libtracer/fwd_router.hpp:943',
      '[[nodiscard]] mem::block_source_t& rx_for(const child_rx_ctx_t* ctx) const noexcept {'),
     # core/include/libtracer/grammar.hpp
     ('core/include/libtracer/grammar.hpp:388',
@@ -500,19 +512,19 @@ ANCHORS = [
     # core/src/fwd_router.cpp
     ('core/src/fwd_router.cpp:522',
      'bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_source_t* rx) {'),
-    ('core/src/fwd_router.cpp:983',
+    ('core/src/fwd_router.cpp:987',
      'void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_t frame,'),
-    ('core/src/fwd_router.cpp:989', 'if (frame.link_count() == 1) {'),
-    ('core/src/fwd_router.cpp:1052', '// A REPLY that reaches its originator here is handed to the sink rope-native'),
-    ('core/src/fwd_router.cpp:1387',
+    ('core/src/fwd_router.cpp:993', 'if (frame.link_count() == 1) {'),
+    ('core/src/fwd_router.cpp:1056', '// A REPLY that reaches its originator here is handed to the sink rope-native'),
+    ('core/src/fwd_router.cpp:1392',
      'void fwd_router_t::on_control_rope(std::string_view inbound_name, view::rope_t frame) {'),
-    ('core/src/fwd_router.cpp:1400', 'const auto head = peek_control(cur, wire::grammar::crc_check_t::VERIFY);'),
-    ('core/src/fwd_router.cpp:1413', 'const view_t route_flat ='),
-    ('core/src/fwd_router.cpp:1414',
+    ('core/src/fwd_router.cpp:1405', 'const auto head = peek_control(cur, wire::grammar::crc_check_t::VERIFY);'),
+    ('core/src/fwd_router.cpp:1418', 'const view_t route_flat ='),
+    ('core/src/fwd_router.cpp:1419',
      'frame.subrope(head->child1_off, head->child1_total).materialize(*flat_);',
      'void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::rope_t frame) {'),
-    ('core/src/fwd_router.cpp:1767', "// dropped fresh ADVERTISE self-heals via the peer's HANDLE_NACK (§E.1)."),
-    ('core/src/fwd_router.cpp:1805',
+    ('core/src/fwd_router.cpp:1775', "// dropped fresh ADVERTISE self-heals via the peer's HANDLE_NACK (§E.1)."),
+    ('core/src/fwd_router.cpp:1813',
      'constexpr std::array<std::byte, 5> op_tlv{std::byte{0x01}, std::byte{0x00}, std::byte{0x01},'),
     # core/src/graph.cpp
     ('core/src/graph.cpp:163', 'const view_t& frame_view, std::vector<std::byte> key,'),
@@ -670,7 +682,7 @@ def source_map(root: pathlib.Path = None) -> dict:
         if not path.is_file() or not path.name.endswith(SOURCE_SUFFIXES):
             continue
         rel = path.relative_to(root)
-        if any(d in rel.parts for d in NON_SOURCE_DIRS):
+        if any(_is_non_source_part(p) for p in rel.parts):
             continue
         out.setdefault(path.name, []).append(rel.as_posix())
     return {name: sorted(paths) for name, paths in out.items()}
@@ -1056,7 +1068,8 @@ def revision_line_maps(rev: str, root: pathlib.Path = None) -> tuple:
                              capture_output=True, text=True, check=True).stdout.split("\n")
     maps, notes = {}, []
     for rel in (c.strip() for c in changed if c.strip()):
-        if not rel.endswith(SOURCE_SUFFIXES) or any(d in pathlib.PurePosixPath(rel).parts for d in NON_SOURCE_DIRS):
+        if not rel.endswith(SOURCE_SUFFIXES) or any(
+                _is_non_source_part(p) for p in pathlib.PurePosixPath(rel).parts):
             continue
         old = subprocess.run(git + ["show", f"{rev}:{rel}"], capture_output=True, text=True)
         if old.returncode != 0:

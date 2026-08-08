@@ -664,29 +664,33 @@ bool fwd_router_t::remove_child(std::string_view name) {
     return true;
 }
 
+// The five sink setters. `sink_m_` serializes SETTERS against each other — the slot
+// publishes for racing readers but does not arbitrate two concurrent publishes (#914).
+// No reader ever takes it, so the frame path stays lock-free.
+
 void fwd_router_t::on_reply(reply_fn_t fn, void* ctx) noexcept {
-    reply_cb_ = fn;
-    reply_ctx_ = ctx;
+    const std::lock_guard lock(sink_m_);
+    reply_.set(fn, ctx);
 }
 
 void fwd_router_t::on_inbound(inbound_fn_t fn, void* ctx) noexcept {
-    inbound_cb_ = fn;
-    inbound_ctx_ = ctx;
+    const std::lock_guard lock(sink_m_);
+    inbound_.set(fn, ctx);
 }
 
 void fwd_router_t::on_raw(raw_fn_t fn, void* ctx) noexcept {
-    raw_cb_ = fn;
-    raw_ctx_ = ctx;
+    const std::lock_guard lock(sink_m_);
+    raw_.set(fn, ctx);
 }
 
 void fwd_router_t::on_compact_delivery(compact_delivery_fn_t fn, void* ctx) noexcept {
-    delivery_cb_ = fn;
-    delivery_ctx_ = ctx;
+    const std::lock_guard lock(sink_m_);
+    delivery_.set(fn, ctx);
 }
 
 void fwd_router_t::on_stale_label(stale_label_fn_t fn, void* ctx) noexcept {
-    stale_cb_ = fn;
-    stale_ctx_ = ctx;
+    const std::lock_guard lock(sink_m_);
+    stale_.set(fn, ctx);
 }
 
 void fwd_router_t::clear_link(std::string_view link_name) { handles_.clear_link(link_name); }
@@ -1052,7 +1056,7 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
             // A REPLY that reaches its originator here is handed to the sink rope-native
             // (ADR-0055): NO flatten — the sink materializes on demand. Absent sink ⇒
             // dropped (as the flatten path would, into a no-op decode).
-            if (reply_cb_ != nullptr) reply_cb_(reply_ctx_, frame);
+            if (const auto sink = reply_.get(); sink.fn != nullptr) sink.fn(sink.ctx, frame);
             return;
         }
         // A BOUND `dst` with a residual longer than one element: this node is a FORWARDER for
@@ -1080,7 +1084,7 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
                 resolve_terminus_rope(inbound_name, std::move(frame));
                 return;
             }
-            if (reply_cb_ != nullptr) reply_cb_(reply_ctx_, frame);
+            if (const auto sink = reply_.get(); sink.fn != nullptr) sink.fn(sink.ctx, frame);
             return;
         }
     }
@@ -1093,7 +1097,7 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
 void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const std::byte> frame,
                                  const view_t* frame_view, const child_rx_ctx_t* inbound_ctx,
                                  bool from_peer) {
-    if (raw_cb_ != nullptr) raw_cb_(raw_ctx_, inbound_name, frame);
+    if (const auto sink = raw_.get(); sink.fn != nullptr) sink.fn(sink.ctx, inbound_name, frame);
     if (frame.size() < 4) return;
 
     // The FWD plane never builds a tlv_t (ADR-0038 inv. #1 / ADR-0041 §5): the
@@ -1103,9 +1107,10 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
     // keep the owning wire::decode (test/SDK-facing and flow-setup paths, allowed
     // to allocate per ADR-0039).
     if (static_cast<type_t>(u8(frame[0])) == type_t::FWD) {
-        if (inbound_cb_ != nullptr) {  // read-only observer (tests/ACL seam) — wants the tree
+        // Read-only observer (tests/ACL seam) — wants the tree.
+        if (const auto sink = inbound_.get(); sink.fn != nullptr) {
             if (const auto dec = wire::decode(frame); dec && dec->opt.pl)
-                inbound_cb_(inbound_ctx_, inbound_name, *dec);
+                sink.fn(sink.ctx, inbound_name, *dec);
         }
         const wire::grammar::span_cursor cur{frame};
         {
@@ -1148,12 +1153,12 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
             // decode. A view-delivered frame ropes zero-copy off its owning view; a
             // borrowed span is copied once into an owned segment (the copy the old
             // decode-then-consumer-encode round-trip already paid).
-            if (reply_cb_ != nullptr) {
+            if (const auto sink = reply_.get(); sink.fn != nullptr) {
                 if (frame_view != nullptr) {
-                    reply_cb_(reply_ctx_, view::rope_t(*frame_view));
+                    sink.fn(sink.ctx, view::rope_t(*frame_view));
                 } else if (view_t owned = view::over_bytes(frame).value_or(view_t{});
                            !owned.empty()) {
-                    reply_cb_(reply_ctx_, view::rope_t(std::move(owned)));
+                    sink.fn(sink.ctx, view::rope_t(std::move(owned)));
                 }
             }
             return;
@@ -1574,7 +1579,8 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
     if (!rb.found || rb.mount_gen != registry_.mount_generation()) {
         // Stale/unknown label: drop, observe, and NACK back to prompt a re-advertise
         // (self-heal). Never a crash — the route is simply re-learned (RFC-0004 §E.1).
-        if (stale_cb_ != nullptr) stale_cb_(stale_ctx_, inbound_name, label);
+        if (const auto sink = stale_.get(); sink.fn != nullptr)
+            sink.fn(sink.ctx, inbound_name, label);
         if (transport_t* const up = registry_.by_name(inbound_name)) {
             const std::vector<std::byte> nack = encode_handle_nack(label);
             up->send(std::span<const std::byte>(nack));
@@ -1594,10 +1600,12 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
             view::rope_t value;
             if (!value.try_reserve(1)) return;
             value.append(*payload_view);
-            if (graph_.write(*rb.target, std::move(value)).has_value() && delivery_cb_ != nullptr) {
-                const std::optional<handle_binding_t> b =
-                    handles_.lookup_ingress(inbound_name, label);
-                if (b) delivery_cb_(delivery_ctx_, b->local_route, payload_bytes);
+            if (graph_.write(*rb.target, std::move(value)).has_value()) {
+                if (const auto sink = delivery_.get(); sink.fn != nullptr) {
+                    const std::optional<handle_binding_t> b =
+                        handles_.lookup_ingress(inbound_name, label);
+                    if (b) sink.fn(sink.ctx, b->local_route, payload_bytes);
+                }
             }
             return;
         }
@@ -1613,8 +1621,8 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
                 fill.target_gen = graph_.retire_generation(*v);
                 handles_.cache_resolution(inbound_name, label, fill);
             }
-            if (delivery_cb_ != nullptr)
-                delivery_cb_(delivery_ctx_, binding->local_route, payload_bytes);
+            if (const auto sink = delivery_.get(); sink.fn != nullptr)
+                sink.fn(sink.ctx, binding->local_route, payload_bytes);
         }
         return;
     }
