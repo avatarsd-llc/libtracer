@@ -6,7 +6,8 @@
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * Sweeps the matrix:
- *   - fan-out   1/8/128/1024/8192 subscribers on one endpoint (dispatch scaling)
+ *   - fan-out   1/8/128/1024/8192 subscribers on one endpoint (dispatch scaling), plus the
+ *               mid arms 16/32/64/256/512 on `inproc` (#844 — `kFanoutsMid`)
  *   - payload   1..8192 bytes (per-byte cost), heap-alloc vs borrowed (zero-alloc)
  *   - endpoints 1..8192 distinct topics, write BY PATH (registry/lookup scaling)
  *   - mixed     128 topics, varied fan-out + payloads
@@ -20,6 +21,7 @@
 #include <cstdint>
 #include <cstring>
 #include <expected>
+#include <iterator>
 #include <memory>
 #include <memory_resource>
 #include <mutex>
@@ -46,6 +48,21 @@ using tr::view::rope_t;
 using tr::view::view_t;
 
 namespace {
+
+// The mid fan-out ladder (#844) is pinned to the engine constant it exists to bracket.
+// `kFanoutsMid` lives in bench_common.hpp, which is deliberately dependency-free (the Zenoh
+// harness includes it too), so the tie to `vertex_t::kInlineFanout` is asserted HERE, in the
+// only translation unit that sees both. The first mid arm must sit strictly past the inline
+// capacity and no further than one doubling beyond it: that is the width at which a cost
+// paid only on the overflow path has its largest relative signature (it decays as 1/F), and
+// it is precisely the width the coarse 1/8/128/1024 ladder skips. If `kInlineFanout` moves,
+// this ladder must move with it or the sweep silently stops sampling the transition.
+static_assert(kFanoutsMid[0] > tr::graph::vertex_t::kInlineFanout,
+              "the first mid fan-out arm must spill past kInlineFanout — below it the "
+              "snapshot never leaves the stack buffer and the overflow path is unsampled");
+static_assert(kFanoutsMid[0] <= 2 * tr::graph::vertex_t::kInlineFanout,
+              "the first mid fan-out arm must be within one doubling of kInlineFanout — "
+              "further out, an overflow-path-only cost is already amortized toward noise");
 
 /** @brief A VALUE TLV carrying `payload` bytes (so loopback exercises real encode/decode). */
 std::vector<std::byte> value_tlv(std::size_t payload) {
@@ -1111,6 +1128,24 @@ int main(int argc, char** argv) {
             run_inproc_target(kRefSize, F, target_kind_t::HANDLER, "inproc-target-handler");
         return 0;
     }
+    // The `inproc` fan-out LADDER alone, ascending — coarse (`kFanouts`) merged with the
+    // mid arms (`kFanoutsMid`) so one short run reads as a single curve (#844). This is the
+    // A/B mode for anything that touches dispatch width: measured on this host the ladder
+    // runs in ~1.7 s against ~30 s for the default sweep, nearly all of which is off this
+    // axis — which is what made a hand-added mid arm the path of least resistance for
+    // #841's verify (that line was scaffolding and was never committed).
+    // Ascending here rather than coarse-then-mid because nothing joins on this
+    // mode's row ORDER — only the default run feeds perf_gate.py and the history store, and
+    // that run keeps every pre-existing ordinal exactly where it was.
+    if (argc > 1 && std::string_view(argv[1]) == "fan") {
+        constexpr std::size_t kLadder[] = {1, 8, 16, 32, 64, 128, 256, 512, 1024, 8192};
+        static_assert(std::size(kLadder) == std::size(kFanouts) + std::size(kFanoutsMid),
+                      "kLadder must be the union of kFanouts and kFanoutsMid — an arm added "
+                      "to either without being added here would be missing from `fan` runs");
+        for (std::size_t F : kLadder)
+            run_inproc(kRefSize, F, kRefEndpoints, alloc_t::HEAP, false, "inproc");
+        return 0;
+    }
     if (argc > 1 && std::string_view(argv[1]) == "lkv") {  // ADR-0060 alloc gate alone (fast)
         run_lkv_store_gate();
         return 0;
@@ -1181,5 +1216,19 @@ int main(int argc, char** argv) {
         run_inproc_target(kRefSize, F, target_kind_t::STORED, "inproc-target-stored");
     for (std::size_t F : kFanouts)
         run_inproc_target(kRefSize, F, target_kind_t::HANDLER, "inproc-target-handler");
+    // MID fan-out arms (#844): 16 / 32 / 64 / 256 / 512 on the `inproc` mode, filling the
+    // two gaps in `kFanouts` where the cost model kinks — the first widths past
+    // `vertex_t::kInlineFanout` (8), and the 128 -> 1024 octave the edge array crosses L1
+    // in. See `kFanoutsMid` in bench_common.hpp for why those two bands and no others.
+    // Same `mode` string, so they land on the SAME charted series as the coarse ladder
+    // (`collate.py`'s fan-out table and `render_history.py`'s `fan` / `batch-fan` families
+    // derive their arm list from the data) — a denser curve, not a new one.
+    // Appended LAST per the row-ordering note above: never ahead of a gated row. That is
+    // load-bearing here and not just convention — a paired gate run compares a candidate
+    // binary against a `main` binary that does NOT emit these rows, and inserting them
+    // into the first fan sweep would move the gated `inproc/64/1024/1` row to a different
+    // thermal/turbo position in one arm only.
+    for (std::size_t F : kFanoutsMid)
+        run_inproc(kRefSize, F, kRefEndpoints, alloc_t::HEAP, false, "inproc");
     return 0;
 }

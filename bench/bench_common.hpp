@@ -40,6 +40,41 @@ inline constexpr std::size_t kSizes[] = {1, 8, 64, 1024, 8192};       // payload
 inline constexpr std::size_t kFanouts[] = {1, 8, 128, 1024, 8192};    // subscribers / endpoint
 inline constexpr std::size_t kEndpoints[] = {1, 8, 128, 1024, 8192};  // distinct topics
 
+/**
+ * @brief Fan-out widths filling the two widest gaps in `kFanouts`, chosen where the
+ *        dispatch cost model is expected to BREAK (#844).
+ *
+ * A publish costs roughly `fixed + F * marginal` (measured on this host: ~118 ns + ~16 ns
+ * per delivery on `inproc`), and two arms already determine a straight line. Extra arms
+ * therefore earn their keep only where the line has a KINK, and two bands were picked on
+ * that basis:
+ *
+ *   * **16 and 32 — just past the inline/overflow boundary.** `vertex_t::kInlineFanout` is
+ *     8, so fan-8 is the LAST width that still snapshots into the raw stack buffer and
+ *     fan-9 is the first that spills to the overflow vector (`graph.cpp`'s wide-fan-out
+ *     path). The coarse ladder samples that boundary from below (8) and then jumps 16x
+ *     past it (128). A per-publish cost paid ONLY on the overflow path decays as 1/F, so
+ *     its relative signature is largest just past the boundary and is amortized toward
+ *     noise by fan-128. MEASURED: against a build with the per-publish overflow allocation
+ *     deliberately reintroduced, fan-16 read 1.101x on the mean and fan-32 1.068x (12/15
+ *     and 11/15 interleaved pairs), while fan-1 / 8 / 64 / 128 / 1024 / 8192 all stayed
+ *     inside a same-window A/A null. See bench/README.md for the full table.
+ *   * **64, 256 and 512 — curve density across the two octave gaps.** RATIONALE, NOT A
+ *     MEASUREMENT: no defect is on record that only these arms catch, and fan-64 did NOT
+ *     resolve the overflow step above. They are here so the 8 -> 128 and 128 -> 1024 gaps
+ *     are sampled at <= 2x steps, which is what lets a wide-band step be LOCATED rather
+ *     than only detected — the edge array the fan-out loop streams is
+ *     `F * sizeof(edge_view_t)` and outgrows a typical L1 somewhere inside the upper gap,
+ *     and #841's regression (per #844's write-up, a published entry grown to ~2x the slot
+ *     it projects) was a bytes-streamed defect that the gate saw only as one number at
+ *     fan-1024, with no neighbour to place it against.
+ *
+ * ADDITIVE: these are new `(mode, size, fanout, endpoints)` points, emitted after every
+ * pre-existing row. No existing row key, value or ordinal changes — several harnesses
+ * (`collate.py`, `render_history.py`, `perf_gate.py`) join on those.
+ */
+inline constexpr std::size_t kFanoutsMid[] = {16, 32, 64, 256, 512};
+
 /** @brief Fixed points used while sweeping a different axis. */
 inline constexpr std::size_t kRefSize = 64;
 inline constexpr std::size_t kRefFanout = 1;
