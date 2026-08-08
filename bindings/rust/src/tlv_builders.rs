@@ -70,6 +70,17 @@ pub enum BuildError {
      * (`tr::path::invalid`).
      */
     InvalidUtf8,
+    /**
+     * @brief A tree carried an ill-formed `PATH_REF`, so [`crate::encode`] refused it
+     * (`tr::frame::invalid`).
+     *
+     * The one shape-rather-than-semantics member of this enum, and the one that is a CODEC
+     * fault surfaced through this channel rather than a path/schema rejection: a builder that
+     * returns bytes has to say something when the codec emits none, and returning `Ok` over an
+     * empty `Vec` would hand a caller a frame that is silently nothing. See
+     * [`crate::encode`]'s postcondition for what makes a `PATH_REF` ill-formed.
+     */
+    InvalidPathRef,
 }
 
 const RESERVED_CHARS: &[u8] = b"/:.[]*?";

@@ -9,6 +9,31 @@ versioning/publish strategy.
 
 ### Fixed
 
+- **`encode` no longer mints a `PATH_REF` frame this core's own `decode` rejects (#1004)**
+  (`@avatarsd-llc/libtracer`, `src/codec.mjs`). The grammar has exactly one per-type structural
+  rule — a `PATH_REF` body is a fixed-stride 8-byte record array, so `opt.PL` and `opt.LL` are
+  both forbidden and the length is a bounded multiple of 8 (RFC-0024 §4.2/§4.3) — and `parseOne`
+  has always enforced it. The generic `encode` did not: it serialized any `Tlv` verbatim, so a
+  `PATH_REF` built with `opt.pl` even took the children branch and emitted per-child TLV
+  framing. All four ill-formed shapes produced bytes this core answers with `FRAME_INVALID`.
+  This package exports no `PATH_REF` builder, so a caller composes the object literal directly
+  and `encode` is the only door. The four clauses now live in one module-private predicate that
+  `parseOne` and `encode` share, rather than the encoder gaining a copy.
+
+  The C++ core closed the same asymmetry in #886 and this core did not, so the three cores
+  diverged on one input tree; that divergence is now closed on this side. No wire change, and no
+  well-formed tree encodes differently.
+
+  **API note — the failure mode is a new `encode` postcondition.** `encode` returns a
+  `Uint8Array` and has no error channel, so refusal is spelled **emits nothing**: an ill-formed
+  `PATH_REF` anywhere in the tree makes the whole call return an EMPTY array, and a refused TLV
+  refuses its ancestors rather than being dropped into a frame that DOES decode, one component
+  short. Empty is unambiguous — an accepted TLV always carries at least its 4-byte header, so no
+  well-formed tree encodes to nothing. This matches the C++ core's `wire::encode` exactly. The
+  client package's byte-returning builders (`encodeFwd`, `encodeValue`, …) pass that empty
+  result through unchanged: they return a `Uint8Array` and have no error channel either, so
+  refusal reaches a caller in the same documented spelling.
+
 - **A peer's error was invisible to this core whenever its STATUS carried anything before the
   ERROR** (`@avatarsd-llc/libtracer-client`, `src/fwd.ts`). `replyErrorTlv` required the ERROR
   to be the STATUS's `children[0]`; a `kind=ERROR` reply whose STATUS leads with its optional
