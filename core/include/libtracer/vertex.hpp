@@ -2116,8 +2116,9 @@ class vertex_t {
         lkv_.clear(std::memory_order_release);  // a mid-read reader holds its own
                                                 // reference — safe under either policy.
         own_subs_.store(0, std::memory_order_relaxed);
-        role_ = role_t::STORED_VALUE;                // the placeholder default (see graph.cpp)
-        delivery_mode_ = delivery_mode_t::IF_NEWER;  // graph drops the unconditional_ entry
+        role_ = role_t::STORED_VALUE;  // the placeholder default (see graph.cpp)
+        // graph drops the unconditional_ entry (graph_t::retire, once the map lock is out).
+        delivery_mode_.store(delivery_mode_t::IF_NEWER, std::memory_order_relaxed);
         value_handlers_t* detached = nullptr;
         if (vertex_ext_t* e = ext_.load(std::memory_order_acquire); e != nullptr) {
             // The value seam is read lock-free — swap it out atomically and hand the old
@@ -2476,11 +2477,25 @@ class vertex_t {
         e.pin_payload_ratio = k;
     }
 
-    /** @brief How this vertex participates in an ANCESTOR's propagate sweep (RFC-0008 §C). */
-    [[nodiscard]] delivery_mode_t delivery_mode() const noexcept { return delivery_mode_; }
+    /**
+     * @brief How this vertex participates in an ANCESTOR's propagate sweep (RFC-0008 §C).
+     *
+     * Relaxed, and deliberately racy against a concurrent `set_delivery_mode`: the assign
+     * path reads it lock-free as a FAST PATH only (`graph_t::mark_pending`), and whichever
+     * of the two values it observes there, the decision that actually places the vertex in
+     * a sweep set is re-taken under the graph's sweep lock. ATOMIC because
+     * `set_delivery_mode` may run concurrently on another thread (#895) — the same doctrine
+     * `own_subs_` / `listeners_above_` / `flags_` already follow in this byte group.
+     */
+    [[nodiscard]] delivery_mode_t delivery_mode() const noexcept {
+        return delivery_mode_.load(std::memory_order_relaxed);
+    }
     /** @brief Set the propagation policy — wiring-time, via `graph_t::set_delivery_mode`
-     *         (which also maintains the sweep's UNCONDITIONAL membership). */
-    void set_delivery_mode(delivery_mode_t mode) noexcept { delivery_mode_ = mode; }
+     *         (which also maintains the sweep's UNCONDITIONAL membership, and holds its
+     *         sweep lock across this store so the two stay one decision). */
+    void set_delivery_mode(delivery_mode_t mode) noexcept {
+        delivery_mode_.store(mode, std::memory_order_relaxed);
+    }
 
     // -- RFC-0005 listener bookkeeping (lock-free counters) ------------------------------
 
@@ -2973,7 +2988,10 @@ class vertex_t {
     // How this vertex participates in an ANCESTOR's propagate sweep (RFC-0008 §C).
     // Set at wiring time via graph_t::set_delivery_mode (the "configure before frames
     // flow" contract, like the storage policy); read on the assign path. Default IF_NEWER.
-    delivery_mode_t delivery_mode_ = delivery_mode_t::IF_NEWER;
+    // ATOMIC (#895): the assign path reads it with no lock held while set_delivery_mode
+    // writes it under the graph's sweep lock, so a plain byte here was a data race — UB,
+    // not a benign torn read. Byte-wide as an atomic too, so the group stays four bytes.
+    std::atomic<delivery_mode_t> delivery_mode_{delivery_mode_t::IF_NEWER};
     // Two lock-free predicates, packed into ONE byte so the flag group stays exactly four
     // bytes wide and `sizeof(vertex_t)` stays at the 112 the #361 diet measured — the size
     // gate's own failure message says to put a new member behind vertex_ext_t rather than

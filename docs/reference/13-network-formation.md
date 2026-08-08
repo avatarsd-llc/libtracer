@@ -205,7 +205,7 @@ remain in the devices — RAM, or NVS where the device persists them.
 **Subscriber edges do not survive a third-party orchestrator's departure.**
 A subscription written *over the wire* binds to the **arrival session**, not to the
 target the writer named: `graph_t::subscribe_wire` discards the SUBSCRIBER's PATH
-target (`core/src/graph.cpp:1687`) and delivery rides the accumulated `src` back to
+target (`core/src/graph.cpp:1696`) and delivery rides the accumulated `src` back to
 whoever wrote it — the orchestrator. Its departure then evicts the edge outright
 (`fwd_router_t::link_down` → `graph_t::evict_link_edges`). So the paragraph above
 holds only for a subscription the **consumer itself** wrote. Closing the gap needs a

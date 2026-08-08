@@ -1353,8 +1353,17 @@ void graph_t::mark_pending(vertex_t* v) {
     std::vector<std::byte> key;  // outside the lock (a lock-free parent walk)
     if (!try_build_key(v, key)) return;
     const std::lock_guard lock(sweep_mutex_);
-    if (!detail::probe_bytes(kSetNodeProbe)) return;
-    if (pending_.insert(std::move(key)).second)
+    // Re-read the mode UNDER this lock (#895) — the check at the top is only a fast path.
+    // set_delivery_mode holds the SAME lock across the mode store and both set edits, so a
+    // flip landing between that unlocked read and this insert would otherwise leave the key
+    // in BOTH sets (UNCONDITIONAL ⇒ the next covering propagate collects it from each and
+    // delivers the vertex twice in one sweep), or in pending_ for a vertex now EXPLICIT,
+    // which an ancestor sweep must never include. Re-reading here is what makes the two
+    // sets mutually exclusive by construction. It joins the probe's condition rather than
+    // taking a `return` of its own so `key`'s cleanup stays single-exit — worth 4 of the 18
+    // instructions per assign the two-exit spelling cost (`perf stat -e instructions:u`).
+    if (v->delivery_mode() == delivery_mode_t::IF_NEWER && detail::probe_bytes(kSetNodeProbe) &&
+        pending_.insert(std::move(key)).second)
         pending_count_.fetch_add(1, std::memory_order_relaxed);
 }
 
