@@ -16,6 +16,19 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`wire::key_view_t` gains record accessors — `record_end`, `record_from`, `record_t` and
+  `record_cursor_t` (#888).** The NAME-record framing walk (4-byte header, u16 length, advance
+  by `4 + len`) was hand-rolled at five sites outside `key_view.hpp`'s own three copies of it,
+  because the class offered no way to ask for a record: `graph.cpp`'s Composite `segment_end`,
+  `fwd_router.cpp`'s `subscribe_toward` (twice — and its indexed accessor rescanned from
+  offset 0 per segment), and `transport_vertex.cpp` (a near-verbatim copy of the already-public
+  `last_segment`). All of them now read the framing through `record_end`, which is the ONE
+  place the decode is written. Purely additive — no existing member changed signature or
+  behaviour. `record_end(at)` answers the next record's offset, or `0` for ragged framing;
+  `record_from(at)` adds the bounds and the payload span; `record_cursor_t` is the
+  non-allocating INDEXED walk the strip-K mount descent asks by segment number, resuming
+  instead of rescanning.
+
 - **`graph::status_t::TRANSPORT_DOWN` — a link that could not come up now has its own status
   (#929).** The L4 status set had eight members and no transport member, so every
   dial/bind/handshake failure was reported as `NOT_FOUND` and `error_code(status_t)` — the
