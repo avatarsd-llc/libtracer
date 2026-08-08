@@ -124,8 +124,8 @@ ANCHORS = [
     ("core/src/transport_vertex.cpp:350", "return std::unexpected(status_t::BACKPRESSURE);",
      "if (!router_.add_child(qualified, *link))"),
     ("core/src/transport_vertex.cpp:356", "pending_links_.erase(pl)"),
-    ("core/src/transport_vertex.cpp:361", "if (constructed)"),
-    ("core/src/transport_vertex.cpp:363", "link_state_t::LISTENING : link_state_t::UP"),
+    ("core/src/transport_vertex.cpp:370", "if (constructed)"),
+    ("core/src/transport_vertex.cpp:372", "link_state_t::LISTENING : link_state_t::UP"),
     ("core/include/libtracer/transport_vertex.hpp:267", "result_t<void> register_module"),
     ("core/include/libtracer/transport_vertex.hpp:96", "enum class link_state_t"),
     ("core/src/graph.cpp:1719", "field.steps.size() != 1", 'step0.name == "subscribers"'),
@@ -423,7 +423,7 @@ ANCHORS = [
     ('core/include/libtracer/transport.hpp:65', 'class bus_link_t {'),
     ('core/include/libtracer/transport.hpp:256',
      'virtual void send(std::span<const std::span<const std::byte>> iov) {'),
-    ('core/include/libtracer/transport.hpp:354',
+    ('core/include/libtracer/transport.hpp:373',
      '[[nodiscard]] virtual bool delivers_ropes() const { return false; }',
      'rx_.set_rope([](void* c, view::rope_t f) { (*static_cast<F*>(c))(std::move(f)); }, &sink);'),
     # core/include/libtracer/transport_can.hpp
@@ -460,7 +460,7 @@ ANCHORS = [
     ('core/include/libtracer/transport_ws.hpp:217',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'void send(std::span<const std::span<const std::byte>> iov) override;'),
-    ('core/include/libtracer/transport_ws.hpp:412',
+    ('core/include/libtracer/transport_ws.hpp:439',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'transport_ws_client& operator=(const transport_ws_client&) = delete;'),
     # core/include/libtracer/vertex.hpp
@@ -614,7 +614,7 @@ ANCHORS = [
      'listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);'),
     ('core/src/transport_ws.cpp:406', 'std::array<std::byte, 4096> chunk;',
      'void transport_ws_server::service_peer(session_t& s) {'),
-    ('core/src/transport_ws.cpp:771', 'std::array<std::byte, 4096> chunk;',
+    ('core/src/transport_ws.cpp:793', 'std::array<std::byte, 4096> chunk;',
      'void transport_ws_client::serve(int fd, std::vector<std::byte> pipelined) {'),
     # core/tests/registry_teardown_test.cpp
     ('core/tests/registry_teardown_test.cpp:289', 'void test_digest_paths_agree() {'),

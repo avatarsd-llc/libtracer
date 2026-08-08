@@ -348,6 +348,25 @@ class transport_t {
     }
 
     /**
+     * @brief Begin delivering inbound frames — the second half of a two-phase bring-up.
+     *
+     * Every sink above says "must be set before frames flow", and for a transport whose
+     * receive thread starts inside its own constructor that contract is UNSATISFIABLE from
+     * the outside: the thread is already draining the socket while the owner is still
+     * installing its sinks, so a frame the peer pushes the instant the connection comes up
+     * is decoded into an empty slot and dropped — silently, with no counter moving (#1025).
+     * A DIAL connection is where that bites, because the peer's push is triggered by our own
+     * connect. This is the window: construct (dial + handshake), install the sinks, then
+     * call this.
+     *
+     * IDEMPOTENT, and the DEFAULT IS A NO-OP — a transport that is already receiving from
+     * its constructor has nothing left to do — so an owner may call it unconditionally on
+     * any link. `%transport_vertex_t::make_connection` does exactly that, once the link
+     * is registered and `%fwd_router_t::add_child` has installed its receiver.
+     */
+    virtual void start_receiving() {}
+
+    /**
      * @brief The owning-delivery capability (ADR-0042 §1): true iff this transport
      *        honors @ref set_rope_receiver by delivering refcounted rope frames.
      */

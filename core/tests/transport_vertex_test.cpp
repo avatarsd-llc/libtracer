@@ -467,6 +467,55 @@ void test_provide_link_wins() {
     channel.shutdown();
 }
 
+/**
+ * @brief A link that records the state of its own receiver slot at `start_receiving()` time.
+ *
+ * `rx_` is the protected delivery slot every `transport_t` carries, so a link can answer
+ * "was a sink installed by the time I was told to start receiving?" about itself — which is
+ * the whole ordering claim of #1025, observed from where it matters.
+ */
+struct arm_probe_link_t : tr::net::transport_t {
+    std::atomic<int> starts{0};           /**< @brief How many times it was armed. */
+    std::atomic<bool> sink_at_arm{false}; /**< @brief Was a sink installed at that instant? */
+
+    /** @brief Egress is not what this probe measures. */
+    void send(std::span<const std::byte> /*frame*/) override {}
+
+    /** @brief Record the slot's state, then count the call. */
+    void start_receiving() override {
+        sink_at_arm.store(rx_.has_any(), std::memory_order_relaxed);
+        starts.fetch_add(1, std::memory_order_relaxed);
+    }
+};
+
+/**
+ * @brief #1025 — `make_connection` arms the link only AFTER it is fully wired.
+ *
+ * A DIAL transport that starts its receive thread inside its own constructor is already
+ * decoding while the creation path is still registering the vertex and running
+ * `fwd_router_t::add_child` — so a message the peer pushes on connect lands in an empty
+ * receiver slot and is dropped silently. The fix hands the ordering to the owner: the
+ * factory builds the socket without a recv thread, and creation arms it here. This pins the
+ * ORDER — the arm must come after the receiver install, not merely happen.
+ */
+void test_link_is_armed_after_wiring() {
+    std::printf("make_connection arms the link only after add_child wired it (#1025):\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+
+    arm_probe_link_t link;
+    check(link.starts.load() == 0, "a freshly constructed link has not been armed");
+    net.provide_link("ws-client", "up", link);
+
+    const auto w =
+        node.write(path_t("/net:children[]"), conn_spec("client", "up", conn_role_t::DIAL, 8080));
+    check(w.has_value(), "the SPEC created the connection over the staged link");
+    check(link.starts.load() > 0, "make_connection armed the link");
+    check(link.starts.load() == 1, "exactly once");
+    check(link.sink_at_arm.load(), "and its receiver was ALREADY installed when it did");
+}
+
 void test_creation_errors() {
     std::printf("Creation errors are clean statuses, never crashes:\n");
     graph_t node;
@@ -958,6 +1007,7 @@ int main() {
     test_local_path_untouched();
     test_config_constructed_udp();
     test_provide_link_wins();
+    test_link_is_armed_after_wiring();
     test_creation_errors();
     test_link_of_accessor();
     test_link_name_collision_rejected();
