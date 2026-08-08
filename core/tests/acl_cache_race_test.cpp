@@ -34,6 +34,12 @@
  * Two shape choices decide whether the window is reachable at all, and both are asymmetric
  * on purpose (see @ref kChainDepth and @ref kSweepSteps): the merge is made EXPENSIVE while
  * the write that invalidates it is made CHEAP, and the writer's inter-epoch delay is SWEPT.
+ *
+ * A third decides whether the instrument is LIVE, and it belongs to B, not to A: the run
+ * ends when B has banked @ref kClaimsPerParity brackets of each parity (and A has raced at
+ * least @ref kRaceEpochsMin epochs), never when a clock runs out — @ref kQuietEpochStride
+ * has A hold still until B can bank one. The wall clock survives only as
+ * @ref kRunCeilingMs, whose expiry is a FAILURE.
  */
 
 #include <algorithm>
@@ -123,8 +129,9 @@ constexpr std::size_t kFillerAces = 48;
  * either always misses that offset or always hits it — and which one is an accident of the
  * host, not a property of the protocol. Sweeping walks the next mark's phase across the
  * whole rebuild, so one run covers the window instead of sampling a single point of it. The
- * long end of the sweep doubles as the quiescent bracket (`committed == pending`) in which
- * the prober's verdict becomes a claim.
+ * long end of the sweep also yields quiescent brackets (`committed == pending`) in which the
+ * prober's verdict becomes a claim — plentifully on an unloaded build, and not at all on a
+ * loaded one, which is why brackets are not left to it (see @ref kQuietEpochStride).
  */
 constexpr std::uint32_t kSweepSteps = 96;
 /** @brief Cycles the sweep spans — see @ref kSweepSteps. */
@@ -133,21 +140,57 @@ constexpr std::uint32_t kSweepCycles = 2;
 constexpr int kCalibrationCycles = 32;
 /** @brief Spin iterations timed to convert the measured cycle into spin units. */
 constexpr std::uint32_t kSpinCalibration = 200000;
-/** @brief Ceiling on the writer's epochs — @ref kWriterBudgetMs is the real limit. */
-constexpr std::uint32_t kEpochsMax = 4000;
-/** @brief Floor, so even a heavily instrumented build still yields a live instrument. */
-constexpr std::uint32_t kEpochsMin = 64;
 /**
- * @brief Wall-clock milliseconds the writer is allowed.
+ * @brief Bracketed claims of EACH parity the prober must bank before the writer stops.
  *
- * The epoch count is DERIVED from this and the measured cycle rather than fixed, for the
- * same reason the delay is: a TSan build evaluates two orders of magnitude slower than a
- * release one, so a fixed count is either a blink or a wedge. Under TSan the first draft of
- * this test completed FIVE probes — every guard vacuous — because the prober could not
- * finish a walk between two marks. Deriving both knobs from one timed cycle keeps the same
- * source honest on both builds.
+ * This is the run's TERMINATION condition, not a threshold checked afterwards, and that is
+ * the whole point (#1036). A wall-clock writer budget adapts the WRITER to the host and
+ * leaves the PROBER to luck: on the loaded runner that produced #1036 the writer got its
+ * full 4000 epochs while the prober ran 35 probes and bracketed NONE of them, because the
+ * writer's longest idle (the sweep's long end, ~2 cycles) was orders of magnitude shorter
+ * than one contended walk. Counting writer epochs cannot fix that — the thing being counted
+ * is prober brackets. So the prober counts them, and the writer runs until it has enough:
+ * a fast host finishes early, a slow one takes longer, and neither can finish vacuous.
  */
-constexpr std::int64_t kWriterBudgetMs = 2000;
+constexpr std::uint64_t kClaimsPerParity = 8;
+/**
+ * @brief Epochs the writer races through between two RENDEZVOUS windows.
+ *
+ * A bracket cannot be waited for from the prober's side alone: it exists only when the
+ * writer happens to be idle across a whole walk. So the writer manufactures one every
+ * @ref kQuietEpochStride epochs — it stops writing, holds the graph at that epoch, and does
+ * not resume until the prober has completed one evaluation entirely inside the window. What
+ * the claim asserts is unchanged (a verdict observed while `committed == pending == e` MUST
+ * be epoch e's); only its EXISTENCE stops being an accident of the host. Natural brackets
+ * off the sweep's long end still count and, on an unloaded build, still dominate.
+ *
+ * ODD on purpose: the parked epoch's parity then alternates window to window, so the two
+ * halves of @ref kClaimsPerParity both fill even when not one natural bracket occurs.
+ */
+constexpr std::uint32_t kQuietEpochStride = 127;
+/**
+ * @brief Racing epochs the writer must complete regardless of how fast the claims arrive.
+ *
+ * The claims quota proves the instrument is LIVE; it does not buy exposure. On an unloaded
+ * release build the prober banks its quota within a few dozen epochs, which would leave the
+ * detector a fraction of the invalidations that catch #880 (ADR-0078 measured ~4–5 k stale
+ * verdicts per run against the predecessor protocol). Racing epochs, not seconds, are what
+ * the exposure scales with, so the floor is denominated in epochs — and set at the epoch
+ * CEILING the wall-clock budget it replaces used to reach, so no run races less than before.
+ */
+constexpr std::uint32_t kRaceEpochsMin = 4096;
+/**
+ * @brief Wall-clock ceiling on the whole race, in milliseconds.
+ *
+ * A CEILING, never a budget: reaching it means the prober could not bank its quota (or the
+ * writer could not reach @ref kRaceEpochsMin) and the run is reported as a FAILURE. It is
+ * not a stop condition the assertions then accommodate — that is precisely how a flaky case
+ * becomes a vacuous one, green on exactly the loaded host where the interleaving never
+ * happened. So the margin has to be wide enough that only a wedge reaches it: a TSan build
+ * needs ~0.5 s unloaded, ~1.2 s pinned to two cores, and ~13.5 s pinned to two cores against
+ * six competing spinners — four times the oversubscription of the runner that filed #1036.
+ */
+constexpr std::int64_t kRunCeilingMs = 60000;
 
 /** @brief True iff epoch @p e's ancestor ACL grants @ref kProbe the READ right. */
 constexpr bool grants_probe(std::uint32_t e) { return (e % 2) == 0; }
@@ -215,9 +258,11 @@ struct calibration_t {
 /**
  * @brief Time one cycle single-threaded, before the racer starts.
  *
- * Times the cycle, times @ref spin, and returns both, so every delay and count this test
- * asks for is expressed in CYCLES instead of in numbers that only mean something on one
- * host and one instrumentation level.
+ * Times the cycle, times @ref spin, and returns both, so the writer's swept delay is
+ * expressed in CYCLES instead of in a spin count that only means something on one host and
+ * one instrumentation level. A TSan build evaluates two orders of magnitude slower than a
+ * release one; the first draft of this test hard-coded the delay and completed FIVE probes
+ * under TSan, every guard vacuous.
  */
 calibration_t calibrate(graph_t& g, vertex_handle_t bearer, std::span<const std::byte> acl_a,
                         std::span<const std::byte> acl_b) {
@@ -273,22 +318,31 @@ void test_ancestor_rewrite_vs_descendant_eval() {
     const std::vector<std::byte> even_acl = ancestor_acl(0);
     const std::vector<std::byte> odd_acl = ancestor_acl(1);
 
-    // Both knobs derived from one timed cycle — see kWriterBudgetMs.
+    // The sweep's step is derived from one timed cycle; the RUN LENGTH is derived from the
+    // prober (kClaimsPerParity) and the exposure floor (kRaceEpochsMin), never from a clock.
     const calibration_t cal = calibrate(g, bearer, even_acl, odd_acl);
     const std::uint32_t step_spins = (cal.cycle_spins * kSweepCycles) / kSweepSteps + 1;
-    // An epoch costs its write plus the sweep's mean delay — about (1 + kSweepCycles/2) cycles.
-    const std::int64_t epoch_ns = cal.cycle_ns * (2 + kSweepCycles) / 2;
-    const std::uint32_t epochs = std::clamp(static_cast<std::uint32_t>(std::min<std::int64_t>(
-                                                kEpochsMax, kWriterBudgetMs * 1000000 / epoch_ns)),
-                                            kEpochsMin, kEpochsMax);
 
-    std::atomic<std::uint32_t> pending{0};    // epoch whose write may be IN FLIGHT
-    std::atomic<std::uint32_t> committed{0};  // epoch whose write has fully landed
+    std::atomic<std::uint32_t> pending{0};      // epoch whose write may be IN FLIGHT
+    std::atomic<std::uint32_t> committed{0};    // epoch whose write has fully landed
+    std::atomic<std::uint32_t> quiet_epoch{0};  // epoch the writer is HELD at (0 ⇒ racing)
+    std::atomic<std::uint32_t> quiet_ack{0};    // newest held epoch the prober bracketed
+    std::atomic<bool> prober_done{false};       // quota banked, or the ceiling hit
     std::thread writer([&] {
-        for (std::uint32_t e = 1; e <= epochs; ++e) {
+        for (std::uint32_t e = 1; !prober_done.load(std::memory_order_acquire); ++e) {
             pending.store(e, std::memory_order_release);
             (void)g.write(path_t("/anc:acl"), make_value(grants_probe(e) ? even_acl : odd_acl));
             committed.store(e, std::memory_order_release);
+            if ((e % kQuietEpochStride) == 0) {
+                // Rendezvous (see kQuietEpochStride): hold epoch e until the prober has run a
+                // whole evaluation inside the window. Every evaluation that STARTS here is
+                // bracketed by construction, since pending cannot advance while we wait.
+                quiet_epoch.store(e, std::memory_order_release);
+                while (quiet_ack.load(std::memory_order_acquire) < e &&
+                       !prober_done.load(std::memory_order_acquire))
+                    std::this_thread::yield();
+                quiet_epoch.store(0, std::memory_order_release);
+            }
             spin((e % kSweepSteps) * step_spins);
         }
     });
@@ -299,7 +353,14 @@ void test_ancestor_rewrite_vs_descendant_eval() {
     std::uint64_t denied_claims = 0;
     std::uint64_t stale_hits = 0;
     std::uint32_t first_stale_epoch = 0;
-    while (committed.load(std::memory_order_acquire) < epochs) {
+    bool ceiling_hit = false;
+    const auto race_start = std::chrono::steady_clock::now();
+    while (granted_claims < kClaimsPerParity || denied_claims < kClaimsPerParity ||
+           committed.load(std::memory_order_acquire) < kRaceEpochsMin) {
+        if (ns_since(race_start) > kRunCeilingMs * 1000000) {
+            ceiling_hit = true;
+            break;
+        }
         const std::uint32_t before = committed.load(std::memory_order_acquire);
         if (before == 0) continue;  // no epoch has landed yet
         const bool allowed = g.read(bearer, kProbe).has_value();
@@ -314,7 +375,12 @@ void test_ancestor_rewrite_vs_descendant_eval() {
             if (stale_hits == 0) first_stale_epoch = before;
             ++stale_hits;
         }
+        // This evaluation ran entirely inside a held window, so release its writer.
+        if (quiet_epoch.load(std::memory_order_acquire) == before)
+            quiet_ack.store(before, std::memory_order_release);
     }
+    const std::int64_t race_ms = ns_since(race_start) / 1000000;
+    prober_done.store(true, std::memory_order_release);
     writer.join();
 
     // Quiescent: nothing is in flight, so the merge must be the last epoch's, full stop.
@@ -322,10 +388,11 @@ void test_ancestor_rewrite_vs_descendant_eval() {
     const bool final_allowed = g.read(bearer, kProbe).has_value();
 
     std::printf(
-        "  %u epochs @ %lld ns/cycle: %llu probes, %llu bracketed claims "
+        "  %u epochs in %lld ms @ %lld ns/cycle: %llu probes, %llu bracketed claims "
         "(%llu grant / %llu deny), %llu stale\n",
-        epochs, static_cast<long long>(cal.cycle_ns), static_cast<unsigned long long>(probes),
-        static_cast<unsigned long long>(claims), static_cast<unsigned long long>(granted_claims),
+        final_epoch, static_cast<long long>(race_ms), static_cast<long long>(cal.cycle_ns),
+        static_cast<unsigned long long>(probes), static_cast<unsigned long long>(claims),
+        static_cast<unsigned long long>(granted_claims),
         static_cast<unsigned long long>(denied_claims),
         static_cast<unsigned long long>(stale_hits));
     if (stale_hits != 0)
@@ -333,11 +400,15 @@ void test_ancestor_rewrite_vs_descendant_eval() {
                     grants_probe(first_stale_epoch) ? "ALLOW" : "DENY",
                     grants_probe(first_stale_epoch) ? "DENY" : "ALLOW");
 
-    // Instrument liveness first: a run that never bracketed a claim, or never resolved BOTH
-    // policies, measured nothing — the vacuous-guard failure mode, reported as such.
-    check(claims > 0, "the prober bracketed at least one evaluation (instrument is live)");
-    check(granted_claims > 0 && denied_claims > 0,
-          "both epoch parities were observed (the probe resolves the ancestor's grant)");
+    // Instrument liveness first: a run that stopped on the clock instead of on the prober's
+    // quota measured whatever the host let it — the vacuous-guard failure mode, reported as
+    // such rather than accommodated.
+    char quota_msg[128];
+    std::snprintf(quota_msg, sizeof(quota_msg),
+                  "the prober banked %llu bracketed claims of EACH parity (instrument is live)",
+                  static_cast<unsigned long long>(kClaimsPerParity));
+    check(!ceiling_hit, "the race ended on the prober's quota, not on the wall-clock ceiling");
+    check(granted_claims >= kClaimsPerParity && denied_claims >= kClaimsPerParity, quota_msg);
     check(stale_hits == 0,
           "no evaluation saw a pre-write ancestor merge inside a quiescent bracket");
     check(final_allowed == grants_probe(final_epoch),
