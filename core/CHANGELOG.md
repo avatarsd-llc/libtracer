@@ -40,6 +40,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **`view::rope_t::try_reserve` keeps only its no-op arm in the inlinable body; the spilling
+  arm moved to an out-of-line private member (#1065).** Signature, return values and
+  observable effects are unchanged — the spilling arm is the previous body verbatim, and
+  `try_reserve` now filters out only the inputs for which that body's `max_size` guard cannot
+  fire. What changes is code shape: on `v0.8.0` gcc inlined the whole check into
+  `graph_t::dispatch_edge_target`'s nothrow delivery clone, and on `main` it does not, so
+  every path-target delivery paid a real `call` for a test that folds to one compare at a
+  fresh 1-link rope. With the arms split, the no-op test inlines again (`nm -S`
+  `dispatch_edge_target`: 0x19f → 0x2df, and the `call rope_t::try_reserve` is gone). Callers
+  that actually reserve now pay one extra `call` on the arm that allocates.
+
 - **`view::rope_t::concat` no longer reserves on the cross-rope path — the self-concat
   guards are charged to the aliasing case alone (#1022).** The `r.concat(r)` safety added in
   #971 (an up-front `try_reserve` plus an indexed re-read of the source each step) was paid

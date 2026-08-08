@@ -302,12 +302,12 @@ A dropped fresh ADVERTISE on the COMPACT leg self-heals: the peer answers the un
 ## Legs that throw, and their nothrow twins
 
 `rope_t::to_iovec` builds the scatter-gather span table by value, and its `reserve` throws on OOM —
-an `abort()` under `-fno-exceptions` (`core/include/libtracer/rope.hpp:247-251`). The terminus reply
+an `abort()` under `-fno-exceptions` (`core/include/libtracer/rope.hpp:245-249`). The terminus reply
 egress builds that table on every send, so on a fragmented heap it was a reachable abort. The
 nothrow twin is `rope_t::try_to_iovec(std::vector<std::span<const std::byte>>& out) noexcept`
-(`rope.hpp:264-269`): it clears `out`, sizes it to `link_count()` through `tr::detail::try_reserve`,
+(`rope.hpp:262-267`): it clears `out`, sizes it to `link_count()` through `tr::detail::try_reserve`,
 and returns `false` without touching `out` further when the table cannot be grown — the caller drops
-the reply (`rope.hpp:254-262`).
+the reply (`rope.hpp:252-260`).
 
 Be exact about what that helper buys, because the twin is named for its *signature*, not for an
 absolute guarantee. `tr::detail::try_reserve` (`core/include/libtracer/mem_heap.hpp:183`) routes
