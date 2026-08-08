@@ -142,8 +142,8 @@ Subscription edges are never destroyed while the graph lives. `unsubscribe` only
 **deactivates** the slot; an in-flight delivery has already snapshotted the edge and
 completes. The caller-owned `ctx` (or, for the templated overload, the callable itself)
 must therefore stay alive past any delivery that may still be running, not merely past
-the `unsubscribe` call (`core/include/libtracer/graph.hpp:980-981`, `:1000` for the
-callable-by-address form, `:1013`).
+the `unsubscribe` call (`core/include/libtracer/graph.hpp:987-988`, `:1007` for the
+callable-by-address form, `:1020`).
 ```
 
 ```{admonition} No strings on the hot path
@@ -193,7 +193,7 @@ for (...) g.write(v, p.field(), setpoint_tlv);           // hot loop — zero st
 ## What a read hands back
 
 `read` and `await` return `result_t<value_ref_t>`, not `result_t<rope_t>`
-(`core/include/libtracer/graph.hpp:770,857` by handle, `:1203,1209` by path;
+(`core/include/libtracer/graph.hpp:777,864` by handle, `:1210,1216` by path;
 `value_ref_t` at `core/include/libtracer/vertex.hpp:170`). A `value_ref_t` is an **owning
 reference** to the value the vertex published: the LKV slot holds it as a
 `std::shared_ptr<const rope_t>`, so handing that reference back costs a refcount clone of

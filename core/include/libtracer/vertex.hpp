@@ -1910,7 +1910,10 @@ class vertex_t {
      * like. A local edge still never matches a real link name: a local door passes
      * the EMPTY context and stores no cold half at all (the one exception,
      * `parse_subscriber_tlv`'s `delivery_compact` opt-in, leaves both spellings
-     * empty). Unlike @ref clear_edge, a matched slot
+     * empty). An EMPTY @p link matches nothing at all and returns 0 — a link with no
+     * name never subscribed, and without that rule the empty key compared equal to
+     * exactly those empty spellings and reclaimed every local `delivery_compact`
+     * edge on the vertex (#1056). Unlike @ref clear_edge, a matched slot
      * is RECLAIMED, not just flagged: the stored SUBSCRIBER view, the return-route
      * refcount pin, the target key, and the whole `subscriber_remote_t` block are
      * released in place (the slot shell stays — §D.2 index stability — and
@@ -1921,6 +1924,12 @@ class vertex_t {
      *         from the RFC-0005 listener bookkeeping).
      */
     std::size_t evict_link_edges(std::string_view link) {
+        // The EMPTY key matches NOTHING (#1056). Every local door leaves both spellings empty,
+        // so without this an empty parameter compared EQUAL to a local edge's admitting link
+        // and reclaimed it — reachable for the `delivery_compact` opt-in, the one local shape
+        // that carries a cold half at all. A non-empty key is unaffected: an empty
+        // `admitted_over` can never equal it, so this only ever short-circuits the no-op case.
+        if (link.empty()) return 0;
         edge_block_t* b = nullptr;
         std::size_t n = 0;
         {

@@ -660,7 +660,14 @@ class graph_t {
      * hold (never across vertices), so concurrent writes/deliveries interleave
      * freely; an in-flight delivery keeps its route alive by refcount clone
      * (ADR-0041 §2). Safe to call for a link that never subscribed (a no-op).
-     * @param link_name This node's NAME for the departed link.
+     *
+     * An EMPTY @p link_name matches nothing and returns 0. This entry point reports a
+     * COUNT and has no error channel, so a nameless link is a no-op rather than a
+     * status: a link with no name never subscribed anything. It is a rule, not a
+     * coincidence of the comparison — a LOCAL admission stores the empty caller
+     * context, so before #1056 an empty key compared equal to every local edge that
+     * carried a cold half (the `delivery_compact` opt-in) and reclaimed it graph-wide.
+     * @param link_name This node's NAME for the departed link; empty ⇒ no-op, 0.
      * @return The number of edges evicted, summed over the graph.
      */
     std::size_t evict_link_edges(std::string_view link_name);
