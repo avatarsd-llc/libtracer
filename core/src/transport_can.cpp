@@ -726,7 +726,9 @@ transport_vertex_t::transport_factory_t can_transport_factory(std::pmr::memory_r
             return std::unexpected(graph::status_t::TYPE_MISMATCH);
         }
         auto link = std::make_unique<socketcan_link_t>(ifname);
-        if (!link->ok()) return std::unexpected(graph::status_t::NOT_FOUND);  // no kernel CAN
+        // The kernel would not open the interface — the link is down, not the address
+        // wrong (#929).
+        if (!link->ok()) return std::unexpected(graph::status_t::TRANSPORT_DOWN);
         return std::make_unique<transport_can>(std::move(link), std::move(cfg));
     };
 }

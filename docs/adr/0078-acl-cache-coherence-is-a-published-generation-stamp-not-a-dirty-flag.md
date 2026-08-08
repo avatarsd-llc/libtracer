@@ -1,6 +1,6 @@
 # ACL-cache coherence is a published-generation stamp, not a dirty flag
 
-Status: **accepted; implemented** (2026-08-06, for [#880](https://github.com/avatarsd-llc/libtracer/issues/880)). `acl_cache_dirty` is gone and validity is derived from the invalidation counter, as decided — but the counter and the published stamp share ONE word rather than two, because two words cost a second load on the gate's fast path and the bench said so; see **Erratum 1** below, which is the shipped encoding. The acceptance instrument is `core/tests/acl_cache_race_test.cpp`: it reddens on the `{gen, dirty}` implementation (30/30 runs, ~4–5 k stale verdicts per run, both signs — fail-open and fail-closed) and greens on the shipped form (40/40 runs), with TSan clean on the same interleaving.
+Status: **accepted; implemented** (2026-08-06, for [#880](https://github.com/avatarsd-llc/libtracer/issues/880)). `acl_cache_dirty` is gone and validity is derived from the invalidation counter, as decided — but the counter and the published stamp share ONE word rather than two, because two words cost a second load on the gate's fast path and the bench said so; see **Erratum 1** below, which is the shipped encoding. The acceptance instrument is `core/tests/acl_cache_race_test.cpp`: it reddens on the `{gen, dirty}` implementation (30/30 runs, ~4–5 k stale verdicts per run, both signs — fail-open and fail-closed) and greens on the shipped form (40/40 runs), with TSan clean on the same interleaving. That redden evidence covers the PREDECESSOR only; **Erratum 2** records what it took to cover the shipped CAS as well.
 
 The per-vertex effective-ACE cache is invalidated **lock-free** from an ancestor `:acl` write (`mark_acl_cache_dirty`, `core/include/libtracer/vertex.hpp:1854-1864`, fanned out by `graph_t::mark_subtree_acl_dirty` under only `shared_lock(map_mutex_)`), while it is rebuilt under the vertex stripe lock. We decide that cache validity is expressed as a single published-generation stamp compared against the invalidation counter — `acl_published_gen == acl_gen` — and **not** as a separate `acl_cache_dirty` boolean that the rebuilder clears. The boolean is removed.
 
@@ -55,3 +55,31 @@ Re-measured with the same instrument, the shipped form is **faster than the pre-
 Two costs are accepted with it. The invalidator's single `fetch_add` becomes a CAS loop — contended only against another invalidator of the same vertex or that vertex's rebuilder, on the control-plane `:acl` write path, never on the gate. And the usable generation space halves to 2^31, since the low bit is no longer a counter bit; the width argument above is unaffected at that order of magnitude.
 
 Rejected alongside it: **packing a 32-bit stamp and a 32-bit counter into one 64-bit atomic**, which would also be a one-load fast path but is not lock-free on the 32-bit MCU targets this core must serve.
+
+## Erratum 2 (2026-08-08, instrument) — the acceptance evidence covered the PREDECESSOR, not the shipped CAS
+
+The decision and the shipped encoding both stand. What was overstated is the coverage the acceptance instrument gave them, and [#1043](https://github.com/avatarsd-llc/libtracer/issues/1043) is where it was caught: a lost-update mutant of the shipped publish —
+
+```cpp
+std::uint32_t expected = gen;                                          // shipped
+if (!e.acl_gen.compare_exchange_strong(expected, gen + 1, ...)) continue;
+
+e.acl_gen.store(gen + 1, std::memory_order_release);                   // mutant
+```
+
+— **survived** `acl_cache_race_test` as it stood: 0 stale verdicts in 39 293 bracketed claims (RelWithDebInfo) and again under the TSan/`hazard_slot_t` CI leg. It is the same defect class the CAS exists to prevent (the concurrent mark is discarded and a merge assembled over pre-write ancestor ACEs is stamped current), so on the mutation-testing reading the load-bearing line of this ADR was unguarded at the observable level. The 30/30 figure above was measured against the `{gen, dirty}` protocol, which is a different implementation with a different window.
+
+**Why it survived is the walk order, not the epoch count.** `graph_t::acl_allows`'s rebuild lambda walks the parent chain from the bearer UPWARD, so the level the writer rewrites decides which side of that read gets the instrument's deliberately expensive filler load:
+
+| rewritten level | read in the walk | the wide interval | which lost update it reaches |
+| --- | --- | --- | --- |
+| `/anc` (**TOP**, as originally shaped) | LAST | after the publish decision — `eff_aces = std::move(merged)` | the predecessor's `dirty = false` clear |
+| the bearer's own parent (**NEAREST**) | FIRST | between the ancestor read and the publish | the shipped publish CAS |
+
+On TOP, the interval a lost mark must land in holds one single-ACE `append_ancestor`, the merge release and an uncontended stripe re-acquire — which is why ~40 k claims never sampled it. Running more epochs was never going to fix that.
+
+Both shapes now run. On NEAREST the same mutant reddens **10/10 RelWithDebInfo runs at 1 089–2 575 stale verdicts each**, and the TSan Debug/`hazard_slot_t` run at **3 420** — both pinned to two cores — and the sign is not fixed: the first stale verdict was fail-OPEN (`expected DENY, got ALLOW`) on the RelWithDebInfo runs and fail-CLOSED on the TSan one. TOP reported 0 stale in every one of those same runs, so neither shape subsumes the other and both are kept.
+
+A racer's exposure is still the host's to grant, so the file also gained a DETERMINISTIC guard on the same line, `test_mark_inside_rebuild_defeats_the_publish`, driving `vertex_t::with_effective_aces` directly. The rebuild is a caller-supplied callable that runs with the stripe lock released, and `mark_acl_cache_dirty` is lock-free and takes no vertex lock, so firing the mark from inside the rebuild reproduces the protocol interleaving exactly — thread identity is not part of the protocol, only the order is. It fails the mutant on every run and on a loaded host, which is the property the racer cannot promise.
+
+The correction this erratum makes to the record is narrow and worth stating plainly: **"the acceptance instrument reddens on the defect" was true of the protocol this ADR replaced, and was read as though it were true of the protocol it shipped.**
