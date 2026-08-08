@@ -90,6 +90,7 @@ add_library(libtracer STATIC
 # for a pure in-process node.
 if(LIBTRACER_NET_PLANE)
     target_sources(libtracer PRIVATE
+        src/fwd_reply.cpp
         src/op_resolve.cpp
         src/op_resolve_view.cpp
         src/route_handle.cpp
