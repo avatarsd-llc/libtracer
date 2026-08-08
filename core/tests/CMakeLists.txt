@@ -905,6 +905,16 @@ target_link_libraries(fwd_readvertise_reuse_test PRIVATE libtracer)
 libtracer_test_warnings(fwd_readvertise_reuse_test)
 add_test(NAME fwd_readvertise_reuse COMMAND fwd_readvertise_reuse_test)
 
+# #833 — a REFUSED forwarding bind strands neither the out-label it took nor the egress route
+# retained with it. Drives the ingress table to its injected bound so the BIND is the step that
+# refuses, then asserts the downstream table returns to its pre-advertise census, the label
+# itself comes back, nothing went on the wire, and the shared entry an established flow rides
+# is left alone.
+add_executable(fwd_bind_refusal_unwind_test fwd_bind_refusal_unwind_test.cpp)
+target_link_libraries(fwd_bind_refusal_unwind_test PRIVATE libtracer)
+libtracer_test_warnings(fwd_bind_refusal_unwind_test)
+add_test(NAME fwd_bind_refusal_unwind COMMAND fwd_bind_refusal_unwind_test)
+
 # RFC-0004 / ADR-0035 slice 4 (#136) — the PRODUCER auto fan-out: a plain graph.write to a
 # vertex with a remote subscriber delivers a full-route FWD{WRITE} (or auto-promoted COMPACT)
 # with no explicit advertise/send. Covers the transient-local latch, the compact byte-delta,
