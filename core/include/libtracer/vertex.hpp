@@ -2484,8 +2484,10 @@ class vertex_t {
      * path reads it lock-free as a FAST PATH only (`graph_t::mark_pending`), and whichever
      * of the two values it observes there, the decision that actually places the vertex in
      * a sweep set is re-taken under the graph's sweep lock. ATOMIC because
-     * `set_delivery_mode` may run concurrently on another thread (#895) — the same doctrine
-     * `own_subs_` / `listeners_above_` / `flags_` already follow in this byte group.
+     * `set_delivery_mode` may run concurrently on another thread (#895) while this read holds
+     * NO lock — which is the whole reason it needs to be atomic, and what distinguishes it
+     * from the other plain members of the same byte group: `registered_` is map-lock state on
+     * both sides (see @ref mark_unregistered), so a plain `bool` is correct there.
      */
     [[nodiscard]] delivery_mode_t delivery_mode() const noexcept {
         return delivery_mode_.load(std::memory_order_relaxed);

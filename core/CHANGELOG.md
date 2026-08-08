@@ -79,8 +79,10 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   re-reads the mode under `sweep_mutex_` before inserting, which makes the two sets mutually
   exclusive by construction; the unlocked read is kept only as the fast path it always was.
   Separately, that unlocked read against `set_delivery_mode`'s store was a **data race** on a
-  plain `delivery_mode_t` byte — UB, and the one member of its four-byte field group that was
-  not atomic while `own_subs_`, `listeners_above_` and `flags_` were. The member is now
+  plain `delivery_mode_t` byte — UB. (An earlier draft called it "the one member of its
+  four-byte field group that was not atomic while `own_subs_`, `listeners_above_` and `flags_`
+  were"; that is wrong twice over — `role_` and `registered_` are also plain members of that
+  group, and `own_subs_` / `listeners_above_` are 4-byte atomics outside it.) The member is now
   `std::atomic<delivery_mode_t>` with relaxed accessors. `vertex_t::delivery_mode()` and
   `vertex_t::set_delivery_mode()` keep their signatures, `sizeof(vertex_t)` is unchanged (the
   atomic is byte-wide, and the `#361` ceilings still hold), and the sweep's delivery semantics
