@@ -46,12 +46,23 @@ inline constexpr std::string_view kUdpServerSuggestedModule = "udp-server";
  * from the first inbound datagram's source address. Supports the owning rope-receiver seam
  * (ADR-0042 §2): each datagram is received straight into a refcounted segment from a
  * host-injected `mem_backend_t`, which also bounds the datagram size a node accepts.
+ *
+ * The ingress bound gains its second half: the universal `:settings max_frame` key
+ * (@ref effective_max_frame), the same key `tcp_transport_t`, the `ws` transports, `quic`
+ * and `webtransport` accept. A datagram longer than the configured cap is refused and
+ * counted in @ref malformed_rx instead of being delivered, and the RX segment is drawn at
+ * the cap rather than at @ref kMaxDatagram. That refusal is unconditional on the
+ * borrowed-span path; on the owning path it holds while the injected backend can furnish
+ * `max_frame + 1` bytes — a backend bounded tighter than the cap truncates the datagram
+ * before the cap is ever consulted (#1074).
  */
 class udp_transport_t : public transport_t, private posix_endpoint_t {
    public:
     /** @brief The largest datagram one frame can occupy — the RX segment size a view
      *         receiver's frames are allocated at (the UDP payload bound, one datagram
-     *         = one frame = one segment, ADR-0042 §2). */
+     *         = one frame = one segment, ADR-0042 §2). It is also the ceiling on
+     *         @ref effective_max_frame — a datagram cannot be larger than this, so a
+     *         configured `max_frame` above it is inert rather than loosening. */
     static constexpr std::size_t kMaxDatagram = 65536;
 
     /**
@@ -71,12 +82,21 @@ class udp_transport_t : public transport_t, private posix_endpoint_t {
      * process heap, unbounded, keeping the full cap). Exhaustion is backpressure — the
      * datagram is dropped and @ref dropped_rx ticks, never an OOM. Must outlive the transport.
      *
+     * @param max_frame The universal `:settings max_frame` receive cap, in bytes — the
+     *        largest datagram this connection accepts (0 → @ref kMaxDatagram). A longer
+     *        datagram is refused: it is never delivered, @ref malformed_rx ticks, and the
+     *        socket stays usable — provided @p backend can furnish `max_frame + 1` bytes,
+     *        since a segment bounded below that truncates the datagram before its length
+     *        can be judged (#1074). It also sizes the RX segment, so a tight cap is a RAM
+     *        lever, not only an admission one. Tighten-only by construction: a datagram
+     *        cannot exceed @ref kMaxDatagram, so a larger configured value is inert.
      * @param recv_stack Recv-thread stack size in bytes, 0 = platform default
      *        (`posix_endpoint_t::start`). Non-zero right-sizes this transport's
      *        recv thread on an MCU instead of raising the global pthread default.
      */
     udp_transport_t(std::uint16_t bind_port, const std::string& peer_host, std::uint16_t peer_port,
-                    mem::mem_backend_t* backend = &mem::heap_backend(), std::size_t recv_stack = 0);
+                    mem::mem_backend_t* backend = &mem::heap_backend(), std::size_t max_frame = 0,
+                    std::size_t recv_stack = 0);
     ~udp_transport_t() override;
 
     udp_transport_t(const udp_transport_t&) = delete;
@@ -100,6 +120,19 @@ class udp_transport_t : public transport_t, private posix_endpoint_t {
         return dropped_rx_.load(std::memory_order_relaxed);
     }
 
+    /** @brief Datagrams refused for exceeding @ref effective_max_frame — the peer's fault,
+     *         not this node's resources (the tcp/ws counter vocabulary: over-cap is
+     *         `malformed_rx`, exhaustion is @ref dropped_rx). UDP is connectionless, so
+     *         nothing is torn down; the next datagram is served normally. */
+    [[nodiscard]] std::uint64_t malformed_rx() const noexcept {
+        return malformed_rx_.load(std::memory_order_relaxed);
+    }
+
+    /** @brief The largest datagram accepted: `min(max_frame, kMaxDatagram)`, with 0 meaning
+     *         @ref kMaxDatagram. The RX *segment* is additionally bounded by the injected
+     *         backend's `max_segment_size()`, which never widens this. */
+    [[nodiscard]] std::size_t effective_max_frame() const noexcept { return max_frame_; }
+
    private:
     void run();  // receive thread
 
@@ -118,7 +151,9 @@ class udp_transport_t : public transport_t, private posix_endpoint_t {
     // RX segment source for view delivery (ADR-0042 §2) + backend-exhaustion
     // drop counter (backpressure, never OOM).
     mem::mem_backend_t* backend_;
+    std::size_t max_frame_ = kMaxDatagram;  // accepted-datagram cap (:settings; 0 => kMaxDatagram)
     std::atomic<std::uint64_t> dropped_rx_{0};
+    std::atomic<std::uint64_t> malformed_rx_{0};
 };
 
 }  // namespace tr::net

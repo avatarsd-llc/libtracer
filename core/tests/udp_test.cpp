@@ -44,6 +44,20 @@ void check(bool ok, std::string_view what) {
     if (!ok) ++g_failures;
 }
 
+/**
+ * @brief Poll until @p pred holds or @p budget expires — every counter these tests read is
+ *        written by the transport's own recv thread.
+ */
+template <typename Pred>
+bool wait_until(Pred pred, std::chrono::milliseconds budget) {
+    const auto deadline = std::chrono::steady_clock::now() + budget;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (pred()) return true;
+        std::this_thread::sleep_for(5ms);
+    }
+    return pred();
+}
+
 std::vector<std::byte> value_tlv(std::initializer_list<std::uint8_t> bytes) {
     std::vector<std::byte> payload;
     for (std::uint8_t b : bytes) payload.push_back(std::byte{b});
@@ -284,6 +298,103 @@ void test_view_pool_exhaustion() {
 }
 
 /**
+ * @brief #926 — the universal `:settings max_frame` key bounds a UDP connection's ingress.
+ *
+ * `max_frame` is parsed centrally into `conn_settings_t` for every kind, and tcp / quic /
+ * webtransport / ws all honor it. `udp` used to have no constructor slot for it at all, so an
+ * operator who set it on a udp connection got no cap and no error. Three things are asserted
+ * here, because a cap that only exists in an accessor is not a cap:
+ *
+ *  - the accessor reports the CONFIGURED value, and a value above `kMaxDatagram` is inert
+ *    (a datagram cannot be larger, so this key can only tighten on this kind);
+ *  - an over-cap datagram is REFUSED on both the owning and the borrowed receive path —
+ *    never delivered, counted in `malformed_rx()`, and the socket still serves the next one;
+ *  - the RX segment is drawn at the cap, not at `kMaxDatagram` — so a tight cap is a RAM
+ *    lever on a bounded node, not only an admission rule.
+ */
+void test_settings_max_frame() {
+    std::printf("UDP transport — a :settings max_frame bounds the accepted datagram (#926):\n");
+    constexpr std::size_t kCap = 1024;
+    constexpr std::size_t kMax = tr::net::udp_transport_t::kMaxDatagram;
+
+    // ----- the accessor: the honored cap is the configured one, and it only tightens. -----
+    {
+        const tr::net::udp_transport_t plain(0, "127.0.0.1", 1);
+        check(plain.effective_max_frame() == kMax, "unset max_frame keeps the kMaxDatagram cap");
+        const tr::net::udp_transport_t tight(0, "127.0.0.1", 1, &tr::mem::heap_backend(), kCap);
+        check(tight.effective_max_frame() == kCap, "a configured max_frame IS the honored cap");
+        const tr::net::udp_transport_t wide(0, "127.0.0.1", 1, &tr::mem::heap_backend(), 8 * kMax);
+        check(wide.effective_max_frame() == kMax,
+              "a max_frame above the datagram ceiling is inert (it cannot raise the bound)");
+    }
+
+    // ----- the owning path: over-cap refused, under-cap delivered, segment sized to the cap. --
+    std::mutex m;
+    std::vector<std::size_t> lens;      // delivered frame lengths
+    std::vector<std::size_t> seg_lens;  // and the segment each was received into
+    auto rope_rx = [&](tr::view::rope_t f) {
+        const tr::view::view_t v = f.only();
+        const std::lock_guard lock(m);
+        lens.push_back(v.bytes().size());
+        seg_lens.push_back(v.owner ? v.owner->bytes.size() : 0);
+    };
+    tr::net::udp_transport_t a(47114, "127.0.0.1", 47115);
+    tr::net::udp_transport_t b(47115, "127.0.0.1", 47114, &tr::mem::heap_backend(), kCap);
+    check(a.ok() && b.ok(), "both UDP sockets bound");
+    b.set_rope_receiver(rope_rx);
+
+    const std::uint64_t before = b.malformed_rx();
+    const std::vector<std::byte> just_over(kCap + 1, std::byte{0xAA});
+    a.send(std::span<const std::byte>(just_over));
+    check(wait_until([&] { return b.malformed_rx() > before; }, 3s),
+          "a datagram ONE BYTE over the cap is refused and counted (owning path)");
+    const std::vector<std::byte> far_over(16u * 1024u, std::byte{0xBB});
+    a.send(std::span<const std::byte>(far_over));
+    check(wait_until([&] { return b.malformed_rx() > before + 1; }, 3s),
+          "and so is a 16 KiB one (it is not merely truncated to the cap)");
+    {
+        const std::lock_guard lock(m);
+        check(lens.empty(), "nothing over the cap reached the receiver");
+    }
+    check(b.dropped_rx() == 0, "a refusal is NOT counted as backend backpressure");
+
+    const std::vector<std::byte> under(64, std::byte{0xCC});
+    a.send(std::span<const std::byte>(under));
+    bool landed = false;
+    check(wait_until(
+              [&] {
+                  const std::lock_guard lock(m);
+                  landed = !lens.empty();
+                  return landed;
+              },
+              3s),
+          "an under-cap datagram still lands — the socket survived the refusals");
+    if (landed) {
+        const std::lock_guard lock(m);
+        check(lens.front() == 64, "and arrives whole");
+        check(seg_lens.front() < kMax && seg_lens.front() <= kCap + 1,
+              "the RX segment was drawn at the configured cap, not at kMaxDatagram");
+    }
+
+    // ----- the borrowed path: no segment is involved, and the cap still holds. -----
+    std::atomic<int> spans{0};
+    auto span_rx = [&spans](std::span<const std::byte>) { spans.fetch_add(1); };
+    tr::net::udp_transport_t c(47116, "127.0.0.1", 47117);
+    tr::net::udp_transport_t d(47117, "127.0.0.1", 47116, &tr::mem::heap_backend(), kCap);
+    check(c.ok() && d.ok(), "the borrowed-path socket pair bound");
+    d.set_receiver(span_rx);
+
+    const std::uint64_t span_before = d.malformed_rx();
+    c.send(std::span<const std::byte>(far_over));
+    check(wait_until([&] { return d.malformed_rx() > span_before; }, 3s),
+          "an over-cap datagram is refused on the borrowed path too");
+    check(spans.load() == 0, "and nothing was handed to the span receiver");
+    c.send(std::span<const std::byte>(under));
+    check(wait_until([&] { return spans.load() > 0; }, 3s),
+          "an under-cap datagram still reaches the span receiver");
+}
+
+/**
  * @brief ADR-0042 end to end: two nodes over real UDP with owning view delivery and an RFC-0022
  *        §3.D ratio that clears the pin predicate — the WRITE lands ZERO-copy (the graph's stored
  *        segment IS the RX frame segment, proven by pointer identity through graph read).
@@ -357,6 +468,7 @@ int main() {
     test_scatter_gather();
     test_view_delivery();
     test_view_pool_exhaustion();
+    test_settings_max_frame();
     test_two_nodes_zero_copy_store();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");

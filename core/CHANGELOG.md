@@ -51,6 +51,23 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `dispatch_edge_target`: 0x19f → 0x2df, and the `call rope_t::try_reserve` is gone). Callers
   that actually reserve now pay one extra `call` on the arm that allocates.
 
+- **`net::udp_transport_t` honours the universal `:settings max_frame` key (#926).** The
+  constructor takes a new `max_frame` parameter **between `backend` and `recv_stack`** — a
+  source-breaking change for any caller that passed `recv_stack` positionally as the fifth
+  argument (in this tree, `bench/bench_conn_ram.cpp` was the only one). `0` keeps the
+  previous behaviour exactly. A non-zero value is the largest datagram the connection
+  accepts: a longer one is never delivered, the new `malformed_rx()` counter ticks, and the
+  socket serves the next datagram normally — so long as the injected backend can furnish
+  `max_frame + 1` bytes, since a segment bounded below that truncates the datagram before
+  its length can be judged (#1074); the RX segment is drawn at the cap instead of at
+  `kMaxDatagram`, so a tight cap is a RAM lever as well as an admission rule. Two new
+  accessors, `malformed_rx()` and `effective_max_frame()`, mirror the names `tcp_transport_t`
+  and the `ws` transports already carry. The `udp` factory threads `conn_settings_t::max_frame`
+  into both the DIAL and the LISTEN shape, so the key now reaches the socket from a plain
+  `/net:children[]` SPEC write — before this it was parsed, readable back from `:settings`,
+  and ignored. Unlike the four framed kinds (see #1035), the key can only *tighten* here: a
+  UDP payload cannot exceed `kMaxDatagram`, so a larger configured value is inert.
+
 - **`view::rope_t::concat` no longer reserves on the cross-rope path — the self-concat
   guards are charged to the aliasing case alone (#1022).** The `r.concat(r)` safety added in
   #971 (an up-front `try_reserve` plus an indexed re-read of the source each step) was paid
