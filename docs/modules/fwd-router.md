@@ -182,8 +182,8 @@ class child_registry_t {                 // the one NAME -> link demux table (AD
 }  // namespace tr::net
 ```
 
-Signature source: `core/include/libtracer/fwd_router.hpp:176` (constructor), `:245`
-(`add_child`), `:301` (`subscribe_toward`), `:397-409` (the sink function-pointer types);
+Signature source: `core/include/libtracer/fwd_router.hpp:177` (constructor), `:246`
+(`add_child`), `:302` (`subscribe_toward`), `:404-416` (the sink function-pointer types);
 `core/include/libtracer/child_registry.hpp:209` (`add`), `:458` (`resolve_peer`), `:473`
 (`erase`), `:499` (`entry_by_name`), `:520` (`by_name`), `:561`/`:571` (`size`/`live_size`).
 
@@ -212,15 +212,15 @@ flowchart TB
   address size grows with hop count, which is what `ADVERTISE`/`COMPACT` route handles exist to
   amortise on a steady flow.
 - **A reply is delivered as a rope, never flattened by the router**
-  (`core/include/libtracer/fwd_router.hpp:411-420`). A sink that wants contiguous bytes holds
+  (`core/include/libtracer/fwd_router.hpp:418-427`). A sink that wants contiguous bytes holds
   `const view_t m = reply.materialize()` and reads `m.bytes()`; a **single-link reply — the common
   case — is returned zero-copy, no allocation and no copy**, and only a multi-link reply pays one
   flatten, on demand. The escape hatch sits at the consumer, so the router never pays for a
   consumer that did not need contiguity. `m` must stay alive while its span is read.
 - **The default delivery leg copies nothing.** A full-route `FWD{WRITE}` fan-out scatter-gathers a
   fresh stack head, the stored return-route bytes, an empty `src`, and one span per link of the
-  stored value (`core/src/fwd_router.cpp:1809`). The `COMPACT` leg is the one that flattens,
-  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:1772`) — single-link, that
+  stored value (`core/src/fwd_router.cpp:1817`). The `COMPACT` leg is the one that flattens,
+  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:1780`) — single-link, that
   flatten is a zero-copy adopt, and multi-link it draws from the router's injected `flat` backend
   (#730), not the global heap.
 - **All rope flattens on the forward AND terminus paths draw from the injected seam.** `flat`
@@ -251,7 +251,7 @@ flowchart TB
   instead of raising an exception that `-fno-exceptions` would turn into `abort()`. A dropped fresh
   `ADVERTISE` self-heals through the peer's `HANDLE_NACK`. The residual is the label store: a
   **compact-flagged** flow's first delivery on a link resolves its label *before* those three steps
-  (`fwd_router.cpp:1774`), and that allocates its `link_tables_t` and its egress entry from the
+  (`fwd_router.cpp:1782`), and that allocates its `link_tables_t` and its egress entry from the
   `std::pmr::memory_resource` (`route_handle.cpp:34-42`, `:236-237`), which reports exhaustion by
   throwing — so that one leg can still abort under `-fno-exceptions`
   ([#603](https://github.com/avatarsd-llc/libtracer/issues/603)). A flow that is not
@@ -315,7 +315,7 @@ adopt; `/net` itself is likewise only the recommended root convention (a constru
 **Creation is all-or-nothing.** A connection is built in three steps — register the identity
 vertex, insert the `conns_` entry, wire the link into the router's `child_registry_t` — and only
 the last can be refused: `add_child` answers `false` when the registry cannot grow, and it is the
-only place that can say so (`core/include/libtracer/fwd_router.hpp:245`,
+only place that can say so (`core/include/libtracer/fwd_router.hpp:246`,
 `core/include/libtracer/child_registry.hpp:209`). A refusal unwinds the first two in reverse —
 retire the vertex, then erase the entry, which destroys the config-constructed socket — publishes
 no liveness, and answers `BACKPRESSURE` (`core/src/transport_vertex.cpp:347-350`). Discarding that
@@ -432,6 +432,22 @@ tested against hand-built frames with no live transport.
   is templated over a cursor concept and yields **offsets, never spans**, so the
   same logic serves a contiguous frame and a link-walking rope and the caller
   re-slices from its own cursor.
+- **`sink_slot_t`** holds each of the router's five observability/terminus sinks —
+  reply, inbound-FWD, raw-frame, compact-delivery, stale-label. A sink is a
+  `{function pointer, context}` pair set from a control thread and read on every
+  transport receive thread, so the two halves have to be published as a unit: a
+  torn read hands a newly installed function the previous sink's context, and
+  every sink casts that context. The slot is three words — a generation counter
+  and the pair — published through the counter and read with plain atomic loads,
+  so the frame path takes no lock and never spins: a reader that lands inside a
+  publish reports *no sink* for that frame rather than waiting. An unset slot
+  therefore costs one load, which is what the plain member it replaced cost, and
+  the router serializes the five setters against each other with one mutex no
+  reader ever takes. It is the observer-shaped sibling of the transport plane's
+  `receiver_slot_t`, which owns the same discipline plus the delivery-tier select
+  ([transport](transport.md)) — and the size matters: a first cut that carried a
+  `std::mutex` per slot put the two sinks the FWD path reads on separate cache
+  lines and `bench_forward_demux` charged ~2% for it at 64 registered links.
 - **The grammar** (`tr::wire::grammar`) is the shared TLV header/trailer core
   underneath all of that; it is documented with the codec on
   [frame-codec](frame-codec.md).
@@ -444,6 +460,11 @@ tested against hand-built frames with no live transport.
 ```
 
 ```{doxygenclass} tr::net::child_registry_t
+:project: libtracer
+:members:
+```
+
+```{doxygenclass} tr::net::sink_slot_t
 :project: libtracer
 :members:
 ```

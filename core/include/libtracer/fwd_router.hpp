@@ -51,6 +51,7 @@
 #include "libtracer/op_resolve.hpp"
 #include "libtracer/path_ref.hpp"
 #include "libtracer/route_handle.hpp"
+#include "libtracer/sink_slot.hpp"
 #include "libtracer/transport.hpp"
 
 namespace tr::net {
@@ -392,7 +393,13 @@ class fwd_router_t {
     // Not std::function: these fire on the per-frame RX path, where the erasure
     // machinery (code size, heap capability, exception paths) is the largest avoidable
     // embedded liability — the same call graph_t::subscriber_fn_t already makes at L4.
-    // Configure before frames flow; passing nullptr clears a sink.
+    //
+    // Each pair lives in a `sink_slot_t` (#914), so a setter may run while frames flow:
+    // the pair is published as a unit and every frame-path read snapshots it, which is
+    // what makes "passing nullptr clears a sink" safe at runtime rather than a race.
+    // What a clear does NOT do is stop a dispatch already in flight — a receive thread
+    // may be inside the sink, or hold a snapshot taken a moment before — so the ctx must
+    // still outlive every possible dispatch, as it must for `receiver_slot_t`.
 
     /** @brief Reply-terminus sink (@ref on_reply): @p ctx, then the FWD{REPLY} frame. */
     using reply_fn_t = void (*)(void* ctx, const view::rope_t& reply);
@@ -974,16 +981,36 @@ class fwd_router_t {
      * is held: `transport_vertex_t::ctl_m_` → this → `graph_t::map_mutex_` → the vertex stripe.
      */
     mutable std::mutex ctl_m_;
-    reply_fn_t reply_cb_ = nullptr;               /**< @brief Reply-terminus sink. */
-    void* reply_ctx_ = nullptr;                   /**< @brief Its opaque context. */
-    inbound_fn_t inbound_cb_ = nullptr;           /**< @brief Inbound-FWD observer. */
-    void* inbound_ctx_ = nullptr;                 /**< @brief Its opaque context. */
-    raw_fn_t raw_cb_ = nullptr;                   /**< @brief Raw-frame observer. */
-    void* raw_ctx_ = nullptr;                     /**< @brief Its opaque context. */
-    compact_delivery_fn_t delivery_cb_ = nullptr; /**< @brief Local COMPACT delivery sink. */
-    void* delivery_ctx_ = nullptr;                /**< @brief Its opaque context. */
-    stale_label_fn_t stale_cb_ = nullptr;         /**< @brief Stale-label observer. */
-    void* stale_ctx_ = nullptr;                   /**< @brief Its opaque context. */
+    /**
+     * @brief Serializes the five sink SETTERS — never taken by a reader (#914).
+     *
+     * A `sink_slot_t` publishes its pair for racing readers but does not serialize two
+     * concurrent publishes; one mutex here does that for all five, which is what keeps a
+     * slot three words wide. Deliberately NOT `ctl_m_`: that one is held across socket
+     * construction for milliseconds, and installing an observer has no business waiting
+     * on a connect. The frame path takes neither.
+     */
+    mutable std::mutex sink_m_;
+    /**
+     * @brief The five observer/terminus sinks, each a `sink_slot_t` (#914).
+     *
+     * They were ten plain members — `fn` and `ctx` stored separately by a setter that
+     * takes no lock, read with check-then-call on every transport receive thread. That
+     * is a data race by the C++ memory model, and the documented runtime clear
+     * ("passing nullptr clears a sink") was its worst case: a torn read hands a new
+     * `fn` the previous `ctx`. Every frame-path read is now one `get()` snapshot and
+     * the dispatch runs off that snapshot, so no read of a sink can straddle a `set`.
+     *
+     * Ordered so that the two the FWD span path reads on EVERY frame — `inbound_` and
+     * `raw_` — are adjacent: three words per slot puts their hot words within one cache
+     * line, which a 64-byte (per-slot-mutex) first cut did not, and `bench_forward_demux`
+     * charged ~2% for at 64 registered links.
+     */
+    sink_slot_t<reply_fn_t> reply_;               /**< @brief Reply-terminus sink. */
+    sink_slot_t<inbound_fn_t> inbound_;           /**< @brief Inbound-FWD observer. */
+    sink_slot_t<raw_fn_t> raw_;                   /**< @brief Raw-frame observer. */
+    sink_slot_t<compact_delivery_fn_t> delivery_; /**< @brief Local COMPACT delivery sink. */
+    sink_slot_t<stale_label_fn_t> stale_;         /**< @brief Stale-label observer. */
 };
 
 }  // namespace tr::net

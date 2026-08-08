@@ -535,6 +535,14 @@ target_link_libraries(registry_rebind_race_test PRIVATE libtracer)
 libtracer_test_warnings(registry_rebind_race_test)
 add_test(NAME registry_rebind_race COMMAND registry_rebind_race_test)
 
+# #914 — the router's five sink pairs are published as a unit: a setter racing the frame
+# path can no longer hand a new `fn` the previous sink's `ctx` (TSan vehicle + a functional
+# wrong-context detector on every build).
+add_executable(fwd_sink_race_test fwd_sink_race_test.cpp)
+target_link_libraries(fwd_sink_race_test PRIVATE libtracer Threads::Threads)
+libtracer_test_warnings(fwd_sink_race_test)
+add_test(NAME fwd_sink_race COMMAND fwd_sink_race_test)
+
 # #419 — the two-mount route: one dst crossing TWO net/<module>/<name> mounts, driven
 # through three in-process routers chained by loopback link pairs. The behavioural binding
 # for the fwd/fwd-routed-two-mount conformance vector (HARNESS.md: a vector gates the codec
