@@ -26,7 +26,7 @@ write.
 The slot is not free of serializing instructions. `std::atomic<std::shared_ptr<T>>` is
 not lock-free on libstdc++, so both load and store take its internal pointer-lock bit —
 "lock-free by contract, spin-locked in practice" (`sp_atomic_slot_t`,
-`core/include/libtracer/lkv_slot.hpp:99-104`). The claim the code supports is the mutex
+`core/include/libtracer/lkv_slot.hpp:100-105`). The claim the code supports is the mutex
 one, not an absence of contention; the cost of that spin and the policy that replaces it
 on a host are in [design/concurrency](../design/concurrency/README.md).
 
@@ -36,7 +36,7 @@ subscribing *is* writing a `SUBSCRIBER` TLV into `:subscribers[]`. On each write
 dispatcher clones the value to every subscriber's target vertex and in-process callback.
 A delivery **terminates at its target** — store and notify, never a re-dispatch to the
 target's own `:subscribers[]` — so a dispatch-level cycle cannot form and there is no
-depth cap to tune (`core/include/libtracer/graph.hpp:82-87`;
+depth cap to tune (`core/include/libtracer/graph.hpp:84-89`;
 [ADR-0051 — delivery terminates at target, no dispatch limits](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0051-delivery-terminates-at-target-no-dispatch-limits.md),
 [RFC-0007 — delivery terminates at target](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0007-delivery-terminates-at-target.md)).
 Propagation past a target is exclusively the target's own logic — a controller
@@ -142,8 +142,8 @@ Subscription edges are never destroyed while the graph lives. `unsubscribe` only
 **deactivates** the slot; an in-flight delivery has already snapshotted the edge and
 completes. The caller-owned `ctx` (or, for the templated overload, the callable itself)
 must therefore stay alive past any delivery that may still be running, not merely past
-the `unsubscribe` call (`core/include/libtracer/graph.hpp:969-970`, `:989` for the
-callable-by-address form, `:1002`).
+the `unsubscribe` call (`core/include/libtracer/graph.hpp:980-981`, `:1000` for the
+callable-by-address form, `:1013`).
 ```
 
 ```{admonition} No strings on the hot path
@@ -193,8 +193,8 @@ for (...) g.write(v, p.field(), setpoint_tlv);           // hot loop — zero st
 ## What a read hands back
 
 `read` and `await` return `result_t<value_ref_t>`, not `result_t<rope_t>`
-(`core/include/libtracer/graph.hpp:759,846` by handle, `:1181,1187` by path;
-`value_ref_t` at `core/include/libtracer/vertex.hpp:147`). A `value_ref_t` is an **owning
+(`core/include/libtracer/graph.hpp:770,857` by handle, `:1203,1209` by path;
+`value_ref_t` at `core/include/libtracer/vertex.hpp:170`). A `value_ref_t` is an **owning
 reference** to the value the vertex published: the LKV slot holds it as a
 `std::shared_ptr<const rope_t>`, so handing that reference back costs a refcount clone of
 one control block instead of one `segment_ptr_t` clone per link.
@@ -299,11 +299,18 @@ remote-delivery sink, which is a `tr::net` concern. See
 
 ## Status codes
 
-`status_t` (`core/include/libtracer/status.hpp:24-33`) is the error side of every
+`status_t` (`core/include/libtracer/status.hpp:25-44`) is the error side of every
 `result_t`. When the operation arrived over the wire, the FWD resolver maps it to the
 registered `tr::` error code the `kind=ERROR` reply carries (`error_code(status_t)`,
-`core/src/op_resolve_walk.hpp:76-95` — a private header under `src/`, not part of the
+`core/src/op_resolve_walk.hpp:76-117` — a private header under `src/`, not part of the
 public API).
+
+The table below is a **total** map, and the compiler keeps it that way: `error_code` is a
+`switch` with no `default:` label and no fall-through tail, compiled under `-Werror=switch`,
+so a `status_t` gained without a row here is a red build rather than a status that goes out
+under some other member's wire code. It reads as a formality only until you notice that the
+two enums are deliberately separate registries — `status_t` is L4 vocabulary, `err_t` is the
+wire's — which is what makes the mapping hand-written and therefore losable.
 
 | `status_t` | Wire error | What produces it |
 | --- | --- | --- |
@@ -315,9 +322,19 @@ public API).
 | `TIMEOUT` | `FLOW_TIMEOUT` | an `await` deadline expired |
 | `SCHEMA_NOT_FOUND` | `SCHEMA_NOT_FOUND` | a field read or write on a vertex that exposes no such field — an undeclared app field, `:identity` on a node with no key installed, a `:children[]` `SPEC` whose `type` is unregistered |
 | `PATH_IN_USE` | `PATH_IN_USE` | `try_register_vertex` collided with a live vertex at that address |
+| `TRANSPORT_DOWN` | `TRANSPORT_DOWN` | a transport-construction failure: a dial refused, a TLS/WebTransport handshake rejected, a listener that could not bind, a CAN interface the kernel would not open |
 
 `BACKPRESSURE` is the allocation-failure and flow-control answer. It is not a
 dispatch-depth signal: no depth cap exists.
+
+`TRANSPORT_DOWN` is the only member of this table whose point is the **disposition**, not
+the name. Its wire code is TRANSIENT in the registry — *retry may succeed* — while every
+other row here is PERMANENT or (for `BACKPRESSURE` / `TIMEOUT`) transient for a reason the
+caller can already see. Until #929 the built-in transport factories spent `NOT_FOUND` on a
+link that did not come up, so a refused connect went out as `tr::path::not_found` and a
+peer reading the disposition off the code stopped retrying a link that would have come
+back. Nothing before #929 could reach `err_t::TRANSPORT_DOWN` from this side: the map was
+total over a `status_t` that had no member for it.
 
 ## Setup-time seams
 
@@ -353,15 +370,21 @@ record of it:
 
 ```cpp
 struct delivery_drops_t {
-    std::uint64_t no_target;      // the target PATH resolved to no live vertex
-    std::uint64_t denied;         // the target's :acl denied WRITE to the edge's stored caller
-    std::uint64_t out_of_memory;  // the nothrow delivery clone could not be allocated
+    std::uint64_t no_target;          // the target PATH resolved to no live vertex
+    std::uint64_t denied;             // the target's :acl denied WRITE to the edge's stored caller
+    std::uint64_t out_of_memory;      // a nothrow delivery clone / edge-view copy could not allocate
+    std::uint64_t fan_out_truncated;  // a wide fan-out's snapshot could not be widened past the
+                                      // inline prefix — the capacity degrade, kept apart from OOM
 };
 ```
 
+The unit is a **delivery, not an event**: a write whose notify clone fails sheds every
+subscriber of the vertex, and a truncated snapshot sheds every edge past the inline prefix, so
+each counts once per shed delivery (`1` never stands in for `N`).
+
 Counted, never enforced: nothing in the library reads them, so a deployment chooses
 whether to alarm. They are relaxed monotonic and incremented only **on** a drop, so the
-delivering path pays nothing when nothing is dropped. The three loads are individually
+delivering path pays nothing when nothing is dropped. The loads are individually
 relaxed rather than one atomic snapshot — making them coherent would put a lock on the
 delivery path to serve a diagnostic, and the useful reading of a monotonic counter is "is
 this growing", not an instant.

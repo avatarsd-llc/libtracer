@@ -21,6 +21,21 @@ token `EVERYONE@` matches any resolved subject. The rights are bits in
 nothing, and the `kAceInherit` flag, which is what makes it visible to
 descendants.
 
+`EVERYONE@` is **reserved**, and the core enforces the reservation rather than
+describing it ([#908](https://github.com/avatarsd-llc/libtracer/issues/908)). The
+wire has one spelling for a subject token — the `acl/acl-aces` vector sends
+`peer-a` and `EVERYONE@` as the same opaque VALUE — so a deployment whose
+resolver passes a caller-supplied identity through (a username, a certificate
+CN, a peer name) could otherwise mint a principal that *is* the wildcard, and an
+entry meant for that one principal would grant everyone. A subject token equal
+to `kEveryoneSubject` therefore matches nothing in either policy, and
+`graph_t::acl_allows` refuses such a caller outright — at every gate, on a
+guarded vertex and on a bare one, the same fail-closed arm the resolver's own
+error return takes. `is_reserved_subject` is public so a resolver can refuse it
+at its own door too. `OWNER@`, the other special subject ADR-0020 names, is *not*
+reserved here: no evaluator special-cases it today, so it is an ordinary opaque
+token until one does.
+
 Evaluation is split in two on purpose:
 
 - **The graph owns the walk.** It collects the vertex's own entries in stored
@@ -56,6 +71,23 @@ Parse-time validation is policy-gated: under the ALLOW-only profile a `DENY`
 entry or an unrecognized flag is rejected with `TYPE_MISMATCH` at write time, so
 stored entries never carry a semantic the running policy cannot evaluate.
 
+**Parsing an ACL is strict, and that is a security property, not fussiness**
+([#906](https://github.com/avatarsd-llc/libtracer/issues/906)). A lenient read of
+an access-control document does not lose a field — it changes what the document
+grants. A `type` sent as a big-endian `u16` `0x0001` (DENY) has `0x00` in its low
+byte, so a width-tolerant load turned a refusal into a grant; a dropped
+`expires_ns` turned a time-limited grant permanent; an ignored unknown key
+dropped whatever restriction a newer writer meant to add. So `parse_acl` rejects
+a numeric field whose payload is empty or **wider** than the field, a known key
+whose value TLV is the wrong type, an unknown key, a repeated key, and a body
+whose `(NAME key, value)` pairing does not hold. A payload *narrower* than the
+field is fine: little-endian zero-extension names the same integer, which is why
+the `acl/acl-aces` conformance vector's two-byte `access_mask` keeps parsing.
+
+The walk is pair-consuming, the same mechanics `net::config_reader_t` uses — and
+the exact opposite ruling on unknown keys, deliberately. Config is where a newer
+peer legitimately sends more than the receiver understands; an ACL is not.
+
 ## Pitfalls
 
 - **`NO_MATCH` is not `DENY`.** A policy that collapses the two takes the
@@ -70,6 +102,10 @@ stored entries never carry a semantic the running policy cannot evaluate.
 - **The subject token is opaque.** Comparing it is a byte comparison; the
   protocol never parses it, so an implementation that reads structure into it has
   invented a private extension.
+- **A resolver may not return `EVERYONE@`.** It is the one string carved out of
+  the otherwise opaque token space, and a resolver that hands it back names no
+  principal — the core refuses that caller instead of letting an identity
+  impersonate the wildcard.
 
 ## API reference
 
@@ -87,6 +123,14 @@ stored entries never carry a semantic the running policy cannot evaluate.
 ```
 
 ```{doxygenvariable} tr::graph::kAceInherit
+:project: libtracer
+```
+
+```{doxygenvariable} tr::graph::kEveryoneSubject
+:project: libtracer
+```
+
+```{doxygenfunction} tr::graph::is_reserved_subject
 :project: libtracer
 ```
 

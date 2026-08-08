@@ -14,6 +14,7 @@
 #include "libtracer/byteorder.hpp"
 #include "libtracer/crc.hpp"
 #include "libtracer/grammar.hpp"
+#include "libtracer/path_ref.hpp"
 #include "libtracer/tlv_emit.hpp"
 
 namespace tr::wire {
@@ -123,10 +124,33 @@ std::expected<tlv_t, err_t> decode(std::span<const std::byte> input) {
 }
 
 std::vector<std::byte> encode(const tlv_t& tlv) {
+    // Symmetry with decode (#886). `path_ref_body_valid` is the ONE home of the grammar's only
+    // per-type structural rule (RFC-0024 §4.2/§4.3) and `grammar::parse_header` has always
+    // consulted it; this door did not, so a caller-built PATH_REF with `opt.pl`, `opt.ll`, or a
+    // body that is not a whole number of 8-byte elements serialized to bytes this very library
+    // answers with `tr::frame::invalid`. The guarded emitters (`emit_path_ref`) satisfy the rule
+    // by construction — they take a typed element array — which left `encode` as the door a
+    // CALLER-BUILT tlv_t reaches. It is not the last unguarded write of the 0x14 type byte:
+    // `wire::emit_tlv` is public and generic, so `emit_tlv(out, type_t::PATH_REF, opt_t{.pl=true},
+    // body)` still mints a self-rejected frame. No in-tree caller does, and `emit_header`'s own
+    // doc makes shape the caller's problem, so that is a documented raw seam rather than a hole
+    // — but it is a seam, not an absence. A PATH_REF body is never structured, so `payload`
+    // IS the body length here: an `opt.pl` PATH_REF fails the PL clause before the children
+    // branch below ever runs. Refusing costs one predicted-not-taken compare per TLV.
+    if (tlv.type == type_t::PATH_REF &&
+        !path_ref_body_valid(tlv.opt.pl, tlv.opt.ll, tlv.payload.size())) {
+        return {};
+    }
+
     std::vector<std::byte> body;
     if (tlv.opt.pl) {
         for (const tlv_t& child : tlv.children) {
             const std::vector<std::byte> cb = encode(child);
+            // A refused child refuses the parent. Dropping it instead would emit a frame that
+            // DOES decode, one component short — a silent truncation, worse than emitting
+            // nothing. An accepted TLV is never empty (`emit_tlv` always writes its 4-byte
+            // header), so an empty result is an unambiguous refusal, never a legal encoding.
+            if (cb.empty()) return {};
             body.insert(body.end(), cb.begin(), cb.end());
         }
     } else {
@@ -134,10 +158,13 @@ std::vector<std::byte> encode(const tlv_t& tlv) {
     }
 
     std::vector<std::byte> out;
-    // The header byte layout has one home now (ADR-0048 §3) — emit_header respects
-    // tlv.opt.ll verbatim, byte-identical to the hand-rolled push it replaces.
-    wire::emit_header(out, tlv.type, tlv.opt, body.size());
-    out.insert(out.end(), body.begin(), body.end());
+    // The header byte layout has one home (ADR-0048 §3) and now so does the LENGTH-WIDTH
+    // POLICY (#924): emit_tlv widens to the u32 LL form when the body exceeds 0xFFFF, so a
+    // tlv_t built programmatically with a default opt (ll = false) over an oversize body can
+    // no longer serialize a length silently truncated to `size & 0xFFFF`. A body at or under
+    // 0xFFFF — and a tlv_t that already carries opt.ll — emits byte-identical bytes; the widen
+    // costs one predicted-not-taken compare per TLV and allocates nothing.
+    wire::emit_tlv(out, tlv.type, tlv.opt, body);
 
     std::vector<std::byte> ts_bytes;
     if (tlv.opt.ts) {

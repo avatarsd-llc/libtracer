@@ -17,6 +17,10 @@
  * A second test wires a transport_ws_client into a transport_ws_server and
  * asserts a full round trip (client.send → server receiver, server.send → client
  * receiver) — the real integration test for the dial-out (client) half (#54).
+ *
+ * The last group inverts the roles: a raw socket acts as a HOSTILE SERVER and our
+ * transport_ws_client dials it, which is the only way to reach the client's own control-frame
+ * reply and teardown paths over a socket (#1010).
  */
 
 #include <arpa/inet.h>
@@ -39,6 +43,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "libtracer/path.hpp"
@@ -85,10 +90,17 @@ void write_str(int fd, std::string_view s) {
     }
 }
 
+/**
+ * @brief Write every byte of @p b to @p fd.
+ *
+ * `MSG_NOSIGNAL` is load-bearing here, not hygiene: the §5.5 client vectors below make the
+ * transport under test FAIL the connection mid-write, so the peer really does vanish under
+ * this loop, and the default `send` would take the process down with SIGPIPE.
+ */
 void write_bytes(int fd, std::span<const std::byte> b) {
     std::size_t off = 0;
     while (off < b.size()) {
-        const ssize_t n = ::send(fd, b.data() + off, b.size() - off, 0);
+        const ssize_t n = ::send(fd, b.data() + off, b.size() - off, MSG_NOSIGNAL);
         if (n <= 0) return;
         off += static_cast<std::size_t>(n);
     }
@@ -98,10 +110,14 @@ void write_bytes(int fd, std::span<const std::byte> b) {
  * @brief Read up to `cap` bytes with a per-read poll timeout; stops when `done(buf)` is true or the
  *        deadline passes.
  *
- * Keeps the test deterministic.
+ * Keeps the test deterministic. @p closed (when given) reports that the PEER went away
+ * during the window — an orderly FIN (`recv` == 0) or a reset (`recv` < 0), which are the
+ * two shapes a `teardown_peer` on the other end can take depending on whether bytes were
+ * still queued for it. A budget that simply expires leaves it untouched.
  */
 template <typename Done>
-std::vector<std::byte> read_until(int fd, Done done, std::chrono::milliseconds budget) {
+std::vector<std::byte> read_until(int fd, Done done, std::chrono::milliseconds budget,
+                                  bool* closed = nullptr) {
     std::vector<std::byte> buf;
     std::array<std::byte, 1024> chunk;
     const auto deadline = std::chrono::steady_clock::now() + budget;
@@ -109,7 +125,10 @@ std::vector<std::byte> read_until(int fd, Done done, std::chrono::milliseconds b
         pollfd pfd{.fd = fd, .events = POLLIN, .revents = 0};
         if (::poll(&pfd, 1, 50) <= 0) continue;
         const ssize_t n = ::recv(fd, chunk.data(), chunk.size(), 0);
-        if (n <= 0) break;
+        if (n <= 0) {
+            if (closed != nullptr) *closed = true;
+            break;
+        }
         buf.insert(buf.end(), chunk.data(), chunk.data() + n);
     }
     return buf;
@@ -599,7 +618,8 @@ void test_multi_peer_bus() {
     frame_sink_t a_sink;
     frame_sink_t b_sink;
 
-    tr::net::transport_ws_server server(0, /*max_peers=*/0, /*peer_named=*/true);
+    tr::net::transport_ws_server server(0, &tr::mem::heap_backend(), /*max_frame=*/0,
+                                        /*max_peers=*/0, /*peer_named=*/true);
     check(server.ok(), "listen socket bound");
     const std::uint16_t port = server.local_port();
     check(server.bus() != nullptr, "peer_named server exposes the bus_link_t facet (ADR-0044)");
@@ -705,7 +725,8 @@ void test_multi_peer_bus() {
 void test_max_peers_cap() {
     std::printf("transport_ws server — max_peers admission cap (#362):\n");
 
-    tr::net::transport_ws_server server(0, /*max_peers=*/1);
+    tr::net::transport_ws_server server(0, &tr::mem::heap_backend(), /*max_frame=*/0,
+                                        /*max_peers=*/1);
     check(server.ok(), "capped server bound");
     const std::uint16_t port = server.local_port();
 
@@ -737,7 +758,8 @@ void test_close_peer() {
     frame_sink_t a_sink;
     frame_sink_t b_sink;
 
-    tr::net::transport_ws_server server(0, /*max_peers=*/2, /*peer_named=*/true);
+    tr::net::transport_ws_server server(0, &tr::mem::heap_backend(), /*max_frame=*/0,
+                                        /*max_peers=*/2, /*peer_named=*/true);
     check(server.ok(), "listen socket bound");
     const std::uint16_t port = server.local_port();
     server.bus()->set_peer_receiver(srv_sink);
@@ -799,6 +821,712 @@ void test_close_peer() {
     b.reset();
 }
 
+/** @brief Append one UNMASKED server→client frame (payload < 126) to @p out. */
+void append_server_frame(std::vector<std::byte>& out, ws::opcode_t op,
+                         std::span<const std::byte> payload, bool fin = true) {
+    out.push_back(static_cast<std::byte>((fin ? 0x80u : 0x00u) | static_cast<std::uint8_t>(op)));
+    out.push_back(static_cast<std::byte>(payload.size()));  // MASK=0: a server frame
+    out.insert(out.end(), payload.begin(), payload.end());
+}
+
+/**
+ * @brief #1020 — bytes the server pipelines behind its `101` reach the frame stream.
+ *
+ * `transport_ws_client::handshake` reads the response into a buffer of its own until
+ * CRLFCRLF, and a single `recv` routinely returns the `101` AND whatever the server sent
+ * straight after it — which is what a server that pushes state on connect does. Those
+ * bytes are off the socket; if the handshake drops them nothing can ever read them back,
+ * and the frame vanishes with no counter moving. The accept side has carried them over
+ * since it grew a second peer (`service_peer`); this is the DIAL side of that rule.
+ *
+ * The peer here writes the `101`, a complete PING, and the FIRST fragment of a BINARY
+ * message in ONE `::send`, so all three land in one `recv` on the client — the shape the
+ * defect needs. Then it goes quiet. Two independent observables follow:
+ *
+ *  - the PONG. A complete pipelined control frame must be answered even though NOTHING
+ *    more arrives on the socket — that fails both if the handshake discards the bytes and
+ *    if the recv loop polls before draining what it was handed.
+ *  - the message BYTES. The closing CONT is only written after the test has installed its
+ *    receiver, so the delivery is not racing the recv thread's start; a dropped first
+ *    fragment leaves that CONT stray (the assembler drops it) and NO message arrives.
+ */
+void test_frame_pipelined_behind_the_101() {
+    std::printf("transport_ws client — a frame pipelined behind the 101 is not dropped (#1020):\n");
+
+    const int lfd = ::socket(AF_INET, SOCK_STREAM, 0);
+    check(lfd >= 0, "raw listener created");
+    const int one = 1;
+    ::setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    sockaddr_in local{};
+    local.sin_family = AF_INET;
+    local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    local.sin_port = 0;
+    check(::bind(lfd, reinterpret_cast<sockaddr*>(&local), sizeof(local)) == 0, "listener bound");
+    check(::listen(lfd, 1) == 0, "listener listening");
+    sockaddr_in bound{};
+    socklen_t blen = sizeof(bound);
+    ::getsockname(lfd, reinterpret_cast<sockaddr*>(&bound), &blen);
+
+    const std::array<std::byte, 4> ping_payload{std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE},
+                                                std::byte{0xEF}};
+    const std::array<std::byte, 4> head_bytes{std::byte{0x01}, std::byte{0x02}, std::byte{0xF0},
+                                              std::byte{0x0D}};
+    const std::array<std::byte, 2> tail_bytes{std::byte{0xC0}, std::byte{0xDE}};
+
+    std::promise<bool> one_write_done;  // the combined blob went out as ONE send
+    std::promise<bool> pong_seen;       // the pipelined PING was answered
+    std::promise<void> receiver_ready;  // the test has installed its sink
+    std::promise<void> test_done;       // safe to close the peer socket
+    auto one_write_fut = one_write_done.get_future();
+    auto pong_fut = pong_seen.get_future();
+    auto ready_fut = receiver_ready.get_future();
+    auto done_fut = test_done.get_future();
+
+    std::thread pusher([&] {
+        const int cfd = ::accept(lfd, nullptr, nullptr);
+        if (cfd < 0) {
+            one_write_done.set_value(false);
+            pong_seen.set_value(false);
+            return;
+        }
+        const auto req = read_until(
+            cfd,
+            [](const std::vector<std::byte>& b) {
+                return std::string_view(reinterpret_cast<const char*>(b.data()), b.size())
+                           .find("\r\n\r\n") != std::string_view::npos;
+            },
+            2s);
+        const std::string_view text(reinterpret_cast<const char*>(req.data()), req.size());
+        const std::size_t kpos = text.find("Sec-WebSocket-Key: ");
+        if (kpos == std::string_view::npos) {
+            one_write_done.set_value(false);
+            pong_seen.set_value(false);
+            ::close(cfd);
+            return;
+        }
+        const std::size_t vstart = kpos + std::string_view("Sec-WebSocket-Key: ").size();
+        const std::string key(text.substr(vstart, text.find("\r\n", vstart) - vstart));
+
+        std::string head =
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            "Sec-WebSocket-Accept: ";
+        head += ws::accept_key(key);
+        head += "\r\n\r\n";
+        std::vector<std::byte> blob;
+        for (const char c : head) blob.push_back(static_cast<std::byte>(c));
+        append_server_frame(blob, ws::opcode_t::PING, ping_payload);
+        append_server_frame(blob, ws::opcode_t::BINARY, head_bytes, /*fin=*/false);
+        // ONE syscall: the handshake reply and the frames behind it coalesce into a single
+        // segment, so the client's first `recv` returns all of them together. A test that
+        // paused here would prove nothing — that pause is the mask this case removes.
+        const ssize_t sent = ::send(cfd, blob.data(), blob.size(), 0);
+        one_write_done.set_value(sent == static_cast<ssize_t>(blob.size()));
+
+        // Nothing else is written until the PONG comes back: the client must decode the
+        // pipelined PING with no further bytes arriving on the socket.
+        const auto pong = read_until(
+            cfd, [](const std::vector<std::byte>& b) { return ws::decode_frame(b).has_value(); },
+            3s);
+        const auto dec = ws::decode_frame(pong);
+        pong_seen.set_value(
+            dec.has_value() && dec->first.op == ws::opcode_t::PONG &&
+            dec->first.payload.size() == ping_payload.size() &&
+            std::memcmp(dec->first.payload.data(), ping_payload.data(), ping_payload.size()) == 0);
+
+        ready_fut.wait();
+        std::vector<std::byte> cont;
+        append_server_frame(cont, ws::opcode_t::CONT, tail_bytes, /*fin=*/true);
+        write_bytes(cfd, cont);
+        done_fut.wait();
+        ::close(cfd);
+    });
+
+    // The sink outlives the transport that delivers to it (this file's destruction idiom).
+    frame_sink_t sink;
+    {
+        tr::net::transport_ws_client client("127.0.0.1", ntohs(bound.sin_port));
+        check(client.ok(), "the client completed its opening handshake");
+        client.set_receiver(sink);
+        receiver_ready.set_value();
+
+        check(one_write_fut.wait_for(3s) == std::future_status::ready && one_write_fut.get(),
+              "the peer put the 101 and the frames behind it in ONE write");
+        check(pong_fut.wait_for(4s) == std::future_status::ready && pong_fut.get(),
+              "the PING pipelined behind the 101 was answered with a matching PONG");
+        check(sink.wait_count(1, 4s), "the pipelined BINARY fragment completed into a message");
+        std::vector<std::byte> got;
+        {
+            const std::lock_guard lock(sink.m);
+            if (!sink.frames.empty()) got = sink.frames.front();
+        }
+        std::vector<std::byte> want(head_bytes.begin(), head_bytes.end());
+        want.insert(want.end(), tail_bytes.begin(), tail_bytes.end());
+        check(got == want, "and it carried the PIPELINED fragment's bytes, not just the CONT's");
+        test_done.set_value();
+    }
+    pusher.join();
+    ::close(lfd);
+}
+
+/**
+ * @brief #1025 — a `defer_recv` client decodes NOTHING until start_receiving(), so a message
+ *        the server pushes ON CONNECT cannot be dropped into an empty sink.
+ *
+ * The one-phase constructor dials, handshakes AND spawns the recv thread before it returns,
+ * so `set_receiver` can only ever run afterwards. A server that pushes its state the instant
+ * the handshake completes has that message in flight before the constructor returns, and
+ * whether it beats the caller's next statement is decided by nothing but scheduling: the
+ * recv thread reaching its first drain versus the calling thread performing one store. Lose
+ * that race and `receiver_slot_t`'s empty slot drops the message — no counter, no queue, a
+ * healthy-looking connection.
+ *
+ * The guard does not race it. The peer writes the `101`, a PING and a COMPLETE BINARY
+ * message in ONE `::send` (so all of it is in the client's first `recv`) and then goes
+ * quiet, and the client is constructed with `defer_recv`. Three observables, in order:
+ *
+ *  - SILENCE. For a generous window after the handshake the client sends back NOTHING — the
+ *    pipelined PING is not answered, because nothing has been decoded at all. A client that
+ *    started its recv thread in the constructor answers it well inside that window.
+ *  - the PONG, once `start_receiving()` runs — the positive control that keeps the silence
+ *    above from being vacuous: the bytes were really there, and really decodable.
+ *  - the MESSAGE, delivered to a sink installed while the thread was still held. In the
+ *    one-phase shape this is exactly the frame that vanishes.
+ */
+void test_push_on_connect_waits_for_start_receiving() {
+    std::printf("transport_ws client — a push-on-connect message waits for the sink (#1025):\n");
+
+    const int lfd = ::socket(AF_INET, SOCK_STREAM, 0);
+    check(lfd >= 0, "raw listener created");
+    const int one = 1;
+    ::setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    sockaddr_in local{};
+    local.sin_family = AF_INET;
+    local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    local.sin_port = 0;
+    check(::bind(lfd, reinterpret_cast<sockaddr*>(&local), sizeof(local)) == 0, "listener bound");
+    check(::listen(lfd, 1) == 0, "listener listening");
+    sockaddr_in bound{};
+    socklen_t blen = sizeof(bound);
+    ::getsockname(lfd, reinterpret_cast<sockaddr*>(&bound), &blen);
+
+    const std::array<std::byte, 3> ping_payload{std::byte{0xA1}, std::byte{0xB2}, std::byte{0xC3}};
+    const std::array<std::byte, 5> pushed{std::byte{0x50}, std::byte{0x55}, std::byte{0x53},
+                                          std::byte{0x48}, std::byte{0x21}};
+
+    std::promise<bool> one_write_done;  // the combined blob went out as ONE send
+    std::promise<bool> stayed_quiet;    // nothing came back while the recv thread was held
+    std::promise<bool> pong_seen;       // ...and the PING was answered once it was released
+    std::promise<void> armed;           // sink installed + start_receiving() called
+    std::promise<void> test_done;       // safe to close the peer socket
+    auto one_write_fut = one_write_done.get_future();
+    auto quiet_fut = stayed_quiet.get_future();
+    auto pong_fut = pong_seen.get_future();
+    auto armed_fut = armed.get_future();
+    auto done_fut = test_done.get_future();
+
+    std::thread pusher([&] {
+        const int cfd = ::accept(lfd, nullptr, nullptr);
+        if (cfd < 0) {
+            one_write_done.set_value(false);
+            stayed_quiet.set_value(false);
+            pong_seen.set_value(false);
+            return;
+        }
+        const auto req = read_until(
+            cfd,
+            [](const std::vector<std::byte>& b) {
+                return std::string_view(reinterpret_cast<const char*>(b.data()), b.size())
+                           .find("\r\n\r\n") != std::string_view::npos;
+            },
+            2s);
+        const std::string_view text(reinterpret_cast<const char*>(req.data()), req.size());
+        const std::size_t kpos = text.find("Sec-WebSocket-Key: ");
+        if (kpos == std::string_view::npos) {
+            one_write_done.set_value(false);
+            stayed_quiet.set_value(false);
+            pong_seen.set_value(false);
+            ::close(cfd);
+            return;
+        }
+        const std::size_t vstart = kpos + std::string_view("Sec-WebSocket-Key: ").size();
+        const std::string key(text.substr(vstart, text.find("\r\n", vstart) - vstart));
+
+        std::string head =
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            "Sec-WebSocket-Accept: ";
+        head += ws::accept_key(key);
+        head += "\r\n\r\n";
+        std::vector<std::byte> blob;
+        for (const char c : head) blob.push_back(static_cast<std::byte>(c));
+        append_server_frame(blob, ws::opcode_t::PING, ping_payload);
+        append_server_frame(blob, ws::opcode_t::BINARY, pushed);  // COMPLETE, FIN=1
+        // ONE syscall: the 101 and the push behind it coalesce into a single segment, so the
+        // client's first `recv` holds the whole message. This is the push-on-connect shape.
+        const ssize_t sent = ::send(cfd, blob.data(), blob.size(), 0);
+        one_write_done.set_value(sent == static_cast<ssize_t>(blob.size()));
+
+        // The held window. `read_until` with a predicate that never fires burns the whole
+        // budget, so this is a full 500 ms of listening — orders of magnitude more than the
+        // recv thread needs to drain what it was handed and reply, which is why a client
+        // that spawned that thread in its constructor fails here deterministically rather
+        // than flakily.
+        auto early = read_until(cfd, [](const std::vector<std::byte>&) { return false; }, 500ms);
+        stayed_quiet.set_value(early.empty());
+
+        armed_fut.wait();
+        auto back = read_until(
+            cfd, [](const std::vector<std::byte>& b) { return ws::decode_frame(b).has_value(); },
+            3s);
+        // Anything that leaked into the held window still counts as sent: the PONG check must
+        // stay a POSITIVE control (the bytes survived and decode) in both states, so that the
+        // silence assertion above is the only thing the deferral is on the hook for.
+        back.insert(back.begin(), early.begin(), early.end());
+        const auto dec = ws::decode_frame(back);
+        pong_seen.set_value(
+            dec.has_value() && dec->first.op == ws::opcode_t::PONG &&
+            dec->first.payload.size() == ping_payload.size() &&
+            std::memcmp(dec->first.payload.data(), ping_payload.data(), ping_payload.size()) == 0);
+
+        done_fut.wait();
+        ::close(cfd);
+    });
+
+    // The sink outlives the transport that delivers to it (this file's destruction idiom).
+    frame_sink_t sink;
+    {
+        tr::net::transport_ws_client client("127.0.0.1", ntohs(bound.sin_port),
+                                            &tr::mem::heap_backend(), /*max_frame=*/0,
+                                            /*recv_stack=*/0, /*defer_recv=*/true);
+        check(client.ok(), "the deferred client completed its opening handshake");
+        check(one_write_fut.wait_for(3s) == std::future_status::ready && one_write_fut.get(),
+              "the peer put the 101 and a COMPLETE pushed message in ONE write");
+        check(quiet_fut.wait_for(3s) == std::future_status::ready && quiet_fut.get(),
+              "the client decoded NOTHING before start_receiving(): the pipelined PING went "
+              "unanswered for the whole held window");
+
+        // The install the one-phase shape cannot make in time.
+        client.set_receiver(sink);
+        client.start_receiving();
+        armed.set_value();
+
+        check(pong_fut.wait_for(4s) == std::future_status::ready && pong_fut.get(),
+              "after start_receiving() the pipelined PING was answered with a matching PONG");
+        check(sink.wait_count(1, 4s),
+              "and the message the server pushed on connect was DELIVERED, not dropped");
+        std::vector<std::byte> got;
+        {
+            const std::lock_guard lock(sink.m);
+            if (!sink.frames.empty()) got = sink.frames.front();
+        }
+        check(got == std::vector<std::byte>(pushed.begin(), pushed.end()),
+              "carrying the pushed message's own bytes");
+        test_done.set_value();
+    }
+    pusher.join();
+    ::close(lfd);
+}
+
+// ---------------------------------------------------------------------------
+// #1010 — RFC 6455 §5.5 at the CLIENT: a hostile SERVER driven at our dial half.
+//
+// `transport_alloc_softfail_test.cpp` drives the same three vectors at the SERVER from a raw
+// socket. Both halves route through the one `decode_frame_checked`, but they do NOT share
+// what comes after it: the server answers out of `kMaxServerControlFrame` and fails a
+// connection through `teardown_slot`, the client answers out of `kMaxClientControlFrame`
+// (four bytes wider, because a client control frame is MASKED) and fails through
+// `teardown_peer` + the departure seam. A regression in either of the client's two would
+// leave the three server-side vectors green, which is the gap these three close. The
+// deployment shape is ordinary: a libtracer node that dials out to a peer is the client, and
+// that peer is exactly as untrusted as an inbound one.
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief Bind and listen on an ephemeral loopback port.
+ *
+ * @param port Out: the port the kernel chose, host byte order.
+ * @retval -1 The listener could not be brought up.
+ */
+int bind_ephemeral_listener(std::uint16_t& port) {
+    const int lfd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (lfd < 0) return -1;
+    const int one = 1;
+    ::setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    sockaddr_in local{};
+    local.sin_family = AF_INET;
+    local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    local.sin_port = 0;
+    if (::bind(lfd, reinterpret_cast<sockaddr*>(&local), sizeof(local)) != 0 ||
+        ::listen(lfd, 1) != 0) {
+        ::close(lfd);
+        return -1;
+    }
+    sockaddr_in bound{};
+    socklen_t blen = sizeof(bound);
+    if (::getsockname(lfd, reinterpret_cast<sockaddr*>(&bound), &blen) != 0) {
+        ::close(lfd);
+        return -1;
+    }
+    port = ntohs(bound.sin_port);
+    return lfd;
+}
+
+/**
+ * @brief Read our client's opening handshake off @p cfd and answer a valid `101`.
+ *
+ * The reply is legitimate — these cases are about what the peer does AFTER the upgrade, so
+ * the handshake must not be the thing that fails.
+ */
+bool answer_opening_handshake(int cfd) {
+    const auto req = read_until(
+        cfd,
+        [](const std::vector<std::byte>& b) {
+            return std::string_view(reinterpret_cast<const char*>(b.data()), b.size())
+                       .find("\r\n\r\n") != std::string_view::npos;
+        },
+        2s);
+    const std::string_view text(reinterpret_cast<const char*>(req.data()), req.size());
+    const std::size_t kpos = text.find("Sec-WebSocket-Key: ");
+    if (kpos == std::string_view::npos) return false;
+    const std::size_t vstart = kpos + std::string_view("Sec-WebSocket-Key: ").size();
+    const std::string key(text.substr(vstart, text.find("\r\n", vstart) - vstart));
+
+    std::string resp =
+        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+        "Sec-WebSocket-Accept: ";
+    resp += ws::accept_key(key);
+    resp += "\r\n\r\n";
+    write_str(cfd, resp);
+    return true;
+}
+
+/**
+ * @brief An UNMASKED server→client CONTROL frame DECLARING @p declared_len payload bytes —
+ *        past the §5.5 bound — in the 16-bit length form, with that many bytes behind it.
+ *
+ * Hand-rolled on purpose: `ws::encode_server_control` refuses a payload past the §5.5 bound
+ * (what `test_control_encoders_are_byte_identical` pins), so this shape has to be written
+ * out byte by byte — which is the point, only a hostile peer emits it.
+ */
+std::vector<std::byte> oversize_server_control(ws::opcode_t op, std::size_t declared_len) {
+    std::vector<std::byte> out;
+    out.push_back(static_cast<std::byte>(0x80u | static_cast<std::uint8_t>(op)));
+    out.push_back(static_cast<std::byte>(126u));  // MASK=0, 16-bit extended length
+    out.push_back(static_cast<std::byte>((declared_len >> 8) & 0xFFu));
+    out.push_back(static_cast<std::byte>(declared_len & 0xFFu));
+    out.insert(out.end(), declared_len, std::byte{0x77});
+    return out;
+}
+
+/**
+ * @brief The link-down seam, latched.
+ *
+ * `%transport_t::set_down_notifier` is how the routing plane learns a point-to-point link
+ * died (RFC-0009 §D extended to peer departure). It is the client's OWN report that it
+ * failed the connection, which is a strictly different observable from the peer's socket
+ * going away: a client that dropped the fd without taking the teardown path would satisfy
+ * the second and not the first.
+ */
+struct down_latch_t {
+    std::mutex m;
+    std::condition_variable cv;
+    bool fired = false;
+
+    /** @brief The `%transport_t::down_fn_t` entry point; @p ctx is the latch. */
+    static void notify(void* ctx) {
+        auto* self = static_cast<down_latch_t*>(ctx);
+        {
+            const std::lock_guard lock(self->m);
+            self->fired = true;
+        }
+        self->cv.notify_all();
+    }
+    /** @brief True once the notifier fired, waiting up to @p timeout for it. */
+    bool wait(std::chrono::milliseconds timeout) {
+        std::unique_lock lock(m);
+        return cv.wait_for(lock, timeout, [&] { return fired; });
+    }
+    /** @brief Whether it has fired already, without waiting. */
+    bool fired_now() {
+        const std::lock_guard lock(m);
+        return fired;
+    }
+};
+
+/** @brief What a hostile server's illegal control frame drew out of our client. */
+struct control_breach_outcome_t {
+    bool handshaken = false;            /**< @brief The client completed its opening handshake. */
+    std::vector<std::byte> reply;       /**< @brief Every byte the client wrote back after it. */
+    bool peer_closed = false;           /**< @brief The client's end of the socket went away. */
+    bool link_down = false;             /**< @brief The departure seam fired. */
+    std::uint64_t malformed_before = 0; /**< @brief `malformed_rx()` before the breach. */
+    std::uint64_t malformed_after = 0;  /**< @brief ...and after it. */
+};
+
+/**
+ * @brief Dial a `%transport_ws_client` at a raw socket acting as a HOSTILE SERVER, feed it
+ *        @p breach, and collect what the client did about it.
+ *
+ * `defer_recv` is what makes this deterministic rather than a race: the breach is written
+ * while the recv thread is still parked, so every byte of it is queued before the client is
+ * allowed to look, and the observation window opens only once `start_receiving()` has run.
+ * The window uses a predicate that never fires, so it burns its whole budget unless the
+ * peer disappears — which is one of the two things being observed.
+ *
+ * The hostile end holds its socket OPEN until the caller says it is done. That is not
+ * tidiness: closing it would make the client's recv return 0 and take the ordinary
+ * remote-hangup teardown, which fires the departure seam too — so `link_down` would be
+ * satisfied by the harness itself and assert nothing about §5.5. Ablating the gate is what
+ * caught that: with the peer closing at the end of the window, `link_down` stayed green in
+ * BOTH states.
+ */
+control_breach_outcome_t drive_control_breach(std::span<const std::byte> breach) {
+    control_breach_outcome_t out;
+    std::uint16_t port = 0;
+    const int lfd = bind_ephemeral_listener(port);
+    if (lfd < 0) return out;
+
+    const std::vector<std::byte> frame(breach.begin(), breach.end());
+    std::promise<void> armed;                                   // start_receiving() has run
+    std::promise<std::pair<std::vector<std::byte>, bool>> obs;  // (bytes back, peer closed)
+    std::promise<void> test_done;                               // safe to close the peer socket
+    auto armed_fut = armed.get_future();
+    auto obs_fut = obs.get_future();
+    auto done_fut = test_done.get_future();
+
+    std::thread hostile([&] {
+        const int cfd = ::accept(lfd, nullptr, nullptr);
+        if (cfd < 0) {
+            obs.set_value({{}, false});
+            return;
+        }
+        if (!answer_opening_handshake(cfd)) {
+            obs.set_value({{}, false});
+            ::close(cfd);
+            return;
+        }
+        write_bytes(cfd, frame);
+        armed_fut.wait();
+        bool closed = false;
+        auto got =
+            read_until(cfd, [](const std::vector<std::byte>&) { return false; }, 3s, &closed);
+        obs.set_value({std::move(got), closed});
+        done_fut.wait();
+        ::close(cfd);
+    });
+
+    // The latch is the notifier's ctx and the sink is the receiver: both must outlive the
+    // transport that calls into them (this file's destruction idiom).
+    down_latch_t latch;
+    frame_sink_t sink;
+    {
+        tr::net::transport_ws_client client("127.0.0.1", port, &tr::mem::heap_backend(),
+                                            /*max_frame=*/0, /*recv_stack=*/0,
+                                            /*defer_recv=*/true);
+        out.handshaken = client.ok();
+        out.malformed_before = client.malformed_rx();
+        client.set_receiver(sink);
+        client.set_down_notifier(&down_latch_t::notify, &latch);
+        client.start_receiving();
+        armed.set_value();
+
+        if (obs_fut.wait_for(6s) == std::future_status::ready) {
+            auto observed = obs_fut.get();
+            out.reply = std::move(observed.first);
+            out.peer_closed = observed.second;
+        }
+        // Read BEFORE releasing the hostile end: past `test_done` its `close` would fire the
+        // departure seam by itself and both of these would stop measuring the §5.5 gate.
+        out.link_down = latch.wait(2s);
+        out.malformed_after = client.malformed_rx();
+        test_done.set_value();
+    }
+    hostile.join();
+    ::close(lfd);
+    return out;
+}
+
+/**
+ * @brief #1010 — a 125-byte PING from the server we dialled is answered with a PONG that is
+ *        byte-exact AND masked, and the link survives it.
+ *
+ * The mirror of the server's `test_ws_ping_at_the_bound_is_answered`, plus the thing only
+ * the client half can get wrong: RFC 6455 §5.3 says every client→server frame is masked, so
+ * the reply is four bytes wider than the server's and its payload is XOR-transformed. The two
+ * existing client PING cases in this file (#1020, #1025) assert only that `ws::decode_frame`
+ * recovers the payload — and decode UNMASKS, so an unmasked PONG passes both of them. This
+ * one reads the wire bytes: the MASK bit, the frame's own key, and the XOR of every payload
+ * byte under it.
+ *
+ * The liveness probe at the end is a POSITIVE control for "the legal frame did not fail the
+ * connection" — a message sent after the PONG still arrives — rather than the vacuous
+ * negative of merely observing no teardown.
+ */
+void test_client_answers_a_control_frame_at_the_bound_masked() {
+    std::printf("transport_ws client — a 125-byte PING draws a MASKED byte-exact PONG (#1010):\n");
+
+    std::uint16_t port = 0;
+    const int lfd = bind_ephemeral_listener(port);
+    check(lfd >= 0, "raw listener bound on an ephemeral loopback port");
+    if (lfd < 0) return;
+
+    std::vector<std::byte> ping_payload(ws::kMaxControlPayload);
+    for (std::size_t i = 0; i < ping_payload.size(); ++i)
+        ping_payload[i] = static_cast<std::byte>(i * 7u + 1u);
+    const std::array<std::byte, 4> liveness{std::byte{0x10}, std::byte{0x20}, std::byte{0x30},
+                                            std::byte{0x40}};
+
+    std::promise<void> armed;                   // start_receiving() has run
+    std::promise<std::vector<std::byte>> pong;  // what came back
+    std::promise<void> test_done;               // safe to close the peer socket
+    auto armed_fut = armed.get_future();
+    auto pong_fut = pong.get_future();
+    auto done_fut = test_done.get_future();
+
+    std::thread hostile([&] {
+        const int cfd = ::accept(lfd, nullptr, nullptr);
+        if (cfd < 0) {
+            pong.set_value({});
+            return;
+        }
+        if (!answer_opening_handshake(cfd)) {
+            pong.set_value({});
+            ::close(cfd);
+            return;
+        }
+        std::vector<std::byte> ping;
+        append_server_frame(ping, ws::opcode_t::PING, ping_payload);
+        write_bytes(cfd, ping);
+        armed_fut.wait();
+        pong.set_value(read_until(
+            cfd,
+            [](const std::vector<std::byte>& b) { return b.size() >= ws::kMaxClientControlFrame; },
+            4s));
+        // The liveness probe, written only once the PONG has been read: a LEGAL control
+        // frame must leave the connection carrying traffic.
+        std::vector<std::byte> msg;
+        append_server_frame(msg, ws::opcode_t::BINARY, liveness);
+        write_bytes(cfd, msg);
+        done_fut.wait();
+        ::close(cfd);
+    });
+
+    down_latch_t latch;
+    frame_sink_t sink;
+    {
+        tr::net::transport_ws_client client("127.0.0.1", port, &tr::mem::heap_backend(),
+                                            /*max_frame=*/0, /*recv_stack=*/0,
+                                            /*defer_recv=*/true);
+        check(client.ok(), "the client completed its opening handshake");
+        client.set_receiver(sink);
+        client.set_down_notifier(&down_latch_t::notify, &latch);
+        client.start_receiving();
+        armed.set_value();
+
+        std::vector<std::byte> got;
+        if (pong_fut.wait_for(6s) == std::future_status::ready) got = pong_fut.get();
+
+        // Every verdict below is computed with its own size guard rather than nested under
+        // one: a shape change must REPORT on each line it breaks, not make the lines
+        // disappear. (An `if (size == …) { … }` wrapper hid the mask-bit check under the
+        // ablation that flattened the reply to the server shape.)
+        const bool whole = got.size() == ws::kMaxClientControlFrame;
+        check(whole,
+              "the client wrote back exactly one client control frame: 2 header + 4 mask key + "
+              "125 payload bytes");
+        check(got.size() >= 2 && got[0] == static_cast<std::byte>(0x80u | static_cast<std::uint8_t>(
+                                                                              ws::opcode_t::PONG)),
+              "FIN=1 and the opcode is PONG");
+        check(got.size() >= 2 && got[1] == static_cast<std::byte>(0x80u | ws::kMaxControlPayload),
+              "the MASK bit is SET with the 125-byte length inline — a client control frame "
+              "is always masked (RFC 6455 §5.3)");
+        bool xor_exact = whole;
+        for (std::size_t i = 0; xor_exact && i < ws::kMaxControlPayload; ++i) {
+            const std::uint8_t key_byte = std::to_integer<std::uint8_t>(got[2 + (i % 4)]);
+            xor_exact =
+                got[6 + i] ==
+                static_cast<std::byte>(std::to_integer<std::uint8_t>(ping_payload[i]) ^ key_byte);
+        }
+        check(xor_exact,
+              "every payload byte on the wire is the PING's byte XOR the frame's OWN key — "
+              "byte-exact and actually masked");
+        const auto dec = ws::decode_frame(got);
+        check(dec.has_value() && dec->first.op == ws::opcode_t::PONG &&
+                  dec->first.payload == ping_payload,
+              "and unmasking the frame recovers the 125-byte payload exactly");
+
+        check(sink.wait_count(1, 4s),
+              "the connection SURVIVED the legal control frame: a message sent after the PONG "
+              "was delivered");
+        std::vector<std::byte> after;
+        {
+            const std::lock_guard lock(sink.m);
+            if (!sink.frames.empty()) after = sink.frames.front();
+        }
+        check(after == std::vector<std::byte>(liveness.begin(), liveness.end()),
+              "carrying that message's own bytes");
+        check(!latch.fired_now(), "and the link was never reported down");
+        check(client.malformed_rx() == 0,
+              "a control frame exactly AT the §5.5 bound is not a breach");
+        test_done.set_value();
+    }
+    hostile.join();
+    ::close(lfd);
+}
+
+/**
+ * @brief #1010 — an OVERSIZED control frame from the server we dialled FAILS the connection
+ *        (RFC 6455 §5.5 / §7.1.7) instead of being echoed.
+ *
+ * The mirror of the server's `test_ws_oversized_ping_fails_the_connection`. The declared
+ * length is checked off the HEADER, so the 4 KiB never has to be buffered — and it is never
+ * reflected, which is what stops a dialled-out link from being an amplifier.
+ *
+ * Which assertion carries the weight, stated plainly: the "no PONG" line is PASSIVE here.
+ * With the §5.5 gate ablated the client decodes the 4 KiB PING as legal and calls
+ * `encode_client_control`, which returns 0 for a payload past the bound — so nothing goes out
+ * either way and that line stays green in both states. The three that redden are the ones
+ * about what the client did INSTEAD of answering: the teardown, the departure seam, and the
+ * counter. (In the fragmented case below the same line is load-bearing — an 8-byte payload
+ * encodes fine, so a client with no gate really does reply.)
+ */
+void test_client_fails_the_connection_on_an_oversize_control_frame() {
+    std::printf(
+        "transport_ws client — a hostile server's 4 KiB PING fails the connection (#1010):\n");
+    const auto got = drive_control_breach(oversize_server_control(ws::opcode_t::PING, 4096));
+    check(got.handshaken, "the client completed its opening handshake");
+    check(got.reply.empty(), "no PONG came back — and so no 4 KiB reflection");
+    check(got.peer_closed, "the client FAILED the connection: its end of the socket went away");
+    check(got.link_down, "and it reported the link down through the departure seam");
+    check(got.malformed_after > got.malformed_before,
+          "the §5.5 breach was COUNTED as malformed, not silently tolerated");
+}
+
+/**
+ * @brief #1010 — a FRAGMENTED control frame from the server we dialled is equally illegal.
+ *
+ * The mirror of the server's `test_ws_fragmented_control_fails_the_connection`. This one is
+ * the sharper of the two on the client: the `PING` arm of the recv loop's switch does not
+ * itself look at `fin`, so with the §5.5 gate gone the client happily builds and sends a
+ * PONG for a frame it should have torn the connection down over.
+ */
+void test_client_fails_the_connection_on_a_fragmented_control_frame() {
+    std::printf(
+        "transport_ws client — a hostile server's non-final PING fails the connection (#1010):\n");
+    const std::array<std::byte, 8> payload{std::byte{0x01}, std::byte{0x02}, std::byte{0x03},
+                                           std::byte{0x04}, std::byte{0x05}, std::byte{0x06},
+                                           std::byte{0x07}, std::byte{0x08}};
+    std::vector<std::byte> frame;
+    append_server_frame(frame, ws::opcode_t::PING, payload, /*fin=*/false);
+
+    const auto got = drive_control_breach(frame);
+    check(got.handshaken, "the client completed its opening handshake");
+    check(got.reply.empty(), "no PONG came back for a non-final control frame");
+    check(got.peer_closed, "the client FAILED the connection: its end of the socket went away");
+    check(got.link_down, "and it reported the link down through the departure seam");
+    check(got.malformed_after > got.malformed_before,
+          "the §5.5 breach was COUNTED as malformed, not silently tolerated");
+}
+
 }  // namespace
 
 int main() {
@@ -811,6 +1539,11 @@ int main() {
     test_multi_peer_bus();
     test_max_peers_cap();
     test_close_peer();
+    test_frame_pipelined_behind_the_101();
+    test_push_on_connect_waits_for_start_receiving();
+    test_client_answers_a_control_frame_at_the_bound_masked();
+    test_client_fails_the_connection_on_an_oversize_control_frame();
+    test_client_fails_the_connection_on_a_fragmented_control_frame();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;

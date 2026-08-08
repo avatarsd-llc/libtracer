@@ -33,6 +33,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <memory_resource>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -68,8 +69,34 @@ inline constexpr std::uint16_t kCanControlEndpoint = 0;
 /** @brief The first `endpoint` slot usable for header-elided data groups (control is 0). */
 inline constexpr std::uint16_t kCanFirstDataEndpoint = 1;
 
+/**
+ * @brief The largest address-shift group this node can place: every data endpoint slot.
+ *
+ * Address-shift slicing spreads a group across CONSECUTIVE endpoint slots of one node
+ * (`endpoint[base .. base+count-1]`), so a group of more slices than the data-endpoint
+ * window holds can never be placed at any base — no wrap helps. DERIVED from the CAN-ID
+ * field widths (`can::kEndpointMax`) minus the reserved control slot, never a chosen
+ * number: the bound is the wire's, so widening `kEndpointBits` widens this with it.
+ *
+ * A group over this bound is refused WHOLE, before its manifest is emitted (#910) —
+ * advertising `slice_count` slices and then running out of slots mid-loop leaves every
+ * receiver holding a reassembly group that can never complete.
+ */
+inline constexpr std::size_t kCanMaxGroupSlices =
+    static_cast<std::size_t>(can::kEndpointMax) - kCanFirstDataEndpoint + 1u;
+
 /** @brief Default liveness window: a peer silent this long leaves the enumeration. */
 inline constexpr std::chrono::milliseconds kCanDefaultPeerTtl{3000};
+
+/**
+ * @brief Sentinel for `transport_can_config_t::rx_ttl`: track `peer_ttl` instead.
+ *
+ * The RX staleness window is not an independent quantity to invent a number for
+ * (the no-synthetic-limits rule): a peer that has been silent longer than
+ * `peer_ttl` is already considered gone, so RX state it would have completed is
+ * definitively dead by then. Left at zero, `rx_ttl` resolves to `peer_ttl`.
+ */
+inline constexpr std::chrono::milliseconds kCanRxTtlFromPeerTtl{0};
 
 /**
  * @brief One raw CAN frame at the `can_link_t` seam — id + data field, no semantics.
@@ -83,7 +110,7 @@ struct can_frame_data_t {
     std::uint32_t id = 0; /**< @brief The 29-bit extended CAN identifier. */
     bool fd = false;      /**< @brief True ⇒ a CAN-FD frame; false ⇒ classic CAN 2.0. */
     std::uint8_t len = 0; /**< @brief Data-field length on the wire (post-DLC-pad for FD). */
-    std::array<std::byte, 64>
+    std::array<std::byte, tr::view::kCanFdMaxData>
         data{}; /**< @brief The data field; only the first @ref len bytes are live. */
 
     /** @brief The live data-field bytes as a read-only span. */
@@ -93,6 +120,59 @@ struct can_frame_data_t {
 };
 
 /**
+ * @brief The largest data field a frame of this mode may declare, as a @ref
+ *        can_frame_data_t::len.
+ *
+ * The widths themselves are the L1 framing layer's (@ref tr::view::can_max_data —
+ * 8 classic, 64 FD, facts of the wire rather than chosen bounds). This is only the
+ * seam's adapter to them: the carrier spells its mode as a `bool` and its length as
+ * a `std::uint8_t`, so the bound arrives in the same width as the field it bounds and
+ * no second copy of the numbers lives here.
+ */
+[[nodiscard]] constexpr std::uint8_t can_max_len(bool fd) noexcept {
+    return static_cast<std::uint8_t>(tr::view::can_max_data(
+        fd ? tr::view::can_frame_mode_t::FD : tr::view::can_frame_mode_t::CLASSIC));
+}
+
+/**
+ * @brief Is an inbound raw frame admissible at the @ref can_link_t seam?
+ *
+ * The ONE ingress admission rule, so the platform links cannot drift on which
+ * frames they let through (#931). Each link decodes the three flags from its own
+ * driver's representation — `socketcan_link_t` from the `CAN_EFF_FLAG` /
+ * `CAN_RTR_FLAG` / `CAN_ERR_FLAG` bits of `can_id`, the ESP-IDF component's
+ * `twai_link_t` from `twai_frame_t::header.ide` / `.rtr` — and the verdict is
+ * decided here, once.
+ *
+ * The binding is header-elided: the 29-bit **extended** identifier IS the path
+ * (ADR-0022), so a standard 11-bit frame carries no decodable identity. A
+ * remote-transmission request carries a DLC but **no** data bytes, and an error
+ * frame is a controller status report rather than bus payload — admitting either
+ * hands the reassembler a slice whose length is a lie, and the flags that told it
+ * apart are stripped by the time the id reaches @ref can_frame_data_t::id.
+ *
+ * @param extended The frame uses a 29-bit extended identifier, not 11-bit standard.
+ * @param remote   The frame is a remote-transmission request (RTR).
+ * @param error    The frame is a controller error/status frame, not bus traffic.
+ */
+[[nodiscard]] constexpr bool can_rx_admissible(bool extended, bool remote, bool error) noexcept {
+    return extended && !remote && !error;
+}
+
+/**
+ * @brief Is @p frame emittable at the @ref can_link_t seam?
+ *
+ * The egress half of the same shared rule: a declared length must fit the data
+ * field the frame's mode actually has. A link that skipped it would `memcpy`
+ * @ref can_frame_data_t::len bytes out of a 64-byte carrier into an 8-byte kernel
+ * `struct can_frame::data` — a stack smash the seam precondition alone was
+ * holding back (#931).
+ */
+[[nodiscard]] constexpr bool can_tx_admissible(const can_frame_data_t& frame) noexcept {
+    return frame.len <= can_max_len(frame.fd);
+}
+
+/**
  * @brief The raw-frame seam between @ref transport_can and a physical CAN bus.
  *
  * Abstracting the socket here is what makes @ref transport_can testable without
@@ -100,6 +180,14 @@ struct can_frame_data_t {
  * in-memory paired link. A link is single-owner (held by one transport) and
  * delivers inbound frames through the registered @ref rx_fn_t, which may fire on
  * an internal receive thread.
+ *
+ * **Which frames cross the seam is the seam's own rule, not each link's.** Every
+ * port of a *physical* bus gates ingress on @ref can_rx_admissible and egress on
+ * @ref can_tx_admissible, so a bus-visible divergence between two ports is a
+ * compile-unit-local bug rather than a design choice (#931). In-memory test links
+ * are exempt by construction — their carrier cannot express RTR, an 11-bit
+ * identifier, or an error flag, so the ingress rule has no input to judge, and one
+ * of them injects raw fragments deliberately.
  */
 class can_link_t {
    public:
@@ -198,6 +286,48 @@ struct transport_can_config_t {
     std::chrono::milliseconds peer_ttl =
         kCanDefaultPeerTtl; /**< @brief Peer liveness window (ADR-0044): a peer silent
                                  longer than this expires from the enumeration. */
+
+    // --- ingress bounding (#912): the injected-resource / config seam ----------
+
+    std::pmr::memory_resource* reasm_mr =
+        std::pmr::new_delete_resource(); /**< @brief Where the RX buffers (reassembly
+                                              groups/slices and the pending-slice queue)
+                                              draw their structure. A constrained node
+                                              injects a bounded resource; the default is
+                                              the process heap. Must outlive the
+                                              transport. */
+    std::size_t max_groups = 0;          /**< @brief Live reassembly-group ceiling; `0` = unbounded
+                                              (host-bounded per RFC-0006). Overflow evicts the
+                                              oldest group and ticks @ref
+                                              transport_can::dropped_groups. */
+    std::size_t max_pending = 0;         /**< @brief Ceiling on data slices parked awaiting their
+                                              advertise; `0` = unbounded (host-bounded per
+                                              RFC-0006). Overflow evicts the oldest parked slice
+                                              and ticks @ref transport_can::dropped_rx. */
+    std::chrono::milliseconds rx_ttl =
+        kCanRxTtlFromPeerTtl; /**< @brief RX staleness window: a parked slice or an
+                                   incomplete reassembly group untouched this long is
+                                   reclaimed, because a lost advertise/data slice would
+                                   otherwise pin it forever. `0` = track `peer_ttl`
+                                   (@ref kCanRxTtlFromPeerTtl); if `peer_ttl` is itself
+                                   `0` the window stays `0`, which retains only what
+                                   arrived this instant — the same reading the peer
+                                   enumeration gives that value, never "disabled".
+                                   Unlike the count caps this is ALWAYS live — the
+                                   age-out is the bound that holds under the shipped
+                                   default config. */
+    mem::mem_backend_t* rx_backend =
+        nullptr; /**< @brief The byte seam an inbound data slice is COPIED into before it
+                      enters the reassembly buffer (`tr::view::over_bytes`'s injected
+                      form, #793). `nullptr` = the process heap, which is what this path
+                      used unconditionally before #911. A constrained node injects a
+                      bounded backend (`mem::pool_t`) so ingress exhaustion is a
+                      by-value refusal on the RX thread instead of a reach into the
+                      global heap; a refusal drops the whole group and ticks @ref
+                      transport_can::dropped_rx. Must outlive the transport — the
+                      segments it hands out are released by it. Companion to @ref
+                      reasm_mr — that one bounds the reassembly STRUCTURE, this one the
+                      slice BYTES. */
 };
 
 /**
@@ -213,7 +343,10 @@ struct transport_can_config_t {
  * can_reassembly_t keyed by `(node, base-endpoint) + slice-index`,
  * trimmed back to the advertised total (undoing FD padding), and delivered
  * byte-exact to the receiver. The map is rebuilt purely from advertise frames, so
- * a rejoining node self-heals with no coordinator (ADR-0030).
+ * a rejoining node self-heals with no coordinator (ADR-0030). The base endpoint
+ * RECURS — the 12-bit space wraps — so that key is only unambiguous because a
+ * fresh advertise retires every binding whose endpoint run it overlaps, and the
+ * group each was feeding with it (#909, `invalidate_overlapping`).
  *
  * **Bus capability (ADR-0044).** The bus reaches many peers over one wire, so the
  * transport also implements @ref bus_link_t — statelessly, from live traffic:
@@ -265,6 +398,58 @@ class transport_can : public transport_t, public bus_link_t {
      */
     [[nodiscard]] std::optional<can::advertise_t> learned_binding(std::uint32_t base_can_id) const;
 
+    // --- drop counters (#912) — the sibling-transport convention -----------------
+
+    /**
+     * @brief Inbound frames dropped rather than delivered (the tcp/quic/udp
+     *        `dropped_rx()` convention).
+     *
+     * Ticks once per parked data slice reclaimed because @ref
+     * transport_can_config_t::max_pending was reached or because it aged past
+     * `rx_ttl` — a bounded, counted drop instead of the unbounded park this
+     * replaces — and once per inbound slice whose bytes could not be owned
+     * (@ref transport_can_config_t::rx_backend refused, #911). It counts SLICES,
+     * not groups; a group's buffered slices reclaimed as a unit are @ref
+     * dropped_groups, which the refusal also ticks because the group it belonged
+     * to is abandoned rather than completed with a fabricated slice.
+     */
+    [[nodiscard]] std::uint64_t dropped_rx() const noexcept {
+        return dropped_rx_.load(std::memory_order_relaxed);
+    }
+
+    /**
+     * @brief Outbound frames the caller believed sent that never reached the bus
+     *        (the twai `tx_dropped()` convention, spelled to match `dropped_rx`).
+     *
+     * Ticks when a `send` cannot own its bytes (allocation failure — the
+     * backpressure case), when the payload splits into no window at all, when the
+     * group needs more consecutive endpoint slots than @ref kCanMaxGroupSlices
+     * (refused WHOLE, before any manifest goes out — #910), and when the group's
+     * advertise manifest cannot be encoded.
+     */
+    [[nodiscard]] std::uint64_t dropped_tx() const noexcept {
+        return dropped_tx_.load(std::memory_order_relaxed);
+    }
+
+    /**
+     * @brief Reassembly groups reclaimed before delivery — a `max_groups` eviction,
+     *        an `rx_ttl` age-out, or a base-endpoint run being re-bound (#909).
+     *
+     * The third form is the wraparound one: the 12-bit endpoint space recurs, so a
+     * fresh advertise over a run that a stale binding still claims retires that
+     * binding and the group it was feeding. That group can never complete (nothing
+     * resolves to it again) and its slices must not merge into the fresh group, so
+     * it is reclaimed here rather than aged out — one counter for "a group's
+     * buffered slices were reclaimed before delivery", whatever forced it.
+     *
+     * The accessor the reassembly buffer's own counter never had: it is private
+     * state on the RX thread, so this reads it under the ingress lock.
+     */
+    [[nodiscard]] std::uint64_t dropped_groups() const;
+
+    /** @brief Data slices currently parked awaiting their advertise (introspection). */
+    [[nodiscard]] std::size_t pending_slices() const;
+
     // --- the bus capability (ADR-0044) ------------------------------------------
 
     /** @brief This link IS a bus — expose the @ref bus_link_t facet. */
@@ -307,7 +492,8 @@ class transport_can : public transport_t, public bus_link_t {
     };
 
     // One entry of the last-heard peer table (ADR-0044), keyed by node id. Entries
-    // are INSERT-ONLY (exactly the learned_ identity-map policy): expiry hides an
+    // are INSERT-ONLY (unlike learned_, which retires overlapping runs — #909; this
+    // table is keyed by node, and a node id never aliases): expiry hides an
     // entry from enumeration/resolution but never frees it, so the endpoint
     // facades peer_link hands out stay pointer-stable for the transport's life
     // (std::map nodes never move). Growth is one entry per DISTINCT node id ever
@@ -320,12 +506,26 @@ class transport_can : public transport_t, public bus_link_t {
     // --- ingress (runs on the link's receive thread) ---
     void on_rx(const can_frame_data_t& frame);
     void learn_advertise(const can::advertise_t& adv);  // requires rx_m_ held
-    void process_data(const can_frame_data_t& frame);   // requires rx_m_ held
+    // Retire every same-node binding whose endpoint run overlaps the one a fresh
+    // advertise claims, and discard the reassembly group each was feeding (#909).
+    // The 12-bit endpoint space wraps, so a base RECURS; without this a stale run
+    // shadows the live binding in the process_data scan and a recurring key merges
+    // stale slices into the fresh group. Holds the invariant "one binding per slot,
+    // and a group lives exactly as long as the binding that feeds it".
+    void invalidate_overlapping(const can::can_id_fields_t& base,
+                                std::uint16_t slice_count);  // requires rx_m_ held
+    void process_data(const can_frame_data_t& frame);        // requires rx_m_ held
+    void park_pending(const can_frame_data_t& frame);        // requires rx_m_ held
+    void expire_pending();                                   // requires rx_m_ held
     void deliver(std::uint16_t src_node, tr::view::rope_t frame);
-    void touch_peer(std::uint16_t node);  // refresh/insert into the last-heard table
+    // Refresh/insert into the last-heard table, using the frame's arrival stamp.
+    void touch_peer(std::uint16_t node, std::chrono::steady_clock::time_point now);
 
     // --- egress helpers ---
-    std::uint16_t alloc_base(std::size_t slice_count);  // requires tx_m_ held
+    // RESERVE the group's run of consecutive endpoint slots (#910). Fallible on
+    // purpose: a group over kCanMaxGroupSlices fits at no base, and the caller must
+    // learn that BEFORE it advertises a slice_count it cannot deliver.
+    std::optional<std::uint16_t> alloc_base(std::size_t slice_count);  // requires tx_m_ held
     // Slices adv's 18-byte header and cfg_.path (in place, never copied — this node only
     // ever advertises its OWN path, so adv.path is left empty) into CLASSIC windows.
     void emit_advertise(const can::advertise_t& adv);  // requires tx_m_ held
@@ -345,11 +545,41 @@ class transport_can : public transport_t, public bus_link_t {
         can::advertise_t adv;
         bool deliver = true;
     };
-    std::mutex rx_m_;                                          // guards the map + buffers
-    can_reassembly_t reasm_;                                   // data-slice reassembly
-    std::map<std::uint32_t, binding_t> learned_;               // base CAN ID -> binding
+    /**
+     * @brief One data slice parked until its advertise lands, with the stamp that
+     *        lets it age out.
+     *
+     * A parked slice whose advertise never lands must not live forever, and the raw
+     * frame alone carries no arrival time to decide that on.
+     */
+    struct pending_slice_t {
+        can_frame_data_t frame{};                        /**< @brief The parked raw frame. */
+        std::chrono::steady_clock::time_point arrived{}; /**< @brief When it was parked. */
+    };
+
+    std::mutex rx_m_;         // guards the map + buffers
+    can_reassembly_t reasm_;  // data-slice reassembly
+    // base CAN ID -> binding. NOT insert-only: a fresh advertise retires every
+    // same-node entry whose endpoint run it overlaps (#909), which is what keeps a
+    // recurring base from claiming two bindings at once. Growth is otherwise one
+    // entry per distinct base a node advertises, structurally bounded by the 12-bit
+    // endpoint space per node.
+    std::map<std::uint32_t, binding_t> learned_;
     std::map<std::uint16_t, std::vector<std::byte>> control_;  // per-node advertise byte stream
-    std::vector<can_frame_data_t> pending_;  // data frames awaiting their advertise
+    // Data slices awaiting their advertise. Drawn from the injected resource (the
+    // RX thread must not reach the global heap), bounded in COUNT by max_pending
+    // and in AGE by rx_ttl; append-ordered, so both the stale prefix and the
+    // evict-oldest end are the front.
+    std::pmr::vector<pending_slice_t> pending_;
+    std::chrono::steady_clock::time_point rx_now_{};  // current frame's arrival stamp
+    // Where an inbound slice's bytes are copied (cfg_.rx_backend, resolved to the
+    // process heap once in the constructor). Resolved rather than branched so the
+    // per-slice path has one indirect call either way.
+    mem::mem_backend_t* rx_backend_ = nullptr;
+
+    // Drop counters (#912). Written on the RX/TX threads, read by anyone.
+    std::atomic<std::uint64_t> dropped_rx_{0};
+    std::atomic<std::uint64_t> dropped_tx_{0};
 
     // the last-heard peer table (ADR-0044) — node id -> entry, insert-only
     mutable std::mutex peers_m_;
@@ -374,13 +604,34 @@ class transport_can : public transport_t, public bus_link_t {
  *  - `version` (VALUE u8) — the protocol-version prefix (default 0);
  *  - `fd` (VALUE u8) — non-zero selects CAN-FD framing (default classic);
  *  - `path` (NAME) — the identity path advertised for this node's groups;
- *  - `peer_ttl_ms` (VALUE u32) — the ADR-0044 peer liveness window.
+ *  - `peer_ttl_ms` (VALUE u32) — the ADR-0044 peer liveness window;
+ *  - `max_groups` (VALUE u32) — the live reassembly-group ceiling (0 = unbounded,
+ *    host-bounded per RFC-0006); this is what makes the reassembly buffer's
+ *    evict-oldest seam reachable in production at all (#912);
+ *  - `max_pending` (VALUE u32) — the ceiling on data slices parked awaiting their
+ *    advertise (0 = unbounded, host-bounded per RFC-0006);
+ *  - `rx_ttl_ms` (VALUE u32) — the RX staleness window (0 = track `peer_ttl_ms`).
  * A missing/invalid `ifname` or `node` fails with `TYPE_MISMATCH`; a socket that
- * cannot bind (no kernel CAN / non-Linux stub) fails with `NOT_FOUND`. The
- * universal `role` is ignored — a bus has no dial/listen asymmetry.
+ * cannot bind (no kernel CAN / non-Linux stub) fails with `TRANSPORT_DOWN` — the
+ * TRANSIENT status, because the address resolved and it was the link that did not
+ * come up (#929). The universal `role` is ignored — a bus has no dial/listen
+ * asymmetry.
  *
+ * @param reasm_mr Where every constructed transport's RX buffers draw their
+ *                 structure — the injection point for the pmr seam the config TLV
+ *                 cannot carry (a resource is a pointer, not a wire value). A host
+ *                 registers the factory with its own bounded resource; the default
+ *                 is the process heap. Must outlive every transport built here.
+ * @param rx_backend Where every constructed transport COPIES an inbound data slice's
+ *                 bytes (@ref transport_can_config_t::rx_backend). Injected here for
+ *                 the same reason as @p reasm_mr — a backend is a pointer, not a wire
+ *                 value — so the seam is reachable from production registration and
+ *                 not only from a unit test. `nullptr` = the process heap. Must
+ *                 outlive every transport built here.
  * @return The factory functor for @ref transport_vertex_t::register_transport_type.
  */
-[[nodiscard]] transport_vertex_t::transport_factory_t can_transport_factory();
+[[nodiscard]] transport_vertex_t::transport_factory_t can_transport_factory(
+    std::pmr::memory_resource* reasm_mr = std::pmr::new_delete_resource(),
+    mem::mem_backend_t* rx_backend = nullptr);
 
 }  // namespace tr::net

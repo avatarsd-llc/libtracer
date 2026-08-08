@@ -27,11 +27,14 @@ import {
   encodeValue,
   encodePath,
   encodeSubscriber,
+  encodeConnSpec,
   DELIVERY_DURABILITY_REQUEST,
   encodeFwd,
   encodeField,
   decodeFwd,
+  firstChild,
   replyErrorCode,
+  replyErrorPath,
   FWD_OP,
   FWD_OP_FLAG_MINT_REQUEST,
   FWD_KIND,
@@ -251,6 +254,62 @@ test('decodeFwd parses the fwd-reply-error vector and replyErrorCode reads NOT_F
   assert.deepEqual(pathSegs(parsed.dst), REPLY_DST);
   assert.deepEqual(pathSegs(parsed.src), REPLY_SRC);
   assert.equal(replyErrorCode(parsed), FWD_ERROR.NOT_FOUND);
+});
+
+/**
+ * @brief The cross-core acceptance rule (#878): a reply's ERROR is the FIRST ERROR child of
+ * the STATUS, at whatever position — reference/05 §`0x09` pins no order over a STATUS's
+ * children, and RFC-0002 §C pins position only INSIDE the ERROR. Same frame as
+ * `fwd/fwd-reply-error` with the STATUS's optional DESCRIPTION written first.
+ *
+ * The Rust binding pins these same bytes in `tests/conformance_vectors.rs`
+ * (`fwd_reply_error_after_description`); before this, only Rust read the frame correctly and
+ * this core answered code 0 — the same answer it gives for a STATUS carrying no ERROR at all.
+ */
+test('replyErrorCode reads the ERROR at any STATUS child position (fwd-reply-error-after-description)', () => {
+  const bin = vector('fwd/fwd-reply-error-after-description');
+  const parsed = decodeFwd(bin);
+  assert.equal(parsed.op, FWD_OP.REPLY);
+  assert.equal(parsed.kind, FWD_KIND.ERROR);
+  assert.deepEqual(pathSegs(parsed.dst), REPLY_DST);
+  assert.deepEqual(pathSegs(parsed.src), REPLY_SRC);
+
+  // The vector is only a gate while its ERROR is genuinely NOT the first child: assert the
+  // shape before asserting the read, so a future re-blessing that reorders it cannot leave
+  // this test silently passing on the easy case.
+  assert.equal(parsed.payload.type, TYPE.STATUS);
+  assert.equal(parsed.payload.children.length, 2);
+  assert.equal(
+    parsed.payload.children[0].type,
+    TYPE.DESCRIPTION,
+    'the ERROR must not be child 0 or this vector gates nothing',
+  );
+  assert.equal(parsed.payload.children[1].type, TYPE.ERROR);
+
+  assert.equal(replyErrorCode(parsed), FWD_ERROR.NOT_FOUND);
+  assert.equal(replyErrorPath(parsed), null, 'registered identity, not the string form');
+
+  // firstChild is the shared accessor both cores answer "the X child" with; index-0 is not it.
+  assert.equal(firstChild(parsed.payload, TYPE.ERROR), parsed.payload.children[1]);
+  assert.equal(firstChild(parsed.payload, TYPE.PATH), null);
+
+  // And the offending shape is buildable from this package's own surface, so it is a wire a
+  // conformant peer can really send: encodeFwd embeds the STATUS bytes verbatim.
+  const status = encode({
+    type: TYPE.STATUS,
+    opt: { ...parsed.payload.opt },
+    payload: new Uint8Array(0),
+    children: parsed.payload.children,
+    trailer: null,
+  });
+  const built = encodeFwd({
+    op: FWD_OP.REPLY,
+    dst: REPLY_DST,
+    src: REPLY_SRC,
+    kind: FWD_KIND.ERROR,
+    payload: status,
+  });
+  assert.ok(sameBytes(built, bin), hex(built));
 });
 
 /* ----------------------------------------------- RFC-0024 §4 PATH_REF (0x14) --- */
@@ -488,4 +547,57 @@ test('fwd-bound-forward / fwd-bound-forwarded are one hop apart, byte for byte',
   // Exactly 8 bytes of dst left, and the payload rode through untouched.
   assert.equal(before.length - after.length, PATH_REF_ELEMENT_BYTES - 7 /* src grew by 7 */);
   assert.equal(hex(before.subarray(before.length - 8)), hex(after.subarray(after.length - 8)));
+});
+
+/* -------------------------------- #877 — the creation SPEC's field value TYPE --- */
+
+/**
+ * @brief `spec/conn-client-ws` — `encodeConnSpec` reproduces the shared vector exactly.
+ *
+ * TypeScript is the parity reference for this vector: it already emitted the correct
+ * shape, so this test passing is what confirms the vector encodes the right bytes rather
+ * than merely the bytes one core happens to produce. `test/conn-spec.test.mjs` pins the
+ * same bytes against the C++ emitter's captured output; this pins them against the file
+ * every core now reads.
+ *
+ * The load-bearing detail is the value TYPE of each field. `type`/`name` and the string
+ * settings `kind`/`addr` are NAME (0x02) nodes; only the integer settings `role`/`port`
+ * are VALUE (0x01). The terminus matches each (NAME key, value) pair on the value's type,
+ * so the two are not interchangeable — and since a VALUE-typed SPEC round-trips itself
+ * perfectly, the codec harness cannot tell the difference. This byte pin can.
+ */
+test('encodeConnSpec matches the spec/conn-client-ws vector byte-for-byte', () => {
+  const expected = vector('spec/conn-client-ws');
+  const built = encodeConnSpec({
+    type: 'client',
+    name: 'up',
+    role: 'dial',
+    port: 8080,
+    kind: 'ws',
+    addr: '127.0.0.1',
+  });
+  assert.ok(sameBytes(built, expected), `built ${hex(built)} != ${hex(expected)}`);
+});
+
+/**
+ * @brief `spec/create-child` — the minimal creation SPEC, and the type assertion on both
+ * of its field values.
+ *
+ * The client has no builder for a bare (config-less) creation SPEC, so this decodes the
+ * vector and asserts the shape every emitter must produce: two NAME-keyed pairs whose
+ * VALUES are themselves NAME nodes.
+ */
+test('spec/create-child carries NAME-typed field values, not VALUE-typed ones', () => {
+  const dec = decode(vector('spec/create-child'));
+  assert.equal(dec.type, TYPE.SPEC);
+  assert.equal(dec.opt.pl, true);
+  assert.equal(dec.children.length, 4, 'two (key, value) pairs');
+  const text = (t) => Buffer.from(t.payload).toString('utf8');
+  for (const child of dec.children) {
+    assert.equal(child.type, TYPE.NAME, 'every SPEC child here is a NAME — keys and values alike');
+  }
+  assert.equal(text(dec.children[0]), 'type');
+  assert.equal(text(dec.children[1]), 'stored_value');
+  assert.equal(text(dec.children[2]), 'name');
+  assert.equal(text(dec.children[3]), 'temp');
 });

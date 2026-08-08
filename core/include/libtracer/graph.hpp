@@ -18,6 +18,7 @@
 #include <concepts>
 #include <cstdint>
 #include <deque>
+#include <expected>
 #include <functional>
 #include <map>
 #include <memory>
@@ -32,6 +33,7 @@
 #include <utility>
 #include <vector>
 
+#include "libtracer/error.hpp"
 #include "libtracer/key_view.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
@@ -147,15 +149,24 @@ using subject_token_t = std::vector<std::byte>;
 /**
  * @brief The pluggable subject resolver (ADR-0018, #81): caller context → subject token.
  *
- * Maps an operation's caller context — this node's NAME for the inbound link a
- * remote FWD arrived on, or empty for a local API call — to the subject token ACL
- * evaluation matches against ACE subjects. Returning `std::nullopt` marks the
- * caller trusted (no subject — the operation is allowed unchecked), which is the
- * natural mapping for empty (local) contexts. The token is identity-provenance:
- * v1 typically returns the transport-authenticated peer id for a link; a stronger
- * (PKI) token slots in later without changing the ACL model.
+ * Maps an operation's caller context — this node's NAME for the inbound link a remote FWD
+ * arrived on — to the subject token ACL evaluation matches against ACE subjects. The token
+ * is identity-provenance: v1 typically returns the transport-authenticated peer id for a
+ * link; a stronger (PKI) token slots in later without changing the ACL model.
+ *
+ * @warning The ERROR arm is a **deny**, not a fallback (#905). A resolver that cannot name
+ *          the caller returns `std::unexpected(wire::err_t::ACCESS_DENIED)` and the
+ *          operation fails `status_t::PERMISSION_DENIED` at every gate — READ, WRITE,
+ *          SUBSCRIBE, CREATE, WRITE_ACL, READ_ACL, and remote-edge fan-in delivery. It is
+ *          never invoked with an empty caller: the empty (local API) context is the
+ *          trusted-by-convention channel and `graph_t::acl_allows` short-circuits it
+ *          BEFORE the resolver, so a remote identity — which always carries a non-empty
+ *          inbound link NAME — cannot reach the trusted arm. The predecessor of this type
+ *          returned `std::optional`, whose `nullopt` meant "fully trusted": an
+ *          unresolvable caller was granted everything, `WRITE_ACL` and `CREATE` included.
  */
-using subject_resolver_t = std::function<std::optional<subject_token_t>(std::string_view caller)>;
+using subject_resolver_t =
+    std::function<std::expected<subject_token_t, wire::err_t>(std::string_view caller)>;
 
 /**
  * @brief One EXTERNAL mutation of a producer's `:subscribers[]` — what @ref
@@ -1107,13 +1118,24 @@ class graph_t {
      *
      * No resolver (the default) ⇒ enforcement is DISABLED: every operation is allowed,
      * exactly today's behavior, and the hot path pays one null check. With a resolver
-     * installed, each gated operation maps its caller context through it and — when a
-     * subject token comes back — evaluates the target vertex's *effective* ACL (own
-     * ACEs + ancestor ACEs carrying INHERIT, ADR-0020): allowed iff some non-expired
-     * ACE with a matching subject (or `"EVERYONE@"`) grants the operation's right bit;
-     * a vertex whose effective ACL is empty stays open (enforcement is opt-in per
-     * vertex via ACL presence). Denial returns status_t::PERMISSION_DENIED
+     * installed, each gated operation with a NON-EMPTY caller context maps it through the
+     * resolver and — when a subject token comes back — evaluates the target vertex's
+     * *effective* ACL (own ACEs + ancestor ACEs carrying INHERIT, ADR-0020): allowed iff
+     * some non-expired ACE with a matching subject (or `"EVERYONE@"`) grants the
+     * operation's right bit; a vertex whose effective ACL is empty stays open (enforcement
+     * is opt-in per vertex via ACL presence). Denial returns status_t::PERMISSION_DENIED
      * (`tr::access::denied` on the wire, RFC-0002).
+     *
+     * The EMPTY caller context is the local-API convention and is trusted WITHOUT consulting
+     * the resolver (#905) — a remote op always carries its inbound link NAME, so it cannot
+     * spell the trusted context. The resolver's own error arm is therefore free to mean
+     * DENY: an unresolvable caller is refused, not waved through.
+     *
+     * The wildcard spelling is RESERVED against the resolver's OUTPUT (#908): a token equal to
+     * `tr::graph::kEveryoneSubject` is not a principal — that caller is refused at every gate,
+     * guarded vertex or not — because the wire has one spelling for a subject token, so a
+     * resolver that passes a caller-supplied identity through could otherwise mint a principal
+     * indistinguishable from the wildcard ACE.
      *
      * Set once at wiring time, before frames flow — read-only afterwards on the op
      * paths, so no lock (the remote-sink / child-catalog contract).
@@ -1248,6 +1270,12 @@ class graph_t {
      * fan-in gate denies the edge's stored caller, otherwise drops every delivery for the
      * rest of its life with nothing anywhere to say so.
      *
+     * The drop is not always ONE delivery, and the counters say so by counting deliveries
+     * rather than events (#896): a fan-out truncated by an unreservable overflow buffer
+     * sheds every edge past the inline prefix, and a handler write whose notify clone
+     * cannot be allocated sheds the vertex's WHOLE subscriber set — each shed delivery is
+     * one increment, so `1` never stands in for `N`.
+     *
      * Counted, never enforced: nothing in the library reads them, so a deployment chooses
      * whether to alarm. Relaxed monotonic, incremented only ON a drop — the delivering path
      * pays nothing when nothing is dropped, exactly like @ref ancestor_walks.
@@ -1257,14 +1285,19 @@ class graph_t {
         std::uint64_t no_target = 0;
         /** @brief The target's `:acl` denied WRITE to the edge's stored caller (#81). */
         std::uint64_t denied = 0;
-        /** @brief The nothrow delivery clone could not be allocated (#477). */
+        /** @brief The nothrow delivery clone / edge-view copy could not be allocated
+         *         (#477) — one count per delivery shed, whatever the fan-out width. */
         std::uint64_t out_of_memory = 0;
+        /** @brief Deliveries shed because a wide fan-out's snapshot could not be widened
+         *         past the inline prefix — a capacity degrade, not an allocation failure
+         *         on the delivery itself (`vertex_t::snapshot_drops_t::truncated`). */
+        std::uint64_t fan_out_truncated = 0;
     };
 
     /**
      * @brief Snapshot the per-cause delivery-drop counters (@ref delivery_drops_t).
      *
-     * The three loads are individually relaxed and not one atomic snapshot, so a reader
+     * The loads are individually relaxed and not one atomic snapshot, so a reader
      * racing a delivering thread may see a torn total. That is deliberate: making it
      * coherent would put a lock on the drop path to serve a diagnostic, and these are
      * monotonic counters whose useful reading is "is this growing", not an instant.
@@ -1315,6 +1348,20 @@ class graph_t {
     // target's own logic; a dispatch cycle is impossible by construction (no depth cap).
     void dispatch_edge_target(const edge_view_t& e, const rope_t& value);
     void dispatch_edge_remote(const edge_view_t& e, const rope_t& value);
+    // The cause a delivery was declined for — the argument of the ONE counting door
+    // below. Kept private: the enum names the internal drop sites, while the public
+    // surface is delivery_drops_t, whose fields are what an operator reads.
+    enum class drop_reason_t : std::uint8_t { NO_TARGET, DENIED, OUT_OF_MEMORY, FAN_OUT_TRUNCATED };
+    // Count `n` declined deliveries against `why` — the SINGLE door every drop site goes
+    // through (#896). It exists because the three sites that forgot to count were the
+    // three that incremented nothing rather than the wrong thing: a path that abandons an
+    // admitted delivery and does not call this is now the visible omission it should be.
+    // `n` is a delivery count, never an event count — a shed fan-out of N counts N.
+    void count_drop(drop_reason_t why, std::uint64_t n) noexcept;
+    // Fold one snapshot's shed tally (vertex_t::snapshot_drops_t, reported by
+    // snapshot_edges) into the per-cause counters. Called on the fan-out path, so it
+    // early-outs on the clean case in one test.
+    void count_snapshot_drops(const vertex_t::snapshot_drops_t& drops) noexcept;
     // Vertical bubbling (RFC-0005): fan `value` out to every registered ancestor's
     // subscribers. Called only when v->listeners_above_ says someone is listening.
     void bubble_up(vertex_t* v, const rope_t& value);
@@ -1372,9 +1419,10 @@ class graph_t {
     result_t<void> field_write(vertex_t* v, const field_path_t& field, const view_t& value,
                                std::string_view caller);
     // The ACL gate (#81, ADR-0018/0020): true iff `caller` may exercise `right` on
-    // `v`. True with no resolver installed (one null check — enforcement off), for a
-    // trusted caller (resolver returns nullopt), or when the effective ACL (own ACEs
-    // + INHERIT-flagged ancestor ACEs) is empty; otherwise the verdict of the pure
+    // `v`. True with no resolver installed (one null check — enforcement off), for the
+    // trusted EMPTY (local) caller — settled before the resolver runs, #905 — or when
+    // the effective ACL (own ACEs + INHERIT-flagged ancestor ACEs) is empty. FALSE
+    // outright when the resolver refuses to name the caller; otherwise the verdict of the pure
     // per-target policy over the CACHED effective-ACE merge (ADR-0050
     // effective_acl_t — own list before ancestors, pre-merged per vertex). Runs on
     // EVERY gated data op (read/write/await), and evaluates ONE list under one
@@ -1403,8 +1451,8 @@ class graph_t {
     // (ADR-0044 — a transport vertex lists live bus peers, no vertices created);
     // otherwise the direct child vertices registered under v's key are enumerated.
     [[nodiscard]] result_t<view_t> read_children(vertex_t* v) const;
-    // ":acl" read => the raw stored ACL TLV bytes verbatim (#81-A, ADR-0018/0020). The
-    // caller-facing gate (READ_ACL) runs in read(v, field, caller) before reaching here.
+    // ":acl" read => the stored ACEs RE-ENCODED (#81-A, ADR-0018/0020, #907) — a projection
+    // of the list acl_allows walks. The READ_ACL gate runs in read(v, field, caller).
     [[nodiscard]] result_t<view_t> read_acl(vertex_t* v) const;
     // Bare ":settings" read (RFC-0010 §A.4 as amended by RFC-0022 §4) => the settings
     // container: the reserved `app` record iff a descriptor table is installed, and
@@ -1532,6 +1580,7 @@ class graph_t {
     mutable std::atomic<std::uint64_t> drops_no_target_{0};
     mutable std::atomic<std::uint64_t> drops_denied_{0};
     mutable std::atomic<std::uint64_t> drops_oom_{0};
+    mutable std::atomic<std::uint64_t> drops_truncated_{0};
 
     // The propagate-sweep selection sets (RFC-0008 §B), keyed on canonical PATH-payload
     // bytes and ORDERED so a subtree is a contiguous prefix range (a parent's key is a

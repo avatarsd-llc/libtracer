@@ -62,7 +62,7 @@ encodeField(':subscribers[]');                                 // === field-appe
 | `encodeFwd` / `encodeField` builders + `decodeFwd` | **implemented** | `fwd-*`, `field-*`, `fwd-reply-*` |
 | `encodeValue` / `encodeSubscriber` / `encodePath` payload builders | **implemented** | `value-bool-true`, `value-ll-u32`, `value-ts-abs`, `subscriber-path`, `path-sensor-temp` |
 | inbound VALUE delivery (FWD{WRITE} / bare / ROUTER-shed) | **implemented** | `router-wrapped` + all vectors |
-| typed `FwdError` on `kind=ERROR` reply | **implemented** (codes provisional) | `fwd-reply-error`; ERROR registry (#8) pins the code set |
+| typed `FwdError` on `kind=ERROR` reply | **implemented** (codes provisional) | `fwd-reply-error`; ERROR registry (#8) pins the code set. The ERROR is the first `ERROR` child of the STATUS **at whatever position** — `fwd-reply-error-after-description` pins that rule here and in the Rust binding |
 
 ## Dependencies
 

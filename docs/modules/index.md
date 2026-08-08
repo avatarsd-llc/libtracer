@@ -69,7 +69,9 @@ Each module has its own page in the sidebar, grouped by layer:
 - **L4 graph** — [path](path.md) (addressing), [graph](graph.md) (vertices, read/write/await,
   dispatch), [fwd-router](fwd-router.md) (FWD source-routing and the `/net` plane)
 - **L4 transport** — [transport](transport.md) (loopback · UDP · TCP · WS; QUIC / WebTransport opt-in),
-  [can](can.md) (the header-elided CAN stack: ID codec, advertise, splitter, reassembly, binding)
+  [connection config](connection-config.md) (the SPEC `config` keys a `/net:children[]` creation
+  carries — universal and kind-private), [can](can.md) (the header-elided CAN stack: ID codec,
+  advertise, splitter, reassembly, binding)
 - **Cross-cutting** — [status & errors](status.md) (`status_t` / `result_t<T>` / `err_t`),
   [config](config.md) (the named-traits type and the policies it selects),
   [security & ACL](security-acl.md) (typed entries and the policy seam),
@@ -79,8 +81,8 @@ Each module has its own page in the sidebar, grouped by layer:
 
 The diagram draws dispatch as a box because it is a distinct *function*: fan-out to an
 edge set and the colon-field write plane. It is not a distinct translation unit. Both
-live in the graph module — `graph_t::fan_out` (`core/src/graph.cpp:921`) and
-`graph_t::field_write` (`core/src/graph.cpp:1638`) — so [graph](graph.md) is the page
+live in the graph module — `graph_t::fan_out` (`core/src/graph.cpp:966`) and
+`graph_t::field_write` (`core/src/graph.cpp:1702`) — so [graph](graph.md) is the page
 that documents them, and there is no `dispatcher` source file to look for.
 
 At the standard level the split is real: `dispatcher` is one of the **required modules**
@@ -154,5 +156,6 @@ graph — vertices & dispatch <graph>
 security & ACL — access control <security-acl>
 fwd-router — FWD routing and the /net plane <fwd-router>
 transport — the wire <transport>
+connection config — the SPEC config keys <connection-config>
 can — the header-elided CAN stack <can>
 ```

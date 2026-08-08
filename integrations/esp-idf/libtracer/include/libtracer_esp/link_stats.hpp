@@ -44,12 +44,12 @@ namespace tr::net {
  *        threading contract (owner's mutex) and the message-granularity definition.
  */
 struct link_counters_t {
-    std::uint32_t rx_frames = 0;  /**< @brief Messages delivered inbound. */
-    std::uint32_t rx_bytes = 0;   /**< @brief Payload bytes delivered inbound. */
-    std::uint32_t tx_frames = 0;  /**< @brief Messages written outbound. */
-    std::uint32_t tx_bytes = 0;   /**< @brief Payload bytes written outbound. */
-    std::uint32_t tx_drops = 0;   /**< @brief Frames dropped toward this connection. */
-    std::uint32_t rx_drops = 0;   /**< @brief Inbound discards (oversize / reassembly). */
+    std::uint32_t rx_frames = 0; /**< @brief Messages delivered inbound. */
+    std::uint32_t rx_bytes = 0;  /**< @brief Payload bytes delivered inbound. */
+    std::uint32_t tx_frames = 0; /**< @brief Messages written outbound. */
+    std::uint32_t tx_bytes = 0;  /**< @brief Payload bytes written outbound. */
+    std::uint32_t tx_drops = 0;  /**< @brief Frames dropped toward this connection. */
+    std::uint32_t rx_drops = 0;  /**< @brief Inbound discards (oversize / reassembly). */
     /** @brief `esp_timer_get_time()` of the last delivered message; -1 = never. */
     std::int64_t last_rx_us = -1;
     /** @brief `esp_timer_get_time()` when this connection came up; -1 = not connected. */

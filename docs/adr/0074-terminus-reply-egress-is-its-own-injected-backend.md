@@ -16,7 +16,7 @@ The failure *half* was already closed: a null segment yields an empty rope, whic
 > path as a whole. `assemble` first sizes the reply chain through
 > `rope_t::try_reserve` (`core/src/op_resolve_walk.hpp:575`), and once the chain exceeds the
 > rope's inline capacity that delegates to `tr::detail::try_reserve`
-> (`core/include/libtracer/rope.hpp:107`), whose second step is the **throwing**
+> (`core/include/libtracer/rope.hpp:299`), whose second step is the **throwing**
 > `std::vector::reserve` run after a probe-and-free
 > (`core/include/libtracer/mem_heap.hpp:116-121`). The helper is declared `noexcept`, so a lost
 > race on the just-freed probe block terminates rather than degrading by value — its own comment

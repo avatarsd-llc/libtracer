@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <expected>
 #include <initializer_list>
 #include <map>
 #include <optional>
@@ -345,8 +346,9 @@ void test_acl_prune() {
     (void)g.write(path_t("/p/mid/inner"), make_value(value_tlv({0x02})));
     (void)g.write(path_t("/p/sib"), make_value(value_tlv({0x03})));
 
-    // Enforcement on: every caller resolves to a subject.
-    g.set_subject_resolver([](std::string_view) -> std::optional<subject_token_t> {
+    // Enforcement on for the attributed caller "peer"; the empty (local) context is settled
+    // as trusted before the resolver runs (#905), which is what the setup writes above use.
+    g.set_subject_resolver([](std::string_view) -> std::expected<subject_token_t, tr::wire::err_t> {
         return subject_token_t{std::byte{'u'}};
     });
     std::vector<std::byte> everyone;
@@ -386,9 +388,14 @@ void test_acl_prune() {
     while (!frontier.empty()) {
         const std::string at = frontier.back();
         frontier.pop_back();
-        const auto members = g.read(path_t("/p" + at + ":children"));
+        // Attributed to the SAME caller the snapshot ran under — an unattributed read
+        // would be the trusted local context and enumerate past the gate.
+        const path_t at_children{"/p" + at + ":children"};
+        const auto at_v = g.find(at_children.key());
+        if (!at_v) continue;
+        const auto members = g.read(*at_v, at_children.field(), "peer");
         if (!members) continue;  // READ denied here => cannot enumerate below
-        const view_t flat = (*members)->flatten();
+        const view_t flat = members->flatten();
         const auto listing = parse_snapshot(flat.bytes());  // POINT{ POINT{NAME}… } parses too
         if (!listing) continue;
         for (const std::string& child : listing->topology) {

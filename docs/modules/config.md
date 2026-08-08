@@ -32,12 +32,34 @@ is the API surface.
 
 **Runtime configuration** is `config_reader_t`. A connection's settings arrive as
 a SPEC `config` SETTINGS TLV: positional NAME-key / value pairs, string values as
-`NAME` children and integers as `VALUE` children. Every transport factory used to
-hand-roll the same walk; this class is its one home. Unknown keys are ignored so
+`NAME` children and integers as `VALUE` children. All six transport-side consumers
+used to hand-roll the same walk — the universal keys plus the tcp, ws, can, quic and
+webtransport factories — and this class is their one home. Unknown keys are ignored so
 a newer peer can send more than a receiver understands, a key whose value child
 has the wrong type is ignored, and a repeated key resolves to its last
 well-formed occurrence. Each factory still reads only *its own* keys — what is
 shared is the walk, not the vocabulary.
+
+The walk is **pair-consuming**: it advances a whole `(key, value)` pair at a
+time, so an unknown key is skipped *together with its value*. That is what lets
+the tolerance coexist with positional pairing. Scanning every offset instead made
+the grammar ambiguous — a pair whose string value textually equalled a known key
+(`link_hint = "addr"`) had that value re-read as a key, binding the following
+child as `addr` and, under last-wins, destroying a legitimate earlier one. A
+child that is not a `NAME` where a key belongs desynchronizes the stream and the
+walk stops there rather than guessing a resync.
+
+Which keys those factories actually read — the universal set and each kind's private
+one, with the wire value each takes — is [connection config](connection-config.md).
+This page is the walk; that page is the vocabulary.
+
+`config_reader_t` is the one home for the *transport* config walk, not for every
+pair walk in the tree — the scope of that claim is deliberate. `graph_t::create_child`
+(the creation SPEC) and the SUBSCRIBER QoS `SETTINGS` parse read the same positional
+grammar at L4, where `tr::net` cannot be a dependency, so they carry the same
+pair-consuming *rule* without sharing the type. `graph::parse_acl` carries it as well
+([#906](https://github.com/avatarsd-llc/libtracer/issues/906)) — the same mechanics
+under the opposite unknown-key ruling, which is to reject.
 
 ## Declaring your own build configuration
 
@@ -89,7 +111,10 @@ satisfy.
 - **A `config_reader_t` borrows.** The reader and every `std::string_view` it
   returns point into the decoded TLV's storage; both die with the `tlv_t`.
 - **Ignoring an unknown key is deliberate.** A reader that rejects settings it
-  does not recognize breaks forward compatibility with a newer peer.
+  does not recognize breaks forward compatibility with a newer peer. This is the
+  *opposite* ruling from `parse_acl`, which rejects an unknown key: an ACL is a
+  security document, where silently dropping an attribute widens access. The
+  tolerance is safe here only because the skip takes the whole pair.
 
 ## API reference
 

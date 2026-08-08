@@ -164,7 +164,10 @@ frame is a **slice**; slices are grouped by the in-flight identity
 delivery-borne producer id, so on this header-elided transport the binding derives
 it from how the slice arrived — the link-local peer identity read off the frame id
 (`can_reassembly_t` keys it as `(node, base-endpoint)`). There is no dedup or
-revisit state anywhere in the stack; the key groups slices, nothing else.
+revisit state anywhere in the stack; the key groups slices, nothing else. The base
+endpoint **recurs** — the 12-bit space wraps — so that key is unambiguous only under the
+binding-lifetime invariant described in *A re-issued endpoint run retires whatever still
+claims it*, which is what stops a reused base from merging two unrelated payloads.
 `assemble()` chains the slices, in index order, into a `rope_t` — zero copies.
 
 This deliberately reuses libtracer's **one reassembly model** rather than bolting
@@ -195,6 +198,14 @@ resource: structure is drawn from an injected resource, the live group count is
 bounded by configuration, and overflow evicts the oldest group and increments a
 `dropped_groups` counter. A constrained node therefore degrades by a bounded drop
 rather than by unbounded growth, and no magic number appears anywhere in the buffer.
+
+A count bound alone does not reclaim a group that will **never** complete, which is
+what a lost data slice leaves behind: `erase()` is reached only after `is_complete()`.
+So the buffer also **ages out**. It holds no clock of its own — the caller stamps it
+(`set_now`) and sweeps on a cadence it chooses (`sweep_stale`), keeping the buffer a
+pure framing primitive exactly as it has no allocator of its own. An age-out ticks the
+same `dropped_groups` counter an eviction does: one counter for "a group's buffered
+slices were reclaimed before delivery", whatever forced it.
 ```
 
 ## The in-band advertise frame and the dynamic map
@@ -285,7 +296,19 @@ the byte-exact frame surfaces at the peer's receiver.
 ### The `can_link_t` seam (testable without kernel CAN)
 
 The raw frame I/O sits behind a small seam, `can_link_t` (`write_raw(frame)` + an
-`on_receive` callback), so the transport never touches a socket directly:
+`on_receive` callback), so the transport never touches a socket directly.
+
+**Which frames cross the seam is the seam's rule, not each link's.** Ingress admits
+only 29-bit **data** frames — `can_rx_admissible(extended, remote, error)` — because
+the extended identifier *is* the path, so an 11-bit standard frame carries no
+decodable identity, a remote-transmission request carries a DLC but no data bytes,
+and an error frame is a controller status report. Egress admits only a length that
+fits the mode's data field — `can_tx_admissible(frame)` over `can_max_len(fd)`, the
+seam's adapter onto the L1 widths. Every port of a *physical* bus calls both,
+decoding the flags from its own driver's representation; the verdict is reached in
+one place, so two ports cannot disagree about what is real traffic. (The in-memory
+test links are exempt by construction: their carrier cannot express RTR, an 11-bit
+identifier, or an error flag, so the ingress rule has nothing to judge.)
 
 - **`socketcan_link_t`** — the production impl: `socket(PF_CAN, SOCK_RAW, CAN_RAW)`,
   `CAN_RAW_FD_FRAMES` enabled best-effort (a classic-only controller works unchanged),
@@ -337,10 +360,114 @@ re-driven when the manifest lands.
   keeps the data plane correct and uniform (single value and multi-frame group are the
   same path) and makes DLC-padding trim unconditional. The steady-state
   *advertise-once-then-reuse* optimization (one binding, many lean values) is not
-  realized; the learned bindings persist and self-heal by overwrite on re-advertise.
+  realized; a learned binding persists past delivery and is retired only when a fresh
+  advertise re-issues its endpoint run (below), which is also how it self-heals.
 - **Ordering.** Correctness relies on per-bus in-order delivery of a group's frames
   (which a single producer gets on CAN); the pending-data buffer covers control/data
   cross-ID reordering.
+```
+
+### Ingress is bounded in count and in age
+
+Both receive-side buffers are reclaimable, because on a bus that drops frames both
+have a residue that nothing else frees:
+
+| Buffer | Count bound | Age bound | Counter |
+| --- | --- | --- | --- |
+| pending data slices (awaiting an advertise) | `max_pending` — evict oldest | `rx_ttl`, swept on every inbound frame | `dropped_rx()` |
+| reassembly groups | `max_groups` — evict oldest | `rx_ttl`, swept on every inbound advertise | `dropped_groups()` |
+
+A group is also reclaimed, on the same counter, when a fresh advertise re-issues the
+endpoint run its binding held — see *A re-issued endpoint run retires whatever still
+claims it* below. That one is not a bound at all but a correctness rule; it shares the
+counter because the counter's meaning is "a group's buffered slices were reclaimed before
+delivery", whatever forced it.
+
+The count bounds are **opt-in** — `0` means unbounded, host-bounded per RFC-0006,
+the same policy as the stream servers' `max_peers` — and both, along with the pmr
+resource the buffers draw from, arrive through the connection's own config door
+(`max_groups`, `max_pending`, `rx_ttl_ms`; the resource is injected at
+factory-registration time, since a pointer cannot ride a config TLV). The **age**
+bound is always live, so it is what holds under the default configuration. It is not
+an independently invented number: left at `0`, `rx_ttl` tracks the configured
+`peer_ttl`, on the reasoning that RX state a peer would have completed is dead once
+that peer is itself considered gone.
+
+A third reclamation shares those counters: an inbound slice whose bytes the ingress
+backend refuses (`rx_backend`, the companion injection to the pmr resource — that one
+bounds the reassembly *structure*, this one the slice *bytes*) drops the **whole**
+group, ticking `dropped_rx()` for the slice and `dropped_groups()` for the group.
+Never a placeholder: the reassembly buffer counts entries without inspecting their
+length, so an empty stand-in would satisfy `is_complete`, chain into the rope, and be
+trimmed to a byte-wrong short frame that the receiver could not tell from good data.
+
+Egress has the matching counter, `dropped_tx()`: a send that never reached the bus
+(no storage for the payload, a payload that split into no window, a group needing more
+consecutive endpoint slots than `kCanMaxGroupSlices`, or a manifest that could not be
+encoded) is counted rather than silently discarded.
+
+### A group is reserved before it is advertised
+
+The endpoint window is the scarce resource, and a group occupies a *run* of
+consecutive slots in it. The manifest is a promise of `slice_count` slices, so the run
+is reserved **before** the manifest goes out: a group that fits at no base is refused
+whole and counted, and nothing is said on the bus. Advertising first and discovering
+the shortfall mid-loop is what leaves every listener holding a group that can never
+complete. The bound is derived from the ID field widths (`kCanMaxGroupSlices` =
+`kEndpointMax` minus the reserved control slot), so it moves with the wire and is never
+a chosen number. Retracting an already-emitted manifest was the alternative and was
+declined: it is a second wire concern — a control-frame semantic every peer must
+implement, itself lossy on the very medium that lost the tail slices — where the
+capacity is a purely local fact the sender already holds.
+
+### A re-issued endpoint run retires whatever still claims it
+
+The endpoint window is not only scarce, it **wraps**: `alloc_base` resets to the first
+data slot when a reservation runs off the end, so a base *recurs* — routine, not
+exceptional. Two receive-side structures key on that base, and both aliased once a run
+was re-issued: the learned-binding map resolves a slice by first-match over `[base,
+base + slice_count)` in ascending base order, so a stale, wider, lower-numbered range
+**shadowed** the live binding; and the reassembly group key is `(node, base-endpoint)`,
+so a recurring base **merged** slices left over from an incomplete group into the fresh
+one. The second is the worse one: `is_complete` could be satisfied by a mix of old and
+new slices, so a byte-corrupted frame was delivered as valid — silent cross-talk between
+two unrelated payloads, not a crash.
+
+Both close on one invariant, enforced when an advertise is learned: **at most one binding
+may claim an endpoint slot of a node, and a reassembly group lives exactly as long as the
+binding that feeds it.** A fresh advertise retires every same-node binding whose run
+overlaps the one it claims, and discards the group each was feeding — reclaimed and
+counted on `dropped_groups()`, exactly as an age-out or an eviction is. Because a group
+is only ever fed through a live binding, and its key is derived from that binding's base,
+two groups can share a key only if two bindings share a base, which this makes impossible.
+The overlap test is arithmetic on the CAN ID's own endpoint field: no epoch, no generation
+counter, and no bound that is not the wire's.
+
+Two residues this does **not** reach, both rooted in the same fact: a data frame carries
+only the CAN ID, so a slice from a previous lap is byte-indistinguishable from one
+belonging to the group now claiming those slots. Both are bounded by the `rx_ttl` age-out
+and neither is a gap of the keying — they are gaps of the header-elided design itself.
+
+1. **A slice parked before its advertise.** It is re-driven into whichever group later
+   claims its slot.
+2. **A stale binding no re-issue overlapped, fed by frames whose own advertises were
+   lost.** The retire-on-re-issue rule fires only when a new run *overlaps* the old one.
+   A binding whose run is skipped over survives; if the advertises for the groups that
+   later occupy nearby slots are themselves lost on the bus, their data slices resolve
+   first-match to that surviving binding, fill its indices, and complete its stale group.
+   Two different payloads are then welded into one frame and delivered upstream as valid.
+   No slice is ever parked, so this is a distinct mechanism from (1) rather than a
+   restatement of it.
+
+```{admonition} Eviction is not a substitute for correct keying
+:class: warning
+Aging and eviction bound *memory*; they do not make a stale binding safe to reuse. The
+deterministic property is the invariant above — a binding, and the group it feeds, are
+retired at the moment their run is re-issued, not whenever a timer happens to fire.
+[ADR-0077](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0077-can-advertise-carries-a-producer-generation-keying-reassembly.md)
+records the decision and, in its implementation-status section, why the producer
+**generation** it also proposes has not been implemented: it is redundant against this
+invariant and cannot reach the parked-slice residue either.
 ```
 
 ### Peer enumeration and transparent per-peer forwarding
@@ -436,14 +563,22 @@ reply completion at the `op_resolver_t` terminus, which resolves synchronously.
   under the sanitizer builds.
 - **Real `vcan0`** — `core/tests/transport_can_vcan_test.cpp` drives two
   `socketcan_link_t` over a kernel virtual-CAN device and asserts a byte-exact frame
-  each way. It **self-skips** when `vcan0` cannot bind, so the required gates never
-  depend on kernel CAN; the dedicated **`can-vcan-e2e`** workflow sets `vcan0` up so the
-  socket path runs for real.
+  each way, and carries the seam-rule vectors that need a real socket to exist: a bare
+  `CAN_RAW` adversary injects an RTR frame and an 11-bit standard frame alongside one
+  admissible data frame, and exactly one crosses; an over-length classic frame handed
+  to `write_raw` is dropped rather than clamped (the stack smash it would otherwise
+  cause is ASan's to see — the kernel refuses the oversized write either way, so no
+  *unguarded* link is distinguishable on the bus; the drop-vs-**clamp** choice is,
+  and the vector pins it by giving the two frames distinct ids and payloads, so a
+  truncated frame would be witnessed under its own id). It **self-skips** when
+  `vcan0` cannot bind, so the required gates never depend on kernel CAN; the dedicated
+  **`can-vcan-e2e`** workflow sets `vcan0` up so the socket path runs for real.
 
 ## Pitfalls
 
 | Rule | Failure mode it prevents |
 | --- | --- |
+| Which frames cross the `can_link_t` seam is decided once, at the seam. | Two ports of the same seam drift on what counts as traffic. This is not hypothetical: `twai_link_t` filtered RTR and bounded classic length while `socketcan_link_t` did neither, so on Linux a remote-request frame reached the reassembler as a data slice whose DLC promised bytes it never carried. |
 | The 29-bit ID carries no bus field. | An implementation that packs a controller index into the ID collides with a deployment that repartitioned the lower 25 bits, and loses the property that one arbitration band belongs to one node. Two buses are two path segments, not two ID layouts. |
 | A slice group is `(origin, ts) + index`, and `origin` is receiver-derived, never read off the wire. | Grouping by `ts` alone merges the slices of two publishers that emit at the same timestamp into one corrupt rope. |
 | Trailing-slice loss is only detectable with a declared count. | An implementation that infers `N` from the highest index observed reports a 100-slice group as complete when index 99 was dropped. The advertise manifest's `slice_count` is what makes the group total. |

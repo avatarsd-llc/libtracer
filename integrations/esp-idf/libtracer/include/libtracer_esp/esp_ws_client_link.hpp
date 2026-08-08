@@ -18,9 +18,16 @@
  * mirror of @ref httpd_ws_link_t (the esp_http_server-backed *server* link) — the
  * same "platform link picked by which TU compiles, never an in-source #ifdef"
  * split as `twai_link_t` is for CAN. The portable `transport_ws_client` stays for
- * the linux virtual board (glibc sockets); the two are selected by the build, and
- * a chip node that binds this link leaves the portable one unreferenced for
- * `--gc-sections` to drop.
+ * the linux virtual board (glibc sockets); the two are selected by the build.
+ *
+ * Since #947 the selection is EXCLUSIVE and nothing rests on `--gc-sections`: on a
+ * chip target `core/src/transport_ws.cpp` is not compiled, so this link is the only
+ * `ws` dialer there. Relying on the collector never worked anyway — the built-in
+ * transport catalog REGISTERED the portable factory, which kept 46 of its symbols
+ * reachable in a measured chip image. Excluding the TU is the fix, because on lwIP
+ * the portable pair is not just unreachable but unusable: its scatter-gather egress
+ * asks `sendmsg` for `MSG_NOSIGNAL`, `lwip_sendmsg` rejects it with `EOPNOTSUPP`,
+ * and every data frame is dropped in silence (#948).
  *
  * It presents the same `transport_t` contract as `transport_ws_client`: one
  * inbound BINARY WebSocket message is one libtracer TLV, delivered borrowed
@@ -44,9 +51,31 @@
  *     thread, a reply on the recv thread itself). `esp_transport_ws`'s handle is
  *     NOT thread-safe, so all handle access is serialized by one small mutex held
  *     ONLY for the read/write syscall (the poll runs outside it). The read after a
- *     positive poll is prompt, so the mutex is never held blocking. The reads run
+ *     positive poll is prompt; the WRITE is not — IDF spends the caller's timeout on
+ *     up to three legs inside one `esp_transport_write` — so that mutex IS held
+ *     blocking, for a bound derived from the task-watchdog period rather than the
+ *     4 s literal it used to be (#952: 3 x 4 s against a 5 s watchdog). The reads run
  *     otherwise lock-free on the one recv thread; the graph/router lock-stripes
  *     below are unchanged — this link adds no lock beyond that syscall serializer.
+ *   - Teardown is a BARRIER, not an assumption. The destructor disarms the link
+ *     (`stop_`), wakes the recv thread's backoff, joins it, then destroys the handles
+ *     UNDER the same mutex a sender holds across its write, and finally waits out
+ *     every sender that had already ANNOUNCED itself on the in-flight tally — raised at
+ *     the top of `send()`, before it queues on that mutex. Before #952 it destroyed the
+ *     handles with that mutex held nowhere, on the false premise that the joined recv
+ *     thread was the only handle user — so a sender queued behind a stalled write woke
+ *     up owning a destroyed handle. The tally, not `send()`'s first instruction, is the
+ *     covered boundary, and it is drawn there because no barrier inside an object can
+ *     draw it earlier: a caller that has not reached the tally when the destructor reads
+ *     it for the last time is NOT waited out — whether it is a `send()` that STARTS
+ *     after the destructor returns, or one that entered `send()` and is still short of
+ *     the tally (a few instructions). The embedder owns the link's lifetime against its
+ *     own callers; this type bounds what happens once a caller is on the tally.
+ *   - The handles themselves are published by `connected_`, not by the mutex: the recv
+ *     thread rebuilds `ws_`/`tcp_` on every re-dial holding NO lock, and releases them
+ *     with the `connected_` store. So a handle is only ever read behind an ACQUIRE that
+ *     observed `true` — a check ahead of that gate races the rebuild, whatever lock it
+ *     holds.
  *   - `send()` COPIES the frame into a reusable tx scratch before writing, because
  *     `esp_transport_write` masks IN-PLACE (RFC 6455 client rule) and a delivered
  *     frame may be shared with the concurrent server link — so the caller's (const,
@@ -71,6 +100,7 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -109,21 +139,46 @@ class esp_ws_client_link_t : public transport_t {
      * @param rx_bytes Reusable receive-buffer size (one inbound message must fit); our
      *                 control TLVs are small, so the default is modest.
      * @param tx_bytes Reusable send-scratch size (one outbound frame must fit).
-     * @param recv_stack Recv-thread stack (0 = the pthread default, which the node sizes
-     *                   for in-call delivery through the graph's on_write seam).
+     * @param recv_stack Recv-thread stack in bytes, HONORED (#900): the recv thread runs
+     *                   in-call delivery through the graph's on_write seam, which is the
+     *                   deep path, so a node that knows its delivery depth sizes it here.
+     *                   0 = the platform pthread default.
      */
     explicit esp_ws_client_link_t(std::string host, std::uint16_t port, std::string ws_path = "/ws",
                                   std::size_t rx_bytes = 2048, std::size_t tx_bytes = 2048,
                                   std::size_t recv_stack = 0);
 
-    /** @brief Stop the recv thread, then close + destroy the esp_transport handles. */
+    /**
+     * @brief Stop the recv thread, then close + destroy the esp_transport handles.
+     *
+     * Bounded and ordered (#952): the link is disarmed first, the recv thread's
+     * reconnect backoff is woken rather than waited out, the handles are destroyed
+     * under the send serializer, and every sender that has ANNOUNCED itself on the
+     * in-flight tally is waited out before this object's own members go. The tally is
+     * raised at the top of `send()`, before it queues on that serializer — so what is
+     * guaranteed is "a caller on the tally finishes first", NOT "a caller that has
+     * entered `send()` finishes first": a caller between `send()`'s entry checks and
+     * that raise is not waited out, exactly as a `send()` starting after this
+     * destructor returns is not. Both are the embedder's lifetime problem; nothing
+     * inside the object can close them. A teardown that lands mid-dial still costs one
+     * dial timeout — `esp_transport_connect` takes no cancellation — which is why that
+     * timeout is derived from the task-watchdog period.
+     */
     ~esp_ws_client_link_t() override;
 
     esp_ws_client_link_t(const esp_ws_client_link_t&) = delete;
     esp_ws_client_link_t& operator=(const esp_ws_client_link_t&) = delete;
 
-    /** @brief Send @p frame as one masked BINARY WebSocket message to the peer. Drops
-     *         (best-effort, like the UDP path) when not currently connected. */
+    /**
+     * @brief Send @p frame as one masked BINARY WebSocket message to the peer. Drops
+     *        (best-effort, like the UDP path) when not currently connected.
+     *
+     * Blocking, and BOUNDED: a peer whose TCP window has closed costs the calling task
+     * one write budget (a quarter of the task-watchdog period, split across the three
+     * legs IDF spends the timeout on) and then drops the frame, tearing the connection
+     * down for the recv thread to re-dial. It used to cost up to three times a 4 s
+     * literal, which is a watchdog panic rather than a dropped frame (#952).
+     */
     void send(std::span<const std::byte> frame) override;
 
     /** @brief Span delivery: the router services each inbound frame in-call, so no
@@ -135,6 +190,20 @@ class esp_ws_client_link_t : public transport_t {
 
     /** @brief True once the opening handshake has completed (and while connected). */
     [[nodiscard]] bool ok() const noexcept { return connected_.load(std::memory_order_acquire); }
+
+    /**
+     * @brief Inbound MESSAGES dropped by the receive path since construction — the
+     *        `dropped_rx()` convention core's transports already spell this way.
+     *
+     * Two causes, both of which used to be logs-only (#953): a message that does not fit
+     * `rx_bytes` (dropped whole, never truncated — its remaining fragments are consumed
+     * and discarded too, #901), and a stray CONTINUATION arriving with no message open.
+     * A frame lost to a connection drop is NOT counted: that is the link going down, not
+     * the receive path refusing a message.
+     */
+    [[nodiscard]] std::uint64_t dropped_rx() const noexcept {
+        return dropped_rx_.load(std::memory_order_relaxed);
+    }
 
     /**
      * @brief One coherent snapshot of this link's passive counters plus the two
@@ -151,6 +220,9 @@ class esp_ws_client_link_t : public transport_t {
      * i.e. the TCP connect plus the RFC 6455 opening handshake. It is an UPPER BOUND
      * on roughly two round-trips, sampled only at (re)dial — it can be days stale and
      * it is NOT an RTT measurement. A host surfacing it should label it "handshake".
+     *
+     * `c.rx_drops` is NOT a second tally: it is read straight from @ref dropped_rx, so
+     * this link has exactly one inbound-drop truth and both spellings always agree.
      */
     struct stats_t {
         link_counters_t c;            /**< @brief Traffic counters (see link_stats.hpp). */
@@ -160,12 +232,12 @@ class esp_ws_client_link_t : public transport_t {
     };
 
     /**
-     * @brief Copy out @ref stats_t under a brief hold of the syscall serializer.
+     * @brief Copy out @ref stats_t under a brief hold of the counter mutex.
      *
-     * Callable from ANY task. It takes `write_m_` only for the struct copy — no
-     * syscall, no allocation, and it NEVER calls back into the embedder, which is
-     * what lets a host hold its own lock across this call without introducing a
-     * cycle (a downstream publisher holds its own dial mutex across this call).
+     * Callable from ANY task. It takes `st_m_` only for the struct copy — no syscall, no
+     * allocation, and it NEVER calls back into the embedder, which is what lets a host
+     * hold its own lock across this call without introducing a cycle (a downstream
+     * publisher holds its own dial mutex across this call).
      */
     [[nodiscard]] stats_t stats() const;
 
@@ -198,13 +270,29 @@ class esp_ws_client_link_t : public transport_t {
      *         thread when it (re)dials — see @ref set_handshake_headers. */
     std::string handshake_headers_;
 
+    // Both handles are written ONLY by the recv thread (connect_once rebuilds them on
+    // every dial, holding no lock) and PUBLISHED by the connected_ release store below;
+    // any other thread must observe that store before it may read either one.
     esp_transport_handle_t tcp_ = nullptr;  // parent TCP transport (owned)
     esp_transport_handle_t ws_ = nullptr;   // WS transport over tcp_ (owned)
 
     std::vector<std::byte> rx_buf_;  // reusable RX fill (zero-copy read target)
     std::vector<std::byte> tx_buf_;  // reusable TX scratch (masked in-place under write_m_)
 
-    std::mutex write_m_;  // serializes all esp_transport handle access (syscall-brief)
+    // Serializes the esp_transport read/write SYSCALLS (the write is bounded). It does
+    // NOT cover the re-dial's rebuild of the handles above — assuming it did is the
+    // premise the pre-#952 destructor was written on.
+    std::mutex write_m_;
+    /** @brief Senders that have RAISED this tally and not yet returned from @ref send.
+     *         Raised BEFORE the sender queues on `write_m_`, so the destructor's drain
+     *         covers exactly the callers that could already be parked on that mutex —
+     *         and, by the same token, no earlier than the raise itself (#952). */
+    std::atomic<std::uint32_t> senders_{0};
+    /** @brief Guards nothing but the reconnect backoff wait — a sleep the destructor has
+     *         to be able to cut short, hence a condition variable rather than
+     *         `sleep_for` (#952). Never taken with `write_m_` held. */
+    std::mutex backoff_m_;
+    std::condition_variable backoff_cv_; /**< @brief Signalled by the destructor. */
     /**
      * @brief Guards the counter block below, and NOTHING else.
      *
@@ -217,7 +305,8 @@ class esp_ws_client_link_t : public transport_t {
      * `write_m_ -> st_m_`, never the reverse. `mutable` for the const snapshot.
      */
     mutable std::mutex st_m_;
-    /** @brief Passive traffic counters — st_m_. See @ref stats. */
+    /** @brief Passive traffic counters — st_m_. `rx_drops` is filled from `dropped_rx_`
+     *         at snapshot time and is never bumped here. See @ref stats. */
     link_counters_t st_;
     /** @brief Completed handshakes since construction — st_m_. */
     std::uint32_t reconnects_ = 0;
@@ -225,6 +314,9 @@ class esp_ws_client_link_t : public transport_t {
     std::uint32_t connect_ms_ = 0;
     std::atomic<bool> connected_{false};
     std::atomic<bool> stop_{false};
+    /** @brief Receive-path message drops — see @ref dropped_rx. Written only by the recv
+     *         thread, read by anyone, so relaxed is enough (it is a statistic). */
+    std::atomic<std::uint64_t> dropped_rx_{0};
     std::thread recv_thread_;
 };
 

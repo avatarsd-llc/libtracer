@@ -497,7 +497,8 @@ void test_ws_server_send_iov_overflow_drops() {
 void test_ws_peer_endpoint_send_iov_overflow_drops() {
     std::printf(
         "ws peer_endpoint send — directed span allocates nothing, gather drops (A2/A3/B1):\n");
-    tr::net::transport_ws_server server(0, /*max_peers=*/0, /*peer_named=*/true);
+    tr::net::transport_ws_server server(0, &tr::mem::heap_backend(), /*max_frame=*/0,
+                                        /*max_peers=*/0, /*peer_named=*/true);
     check(server.ok(), "peer-named server bound");
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
@@ -954,6 +955,11 @@ void test_can_send_advertise_allocates_nothing() {
 
 // ---------------------------------------------------------------------------
 // RFC 6455 §5.5 — the PONG is unfailable because the control frame is bounded
+//
+// These three drive the SERVER. Their CLIENT mirror — a raw socket acting as a hostile
+// server with our `transport_ws_client` dialing it — lives in `ws_transport_test.cpp`
+// (#1010): the two halves share `decode_frame_checked` but not the reply buffer they build
+// into or the teardown path they fail through, so neither set covers the other.
 // ---------------------------------------------------------------------------
 
 /** @brief A legal (<= 125 B) PING is answered with a PONG carrying exactly those bytes —

@@ -8,9 +8,9 @@
 # packages the FULL NODE (#183): the wire codec, the L0/L1 substrate, the L4
 # graph runtime, AND the net plane — fwd_router / op_resolve / route_handle /
 # transport_vertex (child_registry is header-only) plus the socket transports
-# (udp / tcp / ws over lwIP BSD sockets), loopback, and transport_can with the
-# ESP TWAI can_link_t (twai_link.cpp, this directory — the only IDF-specific
-# source).
+# (udp / tcp over lwIP BSD sockets), loopback, and transport_can with the
+# ESP TWAI can_link_t (twai_link.cpp, this directory). WebSocket on a chip target
+# is IDF-native, NOT a socket transport — see the WS-plane block below.
 #
 # Platform TU selection happens HERE, in the build system — never via in-source
 # #ifdefs (the no-feature-macro ruling):
@@ -18,7 +18,10 @@
 #     socketcan_link_t::ok() stays false) and twai_link.cpp (the TWAI-backed
 #     can_link_t, needs esp_driver_twai + FreeRTOS headers);
 #   * the `linux` (POSIX host) target compiles the REAL socketcan_link.cpp
-#     (glibc has <linux/can.h>) and no twai_link (no TWAI peripheral).
+#     (glibc has <linux/can.h>) and no twai_link (no TWAI peripheral);
+#   * chip targets compile the IDF-native WS links (httpd_ws_link.cpp,
+#     esp_ws_client_link.cpp) and NOT core's POSIX-socket transport_ws.cpp; the
+#     `linux` target does the opposite (#947).
 #
 # Requires the GCC 13+ toolchain (C++23: std::expected, std::span) shipped with
 # ESP-IDF >= 5.3; CI builds with release-v6.0 (GCC 15).
@@ -72,6 +75,35 @@ set(LIBTRACER_SRCS
 # the second (build) pass, where sdkconfig (default y) is loaded. The transport
 # PRIV_REQUIRES below therefore stay UNCONDITIONAL, for the same reason a Kconfig-gated
 # REQUIRES never propagates (it evaluates false in the early pass).
+
+# --- Which WS PLANE this target gets (#947, ruling; #948) ---------------------------
+# ESP-IDF WebSocket never uses POSIX sockets. core's transport_ws_server /
+# transport_ws_client are the HOST implementation: they open their own ::socket, run
+# their own poll thread, and egress through posix_endpoint's sendmsg(MSG_NOSIGNAL) —
+# a flag lwIP DEFINES but lwip_sendmsg REJECTS with EOPNOTSUPP, which write_all_iov
+# reads as peer-gone. On a chip target they are therefore not merely 18 KB of code no
+# node reaches; every scatter-gather data frame they emit is silently discarded while
+# the handshake and PING/PONG still work (#948). So on chip targets they are ABSENT,
+# not fixed: the sanctioned plane is the IDF-native links below (httpd_ws_link_t on
+# esp_http_server, esp_ws_client_link_t on esp_websocket_client), which the
+# application binds via provide_link.
+#
+# This is a TU choice, exactly as socketcan_link.cpp vs. socketcan_link_stub.cpp is —
+# never an in-source #if defined(ESP_PLATFORM) (the no-feature-macro doctrine). The
+# `linux` (POSIX host) target keeps the portable pair: it has glibc's sendmsg, and it
+# has no esp_http_server to host the native links.
+#
+# Consequence on a chip target: no register_ws_transport call is generated, so a
+# `:children[]` SPEC carrying `kind=ws` and NO staged link resolves to
+# SCHEMA_NOT_FOUND — the same answer any un-registered kind gets. A node serving
+# WebSocket on silicon stages an IDF-native link with provide_link instead, which
+# bypasses the factory catalog entirely (register_module never consults it).
+if(IDF_TARGET STREQUAL "linux")
+    set(LIBTRACER_PORTABLE_WS TRUE)
+else()
+    set(LIBTRACER_PORTABLE_WS FALSE)
+endif()
+
 set(LIBTRACER_BUILTIN_TRANSPORT_CALLS "")
 if(CONFIG_LIBTRACER_TRANSPORT_UDP)
     list(APPEND LIBTRACER_SRCS
@@ -87,7 +119,9 @@ if(CONFIG_LIBTRACER_TRANSPORT_TCP)
     string(APPEND LIBTRACER_BUILTIN_TRANSPORT_CALLS
         "    register_tcp_transport(vertex, rx_backend);\n")
 endif()
-if(CONFIG_LIBTRACER_TRANSPORT_WS)
+# The portable WS pair rides LIBTRACER_PORTABLE_WS on top of its module bool (see above):
+# ON only where POSIX sockets are the right answer, i.e. the `linux` target.
+if(CONFIG_LIBTRACER_TRANSPORT_WS AND LIBTRACER_PORTABLE_WS)
     list(APPEND LIBTRACER_SRCS
         "${LIBTRACER_ROOT}/core/src/builtin_transport_ws.cpp"
         "${LIBTRACER_ROOT}/core/src/transport_ws.cpp")
@@ -96,7 +130,10 @@ if(CONFIG_LIBTRACER_TRANSPORT_WS)
 endif()
 
 # posix_endpoint_t — the recv-thread/endpoint scaffold shared by every socket transport.
-if(CONFIG_LIBTRACER_TRANSPORT_UDP OR CONFIG_LIBTRACER_TRANSPORT_TCP OR CONFIG_LIBTRACER_TRANSPORT_WS)
+# WS counts toward it only where the PORTABLE (socket-owning) WS pair compiles; the
+# IDF-native links never touch posix_endpoint_t.
+if(CONFIG_LIBTRACER_TRANSPORT_UDP OR CONFIG_LIBTRACER_TRANSPORT_TCP
+   OR (CONFIG_LIBTRACER_TRANSPORT_WS AND LIBTRACER_PORTABLE_WS))
     list(APPEND LIBTRACER_SRCS "${LIBTRACER_ROOT}/core/src/posix_endpoint.cpp")
 endif()
 
@@ -104,8 +141,12 @@ endif()
 # when all three are on — identical to a stock node — else a CMake-generated variant
 # from src/builtin_transports.cpp.in that calls ONLY the enabled register_*_transport, so
 # a dropped transport leaves neither a glue TU nor a dangling call (same mechanism as
-# core/CMakeLists.txt).
-if(CONFIG_LIBTRACER_TRANSPORT_UDP AND CONFIG_LIBTRACER_TRANSPORT_TCP AND CONFIG_LIBTRACER_TRANSPORT_WS)
+# core/CMakeLists.txt). A chip target takes the GENERATED branch even with all three
+# module bools on, because its ws leg is absent (LIBTRACER_PORTABLE_WS): the hand-written
+# form's register_ws_transport call is exactly the reference that would drag the portable
+# WS objects back into the image.
+if(CONFIG_LIBTRACER_TRANSPORT_UDP AND CONFIG_LIBTRACER_TRANSPORT_TCP
+   AND CONFIG_LIBTRACER_TRANSPORT_WS AND LIBTRACER_PORTABLE_WS)
     list(APPEND LIBTRACER_SRCS "${LIBTRACER_ROOT}/core/src/builtin_transports.cpp")
 else()
     configure_file(
@@ -148,13 +189,15 @@ if(NOT IDF_TARGET STREQUAL "linux")
     # that never names critical_pool_t leaves the symbols for --gc-sections to drop.
     list(APPEND LIBTRACER_SRCS "critical_pool.cpp")
     # Chip targets: the esp_http_server-backed WS transport link (httpd_ws_link_t) — the
-    # embedded-native replacement for core's raw-socket transport_ws_server, a platform
-    # link picked by which TU compiles (never an in-source #ifdef). transport_ws.cpp is in
-    # the WS block above: it compiles but a node that binds this httpd link instead
-    # references it nowhere, so --gc-sections drops it (the linux VB, which HAS no
-    # esp_http_server, keeps it). Gated on BOTH the WS module (#393) and
-    # CONFIG_HTTPD_WS_SUPPORT (the TU rides esp_http_server's native WS API, which the
-    # component ships only when that config is on).
+    # embedded-native REPLACEMENT for core's raw-socket transport_ws_server, a platform
+    # link picked by which TU compiles (never an in-source #ifdef). Since #947 that is a
+    # true replacement, not a coexistence: transport_ws.cpp is NOT compiled here at all
+    # (LIBTRACER_PORTABLE_WS is FALSE on chips), so nothing relies on --gc-sections to
+    # drop it — the registration in the built-in catalog kept it reachable and it never
+    # got dropped. Gated on BOTH the WS module (#393) and CONFIG_HTTPD_WS_SUPPORT (the TU
+    # rides esp_http_server's native WS API, which the component ships only when that
+    # config is on) — so an application that wants the native WS SERVER must set
+    # CONFIG_HTTPD_WS_SUPPORT=y; there is no portable fallback behind it any more.
     if(CONFIG_LIBTRACER_TRANSPORT_WS AND CONFIG_HTTPD_WS_SUPPORT)
         list(APPEND LIBTRACER_SRCS "httpd_ws_link.cpp")
     endif()
@@ -162,8 +205,7 @@ if(NOT IDF_TARGET STREQUAL "linux")
     # embedded-native replacement for core's raw-socket transport_ws_client (which fails the
     # handshake on lwIP silicon), the dial mirror of httpd_ws_link_t. Uses tcp_transport (core
     # IDF), so gated on CONFIG_LIBTRACER_TRANSPORT_WS alone (no esp_http_server dependency).
-    # transport_ws.cpp's portable client still compiles; a node that binds this link leaves it
-    # unreferenced for --gc-sections to drop (same coexistence as httpd_ws_link vs the server).
+    # It is the ONLY ws dialer on a chip target since #947.
     if(CONFIG_LIBTRACER_TRANSPORT_WS)
         list(APPEND LIBTRACER_SRCS "esp_ws_client_link.cpp")
     endif()
@@ -248,6 +290,16 @@ idf_component_register(
 # libtracer's core is C++23. ESP-IDF compiles component sources with the project's
 # C++ standard; pin it here so the component is correct regardless of project default.
 target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_23)
+
+# -Werror=switch, mirroring core/CMakeLists.txt — the SAME core sources compile here, and the
+# hand-written maps out of closed enums (status_t -> wire::err_t at the L4->wire cast point,
+# status_t -> its wire name) have no `default:` label and no fall-through tail, so an unmapped
+# enumerator must be a red build wherever those TUs are compiled (#876). Set explicitly rather
+# than inherited: a project's warning level is the project's business, and IDF promotes
+# warnings to errors only under CONFIG_COMPILER_WARN_WRITE_STRINGS-style opt-ins and its own CI
+# flag — this guarantee cannot be left to the consumer's build settings. PRIVATE, so a
+# dependent component's switches are untouched.
+target_compile_options(${COMPONENT_LIB} PRIVATE -Werror=switch)
 
 # The vertex lock-stripe count (CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES, see Kconfig) now
 # rides the generated config.hpp above — it reaches every TU as the ordinary constexpr

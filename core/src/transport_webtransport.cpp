@@ -22,10 +22,22 @@
  *     their first varint(s): control/QPACK/push/WT-uni streams are drained;
  *     the bidirectional HEADERS (0x01) stream is the extended CONNECT — it is
  *     validated (`:method=CONNECT`, `:protocol=webtransport`), answered with
- *     200, and kept open as the session's lifetime handle; the bidirectional
- *     WEBTRANSPORT_STREAM (0x41) is adopted as THE frame channel, everything
- *     after its session-id varint feeding the 4-byte length-prefix
- *     reassembler.
+ *     200, and kept open as the session's lifetime handle; the FIRST valid
+ *     bidirectional WEBTRANSPORT_STREAM (0x41) is adopted as THE frame
+ *     channel, everything after its session-id varint feeding the 4-byte
+ *     length-prefix reassembler.
+ *
+ *     Classification pulls in two directions on purpose (#919 / #920):
+ *     IDENTITY is strict — a 0x41 stream is adopted only after the extended
+ *     CONNECT succeeded, only when its session-id varint names THAT CONNECT
+ *     stream, and only once (first valid one wins); anything else is refused
+ *     at STREAM scope, never by killing the session. UNKNOWN EXTENSIONS are
+ *     lenient — an unrecognized H3 frame type is skipped by its declared
+ *     length and classification continues, because RFC 9114 §7.2.8 requires
+ *     unknown frame types to be ignored and §9 has conformant peers (Chrome)
+ *     emit reserved GREASE types precisely to catch endpoints that don't.
+ *     Pinning who may speak and ignoring what you don't understand are not
+ *     in tension: the first is authentication, the second is extensibility.
  *   - DIAL (the self-contained e2e counterpart, and a native client): after
  *     the QUIC handshake it sends its control/QPACK streams, performs the
  *     extended CONNECT, waits for the 200, then opens the frame stream
@@ -49,6 +61,7 @@
 #include <vector>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/config_reader.hpp"
 #include "libtracer/frame.hpp"
 #include "msquic_endpoint.hpp"
 #include "wt_h3.hpp"
@@ -105,7 +118,13 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
     };
 
     std::string authority; /**< @brief DIAL: the CONNECT :authority. */
-    std::string path;      /**< @brief DIAL: the CONNECT :path. */
+    /**
+     * @brief The session's CONNECT :path — DIAL: the one this endpoint
+     *        requests (written in the constructor, before any callback exists);
+     *        LISTEN: the one the accepted CONNECT named (written on the stream
+     *        callback under conn_m, a derived slot of the live session).
+     */
+    std::string path;
 
     /** @brief Every stream context of the live session (guarded by conn_m). */
     std::vector<stream_ctx_t*> ctxs;
@@ -204,83 +223,164 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
         }
     }
 
-    /** @brief A peer bidirectional stream on the LISTEN side: either the
-     *         extended CONNECT request (HEADERS) or the WebTransport frame
-     *         channel (0x41). Returns false when the connection was shut
-     *         down. */
+    /**
+     * @brief Refuse ONE peer stream: abort it in both directions and park its
+     *        ctx as DRAIN, leaving the connection and the live session alone.
+     *
+     * The refusal SCOPE is the point (#919). A nonconforming or hostile stream
+     * must not be able to take down a session the peer already established, so
+     * a refused 0x41 candidate never reaches `shutdown_conn` — the same
+     * peer-controlled-topology rejection the PONG ruling (#848) applies to
+     * frames. The handle stays in `ctxs`: the destructor / replacement path
+     * still owns every close, and callbacks never close handles.
+     */
+    void refuse_stream(stream_ctx_t& c) {
+        c.kind = stream_ctx_t::kind_t::DRAIN;
+        c.acc.clear();
+        c.acc.shrink_to_fit();
+        if (c.h != nullptr)
+            api->StreamShutdown(c.h, QUIC_STREAM_SHUTDOWN_FLAG_ABORT, kAppErrBadRequest);
+    }
+
+    /**
+     * @brief A peer bidirectional stream on the LISTEN side: either the
+     *        extended CONNECT request (HEADERS) or the WebTransport frame
+     *        channel (0x41); any other frame type is an unknown extension and
+     *        is skipped by its declared length. Returns false when the
+     *        connection was shut down.
+     *
+     * A skip LOOP, not a single look (#920): RFC 9114 §7.2.8 makes ignoring
+     * unrecognized frame types mandatory, and §9 has conformant peers emit
+     * reserved (GREASE) types `0x1f * N + 0x21` on any stream to prove their
+     * peers do it — Chrome sends them ahead of the extended CONNECT, so
+     * treating the first non-0x41/non-HEADERS type as fatal let a CONFORMANT
+     * browser take the node down. Every skipped frame is dropped from `acc`
+     * before the "need more bytes" return, so an unbounded GREASE run is
+     * bounded memory rather than a slow march into the accumulation cap.
+     */
     bool classify_bidi(stream_ctx_t& c) {
-        const std::span<const std::uint8_t> in(c.acc);
-        const auto t = wt_h3::read_varint(in);
-        if (!t) return true;  // need more bytes
+        std::size_t skipped = 0;  // acc bytes consumed by unknown frames this pass
+        while (true) {
+            const std::span<const std::uint8_t> in =
+                std::span<const std::uint8_t>(c.acc).subspan(skipped);
+            const auto t = wt_h3::read_varint(in);
+            if (!t) break;  // need more bytes
 
-        if (t->value == wt_h3::kFrameWtStream) {
-            // The frame channel: consume the session-id varint (one session is
-            // live at a time, so any id is accepted), adopt the stream, and
-            // feed the leftover bytes straight into the frame reassembler.
-            auto rest = in.subspan(t->consumed);
-            const auto sid = wt_h3::read_varint(rest);
-            if (!sid) return true;
-            {
-                // Adopt only while the session is live: a harvested ctx's
-                // handle is being closed by the destructor / the replacement
-                // path — resurrecting it into frame_stream would leave send()
-                // a dangling handle.
-                const std::lock_guard lock(conn_m);
-                if (c.harvested) return true;
-                frame_stream = c.h;
+            if (t->value == wt_h3::kFrameWtStream) {
+                // The frame channel. Adoption is STRICT — the deliberate
+                // opposite pull from the lenient unknown-frame skip below, and
+                // not a contradiction: identity must be pinned, unknown
+                // extensions must be ignored. Three guards, in order:
+                //   1. the extended CONNECT must already have been accepted
+                //      (no frames before the handshake — the bypass arm);
+                //   2. the session-id varint must name THAT CONNECT stream
+                //      (draft-ietf-webtrans-http3 §4.2 — the id IS the CONNECT
+                //      stream's id, so a mismatch is not our session);
+                //   3. no frame channel may be adopted yet — FIRST valid one
+                //      wins. A second 0x41 stream would silently overwrite
+                //      frame_stream while the first ctx kept feeding the ONE
+                //      shared length-prefix reassembler, interleaving two
+                //      independent streams into it.
+                // A refusal aborts only that stream (refuse_stream).
+                auto rest = in.subspan(t->consumed);
+                const auto sid = wt_h3::read_varint(rest);
+                if (!sid) break;  // need the session-id varint
+                bool refuse = false;
+                {
+                    // Adopt only while the session is live: a harvested ctx's
+                    // handle is being closed by the destructor / the
+                    // replacement path — resurrecting it into frame_stream
+                    // would leave send() a dangling handle.
+                    const std::lock_guard lock(conn_m);
+                    if (c.harvested) return true;
+                    refuse = !session.load(std::memory_order_relaxed) ||
+                             sid->value != connect_stream_id || frame_stream != nullptr;
+                    if (!refuse) frame_stream = c.h;
+                }
+                if (refuse) {
+                    refuse_stream(c);
+                    return true;  // the session stays up
+                }
+                c.kind = stream_ctx_t::kind_t::FRAME;
+                const std::vector<std::uint8_t> leftover(rest.begin() + sid->consumed, rest.end());
+                c.acc.clear();
+                c.acc.shrink_to_fit();
+                if (!leftover.empty()) return on_rx_chunk(leftover.data(), leftover.size());
+                return true;
             }
-            c.kind = stream_ctx_t::kind_t::FRAME;
-            const std::vector<std::uint8_t> leftover(rest.begin() + sid->consumed, rest.end());
-            c.acc.clear();
-            c.acc.shrink_to_fit();
-            if (!leftover.empty()) return on_rx_chunk(leftover.data(), leftover.size());
-            return true;
-        }
 
-        if (t->value == wt_h3::kFrameHeaders) {
+            if (t->value == wt_h3::kFrameHeaders) {
+                auto rest = in.subspan(t->consumed);
+                const auto len = wt_h3::read_varint(rest);
+                if (!len) break;
+                if (len->value > kMaxHandshakeBytes) {
+                    shutdown_conn(kAppErrBadRequest);
+                    return false;
+                }
+                rest = rest.subspan(len->consumed);
+                if (rest.size() < len->value) break;  // need the full field section
+
+                const auto headers =
+                    wt_h3::decode_field_section(rest.first(static_cast<std::size_t>(len->value)));
+                std::string_view method;
+                std::string_view protocol;
+                std::string_view req_path;
+                if (headers) {
+                    for (const auto& h : *headers) {
+                        if (h.name == ":method") method = h.value;
+                        if (h.name == ":protocol") protocol = h.value;
+                        if (h.name == ":path") req_path = h.value;
+                    }
+                }
+                if (method != "CONNECT" || protocol != "webtransport") {
+                    shutdown_conn(kAppErrBadRequest);  // not a WebTransport session request
+                    return false;
+                }
+                // Accept: 200 on this stream, which stays open as the session
+                // handle (its closure ends the session). Any path is served —
+                // the resource is RECORDED for session_path(), never used to
+                // admit or refuse.
+                {
+                    const std::lock_guard lock(conn_m);
+                    path = std::string(req_path);
+                }
+                std::vector<std::uint8_t> resp;
+                wt_h3::append_h3_frame(resp, wt_h3::kFrameHeaders,
+                                       wt_h3::encode_status_200_field_section());
+                send_raw(c.h, std::move(resp));
+                std::uint64_t sid = 0;
+                std::uint32_t sz = sizeof(sid);
+                if (QUIC_SUCCEEDED(api->GetParam(c.h, QUIC_PARAM_STREAM_ID, &sz, &sid)))
+                    connect_stream_id = sid;
+                session.store(true, std::memory_order_relaxed);
+                // Everything after the CONNECT on this stream — capsules AND
+                // any unknown/GREASE frame — is ignored by the SESSION arm of
+                // on_stream_rx, which is exactly RFC 9114 §7.2.8's "ignore".
+                c.kind = stream_ctx_t::kind_t::SESSION;
+                c.acc.clear();
+                c.acc.shrink_to_fit();
+                return true;
+            }
+
+            // An unknown/reserved (GREASE) frame type: skip its declared body
+            // and keep classifying. The length is capped like the HEADERS arm
+            // — §7.2.8 obliges us to IGNORE the type, not to buffer an
+            // arbitrary pre-handshake payload for it.
             auto rest = in.subspan(t->consumed);
             const auto len = wt_h3::read_varint(rest);
-            if (!len) return true;
+            if (!len) break;  // need the length varint
             if (len->value > kMaxHandshakeBytes) {
                 shutdown_conn(kAppErrBadRequest);
                 return false;
             }
             rest = rest.subspan(len->consumed);
-            if (rest.size() < len->value) return true;  // need the full field section
-
-            const auto headers =
-                wt_h3::decode_field_section(rest.first(static_cast<std::size_t>(len->value)));
-            std::string_view method;
-            std::string_view protocol;
-            if (headers) {
-                for (const auto& h : *headers) {
-                    if (h.name == ":method") method = h.value;
-                    if (h.name == ":protocol") protocol = h.value;
-                }
-            }
-            if (method != "CONNECT" || protocol != "webtransport") {
-                shutdown_conn(kAppErrBadRequest);  // not a WebTransport session request
-                return false;
-            }
-            // Accept: 200 on this stream, which stays open as the session
-            // handle (its closure ends the session). Any path is served.
-            std::vector<std::uint8_t> resp;
-            wt_h3::append_h3_frame(resp, wt_h3::kFrameHeaders,
-                                   wt_h3::encode_status_200_field_section());
-            send_raw(c.h, std::move(resp));
-            std::uint64_t sid = 0;
-            std::uint32_t sz = sizeof(sid);
-            if (QUIC_SUCCEEDED(api->GetParam(c.h, QUIC_PARAM_STREAM_ID, &sz, &sid)))
-                connect_stream_id = sid;
-            session.store(true, std::memory_order_relaxed);
-            c.kind = stream_ctx_t::kind_t::SESSION;  // capsules after CONNECT are ignored
-            c.acc.clear();
-            c.acc.shrink_to_fit();
-            return true;
+            if (rest.size() < len->value) break;  // need the whole body before skipping it
+            skipped += t->consumed + len->consumed + static_cast<std::size_t>(len->value);
         }
 
-        shutdown_conn(kAppErrBadRequest);  // an ordinary H3 request — not served here
-        return false;
+        if (skipped != 0)
+            c.acc.erase(c.acc.begin(), c.acc.begin() + static_cast<std::ptrdiff_t>(skipped));
+        return true;
     }
 
     /** @brief The DIAL side's CONNECT stream: parse the response HEADERS,
@@ -629,6 +729,11 @@ bool webtransport_transport_t::session_up() const noexcept {
     return impl_->session.load(std::memory_order_relaxed);
 }
 
+std::string webtransport_transport_t::session_path() const {
+    const std::lock_guard lock(impl_->conn_m);
+    return impl_->path;
+}
+
 std::uint64_t webtransport_transport_t::dropped_rx() const noexcept {
     return impl_->dropped_rx.load(std::memory_order_relaxed);
 }
@@ -642,29 +747,42 @@ namespace {
 /**
  * @brief The webtransport kind's PRIVATE config keys, parsed module-side from
  *        the raw SPEC config SETTINGS TLV (ADR-0043 §5 leanness — identical to
- *        the quic kind): NAME "cert" NAME <path>, NAME "key" NAME <path>;
- *        unknown pairs ignored.
+ *        the quic kind, plus one of its own): NAME "cert" NAME <file>, NAME
+ *        "key" NAME <file>, NAME "ca" NAME <file>, NAME "insecure" VALUE <u8>,
+ *        NAME "path" NAME <resource>; unknown pairs ignored.
+ *
+ * Two of the five are LISTEN-side (the served credential), two are DIAL-side
+ * (how the server certificate is trusted, #918), and one is the DIAL-side
+ * extended CONNECT `:path` (#1023) — the only key not shared with `quic`, which
+ * has no HTTP layer to carry a resource.
  */
 struct wt_private_cfg_t {
-    std::string cert; /**< @brief PEM server-certificate path (LISTEN). */
-    std::string key;  /**< @brief PEM private-key path matching cert (LISTEN). */
+    std::string cert;      /**< @brief PEM server-certificate path (LISTEN). */
+    std::string key;       /**< @brief PEM private-key path matching cert (LISTEN). */
+    std::string ca;        /**< @brief PEM CA-bundle path the DIAL side verifies the
+                                       server certificate against; empty = the system
+                                       trust store (DIAL). */
+    bool insecure = false; /**< @brief DEV ONLY: skip server-certificate validation on
+                                       the DIAL side entirely. Must be asked for
+                                       explicitly — the default is to verify (DIAL). */
+    std::string path;      /**< @brief The extended CONNECT `:path` the dial requests;
+                                       empty = the "/" default (DIAL, #1023). */
 };
 
-/** @brief The positional NAME-key / value-pair walk over the raw config TLV. */
+/** @brief The shared config_reader_t walk over the webtransport-private keys: NAME
+ *         "cert" NAME <file>, NAME "key" NAME <file>, NAME "ca" NAME <file>, NAME
+ *         "insecure" VALUE <u8>, NAME "path" NAME <resource>; unknown pairs ignored
+ *         (forward-compat). Pair-consuming (#927), like every other config parse: a
+ *         forward-compat pair whose string value reads `"key"` must not bind the
+ *         FOLLOWING child as the private-key path. */
 [[nodiscard]] wt_private_cfg_t parse_wt_config(const wire::tlv_t* raw_config) {
     wt_private_cfg_t out;
-    if (raw_config == nullptr) return out;
-    const std::vector<wire::tlv_t>& ch = raw_config->children;
-    for (std::size_t i = 0; i + 1 < ch.size(); ++i) {
-        if (ch[i].type != wire::type_t::NAME) continue;
-        const std::string_view key = detail::as_string_view(ch[i].payload);
-        const wire::tlv_t& val = ch[i + 1];
-        if (key == "cert" && val.type == wire::type_t::NAME) {
-            out.cert = std::string(detail::as_string_view(val.payload));
-        } else if (key == "key" && val.type == wire::type_t::NAME) {
-            out.key = std::string(detail::as_string_view(val.payload));
-        }
-    }
+    const config_reader_t cfg(raw_config);
+    if (const auto v = cfg.name("cert")) out.cert = std::string(*v);
+    if (const auto v = cfg.name("key")) out.key = std::string(*v);
+    if (const auto v = cfg.name("ca")) out.ca = std::string(*v);
+    if (const auto v = cfg.flag("insecure")) out.insecure = *v;
+    if (const auto v = cfg.name("path")) out.path = std::string(*v);
     return out;
 }
 
@@ -675,23 +793,34 @@ transport_vertex_t::transport_factory_t webtransport_transport_factory(
     return [rx_backend](
                const conn_settings_t& s,
                const wire::tlv_t* raw_config) -> graph::result_t<std::unique_ptr<transport_t>> {
+        // BOTH roles carry kind-private keys, so the parse precedes the role split:
+        // the DIAL branch used to return before parse_wt_config ever ran, which is
+        // why no SPEC could reach the dial-side trust knobs at all (#918).
+        const wt_private_cfg_t priv = parse_wt_config(raw_config);
         std::unique_ptr<webtransport_transport_t> t;
         if (s.role == conn_role_t::DIAL) {
             if (s.addr.empty() || s.port == 0)
                 return std::unexpected(graph::status_t::TYPE_MISMATCH);
+            // Secure by default (#918): absent both keys this verifies the server
+            // certificate against the system trust store. `insecure = 1` is the
+            // explicit dev opt-out; `ca` names a bundle to verify against instead.
+            // The `:path` came from a hard-coded "/" until #1023, so a SPEC could
+            // only ever reach a server that serves its session at the root; an
+            // absent (or empty) `path` key still normalises to "/" in the ctor.
             t = std::make_unique<webtransport_transport_t>(
-                s.addr, s.port, "/",
-                webtransport_dial_tls_t{.ca_file = {}, .insecure_no_verify = true}, rx_backend,
-                s.max_frame);
-            if (!t->ok()) return std::unexpected(graph::status_t::NOT_FOUND);  // handshake failed
+                s.addr, s.port, priv.path,
+                webtransport_dial_tls_t{.ca_file = priv.ca, .insecure_no_verify = priv.insecure},
+                rx_backend, s.max_frame);
+            // A refused session is TRANSIENT, not a bad address (#929).
+            if (!t->ok()) return std::unexpected(graph::status_t::TRANSPORT_DOWN);
             return t;
         }
-        const wt_private_cfg_t priv = parse_wt_config(raw_config);
         if (s.port == 0 || priv.cert.empty() || priv.key.empty())
             return std::unexpected(graph::status_t::TYPE_MISMATCH);
         t = std::make_unique<webtransport_transport_t>(s.port, priv.cert, priv.key, rx_backend,
                                                        s.max_frame);
-        if (!t->ok()) return std::unexpected(graph::status_t::NOT_FOUND);  // bind/cred failed
+        // bind/cred failed — the listener did not come up (#929).
+        if (!t->ok()) return std::unexpected(graph::status_t::TRANSPORT_DOWN);
         return t;
     };
 }

@@ -18,8 +18,17 @@
  * (transport_ws_server::teardown_slot, five call sites in `service_peer`): the
  * peer closing the socket or a read error, at either phase; on an ESTABLISHED
  * stream a CLOSE or an RFC 6455 violation the checked decode reports (an
- * oversized or non-final control frame, §5.5/§7.1.7); during the opening
+ * oversized or non-final control frame, §5.5/§7.1.7, or a DATA frame declaring
+ * more than the injected receive cap, #872); during the opening
  * HANDSHAKE a request that overruns 16 KiB or carries no `Sec-WebSocket-Key`.
+ *
+ * INGRESS IS BOUNDED BY AN INJECTED SEAM, not by the peer. Both roles take the same
+ * `(mem::mem_backend_t*, max_frame)` pair tcp/quic/webtransport take, and both expose the
+ * same `dropped_rx()`/`malformed_rx()` counters, so one operator vocabulary reads across
+ * every framed transport. The cap is checked against the DECLARED length in the WS frame
+ * header — before a body byte is buffered — and against the reassembled total of a
+ * fragmented message, so neither a 64-bit length nor a million CONTs can make the receiver
+ * hold more than the deployment allowed.
  * send(frame) broadcasts to every open peer (the flat point-to-point surface);
  * a directed per-peer send is peer_link(name)->send().
  *
@@ -28,6 +37,20 @@
  * the latter sending MASKED client frames per RFC 6455 §5.1. POSIX sockets;
  * mirrors transport_udp's lifecycle (a recv thread polled for a clean shutdown).
  * The framing itself is never reimplemented here — it all goes through tr::net::ws.
+ *
+ * SCOPE — this is the HOST/POSIX WebSocket, and ESP-IDF is NOT in it (#947 ruling).
+ * The single-thread-multiplexes-every-peer design above is stated in FreeRTOS terms
+ * because stacks are the scarce resource wherever this runs, but do not read that as
+ * an invitation to run it on an MCU: on ESP-IDF the supported plane is the IDF-native
+ * pair (tr::net::httpd_ws_link_t on esp_http_server, tr::net::esp_ws_client_link_t on
+ * esp_transport_ws), and these two types are NOT COMPILED into an ESP-IDF chip build
+ * at all. That is not a footprint preference — it is a correctness one: the
+ * scatter-gather egress underneath (posix_endpoint_t::write_all_iov) asks sendmsg for
+ * MSG_NOSIGNAL, a flag lwIP defines but lwip_sendmsg rejects with EOPNOTSUPP, and the
+ * failure is read as peer-gone, so on lwIP every data frame is silently dropped while
+ * the opening handshake and PING/PONG keep working (#948). Nothing here needs a
+ * platform #ifdef: the ESP-IDF component simply does not list this TU on a chip
+ * target, exactly as socketcan_link.cpp is swapped for its stub.
  */
 #pragma once
 
@@ -41,6 +64,8 @@
 #include <string_view>
 #include <vector>
 
+#include "libtracer/length_prefix_framer.hpp"
+#include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/posix_endpoint.hpp"
 #include "libtracer/transport.hpp"
@@ -101,6 +126,16 @@ inline constexpr std::string_view kWsServerSuggestedModule = "ws-server";
  */
 class transport_ws_server : public transport_t, public bus_link_t, private stream_endpoint_t {
    public:
+    /** @brief The largest MESSAGE a peer may announce — the shared
+     *         length_prefix_framer::kDefaultMaxFrame (16 MiB) unless `:settings max_frame`
+     *         tightens it, and further bounded by the injected backend's real capacity.
+     *
+     * One WS message is one libtracer frame, so this is the same per-connection receive cap
+     * tcp/quic/webtransport apply to their length prefix — it just reads off a WS frame
+     * header instead. A frame (or a reassembled message) claiming more is malformed:
+     * @ref malformed_rx ticks and the connection is failed, RFC 6455 §7.1.7. */
+    static constexpr std::size_t kMaxFrame = length_prefix_framer::kDefaultMaxFrame;
+
     /**
      * @brief Bind+listen on @p bind_port (0 = ephemeral; see local_port()).
      *
@@ -108,6 +143,19 @@ class transport_ws_server : public transport_t, public bus_link_t, private strea
      * socket bound. The bound port is observable via local_port().
      *
      * @param bind_port TCP port to listen on (host byte order; 0 → ephemeral).
+     * @param backend   The host-injected RX memory seam (ADR-0042 §2), the same
+     *                  parameter tcp/quic/webtransport take in the same position:
+     *                  every inbound message fragment is copied into a fresh
+     *                  segment drawn from it (default: the process heap; a
+     *                  bounded host passes its pool). Exhaustion is
+     *                  backpressure — the message is shed and dropped_rx()
+     *                  ticks; never an OOM. Must outlive the transport.
+     * @param max_frame Per-connection receive cap (0 → @ref kMaxFrame); the
+     *                  effective cap also honors the backend's real capacity
+     *                  (`length_prefix_framer::effective_cap` — the
+     *                  no-synthetic-limits doctrine). It is checked against the
+     *                  DECLARED length in the WS frame header, so an oversize
+     *                  announcement is refused before one body byte is buffered.
      * @param max_peers Concurrent-peer admission cap; 0 = unbounded (host
      *                  default). A deployment-injected bound (RFC-0006) —
      *                  a connection beyond it is accepted and immediately
@@ -122,7 +170,9 @@ class transport_ws_server : public transport_t, public bus_link_t, private strea
      *                   the listener and every peer, so this is the whole
      *                   server's recv-stack knob.
      */
-    explicit transport_ws_server(std::uint16_t bind_port, std::size_t max_peers = 0,
+    explicit transport_ws_server(std::uint16_t bind_port,
+                                 mem::mem_backend_t* backend = &mem::heap_backend(),
+                                 std::size_t max_frame = 0, std::size_t max_peers = 0,
                                  bool peer_named = false, std::size_t recv_stack = 0);
 
     /** @brief Stop the recv thread and close all sockets. */
@@ -215,6 +265,27 @@ class transport_ws_server : public transport_t, public bus_link_t, private strea
     /** @brief The actual bound TCP port (resolves an ephemeral 0 request). */
     [[nodiscard]] std::uint16_t local_port() const noexcept { return bound_port_; }
 
+    /** @brief Messages dropped because the RX backend was exhausted (backpressure,
+     *         ADR-0039 §4 / ADR-0042 §2) — shed mid-reassembly, never an OOM. Summed
+     *         over every peer this server has served. */
+    [[nodiscard]] std::uint64_t dropped_rx() const noexcept {
+        return dropped_rx_.load(std::memory_order_relaxed);
+    }
+
+    /** @brief RFC 6455 violations seen: an over-cap declared length (see @ref kMaxFrame),
+     *         a reassembled message past the cap, or a §5.5 control-frame breach. Each one
+     *         fails its connection (§7.1.7). Summed over every peer. */
+    [[nodiscard]] std::uint64_t malformed_rx() const noexcept {
+        return malformed_rx_.load(std::memory_order_relaxed);
+    }
+
+    /** @brief The cap actually honored: `min(max_frame, backend.max_segment_size())` — what
+     *         a declared frame length is compared against, resolved from the two injected
+     *         resources rather than restated as a number. */
+    [[nodiscard]] std::size_t effective_max_frame() const noexcept {
+        return length_prefix_framer::effective_cap(*backend_, max_frame_);
+    }
+
    private:
     struct session_t;  // one peer slot's connection state (defined in the .cpp)
 
@@ -259,6 +330,13 @@ class transport_ws_server : public transport_t, public bus_link_t, private strea
     std::uint16_t bound_port_ = 0;
     std::size_t max_peers_ = 0;  // 0 = unbounded (deployment-injected, RFC-0006)
     bool peer_named_ = false;    // expose bus() — wiring-time deployment choice
+
+    // RX segment source for message reassembly (ADR-0042 §2) + the ingress bound and
+    // its counters — the same four members tcp/quic/webtransport carry.
+    mem::mem_backend_t* backend_;
+    std::size_t max_frame_ = kMaxFrame;  // per-connection receive cap (:settings; 0 => kMaxFrame)
+    std::atomic<std::uint64_t> dropped_rx_{0};
+    std::atomic<std::uint64_t> malformed_rx_{0};
     /**
      * @brief Guards the slot vector and every slot's NAME (the cross-thread
      *        reads: enumerate_peers / peer_link vs the recv thread's
@@ -296,10 +374,30 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
      *
      * @param host Dotted-quad IPv4 address of the peer (e.g. "127.0.0.1").
      * @param port TCP port of the peer (host byte order).
+     * @param backend The host-injected RX memory seam — see
+     *             transport_ws_server's constructor; a DIALLED peer is no more
+     *             trusted than an accepted one, so the client takes the same
+     *             seam in the same position as `tcp_transport_t`'s DIAL form.
+     * @param max_frame Per-connection receive cap (0 → @ref
+     *             transport_ws_server::kMaxFrame), bounded by the backend's real
+     *             capacity — see transport_ws_server's constructor.
      * @param recv_stack Recv-thread stack size in bytes, 0 = platform default
      *             (`posix_endpoint_t::start`).
+     * @param defer_recv Two-phase bring-up (#1025): with `true` the handshake still runs
+     *             HERE (so ok() answers on return) but the recv thread is NOT spawned —
+     *             nothing can be decoded, let alone delivered, until @ref start_receiving
+     *             is called. That is the only ordering in which
+     *             `%transport_t::set_receiver`'s "must be set before frames flow" is
+     *             satisfiable on a DIAL socket: a server that pushes its state the instant
+     *             the handshake completes has its first message in flight before this
+     *             constructor returns, and the default (`false`, the historical shape)
+     *             decodes it on the recv thread into whatever sink is installed by then —
+     *             possibly none, in which case it is dropped with no counter moving.
      */
-    transport_ws_client(const std::string& host, std::uint16_t port, std::size_t recv_stack = 0);
+    transport_ws_client(const std::string& host, std::uint16_t port,
+                        mem::mem_backend_t* backend = &mem::heap_backend(),
+                        std::size_t max_frame = 0, std::size_t recv_stack = 0,
+                        bool defer_recv = false);
 
     /** @brief Stop the recv thread and close the socket. */
     ~transport_ws_client() override;
@@ -318,6 +416,22 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
      */
     void send(std::span<const std::byte> frame) override;
 
+    /**
+     * @brief Spawn the recv thread a `defer_recv` construction held back (#1025).
+     *
+     * The second phase of the two-phase bring-up: the socket is connected and handshaken,
+     * the bytes the server pipelined behind its `101` are held, and NOTHING has been
+     * decoded yet — so a sink installed before this call cannot have missed a frame. From
+     * here the client behaves exactly as a one-phase one: the thread's first act is to
+     * drain what the handshake carried over.
+     *
+     * Idempotent and safe on a one-phase client (the thread is already running → no-op) and
+     * on a failed handshake (`ok()` false → no-op, nothing to serve). A `defer_recv` client
+     * that is never started never receives, never answers a PING and never reports the link
+     * down; it is simply an open socket until it is destroyed.
+     */
+    void start_receiving() override;
+
     /** @brief True — WS reassembles fragmented messages into ropes (ADR-0053 §5):
      *         each message crosses the seam as a `rope_t`, one owning link per WS
      *         fragment (a single link for an unfragmented message), chained by
@@ -327,13 +441,48 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
     /** @brief True if the connection handshake succeeded and the link is up. */
     [[nodiscard]] bool ok() const noexcept { return connected_; }
 
+    /** @brief Messages dropped to RX-backend exhaustion (backpressure) — the server-side
+     *         counter's twin, same name, same meaning. */
+    [[nodiscard]] std::uint64_t dropped_rx() const noexcept {
+        return dropped_rx_.load(std::memory_order_relaxed);
+    }
+
+    /** @brief RFC 6455 violations seen — an over-cap declared length, an over-cap
+     *         reassembled message, or a §5.5 control breach. Each fails the connection. */
+    [[nodiscard]] std::uint64_t malformed_rx() const noexcept {
+        return malformed_rx_.load(std::memory_order_relaxed);
+    }
+
+    /** @brief The cap actually honored: `min(max_frame, backend.max_segment_size())`. */
+    [[nodiscard]] std::size_t effective_max_frame() const noexcept {
+        return length_prefix_framer::effective_cap(*backend_, max_frame_);
+    }
+
    private:
-    bool handshake(int fd, const std::string& host, std::uint16_t port);  // GET Upgrade, verify 101
-    void serve(int fd);                                                   // frame recv loop
+    /**
+     * @brief Send the GET Upgrade, verify the 101, and hand back what came after it.
+     *
+     * The response `recv` routinely returns the 101 AND the bytes the server pipelined
+     * behind it — a server that pushes state the instant the handshake completes puts its
+     * first frame in that same segment. Those bytes are the start of the frame stream, so
+     * they are moved into @p pipelined (cleared first, empty in the common case) for
+     * `serve` to decode; dropping them loses that frame silently. The server half has
+     * carried them over since it grew a second peer (`service_peer`'s `s.buf.assign`) —
+     * this is the DIAL half of the same rule (#1020).
+     */
+    bool handshake(int fd, const std::string& host, std::uint16_t port,
+                   std::vector<std::byte>& pipelined);
+    /** @brief Frame recv loop, seeded with the bytes `handshake` found behind the 101. */
+    void serve(int fd, std::vector<std::byte> pipelined);
     std::uint32_t next_mask_key();  // per-frame masking key (varied, not crypto)
 
     // conn_fd_ + write_m_ (and their teardown discipline) live in stream_endpoint_t.
     std::atomic<std::uint64_t> mask_state_{0};
+    // The RX seam + ingress bound + counters, identical to the server's (and to tcp's).
+    mem::mem_backend_t* backend_;
+    std::size_t max_frame_ = transport_ws_server::kMaxFrame;
+    std::atomic<std::uint64_t> dropped_rx_{0};
+    std::atomic<std::uint64_t> malformed_rx_{0};
     /**
      * @brief The REUSED masked-frame buffer `send` encodes into, guarded by `write_m_`.
      *
@@ -346,6 +495,18 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
      */
     mem::block_array_t<std::byte> tx_buf_{mem::heap_source()};
     bool connected_ = false;
+    /**
+     * @brief The bytes the server pipelined behind its `101`, parked between the handshake
+     *        and @ref start_receiving (moved into the recv thread there, empty after).
+     *
+     * Written by the constructor, read once by the thread-spawning `start_receiving`; the
+     * recv thread never touches this member (it owns its own copy).
+     */
+    std::vector<std::byte> pipelined_;
+    std::size_t recv_stack_ = 0; /**< @brief The stack hint, held for `start_receiving`. */
+    /** @brief One-shot latch making @ref start_receiving idempotent — `start()` may be
+     *         called at most once per endpoint. */
+    std::atomic<bool> recv_started_{false};
 };
 
 }  // namespace tr::net

@@ -66,8 +66,8 @@ struct peer_name_buf_t {
  * @brief Reassembly identity for a group is derived purely from the CAN ID: the `node` sub-field
  *        becomes the 16-byte origin and the group's base endpoint becomes the `ts`.
  *
- * Both peers compute it the same way from the same id, so no per-frame
- * origin/ts ever rides the constrained bus (header-elided).
+ * Both peers compute it the same way from the same id, so no per-frame origin/ts rides the
+ * bus. The base endpoint RECURS (12-bit wrap): see `invalidate_overlapping`'s rule (#909).
  */
 tr::net::can_origin_id_t origin_of(std::uint16_t node) {
     tr::net::can_origin_id_t o{};
@@ -78,6 +78,19 @@ tr::net::can_origin_id_t origin_of(std::uint16_t node) {
 
 tr::net::reassembly_key_t key_of(std::uint16_t node, std::uint16_t base_endpoint) {
     return tr::net::reassembly_key_t{origin_of(node), static_cast<std::uint64_t>(base_endpoint)};
+}
+
+/**
+ * @brief The monotonic stamp the reassembly buffer ages groups against: steady-clock
+ *        milliseconds, the same unit `rx_ttl` is expressed in.
+ *
+ * The buffer holds no clock of its own (it is a pure framing primitive), so the
+ * transport — which already reads `steady_clock` once per inbound frame for the
+ * ADR-0044 last-heard table — feeds it this.
+ */
+[[nodiscard]] std::uint64_t stamp_ms(std::chrono::steady_clock::time_point t) {
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t.time_since_epoch());
+    return static_cast<std::uint64_t>(ms.count());
 }
 
 // (removed) own_copy — the alloc/copy/over triplet now lives in one audited
@@ -91,7 +104,36 @@ tr::net::reassembly_key_t key_of(std::uint16_t node, std::uint16_t base_endpoint
 // the transport talks only to the can_link_t seam.
 
 transport_can::transport_can(std::unique_ptr<can_link_t> link, transport_can_config_t config)
-    : link_(std::move(link)), cfg_(std::move(config)) {
+    : link_(std::move(link)),
+      cfg_(std::move(config)),
+      // The injected-bound seam the reassembly buffer was built around, finally
+      // reached (#912): before this it was default-constructed, so max_groups was
+      // 0 and its evict-oldest never fired. Both RX buffers draw from the same
+      // injected resource — the RX thread never reaches the global heap.
+      reasm_(cfg_.reasm_mr, cfg_.max_groups),
+      pending_(cfg_.reasm_mr) {
+    // The RX staleness window is derived, not invented: left at zero it tracks the
+    // configured peer liveness window, since RX state a peer would have completed
+    // is dead once that peer is itself considered gone.
+    if (cfg_.rx_ttl <= kCanRxTtlFromPeerTtl) cfg_.rx_ttl = cfg_.peer_ttl;
+    // ...and a window that is still non-positive after the derivation means the
+    // peer window is itself zero, i.e. NOTHING is live. Normalize it to zero here
+    // so all three consumers read one value and read it the same way: the peer
+    // enumeration (`now - last_heard > peer_ttl`), the group sweep
+    // (`sweep_stale(0)`), and `expire_pending` each then retain only what arrived
+    // this instant. Before this, zero meant "instantly expired" to the enumeration
+    // and "never expire" to the pending age-out, so a configured `peer_ttl_ms=0`
+    // silently disabled the one bound that holds under the default `max_pending=0`
+    // — the exact unbounded growth #912 exists to close. A negative window was
+    // worse than inconsistent: `static_cast<std::uint64_t>` of it made
+    // `sweep_stale` compare against ~1.8e19 and reclaim nothing at all.
+    if (cfg_.rx_ttl < std::chrono::milliseconds::zero()) {
+        cfg_.rx_ttl = std::chrono::milliseconds::zero();
+    }
+    // Resolve the slice-byte seam ONCE (#911). `nullptr` means the process heap, which
+    // is what this path used unconditionally before; resolving here rather than
+    // branching per slice keeps the RX path at one indirect call either way.
+    rx_backend_ = cfg_.rx_backend != nullptr ? cfg_.rx_backend : &tr::mem::heap_backend();
     link_->on_receive([this](const can_frame_data_t& f) { on_rx(f); });
     // Announce presence at join (ADR-0044): a hello advertise (slice_count == 0)
     // seeds every listener's last-heard table before any data flows, so a fresh
@@ -117,14 +159,25 @@ std::optional<can::advertise_t> transport_can::learned_binding(std::uint32_t bas
     return it->second.adv;
 }
 
+std::uint64_t transport_can::dropped_groups() const {
+    // reasm_ is plain (non-atomic) RX-thread state, so its counter is read under
+    // the ingress lock — introspection, never a hot path.
+    const std::lock_guard lock(const_cast<std::mutex&>(rx_m_));
+    return reasm_.dropped_groups();
+}
+
+std::size_t transport_can::pending_slices() const {
+    const std::lock_guard lock(const_cast<std::mutex&>(rx_m_));
+    return pending_.size();
+}
+
 // --- the bus capability (ADR-0044) -------------------------------------------
 
-void transport_can::touch_peer(std::uint16_t node) {
-    const auto now = std::chrono::steady_clock::now();
+void transport_can::touch_peer(std::uint16_t node, std::chrono::steady_clock::time_point now) {
     const std::lock_guard lock(peers_m_);
-    // Insert-only, one entry per DISTINCT node id ever heard (the learned_ map's
-    // policy): growth tracks the bus population — structurally bounded by the
-    // 13-bit id space, never per-frame — and an existing entry only refreshes.
+    // Insert-only, one entry per DISTINCT node id ever heard (unlike learned_, which
+    // retires overlapping runs — #909): growth tracks the bus population, structurally
+    // bounded by the 13-bit id space, never per-frame; an existing entry only refreshes.
     const auto [it, fresh] = peers_.try_emplace(node);
     it->second.last_heard = now;
     if (fresh) {
@@ -157,13 +210,22 @@ void transport_can::peer_endpoint_t::send(std::span<const std::byte> frame) {
     owner_->send_impl(frame, node_.load(std::memory_order_relaxed));
 }
 
-std::uint16_t transport_can::alloc_base(std::size_t slice_count) {
-    const auto span = static_cast<std::uint16_t>(slice_count == 0 ? 1 : slice_count);
-    if (static_cast<std::size_t>(next_base_) + span > can::kEndpointMax) {
+std::optional<std::uint16_t> transport_can::alloc_base(std::size_t slice_count) {
+    // Everything here stays in std::size_t. The u16 this used to narrow to was the
+    // silent half of #910: a >65535-slice group wrapped `span` (65536 became 0), the
+    // reservation then trivially "fit", and the manifest advertised the same wrapped
+    // count — a group of 65536 slices announced as a hello. The width the endpoint
+    // field can actually hold is asserted below, not assumed by a cast.
+    const std::size_t span = slice_count == 0 ? 1 : slice_count;
+    // A group occupies CONSECUTIVE slots [base, base+span-1], so one wider than the
+    // whole data-endpoint window fits at no base and no wrap rescues it. Refuse it
+    // here so the caller never advertises a count it cannot deliver.
+    if (span > kCanMaxGroupSlices) return std::nullopt;
+    if (static_cast<std::size_t>(next_base_) + span - 1u > can::kEndpointMax) {
         next_base_ = kCanFirstDataEndpoint;  // wrap, leaving the control slot free
     }
     const std::uint16_t base = next_base_;
-    next_base_ = static_cast<std::uint16_t>(next_base_ + span);
+    next_base_ = static_cast<std::uint16_t>(static_cast<std::size_t>(base) + span);
     return base;
 }
 
@@ -179,7 +241,12 @@ void transport_can::emit_advertise(const can::advertise_t& adv) {
     // was a per-send abort() risk under `-fno-exceptions`. Zero allocation, zero drop:
     // 18 bytes of stack and a view of a string this transport already owns for its life.
     std::array<std::byte, can::kAdvertiseHeaderSize> header{};
-    if (!can::encode_advertise_header(header, adv, cfg_.path)) return;  // over-long: emit nothing
+    if (!can::encode_advertise_header(header, adv, cfg_.path)) {
+        // Over-long: emit nothing. Without the manifest no peer can bind the group,
+        // so the whole send is lost — counted, not silent (#912).
+        dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     const std::span<const std::byte> parts[2] = {
         std::span<const std::byte>(header),
         std::as_bytes(std::span<const char>(cfg_.path.data(), cfg_.path.size()))};
@@ -238,14 +305,33 @@ void transport_can::send_impl(std::span<const std::byte> frame, std::uint16_t ta
 
     // Own the bytes so view_can_frames_t can carve zero-copy subviews out of them.
     const auto payload = tr::view::over_bytes(frame);
-    if (!payload) return;  // alloc failure => backpressure drop
+    if (!payload) {
+        dropped_tx_.fetch_add(1, std::memory_order_relaxed);  // alloc failure => backpressure drop
+        return;
+    }
     const tr::view::view_can_frames_t frames =
         tr::view::view_can_frames_t::split(*payload, cfg_.mode);
     const std::size_t count = frames.frame_count();
-    if (count == 0) return;
+    if (count == 0) {
+        dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
 
-    const std::uint16_t base_ep = alloc_base(count);
-    const can::can_id_fields_t base_fields{cfg_.version, cfg_.node, base_ep};
+    // RESERVE FIRST, then advertise (#910). The manifest is a promise of `slice_count`
+    // slices, and it used to be emitted before the loop that discovers the endpoint
+    // window is too small — so a group over the window advertised N and sent N-1, and
+    // every receiver on the bus pinned a reassembly group that could never complete.
+    // Reserving here makes the promise checkable before it is made. The alternative
+    // shape — advertise, then retract — was declined: a retraction is a SECOND wire
+    // concern (a new control-frame semantic every peer must implement, and one that
+    // is itself lossy on the medium that lost the tail slices), where the capacity is
+    // a purely local fact the sender already holds.
+    const std::optional<std::uint16_t> base_ep = alloc_base(count);
+    if (!base_ep) {
+        dropped_tx_.fetch_add(1, std::memory_order_relaxed);  // whole group refused, nothing said
+        return;
+    }
+    const can::can_id_fields_t base_fields{cfg_.version, cfg_.node, *base_ep};
     const std::uint32_t base_id = can::encode_can_id(base_fields);
 
     // The manifest carries the exact total length (so the peer trims FD padding),
@@ -266,7 +352,15 @@ void transport_can::send_impl(std::span<const std::byte> frame, std::uint16_t ta
         const tr::view::view_t& window = frames.frames()[i];
         const std::span<const std::byte> wb = window.bytes();
         const auto slice_id = can::slice_can_id(base_fields, i);
-        if (!slice_id) break;  // endpoint overflow — group too large for this node
+        if (!slice_id) {
+            // Unreachable by construction: alloc_base reserved [base, base+count) inside
+            // the endpoint window before the manifest went out, so every index here is in
+            // range. Kept as a hard, COUNTED stop rather than the silent `break` it was —
+            // if the reservation invariant is ever broken the group is reported lost, not
+            // half-delivered against a manifest that promised all of it.
+            dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+            break;
+        }
 
         can_frame_data_t out;
         out.id = *slice_id;
@@ -291,11 +385,19 @@ void transport_can::on_rx(const can_frame_data_t& frame) {
     // Self-echo guard (e.g. CAN_RAW_RECV_OWN_MSGS, or a second local socket):
     // our own frames neither feed the map nor make us our own peer.
     if (fields->node == cfg_.node) return;
+    // One clock read per inbound frame, shared by the ADR-0044 last-heard table and
+    // the RX age-out below — the RX path's only notion of "now".
+    const auto now = std::chrono::steady_clock::now();
     // ANY valid same-version frame from another node is a liveness signal —
     // the last-heard table (ADR-0044) is refreshed before the payload is parsed.
-    touch_peer(fields->node);
+    touch_peer(fields->node, now);
 
     const std::lock_guard lock(rx_m_);
+    rx_now_ = now;
+    reasm_.set_now(stamp_ms(now));
+    // Age out parked slices on EVERY inbound frame, not just on a park: a bus that
+    // stops emitting unmatched data must still shed what it already parked.
+    expire_pending();
     if (fields->endpoint == kCanControlEndpoint) {
         // Accumulate the per-node advertise byte stream and pop every complete frame.
         std::vector<std::byte>& buf = control_[fields->node];
@@ -327,33 +429,118 @@ void transport_can::on_rx(const can_frame_data_t& frame) {
 }
 
 void transport_can::learn_advertise(const can::advertise_t& adv) {
+    // The on-advertise stale-group sweep (#912). Every group is created by an
+    // advertise, so this is the cadence that sees every group. `erase` is reached
+    // only after `is_complete`, so a group a lost advertise or a lost data slice
+    // left permanently incomplete is pinned until something ages it out — this.
+    reasm_.sweep_stale(static_cast<std::uint64_t>(cfg_.rx_ttl.count()));
+
     // The hello/presence form (slice_count == 0) binds nothing — its liveness
     // effect already landed in touch_peer on the frame that carried it.
     if (adv.slice_count == 0) return;
+    // Decoded BEFORE the insert, where it used to sit after it. Two reasons: the
+    // endpoint run the invalidation below is computed from lives in these fields,
+    // and an id no CAN frame could carry (>29 bits) binds nothing anyway —
+    // process_data decodes the same id and skips whatever fails, so such an entry
+    // could only ever accumulate in a map that is not otherwise erased per id.
+    const auto base = can::decode_can_id(adv.can_id);
+    if (!base) return;
     // A directed group addressed to another node (ADR-0044) is learned so its
     // data slices are recognized and CONSUMED, but never reassembled/delivered.
     const bool deliver = adv.target == can::kCanBroadcastNode || adv.target == cfg_.node;
+    // The endpoint space wraps by design, so this base has been used before (#909).
+    // Retire whatever still claims these slots BEFORE the fresh binding lands.
+    invalidate_overlapping(*base, adv.slice_count);
     learned_[adv.can_id] = binding_t{adv, deliver};
-    const auto base = can::decode_can_id(adv.can_id);
-    if (!base) return;
     if (deliver) reasm_.set_expected_count(key_of(base->node, base->endpoint), adv.slice_count);
 
     // A data frame may have arrived ahead of its manifest (cross-ID arbitration);
-    // re-drive any now-matchable pending slices.
-    std::vector<can_frame_data_t> still_pending;
-    std::vector<can_frame_data_t> ready;
-    still_pending.reserve(pending_.size());
-    for (auto& f : pending_) {
-        const auto ff = can::decode_can_id(f.id);
+    // re-drive any now-matchable pending slices. Compact in place and lift only the
+    // matches into one batch drawn from the SAME injected resource — the old
+    // two-vector rebuild reallocated the whole queue from the global heap on every
+    // advertise, and a pmr container cannot be move-assigned across resources.
+    std::pmr::vector<pending_slice_t> ready(pending_.get_allocator());
+    auto keep = pending_.begin();
+    for (auto& p : pending_) {
+        const auto ff = can::decode_can_id(p.frame.id);
         if (ff && ff->node == base->node && ff->endpoint >= base->endpoint &&
             ff->endpoint < base->endpoint + adv.slice_count) {
-            ready.push_back(f);
+            ready.push_back(std::move(p));
         } else {
-            still_pending.push_back(f);
+            *keep++ = std::move(p);
         }
     }
-    pending_ = std::move(still_pending);
-    for (const auto& f : ready) process_data(f);
+    pending_.erase(keep, pending_.end());
+    for (const auto& p : ready) process_data(p.frame);
+}
+
+/**
+ * @brief Retire every same-node binding whose endpoint run overlaps the one a fresh
+ *        advertise claims — and the reassembly group each was feeding (#909).
+ *
+ * The endpoint sub-field is 12 bits and `alloc_base` wraps it back to
+ * @ref kCanFirstDataEndpoint when the window is exhausted, so a base RECURS after the
+ * space is consumed — routine, not exceptional. Before this, `learned_` was written
+ * only via `operator[]` on the exact base id and never erased, which aliased two ways
+ * once a run was reused:
+ *
+ *  1. **The stale binding shadowed the live one.** `process_data` takes the FIRST
+ *     `learned_` entry (ascending base order) whose `[base, base + slice_count)`
+ *     contains the slice's endpoint, so a wider stale range with a lower base won the
+ *     scan and filed the slice under the wrong group at the wrong index — bytes of one
+ *     payload landing inside another.
+ *  2. **The reassembly key collided.** The group key is `(origin, base endpoint)`, so a
+ *     recurring base merged slices left over from an incomplete group into the fresh
+ *     one. `is_complete` could then be satisfied by a MIX of old and new slices and a
+ *     byte-corrupted frame was delivered as valid — silent, not a crash.
+ *
+ * Both close on one invariant, enforced here: **at most one binding may claim an
+ * endpoint slot of a node, and a reassembly group lives exactly as long as the binding
+ * that feeds it.** A group is only ever fed through a live binding (`process_data`
+ * resolves one before it touches the buffer) and its key is derived from that binding's
+ * base, so two groups can share a key only if two bindings share a base — which this
+ * makes impossible. No epoch, no generation, and no bound that is not the wire's: the
+ * overlap test is arithmetic on the CAN ID's own endpoint field.
+ *
+ * A second advertise over a range is, by construction, a NEW group: this transport
+ * emits one manifest per `send`, so the same run is only re-announced after the
+ * allocator has come round again. The stale group's buffered slices are therefore
+ * unreachable — nothing will ever resolve to them — and @ref can_reassembly_t::discard
+ * reclaims them and counts them on `dropped_groups`, exactly as an `rx_ttl` age-out or
+ * a `max_groups` eviction does.
+ *
+ * @param base        The fields of the fresh binding's base id (its endpoint is slot 0).
+ * @param slice_count The fresh binding's slice count; never 0 (hello returns earlier).
+ * @note Requires `rx_m_` held.
+ */
+void transport_can::invalidate_overlapping(const can::can_id_fields_t& base,
+                                           std::uint16_t slice_count) {
+    // Half-open runs in the endpoint field's own units. Widened to u32 only so the
+    // upper edge of a non-conforming peer's over-long slice_count cannot wrap the u16
+    // it is compared in; the values themselves are the wire's.
+    const std::uint32_t lo = base.endpoint;
+    const std::uint32_t hi = lo + slice_count;
+    for (auto it = learned_.begin(); it != learned_.end();) {
+        const auto stale = can::decode_can_id(it->first);
+        // A different node's slots are a different address space entirely — the node
+        // sub-field is part of the id, so only THIS node's runs can be aliased.
+        if (!stale || stale->node != base.node) {
+            ++it;
+            continue;
+        }
+        const std::uint32_t s_lo = stale->endpoint;
+        const std::uint32_t s_hi = s_lo + it->second.adv.slice_count;
+        if (s_hi <= lo || hi <= s_lo) {  // disjoint runs — untouched
+            ++it;
+            continue;
+        }
+        // Ordered discard-then-erase: the key is derived from the entry being erased.
+        // `discard` is a no-op returning false when the binding never accumulated a
+        // group (a directed group addressed elsewhere, or one whose slices are all
+        // still in flight), so nothing is counted that was not actually reclaimed.
+        reasm_.discard(key_of(stale->node, stale->endpoint));
+        it = learned_.erase(it);
+    }
 }
 
 void transport_can::process_data(const can_frame_data_t& frame) {
@@ -374,7 +561,7 @@ void transport_can::process_data(const can_frame_data_t& frame) {
         }
     }
     if (!binding) {
-        pending_.push_back(frame);  // hold until its advertise lands
+        park_pending(frame);  // hold until its advertise lands — bounded and aged
         return;
     }
     // A directed group addressed to another node (ADR-0044): recognized, consumed,
@@ -383,14 +570,46 @@ void transport_can::process_data(const can_frame_data_t& frame) {
 
     const tr::net::reassembly_key_t key = key_of(fields->node, base_ep);
     const std::uint32_t index = static_cast<std::uint32_t>(fields->endpoint - base_ep);
-    reasm_.add_slice(key, index, tr::view::over_bytes(frame.bytes()).value_or(tr::view::view_t{}));
+    // `over_bytes` has exactly two outcomes and nullopt means ONE thing: the backend
+    // refused (empty input still returns an engaged empty view). The `value_or(view_t{})`
+    // this replaces converted that refusal into a fabricated engaged-EMPTY slice (#911):
+    // the reassembly buffer counts entries without inspecting their length, so the
+    // placeholder satisfied `is_complete`, `assemble` chained it, and the trim below
+    // shortened the rope to whatever did arrive — a byte-wrong, short frame delivered
+    // upstream as valid. A refusal is backpressure, so it drops like backpressure: the
+    // whole group goes (the surviving slices can never be completed into anything true),
+    // the slice ticks dropped_rx, and `discard` ticks dropped_groups. Never fabricate.
+    //
+    // A zero-length data field takes the SAME disposition, and for the same reason.
+    // `over_bytes` returns an ENGAGED empty view for empty input, so a DLC-0 data frame
+    // walks the success path and inserts exactly the placeholder the paragraph above
+    // exists to prevent — the buffer counts it, `is_complete` fires early, and the trim
+    // delivers a short frame. A conforming sender never emits one (every slice of a
+    // group is a fragment of a non-empty frame, and the last is full or partial, never
+    // absent), so this is the non-conforming-peer door onto the identical corruption.
+    // Guarding on the frame rather than on the view's length keeps the check at the
+    // seam where the wire fact lives.
+    if (frame.len == 0) {
+        reasm_.discard(key);
+        dropped_rx_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    std::optional<tr::view::view_t> slice = tr::view::over_bytes(frame.bytes(), *rx_backend_);
+    if (!slice) {
+        reasm_.discard(key);
+        dropped_rx_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    reasm_.add_slice(key, index, *std::move(slice));
 
     if (!reasm_.is_complete(key)) return;
     const auto rope = reasm_.assemble(key);
     const std::uint32_t total = binding->adv.group_total_len;
     reasm_.erase(key);
-    // The learned binding is kept (the identity↔path map persists and self-heals by
-    // overwrite when the node re-advertises); only the per-group slice buffer is freed.
+    // The learned binding is kept: the identity↔path map persists past delivery and is
+    // retired only when a fresh advertise claims its endpoint run (#909). Here only the
+    // per-group slice buffer is freed — `erase`, not `discard`: the bytes reached the
+    // receiver, so nothing was lost and nothing is counted.
     if (!rope) return;
 
     // Trim back to the advertised total by SHORTENING the tail link (subrope) —
@@ -399,6 +618,51 @@ void transport_can::process_data(const can_frame_data_t& frame) {
     // delivered frame (ADR-0053 §5); only a span-tier receiver pays a flatten.
     const std::size_t n = std::min<std::size_t>(total, rope->total_length());
     deliver(fields->node, rope->subrope(0, n));
+}
+
+/**
+ * @brief Park a data slice whose advertise has not landed — bounded in count, counted on drop.
+ *
+ * The unbounded park this replaces was reachable by any bus peer: a data frame on a
+ * never-advertised endpoint was appended and, since the only drain is the
+ * covered-range re-drive in @ref learn_advertise, never reclaimed (#912). The count
+ * ceiling is the injected `max_pending`, never a magic number; the age ceiling is
+ * @ref expire_pending.
+ */
+void transport_can::park_pending(const can_frame_data_t& frame) {
+    // Evict the OLDEST parked slices to make room — append order is arrival order,
+    // so the front is oldest. A newly arrived slice is the one most likely to have
+    // its advertise still in flight, so it is the one worth keeping.
+    if (cfg_.max_pending != 0 && pending_.size() >= cfg_.max_pending) {
+        const std::size_t over = pending_.size() + 1 - cfg_.max_pending;
+        pending_.erase(pending_.begin(), pending_.begin() + static_cast<std::ptrdiff_t>(over));
+        dropped_rx_.fetch_add(over, std::memory_order_relaxed);
+    }
+    pending_.push_back(pending_slice_t{frame, rx_now_});
+}
+
+/**
+ * @brief Drop parked slices older than `rx_ttl` — the age-out that holds under the
+ *        shipped default config, where the count caps are opt-in.
+ *
+ * A parked slice waits for an advertise that, on a bus that drops control frames,
+ * may never come. Arrival order is insertion order, so every stale entry is a
+ * contiguous prefix and the scan stops at the first live one.
+ */
+void transport_can::expire_pending() {
+    // No `rx_ttl <= 0` early-out. The constructor normalized the window to
+    // non-negative, and zero here means the same thing it means to the peer
+    // enumeration and to `sweep_stale(0)`: nothing but this instant is retained.
+    // Disabling the sweep on zero was how a configured `peer_ttl_ms=0` re-opened
+    // unbounded RX growth under the default `max_pending=0`.
+    if (pending_.empty()) return;
+    const auto cutoff = rx_now_ - cfg_.rx_ttl;
+    auto first_live = pending_.begin();
+    while (first_live != pending_.end() && first_live->arrived < cutoff) ++first_live;
+    const auto stale = static_cast<std::size_t>(first_live - pending_.begin());
+    if (stale == 0) return;
+    pending_.erase(pending_.begin(), first_live);
+    dropped_rx_.fetch_add(stale, std::memory_order_relaxed);
 }
 
 void transport_can::deliver(std::uint16_t src_node, tr::view::rope_t frame) {
@@ -422,9 +686,11 @@ void transport_can::deliver(std::uint16_t src_node, tr::view::rope_t frame) {
 
 // --- the `can` catalog factory (ADR-0027 / ADR-0043 §5 / ADR-0044) -----------
 
-transport_vertex_t::transport_factory_t can_transport_factory() {
-    return [](const conn_settings_t& /*settings*/,
-              const wire::tlv_t* raw_config) -> graph::result_t<std::unique_ptr<transport_t>> {
+transport_vertex_t::transport_factory_t can_transport_factory(std::pmr::memory_resource* reasm_mr,
+                                                              mem::mem_backend_t* rx_backend) {
+    return [reasm_mr, rx_backend](
+               const conn_settings_t& /*settings*/,
+               const wire::tlv_t* raw_config) -> graph::result_t<std::unique_ptr<transport_t>> {
         // Every CAN-private key is parsed HERE from the raw config TLV (the
         // ADR-0043 §5 leanness ruling): nothing CAN-shaped lands in the shared
         // conn_settings_t. The shared config_reader_t walk, CAN's own keys.
@@ -442,12 +708,27 @@ transport_vertex_t::transport_factory_t can_transport_factory() {
         if (const auto v = reader.flag("fd"))
             cfg.mode = *v ? tr::view::can_frame_mode_t::FD : tr::view::can_frame_mode_t::CLASSIC;
         if (const auto v = reader.u32("peer_ttl_ms")) cfg.peer_ttl = std::chrono::milliseconds(*v);
+        // The ingress bounds (#912). Without these keys the reassembly buffer's
+        // evict-oldest seam was unreachable from production config at all — the
+        // buffer was default-constructed with max_groups == 0. The pmr resource
+        // cannot ride a config TLV (it is a pointer, not a wire value), so it is
+        // injected at factory-registration time instead.
+        cfg.reasm_mr = reasm_mr != nullptr ? reasm_mr : std::pmr::new_delete_resource();
+        // Same reasoning one seam over (#911): the slice-byte backend is a pointer, so
+        // it rides the factory registration, not the config TLV. nullptr = process heap.
+        cfg.rx_backend = rx_backend;
+        if (const auto v = reader.u32("max_groups")) cfg.max_groups = static_cast<std::size_t>(*v);
+        if (const auto v = reader.u32("max_pending"))
+            cfg.max_pending = static_cast<std::size_t>(*v);
+        if (const auto v = reader.u32("rx_ttl_ms")) cfg.rx_ttl = std::chrono::milliseconds(*v);
         if (ifname.empty() || !have_node || cfg.node > can::kNodeMax ||
             cfg.version > can::kVersionMax) {
             return std::unexpected(graph::status_t::TYPE_MISMATCH);
         }
         auto link = std::make_unique<socketcan_link_t>(ifname);
-        if (!link->ok()) return std::unexpected(graph::status_t::NOT_FOUND);  // no kernel CAN
+        // The kernel would not open the interface — the link is down, not the address
+        // wrong (#929).
+        if (!link->ok()) return std::unexpected(graph::status_t::TRANSPORT_DOWN);
         return std::make_unique<transport_can>(std::move(link), std::move(cfg));
     };
 }

@@ -51,6 +51,7 @@
 #include "libtracer/op_resolve.hpp"
 #include "libtracer/path_ref.hpp"
 #include "libtracer/route_handle.hpp"
+#include "libtracer/sink_slot.hpp"
 #include "libtracer/transport.hpp"
 
 namespace tr::net {
@@ -225,6 +226,13 @@ class fwd_router_t {
      * reported as a healthy child while every forward to it missed and fell through to the
      * terminus with no error anywhere — the #516 failure shape, one layer up.
      *
+     * **A NAME owns exactly one receiver ctx, for the router's life (#884).** Registering a
+     * name that already has one — a re-add after @ref remove_child, or a duplicate add of a
+     * live name — REBINDS that ctx rather than appending a second, the same one-slot-per-name
+     * rule @ref child_registry_t::add follows and for the same two reasons. A second ctx would
+     * shadow the first on every name-keyed lookup (which returns the FIRST match, so the DEAD
+     * one), and churn on a stable name set would grow the published chain without bound.
+     *
      * @param name This node's local mount name for the link (e.g. "up", "ws-server/up").
      * @param link The transport carrying the next/previous hop.
      * @param rx   Optional per-child failable-block source; null uses the router's. Give
@@ -250,6 +258,12 @@ class fwd_router_t {
      * would permanently unroute a link that is only reconnecting. Call this one when the
      * connection itself is gone — and call it BEFORE destroying the `transport_t`, so no
      * forward can resolve a freed object.
+     *
+     * The child's receiver ctx is TOMBSTONED, not unlinked (#884): it stays on the published
+     * chain — a lock-free reader may be walking it right now — but stops answering every
+     * name-keyed and slot-keyed lookup, and a later @ref add_child of the same name revives it
+     * in place. That is what keeps `connection_ref`/`hop_mint` off the dead context after a
+     * re-add, and what keeps create/remove churn on a stable name set from growing the chain.
      * @param name The child's registered NAME.
      * @return true if @p name named a live child, false if it named none.
      */
@@ -379,7 +393,13 @@ class fwd_router_t {
     // Not std::function: these fire on the per-frame RX path, where the erasure
     // machinery (code size, heap capability, exception paths) is the largest avoidable
     // embedded liability — the same call graph_t::subscriber_fn_t already makes at L4.
-    // Configure before frames flow; passing nullptr clears a sink.
+    //
+    // Each pair lives in a `sink_slot_t` (#914), so a setter may run while frames flow:
+    // the pair is published as a unit and every frame-path read snapshots it, which is
+    // what makes "passing nullptr clears a sink" safe at runtime rather than a race.
+    // What a clear does NOT do is stop a dispatch already in flight — a receive thread
+    // may be inside the sink, or hold a snapshot taken a moment before — so the ctx must
+    // still outlive every possible dispatch, as it must for `receiver_slot_t`.
 
     /** @brief Reply-terminus sink (@ref on_reply): @p ctx, then the FWD{REPLY} frame. */
     using reply_fn_t = void (*)(void* ctx, const view::rope_t& reply);
@@ -467,15 +487,15 @@ class fwd_router_t {
     /**
      * @brief Advertise a `label ↔ route` binding over link @p link_name (producer side).
      *
-     * Allocates a fresh per-link label, sends an ADVERTISE carrying it and @p route,
-     * and records the egress binding (so a NACK can re-advertise). Call when a
-     * compact-flagged flow starts or on (re)connect — re-advertising is the self-heal.
+     * Sends an ADVERTISE carrying @p route and records the egress binding (so a NACK can
+     * re-advertise). Call when a compact-flagged flow starts or on (re)connect — re-advertising
+     * IS the self-heal, and the label is minted once per `(link, route)` then REUSED (#913): the
+     * frame goes out on every call, but a re-advertise loop grows no label or table state.
      * @param link_name  This node's NAME for the downstream link to advertise over.
      * @param route_path A complete PATH TLV's bytes — the delivery route to alias.
-     * @return The allocated label (to stamp on subsequent @ref send_compact), or 0 if
-     *         @p link_name names no child, or if that link's 16-bit label space is
-     *         exhausted (`route_handle_t::alloc_label` saturates rather than wrapping onto
-     *         a live label — #603). No ADVERTISE is sent in either case.
+     * @return The label to stamp on subsequent @ref send_compact, or 0 if @p link_name names no
+     *         child, or that link's label space is exhausted / its egress table full (#603 —
+     *         see `route_handle_t::ensure_egress`). No ADVERTISE is sent in either case.
      */
     std::uint16_t advertise(std::string_view link_name, std::span<const std::byte> route_path);
 
@@ -551,6 +571,20 @@ class fwd_router_t {
     /** @brief The connection registry (test introspection — the shared demux table). */
     [[nodiscard]] const child_registry_t& registry() const noexcept { return registry_; }
 
+    /**
+     * @brief How many receiver contexts this router holds (test introspection — the churn
+     *        bound of #884): one per NAME ever registered, live or tombstoned.
+     *
+     * The twin of @ref child_registry_t::size, and asserted against for the same reason: it is
+     * the length of the chain every name-keyed and slot-keyed lookup walks, so "create/remove
+     * churn does not grow it" is a latency property as well as a memory one. Takes the control
+     * lock, so it is a control-plane call — never a per-frame one.
+     */
+    [[nodiscard]] std::size_t receiver_ctx_count() const {
+        const std::lock_guard ctl(ctl_m_);
+        return child_rx_.size();
+    }
+
    private:
     /** @brief "This child has no connection vertex" — the unbindable child (RFC-0024 §5.1).
      *         A sentinel rather than an `optional` because it lives in the per-frame ctx and
@@ -594,8 +628,13 @@ class fwd_router_t {
          * is touched by exactly one — the per-thread shape, obtained by ownership rather
          * than by a lock. A bounded node gives each child its own slab, which also makes
          * the bound per-peer: one noisy link cannot starve another's decode.
+         *
+         * Atomic because a re-add REBINDS this ctx (#884) — the store runs on the control
+         * thread while the departing transport's receive thread may still be reading it.
+         * Relaxed on both sides: the value names an object that outlives the router either
+         * way, and the ordering edge for the rebind as a whole is `retired`.
          */
-        mem::block_source_t* rx = nullptr;
+        std::atomic<mem::block_source_t*> rx{nullptr};
         /**
          * @brief This child's CONNECTION vertex slot index, resolved once at registration
          *        (RFC-0024 §5.1) — `kNoConnSlot` when the child has none.
@@ -612,8 +651,14 @@ class fwd_router_t {
          * child registered before its connection vertex exists simply has none, and every
          * bound route through it fails validation and falls back to canonical — the shipped
          * wiring registers the vertex first (`transport_vertex_t::make_connection`).
+         *
+         * "Once at registration" now means once per REGISTRATION, not once per ctx (#884): a
+         * re-add of the same name re-resolves it into this same node, because the answer is a
+         * property of the current tenancy and not of the name. Atomic for that store, and read
+         * relaxed — `retired` carries the ordering, and on the bound hop the compare is the
+         * same single instruction a plain load was.
          */
-        std::uint32_t conn_slot = kNoConnSlot;
+        std::atomic<std::uint32_t> conn_slot{kNoConnSlot};
         /**
          * @brief The registry slot this child was registered into — resolved once, here.
          *
@@ -624,8 +669,43 @@ class fwd_router_t {
          * slot pointer is stable for the registry's lifetime — which is what makes caching it
          * sound. (The `mount_tlv` member doc's older aside about an append invalidating a slot
          * pointer describes a shape the registry has not had since it became chunked.)
+         *
+         * Written ONCE and never rewritten, which is why it alone stays non-atomic while its
+         * neighbours became atomics for the rebind (#884). A registry slot is keyed by NAME
+         * and reused for that name forever — `erase` tombstones the slot in place and `add`
+         * rebinds the tombstone rather than appending — so a re-add of this ctx's name always
+         * yields the pointer already stored here. `acquire_ctx` asserts exactly that, which is
+         * where the coupling to `child_registry_t`'s tombstone contract is pinned.
          */
         const child_registry_t::child_t* entry = nullptr;
+        /**
+         * @brief Tombstoned: this ctx names no live child, and every lookup SKIPS it (#884).
+         *
+         * The ctx cannot simply be unlinked on `remove_child` — a lock-free reader may be
+         * standing on it — and it must not be left resolving either: `ctx_by_name` answers
+         * with the FIRST match, so a re-add that appended a second ctx handed every
+         * name-keyed consumer the DEAD one, whose `conn_slot` indexes the retired tenancy.
+         * The registry solved the identical problem the identical way, so this is its scheme
+         * one layer out: retire in place, skip on read, revive on re-add.
+         *
+         * **This is the publication edge for a REVIVED node**, the role `next`'s release-store
+         * plays for a fresh one: `acquire_ctx` hides the node, rewrites `rx`/`conn_slot`, and
+         * `publish_ctx` release-stores `false`; a reader acquire-loads it before reading either
+         * field, so it sees a whole tenancy or skips the node. The narrow window in between is
+         * the same one `child_registry_t::add`'s rebind has, and lands in the same place: a
+         * mint that straddles it resolves against a vertex whose registration state
+         * `graph_t::vertex_slot_at` re-checks, so the answer is `nullopt` and the caller stays
+         * canonical.
+         */
+        std::atomic<bool> retired{false};
+        /**
+         * @brief Already linked into the published chain — CONTROL PLANE ONLY, under `ctl_m_`.
+         *
+         * Distinguishes the two things `publish_ctx` must do: LINK a fresh node, or clear the
+         * tombstone on one that is already reachable. Never read by a frame path, so it is a
+         * plain `bool` rather than an atomic.
+         */
+        bool linked = false;
         /**
          * @brief Next published receiver ctx — the LOCK-FREE reader chain (ADR-0063 §3).
          *
@@ -637,8 +717,9 @@ class fwd_router_t {
          * this intrusive chain PUBLISHES them, exactly as `child_registry_t` does with its
          * chunks: the node is fully built before the release-store that links it, and a reader
          * acquires each link before touching the node behind it. The chain is append-only —
-         * `remove_child` deliberately leaves the ctx in place — so a reader's walk is never
-         * invalidated.
+         * `remove_child` retires a node where it stands rather than unlinking it, and a re-add
+         * revives that same node (`retired`) — so a reader's walk is never invalidated, and
+         * churn on a stable name set adds no links at all.
          */
         std::atomic<child_rx_ctx_t*> next{nullptr};
     };
@@ -770,11 +851,39 @@ class fwd_router_t {
                                            const child_rx_ctx_t* inbound_ctx, bool from_peer,
                                            const Cursor& cur, const fwd_pre_t& pre,
                                            std::size_t element_count);
-    /** @brief Publish @p ctx onto the lock-free reader chain. Control plane, under `ctl_m_`. */
+    /**
+     * @brief The receiver ctx of @p name whatever its state — live OR tombstoned (#884).
+     *
+     * The CONTROL-PLANE half of the name → ctx direction, and deliberately a different
+     * function from `ctx_by_name`: this one walks the owning deque under `ctl_m_` and
+     * matches a tombstone, because both of its callers exist to change one. A frame path must
+     * use `ctx_by_name`, which walks the published chain and skips the dead.
+     */
+    child_rx_ctx_t* ctl_ctx_by_name(std::string_view name);
+    /**
+     * @brief The receiver ctx @p name is to be registered through — reuse-or-append (#884).
+     *
+     * The one-ctx-per-NAME rule, enforced where it can be: an existing ctx for @p name (live
+     * or tombstoned) is HIDDEN and rebound; only a name this router has never seen appends.
+     * The returned ctx is not visible to a reader until `publish_ctx`, so the caller may
+     * finish filling it (`conn_slot`) first.
+     *
+     * Control plane, under `ctl_m_` — it walks the OWNING deque, which no frame path may.
+     */
+    child_rx_ctx_t& acquire_ctx(const std::string& name, mem::block_source_t* rx);
+    /**
+     * @brief Publish @p ctx to the lock-free readers. Control plane, under `ctl_m_`.
+     *
+     * Links a fresh node onto the chain, or clears the tombstone on a revived one — a
+     * release-store either way, so a reader that reaches the node sees every field it needs.
+     */
     void publish_ctx(child_rx_ctx_t& ctx) noexcept;
-    /** @brief The receiver ctx of child @p link_name, or nullptr — the name → ctx direction. */
+    /** @brief The LIVE receiver ctx of child @p link_name, or nullptr — the name → ctx
+     *         direction. Tombstoned nodes are skipped: a removed child resolves to nothing,
+     *         and a re-added one resolves to its CURRENT tenancy (#884). */
     [[nodiscard]] const child_rx_ctx_t* ctx_by_name(std::string_view link_name) const;
-    /** @brief The registered child whose CONNECTION vertex sits at slot @p index, or nullptr. */
+    /** @brief The registered LIVE child whose CONNECTION vertex sits at slot @p index, or
+     *         nullptr — tombstoned nodes are skipped, as in `ctx_by_name`. */
     [[nodiscard]] const child_rx_ctx_t* ctx_by_conn_slot(std::uint32_t index) const;
     /** @brief This node's element for the link a REPLY arrived on — the forwarder's mint
      *         contribution (RFC-0024 §7.1 step 2); nullopt when it has none to give. */
@@ -801,13 +910,23 @@ class fwd_router_t {
                     std::span<const std::byte> payload_bytes);
     /** @brief Re-advertise an egress binding in response to a downstream HANDLE_NACK. */
     void on_nack(std::string_view inbound_name, std::uint16_t label);
-    /** @brief Resolve a bound local route and apply the delivered write (delivery-is-a-write). */
     /** @brief The vertex a bound route names, or nullopt — the memoizable half of
      *         `deliver_local`, shared so a cached handle cannot diverge from it. */
     [[nodiscard]] std::optional<graph::vertex_handle_t> resolve_route_vertex(
         std::span<const std::byte> route_path) const;
+    /**
+     * @brief Apply a bound route's delivery as a write under @p caller's ACL context.
+     *
+     * @param caller The ACL subject context — the inbound link's NAME for a COMPACT that
+     *               arrived on the wire, matching what the equivalent full-route
+     *               `FWD{WRITE}` presents (RFC-0004 §F gates the target vertex at the final
+     *               hop, and both spellings of one delivery must present one subject).
+     *               Required, not defaulted: an empty caller is the local-trusted
+     *               short-circuit in `graph_t::acl_allows`, and #974 was exactly a delivery
+     *               path inheriting it by omission.
+     */
     [[nodiscard]] bool deliver_local(std::span<const std::byte> route_path,
-                                     std::span<const std::byte> payload);
+                                     std::span<const std::byte> payload, std::string_view caller);
     /**
      * @brief The graph remote-delivery sink (#136): emit one producer delivery to @p sub.
      *
@@ -832,7 +951,9 @@ class fwd_router_t {
      * pointer, which is the wrong trade under latency-first.
      */
     [[nodiscard]] mem::block_source_t& rx_for(const child_rx_ctx_t* ctx) const noexcept {
-        return ctx != nullptr && ctx->rx != nullptr ? *ctx->rx : *rx_;
+        if (ctx == nullptr) return *rx_;
+        mem::block_source_t* const own = ctx->rx.load(std::memory_order_relaxed);
+        return own != nullptr ? *own : *rx_;
     }
 
     graph::graph_t& graph_;
@@ -870,16 +991,36 @@ class fwd_router_t {
      * is held: `transport_vertex_t::ctl_m_` → this → `graph_t::map_mutex_` → the vertex stripe.
      */
     mutable std::mutex ctl_m_;
-    reply_fn_t reply_cb_ = nullptr;               /**< @brief Reply-terminus sink. */
-    void* reply_ctx_ = nullptr;                   /**< @brief Its opaque context. */
-    inbound_fn_t inbound_cb_ = nullptr;           /**< @brief Inbound-FWD observer. */
-    void* inbound_ctx_ = nullptr;                 /**< @brief Its opaque context. */
-    raw_fn_t raw_cb_ = nullptr;                   /**< @brief Raw-frame observer. */
-    void* raw_ctx_ = nullptr;                     /**< @brief Its opaque context. */
-    compact_delivery_fn_t delivery_cb_ = nullptr; /**< @brief Local COMPACT delivery sink. */
-    void* delivery_ctx_ = nullptr;                /**< @brief Its opaque context. */
-    stale_label_fn_t stale_cb_ = nullptr;         /**< @brief Stale-label observer. */
-    void* stale_ctx_ = nullptr;                   /**< @brief Its opaque context. */
+    /**
+     * @brief Serializes the five sink SETTERS — never taken by a reader (#914).
+     *
+     * A `sink_slot_t` publishes its pair for racing readers but does not serialize two
+     * concurrent publishes; one mutex here does that for all five, which is what keeps a
+     * slot three words wide. Deliberately NOT `ctl_m_`: that one is held across socket
+     * construction for milliseconds, and installing an observer has no business waiting
+     * on a connect. The frame path takes neither.
+     */
+    mutable std::mutex sink_m_;
+    /**
+     * @brief The five observer/terminus sinks, each a `sink_slot_t` (#914).
+     *
+     * They were ten plain members — `fn` and `ctx` stored separately by a setter that
+     * takes no lock, read with check-then-call on every transport receive thread. That
+     * is a data race by the C++ memory model, and the documented runtime clear
+     * ("passing nullptr clears a sink") was its worst case: a torn read hands a new
+     * `fn` the previous `ctx`. Every frame-path read is now one `get()` snapshot and
+     * the dispatch runs off that snapshot, so no read of a sink can straddle a `set`.
+     *
+     * Ordered so that the two the FWD span path reads on EVERY frame — `inbound_` and
+     * `raw_` — are adjacent: three words per slot puts their hot words within one cache
+     * line, which a 64-byte (per-slot-mutex) first cut did not, and `bench_forward_demux`
+     * charged ~2% for at 64 registered links.
+     */
+    sink_slot_t<reply_fn_t> reply_;               /**< @brief Reply-terminus sink. */
+    sink_slot_t<inbound_fn_t> inbound_;           /**< @brief Inbound-FWD observer. */
+    sink_slot_t<raw_fn_t> raw_;                   /**< @brief Raw-frame observer. */
+    sink_slot_t<compact_delivery_fn_t> delivery_; /**< @brief Local COMPACT delivery sink. */
+    sink_slot_t<stale_label_fn_t> stale_;         /**< @brief Stale-label observer. */
 };
 
 }  // namespace tr::net

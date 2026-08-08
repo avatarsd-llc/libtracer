@@ -130,12 +130,12 @@ none — and remains a conforming node that any forwarder routes and any peer re
 
 Creation is not a new verb. It is an **append of a `SPEC` TLV to a parent's
 `:children[]` field**, gated by that parent's `CREATE` right
-(`core/src/graph.cpp:1603`;
+(`core/src/graph.cpp:1667`;
 [ADR-0020 — NFSv4-style ACEs with inheritance](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0020-acl-nfsv4-style-aces-with-inheritance.md)).
 The SPEC's `type` member names one of the device's registered child types and its
 optional `config` SETTINGS carries the instantiation parameters; an unregistered
 `type` answers `SCHEMA_NOT_FOUND`, the `ENOTTY` of an unsupported field
-(`graph_t::create_child`, `core/src/graph.cpp:1832-1859`). Reading `:children[]`
+(`graph_t::create_child`, `core/src/graph.cpp:1914-1941`). Reading `:children[]`
 returns the parent's **members**, never SPECs.
 
 On the `/net` plane the registered child types are `client` and `listener`
@@ -145,7 +145,7 @@ registered through `register_transport_type` at `:128`). The created connection 
 mounted and routed at **`/net/<module>/<name>`**, where `module` is **declared by the
 application** through `register_module` — modules are declared-only (ADR-0073 §4); an
 undeclared kind fails creation with `SCHEMA_NOT_FOUND`
-(`core/src/transport_vertex.cpp:149-157,193-211`).
+(`core/src/transport_vertex.cpp:149-167,203-221`).
 
 A per-module creator endpoint — `/net/<module>/conn`, one self-contained module per
 *(transport, role)*, replacing the single global catalog — is the accepted
@@ -156,7 +156,7 @@ arrive beside it, not instead of it.
 
 Removal has no wire spelling on either surface: a `[N]` clear of `:children[]` is
 not implemented, and `graph_t::retire` is an owner-side call with no wire operation
-behind it (`core/include/libtracer/graph.hpp:351-355`). Retirement empties the
+behind it (`core/include/libtracer/graph.hpp:362-366`). Retirement empties the
 vertex in place rather than freeing it — the handle stays dereferenceable and a
 holder that caches a resolution re-checks `retire_generation` before use — and it
 re-virginizes the address, clearing the previous owner's `:acl`, value seam, stored

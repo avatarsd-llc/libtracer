@@ -42,12 +42,20 @@ address-shift slicing, not ISO-TP. Its storage comes from an injected
 `std::pmr::memory_resource` and its group count is bounded by configuration, so
 exhaustion on a constrained node is a bounded evict-oldest drop with a counter,
 never an allocation failure. The defaults — process heap, unbounded — are what a
-host gets unless it says otherwise.
+host gets unless it says otherwise. The in-band spelling of those bounds — the
+`can`-private `max_groups` / `max_pending` / `rx_ttl_ms` keys a `:children[]`
+creation SPEC carries, alongside the bus identity `ifname` / `node` — is
+[connection config](connection-config.md).
 
 **The binding** (`tr::net::transport_can`) joins all of that to a real bus
 through the `can_link_t` seam. `socketcan_link_t` is the production Linux
 implementation, a `PF_CAN` raw socket with a receive thread. A different platform
-implements the same seam.
+implements the same seam — and inherits the same admission rule, because the rule
+lives at the seam rather than in each port: `can_rx_admissible` (29-bit data frames
+only; remote-request, 11-bit standard and error frames are not traffic) and
+`can_tx_admissible` (a declared length must fit the mode's data field). A port
+decodes those flags from its own driver's representation, but does not get to reach
+its own verdict.
 
 **The TX pool** (`tr::net::can_tx_pool_t`) exists for *asynchronous* links only.
 A synchronous link needs none of it — the kernel copies the frame inside the
@@ -124,6 +132,10 @@ with its platform's blocking primitive.
 :project: libtracer
 ```
 
+```{doxygenvariable} tr::net::can::kEndpointMax
+:project: libtracer
+```
+
 ```{doxygenfunction} tr::net::can::encode_advertise_header
 :project: libtracer
 ```
@@ -191,6 +203,18 @@ with its platform's blocking primitive.
 :members:
 ```
 
+```{doxygenfunction} tr::net::can_max_len
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::can_rx_admissible
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::can_tx_admissible
+:project: libtracer
+```
+
 ```{doxygenclass} tr::net::socketcan_link_t
 :project: libtracer
 :members:
@@ -199,6 +223,22 @@ with its platform's blocking primitive.
 ```{doxygenstruct} tr::net::transport_can_config_t
 :project: libtracer
 :members:
+```
+
+The two sentinels its liveness fields default to. They are published because the struct's own
+member docs `@ref` them, and an `@ref` to a symbol no page publishes is a dead link the docs
+gate rejects — the same rule that forbids `@ref`-ing a private.
+
+```{doxygenvariable} tr::net::kCanDefaultPeerTtl
+:project: libtracer
+```
+
+```{doxygenvariable} tr::net::kCanRxTtlFromPeerTtl
+:project: libtracer
+```
+
+```{doxygenvariable} tr::net::kCanMaxGroupSlices
+:project: libtracer
 ```
 
 ```{doxygenclass} tr::net::transport_can

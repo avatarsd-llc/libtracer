@@ -19,14 +19,19 @@
 
 namespace tr::net {
 
-void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* /*rx_backend*/) {
+void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_backend) {
     // Built-in `ws`: DIAL = transport_ws_client(addr, port) — a SYNCHRONOUS TCP connect +
     // RFC 6455 opening handshake at creation time (the peer's server must be up, or the
-    // SPEC write fails NOT_FOUND); LISTEN = transport_ws_server(port), serving MANY
+    // SPEC write fails TRANSPORT_DOWN); LISTEN = transport_ws_server(port), serving MANY
     // concurrent inbound peers (#362). `keepalive` is ignored by both (PING/PONG is
-    // handled at the ws protocol layer). ws stays span-delivering until its frame
-    // assembly is pointed at segments (ADR-0042 §4), so it does not draw from the
-    // rx_backend seam.
+    // handled at the ws protocol layer).
+    //
+    // Both halves take the SAME (rx_backend, max_frame) seam tcp/quic/webtransport take,
+    // in the same position (#872): every reassembled message fragment is drawn from
+    // rx_backend, and `max_frame` — the universal `:settings` key parsed centrally into
+    // conn_settings_t — is the declared-length bound a peer may not exceed. Passing
+    // `s.max_frame` through is what makes the honored cap the CONFIGURED one; a literal
+    // here would be the synthetic limit the doctrine forbids.
     //
     // The two LISTEN-side ws-private keys are parsed HERE from the raw config TLV — the
     // ADR-0043 §5 leanness ruling (as `quic` does for cert/key and `can` for ifname/node):
@@ -44,15 +49,30 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* /*rx_
     // library registers NEITHER (ADR-0073 §4): the application declares each module under a
     // name IT chooses via register_module (kWsClientSuggestedModule / kWsServerSuggestedModule
     // in transport_ws.hpp are the suggested defaults).
-    vertex.register_transport_type(
-        "ws", [](const conn_settings_t& s, const wire::tlv_t* raw_config) {
-            const config_reader_t cfg(raw_config);
-            const bool peer_named = cfg.flag("peer_named").value_or(false);
-            const auto max_peers = static_cast<std::size_t>(cfg.u32("max_peers").value_or(0));
-            return dial_or_listen(
-                s, [&] { return make_checked<transport_ws_client>(s.addr, s.port); },
-                [&] { return make_checked<transport_ws_server>(s.port, max_peers, peer_named); });
-        });
+    vertex.register_transport_type("ws", [rx_backend](const conn_settings_t& s,
+                                                      const wire::tlv_t* raw_config) {
+        const config_reader_t cfg(raw_config);
+        const bool peer_named = cfg.flag("peer_named").value_or(false);
+        const auto max_peers = static_cast<std::size_t>(cfg.u32("max_peers").value_or(0));
+        return dial_or_listen(
+            s,
+            [&] {
+                // DEFERRED recv thread (#1025): the connection is dialled and handshaken here,
+                // but `transport_vertex_t::make_connection` only wires the receiver a few
+                // steps later (register the vertex, then `fwd_router_t::add_child`). A server
+                // that pushes its state the instant our connect completes has that message in
+                // flight through that whole window, and a recv thread running inside it would
+                // decode it into an empty sink and drop it with no counter moving. The vertex
+                // calls `start_receiving()` once the link is fully wired.
+                return make_checked<transport_ws_client>(s.addr, s.port, rx_backend, s.max_frame,
+                                                         /*recv_stack=*/std::size_t{0},
+                                                         /*defer_recv=*/true);
+            },
+            [&] {
+                return make_checked<transport_ws_server>(s.port, rx_backend, s.max_frame, max_peers,
+                                                         peer_named);
+            });
+    });
 }
 
 }  // namespace tr::net

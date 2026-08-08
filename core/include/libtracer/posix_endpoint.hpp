@@ -18,6 +18,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <mutex>
 #include <span>
@@ -26,7 +27,59 @@
  *         so this header need not pull the system socket headers in. */
 struct iovec;
 
+namespace tr::detail {
+
+/**
+ * @brief TEST SEAM: consulted immediately before each `send(2)`/`sendmsg(2)` the full-write
+ *        helpers issue; a non-zero return makes that ONE attempt fail with that errno
+ *        instead of reaching the kernel (#948).
+ *
+ * The write-fault classification exists for errnos a healthy host kernel never produces here
+ * — a call this library got WRONG (`EOPNOTSUPP` from an lwIP `sendmsg` handed a flag it does
+ * not implement, `EINVAL`, …). glibc produces none of them, so the classification's arms are
+ * unreachable without injection and any host test of them would be vacuous by construction.
+ * This is their failure-injection tool: return the errno to fake, or 0 to let the real
+ * syscall run.
+ *
+ * Same shape and same rules as its neighbour @ref probe_fail_hook (and it lives in the same
+ * namespace deliberately: `tr::net::detail` would SHADOW this one for every unqualified
+ * `detail::` lookup inside `tr::net`, of which `transport.hpp` and `transport_tcp.cpp`
+ * already have several): install it before the write that should trip it, and clear it
+ * before the test returns. Production never sets it — the cost is one predictable,
+ * never-taken branch immediately ahead of a syscall.
+ */
+inline int (*write_fault_inject_hook)() noexcept = nullptr;
+
+}  // namespace tr::detail
+
 namespace tr::net {
+
+/**
+ * @brief The malformed-call write-fault tally of the POSIX stream transports (#948).
+ *
+ * Process-wide, because the fault it counts is a defect in libtracer's OWN syscall
+ * arguments rather than a property of any one connection — the full-write helpers are
+ * static and shared by every stream transport, and a non-zero count means the same bug on
+ * all of them.
+ */
+struct write_fault_stats_t {
+    /**
+     * @brief How many `send`/`sendmsg` attempts failed with an errno that means "this call
+     *        was malformed", not "this socket is dead".
+     *
+     * Non-zero is ALWAYS a libtracer defect (or an unsupported platform syscall surface):
+     * the frame's bytes were still deliverable. Zero on every supported host.
+     */
+    std::uint64_t malformed_calls = 0;
+    int last_errno = 0; /**< @brief The errno of the most recent such fault (0 = none yet) —
+                                    what the defect actually was, e.g. `EOPNOTSUPP`. */
+};
+
+/**
+ * @brief Read the @ref write_fault_stats_t tally (relaxed; a diagnostic read, not a
+ *        synchronizer).
+ */
+[[nodiscard]] write_fault_stats_t write_fault_stats() noexcept;
 
 /**
  * @brief The shared recv-thread scaffold of the POSIX socket transports.
@@ -65,10 +118,13 @@ class posix_endpoint_t {
     /**
      * @brief Spawn the receive thread running @p body.
      *
-     * Call at most once, from the derived constructor, after the socket is up
-     * and every resource @p body touches is initialized. @p body must poll
-     * @ref stop_ (directly or via the bounded waits below) and return promptly
-     * once it is set.
+     * Call at most once, after the socket is up and every resource @p body
+     * touches is initialized. @p body must poll @ref stop_ (directly or via the
+     * bounded waits below) and return promptly once it is set. Usually that is
+     * the derived constructor; a transport offering the two-phase bring-up
+     * (`%transport_t::start_receiving` — the owner installs its sinks BEFORE any
+     * frame can be decoded) calls it from there instead, and owns the one-shot
+     * latch that keeps "at most once" true.
      *
      * Spawns via `pthread_create` (not `std::thread`): the constructor of the
      * latter THROWS on failure, which under `-fno-exceptions` (the MCU build)
@@ -204,9 +260,15 @@ class stream_endpoint_t : protected posix_endpoint_t {
      * @brief Write @p bytes to @p fd completely, resuming partial writes.
      *
      * A stream write may stop anywhere; loops `send(2)` (MSG_NOSIGNAL — a
-     * vanished peer must not SIGPIPE the process) until done. Peer-gone /
-     * error drops the rest silently (link-down is #66 lifecycle). The caller
-     * holds @ref write_m_ per the write-serialization invariant.
+     * vanished peer must not SIGPIPE the process) until done. A signal that
+     * interrupts the blocked write before any byte moved (EINTR) is RESUMED,
+     * not abandoned — the connection is healthy, and a partial frame left on a
+     * live framed stream would desync the peer's framing permanently (#903).
+     * A socket-dead errno drops the rest silently (link-down is #66 lifecycle);
+     * every OTHER errno means the call itself was malformed, is re-attempted once
+     * and counted in `write_fault_stats()` rather than mistaken for a
+     * disconnect (#948). The caller holds @ref write_m_ per the
+     * write-serialization invariant.
      *
      * @param fd    The destination fd; a negative fd is a no-op.
      * @param bytes The bytes to write.
@@ -223,9 +285,11 @@ class stream_endpoint_t : protected posix_endpoint_t {
      * loop advances past fully-written entries and trims a partially-written one
      * and resends. @p vec is CONSUMED (its entries' `iov_base`/`iov_len` are
      * advanced in place) — a caller that fans the same gather to several fds must
-     * pass a fresh copy per fd. Peer-gone / error drops the rest silently
-     * (link-down is #66 lifecycle). The caller holds @ref write_m_ per the
-     * write-serialization invariant.
+     * pass a fresh copy per fd. EINTR resumes, a socket-dead errno drops the rest
+     * silently, and any other errno is a malformed call that is re-attempted once
+     * and counted — the same ONE write-fault policy as @ref write_all
+     * (#903 / #948; link-down is #66 lifecycle). The caller holds
+     * @ref write_m_ per the write-serialization invariant.
      *
      * @param fd    The destination fd; a negative fd is a no-op.
      * @param vec   The iovec array to gather (consumed in place).

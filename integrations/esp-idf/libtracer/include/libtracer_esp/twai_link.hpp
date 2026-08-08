@@ -53,9 +53,12 @@ struct twai_link_config_t {
     std::uint32_t tx_queue_depth = 8;  /**< @brief Driver-side TX queue depth. */
     std::uint32_t rx_queue_depth = 16; /**< @brief ISR→dispatch RX queue depth (frames). */
     std::uint32_t tx_timeout_ms = 20;  /**< @brief Bounded wait for a free in-flight TX slot
-                                            (the FULL policy's backpressure window); an
-                                            expired wait is a COUNTED drop, @ref
-                                            twai_link_t::tx_dropped. */
+                                            (the FULL policy's backpressure window, per
+                                            frame); an expired wait is a COUNTED drop, @ref
+                                            twai_link_t::tx_dropped. CLAMPED to the task
+                                            watchdog period (`CONFIG_ESP_TASK_WDT_TIMEOUT_S`)
+                                            — one frame's wait must not on its own outlast
+                                            the window a task may go unfed (#962). */
     std::size_t stack_size = 0;        /**< @brief Dispatch-thread stack size in bytes, 0 =
                                             the global pthread default. Non-zero right-sizes
                                             this task via `esp_pthread_set_cfg` instead of
@@ -83,7 +86,10 @@ struct twai_link_config_t {
  * tx-done ISR gates writers: a continuation burst deeper than the driver
  * queue BLOCKS (bounded by `tx_timeout_ms`) instead of silently losing
  * frames; only a wait that expires drops — counted, visible via
- * @ref tx_dropped.
+ * @ref tx_dropped. That semaphore is taken OUTSIDE the write lock, so the
+ * bound is one frame's, never the sum of the frames queued ahead of it
+ * (#962); the lock covers the submission — the node handle and the pool's
+ * serialized acquire — and nothing that blocks.
  */
 class twai_link_t : public can_link_t {
    public:
@@ -93,7 +99,13 @@ class twai_link_t : public can_link_t {
      */
     explicit twai_link_t(const twai_link_config_t& config);
 
-    /** @brief Drain in-flight TX (bounded), stop dispatch, delete the node. */
+    /**
+     * @brief Drain in-flight TX (bounded), stop dispatch, delete the node.
+     *
+     * Does not inherit a backpressured writer's window: it releases every
+     * writer parked on the slot semaphore and waits only for them to leave,
+     * rather than queueing behind their timeouts (#962).
+     */
     ~twai_link_t() override;
 
     twai_link_t(const twai_link_t&) = delete;
@@ -107,6 +119,12 @@ class twai_link_t : public can_link_t {
      * When every in-flight slot is taken the call blocks up to
      * `tx_timeout_ms` for the tx-done ISR to free one (backpressure); an
      * expired wait drops the frame and increments @ref tx_dropped.
+     *
+     * That window is PER FRAME, not per queue: concurrent writers park on the
+     * slot semaphore side by side, not one behind the other, so a controller
+     * that never completes a transmit costs each writer one window rather than
+     * the sum of every earlier writer's (#962). The link's own serialization
+     * covers the submission only.
      */
     void write_raw(const can_frame_data_t& frame) override;
 
@@ -153,8 +171,16 @@ class twai_link_t : public can_link_t {
     std::mutex write_m_;                      /**< @brief Serializes writes / teardown. */
     can_tx_pool_t<tx_slot_t> tx_pool_;        /**< @brief In-flight TX storage, freed on tx-done. */
     SemaphoreHandle_t tx_free_sem_ = nullptr; /**< @brief Counts free pool slots; taken in
-                                                   write_raw, given from the tx-done ISR. */
-    std::uint32_t tx_timeout_ms_ = 20;        /**< @brief The bounded backpressure window. */
+                                                   write_raw OUTSIDE write_m_ (#962), given
+                                                   from the tx-done ISR. */
+    std::atomic<std::uint32_t> tx_writers_{0}; /**< @brief Writers past the live-node check and
+                                                    not yet done with tx_free_sem_. Raised under
+                                                    write_m_, so the destructor's own critical
+                                                    section fixes the set it must wait out
+                                                    before deleting the semaphore (#962). */
+    std::uint32_t tx_timeout_ms_ = 20;         /**< @brief The bounded backpressure window, ONE
+                                                    frame's wait, clamped to the task-watchdog
+                                                    period at construction (#962). */
     std::atomic<std::uint32_t> tx_dropped_{0}; /**< @brief FULL-policy drop counter. */
     std::atomic<bool> stop_{false};
     std::thread thread_;

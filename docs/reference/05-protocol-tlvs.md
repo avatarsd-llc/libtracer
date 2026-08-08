@@ -667,6 +667,12 @@ ACL (PL=1) {                                ; outer = ACE collection
 
 **Enforcement (core subset).** A core implementing the MCU subset enforces **ALLOW-only** — an `:acl` write carrying a DENY ACE, or any flag bit beyond the single `INHERIT`, is rejected with `TYPE_MISMATCH`, so stored ACEs never carry semantics the subset evaluator would silently weaken — and is **open by default** twice over: enforcement is off until a **subject resolver** is installed (the pluggable-subject-token seam of [ADR-0018](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0018-access-control-authorization-pluggable-subject-token.md): caller context → subject token; the FWD terminus passes the inbound link as the caller context, local API calls are trusted by default), and a vertex whose *effective* ACL is empty stays unrestricted. With a resolver set, an operation is allowed iff some non-expired ACE with a matching subject (byte-equal, or the special `EVERYONE@`) grants the operation's bit: data/field read and `await` need `READ`, data/field writes need `WRITE`, the `:subscribers[]` append needs `SUBSCRIBE` on the *producer* and delivery needs `WRITE` on the *target* (the two-ACL gate of [ADR-0026](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0026-consumer-initiated-subscription-client-write.md)), creation needs `CREATE`, and `:acl` read/write need `READ_ACL`/`WRITE_ACL`. The one named exemption is `:identity`, which resolves above the READ gate (§`0x0B`). Denial is `ERROR{tr::access::denied}` (`0x0050`). The effective ACL is computed at check time by walking the ancestor keys — control-plane frequency; the data hot path pays one null check when no resolver is installed.
 
+**`EVERYONE@` is reserved in the subject-token space, and the reservation is enforced on the RESOLVER's output.** The wire carries one spelling for a subject token — the `acl/acl-aces` vector sends `peer-a` and `EVERYONE@` as the same opaque VALUE, and a resolver returns opaque bytes — so a deployment that passes a caller-supplied identity through (a username, a certificate CN, a peer name) could otherwise mint a principal indistinguishable from the wildcard, and an ACE meant for that one principal would grant everyone. This core therefore refuses a resolved subject equal to `EVERYONE@` at every gate, on a vertex with an effective ACL and on one without, the same fail-closed arm the resolver's error return takes — rather than leaving each integrator to blacklist the string. Nothing about the wire changes: an ACE still names the wildcard exactly as the vector spells it, and `OWNER@` is not reserved, because no evaluator here special-cases it yet. ([#908](https://github.com/avatarsd-llc/libtracer/issues/908).)
+
+**Non-canonical ACE shapes are rejected at write time.** An ACE's fields are positional `(NAME key, value)` pairs, and a reference core reads them as *pairs* rather than scanning every offset — so a `NAME`-typed value (the `OWNER@` / `EVERYONE@` subject spelling) is never re-read as the following key. It answers `TYPE_MISMATCH` for: a numeric field whose `VALUE` payload is empty or **wider** than the width that field is *parsed* at — `type` and `flags` u8, `access_mask` u32, `expires_ns` u64 (a big-endian `u16` `type` of `0x0001` would otherwise read as its low byte, `ALLOW` — leniency here inverts a refusal into a grant); a known key carrying the wrong value TLV type (a skipped `expires_ns` would make a time-limited grant permanent); an **unknown** key; a **repeated** key; and a body whose pairing does not hold (a non-`NAME` where a key belongs, or a trailing key with no value). A payload **narrower** than the parsed width is accepted and zero-extends — little-endian narrowing is exact, so the two-byte `access_mask` of the `acl/acl-aces` vector and a four-byte one name the same rights. Parsed width is deliberately the bound rather than the layout above, which declares `access_mask` as `u16` while this core's `encode_acl` emits four bytes; that divergence is [#993](https://github.com/avatarsd-llc/libtracer/issues/993) and is not settled here. Gating on the narrower declared width would reject this core's own output. Unknown-key tolerance is deliberately *not* granted here, unlike `SETTINGS` (§`0x0B`): an ACL is a security document, and an attribute dropped in silence widens access.
+
+**The OUTER container's shape is checked too, and a read serves a re-encode.** The collection must be *structured*: a **primitive** ACL (`opt.PL=0`) is rejected with `TYPE_MISMATCH`, because its bytes are opaque payload rather than children, so it would parse as **no ACEs at all** — clearing enforcement, the most permissive outcome the field has, on a write that looks like it installs a policy. An **empty container** (`opt.PL=1`, zero children) is the sanctioned way to clear: it stores an ACL that grants nothing, which under the open-by-default rule restricts nothing. A read of `:acl` is answered by **re-encoding the stored ACEs**, not by echoing the bytes that were written, so what an auditor reads back is a projection of the very list the gates evaluate and the two cannot drift apart; the canonical spelling above is therefore what comes back, whichever accepted spelling went in. `NOT_FOUND` means no `:acl` was ever written, which stays distinct from an empty container. ([#907](https://github.com/avatarsd-llc/libtracer/issues/907).)
+
 ### Header settings
 
 - `opt.PL = 1`.
@@ -878,11 +884,31 @@ Structured (`opt.PL=1`):
 
 ```
 SPEC (0x0E, PL=1) {
-  NAME "type"     <catalog selector — required only where the catalog is global>
-  NAME "name"     <the new child's path component>
-  SETTINGS "config"   ; optional — instantiation params
+  NAME "type"    NAME <catalog selector — required only where the catalog is global>
+  NAME "name"    NAME <the new child's path component>
+  NAME "config"  SETTINGS { … }   ; optional — instantiation params
 }
 ```
+
+The body is a run of positional **pairs**: a `NAME` key followed by its value child. Both
+halves are typed, and the value's type is part of the grammar, not a stylistic choice —
+`type` and `name` are carried by a **`NAME` (`0x02`)** child, `config` by a `SETTINGS`
+(`0x0B`). A receiver matches each pair on the value's type and skips any other, so a
+`VALUE` (`0x01`) in a `type`/`name` slot is not a lenient spelling of the same thing: the
+field is dropped, the catalog selector comes up empty, and the create is refused
+(`INVALID_PATH`). The distinction is invisible to a round-trip — such a SPEC decodes and
+re-encodes to itself perfectly — so it is pinned by the `spec/` conformance vectors
+instead.
+
+The same typing rule governs `config`'s own key/value pairs: an integer or flag is a
+`VALUE` (little-endian), a string is a `NAME`. A string-valued key is found *only* as a
+`NAME` child. Note that such a string is not an address segment and need not satisfy the
+addressing grammar — a `addr` dotted quad contains `.`, which an address segment may not
+— it is simply the wire's string node.
+
+The walk is **pair-consuming**: an unrecognised key is skipped together with its value, so
+a value child is never re-read as the next position's key. That is what lets forward-compat
+tolerance coexist with positional pairing.
 
 ### Where it appears
 
@@ -980,6 +1006,8 @@ HANDLE_NACK (0x13, PL=1) {         ; "I have no binding for this label" — prom
 ```
 
 A `COMPACT` whose `label` has no binding on its inbound link is **dropped** and a `HANDLE_NACK` is returned (never a crash); re-advertising on (re)connect — the same producer-holds reconnect trigger — **rebinds** the flow ([ADR-0030](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md) self-heal).
+
+**A `COMPACT` terminus is ACL-gated exactly as the `FWD{WRITE}` it compacts is.** RFC-0004 §E.1 makes the terminus expand the label to the bound route and *apply the write*, and §F gates the target vertex's `:acl` at the final hop — so compaction is a framing optimisation and never an authorization one. The caller context is the **inbound link's name**, the same string the full-route form presents, and it is evaluated **per frame**: a label binding caches the *address, never the authorization* ([ADR-0062](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0062-resolve-once-label-bindings-hold-resolutions-not-names.md)), so an `:acl` written after a flow was advertised applies to that flow's very next `COMPACT` and a label never becomes a capability that outlives its grant. A denied delivery is dropped like any other unwritable one — no new frame, no wire surface change. This is descriptive of the reference core: the two paths used to disagree, because the compacted one wrote with no caller at all and inherited the local-trusted context ([#974](https://github.com/avatarsd-llc/libtracer/issues/974)).
 
 A node clearing a link's label state on (re)connect **MUST** also treat as stale every ingress binding it holds — **on any link** — whose downstream half crossed that link, and drop those bindings too. A forwarding binding is keyed by the link the label *arrives* on while it names the link the swapped label *leaves* by, so clearing only the reconnected link's own tables leaves a mid-chain node still holding a binding aimed at an out-label that no longer exists. The upstream never observed the reconnect and so never re-advertises: it keeps streaming `COMPACT`s, the mid-chain node keeps swapping onto the dead out-label, the downstream keeps returning `HANDLE_NACK`s the mid-chain node can no longer answer, and the flow is silently dead in both directions. Dropping the crossing bindings makes the upstream's next `COMPACT` miss, which draws the ordinary stale-label `HANDLE_NACK` and prompts the upstream's own re-advertise — so recovery uses only the frames above, in the situations already specified for them, and **no wire surface changes**. A **terminus** binding has no downstream half and is never dropped by this rule.
 

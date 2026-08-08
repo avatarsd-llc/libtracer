@@ -572,9 +572,7 @@ bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_sou
         // all, so there is nothing an element could name here. A bound route over a bus fails
         // validation at this hop and the origin falls back to canonical, which is exactly what
         // the canonical spelling already does with the bus link's own name.
-        child_rx_ctx_t& bctx =
-            child_rx_.emplace_back(this, name, registry_.mount_run_for(name), rx);
-        bctx.entry = registry_.entry_by_name(name);
+        child_rx_ctx_t& bctx = acquire_ctx(name, rx);
         publish_ctx(bctx);
         bus->set_peer_down_notifier(
             [](void* c, std::string_view peer) {
@@ -600,16 +598,21 @@ bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_sou
     }
     // Point-to-point: the inbound NAME is fixed per child, carried by a stable
     // per-child ctx (child_rx_ holds the address for the transport's lifetime).
-    child_rx_ctx_t& ctx = child_rx_.emplace_back(this, name, registry_.mount_run_for(name), rx);
-    ctx.entry = registry_.entry_by_name(name);
-    // The bound-path join (RFC-0024 §5.1), resolved ONCE here: the child's mount run IS the
-    // canonical key of its connection vertex, so this is one map lookup of bytes already in
-    // hand. A child whose vertex does not exist yet keeps `kNoConnSlot` and is simply not
-    // bindable — a bound route through it fails validation and the origin falls back, which
-    // is the degrade every other refusal in this design takes.
+    child_rx_ctx_t& ctx = acquire_ctx(name, rx);
+    // The bound-path join (RFC-0024 §5.1), resolved ONCE per registration: the child's mount
+    // run IS the canonical key of its connection vertex, so this is one map lookup of bytes
+    // already in hand. A child whose vertex does not exist yet keeps `kNoConnSlot` and is
+    // simply not bindable — a bound route through it fails validation and the origin falls
+    // back, which is the degrade every other refusal in this design takes.
+    //
+    // Re-resolved on a re-add and not inherited (#884): the vertex a name denotes is a
+    // property of the CURRENT tenancy. A child registered before its connection vertex
+    // existed and re-added after it exists must come back bindable, and the reverse
+    // direction — a name re-added as a BUS mount, which takes no `conn_slot` at all — must
+    // not keep answering with the point-to-point slot it used to have.
     if (const std::optional<graph::vertex_handle_t> v = graph_.find(ctx.mount_tlv)) {
         if (const std::optional<graph::vertex_slot_t> slot = graph_.vertex_slot(*v))
-            ctx.conn_slot = slot->index;
+            ctx.conn_slot.store(slot->index, std::memory_order_relaxed);
     }
     // LAST: every field a lock-free reader may look at is written above, and this is the
     // release edge that makes the node visible to one (see `child_rx_ctx_t::next`).
@@ -647,36 +650,47 @@ bool fwd_router_t::remove_child(std::string_view name) {
     // ordinary departure eviction reclaims the graph edges and label state — the same
     // work link_down does, reused rather than duplicated.
     if (!registry_.erase(name)) return false;
+    // TOMBSTONE the receiver ctx (#884) — it stays on the published chain, because a lock-free
+    // reader may be standing on it right now and the transport still holds its address, but it
+    // stops answering `ctx_by_name`/`ctx_by_conn_slot`. Leaving it RESOLVING was the defect:
+    // `add_child` of the same name appended a second ctx, and the name-keyed lookups answer
+    // with the FIRST match, so every `connection_ref`/`hop_mint`/`adopt_binding` after a
+    // re-add resolved the DEAD context — bound routes for the re-created child were minted
+    // against the retired tenancy and never validated. A `release` store, paired with the
+    // acquire each walk performs, so a reader either skips this node or has already passed it.
+    if (child_rx_ctx_t* const ctx = ctl_ctx_by_name(name))
+        ctx->retired.store(true, std::memory_order_release);
     link_down(name);
-    // NOTE: the point-to-point receiver ctx in child_rx_ is intentionally left in place.
-    // The transport held its address, and the deque never invalidates, so the slot is
-    // inert once the link is gone; reclaiming it needs the S5 mutation contract.
     return true;
 }
 
+// The five sink setters. `sink_m_` serializes SETTERS against each other — the slot
+// publishes for racing readers but does not arbitrate two concurrent publishes (#914).
+// No reader ever takes it, so the frame path stays lock-free.
+
 void fwd_router_t::on_reply(reply_fn_t fn, void* ctx) noexcept {
-    reply_cb_ = fn;
-    reply_ctx_ = ctx;
+    const std::lock_guard lock(sink_m_);
+    reply_.set(fn, ctx);
 }
 
 void fwd_router_t::on_inbound(inbound_fn_t fn, void* ctx) noexcept {
-    inbound_cb_ = fn;
-    inbound_ctx_ = ctx;
+    const std::lock_guard lock(sink_m_);
+    inbound_.set(fn, ctx);
 }
 
 void fwd_router_t::on_raw(raw_fn_t fn, void* ctx) noexcept {
-    raw_cb_ = fn;
-    raw_ctx_ = ctx;
+    const std::lock_guard lock(sink_m_);
+    raw_.set(fn, ctx);
 }
 
 void fwd_router_t::on_compact_delivery(compact_delivery_fn_t fn, void* ctx) noexcept {
-    delivery_cb_ = fn;
-    delivery_ctx_ = ctx;
+    const std::lock_guard lock(sink_m_);
+    delivery_.set(fn, ctx);
 }
 
 void fwd_router_t::on_stale_label(stale_label_fn_t fn, void* ctx) noexcept {
-    stale_cb_ = fn;
-    stale_ctx_ = ctx;
+    const std::lock_guard lock(sink_m_);
+    stale_.set(fn, ctx);
 }
 
 void fwd_router_t::clear_link(std::string_view link_name) { handles_.clear_link(link_name); }
@@ -696,13 +710,13 @@ std::uint16_t fwd_router_t::advertise(std::string_view link_name,
                                       std::span<const std::byte> route_path) {
     transport_t* const link = registry_.by_name(link_name);
     if (link == nullptr) return 0;
-    const std::uint16_t label = handles_.alloc_label(link_name);
-    if (label == 0) return 0;  // link's label space exhausted (#603) — no binding, no frame
-    // Never advertise a label this node cannot re-advertise on a NACK: a full egress table
-    // refuses, and the caller stays on the full-route form (#603).
-    if (!handles_.record_egress(link_name, label,
-                                std::vector<std::byte>(route_path.begin(), route_path.end())))
-        return 0;
+    // ONE label per (link, route), never one per CALL (#913): this door IS the documented
+    // self-heal, so a producer calls it on every (re)connect, and minting unconditionally
+    // burned a label and leaked an egress entry per cycle. `ensure_egress` reuses the label
+    // bound to an identical route, mints only for a new one, and returns 0 when the link's
+    // space is exhausted or its egress table is full (#603) — nothing recorded, no frame.
+    const std::uint16_t label = handles_.ensure_egress(link_name, route_path).first;
+    if (label == 0) return 0;  // no label, no binding, no frame — the full-route form instead
     const std::vector<std::byte> adv = encode_advertise(label, route_path);
     link->send(std::span<const std::byte>(adv));
     return label;
@@ -717,20 +731,72 @@ void fwd_router_t::send_compact(std::string_view link_name, std::uint16_t label,
 
 // --- bound paths (RFC-0024) --------------------------------------------------
 
+fwd_router_t::child_rx_ctx_t* fwd_router_t::ctl_ctx_by_name(std::string_view name) {
+    // The owning deque, not the chain: this is the control plane, it holds `ctl_m_`, and it
+    // must see a TOMBSTONE — which is exactly what the published walks refuse to return.
+    for (child_rx_ctx_t& c : child_rx_)
+        if (c.name == name) return &c;
+    return nullptr;
+}
+
+fwd_router_t::child_rx_ctx_t& fwd_router_t::acquire_ctx(const std::string& name,
+                                                        mem::block_source_t* rx) {
+    if (child_rx_ctx_t* const hit = ctl_ctx_by_name(name)) {
+        // One ctx per NAME, for the router's life — `child_registry_t::add`'s rule, one layer
+        // out and for its two reasons (#884). A second ctx SHADOWS the first on every
+        // name-keyed lookup (first match wins, and the first match is the older tenancy), and
+        // churn on a stable name set would grow the chain every walk pays for, unboundedly.
+        //
+        // Hide it FIRST, so the rewrite below is never half-visible: a reader either sees the
+        // outgoing tenancy whole, skips the node, or sees the incoming one whole. Relaxed —
+        // nothing is being published here, and the publication edge is `publish_ctx`'s
+        // release-store of `false`.
+        hit->retired.store(true, std::memory_order_relaxed);
+        // Rewound to "no connection vertex": the caller re-resolves it for the new tenancy,
+        // and a BUS re-add of a formerly point-to-point name deliberately leaves it here.
+        hit->conn_slot.store(kNoConnSlot, std::memory_order_relaxed);
+        hit->rx.store(rx, std::memory_order_relaxed);
+        // `entry` is NOT rewritten, because it cannot have changed: a registry slot is keyed
+        // by name and reused for that name forever (`erase` tombstones in place, `add`
+        // rebinds the tombstone), and `add_child` has already re-added by the time we run.
+        // The assert is where that coupling is pinned rather than assumed.
+        assert(hit->entry == registry_.entry_by_name(name));
+        // `name` and `mount_tlv` are immutable after the first publish, for the reason
+        // `child_registry_t::add` gives about its own `mount_tlv`: a reader on a receive
+        // thread may be holding either right now, and the bytes a rewrite would store are
+        // identical anyway — the mount run is a pure function of the name.
+        return *hit;
+    }
+    child_rx_ctx_t& fresh = child_rx_.emplace_back(this, name, registry_.mount_run_for(name), rx);
+    fresh.entry = registry_.entry_by_name(name);
+    return fresh;
+}
+
 void fwd_router_t::publish_ctx(child_rx_ctx_t& ctx) noexcept {
-    // Append-only, release-published: a reader that acquires the link sees a fully built node.
+    // Release-published either way: a reader that reaches the node sees a fully built one.
+    if (ctx.linked) {
+        // A revived tombstone is already reachable, so clearing the flag IS the publish —
+        // linking it a second time would splice the chain onto itself and lose every node
+        // between here and the tail.
+        ctx.retired.store(false, std::memory_order_release);
+        return;
+    }
     if (rx_tail_ == nullptr) {
         rx_head_.store(&ctx, std::memory_order_release);
     } else {
         rx_tail_->next.store(&ctx, std::memory_order_release);
     }
     rx_tail_ = &ctx;
+    ctx.linked = true;
 }
 
 const fwd_router_t::child_rx_ctx_t* fwd_router_t::ctx_by_name(std::string_view link_name) const {
+    // The tombstone test comes FIRST and acquires: it is the edge that orders this node's
+    // `conn_slot`/`rx` against the control thread's rewrite, so reading them before it would
+    // be reading a tenancy that may already be half-replaced (#884).
     for (const child_rx_ctx_t* c = rx_head_.load(std::memory_order_acquire); c != nullptr;
          c = c->next.load(std::memory_order_acquire))
-        if (c->name == link_name) return c;
+        if (!c->retired.load(std::memory_order_acquire) && c->name == link_name) return c;
     return nullptr;
 }
 
@@ -743,18 +809,30 @@ const fwd_router_t::child_rx_ctx_t* fwd_router_t::ctx_by_conn_slot(std::uint32_t
     // Walked over the PUBLISHED chain, never the owning deque: `add_child` appends from a
     // control thread while this runs on a receive thread, and iterating the deque under no
     // lock is a race on its chunk map (ADR-0063 erratum 3's ruling, applied to a container).
+    //
+    // A TOMBSTONED node is skipped before its slot is even compared (#884), and the acquire on
+    // that test is what orders the compare against a concurrent rebind. Skipping is not
+    // belt-and-braces here: it is what keeps this walk's length the LIVE child count under
+    // create/remove churn, which is the property RFC-0024 §3.4 prices the bound hop against.
     if (index == kNoConnSlot) return nullptr;
     for (const child_rx_ctx_t* c = rx_head_.load(std::memory_order_acquire); c != nullptr;
          c = c->next.load(std::memory_order_acquire))
-        if (c->conn_slot == index) return c;
+        if (!c->retired.load(std::memory_order_acquire) &&
+            c->conn_slot.load(std::memory_order_relaxed) == index)
+            return c;
     return nullptr;
 }
 
 std::optional<wire::path_ref_element_t> fwd_router_t::connection_ref(
     std::string_view link_name) const {
+    // The walk skips tombstones (#884), so a removed child has no reference to give and a
+    // re-added one gives its CURRENT tenancy's — never the dead context's, which is what made
+    // a re-created child permanently unbindable.
     const child_rx_ctx_t* const ctx = ctx_by_name(link_name);
-    if (ctx == nullptr || ctx->conn_slot == kNoConnSlot) return std::nullopt;
-    const std::optional<graph::vertex_slot_t> slot = graph_.vertex_slot_at(ctx->conn_slot);
+    if (ctx == nullptr) return std::nullopt;
+    const std::uint32_t conn = ctx->conn_slot.load(std::memory_order_relaxed);
+    if (conn == kNoConnSlot) return std::nullopt;
+    const std::optional<graph::vertex_slot_t> slot = graph_.vertex_slot_at(conn);
     if (!slot) return std::nullopt;  // saturated ⇒ permanently unbindable (§4.4 rule 3)
     return wire::path_ref_element_t{.index = slot->index, .generation = slot->generation};
 }
@@ -766,8 +844,14 @@ std::optional<wire::path_ref_element_t> fwd_router_t::hop_mint(
     // read from the frame's own arrival, never from a per-flow table (there is none).
     const child_rx_ctx_t* const ctx =
         inbound_ctx != nullptr ? inbound_ctx : ctx_by_name(inbound_name);
-    if (ctx == nullptr || ctx->conn_slot == kNoConnSlot) return std::nullopt;
-    const std::optional<graph::vertex_slot_t> slot = graph_.vertex_slot_at(ctx->conn_slot);
+    // The tombstone is tested HERE as well as inside the walk, because a frame can still
+    // arrive through the ctx a removed child left behind — the transport holds its address
+    // and may not have been torn down yet. Minting for it would answer the origin with a
+    // route through a link this node no longer has (#884).
+    if (ctx == nullptr || ctx->retired.load(std::memory_order_acquire)) return std::nullopt;
+    const std::uint32_t conn = ctx->conn_slot.load(std::memory_order_relaxed);
+    if (conn == kNoConnSlot) return std::nullopt;
+    const std::optional<graph::vertex_slot_t> slot = graph_.vertex_slot_at(conn);
     if (!slot) return std::nullopt;
     return wire::path_ref_element_t{.index = slot->index, .generation = slot->generation};
 }
@@ -972,7 +1056,7 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
             // A REPLY that reaches its originator here is handed to the sink rope-native
             // (ADR-0055): NO flatten — the sink materializes on demand. Absent sink ⇒
             // dropped (as the flatten path would, into a no-op decode).
-            if (reply_cb_ != nullptr) reply_cb_(reply_ctx_, frame);
+            if (const auto sink = reply_.get(); sink.fn != nullptr) sink.fn(sink.ctx, frame);
             return;
         }
         // A BOUND `dst` with a residual longer than one element: this node is a FORWARDER for
@@ -1000,7 +1084,7 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
                 resolve_terminus_rope(inbound_name, std::move(frame));
                 return;
             }
-            if (reply_cb_ != nullptr) reply_cb_(reply_ctx_, frame);
+            if (const auto sink = reply_.get(); sink.fn != nullptr) sink.fn(sink.ctx, frame);
             return;
         }
     }
@@ -1013,7 +1097,7 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
 void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const std::byte> frame,
                                  const view_t* frame_view, const child_rx_ctx_t* inbound_ctx,
                                  bool from_peer) {
-    if (raw_cb_ != nullptr) raw_cb_(raw_ctx_, inbound_name, frame);
+    if (const auto sink = raw_.get(); sink.fn != nullptr) sink.fn(sink.ctx, inbound_name, frame);
     if (frame.size() < 4) return;
 
     // The FWD plane never builds a tlv_t (ADR-0038 inv. #1 / ADR-0041 §5): the
@@ -1023,9 +1107,10 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
     // keep the owning wire::decode (test/SDK-facing and flow-setup paths, allowed
     // to allocate per ADR-0039).
     if (static_cast<type_t>(u8(frame[0])) == type_t::FWD) {
-        if (inbound_cb_ != nullptr) {  // read-only observer (tests/ACL seam) — wants the tree
+        // Read-only observer (tests/ACL seam) — wants the tree.
+        if (const auto sink = inbound_.get(); sink.fn != nullptr) {
             if (const auto dec = wire::decode(frame); dec && dec->opt.pl)
-                inbound_cb_(inbound_ctx_, inbound_name, *dec);
+                sink.fn(sink.ctx, inbound_name, *dec);
         }
         const wire::grammar::span_cursor cur{frame};
         {
@@ -1068,12 +1153,12 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
             // decode. A view-delivered frame ropes zero-copy off its owning view; a
             // borrowed span is copied once into an owned segment (the copy the old
             // decode-then-consumer-encode round-trip already paid).
-            if (reply_cb_ != nullptr) {
+            if (const auto sink = reply_.get(); sink.fn != nullptr) {
                 if (frame_view != nullptr) {
-                    reply_cb_(reply_ctx_, view::rope_t(*frame_view));
+                    sink.fn(sink.ctx, view::rope_t(*frame_view));
                 } else if (view_t owned = view::over_bytes(frame).value_or(view_t{});
                            !owned.empty()) {
-                    reply_cb_(reply_ctx_, view::rope_t(std::move(owned)));
+                    sink.fn(sink.ctx, view::rope_t(std::move(owned)));
                 }
             }
             return;
@@ -1425,27 +1510,27 @@ void fwd_router_t::on_advertise(std::string_view inbound_name, std::uint16_t lab
         // Sample the downstream link's clear epoch BEFORE minting anything against it (#827).
         // This runs on the INBOUND link's rx thread, so a reconnect of `down_name` on its own
         // thread can land anywhere in the three steps below; the sample is what lets the bind
-        // tell "the tables I minted into" from "the tables that are there now". It must
-        // precede `alloc_label`, which creates those tables: sampling after would name a
-        // post-clear allocator while the label came from the pre-clear one.
+        // tell "the tables I minted into" from "the tables that are there now". It must precede
+        // `ensure_egress`, which creates those tables: sampling after would name a post-clear
+        // allocator while the label came from the pre-clear one.
         const std::uint32_t down_epoch = handles_.link_epoch(down_name);
-        const std::uint16_t out_label = handles_.alloc_label(down_name);
-        // Exhausted downstream label space (#603): bind nothing and re-advertise nothing.
-        // The alternative -- reusing a live label -- would swap this flow onto another
-        // flow's route. The upstream's COMPACTs then draw a HANDLE_NACK, the same signal a
-        // stale label already produces; the uncompacted FWD path is unaffected.
+        // ONE label per (down-link, stripped route), never one per re-advertise (#913). This arm
+        // runs on EVERY upstream re-advertise — a reconnect loop, a flapping link — so an
+        // unconditional mint burned a label out of the saturating 16-bit space AND left another
+        // egress entry behind each cycle, neither reclaimable short of a whole-link `clear_link`.
+        // `ensure_egress` is the primitive `deliver_remote` already uses: under the egress
+        // table's own lock it reuses the label bound to an identical route, mints only for a
+        // genuinely new one, and records in that same critical section — which also retires the
+        // old alloc-then-record pair's split outcome, a label minted then burned for nothing on
+        // a refused record. Egress still precedes ingress and both precede the wire (#603), and
+        // a refused bind below now leaves an entry the NEXT cycle REUSES rather than duplicates.
+        const std::uint16_t out_label = handles_.ensure_egress(down_name, stripped_bytes).first;
+        // 0 ⇒ exhausted label space or a full egress table: bind and advertise nothing, and let
+        // the upstream's COMPACTs draw the HANDLE_NACK a stale label already draws (reusing a
+        // LIVE label would swap this flow onto another's route). An ESTABLISHED flow is never
+        // refused — the reuse scan runs ahead of the bound, so only NEW flows degrade.
         if (out_label == 0) return;
-        // Built field-by-field rather than with a designated-initializer brace: the binding
-        // now carries ADR-0062's memoized resolution too, and an aggregate init that names
-        // only some members trips -Werror=missing-field-initializers on the ESP toolchain.
-        // Egress FIRST, then ingress, then the wire (#603). Both tables can refuse when
-        // full, and the order makes every partial outcome safe: a refused egress means no
-        // swap is bound at all, and a refused ingress leaves an unused egress slot but
-        // sends nothing — never an advertised label with no route to re-advertise, and
-        // never a bound swap pointing at a label the downstream was never told about. The
-        // out-label burned on a refusal is harmless: the allocator is monotonic, so it
-        // simply skips a number.
-        if (!handles_.record_egress(down_name, out_label, stripped_bytes)) return;
+        // Field by field, not a designated-initializer brace: -Werror=missing-field-initializers.
         handle_binding_t fwd;
         fwd.terminus = false;
         fwd.down_link = down_name;
@@ -1494,7 +1579,8 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
     if (!rb.found || rb.mount_gen != registry_.mount_generation()) {
         // Stale/unknown label: drop, observe, and NACK back to prompt a re-advertise
         // (self-heal). Never a crash — the route is simply re-learned (RFC-0004 §E.1).
-        if (stale_cb_ != nullptr) stale_cb_(stale_ctx_, inbound_name, label);
+        if (const auto sink = stale_.get(); sink.fn != nullptr)
+            sink.fn(sink.ctx, inbound_name, label);
         if (transport_t* const up = registry_.by_name(inbound_name)) {
             const std::vector<std::byte> nack = encode_handle_nack(label);
             up->send(std::span<const std::byte>(nack));
@@ -1508,16 +1594,28 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
         // RESOLUTION and not merely to the wire. The generation guard is what makes the
         // cached handle safe: retire() bumps it (#511), so a retired-and-revived vertex is
         // detected here rather than silently written through (RFC-0009 §B.6 re-virginize).
+        //
+        // `inbound_name` is the ACL caller context (#974), exactly as `inbound_link` is for
+        // the full-route FWD{WRITE} (op_resolve_walk.hpp's WRITE arm). A COMPACT is a
+        // delivery-is-a-write (RFC-0004 §E.1 / §D) and RFC-0004 §F gates the target vertex's
+        // `:acl` at the final hop, so the two forms of ONE write must present one subject.
+        // Writing with the default empty caller spelled the local-trusted short-circuit in
+        // `graph_t::acl_allows`, so a flow auto-promoted to COMPACT skipped every ACE the
+        // full-route form is checked against. ADR-0062 already ruled the shape — "a binding
+        // caches the address, never the authorization" — so the cached handle is reused and
+        // the gate is re-evaluated per frame: a later `:acl` binds the very next COMPACT.
         if (rb.warm && rb.target && graph_.retire_generation(*rb.target) == rb.target_gen) {
             const auto payload_view = view::over_bytes(payload_bytes);
             if (!payload_view) return;  // alloc failure ⇒ drop (one audited locus)
             view::rope_t value;
             if (!value.try_reserve(1)) return;
             value.append(*payload_view);
-            if (graph_.write(*rb.target, std::move(value)).has_value() && delivery_cb_ != nullptr) {
-                const std::optional<handle_binding_t> b =
-                    handles_.lookup_ingress(inbound_name, label);
-                if (b) delivery_cb_(delivery_ctx_, b->local_route, payload_bytes);
+            if (graph_.write(*rb.target, std::move(value), inbound_name).has_value()) {
+                if (const auto sink = delivery_.get(); sink.fn != nullptr) {
+                    const std::optional<handle_binding_t> b =
+                        handles_.lookup_ingress(inbound_name, label);
+                    if (b) sink.fn(sink.ctx, b->local_route, payload_bytes);
+                }
             }
             return;
         }
@@ -1525,7 +1623,9 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
         const std::optional<handle_binding_t> binding =
             handles_.lookup_ingress(inbound_name, label);
         if (!binding) return;
-        if (deliver_local(binding->local_route, payload_bytes)) {
+        // Same caller context as the warm arm above (#974): the cold and warm halves of one
+        // flow must not disagree about who is writing.
+        if (deliver_local(binding->local_route, payload_bytes, inbound_name)) {
             if (const auto v = resolve_route_vertex(binding->local_route)) {
                 resolved_binding_t fill = rb;
                 fill.warm = true;
@@ -1533,8 +1633,8 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
                 fill.target_gen = graph_.retire_generation(*v);
                 handles_.cache_resolution(inbound_name, label, fill);
             }
-            if (delivery_cb_ != nullptr)
-                delivery_cb_(delivery_ctx_, binding->local_route, payload_bytes);
+            if (const auto sink = delivery_.get(); sink.fn != nullptr)
+                sink.fn(sink.ctx, binding->local_route, payload_bytes);
         }
         return;
     }
@@ -1593,7 +1693,7 @@ std::optional<graph::vertex_handle_t> fwd_router_t::resolve_route_vertex(
 }
 
 bool fwd_router_t::deliver_local(std::span<const std::byte> route_path,
-                                 std::span<const std::byte> payload) {
+                                 std::span<const std::byte> payload, std::string_view caller) {
     // Through the SAME helper the memoized handle is resolved by — so the cold path and the
     // cached path cannot disagree about which vertex a label names. Two decode+find copies
     // would be two sources of truth, which is the shape #516 turned out to be.
@@ -1603,7 +1703,10 @@ bool fwd_router_t::deliver_local(std::span<const std::byte> route_path,
     // failure → drop the delivery (one audited alloc/copy/over locus).
     const auto payload_view = view::over_bytes(payload);
     if (!payload_view) return false;
-    return graph_.write(*v, *payload_view).has_value();
+    // @p caller is the ACL subject context (#974) — the inbound link's NAME on the COMPACT
+    // path, matching what the full-route FWD{WRITE} presents. It is a required parameter
+    // precisely so a future delivery path cannot land here unattributed by omission.
+    return graph_.write(*v, *payload_view, caller).has_value();
 }
 
 graph::result_t<void> fwd_router_t::subscribe_toward(const graph::path_t& producer,

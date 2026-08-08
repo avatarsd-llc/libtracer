@@ -5,9 +5,13 @@
 # `VERSION` file is the sole hand-edited version; every publishable artifact is
 # versioned in lockstep from it via `tools/sync-version.py` — the PlatformIO /
 # Arduino / ESP manifests, the four TypeScript packages (version + internal dep
-# ranges), and the Rust crate. This job runs the stamper in --check mode and
-# fails if anything has drifted from `VERSION`, so a version bump can never land
-# half-applied. (The ROS 2 stub is unreleased and intentionally excluded.)
+# ranges), the npm lockfile that mirrors them, and the Rust crate. This job runs
+# the stamper in --check mode and fails if anything has drifted from `VERSION`, so
+# a version bump can never land half-applied. (The ROS 2 stub is unreleased and
+# intentionally excluded.)
+#
+# `paths:` below is an allowlist, so every guarded file must be listed — the
+# lockfile went unwatched for two releases precisely because it was not (#862).
 #
 # It also runs the unit tests for the two other release-mechanics tools —
 # `tools/gen_release_notes.py` (the multi-package GitHub Release body) and
@@ -25,6 +29,7 @@ on:
       - integrations/arduino/library.properties
       - integrations/esp-idf/libtracer/idf_component.yml
       - bindings/typescript/packages/**/package.json
+      - bindings/typescript/package-lock.json
       - bindings/rust/Cargo.toml
       - tools/sync-version.py
       - tools/gen_release_notes.py
@@ -39,6 +44,7 @@ on:
       - integrations/arduino/library.properties
       - integrations/esp-idf/libtracer/idf_component.yml
       - bindings/typescript/packages/**/package.json
+      - bindings/typescript/package-lock.json
       - bindings/rust/Cargo.toml
       - tools/sync-version.py
       - tools/gen_release_notes.py

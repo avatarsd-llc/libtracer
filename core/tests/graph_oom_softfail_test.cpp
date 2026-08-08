@@ -84,6 +84,30 @@ struct hook_guard_t {
 /** @brief The delivered-count callback: bumps the int behind @p ctx. */
 void count_cb(void* ctx, const rope_t& /*value*/) { ++*static_cast<int*>(ctx); }
 
+/**
+ * @brief The delivered-SEQUENCE callback: appends each single-link value's first byte to
+ *        the vector behind @p ctx — a count alone cannot tell a duplicate from a fresh
+ *        entry, which is exactly what #925 is about.
+ */
+void record_cb(void* ctx, const rope_t& value) {
+    static_cast<std::vector<std::uint8_t>*>(ctx)->push_back(
+        std::to_integer<std::uint8_t>(value.only().bytes()[0]));
+}
+
+/**
+ * @brief A 3-link (SPILLED) rope: its delivery clone must grow a heap chain, which is the
+ *        one allocation `try_clone_rope` can be made to fail.
+ *
+ * An inline rope (≤ 2 links) reserves nothing, so a clone of one cannot fail and no
+ * injection reaches the drop legs at all — the shape is load-bearing, not incidental.
+ */
+rope_t three_link() {
+    rope_t r{make_value({0x0A})};
+    r.append(make_value({0x0B}));
+    r.append(make_value({0x0C}));
+    return r;
+}
+
 // --- FWD wire builders + reply decoders (the op_resolve_test idiom) -----------
 std::vector<std::byte> b_name(std::string_view s) {
     std::vector<std::byte> out;
@@ -184,10 +208,12 @@ void test_small_fanout_allocation_free() {
 void test_wide_fanout_degrade() {
     std::printf("wide fan-out — overflow snapshot OOM degrades to the inline prefix:\n");
     constexpr std::size_t kSubs = 12;  // > kInlineFanout (8)
+    constexpr std::uint64_t kShed = kSubs - tr::graph::vertex_t::kInlineFanout;
     graph_t g;
     auto v = g.register_vertex(path_t("/s/c"), role_t::STORED_VALUE);
     std::array<int, kSubs> counts{};
     for (int& c : counts) (void)g.subscribe(path_t("/s/c"), count_cb, &c);
+    const auto before = g.delivery_drops();
     {
         const hook_guard_t frag(fail_big);  // the 12-view overflow reserve exceeds 512 B
         check(g.write(v, make_value({0x02})).has_value(), "the write itself still succeeds");
@@ -196,11 +222,123 @@ void test_wide_fanout_degrade() {
     for (const int c : counts) delivered += c;
     check(delivered == static_cast<int>(tr::graph::vertex_t::kInlineFanout),
           "exactly the inline-prefix subscribers were delivered, the rest dropped");
+
+    // The observable, at the WIDTH it sheds (#896). The degrade used to be invisible: an
+    // operator watching delivery_drops() saw zero while a third of the fan-out evaporated.
+    // Its own cause, too — this is a buffer that could not be widened, not a delivery whose
+    // clone failed, and an alarm that cannot tell them apart cannot act on either.
+    const auto d = g.delivery_drops();
+    check(d.fan_out_truncated == before.fan_out_truncated + kShed,
+          "every edge past the inline prefix is counted, one per shed delivery");
+    check(d.out_of_memory == before.out_of_memory,
+          "and the capacity degrade is NOT attributed to the OOM cause");
+
     check(g.write(v, make_value({0x03})).has_value(), "post-OOM write succeeds");
     delivered = 0;
     for (const int c : counts) delivered += c;
     check(delivered == static_cast<int>(tr::graph::vertex_t::kInlineFanout + kSubs),
           "all subscribers deliver again once memory returns");
+    check(g.delivery_drops().fan_out_truncated == before.fan_out_truncated + kShed,
+          "and the full delivery counts no further drop");
+}
+
+/**
+ * @brief A HANDLER write whose notify clone OOMs sheds the vertex's WHOLE fan-out — and
+ *        counts every shed delivery, not one event (#896).
+ *
+ * The sharpest of the three uncounted sites: `write_impl`'s handler branch clones the value
+ * for delivery because the handler consumes the original, and on a failed clone it skips
+ * `deliver_vertex` entirely — no edge is dispatched at all — while still returning success.
+ * The behaviour is specified (the handler ran; un-running it is not on the table), so the
+ * only thing that can tell an operator it happened is the counter. It moved by nothing, and
+ * a counter that moved by ONE would have been almost as misleading: the unit of this drop is
+ * a delivery, and this one drops all of them.
+ */
+void test_handler_notify_clone_sheds_fan_out() {
+    std::printf("handler notify — a failed delivery clone sheds the WHOLE fan-out:\n");
+    constexpr int kSubs = 3;  // < kInlineFanout: the snapshot itself never allocates
+    graph_t g;
+    int handled = 0;
+    tr::graph::handlers_t h;
+    h.on_write = [&handled](const rope_t&) -> tr::graph::result_t<void> {
+        ++handled;
+        return {};
+    };
+    auto v = g.register_vertex(path_t("/h/fan"), role_t::HANDLER, std::move(h));
+    std::array<int, kSubs> counts{};
+    for (int& c : counts) (void)g.subscribe(path_t("/h/fan"), count_cb, &c);
+    const auto before = g.delivery_drops();
+    {
+        g_reject_size = 3 * sizeof(view_t);  // exactly the notify clone's chain reserve
+        const hook_guard_t oom(fail_exact);
+        check(g.write(v, three_link()).has_value(), "the handler write still reports success");
+    }
+    check(handled == 1, "the handler ran — the value was consumed, not lost");
+    int delivered = 0;
+    for (const int c : counts) delivered += c;
+    check(delivered == 0, "NOT ONE subscriber was delivered — the clone sheds the fan-out");
+    const auto d = g.delivery_drops();
+    check(d.out_of_memory == before.out_of_memory + kSubs,
+          "all 3 shed deliveries are counted (a single +1 for a fan-out of N is the defect)");
+    check(d.no_target == before.no_target && d.denied == before.denied &&
+              d.fan_out_truncated == before.fan_out_truncated,
+          "and by its own cause — not a missing target, a denial, or a capacity degrade");
+
+    check(g.write(v, three_link()).has_value(), "the handler write succeeds once memory returns");
+    delivered = 0;
+    for (const int c : counts) delivered += c;
+    check(delivered == kSubs, "and the full fan-out delivers again");
+    check(g.delivery_drops().out_of_memory == before.out_of_memory + kSubs,
+          "with no further drop counted");
+}
+
+/**
+ * @brief A remote edge whose owning link copy OOMs is skipped by the snapshot — one counted
+ *        drop per skipped edge (#896).
+ *
+ * The per-edge half of the snapshot's soft-fail: `try_copy_published` copies the cold half
+ * (link NAME, stored caller) of a wire-made subscriber, and those are the only strings in a
+ * dispatch view large enough to allocate. A local callback edge copies two pointers and a
+ * refcount, which is why the small-fan-out hot path cannot reach this at all — and why the
+ * drop needs a REMOTE subscriber to reproduce, not a mocked snapshot.
+ */
+void test_remote_edge_copy_drop() {
+    std::printf("remote edge — a snapshot copy that cannot allocate drops that edge:\n");
+    constexpr int kSubs = 3;               // < kInlineFanout: no overflow reserve in play
+    constexpr std::size_t kLinkLen = 200;  // > SSO, so the copy is a real allocation
+    graph_t g;
+    auto v = g.register_vertex(path_t("/s/remote"), role_t::STORED_VALUE);
+    int deliveries = 0;
+    g.set_remote_delivery_sink(
+        [&deliveries](const tr::graph::remote_delivery_t&, const rope_t&) { ++deliveries; });
+    for (int i = 0; i < kSubs; ++i) {
+        // Distinct links, one length: every copy probes the same byte count, so ONE
+        // injected rejection covers the whole set.
+        std::string link = "lnk" + std::to_string(i);
+        link.append(kLinkLen - link.size(), 'x');
+        check(g.subscribe_wire(v, make_value({0x04, 0x40, 0x00, 0x00}),
+                               make_value({0x06, 0x40, 0x00, 0x00}), std::move(link))
+                  .has_value(),
+              "bind a remote subscriber over a long-named link");
+    }
+    const auto before = g.delivery_drops();
+    {
+        g_reject_size = kLinkLen + 1;  // the link copy's growth (+1 for the NUL)
+        const hook_guard_t oom(fail_exact);
+        check(g.write(v, make_value({0x30})).has_value(), "the write itself still succeeds");
+    }
+    check(g.read(v).has_value(), "the LKV landed — only the delivery legs were shed");
+    check(deliveries == 0, "no remote delivery was made: every edge's view copy failed");
+    const auto d = g.delivery_drops();
+    check(d.out_of_memory == before.out_of_memory + kSubs,
+          "each skipped edge is counted once, by the OOM cause");
+    check(d.fan_out_truncated == before.fan_out_truncated,
+          "a per-edge copy failure is not the capacity degrade");
+
+    check(g.write(v, make_value({0x31})).has_value(), "post-OOM write succeeds");
+    check(deliveries == kSubs, "every remote edge delivers again once memory returns");
+    check(g.delivery_drops().out_of_memory == before.out_of_memory + kSubs,
+          "and the full delivery counts no further drop");
 }
 
 /** @brief A spilled (>2-link) value's target-edge clone drops that ONE leg on OOM. */
@@ -210,12 +348,6 @@ void test_target_clone_drop() {
     auto a = g.register_vertex(path_t("/s/src"), role_t::STORED_VALUE);
     auto b = g.register_vertex(path_t("/s/dst"), role_t::STORED_VALUE);
     (void)g.subscribe(path_t("/s/src"), path_t("/s/dst"));
-    const auto three_link = [] {  // 3 links => the clone must grow a heap chain
-        rope_t r{make_value({0x0A})};
-        r.append(make_value({0x0B}));
-        r.append(make_value({0x0C}));
-        return r;
-    };
     const std::uint64_t oom_before = g.delivery_drops().out_of_memory;
     {
         g_reject_size = 3 * sizeof(view_t);  // exactly the clone's chain reserve
@@ -257,6 +389,47 @@ void test_stream_ring_shed() {
     }
     check(g.write(v, make_value({0x11})).has_value() && g.history(v)->size() == 1,
           "the ring accepts entries again once memory returns");
+}
+
+/**
+ * @brief A SHED ring append must not make the next drain re-deliver the previous entry
+ *        (#925) — the drain counts APPENDS, not write-sequence bumps.
+ *
+ * `store` bumps `write_seq_` unconditionally (it is the await/readiness cursor, and the
+ * LKV publish above it DID land), so a drain that derives "how many entries are new" from
+ * a sequence delta claims a tail entry the shed never appended. Nothing is ever removed
+ * from the ring on a drain, so it re-takes the newest ALREADY-FLUSHED entry and the
+ * subscriber observes the same stream element twice — on machinery whose whole point is
+ * an in-order queue rather than a coalesce (RFC-0008 §E).
+ *
+ * The write still answering SUCCESS with no drop counted is the OTHER half of this shed
+ * and is deliberately not asserted here (#1003 owns making it visible).
+ */
+void test_stream_shed_append_no_redelivery() {
+    std::printf("stream drain — a shed ring append re-delivers NOTHING (#925):\n");
+    graph_t g;
+    auto v = g.register_vertex(path_t("/s/shed"), role_t::STREAM);
+    g.set_history_depth(v, 4);
+    std::vector<std::uint8_t> seen;
+    (void)g.subscribe(path_t("/s/shed"), record_cb, &seen);
+
+    check(g.write(v, make_value({0x10})).has_value(), "the first stream write succeeds");
+    check(seen.size() == 1 && seen[0] == 0x10, "the subscriber saw 0x10 exactly once");
+
+    {
+        const hook_guard_t frag(fail_big);  // the ring-append probe exceeds 512 B
+        check(g.write(v, make_value({0x11})).has_value(), "the shed stream write still succeeds");
+    }
+    check(g.history(v).has_value() && g.history(v)->size() == 1,
+          "the shed entry never entered the ring");
+    check(seen.size() == 1, "the shed append delivered NOTHING — no phantom tail entry");
+    check(seen.size() == 1 && seen.back() == 0x10, "0x10 was NOT re-delivered as 0x11's entry");
+
+    // A queue, not a coalesce: the next real append still delivers, exactly once.
+    check(g.write(v, make_value({0x12})).has_value(), "the ring accepts entries again");
+    check(seen.size() == 2 && seen.back() == 0x12, "the next real append delivers once");
+    g.propagate(v);
+    check(seen.size() == 2, "a covering sweep after the shed re-delivers nothing");
 }
 
 /** @brief A stream drain under OOM DEFERS (cursor kept) and catches up afterwards. */
@@ -357,7 +530,10 @@ int main() {
     test_small_fanout_allocation_free();
     test_wide_fanout_degrade();
     test_target_clone_drop();
+    test_handler_notify_clone_sheds_fan_out();
+    test_remote_edge_copy_drop();
     test_stream_ring_shed();
+    test_stream_shed_append_no_redelivery();
     test_stream_drain_defer();
     test_composed_read_reply_backpressure();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,

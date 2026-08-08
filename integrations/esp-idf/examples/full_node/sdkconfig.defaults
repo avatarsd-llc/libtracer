@@ -25,6 +25,15 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 # std::thread on ESP-IDF is pthread on FreeRTOS: every libtracer recv thread
 # (one per socket transport) gets THIS stack unless the app sets a pthread cfg.
 # The udp recv loop keeps its big scratch off the stack (lazy heap), but the
-# ws/tcp serve loops carry ~4 KiB frame chunks + TLV decode frames; 12 KiB is a
+# tcp serve loop carries ~4 KiB frame chunks + TLV decode frames; 12 KiB is a
 # comfortable floor. Tune per-node with real high-water marks.
 CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=12288
+
+# esp_http_server's native WebSocket API — what httpd_ws_link_t rides. Since #947
+# the IDF-native links ARE the chip WebSocket plane (core's POSIX transport_ws is
+# not compiled on a chip target at all), and this config defaults to `n`, so
+# without it the sanctioned WS SERVER is not built and the on-silicon gate has
+# nothing to assert. It also gave httpd_ws_link.cpp its first compile coverage:
+# before this, no CI job built that TU, because the portable server it replaces
+# was quietly standing in for it.
+CONFIG_HTTPD_WS_SUPPORT=y

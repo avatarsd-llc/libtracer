@@ -10,6 +10,268 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`tr::net::link_counters_t`** (`libtracer_esp/link_stats.hpp`) plus
+  **`esp_ws_client_link_t::stats()`** and **`httpd_ws_link_t::enumerate_peer_stats()`** —
+  per-link passive traffic counters (#942): rx/tx messages and payload bytes, rx/tx drops,
+  and `esp_timer` stamps for the last delivered message and for when the connection came
+  up. Counts MESSAGES, not WebSocket fragments, so a client's `tx_frames` is directly
+  comparable with the server's `rx_frames` across a link. The client's snapshot also
+  carries `reconnects` (completed handshakes — the only externally-observable signal that
+  a transient drop happened, since `drop()` deliberately suppresses `notify_down`) and
+  `connect_ms` (the last handshake's duration; an upper bound on ~2 round-trips sampled
+  only at re-dial, never an RTT). Server-side counters are per SESSION and are handed out
+  with the slot's claim generation, so a consumer differencing successive snapshots can
+  tell "same connection, N more frames" from "a different peer landed on that slot".
+
+  `stats().c.rx_drops` is not a second tally: it is read from the existing
+  `dropped_rx()` below, so the client link keeps exactly one inbound-drop truth.
+
+  Scope is deliberately narrow — `transport_t` grows no `counters()` virtual and
+  `fwd_router_t` no per-child accounting, because the only consumers are hosts that
+  enumerate the two concrete link types they constructed themselves. A polymorphic hook
+  would put a counter bump on core's hot `deliver_remote` path and buy nothing.
+
+- **`httpd_ws_link_t::tx_strands()` / `tx_slots_busy()` / `tx_slot_capacity()`** — TX work
+  slot observability (#944). `tx_strands()` counts slots reclaimed from a work item the
+  control socket accepted and then silently binned; `tx_slots_busy()` is the pool's live
+  occupancy and `tx_slot_capacity()` its size, so a caller can see the pool being starved
+  rather than infer it from allocation pressure. The existing `enqueue_drops()` could not
+  cover this: it counts the enqueue failures that are *observable* (`ESP_FAIL`), and the
+  binned ones are, by construction, not.
+
+- **`esp_ws_client_link_t::dropped_rx()`** — inbound messages the receive path refused,
+  spelled the way core's transports already spell it (`transport_can::dropped_rx()`).
+  It counts the two refusals that were previously logs-only (#953): a message that does
+  not fit `rx_bytes`, and a stray WebSocket CONTINUATION arriving with no message open.
+  A frame lost to a connection drop is not counted — that is the link going down, not
+  the receive path refusing a message.
+
+### Fixed
+
+- **`esp_ws_client_link_t` got a bounded-blocking discipline: a derived write bound, an
+  interruptible backoff, and a teardown barrier** (#952). Three defects on one seam —
+  `write_m_` and `stop_` were treated as if the operations under them were prompt.
+  (1) `send()` held `write_m_` across a 4000 ms write timeout that IDF's `_ws_write`
+  spends up to three times over (poll, header, payload), so a peer with a closed TCP
+  window parked the *calling* task for up to 12 s against a typical 5 s task watchdog —
+  a panic, not a dropped frame — and blocked the recv thread, which serializes its reads
+  on the same mutex, from even seeing the CLOSE. Both blocking bounds are now derived
+  from `CONFIG_ESP_TASK_WDT_TIMEOUT_S` the way the server sibling's send bound already
+  is (#835): a dial gets half a watchdog window and one whole `send()` a quarter of one,
+  and `SO_SNDTIMEO` is set on the socket next to the existing `TCP_NODELAY` so the
+  blocking write leg is bounded too. **Behaviour change:** a peer that cannot accept a
+  small frame within that budget now has its connection torn down and re-dialed instead
+  of parking the sender; a dial that does not complete within half a watchdog window is
+  retried rather than waited out. (2) The reconnect backoff was a plain `sleep_for`, so
+  the destructor's join waited out the full 1.5 s of exactly the unreachable peer a
+  re-dial exists for; it is now a condition-variable wait the destructor signals.
+  (3) The destructor destroyed the transport handles with `write_m_` held nowhere, on
+  the premise that the joined recv thread was the only handle user — which this type's
+  own contract contradicts (`send()` may be called from any task), so a sender queued
+  behind a stalled write woke up owning a destroyed handle. Teardown now disarms the
+  link, destroys the handles under `write_m_`, and waits out every sender that had
+  already *announced itself on the in-flight tally* — raised at the top of `send()`,
+  before it queues on that mutex. That tally is the covered boundary, and it is the most
+  a barrier inside the object can cover: a caller that has not reached it when the
+  destructor reads it for the last time is not waited out, whether it is a `send()` that
+  *starts* after the destructor returns or one that entered `send()` and is still short
+  of the raise. Both stay the embedder's lifetime problem. A sender also reads the
+  transport handle only behind the `connected_` acquire gate that pairs with the recv
+  thread's release store: the re-dial rebuilds the handles holding no lock, so `write_m_`
+  alone does not order that rewrite against a sender's read. No API change; a teardown
+  that lands mid-dial still costs one dial bound, since `esp_transport_connect` takes no
+  cancellation.
+
+- **`httpd_ws_link_t::send` (the broadcast) no longer allocates, so a fan-out during a
+  heap trough drops a frame instead of aborting the node** (#961). The fan-out opened by
+  building a `std::vector` of destinations under `peers_m_` — the one container shape the
+  rest of that translation unit is written to avoid, because under `-fno-exceptions` its
+  throwing allocator turns a failed growth into `abort()` inside libstdc++'s `bad_alloc`
+  stub. It sat AHEAD of every `new (std::nothrow)` fallback the TX path has, so the
+  drop-on-OOM backpressure the header advertises was void on the one path every
+  subscription push takes, and the failure was silent: no counter moves, no OOM log, just
+  an unexplained reboot. The destinations are now snapshotted into a fixed on-stack chunk
+  (`kFanoutChunk`, sized at the link's own `kDefaultPeerCap` socket budget) with the scan
+  resuming where it stopped, so a broadcast to any number of peers takes no heap arm at
+  all — there is nothing left to fail, hence no new drop counter and no sizing policy for
+  the unbounded-`max_peers` case. A broadcast at or under the chunk still takes exactly
+  one `peers_m_` hold; past it, one more uncontended acquisition per chunk. No API change;
+  the header's steady-state allocation contract now covers fan-out explicitly.
+
+- **`httpd_ws_link_t` fires the peer-departure eviction notifier with the handler gate
+  RELEASED, not held across it** (#960). `reclaim_slot` scoped `peers_m_` to the field
+  clears and fired the routing plane's eviction hook outside it — but its only caller held
+  the handler gate's mutex for the whole call, so `fwd_router_t::link_down` (a walk of
+  every subscribed vertex under the graph's own locks, bounded by nothing this link owns)
+  ran under the one mutex every dispatch into the link takes and a destructor blocks on.
+  `bus_link_t::notify_peer_down` documents the opposite precondition outright ("with none
+  of its internal locks held"), and both core reference servers
+  (`transport_ws_server::teardown_slot`, `transport_tcp_server::teardown_slot`) honour it;
+  this link was the exception, and it established an undocumented `gate → router → graph`
+  ordering edge that nothing recorded. `reclaim_slot` now returns the departed peer's name
+  and `on_session_closed` fires the notification after the lock scope ends; the order it
+  no longer has is written down on `gate_t`. What does **not** change is the lifetime
+  guarantee holding the mutex supplied: the notification registers on the gate's existing
+  `depth`/`cv` barrier — the same one a URI-handler frame uses — so `close_gate` still
+  cannot return while one is in flight, and the notifier still cannot outlive the link.
+  Scope, stated because both are easy to over-read into this: (1) the mutex-order edge is
+  gone, so a thread holding a graph lock can always take the gate — but destroying a link
+  while holding a lock its in-flight work needs still deadlocks on the barrier, exactly as
+  it already did through the URI-handler join and as it does in `transport_ws_server`,
+  whose destructor joins its poll thread for the same reason; (2) the eviction still runs
+  synchronously on the httpd task from inside `free_ctx`, so a departing peer still costs
+  that task the walk — moving it off is a separate design question (#1071). No API change.
+
+- **`twai_link_t`'s TX backpressure window is spent PER FRAME again, and teardown no
+  longer queues behind it** (#962). `write_raw` took `write_m_` and only then parked on
+  the free-slot semaphore that *is* the FULL policy's backpressure point, so the window
+  was per queue rather than per frame: on a controller whose tx-done never fires (a
+  bus-off or stalled node), K concurrent writers spent `K * tx_timeout_ms` in series
+  rather than one window each, and the destructor — which takes the same lock — inherited
+  the whole series, so a link removal during a bus fault blocked the destroying task for
+  the same multiple. `tx_dropped()` kept moving throughout, so the symptom read as "we're
+  dropping, as designed" right up to the watchdog reboot. The semaphore is now taken
+  OUTSIDE the lock, which leaves the lock covering only the submission (the node handle
+  and the pool's serialized acquire); a writer parked across teardown re-checks the node
+  under the lock and hands its token back rather than submitting to a deleted controller,
+  and the destructor releases parked writers and waits for them to leave before deleting
+  the semaphore they are waiting on. No API change.
+
+- **`twai_link_config_t::tx_timeout_ms` is clamped to the task-watchdog period**
+  (`CONFIG_ESP_TASK_WDT_TIMEOUT_S`, #962). It was taken verbatim, so a config could park
+  a writing task longer than a task may go unfed and reboot the board instead of dropping
+  the frame — the same class of footgun `derive_send_timeout_ms` exists for on the WS
+  server link (#835). The bound is one FRAME's wait; a caller writing a burst on one task
+  still sums its own frames' waits. Configs at or under the watchdog period — including
+  the 20 ms default — are unaffected.
+
+- **`httpd_ws_link_t`'s TX slot pool no longer dies four dropped datagrams into a boot**
+  (#944). `httpd_queue_work` on the default non-blocking path is a bare `sendto` to a
+  loopback UDP control socket, so an enqueue past the receiver's mbox is discarded inside
+  lwIP while `sendto` — and therefore `httpd_queue_work` — still returns `ESP_OK`. The
+  close path was routed around that fact with `shutdown`; the TX path still trusted the
+  return value. A binned work item never ran, and the work item was the *only* thing that
+  released the pool slot it had claimed: four of them and the pool was gone for the rest
+  of the boot, after which every outbound frame took two global-heap allocations on a hot
+  publish path. There was no counter for it — `enqueue_drops()` covers the *refused*
+  enqueue, which already recycled correctly.
+
+  A TX slot now carries a four-state lifetime (free / claimed / armed / running) instead
+  of a single `busy` flag, and an exhausted claim sweeps the pool before giving up:
+  a slot armed for longer than `kTxPoolSlots * send_timeout_ms()` — every other slot ahead
+  of it, each stalled to this link's full per-socket send bound — is presumed lost and
+  recycled. **Safety does not rest on that window.** A pooled work item lives inside its
+  slot and so cannot carry an identity a re-claim would not overwrite; it is therefore a
+  bare token meaning "send whatever slot *i* has armed", and a token that arrives after a
+  reclaim either finds nothing armed or sends the later frame that is — correctly, since a
+  payload and the destination it was gathered for are armed together. A window chosen too
+  short costs a dropped frame (counted, and droppable by contract), never a torn one.
+  Reclaiming happens only on the exhausted-claim path: no timer, no task, and nothing at
+  all in the steady state. The **heap-fallback** work item (taken when the pool is
+  exhausted) is *not* reclaimable by this or any timeout — the token holds a raw pointer
+  to the shell, so freeing it on a guess is a use-after-free rather than a leak; what the
+  fix removes is the driver that made those leaks unbounded, since a pool that cannot die
+  is no longer permanently bypassed.
+
+- **`httpd_ws_link_t`'s queued TX no longer delivers one peer's frames to another after a
+  descriptor is reused** (#954, partial — the directed-resolve residue is #1013). The
+  whole TX path identified its destination by bare fd: `send()`
+  snapshotted fds under the peer lock and released it before enqueueing, the queued work
+  item stored only `int fd`, and the drain asked `httpd_ws_get_fd_info(handle, fd)` —
+  which reports "some websocket lives at this number", never "the session this frame was
+  gathered for", because IDF's session lookup is purely fd-keyed with no generation. The
+  residency window is wide: `httpd_server` handles ONE control message per `select()`
+  pass while close, accept and handshake proceed in that same pass, so a peer can hang up
+  and an unrelated client be accepted onto the recycled descriptor while the first peer's
+  frames still sit in the queue. Those frames were then written to the new peer — a
+  **cross-session data leak** on a peer-named server, where a directed FWD reply or a
+  subscription push produced for one authenticated session was delivered to a different
+  one — and their failures were charged to the newcomer's strike counter, closing a
+  session that had failed nothing. The TX path now carries a `session_ref_t` (the peer
+  slot plus a generation stamped at every claim) and re-validates it at each site through
+  `live_fd`; a stale reference FAILS and the frame is dropped rather than misdelivered.
+
+  **Scope: the enqueue → drain gap, not every gap.** The generation protects a reference
+  from the moment it is MINTED. It does not protect the window BEFORE that: on the directed
+  path a caller resolves a peer's endpoint via `peer_link` and sends later in the same
+  forward hop, and `peer_endpoint_t::send` mints the reference from the slot's CURRENT
+  generation — so whichever session occupies the slot at send time satisfies the downstream
+  check. Under preemption that window is unbounded, and the misdelivery is still
+  constructible. It is narrower than the window this closes and it predates this change,
+  but it is the same consequence, so it is tracked as **#1013** rather than described as
+  fixed. Closing it needs a per-resolution identity, which is an API-shape decision the
+  shared per-slot endpoint object cannot absorb silently.
+
+  Both halves of the shipped reference are needed: slots are recycled IN PLACE, so the departed peer's slot — and
+  therefore the server's session ctx POINTER — is exactly what the next peer is handed,
+  which is why the pointer comparison the teardown detach path uses does not close this
+  hole on the live path. No public API change.
+
+- **`esp_ws_client_link_t` now HONORS its `recv_stack` argument** (#900). The constructor
+  accepted the knob and discarded it, spawning a plain `std::thread` — which on ESP-IDF
+  takes the global `CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT`, since a pthread's stack can
+  only be set by arming `esp_pthread_set_cfg` for the next `pthread_create`. That thread
+  runs in-call graph delivery through the `on_write` seam (the deep path the sibling
+  *server* link sizes at 12288 bytes), so a caller who sized the stack for its delivery
+  path silently got the default and a stack-overflow reboot. The save/set/spawn/restore
+  recipe `twai_link_t` already carried is now one shared helper (`tr::esp::spawn_thread`,
+  component-private) used by both links; the restore is what keeps the size from leaking
+  onto later threads spawned by the same caller. `recv_stack = 0` still means "platform
+  default" and arms nothing, so callers passing nothing are unchanged.
+
+- **An over-sized inbound message is now dropped WHOLE** (#901). The receive loop reset
+  its accumulator on overflow but kept reading the same message, so the remainder
+  re-accumulated from offset zero and was handed to the router as a bogus standalone
+  frame — the peer's stream desynchronised and nothing reported it. This never required
+  fragmentation: `esp_transport_read` caps each read at the space offered and IDF
+  re-reports the frame's `fin` on every one of them, so one over-sized *unfragmented*
+  frame split across reads and its tail was delivered. The loop now tracks the current
+  frame's unread bytes (from `esp_transport_ws_get_read_payload_len`), so "the message
+  ended" is distinguishable from "the buffer ran out", and consumes the remainder of a
+  dropped message without delivering it. Two adjacent gaps close with it: a stray
+  CONTINUATION arriving with no message open is dropped (the rule `httpd_ws_link_t`
+  already applies), and an **exact-fit** message — `off == rx_bytes` with `fin` — is
+  delivered instead of being swept into the overflow branch.
+
+### Changed
+
+- **BREAKING (chip targets): the portable `ws` transport is no longer built, and no `ws`
+  entry is registered in the built-in transport catalog.** ESP-IDF WebSocket must never
+  use POSIX sockets (#947 ruling). Core's `transport_ws_server` / `transport_ws_client`
+  are the HOST implementation; on lwIP they are not merely unreachable but *unusable* —
+  their scatter-gather egress asks `sendmsg` for `MSG_NOSIGNAL`, `lwip_sendmsg` rejects
+  any flag outside `MSG_DONTWAIT|MSG_MORE` with `EOPNOTSUPP`, and `write_all_iov` reads
+  that as peer-gone, so every data frame is silently discarded while the opening
+  handshake and PING/PONG still answer (#948). They are therefore **absent**, not fixed.
+  The sanctioned plane is the IDF-native links this component already ships:
+  `httpd_ws_link_t` (on `esp_http_server`, needs `CONFIG_HTTPD_WS_SUPPORT=y`) and
+  `esp_ws_client_link_t` (on `esp_transport_ws`), both bound by the application through
+  `transport_vertex_t::provide_link`.
+
+  Selection is by **which TU compiles**, not a feature macro — the rule
+  `socketcan_link.cpp` vs. `socketcan_link_stub.cpp` already follows. The `linux` (POSIX
+  host) target is unchanged and keeps the portable pair; it has glibc's `sendmsg` and no
+  `esp_http_server`.
+
+  **What breaks:** a `:children[]` SPEC carrying `kind=ws` with no staged link now
+  answers `SCHEMA_NOT_FOUND` on a chip target instead of constructing a portable
+  socket server that could not deliver anyway. Nodes already staging an IDF-native link
+  with `provide_link` are unaffected. `CONFIG_LIBTRACER_TRANSPORT_WS` keeps its meaning
+  ("build the WebSocket plane") — only *which* plane it builds is now target-decided.
+
+  Measured on `examples/full_node`, esp32c6, `-Os`, ESP-IDF v6.0-dev: `nm` on the linked
+  ELF went from **46** `transport_ws_server`/`transport_ws_client` symbols to **0**, and
+  flash fell 394,146 → 381,098 B (**−13,048 B**; `libtracer.a` −12,769 B, image `.bin`
+  −13,040 B). Flash here is tracked, never gated. `tools/check_esp_ws_plane.py` is the
+  standing gate.
+
+- **`examples/full_node` now sets `CONFIG_HTTPD_WS_SUPPORT=y`,** so `httpd_ws_link.cpp`
+  — the sanctioned chip WebSocket *server* — is compiled by CI. It previously had no
+  compile coverage anywhere: the config it is gated on defaults to `n`, and the portable
+  server it replaces was silently filling in.
+
 ## [0.8.0] — 2026-08-06
 
 ### Changed

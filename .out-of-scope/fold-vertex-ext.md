@@ -22,7 +22,7 @@ saving one allocation per non-default vertex plus locality, at the cost of the l
 signal.** `vertex_t::ext_` is an `std::atomic<vertex_ext_t*>`, `null` for a plain
 leaf, CAS-published once and never cleared (ADR-0057 insert-only), and **read
 lock-free on the hot path** — `handlers` loads it with no stripe lock
-(`vertex.hpp:2751`, `:2828`). The `null` value *is* the "no ext" signal. Folding
+(`vertex.hpp:2825`, `:2902`). The `null` value *is* the "no ext" signal. Folding
 breaks or taxes this:
 
 - **Unconditional inline** destroys the `null`-means-no-ext signal (a validity flag

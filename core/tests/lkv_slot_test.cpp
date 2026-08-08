@@ -26,17 +26,27 @@
  *     which is the RAM argument that chose hazard over epoch;
  *   - **exhaustion** — with every hazard index claimed, readers and writers still agree,
  *     which is the fallback ADR-0069 §3 promised (by a different mechanism; see the header);
+ *   - **containment of an over-capacity thread** (#899, #1027) — claiming an index writes no
+ *     byte of the announcement table, a thread that could not claim one stops re-probing every
+ *     index on every operation, and taking the overflow spin lock writes no byte of the line
+ *     `orphans` is read on; the three are what makes "costs the overflow threads and nothing
+ *     else" a property rather than an aspiration;
  *   - **a declined publish is reported** — the whole point of `store` returning `bool`, driven
- *     here by replacing this binary's nothrow `operator new` rather than by inspection.
+ *     here by replacing this binary's nothrow `operator new` rather than by inspection;
+ *   - **the exit sweep spares live participants** (#898) — driven by an injected
+ *     `final_sweep_t`, since a static-destruction object is otherwise unobservable, once as a
+ *     deterministic snapshot of a blocked worker's lists and once as a race a sanitizer sees.
  */
 
 #include "libtracer/lkv_slot.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <new>
 #include <string_view>
@@ -200,15 +210,243 @@ void exhausted_registry() {
     auto& reg = tr::graph::detail_hp::registry();
     std::vector<std::size_t> taken;
     for (std::size_t i = 0; i < tr::graph::kHazardReaderSlots; ++i) {
-        bool expected = false;
-        if (reg.cells[i].claimed.compare_exchange_strong(expected, true)) taken.push_back(i);
+        if (tr::graph::detail_hp::try_claim(reg, i)) taken.push_back(i);
     }
     check(taken.size() + 1 >= tr::graph::kHazardReaderSlots,
           "the registry is full (this thread may already hold one index)");
 
     concurrent<hazard_slot_t>("  overflow", 1, 2, 500);
 
-    for (std::size_t i : taken) reg.cells[i].claimed.store(false);
+    for (std::size_t i : taken) tr::graph::detail_hp::release_claim(reg, i);
+}
+
+/**
+ * @brief Claiming an index must not write into the announcement table (#899).
+ *
+ * Stated as bytes on purpose. The defect was storage: the claim flag lived inside `cell_t`,
+ * so every probe of an index was a read-modify-write on the line whose owner announces its
+ * pin there — and nothing in the abstract machine distinguishes that from a probe elsewhere,
+ * only the machine running it, which invalidates the reader's hot line for one and not the
+ * other. What IS observable here is that a claim leaves the announcement table's object
+ * representation untouched; the header's `alignas` assertions carry the other half (the table
+ * starts on a line of its own).
+ *
+ * Single-threaded by construction — the comparison reads the announcement bytes directly, so
+ * it must run where no other participant can be storing a pin.
+ */
+void claiming_writes_nothing_into_the_announcement_table() {
+    namespace hp = tr::graph::detail_hp;
+    std::printf("hazard_slot_t — claiming an index leaves every announcement byte alone:\n");
+    auto& reg = hp::registry();
+
+    std::size_t victim = hp::kNoIndex;
+    std::array<unsigned char, sizeof(reg.cells)> before{};
+    std::memcpy(before.data(), &reg.cells, sizeof(reg.cells));
+    for (std::size_t i = 0; i < tr::graph::kHazardReaderSlots; ++i) {
+        if (hp::try_claim(reg, i)) {
+            victim = i;
+            break;
+        }
+    }
+    std::array<unsigned char, sizeof(reg.cells)> after{};
+    std::memcpy(after.data(), &reg.cells, sizeof(reg.cells));
+    if (victim != hp::kNoIndex) hp::release_claim(reg, victim);
+
+    check(victim != hp::kNoIndex, "an index was actually claimed, so there was something to see");
+    check(std::memcmp(before.data(), after.data(), before.size()) == 0,
+          "claiming an index modified no byte of the announcement table");
+}
+
+/**
+ * @brief An over-capacity thread must not re-probe the whole claim table per operation (#899).
+ *
+ * Counted rather than timed: the defect is a *number* of read-modify-writes, and a wall-clock
+ * reading of a contention effect on a shared runner is not evidence of anything. The bound is
+ * relative to the work done — "fewer probes than operations" — because an absolute one would
+ * pass vacuously on a thread that happened to claim an index.
+ */
+void overflow_thread_stops_sweeping_the_claim_table() {
+    namespace hp = tr::graph::detail_hp;
+    std::printf("hazard_slot_t — an over-capacity thread does not re-probe every index:\n");
+    auto& reg = hp::registry();
+    std::vector<std::size_t> taken;
+    for (std::size_t i = 0; i < tr::graph::kHazardReaderSlots; ++i) {
+        if (hp::try_claim(reg, i)) taken.push_back(i);
+    }
+
+    constexpr std::size_t kOps = 500;
+    std::size_t probes = 0;
+    std::size_t idx = 0;
+    std::size_t good = 0;
+    {
+        hazard_slot_t slot;
+        (void)slot.store(make_tagged(7));
+        std::thread over([&] {
+            const std::size_t before = hp::self().claim_probes();
+            for (std::size_t i = 0; i < kOps; ++i) {
+                if (intact(slot.load())) ++good;
+            }
+            probes = hp::self().claim_probes() - before;
+            idx = hp::self().index();
+        });
+        over.join();
+    }
+    for (std::size_t i : taken) hp::release_claim(reg, i);
+
+    check(idx == hp::kNoIndex, "the thread really was over capacity (it claimed no index)");
+    check(good == kOps, "and every one of its reads returned an intact value");
+    std::printf("    %zu claim-table RMWs over %zu operations (budget < %zu)\n", probes, kOps,
+                kOps);
+    check(probes < kOps, "an over-capacity thread issues fewer claim RMWs than it does reads");
+}
+
+/**
+ * @brief The overflow spin lock must not write the line `orphans` lives on (#1027).
+ *
+ * The sibling of the claim-table finding, against a different reader. A thread that could not
+ * claim an index takes and drops this flag once per operation — two read-modify-writes, one at
+ * each end of its ticket — while threads inside the budget LOAD `orphans`, in `scan` and in
+ * `retire_and_flush` on every slot destruction. Unpadded, the flag sat eight bytes past
+ * `orphans`, so an over-capacity thread took a line in-capacity threads read exclusive.
+ *
+ * Asserted as bytes rather than as addresses, because the address arithmetic alone would not
+ * say the lock ever WRITES anything: the line is snapshotted, the flag is taken and left held,
+ * and the snapshot is compared. The "the lock was free" check ahead of it is what stops the
+ * comparison passing vacuously — a `test_and_set` on an already-set flag writes the same value
+ * back and would dirty nothing even with the two on one line. The line-disjointness check that
+ * follows is the layout half, and the header's `alignas` assertion carries it into every build.
+ *
+ * Single-threaded by construction: it reads the registry's bytes directly.
+ */
+void the_overflow_lock_does_not_dirty_the_orphan_line() {
+    namespace hp = tr::graph::detail_hp;
+    std::printf("hazard_slot_t — taking the overflow lock leaves the orphan line alone:\n");
+    if constexpr (tr::graph::kCacheLineBytes == 0) {
+        std::printf("    single-core profile: no cache lines to share, nothing to assert\n");
+    } else {
+        constexpr std::size_t kLine = tr::graph::kCacheLineBytes;
+        auto& reg = hp::registry();
+        const auto* base = reinterpret_cast<const unsigned char*>(&reg);
+        check(reinterpret_cast<std::uintptr_t>(base) % kLine == 0,
+              "the registry itself starts on a line, so its offsets are line offsets");
+
+        // The whole line `orphans` sits on, clipped to the registry so nothing past it is read.
+        const auto orphans_off =
+            static_cast<std::size_t>(reinterpret_cast<const unsigned char*>(&reg.orphans) - base);
+        const std::size_t lo = orphans_off - orphans_off % kLine;
+        const std::size_t hi = std::min(lo + kLine, sizeof(hp::registry_t));
+
+        std::vector<unsigned char> before(hi - lo);
+        std::vector<unsigned char> after(hi - lo);
+        std::memcpy(before.data(), base + lo, before.size());
+        const bool was_free = !reg.overflow_lock.flag.test_and_set(std::memory_order_acquire);
+        std::memcpy(after.data(), base + lo, after.size());
+        if (was_free) reg.overflow_lock.flag.clear(std::memory_order_release);
+
+        const auto flag_off = static_cast<std::size_t>(
+            reinterpret_cast<const unsigned char*>(&reg.overflow_lock.flag) - base);
+        std::printf("    orphans at +%zu (line %zu), overflow lock flag at +%zu (line %zu)\n",
+                    orphans_off, orphans_off / kLine, flag_off, flag_off / kLine);
+
+        check(was_free, "the lock was free, so this really did write it (never a no-op compare)");
+        check(std::memcmp(before.data(), after.data(), before.size()) == 0,
+              "taking the overflow lock modified no byte of the line orphans is read on");
+        check(flag_off / kLine != orphans_off / kLine,
+              "and the flag the lock writes is not on the line orphans is read on");
+    }
+}
+
+/**
+ * @brief The exit sweep must not free the lists of a participant that is still live (#898).
+ *
+ * The sweep is a static-destruction object, so the honest instrument is an **injected
+ * trigger**: `final_sweep_t`'s destructor *is* the whole of the behaviour under test, and
+ * running one on the stack runs exactly the production path at a moment where a worker thread
+ * is provably still claimed. The worker parks nodes, announces that it has, and then blocks —
+ * so the comparison below reads lists nobody is touching, which makes the check deterministic
+ * rather than a race the test hopes to win.
+ */
+void sweep_spares_a_live_participant() {
+    namespace hp = tr::graph::detail_hp;
+    std::printf("hazard_slot_t — the exit sweep leaves a live participant's lists alone:\n");
+
+    std::atomic<bool> parked{false};
+    std::atomic<bool> resume{false};
+    std::atomic<std::size_t> widx{hp::kNoIndex};
+    std::atomic<bool> reread_ok{false};
+    {
+        hazard_slot_t slot;
+        std::thread worker([&] {
+            for (std::uint64_t i = 0; i < 4; ++i) (void)slot.store(make_tagged(i + 1));
+            widx.store(hp::self().index());
+            parked.store(true);
+            while (!resume.load()) std::this_thread::yield();
+            for (std::uint64_t i = 0; i < 64; ++i) (void)slot.store(make_tagged(i + 100));
+            reread_ok.store(intact(slot.load()));
+        });
+
+        while (!parked.load()) std::this_thread::yield();
+        auto& reg = hp::registry();
+        const std::size_t idx = widx.load();
+        check(idx != hp::kNoIndex, "the worker claimed a domain index");
+        const hp::lists_t& l = reg.lists[idx];
+        const hp::node_t* const retired = l.retired;
+        const hp::node_t* const freelist = l.freelist;
+        const std::size_t retired_n = l.retired_n;
+        const std::size_t freelist_n = l.freelist_n;
+        check(retired != nullptr, "and parked nodes on it, so the sweep has something to take");
+
+        {
+            hp::final_sweep_t sweep;  // exactly what exit runs, while the worker is still live
+            (void)sweep;
+        }
+
+        // Asked through the same operation the sweep uses: an index a live participant owns
+        // must be unclaimable. Handed straight back if it somehow was not, so a failure here
+        // reports one defect instead of cascading into the worker's lists.
+        const bool stolen = hp::try_claim(reg, idx);
+        if (stolen) hp::release_claim(reg, idx);
+        check(!stolen, "the worker still owns its index after the sweep");
+        check(l.retired == retired && l.freelist == freelist && l.retired_n == retired_n &&
+                  l.freelist_n == freelist_n,
+              "and the sweep freed none of the nodes that index owns");
+
+        resume.store(true);
+        worker.join();
+        check(reread_ok.load(), "the worker publishes and reads correctly on the far side");
+    }
+    check(g_live.load() == 0, "and every rope is still reclaimed once the slot dies");
+}
+
+/**
+ * @brief The same defect as a race rather than a snapshot: sweeps against a thread that is
+ *        inside `store()` / `load()`, which is the shape ASan and TSan see.
+ *
+ * A plain build can only report a value that came back wrong; the sanitizer legs are what
+ * name the use-after-free on `l.freelist` between `acquire_node`'s read and its use.
+ */
+void sweep_races_a_live_writer(std::size_t sweeps) {
+    namespace hp = tr::graph::detail_hp;
+    std::printf("hazard_slot_t — %zu exit sweeps against a thread still publishing:\n", sweeps);
+    std::atomic<std::size_t> bad{0};
+    {
+        hazard_slot_t slot;
+        std::atomic<bool> stop{false};
+        std::thread worker([&] {
+            for (std::uint64_t i = 1; !stop.load(relaxed_); ++i) {
+                if (!slot.store(make_tagged(i))) bad.fetch_add(1, relaxed_);
+                if (!intact(slot.load())) bad.fetch_add(1, relaxed_);
+            }
+        });
+        for (std::size_t i = 0; i < sweeps; ++i) {
+            hp::final_sweep_t sweep;
+            (void)sweep;
+        }
+        stop.store(true, relaxed_);
+        worker.join();
+    }
+    check(bad.load() == 0, "every publish took and every read returned an intact value");
+    check(g_live.load() == 0, "and the run freed every rope");
 }
 
 /**
@@ -317,8 +555,15 @@ int main() {
     bounded_parking<sp_atomic_slot_t>("sp_atomic_slot_t", 20000);
     bounded_parking<hazard_slot_t>("hazard_slot_t", 20000);
 
+    claiming_writes_nothing_into_the_announcement_table();
     exhausted_registry();
     check(g_live.load() == 0, "the overflow run freed every rope too");
+    overflow_thread_stops_sweeping_the_claim_table();
+    check(g_live.load() == 0, "the over-capacity probe freed every rope too");
+    the_overflow_lock_does_not_dirty_the_orphan_line();
+
+    sweep_spares_a_live_participant();
+    sweep_races_a_live_writer(200);
 
     sp_atomic_never_declines();
     declined_publish();

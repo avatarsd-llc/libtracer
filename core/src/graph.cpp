@@ -634,7 +634,33 @@ std::uint64_t graph_t::ancestor_walks() const noexcept {
 graph_t::delivery_drops_t graph_t::delivery_drops() const noexcept {
     return {.no_target = drops_no_target_.load(std::memory_order_relaxed),
             .denied = drops_denied_.load(std::memory_order_relaxed),
-            .out_of_memory = drops_oom_.load(std::memory_order_relaxed)};
+            .out_of_memory = drops_oom_.load(std::memory_order_relaxed),
+            .fan_out_truncated = drops_truncated_.load(std::memory_order_relaxed)};
+}
+
+void graph_t::count_drop(drop_reason_t why, std::uint64_t n) noexcept {
+    // The one counting door (#896). Exhaustive on purpose — no default: a new reason
+    // must choose a counter here, it cannot fall through into silence, which is the
+    // exact failure this centralization is fixing.
+    switch (why) {
+        case drop_reason_t::NO_TARGET:
+            drops_no_target_.fetch_add(n, std::memory_order_relaxed);
+            return;
+        case drop_reason_t::DENIED:
+            drops_denied_.fetch_add(n, std::memory_order_relaxed);
+            return;
+        case drop_reason_t::OUT_OF_MEMORY:
+            drops_oom_.fetch_add(n, std::memory_order_relaxed);
+            return;
+        case drop_reason_t::FAN_OUT_TRUNCATED:
+            drops_truncated_.fetch_add(n, std::memory_order_relaxed);
+            return;
+    }
+}
+
+void graph_t::count_snapshot_drops(const vertex_t::snapshot_drops_t& drops) noexcept {
+    if (drops.out_of_memory != 0) count_drop(drop_reason_t::OUT_OF_MEMORY, drops.out_of_memory);
+    if (drops.truncated != 0) count_drop(drop_reason_t::FAN_OUT_TRUNCATED, drops.truncated);
 }
 
 void graph_t::bump_subtree_listeners(vertex_t* v, std::int32_t delta) {
@@ -750,8 +776,27 @@ void graph_t::set_subject_resolver(subject_resolver_t resolver) {
 
 bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right) const {
     if (!subject_resolver_) return true;  // enforcement disabled — the one hot-path check
-    const std::optional<subject_token_t> subject = subject_resolver_(caller);
-    if (!subject) return true;  // trusted caller (no subject) — e.g. a local API call
+    // The trusted channel is the EMPTY caller context — a local API call — settled HERE,
+    // before the resolver runs (#905). It used to be a resolver return value (`nullopt`),
+    // whose natural reading ("I cannot name this caller") meant "grant everything", WRITE_ACL
+    // and CREATE included. A remote op carries the inbound link's NAME, so it cannot spell
+    // this arm: the full-route form through `ensure_remote().caller`, and — since #974 — the
+    // COMPACT delivery fast path, whose two terminus write arms in `fwd_router_t::on_compact`
+    // pass `inbound_name` too. #974 was that second one missing: unattributed, it landed here
+    // and was waved through every ACE the first is checked against. Any further net-plane
+    // write path must carry a caller for the same reason — which is why
+    // `fwd_router_t::deliver_local` takes its own as a REQUIRED, undefaulted parameter.
+    if (caller.empty()) return true;
+    const std::expected<subject_token_t, wire::err_t> subject = subject_resolver_(caller);
+    if (!subject) return false;  // the resolver DENIED this caller — PERMISSION_DENIED
+    // The wildcard spelling is RESERVED in the subject-token space (#908): the wire has one
+    // spelling for a subject, so a principal that could BE `EVERYONE@` is indistinguishable
+    // from the wildcard ACE. Enforced HERE, which is the only site that invokes
+    // `subject_resolver_` at all, rather than left to every integrator to blacklist — and
+    // BEFORE the bearing-ancestor walk,
+    // so a misconfigured resolver is refused at an unguarded vertex too. Fail closed, exactly
+    // like the resolver's own error arm above.
+    if (is_reserved_subject(*subject)) return false;
     const auto bit = static_cast<std::uint32_t>(right);
     const std::uint64_t now = now_ns();
     // #361 §3: ACL state lives only on BEARING vertices (those with own ACEs). A bare
@@ -867,14 +912,14 @@ void graph_t::dispatch_edge_target(const edge_view_t& e, const rope_t& value) {
     // an UNCOUNTED drop is indistinguishable from a delivery that never had to happen, for
     // an operator and for a benchmark alike.
     if (target == nullptr) {
-        drops_no_target_.fetch_add(1, std::memory_order_relaxed);
+        count_drop(drop_reason_t::NO_TARGET, 1);
         return;
     }
     // Fan-in gate (#81, ADR-0026): the delivery is an ordinary write to the target,
     // gated by the TARGET's :acl WRITE right under the edge's stored caller context.
     // Denial drops this delivery.
     if (!acl_allows(target, e.caller, acl_right_t::WRITE)) {
-        drops_denied_.fetch_add(1, std::memory_order_relaxed);
+        count_drop(drop_reason_t::DENIED, 1);
         return;
     }
     // Delivery TERMINATES at the target (ADR-0051 / RFC-0007): apply exactly the
@@ -886,7 +931,7 @@ void graph_t::dispatch_edge_target(const edge_view_t& e, const rope_t& value) {
     // no dedup, no drain queue. An app wanting pure relay subscribes the consumer directly.
     rope_t clone;  // the NOTHROW delivery clone (#477) — on OOM this one leg drops
     if (!try_clone_rope(clone, value)) {
-        drops_oom_.fetch_add(1, std::memory_order_relaxed);
+        count_drop(drop_reason_t::OUT_OF_MEMORY, 1);
         return;
     }
     (void)store_value(target, std::move(clone));
@@ -967,7 +1012,12 @@ void graph_t::fan_out(vertex_t* v, const rope_t& value) {
                 ~reset_t() noexcept { b = false; }
             } reset{tls_busy};
             tls_buf.clear();  // keeps capacity — the amortised-zero-alloc reuse
-            const std::size_t n = v->snapshot_edges(inline_buf, tls_buf);
+            vertex_t::snapshot_drops_t drops;
+            const std::size_t n = v->snapshot_edges(inline_buf, tls_buf, drops);
+            // Fold BEFORE dispatching: these deliveries were abandoned inside the
+            // snapshot, and dispatch re-enters the graph (a callback may publish, and a
+            // nested publish must not be able to swallow this tally).
+            if (drops.any()) count_snapshot_drops(drops);
             if (tls_buf.empty())
                 for (std::size_t i = 0; i < n; ++i) dispatch_edge(inline_buf[i], value);
             else
@@ -980,7 +1030,9 @@ void graph_t::fan_out(vertex_t* v, const rope_t& value) {
     // Small fan-out (or a nested wide fan-out): fill the stack buffer; the empty local vector
     // never allocates unless the overflow path above genuinely spilled.
     std::vector<edge_view_t> heap_buf;
-    const std::size_t n = v->snapshot_edges(inline_buf, heap_buf);
+    vertex_t::snapshot_drops_t drops;
+    const std::size_t n = v->snapshot_edges(inline_buf, heap_buf, drops);
+    if (drops.any()) count_snapshot_drops(drops);
     if (heap_buf.empty())
         for (std::size_t i = 0; i < n; ++i) dispatch_edge(inline_buf[i], value);
     else  // count race (a subscriber was added between own_subs() and the lock): one alloc
@@ -1059,7 +1111,19 @@ result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, std::string_view c
         const bool can_notify = try_clone_rope(notify, value);
         const result_t<std::shared_ptr<const rope_t>> stored = store_value(v, std::move(value));
         if (!stored) return std::unexpected(stored.error());
-        if (can_notify) deliver_vertex(v, notify);
+        if (can_notify) {
+            deliver_vertex(v, notify);
+        } else {
+            // A failed clone sheds the ENTIRE fan-out, not one leg: no edge of this
+            // vertex is dispatched, and the write still returns success. Keeping the
+            // write successful is right (the handler ran; un-running it is impossible),
+            // but the drop is the widest one in the graph, so it is counted at the width
+            // it sheds — one per subscriber, never one per event. Counted here, at the
+            // frame that abandons the delivery, because no inner frame is entered at all.
+            // The ancestor legs a bubble would also have served are deliberately not
+            // counted: that axis and its instrumentation are #854's.
+            count_drop(drop_reason_t::OUT_OF_MEMORY, v->own_subs());
+        }
         clear_pending(v);  // eager delivery flushes any pending mark a prior assign left
         return {};
     }
@@ -1373,19 +1437,18 @@ namespace {
  * @brief Parse a SUBSCRIBER TLV into slot fields — the ONE parse every admission door shares
  *        (ADR-0049; the resolver's parallel subscriber_compact() parse is retired).
  *
- * Extracts
- * the first PATH child's target key (may stay empty — the wire door ignores it) and, from
- * the SETTINGS child, the `delivery_compact` opt-in (NAME "delivery_compact" VALUE u8,
- * RFC-0004 §E.1 / docs/reference/05) and the packed `delivery_policy` (NAME
- * "delivery_policy" VALUE u16, RFC-0022 §3.A) — the SAME child, so the per-subscription
- * policy introduced no new wire structure. Back-compat: a SUBSCRIBER carrying neither (or
- * an older parser) keeps the full-route delivery path and the all-zero default policy —
- * existing conformance vectors unaffected.
+ * Extracts the first PATH child's target key (may stay empty — the wire door ignores it) and,
+ * from the SETTINGS child, the `delivery_compact` opt-in (NAME "delivery_compact" VALUE u8,
+ * RFC-0004 §E.1 / docs/reference/05) and the packed `delivery_policy` (NAME "delivery_policy"
+ * VALUE u16, RFC-0022 §3.A) — the SAME child, so the per-subscription policy introduced no new
+ * wire structure. Back-compat: a SUBSCRIBER carrying neither (or an older parser) keeps the
+ * full-route delivery path and the all-zero default policy — conformance vectors unaffected.
+ * The SETTINGS walk is pair-consuming, the `net::config_reader_t` rule (#927): a forward-compat
+ * pair whose value reads `"delivery_policy"` must not bind the FOLLOWING child as the policy.
  *
  * The policy's reserved bits (6–15) are stored VERBATIM and never interpreted: §3.A says a
- * sender MUST write 0 and a receiver MUST ignore them, which is an ignore, not a reject —
- * so a future sender's bits round-trip through `:subscribers[]` instead of being refused by
- * a node that predates their meaning.
+ * sender MUST write 0 and a receiver MUST ignore them — an ignore, not a reject — so a future
+ * sender's bits round-trip through `:subscribers[]` rather than being refused by an older node.
  */
 void parse_subscriber_tlv(const tlv_t& sub, subscriber_t& s) {
     for (const tlv_t& child : sub.children) {
@@ -1395,14 +1458,15 @@ void parse_subscriber_tlv(const tlv_t& sub, subscriber_t& s) {
             if (auto k = wire::path_key(child)) s.target_key = try_make_target_key(*std::move(k));
         } else if (child.type == type_t::SETTINGS) {
             const std::vector<tlv_t>& q = child.children;
-            for (std::size_t i = 0; i + 1 < q.size(); ++i) {
-                if (q[i].type != type_t::NAME || q[i + 1].type != type_t::VALUE) continue;
+            for (std::size_t i = 0; i + 1 < q.size(); i += 2) {  // whole pairs, not every offset
+                if (q[i].type != type_t::NAME) break;  // key slot lost: stop, do not resync
                 const std::string_view key = detail::as_string_view(q[i].payload);
-                if (key == "delivery_compact" &&
-                    detail::load_le<std::uint8_t>(q[i + 1].payload) != 0)
+                const tlv_t& val = q[i + 1];
+                if (val.type != type_t::VALUE) continue;
+                if (key == "delivery_compact" && detail::load_le<std::uint8_t>(val.payload) != 0)
                     s.ensure_remote().delivery_compact = true;  // cold half only when opted in
                 else if (key == "delivery_policy")
-                    s.policy.bits = detail::load_le<std::uint16_t>(q[i + 1].payload);
+                    s.policy.bits = detail::load_le<std::uint16_t>(val.payload);
             }
         }
     }
@@ -1666,9 +1730,24 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
             if (!s.target_key) return std::unexpected(status_t::TYPE_MISMATCH);
             s.source_view = value;  // retain the SUBSCRIBER TLV zero-copy (refcount clone) so a
                                     // later :subscribers[] read ropes it into the REPLY (ADR-0035).
-            if (!caller.empty())    // the fan-in gate context for this edge's deliveries (#81);
-                                    // the empty (local) context needs no cold half
-                s.ensure_remote().caller.assign(caller);
+            // The fan-in gate context for this edge's deliveries (#81); the empty (local)
+            // context needs no cold half. It is ALSO what makes the edge reclaimable: this
+            // door leaves `subscriber_remote_t::link` empty (there is no return route to
+            // deliver over — the edge fans out to a LOCAL target), so
+            // `vertex_t::evict_link_edges` falls back to this context to find the link the
+            // edge was admitted over (#943). Do NOT "fix" that by assigning `link` here:
+            // `graph_t::dispatch_edge` gates its remote leg on `!e.link.empty()`, so a
+            // non-empty link would add a phantom `FWD{WRITE}` per publish carrying an EMPTY
+            // return route.
+            //
+            // Reachability, as of this commit: the ONE in-tree wire door
+            // (`op_resolve_walk.hpp`'s WRITE case) routes a remote `:subscribers[]` append
+            // bearing a SUBSCRIBER to `subscribe_wire` instead (its `remote_sub` test), and
+            // any other payload fails the TYPE_MISMATCH above — so the non-empty branch is
+            // reached only through the public `graph_t::write(v, field, value, caller)`,
+            // which an embedder may drive with an inbound link name. The `[N]` arm below has
+            // no such diversion and IS reached from the wire.
+            if (!caller.empty()) s.ensure_remote().caller.assign(caller);
             // The single admission step (ADR-0049): SUBSCRIBE gate → append → latch.
             // A field-write subscribe returns no host handle — discard the slot.
             if (const auto r = admit_subscriber(v, std::move(s), caller); !r)
@@ -1713,6 +1792,9 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
             parse_subscriber_tlv(*tlv, s);  // the shared door parse (ADR-0049)
             if (!s.target_key) return std::unexpected(status_t::TYPE_MISMATCH);
             s.source_view = value;  // retain the SUBSCRIBER TLV zero-copy, as the append arm does
+            // As in the append arm: the stored context is also the link this edge was
+            // admitted over, which is what `vertex_t::evict_link_edges` falls back to when
+            // the cold half carries no delivery link (#943).
             if (!caller.empty()) s.ensure_remote().caller.assign(caller);
             // Through the SAME admission door as an append, so a replace passes the
             // SUBSCRIBE gate — §D.1's "admitted through the same admission door".
@@ -1724,27 +1806,27 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
     }
 
     if (step0.name == "acl") {
-        // Store the :acl (#81, ADR-0018/0020): gate on WRITE_ACL — precisely the `admin`
-        // right — then validate + parse the typed ACEs (ADR-0050 parse_acl; strictness
-        // follows the selected policy — the default ALLOW-only profile rejects DENY /
-        // extra flags with TYPE_MISMATCH) and keep BOTH the raw bytes (served back
-        // verbatim by read_acl) and the parsed list (evaluated by acl_allows).
-        // The ACL is written WHOLE: `:acl` and nothing else. `set_acl` REPLACES, so a
-        // shape this branch does not resolve is not a harmless no-op — before this
-        // bound, `:acl.bogus` / `:acl[0]` / `:acl[]` all reached `set_acl` and silently
-        // replaced the vertex's entire access-control list. There is no member or slot
-        // addressing (an ACE is not separately writable), so any other shape names
-        // nothing: SCHEMA_NOT_FOUND, resolved BEFORE the gate like any unknown field.
+        // Store the :acl (#81, ADR-0018/0020): gate on WRITE_ACL — the `admin` right — then
+        // validate + parse the typed ACEs (ADR-0050 parse_acl) and store THAT LIST ALONE,
+        // no verbatim byte copy beside it (#907): read_acl re-encodes, so read-back cannot
+        // describe a policy other than the one acl_allows walks. The outer SHAPE is checked
+        // too, not just the type code — only `opt.pl` populates children, so a PRIMITIVE
+        // ACL parses as ZERO ACEs and CLEARS enforcement on a write that looks like it
+        // installs one; an EMPTY CONTAINER is the sanctioned clear. `set_acl` REPLACES, so
+        // an unresolved shape is no harmless no-op: before this bound `:acl.bogus` /
+        // `:acl[0]` / `:acl[]` all reached it and silently replaced the whole list. There is
+        // no member or slot addressing (an ACE is not separately writable), so any other
+        // shape names nothing: SCHEMA_NOT_FOUND, resolved BEFORE the gate like any field.
         if (field.steps.size() != 1 || !plain_step(step0))
             return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         if (!acl_allows(v, caller, acl_right_t::WRITE_ACL))
             return std::unexpected(status_t::PERMISSION_DENIED);
         const auto acl = wire::decode(value);
-        if (!acl || acl->type != type_t::ACL) return std::unexpected(status_t::TYPE_MISMATCH);
+        if (!acl || acl->type != type_t::ACL || !acl->opt.pl)
+            return std::unexpected(status_t::TYPE_MISMATCH);
         result_t<std::vector<ace_t>> aces = parse_acl(*acl);
         if (!aces) return std::unexpected(aces.error());
-        v->set_acl(value.bytes(), std::move(*aces));  // storing replaces; empty => no
-                                                      // restrictions
+        v->set_acl(std::move(*aces));  // storing replaces; empty => no restrictions
         {
             // Subtree-precise cache invalidation (ADR-0050 via the ADR-0057 child
             // links): every descendant's effective merge embeds this vertex's
@@ -1832,7 +1914,7 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
 result_t<void> graph_t::create_child(vertex_t* parent, const view_t& spec_value) {
     // Parse SPEC{ NAME "type" <sel>, NAME "name" <seg>, SETTINGS "config"? } — the
     // creation spec of docs/reference/05 §0x0E. The two NAMEs are positional pairs
-    // (NAME key, NAME/SETTINGS value), same shape as the qos_settings parse above.
+    // (NAME key, NAME/SETTINGS value), pair-consuming like net::config_reader_t (#927).
     const auto spec = wire::decode(spec_value);
     if (!spec || spec->type != type_t::SPEC) return std::unexpected(status_t::TYPE_MISMATCH);
 
@@ -1840,8 +1922,8 @@ result_t<void> graph_t::create_child(vertex_t* parent, const view_t& spec_value)
     std::span<const std::byte> child_name;
     const tlv_t* config = nullptr;
     const std::vector<tlv_t>& ch = spec->children;
-    for (std::size_t i = 0; i + 1 < ch.size(); ++i) {
-        if (ch[i].type != type_t::NAME) continue;
+    for (std::size_t i = 0; i + 1 < ch.size(); i += 2) {  // whole pairs, never every offset
+        if (ch[i].type != type_t::NAME) break;  // key slot lost: stop, do not resync (#927)
         const std::string_view key = detail::as_string_view(ch[i].payload);
         if (key == "type" && ch[i + 1].type == type_t::NAME) {
             type_sel = detail::as_string_view(ch[i + 1].payload);
@@ -2010,13 +2092,13 @@ result_t<view_t> graph_t::read_settings_app(vertex_t* v) const {
 }
 
 result_t<view_t> graph_t::read_acl(vertex_t* v) const {
-    // Serve back the raw :acl TLV bytes stored by field_write (heap-alloc + copy, like
-    // read_schema), or NOT_FOUND when none was set. Verbatim — the parsed-ACE evaluation
-    // lives in acl_allows; the READ_ACL gate runs in the caller (read(v, field, caller)).
-    const std::vector<std::byte> acl = v->acl_bytes();
+    // RE-ENCODE the stored ACEs (#907): read-back is a projection of the list acl_allows
+    // walks, never a copy that could disagree with it. An encoded ACL is never empty, so
+    // empty ⇒ no :acl was ever written — NOT_FOUND, distinct from an EMPTY container.
+    const auto acl = v->with_acl([](bool set, const std::vector<ace_t>& aces) {
+        return set ? encode_acl(aces) : std::vector<std::byte>{};
+    });
     if (acl.empty()) return std::unexpected(status_t::NOT_FOUND);
-    // `acl` is non-empty (guarded above); `nullopt` is exactly an alloc failure
-    // → BACKPRESSURE. One audited locus for the alloc/copy/over triplet.
     const auto out = view::over_bytes(acl);
     if (!out) return std::unexpected(status_t::BACKPRESSURE);
     return *out;
@@ -2154,6 +2236,12 @@ result_t<rope_t> graph_t::read_children_folded(vertex_handle_t vh) const {
     view::segment_ptr_t oseg = folded_point_header(hdr_backend, members_len);
     if (!oseg) return std::unexpected(status_t::BACKPRESSURE);
     rope_t out{view::view_t::over(std::move(oseg))};
+    // The member count is already in hand, so take the join as ONE sized growth instead of
+    // the geometric push_back ladder (a wide listing is 2 links per child). Best effort:
+    // on soft-fail the concat below still produces the right chain, it just pays the
+    // ordinary growth path. `concat` no longer reserves for us — that guard belongs to the
+    // caller that knows the count, not to every 1-link delivery clone (#1022).
+    static_cast<void>(out.try_reserve(members.link_count()));
     out.concat(members);  // empty members (no children) => header-only rope, len 0
     return out;
 }

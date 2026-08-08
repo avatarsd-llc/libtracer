@@ -97,6 +97,78 @@ void test_sbo_gate() {
           "spilled chain preserves link order");
 }
 
+/**
+ * @brief `r.concat(r)` — the self-aliasing gate (#915), in BOTH storage modes.
+ *
+ * `concat` walks `other`'s links while `append` mutates that same storage when
+ * `&other == this`. In INLINE mode the spill blanks every inline slot and zeroes
+ * `inline_n_` mid-walk, so a naive range-for produced `[a,b,a,{}]` — a zero-length
+ * link where `b` should be, i.e. wrong bytes on the wire. In HEAP mode `push_back`
+ * can reallocate the vector the walk points into (a dangling span, UB — the leg an
+ * ASan build reddens on). Both are checked here by the resulting link bytes, so the
+ * inline corruption is caught with no sanitizer at all.
+ */
+void test_self_concat() {
+    std::printf("rope_t self-concat aliasing (#915):\n");
+    std::array<std::byte, 8> buf{std::byte{0xC0}, std::byte{0xC1}, std::byte{0xC2},
+                                 std::byte{0xC3}, std::byte{0xC4}, std::byte{0xC5},
+                                 std::byte{0xC6}, std::byte{0xC7}};
+
+    // INLINE mode, inline_n_ == 2: the first append of the walk spills.
+    rope_t inl(byte_view(buf[0]));
+    inl.append(byte_view(buf[1]));
+    check(links_inline(inl), "precondition: the source chain is INLINE with two links");
+    inl.concat(inl);
+    check(inl.link_count() == 4, "inline self-concat yields four links");
+    check(inl.total_length() == 4, "inline self-concat yields four bytes (no empty link)");
+    bool inl_order = inl.link_count() == 4;
+    if (inl_order) {
+        const int want[4] = {0xC0, 0xC1, 0xC0, 0xC1};
+        for (std::size_t i = 0; i < 4; ++i) {
+            if (inl.links()[i].length != 1 ||
+                std::to_integer<int>(inl.links()[i].bytes()[0]) != want[i]) {
+                inl_order = false;
+            }
+        }
+    }
+    check(inl_order, "inline self-concat is [a,b,a,b], not the corrupted [a,b,a,{}]");
+
+    // HEAP mode: enough links that the push_back walk would outgrow the vector.
+    rope_t hp(byte_view(buf[0]));
+    for (std::size_t i = 1; i < 5; ++i) hp.append(byte_view(buf[i]));
+    check(!links_inline(hp), "precondition: the source chain is SPILLED to the heap");
+    hp.concat(hp);
+    check(hp.link_count() == 10, "heap self-concat yields ten links");
+    check(hp.total_length() == 10, "heap self-concat yields ten bytes");
+    bool hp_order = hp.link_count() == 10;
+    if (hp_order) {
+        for (std::size_t i = 0; i < 10; ++i) {
+            if (hp.links()[i].length != 1 ||
+                std::to_integer<int>(hp.links()[i].bytes()[0]) != 0xC0 + static_cast<int>(i % 5)) {
+                hp_order = false;
+            }
+        }
+    }
+    check(hp_order, "heap self-concat repeats the chain in order (no dangling-span garbage)");
+
+    // The self-concat guard must not disturb the ordinary cross-rope case.
+    rope_t lhs(byte_view(buf[0]));
+    rope_t rhs(byte_view(buf[1]));
+    rhs.append(byte_view(buf[2]));
+    const rope_t sum = lhs + rhs;
+    check(sum.link_count() == 3 && std::to_integer<int>(sum.links()[0].bytes()[0]) == 0xC0 &&
+              std::to_integer<int>(sum.links()[1].bytes()[0]) == 0xC1 &&
+              std::to_integer<int>(sum.links()[2].bytes()[0]) == 0xC2,
+          "cross-rope operator+ is unchanged");
+    const rope_t empty_src;
+    rope_t keep(byte_view(buf[3]));
+    keep.concat(empty_src);
+    check(keep.link_count() == 1, "concat of an empty rope is a no-op");
+    rope_t self_empty;
+    self_empty.concat(self_empty);
+    check(self_empty.link_count() == 0, "self-concat of an empty rope stays empty");
+}
+
 void test_accessors() {
     std::printf("rope_t only()/materialize() (the L4 value consumption accessors):\n");
     std::array<std::byte, 4> buf{std::byte{0xB0}, std::byte{0xB1}, std::byte{0xB2},
@@ -155,6 +227,40 @@ void test_nothrow_growth() {
     check(small.link_count() == 2 && links_inline(small),
           "two appends after the inline try_reserve stay INLINE (still no allocation)");
 
+    // The two storage states in which the inline no-op arm must NOT fire (#1065). It is
+    // guarded on "the chain is still inline AND stays inline", and each half owns a case
+    // that a reservation-shaped promise is made about, so each is asserted separately.
+    //
+    // (a) PARTIALLY-FILLED inline chain: one link held, two more asked for. 1 + 2 > kInline,
+    // so the reservation must spill and migrate NOW — returning a bare `true` would leave
+    // the caller's next append to take the throwing inline->heap spill it was told it had
+    // already paid for.
+    rope_t part;
+    part.append(byte_view(buf[0]));
+    check(part.try_reserve(2), "try_reserve(2) on a 1-link inline rope returns true");
+    check(!links_inline(part),
+          "a reservation that will not fit inline SPILLS at reserve time, not at append");
+    const view_t* part_anchor = part.links().data();
+    part.append(byte_view(buf[1]));
+    part.append(byte_view(buf[2]));
+    check(part.link_count() == 3, "the reserved appends on a partially-filled rope all land");
+    check(part.links().data() == part_anchor,
+          "appends after a partially-filled-rope reservation do not reallocate");
+
+    // (b) ALREADY-SPILLED chain: `inline_n_` is back to 0 once the chain lives on the heap,
+    // so a count that would fit the small buffer must still reach the allocator — the links
+    // are not in the small buffer any more.
+    rope_t sp;
+    for (std::size_t i = 0; i < 3; ++i) sp.append(byte_view(buf[i]));
+    check(!links_inline(sp), "three appends spill the chain (precondition)");
+    check(sp.try_reserve(2), "try_reserve(2) on an already-spilled rope returns true");
+    const view_t* sp_anchor = sp.links().data();
+    sp.append(byte_view(buf[3]));
+    sp.append(byte_view(buf[4]));
+    check(sp.link_count() == 5, "the reserved appends on a spilled rope all land");
+    check(sp.links().data() == sp_anchor,
+          "appends after a spilled-rope reservation do not reallocate the chain");
+
     // A normal reservation: the reserved appends never reallocate the heap chain.
     rope_t r;
     check(r.try_reserve(buf.size()), "try_reserve(normal count) returns true");
@@ -195,6 +301,7 @@ void test_nothrow_growth() {
 
 int main() {
     test_sbo_gate();
+    test_self_concat();
     test_accessors();
     test_nothrow_growth();
     if (g_failures == 0) {

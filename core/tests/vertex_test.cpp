@@ -9,7 +9,7 @@
  * Covers: store/read_stored (LKV + seq bump), the STREAM ring keep-last trim and the
  * RFC-0008 §E drain cursor, wait_for_change wake/timeout, snapshot_edges under a
  * concurrent add_edge storm (inline→heap crossover included), clear_edge, the
- * transient-local add_edge latch, and set_acl/acl_bytes/with_aces.
+ * transient-local add_edge latch, and set_acl/with_acl/with_aces.
  */
 
 #include "libtracer/vertex.hpp"
@@ -158,19 +158,23 @@ void test_edges_snapshot_clear_latch() {
 
     edge_snapshot_t buf;
     std::vector<edge_view_t> heap;
-    check(v.snapshot_edges(buf, heap) == 3 && heap.empty(),
+    vertex_t::snapshot_drops_t drops;
+    check(v.snapshot_edges(buf, heap, drops) == 3 && heap.empty(),
           "3 active edges snapshot into the inline buffer (no heap)");
+    check(!drops.any(), "an unpressured snapshot sheds nothing (#896)");
     buf[0].callback(buf[0].callback_ctx, *v.read_stored());
     check(hits == 1, "a snapshotted edge dispatches through its {fn, ctx} pair");
 
     check(v.clear_edge(0), "clearing an active slot reports true");
     check(!v.clear_edge(0), "re-clearing the same slot reports false");
     check(!v.clear_edge(99), "clearing an out-of-range slot reports false");
-    check(v.snapshot_edges(buf, heap) == 2, "a cleared edge vanishes from the snapshot");
+    check(v.snapshot_edges(buf, heap, drops) == 2, "a cleared edge vanishes from the snapshot");
+    check(!drops.any(), "a cleared edge is not a DROPPED delivery — nothing shed");
 
     for (int i = 0; i < 11; ++i) (void)v.add_edge(mk_edge());
-    const std::size_t n = v.snapshot_edges(buf, heap);
+    const std::size_t n = v.snapshot_edges(buf, heap, drops);
     check(n == 13 && heap.size() == 13, "a >kInlineFanout subscriber list overflows to the heap");
+    check(!drops.any(), "a heap-backed wide snapshot sheds nothing either");
 }
 
 void test_snapshot_under_concurrent_add() {
@@ -203,37 +207,50 @@ void test_snapshot_under_concurrent_add() {
     go.store(true, std::memory_order_release);
     edge_snapshot_t buf;
     std::vector<edge_view_t> heap;
+    vertex_t::snapshot_drops_t drops;
     for (int i = 0; i < 2000; ++i) {
-        const std::size_t n = v.snapshot_edges(buf, heap);
+        const std::size_t n = v.snapshot_edges(buf, heap, drops);
         if (n < last) monotonic = false;
         last = n;
     }
     for (std::thread& t : adders) t.join();
     check(monotonic, "concurrent snapshots see a monotonically growing active-edge count");
-    check(v.snapshot_edges(buf, heap) == kThreads * kPerThread,
+    check(v.snapshot_edges(buf, heap, drops) == kThreads * kPerThread,
           "every concurrently added edge is snapshotted after the storm");
 }
 
+/** @brief The presence bit @ref vertex_t::with_acl reports, lifted out of the callback. */
+bool acl_present(vertex_t& v) {
+    return v.with_acl([](bool present, const std::vector<ace_t>&) { return present; });
+}
+
+/** @brief How many ACEs @ref vertex_t::with_acl reports (0 for an absent ACL too). */
+std::size_t acl_ace_count(vertex_t& v) {
+    return v.with_acl([](bool, const std::vector<ace_t>& aces) { return aces.size(); });
+}
+
 void test_acl_verbs() {
-    std::printf("ACL verbs — set_acl / acl_bytes / with_aces:\n");
+    std::printf("ACL verbs — set_acl / with_acl / with_aces:\n");
     vertex_t v{role_t::STORED_VALUE, key_of({0x06}), {}};
-    check(v.acl_bytes().empty(), "no :acl set => empty raw bytes");
+    check(!acl_present(v), "no :acl set => with_acl reports absent");
     check(v.with_aces([](const std::vector<ace_t>& aces) { return aces.empty(); }),
           "no :acl set => empty ACE list");
 
-    const std::array<std::byte, 3> raw{std::byte{0x0A}, std::byte{0x01}, std::byte{0xFF}};
     ace_t ace;
     ace.access_mask = 0x3;
-    v.set_acl(raw, {ace});
-    check(v.acl_bytes().size() == 3 && v.acl_bytes()[2] == std::byte{0xFF},
-          "acl_bytes serves the stored raw bytes back verbatim");
+    v.set_acl({ace});
+    check(acl_present(v) && acl_ace_count(v) == 1,
+          "with_acl serves the presence bit and the stored ACE list together");
     check(v.with_aces([](const std::vector<ace_t>& aces) {
         return aces.size() == 1 && aces[0].access_mask == 0x3;
     }),
           "with_aces evaluates over the parsed ACE list under the lock");
 
-    v.set_acl({}, {});
-    check(v.acl_bytes().empty(), "storing replaces — an empty store clears the ACL");
+    // #907: an empty store replaces the list, but the ACL stays PRESENT — the empty
+    // container is a written policy that grants nothing, not the absence of one.
+    v.set_acl({});
+    check(acl_ace_count(v) == 0, "storing replaces — an empty store clears the ACE list");
+    check(acl_present(v), "an empty store leaves the :acl PRESENT (an ACL granting nothing)");
 }
 
 void test_bookkeeping_counters() {

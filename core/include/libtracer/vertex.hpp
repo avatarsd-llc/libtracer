@@ -29,6 +29,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -41,6 +42,28 @@
 #include "libtracer/view.hpp"
 
 namespace tr::graph {
+
+/**
+ * @brief A build that binds `%hazard_slot_t` must be on a target whose claim table is
+ *        lock-free (#899).
+ *
+ * This is the one place both halves of the question are visible: `%lkv_slot_t` (the binding,
+ * from the generated `%config.hpp`) and `detail_hp::claim_word_t` (the table's word, from
+ * `%lkv_slot.hpp`). Asserting it inside `%lkv_slot.hpp` instead is what broke both esp32c3
+ * legs — that header is pulled in by every consumer of a vertex, including `rv32imc` targets
+ * that have no atomic instructions at all and never bind `%hazard_slot_t`, and a
+ * `static_assert` is evaluated when the header is PARSED, not when the domain is emitted.
+ *
+ * A thread that failed to claim re-probes this table on every operation, so a probe that took
+ * a libatomic lock would serialize the very readers `%hazard_slot_t` exists to keep
+ * lock-free — the binding would be actively worse than the `sp_atomic_slot_t` default rather
+ * than merely no better.
+ */
+static_assert(!std::is_same_v<lkv_slot_t, hazard_slot_t> || detail_hp::kClaimWords == 0 ||
+                  std::atomic<detail_hp::claim_word_t>::is_always_lock_free,
+              "this target binds hazard_slot_t but cannot claim a hazard index without taking "
+              "a lock — bind sp_atomic_slot_t here, or build for a target with lock-free "
+              "atomics of pointer width");
 
 /**
  * @brief The terminal value of a vertex's retirement generation (RFC-0024 §4.4 rule 3).
@@ -258,9 +281,10 @@ enum class app_access_t : std::uint8_t {
  *        remote-writability, self-description, and current value of ONE application field
  *        under `:settings.app.` — one record, so the schema can never drift from the gate.
  *
- * The value and descriptor bytes are OPAQUE to the runtime (stored and served verbatim,
- * the `set_acl`/`acl_bytes` store-verbatim pattern): dtype/range validation is the
- * owner's, in its apply seam (@ref handlers_t::on_app_field_write) — the runtime
+ * The value and descriptor bytes are OPAQUE to the runtime (stored and served verbatim —
+ * the last store-verbatim control surface, now that `:acl` re-encodes from its parsed
+ * projection, #907): dtype/range validation is the owner's, in its apply seam
+ * (@ref handlers_t::on_app_field_write) — the runtime
  * validates only addressing (declared / undeclared, writability): one table lookup.
  */
 struct app_field_t {
@@ -1101,29 +1125,38 @@ struct vertex_ext_t {
      *         STREAM
      *         role ever appends. Null ⇒ empty ring. Guarded by the vertex mutex. */
     std::unique_ptr<std::deque<std::shared_ptr<const rope_t>>> history;
-    /** @brief Raw `:acl` TLV bytes, served back verbatim (#81-A, ADR-0018/0020); guarded by
-     *         the vertex mutex. Empty ⇒ no `:acl` set. */
-    std::vector<std::byte> acl;
-    /** @brief The `:acl` bytes parsed into core-subset ACEs at write time (#81); guarded by
-     *         the vertex mutex. `graph_t::acl_allows` evaluates these. */
+    /** @brief The `:acl` parsed into core-subset ACEs at write time (#81) — the ONLY stored
+     *         ACL state (#907); guarded by the vertex mutex. `graph_t::acl_allows` evaluates
+     *         this list and `graph_t::read_acl` RE-ENCODES it, so read-back is canonical by
+     *         construction and cannot describe something other than what is enforced. The
+     *         retired verbatim byte copy could: a shape that parsed to no ACEs cleared
+     *         enforcement while still reading back as a payload — ACEs apparently present
+     *         (⇒ closed) on an open vertex. */
     std::vector<ace_t> aces;
     /** @brief The ADR-0050 cached effective-ACE merge (own + INHERIT-flagged ancestor ACEs,
      *         pre-merged in evaluation order); guarded by the vertex mutex, rebuilt lazily
-     *         when @ref acl_cache_dirty is raised. Only the MERGE is cached, never a
-     *         verdict — expiry evaluates at check time against the caller's now. */
+     *         whenever `acl_gen` turns ODD. Only the MERGE is cached, never a verdict —
+     *         expiry evaluates at check time against the caller's now. */
     std::vector<ace_t> eff_aces;
-    /** @brief Raised ⇒ @ref eff_aces is stale (rebuild lazily; ADR-0050 cache protocol). */
-    std::atomic<bool> acl_cache_dirty{true};
-    /** @brief Monotonic `:acl`-mutation counter — bumped (ahead of @ref acl_cache_dirty) by
-     *         every writer that invalidates the merge (@ref vertex_t::set_acl,
-     *         @ref vertex_t::mark_acl_cache_dirty, placeholder revert). A lazy rebuild
-     *         (@ref vertex_t::with_effective_aces) snapshots it before the unlocked walk and,
-     *         back under the lock, publishes AND clears the dirty flag ONLY if the counter is
-     *         unchanged — so a rebuilder never publishes a stale/torn merge or clears over a
-     *         newer mark. 32-bit: wrapping needs 2^32 `:acl` writes DURING one rebuild walk
-     *         (physically impossible), and it packs into the padding after @ref
-     *         acl_cache_dirty so the merge cache costs no extra per-vertex bytes. */
-    std::atomic<std::uint32_t> acl_gen{0};
+    /** @brief `:acl`-invalidation counter AND cache-validity stamp in ONE word (ADR-0078):
+     *         ODD ⇒ `eff_aces` is stale, EVEN ⇒ it is the merge published for exactly this
+     *         value. Every invalidator (@ref vertex_t::set_acl, the placeholder revert,
+     *         @ref vertex_t::mark_acl_cache_dirty) advances it lock-free to the next ODD
+     *         value; a rebuilder publishes by CAS-ing the value it snapshotted BEFORE its walk
+     *         to that value + 1, so an invalidation landing anywhere in the rebuild defeats
+     *         the CAS — there is no second word whose store could be lost. Folding the stamp
+     *         into the counter keeps the gate's fast path at ONE atomic load, exactly what the
+     *         retired dirty flag cost; a separate stamp word measured ~1% on `acl-inherit-d4`.
+     *         32-bit: a wrap onto a stale-but-EVEN value needs 2^31 `:acl` writes on ONE
+     *         vertex, unreachable at control-plane rates. Starts at 1 — never built ⇒ stale. */
+    std::atomic<std::uint32_t> acl_gen{1};
+    /** @brief True once an `:acl` has been written here; guarded by the vertex mutex and read
+     *         only by the `:acl` read-back (#907). The one fact @ref aces cannot carry: an
+     *         EMPTY container ACL is the sanctioned clear-enforcement write, and it must keep
+     *         reading back as an empty ACL rather than as the NOT_FOUND of a vertex that was
+     *         never given one — a distinction the retired byte copy drew implicitly, by being
+     *         non-empty. Lands in the padding beside `%acl_gen`: zero extra bytes. */
+    bool acl_present = false;
     /**
      * @brief STREAM ring depth — how many entries @ref history retains (RFC-0022 §3.C).
      *
@@ -1161,10 +1194,10 @@ struct vertex_ext_t {
      *         fields and no apply seam keeps this null. Guarded by the vertex mutex,
      *         insert-only. Null ⇒ the closed `ENOTTY` default (pre-RFC `:schema` shape). */
     std::unique_ptr<app_field_group_t> app;
-    /** @brief STREAM drain cursor (RFC-0008 §E): the write seq at the last flush, so a
-     *         propagate drains only the entries appended since; guarded by the vertex
-     *         mutex. */
-    std::uint64_t last_flushed_seq = 0;
+    /** @brief STREAM drain cursor (RFC-0008 §E): ring APPENDS not yet flushed, so a
+     *         propagate drains only what was appended; guarded by the vertex mutex. NOT a
+     *         `write_seq_` delta (#925) — that bumps on a SHED append, fabricating a tail. */
+    std::uint64_t appended_since_flush = 0;
 
     /** @brief Free the live handler block. `handlers` is a raw atomic pointer (for
      *         lock-free reads) so it no longer self-frees; this closes that. Blocks parked
@@ -1188,7 +1221,7 @@ struct vertex_ext_t {
  * The public surface is a VERB interface — storage (@ref store / @ref read_stored),
  * readiness (@ref note_write / @ref wait_for_change / the seq cursors), edges
  * (@ref add_edge / @ref clear_edge / @ref snapshot_edges), and ACL state (@ref set_acl /
- * @ref with_aces / @ref with_effective_aces) — each verb taking the vertex mutex
+ * @ref with_acl / @ref with_aces / @ref with_effective_aces) — each verb taking the vertex mutex
  * internally (the LKV slot stays
  * lock-free). `graph_t` keeps what SPANS vertices: routing, ancestor walks, fan-out
  * dispatch legs, the effective-ACL walk, admission, and the field surface.
@@ -1564,6 +1597,7 @@ class vertex_t {
                     if (!e->history)  // first append allocates the ring (#388 lazy deque)
                         e->history = std::make_unique<std::deque<std::shared_ptr<const rope_t>>>();
                     e->history->push_back(sp);  // refcount bump — the caller keeps `sp`
+                    ++e->appended_since_flush;  // the drain counts APPENDS, not seq (#925)
                     const std::size_t keep = e->history_keep_last != 0 ? e->history_keep_last : 1;
                     while (e->history->size() > keep) e->history->pop_front();
                 }
@@ -1634,8 +1668,7 @@ class vertex_t {
      */
     void mark_flushed() {
         const std::lock_guard lock(vertex_stripe_of(this).m);
-        if (vertex_ext_t* e = ext_.load(std::memory_order_acquire))
-            e->last_flushed_seq = write_seq_.load(std::memory_order_relaxed);
+        if (vertex_ext_t* e = ext_.load(std::memory_order_acquire)) e->appended_since_flush = 0;
     }
 
     /**
@@ -1647,6 +1680,10 @@ class vertex_t {
      * drain are lost (bounded history). The snapshot growth is NOTHROW (#477): on OOM
      * the drain returns 0 WITHOUT advancing the cursor, so the entries re-drain on the
      * next covering flush — deferred, never lost, never an abort.
+     *
+     * @note Counts ring APPENDS, never a `write_seq_` delta (#925): that sequence is the
+     *       await/readiness cursor and bumps on a SHED append too, so the surplus would
+     *       re-take an ALREADY-FLUSHED entry — a drain removes nothing from the ring.
      * @return The number of entries drained (0 ⇒ nothing appended since the last flush,
      *         or the snapshot could not be allocated — retry on the next flush).
      */
@@ -1654,19 +1691,15 @@ class vertex_t {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         vertex_ext_t* e = ext_.load(std::memory_order_acquire);
         if (e == nullptr) return 0;  // no ring — nothing was ever appended
-        const std::uint64_t now = write_seq_.load(std::memory_order_relaxed);
-        if (now == e->last_flushed_seq) return 0;
-        const std::uint64_t n_new = now - e->last_flushed_seq;
-        if (!e->history) {  // seq advanced but no ring — nothing to drain
-            e->last_flushed_seq = now;
-            return 0;
-        }
-        const auto take =
-            static_cast<std::ptrdiff_t>(std::min<std::uint64_t>(n_new, e->history->size()));
-        // Nothrow-reserve BEFORE the cursor advance: a failed snapshot leaves the ring
+        // A non-zero count implies a ring: the counter is bumped only where the append
+        // lands (which creates it), and `retire` clears the two together.
+        if (e->appended_since_flush == 0 || !e->history) return 0;
+        const auto take = static_cast<std::ptrdiff_t>(
+            std::min<std::uint64_t>(e->appended_since_flush, e->history->size()));
+        // Nothrow-reserve BEFORE the cursor reset: a failed snapshot leaves the appends
         // marked un-flushed (deferred delivery), instead of a throwing assign (#477).
         if (!tr::detail::try_reserve(out, static_cast<std::size_t>(take))) return 0;
-        e->last_flushed_seq = now;
+        e->appended_since_flush = 0;
         out.assign(e->history->end() - take, e->history->end());  // within capacity
         return out.size();
     }
@@ -1862,9 +1895,22 @@ class vertex_t {
      *        link @p link — the per-vertex half of peer-departure eviction (RFC-0009
      *        §D, extended to link teardown).
      *
-     * Matches each active slot whose cold half stores @p link as the link the
-     * subscribe arrived on (`subscriber_remote_t::link`); a local edge (no cold
-     * half, or an empty link) never matches. Unlike @ref clear_edge, a matched slot
+     * Matches each active slot on the link it was ADMITTED over: the cold half's
+     * `subscriber_remote_t::link` when it carries one, and otherwise its
+     * `subscriber_remote_t::caller` — the two spellings the two admission doors
+     * leave behind for the SAME fact. `subscribe_wire` (the `SUBSCRIBE` op and the
+     * wire `:subscribers[]` append) stores both; `graph_t::field_write`'s
+     * `:subscribers[]` / `:subscribers[N]` arms store ONLY the context, because
+     * those edges deliver to a LOCAL target and have no return route to send over.
+     * Matching `link` alone therefore left a field-write-admitted edge permanently
+     * un-evictable — active, counted, and still fanning out to its target under a
+     * gate context whose session had departed (#943). ADR-0018 defines that context
+     * as this node's NAME for the inbound link a remote `FWD` arrived on, i.e. the
+     * same name space @p link is spelled in, so the fallback compares like with
+     * like. A local edge still never matches a real link name: a local door passes
+     * the EMPTY context and stores no cold half at all (the one exception,
+     * `parse_subscriber_tlv`'s `delivery_compact` opt-in, leaves both spellings
+     * empty). Unlike @ref clear_edge, a matched slot
      * is RECLAIMED, not just flagged: the stored SUBSCRIBER view, the return-route
      * refcount pin, the target key, and the whole `subscriber_remote_t` block are
      * released in place (the slot shell stays — §D.2 index stability — and
@@ -1884,7 +1930,14 @@ class vertex_t {
             std::vector<subscriber_t>& subs = b->slots;
             for (std::size_t i = 0; i < subs.size(); ++i) {
                 subscriber_t& s = subs[i];
-                if (!s.active || s.remote == nullptr || s.remote->link != link) continue;
+                if (!s.active || s.remote == nullptr) continue;
+                // The link this edge was ADMITTED over — see the declaration comment. Not
+                // `link` alone: a `graph_t::field_write` admission stores the inbound link
+                // ONLY as the gate context, so keying on the delivery link skipped it
+                // forever (#943). No copy: both members are `std::string`.
+                const std::string& admitted_over =
+                    s.remote->link.empty() ? s.remote->caller : s.remote->link;
+                if (admitted_over != link) continue;
                 subscriber_t reclaimed;       // an inert shell: no view, no route, no cold half
                 reclaimed.active = false;     // the slot is free for add_edge reuse
                 s = std::move(reclaimed);     // frees the old slot's retained state in place
@@ -1896,6 +1949,34 @@ class vertex_t {
         if (n != 0) scan_retired_edges(*b);
         return n;
     }
+
+    /**
+     * @brief What a snapshot DECLINED to hand back: the deliveries a vertex shed before
+     *        the graph could dispatch them (#896).
+     *
+     * `snapshot_edges` is allowed to come back short, and both ways it can are specified
+     * drops rather than aborts (#477). A drop nobody counts, though, is indistinguishable
+     * from a delivery that never had to happen — which is how a whole fan-out could be
+     * shed under memory pressure while `graph_t::delivery_drops()`, the one observable,
+     * read zero. `vertex_t` owns no counters (it is the storage layer, not the
+     * instrumentation layer): it reports the tally by reference and `graph_t::fan_out`
+     * folds it into the graph's per-cause counters at the frame that owns them.
+     *
+     * The two causes stay separate all the way out: an operator reading a rising
+     * `truncated` is looking at a fan-out wider than the inline snapshot on a heap that
+     * would not lend it a buffer, which is a capacity story, not the per-edge allocation
+     * failure `out_of_memory` reports.
+     */
+    struct snapshot_drops_t {
+        /** @brief Edges skipped because an owning copy (target key / link / caller) could
+         *         not be allocated — one delivery each. */
+        std::uint32_t out_of_memory = 0;
+        /** @brief Edges past the inline prefix, abandoned because the overflow buffer for a
+         *         wide fan-out could not be reserved — the capacity degrade. */
+        std::uint32_t truncated = 0;
+        /** @brief Did this snapshot shed anything? The ONE test a clean fan-out pays. */
+        [[nodiscard]] bool any() const noexcept { return (out_of_memory | truncated) != 0; }
+    };
 
     /**
      * @brief Snapshot every ACTIVE edge's dispatch view into caller storage — the
@@ -1911,6 +1992,8 @@ class vertex_t {
      * unreservable @p overflow degrades the snapshot to the first `kInlineFanout`
      * views in @p inline_buf (the rest of this delivery is dropped), and an edge
      * whose owning copies cannot be cloned is skipped (that one delivery dropped).
+     * Both are TALLIED into @p drops (@ref snapshot_drops_t) so the caller can report
+     * them; neither is silent any more (#896).
      * The small local fan-out (empty target/link/caller strings) stays allocation-
      * free end to end, so the hot path cannot even reach a probe.
      * **NO LOCK (#635).** The source is the vertex's PUBLISHED, immutable-after-publish edge
@@ -1929,19 +2012,25 @@ class vertex_t {
      * constant; only scaling does.
      * @param inline_buf The caller's raw stack buffer (cleared on entry).
      * @param overflow   The heap fallback for large fan-out (cleared on entry).
+     * @param drops      Out: what this snapshot SHED (@ref snapshot_drops_t), zeroed on
+     *                   entry. By reference, not optional — a caller that may not see the
+     *                   shed count is the #896 defect itself.
      * @return The number of views snapshotted (into whichever buffer was used).
      */
-    std::size_t snapshot_edges(edge_snapshot_t& inline_buf, std::vector<edge_view_t>& overflow) {
+    std::size_t snapshot_edges(edge_snapshot_t& inline_buf, std::vector<edge_view_t>& overflow,
+                               snapshot_drops_t& drops) {
         inline_buf.clear();
         overflow.clear();
+        drops = snapshot_drops_t{};
         edge_block_t* b = edges_.load(std::memory_order_acquire);
         if (b == nullptr) return 0;  // never subscribed: no block was ever allocated
         detail_ep::pin_t pin;
         if (!pin.valid()) {  // domain exhausted: the pre-#635 path, for these threads only
             const std::lock_guard lock(vertex_stripe_of(this).m);
-            return copy_published(b->pub.load(std::memory_order_acquire), inline_buf, overflow);
+            return copy_published(b->pub.load(std::memory_order_acquire), inline_buf, overflow,
+                                  drops);
         }
-        const std::size_t n = copy_published(pin.acquire(b->pub), inline_buf, overflow);
+        const std::size_t n = copy_published(pin.acquire(b->pub), inline_buf, overflow, drops);
         pin.release();  // BEFORE the caller dispatches — the invariant `pin_t` asserts
         return n;
     }
@@ -2037,15 +2126,14 @@ class vertex_t {
             detached = e->handlers.exchange(nullptr, std::memory_order_acq_rel);
             const std::lock_guard lock(vertex_stripe_of(this).m);
             e->history.reset();
-            e->acl.clear();
+            e->acl_present = false;
             e->aces.clear();
             e->eff_aces.clear();
-            e->acl_gen.fetch_add(1, std::memory_order_release);
-            e->acl_cache_dirty.store(true, std::memory_order_release);
+            invalidate_acl_cache(*e);  // ADR-0078: nothing here a rebuilder can clobber
             e->history_keep_last = 1;
             e->pin_payload_ratio = 0;
             e->app.reset();
-            e->last_flushed_seq = 0;
+            e->appended_since_flush = 0;  // cleared WITH `history` — the drain's invariant
         }
         // The edge block is stripe-guarded; clear it in its own critical section (both it and
         // the ext block may be absent). The graph has already adjusted descendant
@@ -2065,33 +2153,52 @@ class vertex_t {
     }
 
     /**
-     * @brief Store this vertex's `:acl`: the raw TLV bytes (served back verbatim by an
-     *        `:acl` read) plus the same bytes parsed into typed ACEs (what evaluation
-     *        walks). Storing replaces; empty ⇒ no restrictions.
+     * @brief Store this vertex's `:acl` as typed ACEs — the ONLY stored ACL state (#907).
+     *
+     * Storing replaces, and marks the ACL PRESENT: an empty list is the sanctioned
+     * clear-enforcement write (⇒ no restrictions) and still reads back as an empty ACL,
+     * not as the NOT_FOUND of a vertex that never had one. Takes no raw bytes, because
+     * there is no second copy to fall out of step with the list evaluation walks — an
+     * `:acl` read re-encodes from here.
      */
-    void set_acl(std::span<const std::byte> raw, std::vector<ace_t> aces) {
+    void set_acl(std::vector<ace_t> aces) {
         vertex_ext_t& e = ensure_ext();
         const std::lock_guard lock(vertex_stripe_of(this).m);
-        e.acl.assign(raw.begin(), raw.end());
         e.aces = std::move(aces);
+        e.acl_present = true;
         // Lock-free bearing flag (#361 §3): the graph's nearest-bearing-ancestor walk
         // reads it without touching any stripe. Publish under the lock, before the
-        // dirty flag, same ordering discipline as the ACE list itself.
+        // generation bump, same ordering discipline as the ACE list itself.
         set_flag(flag_t::OWN_ACES, !e.aces.empty());
-        // Publish-then-mark (ADR-0050 cache protocol): the new ACEs are visible
-        // under m_ BEFORE the generation bump and dirty flag are raised, so a rebuild
-        // that observes the flag always reads the new list (or leaves the flag set for
-        // the next one). Bump the generation ahead of the flag so a rebuild in flight
-        // over the OLD list detects the write at publish and declines to clear.
-        e.acl_gen.fetch_add(1, std::memory_order_release);
-        e.acl_cache_dirty.store(true, std::memory_order_release);
+        // Publish-then-invalidate (ADR-0050 cache protocol, ADR-0078 counter): the new ACEs
+        // are visible under m_ BEFORE the counter turns odd, so a rebuild that observes the
+        // new value always reads the new list. Turning it odd is the WHOLE invalidation —
+        // there is no second flag a concurrent rebuilder could clear over it — and it also
+        // defeats the publish CAS of any rebuild already in flight over the OLD list, which
+        // is what stops a stale merge being stamped current.
+        invalidate_acl_cache(e);
     }
 
-    /** @brief A copy of the stored raw `:acl` TLV bytes (empty ⇒ no `:acl` set). */
-    [[nodiscard]] std::vector<std::byte> acl_bytes() {
+    /**
+     * @brief Run @p f over this vertex's whole `:acl` state — the presence bit and the
+     *        parsed ACE list, read together under ONE hold — the read-back accessor (#907).
+     *
+     * The caller re-encodes the list it is handed (`graph::encode_acl` lives a layer up and
+     * cannot be named from here), which is what makes an `:acl` read canonical: it serves a
+     * projection of the SAME list `acl_allows` evaluates, so the two can no longer disagree.
+     * Presence and list travel together because a clear that landed between two accessors
+     * would otherwise be served as an ACL that no longer exists.
+     *
+     * @p f must not re-enter this vertex — the lock is held.
+     * @return Whatever @p f returns.
+     */
+    template <typename F>
+    auto with_acl(F&& f) -> decltype(f(false, std::declval<const std::vector<ace_t>&>())) {
+        static const std::vector<ace_t> kNoAces{};
         const std::lock_guard lock(vertex_stripe_of(this).m);
         const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
-        return e != nullptr ? e->acl : std::vector<std::byte>{};
+        if (e == nullptr) return f(false, kNoAces);
+        return f(e->acl_present, e->aces);
     }
 
     /**
@@ -2112,51 +2219,68 @@ class vertex_t {
     }
 
     /**
-     * @brief Mark this vertex's cached effective-ACE merge stale (ADR-0050).
+     * @brief Mark this vertex's cached effective-ACE merge stale (ADR-0050/0078).
      *
      * Raised by the graph on every `:acl` write for the WRITTEN vertex's whole
      * subtree (subtree-precise invalidation via the ADR-0057 child links —
      * wiring-frequency); @ref set_acl raises it for the written vertex itself.
      * The next @ref with_effective_aces on a marked vertex rebuilds lazily.
-     * @note Lock-free (a release store) — callable under the graph's map lock
+     * @note Lock-free (one uncontended CAS) — callable under the graph's map lock
      *       during the subtree walk without touching any vertex mutex.
      */
     void mark_acl_cache_dirty() noexcept {
         // No extension block ⇒ no cached merge exists to invalidate; a block created
-        // later starts dirty, so a concurrent first-gated-op cannot miss this mark
+        // later starts stale, so a concurrent first-gated-op cannot miss this mark
         // (its rebuild reads ancestor ACEs already published before this walk).
         if (vertex_ext_t* e = ext_.load(std::memory_order_acquire)) {
-            // Bump the generation ahead of the flag (release), so a lazy rebuild racing
-            // this mark from an ancestor :acl write detects the change at publish.
-            e->acl_gen.fetch_add(1, std::memory_order_release);
-            e->acl_cache_dirty.store(true, std::memory_order_release);
+            // ADR-0078: advancing the counter is the ENTIRE mark. The
+            // `acl_cache_dirty.store(true)` that used to follow it could be clobbered by a
+            // rebuilder clearing that same flag, pinning a stale merge as clean FOREVER (#880).
+            invalidate_acl_cache(*e);
         }
     }
 
+   private:
+    /**
+     * @brief Advance @p e's ACL-cache counter to the next ODD value — the whole of an
+     *        invalidation, and the only write to it outside a publish (ADR-0078).
+     * @note Lock-free and callable with NO vertex mutex held; that is the point, since the
+     *       subtree fan-out from an ancestor `:acl` write runs under only the graph's map lock.
+     */
+    static void invalidate_acl_cache(vertex_ext_t& e) noexcept {
+        // ALWAYS advance, even when the counter is already odd (already stale): a rebuilder
+        // that snapshotted the current odd value would otherwise still win its publish CAS and
+        // stamp a merge assembled BEFORE this mark as current. +1 from even, +2 from odd.
+        for (std::uint32_t g = e.acl_gen.load(std::memory_order_relaxed);;) {
+            if (e.acl_gen.compare_exchange_weak(g, g + 1 + (g & 1u), std::memory_order_release,
+                                                std::memory_order_relaxed))
+                break;
+        }
+    }
+
+   public:
     /**
      * @brief Evaluate against this vertex's cached effective-ACE merge, rebuilding
      *        it first iff it is stale — the ADR-0050 cached-merge verb.
      *
-     * When the dirty flag is raised the generation is SNAPSHOTTED, this vertex's own
-     * parsed ACEs are SNAPSHOTTED, and @p rebuild runs with the stripe lock RELEASED
-     * (#361 §2): the graph's rebuild walks the immutable parent chain taking each
-     * ancestor's @ref with_aces — one stripe lock at a time, never nested — so an
-     * ancestor sharing this vertex's stripe cannot self-deadlock, and no cross-stripe
-     * ordering exists at all. The merge is then stored under a re-acquired lock, the
-     * flag is lowered only if the generation is unchanged, and @p eval runs over the
-     * cached list.
+     * Staleness is ONE bit of ONE word (ADR-0078): `%vertex_ext_t::acl_gen` is odd. When it
+     * is, that odd value and this vertex's own parsed ACEs are SNAPSHOTTED and @p rebuild runs
+     * with the stripe lock RELEASED (#361 §2) — the graph's rebuild walks the immutable parent
+     * chain taking each ancestor's @ref with_aces one stripe lock at a time, never nested, so
+     * an ancestor sharing this vertex's stripe cannot self-deadlock. Back under the lock the
+     * rebuilder publishes by CAS-ing that snapshot to snapshot + 1 (even), then @p eval runs.
      *
-     * Race resolution (rebuild vs concurrent `:acl` write): the writer publishes ACEs
-     * and BUMPS the generation BEFORE raising the flag (@ref set_acl / graph subtree
-     * mark). The flag is lowered AFTER the fresh merge is published and only when the
-     * generation is unchanged (#425): so `dirty == false` under the lock always means a
-     * published merge — a concurrent reader that still sees the flag raised rebuilds
-     * rather than evaluating a not-yet-populated (empty, open-by-default) cache, which
-     * would transiently allow a denied caller. A write landing during the unlocked
-     * rebuild window advances the generation, so the rebuilder declines to clear and the
-     * possibly-stale merge is rebuilt on the NEXT check; a stale-forever cache is
-     * impossible. Concurrent rebuilds may interleave; each stores a valid merge of some
-     * recent state, and the flag/generation protocol converges the cache.
+     * Race resolution (rebuild vs concurrent `:acl` write): every invalidator — @ref set_acl,
+     * the placeholder revert, the subtree mark an ancestor `:acl` write fans out (@ref
+     * mark_acl_cache_dirty) — advances that one counter via `%invalidate_acl_cache` after
+     * publishing its ACEs, lock-free, and does NOTHING else. The recheck and the publish are
+     * therefore the SAME atomic operation, so an invalidation landing anywhere in the rebuild
+     * defeats the CAS. That is the whole of the coherence argument, and it is what the retired
+     * `{acl_gen, acl_cache_dirty}` pair could not give: there they were two ops, and a mark
+     * landing between them was overwritten by `dirty = false`, pinning a stale merge as clean
+     * FOREVER (#880) — a revoked policy still enforced. A failed CAS also discards a `merged`
+     * that may be TORN across the write rather than answering from it. The one premise left is
+     * that the counter does not WRAP onto a stale-but-even value (`%vertex_ext_t::acl_gen`).
      *
      * @param rebuild `std::vector<ace_t>(const std::vector<ace_t>& own)` — the
      *                fresh merge over a snapshot of this vertex's own ACEs; runs
@@ -2172,39 +2296,25 @@ class vertex_t {
     template <typename Rebuild, typename Eval>
     auto with_effective_aces(Rebuild&& rebuild, Eval&& eval)
         -> decltype(eval(std::declval<const std::vector<ace_t>&>())) {
-        vertex_ext_t& e = ensure_ext();  // gated eval caches its merge here (fresh ⇒ dirty)
+        vertex_ext_t& e = ensure_ext();  // gated eval caches its merge here (fresh ⇒ stale)
         std::unique_lock lock(vertex_stripe_of(this).m);
-        // Generation-gated rebuild (#425). `acl_gen` is bumped — ahead of the dirty flag,
-        // lock-free — by every invalidator of THIS vertex's merge: its own `set_acl`, the
-        // placeholder revert, and the subtree mark an ancestor `:acl` write fans out
-        // (`mark_acl_cache_dirty`). A rebuild snapshots the generation BEFORE the UNLOCKED
-        // ancestor walk (#361 §2 releases the stripe lock so an ancestor sharing this stripe
-        // cannot self-deadlock) and, back under the lock, verifies it is UNCHANGED. That one
-        // guard gates BOTH the publish and the clear:
-        //   - unchanged ⇒ no `:acl` write touched this merge across the walk, so `merged` is a
-        //     clean, current snapshot: publish it, then lower the flag. `dirty == false` under
-        //     the lock therefore ALWAYS means eff_aces holds a CURRENT published merge — closing
-        //     the original #425 window where a loser read the empty (open-by-default) cache
-        //     after the winner cleared the flag (a transient fail-open).
-        //   - changed ⇒ a write landed during the walk, so `merged` may be stale or torn:
-        //     DISCARD it and retry with the new generation. Publishing it would let a slow
-        //     rebuilder CLOBBER a fresh merge a faster one already published, and — since a
-        //     mismatched clear is a no-op, not a re-raise — leave `dirty == false` over a stale
-        //     merge: a PERSISTENT fail-open. Never publishing or clearing across a generation
-        //     change also means no `:acl` mark is ever lost (no stale-forever cache).
-        // A reader that finds the flag already clear takes the fast path — evaluate the current
-        // cached merge, no rebuild — and a rebuilder whose flag a peer clears mid-retry likewise
-        // falls through to that fresh cache.
-        while (e.acl_cache_dirty.load(std::memory_order_acquire)) {
+        while (true) {
+            // The fast path is ONE acquire load and a parity test — what the retired dirty
+            // flag cost, which is why the published stamp lives in this word rather than
+            // beside it (a second load measured ~1% on the acl-inherit-d4 gate bench).
             const std::uint32_t gen = e.acl_gen.load(std::memory_order_acquire);
+            if ((gen & 1u) == 0) break;             // even ⇒ the cached merge is current
             const std::vector<ace_t> own = e.aces;  // snapshot; rebuild runs unlocked
             lock.unlock();
             std::vector<ace_t> merged = rebuild(static_cast<const std::vector<ace_t>&>(own));
             lock.lock();
-            if (e.acl_gen.load(std::memory_order_acquire) != gen)
-                continue;  // an :acl write raced the walk — drop the stale merge, rebuild
+            std::uint32_t expected = gen;
+            if (!e.acl_gen.compare_exchange_strong(expected, gen + 1, std::memory_order_release,
+                                                   std::memory_order_relaxed))
+                continue;  // an :acl write raced the walk — drop the possibly-torn merge
+            // The word says FRESH before the merge lands, but the stripe lock spans both and
+            // every reader of eff_aces holds it, so no one can observe the gap.
             e.eff_aces = std::move(merged);
-            e.acl_cache_dirty.store(false, std::memory_order_release);
             break;
         }
         return eval(static_cast<const std::vector<ace_t>&>(e.eff_aces));
@@ -2629,10 +2739,15 @@ class vertex_t {
      * Bounded, allocation-light and provably non-re-entrant: every allocation here is NOTHROW
      * (#477), and the small local fan-out (empty target/link/caller strings) reaches no probe
      * at all — it is refcount clones and POD copies, exactly what it was under the lock.
+     *
+     * Both shed legs TALLY into @p drops at the site the delivery is actually abandoned —
+     * not at the caller's frame, which cannot tell a truncated snapshot from a short
+     * subscriber list (#896).
      */
     [[nodiscard]] static std::size_t copy_published(const edge_pub_t* p,
                                                     edge_snapshot_t& inline_buf,
-                                                    std::vector<edge_view_t>& overflow) noexcept {
+                                                    std::vector<edge_view_t>& overflow,
+                                                    snapshot_drops_t& drops) noexcept {
         if (p == nullptr) return 0;
         const bool use_heap =
             p->count > edge_snapshot_t::kCapacity && tr::detail::try_reserve(overflow, p->count);
@@ -2641,10 +2756,19 @@ class vertex_t {
         for (std::uint32_t i = 0; i < p->count; ++i) {
             if (!src[i].active.load(std::memory_order_acquire)) continue;
             // OOM fallback (reserve failed on a wide list): the inline prefix delivers,
-            // the remainder of this fan-out is dropped — never an abort.
-            if (!use_heap && n == edge_snapshot_t::kCapacity) break;
+            // the remainder of this fan-out is dropped — never an abort. Walk the tail
+            // rather than breaking blind: the abandoned edges are N deliveries, and a
+            // counter that said "1" for a truncated fan-out of N would be its own defect.
+            if (!use_heap && n == edge_snapshot_t::kCapacity) {
+                for (; i < p->count; ++i)
+                    if (src[i].active.load(std::memory_order_acquire)) ++drops.truncated;
+                break;
+            }
             edge_view_t e;
-            if (!try_copy_published(src[i], e)) continue;  // OOM: drop this one edge's delivery
+            if (!try_copy_published(src[i], e)) {
+                ++drops.out_of_memory;  // OOM: drop this one edge's delivery
+                continue;
+            }
             if (use_heap)
                 overflow.push_back(std::move(e));  // reserved above — no reallocation
             else
@@ -2869,7 +2993,7 @@ class vertex_t {
      * no second invalidation mechanism exists.
      *
      * Read lock-free off the delivery path while `revert_to_placeholder` writes it, hence
-     * atomic. Placed here rather than in @ref vertex_ext_t deliberately: the ext block is
+     * atomic. Placed here rather than in `%vertex_ext_t` deliberately: the ext block is
      * LAZILY allocated, so a generation living there would be absent for exactly the plain
      * leaves that retire most often. 32-bit wrap needs 2^32 retirements of one vertex.
      */

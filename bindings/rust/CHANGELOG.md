@@ -8,6 +8,79 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`fwd/fwd-reply-error-after-description` conformance vector**, shared with the C++ and
+  TypeScript cores and pinned here by `fwd_reply_error_after_description`. No behaviour change to
+  this crate: `reply_error_tlv` already scanned the STATUS's children for the first `ERROR`, which
+  is the ruled rule. What changed is that the rule is now **gated** rather than coincidental — the
+  TypeScript binding required the ERROR at `children[0]` and read this frame as code `0`, so the
+  two cores disagreed on which of a peer's errors were diagnosable at all (#878). Ablating this
+  crate's reader to the positional rule reddens the new test with the same `0 != 32`, so the gate
+  catches the drift whichever core drifts.
+
+  The ruling, recorded on `reply_error_tlv` and in `tests/conformance/HARNESS.md`: a reply's ERROR
+  is the **first `ERROR` child of the STATUS, at whatever position**. reference/05 §`0x09` pins no
+  order over a STATUS's children; RFC-0002 §C pins position only one level down, inside the ERROR.
+  Emitters are unaffected and still write the canonical order.
+
+### Fixed
+
+- **`structured::spec` emitted a SPEC no terminus accepts.** Both field values — `type` and
+  `name` — were wrapped in a `VALUE` (`0x01`) node where the wire form is a `NAME` (`0x02`).
+  The terminus matches each `(NAME key, value)` pair on the value's TYPE and skips any other,
+  so both fields were dropped, the catalog selector came up empty, and every SPEC this crate
+  built was refused with `INVALID_PATH` — a vertex could not be created from Rust at all.
+  Nothing here caught it: the drifted bytes decode and re-encode to themselves, so the
+  conformance harness scored them `ok`, and this crate's own reader accepted whatever payload
+  it found. Both halves are fixed, and both are now byte-pinned against shared vectors.
+
+### Added
+
+- **`spec/create-child` and `spec/conn-client-ws` conformance vectors**, shared with the C++
+  and TypeScript cores and pinned in `tests/conformance_vectors.rs`
+  (`spec_create_child`, `spec_conn_client_ws`, `spec_value_typed_fields_are_not_the_vector`).
+  The `spec/` category did not exist before, which is why the drift above went unnoticed.
+
+- **`structured::SettingValue` and `structured::settings_typed`** — build a SETTINGS record
+  whose values are typed per key: `SettingValue::Value(&[u8])` for an opaque `VALUE`
+  (integers little-endian, flags, blobs) and `SettingValue::Name(&str)` for a textual `NAME`.
+  A reader looks a key up BY type, so a string written as a `VALUE` is invisible where a
+  string is expected; before this, the crate could emit only the `VALUE` form and a
+  string-valued setting such as a connection's `kind` / `addr` was inexpressible.
+  `settings` is unchanged and is now the all-`Value` case of `settings_typed`.
+
+- **`structured::settings_str`** — read a SETTINGS key back as a string, present only when
+  the value child really is a `NAME`, mirroring the terminus's typed lookup.
+
+- **`text_name`** (re-exported at the crate root) — a `NAME` node for a KEY or a string field
+  VALUE that is not an address segment. `NAME` is the wire's only string node and spells both
+  things; `name` enforces the addressing grammar because an address segment must satisfy it,
+  while a string value routinely may not (an `addr` dotted quad contains `.`, which `name`
+  rejects).
+
+### Changed
+
+- **`structured::spec_type_name` now reads the value TYPE, not just the payload.** A `type` /
+  `name` field whose value child is not a `NAME` reads as `None`, matching the terminus's
+  typed lookup. Previously any payload was accepted, which is what let this crate round-trip
+  its own malformed SPEC green.
+
+- **`structured::spec` validates its two fields the way the terminus does:** `name` must be a
+  legal address segment (it becomes a path component), `type` need only be non-empty and
+  within the 64-byte budget (a catalog selector is never addressed). A `child_name` that no
+  terminus would accept is now refused at build time instead of on the wire.
+
+  Two divergences from the C++ terminus remain, both pre-existing and both disclosed in the
+  rustdoc rather than papered over — this release closes the **type** half of the parity, not
+  all of it. (1) The readers' **walk** differs: the terminus consumes strict `(NAME key,
+  value)` pairs, breaks at the first non-`NAME` key slot, and lets a later well-formed pair
+  win, while `named_fields` resynchronises at every offset and `named_field` takes the first
+  match — so a stray leading `VALUE` in a SPEC is fatal there and survivable here, and a
+  re-stated SETTINGS key resolves to opposite values. (2) `name`'s segment predicate rejects
+  `[` and `]`, which `valid_segment` deliberately admits as the address-index suffix form, so
+  the builder refuses a `child_name` a terminus would accept.
+
 ## [0.8.0] — 2026-08-06
 
 ### Changed

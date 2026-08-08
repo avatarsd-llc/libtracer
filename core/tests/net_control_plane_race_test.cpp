@@ -27,6 +27,15 @@
  *
  * It is a race detector's test: with TSan it reports, without TSan it is a smoke test that the
  * churn does not crash or lose children. Both are worth running, so it is not TSan-gated.
+ *
+ * `transport_vertex_control_plane_churn` below is the second half (#881), one layer up. The
+ * registry is not the only control-plane table RFC-0014 made runtime-mutable: the connection
+ * map and the module declarations are too, and two PUBLIC readers of them —
+ * `transport_vertex_t::set_link_state` and `::module_for` — took no lock while
+ * `make_connection` / `remove_connection` / `register_module` mutated them under `ctl_m_`.
+ * The deployment shape is what makes it reachable: liveness is reported from a TRANSPORT
+ * thread, creation arrives on a RECEIVE thread. That section drives exactly those two
+ * threads at each other.
  */
 
 #include <array>
@@ -34,6 +43,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <span>
 #include <string>
 #include <string_view>
@@ -42,14 +52,21 @@
 
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/graph.hpp"
+#include "libtracer/path.hpp"
 #include "libtracer/path_ref.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "libtracer/transport_vertex.hpp"
 
 namespace {
 
 using tr::graph::graph_t;
+using tr::graph::path_t;
+using tr::net::conn_role_t;
 using tr::net::fwd_router_t;
+using tr::net::link_state_t;
+using tr::net::transport_vertex_t;
+using tr::view::view_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
@@ -123,6 +140,161 @@ std::vector<std::byte> make_bound_fwd() {
 constexpr int kRounds = 4000;
 /** @brief Distinct names per writer. Small, so the churn keeps REBINDING rather than growing. */
 constexpr std::size_t kNamesPerWriter = 4;
+
+/** @name The #881 `transport_vertex_t` half */
+/**@{*/
+
+/** @brief An owned view over @p bytes — the value shape `graph_t::write` takes. */
+view_t owned(std::span<const std::byte> bytes) {
+    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
+    if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
+    return view_t::over(std::move(seg));
+}
+
+/**
+ * @brief `SPEC{ NAME "type" "client", NAME "name" <name>, SETTINGS "config"{ role=DIAL } }`.
+ *
+ * The creation frame written to `/net:children[]`, i.e. the PRODUCTION wiring: the graph's
+ * child-type catalog is what reaches `make_connection`, so the churn exercises the same entry
+ * a peer's CREATE does rather than a private back door (the RFC-0014 lesson).
+ */
+view_t conn_spec(std::string_view name) {
+    std::vector<std::byte> cfg;
+    tr::wire::emit_name(cfg, "role");
+    const std::byte r{static_cast<std::uint8_t>(conn_role_t::DIAL)};
+    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, std::span<const std::byte>(&r, 1));
+
+    std::vector<std::byte> body;
+    tr::wire::emit_name(body, "type");
+    tr::wire::emit_name(body, "client");
+    tr::wire::emit_name(body, "name");
+    tr::wire::emit_name(body, name);
+    tr::wire::emit_name(body, "config");
+    tr::wire::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true}, cfg);
+
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
+    return owned(out);
+}
+
+/** @brief Create/remove cycles the connection writer runs — bounded, so CI cannot hang. */
+constexpr int kConnRounds = 1500;
+/** @brief Connection names churned, all under one module. Small: the point is the rebind. */
+constexpr std::size_t kConnNames = 4;
+/** @brief The module every churned connection mounts under (`/net/m/<name>`). */
+constexpr std::string_view kChurnModule = "m";
+/** @brief The `kind` whose module declaration the declarer rewrites under the resolver. */
+constexpr std::string_view kChurnKind = "k";
+
+/**
+ * @brief #881 — the two public readers of `ctl_m_`-guarded state, driven at their writers.
+ *
+ * Four threads, two writer/reader pairs over ONE `transport_vertex_t`:
+ *
+ *   - **`set_link_state` vs create/remove.** The creator stages a link, writes the creating
+ *     SPEC and tears the connection down again, so `conns_` takes an `insert_or_assign` and an
+ *     `erase` per cycle; the liveness thread calls the PUBLIC `set_link_state` throughout.
+ *     Unfixed, that `find` walks the map mid-rebalance and can be handed the very node the
+ *     erase is destroying — the returned `conn_t::vertex` is then read after free.
+ *   - **`module_for` vs `register_module`.** The declarer rewrites an existing declaration's
+ *     module string in place AND periodically appends a new one, so the resolver's walk faces
+ *     both a mutating `std::string` and the vector reallocation that invalidates the walk
+ *     outright. The string rewrite is the dense signal; the append is the reported one.
+ *
+ * Both readers are the entry an application actually calls, so this fails at the surface the
+ * fix moved. With TSan it reports; without it, it is a smoke test that the churn completes and
+ * that both tables end in the state the writers left them.
+ */
+void transport_vertex_control_plane_churn() {
+    std::printf(
+        "\ntransport_vertex_t control plane: public liveness/module reads vs their writers "
+        "(#881)\n");
+
+    graph_t g;
+    fwd_router_t router(g);
+    transport_vertex_t net(g, router);
+
+    // Qualified keys are precomputed: the readers must spin on the LOOKUP, not on rebuilding
+    // a string, or the window they are meant to hit is buried under allocation.
+    std::vector<std::string> names, qualified;
+    for (std::size_t i = 0; i < kConnNames; ++i) {
+        names.push_back("c" + std::to_string(i));
+        qualified.push_back("net/" + std::string(kChurnModule) + "/" + names.back());
+    }
+    std::array<sink_t, kConnNames> links;
+
+    std::atomic<int> created{0}, removed{0};
+    const auto creator = [&] {
+        for (int r = 0; r < kConnRounds; ++r) {
+            for (std::size_t i = 0; i < kConnNames; ++i) {
+                // A staged link is CONSUMED by a successful creation, so it is re-staged every
+                // round; `provide_link` is itself a `ctl_m_` mutation.
+                net.provide_link(std::string(kChurnModule), names[i], links[i]);
+                if (g.write(path_t("/net:children[]"), conn_spec(names[i])))
+                    created.fetch_add(1, std::memory_order_relaxed);
+                if (net.remove_connection(qualified[i]))
+                    removed.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    };
+
+    const auto declarer = [&] {
+        for (int r = 0; r < kConnRounds; ++r) {
+            // Rewrite the SAME (kind, role)'s module in place — two names either side of the
+            // small-string boundary, so the assignment touches heap storage the resolver may
+            // be copying out.
+            (void)net.register_module(
+                (r & 1) ? "uplink" : "uplink-long-enough-to-leave-the-small-string-buffer",
+                std::string(kChurnKind), conn_role_t::DIAL);
+            // And grow the vector now and then: a push_back reallocates it under the walk.
+            if (r % 8 == 0)
+                (void)net.register_module("g", std::string(kChurnKind) + std::to_string(r),
+                                          conn_role_t::DIAL);
+        }
+    };
+
+    std::atomic<bool> stop{false};
+    const auto liveness = [&] {
+        while (!stop.load(std::memory_order_relaxed))
+            for (const std::string& q : qualified) (void)net.set_link_state(q, link_state_t::UP);
+    };
+    const auto resolver = [&] {
+        while (!stop.load(std::memory_order_relaxed))
+            (void)net.module_for(kChurnKind, conn_role_t::DIAL);
+    };
+
+    std::thread live(liveness);
+    std::thread resolve(resolver);
+    std::thread make(creator);
+    std::thread declare(declarer);
+    make.join();
+    declare.join();
+    stop.store(true, std::memory_order_relaxed);
+    live.join();
+    resolve.join();
+
+    // Non-vacuity for the instrument itself: a churn that created nothing races nothing. Every
+    // cycle must have both created and removed, or the two threads never overlapped on a
+    // populated table.
+    const int want = kConnRounds * static_cast<int>(kConnNames);
+    check(created.load() == want && removed.load() == want,
+          "every create/remove cycle ran — the liveness reader faced a populated table");
+
+    // The writers left both tables in a definite state, and the readers must not have
+    // disturbed it: the last act per name was a removal, and the declarer's last write wins.
+    int lingering = 0;
+    for (const std::string& q : qualified)
+        if (net.settings_of(q) != nullptr) ++lingering;
+    check(lingering == 0, "no connection outlived its removal (conns_ survived the churn intact)");
+
+    const auto declared = net.module_for(kChurnKind, conn_role_t::DIAL);
+    check(declared.has_value() &&
+              (*declared == "uplink" || *declared == "uplink-long-enough-to-leave-the-small-string-"
+                                                     "buffer"),
+          "module_for answers one of the churned declarations, not a torn string");
+}
+
+/**@}*/
 
 }  // namespace
 
@@ -200,6 +372,8 @@ int main() {
     // — a duplicate would inflate it even while every lookup above still succeeded.
     check(router.registry().live_size() == 1 + 2 * kNamesPerWriter,
           "and no name grew a second slot — the name→slot mapping stayed one-to-one");
+
+    transport_vertex_control_plane_churn();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");

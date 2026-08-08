@@ -13,10 +13,13 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <span>
 #include <string_view>
 #include <vector>
 
+#include "libtracer/byteorder.hpp"
 #include "libtracer/frame.hpp"
+#include "libtracer/tlv_emit.hpp"
 
 namespace {
 
@@ -54,6 +57,67 @@ ace_t ace(std::string_view subject, std::uint32_t mask, ace_type_t type = ace_ty
                  .expires_ns = expires_ns};
 }
 
+/** @brief The little-endian bytes of @p v in exactly @p width bytes (`width <= 8`). */
+std::vector<std::byte> le(std::uint64_t v, std::size_t width) {
+    std::vector<std::byte> out(width);
+    tr::detail::store_le(std::span<std::byte>(out), v, width);
+    return out;
+}
+
+/** @brief Append one `(NAME key, value)` pair to an ACE field body. */
+void add_pair(std::vector<std::byte>& entry, std::string_view key, tr::wire::type_t vt,
+              std::span<const std::byte> payload) {
+    tr::wire::emit_name(entry, key);
+    tr::wire::emit_tlv(entry, vt, tr::wire::opt_t{}, payload);
+}
+
+/** @brief Append a bare NAME key with no value — the trailing-unpaired-key shape. */
+void add_key(std::vector<std::byte>& entry, std::string_view key) {
+    tr::wire::emit_name(entry, key);
+}
+
+/** @brief Append a bare value with no key — the shape that desynchronizes the pair stream. */
+void add_val(std::vector<std::byte>& entry, tr::wire::type_t vt,
+             std::span<const std::byte> payload) {
+    tr::wire::emit_tlv(entry, vt, tr::wire::opt_t{}, payload);
+}
+
+/** @brief Wrap one ACE field body as the `ACL{ ACL{…} }` blob an `:acl` write carries. */
+std::vector<std::byte> one_ace(std::span<const std::byte> entry) {
+    std::vector<std::byte> body;
+    tr::wire::emit_tlv(body, tr::wire::type_t::ACL, tr::wire::opt_t{.pl = true}, entry);
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, tr::wire::type_t::ACL, tr::wire::opt_t{.pl = true}, body);
+    return out;
+}
+
+/**
+ * @brief Assert that @p wire is REJECTED with `TYPE_MISMATCH` under `Policy`.
+ *
+ * @note `wire::decode` borrows its input, so @p wire must outlive the call — passing a
+ *       temporary is fine (it lives to the end of the full expression).
+ */
+template <class Policy>
+void rejects(std::span<const std::byte> wire, std::string_view what) {
+    const auto acl = tr::wire::decode(wire);
+    if (!acl.has_value()) {
+        check(false, what);  // the blob must be structurally decodable to test the parse gate
+        return;
+    }
+    const auto parsed = parse_acl<Policy>(*acl);
+    check(!parsed.has_value() && parsed.error() == status_t::TYPE_MISMATCH, what);
+}
+
+/** @brief The ACEs @p wire parses to under `Policy`, or an empty list if it was rejected. */
+template <class Policy>
+std::vector<ace_t> parsed_aces(std::span<const std::byte> wire) {
+    const auto acl = tr::wire::decode(wire);
+    if (!acl.has_value()) return {};
+    const auto out = parse_acl<Policy>(*acl);
+    if (!out.has_value()) return {};
+    return *out;
+}
+
 }  // namespace
 
 int main() {
@@ -86,6 +150,33 @@ int main() {
         check(allow_only_policy_t::allows(bob, bit(acl_right_t::READ), aces, /*now=*/500) ==
                   acl_verdict_t::NO_MATCH,
               "an expired ACE grants nothing (now == expires_ns)");
+    }
+
+    // 2b. The wildcard spelling is RESERVED in the SUBJECT space too (#908). The wire has one
+    //     spelling for a subject token, so a principal that could BE "EVERYONE@" would be
+    //     indistinguishable from the wildcard; a subject that spells it is therefore not a
+    //     principal at all and matches NOTHING — not even the wildcard ACE it spells.
+    {
+        const std::vector<std::byte> everyone = as_bytes("EVERYONE@");
+        const std::vector<ace_t> wildcard{ace("EVERYONE@", bit(acl_right_t::READ))};
+        check(allow_only_policy_t::allows(everyone, bit(acl_right_t::READ), wildcard, kNow) ==
+                  acl_verdict_t::NO_MATCH,
+              "allow_only: a SUBJECT spelling EVERYONE@ matches nothing (#908)");
+        check(full_acl_policy_t::allows(everyone, bit(acl_right_t::READ), wildcard, kNow) ==
+                  acl_verdict_t::NO_MATCH,
+              "full: a SUBJECT spelling EVERYONE@ matches nothing (#908)");
+        // Ablation: the very same ACE list still grants an ordinary subject, so the two
+        // checks above measure the reserved SUBJECT and not a wildcard ACE that stopped
+        // working. A DENY ACE naming an ordinary subject is likewise still decisive.
+        check(allow_only_policy_t::allows(bob, bit(acl_right_t::READ), wildcard, kNow) ==
+                  acl_verdict_t::ALLOW,
+              "…while the same wildcard ACE still grants an ordinary subject");
+        const std::vector<ace_t> deny_bob{ace("bob", bit(acl_right_t::READ), ace_type_t::DENY)};
+        check(full_acl_policy_t::allows(bob, bit(acl_right_t::READ), deny_bob, kNow) ==
+                  acl_verdict_t::DENY,
+              "…and an ordinary subject still reaches a DENY ACE");
+        check(tr::graph::is_reserved_subject(everyone) && !tr::graph::is_reserved_subject(bob),
+              "is_reserved_subject names EVERYONE@ and nothing else tested here");
     }
 
     // 3. required_flags: an ancestor list only contributes INHERIT-flagged ACEs.
@@ -168,6 +259,279 @@ int main() {
         const auto acl = tr::wire::decode(wire);
         check(acl.has_value() && !parse_acl<full_acl_policy_t>(*acl).has_value(),
               "a flag bit beyond INHERIT is TYPE_MISMATCH even under full");
+    }
+
+    // 8. The #906 rejection-vector table: one blob per lenient arm parse_acl used to
+    //    admit. Each deviates from encode_acl's shape in EXACTLY ONE way, so a failing
+    //    row names the arm it covers rather than "some bad ACL is rejected".
+    {
+        using tr::wire::type_t;
+        const std::vector<std::byte> subject = as_bytes("alice");
+        const std::vector<std::byte> mask4 = le(bit(acl_right_t::READ), 4);
+
+        // 8a. A big-endian u16 `type` of 0x0001 (DENY): the low byte is 0x00, so a
+        //     width-tolerant load read it as ALLOW=0 and it passed the `t > 1` gate —
+        //     the DENY-to-ALLOW inversion, under the policy that evaluates DENY.
+        {
+            std::vector<std::byte> e;
+            add_pair(e, "type", type_t::VALUE,
+                     std::vector<std::byte>{std::byte{0x00}, std::byte{0x01}});
+            add_pair(e, "flags", type_t::VALUE, le(0, 1));
+            add_pair(e, "subject", type_t::VALUE, subject);
+            add_pair(e, "access_mask", type_t::VALUE, mask4);
+            rejects<full_acl_policy_t>(one_ace(e),
+                                       "BE-u16 `type` 0x0001 is not truncated to ALLOW");
+            rejects<allow_only_policy_t>(one_ace(e), "the same blob is rejected under allow_only");
+        }
+
+        // 8b. An EMPTY `type` payload loads as 0 = ALLOW: an absent value must not read
+        //     as the permissive one.
+        {
+            std::vector<std::byte> e;
+            add_pair(e, "type", type_t::VALUE, std::span<const std::byte>{});
+            add_pair(e, "subject", type_t::VALUE, subject);
+            add_pair(e, "access_mask", type_t::VALUE, mask4);
+            rejects<allow_only_policy_t>(one_ace(e), "an empty `type` payload is not ALLOW");
+        }
+
+        // 8c. A u64 `access_mask` was loaded and TRUNCATED to u32 — the high bytes
+        //     dropped silently while `has_mask` still counted the field as present.
+        {
+            std::vector<std::byte> e;
+            add_pair(e, "type", type_t::VALUE, le(0, 1));
+            add_pair(e, "subject", type_t::VALUE, subject);
+            add_pair(e, "access_mask", type_t::VALUE, le(0x0000'0001'0000'0001ull, 8));
+            rejects<allow_only_policy_t>(one_ace(e), "a u64 `access_mask` is not truncated to u32");
+        }
+
+        // 8d. A two-byte `flags`: the u8 field's declared width is one.
+        {
+            std::vector<std::byte> e;
+            add_pair(e, "type", type_t::VALUE, le(0, 1));
+            add_pair(e, "flags", type_t::VALUE, le(kAceInherit, 2));
+            add_pair(e, "subject", type_t::VALUE, subject);
+            add_pair(e, "access_mask", type_t::VALUE, mask4);
+            rejects<allow_only_policy_t>(one_ace(e), "an over-wide `flags` payload is rejected");
+        }
+
+        // 8e. An over-wide `expires_ns` whose low eight bytes are zero: the truncating
+        //     load read 0, and 0 means "never expires" — a time-limited grant made
+        //     permanent by a width the builder never emits.
+        {
+            std::vector<std::byte> wide(16);
+            wide[8] = std::byte{0x01};
+            std::vector<std::byte> e;
+            add_pair(e, "type", type_t::VALUE, le(0, 1));
+            add_pair(e, "subject", type_t::VALUE, subject);
+            add_pair(e, "access_mask", type_t::VALUE, mask4);
+            add_pair(e, "expires_ns", type_t::VALUE, wide);
+            rejects<allow_only_policy_t>(one_ace(e),
+                                         "an over-wide `expires_ns` does not truncate to never");
+        }
+
+        // 8f. `expires_ns` paired with a NON-VALUE TLV fell through the else-if chain and
+        //     left expires_ns = 0 — the same permanent grant, by a wrong value type.
+        {
+            std::vector<std::byte> e;
+            add_pair(e, "type", type_t::VALUE, le(0, 1));
+            add_pair(e, "subject", type_t::VALUE, subject);
+            add_pair(e, "access_mask", type_t::VALUE, mask4);
+            add_pair(e, "expires_ns", type_t::NAME, as_bytes("1000"));
+            rejects<allow_only_policy_t>(one_ace(e),
+                                         "a NAME-typed `expires_ns` is rejected, not skipped");
+        }
+
+        // 8g. An unknown NAME key was dropped, so a restrictive attribute a newer writer
+        //     meant to apply would evaluate more broadly than written.
+        {
+            std::vector<std::byte> e;
+            add_pair(e, "type", type_t::VALUE, le(0, 1));
+            add_pair(e, "subject", type_t::VALUE, subject);
+            add_pair(e, "access_mask", type_t::VALUE, mask4);
+            add_pair(e, "audit", type_t::VALUE, le(1, 1));
+            rejects<allow_only_policy_t>(one_ace(e), "an unknown ACE key is rejected, not ignored");
+        }
+
+        // 8h. A trailing unpaired NAME: the old `i + 1 < size` bound simply never reached
+        //     it, so a key whose value the sender believes it wrote vanished.
+        {
+            std::vector<std::byte> e;
+            add_pair(e, "type", type_t::VALUE, le(0, 1));
+            add_pair(e, "subject", type_t::VALUE, subject);
+            add_pair(e, "access_mask", type_t::VALUE, mask4);
+            add_key(e, "expires_ns");
+            rejects<allow_only_policy_t>(one_ace(e), "a trailing unpaired NAME key is rejected");
+        }
+
+        // 8i. A non-NAME where a key belongs: the every-offset scan resynchronized onto
+        //     the next NAME and parsed a body whose pairing is lost.
+        {
+            std::vector<std::byte> e;
+            add_val(e, type_t::VALUE, le(0, 1));
+            add_val(e, type_t::VALUE, le(0, 1));
+            add_pair(e, "type", type_t::VALUE, le(0, 1));
+            add_pair(e, "subject", type_t::VALUE, subject);
+            add_pair(e, "access_mask", type_t::VALUE, mask4);
+            rejects<allow_only_policy_t>(one_ace(e), "a non-NAME in a key slot is rejected");
+        }
+
+        // 8j. A duplicate `type`, DENY then ALLOW: last-wins silently dropped the DENY —
+        //     the inversion again, this time by repetition rather than by width.
+        {
+            std::vector<std::byte> e;
+            add_pair(e, "type", type_t::VALUE, le(1, 1));
+            add_pair(e, "type", type_t::VALUE, le(0, 1));
+            add_pair(e, "subject", type_t::VALUE, subject);
+            add_pair(e, "access_mask", type_t::VALUE, mask4);
+            rejects<full_acl_policy_t>(one_ace(e),
+                                       "a duplicate `type` does not last-wins to ALLOW");
+        }
+
+        // 8k. A duplicate `access_mask`, narrow then wide: last-wins WIDENED the grant.
+        {
+            std::vector<std::byte> e;
+            add_pair(e, "type", type_t::VALUE, le(0, 1));
+            add_pair(e, "subject", type_t::VALUE, subject);
+            add_pair(e, "access_mask", type_t::VALUE, mask4);
+            add_pair(e, "access_mask", type_t::VALUE, le(0xFFFFFFFFull, 4));
+            rejects<allow_only_policy_t>(one_ace(e), "a duplicate `access_mask` is rejected");
+        }
+
+        // 8l. An empty `subject` token — rejected before, and still rejected at the pair
+        //     rather than by the end-of-ACE required-field check.
+        {
+            std::vector<std::byte> e;
+            add_pair(e, "type", type_t::VALUE, le(0, 1));
+            add_pair(e, "subject", type_t::VALUE, std::span<const std::byte>{});
+            add_pair(e, "access_mask", type_t::VALUE, mask4);
+            rejects<allow_only_policy_t>(one_ace(e), "an empty `subject` token is rejected");
+        }
+
+        // 8m. The key-slot type check, ISOLATED. 8i's key-slot VALUE spells nothing, so
+        //     the unknown-key arm rejects it too and the row cannot tell the two checks
+        //     apart — deleting the key-slot check leaves 8i green. Here the VALUE in the
+        //     key slot spells a KNOWN key, so the unknown-key arm would wave it through:
+        //     only `ch[i].type != NAME` stands between this blob and a parsed ACE.
+        {
+            std::vector<std::byte> e;
+            add_val(e, type_t::VALUE,
+                    std::span<const std::byte>(reinterpret_cast<const std::byte*>("subject"), 7));
+            add_val(e, type_t::VALUE, subject);
+            add_pair(e, "type", type_t::VALUE, le(0, 1));
+            add_pair(e, "access_mask", type_t::VALUE, mask4);
+            rejects<allow_only_policy_t>(one_ace(e),
+                                         "a VALUE key slot spelling a KNOWN key is still rejected");
+        }
+
+        // 8n. The wrong-value-type rule, per numeric key. 8f pins it for `expires_ns`
+        //     only; ablating the same check in the `access_mask` arm left the suite
+        //     green. A NAME-typed value would be load_le'd as though it were a VALUE.
+        {
+            std::vector<std::byte> e;
+            add_pair(e, "type", type_t::VALUE, le(0, 1));
+            add_pair(e, "subject", type_t::VALUE, subject);
+            add_pair(e, "access_mask", type_t::NAME, mask4);
+            rejects<allow_only_policy_t>(one_ace(e),
+                                         "an `access_mask` paired with a NAME is rejected");
+        }
+
+        // 8o. Same rule, `type` — the key whose mis-read INVERTS the ACE.
+        {
+            std::vector<std::byte> e;
+            add_pair(e, "type", type_t::NAME, le(0, 1));
+            add_pair(e, "subject", type_t::VALUE, subject);
+            add_pair(e, "access_mask", type_t::VALUE, mask4);
+            rejects<allow_only_policy_t>(one_ace(e), "a `type` paired with a NAME is rejected");
+        }
+
+        // 8p. Same rule, `flags`.
+        {
+            std::vector<std::byte> e;
+            add_pair(e, "type", type_t::VALUE, le(0, 1));
+            add_pair(e, "flags", type_t::NAME, le(0, 1));
+            add_pair(e, "subject", type_t::VALUE, subject);
+            add_pair(e, "access_mask", type_t::VALUE, mask4);
+            rejects<allow_only_policy_t>(one_ace(e), "a `flags` paired with a NAME is rejected");
+        }
+
+        // 8q. Duplicate detection for the three keys 8j/8k do not cover. Each `has_*`
+        //     flag is its own guard, so pinning two of five leaves three ablatable.
+        {
+            std::vector<std::byte> e;
+            add_pair(e, "type", type_t::VALUE, le(0, 1));
+            add_pair(e, "flags", type_t::VALUE, le(kAceInherit, 1));
+            add_pair(e, "flags", type_t::VALUE, le(0, 1));
+            add_pair(e, "subject", type_t::VALUE, subject);
+            add_pair(e, "access_mask", type_t::VALUE, mask4);
+            rejects<allow_only_policy_t>(one_ace(e), "a duplicate `flags` is rejected");
+        }
+        {
+            std::vector<std::byte> e;
+            add_pair(e, "type", type_t::VALUE, le(0, 1));
+            add_pair(e, "subject", type_t::VALUE, subject);
+            add_pair(e, "subject", type_t::VALUE, subject);
+            add_pair(e, "access_mask", type_t::VALUE, mask4);
+            rejects<allow_only_policy_t>(one_ace(e), "a duplicate `subject` is rejected");
+        }
+        {
+            std::vector<std::byte> e;
+            add_pair(e, "type", type_t::VALUE, le(0, 1));
+            add_pair(e, "subject", type_t::VALUE, subject);
+            add_pair(e, "access_mask", type_t::VALUE, mask4);
+            add_pair(e, "expires_ns", type_t::VALUE, le(1, 8));
+            add_pair(e, "expires_ns", type_t::VALUE, le(0, 8));
+            rejects<allow_only_policy_t>(one_ace(e), "a duplicate `expires_ns` is rejected");
+        }
+    }
+
+    // 9. What the strict walk must still ACCEPT — the shapes the wire genuinely carries.
+    {
+        using tr::wire::type_t;
+        const std::vector<std::byte> mask4 = le(bit(acl_right_t::READ), 4);
+
+        // 9a. The `acl/acl-aces` conformance vector (and the Rust core's builder, and
+        //     reference/05 §0x0A's own layout) spell `access_mask` as u16 where
+        //     encode_acl spells it u32. A narrower payload zero-extends exactly, so both
+        //     name the same rights and both parse — rejecting the narrow one would make
+        //     this core reject its own published vector.
+        {
+            std::vector<std::byte> e;
+            add_pair(e, "type", type_t::VALUE, le(0, 1));
+            add_pair(e, "flags", type_t::VALUE, le(kAceInherit, 1));
+            add_pair(e, "subject", type_t::VALUE, as_bytes("peer-a"));
+            add_pair(e, "access_mask", type_t::VALUE, le(0x0003, 2));
+            const std::vector<ace_t> got = parsed_aces<allow_only_policy_t>(one_ace(e));
+            check(got.size() == 1 && got[0].access_mask == 0x0003 && got[0].flags == kAceInherit,
+                  "a u16 `access_mask` (the conformance-vector spelling) still parses");
+        }
+
+        // 9b. A NAME-typed `subject` is the OWNER@/EVERYONE@ spelling and stays legal —
+        //     and, being pair-consumed, is no longer re-read as the next key. Before the
+        //     fix this ACE bound `subject` to the FOLLOWING key's name ("access_mask")
+        //     instead of the token actually written.
+        {
+            std::vector<std::byte> e;
+            add_pair(e, "type", type_t::VALUE, le(0, 1));
+            add_pair(e, "subject", type_t::NAME, as_bytes("subject"));
+            add_pair(e, "access_mask", type_t::VALUE, mask4);
+            const std::vector<ace_t> got = parsed_aces<allow_only_policy_t>(one_ace(e));
+            check(got.size() == 1 && got[0].subject == as_bytes("subject"),
+                  "a NAME-typed subject binds the token written, not the next key");
+        }
+
+        // 9c. EVERYONE@ as a NAME-typed subject, the round-trip gate's named shape.
+        {
+            std::vector<std::byte> e;
+            add_pair(e, "type", type_t::VALUE, le(0, 1));
+            add_pair(e, "flags", type_t::VALUE, le(0, 1));
+            add_pair(e, "subject", type_t::NAME, as_bytes("EVERYONE@"));
+            add_pair(e, "access_mask", type_t::VALUE, mask4);
+            add_pair(e, "expires_ns", type_t::VALUE, le(42, 8));
+            const std::vector<ace_t> got = parsed_aces<allow_only_policy_t>(one_ace(e));
+            check(got.size() == 1 && got[0].subject == as_bytes("EVERYONE@") &&
+                      got[0].expires_ns == 42,
+                  "a NAME-typed EVERYONE@ subject with an expiry parses");
+        }
     }
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,

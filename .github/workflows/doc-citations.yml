@@ -14,6 +14,13 @@
 # It is deliberately its own workflow rather than a step inside core-ci: the check needs
 # no build, no toolchain and ~0.3 s, and hanging it off a 3-way build matrix would make a
 # doc-only failure wait on compilation.
+#
+# `tools/check_config_keys.py` rides along (#1012). It is the same GENRE of check — a
+# hand-maintained doc pointer that rots silently — over a different artifact: the
+# connection-config key tables in `docs/modules/connection-config.md`, derived from the
+# `tr::net::config_reader_t` accessor calls that actually read those keys. It needs the
+# same two trees (`docs/**`, `core/**`), the same zero build, and the same ~0.1 s, so a
+# second workflow would only duplicate this one's checkout.
 name: doc-citations
 
 on:
@@ -29,6 +36,8 @@ on:
       - "examples/**"
       - "tools/check_doc_citations.py"
       - "tools/tests/test_check_doc_citations.py"
+      - "tools/check_config_keys.py"
+      - "tools/tests/test_check_config_keys.py"
       - ".github/workflows/doc-citations.yml"
   pull_request:
     # Duplicated rather than a YAML anchor: GitHub Actions does not expand aliases.
@@ -42,6 +51,8 @@ on:
       - "examples/**"
       - "tools/check_doc_citations.py"
       - "tools/tests/test_check_doc_citations.py"
+      - "tools/check_config_keys.py"
+      - "tools/tests/test_check_config_keys.py"
       - ".github/workflows/doc-citations.yml"
   workflow_dispatch:
 
@@ -67,3 +78,9 @@ jobs:
         run: python3 -m unittest discover -s tools/tests -p "test_check_doc_citations.py" -v
       - name: Doc-citation gate (anchored file:line citations still resolve)
         run: python3 tools/check_doc_citations.py
+      # Same reasoning one artifact over: the key extractor is a derivation, and a
+      # derivation that under-reads makes the gate pass over an incomplete page.
+      - name: Config-key extractor unit tests
+        run: python3 -m unittest discover -s tools/tests -p "test_check_config_keys.py" -v
+      - name: Config-key gate (the connection-config page matches the source that reads the keys)
+        run: python3 tools/check_config_keys.py

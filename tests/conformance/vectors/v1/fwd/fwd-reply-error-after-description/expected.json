@@ -1,0 +1,12 @@
+{
+  "name": "fwd-reply-error-after-description",
+  "category": "fwd",
+  "hex": "0F408200010001000306403E00020003006E657402000800646F776E6C696E6B0200010061020003006E657402000800646F776E6C696E6B02000300636C69020008007265706C792D6570064012000200060073656E736F720200040074656D70010001000109401C0003000E006E6F20737563682076657274657808400600010002002000",
+  "total_bytes": 134,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "meaning": "FWD{ op=REPLY, dst=/net/downlink/a/net/downlink/cli/reply-ep, src=/sensor/temp, kind=ERROR, STATUS{ DESCRIPTION 'no such vertex', ERROR{ VALUE u16=0x0020 tr::path::not_found } } } — the fwd-reply-error frame with the STATUS's optional DESCRIPTION written BEFORE the ERROR: the reader's ERROR is the first ERROR child, at whatever position, never child[0]",
+    "note": "reference/05 §0x09 lists DESCRIPTION as a STATUS child and pins no order over the STATUS's children; RFC-0002 §C pins position only INSIDE the ERROR ('its first child is the identity'). A reader that demands the ERROR at child[0] reports code 0 here and loses the typed identity. Emitters stay canonical (ERROR first, as fwd-reply-error) — this vector is the acceptance rule, not a licence to emit."
+  }
+}

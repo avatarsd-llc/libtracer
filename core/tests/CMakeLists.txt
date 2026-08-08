@@ -48,6 +48,15 @@ target_link_libraries(fwd_frame_view_test PRIVATE libtracer)
 libtracer_test_warnings(fwd_frame_view_test)
 add_test(NAME fwd_frame_view COMMAND fwd_frame_view_test)
 
+# The shared SPEC-config SETTINGS walk (config_reader.hpp) — the pair-consuming scan
+# every transport config parser funnels through (#927): the value-read-as-a-key hijack
+# vectors, the forward-compat tolerance that must SURVIVE the fix (the opposite ruling
+# from the ACL parse), and the representative per-kind configs pinned unchanged.
+add_executable(config_reader_test config_reader_test.cpp)
+target_link_libraries(config_reader_test PRIVATE libtracer)
+libtracer_test_warnings(config_reader_test)
+add_test(NAME config_reader COMMAND config_reader_test)
+
 # Canonical-key NAME navigation (key_view.hpp) — the locus the graph walks funnel through.
 add_executable(key_view_test key_view_test.cpp)
 target_link_libraries(key_view_test PRIVATE libtracer)
@@ -86,6 +95,14 @@ target_link_libraries(path_ref_test PRIVATE libtracer)
 libtracer_test_warnings(path_ref_test)
 add_test(NAME path_ref COMMAND path_ref_test)
 
+# The wire grammar's total-encoded-size bound (grammar.hpp, #921) — pinned at
+# 32-bit-`size_t` width, because the truncation it closes is unreachable at the
+# host's 64-bit width and a host-only vector would be a vacuous guard.
+add_executable(grammar_bounds_test grammar_bounds_test.cpp)
+target_link_libraries(grammar_bounds_test PRIVATE libtracer)
+libtracer_test_warnings(grammar_bounds_test)
+add_test(NAME grammar_bounds COMMAND grammar_bounds_test)
+
 # Frame codec — nesting depth cap / iterative-parse contract (reference/01).
 add_executable(frame_test frame_test.cpp)
 target_link_libraries(frame_test PRIVATE libtracer)
@@ -96,6 +113,16 @@ add_executable(rope_test rope_test.cpp)
 target_link_libraries(rope_test PRIVATE libtracer)
 libtracer_test_warnings(rope_test)
 add_test(NAME rope COMMAND rope_test)
+
+# rope_cursor bounds preconditions (#916) — the debug-assert parity with
+# view_t::subview. The asserts are debug-only, so this TU forces NDEBUG off and
+# observes each abort in a forked child; POSIX-only (fork/waitpid).
+if(UNIX)
+    add_executable(rope_cursor_assert_test rope_cursor_assert_test.cpp)
+    target_link_libraries(rope_cursor_assert_test PRIVATE libtracer)
+    libtracer_test_warnings(rope_cursor_assert_test)
+    add_test(NAME rope_cursor_assert COMMAND rope_cursor_assert_test)
+endif()
 
 add_executable(rope_decode_test rope_decode_test.cpp)
 target_link_libraries(rope_decode_test PRIVATE libtracer)
@@ -151,13 +178,20 @@ target_link_libraries(transport_can_peers_test PRIVATE libtracer)
 libtracer_test_warnings(transport_can_peers_test)
 add_test(NAME transport_can_peers COMMAND transport_can_peers_test)
 
-# #55 (increment 2) — real-bus smoke test over a kernel vcan0 device. Self-skips
+# #55 (increment 2) — real-bus smoke test over a kernel vcan0 device, plus the #931
+# can_link_t seam-rule vectors (an injected RTR / 11-bit standard frame must not
+# cross ingress; an over-length classic frame must not cross egress). Self-skips
 # (clean exit) when vcan0 cannot bind, so it is harmless in the normal suite; the
 # dedicated can-vcan-e2e CI job sets vcan0 up so the SocketCAN path runs for real.
-add_executable(transport_can_vcan_test transport_can_vcan_test.cpp)
-target_link_libraries(transport_can_vcan_test PRIVATE libtracer)
-libtracer_test_warnings(transport_can_vcan_test)
-add_test(NAME transport_can_vcan COMMAND transport_can_vcan_test)
+# LINUX-ONLY: it speaks <linux/can.h> directly to inject the frames no well-formed
+# link would emit — platform selection is a build-system concern, never an in-source
+# #ifdef (the same doctrine that picks socketcan_link.cpp over its stub).
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_executable(transport_can_vcan_test transport_can_vcan_test.cpp)
+  target_link_libraries(transport_can_vcan_test PRIVATE libtracer)
+  libtracer_test_warnings(transport_can_vcan_test)
+  add_test(NAME transport_can_vcan COMMAND transport_can_vcan_test)
+endif()
 
 # #383 — owned in-flight TX storage for asynchronous can_link_t backends (the
 # TWAI UAF fix's host-testable half): ownership/exhaustion/reuse invariants,
@@ -230,6 +264,178 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     # teardown suite pins); every case here constructs an adopting link, so LeakSanitizer
     # would flag that deliberate leak. ASan's use-after-free detection stays on.
     set_tests_properties(httpd_ws_send_stall PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+
+    # #954 — SESSION IDENTITY on the TX path, on the same fake. The event neither suite
+    # above stages is a DESCRIPTOR being reused: the fake hands one socket number to two
+    # unrelated sessions in turn, while the first one's frames are still in the control
+    # queue. That is what makes "the send resolved its destination by bare fd" observable
+    # as a cross-session misdelivery rather than a code reading.
+    add_executable(httpd_ws_session_identity_test
+        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_session_identity_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
+    target_include_directories(httpd_ws_session_identity_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(httpd_ws_session_identity_test PRIVATE libtracer)
+    target_link_options(httpd_ws_session_identity_test PRIVATE
+        "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    libtracer_test_warnings(httpd_ws_session_identity_test)
+    add_test(NAME httpd_ws_session_identity COMMAND httpd_ws_session_identity_test)
+    # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
+    # every case here constructs an adopting link — same exemption as the two suites above.
+    set_tests_properties(httpd_ws_session_identity
+        PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+
+    # #944 — the TX WORK SLOT's lifetime, on the same fake. The event the three suites
+    # above never spend is the one the fake already models: an enqueue DROPPED inside
+    # lwIP while httpd_queue_work still returns ESP_OK (set_queue_capacity). The work
+    # item never runs, and it used to be the only thing that could release the slot it
+    # had claimed — four of those and the pool was dead for the rest of the boot.
+    add_executable(httpd_ws_tx_strand_test
+        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_tx_strand_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
+    target_include_directories(httpd_ws_tx_strand_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(httpd_ws_tx_strand_test PRIVATE libtracer)
+    target_link_options(httpd_ws_tx_strand_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    libtracer_test_warnings(httpd_ws_tx_strand_test)
+    add_test(NAME httpd_ws_tx_strand COMMAND httpd_ws_tx_strand_test)
+    # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
+    # every case here constructs an adopting link — same exemption as the suites above.
+    set_tests_properties(httpd_ws_tx_strand
+        PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+
+    # #961 — the FAN-OUT path's allocation, on the same fake. The instrument is what is
+    # new: the suite replaces the WHOLE global operator new/delete family (whole because a
+    # subset makes ASan abort on a mismatched pair), so "a broadcast allocates" is a number
+    # rather than a code reading. The destination snapshot used to be a std::vector, whose
+    # throwing allocator put an abort() ahead of every nothrow fallback on the push path.
+    add_executable(httpd_ws_fanout_alloc_test
+        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_fanout_alloc_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
+    target_include_directories(httpd_ws_fanout_alloc_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(httpd_ws_fanout_alloc_test PRIVATE libtracer)
+    target_link_options(httpd_ws_fanout_alloc_test PRIVATE
+        "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    libtracer_test_warnings(httpd_ws_fanout_alloc_test)
+    add_test(NAME httpd_ws_fanout_alloc COMMAND httpd_ws_fanout_alloc_test)
+    # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
+    # every case here constructs an adopting link — same exemption as the suites above.
+    set_tests_properties(httpd_ws_fanout_alloc
+        PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+
+    # #960 — the peer-departure eviction notifier's LOCK DISCIPLINE, on the same fake. The
+    # event none of the suites above stages is a departure notification held OPEN: the
+    # notifier parks the server task while another task tries to acquire the handler gate.
+    # That is what turns "an unbounded foreign callback runs under gate_t::m" into a number
+    # instead of a code reading, and it pins the other half at the same time — the
+    # destructor must still join a notification in flight, now through the gate's barrier
+    # rather than its mutex.
+    add_executable(httpd_ws_eviction_lock_test
+        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_eviction_lock_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
+    target_include_directories(httpd_ws_eviction_lock_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(httpd_ws_eviction_lock_test PRIVATE libtracer)
+    target_link_options(httpd_ws_eviction_lock_test PRIVATE
+        "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    libtracer_test_warnings(httpd_ws_eviction_lock_test)
+    add_test(NAME httpd_ws_eviction_lock COMMAND httpd_ws_eviction_lock_test)
+    # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
+    # every case here constructs an adopting link — same exemption as the suites above.
+    set_tests_properties(httpd_ws_eviction_lock
+        PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+
+    # #900 + #901 — the WS *CLIENT* link's receive path, on the same construction: the
+    # chip TU (integrations/esp-idf/libtracer/esp_ws_client_link.cpp) compiled against a
+    # host fake of esp_transport_ws's frame stream and esp_pthread's stack-sizing seam.
+    # Those are the two IDF facilities the contracts rest on — a `recv_stack` that never
+    # reaches esp_pthread_set_cfg never reaches the FreeRTOS task, and a read capped at
+    # the offered buffer is what splits ONE oversized frame across reads that each report
+    # the same fin. NO socket is interposed or opened here (contrast the httpd targets
+    # above, which wrap ::send): the fake's esp_transport_get_socket answers -1, keeping
+    # the suite faithful to the ruling that this plane never uses POSIX sockets (#947).
+    add_executable(esp_ws_client_recv_test
+        "${LIBTRACER_ESP_DIR}/tests/host/esp_ws_client_recv_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_esp_transport.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/esp_ws_client_link.cpp")
+    target_include_directories(esp_ws_client_recv_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(esp_ws_client_recv_test PRIVATE libtracer)
+    libtracer_test_warnings(esp_ws_client_recv_test)
+    add_test(NAME esp_ws_client_recv COMMAND esp_ws_client_recv_test)
+
+    # #952 — the WS CLIENT link's BOUNDED-BLOCKING discipline, on the same TU and the
+    # same fake: what a send may cost with the send serializer held, what a teardown may
+    # cost, and who may still be inside the transport when the handles are destroyed.
+    # The receive-path suite above scripts the fake's inbound frames; this one scripts
+    # its BLOCKING (a dial that hangs, a dial that fails, a write that parks), because
+    # every defect here is a wait nobody bounded. The use-after-free observable is the
+    # fake's handle LIVENESS: its parked write re-checks it on the way out, which is what
+    # makes "the handles were destroyed under a sender" a measurement rather than a code
+    # reading. Still no socket anywhere (#947). Its last case has a second oracle: it
+    # sends straight through a failing-dial cycle, where the recv thread rewrites the
+    # transport handles with no lock held, so the `tsan` leg judges whether the sender's
+    # handle read is behind the `connected_` acquire gate that publishes them.
+    add_executable(esp_ws_client_teardown_test
+        "${LIBTRACER_ESP_DIR}/tests/host/esp_ws_client_teardown_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_esp_transport.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/esp_ws_client_link.cpp")
+    target_include_directories(esp_ws_client_teardown_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(esp_ws_client_teardown_test PRIVATE libtracer)
+    libtracer_test_warnings(esp_ws_client_teardown_test)
+    add_test(NAME esp_ws_client_teardown COMMAND esp_ws_client_teardown_test)
+    # Three cases spend a real wait on purpose (a 600 ms held write, a 2.5 s hung dial,
+    # and two 1.5 s reconnect backoffs to straddle a pair of handle rebuilds).
+    # Generous against a loaded runner, and still far under CTest's default.
+    set_tests_properties(esp_ws_client_teardown PROPERTIES TIMEOUT 60)
+
+    # #962 — the TWAI link's TX BACKPRESSURE window, on the same construction: the chip
+    # TU (integrations/esp-idf/libtracer/twai_link.cpp) compiled against a host fake of
+    # esp_driver_twai's node API plus the FreeRTOS counting semaphore and queue it is
+    # built on (fake_twai.hpp). This is the first host target to compile that TU at all,
+    # leaving the TWAI link's own FULL policy untested on any host until now. It is NOT
+    # the first host coverage of the CAN plane: transport_can_vcan_test drives real
+    # socketcan_link_t instances over kernel vcan0 and has its own CI leg
+    # (.github/workflows/can-vcan-e2e.yml). The gap this closes is the TWAI link, not CAN.
+    #
+    # The fake's semaphore counts callers parked in xSemaphoreTake AT ONCE, which is what
+    # makes "the wait was serialized behind the write lock" observable rather than a code
+    # reading. No socket is interposed and none is opened: the TWAI plane has none.
+    add_executable(twai_backpressure_test
+        "${LIBTRACER_ESP_DIR}/tests/host/twai_backpressure_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_twai.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/twai_link.cpp")
+    target_include_directories(twai_backpressure_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(twai_backpressure_test PRIVATE libtracer)
+    libtracer_test_warnings(twai_backpressure_test)
+    add_test(NAME twai_backpressure COMMAND twai_backpressure_test)
+    # Wall-clock separations of 3-5x, on a suite that also parks threads on purpose.
+    # Generous against a loaded runner, and still far under CTest's default.
+    set_tests_properties(twai_backpressure PROPERTIES TIMEOUT 60)
 else()
     message(STATUS "httpd_ws_teardown_test skipped: integrations/esp-idf is not in this tree")
 endif()
@@ -242,11 +448,18 @@ add_test(NAME security_acl COMMAND security_acl_test)
 
 # ADR-0050 — the effective-ACL merge semantics (effective_acl_t, pure, synthetic ACE
 # lists) + the graph's cached merge: subtree-precise invalidation (ADR-0057 child
-# links) and the dirty-flag protocol under concurrent :acl rewrites (a TSan target).
+# links) and the ADR-0078 stamp protocol under concurrent :acl rewrites (a TSan target).
 add_executable(effective_acl_test effective_acl_test.cpp)
 target_link_libraries(effective_acl_test PRIVATE libtracer)
 libtracer_test_warnings(effective_acl_test)
 add_test(NAME effective_acl COMMAND effective_acl_test)
+
+# ADR-0078 (#880) — the ACL cache's published-generation stamp under a LOCK-FREE subtree
+# invalidation: an ancestor :acl rewriter racing a descendant's gated eval. A TSan target.
+add_executable(acl_cache_race_test acl_cache_race_test.cpp)
+target_link_libraries(acl_cache_race_test PRIVATE libtracer Threads::Threads)
+libtracer_test_warnings(acl_cache_race_test)
+add_test(NAME acl_cache_race COMMAND acl_cache_race_test)
 
 # #81-A — per-endpoint :acl structural storage (store/serve raw ACL TLV; no enforcement).
 add_executable(acl_test acl_test.cpp)
@@ -267,6 +480,14 @@ add_executable(mount_add_oom_test mount_add_oom_test.cpp)
 target_link_libraries(mount_add_oom_test PRIVATE libtracer)
 libtracer_test_warnings(mount_add_oom_test)
 add_test(NAME mount_add_oom COMMAND mount_add_oom_test)
+
+# `make_connection` under the same REFUSING allocator (#930): a connection whose link cannot
+# be wired into the router is rolled back rather than published as a live-looking dead
+# connection. Its own binary for the same whole-program reason as mount_add_oom_test.
+add_executable(conn_add_oom_test conn_add_oom_test.cpp)
+target_link_libraries(conn_add_oom_test PRIVATE libtracer)
+libtracer_test_warnings(conn_add_oom_test)
+add_test(NAME conn_add_oom COMMAND conn_add_oom_test)
 
 add_executable(mount_width_test mount_width_test.cpp)
 target_link_libraries(mount_width_test PRIVATE libtracer)
@@ -304,6 +525,15 @@ target_link_libraries(registry_teardown_test PRIVATE libtracer)
 libtracer_test_warnings(registry_teardown_test)
 add_test(NAME registry_teardown COMMAND registry_teardown_test)
 
+# #884 — the router's OWN per-child table under create/remove churn: the twin of the
+# registry teardown contract above, one layer out. Every pointer involved stays live, so the
+# failures this pins are wrong-tenancy resolutions and unbounded growth, NOT memory errors —
+# which is why it is an ordinary host test and its ASan value is the report it does NOT make.
+add_executable(child_rx_churn_test child_rx_churn_test.cpp)
+target_link_libraries(child_rx_churn_test PRIVATE libtracer)
+libtracer_test_warnings(child_rx_churn_test)
+add_test(NAME child_rx_churn COMMAND child_rx_churn_test)
+
 add_executable(retire_test retire_test.cpp)
 target_link_libraries(retire_test PRIVATE libtracer)
 libtracer_test_warnings(retire_test)
@@ -320,10 +550,13 @@ target_link_libraries(collect_test PRIVATE libtracer Threads::Threads)
 libtracer_test_warnings(collect_test)
 add_test(NAME collect COMMAND collect_test)
 
-# #82 — in-band :children[] SPEC vertex creation (ADR-0017).
+# #82 — in-band :children[] SPEC vertex creation (ADR-0017). Reads the shared `spec/`
+# conformance vectors (#877), so it needs LIBTRACER_VECTORS_DIR.
 add_executable(children_test children_test.cpp)
 target_link_libraries(children_test PRIVATE libtracer)
 libtracer_test_warnings(children_test)
+target_compile_definitions(children_test PRIVATE
+    LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 add_test(NAME children COMMAND children_test)
 
 # L4 fold, Slice 0 — folded :children projection is byte-identical to the materialized
@@ -378,6 +611,14 @@ add_executable(registry_rebind_race_test registry_rebind_race_test.cpp)
 target_link_libraries(registry_rebind_race_test PRIVATE libtracer)
 libtracer_test_warnings(registry_rebind_race_test)
 add_test(NAME registry_rebind_race COMMAND registry_rebind_race_test)
+
+# #914 — the router's five sink pairs are published as a unit: a setter racing the frame
+# path can no longer hand a new `fn` the previous sink's `ctx` (TSan vehicle + a functional
+# wrong-context detector on every build).
+add_executable(fwd_sink_race_test fwd_sink_race_test.cpp)
+target_link_libraries(fwd_sink_race_test PRIVATE libtracer Threads::Threads)
+libtracer_test_warnings(fwd_sink_race_test)
+add_test(NAME fwd_sink_race COMMAND fwd_sink_race_test)
 
 # #419 — the two-mount route: one dst crossing TWO net/<module>/<name> mounts, driven
 # through three in-process routers chained by loopback link pairs. The behavioural binding
@@ -556,6 +797,15 @@ target_link_libraries(fwd_compact_test PRIVATE libtracer)
 libtracer_test_warnings(fwd_compact_test)
 add_test(NAME fwd_compact COMMAND fwd_compact_test)
 
+# RFC-0004 §E.1/§F (#974) — a COMPACT delivery is ACL-gated under the INBOUND LINK's name,
+# like the full-route FWD{WRITE} it compacts. Both terminus write arms of on_compact (the
+# cold deliver_local one and the memoized warm one) are proven separately, each paired with
+# a positive control, plus the no-resolver default where nothing is enforced.
+add_executable(fwd_compact_acl_test fwd_compact_acl_test.cpp)
+target_link_libraries(fwd_compact_acl_test PRIVATE libtracer)
+libtracer_test_warnings(fwd_compact_acl_test)
+add_test(NAME fwd_compact_acl COMMAND fwd_compact_acl_test)
+
 # RFC-0004 §E.1 (#716) — the MID-CHAIN reconnect self-heal: clear_link sweeps every ingress
 # binding, on ANY link, whose downstream half crossed the cleared link, so an origin that never
 # saw the reconnect stops streaming onto a dead out-label. Asserts RECOVERY end to end over a
@@ -564,6 +814,15 @@ add_executable(fwd_reconnect_selfheal_test fwd_reconnect_selfheal_test.cpp)
 target_link_libraries(fwd_reconnect_selfheal_test PRIVATE libtracer)
 libtracer_test_warnings(fwd_reconnect_selfheal_test)
 add_test(NAME fwd_reconnect_selfheal COMMAND fwd_reconnect_selfheal_test)
+
+# #913 — a re-advertise cycle grows NOTHING: both ADVERTISE-emitting sites (the producer door
+# and the mid-chain forwarding swap) reuse the label already bound to an identical route, so a
+# reconnect loop cannot walk a link's 16-bit label space or its egress table. Counts distinct
+# labels and table entries across 51 cycles at every node of a two-hop chain.
+add_executable(fwd_readvertise_reuse_test fwd_readvertise_reuse_test.cpp)
+target_link_libraries(fwd_readvertise_reuse_test PRIVATE libtracer)
+libtracer_test_warnings(fwd_readvertise_reuse_test)
+add_test(NAME fwd_readvertise_reuse COMMAND fwd_readvertise_reuse_test)
 
 # RFC-0004 / ADR-0035 slice 4 (#136) — the PRODUCER auto fan-out: a plain graph.write to a
 # vertex with a remote subscriber delivers a full-route FWD{WRITE} (or auto-promoted COMPACT)
@@ -654,11 +913,38 @@ target_link_libraries(tcp_test PRIVATE libtracer)
 libtracer_test_warnings(tcp_test)
 add_test(NAME tcp COMMAND tcp_test)
 
+# #903 — the stream_endpoint_t full-write helpers under a REAL signal storm: a
+# socketpair with a small SO_SNDBUF, a deliberately slow reader, and SIGUSR1
+# (no SA_RESTART) fired at the writer thread, so a blocked send returns EINTR
+# mid-frame. Both write_all and write_all_iov must resume, not truncate.
+add_executable(write_all_eintr_test write_all_eintr_test.cpp)
+target_link_libraries(write_all_eintr_test PRIVATE libtracer)
+libtracer_test_warnings(write_all_eintr_test)
+add_test(NAME write_all_eintr COMMAND write_all_eintr_test)
+
+# #948 — the write-fault classification: a malformed send/sendmsg call (EOPNOTSUPP,
+# EINVAL) is OUR defect, not a dead socket, so it must be re-attempted and counted
+# rather than swallowed as a disconnect. Driven through the
+# tr::detail::write_fault_inject_hook seam, since a host kernel emits none of those
+# errnos here — a real-socket-only test would classify nothing.
+add_executable(write_fault_class_test write_fault_class_test.cpp)
+target_link_libraries(write_fault_class_test PRIVATE libtracer)
+libtracer_test_warnings(write_fault_class_test)
+add_test(NAME write_fault_class COMMAND write_fault_class_test)
+
 # #54 — transport_ws server socket layer (TCP accept + RFC6455 handshake + transport_t).
 add_executable(ws_transport_test ws_transport_test.cpp)
 target_link_libraries(ws_transport_test PRIVATE libtracer)
 libtracer_test_warnings(ws_transport_test)
 add_test(NAME ws_transport COMMAND ws_transport_test)
+
+# #872 — the WS DATA path is bounded by the injected (backend, max_frame) seam: an over-cap
+# declared length is refused off the frame HEADER (measured against the process peak RSS, not
+# inferred), fragments cannot sum past the cap, and backend exhaustion is counted backpressure.
+add_executable(ws_rx_bound_test ws_rx_bound_test.cpp)
+target_link_libraries(ws_rx_bound_test PRIVATE libtracer)
+libtracer_test_warnings(ws_rx_bound_test)
+add_test(NAME ws_rx_bound COMMAND ws_rx_bound_test)
 
 # transport_t seam conformance — ONE parameterized contract (send/receive, byte-identity,
 # scatter-gather, bidirectional, multi-frame, ADR-0042 owning view) over every
@@ -726,6 +1012,34 @@ target_compile_definitions(substrate_test_no_atomic PRIVATE
     LIBTRACER_NO_ATOMIC
     LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 add_test(NAME substrate_no_atomic COMMAND substrate_test_no_atomic)
+
+# #922 — the SINGLE-MEMBER module-set dispatch (LIBTRACER_BACKEND_SET_POOL_ONLY, the MCU
+# profile). Nothing else in the suite compiles that fold, which is how its destroy leg
+# shipped with an unconditional static_cast<pool_t*> while the `transfer` two lines below
+# it checked the tag. Like substrate_test_no_atomic this compiles the (few) library
+# sources it needs directly rather than linking libtracer.a — the library's own
+# backend_set.o carries the MULTI-member dispatch, so linking both would be a duplicate
+# definition of destroy_dispatch/transfer.
+add_executable(pool_only_dispatch_test
+    pool_only_dispatch_test.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/backend_set.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/mem_pool.cpp
+)
+target_include_directories(pool_only_dispatch_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_features(pool_only_dispatch_test PRIVATE cxx_std_23)
+libtracer_test_warnings(pool_only_dispatch_test)
+target_compile_definitions(pool_only_dispatch_test PRIVATE LIBTRACER_BACKEND_SET_POOL_ONLY)
+add_test(NAME pool_only_dispatch COMMAND pool_only_dispatch_test)
+
+# #923 — the nothrow try_* growth helpers must never let an allocation failure cross their
+# `noexcept` boundary. This TU OWNS global operator new (it must refuse specific
+# allocations, which `probe_fail_hook` cannot do — the hook gates the probe, not the
+# vector's own reserve), so it links the library like any other consumer but its
+# replacement operators bind process-wide. Threads: the race leg.
+add_executable(try_grow_race_test try_grow_race_test.cpp)
+target_link_libraries(try_grow_race_test PRIVATE libtracer Threads::Threads)
+libtracer_test_warnings(try_grow_race_test)
+add_test(NAME try_grow_race COMMAND try_grow_race_test)
 
 # ADR-0043 Phase A — the libtracer_quic MODULE harness (a consumer that talks QUIC
 # links the module target; nothing quic-related exists in a default configure):

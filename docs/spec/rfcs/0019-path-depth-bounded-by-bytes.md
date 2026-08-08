@@ -90,7 +90,7 @@ cliff. Uncapping the 32 has none — this RFC does not touch `kMountPeekMax`.
 
 Verified from source, not assumed. Nothing on the wire path counts segments:
 
-- `core/src/frame.cpp:166-179` (`wire::path_key`) sums child lengths only to reserve, then emits.
+- `core/src/frame.cpp:193-215` (`wire::path_key`) sums child lengths only to reserve, then emits.
   No cap test.
 - `core/src/op_resolve_walk.hpp:660-669` (`path_lookup_key`) rejects a non-`NAME` child and counts
   nothing.
