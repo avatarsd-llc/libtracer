@@ -629,6 +629,27 @@ class UnverifiableCitationTest(unittest.TestCase):
     cited file shifted lines".
     """
 
+    def test_an_ambiguous_non_source_basename_is_reported_not_silently_accepted(self):
+        """The same false green, one step earlier — the case the first fix left open.
+
+        `unverifiable_citations` reported only when the basename resolved to exactly ONE
+        tree file. An AMBIGUOUS one resolves to none, so it fell through and was accepted
+        in silence: `CMakeLists.txt:172` has 15 candidate carriers in this repo and kept
+        the gate at exit 0, which is verbatim the thing #1095 exists to stop.
+        """
+        found = cdc.unverifiable_citations("built at `CMakeLists.txt:172`")
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("ambiguous", found[0])
+        self.assertIn("CMakeLists.txt:172", found[0])
+
+    def test_an_unresolvable_basename_is_still_NOT_reported(self):
+        """The one stated exemption has to survive the fix above.
+
+        A token naming no file in the tree is an address or something outside the repo;
+        reporting it would make every `127.0.0.1:8080` in the docs an error.
+        """
+        self.assertEqual(cdc.unverifiable_citations("reach it at `127.0.0.1:8080`"), [])
+
     def test_a_line_cited_in_an_unenrolled_real_file_is_reported(self):
         found = cdc.unverifiable_citations("see `.github/workflows/quic.yml:12`")
         self.assertEqual(len(found), 1, found)

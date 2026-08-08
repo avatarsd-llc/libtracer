@@ -836,7 +836,8 @@ _ANY_PATH = r"(?:[A-Za-z0-9_./-]*/)?[A-Za-z0-9_][A-Za-z0-9_.-]*\.[A-Za-z0-9_]+"
 # alternative: with a backtick the catch-all could start one character before the document
 # branch could, so `` `docs/reference/07-host-embedding.md:79` `` matched the catch-all
 # instead — and a cited page silently stopped BREAKING the inheritance run. Measured on the
-# real doc set: five RFCs then dragged ~90 bare `:N` continuations onto stale source files.
+# real doc set: four RFCs and one README then dragged 61 bare `:N` continuations onto stale
+# source files (0019: 42, 0018: 14, 0024: 3, 0023: 1, tests/testbed/README.md: 1).
 CITATION_RE = re.compile(
     r"`?((?:[A-Za-z0-9_./-]*/)?[A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:" + _EXTS + r")):([\d,\-]+)`?"
     r"|`?((?:[A-Za-z0-9_./-]*/)?[A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:" + DOC_EXTS + r")):[\d,\-]+"
@@ -915,7 +916,9 @@ def unverifiable_citations(text: str) -> list:
     real file that is neither a source nor enrolled is reported here, and the author must
     enrol the file (@ref CITABLE_NON_SOURCE_PATHS, then pin it in @ref ANCHORS) or drop the
     line number. A token that names no file in the tree is NOT reported — it is an address
-    or a file outside the repo, and this tool has never claimed those.
+    or a file outside the repo, and this tool has never claimed those. An AMBIGUOUS basename
+    IS reported: it resolves to nothing, so leaving it out would reopen the same false green
+    one step earlier (`CMakeLists.txt:172` has 15 candidate carriers here).
     """
     out = []
     for m in CITATION_RE.finditer(text):
@@ -929,6 +932,16 @@ def unverifiable_citations(text: str) -> list:
             out.append(f"`{spelling}:{m.group('otherspec')}` cites a line in a file this gate "
                        f"cannot verify ({hits[0]}) — enrol it in CITABLE_NON_SOURCE_PATHS and "
                        f"pin it in ANCHORS, or drop the line number")
+        elif len(hits) > 1:
+            # An AMBIGUOUS non-source basename is the same false green, one step earlier: the
+            # spelling resolves to nothing, so the branch above never fires and the citation is
+            # accepted in silence. `CMakeLists.txt` has 15 carriers here, so `CMakeLists.txt:172`
+            # would have sailed through. Reported with the same remedy plus the disambiguation
+            # the source path already demands.
+            out.append(f"`{spelling}:{m.group('otherspec')}` cites a line in a file this gate "
+                       f"cannot verify, and `{spelling}` is an ambiguous basename "
+                       f"({', '.join(hits)}) — cite the full path AND enrol it in "
+                       f"CITABLE_NON_SOURCE_PATHS, or drop the line number")
     return out
 
 
@@ -1447,8 +1460,10 @@ def main(argv: list = None) -> int:
         failures += [f"{rel}: {e}" for e in dict.fromkeys(cited_locations(text, filemap)[1])]
         # The dated genres are exempt for the same reason they are never anchored: an ADR
         # or an RFC cites the tree AS IT STOOD, so demanding that its citations be
-        # verifiable today would demand rewriting the record. 28 of them name a Rust or
-        # TypeScript binding file by line, and every one is a description of history.
+        # verifiable today would demand rewriting the record. Of the line-numbered
+        # non-source citations living in those genres, TWENTY-SIX name a Rust or TypeScript
+        # binding file; the other two name an ESP-IDF CMakeLists and a conformance script.
+        # All of them describe history.
         if not is_historical(rel):
             failures += [f"{rel}: {e}" for e in dict.fromkeys(unverifiable_citations(text))]
     index = citation_index(docs, filemap)
