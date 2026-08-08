@@ -655,7 +655,7 @@ void test_spec_dial_trust_keys() {
     const auto plain =
         node_a.write(path_t("/net:children[]"),
                      conn_spec("client", "verify", tr::net::conn_role_t::DIAL, 47160, "127.0.0.1"));
-    check(!plain.has_value() && plain.error() == tr::graph::status_t::NOT_FOUND,
+    check(!plain.has_value() && plain.error() == tr::graph::status_t::TRANSPORT_DOWN,
           "A: a SPEC dial carrying no trust key is REFUSED — the peer cert does not validate");
     check(router_a.registry().by_name("net/webtransport-client/verify") == nullptr,
           "A: the refused dial leaves no endpoint behind");

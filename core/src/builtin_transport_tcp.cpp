@@ -19,7 +19,7 @@ namespace tr::net {
 
 void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_backend) {
     // Built-in `tcp`: DIAL = tcp_transport_t(addr, port) — a SYNCHRONOUS TCP connect at
-    // creation time (the peer's listener must be up, or the SPEC write fails NOT_FOUND);
+    // creation time (the peer's listener must be up, or the SPEC write fails TRANSPORT_DOWN);
     // LISTEN = transport_tcp_server(port), the multi-peer listener (the ws factory's
     // shape: a single-client deployment behaves exactly as the one-peer listener always
     // did). Length-prefix framing is internal to the transport. `keepalive` is ignored

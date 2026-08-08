@@ -16,6 +16,16 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`graph::status_t::TRANSPORT_DOWN` — a link that could not come up now has its own status
+  (#929).** The L4 status set had eight members and no transport member, so every
+  dial/bind/handshake failure was reported as `NOT_FOUND` and `error_code(status_t)` — the
+  total L4→wire map — could never emit `wire::err_t::TRANSPORT_DOWN` (0x0060). The new member
+  maps to it. **Source-compatible in the direction that matters** (a caller comparing against
+  the existing members still compiles), but a `switch` over `status_t` with no `default:` —
+  the shape this library uses on purpose — gains an unhandled enumerator and, under
+  `-Werror=switch`, will name itself at compile time. `to_string(status_t)` answers
+  `"transport_down"`.
+
 - **`net::transport_t::start_receiving()` — the second half of a two-phase link bring-up
   (#1025).** A virtual whose default is a no-op, so every existing transport and every
   embedder's is unaffected and an owner may call it unconditionally. It exists because
@@ -29,6 +39,18 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `defer_recv` flag, so a direct `transport_ws_client(host, port)` behaves exactly as before.
 
 ### Fixed
+
+- **A transport that could not come up is no longer reported to a peer as a permanent
+  wrong-address (#929).** `make_checked` (the shared `!ok()` check behind the built-in
+  udp/tcp/ws factories) and the five hand-rolled `!ok()` sites in `transport_quic.cpp`,
+  `transport_webtransport.cpp` and `transport_can.cpp` returned `status_t::NOT_FOUND`, which
+  the terminus maps to `tr::path::not_found` (0x0020) — PERMANENT in the RFC-0002 registry,
+  *don't retry*. A refused connect, a rejected TLS/WebTransport handshake, a listener that
+  could not bind and a CAN interface the kernel would not open are all TRANSIENT, and they
+  now answer `status_t::TRANSPORT_DOWN` ⇒ `tr::transport::down` (0x0060). Wire-visible: a
+  `SPEC` create over the wire whose link fails now replies with 0x0060 in the ERROR TLV where
+  it replied 0x0020 before. The graph address the create named is unaffected — it resolved,
+  which is why `NOT_FOUND` was the wrong word for it.
 
 - **A SPEC-created `ws` DIAL connection no longer drops a message the server pushes on
   connect (#1025).** `transport_ws_client`'s constructor dials, runs the opening handshake

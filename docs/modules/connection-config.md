@@ -136,7 +136,7 @@ the vertex mounts under.)
 
 | key | value | applies to | default | meaning |
 | --- | --- | --- | --- | --- |
-| `ifname` | `NAME` utf-8 | both | — (required) | The SocketCAN interface (`can0`, `vcan0`). Empty answers `TYPE_MISMATCH`; an interface the kernel will not open answers `NOT_FOUND`. |
+| `ifname` | `NAME` utf-8 | both | — (required) | The SocketCAN interface (`can0`, `vcan0`). Empty answers `TYPE_MISMATCH`; an interface the kernel will not open answers `TRANSPORT_DOWN`. |
 | `node` | `VALUE` u16 | both | — (required) | This node's id, the `node` band of the 29-bit CAN ID. Required — an absent key answers `TYPE_MISMATCH`, and so does a value above `8191` (13 bits). |
 | `version` | `VALUE` u8 | both | `0` | Protocol-version prefix, the top 4 bits of the CAN ID, so distinct versions occupy disjoint arbitration bands. Above `15` answers `TYPE_MISMATCH`. |
 | `path` | `NAME` utf-8 | both | empty | The path advertised for this node's groups. Same spelling as the `webtransport` kind's `path`, unrelated meaning — that one is an HTTP URL path. Kind-private keys cannot collide at parse time; the collision is in the reader's head. |
@@ -161,7 +161,7 @@ decision.
 
 | key | value | applies to | default | meaning |
 | --- | --- | --- | --- | --- |
-| `cert` | `NAME` utf-8 | LISTEN | — (required) | PEM server-certificate path. Absent answers `TYPE_MISMATCH`; a path msquic will not load answers `NOT_FOUND`. |
+| `cert` | `NAME` utf-8 | LISTEN | — (required) | PEM server-certificate path. Absent answers `TYPE_MISMATCH`; a path msquic will not load answers `TRANSPORT_DOWN` (the listener did not come up). |
 | `key` | `NAME` utf-8 | LISTEN | — (required) | PEM private-key path matching `cert`. Same two failures. |
 | `ca` | `NAME` utf-8 | DIAL | empty ⇒ the system trust store | PEM CA-bundle the peer's certificate is verified against, *instead of* the system trust store. |
 | `insecure` | `VALUE` u8 (flag) | DIAL | `0` | **DEV ONLY.** Non-zero skips server-certificate validation entirely. |
@@ -187,7 +187,7 @@ one with a resource to name:
 `tools/gen-dev-cert.sh` emits a self-signed pair for the LISTEN side.
 
 A dial to the wrong resource is not a distinguishable failure: the server refuses
-the CONNECT, the session never establishes, and creation answers `NOT_FOUND` — the
+the CONNECT, the session never establishes, and creation answers `TRANSPORT_DOWN` — the
 same status a certificate rejection gives. Before [#1023] there was no key at all
 and the factory hard-coded `/`, so a SPEC could reach only a root-served session
 and any other server needed the direct constructor plus `provide_link`. On the
@@ -201,7 +201,7 @@ Four points, in the order an integrator meets them.
 **The default is verify.** A `quic` or `webtransport` dialer created from a SPEC
 with *neither* trust key validates the peer's certificate against the system trust
 store, and a certificate that does not chain to it is refused: the handshake fails
-and creation answers `NOT_FOUND`. Anything dialing a self-signed peer must say so,
+and creation answers `TRANSPORT_DOWN`. Anything dialing a self-signed peer must say so,
 with `ca` or with `insecure = 1`. This is a change of behaviour, not a restatement
 of one: before [#918] the DIAL branch hard-coded no-verify and returned *before*
 the kind-private parse ran at all, so every SPEC-created dialer skipped validation

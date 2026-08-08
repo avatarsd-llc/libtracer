@@ -31,6 +31,16 @@ enum class status_t {
     SCHEMA_NOT_FOUND,  /**< @brief Field read/write on a vertex that doesn't expose it. */
     PERMISSION_DENIED, /**< @brief ACL rejected (ALLOW-only ACEs + INHERIT, core subset). */
     PATH_IN_USE,       /**< @brief Registration collided with an existing vertex. */
+    /**
+     * @brief A link could not be brought up — a dial, bind, or handshake that failed.
+     *
+     * The transport-plane counterpart of `NOT_FOUND`, and deliberately NOT the same member:
+     * `NOT_FOUND` says *this address does not resolve*, which the wire registry reads as
+     * PERMANENT, while a refused connect or a listener that could not bind is TRANSIENT —
+     * retrying it may succeed (`wire::err_t::TRANSPORT_DOWN`, `wire::err_disposition_t`).
+     * Collapsing the two told a peer to stop retrying a link that would have come back (#929).
+     */
+    TRANSPORT_DOWN,
 };
 
 /**
@@ -75,6 +85,8 @@ using result_t = std::expected<T, status_t>;
             return "permission_denied";
         case status_t::PATH_IN_USE:
             return "path_in_use";
+        case status_t::TRANSPORT_DOWN:
+            return "transport_down";
     }
     std::unreachable();
 }
