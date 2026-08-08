@@ -124,6 +124,29 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Fixed
 
+- **`graph_t::evict_link_edges("")` / `vertex_t::evict_link_edges("")` now match nothing and
+  return 0, instead of reclaiming local `delivery_compact` edges (#1056).** The predicate keys
+  a slot on the link it was **admitted over** — `subscriber_remote_t::link` when the cold half
+  carries one, the stored `caller` gate context otherwise (#943) — and did not exclude the
+  EMPTY spelling. A local admission passes the empty caller context, so a local edge's
+  admitting link is empty too, and an empty parameter compared equal to it. That is reachable
+  because a local edge *can* carry a cold half: the shared SUBSCRIBER parse calls
+  `ensure_remote()` for the `delivery_compact` opt-in at every door, local ones included
+  (a local edge with no settings has no cold half at all and was never affected). The
+  consequence was that one `evict_link_edges("")` silently reclaimed every local
+  compact-opted-in edge on the node — SUBSCRIBER view, target key and cold block released,
+  slot deactivated, RFC-0005 listener bookkeeping unwound to match — and reported it as an
+  ordinary eviction count. The entry point returns a count and has **no error channel**, so
+  the empty key is a no-op returning 0, not a new status. **No signature change**, and an
+  eviction on a real link name is untouched: an empty `admitted_over` could never equal a
+  non-empty key, so the guard only short-circuits the case that had no legitimate match. The
+  reachable door was the public graph-level API, not a transport: `fwd_router_t::link_down` is
+  the only non-test caller of `graph_t::evict_link_edges` in tree, the three non-test
+  `notify_peer_down` call sites (`transport_tcp.cpp`, `transport_ws.cpp`, the ESP-IDF
+  `httpd_ws_link.cpp`) each guard on a non-empty departed name, and `fwd_router_t::add_child`
+  refuses an empty mount name outright (`routable_mount_name`), so the point-to-point notifier
+  and `remove_child` cannot carry one either.
+
 - **A FWD frame the router could classify but whose op VALUE it could not read is now
   resolved at the terminus on BOTH cursor tiers, instead of vanishing on the rope one
   (#870).** Router ingress classification was written twice — `on_frame_rope_impl` for the

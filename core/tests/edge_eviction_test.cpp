@@ -140,6 +140,23 @@ std::vector<std::byte> b_subscriber(std::string_view marker) {
     return out;
 }
 
+/**
+ * @brief SUBSCRIBER{ PATH @p marker, SETTINGS qos{ NAME "delivery_compact" VALUE u8 1 } } —
+ *        the RFC-0004 §E.1 opt-in, which is what forces a cold half onto the slot.
+ */
+std::vector<std::byte> b_subscriber_compact(std::string_view marker) {
+    std::vector<std::byte> body = b_path({marker});
+    std::vector<std::byte> qos;
+    append(qos, b_name("delivery_compact"));
+    append(qos, b_value_u8(1));
+    std::vector<std::byte> settings;
+    tr::wire::emit_tlv(settings, type_t::SETTINGS, opt_t{.pl = true}, qos);
+    append(body, settings);
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, type_t::SUBSCRIBER, opt_t{.pl = true}, body);
+    return out;
+}
+
 /** @brief FIELD{ NAME "subscribers", VALUE u8 ELEMENT } — the ":subscribers[]" append. */
 std::vector<std::byte> b_field_subscribers_append() {
     std::vector<std::byte> body;
@@ -532,6 +549,68 @@ void test_evict_reaches_field_write_admitted_edges() {
     check(g.evict_link_edges("cli") == 0, "a second eviction for 'cli' finds nothing left");
 }
 
+/**
+ * @brief #1056 — an eviction keyed on the EMPTY link name matches nothing.
+ *
+ * The predicate keys on the link an edge was ADMITTED over: `subscriber_remote_t::link` when
+ * the cold half carries one, the stored `caller` gate context otherwise (#943). A LOCAL door
+ * passes the empty context, so a local edge's admitting spelling is empty too — and an empty
+ * PARAMETER compared equal to it, reclaiming the edge. The case is reachable because a local
+ * edge CAN carry a cold half: the shared SUBSCRIBER parse calls `ensure_remote()` for the
+ * `delivery_compact` opt-in at every door, local ones included.
+ *
+ * `graph_t::evict_link_edges` returns a count and has no error channel, so the empty key is a
+ * no-op returning 0, not a new status. Two arms, and the CONTROL arm is what identifies the
+ * mechanism: the compact edge (cold half, both spellings empty) is the one that was reclaimed;
+ * the plain edge (no cold half at all, so `s.remote == nullptr` skips it) never was, and
+ * asserting on it alone would pass no matter what the predicate did.
+ */
+void test_empty_link_name_evicts_nothing() {
+    std::printf("an eviction keyed on the EMPTY link name matches nothing (#1056):\n");
+    graph_t g;
+    vertex_handle_t p = g.register_vertex(path_t("/p"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/tc"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/tp"), role_t::STORED_VALUE);
+
+    /** @brief The flat stored bytes at @p at (empty on error). */
+    const auto value_of = [&](const char* at) -> std::vector<std::byte> {
+        const auto r = g.read(path_t(at));
+        return r ? rope_bytes(**r) : std::vector<std::byte>{};
+    };
+
+    // Both admitted through the LOCAL `:subscribers[]` field-write door — the 3-arg write, so
+    // the caller context is empty. `/tc` opts into delivery_compact (⇒ a cold half whose `link`
+    // AND `caller` are both empty); `/tp` carries no settings at all (⇒ no cold half).
+    const auto append_fp = path_t::parse("/p:subscribers[]");
+    check(append_fp.has_value(), "the :subscribers[] append field-path parses");
+    check(append_fp.has_value() &&
+              g.write(p, append_fp->field(), make_value(b_subscriber_compact("tc"))).has_value(),
+          "admit a LOCAL delivery_compact subscriber under an empty caller");
+    check(append_fp.has_value() &&
+              g.write(p, append_fp->field(), make_value(b_subscriber("tp"))).has_value(),
+          "admit a plain LOCAL subscriber under an empty caller");
+
+    check(g.write(path_t("/p"), rope_t{make_value(b_value_u8(0x61))}).has_value(), "write /p");
+    check(value_of("/tc") == b_value_u8(0x61),
+          "the compact local edge IS delivering (the test is not vacuous)");
+    check(value_of("/tp") == b_value_u8(0x61), "the plain local edge IS delivering");
+
+    check(g.evict_link_edges("") == 0, "evict('') reclaims nothing and reports 0");
+
+    check(g.write(path_t("/p"), rope_t{make_value(b_value_u8(0x62))}).has_value(),
+          "write /p after the empty-key eviction");
+    check(value_of("/tc") == b_value_u8(0x62),
+          "the compact local edge STILL delivers after evict('')");
+    check(value_of("/tp") == b_value_u8(0x62), "the plain local edge still delivers");
+
+    // The listener bookkeeping must be untouched too: a DESCENDANT write still bubbles to /p's
+    // edges (RFC-0005). A silent over-unwind here would strand the counters below zero.
+    vertex_handle_t pd = g.register_vertex(path_t("/p/d"), role_t::STORED_VALUE);
+    check(g.write(pd, make_value(b_value_u8(0x63))).has_value(), "descendant write /p/d");
+    check(value_of("/tc") == b_value_u8(0x63) && value_of("/tp") == b_value_u8(0x63),
+          "a descendant write still bubbles to both edges (RFC-0005 counters intact)");
+}
+
 /** @brief Eviction concurrent with writes: no crash, no deadlock, coherent finish (TSan gate). */
 void test_concurrent_evict_vs_writes() {
     std::printf("concurrent writer x evict/re-subscribe (TSan gate):\n");
@@ -668,6 +747,7 @@ int main() {
     test_slot_reuse_and_index_stability();
     test_router_link_down();
     test_evict_reaches_field_write_admitted_edges();
+    test_empty_link_name_evicts_nothing();
     test_departure_notifier_seam();
     test_concurrent_evict_vs_writes();
     if (g_failures != 0) {
