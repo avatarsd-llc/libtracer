@@ -353,6 +353,30 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **A SPEC-created `webtransport` dialer can name its extended CONNECT `:path` (#1023).**
+  `webtransport_transport_t`'s DIAL constructor has always taken the CONNECT `:path`, but
+  the catalog factory hard-coded `"/"` and `parse_wt_config` read four keys — `cert`, `key`,
+  `ca`, `insecure` — none of which was it. So an in-band
+  `write /net:children[] += SPEC{kind=webtransport, …}` could reach only a server that
+  serves its session at the root; anything else had to abandon the creation SPEC for the
+  direct constructor plus `provide_link`, and the difference was not reported — the dial
+  simply went to the wrong resource and creation answered `NOT_FOUND`. A fifth
+  kind-PRIVATE key, `path` (`NAME`, DIAL, default `/`, empty normalised to `/`), now carries
+  it, parsed by `parse_wt_config` alongside the others so nothing lands on the shared
+  `conn_settings_t` (the ADR-0043 §5 leanness ruling). It is the one key `webtransport` does
+  not share with `quic`, which has no HTTP layer to carry a resource; it does **not** collide
+  with the `can` kind's unrelated `path` (kind-private namespaces are disjoint), and
+  `docs/modules/connection-config.md` now says so on both rows. Same *shape* of gap as #918,
+  one parameter over. **New public API:** `webtransport_transport_t::session_path()` returns
+  the session's CONNECT `:path` — on LISTEN, the path the ACCEPTED CONNECT named (empty until
+  one is accepted); on DIAL, the path this endpoint requests. The listener still serves every
+  path (it validates `:method`/`:protocol` only), so this is an observation, not an admission
+  decision — and it is what makes the fix testable over the real wire rather than by reading
+  a config value back out of the dialer. `core/tests/webtransport_test.cpp` drives three
+  legs through the real `:children[]` SPEC path against a directly-held listener:
+  `path = "/tracer"` arrives as `/tracer`, an absent key still dials `/`, and an empty path
+  normalises to `/`.
+
 - **The `can_link_t` seam owns its admission rule, so the two ports can no longer disagree
   about which frames are real (#931).** `twai_link_t` filtered remote-request and 11-bit
   standard frames on ingress and bounded classic length on egress; `socketcan_link_t` did

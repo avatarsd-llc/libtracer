@@ -68,7 +68,7 @@ Every socket transport in the tree declares the owning tier: UDP
 (`transport_udp.hpp:91`), TCP client and server (`transport_tcp.hpp:151,277`),
 WebSocket server and client (`transport_ws.hpp:217,412`), CAN
 (`transport_can.hpp:475`), QUIC (`transport_quic.hpp:153`) and WebTransport
-(`transport_webtransport.hpp:156`). The borrowed-span path is the base-class default
+(`transport_webtransport.hpp:158`). The borrowed-span path is the base-class default
 and the tier an out-of-tree transport gets for free.
 
 ## Point-to-point links and bus links
