@@ -36,7 +36,8 @@ No ``strace``, no permission to ptrace, a summary that cannot be parsed: every o
 exits non-zero. A guard that quietly downgrades to "not checked" is the defect it was
 written to prevent, wearing a passing badge.
 
-    syscall_guard.py --floor 50 --label zenoh-pub -- ./build/bench_zenoh_compose pub 48610 8 64 0 400
+    syscall_guard.py --floor 50 --label zenoh-pub -- \
+        ./build/bench_zenoh_compose pub 48610 8 64 0 400 12345
 """
 from __future__ import annotations
 

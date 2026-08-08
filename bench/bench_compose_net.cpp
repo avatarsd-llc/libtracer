@@ -10,16 +10,21 @@
  * The publisher builds the K records of one group and the iovec over them ONCE, then the
  * timed loop is nothing but `transport_t::send(iov)` — which `udp_transport_t` lowers to a
  * single `sendmsg` with a K-entry iovec. That is the property under test: one syscall, one
- * datagram, K values. See bench_compose.hpp for the record framing, the claim, and the list of
- * what this harness does NOT measure.
+ * datagram, K values. See bench_compose.hpp for the record framing, the claim, the list of
+ * what this harness does NOT measure, and what the timed loop still allocates (it is not
+ * allocation-free above K=16, and that is the transport's own spill, not the harness's).
  *
- *   bench_compose_net sub <port> <K> <value_bytes> <window_ms>
- *   bench_compose_net pub <port> <K> <value_bytes> <groups> <latency_groups>
+ *   bench_compose_net sub <port> <K> <value_bytes> <window_ms> <run_id> <min_msgs> [audit]
+ *   bench_compose_net pub <port> <K> <value_bytes> <groups> <latency_groups> <run_id>
  *
- * The subscriber exits non-zero, and emits no `RESULT` row at all, when it observed no values
- * or any malformed record. run_compose.sh treats that as a failed point.
+ * `run_id` is the driver's per-point nonce and both roles require it — see
+ * bench_compose.hpp @ref compose_record. `min_msgs` is the fewest throughput datagrams the
+ * subscriber will publish a rate from.
+ *
+ * The subscriber exits non-zero, and emits no `RESULT` row at all, when it observed no values,
+ * any malformed record, or fewer than `min_msgs` throughput datagrams. run_compose.sh treats
+ * that as a failed point.
  */
-#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -46,32 +51,38 @@ int run_sub(int argc, char** argv) {
     const auto width = static_cast<std::size_t>(std::strtoul(argv[3], nullptr, 10));
     const auto value_bytes = static_cast<std::size_t>(std::strtoul(argv[4], nullptr, 10));
     const auto window_ms = static_cast<std::uint64_t>(std::strtoull(argv[5], nullptr, 10));
-    const bool audit = argc > 6 && std::string_view(argv[6]) == "audit";
+    const auto run_id = static_cast<std::uint32_t>(std::strtoul(argv[6], nullptr, 10));
+    const auto min_msgs = static_cast<std::uint64_t>(std::strtoull(argv[7], nullptr, 10));
+    const bool audit = argc > 8 && std::string_view(argv[8]) == "audit";
+    if (!bench::compose::value_bytes_ok(value_bytes)) return 2;
 
-    // The counter and the receiver lambda outlive the transport: the slot binds the callable
-    // by address, and ~udp_transport_t joins the recv thread.
-    bench::compose::sub_counter_t counter("libtracer", "compose-udp", width, value_bytes);
-    std::atomic<std::uint64_t> last_recv{0};
-    auto rx = [&](std::span<const std::byte> d) {
-        (void)counter.on_message(d);
-        last_recv.store(bench::now_ns(), std::memory_order_relaxed);
-    };
-    tr::net::udp_transport_t t(port, "127.0.0.1", static_cast<std::uint16_t>(port + 1));
-    if (!t.ok()) {
-        std::fprintf(stderr, "compose sub: bind failed on %u\n", port);
-        return 1;
+    // The counter and the receiver lambda outlive the transport on purpose: the slot binds the
+    // callable by address, and the transport's destructor is what ends the recv thread.
+    bench::compose::sub_counter_t counter("libtracer", "compose-udp", width, value_bytes, run_id,
+                                          min_msgs);
+    auto rx = [&](std::span<const std::byte> d) { (void)counter.on_message(d); };
+    {
+        tr::net::udp_transport_t t(port, "127.0.0.1", static_cast<std::uint16_t>(port + 1));
+        if (!t.ok()) {
+            std::fprintf(stderr, "compose sub: bind failed on %u\n", port);
+            return 1;
+        }
+        t.set_receiver(rx);
+
+        std::printf("SUB_READY\n");
+        std::fflush(stdout);
+
+        const auto t0 = bench::Clock::now();
+        const auto deadline = t0 + std::chrono::milliseconds(window_ms);
+        while (!counter.done() && bench::Clock::now() < deadline) std::this_thread::sleep_for(2ms);
+        // A DRAIN, not a barrier: it lets a straggling datagram land, because the publisher
+        // repeats its END_OF_POINT marker and a lost one should cost this pause, not the point.
+        std::this_thread::sleep_for(50ms);
     }
-    t.set_receiver(rx);
-
-    std::printf("SUB_READY\n");
-    std::fflush(stdout);
-
-    const auto t0 = bench::Clock::now();
-    const auto deadline = t0 + std::chrono::milliseconds(window_ms);
-    while (!counter.done() && bench::Clock::now() < deadline) std::this_thread::sleep_for(2ms);
-    // Let a straggling datagram land before finalizing; the publisher repeats its
-    // END_OF_POINT marker, so a lost one costs this pause and not the point.
-    std::this_thread::sleep_for(50ms);
+    // THE barrier. ~udp_transport_t calls stop_and_join() as its first act (posix_endpoint.hpp
+    // teardown invariant), so the recv thread is joined before the counter is read on this
+    // thread. The 50 ms above synchronises nothing; reading the counter while the recv thread
+    // could still call on_message would be a data race however long that sleep were.
     return audit ? counter.finish_audit() : counter.finish();
 }
 
@@ -83,6 +94,8 @@ int run_pub(int argc, char** argv) {
     const auto value_bytes = static_cast<std::size_t>(std::strtoul(argv[4], nullptr, 10));
     const auto groups = static_cast<std::uint64_t>(std::strtoull(argv[5], nullptr, 10));
     const auto lat_groups = static_cast<std::uint64_t>(std::strtoull(argv[6], nullptr, 10));
+    const auto run_id = static_cast<std::uint32_t>(std::strtoul(argv[7], nullptr, 10));
+    if (!bench::compose::value_bytes_ok(value_bytes)) return 2;
 
     tr::net::udp_transport_t t(static_cast<std::uint16_t>(port + 1), "127.0.0.1", port);
     if (!t.ok()) {
@@ -93,11 +106,15 @@ int run_pub(int argc, char** argv) {
 
     // BUILT ONCE, OUTSIDE EVERY TIMED LOOP. The composite endpoint's value is supposed to be a
     // rope that already exists; charging its construction to the send is what made the
-    // withdrawn bench understate libtracer by 33-58%.
+    // withdrawn bench understate libtracer by 33-58%. This does NOT make the timed loop
+    // allocation-free — above kMaxInlineIov=16 spans udp_transport_t::send takes one nothrow
+    // heap block per datagram for its iovec table. That spill is the transport's, it is on the
+    // shipping forward path too, and bench_compose.hpp @ref compose_alloc says so rather than
+    // this bench pretending it away.
     std::vector<std::vector<std::byte>> lat_recs =
-        bench::compose::make_group(width, value_bytes, phase_t::LATENCY);
+        bench::compose::make_group(width, value_bytes, phase_t::LATENCY, run_id);
     std::vector<std::vector<std::byte>> thru_recs =
-        bench::compose::make_group(width, value_bytes, phase_t::THROUGHPUT);
+        bench::compose::make_group(width, value_bytes, phase_t::THROUGHPUT, run_id);
     const auto gather = [](const std::vector<std::vector<std::byte>>& recs) {
         std::vector<std::span<const std::byte>> iov;
         iov.reserve(recs.size());
@@ -130,7 +147,7 @@ int run_pub(int argc, char** argv) {
 
     // Repeat the marker: it is a datagram like any other and may be dropped.
     std::vector<std::vector<std::byte>> eop =
-        bench::compose::make_group(width, value_bytes, phase_t::END_OF_POINT);
+        bench::compose::make_group(width, value_bytes, phase_t::END_OF_POINT, run_id);
     std::this_thread::sleep_for(200ms);
     for (int i = 0; i < 8; ++i) {
         t.send(std::span<const std::byte>(eop[0]));
@@ -149,11 +166,12 @@ int run_pub(int argc, char** argv) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc >= 6 && std::string_view(argv[1]) == "sub") return run_sub(argc, argv);
-    if (argc >= 7 && std::string_view(argv[1]) == "pub") return run_pub(argc, argv);
+    if (argc >= 8 && std::string_view(argv[1]) == "sub") return run_sub(argc, argv);
+    if (argc >= 8 && std::string_view(argv[1]) == "pub") return run_pub(argc, argv);
     std::fprintf(stderr,
-                 "usage: bench_compose_net sub <port> <K> <value_bytes> <window_ms>\n"
+                 "usage: bench_compose_net sub <port> <K> <value_bytes> <window_ms> <run_id> "
+                 "<min_msgs> [audit]\n"
                  "       bench_compose_net pub <port> <K> <value_bytes> <groups> "
-                 "<latency_groups>\n");
+                 "<latency_groups> <run_id>\n");
     return 2;
 }

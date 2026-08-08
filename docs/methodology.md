@@ -321,13 +321,13 @@ of work per operation*.
   processes per engine over real loopback UDP, the composition width K swept on both
   sides, and every rate taken from the subscriber's own count over the subscriber's own
   clock. It carries two guards, and reports nothing unless both hold — the receiver emits
-  no row at all when it observed no values or any malformed record, and a **wire-use
-  audit** runs the publisher under `strace` and fails the point if it issued fewer than 50
-  send-family syscalls, which is exactly the check whose absence let the withdrawn version
-  report a rate for an engine that had only ever emitted scouting beacons. What is still
-  absent is the **chart**: publishing this comparison is a claim, so it is a separate,
-  reviewed step, and until it is taken the chapter states the gap rather than showing a
-  number.
+  no row at all when it observed no values, any malformed record, or fewer throughput
+  datagrams than the sample floor the driver hands it, and a **wire-use audit** runs the
+  publisher under `strace` and fails the point below a send-syscall floor (`COMPOSE_SEND_FLOOR`,
+  default 50), which is exactly the check whose absence let the withdrawn version report a
+  rate for an engine that had only ever emitted scouting beacons. What is still absent is
+  the **chart**: publishing this comparison is a claim, so it is a separate, reviewed step,
+  and until it is taken the chapter states the gap rather than showing a number.
 - **Network latency is the surviving network comparison**, and it is fair: a
   single-value, two-process, same-clock measurement over the real loopback kernel path,
   identical topology for both engines. **p50**, the **p99 tail** and the **p999 deep

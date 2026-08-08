@@ -41,6 +41,14 @@ add_executable(bench_compose_net bench_compose_net.cpp)
 target_link_libraries(bench_compose_net PRIVATE libtracer)
 target_compile_options(bench_compose_net PRIVATE -Wall -Wextra)
 
+# The RECEIVER-side guards of that comparison, driven with bytes built in-process: the
+# per-point nonce (which is what rejects a CONCURRENT run of the harness at the same K) and the
+# sample floor under which a point emits no RESULT row. No network, no subprocess, no timing.
+# Not named bench_* on purpose — it is a test, not an instrument, and gen_results_page's
+# registry joins on the bench_*.cpp glob.
+add_executable(test_compose_record test_compose_record.cpp)
+target_compile_options(test_compose_record PRIVATE -Wall -Wextra)
+
 # NETWORK transport comparison (UDP/TCP/WS over the loopback kernel path) — the
 # libtracer side of the transport matrix vs Zenoh (bench_zenoh_net). Two PROCESSES
 # (pub|sub role arg), same topology as the Zenoh bench; emits mode `net-<proto>`.

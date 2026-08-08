@@ -127,28 +127,61 @@ disfavour, and still not a measurement of what it claimed.) And it does not meas
 receiver fanning K values out to K consumers: the subscriber walks the datagram's records
 and counts them.
 
+**What each timed loop still allocates.** The harness does *not* claim an allocation-free
+timed loop — an earlier revision of this section did, and it was wrong on both arms. What
+it claims is that no allocation left in either loop is one the *harness* added:
+
+* libtracer's arm gathers into a stack `::iovec` array up to `kMaxInlineIov = 16`
+  (`core/include/libtracer/iov_table.hpp`) and takes **one nothrow heap block per
+  datagram** above it. Counted with a replaced global `operator new` over 1 000 sends per
+  width: K = 1, 8, 16 → **0 per send**; K = 17, 64, 256 → **exactly 1 per send**. Of the
+  four default widths (`1 8 64 256`) that is `64` and `256` paying it. The spill is inside
+  `udp_transport_t::send`, it is on the shipping forward path too, `bench_transport_iov`
+  is the in-tree instrument that located the boundary, and it is deliberately left visible.
+* the per-value arm must not pay a **staging copy** the composite arm does not:
+  `Bytes(const std::vector<uint8_t>&)` selects `z_bytes_copy_from_buf`, which the vendored
+  API documents as converting "by copying" — inside the blast loop that is every payload
+  byte copied per put, harness overhead on one side of a comparison.
+  `bench_zenoh_compose.cpp` therefore aliases the staging buffer into the payload with the
+  documented non-copying twin (`z_bytes_from_buf`, NULL deleter) instead. That difference
+  is the vendored API's contract, not something measured here; whatever an engine then
+  allocates internally is its own cost and this harness makes no claim about it.
+
+**The sample budget.** `LIBTRACER_BENCH_COMPOSE_VALUES` is a *value* budget, so the
+datagram count `VALUES / K` falls by K — at the default that is 400 000 datagrams at K=1
+but 1 562 at K=256, and K=256 is exactly where "per-value cost stays flat" gets read off.
+The driver therefore floors the group count at `COMPOSE_MIN_GROUPS` (default 20 000), and
+hands the receiver a floor of a quarter of that to enforce on what it actually *observed*
+(the quarter is loss headroom; loss itself is reported separately). The floor is a
+datagram count, not a duration: how long they take is a property of the host.
+
 **Two guards, and a number is published only if both hold.**
 
 1. **The receiver refuses to report.** A point that observed no values, no throughput
-   window, or any malformed record emits **no `RESULT` row at all** and exits non-zero. A
-   record carries a magic word and its own K, so a stray datagram from another run on a
-   reused port is counted as malformed rather than folded into the rate.
+   window, any malformed record, or fewer throughput datagrams than the sample floor emits
+   **no `RESULT` row at all** and exits non-zero. A record carries a magic word, its own K,
+   and the driver's **per-point nonce** — the nonce being the part that matters on a shared
+   host, because the magic is a compile-time constant and the K is the swept parameter, so
+   without it a *concurrent run of this same harness at the same K* on the same
+   deterministic port walk would have been folded into the rate rather than rejected.
 2. **The wire-use audit** (`syscall_guard.py`) runs a short pass of the same pub/sub pair
-   with the publisher under `strace -c`, and fails the point if it issued fewer than 50
-   send-family syscalls. Both ends of that floor are measured, not guessed: a **peerless**
-   publisher — the original defect, reproduced — issued **3 `sendto` / 8 `write` for 4 000
-   puts**, while a publisher with a live subscriber **batches**, turning 3 200 puts into
-   **479** `sendto`. So the floor cannot be "one send per message" without failing honest
-   batching, and `write` cannot count toward it at all, because in a `-c` summary a socket
-   write and a `printf` are the same row. The audit is its own pass because tracing costs
-   tens of microseconds per syscall; the measured pass is untraced. No `strace`, no ptrace
-   permission, or an unparseable summary all **fail** — a guard that downgrades itself to
-   "not checked" is the defect it exists to prevent, wearing a passing badge.
+   with the publisher under `strace -c`, and fails the point if it issued fewer
+   send-family syscalls than `COMPOSE_SEND_FLOOR` (default **50**). Both ends of that
+   default are measured, not guessed: a **peerless** publisher — the original defect,
+   reproduced — issued **3 `sendto` / 8 `write` for 4 000 puts**, while a publisher with a
+   live subscriber **batches**, turning 3 200 puts into **479** `sendto`. So the floor
+   cannot be "one send per message" without failing honest batching, and `write` cannot
+   count toward it at all, because in a `-c` summary a socket write and a `printf` are the
+   same row. The audit is its own pass because tracing costs tens of microseconds per
+   syscall; the measured pass is untraced. No `strace`, no ptrace permission, or an
+   unparseable summary all **fail** — a guard that downgrades itself to "not checked" is
+   the defect it exists to prevent, wearing a passing badge.
 
 ```sh
 bash bench/fetch_zenoh.sh          # the comparison arm; libtracer's arm needs nothing
 ./run_compose.sh ./build           # RESULT / RESULT_COMPOSE / SYSCALL_AUDIT / COMPOSE_LOSS rows
-python3 test_compose_guard.py      # the guard's own tests, both directions
+python3 test_compose_guard.py      # the wire-use guard's own tests, both directions
+./build/test_compose_record        # the receiver's guards: the nonce and the sample floor
 ```
 
 **Nothing here is charted.** Re-adding the comparison chart is

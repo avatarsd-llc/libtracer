@@ -33,6 +33,33 @@
  * measure a receiver's cost to fan K values out to K consumers: the subscriber walks the
  * datagram's records and counts them.
  *
+ * @section compose_alloc What each timed loop still allocates
+ *
+ * The harness does NOT claim an allocation-free timed loop on either arm. What it claims is
+ * that no allocation in either timed loop is one the HARNESS added; each is the engine's own
+ * cost of shipping the value. Stated per arm, because an earlier revision of this comment
+ * asserted "neither timed loop allocates", which was false on both:
+ *
+ *  - **libtracer.** `udp_transport_t::send(iov)` gathers into a stack `::iovec` array while the
+ *    entry count fits `tr::net::kMaxInlineIov` (16, `%iov_table.hpp`), and takes ONE nothrow
+ *    heap block per datagram above it. COUNTED, with a replaced global `operator new` around
+ *    1 000 sends per width: K=1, 8 and 16 cost **0 per send**, K=17, 64 and 256 cost **exactly
+ *    1 per send** (a single warm-up allocation lands in whichever width is measured FIRST —
+ *    reordering the sweep moves it, so it tracks order, not width). Of `run_compose.sh`'s four
+ *    default widths that means `1` and `8` take the inline path and `64` and `256` take the
+ *    overflow. The spill is inside the transport, it is the same code the shipping forward path
+ *    runs, and `bench_transport_iov` is the in-tree instrument that located the boundary (0
+ *    allocations up to 16 spans, 1 of ~272 B at 17) — so it is engine cost, and it is
+ *    deliberately NOT hidden from the comparison.
+ *  - **The per-value arm.** Handing a payload to the engine must not COPY it, because the
+ *    composite arm's `std::span` iovec does not: a staging copy per put would be harness
+ *    overhead charged to one side only. `bench_zenoh_compose.cpp` therefore aliases its staging
+ *    buffer into the payload rather than copying it, using the vendored API's documented
+ *    non-copying entry point — see the comment on `alias_bytes` there for the exact call, what
+ *    is documented versus measured, and the lifetime argument. Whatever the engine then
+ *    allocates internally is its own cost, and this harness neither counts nor claims anything
+ *    about it.
+ *
  * @section compose_record The record framing — identical on both engines
  *
  * One **value** is one length-prefixed record. A composite datagram is K records back to back,
@@ -42,17 +69,26 @@
  *
  *     offset  size  field
  *          0     4  len       total record bytes, little-endian, including this prefix
- *          4     2  magic     @ref kMagic — rejects a stray datagram from another run
+ *          4     2  magic     @ref kMagic — this harness's framing, not a run identity
  *          6     2  width     K, the composition width this record belongs to
  *          8     2  index     0..K-1, position within the group
  *         10     1  phase     @ref phase_t
  *         11     1  reserved  0
  *         12     8  send_ts   CLOCK_MONOTONIC ns, or 0 when unstamped
- *         20        filler    to `len`
+ *         20     4  run_id    the DRIVER's per-point nonce — see below
+ *         24        filler    to `len`
  *
- * `magic` and `width` are checked against the point being measured, so a datagram from another
- * process that happens to share the port is counted as MALFORMED and fails the point rather
- * than inflating it — a shared bench host is the normal case here, not the exotic one.
+ * The receiver checks `magic`, `width` and `run_id` against the point it was told to measure,
+ * and counts any record failing one of them as MALFORMED — which makes the point unreportable
+ * (@ref sub_counter_t::finish) rather than inflating its rate.
+ *
+ * `run_id` is why the check is worth anything on a shared host. `magic` is a compile-time
+ * constant and `width` is the swept parameter, so with those two alone a SECOND concurrent run
+ * of this same harness at the same K, on the deterministic port sequence `run_compose.sh`
+ * walks, would have passed both checks and been folded into the rate. `run_id` is drawn once
+ * per point by the driver and handed to BOTH processes on argv, so two runs are separated by a
+ * 32-bit nonce collision instead of by luck. Neither process has a default for it: there is no
+ * value of `run_id` that means "unchecked".
  *
  * CLOCK_MONOTONIC is system-wide on Linux, so `recv_ts - send_ts` across the two processes on
  * one host is a valid one-way latency.
@@ -78,12 +114,12 @@ enum class phase_t : std::uint8_t {
     END_OF_POINT = 2, /**< The publisher is done with this K; finalize and report. */
 };
 
-/** @brief Marks a datagram as belonging to THIS harness. */
+/** @brief Marks a datagram as belonging to THIS harness — framing only, not a run identity. */
 inline constexpr std::uint16_t kMagic = 0xC0DE;
 
 /** @brief Field offsets and the fixed header width of one value record. */
 inline constexpr std::size_t kOffLen = 0, kOffMagic = 4, kOffWidth = 6, kOffIndex = 8,
-                             kOffPhase = 10, kOffTs = 12, kRecordHeader = 20;
+                             kOffPhase = 10, kOffTs = 12, kOffRun = 20, kRecordHeader = 24;
 
 // The swept K set, the bytes per value and the per-point counts are NOT defined here. Both
 // binaries take every one of them on argv, and run_compose.sh is their single source: a default
@@ -115,10 +151,13 @@ inline void put_le(std::span<std::byte> b, std::size_t off, std::uint64_t v, std
  *
  * Called BEFORE the timed loop on purpose — see @ref compose_measured. The only per-send
  * mutation the timed loops perform is @ref stamp on record 0, and only in the paced phase.
+ *
+ * @param run_id The driver's per-point nonce, stamped into every record (@ref compose_record).
  */
 [[nodiscard]] inline std::vector<std::vector<std::byte>> make_group(std::size_t k,
                                                                     std::size_t value_bytes,
-                                                                    phase_t phase) {
+                                                                    phase_t phase,
+                                                                    std::uint32_t run_id) {
     std::vector<std::vector<std::byte>> recs(k,
                                              std::vector<std::byte>(value_bytes, std::byte{0xAB}));
     for (std::size_t i = 0; i < k; ++i) {
@@ -130,8 +169,26 @@ inline void put_le(std::span<std::byte> b, std::size_t off, std::uint64_t v, std
         r[kOffPhase] = static_cast<std::byte>(phase);
         r[kOffPhase + 1] = std::byte{0};
         put_le(r, kOffTs, 0, 8);
+        put_le(r, kOffRun, run_id, 4);
     }
     return recs;
+}
+
+/**
+ * @brief Reject a value size that cannot hold the record header.
+ *
+ * The framing is fixed-width and the value size is an operator knob (`COMPOSE_VALUE_BYTES`), so
+ * the two can be set against each other. A record shorter than @ref kRecordHeader would make
+ * every datagram malformed at the receiver and every point unreportable, for a reason no output
+ * line would name; both roles of both arms call this on entry instead.
+ *
+ * @return false after printing the reason, so the caller can exit non-zero.
+ */
+[[nodiscard]] inline bool value_bytes_ok(std::size_t value_bytes) {
+    if (value_bytes >= kRecordHeader) return true;
+    std::fprintf(stderr, "compose: value_bytes=%zu is below the %zu-byte record header\n",
+                 value_bytes, kRecordHeader);
+    return false;
 }
 
 /** @brief Write the group's send timestamp into record 0 — one 8-byte store per group. */
@@ -151,14 +208,23 @@ class sub_counter_t {
      * @param system Engine name for the RESULT row.
      * @param mode Row mode (e.g. `compose-udp`).
      * @param width The K this point is measuring; a record claiming any other width is
-     *              malformed, which is how a foreign datagram on a reused port is rejected.
+     *              malformed.
      * @param value_bytes Bytes per value, for the MB/s column.
+     * @param run_id The driver's per-point nonce; a record carrying any other one is malformed.
+     *               Together with @p width this is what rejects a datagram from a CONCURRENT run
+     *               of this harness on the same port (@ref compose_record).
+     * @param min_thru_messages Fewest throughput messages a publishable point may rest on; below
+     *               it @ref finish refuses the point. 0 disables the floor and is used only by
+     *               the record-level self-test.
      */
-    sub_counter_t(std::string system, std::string mode, std::size_t width, std::size_t value_bytes)
+    sub_counter_t(std::string system, std::string mode, std::size_t width, std::size_t value_bytes,
+                  std::uint32_t run_id, std::uint64_t min_thru_messages)
         : system_(std::move(system)),
           mode_(std::move(mode)),
           width_(width),
-          value_bytes_(value_bytes) {}
+          value_bytes_(value_bytes),
+          run_id_(run_id),
+          min_thru_messages_(min_thru_messages) {}
 
     /**
      * @brief Feed one received message — a composite datagram, or a single-value message.
@@ -178,7 +244,10 @@ class sub_counter_t {
             }
             const std::span<const std::byte> r = d.subspan(off, static_cast<std::size_t>(len));
             off += static_cast<std::size_t>(len);
-            if (get_le(r, kOffMagic, 2) != kMagic || get_le(r, kOffWidth, 2) != width_) {
+            // Framing, swept parameter, and the driver's per-point nonce. The nonce is the one
+            // that survives a concurrent run of this same harness at this same K.
+            if (get_le(r, kOffMagic, 2) != kMagic || get_le(r, kOffWidth, 2) != width_ ||
+                static_cast<std::uint32_t>(get_le(r, kOffRun, 4)) != run_id_) {
                 ++bad_;
                 continue;
             }
@@ -213,26 +282,47 @@ class sub_counter_t {
     [[nodiscard]] bool done() const { return done_; }
     /** @brief Values observed so far — the liveness signal the wait loop watches. */
     [[nodiscard]] std::uint64_t values() const { return values_; }
+    /** @brief Records rejected by the magic / width / run-id check. */
+    [[nodiscard]] std::uint64_t bad() const { return bad_; }
+    /** @brief Throughput-phase DATAGRAMS observed — the sample count behind the rate. */
+    [[nodiscard]] std::uint64_t thru_messages() const { return thru_messages_; }
 
     /**
      * @brief Emit the point, or refuse to.
      *
-     * A point with no observed values, no observed throughput window, or any malformed record
-     * emits NO `RESULT` row at all: an engine that never reached the wire, and a run polluted
-     * by a foreign datagram, must both be unreportable rather than reported as a zero.
+     * A point emits NO `RESULT` row at all — an engine that never reached the wire, a run
+     * polluted by a foreign datagram, and a window too small to divide by must all be
+     * unreportable rather than reported as a number — when any of these holds:
+     *
+     *  - it observed no values, or no throughput-phase values at all;
+     *  - its throughput window has no positive duration;
+     *  - any record was malformed (@ref compose_record);
+     *  - it observed fewer than `min_thru_messages` throughput datagrams. This is the SAMPLE
+     *    floor. `run_compose.sh` spends a fixed VALUE budget per point, so the datagram count
+     *    falls by K and it is exactly at the largest K — where the "per-value cost stays flat"
+     *    reading is taken — that the window would otherwise be thinnest. The driver both floors
+     *    the group count it asks for and passes the floor the receiver enforces here, so a
+     *    window that evaporated cannot come back as a rate.
+     *
+     * The floor is a datagram COUNT, not a duration: how long those datagrams take is a
+     * property of the host, and a duration floor would bake a host-speed assumption into the
+     * refusal.
      *
      * @return Process exit status: 0 when a row was emitted, 1 otherwise.
      */
     [[nodiscard]] int finish() {
         const double secs =
             thru_last_ > thru_first_ ? static_cast<double>(thru_last_ - thru_first_) / 1e9 : 0.0;
-        if (values_ == 0 || thru_values_ == 0 || secs <= 0.0 || bad_ != 0) {
+        if (values_ == 0 || thru_values_ == 0 || secs <= 0.0 || bad_ != 0 ||
+            thru_messages_ < min_thru_messages_) {
             std::printf(
                 "COMPOSE_FAIL\t%s\t%s\t%zu\tvalues=%llu\tthroughput_values=%llu\tbad=%llu\t"
-                "span_s=%.6f\n",
+                "span_s=%.6f\tmessages=%llu\tmin_messages=%llu\n",
                 system_.c_str(), mode_.c_str(), width_, static_cast<unsigned long long>(values_),
                 static_cast<unsigned long long>(thru_values_),
-                static_cast<unsigned long long>(bad_), secs);
+                static_cast<unsigned long long>(bad_), secs,
+                static_cast<unsigned long long>(thru_messages_),
+                static_cast<unsigned long long>(min_thru_messages_));
             std::fflush(stdout);
             return 1;
         }
@@ -295,6 +385,8 @@ class sub_counter_t {
 
     std::string system_, mode_;
     std::size_t width_, value_bytes_;
+    std::uint32_t run_id_ = 0;
+    std::uint64_t min_thru_messages_ = 0;
     Latency lat_;
     std::uint64_t group_ts_ = 0;
     std::uint64_t messages_ = 0, values_ = 0, bad_ = 0;
