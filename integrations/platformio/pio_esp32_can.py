@@ -17,7 +17,9 @@
 # consumer of the PACKED package that names twai_link_t, a CLASSIC transport_can over
 # it, and can_transport_factory(); the `pio-esp32-can` workflow `pio run`s it, so each
 # step below — this script running at all, both CPPPATH entries, the BuildSources call
-# and its guard — is gated at COMPILE+LINK, and so is library.json's export list.
+# and its guard — is gated at COMPILE+LINK. So are the `library.json` export entries this
+# fixture actually reaches; entries it does not compile against (LICENSE, README.md, and
+# any header no translation unit here includes) can be dropped without reddening the job.
 # That frames no CAN bit: moving frames on real silicon is still the open on-bus
 # sign-off, and nothing in CI energises a pin.
 import os
@@ -29,8 +31,9 @@ if env.get("PIOPLATFORM", "") == "espressif32":
     # PlatformIO exec()s a library extraScript as an SCons SConscript, and SCons
     # runs it against SConscript globals where `__file__` is NOT defined — deriving
     # the package root from it raises NameError and fails the whole build. The
-    # exported library builder carries that root directly (LibBuilderBase.path, an
-    # absolute path with any symlink already resolved), so take it from there and
+    # exported library builder carries that root directly (LibBuilderBase.path,
+    # which piolib.py builds with os.path.abspath — absolute, but NOT symlink-
+    # resolved; do not rely on it being canonical), so take it from there and
     # do no dirname arithmetic at all. twai_link lives in the ESP-IDF component
     # tree, not core/.
     _pkg = pio_lib_builder.path  # noqa: F821

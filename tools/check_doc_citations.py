@@ -76,7 +76,14 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 SOURCE_SUFFIXES = (".hpp.in", ".hpp", ".cpp", ".cc", ".hh", ".h")
 
 # Directories that hold no citable source: build output, vendored deps, worktrees.
-NON_SOURCE_DIRS = ("_build", "build", "node_modules", ".claude", ".git", "target", "dist")
+# `.pio` is PlatformIO's per-project cache: `pio run` in the packaging fixture unpacks the
+# library UNDER TEST into `.pio/libdeps/<env>/libtracer/`, which is a second copy of every
+# core source. Without this the gate turns red the moment anyone runs that fixture locally,
+# for the same reason `build-` is here — a basename with two paths is ambiguous, and the
+# gate must not depend on which builds someone happens to have run in the tree.
+NON_SOURCE_DIRS = (
+    "_build", "build", "node_modules", ".claude", ".git", "target", "dist", ".pio",
+)
 # ...and the same, for any `build-<something>` sibling. The exact name "build" is not the
 # only one that appears: this repo's agent workflow mandates `build-agent` (`.gitignore`
 # covers `build-*/`), and a generated `build-agent/generated/include/libtracer/config.hpp`

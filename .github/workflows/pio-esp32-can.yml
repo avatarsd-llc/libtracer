@@ -33,8 +33,10 @@
 # it still needs a transceiver and a second node; nothing here energises a pin.
 name: pio-esp32-can
 
-# The two path lists are duplicated on purpose — GitHub's workflow parser does not
-# resolve YAML anchors. `core/include/**` + `core/src/**` are in both: the packaged
+# The two path lists are duplicated rather than shared through a YAML anchor: `on:`
+# is parsed before any anchor a job could define, and this file needs no other
+# sharing, so the duplication costs one edit and avoids depending on how the parser
+# treats anchors here. `core/include/**` + `core/src/**` are in both: the packaged
 # srcFilter compiles the whole core, so a shared-header change can break this build
 # without touching a single platformio/ file (the trap quic.yml's allowlist fell into).
 on:
@@ -75,8 +77,10 @@ jobs:
           python-version: "3.12"
 
       # PINNED on purpose. The hook reads `pio_lib_builder.path` — a PlatformIO
-      # builder internal, and the only handle to the package root that exists in
-      # an SCons SConscript (where `__file__` is undefined). A floating core could
+      # builder internal, and the handle this hook uses to reach the package root
+      # (`__file__` is undefined in an SCons SConscript, so dirname arithmetic is
+      # out; piolib does chdir into the package, so a relative path would work too,
+      # but it would depend on that behaviour rather than on an exported value). A floating core could
       # move that under us and red main for a reason outside this repo; bumping
       # this pin is the visible, reviewable act that re-validates the assumption.
       - name: Install PlatformIO Core
