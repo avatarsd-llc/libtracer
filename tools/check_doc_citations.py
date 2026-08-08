@@ -138,7 +138,7 @@ ANCHORS = [
     ("core/src/transport_vertex.cpp:356", "pending_links_.erase(pl)"),
     ("core/src/transport_vertex.cpp:370", "if (constructed)"),
     ("core/src/transport_vertex.cpp:372", "link_state_t::LISTENING : link_state_t::UP"),
-    ("core/include/libtracer/transport_vertex.hpp:267", "result_t<void> register_module"),
+    ("core/include/libtracer/transport_vertex.hpp:275", "result_t<void> register_module"),
     ("core/include/libtracer/transport_vertex.hpp:96", "enum class link_state_t"),
     ("core/src/graph.cpp:1719", "field.steps.size() != 1", 'step0.name == "subscribers"'),
     ("core/src/graph.cpp:1798", "field.steps.size() != 1 || !plain_step(step0)"),
@@ -151,8 +151,8 @@ ANCHORS = [
     ("core/src/graph.cpp:2368", "return read_children_folded(vh);"),
     ("core/src/graph.cpp:2364", '"children" && !field.steps[0].wildcard'),
     ("core/src/graph.cpp:2464", "!field.steps[0].wildcard", 'field.steps[0].name == "subscribers"'),
-    ("core/src/op_resolve_walk.hpp:353", "enum class index_mode_t"),
-    ("core/src/op_resolve_walk.hpp:1014", 'field.steps[0].name != "subscribers"'),
+    ("core/src/op_resolve_walk.hpp:355", "enum class index_mode_t"),
+    ("core/src/op_resolve_walk.hpp:1016", 'field.steps[0].name != "subscribers"'),
     ("core/include/libtracer/mem_heap.hpp:217", "try_assign"),
     ("core/include/libtracer/view.hpp:26", "namespace tr::view"),
     ("core/include/libtracer/frame.hpp:23", "namespace tr::wire"),
@@ -202,11 +202,11 @@ ANCHORS = [
     # the gate noticing — the exact rot class this file exists for.
     ("core/src/op_resolve_view.cpp:136", "sub.flatten(flat)"),
     # #801 — the SPAN tier's ownership copy, cited by allocation-and-backpressure.md.
-    ("core/src/op_resolve_walk.hpp:210", "view_t own_wire(mem::mem_backend_t& flat)"),
+    ("core/src/op_resolve_walk.hpp:212", "view_t own_wire(mem::mem_backend_t& flat)"),
     ("core/src/op_resolve_view.cpp:146", "over_bytes(sub.only().bytes(), flat)"),
     ("core/src/op_resolve_view.cpp:254", "wire().materialize(backend())"),
-    ("core/src/op_resolve_walk.hpp:600", "view::segment_alloc(egress, head_len)"),
-    ("core/src/op_resolve_walk.hpp:703", "rope_t or_backpressure"),
+    ("core/src/op_resolve_walk.hpp:602", "view::segment_alloc(egress, head_len)"),
+    ("core/src/op_resolve_walk.hpp:705", "rope_t or_backpressure"),
     ("core/src/fwd_router.cpp:1344", "decode_into(frame, rx_for(inbound_ctx))"),
     # `vertex.hpp:<parent_>` was pinned here TWICE, and the only doc that cites it is
     # `docs/spec/rfcs/0019` — a historical genre this tool's own header excludes from
@@ -563,13 +563,13 @@ ANCHORS = [
     ('core/src/graph.cpp:2495', 'result_t<void> graph_t::write(const path_t& path, rope_t value) {'),
     # core/src/op_resolve_walk.hpp
     ('core/src/op_resolve_walk.hpp:76', "*        the u16 the kind=ERROR reply's ERROR{VALUE} identity carries."),
-    ('core/src/op_resolve_walk.hpp:542',
+    ('core/src/op_resolve_walk.hpp:544',
      'void tlv_sliced(std::span<const std::byte> wire) {  // trailer-sliced whole-TLV copy (§4)'),
-    ('core/src/op_resolve_walk.hpp:609', 'out.tlv_sliced(reply_dst_wire);'),
-    ('core/src/op_resolve_walk.hpp:992',
+    ('core/src/op_resolve_walk.hpp:611', 'out.tlv_sliced(reply_dst_wire);'),
+    ('core/src/op_resolve_walk.hpp:994',
      'if (!req.src.spans_intact()) return std::unexpected(status_t::BACKPRESSURE);'),
-    ('core/src/op_resolve_walk.hpp:1079', 'if (!req.dst.spans_intact()) return reply_error(status_t::BACKPRESSURE);'),
-    ('core/src/op_resolve_walk.hpp:912', 'if (value.total_length() == 0)'),
+    ('core/src/op_resolve_walk.hpp:1081', 'if (!req.dst.spans_intact()) return reply_error(status_t::BACKPRESSURE);'),
+    ('core/src/op_resolve_walk.hpp:914', 'if (value.total_length() == 0)'),
     # core/src/path.cpp
     # core/src/posix_endpoint.cpp
     ('core/src/posix_endpoint.cpp:218',

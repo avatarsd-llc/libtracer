@@ -669,6 +669,43 @@ void test_wildcard_and_not_local() {
           "ERROR payload == STATUS{ ERROR{ VALUE u16=0x0020 tr::path::not_found } }");
 }
 
+/**
+ * @brief #929: a `TRANSPORT_DOWN` status leaves this seam as `tr::transport::down` (0x0060).
+ *
+ * `error_code(status_t)` is the L4→wire cast, and the two enums either side of it are separate
+ * registries, so the map is hand-written. `-Werror=switch` proves an arm EXISTS for every
+ * status; only a wire read proves the arm is the RIGHT one. Before #929 no `status_t` member
+ * could reach `err_t::TRANSPORT_DOWN` at all — the transport factories spent `NOT_FOUND` on a
+ * link that did not come up, which goes out as `tr::path::not_found` (0x0020), PERMANENT.
+ *
+ * A HANDLER vertex whose `on_read` refuses is the shortest path from an arbitrary status to
+ * the ERROR reply's bytes: the seam's error propagates verbatim (`graph.cpp`'s HANDLER arm),
+ * so this asserts the mapping, not the transport.
+ */
+void test_transport_down_reaches_the_wire() {
+    std::printf("#929: status_t::TRANSPORT_DOWN goes out as tr::transport::down (0x0060):\n");
+    graph_t g;
+    op_resolver_t resolver(g);
+
+    tr::graph::handlers_t down;
+    down.on_read = []() -> tr::graph::result_t<tr::view::rope_t> {
+        return std::unexpected(status_t::TRANSPORT_DOWN);
+    };
+    (void)g.register_vertex(*path_t::parse("/net/link"), role_t::HANDLER, std::move(down));
+
+    const auto fwd = b_fwd(fwd_op_t::READ, b_path({"net", "link"}), b_path({"reply-ep"}));
+    auto reply = resolve_bytes(resolver, fwd);
+    check(reply.has_value(), "a refusing HANDLER still produces an addressed reply");
+    const auto dec = decode_reply(*reply);
+    const tlv_t& r = dec.tlv;
+    check(value_u8(r.children[3]) == static_cast<std::uint8_t>(reply_kind_t::ERROR),
+          "a TRANSPORT_DOWN status => kind=ERROR");
+    check(status_error_code(r.children[4]) == 0x0060 /*tr::transport::down*/,
+          "ERROR payload == STATUS{ ERROR{ VALUE u16=0x0060 tr::transport::down } }");
+    check(status_error_code(r.children[4]) != 0x0020 /*tr::path::not_found*/,
+          "it is NOT tr::path::not_found — the code whose disposition says stop retrying");
+}
+
 void test_write_creates_remote() {
     std::printf("write-creates over FWD (RFC-0005): a remote data WRITE creates the path:\n");
     graph_t g;
@@ -944,6 +981,7 @@ int main() {
     test_non_canonical_dst();
     test_wildcard_and_not_local();
     test_out_of_range_index_mode();
+    test_transport_down_reaches_the_wire();
     test_write_creates_remote();
     test_subscription_observer();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,

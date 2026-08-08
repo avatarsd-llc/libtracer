@@ -43,9 +43,11 @@
 #include <vector>
 
 #include "libtracer/backend.hpp"
+#include "libtracer/error.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "libtracer/transport_tcp.hpp"
 #include "libtracer/transport_udp.hpp"
 #include "libtracer/transport_ws.hpp"
 #include "libtracer/ws.hpp"
@@ -1131,6 +1133,48 @@ void test_ws_peer_named_config() {
 }
 
 /**
+ * @brief #929: a dial that could not come up answers TRANSPORT_DOWN, not NOT_FOUND.
+ *
+ * The disposition is the whole point. `NOT_FOUND` maps to `tr::path::not_found` (0x0020),
+ * whose registry disposition is PERMANENT — "don't retry this as-is". A refused connect is
+ * `tr::transport::down` (0x0060), TRANSIENT — "retry may succeed". Before #929 every
+ * built-in factory's `!ok()` collapsed to `NOT_FOUND`, so a peer that reads the disposition
+ * off the code stopped retrying a link that would have come back, and a genuinely wrong
+ * address was indistinguishable from a link that was momentarily down.
+ *
+ * The dial is a real loopback connect to a port `free_port()` reserved and released, so
+ * nothing is listening and the connect is REFUSED — the same `!ok()` a peer-not-up dial hits.
+ */
+void test_refused_dial_is_transport_down() {
+    std::printf("#929: a refused dial reports TRANSPORT_DOWN (transient), not NOT_FOUND:\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    check(net.register_module(std::string(tr::net::kTcpClientSuggestedModule), "tcp",
+                              conn_role_t::DIAL)
+              .has_value(),
+          "the application declares a tcp DIAL module (ADR-0073 §4)");
+
+    const std::uint16_t dead = free_port();
+    check(dead != 0, "reserved and released a loopback port — nothing listens on it");
+    const auto w =
+        node.write(path_t("/net:children[]"),
+                   conn_spec("client", "refused", conn_role_t::DIAL, dead, "tcp", "127.0.0.1"));
+    check(!w.has_value() && w.error() == status_t::TRANSPORT_DOWN,
+          "a refused tcp dial => TRANSPORT_DOWN (the pre-#929 answer was NOT_FOUND)");
+    check(!node.find(path_t::parse("/net/tcp-client/refused")->key()).has_value(),
+          "the refused dial left no connection vertex behind");
+
+    // The wire disposition this status now carries — the consequence the collapse inverted.
+    check(tr::wire::err_disposition(tr::wire::err_t::TRANSPORT_DOWN) ==
+              tr::wire::err_disposition_t::TRANSIENT,
+          "tr::transport::down is TRANSIENT in the registry");
+    check(tr::wire::err_disposition(tr::wire::err_t::PATH_NOT_FOUND) ==
+              tr::wire::err_disposition_t::PERMANENT,
+          "tr::path::not_found is PERMANENT — the disposition the collapse handed a peer");
+}
+
+/**
  * @brief ADR-0073 §4 / #621: modules are declared-only — an unregistered kind answers
  *        SCHEMA_NOT_FOUND instead of silently mounting under a library-derived name.
  *
@@ -1328,6 +1372,7 @@ int main() {
     test_link_name_collision_rejected();
     test_link_name_collision_placeholder_parent();
     test_ws_peer_named_config();
+    test_refused_dial_is_transport_down();
     test_unregistered_kind_is_schema_not_found();
     test_register_module_rejects_reserved_chars();
     test_wire_name_reaches_add_child();
