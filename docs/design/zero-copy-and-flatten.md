@@ -22,7 +22,7 @@ byte source is the wrong shape:
 
 | Structural copy | Site | Why it cannot go |
 |---|---|---|
-| Ingress ownership | `rope_t::flatten` (`core/src/rope.cpp:22`), `read_exact` into the accepted segment (`core/src/transport_tcp.cpp:269`) | A transient recv buffer cannot be borrowed by a rope that outlives the receive call |
+| Ingress ownership | `rope_t::flatten` (`core/src/rope.cpp:22`), `read_exact` into the accepted segment (`core/src/transport_tcp.cpp:266`) | A transient recv buffer cannot be borrowed by a rope that outlives the receive call |
 | Mutation ownership | `own_wire` (`core/src/op_resolve_view.cpp:136`) | A mutated multi-link value must own a contiguous, patchable, trailer-cleared segment |
 | WS TX gather | `httpd_ws_link_t::queue_send` (`integrations/esp-idf/libtracer/httpd_ws_link.cpp`; destination is a pre-allocated tx work slot, heap fallback) | `httpd_ws_send_frame_async` takes one contiguous buffer and `httpd_queue_work` runs later, after the rope links are gone |
 
@@ -59,10 +59,10 @@ where the mechanism lives:
 - **Egress scatter-gathers.** `rope_t::to_iovec` (`core/include/libtracer/rope.hpp:245`) emits one
   span per link into the original segments. The host WS server builds `[header, link0, link1, …]`
   and `sendmsg`s it with "no flatten, no re-copy (server frames are UNMASKED, RFC 6455 §5.1)"
-  (`core/src/transport_ws.cpp:277`); TCP prepends a u32-LE length via `prefixed_iov_t`
-  (`core/src/transport_tcp.cpp:59`). With `kMaxServerIov = 16` (`core/src/transport_ws.cpp:150`),
+  (`core/src/transport_ws.cpp:264`); TCP prepends a u32-LE length via `prefixed_iov_t`
+  (`core/src/transport_tcp.cpp:56`). With `kMaxServerIov = 16` (`core/src/transport_ws.cpp:150`),
   the common reply (≤ ~6 spans) fits the stack `std::array<::iovec, kMaxServerIov + 1>`
-  (`core/src/transport_ws.cpp:285`) — zero heap, zero payload copy. The only host TX copy is the
+  (`core/src/transport_ws.cpp:272`) — zero heap, zero payload copy. The only host TX copy is the
   kernel skb copy every BSD socket pays.
 - **Flatten refuses a heterogeneous rope.** A DEVICE link is not CPU-addressable, so a host memcpy
   would fault; `flatten` checks `all_host()` up front and returns an empty view
@@ -79,7 +79,7 @@ identifiers for the rest of this page.
 
 | # | Site | Single-link? | Multi-link? | Kind | Removed by the rope cursor? |
 |---|------|:--:|:--:|---------|---------|
-| ① | Ingress ownership — `flatten` (`core/src/rope.cpp:22`), pull-path `read_exact` into the accepted segment (`core/src/transport_tcp.cpp:269`) | yes (it *is* the recv) | yes | Structural | No — orthogonal; it is the ingress floor |
+| ① | Ingress ownership — `flatten` (`core/src/rope.cpp:22`), pull-path `read_exact` into the accepted segment (`core/src/transport_tcp.cpp:266`) | yes (it *is* the recv) | yes | Structural | No — orthogonal; it is the ingress floor |
 | ② | Branch write — `value.materialize(*value_backend_)` (`core/src/graph.cpp:1170`) | no — refcount bump | yes (one flatten to feed the span cursor) | Fallback | Multi-link leg: yes, via a rope-native branch decode |
 | ③ | Field write — the twin of ② (`core/src/graph.cpp:1416`) | no — refcount bump | yes | Fallback | Same as ② |
 | ④ | 4096-byte decode arena (`core/src/graph.cpp:1183-1184`) | yes — paid on every branch write | yes | Structure scratch, not a payload copy | **No** — see §3; the rope cursor is a byte source, not a structure store |
@@ -168,11 +168,14 @@ injected pool or heap. **Net device RAM is unchanged.** What drops is the scarce
 a flat 4096 bytes — a `std::array` reserves its whole frame slot whether filled or not — off the
 deep receive task.
 
-A stack budget for that task counts five such buffers, not one. The decode arena is the only one
-this document covers; the other four are transport receive and chunk scratch, each a 4096-byte
-`std::array` — `transport_tcp.cpp:227` (the backpressure drain) and `:508`,
-`transport_ws.cpp:420` and `:808`. They are not decode arenas and carry no structure,
-but they occupy the same frames and none of the five has a measured per-task high-water.
+A stack budget for that task counts four such buffers, not one. The decode arena is the only one
+this document covers; the other three are transport receive and chunk scratch, each a 4096-byte
+`std::array` — `core/src/transport_tcp.cpp:224` (the backpressure drain),
+`core/src/transport_ws.cpp:625` (the WS client's receive loop), and
+`core/src/posix_endpoint.cpp:442` — the ONE per-chunk scratch both multi-peer servers now
+share, since #871 folded their duplicated poll loops into `slot_server_t::service_peer` (it
+was two buffers, one apiece, before that). They are not decode arenas and carry no structure,
+but they occupy the same frames and none of the four has a measured per-task high-water.
 
 That receive task is the binding constraint on a single-core, RAM-constrained node. In the ESP-IDF
 WS integration, servicing a graph request in-call was measured overflowing an 8 KB stack and needing
@@ -304,14 +307,14 @@ asynchronously, awaited. A borrowed view of that buffer would dangle. Ingress mu
 bytes in an owned segment.
 
 **Why the pull path pays nothing extra.** The TCP `serve` loop reads the body straight into the
-accepted segment: `read_exact(fd, seg->bytes.data(), len)` (`core/src/transport_tcp.cpp:269`,
-`read_exact` defined at `:207`) fills a segment freshly allocated from the injected backend by
+accepted segment: `read_exact(fd, seg->bytes.data(), len)` (`core/src/transport_tcp.cpp:266`,
+`read_exact` defined at `:204`) fills a segment freshly allocated from the injected backend by
 `length_prefix_framer::on_prefix`. The pooled receive target *is* the owned segment — one kernel
 copy and zero user-space copies. The in-source rationale names the trade explicitly: feeding recv
 chunks through `feed()` "would add one" copy, so the pull loop shares framing *rules* with the
-chunk-fed transports rather than their state machine (`core/src/transport_tcp.cpp:244-249`). The
+chunk-fed transports rather than their state machine (`core/src/transport_tcp.cpp:241-246`). The
 only stack scratch left on this path is `drain()`'s 4096-byte backpressure discard buffer
-(`core/src/transport_tcp.cpp:227`), which runs when a frame is dropped, not when one is delivered.
+(`core/src/transport_tcp.cpp:224`), which runs when a frame is dropped, not when one is delivered.
 
 **Where the pull-path shape is not followed**, the residual costs are pool-recv questions, not
 flatten questions:

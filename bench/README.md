@@ -56,7 +56,7 @@ window, so **"the forward hop is heap-free by construction" is false as stated**
   spill to the heap above a fixed inline width. `bench_transport_iov` measures the boundary at
   **17 caller spans / ~288 B**; headroom from the structural `kFwdMaxIov` (9) is 8 regions, and
   a rope source may split any region further. The stub never runs that code, so `allocs=0` says
-  nothing about it (`core/src/transport_tcp.cpp:54-58`).
+  nothing about it (`core/src/transport_tcp.cpp:51-55`).
 - **The multi-link rope arm.** A rope source's sub-span count is the sender's choice and is
   known only at run time, so that arm gathers into a `mem::block_array_t` drawn from the
   injected receive source (`core/src/fwd_router.cpp:1295`). Nothrow (ADR-0065 — exhaustion
