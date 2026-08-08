@@ -453,8 +453,8 @@ ANCHORS = [
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'transport_tcp_server& operator=(const transport_tcp_server&) = delete;'),
     # core/include/libtracer/transport_udp.hpp
-    ('core/include/libtracer/transport_udp.hpp:62', 'static constexpr std::size_t kMaxDatagram = 65536;'),
-    ('core/include/libtracer/transport_udp.hpp:105',
+    ('core/include/libtracer/transport_udp.hpp:66', 'static constexpr std::size_t kMaxDatagram = 65536;'),
+    ('core/include/libtracer/transport_udp.hpp:111',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }'),
     # core/include/libtracer/transport_vertex.hpp
     ('core/include/libtracer/transport_vertex.hpp:77',

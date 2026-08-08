@@ -36,7 +36,9 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   argument (in this tree, `bench/bench_conn_ram.cpp` was the only one). `0` keeps the
   previous behaviour exactly. A non-zero value is the largest datagram the connection
   accepts: a longer one is never delivered, the new `malformed_rx()` counter ticks, and the
-  socket serves the next datagram normally; the RX segment is drawn at the cap instead of at
+  socket serves the next datagram normally — so long as the injected backend can furnish
+  `max_frame + 1` bytes, since a segment bounded below that truncates the datagram before
+  its length can be judged (#1074); the RX segment is drawn at the cap instead of at
   `kMaxDatagram`, so a tight cap is a RAM lever as well as an admission rule. Two new
   accessors, `malformed_rx()` and `effective_max_frame()`, mirror the names `tcp_transport_t`
   and the `ws` transports already carry. The `udp` factory threads `conn_settings_t::max_frame`

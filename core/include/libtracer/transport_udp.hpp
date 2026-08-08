@@ -47,10 +47,14 @@ inline constexpr std::string_view kUdpServerSuggestedModule = "udp-server";
  * (ADR-0042 §2): each datagram is received straight into a refcounted segment from a
  * host-injected `mem_backend_t`, which also bounds the datagram size a node accepts.
  *
- * The ingress bound has the second half every other socket transport has: the universal
- * `:settings max_frame` key (@ref effective_max_frame). A datagram longer than the
- * configured cap is refused and counted in @ref malformed_rx instead of being delivered,
- * and the RX segment is drawn at the cap rather than at @ref kMaxDatagram.
+ * The ingress bound gains its second half: the universal `:settings max_frame` key
+ * (@ref effective_max_frame), the same key `tcp_transport_t`, the `ws` transports, `quic`
+ * and `webtransport` accept. A datagram longer than the configured cap is refused and
+ * counted in @ref malformed_rx instead of being delivered, and the RX segment is drawn at
+ * the cap rather than at @ref kMaxDatagram. That refusal is unconditional on the
+ * borrowed-span path; on the owning path it holds while the injected backend can furnish
+ * `max_frame + 1` bytes — a backend bounded tighter than the cap truncates the datagram
+ * before the cap is ever consulted (#1074).
  */
 class udp_transport_t : public transport_t, private posix_endpoint_t {
    public:
@@ -81,7 +85,9 @@ class udp_transport_t : public transport_t, private posix_endpoint_t {
      * @param max_frame The universal `:settings max_frame` receive cap, in bytes — the
      *        largest datagram this connection accepts (0 → @ref kMaxDatagram). A longer
      *        datagram is refused: it is never delivered, @ref malformed_rx ticks, and the
-     *        socket stays usable. It also sizes the RX segment, so a tight cap is a RAM
+     *        socket stays usable — provided @p backend can furnish `max_frame + 1` bytes,
+     *        since a segment bounded below that truncates the datagram before its length
+     *        can be judged (#1074). It also sizes the RX segment, so a tight cap is a RAM
      *        lever, not only an admission one. Tighten-only by construction: a datagram
      *        cannot exceed @ref kMaxDatagram, so a larger configured value is inert.
      * @param recv_stack Recv-thread stack size in bytes, 0 = platform default

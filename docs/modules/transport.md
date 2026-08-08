@@ -65,7 +65,7 @@ the rope form for an owning link, the span form otherwise (`fwd_router.cpp:629,6
 `fwd_router.cpp:583,590` for the peer-named bus equivalent).
 
 Every socket transport in the tree declares the owning tier: UDP
-(`transport_udp.hpp:105`), TCP client and server (`transport_tcp.hpp:151,277`),
+(`transport_udp.hpp:111`), TCP client and server (`transport_tcp.hpp:151,277`),
 WebSocket server and client (`transport_ws.hpp:217,439`), CAN
 (`transport_can.hpp:475`), QUIC (`transport_quic.hpp:153`) and WebTransport
 (`transport_webtransport.hpp:158`). The borrowed-span path is the base-class default
@@ -159,7 +159,8 @@ class udp_transport_t : public transport_t {
     // in one syscall. Datagrams land in segments from `backend`; exhaustion drops
     // the datagram and ticks dropped_rx. `max_frame` (the universal :settings key,
     // 0 = kMaxDatagram) is the largest datagram accepted — a longer one is refused
-    // and ticks malformed_rx instead of being delivered.
+    // and ticks malformed_rx instead of being delivered, while the backend can
+    // furnish max_frame + 1 bytes (below that it truncates first, #1074).
 };
 ```
 

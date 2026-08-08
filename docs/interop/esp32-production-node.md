@@ -201,7 +201,7 @@ Rules that follow:
 - **Size the pool from the transport, not from hope.** `udp_transport_t` sizes RX
   segments to `min(64 KiB, backend->max_segment_size())`
   (`core/src/transport_udp.cpp:132`; `kMaxDatagram = 65536` at
-  `core/include/libtracer/transport_udp.hpp:62`). Give the pool MTU-sized slots and
+  `core/include/libtracer/transport_udp.hpp:66`). Give the pool MTU-sized slots and
   datagrams arrive without a 64 KiB scratch buffer on a small thread stack.
 
 ## 2. Role composition and the transport RAM lever
