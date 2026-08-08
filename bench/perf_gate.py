@@ -73,6 +73,18 @@ BASELINE = HERE / "perf_baseline.json"
 #   inproc-path @ 8192 ep   — the resolver canary (registry lookup per write)
 #   mixed                   — the composed realistic topology
 #   fold-b4                 — the L0 inline-fold codec tier (batch-amortized)
+#
+# EDITORS: this list is the answer to "how many points does the per-PR gate watch?",
+# and `docs/methodology.md` (§What actually stops a regression) states that count and
+# names every entry — by its `mode/size/fan/ep` key — in prose. That doc is HAND-WRITTEN
+# and is spliced into the published performance page by `gen_results_page.py`, so a
+# stale count is not an internal note: it is the PUBLIC description of what the gate
+# covers. The same generator's instrument registry states the count a second time, in
+# the table at the top of that page. Neither can track this list on its own — the
+# sibling MEM_POINTS count rotted exactly that way, silently, until #792. Adding to or
+# removing from POINTS means editing docs/methodology.md AND that registry row in the
+# same commit; `PointsAreDocumented` in bench/test_perf_gate.py fails until it does
+# (#1041).
 POINTS = [
     ("inproc", 64, 1, 1),
     ("inproc-borrow", 64, 1, 1),

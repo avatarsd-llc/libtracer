@@ -356,5 +356,53 @@ class MemPointsAreDocumented(unittest.TestCase):
                             f"{point} is gated but not named in {self.DOC}")
 
 
+class PointsAreDocumented(unittest.TestCase):
+    """@brief The same pin for the gated latency/throughput points (#1041).
+
+    `MEM_POINTS` had this guard and `POINTS` did not, though both lists are edited by the
+    same kind of change. docs/methodology.md states the point COUNT in prose and is
+    spliced into the published performance page by `gen_results_page.py`, so a stale count
+    is the PUBLIC description of what the per-PR gate covers — and the doc is not
+    generated, so it can only rot silently, which is how the memory-probe count reached
+    #792 stale at three.
+
+    The count is published from TWO hand-written places, so both are pinned: the prose in
+    docs/methodology.md, and the `gate` column of `gen_results_page.py`'s instrument
+    registry, which renders the same claim into the instrument table at the top of the
+    same page. Pinning one of the two would leave the page able to contradict itself."""
+
+    DOC = pathlib.Path(__file__).resolve().parents[1] / "docs" / "methodology.md"
+    GEN = pathlib.Path(__file__).resolve().parent / "gen_results_page.py"
+    WORDS = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven"}
+
+    def test_methodology_names_every_point(self):
+        if not self.DOC.exists():          # bench/ checked out alone
+            self.skipTest(f"{self.DOC} not present")
+        text = self.DOC.read_text()
+        words = self.WORDS
+        n = len(pg.POINTS)
+        # `assertTrue` rather than `assertIn`: the doc is 300 lines and a failing
+        # `assertIn` dumps the whole of it over the real message.
+        self.assertTrue(f"**{words[n]} canonical points**" in text,
+                        f"{self.DOC} does not say '{words[n]} canonical points' — "
+                        f"POINTS now has {n} entries and the doc has rotted (#1041)")
+        # The key form is the one the gate itself prints (`paired_samples`), so the doc
+        # names each point exactly as a failure line will name it.
+        for (mode, size, fan, ep) in pg.POINTS:
+            key = f"{mode}/{size}/{fan}/{ep}"
+            self.assertTrue(f"`{key}`" in text,
+                            f"{key} is gated but not named in {self.DOC}")
+
+    def test_instrument_registry_states_the_count(self):
+        """The published instrument table repeats the count in its own words."""
+        if not self.GEN.exists():          # perf_gate.py vendored alone
+            self.skipTest(f"{self.GEN} not present")
+        n = len(pg.POINTS)
+        self.assertTrue(f"{self.WORDS[n]} canonical points" in self.GEN.read_text(),
+                        f"{self.GEN}'s instrument registry does not say "
+                        f"'{self.WORDS[n]} canonical points' — POINTS now has {n} entries "
+                        f"and the published instrument table has rotted (#1041)")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
