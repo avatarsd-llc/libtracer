@@ -156,7 +156,7 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   a kind-less SPEC takes it from the staged set) and then looks the staging up **directly**,
   by the exact key the map is keyed with.
 
-  **Contract change, two parts.** (1) `kind` is no longer "ignored when a link is staged": a
+  **Contract change, three parts.** (1) `kind` is no longer "ignored when a link is staged": a
   staged link takes precedence over construction only **within the module the SPEC resolves
   to**. A SPEC whose `kind` is declared under a different module now builds that kind's socket
   there and leaves the staging untouched — previously the staging captured it. An application
@@ -165,7 +165,14 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   leaf NAME matches **two or more** stagings is refused with `status_t::TYPE_MISMATCH` (wire
   `SCHEMA_TYPE_MISMATCH`, PERMANENT) instead of binding one by map order; the SPEC must carry
   a `kind` whose declared module says which staging it meant. The refusal is total — neither
-  staging is consumed. Single-module staging, the overwhelmingly common shape, is unchanged.
+  staging is consumed. (3) A SPEC carrying a `kind` for which **no module is declared for that
+  role** now fails `status_t::SCHEMA_NOT_FOUND`, even when a link is staged under the matching
+  leaf NAME — module resolution runs first, so the leaf-NAME scan that used to rescue this shape
+  is never reached. This is the one user-visible break that is a hard failure rather than a
+  re-route, and it applies to single-module staging too. The migration is to call
+  `register_module(<module>, <kind>, <role>)` once; a `kind` used purely to disambiguate needs
+  only that declaration and **not** a `register_transport_type` factory, because a staged link
+  at the resolved module short-circuits before the factory lookup.
 
 - **`graph_t::evict_link_edges("")` / `vertex_t::evict_link_edges("")` now match nothing and
   return 0, instead of reclaiming local `delivery_compact` edges (#1056).** The predicate keys
