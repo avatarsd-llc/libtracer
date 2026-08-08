@@ -8,9 +8,27 @@ name: core-ci
 on:
   push:
     branches: [main]
-    paths: ["core/**", "bench/**", "tests/packaging/**", ".github/workflows/core-ci.yml"]
+    # DERIVED by tools/gen_ci_paths.py -- do not hand-edit: this list is what
+    # core-ci's jobs configure and compile. `gen_ci_paths.py --apply` rewrites it.
+    paths:
+      - "bench/**"
+      - "core/**"
+      - "integrations/esp-idf/libtracer/**"
+      - "integrations/esp-idf/tests/host/**"
+      - "tests/conformance/vectors/v1/**"
+      - "tests/packaging/**"
+      - ".github/workflows/core-ci.yml"
   pull_request:
-    paths: ["core/**", "bench/**", "tests/packaging/**", ".github/workflows/core-ci.yml"]
+    # DERIVED by tools/gen_ci_paths.py -- do not hand-edit: this list is what
+    # core-ci's jobs configure and compile. `gen_ci_paths.py --apply` rewrites it.
+    paths:
+      - "bench/**"
+      - "core/**"
+      - "integrations/esp-idf/libtracer/**"
+      - "integrations/esp-idf/tests/host/**"
+      - "tests/conformance/vectors/v1/**"
+      - "tests/packaging/**"
+      - ".github/workflows/core-ci.yml"
   workflow_dispatch:
 
 jobs:
@@ -143,6 +161,26 @@ jobs:
         run: |
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
           cmake --build bench/build -j
+
+  # This workflow's own `paths:` trigger, gated against what its jobs actually build
+  # (#1082). The list used to be hand-written — `core/**`, `bench/**`,
+  # `tests/packaging/**` — while ctest targets defined in core/tests/CMakeLists.txt
+  # compile ESP-IDF sources out of `integrations/esp-idf/` and read the conformance
+  # vectors out of `tests/conformance/`. Neither tree was named, so a pull request
+  # confined to one of them ran no host test at all, from the very suites written to
+  # cover it. tools/gen_ci_paths.py re-derives the list from a real configure of the
+  # core project (CMake file-api: target sources, include directories, path-valued
+  # compile definitions, ctest properties) plus every `cmake -S <dir>` this file runs,
+  # and fails here on any drift. Making a suite compile a new tree means editing a
+  # CMakeLists under `core/**`, which is always in the trigger, so this check runs on
+  # exactly the changes that can invalidate it. Ablate it by deleting a `paths:` entry
+  # — the job goes red naming that entry.
+  ci-paths:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: core-ci's paths trigger covers everything core-ci builds
+        run: python3 tools/gen_ci_paths.py --check
 
   format:
     runs-on: ubuntu-24.04
