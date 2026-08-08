@@ -34,6 +34,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <type_traits>
 
 namespace tr::net {
 
@@ -71,9 +72,19 @@ namespace tr::net {
  */
 template <typename Fn>
 class sink_slot_t {
-    static_assert(std::atomic<Fn>::is_always_lock_free,
-                  "sink_slot_t assumes a lock-free pointer-sized atomic: the whole point is a "
-                  "read path that takes no lock");
+    // The design constraint this header can check locally: the sink is a bare function
+    // pointer, so the published word is pointer-sized and the snapshot is two adjacent
+    // words rather than an object needing a lock of its own.
+    static_assert(sizeof(Fn) <= sizeof(void*) && std::is_pointer_v<Fn>,
+                  "sink_slot_t publishes a pointer-sized function pointer");
+    // NOT asserted: `std::atomic<Fn>::is_always_lock_free`. It is false on a target with no
+    // atomic instructions at all — esp32c3 is rv32imc (no A extension), and Cortex-M0 has no
+    // exclusives — and this header is on the fwd_router include path, so a hard assert there
+    // breaks both esp32c3 CI legs at compile time. libtracer supports those targets, and on
+    // them std::atomic falls back to libatomic: still CORRECT, just not lock-free. They are
+    // single-core, so the contention the lock-free path exists to avoid does not arise. The
+    // "no lock, no spin" claim above is therefore about hosts with real atomics; it is not a
+    // portability promise, and it must not be spelled as one in a header every target parses.
 
    public:
     /** @brief One coherent read of the pair — both halves from the same @ref set. */
