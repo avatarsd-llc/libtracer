@@ -23,7 +23,8 @@
  *      `httpd_ws_link_t::kRequiredHttpdStack`, and the link samples the task's free-stack
  *      high-water mark at each session claim so a stack below it is NAMED once rather than
  *      arriving as an unexplained stack-protection reboot.
- *   2. IDF advances a session's LRU counter from inbound request processing only
+ *   2. Apart from the explicit `httpd_sess_update_lru_counter` API, IDF advances a
+ *      session's LRU counter from inbound request processing only
  *      (`httpd_sess_process`), so on a purging host a graph peer that subscribes and
  *      thereafter only RECEIVES ages toward the lowest counter — it becomes the
  *      preferential victim of `httpd_accept_conn`'s purge no matter how much this link is

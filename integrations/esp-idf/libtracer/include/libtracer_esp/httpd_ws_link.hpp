@@ -190,8 +190,9 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *      free headroom is thin — it names the cause of a reboot, it cannot prevent one.
      *   2. `lru_purge_enable = false`. With purge on, `httpd_accept_conn` closes the
      *      least-recently-used session before each accept once the socket table is full,
-     *      and IDF advances a session's LRU counter only from `httpd_sess_process`
-     *      (inbound request processing) — a server-initiated push does not touch it. A
+     *      and — apart from the explicit `httpd_sess_update_lru_counter` API — IDF advances
+     *      a session's LRU counter only from `httpd_sess_process` (inbound request
+     *      processing); a server-initiated push does not touch it. A
      *      graph peer that subscribes and thereafter only RECEIVES therefore ages toward
      *      the lowest counter, i.e. toward being the victim. The link mitigates this from
      *      its side in adopted mode — it calls `httpd_sess_update_lru_counter` after each
@@ -590,8 +591,8 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * @brief Sample the httpd task's free-stack high-water mark and, ONCE, name a thin
      *        one (#955). Runs on the httpd task, at the session-claim edge only.
      *
-     * The only check available for precondition 1 of the adopting ctor: nothing can read
-     * an adopted server's `stack_size`, but every task's minimum-ever free stack is
+     * The stand-in for a check of precondition 1 of the adopting ctor: nothing can read an
+     * adopted server's configured `stack_size`, but a task's minimum-ever free stack is
      * readable. The mark is a running MINIMUM, so a sample taken at a claim already
      * reflects every deep delivery the task has served before it — one connection late,
      * which is the price of not paying an O(free-stack) scan per frame.

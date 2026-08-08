@@ -67,8 +67,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed
 
 - **A receive-only graph peer is no longer the preferential LRU purge victim on an adopted
-  server** (#955). ESP-IDF advances a session's LRU counter from inbound request processing
-  only (`httpd_sess_process`); a server-initiated push does not touch it. So on a host that
+  server** (#955). Apart from the explicit `httpd_sess_update_lru_counter` API, ESP-IDF
+  advances a session's LRU counter from inbound request processing only
+  (`httpd_sess_process`); a server-initiated push does not touch it. So on a host that
   runs with `lru_purge_enable = true`, a peer that subscribes and thereafter only RECEIVES
   ages toward the lowest counter no matter how much this link is pushing to it — and
   `httpd_accept_conn`'s victim search (which skips only `for_async_req` sessions, never a

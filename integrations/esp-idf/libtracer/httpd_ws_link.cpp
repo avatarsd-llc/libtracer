@@ -1974,24 +1974,25 @@ void httpd_ws_link_t::tx_work(void* arg) {
         f.len = work->len;
         err = httpd_ws_send_frame_async(work->handle, fd, &f);
         if (err == ESP_OK && refresh_lru) {
-            // Tell the ADOPTED server this session is not idle (#955). IDF advances a
-            // session's LRU counter in exactly one place — the tail of httpd_sess_process,
-            // i.e. inbound request processing — so a server-initiated push does not touch
-            // it. A graph peer that subscribes and thereafter only RECEIVES therefore ages
-            // toward the lowest counter no matter how much this link is pushing at it, and
-            // httpd_accept_conn's victim search (which skips only for_async_req sessions,
-            // never a WS one) picks the lowest. On a purging host the busiest subscriber
-            // was the preferential victim; refreshing here removes exactly that inversion.
+            // Tell the ADOPTED server this session is not idle (#955). Apart from this very
+            // API, IDF advances a session's LRU counter in one place — the tail of
+            // httpd_sess_process, i.e. inbound request processing — so a server-initiated
+            // push does not touch it. A graph peer that subscribes and thereafter only
+            // RECEIVES therefore ages toward the lowest counter no matter how much this link
+            // is pushing at it, and httpd_accept_conn's victim search (which excludes only
+            // sessions marked for_async_req, never a WS one) picks the lowest. The pure
+            // subscriber was the preferential victim precisely BECAUSE the push stream is
+            // invisible to the counter; refreshing here removes that inversion.
             //
             // It is NOT immunity, and must not be described as any: at the host's socket
             // ceiling some session is still closed, and an evicted peer reaches this link
             // as an ordinary departure. The inbound direction needs nothing — httpd_sess_process
             // already covers it, and this handler runs inside it.
             //
-            // Safe here and only here: the function walks hd->hd_sd and bumps hd->lru_counter
-            // with no lock of its own, and tx_work runs on the httpd task (httpd_queue_work
-            // put it there), which is the task that owns that table. The result is dropped
-            // on purpose — ESP_ERR_NOT_FOUND only says the session left between the send and
+            // Safe on this task: the function walks hd->hd_sd and bumps hd->lru_counter with
+            // no lock of its own, and tx_work runs on the httpd task (httpd_queue_work put it
+            // there), which is the task that owns that table. The result is dropped on
+            // purpose — ESP_ERR_NOT_FOUND only says the session left between the send and
             // now, which is neither this frame's business nor actionable.
             (void)httpd_sess_update_lru_counter(work->handle, fd);
         }
