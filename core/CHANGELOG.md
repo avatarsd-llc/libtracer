@@ -53,6 +53,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`wire::key_view_t` gains record accessors — `record_end`, `record_from`, `record_t` and
+  `record_cursor_t` (#888).** The NAME-record framing walk (4-byte header, u16 length, advance
+  by `4 + len`) was hand-rolled at **eight** places, because the class offered no way to ask
+  for a record: FOUR outside this header — `graph.cpp`'s Composite `segment_end`,
+  `fwd_router.cpp`'s `subscribe_toward` **twice** (and its indexed accessor rescanned from
+  offset 0 per segment), and `transport_vertex.cpp` (a near-verbatim copy of the already-public
+  `last_segment`) — and FOUR inside it: `last_segment`, `parent`, `child_record_under` and
+  `split_levels`. All eight now read the framing through `record_end`, which is the ONE
+  place the decode is written — including the zero-length-record rejection (#932), which is
+  now enforced once there instead of once per walk. Purely additive — no existing member
+  changed signature or behaviour. `record_end(at)` answers the next record's offset, or `0`
+  for ragged framing; `record_from(at)` adds the bounds and the payload span;
+  `record_cursor_t` is the non-allocating INDEXED walk the strip-K mount descent asks by
+  segment number, resuming instead of rescanning.
+
 - **`config_reader_t::name_bytes(key)`** — the raw payload span of a `NAME` value child
   (the byte-span twin of `name()`, for values that are wire segments rather than text), and
   **`config_reader_t::settings(key)`** — the nested `SETTINGS` value child, or `nullptr`.
