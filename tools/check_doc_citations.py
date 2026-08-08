@@ -453,8 +453,8 @@ ANCHORS = [
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'transport_tcp_server& operator=(const transport_tcp_server&) = delete;'),
     # core/include/libtracer/transport_udp.hpp
-    ('core/include/libtracer/transport_udp.hpp:55', 'static constexpr std::size_t kMaxDatagram = 65536;'),
-    ('core/include/libtracer/transport_udp.hpp:91',
+    ('core/include/libtracer/transport_udp.hpp:62', 'static constexpr std::size_t kMaxDatagram = 65536;'),
+    ('core/include/libtracer/transport_udp.hpp:105',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }'),
     # core/include/libtracer/transport_vertex.hpp
     ('core/include/libtracer/transport_vertex.hpp:77',
@@ -600,7 +600,7 @@ ANCHORS = [
     ('core/src/transport_tcp.cpp:457', 'std::array<std::byte, 4096> chunk;',
      'void transport_tcp_server::service_peer(session_t& s) {'),
     # core/src/transport_udp.cpp
-    ('core/src/transport_udp.cpp:138',
+    ('core/src/transport_udp.cpp:132',
      'const std::size_t rx_cap = std::min(kMaxDatagram, backend_->max_segment_size());'),
     # core/src/transport_vertex.cpp
     ('core/src/transport_vertex.cpp:53',
