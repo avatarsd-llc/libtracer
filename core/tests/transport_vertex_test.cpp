@@ -833,6 +833,187 @@ void test_factory_built_ws_dial_delivers_push_on_connect() {
     ::close(lfd);
 }
 
+/** @brief One length-prefixed record: u32-LE len ++ payload (the M6 tcp transport framing). */
+std::vector<std::byte> tcp_record(std::span<const std::byte> payload) {
+    std::vector<std::byte> out(4);
+    tr::detail::store_le(out, static_cast<std::uint32_t>(payload.size()), 4);
+    out.insert(out.end(), payload.begin(), payload.end());
+    return out;
+}
+
+/**
+ * @brief #1045 — a SPEC-created `kind=tcp` DIAL delivers the frame its peer pushed on connect.
+ *
+ * The `ws` twin above, for the transport this issue is scoped to. The same argument applies
+ * unchanged: `tcp_test`'s raw-peer case constructs `tcp_transport_t` DIRECTLY, so the
+ * factory's argument list is never read, and `test_link_is_armed_after_wiring` goes in through
+ * `provide_link`, which takes the staged-link branch and calls no factory at all. The
+ * `defer_recv` argument the built-in `tcp` factory passes
+ * (`core/src/builtin_transport_tcp.cpp`) sits between them. Drop it and the SPEC-created DIAL
+ * is one-phase again: the recv thread is spawned inside the constructor,
+ * `make_connection`'s `start_receiving()` finds the one-shot latch already set and does
+ * nothing, and the push-on-connect frame is back to racing the receiver install — silently,
+ * because a decode into an empty `receiver_slot_t` moves no counter at all.
+ *
+ * So this drives a raw-peer harness through the PRODUCTION creation path — a graph write of
+ * SPEC{client, kind=tcp, addr, port} — and observes DOWNSTREAM of the link, where a drop
+ * shows. tcp has no handshake, so the peer simply writes ONE complete length-prefixed record
+ * carrying `FWD{WRITE dst=/temp}` the moment it accepts, and then goes quiet. The factory
+ * wires the router as the receiver, so a DELIVERED frame reaches the terminus and lands in
+ * the LKV — `/temp` takes a write it had not taken before. A frame decoded before the wiring
+ * reaches nothing, and `/temp` stays as it was.
+ *
+ * The window is held open on purpose (see @ref map_lock_gate_t) — left to the host it is a
+ * couple of microseconds, so the one-phase shape would usually win the race by accident and
+ * the guard would assert nothing.
+ */
+void test_factory_built_tcp_dial_delivers_push_on_connect() {
+    std::printf("a SPEC-created kind=tcp DIAL delivers the peer's push-on-connect (#1045):\n");
+
+    const int lfd = ::socket(AF_INET, SOCK_STREAM, 0);
+    check(lfd >= 0, "raw listener created");
+    const int one = 1;
+    ::setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    sockaddr_in local{};
+    local.sin_family = AF_INET;
+    local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    local.sin_port = 0;
+    check(::bind(lfd, reinterpret_cast<sockaddr*>(&local), sizeof(local)) == 0, "listener bound");
+    check(::listen(lfd, 1) == 0, "listener listening");
+    sockaddr_in bound{};
+    socklen_t blen = sizeof(bound);
+    ::getsockname(lfd, reinterpret_cast<sockaddr*>(&bound), &blen);
+
+    // The pushed frame: a remote WRITE of one byte into this node's own /temp.
+    const std::byte kPushed{0x6B};
+    const std::vector<std::byte> record = tcp_record(fwd_write({"temp"}, kPushed));
+    // How long the creation path is held between the socket and the wiring. Three orders of
+    // magnitude more than a one-phase recv thread needs to decode what is already sitting in
+    // its socket, so the reverted factory fails here deterministically rather than flakily.
+    constexpr auto kHeld = 200ms;
+
+    std::promise<bool> one_write_done;  // the whole record went out as ONE send
+    std::promise<void> peer_answered;   // ...and it is on the wire NOW (the hold's anchor)
+    std::promise<void> test_done;       // safe to close the peer socket
+    auto one_write_fut = one_write_done.get_future();
+    auto answered_fut = peer_answered.get_future();
+    auto done_fut = test_done.get_future();
+
+    std::thread pusher([&] {
+        const int cfd = ::accept(lfd, nullptr, nullptr);
+        if (cfd < 0) {
+            one_write_done.set_value(false);
+            peer_answered.set_value();
+            return;
+        }
+        // ONE syscall the instant the connection is accepted — the push-on-connect shape,
+        // and what makes the window real.
+        const ssize_t sent = ::send(cfd, record.data(), record.size(), 0);
+        one_write_done.set_value(sent == static_cast<ssize_t>(record.size()));
+        peer_answered.set_value();
+
+        done_fut.wait();
+        ::close(cfd);
+    });
+
+    // Declared before the graph they serve: the gate IS the graph's value backend, and the
+    // counter and its callable outlive the vertex they are subscribed on.
+    map_lock_gate_t gate;
+    std::atomic<int> temp_writes{0};
+    auto on_temp = [&temp_writes](const tr::view::rope_t&) {
+        temp_writes.fetch_add(1, std::memory_order_relaxed);
+    };
+
+    graph_t node(std::pmr::get_default_resource(), &gate);
+    fwd_router_t router(node);
+    (void)node.register_vertex(path_t("/temp"), role_t::STORED_VALUE);
+    (void)node.subscribe(path_t("/temp"), on_temp);
+    // The vertex whose `:children[]` fold parks the gate — it needs one REGISTERED child.
+    const tr::graph::vertex_handle_t gate_v =
+        node.register_vertex(path_t("/gate"), role_t::STORED_VALUE);
+    (void)node.register_vertex(path_t("/gate/x"), role_t::STORED_VALUE);
+    const int before = temp_writes.load(std::memory_order_relaxed);
+
+    {
+        // The FULL ctor — the one that installs the built-in `kind` catalog, so `kind=tcp`
+        // below is served by core/src/builtin_transport_tcp.cpp and by nothing else. Declared
+        // in its own scope so the socket (and its recv thread) is torn down before the router
+        // and graph it delivers into.
+        transport_vertex_t net(node, router);
+        // ADR-0073 §4: the application mints the module name. `declare_builtin_modules` above
+        // covers udp/ws; the tcp DIAL module is declared here, where it is used.
+        check(net.register_module(std::string(tr::net::kTcpClientSuggestedModule), "tcp",
+                                  conn_role_t::DIAL)
+                  .has_value(),
+              "the tcp DIAL module is declared");
+        // Pre-create the `/net/<module>` grouping vertex `make_connection` would otherwise
+        // create lazily. That lazy call is a `register_vertex_key` BEFORE the factory runs, so
+        // leaving it would park the creation path on the gate with no socket built yet — the
+        // held window has to start AFTER the dialer exists to be the window #1045 is about.
+        (void)node.try_register_vertex(path_t("/net/tcp-client"), role_t::STORED_VALUE);
+
+        gate.arm();
+        std::thread holder([&] { (void)node.read_children_folded(gate_v); });
+        check(gate.wait_parked(5s), "the gate parked inside the graph's map lock");
+
+        // The creation path is about to block, so the release cannot come from this thread.
+        // The hold is anchored to the instant the peer's record hit the wire rather than to a
+        // wall-clock guess, so a loaded runner cannot eat the window.
+        std::chrono::steady_clock::time_point released_at;
+        std::thread releaser([&] {
+            (void)answered_fut.wait_for(5s);
+            std::this_thread::sleep_for(kHeld);
+            released_at = std::chrono::steady_clock::now();
+            gate.release();
+        });
+
+        const auto w = node.write(path_t("/net:children[]"),
+                                  conn_spec("client", "up", conn_role_t::DIAL,
+                                            ntohs(bound.sin_port), "tcp", "127.0.0.1"));
+        const auto spec_returned = std::chrono::steady_clock::now();
+        releaser.join();  // ...and with it the happens-before edge on `released_at`
+        holder.join();
+
+        check(w.has_value(), "the SPEC created the connection through the built-in tcp factory");
+        check(net.link_of("net/tcp-client/up") != nullptr,
+              "the link is a CONSTRUCTED one (no provide_link staged anything here)");
+        check(one_write_fut.wait_for(3s) == std::future_status::ready && one_write_fut.get(),
+              "the peer put a COMPLETE pushed record on the wire in ONE write");
+        // Without this the case is vacuous: it would be asserting delivery across a window too
+        // short for either shape to lose, and would pass whatever the factory passes. The write
+        // returning only AFTER the gate let go is what proves it was gated.
+        check(spec_returned >= released_at,
+              "and the creation path was still INSIDE make_connection when the gate let go — "
+              "the window really was held open across it");
+
+        bool delivered = false;
+        const auto deadline = std::chrono::steady_clock::now() + 5s;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (temp_writes.load(std::memory_order_relaxed) > before) {
+                delivered = true;
+                break;
+            }
+            std::this_thread::sleep_for(1ms);
+        }
+        check(delivered,
+              "the pushed frame reached the receiver the factory-built link was wired to: "
+              "/temp took a write it had not taken before the SPEC");
+
+        const auto stored = node.read(path_t("/temp"));
+        bool carried = false;
+        if (stored) {
+            const auto inner = tr::wire::decode((*stored)->only());
+            carried = inner.has_value() && inner->type == type_t::VALUE &&
+                      inner->payload.size() == 1 && inner->payload[0] == kPushed;
+        }
+        check(carried, "carrying the pushed frame's own value");
+    }
+
+    test_done.set_value();
+    pusher.join();
+    ::close(lfd);
+}
+
 void test_creation_errors() {
     std::printf("Creation errors are clean statuses, never crashes:\n");
     graph_t node;
@@ -1409,6 +1590,7 @@ int main() {
     test_provide_link_wins();
     test_link_is_armed_after_wiring();
     test_factory_built_ws_dial_delivers_push_on_connect();
+    test_factory_built_tcp_dial_delivers_push_on_connect();
     test_creation_errors();
     test_link_of_accessor();
     test_link_name_collision_rejected();

@@ -898,6 +898,205 @@ void test_accept_publish_is_atomic_to_senders() {
     check(got == want, "the frame broadcast in that instant REACHED the accepted peer");
 }
 
+/** @brief A bound+listening raw loopback socket the test drives by hand (accept, write, close). */
+struct raw_listener_t {
+    int fd = -1;            /**< @brief The listening socket, or -1 if setup failed. */
+    std::uint16_t port = 0; /**< @brief The ephemeral port the kernel assigned. */
+
+    raw_listener_t() {
+        fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) return;
+        const int one = 1;
+        ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+        sockaddr_in local{};
+        local.sin_family = AF_INET;
+        local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        local.sin_port = 0;
+        if (::bind(fd, reinterpret_cast<sockaddr*>(&local), sizeof(local)) < 0 ||
+            ::listen(fd, 1) < 0) {
+            ::close(fd);
+            fd = -1;
+            return;
+        }
+        sockaddr_in bound{};
+        socklen_t blen = sizeof(bound);
+        if (::getsockname(fd, reinterpret_cast<sockaddr*>(&bound), &blen) == 0)
+            port = ntohs(bound.sin_port);
+    }
+    ~raw_listener_t() {
+        if (fd >= 0) ::close(fd);
+    }
+    raw_listener_t(const raw_listener_t&) = delete;
+    raw_listener_t& operator=(const raw_listener_t&) = delete;
+};
+
+/**
+ * @brief #1045 — a `defer_recv` DIAL link reads NOTHING until start_receiving(), so a frame
+ *        the peer pushes ON CONNECT cannot be dropped into an empty sink.
+ *
+ * The one-phase constructor connects AND spawns the recv thread before it returns, so
+ * `set_receiver` can only ever run afterwards. A peer that pushes the instant it accepts has
+ * that frame in flight before the constructor returns, and whether it beats the caller's next
+ * statement is decided by nothing but scheduling: the recv thread reaching its first
+ * `read_exact` versus the calling thread performing one store. Lose that race and
+ * `receiver_slot_t`'s empty slot drops the frame — no `dropped_rx()`, no `malformed_rx()`, a
+ * healthy-looking connection. Measured at `ce5e902b` with a 300 ms sink-install delay: peer
+ * pushed 1, sink received 0, both counters 0.
+ *
+ * The guard does not race it. The peer writes ONE complete length-prefixed record the moment
+ * it accepts and then goes quiet; the link is constructed with `defer_recv` and its sink is
+ * installed IMMEDIATELY — so the silence below cannot be explained by a missing sink, only by
+ * an un-armed link. Then:
+ *
+ *  - SILENCE. For a generous window nothing is delivered and neither counter moves, because
+ *    not one byte has been read off the socket.
+ *  - the FRAME, once `start_receiving()` runs — the positive control that keeps the silence
+ *    from being vacuous: the bytes were really there, and really decodable.
+ *
+ * Reverting the `defer_recv` gate in `tcp_transport_t`'s DIAL constructor reddens this in one
+ * of two ways — the frame is delivered inside the silence window, or it was decoded into the
+ * empty slot before `set_receiver` ran and never arrives at all. Both are failures, and which
+ * one shows is exactly the scheduling race the fix removes.
+ */
+void test_push_on_connect_waits_for_start_receiving() {
+    std::printf("TCP transport — a push-on-connect frame waits for the sink (#1045):\n");
+    const raw_listener_t peer_listener;
+    check(peer_listener.fd >= 0, "raw listener bound and listening");
+
+    const auto pushed = test_frame(11, 0x70);
+    const auto rec = record(pushed);
+
+    std::promise<bool> one_write_done;  // the whole record went out as ONE send
+    std::promise<void> test_done;       // safe to close the peer socket
+    auto one_write_fut = one_write_done.get_future();
+    auto done_fut = test_done.get_future();
+
+    std::thread pusher([&] {
+        const int cfd = ::accept(peer_listener.fd, nullptr, nullptr);
+        if (cfd < 0) {
+            one_write_done.set_value(false);
+            return;
+        }
+        // The push-on-connect shape: one COMPLETE record the instant the connection is
+        // accepted, and then the peer never writes again.
+        const ssize_t sent = ::send(cfd, rec.data(), rec.size(), 0);
+        one_write_done.set_value(sent == static_cast<ssize_t>(rec.size()));
+        done_fut.wait();
+        ::close(cfd);
+    });
+
+    // The sink outlives the transport that delivers to it (this file's destruction idiom).
+    sink_t sink;
+    auto rx = [&](std::span<const std::byte> f) { sink.push(f); };
+    {
+        tcp_transport_t dialer("127.0.0.1", peer_listener.port, &tr::mem::heap_backend(),
+                               /*max_frame=*/0, /*recv_stack=*/0, /*defer_recv=*/true);
+        check(dialer.ok(), "the deferred dialer's connect still happened in the constructor");
+        // Installed BEFORE the window: what holds the frame back below is the un-armed link,
+        // and nothing else.
+        dialer.set_receiver(rx);
+        check(one_write_fut.wait_for(3s) == std::future_status::ready && one_write_fut.get(),
+              "the peer pushed one COMPLETE record the moment it accepted");
+
+        // Orders of magnitude more than a recv thread needs to drain what is already sitting
+        // in the socket, so a link that spawned that thread in its constructor fails here.
+        std::this_thread::sleep_for(500ms);
+        check(sink.count() == 0,
+              "the deferred link delivered NOTHING for the whole window: nothing was read");
+        check(dialer.dropped_rx() == 0 && dialer.malformed_rx() == 0,
+              "and it was not shed under another name either (both counters still 0)");
+
+        dialer.start_receiving();
+        check(sink.wait_for_count(1, 4s),
+              "after start_receiving() the pushed frame was DELIVERED, not dropped");
+        check(sink.count() == 1 && sink.at(0) == pushed, "carrying the pushed frame's own bytes");
+        check(dialer.dropped_rx() == 0 && dialer.malformed_rx() == 0,
+              "delivered with both counters still 0");
+        test_done.set_value();
+    }
+    pusher.join();
+}
+
+/**
+ * @brief #1045 — `start_receiving()` is a safe no-op on every link that has nothing to arm.
+ *
+ * `transport_vertex_t::make_connection` calls it unconditionally on every link it wires, so
+ * the three cases that are NOT a deferred DIAL must all be inert: a second call on an armed
+ * link, a one-phase DIAL (its thread started in the constructor), a LISTEN link (its accept
+ * loop is that one `start`), and a link whose dial failed (no socket to serve).
+ *
+ * The observable for "no second thread" is exactly-one delivery plus a clean teardown:
+ * `posix_endpoint_t::start` may be called at most once, and a second call would overwrite the
+ * thread handle so `stop_and_join` joins only the newer one — leaving the older thread running
+ * on a destroyed object, which the sanitized CI builds of this suite report.
+ */
+void test_start_receiving_is_idempotent() {
+    std::printf("TCP transport — start_receiving() is idempotent and inert where it must be:\n");
+
+    // (a) a one-phase DIAL + (b) a LISTEN link: both started their thread in the constructor.
+    {
+        sink_t at_listener, at_dialer;
+        auto listener_rx = [&](std::span<const std::byte> f) { at_listener.push(f); };
+        auto dialer_rx = [&](std::span<const std::byte> f) { at_dialer.push(f); };
+        tcp_transport_t listener(std::uint16_t{0});
+        check(listener.ok(), "listener bound (ephemeral port)");
+        listener.start_receiving();  // before any peer at all
+        tcp_transport_t dialer("127.0.0.1", listener.local_port());
+        check(dialer.ok(), "one-phase dialer connected");
+        listener.set_receiver(listener_rx);
+        dialer.set_receiver(dialer_rx);
+
+        // Round-trip FIRST, so the listener has demonstrably ACCEPTED its peer (its accept
+        // loop polls on a 100 ms grain, so calling straight after the connect would find
+        // `conn_fd_` still -1 and exercise nothing).
+        const auto f1 = test_frame(5, 0x10);
+        dialer.send(f1);
+        check(at_listener.wait_for_count(1, 2000ms), "the listener accepted its peer and receives");
+
+        // ...and only now arm both, twice each: this is the state in which a missing guard
+        // spawns a second `serve` loop onto the accepted fd.
+        listener.start_receiving();
+        listener.start_receiving();
+        dialer.start_receiving();
+        dialer.start_receiving();
+
+        const auto f1b = test_frame(13, 0x30);
+        dialer.send(f1b);
+        check(at_listener.wait_for_count(2, 2000ms), "the listener still receives after arming");
+        const auto f2 = test_frame(9, 0x40);
+        listener.send(f2);
+        check(at_dialer.wait_for_count(1, 2000ms), "the one-phase dialer still receives");
+        std::this_thread::sleep_for(200ms);
+        check(at_listener.count() == 2 && at_listener.at(0) == f1 && at_listener.at(1) == f1b,
+              "each frame exactly once at the listener (no second serve loop on its peer)");
+        check(at_dialer.count() == 1 && at_dialer.at(0) == f2,
+              "exactly once at the dialer (no second recv thread)");
+        check(listener.malformed_rx() == 0 && dialer.malformed_rx() == 0,
+              "and neither stream lost framing sync");
+    }
+
+    // (c) a dial that FAILED: ok() is false and there is no socket to serve. The port is a
+    // real free one (reserved and released — a listener that never accepts closes straight to
+    // CLOSED, no TIME_WAIT), so the connect is refused rather than landing somewhere.
+    std::uint16_t dead_port = 0;
+    {
+        tcp_transport_t port_probe{std::uint16_t{0}};
+        dead_port = port_probe.local_port();
+    }
+    check(dead_port != 0, "reserved (and released) a free localhost port");
+    std::atomic<int> delivered{0};
+    auto rx = [&](std::span<const std::byte>) { delivered.fetch_add(1); };
+    {
+        tcp_transport_t bad("127.0.0.1", dead_port, &tr::mem::heap_backend(), /*max_frame=*/0,
+                            /*recv_stack=*/0, /*defer_recv=*/true);
+        check(!bad.ok(), "the dial to a closed port failed");
+        bad.set_receiver(rx);
+        bad.start_receiving();
+        bad.start_receiving();
+    }
+    check(delivered.load() == 0, "arming a failed dial delivered nothing and did not crash");
+}
+
 }  // namespace
 
 // Proves the recv_stack knob (libtracer #486): a transport constructed with an
@@ -938,6 +1137,8 @@ int main() {
     test_server_multi_peer_bus();
     test_server_max_peers_cap();
     test_accept_publish_is_atomic_to_senders();
+    test_push_on_connect_waits_for_start_receiving();
+    test_start_receiving_is_idempotent();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;

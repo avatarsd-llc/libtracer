@@ -103,9 +103,10 @@ class tcp_transport_t : public transport_t, private stream_endpoint_t {
      * @brief DIAL mode: connect to @p peer_host:@p peer_port (synchronous).
      *
      * The TCP connect happens in the constructor (the transport_ws_client
-     * shape) — confirm with ok(); on failure no thread is spawned. On success
+     * shape) — confirm with ok(); on failure no thread is spawned. By default
      * the receive thread starts immediately, so receivers must be installed
-     * before frames flow (the set_receiver contract).
+     * before frames flow (the set_receiver contract); @p defer_recv is what
+     * makes that contract satisfiable on this socket at all.
      *
      * @param peer_host Dotted-quad IPv4 address of the peer (e.g. "127.0.0.1").
      * @param peer_port TCP port of the peer (host byte order).
@@ -119,10 +120,22 @@ class tcp_transport_t : public transport_t, private stream_endpoint_t {
      * @param recv_stack Recv-thread stack size in bytes, 0 = platform default
      *                  (`posix_endpoint_t::start`). Non-zero right-sizes this
      *                  transport's recv thread on an MCU.
+     * @param defer_recv Two-phase bring-up (#1045, the transport_ws_client
+     *                  contract verbatim): with `true` the connect still runs
+     *                  HERE (so ok() answers for it on return) but the recv
+     *                  thread is NOT spawned — not one byte is read off the
+     *                  socket until @ref start_receiving. That is the ordering in
+     *                  which the set_receiver contract above is satisfiable on a
+     *                  DIAL socket: a peer that pushes the instant our connect
+     *                  completes has its first frame in flight before this
+     *                  constructor returns, and the default (`false`, the
+     *                  historical shape) decodes it on the recv thread into
+     *                  whatever sink is installed by then — possibly none, in
+     *                  which case it is dropped with no counter moving.
      */
     tcp_transport_t(const std::string& peer_host, std::uint16_t peer_port,
                     mem::mem_backend_t* backend = &mem::heap_backend(), std::size_t max_frame = 0,
-                    std::size_t recv_stack = 0);
+                    std::size_t recv_stack = 0, bool defer_recv = false);
 
     /**
      * @brief LISTEN mode: bind+listen on @p bind_port, accept ONE inbound peer.
@@ -169,6 +182,23 @@ class tcp_transport_t : public transport_t, private stream_endpoint_t {
      */
     void send(std::span<const std::span<const std::byte>> iov) override;
 
+    /**
+     * @brief Spawn the recv thread a `defer_recv` DIAL construction held back (#1045).
+     *
+     * The second phase of the two-phase bring-up: the socket is connected and NOTHING has
+     * been read off it, so a sink installed before this call cannot have missed a frame.
+     * From here the link behaves exactly as a one-phase one.
+     *
+     * IDEMPOTENT, and a no-op wherever there is nothing to arm — a one-phase DIAL link
+     * (its thread is already running), a LISTEN link (its accept loop started in the
+     * constructor), and a link whose dial failed (`ok()` false, no socket to serve) — so an
+     * owner may call it unconditionally on every link it wires, which is what
+     * `%transport_vertex_t::make_connection` does. A `defer_recv` link that is never armed
+     * never receives and never reports the link down; it is simply an open socket until it
+     * is destroyed.
+     */
+    void start_receiving() override;
+
     /** @brief True — this transport honors @ref set_rope_receiver (ADR-0042):
      *         one frame = one refcounted segment from the injected backend,
      *         handed up owning; a span-only sink gets the same bytes borrowed. */
@@ -209,6 +239,11 @@ class tcp_transport_t : public transport_t, private stream_endpoint_t {
     std::size_t max_frame_ = kMaxFrame;  // per-connection receive cap (:settings; 0 => kMaxFrame)
     std::atomic<std::uint64_t> dropped_rx_{0};
     std::atomic<std::uint64_t> malformed_rx_{0};
+    std::size_t recv_stack_ = 0; /**< @brief The stack hint, held for @ref start_receiving. */
+    /** @brief One-shot latch making @ref start_receiving idempotent — `start()` may be
+     *         called at most once per endpoint. DIAL only; a LISTEN link spends its one
+     *         `start` on the accept loop and never enters the latched path at all. */
+    std::atomic<bool> recv_started_{false};
     // conn_fd_ + write_m_ (and their teardown discipline) live in stream_endpoint_t.
 };
 
