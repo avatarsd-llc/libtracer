@@ -29,6 +29,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`httpd_ws_link_t::send` (the broadcast) no longer allocates, so a fan-out during a
+  heap trough drops a frame instead of aborting the node** (#961). The fan-out opened by
+  building a `std::vector` of destinations under `peers_m_` — the one container shape the
+  rest of that translation unit is written to avoid, because under `-fno-exceptions` its
+  throwing allocator turns a failed growth into `abort()` inside libstdc++'s `bad_alloc`
+  stub. It sat AHEAD of every `new (std::nothrow)` fallback the TX path has, so the
+  drop-on-OOM backpressure the header advertises was void on the one path every
+  subscription push takes, and the failure was silent: no counter moves, no OOM log, just
+  an unexplained reboot. The destinations are now snapshotted into a fixed on-stack chunk
+  (`kFanoutChunk`, sized at the link's own `kDefaultPeerCap` socket budget) with the scan
+  resuming where it stopped, so a broadcast to any number of peers takes no heap arm at
+  all — there is nothing left to fail, hence no new drop counter and no sizing policy for
+  the unbounded-`max_peers` case. A broadcast at or under the chunk still takes exactly
+  one `peers_m_` hold; past it, one more uncontended acquisition per chunk. No API change;
+  the header's steady-state allocation contract now covers fan-out explicitly.
+
 - **`twai_link_t`'s TX backpressure window is spent PER FRAME again, and teardown no
   longer queues behind it** (#962). `write_raw` took `write_m_` and only then parked on
   the free-slot semaphore that *is* the FULL policy's backpressure point, so the window
