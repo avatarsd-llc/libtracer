@@ -275,6 +275,58 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **BREAKING: `esp_ws_client_link_t`'s handshake headers moved into the constructor and
+  `set_handshake_headers()` is gone** (#959). The setter could not work: the constructor
+  spawns the recv thread, the recv thread dials at once, and the setter necessarily ran
+  after both. So the *only* ordering the API permitted was the racy one — a `std::string`
+  assigned by the wiring task while `connect_once()` read it with `.empty()`/`.c_str()`,
+  where a reallocating assignment can hand `esp_transport_ws_set_config` a `cfg.headers`
+  that is already freed. Nothing in the API decided which side of that race won, so
+  whether the FIRST dial carried the token was **undefined** — and a dial without one is
+  refused by a peer whose graph WS gates admission, costing a 1.5 s reconnect backoff
+  before the next dial. That is what made first-dial liveness nondeterministic by
+  construction. Which side wins in practice is a scheduler property, not an API one: it
+  was never measured on chip, and on the host fake a rebuilt pre-fix ordering had the write
+  win **20 of 20** measured runs. A tokenless first dial is therefore what the old surface
+  *permitted*; it is not a behaviour recorded here as observed.
+
+  The headers are now the **fourth** constructor parameter (after `ws_path`, completing
+  the "what the handshake requests" group) and the member is `const`: written before the
+  thread that reads it exists, re-read on every re-dial, no lock and no snapshot. Empty
+  still leaves `cfg.headers` NULL, so a dial without a token is byte-for-byte the
+  historical request. Placing it fourth rather than last is deliberate — appending it
+  would have forced any caller wanting a token to restate `rx_bytes`/`tx_bytes`/
+  `recv_stack` positionally, pinning today's defaults into call sites that never meant to
+  choose them.
+
+  **What breaks:** `link.set_handshake_headers(tok)` after construction no longer compiles;
+  move `tok` into the construction site. A call that passed buffer sizes positionally
+  (`{host, port, "/ws", 4096, 4096, 12288}`) also no longer compiles — `std::string` is not
+  constructible from `std::size_t`, so a size in the fourth slot is a hard error.
+  **One exception, and it is silent:** a literal `0` in that slot is a null-pointer
+  constant, binds to `std::string(const char*)` and yields `std::string(nullptr)`, which is
+  UB at run time — `L(host, 8080, "/ws", 0, 0, 0)` compiles clean under
+  `g++ -std=c++20 -Wall -Wextra`. Grep call sites for a literal `0` in the old `rx_bytes`
+  position before trusting the compiler here.
+  `libtracer_esp/esp_ws_client_link.hpp` is the only file involved.
+
+  This is deliberately NOT a `start()` split. Deferring the recv thread would make the
+  whole "set X before the first dial" family expressible, but its other motivation (#900's
+  discarded `recv_stack`) was already answered by honouring the knob at spawn time, and
+  the shape of a deferral on this link — which dials, re-dials and delivers on one thread —
+  is the open contract question in #1102, not something to settle as a side effect here.
+
+- **`esp_ws_client_link_t` now LOGS an outbound frame that exceeds `tx_bytes`**, with both
+  sizes, alongside the `tx_drops` bump that landed with #942 (#959). `transport_t::send`
+  returns void, so the router cannot be told the frame died; `tx_drops` says one did, but
+  `send()`'s peer-down and short-write arms bump that same counter, so a bump does not even
+  say which drop happened, let alone which knob was too small. A per-frame ceiling nobody
+  can see is how a blob-carrying value or a composed reply vanishes with clean logs on both
+  ends. The log is the new channel and the only one that names a size; the counter is
+  unchanged. The 2048-byte defaults are unchanged — they are documented as modest on
+  purpose and raising them costs RAM on every dialed peer; what was wrong was the silence
+  around exceeding them, not the number.
+
 - **BREAKING (chip targets): the portable `ws` transport is no longer built, and no `ws`
   entry is registered in the built-in transport catalog.** ESP-IDF WebSocket must never
   use POSIX sockets (#947 ruling). Core's `transport_ws_server` / `transport_ws_client`

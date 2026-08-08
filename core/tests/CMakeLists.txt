@@ -457,6 +457,33 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     # failed-dial case). Generous against a loaded runner, still far under CTest's default.
     set_tests_properties(esp_ws_client_liveness PROPERTIES TIMEOUT 60)
 
+    # #959 — the WS CLIENT link's DIAL/CONFIG surface, on the same TU and the same fake.
+    # The seam none of the client suites above reaches is ORDERING at construction: the
+    # ctor spawns the thread that dials, so anything a caller supplied afterwards was both
+    # a race and — for a handshake token — a first dial the peer's admission hook refuses.
+    # The fake's observable is therefore PER DIAL (fake_ws::dial_headers), because "the
+    # LAST dial carried the token" is exactly what the broken surface would also report. No
+    # socket and no setsockopt interposition here (#947), unlike the liveness target above:
+    # this suite is about what the handshake requested, not the socket it went out on.
+    # Registered after the three suites it shares a TU with so their ctest indices do not
+    # move — #1118 tracks a known flake by index as well as by name.
+    add_executable(esp_ws_client_dial_test
+        "${LIBTRACER_ESP_DIR}/tests/host/esp_ws_client_dial_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_esp_transport.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/esp_ws_client_link.cpp")
+    target_include_directories(esp_ws_client_dial_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(esp_ws_client_dial_test PRIVATE libtracer)
+    libtracer_test_warnings(esp_ws_client_dial_test)
+    add_test(NAME esp_ws_client_dial COMMAND esp_ws_client_dial_test)
+    # One case spends a real reconnect backoff on purpose (1.5 s), to make the second dial
+    # a genuine handle rebuild rather than a re-use. Generous against a loaded runner,
+    # still far under CTest's default.
+    set_tests_properties(esp_ws_client_dial PROPERTIES TIMEOUT 60)
+
     # #962 — the TWAI link's TX BACKPRESSURE window, on the same construction: the chip
     # TU (integrations/esp-idf/libtracer/twai_link.cpp) compiled against a host fake of
     # esp_driver_twai's node API plus the FreeRTOS counting semaphore and queue it is

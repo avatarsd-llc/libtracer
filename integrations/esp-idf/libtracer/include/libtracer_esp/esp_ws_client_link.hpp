@@ -39,6 +39,29 @@
  * SPEC wiring `httpd_ws_link_t` uses for the listener.
  *
  * Threading (the review-critical part):
+ *   - EVERY DIAL INPUT IS SETTLED BEFORE THE RECV THREAD EXISTS. The ctor spawns a thread
+ *     that dials immediately, so this type has NO post-construction dial-configuration
+ *     surface: host, port, `ws_path` and the handshake headers are all constructor
+ *     arguments and all `const` thereafter — read by the recv thread, written by nobody.
+ *     (The rx/tx buffers are the same rule in a weaker spelling: sized once in the ctor and
+ *     never resized. The vectors are not `const` because their BYTES are scratch, but no
+ *     one may make their extent settable after the spawn either.)
+ *     It used to have one such surface — `set_handshake_headers()` assigned an
+ *     unsynchronized `std::string` that `connect_once()` was already reading (#959). That
+ *     assignment is concurrent with the read, so it is a data race: a reallocating
+ *     assignment can hand `esp_transport_ws_set_config` a `cfg.headers` that is already
+ *     freed. And nothing in the API decided which side won, so whether the FIRST dial
+ *     carried the token was UNDEFINED — a dial without one is refused by a peer that gates
+ *     admission, costing a `kReconnectBackoffMs` flap before the next dial, which is what
+ *     made first-dial liveness nondeterministic by construction. (Which side actually wins
+ *     is a scheduler property, not an API one. It was never measured on chip; on the host
+ *     fake, a rebuilt pre-fix ordering had the write win 20 of 20 measured runs, so a
+ *     tokenless first dial is what the old surface PERMITTED rather than an observed
+ *     behaviour.) "Set it before the link first dials"
+ *     was not a contract the API could express, only one it could ask for; a ctor argument
+ *     makes it structural. A knob that must be applied before the thread starts belongs in
+ *     the ctor, which is the same rule that made `recv_stack` reach `esp_pthread_set_cfg`
+ *     (#900) rather than be discarded after the spawn.
  *   - A single recv thread (spawned in the ctor) owns the read side: it dials
  *     (with reconnect/backoff), then loops `esp_transport_poll_read` +
  *     `esp_transport_read` — reading each frame's payload DIRECTLY into a reusable
@@ -155,17 +178,32 @@ class esp_ws_client_link_t : public transport_t {
      * @param port     The peer's TCP port (its :80 esp_http_server, for the /ws mount).
      * @param ws_path  The WS URI to request in the handshake (default "/ws", matching
      *                 the httpd_ws_link_t server mount).
+     * @param handshake_headers Extra HTTP header lines appended to the opening-handshake
+     *                 request, each `Name: value\r\n`-terminated (`esp_transport_ws` emits
+     *                 them verbatim); empty leaves the field null, so the handshake is
+     *                 byte-for-byte the historical one. The client counterpart to
+     *                 @ref httpd_ws_link_t::set_admission_cb: a board-to-board dial carries
+     *                 no browser session cookie, so a token header here is how a dialing
+     *                 node authenticates itself to a peer whose graph WS gates admission.
+     *                 It is a CONSTRUCTOR argument and not a setter because the recv thread
+     *                 dials as soon as it exists — see the threading note (#959). Applied
+     *                 to the first dial and to every re-dial.
      * @param rx_bytes Reusable receive-buffer size (one inbound message must fit); our
      *                 control TLVs are small, so the default is modest.
-     * @param tx_bytes Reusable send-scratch size (one outbound frame must fit).
+     * @param tx_bytes Reusable send-scratch size (one outbound frame must fit). An
+     *                 outbound frame larger than this is DROPPED whole — counted on
+     *                 `stats().c.tx_drops` and LOGGED with both sizes (#959). The log is
+     *                 what makes the ceiling nameable: the same `tx_drops` is bumped when
+     *                 the peer is down and on a short write, so the counter alone does not
+     *                 say which drop happened, let alone which knob was too small.
      * @param recv_stack Recv-thread stack in bytes, HONORED (#900): the recv thread runs
      *                   in-call delivery through the graph's on_write seam, which is the
      *                   deep path, so a node that knows its delivery depth sizes it here.
      *                   0 = the platform pthread default.
      */
     explicit esp_ws_client_link_t(std::string host, std::uint16_t port, std::string ws_path = "/ws",
-                                  std::size_t rx_bytes = 2048, std::size_t tx_bytes = 2048,
-                                  std::size_t recv_stack = 0);
+                                  std::string handshake_headers = {}, std::size_t rx_bytes = 2048,
+                                  std::size_t tx_bytes = 2048, std::size_t recv_stack = 0);
 
     /**
      * @brief Stop the recv thread, then close + destroy the esp_transport handles.
@@ -268,19 +306,6 @@ class esp_ws_client_link_t : public transport_t {
      */
     [[nodiscard]] stats_t stats() const;
 
-    /**
-     * @brief Set (or clear, with an empty string) extra HTTP header lines appended to the
-     *        opening-handshake request. Each line must be `Name: value\r\n`-terminated
-     *        (`esp_transport_ws` emits them verbatim). Applied on the NEXT dial.
-     *
-     * The client counterpart to @ref httpd_ws_link_t::set_admission_cb: a board-to-board
-     * dial carries no browser session cookie, so a token header here is how a dialing node
-     * authenticates itself to a peer whose graph WS gates admission. NOT synchronized — set
-     * it once at wiring time, before the link first dials; the recv thread reads it when it
-     * (re)builds the transport.
-     */
-    void set_handshake_headers(std::string headers) { handshake_headers_ = std::move(headers); }
-
    private:
     /** @brief The recv thread body: (re)connect, then poll+read+deliver until stopped. */
     void recv_loop();
@@ -296,9 +321,11 @@ class esp_ws_client_link_t : public transport_t {
     const std::string host_;
     const std::uint16_t port_;
     const std::string ws_path_;
-    /** @brief Extra CRLF-terminated handshake header lines, empty = none; read on the recv
-     *         thread when it (re)dials — see @ref set_handshake_headers. */
-    std::string handshake_headers_;
+    /** @brief Extra CRLF-terminated handshake header lines, empty = none. `const`, and that
+     *         is the fix (#959): it is written once by the ctor, BEFORE the recv thread that
+     *         reads it on every (re)dial exists, so there is no cross-thread write to order
+     *         and the first dial carries it. */
+    const std::string handshake_headers_;
 
     // Both handles are written ONLY by the recv thread (connect_once rebuilds them on
     // every dial, holding no lock) and PUBLISHED by the connected_ release store below;
