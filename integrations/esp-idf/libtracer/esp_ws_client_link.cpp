@@ -105,6 +105,29 @@ constexpr int kReconnectBackoffMs = 1500;
 constexpr int kDrainSliceMs = 1;
 
 /**
+ * @brief TCP keepalive policy for the dialed connection: idle seconds before the first
+ *        probe, seconds between probes, and probes before the stack declares the
+ *        connection dead (#957).
+ *
+ * Not numbers of ours. They are the defaults ESP-IDF documents for `esp_http_server`'s
+ * own keepalive (`esp_http_server.h`, `httpd_config_t`: `keep_alive_idle` "Default is 5
+ * (second)", `keep_alive_interval` "Default is 5 (second)", `keep_alive_count` "Default
+ * is 3 counts"), which is the server this link dials — so the same FACT is stated on
+ * both ends of the same connection and a peer's death is declared at the same age from
+ * either side. `httpd_ws_link_t::bound_socket` states it for accepted sockets; this
+ * states it for dialed ones. A shared fact, never a shared constant.
+ *
+ * lwIP takes `TCP_KEEPIDLE`/`TCP_KEEPINTVL` in SECONDS (`lwip/sockets.h`) and IDF
+ * compiles lwIP with `LWIP_TCP_KEEPALIVE == 1` unconditionally
+ * (`lwip/port/include/lwipopts.h`), so the three tunables exist on every chip target
+ * this link builds for; Linux takes the same three in the same units, which is what
+ * makes the host suite representative of the option seam.
+ */
+constexpr int kKeepIdleSeconds = 5;
+constexpr int kKeepIntervalSeconds = 5; /**< @brief Seconds between probes. */
+constexpr int kKeepProbes = 3;          /**< @brief Unanswered probes before death. */
+
+/**
  * @brief RAII half of the in-flight-sender tally the destructor drains (#952).
  *
  * Only the DECREMENT lives here. The raise cannot: it has to happen BEFORE the sender
@@ -273,6 +296,35 @@ bool esp_ws_client_link_t::connect_once() {
         snd.tv_usec = static_cast<suseconds_t>((kWriteTimeoutMs % 1000) * 1000);
         if (::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &snd, sizeof(snd)) != 0)
             ESP_LOGW(kTag, "SO_SNDTIMEO not applied fd=%d (%d ms)", fd, kWriteTimeoutMs);
+        // Notice a peer that vanishes WITHOUT a FIN — a Wi-Fi drop, a power cut, a NAT
+        // rebind (#957). Nothing else in this loop notices one: esp_transport_poll_read
+        // keeps reporting "no data this turn" forever, so `connected_` stays true, ok()
+        // keeps answering true for a peer that no longer exists, and on an idle link the
+        // only other bound is TCP's own retransmit timeout — minutes when there is
+        // something to retransmit, never when there is not. Keepalive probes are the
+        // answer that costs no protocol work: the stack fails the connection, which
+        // surfaces on the very next poll or read as an error and takes the ordinary drop
+        // path below. Applied as a GROUP and only behind the enable, because the three
+        // tunables mean nothing without it — a stack that refuses SO_KEEPALIVE keeps
+        // this link on the retransmit timeout rather than on half a policy. Best-effort
+        // like the two options above.
+        const int keepalive = 1;
+        if (::setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive)) != 0) {
+            ESP_LOGW(kTag, "SO_KEEPALIVE not applied fd=%d (a silent peer death is undetected)",
+                     fd);
+        } else {
+            const int idle = kKeepIdleSeconds;
+            const int intvl = kKeepIntervalSeconds;
+            const int cnt = kKeepProbes;
+            // Each attempted independently: a stack that refuses one tunable still gets
+            // the others, and `||` would stop at the first refusal.
+            int refused = ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle)) != 0;
+            refused += ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl)) != 0;
+            refused += ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt)) != 0;
+            if (refused != 0)
+                ESP_LOGW(kTag, "%d keepalive tunable(s) refused fd=%d (stack defaults apply)",
+                         refused, fd);
+        }
     }
     connected_.store(true, std::memory_order_release);
     ESP_LOGI(kTag, "connected ws://%s:%u%s", host_.c_str(), static_cast<unsigned>(port_),
@@ -283,10 +335,15 @@ bool esp_ws_client_link_t::connect_once() {
 void esp_ws_client_link_t::drop() {
     // Close under the syscall serializer so an in-flight send() cannot touch a
     // half-closed handle, and mark down so the recv loop re-dials (which rebuilds
-    // the transport pair — see connect_once). NOT firing notify_down: a transient
-    // drop keeps the producer's subscriber edges so deliveries resume transparently
-    // on reconnect ("configured but idle, resumes on reconnect"), instead of evicting
-    // bindings on every network blip.
+    // the transport pair — see connect_once).
+    //
+    // The departure REPORT is not made here, and deliberately: this is called with
+    // `write_m_` about to be taken, and `notify_down` re-enters the routing plane (the
+    // notifier takes graph locks), which the transport contract forbids doing under an
+    // internal lock. It is also not the only way down — `send()` clears `connected_` on
+    // a failed or short write without ever calling this. The one place that observes
+    // EVERY transition to down is the recv loop's own `!connected_` arm, so that is
+    // where the report is made (see recv_loop, #957).
     const std::lock_guard<std::mutex> lk(write_m_);
     if (ws_ != nullptr) esp_transport_close(ws_);
     connected_.store(false, std::memory_order_release);
@@ -357,6 +414,13 @@ void esp_ws_client_link_t::recv_loop() {
     // at 0, so an `off == 0` test reads its CONT frames as strays and drops the whole
     // message. Assembly is a property of the FIN flags seen, not of the byte count.
     bool assembling = false;
+    // Whether a connection this loop has to REPORT the death of is currently standing.
+    // Set only by a completed dial, cleared by the report — so the departure seam fires
+    // exactly once per connection that was up, and never for a dial that never landed
+    // (the first turn, and every failed re-dial, would otherwise announce the death of a
+    // link that was never alive). It is a plain local because this thread is the only
+    // writer of `connected_ == true`: a dial is the sole way up, and it happens here.
+    bool was_up = false;
     while (!stop_.load(std::memory_order_relaxed)) {
         if (!connected_.load(std::memory_order_acquire)) {
             off = 0;
@@ -371,7 +435,33 @@ void esp_ws_client_link_t::recv_loop() {
             // break is what keeps the destructor's `connected_` store from re-opening
             // the handle rewrite underneath a sender that observed the previous `true`.
             if (stop_.load(std::memory_order_acquire)) break;
-            if (!connect_once()) {
+            if (was_up) {
+                was_up = false;
+                // The departure seam (RFC-0009 §D extended to peer departure), and the
+                // reason it is reported at all (#957). This arm is downstream of all
+                // three sites that clear `connected_` — drop() (peer CLOSE, a poll
+                // error, a read error), send()'s failed/short-write arm, and the
+                // destructor — so ONE report here covers every way this link goes down,
+                // with no transport lock held, exactly as the contract asks.
+                //
+                // It fires on a blip too, and that is the choice, not an oversight. The
+                // link cannot tell a blip from a peer that REBOOTED: the reconnect
+                // rebuilds the transport pair and says nothing, so keeping the child's
+                // edges and label bindings across it is only sound if the far side kept
+                // its own — and a rebooted peer has forgotten every subscription and
+                // every label it ever issued, leaving this node producing into a session
+                // that no longer exists and resolving compact labels against a stranger's
+                // label space. Re-establishing after a flap is cheap and correct;
+                // resurrecting stale routing is neither. This is also what core's
+                // portable `transport_ws_client` does at the end of its recv loop
+                // (core/src/transport_ws.cpp), which this type claims to be a drop-in
+                // for. Guarded by the `stop_` break above, on core's rule: a LOCAL
+                // teardown is not a peer departure and reports nothing.
+                notify_down();
+            }
+            if (connect_once()) {
+                was_up = true;  // there is now a connection whose death is reportable
+            } else {
                 // Interruptible backoff. `sleep_for` was not: the destructor's join
                 // inherited the whole 1.5 s on exactly the unreachable peer a re-dial
                 // exists for. What remains uninterruptible is the dial itself —

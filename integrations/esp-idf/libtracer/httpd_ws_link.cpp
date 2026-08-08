@@ -132,6 +132,30 @@ constexpr std::uint32_t kTaskWdtSeconds = 5;
 constexpr std::size_t kDefaultPeerCap = 4;
 
 /**
+ * @brief TCP keepalive policy for an upgraded WS socket: idle seconds before the first
+ *        probe, seconds between probes, and probes before the stack declares the
+ *        connection dead (#957).
+ *
+ * Not numbers of ours. They are the defaults ESP-IDF documents for this very server's
+ * own keepalive (`esp_http_server.h`, `httpd_config_t`: `keep_alive_idle` "Default is 5
+ * (second)", `keep_alive_interval` "Default is 5 (second)", `keep_alive_count` "Default
+ * is 3 counts") — so the policy applied per WS socket is the host server's own, stated
+ * where this link can guarantee it rather than where its owner may have left it off.
+ * `esp_ws_client_link_t` states the same fact for dialed sockets, so a board-to-board
+ * pair declares a peer dead at the same age from either end. A shared FACT, never a
+ * shared constant.
+ *
+ * lwIP takes `TCP_KEEPIDLE`/`TCP_KEEPINTVL` in SECONDS (`lwip/sockets.h`) and IDF
+ * compiles lwIP with `LWIP_TCP_KEEPALIVE == 1` unconditionally
+ * (`lwip/port/include/lwipopts.h`), so the three tunables exist on every chip target
+ * this link builds for; Linux takes the same three in the same units, which is what
+ * makes the host suite representative of the option seam.
+ */
+constexpr int kKeepIdleSeconds = 5;
+constexpr int kKeepIntervalSeconds = 5; /**< @brief Seconds between probes. */
+constexpr int kKeepProbes = 3;          /**< @brief Unanswered probes before death. */
+
+/**
  * @brief Derive the per-socket send bound for @p peer_cap peers, milliseconds.
  *
  * One full fan-out round — one bounded send to EVERY peer, all of them stalled — must
@@ -1614,6 +1638,43 @@ void httpd_ws_link_t::bound_socket(int fd) const {
     const int nodelay = 1;
     if (::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay)) != 0)
         ESP_LOGW(kTag, "TCP_NODELAY not applied fd=%d", fd);
+    // Notice a peer that vanishes WITHOUT a FIN — a Wi-Fi drop, a power cut, a killed
+    // browser tab, a NAT rebind (#957). Enumerating the ways an inbound session can end
+    // gives peer CLOSE/FIN, a handler returning ESP_FAIL, the TX failure streak, the
+    // short-write condemn, and httpd_stop — there is no timer among them, and
+    // `lru_purge_enable = false` (the admission contract in both constructors) removes
+    // the one reclaim esp_http_server has for an idle socket. The TX streak cannot stand
+    // in: `note_tx_result` is fed only from `tx_work`, so a session this link never sends
+    // to accrues no evidence at all. Without keepalive probes such a peer holds its slot
+    // and one unit of `max_peers` for the life of the process; with them the stack fails
+    // the socket, httpd closes the session, and the ordinary free_ctx → reclaim_slot →
+    // notify_peer_down path runs.
+    //
+    // Applied HERE and not left to the server's own `keep_alive_enable`, for the same
+    // reason the send bound is: an adopted server's config belongs to its owner and this
+    // link must not depend on the owner having got it right — and in owning mode
+    // HTTPD_DEFAULT_CONFIG leaves keepalive off. The three tunables are the ones IDF
+    // documents as the defaults for that same server config (esp_http_server.h:
+    // keep_alive_idle / _interval / _count), so the policy is IDF's, stated per WS
+    // socket. Best-effort, and only behind the enable: without SO_KEEPALIVE the tunables
+    // mean nothing, so a stack that refuses it keeps the pre-#957 behaviour for that one
+    // peer rather than half a policy.
+    const int keepalive = 1;
+    if (::setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive)) != 0) {
+        ESP_LOGW(kTag, "SO_KEEPALIVE not applied fd=%d (a silent peer death is undetected)", fd);
+    } else {
+        const int idle = kKeepIdleSeconds;
+        const int intvl = kKeepIntervalSeconds;
+        const int cnt = kKeepProbes;
+        // Each attempted independently: a stack that refuses one tunable still gets the
+        // others, and `||` would stop at the first refusal.
+        int refused = ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle)) != 0;
+        refused += ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl)) != 0;
+        refused += ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt)) != 0;
+        if (refused != 0)
+            ESP_LOGW(kTag, "%d keepalive tunable(s) refused fd=%d (stack defaults apply)", refused,
+                     fd);
+    }
     // The short-write guard is not optional decoration: a BOUNDED write is exactly the
     // one that can expire mid-buffer, so shortening the bound raises the rate of the case
     // esp_http_server reports as success. See send_guarded.

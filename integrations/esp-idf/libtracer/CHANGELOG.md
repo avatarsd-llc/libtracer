@@ -29,6 +29,44 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Both WS links now detect a peer that vanishes without a FIN, and the client link
+  reports its departure** (#957). Two halves of one gap.
+  (1) **Detection, both links.** Nothing in either link noticed a peer that stopped
+  existing — a Wi-Fi drop, a power cut, a killed browser tab, a NAT rebind. On the server
+  the ways a session can end are peer CLOSE/FIN, a handler failure, the TX failure streak,
+  the short-write condemn and `httpd_stop`, with no timer among them, and
+  `lru_purge_enable = false` (the admission contract that forbids evicting a live peer)
+  removes the one reclaim `esp_http_server` has for an idle socket — so such a peer held
+  its slot and one unit of `max_peers` for the life of the process. On the client, a poll
+  turn that times out is normal and there was no idle deadline, so `ok()` answered `true`
+  for a dead peer indefinitely on an idle link. Both links now apply `SO_KEEPALIVE` plus
+  the idle/interval/count tunables to the socket — `httpd_ws_link_t::bound_socket` at
+  admission, `esp_ws_client_link_t` on every dial — using the values ESP-IDF documents as
+  the defaults for `esp_http_server`'s own keepalive, so both ends of a board-to-board
+  connection declare a peer dead at the same age. The server link applies them itself
+  rather than relying on an adopted server's `keep_alive_enable`, for the same reason it
+  applies its own send bound. Best-effort, and only behind the enable: a stack that
+  refuses `SO_KEEPALIVE` keeps the previous behaviour for that one peer rather than half a
+  policy. **Behaviour change:** a vanished peer's session is now failed by the stack and
+  reclaimed (server) or dropped and re-dialed (client), on the order of tens of seconds
+  instead of never.
+  (2) **Reporting, client link.** `esp_ws_client_link_t` called `notify_down()` from
+  nowhere: peer CLOSE, a read error, a poll error and a failed or short write were all
+  silent, so the one departure seam a point-to-point link has
+  (`transport_t::set_down_notifier`, which `fwd_router_t::add_child` wires to the eviction
+  of that child's subscriber edges and label bindings) never fired, and the header's claim
+  that this type substitutes for core's `transport_ws_client` "with no other change" was
+  false on exactly that seam. The recv loop's not-connected arm — which is downstream of
+  every one of those paths — now fires it once per connection that was up, with no
+  transport lock held, before it re-dials; a LOCAL teardown still reports nothing, on
+  core's `stop_` rule. **Behaviour change:** a reconnect is now a NEW session to the
+  routing plane. The old premise (keep the edges so deliveries resume transparently) holds
+  only for a blip the far side also survives, and the link cannot tell one from a peer
+  that rebooted and forgot every subscription and label it ever issued — which left this
+  node producing into a session that no longer existed and resolving compact labels
+  against a stranger's label space. Re-establishing after a flap costs edge churn; that is
+  the accepted trade.
+
 - **`esp_ws_client_link_t` got a bounded-blocking discipline: a derived write bound, an
   interruptible backoff, and a teardown barrier** (#952). Three defects on one seam —
   `write_m_` and `stop_` were treated as if the operations under them were prompt.

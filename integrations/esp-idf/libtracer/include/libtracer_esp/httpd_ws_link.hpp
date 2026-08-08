@@ -419,11 +419,17 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     void note_enqueue_drop(int fd, std::size_t bytes);
 
     /**
-     * @brief Bound a freshly-upgraded socket's writes and arm the short-write guard.
+     * @brief Apply this link's whole per-socket policy to a freshly-upgraded socket.
      *
-     * Two calls on the peer's own fd, both at admission and nowhere else: `SO_SNDTIMEO`
-     * of @ref send_timeout_ms, and a send override so a SHORT write is seen. Nothing
-     * touches the server's configuration, so REST sockets keep their long bound.
+     * All of it on the peer's own fd, at admission and nowhere else: `SO_SNDTIMEO` of
+     * @ref send_timeout_ms, `TCP_NODELAY`, `SO_KEEPALIVE` with the idle/interval/count
+     * tunables that make a peer vanishing without a FIN detectable at all (#957 — with
+     * `lru_purge_enable = false` there is otherwise no timer on an inbound session, so
+     * such a peer holds its slot and one unit of `max_peers` forever), and a send
+     * override so a SHORT write is seen. Nothing touches the server's configuration, so
+     * REST sockets on the same instance keep their long bound and the owner's keepalive
+     * setting — and, by the same token, this link does not depend on an adopted server
+     * having enabled keepalive.
      */
     void bound_socket(int fd) const;
 
