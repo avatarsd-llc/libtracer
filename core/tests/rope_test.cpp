@@ -227,6 +227,40 @@ void test_nothrow_growth() {
     check(small.link_count() == 2 && links_inline(small),
           "two appends after the inline try_reserve stay INLINE (still no allocation)");
 
+    // The two storage states in which the inline no-op arm must NOT fire (#1065). It is
+    // guarded on "the chain is still inline AND stays inline", and each half owns a case
+    // that a reservation-shaped promise is made about, so each is asserted separately.
+    //
+    // (a) PARTIALLY-FILLED inline chain: one link held, two more asked for. 1 + 2 > kInline,
+    // so the reservation must spill and migrate NOW — returning a bare `true` would leave
+    // the caller's next append to take the throwing inline->heap spill it was told it had
+    // already paid for.
+    rope_t part;
+    part.append(byte_view(buf[0]));
+    check(part.try_reserve(2), "try_reserve(2) on a 1-link inline rope returns true");
+    check(!links_inline(part),
+          "a reservation that will not fit inline SPILLS at reserve time, not at append");
+    const view_t* part_anchor = part.links().data();
+    part.append(byte_view(buf[1]));
+    part.append(byte_view(buf[2]));
+    check(part.link_count() == 3, "the reserved appends on a partially-filled rope all land");
+    check(part.links().data() == part_anchor,
+          "appends after a partially-filled-rope reservation do not reallocate");
+
+    // (b) ALREADY-SPILLED chain: `inline_n_` is back to 0 once the chain lives on the heap,
+    // so a count that would fit the small buffer must still reach the allocator — the links
+    // are not in the small buffer any more.
+    rope_t sp;
+    for (std::size_t i = 0; i < 3; ++i) sp.append(byte_view(buf[i]));
+    check(!links_inline(sp), "three appends spill the chain (precondition)");
+    check(sp.try_reserve(2), "try_reserve(2) on an already-spilled rope returns true");
+    const view_t* sp_anchor = sp.links().data();
+    sp.append(byte_view(buf[3]));
+    sp.append(byte_view(buf[4]));
+    check(sp.link_count() == 5, "the reserved appends on a spilled rope all land");
+    check(sp.links().data() == sp_anchor,
+          "appends after a spilled-rope reservation do not reallocate the chain");
+
     // A normal reservation: the reserved appends never reallocate the heap chain.
     rope_t r;
     check(r.try_reserve(buf.size()), "try_reserve(normal count) returns true");
