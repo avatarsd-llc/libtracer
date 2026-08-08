@@ -53,6 +53,13 @@ route_t registered_route() { return g_route; }
 
 void set_registered_route(route_t route) { g_route = route; }
 
+httpd_config_t& start_config_slot() {
+    static httpd_config_t cfg = {};
+    return cfg;
+}
+
+const httpd_config_t& last_start_config() { return start_config_slot(); }
+
 server_t& instance() {
     static server_t server;
     return server;
@@ -66,6 +73,9 @@ void server_t::open_session(int fd, void* ctx, httpd_free_ctx_fn_t free_fn) {
     // The handshake latches the route INTO the session; nothing later can revoke it.
     sess.ws_handler = g_route.handler;
     sess.ws_user_ctx = g_route.user_ctx;
+    // httpd_sess_new seeds the session from the server's clock WITHOUT advancing it, so a
+    // brand-new session starts level with the oldest existing one rather than ahead of it.
+    sess.lru_counter = lru_clock_;
     sessions_[fd] = sess;
 }
 
@@ -140,6 +150,32 @@ esp_err_t server_t::set_send_override(int fd, httpd_send_func_t send_fn) {
 bool server_t::owns_socket(int fd) const {
     const std::lock_guard lock(m_);
     return sessions_.find(fd) != sessions_.end();
+}
+
+esp_err_t server_t::update_lru_counter(int fd) {
+    const std::lock_guard lock(m_);
+    const auto it = sessions_.find(fd);
+    if (it == sessions_.end()) return ESP_ERR_NOT_FOUND;
+    it->second.lru_counter = ++lru_clock_;
+    return ESP_OK;
+}
+
+std::uint64_t server_t::lru_counter(int fd) const {
+    const std::lock_guard lock(m_);
+    const auto it = sessions_.find(fd);
+    return it == sessions_.end() ? 0 : it->second.lru_counter;
+}
+
+int server_t::lowest_lru_fd() const {
+    const std::lock_guard lock(m_);
+    int victim = -1;
+    std::uint64_t lowest = UINT64_MAX;
+    for (const auto& [fd, sess] : sessions_)
+        if (sess.lru_counter < lowest) {
+            lowest = sess.lru_counter;
+            victim = fd;
+        }
+    return victim;
 }
 
 bool server_t::is_shut(int fd) const {
@@ -444,6 +480,15 @@ esp_err_t server_t::deliver_frame(int fd, std::span<const std::byte> body, bool 
     }
     t_req = request_scope_t{};
     if (stale != nullptr && stale_free != nullptr) stale_free(stale);
+    // httpd_sess_process's tail (httpd_sess.c:438): INBOUND processing is what advances a
+    // session's LRU counter. Modelling it is what makes the asymmetry the #955 mitigation
+    // addresses reproducible — without it every session would sit at 0 and the victim
+    // search would answer by map order instead of by traffic.
+    {
+        const std::lock_guard lock(m_);
+        const auto it = sessions_.find(fd);
+        if (it != sessions_.end()) it->second.lru_counter = ++lru_clock_;
+    }
     return err;
 }
 
@@ -456,7 +501,7 @@ esp_err_t server_t::deliver_frame(int fd, std::span<const std::byte> body, bool 
 const char* esp_err_to_name(esp_err_t err) { return err == ESP_OK ? "ESP_OK" : "ESP_FAIL"; }
 
 esp_err_t httpd_start(httpd_handle_t* handle, const httpd_config_t* config) {
-    (void)config;
+    if (config != nullptr) fake_httpd::start_config_slot() = *config;
     *handle = static_cast<httpd_handle_t>(&fake_httpd::instance());
     return ESP_OK;
 }
@@ -499,6 +544,11 @@ void httpd_sess_set_ctx(httpd_handle_t handle, int sockfd, void* ctx, httpd_free
 esp_err_t httpd_sess_trigger_close(httpd_handle_t handle, int sockfd) {
     (void)handle;
     return fake_httpd::instance().trigger_close(sockfd);
+}
+
+esp_err_t httpd_sess_update_lru_counter(httpd_handle_t handle, int sockfd) {
+    (void)handle;
+    return fake_httpd::instance().update_lru_counter(sockfd);
 }
 
 esp_err_t httpd_queue_work(httpd_handle_t handle, httpd_work_fn_t work, void* arg) {

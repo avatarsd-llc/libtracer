@@ -28,6 +28,12 @@
  *   - `httpd_queue_work` merely ENQUEUES; the work function runs later, on whichever
  *     thread drains the control queue (the fake's stand-in for the httpd task);
  *   - `httpd_sess_trigger_close` is that same asynchronous queue, not an inline close;
+ *   - a session's LRU counter is advanced by INBOUND request processing only
+ *     (`httpd_sess_process`, httpd_sess.c:438) or by an explicit
+ *     `httpd_sess_update_lru_counter` (httpd_sess.c:442); nothing on the send path
+ *     touches it. `httpd_accept_conn` picks the lowest-counter session as its purge
+ *     victim (httpd_main.c:53-72 via `httpd_sess_close_lru`), which is what makes a
+ *     receive-only subscriber the preferential one;
  *   - every socket write goes through the SESSION's send function — `httpd_default_send`
  *     unless `httpd_sess_set_send_override` replaced it — and
  *     `httpd_ws_send_frame_async` treats any return `>= 0` as success
@@ -141,6 +147,7 @@ int httpd_req_to_sockfd(httpd_req_t* req);
 void* httpd_sess_get_ctx(httpd_handle_t handle, int sockfd);
 void httpd_sess_set_ctx(httpd_handle_t handle, int sockfd, void* ctx, httpd_free_ctx_fn_t free_fn);
 esp_err_t httpd_sess_trigger_close(httpd_handle_t handle, int sockfd);
+esp_err_t httpd_sess_update_lru_counter(httpd_handle_t handle, int sockfd);
 esp_err_t httpd_queue_work(httpd_handle_t handle, httpd_work_fn_t work, void* arg);
 esp_err_t httpd_ws_recv_frame(httpd_req_t* req, httpd_ws_frame_t* frame, std::size_t max_len);
 esp_err_t httpd_ws_send_frame_async(httpd_handle_t handle, int fd, httpd_ws_frame_t* frame);
