@@ -247,16 +247,16 @@ struct branch_node_t {
  *        the remainder after it is ragged — mirroring key_view_t::parent()'s framing (a ragged tail
  *        glues onto the last well-framed record), so tree decomposition and byte navigation
  *        (ancestor keys, bubbling order) agree even on malformed register_vertex_key blobs.
+ *
+ * The framing is read through key_view_t::record_end, the one locus of it (#888); what stays
+ * HERE is only the ragged-tail RULE above, which is this decomposition's own and not shared.
+ * `record_end` reports ragged as 0, which is what the local lambda this replaces reported too.
  */
 [[nodiscard]] std::size_t segment_end(std::span<const std::byte> key, std::size_t i) noexcept {
-    const auto record_end = [&key](std::size_t p) noexcept -> std::size_t {  // 0 => ragged
-        if (p + 4 > key.size()) return 0;
-        const std::size_t len = detail::load_le<std::uint16_t>(key.subspan(p + 2, 2));
-        return p + 4 + len > key.size() ? 0 : p + 4 + len;
-    };
-    const std::size_t e = record_end(i);
+    const key_view_t k{key};
+    const std::size_t e = k.record_end(i);
     if (e == 0 || e == key.size()) return key.size();
-    return record_end(e) == 0 ? key.size() : e;  // ragged remainder: glue it onto this record
+    return k.record_end(e) == 0 ? key.size() : e;  // ragged remainder: glue it onto this record
 }
 
 }  // namespace

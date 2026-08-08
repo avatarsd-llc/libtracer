@@ -18,6 +18,7 @@
 #include "libtracer/error.hpp"
 #include "libtracer/fwd_frame_view.hpp"
 #include "libtracer/grammar.hpp"
+#include "libtracer/key_view.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/path.hpp"
@@ -109,19 +110,11 @@ struct seg_reader_t {
     /** @brief Segment `[off, len)` as a view in stitch slot @p slot, or empty if unroutable. */
     std::string_view read(std::size_t off, std::size_t len, std::size_t slot) {
         if (len == 0 || len > graph::kMaxSegmentBytes) return {};
-        const std::byte* first = nullptr;
-        std::size_t first_len = 0;
-        bool straddles = false;
-        cur.for_each_span(off, len, [&](std::span<const std::byte> s) {
-            if (first == nullptr) {
-                first = s.data();
-                first_len = s.size();
-            } else {
-                straddles = true;
-            }
-        });
-        if (!straddles && first_len == len)
-            return std::string_view(reinterpret_cast<const char*>(first), len);
+        // The contiguous fast path IS `in_place` — this used to restate its span scan
+        // byte for byte (#888). Past the length guard above, `in_place` can only come back
+        // empty because the segment does not sit in one span, which is precisely the case
+        // the stitch slot below exists for, so delegating changes no answer.
+        if (const std::string_view v = in_place(off, len); !v.empty()) return v;
         std::size_t w = slot * graph::kMaxSegmentBytes;
         const std::size_t base = w;
         cur.for_each_span(off, len, [&](std::span<const std::byte> s) {
@@ -1722,22 +1715,16 @@ graph::result_t<void> fwd_router_t::subscribe_toward(const graph::path_t& produc
     // `dst` — no array, so a target routing through a mount of any width binds (#523). The
     // two fixed `kMountPeekMax`-sized arrays this replaces truncated a deeper target to its
     // first four segments and then resolved the truncation.
-    const auto rec_off = [key](std::size_t want) -> std::size_t {
-        std::size_t at = 0;
-        for (std::size_t i = 0; i < want; ++i) {
-            if (at + 4 > key.size()) return key.size();
-            const std::size_t len = detail::load_le<std::uint16_t>(key.subspan(at + 2, 2));
-            if (at + 4 + len > key.size()) return key.size();
-            at += 4 + len;
-        }
-        return at;
-    };
-    const auto key_at = [key, rec_off](std::size_t i) -> std::optional<std::string_view> {
-        const std::size_t at = rec_off(i);
-        if (at + 4 > key.size()) return std::nullopt;
-        const std::size_t len = detail::load_le<std::uint16_t>(key.subspan(at + 2, 2));
-        if (at + 4 + len > key.size()) return std::nullopt;
-        return detail::as_string_view(key.subspan(at + 4, len));
+    //
+    // The walk is `key_view_t`'s INCREMENTAL cursor (#888): the framing lives in one place,
+    // and an ascending ask resumes where the last one stopped instead of rescanning from
+    // offset 0 per segment, as the two hand-rolled lambdas here used to. n is a mount width
+    // and this is bind-time, so that is cleanliness, not a measured cost.
+    wire::key_view_t::record_cursor_t walk{wire::key_view_t{key}};
+    const auto key_at = [&walk](std::size_t i) -> std::optional<std::string_view> {
+        const std::optional<wire::key_view_t::record_t> rec = walk.at(i);
+        if (!rec) return std::nullopt;
+        return detail::as_string_view(rec->payload);
     };
     // The key's bytes outlive this call, so retaining is the identity.
     const auto key_retain = [&key_at](std::size_t i) -> std::string_view {
@@ -1749,13 +1736,13 @@ graph::result_t<void> fwd_router_t::subscribe_toward(const graph::path_t& produc
     // No mount, an exact-mount target (nothing below it to deliver to), or a bus PEER
     // first hop (no directed registry entry to store — see the header doc) all fail the
     // same way the string parser fails an unroutable spelling.
-    if (hit.link == nullptr || !hit.peer.empty() || rec_off(hit.strip_k) >= key.size())
+    if (hit.link == nullptr || !hit.peer.empty() || walk.end_of(hit.strip_k) >= key.size())
         return std::unexpected(graph::status_t::INVALID_PATH);
 
     // The return route is the residual below the mount, as ONE owned PATH TLV — the
     // single copy every delivery then clones by refcount (ADR-0041 §2). The residual
     // NAME records are reused verbatim: the key suffix IS the route payload.
-    const std::span<const std::byte> residual = key.subspan(rec_off(hit.strip_k));
+    const std::span<const std::byte> residual = key.subspan(walk.end_of(hit.strip_k));
     std::vector<std::byte> route_tlv;
     wire::emit_tlv(route_tlv, wire::type_t::PATH, wire::opt_t{.pl = true}, residual);
     const auto route_view = view::over_bytes(route_tlv);

@@ -158,6 +158,107 @@ int main() {
         check(ragged_levels.empty(), "ragged split appends nothing");
     }
 
+    // ---- The shared record accessors (#888) -------------------------------------------
+    // These are the framing decode the graph's Composite descent, the router's mount
+    // descent and transport_vertex used to hand-roll one copy each. The contract pinned
+    // here is exactly what those copies did, including their ragged edges.
+
+    // record_end / record_from over a well-framed key.
+    {
+        const std::vector<std::byte> k3 = make_key({"a", "bb", "ccc"});  // 5 + 6 + 7 = 18 bytes
+        const key_view_t k{k3};
+        check(k3.size() == 18, "fixture /a/bb/ccc is 18 bytes");
+        check(k.record_end(0) == 5, "record_end(0) = 5 (4-byte header + 'a')");
+        check(k.record_end(5) == 11, "record_end(5) = 11");
+        check(k.record_end(11) == 18, "record_end(11) = 18 (records tile the key)");
+        check(k.record_end(18) == 0, "record_end at the key's end is ragged (0)");
+
+        const auto r1 = k.record_from(5);
+        check(r1.has_value(), "record_from(5) is engaged");
+        check(r1 && r1->begin == 5 && r1->end == 11, "record_from(5) spans [5, 11)");
+        check(r1 && as_str(r1->payload) == "bb", "record_from(5) carries 'bb'");
+        check(!k.record_from(18).has_value(), "record_from past the last record is nullopt");
+        check(!key_view_t{}.record_from(0).has_value(), "the root has no record 0");
+
+        // A zero-length payload is a WELL-FRAMED record, not a ragged one.
+        const std::vector<std::byte> empty_seg = make_key({""});
+        check(key_view_t{empty_seg}.record_end(0) == 4, "a len-0 record ends at 4");
+    }
+
+    // record_end's ragged edges, one per shape the hand-walks guarded against.
+    {
+        std::vector<std::byte> short_hdr = make_key({"a"});
+        short_hdr.push_back(std::byte{0x02});  // 2 of the 4 header bytes, then nothing
+        short_hdr.push_back(std::byte{0x00});
+        check(key_view_t{short_hdr}.record_end(5) == 0, "a truncated HEADER is ragged");
+
+        std::vector<std::byte> over_len = make_key({"a"});
+        over_len.push_back(std::byte{0x02});
+        over_len.push_back(std::byte{0x00});
+        over_len.push_back(std::byte{0x09});  // len = 9, but no payload follows
+        over_len.push_back(std::byte{0x00});
+        check(key_view_t{over_len}.record_end(5) == 0, "an OVERSIZED length is ragged");
+        check(key_view_t{over_len}.record_end(0) == 5, "the well-framed record before it is not");
+
+        // graph.cpp's `segment_end` ragged-tail RULE, expressed in the accessor it now
+        // reads the framing through: a record whose REMAINDER is ragged swallows the
+        // remainder, so the Composite decomposition and key_view_t::parent() agree.
+        const key_view_t rag{over_len};
+        check(rag.record_end(0) != 0 && rag.record_end(rag.record_end(0)) == 0,
+              "a ragged remainder is what makes the tail glue onto the last good record");
+    }
+
+    // record_cursor_t: the indexed walk the mount descent asks by segment number.
+    {
+        const std::vector<std::byte> k3 = make_key({"a", "bb", "ccc"});
+        key_view_t::record_cursor_t cur{key_view_t{k3}};
+        check(cur.at(0) && as_str(cur.at(0)->payload) == "a", "cursor at(0) = 'a'");
+        check(cur.at(1) && as_str(cur.at(1)->payload) == "bb", "cursor at(1) = 'bb'");
+        check(cur.at(2) && as_str(cur.at(2)->payload) == "ccc", "cursor at(2) = 'ccc'");
+        check(!cur.at(3).has_value(), "cursor past the last record is nullopt");
+        // Asking BEHIND the walk restarts it and must give the same answer.
+        check(cur.at(0) && as_str(cur.at(0)->payload) == "a", "a descending ask still answers 'a'");
+        check(cur.at(2) && cur.at(2)->begin == 11, "re-ascending re-finds record 2 at offset 11");
+        check(cur.at(2) && cur.at(2)->end == 18, "the memoized repeat is the same record");
+
+        // Every index agrees with a fresh cursor — the incremental walk and the
+        // rescan-from-zero it replaces cannot disagree.
+        for (std::size_t i = 0; i < 4; ++i) {
+            key_view_t::record_cursor_t fresh{key_view_t{k3}};
+            const auto a = fresh.at(i);
+            const auto b = cur.at(i);
+            check(a.has_value() == b.has_value() &&
+                      (!a || (a->begin == b->begin && a->end == b->end)),
+                  "incremental and from-scratch cursors agree at every index");
+        }
+
+        // end_of: the strip-K residual offset. 0 records = 0; all records = the key's size.
+        key_view_t::record_cursor_t e{key_view_t{k3}};
+        check(e.end_of(0) == 0, "end_of(0) is 0");
+        check(e.end_of(1) == 5, "end_of(1) is 5");
+        check(e.end_of(3) == 18, "end_of(3) is the whole key");
+        check(e.end_of(4) == 18, "end_of past the last record clamps to the key's size");
+    }
+
+    // The cursor's ragged edges, which are `subscribe_toward`'s old `rec_off`/`key_at`
+    // rules: a walk that meets a ragged record answers nullopt from there on, and
+    // `end_of` past it reports the KEY SIZE — while `end_of` AT it reports the ragged
+    // tail's offset, which is what the old rescan returned.
+    {
+        std::vector<std::byte> ragged = make_key({"a", "bb"});  // 5 + 6 = 11 well-framed
+        ragged.push_back(std::byte{0x02});
+        ragged.push_back(std::byte{0x00});
+        ragged.push_back(std::byte{0x09});  // len = 9, nothing follows
+        ragged.push_back(std::byte{0x00});
+        key_view_t::record_cursor_t cur{key_view_t{ragged}};
+        check(ragged.size() == 15, "ragged fixture is 15 bytes");
+        check(cur.at(1) && as_str(cur.at(1)->payload) == "bb", "records before the tail decode");
+        check(!cur.at(2).has_value(), "the ragged record itself is nullopt");
+        check(!cur.at(9).has_value(), "so is everything past it");
+        check(cur.end_of(2) == 11, "end_of(2) is where the ragged tail starts");
+        check(cur.end_of(3) == 15, "end_of past the ragged record is the key's size");
+    }
+
     std::printf("%s\n", g_failures == 0 ? "ALL PASS" : "FAILURES");
     return g_failures;
 }
