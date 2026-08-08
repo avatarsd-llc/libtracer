@@ -40,6 +40,23 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   BINARY message in ONE `send`, and asserts both the PONG and the assembled message; the
   100 ms pause that masked this in `core/tests/ws_rx_bound_test.cpp` is removed.
 
+- **The hazard domain's overflow spin lock no longer shares a cache line with `orphans`
+  (#1027).** `detail_hp::registry_t` ended with two unpadded members, so `overflow_lock` landed
+  eight bytes past `orphans` — one `kDomainAlign` line for both (offsets +8384 and +8392,
+  measured on x86-64 with `kCacheLineBytes = 64` and `kHazardReaderSlots = 64`). A thread that
+  could not claim an index takes and drops that flag once per load, store and clear — a
+  `test_and_set` at one end of its `ticket_t` and a `clear` at the other, two unconditional
+  read-modify-writes; `orphans` is LOADED by threads inside the budget — `detail_hp::scan` opens
+  with one and `retire_and_flush` does too, so once per `~hazard_slot_t`. An over-capacity
+  thread therefore took exclusive a line that in-capacity threads read: the same class as #899
+  against a different pair of fields, and the residue that PR named rather than claimed away.
+  The flag moves into `detail_hp::overflow_lock_t`, a `kDomainAlign`-aligned wrapper whose
+  alignment is `static_assert`ed the way `cell_t`'s and `claims_t`'s are; `orphans` ends up
+  alone on its line as a consequence, since the padded claim table precedes it. Cost is 64
+  bytes of `.bss` in a registry that was already 8,448 (now 8,512), and none on a single-core
+  profile, where `kCacheLineBytes` is 0. No public signature changed and no behaviour changed —
+  this is storage, and `sp_atomic_slot_t`, the default binding, emits none of it.
+
 - **An over-capacity `hazard_slot_t` thread no longer CAS-sweeps every reader's announcement
   line on every operation (#899).** `detail_hp::cell_t` packed the claim flag into the same
   `kDomainAlign`-aligned struct as `pinned`, the announcement a reader writes on every
