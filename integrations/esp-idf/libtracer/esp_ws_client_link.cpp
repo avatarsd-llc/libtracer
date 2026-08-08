@@ -12,9 +12,12 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 
 #include <chrono>
+#include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <utility>
 
 #include "esp_log.h"
@@ -22,23 +25,114 @@
 #include "esp_transport.h"
 #include "esp_transport_tcp.h"
 #include "esp_transport_ws.h"
+#include "freertos/FreeRTOS.h"
 
 namespace tr::net {
 
 namespace {
 /** @brief Log tag for this link. */
 constexpr const char* kTag = "ws_client_link";
-/** @brief Connect timeout for one dial attempt (ms). */
-constexpr int kConnectTimeoutMs = 5000;
+
+/**
+ * @brief The task-watchdog period, seconds — the numerator every blocking bound on
+ *        this link is derived from.
+ *
+ * Not a number of ours: `CONFIG_ESP_TASK_WDT_TIMEOUT_S` is the system's own normative
+ * statement of how long a task may go unfed. IDF defines it through `sdkconfig.h`
+ * (pulled in by FreeRTOS.h); the fallback is IDF's own Kconfig default for that symbol,
+ * for a build with the task watchdog compiled out and for the host test build, so the
+ * derivation has one provenance on every target. `httpd_ws_link.cpp` (#835) and
+ * `twai_link.cpp` (#962) read the same symbol for their own bounds — the formulas
+ * differ because the plane each one bounds differs, so this is a shared FACT, never a
+ * shared constant.
+ */
+#ifdef CONFIG_ESP_TASK_WDT_TIMEOUT_S
+constexpr std::uint32_t kTaskWdtSeconds = CONFIG_ESP_TASK_WDT_TIMEOUT_S;
+#else
+constexpr std::uint32_t kTaskWdtSeconds = 5;
+#endif
+
+/** @brief That period in milliseconds. A zero (the symbol defined but the watchdog
+ *  disabled) takes IDF's Kconfig default instead, so no bound below derives to 0 —
+ *  which would mean "give up instantly", not "wait forever". */
+constexpr int kWatchdogMs = static_cast<int>((kTaskWdtSeconds != 0 ? kTaskWdtSeconds : 5) * 1000U);
+
+/**
+ * @brief The teardown budget this link's two blocking legs are cut from.
+ *
+ * A destroying task's worst case is ONE dial (the recv thread is parked in
+ * `esp_transport_connect`, and the destructor joins it) plus ONE full write bound (the
+ * recv thread's read queues on `write_m_` behind a sender, or the destructor's own
+ * handle teardown does). That sum must fit inside a single watchdog window, so the
+ * window is split: half to the dial, a quarter to the write, a quarter left over for
+ * whatever else the destroying task is holding. Nothing else in the loop is unbounded —
+ * the backoff wakes on `stop_` and the poll turn is @ref kPollMs.
+ */
+constexpr int kDialTimeoutMs = kWatchdogMs / 2;
+
+/**
+ * @brief How many times IDF spends the write timeout inside ONE `esp_transport_write`.
+ *
+ * `_ws_write` (components/tcp_transport/transport_ws.c) passes the caller's timeout to
+ * `esp_transport_poll_write`, then again to the parent's write for the WS header, then
+ * again for the payload — so the caller's number is a per-leg bound, never a total. The
+ * old 4000 ms literal was therefore a 12 s stall on a peer with a closed TCP window,
+ * against a 5 s watchdog (#952).
+ */
+constexpr int kIdfWriteLegs = 3;
+
+/** @brief What ONE `send()` may spend in total, all legs (ms) — a quarter of the
+ *  teardown budget above. */
+constexpr int kWriteBudgetMs = kWatchdogMs / 4;
+
+/** @brief Write timeout handed to IDF (ms): the total budget divided by the legs IDF
+ *  spends it on, so `kIdfWriteLegs * kWriteTimeoutMs == kWriteBudgetMs` is what a
+ *  stalled peer can actually cost a sending task. Still several times the read timeout,
+ *  so momentary TX congestion does not tear the connection down (a 100 ms write timeout
+ *  thrashes) — it just stops being unbounded in practice. */
+constexpr int kWriteTimeoutMs = kWriteBudgetMs / kIdfWriteLegs;
+
 /** @brief Read timeout after a positive poll (ms) — data is already buffered, so short. */
 constexpr int kReadTimeoutMs = 100;
-/** @brief Write timeout (ms) — generous vs the read timeout so momentary TX congestion
- *  does not spuriously tear the connection down (a 100 ms write timeout thrashes). */
-constexpr int kWriteTimeoutMs = 4000;
 /** @brief Poll wait per recv-loop turn (ms) — bounds how fast a stop is observed. */
 constexpr int kPollMs = 200;
-/** @brief Backoff before re-dialing after a failed/lost connection (ms). */
+/** @brief Backoff before re-dialing after a failed/lost connection (ms) — an upper
+ *  bound only: the wait is on a condition variable the destructor signals. */
 constexpr int kReconnectBackoffMs = 1500;
+/** @brief Poll slice for the destructor's sender drain (ms). A sleep, not a spin: a
+ *  higher-priority destroying task that only yielded would starve on a unicore chip
+ *  exactly the senders it is waiting for. */
+constexpr int kDrainSliceMs = 1;
+
+/**
+ * @brief RAII half of the in-flight-sender tally the destructor drains (#952).
+ *
+ * Only the DECREMENT lives here. The raise cannot: it has to happen BEFORE the sender
+ * queues on `write_m_`, because the window being closed is precisely "queued on a mutex
+ * a returning destructor is about to destroy".
+ *
+ * The tally is therefore the exact boundary of what teardown covers: a sender whose
+ * raise landed before the destructor's last drain load is waited out; one that has not
+ * raised it yet is not — whether it has not called `send()` at all, or is between
+ * `send()`'s entry checks and the `fetch_add` a few instructions below. That residual is
+ * the caller's own lifetime problem, which no barrier inside the object can answer: the
+ * raise would have to be atomic with the call, and a member cannot outlive the object it
+ * is a member of.
+ */
+class sender_exit_t {
+   public:
+    /** @brief Adopt an ALREADY-raised @p tally; lower it on scope exit. */
+    explicit sender_exit_t(std::atomic<std::uint32_t>& tally) noexcept : tally_(tally) {}
+    /** @brief Lower the tally, releasing everything this sender did to the drain. */
+    ~sender_exit_t() { tally_.fetch_sub(1, std::memory_order_release); }
+
+    sender_exit_t(const sender_exit_t&) = delete;
+    sender_exit_t& operator=(const sender_exit_t&) = delete;
+
+   private:
+    std::atomic<std::uint32_t>& tally_; /**< @brief esp_ws_client_link_t::senders_. */
+};
+
 }  // namespace
 
 esp_ws_client_link_t::esp_ws_client_link_t(std::string host, std::uint16_t port,
@@ -57,20 +151,56 @@ esp_ws_client_link_t::esp_ws_client_link_t(std::string host, std::uint16_t port,
 }
 
 esp_ws_client_link_t::~esp_ws_client_link_t() {
-    stop_.store(true, std::memory_order_relaxed);
+    // Disarm the link BEFORE waiting on anything. `stop_` is what every blocking wait
+    // in the recv loop is predicated on, and it is also what a sender re-reads after it
+    // gets `write_m_` — so from here on no NEW work reaches the handles. Clearing
+    // `connected_` makes ok() honest for the rest of teardown; the recv loop's own
+    // stop_ re-check keeps it from reading that as "re-dial" (see recv_loop).
+    stop_.store(true, std::memory_order_release);
+    connected_.store(false, std::memory_order_release);
+    {
+        // Taking the backoff mutex before notifying is what makes the wakeup safe
+        // against a recv thread that has evaluated the predicate but not yet parked:
+        // either it is already waiting (and this notify reaches it), or it evaluates
+        // the predicate after this store and never waits at all.
+        const std::lock_guard<std::mutex> lk(backoff_m_);
+    }
+    backoff_cv_.notify_all();
     if (recv_thread_.joinable()) recv_thread_.join();
-    // The recv thread has stopped, so no concurrent handle access remains.
-    // esp_transport_ws_init(parent) does NOT take ownership of the parent, so both
-    // handles are destroyed here (ws first, then tcp) — mirrors IDF's own teardown.
-    if (ws_ != nullptr) {
-        esp_transport_close(ws_);
-        esp_transport_destroy(ws_);
-        ws_ = nullptr;
+    {
+        // The recv thread has stopped, but it was only ONE of the two handle users:
+        // the header's contract is that send() may be called from any task, and the
+        // pre-#952 destructor destroyed the handles with `write_m_` held nowhere. A
+        // sender inside esp_transport_write holds this lock for the whole call, so
+        // acquiring it means no sender is inside — and every sender that acquires it
+        // afterwards finds `stop_` set (and `connected_` cleared, both stored above,
+        // before this lock was taken) and leaves without reading either handle.
+        // esp_transport_ws_init(parent) does NOT take ownership of the parent, so both
+        // handles are destroyed here (ws first, then tcp) — mirrors IDF's own teardown.
+        const std::lock_guard<std::mutex> lk(write_m_);
+        if (ws_ != nullptr) {
+            esp_transport_close(ws_);
+            esp_transport_destroy(ws_);
+            ws_ = nullptr;
+        }
+        if (tcp_ != nullptr) {
+            esp_transport_destroy(tcp_);
+            tcp_ = nullptr;
+        }
     }
-    if (tcp_ != nullptr) {
-        esp_transport_destroy(tcp_);
-        tcp_ = nullptr;
-    }
+    // Drain the senders that ANNOUNCED themselves on the tally. Holding `write_m_` for
+    // this would deadlock — that is the lock they are queued on — so the wait is here,
+    // after it. Each one wakes, sees the disarmed link, and leaves; only then is it safe
+    // for `write_m_` itself (and the buffers) to be destroyed under them. The wait is
+    // bounded by one write budget: the sender that was INSIDE the transport is the only
+    // one that can be slow, and its call is now bounded by kWriteBudgetMs.
+    //
+    // The tally, not `send()`'s first instruction, is the boundary — see sender_exit_t.
+    // A caller that entered `send()` but whose raise lands after the last load below is
+    // NOT waited out, and neither is one that has yet to call at all; both are the same
+    // embedder-owned lifetime residual, not something this loop can widen its way into.
+    while (senders_.load(std::memory_order_acquire) != 0)
+        std::this_thread::sleep_for(std::chrono::milliseconds(kDrainSliceMs));
 }
 
 bool esp_ws_client_link_t::connect_once() {
@@ -79,6 +209,13 @@ bool esp_ws_client_link_t::connect_once() {
     // etc.) — ws_connect() does not reset it, only ws_init() zero-allocates it — so a
     // reconnect mid-fragment would mis-parse the first frame of the new connection.
     // Rebuilding is the only way to guarantee a clean frame state.
+    //
+    // This rewrite runs with NO lock — deliberately: taking `write_m_` here would put the
+    // whole dial bound in front of every sender, which is the stall #952 is about. What
+    // makes it safe is that the handles are PUBLISHED by the `connected_` release store
+    // at the end of this function, and nothing off this thread may read them without
+    // first observing that store (see send()). `connected_` is false for the whole of
+    // this rewrite, so a sender racing it turns back at the gate instead of reading.
     if (ws_ != nullptr) {
         esp_transport_close(ws_);
         esp_transport_destroy(ws_);
@@ -102,7 +239,11 @@ bool esp_ws_client_link_t::connect_once() {
     esp_transport_ws_set_config(ws_, &cfg);
 
     // esp_transport_connect performs the full RFC 6455 client handshake for ws_path_.
-    const int rc = esp_transport_connect(ws_, host_.c_str(), port_, kConnectTimeoutMs);
+    // The bound is DERIVED (kDialTimeoutMs), not a literal: this call is the longest
+    // thing the recv thread does, and the destructor joins it, so its size is the size
+    // of a teardown that lands mid-dial. It is not interruptible — see the recv_loop
+    // note on what that still costs.
+    const int rc = esp_transport_connect(ws_, host_.c_str(), port_, kDialTimeoutMs);
     if (rc != 0) {
         esp_transport_close(ws_);
         return false;
@@ -118,6 +259,20 @@ bool esp_ws_client_link_t::connect_once() {
         const int nodelay = 1;
         if (::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay)) != 0)
             ESP_LOGW(kTag, "TCP_NODELAY not applied fd=%d", fd);
+        // Bound the BLOCKING leg of the write, which the transport's own timeout does
+        // not reach: after a positive poll_write, tcp_transport calls a plain write()
+        // on this socket, and lwIP parks in it until the peer's window opens. Without
+        // SO_SNDTIMEO the poll timeout is the only bound there is (#952). Expiring
+        // here surfaces as a short write, which send() already treats as a torn
+        // connection. Best-effort like NODELAY above, and the same shape the server
+        // sibling applies to its accepted sockets (httpd_ws_link_t::bound_socket): a
+        // stack that refuses the option keeps the poll bound for this link rather than
+        // failing the dial.
+        struct timeval snd = {};
+        snd.tv_sec = static_cast<time_t>(kWriteTimeoutMs / 1000);
+        snd.tv_usec = static_cast<suseconds_t>((kWriteTimeoutMs % 1000) * 1000);
+        if (::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &snd, sizeof(snd)) != 0)
+            ESP_LOGW(kTag, "SO_SNDTIMEO not applied fd=%d (%d ms)", fd, kWriteTimeoutMs);
     }
     connected_.store(true, std::memory_order_release);
     ESP_LOGI(kTag, "connected ws://%s:%u%s", host_.c_str(), static_cast<unsigned>(port_),
@@ -139,7 +294,28 @@ void esp_ws_client_link_t::drop() {
 
 void esp_ws_client_link_t::send(std::span<const std::byte> frame) {
     if (frame.empty() || frame.size() > tx_buf_.size()) return;  // drop oversize/empty
+    // Announce this sender BEFORE queueing on write_m_ (#952). The queue on that mutex
+    // is the hazard: it is held across the transport write, so a sender can be parked
+    // on it while the destructor runs, and pre-#952 it woke up owning a destroyed
+    // handle. The tally is what the destructor drains before it lets this object's own
+    // members go.
+    senders_.fetch_add(1, std::memory_order_relaxed);
+    const sender_exit_t leaving(senders_);
     const std::lock_guard<std::mutex> lk(write_m_);
+    // Re-checked, not re-read for tidiness: teardown may have run while this sender was
+    // queued, and it disarms `stop_` BEFORE it takes this very lock to null the handles,
+    // so a sender that wakes to a set `stop_` leaves without touching either handle.
+    if (stop_.load(std::memory_order_acquire)) return;
+    // THE handle gate, and the reason nothing above it may read `ws_`. `write_m_` does
+    // NOT order a handle read against a re-dial: connect_once() destroys and rewrites
+    // ws_/tcp_ holding no lock at all. What orders them is this acquire pairing with the
+    // release store connect_once makes only AFTER the rebuild — and `connected_` is
+    // cleared only under this lock (drop(), a failed write) or by the destructor, whose
+    // store the recv loop answers by breaking rather than re-dialing. So an observed
+    // `true` here is a happens-before edge with the writes that built the handle this
+    // call is about to use, and a handle check placed AHEAD of this line is read against
+    // an unsynchronised rewrite — the same unsynchronised handle read #952 is about,
+    // seen from the sender's side (TSan: send() vs connect_once, on a failing re-dial).
     if (!connected_.load(std::memory_order_acquire)) return;  // best-effort, like UDP
     // Copy into the reusable scratch: esp_transport_write masks IN-PLACE and unmasks
     // back (RFC 6455 client rule), but a delivered frame may be shared with the
@@ -187,8 +363,25 @@ void esp_ws_client_link_t::recv_loop() {
             frame_left = 0;
             discarding = false;
             assembling = false;
+            // Teardown clears `connected_` too, so re-check `stop_` here or a link
+            // destroyed while connected would answer by starting a fresh dial — and
+            // the destructor would join THAT (#952). This is also the general case: a
+            // stop seen during the poll turn below costs no dial at all. It carries a
+            // second load: a fresh dial REWRITES ws_/tcp_ with no lock held, so this
+            // break is what keeps the destructor's `connected_` store from re-opening
+            // the handle rewrite underneath a sender that observed the previous `true`.
+            if (stop_.load(std::memory_order_acquire)) break;
             if (!connect_once()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(kReconnectBackoffMs));
+                // Interruptible backoff. `sleep_for` was not: the destructor's join
+                // inherited the whole 1.5 s on exactly the unreachable peer a re-dial
+                // exists for. What remains uninterruptible is the dial itself —
+                // esp_transport_connect takes no cancellation, and shutting its socket
+                // down from another task is not portable across IDF versions — so a
+                // teardown that lands mid-dial still costs up to kDialTimeoutMs, which
+                // is why that constant is derived from the watchdog window.
+                std::unique_lock<std::mutex> lk(backoff_m_);
+                backoff_cv_.wait_for(lk, std::chrono::milliseconds(kReconnectBackoffMs),
+                                     [this] { return stop_.load(std::memory_order_acquire); });
             }
             continue;
         }
