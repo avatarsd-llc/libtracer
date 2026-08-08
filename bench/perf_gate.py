@@ -66,8 +66,12 @@ BASELINE = HERE / "perf_baseline.json"
 
 # Canonical points: (mode, size, fanout, endpoints). RESULT cols (collate.py):
 # RESULT sys mode size fan ep pub_s deliv_s mb_s p50ns p99ns meanns
-# One point per hot-path family, so a regression anywhere on the dispatch
-# surface is gated — not just the 1:1 write:
+# One point per GATED family, so a regression on any of these legs is caught —
+# not just the 1:1 write. This is NOT the whole dispatch surface: the path-target
+# legs (inproc-target-stored / inproc-target-handler) are charted and published but
+# ungated, as are inproc-deliver, the eptype-* sweep and the -batch twins. Do not
+# restate this list as "anywhere on the dispatch surface" — docs/methodology.md did,
+# and that sentence reaches the public performance page (#1041):
 #   inproc / inproc-borrow  — the canonical zero-copy / loaned 1:1 writes
 #   fan-out 1024            — the subscriber fan-out loop
 #   inproc-path @ 8192 ep   — the resolver canary (registry lookup per write)

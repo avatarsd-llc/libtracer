@@ -215,8 +215,13 @@ thresholds, one hard invariant:
 Details that make these trustworthy:
 
 - The per-PR gate watches **six canonical points** — a representative slice of the
-  fan-out / payload / topic sweeps plus a fold-width point, one per hot-path family, so a
-  pullback anywhere on the dispatch surface is gated and not just the 1:1 write. They are
+  fan-out / payload / topic sweeps plus a fold-width point, one per *gated* family
+  (`inproc` and `inproc-borrow` share one), so a pullback on any of those legs is caught and
+  not just the 1:1 write. They are **not** the whole dispatch surface, and this page should
+  not be read as claiming they are: the path-target delivery legs
+  (`inproc-target-stored` / `inproc-target-handler`) are measured and charted but **ungated**,
+  as are `inproc-deliver`, the `eptype-*` sweep and the `-batch` twins. A pullback confined to
+  those ships without the gate objecting. They are
   `perf_gate.py`'s `POINTS`, named here in full because this page is hand-written and a
   bare count says nothing about what is covered; each is keyed
   `mode/payload/fan-out/endpoints`: `inproc/64/1/1` — the canonical 1:1 write;
