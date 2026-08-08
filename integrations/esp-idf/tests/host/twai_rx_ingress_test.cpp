@@ -15,8 +15,9 @@
  * `complete_one_tx`. Before that, `twai_link_t::on_rx_done_isr` ran only on
  * silicon.
  *
- * The decisions pinned here are the ones that body makes, and every one of them is
- * SHARED with the SocketCAN sibling rather than local to this port:
+ * The decisions pinned here are the ones that body makes. The first two are SHARED with
+ * the SocketCAN sibling rather than local to this port; the third is local, and is listed
+ * because it is the handoff the ISR context forces:
  *
  *   - `tr::net::can_rx_admissible` — 29-bit data frames only. This is the rule the
  *     two platform links have already diverged on once: `twai_link_t` filtered RTR
@@ -31,7 +32,8 @@
  *     9..15 hands the link a code that expands to 12..64 bytes, and the link's own
  *     cap is what keeps `len` inside the 8 bytes the ISR actually copied;
  *   - the ISR→dispatch handoff: a FULL `rx_queue_` DROPS rather than blocking in
- *     ISR context.
+ *     ISR context. LOCAL to this port, not shared: `socketcan_link_t` has neither an ISR
+ *     nor a queue, so there is no sibling decision to diverge from here.
  *
  * What is NOT claimed here: nothing in this file exercises a real controller,
  * arbitration, bus-off/error state, or CAN-FD (this controller has none, and the
