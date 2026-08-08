@@ -329,7 +329,15 @@ std::size_t route_handle_t::link_count() const {
     return links_.size();
 }
 
-// --- transport-plane frame codec ---------------------------------------------
+// --- transport-plane frame BUILDERS -------------------------------------------
+//
+// These three return owning byte vectors and therefore allocate through the throwing global
+// heap. Since #885 NO production path calls them: every ADVERTISE / COMPACT / HANDLE_NACK the
+// router puts on a link is scatter-gathered off a stack head (`fwd_router.cpp`'s
+// `emit_advertise` / `emit_compact` / `emit_handle_nack`), which is what removed the last
+// peer-provoked throwing allocation from the label plane. What survives here is the
+// bytes-in-hand form: conformance vectors, the test suite's frame injection, and benches that
+// need a frame as a value rather than as a send. Do not reach for them from a receive thread.
 
 namespace {
 
@@ -349,10 +357,11 @@ void emit_label(std::vector<std::byte>& out, std::uint16_t label) {
 std::array<std::byte, 6> label_tlv(std::uint16_t label) noexcept {
     // The one spelling of the label child's bytes: a 2-byte opaque VALUE. Written field by
     // field rather than as a literal so the length and the payload keep the wire's
-    // little-endian order by construction. `emit_label` (and therefore every throwing and
-    // nothrow encoder) goes through here, so a gathered frame head and a built frame cannot
-    // disagree; `compact_cache_test` pins these bytes against `wire::emit_tlv` independently,
-    // since a shared locus alone would let a wrong layout pass a self-comparison.
+    // little-endian order by construction. `emit_label` (and therefore every built encoder
+    // below) goes through here, and so does every gather emitter in `fwd_router.cpp`, so a
+    // gathered frame head and a built frame cannot disagree; `compact_cache_test` pins these
+    // bytes against `wire::emit_tlv` independently, since a shared locus alone would let a
+    // wrong layout pass a self-comparison.
     std::array<std::byte, 6> out{};
     out[0] = static_cast<std::byte>(std::to_underlying(type_t::VALUE));
     out[1] = static_cast<std::byte>(opt_t{}.encode());
@@ -386,42 +395,6 @@ std::vector<std::byte> encode_handle_nack(std::uint16_t label) {
     std::vector<std::byte> out;
     wire::emit_tlv(out, type_t::HANDLE_NACK, opt_t{.pl = true}, body);
     return out;
-}
-
-namespace {
-
-/**
- * @brief The shared NOTHROW `<frame>{ VALUE label(u16), tail }` builder behind
- *        @ref try_encode_advertise / @ref try_encode_compact (#477): reserve body and
- *        frame exactly (≤ 6-byte headers, even LL-widened), then the emits below cannot
- *        reallocate — so nothing here can throw. One non-template locus (the footprint-
- *        sentinel discipline).
- * @retval false A buffer could not be reserved — @p out is left empty.
- */
-[[nodiscard]] bool try_encode_labeled(std::vector<std::byte>& out, type_t frame,
-                                      std::uint16_t label,
-                                      std::span<const std::byte> tail) noexcept {
-    out.clear();
-    constexpr std::size_t kLabelTlv = 6;  // 4-byte VALUE header + u16 label
-    std::vector<std::byte> body;
-    if (!detail::try_reserve(body, kLabelTlv + tail.size())) return false;
-    emit_label(body, label);
-    body.insert(body.end(), tail.begin(), tail.end());  // within capacity
-    if (!detail::try_reserve(out, 6 + body.size())) return false;
-    wire::emit_tlv(out, frame, opt_t{.pl = true}, body);  // within capacity
-    return true;
-}
-
-}  // namespace
-
-bool try_encode_advertise(std::vector<std::byte>& out, std::uint16_t label,
-                          std::span<const std::byte> route_path) noexcept {
-    return try_encode_labeled(out, type_t::ADVERTISE, label, route_path);
-}
-
-bool try_encode_compact(std::vector<std::byte>& out, std::uint16_t label,
-                        std::span<const std::byte> payload) noexcept {
-    return try_encode_labeled(out, type_t::COMPACT, label, payload);
 }
 
 }  // namespace tr::net

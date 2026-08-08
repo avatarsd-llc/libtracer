@@ -467,18 +467,28 @@ class route_handle_t {
 
 /**
  * @brief Encode an ADVERTISE frame: `ADVERTISE{ VALUE label(u16), PATH route }`.
+ *
+ * A frame BUILDER, not an emitter. It returns an owning vector and so allocates through the
+ * throwing global heap; on the shipping `-fno-exceptions` profile that is an `abort()`. Since
+ * #885 nothing in the router calls it: a label-plane frame is put on a link by
+ * `fwd_router.cpp`'s scatter-gather emitters, which write the 12-byte head on the stack and
+ * reference the route. Use this only where a frame is wanted as a VALUE and the caller is not
+ * on a peer-provoked path — conformance vectors, tests, tools.
  * @param label      The per-link label being bound (this hop's outbound label).
  * @param route_path A complete PATH TLV's bytes — the dst route the label aliases.
- * @return The framed ADVERTISE TLV bytes, ready for transport_t::send.
+ * @return The framed ADVERTISE TLV bytes.
  */
 [[nodiscard]] std::vector<std::byte> encode_advertise(std::uint16_t label,
                                                       std::span<const std::byte> route_path);
 
 /**
  * @brief Encode a COMPACT delivery: `COMPACT{ VALUE label(u16), <payload TLV> }`.
+ *
+ * A frame BUILDER on the same terms as `encode_advertise` — owning, throwing, and called by
+ * no production path since #885.
  * @param label   The per-link label naming the established route (no route bytes ride).
  * @param payload A complete payload TLV's bytes (the delivered VALUE).
- * @return The framed COMPACT TLV bytes, ready for transport_t::send.
+ * @return The framed COMPACT TLV bytes.
  */
 [[nodiscard]] std::vector<std::byte> encode_compact(std::uint16_t label,
                                                     std::span<const std::byte> payload);
@@ -489,40 +499,22 @@ class route_handle_t {
  * The label child is a fixed-shape run — opaque (`opt.PL=0`), 2-byte length — so it needs no
  * header emitter and no growable buffer. Returning it lets a SCATTER-GATHER egress build a
  * frame head entirely on the stack (`tr::net::stack_writer`) while keeping the byte layout
- * at ONE locus: `encode_compact` and friends emit it through here too, so a gathered frame
- * and a built one cannot drift apart.
+ * at ONE locus: the builders below emit it through here too, so a gathered frame and a built
+ * one cannot drift apart. Since #885 every ADVERTISE, COMPACT and HANDLE_NACK the router
+ * sends is gathered off a head that starts with these six bytes.
  * @param label The per-link label naming the established route.
  * @return `{VALUE, opt=0, len=2 (u16 LE), label (u16 LE)}`.
  */
 [[nodiscard]] std::array<std::byte, 6> label_tlv(std::uint16_t label) noexcept;
 
 /**
- * @brief NOTHROW `encode_advertise` — build the frame into @p out, soft-failing on OOM
- *        instead of a bad_alloc `abort()` under `-fno-exceptions` (#477).
- *
- * For the writer-thread delivery path (a compact flow's first delivery re-advertises); the
- * throwing form stays for setup-time callers. A dropped ADVERTISE self-heals: the peer's
- * HANDLE_NACK on the unknown label prompts a re-advertise (RFC-0004 §E.1).
- * @retval false The frame buffer could not be allocated — @p out is left empty.
- */
-[[nodiscard]] bool try_encode_advertise(std::vector<std::byte>& out, std::uint16_t label,
-                                        std::span<const std::byte> route_path) noexcept;
-
-/**
- * @brief NOTHROW `encode_compact` — build the frame into @p out, soft-failing on OOM
- *        instead of a bad_alloc `abort()` under `-fno-exceptions` (#477).
- *
- * For the writer-thread per-delivery egress: on OOM the delivery drops (a subscriber
- * missing one value under heap exhaustion is valid delivery behavior), never an abort.
- * @retval false The frame buffer could not be allocated — @p out is left empty.
- */
-[[nodiscard]] bool try_encode_compact(std::vector<std::byte>& out, std::uint16_t label,
-                                      std::span<const std::byte> payload) noexcept;
-
-/**
  * @brief Encode a HANDLE_NACK: `HANDLE_NACK{ VALUE label(u16) }` (stale-label signal).
+ *
+ * A frame BUILDER on the same terms as `encode_advertise` — owning, throwing, and called by
+ * no production path since #885. The router answers a stale label from a stack buffer instead:
+ * the frame is a fixed ten bytes, so there is nothing to allocate.
  * @param label The unknown/stale label that prompted the NACK.
- * @return The framed HANDLE_NACK TLV bytes, sent back over the inbound link.
+ * @return The framed HANDLE_NACK TLV bytes.
  */
 [[nodiscard]] std::vector<std::byte> encode_handle_nack(std::uint16_t label);
 

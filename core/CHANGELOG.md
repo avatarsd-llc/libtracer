@@ -67,7 +67,39 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   peer's push-on-connect frame is delivered instead of being decoded into an empty sink and
   dropped with no counter moving.
 
+### Removed
+
+- **`tr::net::try_encode_advertise` / `tr::net::try_encode_compact`
+  (`libtracer/route_handle.hpp`) — deleted (#885).** They existed to make a per-frame
+  allocation on the label plane *refusable* rather than fatal. That allocation no longer
+  exists: since this change every ADVERTISE, COMPACT and HANDLE_NACK the router puts on a
+  link is written as a 12-byte head on the stack with the route or payload referenced, so
+  there is nothing left to refuse and machinery that made the residual affordable outlives
+  the residual. Their two production call sites (`fwd_router_t::deliver_remote`'s
+  auto-promote leg) now emit through the same gather locus the forwarding hop already used.
+  A caller that genuinely wants a frame as a VALUE keeps
+  `encode_advertise` / `encode_compact` / `encode_handle_nack`, which are unchanged in
+  signature and in the bytes they produce and are now documented as builders for tests,
+  tooling and conformance vectors rather than for an egress path.
+
 ### Changed
+
+- **The label control plane emits ADVERTISE and HANDLE_NACK by scatter-gather, not by
+  building a frame (#885).** Four sites — `fwd_router_t::advertise` (the producer door),
+  `on_advertise`'s forwarding-hop re-advertise, `on_compact`'s stale-label NACK and
+  `on_nack`'s re-advertise — reached for the THROWING
+  `encode_advertise` / `encode_handle_nack`. Three of them run on a transport receive thread
+  and are entirely peer-provoked, so on the `-fno-exceptions` profile a peer could drive the
+  node into `abort()` by exhausting the heap; which policy applied was decided by which
+  spelling the author happened to reach for, since the same plane's COMPACT egress had
+  already been zero-allocation since #862. **No frame changes on the wire** — the head
+  arithmetic and the label child come from the same `label_tlv` / LL-widening loci the
+  builders use, pinned across the u16→u32 widening boundary by `compact_cache_test` driving
+  the real router doors. Public signatures are unchanged; the emitters are internal to
+  `core/src/fwd_router.cpp`. What this does NOT close, and what #603 still owns: the label
+  TABLES (`ensure_egress`, `bind_ingress*`) and `on_advertise`'s route deep-copy and
+  `wire::encode` re-encode still allocate through throwing paths, so `on_advertise` remains
+  a peer-reachable abort under `-fno-exceptions` for reasons this change does not touch.
 
 - **A refused bus-NAME hop's error reply now carries TRAILER-LESS route bytes, like every
   other addressed error this library emits (#887).** `fwd_router_t`'s rejection built its

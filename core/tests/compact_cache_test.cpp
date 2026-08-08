@@ -212,44 +212,143 @@ void test_corrupt_crc_compact_is_dropped() {
           "a corrupt-CRC COMPACT is DROPPED — the LKV still holds the last good value");
 }
 
-/**
- * @brief `try_encode_compact` emits BYTE-IDENTICAL frames to `encode_compact`.
- *
- * The forwarding leg swapped to the nothrow exact-reserve encoder to drop four
- * growth-doubling allocations per steady-state frame. That is only a safe swap if the two
- * encoders agree on the wire, so this pins it across payload sizes (including empty and
- * >64 KB, where the length field widens) and across label values (including 0 and 0xFFFF).
- *
- * Byte equality is the assertion that matters here, not the allocation count: an encoder that
- * merely produced a *parseable* frame would pass a routing test while breaking a peer.
- */
-void test_encoders_agree_byte_for_byte() {
-    std::printf("try_encode_compact matches encode_compact byte-for-byte\n");
-    int mismatches = 0;
-    int failures = 0;
-    // 65530 and 70000 are the point of this list: the label child is 6 bytes, so the frame
-    // body crosses 0xFFFF (and the length field widens to 4 bytes) at a payload of 65530 —
-    // NOT at 65536. Every earlier revision stopped at 65000, a body of 65006, so the
-    // "including >64 KB, where the length field widens" claim above was untrue and the
-    // widening path was never executed by any test.
-    for (const std::size_t n :
-         {std::size_t{0}, std::size_t{1}, std::size_t{2}, std::size_t{63}, std::size_t{64},
-          std::size_t{512}, std::size_t{4096}, std::size_t{65000}, std::size_t{65529},
-          std::size_t{65530}, std::size_t{70000}}) {
-        const std::vector<std::byte> payload(n, std::byte{0x5A});
-        for (const std::uint16_t label :
-             {std::uint16_t{0}, std::uint16_t{1}, std::uint16_t{0x1234}, std::uint16_t{0xFFFF}}) {
-            const std::vector<std::byte> a = tr::net::encode_compact(label, payload);
-            std::vector<std::byte> b;
-            if (!tr::net::try_encode_compact(b, label, payload)) {
-                ++failures;
-                continue;
-            }
-            if (a != b) ++mismatches;
-        }
+/** @brief A link that concatenates whatever it is handed, and remembers WHICH send it was. */
+struct gather_rec_link_t : tr::net::transport_t {
+    std::vector<std::byte> last; /**< @brief The concatenation of the last send. */
+    std::size_t gathers = 0;     /**< @brief Calls that took the iov overload. */
+    std::size_t contiguous = 0;  /**< @brief Calls that took the span overload. */
+    void send(std::span<const std::byte> b) override {
+        ++contiguous;
+        last.assign(b.begin(), b.end());
     }
-    check(failures == 0, "the nothrow encoder succeeds for every size and label");
-    check(mismatches == 0, "and its bytes are identical to the throwing encoder's");
+    void send(std::span<const std::span<const std::byte>> iov) override {
+        ++gathers;
+        last.clear();
+        for (const std::span<const std::byte> s : iov) last.insert(last.end(), s.begin(), s.end());
+    }
+};
+
+/**
+ * @brief The gathered ADVERTISE the router emits equals what `encode_advertise` would build.
+ *
+ * #885: the four ADVERTISE emission sites stopped building a frame and started writing a
+ * 12-byte head on the stack, referencing the route. Three of the four are peer-provoked, which
+ * is why the built form had to go — but the swap is only safe if the concatenation of the
+ * gathered spans is byte-identical to what the builder produced, so this drives the REAL
+ * producer door and reassembles what the link was handed.
+ *
+ * The sizes are the point: the label child is 6 bytes, so the ADVERTISE body crosses 0xFFFF —
+ * and the length field widens from u16 to u32 — at a ROUTE of 65530 bytes, not at 65536. The
+ * gathered head computes that length itself, so a widening disagreement between
+ * `stack_writer::header` and `wire::emit_header` would show up here and nowhere else.
+ *
+ * What this case does NOT cover: the LABEL values. `advertise` mints its own label from the
+ * egress table, so a test driving the door cannot choose one; the label child's bytes are
+ * pinned independently, for 0 and 0xFFFF among others, by
+ * @ref test_label_tlv_matches_the_generic_emitter, and both the gathered head and the builder
+ * take those six bytes from that one locus.
+ */
+void test_gathered_advertise_matches_the_built_frame() {
+    std::printf("scatter-gathered ADVERTISE egress matches encode_advertise byte-for-byte\n");
+    graph_t g;
+    fwd_router_t router(g);
+    gather_rec_link_t link;
+    router.add_child("net/ws-server/down", link);
+
+    int mismatches = 0;
+    int no_label = 0;
+    for (const std::size_t n : {std::size_t{1}, std::size_t{4}, std::size_t{64}, std::size_t{4096},
+                                std::size_t{65529}, std::size_t{65530}, std::size_t{70000}}) {
+        // Distinct bytes per size, so `ensure_egress`'s route compare cannot alias two cases
+        // onto one label and quietly halve the coverage.
+        std::vector<std::byte> route(n, static_cast<std::byte>(n & 0xFF));
+        route[0] = std::byte{0x06};  // PATH type byte, so the bytes read as a route in a dump
+        const std::uint16_t label = router.advertise("net/ws-server/down", route);
+        if (label == 0) {
+            ++no_label;
+            continue;
+        }
+        if (link.last != tr::net::encode_advertise(label, route)) ++mismatches;
+    }
+    check(no_label == 0, "every advertise minted a label");
+    check(mismatches == 0, "every gathered ADVERTISE equals the built one, across the LL boundary");
+    check(link.contiguous == 0 && link.gathers > 0,
+          "and the egress took the GATHER form — a contiguous send would mean it still built");
+}
+
+/**
+ * @brief The FORWARDING hop's re-advertise is gathered too, and carries the stripped route.
+ *
+ * The third of #885's ADVERTISE sites, and the one a peer provokes most directly: an inbound
+ * ADVERTISE whose leading segment names a child link makes this node strip that segment, mint
+ * its own downstream label, and re-advertise (the MPLS-style swap). That emission ran on the
+ * inbound link's receive thread and built its frame with the throwing encoder.
+ *
+ * The out-label is read back INDEPENDENTLY rather than parsed out of the frame under test:
+ * `ensure_egress` reuses one label per (link, route), so calling the producer door with the
+ * same stripped route hands back exactly the label the hop minted. Comparing the recorded
+ * frame against a build over THAT label pins the header, the length and the route bytes
+ * without taking any of them from the frame itself.
+ */
+void test_forwarding_hop_advertise_is_gathered() {
+    std::printf("the forwarding hop's re-advertise is gathered and carries the stripped route\n");
+    graph_t g;
+    fwd_router_t router(g);
+    gather_rec_link_t up;
+    gather_rec_link_t down;
+    router.add_child("up", up);
+    router.add_child("down", down);
+
+    router.on_frame("up", tr::net::encode_advertise(7, path_tlv({"down", "sensor"})));
+    check(down.gathers == 1 && down.contiguous == 0,
+          "the hop re-advertised GATHERED — a contiguous send would mean it built the frame");
+    const std::vector<std::byte> emitted = down.last;
+
+    const std::vector<std::byte> stripped = path_tlv({"sensor"});
+    const std::uint16_t out_label = router.advertise("down", stripped);
+    check(out_label != 0, "the stripped route resolves to a bound downstream label");
+    check(emitted == tr::net::encode_advertise(out_label, stripped),
+          "and the frame it sent is byte-for-byte the ADVERTISE the builder would have made");
+}
+
+/**
+ * @brief The stale-label HANDLE_NACK equals what `encode_handle_nack` would build.
+ *
+ * The other half of #885, and the one a hostile peer reaches for free: a COMPACT naming a label
+ * this node never bound. The answer is a fixed ten bytes, so the router writes them into a
+ * stack buffer and sends them contiguous — the frame has no variable-length child, so unlike
+ * ADVERTISE and COMPACT there is nothing to gather and the transport must see the same SPAN
+ * send it saw before. Both halves are asserted: the bytes, and that the send stayed contiguous.
+ *
+ * Unlike the ADVERTISE case above, the label here is chosen by the PEER, so this does pin the
+ * boundary values 0 and 0xFFFF through the real receive path.
+ */
+void test_gathered_handle_nack_matches_the_built_frame() {
+    std::printf("stack-built HANDLE_NACK matches encode_handle_nack byte-for-byte\n");
+    graph_t g;
+    fwd_router_t router(g);
+    gather_rec_link_t link;
+    router.add_child("net/ws-client/up", link);
+
+    int mismatches = 0;
+    int silent = 0;
+    for (const std::uint16_t label :
+         {std::uint16_t{0}, std::uint16_t{1}, std::uint16_t{0x1234}, std::uint16_t{0xFFFF}}) {
+        // Nothing is bound on this router, so EVERY label is stale and every COMPACT draws
+        // the NACK — the arm under test.
+        const std::vector<std::byte> frame = tr::net::encode_compact(label, value_tlv(0x5A));
+        link.last.clear();
+        router.on_frame("net/ws-client/up", frame);
+        if (link.last.empty()) {
+            ++silent;
+            continue;
+        }
+        if (link.last != tr::net::encode_handle_nack(label)) ++mismatches;
+    }
+    check(silent == 0, "every stale COMPACT drew a HANDLE_NACK back over the inbound link");
+    check(mismatches == 0, "and its ten bytes are identical to the built encoder's");
+    check(link.gathers == 0 && link.contiguous > 0,
+          "the NACK went out CONTIGUOUS — it has no variable child to gather");
 }
 
 /**
@@ -432,9 +531,11 @@ int main() {
     test_retire_invalidates_cached_handle();
     test_link_teardown_invalidates_cached_slot();
     test_corrupt_crc_compact_is_dropped();
-    test_encoders_agree_byte_for_byte();
     test_label_tlv_matches_the_generic_emitter();
     test_gathered_egress_matches_the_built_frame();
+    test_gathered_advertise_matches_the_built_frame();
+    test_forwarding_hop_advertise_is_gathered();
+    test_gathered_handle_nack_matches_the_built_frame();
     test_iov_gather_drops_on_oom();
     test_advertise_with_non_name_child_binds_nothing();
 
