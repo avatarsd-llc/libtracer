@@ -955,6 +955,11 @@ void test_can_send_advertise_allocates_nothing() {
 
 // ---------------------------------------------------------------------------
 // RFC 6455 §5.5 — the PONG is unfailable because the control frame is bounded
+//
+// These three drive the SERVER. Their CLIENT mirror — a raw socket acting as a hostile
+// server with our `transport_ws_client` dialing it — lives in `ws_transport_test.cpp`
+// (#1010): the two halves share `decode_frame_checked` but not the reply buffer they build
+// into or the teardown path they fail through, so neither set covers the other.
 // ---------------------------------------------------------------------------
 
 /** @brief A legal (<= 125 B) PING is answered with a PONG carrying exactly those bytes —
