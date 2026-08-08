@@ -55,16 +55,57 @@ build/
 */build/
 build-*/
 */build-*/
-# An out-of-source CMake tree is identifiable by what CMake itself writes into it, whatever the
-# directory is called. The name patterns above only catch `build`-prefixed ones, so a throwaway
-# `cmake -S core -B b` lands ~800 generated files in `git add -A` -- which has happened twice.
-# Ignoring the marker files rather than the directory keeps this working for any name.
+# The bench tree is configured separately from the core one, so it cannot reuse a `build-*`
+# name that is already occupied; `bench-*` is the second conventional out-of-source prefix.
+# `NON_SOURCE_DIR_PREFIXES` in `tools/check_doc_citations.py` lists the same two prefixes for
+# the same reason -- change both together, or a build tree turns the citation gate red.
+bench-*/
+*/bench-*/
+# Below: the files CMake itself writes into an out-of-source tree, ignored by marker rather
+# than by directory name so that a tree the name patterns above do not catch -- a throwaway
+# `cmake -S core -B b` lands ~800 generated files in `git add -A`, which has happened twice --
+# still stays out of the index.
+#
+# Read the limit of this honestly: a marker can only name a path CMake itself chooses. It can
+# NOT cover a link target, whose name comes from the project (`bench_codec`, an extensionless
+# ELF that matches no suffix rule here), nor any other project-named output. There is no git
+# rule for "ignore the directory holding a CMakeCache.txt" -- static path patterns are all
+# gitignore has. So an arbitrarily-named tree is only PARTLY ignored, and the safe habit is:
+# name a build tree `build-*` or `bench-*`, and read `git status` before `git add -A`.
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
 CTestTestfile.cmake
+CPackConfig.cmake
+CPackSourceConfig.cmake
 compile_commands.json
+install_manifest.txt
+_deps/
+# The Makefile generator writes one `Makefile` per directory of the build tree, outside
+# `CMakeFiles/`. Safe to ignore repo-wide: this project builds only through CMake and tracks
+# no makefile of its own (a future one would need `git add -f`).
+Makefile
+# The Ninja generator's equivalents.
+build.ninja
+rules.ninja
+.ninja_deps
+.ninja_log
+# CTest writes these next to CTestTestfile.cmake.
+DartConfiguration.tcl
+Testing/
 .cache/
+
+# Project-named build-tree output: not CMake-named, so the marker list above cannot reach it,
+# but each path is still nameable exactly.
+#
+# `core/CMakeLists.txt` renders the compile-time config header (ADR-0068) into
+# `<build>/core/generated/`, with a `drift-check/` copy beside it for the drift assertion.
+**/generated/
+# The package-config pair `configure_package_config_file` / `write_basic_package_version_file`
+# render at the top of the core build tree. The tracked source is `core/cmake/*.cmake.in`;
+# only the rendered `.cmake` output is ignored here.
+libtracerConfig.cmake
+libtracerConfigVersion.cmake
 
 # Python bytecode caches (tools/*.py — the footprint/size gates)
 __pycache__/
