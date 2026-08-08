@@ -234,8 +234,11 @@ flowchart LR
   unconditionally as its last wiring step; `transport_ws_client` and `tcp_transport_t`
   honor it when constructed with `defer_recv`
   ([#1045](https://github.com/avatarsd-llc/libtracer/issues/1045)), which is how
-  `transport_vertex_t` builds a SPEC-created `ws` or `tcp` dialer. The other DIAL
-  transports still take the no-op default and still have the window.
+  `transport_vertex_t` builds a SPEC-created `ws` or `tcp` dialer. `quic`,
+  `webtransport` and the ESP-IDF-native WS client link still take the no-op default;
+  whether the window is reachable on each has its own follow-up (#1100–#1103). `udp` has
+  no DIAL constructor of this shape — it binds an ephemeral port, never `::connect`s and
+  sends nothing in the constructor, so no peer can learn its source port to push to.
 - **The callable sugar binds by address.** `set_receiver(F& sink)` and
   `set_rope_receiver(F& sink)` take an lvalue; a temporary lambda does not compile,
   and a callable destroyed early dangles exactly like a stale `ctx`.

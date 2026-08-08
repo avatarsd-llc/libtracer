@@ -53,8 +53,10 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   shape (#1025) applied to the transport this issue is scoped to, and nothing else — quic,
   webtransport, the ESP-IDF-native WS client link and CAN are untouched, and each has its own
   follow-up issue. `defer_recv` defaults to `false`, so a direct
-  `tcp_transport_t(host, port)` behaves exactly as before and no existing call site changes;
-  the LISTEN constructor is untouched. With `true` the connect still happens in the
+  `tcp_transport_t(host, port)` behaves exactly as before and no existing call site HAS to
+  change to keep compiling; the one that does change is the built-in `tcp` DIAL factory
+  (`core/src/builtin_transport_tcp.cpp`), deliberately, so a SPEC-created dialer gets the
+  deferred form. The LISTEN constructor is untouched. With `true` the connect still happens in the
   constructor and `ok()` still answers for it, but no receive thread exists and no byte is
   read until the owner calls `start_receiving()`. The override is idempotent and inert
   wherever there is nothing to arm — a second call, a one-phase link, a LISTEN link, and a
