@@ -77,6 +77,7 @@ Gated by `.github/workflows/doc-citations.yml`; unit tests in
 import argparse
 import difflib
 import functools
+import os
 import pathlib
 import re
 import subprocess
@@ -881,15 +882,22 @@ def tree_index() -> dict:
     `127.0.0.1:47301` and `bindings/.../README.md` writes `wss://robot.local:9000`; both
     parse as `path.ext:digits` and neither is a citation. Nothing in the tree is named
     `127.0.0.1` or `robot.local`, and that is the whole discriminator.
+
+    Walks with `os.walk` and PRUNES as it goes, rather than `rglob`-ing everything and
+    filtering after. Same result, and the difference is not cosmetic: `rglob` descends into
+    `.git` and every `build-*` tree before discarding them, which measured +1.2 s on a gate
+    that runs ~1.5 s. Pruning keeps this second walk in the noise.
     """
     out = {}
-    for path in REPO.rglob("*"):
-        if not path.is_file():
-            continue
-        rel = path.relative_to(REPO)
-        if any(_is_non_source_part(p) for p in rel.parts):
-            continue
-        out.setdefault(path.name, []).append(rel.as_posix())
+    for dirpath, dirnames, filenames in os.walk(REPO):
+        dirnames[:] = [d for d in dirnames if not _is_non_source_part(d)]
+        rel_dir = pathlib.Path(dirpath).relative_to(REPO).as_posix()
+        for name in filenames:
+            # A FILE whose own name is a non-source part is skipped too, matching what
+            # @ref source_map's `rel.parts` test does (it sees the basename as a part).
+            if _is_non_source_part(name):
+                continue
+            out.setdefault(name, []).append(name if rel_dir == "." else f"{rel_dir}/{name}")
     return {name: sorted(paths) for name, paths in out.items()}
 
 
