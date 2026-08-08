@@ -159,7 +159,7 @@ holds the graph's memory; take the bytes and drop it.
 
 ```{note}
 `rope_t::only()` has a precondition — `link_count() == 1`, debug-asserted
-(`core/include/libtracer/rope.hpp:151-160`). It is the consumer's explicit "this value
+(`core/include/libtracer/rope.hpp:162-171`). It is the consumer's explicit "this value
 is one segment", correct for a scalar written as above. A consumer that cannot promise
 contiguity calls `materialize()` instead, which returns the single link when there is
 one and pays a single flatten copy otherwise.
