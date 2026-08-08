@@ -100,12 +100,12 @@ Declared in `core/include/libtracer/graph.hpp`, all private:
 
 | function | declaration | role |
 | --- | --- | --- |
-| `deliver_vertex` | `graph.hpp:1371` | the per-vertex delivery unit both `write` and `propagate` build on: `fan_out`, then `bubble_up` if anyone listens above |
-| `fan_out` | `graph.hpp:1337` | return at once if nothing subscribes here; else snapshot under the stripe lock, then `dispatch_edge` per view, outside it |
-| `dispatch_edge` | `graph.hpp:1343` | the one dispatch of an edge's three legs, shared by `fan_out` and the admission durability latch so the legs cannot diverge |
-| `dispatch_edge_target` | `graph.hpp:1349` | the local re-dispatch leg — a delivery into another vertex |
-| `dispatch_edge_remote` | `graph.hpp:1350` | the remote leg — a `FWD{WRITE}` through the injected sink |
-| `bubble_up` | `graph.hpp:1367` | vertical fan-out to every registered ancestor's subscribers |
+| `deliver_vertex` | `graph.hpp:1363` | the per-vertex delivery unit both `write` and `propagate` build on: `fan_out`, then `bubble_up` if anyone listens above |
+| `fan_out` | `graph.hpp:1329` | return at once if nothing subscribes here; else snapshot under the stripe lock, then `dispatch_edge` per view, outside it |
+| `dispatch_edge` | `graph.hpp:1335` | the one dispatch of an edge's three legs, shared by `fan_out` and the admission durability latch so the legs cannot diverge |
+| `dispatch_edge_target` | `graph.hpp:1341` | the local re-dispatch leg — a delivery into another vertex |
+| `dispatch_edge_remote` | `graph.hpp:1342` | the remote leg — a `FWD{WRITE}` through the injected sink |
+| `bubble_up` | `graph.hpp:1359` | vertical fan-out to every registered ancestor's subscribers |
 
 `dispatch_edge` is defined inline (`graph.cpp:956-963`) precisely so its body stays in the
 fan-out loop; the target and remote legs are split into out-of-line helpers to keep that body's
@@ -206,10 +206,10 @@ more sheds happen further up, before an edge is ever dispatched. What is counted
 
 ```cpp
 struct delivery_drops_t {
-    std::uint64_t no_target = 0;         // graph.hpp:1285
-    std::uint64_t denied = 0;            // graph.hpp:1287
-    std::uint64_t out_of_memory = 0;     // graph.hpp:1290
-    std::uint64_t fan_out_truncated = 0; // graph.hpp:1294
+    std::uint64_t no_target = 0;         // graph.hpp:1277
+    std::uint64_t denied = 0;            // graph.hpp:1279
+    std::uint64_t out_of_memory = 0;     // graph.hpp:1282
+    std::uint64_t fan_out_truncated = 0; // graph.hpp:1286
 };
 ```
 
@@ -239,7 +239,7 @@ and the write still answers `SUCCESS`. Those sites are pre-existing and tracked 
 read `delivery_drops()` as *what the dispatch plane shed*, not yet as *everything the vertex
 shed*.
 
-`delivery_drops()` (`graph.hpp:1305`, `graph.cpp:634`) is the only record that any of this
+`delivery_drops()` (`graph.hpp:1297`, `graph.cpp:634`) is the only record that any of this
 happened. Without it, a node whose target was retired, or whose fan-in gate denies the edge's
 stored caller, drops every delivery for the rest of its life with nothing anywhere to say so.
 
