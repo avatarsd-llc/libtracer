@@ -16,6 +16,16 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`tr::net::detail::tcp_peer_publishing_hook` (`libtracer/transport_tcp.hpp`) — a TEST-ONLY
+  seam, null in production (#891).** Run by `transport_tcp_server::accept_peer` at the instant
+  a new peer's fd is published and its slot is one store from open, inside the `write_m_`
+  hold. The window a racing test would have to hit is two instructions wide; the hook lets a
+  test HOLD that instant open, broadcast into it, and check the frame arrives at the peer
+  being accepted (`tcp_test`). Same shape and same rules as `ws_peer_published_hook`: install
+  it before the peer that should trip it connects, clear it before the test returns. The
+  production cost is one predictable null-check per accepted connection on the cold accept
+  path.
+
 - **`graph::status_t::TRANSPORT_DOWN` — a link that could not come up now has its own status
   (#929).** The L4 status set had eight members and no transport member, so every
   dial/bind/handshake failure was reported as `NOT_FOUND` and `error_code(status_t)` — the
@@ -65,6 +75,30 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   builder already did, and `read_children_folded` now does at its own call site.
 
 ### Fixed
+
+- **`transport_tcp_server` publishes an accepted peer's `open`/`fd` under `write_m_`, fd
+  first (#891).** The two halves of a slot's lifecycle used different disciplines on the same
+  two fields: `teardown_slot` reset them under `write_m_` — so an in-flight send either
+  finished against the still-open fd or observed the reset — while `accept_peer` stored them
+  with no lock at all, and stored `open = true` *before* the fd. A broadcast holding
+  `write_m_` mid-accept could therefore read `open == true` next to `fd == -1` and hand the
+  record to `write_all_iov(-1)`, which drops it: the frame reached no peer, silently, and any
+  future per-fd state would have been read in the same half-published instant. The publish is
+  now one `write_m_` critical section with the fd stored first, so "open ⇒ fd valid" holds for
+  every sender. Accept is cold — once per connection, off the delivery path — and the
+  disassembly confirms the price: in both `transport_tcp.cpp` and `transport_ws.cpp` the
+  functions a peer's traffic runs through are instruction-identical to the byte — both `send`
+  overloads, `peer_endpoint_t::send`, `teardown_slot`, `service_peer`, `run`, `peer_link`,
+  `close_peer`, `enumerate_peers` and the destructor — and `accept_peer` is the only body that
+  changed (each server's constructor moves by one rip-relative displacement, because
+  `accept_peer` grew). `transport_ws_server`
+  had the safer order already (it publishes a slot NOT-open and flips `open` past the 101
+  under the same lock) and now takes the same lock around its publish, so **one rule covers
+  both servers**: `open`/`fd` are mutated only under `write_m_`, `name` only under `peers_m_`
+  — the rule [#871](https://github.com/avatarsd-llc/libtracer/issues/871)'s shared slot server
+  should lift rather than re-fork. With the lock doing the ordering, both fields drop to
+  uniform `relaxed` on every access; the `release`/`acq_rel` they carried before paired only
+  with relaxed loads and ordered nothing.
 
 - **A transport that could not come up is no longer reported to a peer as a permanent
   wrong-address (#929).** `make_checked` (the shared `!ok()` check behind the built-in

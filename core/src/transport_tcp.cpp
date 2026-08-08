@@ -77,7 +77,7 @@ struct prefixed_iov_t {
         std::size_t total = 0;
         for (const std::span<const std::byte>& s : iov) total += s.size();
         if (total > cap) return;
-        detail::store_le(prefix, static_cast<std::uint32_t>(total));
+        tr::detail::store_le(prefix, static_cast<std::uint32_t>(total));
         vec = table.acquire(iov.size() + 1);
         if (vec == nullptr) return;  // overflow store exhausted => ok stays false => DROP
         vec[0] = ::iovec{prefix.data(), prefix.size()};
@@ -213,7 +213,7 @@ void tcp_transport_t::serve(int fd) {
         // Read the 4-byte length prefix, reassembling it across TCP segment
         // boundaries (read_exact resumes partial reads through receive timeouts).
         if (!read_exact(fd, prefix.data(), prefix.size())) return;
-        const std::size_t len = detail::load_le<std::uint32_t>(prefix);
+        const std::size_t len = tr::detail::load_le<std::uint32_t>(prefix);
 
         // The framing rules (effective cap, empty record, oversize ⇒ malformed,
         // alloc failure ⇒ backpressure drain) live in length_prefix_framer — one
@@ -278,9 +278,16 @@ void tcp_transport_t::run_listen() {
  * @brief One peer slot.  Slots are never destroyed while the server lives —
  *        recycled in place on departure — so the peer_endpoint_t facade
  *        `peer_link` hands out stays pointer-valid for the server's lifetime.
- *        Threading: @ref fd / @ref open are atomics (senders read them under
- *        `write_m_`); @ref name is guarded by `peers_m_`; the framer is
- *        poll-thread-only.
+ *        Threading, ONE rule for both halves of the lifecycle: @ref fd / @ref
+ *        open are atomics MUTATED only under `write_m_` — accept publishes them
+ *        (fd first), teardown resets them (open first) — and read by senders
+ *        under that same lock, so a sender never sees a half-published slot;
+ *        @ref name is guarded by `peers_m_`; the framer is poll-thread-only.
+ *        (The destructor's closing sweep is the one mutation outside the lock,
+ *        and runs after the poll thread is joined — nothing left to race.)
+ *        `enumerate_peers`/`peer_link` read @ref open under `peers_m_` alone and
+ *        never touch the fd.  Every access to the two atomics is `relaxed`: the
+ *        lock, not the memory order, is what orders them.
  */
 struct transport_tcp_server::session_t {
     std::atomic<int> fd{-1};       /**< @brief The peer socket; -1 ⇒ free slot. */
@@ -334,7 +341,7 @@ transport_tcp_server::~transport_tcp_server() {
     stop_and_join();  // FIRST: the run() thread touches the fds closed below
     if (listen_fd_ >= 0) ::close(listen_fd_);
     for (const std::unique_ptr<session_t>& s : slots_) {  // thread joined — nothing races
-        const int fd = s->fd.exchange(-1, std::memory_order_acq_rel);
+        const int fd = s->fd.exchange(-1, std::memory_order_relaxed);
         if (fd >= 0) ::close(fd);
     }
 }
@@ -445,10 +452,28 @@ void transport_tcp_server::accept_peer() {
     }
     set_nodelay(fd);
     slot->framer.reset();
-    // No handshake phase: the peer is open the moment it is accepted.  Publish
-    // the fd LAST — the slot is now live for senders and the poll pass.
-    slot->open.store(true, std::memory_order_relaxed);
-    slot->fd.store(fd, std::memory_order_release);
+    // No handshake phase: the peer is open the moment it is accepted.  Publish the two
+    // sender-visible fields under write_m_ — the SAME lock teardown_slot resets them under
+    // — so the pair moves as one step for anyone who could act on it: a broadcast holding
+    // that lock runs either entirely before this slot goes live or entirely after.  Inside
+    // the hold the fd goes FIRST, which is what makes "open ⇒ fd valid" an invariant; the
+    // reverse (open first, unlocked) let a broadcast read `open == true` next to `fd == -1`
+    // and write the frame to a closed descriptor — a dropped frame today and a trap for any
+    // future per-fd state (#891).  Accept is cold — once per connection, off the delivery
+    // path — so the hold costs nothing a sender can measure.  The stores are relaxed: the
+    // lock, not the memory order, is what orders them — every reader of the fd that is not
+    // the poll thread itself (both send overloads, close_peer) holds this same lock.
+    {
+        const std::lock_guard lock(write_m_);
+        slot->fd.store(fd, std::memory_order_relaxed);
+        // The seam that makes the line below testable: here the fd is published and the slot
+        // is one store from open, with write_m_ still held. A broadcast that lands in this
+        // instant must block, and must then find the slot whole. Publish these two stores
+        // unlocked in the other order and the same probe writes to fd -1 — that is the
+        // regression this hook exists to redden (`tcp_test`, the accept-publish race).
+        if (detail::tcp_peer_publishing_hook != nullptr) detail::tcp_peer_publishing_hook();
+        slot->open.store(true, std::memory_order_relaxed);
+    }
 }
 
 void transport_tcp_server::service_peer(session_t& s) {
@@ -499,10 +524,13 @@ void transport_tcp_server::teardown_slot(session_t& s) {
         // The stream teardown-under-write-lock invariant, per slot: reset the
         // fd and the open flag under write_m_ BEFORE ::close, so an in-flight
         // send either finished against the still-open fd or observes the reset.
+        // The mirror image of the accept-side publish, same lock, same relaxed
+        // stores — `open` clears first here, so the pair never reads live-with-
+        // no-fd from this side either.
         const std::lock_guard lock(write_m_);
         was_open = s.open.load(std::memory_order_relaxed);
         s.open.store(false, std::memory_order_relaxed);
-        fd = s.fd.exchange(-1, std::memory_order_acq_rel);
+        fd = s.fd.exchange(-1, std::memory_order_relaxed);
     }
     if (fd >= 0) ::close(fd);
     s.framer.reset();
