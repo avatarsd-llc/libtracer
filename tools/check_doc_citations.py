@@ -106,7 +106,13 @@ NON_SOURCE_DIRS = (
 # makes `config.hpp` an AMBIGUOUS basename, which the gate reports as stale citations that
 # do not exist. Green-vs-red then depended on whether someone had configured a build in the
 # tree, which is exactly the kind of environment-sensitivity a gate must not have.
-NON_SOURCE_DIR_PREFIXES = ("build-",)
+#
+# `bench-` is here for the identical reason (#1050): the bench tree is configured separately
+# from the core one and so cannot reuse an occupied `build-*` name, which makes `bench-agent`
+# the second sanctioned prefix in `.gitignore`. A `cmake -S bench -B bench-agent` renders the
+# same `generated/.../config.hpp` one level deeper and turned this gate red. This tuple and
+# the `.gitignore` prefix list describe the same set and have to be changed together.
+NON_SOURCE_DIR_PREFIXES = ("build-", "bench-")
 
 
 def _is_non_source_part(part: str) -> bool:
