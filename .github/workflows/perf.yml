@@ -81,6 +81,12 @@ jobs:
         env:
           LIBTRACER_BENCH: bench/build/bench_libtracer
         run: python3 bench/test_bench_cli.py
+      # The composition bench's wire-use guard (#568 criterion 3), tested in BOTH directions
+      # against the real strace: a process that transmits must pass, and one that does not
+      # must fail. It needs no build and no network, and it is the check that stops a
+      # comparison from ever again reporting a rate for an engine that never reached the wire.
+      - name: Composition-bench wire-use guard tests
+        run: python3 bench/test_compose_guard.py
       - name: Performance gate (INTERLEAVED same-runner A/B vs main)
         run: |
           python3 bench/perf_gate.py \

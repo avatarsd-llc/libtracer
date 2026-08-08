@@ -17,6 +17,7 @@ for a local `preview.html` of the same charts.
 | --- | --- |
 | `run.sh` | **in-process** sweep: dispatch + (optionally) serialization cost, on one process. |
 | `run_net.sh` | **network**: two processes over real localhost **UDP** (the kernel path). |
+| `run_compose.sh` | **composition throughput**: values a *subscriber process* observes per second as the composition width K grows — libtracer ships a K-link rope as one `sendmsg(iovec)`, an engine with no composite send needs K messages. Two processes on both sides, deliveries counted at the receiver, publisher audited for wire use — see [what it measures](#run_composesh--composition-throughput-two-processes-both-sides). |
 | `grid.sh` | **response-surface grid** for both engines → a self-contained `preview.html` of the absolute-value comparison charts (the same ones CI publishes, via `render_compare.py`). |
 | `bench_forward_heap` | **16KB-RAM zero-heap gate**: a global `operator new` counter measures how many heap allocations one FWD *forward hop* costs (ADR-0038). Drives a **stub** link — see [what it does not cover](#bench_forward_heap--the-16kb-ram-zero-heap-forward-gate-adr-0038). |
 | `bench_transport_iov` | **the term the zero-heap gate cannot see**: at what scatter-gather width does a *real* transport start allocating per frame? Measured spill: 17 caller spans / ~288 B, against a structural `kFwdMaxIov` of 9. |
@@ -91,6 +92,68 @@ protocol, the **same two-process topology** so the comparison is fair; each subs
 emits `net-<proto>` RESULT rows. (WebSocket is built but held: libtracer's WS transport
 shows order-of-magnitude single-run latency jitter under this bench. QUIC needs msquic + a
 TLS cert and the `-DLIBTRACER_WITH_QUIC` module, gated like the dedicated `quic` CI job.)
+
+### `run_compose.sh` — composition throughput, two processes both sides
+
+The claim: libtracer batches by **composition**, not by a timer. A composite endpoint's
+value is a **K-link rope already in memory**, and the transport lowers that rope to its
+native scatter-gather form — one `sendmsg(iovec)` carrying K values. An engine with no
+composite send issues K messages for the same K values. So the separating quantity is
+**values delivered per message**, and the prediction is that libtracer's per-value cost
+stays flat as K grows.
+
+That claim was published once on a harness that could not test it, and the numbers were
+withdrawn ([#568](https://github.com/avatarsd-llc/libtracer/issues/568)): the Zenoh side
+declared a publisher with **no subscriber and no peer**, so `put()` never reached the wire
+— 5 `sendto` and 10 `write` for 520 000 puts, and the five were multicast scouting beacons
+— while the libtracer side reported a `sendmsg` rate multiplied by K, egress-only, with
+nothing counting deliveries. Both K-curves were computed, not measured.
+
+**What this harness measures.** The number of values a **separate subscriber process**
+observed arriving over a real loopback UDP socket, per second, at each K; the number of
+messages those values arrived in; and the one-way latency of a whole K-value group
+(stamped in the group's first record, taken when its last lands, so a per-value engine is
+timed on when its group *completed*, not on its first value). Every published figure is
+the receiver's own count over the receiver's own clock. The publisher's send count is
+captured only to report **loss**.
+
+**What it does not measure.** Any in-process graph cost — there is no `graph_t`, no vertex
+and no subscription on either side; this is the transport seam and the kernel path, which
+is where the one-datagram-per-K property lives. Nor what a composite costs to *build*: the
+K records and the iovec over them are constructed **once, before the timed loop**, because
+the value is supposed to be a rope that already exists. (The withdrawn bench rebuilt its
+iovec inside the timed loop and understated libtracer by 33–58% — in libtracer's own
+disfavour, and still not a measurement of what it claimed.) And it does not measure a
+receiver fanning K values out to K consumers: the subscriber walks the datagram's records
+and counts them.
+
+**Two guards, and a number is published only if both hold.**
+
+1. **The receiver refuses to report.** A point that observed no values, no throughput
+   window, or any malformed record emits **no `RESULT` row at all** and exits non-zero. A
+   record carries a magic word and its own K, so a stray datagram from another run on a
+   reused port is counted as malformed rather than folded into the rate.
+2. **The wire-use audit** (`syscall_guard.py`) runs a short pass of the same pub/sub pair
+   with the publisher under `strace -c`, and fails the point if it issued fewer than 50
+   send-family syscalls. Both ends of that floor are measured, not guessed: a **peerless**
+   publisher — the original defect, reproduced — issued **3 `sendto` / 8 `write` for 4 000
+   puts**, while a publisher with a live subscriber **batches**, turning 3 200 puts into
+   **479** `sendto`. So the floor cannot be "one send per message" without failing honest
+   batching, and `write` cannot count toward it at all, because in a `-c` summary a socket
+   write and a `printf` are the same row. The audit is its own pass because tracing costs
+   tens of microseconds per syscall; the measured pass is untraced. No `strace`, no ptrace
+   permission, or an unparseable summary all **fail** — a guard that downgrades itself to
+   "not checked" is the defect it exists to prevent, wearing a passing badge.
+
+```sh
+bash bench/fetch_zenoh.sh          # the comparison arm; libtracer's arm needs nothing
+./run_compose.sh ./build           # RESULT / RESULT_COMPOSE / SYSCALL_AUDIT / COMPOSE_LOSS rows
+python3 test_compose_guard.py      # the guard's own tests, both directions
+```
+
+**Nothing here is charted.** Re-adding the comparison chart is
+[#568](https://github.com/avatarsd-llc/libtracer/issues/568)'s fifth criterion and is gated
+on maintainer sign-off of the published number, so this script prints rows and stops.
 
 ## Many-core contention microbenchmarks (Wave 0e, ADR-0032)
 

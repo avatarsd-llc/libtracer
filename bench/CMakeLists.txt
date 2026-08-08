@@ -31,7 +31,15 @@ target_compile_definitions(bench_codec PRIVATE
 # (ADR-0040 — the net plane is explicit-source-routed FWD only). Two-node FWD delivery
 # over a real transport is covered by core/tests/udp_test.
 
-# Scatter-gather egress demo: one sendmsg(iovec) ships a K-value composite rope.
+# COMPOSITION-THROUGHPUT comparison (#568): how many values a SUBSCRIBER PROCESS observes
+# per second as the composition width K grows. libtracer ships a K-link rope as one
+# sendmsg(iovec); an engine with no composite send needs K messages. Two processes, real
+# loopback UDP, deliveries counted at the receiver, and a wire-use audit before any number is
+# taken. Orchestrated by run_compose.sh. (Successor to the withdrawn bench_scatter, which was
+# one process, egress-only, and published rate x K by arithmetic.)
+add_executable(bench_compose_net bench_compose_net.cpp)
+target_link_libraries(bench_compose_net PRIVATE libtracer)
+target_compile_options(bench_compose_net PRIVATE -Wall -Wextra)
 
 # NETWORK transport comparison (UDP/TCP/WS over the loopback kernel path) — the
 # libtracer side of the transport matrix vs Zenoh (bench_zenoh_net). Two PROCESSES
@@ -133,7 +141,8 @@ set(ZCPP ${CMAKE_CURRENT_SOURCE_DIR}/vendor/zenoh-cpp-1.9.0)
 if(EXISTS ${ZC}/lib/libzenohc.so AND EXISTS ${ZCPP}/include/zenoh.hxx)
     add_executable(bench_zenoh bench_zenoh.cpp)
     add_executable(bench_zenoh_net bench_zenoh_net.cpp)
-    foreach(t bench_zenoh bench_zenoh_net)
+    add_executable(bench_zenoh_compose bench_zenoh_compose.cpp)
+    foreach(t bench_zenoh bench_zenoh_net bench_zenoh_compose)
         target_include_directories(${t} PRIVATE ${ZC}/include ${ZCPP}/include)
         target_link_libraries(${t} PRIVATE ${ZC}/lib/libzenohc.so)
         target_compile_definitions(${t} PRIVATE ZENOHCXX_ZENOHC)

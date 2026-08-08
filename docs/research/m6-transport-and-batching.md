@@ -18,9 +18,11 @@ the perf work — see [Performance](../performance.md)). One syscall carries K
 values, so throughput **should** scale with composition size *at flat latency*.
 Stated as a claim rather than a result on purpose: the benchmark that used to
 back it was withdrawn as invalid (its Zenoh side never reached the wire and its
-libtracer side published `rate x K` by arithmetic, egress-only), so this is a
-design property that has not yet been measured end to end. A valid two-process,
-delivery-counted version is tracked in issue #568. The
+libtracer side published `rate x K` by arithmetic, egress-only). A valid
+two-process, delivery-counted harness now exists — `bench/run_compose.sh`, built
+to issue #568's acceptance criteria — but its numbers are **not published here**:
+the comparison is a claim, so drawing it is a separate reviewed step, and until
+that happens this remains a design property with a harness ready to test it. The
 `BatchingTransport` timer-decorator is therefore **superseded** (kept below only as
 the considered-and-rejected alternative). The remaining M6 work is purely the
 **reliable byte-stream transport** (TCP/QUIC + `FrameReassembler`) for ROS
