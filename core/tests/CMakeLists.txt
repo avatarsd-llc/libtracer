@@ -772,6 +772,15 @@ target_link_libraries(fwd_compact_test PRIVATE libtracer)
 libtracer_test_warnings(fwd_compact_test)
 add_test(NAME fwd_compact COMMAND fwd_compact_test)
 
+# RFC-0004 §E.1/§F (#974) — a COMPACT delivery is ACL-gated under the INBOUND LINK's name,
+# like the full-route FWD{WRITE} it compacts. Both terminus write arms of on_compact (the
+# cold deliver_local one and the memoized warm one) are proven separately, each paired with
+# a positive control, plus the no-resolver default where nothing is enforced.
+add_executable(fwd_compact_acl_test fwd_compact_acl_test.cpp)
+target_link_libraries(fwd_compact_acl_test PRIVATE libtracer)
+libtracer_test_warnings(fwd_compact_acl_test)
+add_test(NAME fwd_compact_acl COMMAND fwd_compact_acl_test)
+
 # RFC-0004 §E.1 (#716) — the MID-CHAIN reconnect self-heal: clear_link sweeps every ingress
 # binding, on ANY link, whose downstream half crossed the cleared link, so an origin that never
 # saw the reconnect stops streaming onto a dead out-label. Asserts RECOVERY end to end over a

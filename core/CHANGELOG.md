@@ -45,6 +45,30 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Fixed
 
+- **A label-compacted (`COMPACT`) delivery is ACL-gated under the inbound link's name, like
+  the full-route `FWD{WRITE}` it compacts (#974).** `graph_t::acl_allows` settles the EMPTY
+  caller context as fully trusted before it invokes the subject resolver (#905) — that arm is
+  the local API call. Both terminus write arms of `fwd_router_t::on_compact` reached the graph
+  with the DEFAULT caller, so a peer whose flow was auto-promoted to `COMPACT` (RFC-0004 §E.1)
+  wrote an ACL-protected vertex with no ACE evaluated at all, while the same peer's full-route
+  `FWD{WRITE}` to the same vertex was denied — two forms of one delivery disagreeing about
+  whether a policy applies. Both arms now pass `inbound_name`, which is the same string
+  `op_resolver_t` presents as `inbound_link`, so RFC-0004 §F's "the target vertex's `:acl`
+  authorizes the actual WRITE at the final hop" holds for either form. **No wire surface
+  changes**: a denied `COMPACT` is dropped exactly as an unwritable one always was, and the
+  authorization is re-evaluated per frame rather than memoized with the resolution — which is
+  [ADR-0062](../docs/adr/0062-resolve-once-label-bindings-hold-resolutions-not-names.md)'s
+  own rule, "a binding caches the address, never the authorization", restored rather than
+  invented: an ACL written after a flow warmed applies to that flow's very next frame. The private
+  `fwd_router_t::deliver_local` now takes its caller as a REQUIRED parameter — an omitted one
+  is what inherited full trust here. Enforcement remains opt-in: with no subject resolver
+  installed, `acl_allows` returns true on its first line and nothing is gated, whatever the
+  caller — the added argument is the whole cost, and `bench_compact_delivery`'s
+  `compact-terminus` rows do not move outside the noise its untouched `compact-forward`
+  control shows on the same host. Guarded by
+  `core/tests/fwd_compact_acl_test.cpp`, which proves the cold (`deliver_local`) and warm
+  (memoized-handle) arms separately, each against a positive control.
+
 - **A SPEC-created `ws` DIAL connection no longer drops a message the server pushes on
   connect (#1025).** `transport_ws_client`'s constructor dials, runs the opening handshake
   AND spawns the recv thread before it returns, so nothing the owner does can run first.

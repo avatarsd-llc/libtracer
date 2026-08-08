@@ -1594,13 +1594,23 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
         // RESOLUTION and not merely to the wire. The generation guard is what makes the
         // cached handle safe: retire() bumps it (#511), so a retired-and-revived vertex is
         // detected here rather than silently written through (RFC-0009 §B.6 re-virginize).
+        //
+        // `inbound_name` is the ACL caller context (#974), exactly as `inbound_link` is for
+        // the full-route FWD{WRITE} (op_resolve_walk.hpp's WRITE arm). A COMPACT is a
+        // delivery-is-a-write (RFC-0004 §E.1 / §D) and RFC-0004 §F gates the target vertex's
+        // `:acl` at the final hop, so the two forms of ONE write must present one subject.
+        // Writing with the default empty caller spelled the local-trusted short-circuit in
+        // `graph_t::acl_allows`, so a flow auto-promoted to COMPACT skipped every ACE the
+        // full-route form is checked against. ADR-0062 already ruled the shape — "a binding
+        // caches the address, never the authorization" — so the cached handle is reused and
+        // the gate is re-evaluated per frame: a later `:acl` binds the very next COMPACT.
         if (rb.warm && rb.target && graph_.retire_generation(*rb.target) == rb.target_gen) {
             const auto payload_view = view::over_bytes(payload_bytes);
             if (!payload_view) return;  // alloc failure ⇒ drop (one audited locus)
             view::rope_t value;
             if (!value.try_reserve(1)) return;
             value.append(*payload_view);
-            if (graph_.write(*rb.target, std::move(value)).has_value()) {
+            if (graph_.write(*rb.target, std::move(value), inbound_name).has_value()) {
                 if (const auto sink = delivery_.get(); sink.fn != nullptr) {
                     const std::optional<handle_binding_t> b =
                         handles_.lookup_ingress(inbound_name, label);
@@ -1613,7 +1623,9 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
         const std::optional<handle_binding_t> binding =
             handles_.lookup_ingress(inbound_name, label);
         if (!binding) return;
-        if (deliver_local(binding->local_route, payload_bytes)) {
+        // Same caller context as the warm arm above (#974): the cold and warm halves of one
+        // flow must not disagree about who is writing.
+        if (deliver_local(binding->local_route, payload_bytes, inbound_name)) {
             if (const auto v = resolve_route_vertex(binding->local_route)) {
                 resolved_binding_t fill = rb;
                 fill.warm = true;
@@ -1681,7 +1693,7 @@ std::optional<graph::vertex_handle_t> fwd_router_t::resolve_route_vertex(
 }
 
 bool fwd_router_t::deliver_local(std::span<const std::byte> route_path,
-                                 std::span<const std::byte> payload) {
+                                 std::span<const std::byte> payload, std::string_view caller) {
     // Through the SAME helper the memoized handle is resolved by — so the cold path and the
     // cached path cannot disagree about which vertex a label names. Two decode+find copies
     // would be two sources of truth, which is the shape #516 turned out to be.
@@ -1691,7 +1703,10 @@ bool fwd_router_t::deliver_local(std::span<const std::byte> route_path,
     // failure → drop the delivery (one audited alloc/copy/over locus).
     const auto payload_view = view::over_bytes(payload);
     if (!payload_view) return false;
-    return graph_.write(*v, *payload_view).has_value();
+    // @p caller is the ACL subject context (#974) — the inbound link's NAME on the COMPACT
+    // path, matching what the full-route FWD{WRITE} presents. It is a required parameter
+    // precisely so a future delivery path cannot land here unattributed by omission.
+    return graph_.write(*v, *payload_view, caller).has_value();
 }
 
 graph::result_t<void> fwd_router_t::subscribe_toward(const graph::path_t& producer,
