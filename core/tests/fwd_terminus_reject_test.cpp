@@ -47,6 +47,7 @@
 #include <string_view>
 #include <vector>
 
+#include "fwd_frame_builder.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/tlv_emit.hpp"
@@ -99,27 +100,18 @@ std::vector<std::byte> b_value_u8(std::uint8_t v) {
 /**
  * @brief An `FWD` from an arbitrary child run — so the children can be WRONG on purpose.
  *
- * The suite's existing `b_fwd` helper emits a correct op/dst/src triple by construction,
- * which is exactly why `parse_fwd`'s type checks had never been reached.
+ * @ref tr::testing::b_fwd emits a correct op/dst/src triple by construction, which is exactly
+ * why `parse_fwd`'s type checks had never been reached; this is the envelope alone.
  */
-std::vector<std::byte> b_fwd_raw(const std::vector<std::byte>& children, bool structured = true) {
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::FWD, structured ? opt_t{.pl = true} : opt_t{}, children);
-    return out;
-}
+using tr::testing::fwd_envelope;
+
+/** @brief A well-formed `FWD`, the shape everything else deviates from. */
+using tr::testing::b_fwd;
 
 std::vector<std::byte> cat(std::initializer_list<std::vector<std::byte>> parts) {
     std::vector<std::byte> out;
     for (const auto& p : parts) out.insert(out.end(), p.begin(), p.end());
     return out;
-}
-
-/** @brief A well-formed `FWD`, the shape everything else deviates from. */
-std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
-                             const std::vector<std::byte>& src,
-                             const std::vector<std::byte>& selector = {},
-                             const std::vector<std::byte>& payload = {}) {
-    return b_fwd_raw(cat({b_value_u8(static_cast<std::uint8_t>(op)), dst, selector, src, payload}));
 }
 
 tr::graph::result_t<tr::view::rope_t> resolve_bytes(op_resolver_t& r,
@@ -194,25 +186,25 @@ int main() {
         tr::wire::emit_tlv(not_fwd, type_t::VALUE, opt_t{}, b_name("x"));
         must_refuse(r, "a non-FWD root is refused", not_fwd);
         must_refuse(r, "an FWD with PL=0 (opaque, not a child run) is refused",
-                    b_fwd_raw(cat({b_value_u8(0), b_path({"sensor"}), b_path({"back"})}),
-                              /*structured=*/false));
+                    fwd_envelope(cat({b_value_u8(0), b_path({"sensor"}), b_path({"back"})}),
+                                 /*structured=*/false));
     }
 
     // :209 — child[0] (the op discriminant) must be an opaque VALUE.
     must_refuse(r, "an FWD whose op child is a NAME, not a VALUE, is refused",
-                b_fwd_raw(cat({b_name("read"), b_path({"sensor"}), b_path({"back"})})));
+                fwd_envelope(cat({b_name("read"), b_path({"sensor"}), b_path({"back"})})));
 
     // :213 — child[1] (dst) must be a PATH.
     must_refuse(r, "an FWD whose dst child is a NAME, not a PATH, is refused",
-                b_fwd_raw(cat({b_value_u8(static_cast<std::uint8_t>(fwd_op_t::READ)),
-                               b_name("sensor"), b_path({"back"})})));
+                fwd_envelope(cat({b_value_u8(static_cast<std::uint8_t>(fwd_op_t::READ)),
+                                  b_name("sensor"), b_path({"back"})})));
 
     // :221 — src must be a PATH, and it is REQUIRED (a two-child FWD has no return route).
     must_refuse(r, "an FWD whose src child is a VALUE, not a PATH, is refused",
-                b_fwd_raw(cat({b_value_u8(static_cast<std::uint8_t>(fwd_op_t::READ)),
-                               b_path({"sensor"}), b_value_u8(9)})));
+                fwd_envelope(cat({b_value_u8(static_cast<std::uint8_t>(fwd_op_t::READ)),
+                                  b_path({"sensor"}), b_value_u8(9)})));
     must_refuse(r, "an FWD with no src child at all is refused",
-                b_fwd_raw(cat(
+                fwd_envelope(cat(
                     {b_value_u8(static_cast<std::uint8_t>(fwd_op_t::READ)), b_path({"sensor"})})));
 
     // :253 — a PATH's children MUST be NAME (the invariant RFC-0004 §C restates).

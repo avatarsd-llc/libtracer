@@ -38,6 +38,7 @@
 #include <utility>
 #include <vector>
 
+#include "fwd_frame_builder.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
@@ -245,19 +246,7 @@ std::vector<std::byte> child_spec(std::string_view name) {
     return out;
 }
 
-std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
-                             const std::vector<std::byte>& src,
-                             const std::vector<std::byte>& payload = {}) {
-    std::vector<std::byte> body;
-    const std::byte opb[1] = {std::byte{static_cast<std::uint8_t>(op)}};
-    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, opb);
-    body.insert(body.end(), dst.begin(), dst.end());
-    body.insert(body.end(), src.begin(), src.end());
-    body.insert(body.end(), payload.begin(), payload.end());
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
-    return out;
-}
+using tr::testing::b_fwd;
 
 tr::graph::result_t<tr::view::rope_t> resolve_bytes(op_resolver_t& resolver,
                                                     std::span<const std::byte> fwd,
@@ -933,14 +922,14 @@ void test_remote_path() {
     tr::wire::emit_tlv(payload, type_t::VALUE, opt_t{}, one);
 
     {  // FWD WRITE denied => kind=ERROR STATUS{ERROR{VALUE 0x0050}}
-        const auto fwd = b_fwd(fwd_op_t::WRITE, b_path({"x"}), b_path({"ret"}), payload);
+        const auto fwd = b_fwd(fwd_op_t::WRITE, b_path({"x"}), b_path({"ret"}), {}, payload);
         const auto reply = resolve_bytes(resolver, fwd, "link-bad");
         const reply_info_t info = reply_info(*reply);
         check(reply.has_value() && info.kind == reply_kind_t::ERROR && info.code == 0x0050,
               "denied FWD WRITE replies kind=ERROR STATUS{ERROR{VALUE 0x0050}}");
     }
     {  // the same WRITE from the granted link succeeds
-        const auto fwd = b_fwd(fwd_op_t::WRITE, b_path({"x"}), b_path({"ret"}), payload);
+        const auto fwd = b_fwd(fwd_op_t::WRITE, b_path({"x"}), b_path({"ret"}), {}, payload);
         const auto reply = resolve_bytes(resolver, fwd, "link-ok");
         check(reply.has_value() && reply_info(*reply).kind == reply_kind_t::RESULT,
               "granted FWD WRITE replies kind=RESULT");
@@ -964,17 +953,8 @@ void test_remote_path() {
         std::vector<std::byte> sub;
         tr::wire::emit_tlv(sub, type_t::SUBSCRIBER, opt_t{.pl = true}, b_path({"sink"}));
 
-        std::vector<std::byte> body;
-        const std::byte opb[1] = {std::byte{static_cast<std::uint8_t>(fwd_op_t::WRITE)}};
-        tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, opb);
-        const std::vector<std::byte> dst = b_path({"x"});
-        const std::vector<std::byte> ret = b_path({"ret"});
-        body.insert(body.end(), dst.begin(), dst.end());
-        body.insert(body.end(), field.begin(), field.end());
-        body.insert(body.end(), ret.begin(), ret.end());
-        body.insert(body.end(), sub.begin(), sub.end());
-        std::vector<std::byte> fwd;
-        tr::wire::emit_tlv(fwd, type_t::FWD, opt_t{.pl = true}, body);
+        const std::vector<std::byte> fwd =
+            b_fwd(fwd_op_t::WRITE, b_path({"x"}), b_path({"ret"}), field, sub);
 
         const auto denied_reply = resolve_bytes(resolver, fwd, "link-bad");
         const reply_info_t info = reply_info(*denied_reply);

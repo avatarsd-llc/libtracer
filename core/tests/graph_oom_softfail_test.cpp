@@ -27,6 +27,7 @@
 #include <string_view>
 #include <vector>
 
+#include "fwd_frame_builder.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -124,16 +125,7 @@ std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
     return out;
 }
-std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
-                             const std::vector<std::byte>& src) {
-    std::vector<std::byte> body;
-    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::array{static_cast<std::byte>(op)});
-    body.insert(body.end(), dst.begin(), dst.end());
-    body.insert(body.end(), src.begin(), src.end());
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
-    return out;
-}
+using tr::testing::b_fwd;
 
 /** @brief A decoded reply: the flattened backing view kept alongside the borrowing tlv. */
 struct decoded_reply_t {

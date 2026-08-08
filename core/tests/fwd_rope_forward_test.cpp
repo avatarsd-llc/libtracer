@@ -32,6 +32,7 @@
 #include <utility>
 #include <vector>
 
+#include "fwd_frame_builder.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/route_handle.hpp"
@@ -87,9 +88,8 @@ std::vector<std::byte> b_value_u32(std::uint32_t v) {
     tr::wire::emit_tlv(out, type_t::VALUE, opt_t{}, p);
     return out;
 }
-void append(std::vector<std::byte>& dst, const std::vector<std::byte>& src) {
-    dst.insert(dst.end(), src.begin(), src.end());
-}
+using tr::testing::b_fwd;
+
 /**
  * @brief A FWD whose op VALUE is present but EMPTY — the frame the two ingress arms
  *        classified differently (#870).
@@ -102,31 +102,7 @@ void append(std::vector<std::byte>& dst, const std::vector<std::byte>& src) {
  * is a resolvable READ and its disposition is OBSERVABLE as a reply, not merely as a drop by
  * one road or another.
  */
-std::vector<std::byte> b_fwd_empty_op(const std::vector<std::byte>& dst,
-                                      const std::vector<std::byte>& src) {
-    std::vector<std::byte> body;
-    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>{});
-    append(body, dst);
-    append(body, src);
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
-    return out;
-}
-std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
-                             const std::vector<std::byte>& src,
-                             const std::vector<std::byte>& payload = {}) {
-    std::vector<std::byte> body;
-    std::vector<std::byte> opv;
-    const std::byte ob{static_cast<std::uint8_t>(op)};
-    tr::wire::emit_tlv(opv, type_t::VALUE, opt_t{}, std::span<const std::byte>(&ob, 1));
-    append(body, opv);
-    append(body, dst);
-    append(body, src);
-    if (!payload.empty()) append(body, payload);
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
-    return out;
-}
+using tr::testing::b_fwd_no_op;
 
 tr::view::view_t make_value(std::span<const std::byte> bytes) {
     tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
@@ -526,7 +502,7 @@ int main() {
         // divergent tail: a canonical PATH concludes "terminus" one branch earlier, on both
         // arms, and so never showed the split.
         const std::vector<std::byte> empty_op =
-            b_fwd_empty_op(b_path_ref_one(slot->index, slot->generation), b_path({"reply-ep"}));
+            b_fwd_no_op(b_path_ref_one(slot->index, slot->generation), b_path({"reply-ep"}));
 
         check(reply_count(empty_op, std::span<const std::size_t>{}) == 1,
               "contiguous: an empty-op bound READ is resolved at the terminus and answers");
@@ -581,7 +557,7 @@ int main() {
         std::vector<std::byte> ref;
         (void)tr::wire::emit_path_ref(ref, std::span<const tr::wire::path_ref_element_t>(els));
         const std::vector<std::byte> bfwd =
-            b_fwd(fwd_op_t::READ, ref, b_path({"reply-ep"}), b_value_u32(9));
+            b_fwd(fwd_op_t::READ, ref, b_path({"reply-ep"}), {}, b_value_u32(9));
 
         const auto boracle = forward_bound(bfwd, std::span<const std::size_t>{});
         check(boracle.size() == 1, "contiguous: the bound forward hop egresses exactly once");
@@ -623,8 +599,8 @@ int main() {
         fake_rope_link_t in;
         router.add_child("in", in);  // reply goes back over the inbound link
         const std::uint32_t kWritten = 0x0BADF00Du;
-        const std::vector<std::byte> wframe =
-            b_fwd(fwd_op_t::WRITE, b_path({"sensor"}), b_path({"reply-ep"}), b_value_u32(kWritten));
+        const std::vector<std::byte> wframe = b_fwd(
+            fwd_op_t::WRITE, b_path({"sensor"}), b_path({"reply-ep"}), {}, b_value_u32(kWritten));
         const std::array<std::size_t, 1> cuts{wframe.size() / 2};
         in.inject(rope_split(wframe, cuts));
         const auto stored = g.read(v);
@@ -653,8 +629,8 @@ int main() {
         router.add_child("in", in);
 
         const std::uint32_t kWritten = 0x0C0FFEE0u;
-        const std::vector<std::byte> plain =
-            b_fwd(fwd_op_t::WRITE, b_path({"sensor"}), b_path({"reply-ep"}), b_value_u32(kWritten));
+        const std::vector<std::byte> plain = b_fwd(fwd_op_t::WRITE, b_path({"sensor"}),
+                                                   b_path({"reply-ep"}), {}, b_value_u32(kWritten));
         // Re-emit the FWD carrying a whole-frame CRC-32C trailer (opt.cr covers the body).
         tr::wire::tlv_t crc_fwd = *tr::wire::decode(plain);
         crc_fwd.opt.cr = true;

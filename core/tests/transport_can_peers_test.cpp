@@ -43,6 +43,7 @@
 #include <thread>
 #include <vector>
 
+#include "fwd_frame_builder.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport_can.hpp"
@@ -195,19 +196,7 @@ std::vector<std::byte> b_field_children() {
     return out;
 }
 
-std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
-                             const std::vector<std::byte>& src,
-                             const std::vector<std::byte>& field = {}) {
-    std::vector<std::byte> body;
-    const std::byte ob{static_cast<std::uint8_t>(op)};
-    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&ob, 1));
-    body.insert(body.end(), dst.begin(), dst.end());
-    body.insert(body.end(), field.begin(), field.end());
-    body.insert(body.end(), src.begin(), src.end());
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
-    return out;
-}
+using tr::testing::b_fwd;
 
 view_t owned(std::span<const std::byte> bytes) {
     tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
@@ -399,18 +388,8 @@ void test_enumeration_and_forwarding() {
     // ----- 4) FWD WRITE through: the peer's LKV updates, RESULT acks. ---------
     const std::uint32_t kWritten = 0x0BADF00Du;
     {
-        std::vector<std::byte> body;
-        const std::byte ob{static_cast<std::uint8_t>(fwd_op_t::WRITE)};
-        tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&ob, 1));
-        const std::vector<std::byte> dst = b_path({"net", "can", "can0", "n5", "a", "b"});
-        const std::vector<std::byte> src = b_path({"reply-ep"});
-        const std::vector<std::byte> payload = b_value_u32(kWritten);
-        body.insert(body.end(), dst.begin(), dst.end());
-        body.insert(body.end(), src.begin(), src.end());
-        body.insert(body.end(), payload.begin(), payload.end());
-        std::vector<std::byte> out;
-        tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
-        channel.b().send(out);
+        channel.b().send(b_fwd(fwd_op_t::WRITE, b_path({"net", "can", "can0", "n5", "a", "b"}),
+                               b_path({"reply-ep"}), {}, b_value_u32(kWritten)));
     }
     const auto r_write = inbox.wait(kBudget);
     check(r_write.has_value(), "client received a REPLY for the forwarded WRITE via n5");

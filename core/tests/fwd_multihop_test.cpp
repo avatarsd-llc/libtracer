@@ -42,6 +42,7 @@
 #include <string_view>
 #include <vector>
 
+#include "fwd_frame_builder.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -92,24 +93,7 @@ std::vector<std::byte> b_value_u32(std::uint32_t v) {
     tr::wire::emit_tlv(out, type_t::VALUE, opt_t{}, p);
     return out;
 }
-void append(std::vector<std::byte>& dst, const std::vector<std::byte>& src) {
-    dst.insert(dst.end(), src.begin(), src.end());
-}
-std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
-                             const std::vector<std::byte>& src,
-                             const std::vector<std::byte>& payload = {}) {
-    std::vector<std::byte> body;
-    std::vector<std::byte> opv;
-    const std::byte ob{static_cast<std::uint8_t>(op)};
-    tr::wire::emit_tlv(opv, type_t::VALUE, opt_t{}, std::span<const std::byte>(&ob, 1));
-    append(body, opv);
-    append(body, dst);
-    append(body, src);
-    if (!payload.empty()) append(body, payload);
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
-    return out;
-}
+using tr::testing::b_fwd;
 
 tr::view::view_t make_value(std::span<const std::byte> bytes) {
     tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
@@ -264,7 +248,7 @@ int main() {
     // ===== 2) WRITE /up/sensor -> B's LKV updated + RESULT ack ===================
     std::printf("WRITE forwarded A->B; LKV updated + OK ack:\n");
     const std::uint32_t kWritten = 0x12345678u;
-    c_to_a.send(b_fwd(fwd_op_t::WRITE, b_path({"up", "sensor"}), b_path({"reply-ep"}),
+    c_to_a.send(b_fwd(fwd_op_t::WRITE, b_path({"up", "sensor"}), b_path({"reply-ep"}), {},
                       b_value_u32(kWritten)));
     auto r2 = inbox.wait(kBudget);
     check(r2.has_value(), "client received a REPLY for the forwarded WRITE");

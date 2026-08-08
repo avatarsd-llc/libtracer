@@ -24,6 +24,7 @@
 #include <utility>
 #include <vector>
 
+#include "fwd_frame_builder.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/rope.hpp"
@@ -89,18 +90,7 @@ bytes_t b_op(fwd_op_t op) {
     return out;
 }
 
-/** @brief A canonical FWD frame: `FWD{ op, dst, sel?, src, payload? }`. */
-bytes_t b_fwd(fwd_op_t op, const bytes_t& dst, const bytes_t& src, const bytes_t& payload = {},
-              const bytes_t& sel = {}) {
-    bytes_t body = b_op(op);
-    append(body, dst);
-    if (!sel.empty()) append(body, sel);
-    append(body, src);
-    if (!payload.empty()) append(body, payload);
-    bytes_t out;
-    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
-    return out;
-}
+using tr::testing::b_fwd;
 
 /** @brief An owned single-link view holding a copy of @p bytes. */
 tr::view::view_t make_value(std::span<const std::byte> bytes) {
@@ -146,7 +136,7 @@ int main() {
     // 1. peek_fwd_first_dst_seg — span cursor: offsets name the first dst segment's bytes.
     {
         const bytes_t frame =
-            b_fwd(fwd_op_t::WRITE, b_path({"child", "x"}), b_path({"c"}), payload);
+            b_fwd(fwd_op_t::WRITE, b_path({"child", "x"}), b_path({"c"}), {}, payload);
         const span_cursor cur{frame};
         const auto seg = tr::net::peek_fwd_first_dst_seg(cur);
         check(seg.has_value(), "first-dst-seg peek: a structured FWD yields the segment window");
@@ -159,7 +149,8 @@ int main() {
     // 1b. peek_fwd_first_dst_seg — rope cursor, split at EVERY byte boundary: the
     //     offsets must be identical to the contiguous read (they are source-agnostic).
     {
-        const bytes_t frame = b_fwd(fwd_op_t::READ, b_path({"hop", "leaf"}), b_path({}), payload);
+        const bytes_t frame =
+            b_fwd(fwd_op_t::READ, b_path({"hop", "leaf"}), b_path({}), {}, payload);
         const auto span_seg = tr::net::peek_fwd_first_dst_seg(span_cursor{frame});
         bool all_equal = span_seg.has_value();
         for (std::size_t cut = 1; cut + 1 < frame.size() && all_equal; ++cut) {
@@ -244,18 +235,20 @@ int main() {
     // 4. Head rebuild — shrink dst, grow src: BYTE-EXACT vs a reference re-encode.
     {
         const bytes_t frame =
-            b_fwd(fwd_op_t::WRITE, b_path({"child", "x"}), b_path({"c"}), payload);
+            b_fwd(fwd_op_t::WRITE, b_path({"child", "x"}), b_path({"c"}), {}, payload);
         const auto out = forward_bytes(span_cursor{frame}, "in");
-        const bytes_t want = b_fwd(fwd_op_t::WRITE, b_path({"x"}), b_path({"in", "c"}), payload);
+        const bytes_t want =
+            b_fwd(fwd_op_t::WRITE, b_path({"x"}), b_path({"in", "c"}), {}, payload);
         check(out.has_value(), "rebuild: a forwardable FWD rebuilds");
         check(out == want, "rebuild: shrunk-dst + grown-src bytes == the reference re-encode");
     }
 
     // 4b. REPLY does not grow src (a reply accumulates no return route, RFC-0004 §B).
     {
-        const bytes_t frame = b_fwd(fwd_op_t::REPLY, b_path({"back", "home"}), b_path({}), payload);
+        const bytes_t frame =
+            b_fwd(fwd_op_t::REPLY, b_path({"back", "home"}), b_path({}), {}, payload);
         const auto out = forward_bytes(span_cursor{frame}, "in");
-        const bytes_t want = b_fwd(fwd_op_t::REPLY, b_path({"home"}), b_path({}), payload);
+        const bytes_t want = b_fwd(fwd_op_t::REPLY, b_path({"home"}), b_path({}), {}, payload);
         check(out == want, "rebuild: a REPLY shrinks dst but does NOT grow src");
     }
 
@@ -264,18 +257,18 @@ int main() {
         bytes_t sel;
         tr::wire::emit_tlv(sel, type_t::FIELD, opt_t{.pl = true}, b_name("mode"));
         const bytes_t frame =
-            b_fwd(fwd_op_t::READ, b_path({"child", "x"}), b_path({"c"}), payload, sel);
+            b_fwd(fwd_op_t::READ, b_path({"child", "x"}), b_path({"c"}), sel, payload);
         const auto out = forward_bytes(span_cursor{frame}, "up");
         const bytes_t want =
-            b_fwd(fwd_op_t::READ, b_path({"x"}), b_path({"up", "c"}), payload, sel);
+            b_fwd(fwd_op_t::READ, b_path({"x"}), b_path({"up", "c"}), sel, payload);
         check(out == want, "rebuild: the FIELD selector is carried byte-identically");
     }
 
     // 4d. A single-segment dst shrinks to an empty PATH (the next hop is the terminus).
     {
-        const bytes_t frame = b_fwd(fwd_op_t::WRITE, b_path({"child"}), b_path({}), payload);
+        const bytes_t frame = b_fwd(fwd_op_t::WRITE, b_path({"child"}), b_path({}), {}, payload);
         const auto out = forward_bytes(span_cursor{frame}, "in");
-        const bytes_t want = b_fwd(fwd_op_t::WRITE, b_path({}), b_path({"in"}), payload);
+        const bytes_t want = b_fwd(fwd_op_t::WRITE, b_path({}), b_path({"in"}), {}, payload);
         check(out == want, "rebuild: a single-segment dst shrinks to an empty PATH");
     }
 
@@ -285,7 +278,7 @@ int main() {
         bytes_t sel;
         tr::wire::emit_tlv(sel, type_t::FIELD, opt_t{.pl = true}, b_name("f"));
         const bytes_t frame =
-            b_fwd(fwd_op_t::WRITE, b_path({"child", "leaf"}), b_path({"c0"}), payload, sel);
+            b_fwd(fwd_op_t::WRITE, b_path({"child", "leaf"}), b_path({"c0"}), sel, payload);
         const auto span_out = forward_bytes(span_cursor{frame}, "bus7");
         bool all_equal = span_out.has_value();
         for (std::size_t cut = 1; cut + 1 < frame.size() && all_equal; ++cut) {
@@ -298,7 +291,7 @@ int main() {
 
     // 5. Malformed rejects — each structural precondition fails to nullopt.
     {
-        const bytes_t good = b_fwd(fwd_op_t::WRITE, b_path({"a", "b"}), b_path({}), payload);
+        const bytes_t good = b_fwd(fwd_op_t::WRITE, b_path({"a", "b"}), b_path({}), {}, payload);
         const bytes_t truncated(good.begin(), good.begin() + 3);
         check(!tr::net::rebuild_fwd_forward(span_cursor{truncated}, "in").has_value(),
               "reject: a truncated frame");
@@ -321,13 +314,13 @@ int main() {
         tr::wire::emit_tlv(dst_body, type_t::VALUE, opt_t{}, std::span<const std::byte>{});
         bytes_t bad_dst;
         tr::wire::emit_tlv(bad_dst, type_t::PATH, opt_t{.pl = true}, dst_body);
-        const bytes_t frame = b_fwd(fwd_op_t::WRITE, bad_dst, b_path({}), payload);
+        const bytes_t frame = b_fwd(fwd_op_t::WRITE, bad_dst, b_path({}), {}, payload);
         check(!tr::net::rebuild_fwd_forward(span_cursor{frame}, "in").has_value(),
               "reject: a dst whose first child is not a NAME");
         check(!tr::net::peek_fwd_first_dst_seg(span_cursor{frame}).has_value(),
               "reject: first-dst-seg peek agrees (no NAME, no window)");
         // An empty dst PATH is not forwardable either.
-        const bytes_t empty_dst = b_fwd(fwd_op_t::WRITE, b_path({}), b_path({}), payload);
+        const bytes_t empty_dst = b_fwd(fwd_op_t::WRITE, b_path({}), b_path({}), {}, payload);
         check(!tr::net::peek_fwd_first_dst_seg(span_cursor{empty_dst}).has_value(),
               "reject: an empty dst PATH yields no segment window");
     }

@@ -34,6 +34,7 @@
 #include <string_view>
 #include <vector>
 
+#include "fwd_frame_builder.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/fwd_frame_view.hpp"
 #include "libtracer/security_acl.hpp"
@@ -96,25 +97,7 @@ std::vector<std::byte> b_value(std::initializer_list<std::uint8_t> bytes) {
     return out;
 }
 
-/**
- * @brief Assemble a request `FWD` (RFC-0004 §B child order) with a RAW op byte.
- *
- * The op byte is passed unmasked on purpose: the flag bits (RFC-0024 §7.5) are exactly what
- * several cases here are about, and a builder that took a `fwd_op_t` could not spell them.
- */
-std::vector<std::byte> b_fwd_raw_op(std::uint8_t op_byte, const std::vector<std::byte>& dst,
-                                    const std::vector<std::byte>& src,
-                                    const std::vector<std::byte>& payload = {}) {
-    std::vector<std::byte> body;
-    const std::byte opb[1] = {std::byte{op_byte}};
-    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, opb);
-    body.insert(body.end(), dst.begin(), dst.end());
-    body.insert(body.end(), src.begin(), src.end());
-    body.insert(body.end(), payload.begin(), payload.end());
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
-    return out;
-}
+using tr::testing::b_fwd_raw_op;
 
 /** @brief Arena-decode + resolve — the terminus wiring `fwd_router_t` uses. */
 tr::graph::result_t<tr::view::rope_t> resolve_bytes(op_resolver_t& resolver,
@@ -382,7 +365,7 @@ void test_mint_round_trip() {
     // A WRITE mints too — the flag is on the op byte, not on any one opcode.
     const auto wrote =
         resolve_bytes(resolver, b_fwd_raw_op(kWrite | kMint, b_path({"sensor", "temp"}),
-                                             b_path({"back"}), b_value({0x09})));
+                                             b_path({"back"}), {}, b_value({0x09})));
     check(wrote.has_value() && reply_facts(*wrote).kind == reply_kind_t::RESULT &&
               reply_facts(*wrote).has_mint,
           "a mint-flagged WRITE writes AND mints");
