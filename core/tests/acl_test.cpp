@@ -953,17 +953,8 @@ void test_remote_path() {
         std::vector<std::byte> sub;
         tr::wire::emit_tlv(sub, type_t::SUBSCRIBER, opt_t{.pl = true}, b_path({"sink"}));
 
-        std::vector<std::byte> body;
-        const std::byte opb[1] = {std::byte{static_cast<std::uint8_t>(fwd_op_t::WRITE)}};
-        tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, opb);
-        const std::vector<std::byte> dst = b_path({"x"});
-        const std::vector<std::byte> ret = b_path({"ret"});
-        body.insert(body.end(), dst.begin(), dst.end());
-        body.insert(body.end(), field.begin(), field.end());
-        body.insert(body.end(), ret.begin(), ret.end());
-        body.insert(body.end(), sub.begin(), sub.end());
-        std::vector<std::byte> fwd;
-        tr::wire::emit_tlv(fwd, type_t::FWD, opt_t{.pl = true}, body);
+        const std::vector<std::byte> fwd =
+            b_fwd(fwd_op_t::WRITE, b_path({"x"}), b_path({"ret"}), field, sub);
 
         const auto denied_reply = resolve_bytes(resolver, fwd, "link-bad");
         const reply_info_t info = reply_info(*denied_reply);
