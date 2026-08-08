@@ -161,19 +161,19 @@ target](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0007-
 
 ## 5. Remote delivery legs
 
-`fwd_router_t::deliver_remote` (`core/src/fwd_router.cpp:1798`) is the sink the remote leg calls.
+`fwd_router_t::deliver_remote` (`core/src/fwd_router.cpp:1806`) is the sink the remote leg calls.
 It has two legs, and only one of them copies payload bytes.
 
 **The default full-route leg copies nothing.** It emits
 `FWD{ op=WRITE, dst=<stored return route>, src=<empty PATH>, payload=<VALUE> }` as a
 scatter-gather send: a fresh stack header, the stored route, an empty `src`, and one span per
-rope link (`fwd_router.cpp:1854-1861`). The header is a `stack_writer<16>` — the FWD header of at
+rope link (`fwd_router.cpp:1862-1869`). The header is a `stack_writer<16>` — the FWD header of at
 most 6 bytes plus the 5-byte op TLV — and both constant TLVs are `constexpr` arrays with no
-runtime construction (`fwd_router.cpp:1851-1855`). The route bytes were copied once at subscribe
+runtime construction (`fwd_router.cpp:1859-1863`). The route bytes were copied once at subscribe
 time, so a delivery re-uses them by reference; a multi-link value crosses as its own segments,
 with no flatten. The iov vector is sized once up front through `tr::detail::try_reserve`, and a
 refused reserve drops that delivery rather than emitting a truncated frame
-(`fwd_router.cpp:1867-1868`). That helper runs the *throwing* `std::vector::reserve` through
+(`fwd_router.cpp:1875-1876`). That helper runs the *throwing* `std::vector::reserve` through
 `try_grow` and answers its failure by value (`core/include/libtracer/mem_heap.hpp:157-171`), so on
 a hosted build the OOM becomes a drop with no probe-then-commit window left to lose
 ([#923](https://github.com/avatarsd-llc/libtracer/issues/923), which folded in
@@ -182,10 +182,10 @@ nothing to catch and the helper still probes first, so the window survives on th
 tabulated in [`../allocation-and-backpressure.md`](../allocation-and-backpressure.md).
 
 **The COMPACT leg is the one that flattens.** `const view_t flat = value.materialize(*flat_);`
-(`fwd_router.cpp:1830`) precedes the compact encode, because a COMPACT wraps a contiguous
+(`fwd_router.cpp:1838`) precedes the compact encode, because a COMPACT wraps a contiguous
 payload. Single-link — the common case — that materialize is a zero-copy adopt; a multi-link
 value pays one flatten per delivery, out of the router's INJECTED byte backend rather than the
-global heap. A failed flatten drops the delivery (`fwd_router.cpp:1831`).
+global heap. A failed flatten drops the delivery (`fwd_router.cpp:1839`).
 Auto-promotion advertises the label once per flow and then streams
 compact frames; a dropped fresh ADVERTISE self-heals through the peer's `HANDLE_NACK`
 ([RFC-0004 — Remote operation

@@ -554,6 +554,15 @@ target_link_libraries(mount_routing_test PRIVATE libtracer)
 libtracer_test_warnings(mount_routing_test)
 add_test(NAME mount_routing COMMAND mount_routing_test)
 
+# #882 — a reconnect rebind that FLIPS a mount's shape (point-to-point <-> bus) must never
+# let a forward pair one publication's shape with another's link: that routes a bus link
+# point-to-point and its send() BROADCASTS (the #409 one-request/N-replies misroute).
+add_executable(mount_shape_flip_test mount_shape_flip_test.cpp)
+target_link_libraries(mount_shape_flip_test PRIVATE libtracer Threads::Threads)
+libtracer_test_warnings(mount_shape_flip_test)
+add_test(NAME mount_shape_flip COMMAND mount_shape_flip_test)
+set_tests_properties(mount_shape_flip PROPERTIES RUN_SERIAL TRUE TIMEOUT 300)
+
 # `add_child` under a REFUSING allocator (#523): the registry chunk is the one soft-failing
 # allocation on the control path, and it is driven by replacing the global NOTHROW
 # `operator new` — a whole-program decision, hence its own binary.

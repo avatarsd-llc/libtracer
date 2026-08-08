@@ -69,6 +69,24 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **BREAKING: `net::child_registry_t::child_t` publishes its link and its SHAPE as ONE atomic
+  word; the `link` and `multi_peer` data members are replaced by `egress()` / `link()`
+  (#882).** The two were separate atomics — `add`'s rebind stored the shape, then the link —
+  and the forward mount descent read them in the opposite order. A reconnect rebind that
+  FLIPS a name's shape could therefore hand a forward a stale point-to-point shape paired
+  with a fresh **bus** link, and the descent returned that link as a directed egress: its
+  `send()` fans out to every open peer, which is the one-request/N-replies misroute (#409)
+  the descent's own rejected-hit branch exists to prevent. `bound_egress` had the same shape.
+  Reading the link first was measured **insufficient** — a second rebind landing between the
+  two loads reproduces the same pairing — so the shape bit now lives in the link pointer's
+  spare low bit (`child_registry_t::kBusShapeBit`) and the invalid pairing cannot be spelled.
+  Migration: `c.link.load(order)` → `c.link()`; `c.multi_peer.load(order)` → shared with the
+  link via `const auto eg = c.egress();` then `eg.link` / `eg.multi_peer`. `live()` is
+  unchanged, `sizeof(child_t)` is unchanged at 80 bytes, and the forward path takes one
+  acquire load where it took two. A tombstone now clears the pointer and KEEPS the shape bit,
+  so a dead bus mount still rejects a residual segment instead of falling through to the
+  local terminus (ADR-0073 §3). Recorded as ADR-0063 erratum 6.
+
 - **A refused bus-NAME hop's error reply now carries TRAILER-LESS route bytes, like every
   other addressed error this library emits (#887).** `fwd_router_t`'s rejection built its
   `FWD{REPLY, kind=ERROR, STATUS{ERROR{tr::path::invalid}}}` with a hand-rolled encoder that

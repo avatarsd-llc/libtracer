@@ -163,8 +163,8 @@ void test_module_scoping() {
 
     const auto* a = find(reg, {"ws-client", "foo"});
     const auto* b = find(reg, {"tcp-client", "foo"});
-    check(a != nullptr && a->link == &ws, "/net/ws-client/foo resolves to the ws link");
-    check(b != nullptr && b->link == &tcp, "/net/tcp-client/foo resolves to the tcp link");
+    check(a != nullptr && a->link() == &ws, "/net/ws-client/foo resolves to the ws link");
+    check(b != nullptr && b->link() == &tcp, "/net/tcp-client/foo resolves to the tcp link");
     check(a != b, "the same NAME in two modules is two distinct children");
     check(find(reg, {"ws-client", "nope"}) == nullptr, "an unknown name in a known module misses");
     check(find(reg, {"nope", "foo"}) == nullptr, "a known name in an unknown module misses");
@@ -202,8 +202,8 @@ void test_scoped_peer_resolution() {
     const auto* ws = find(reg, {"ws-server", "s"});
     const auto* tcp = find(reg, {"tcp-server", "s"});
     const auto* p2p = find(reg, {"ws-client", "c"});
-    check(ws != nullptr && ws->multi_peer, "a bus child records multi_peer at add time");
-    check(p2p != nullptr && !p2p->multi_peer, "a point-to-point child does not");
+    check(ws != nullptr && ws->egress().multi_peer, "a bus child records multi_peer at add time");
+    check(p2p != nullptr && !p2p->egress().multi_peer, "a point-to-point child does not");
 
     check(child_registry_t::resolve_peer(*ws, "alice") == &alice_ws,
           "/net/ws-server/s/alice reaches the ws peer");
