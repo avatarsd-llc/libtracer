@@ -26,9 +26,13 @@
  *   - a zero-payload frame returns 0 from `esp_transport_read`, indistinguishable from a
  *     poll timeout (transport_ws.c:763).
  *
- * There is NO socket in this fake, at any layer: `esp_transport_get_socket` answers -1.
- * The ESP-IDF WebSocket plane must never use POSIX sockets (#947), and a fake that
- * opened one would quietly make the suite prove the wrong thing.
+ * There is NO socket in this fake, at any layer: nothing is opened, and every byte the
+ * link reads comes from the script above. The ESP-IDF WebSocket plane must never use
+ * POSIX sockets (#947), and a fake that opened one would quietly make the suite prove the
+ * wrong thing. `esp_transport_get_socket` therefore answers -1 unless a suite opts in
+ * with @ref set_socket_fd, which hands back a descriptor NUMBER — enough to reach the
+ * link's best-effort socket-option block (#957), with `setsockopt` interposed on the
+ * opting-in target so no option reaches the kernel either.
  */
 #pragma once
 
@@ -73,6 +77,17 @@ void push_frames(std::vector<frame_t> frames);
 
 /** @brief The `ws_path` the last dial requested. */
 [[nodiscard]] std::string last_ws_path();
+
+/**
+ * @brief Make `esp_transport_get_socket` answer @p fd instead of -1 (reset restores -1).
+ *
+ * A descriptor NUMBER, not a socket — nothing is opened and no byte moves through it.
+ * Its only purpose is to make the link's best-effort socket-option block reachable, so a
+ * suite can assert which options a dial applies; the target that opts in also interposes
+ * `setsockopt`, so no option reaches the kernel. Every other suite leaves this at -1 and
+ * behaves exactly as before.
+ */
+void set_socket_fd(int fd);
 
 /**
  * @brief The `stack_size` the last ARMING `esp_pthread_set_cfg` carried, 0 if none.

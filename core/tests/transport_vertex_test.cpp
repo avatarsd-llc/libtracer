@@ -89,7 +89,7 @@ view_t owned(std::span<const std::byte> bytes) {
  */
 view_t conn_spec(std::string_view type, std::string_view name, conn_role_t role, std::uint16_t port,
                  std::string_view kind = {}, std::string_view addr = {}, std::uint32_t backoff = 0,
-                 std::uint32_t connect_timeout = 0) {
+                 std::uint32_t connect_timeout = 0, std::uint32_t max_frame = 0) {
     std::vector<std::byte> cfg;
     tr::wire::emit_name(cfg, "role");
     const std::byte r{static_cast<std::uint8_t>(role)};
@@ -114,6 +114,7 @@ view_t conn_spec(std::string_view type, std::string_view name, conn_role_t role,
     };
     if (backoff != 0) emit_u32("backoff", backoff);
     if (connect_timeout != 0) emit_u32("connect_timeout", connect_timeout);
+    if (max_frame != 0) emit_u32("max_frame", max_frame);
 
     std::vector<std::byte> body;
     tr::wire::emit_name(body, "type");
@@ -1060,6 +1061,47 @@ bool wait_until(Pred pred, std::chrono::milliseconds budget) {
 }
 
 /**
+ * @brief #926 — the universal `max_frame` key reaches the `udp` factory's transport.
+ *
+ * `max_frame` is parsed once, centrally, into `conn_settings_t` for every kind; honoring it is
+ * each factory's job. The `udp` factory used to construct its transport without it, so the key
+ * was inert on this kind — read back by `:settings` as though honored. This asserts the whole
+ * door, from the SPEC write to the constructed socket's own cap, against a CONTROL connection
+ * that omits the key.
+ */
+void test_udp_max_frame_reaches_the_transport() {
+    std::printf("#926: a config max_frame reaches the SPEC-constructed udp transport:\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    declare_builtin_modules(net);
+
+    // The CONTROL: no max_frame in the config => the transport's own kMaxDatagram ceiling.
+    const auto plain = node.write(
+        path_t("/net:children[]"),
+        conn_spec("listener", "plain", conn_role_t::LISTEN, free_port(), "udp", {}, 0, 0, 0));
+    check(plain.has_value(), "SPEC{listener, kind=udp} with no max_frame constructs the socket");
+    auto* const plain_link =
+        dynamic_cast<tr::net::udp_transport_t*>(net.link_of("net/udp-server/plain"));
+    check(plain_link != nullptr &&
+              plain_link->effective_max_frame() == tr::net::udp_transport_t::kMaxDatagram,
+          "without the key the connection carries the full datagram ceiling");
+
+    // The SUBJECT: the same write plus `max_frame = 4096`.
+    const auto capped = node.write(path_t("/net:children[]"),
+                                   conn_spec("listener", "capped", conn_role_t::LISTEN, free_port(),
+                                             "udp", {}, 0, 0, /*max_frame=*/4096));
+    check(capped.has_value(), "SPEC{listener, kind=udp, max_frame=4096} constructs the socket");
+    const auto* const s = net.settings_of("net/udp-server/capped");
+    check(s != nullptr && s->max_frame == 4096, "the key was parsed into conn_settings_t");
+    auto* const capped_link =
+        dynamic_cast<tr::net::udp_transport_t*>(net.link_of("net/udp-server/capped"));
+    check(capped_link != nullptr, "the owned transport is a live udp_transport_t");
+    check(capped_link != nullptr && capped_link->effective_max_frame() == 4096,
+          "and the CONFIGURED cap is the one the socket honors");
+}
+
+/**
  * @brief #408 / ADR-0043 §5 / ADR-0044: the ws-private `peer_named` config key makes the
  *        Brick-C peer listing reachable from a purely IN-BAND SPEC write.
  *
@@ -1371,6 +1413,7 @@ int main() {
     test_link_of_accessor();
     test_link_name_collision_rejected();
     test_link_name_collision_placeholder_parent();
+    test_udp_max_frame_reaches_the_transport();
     test_ws_peer_named_config();
     test_refused_dial_is_transport_down();
     test_unregistered_kind_is_schema_not_found();

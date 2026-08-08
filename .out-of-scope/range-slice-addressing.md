@@ -6,7 +6,7 @@ SUBSCRIBER target addressing elements 0..29 of one array-valued vertex.
 ## Why this is out of scope
 
 The proposal ([#336](https://github.com/avatarsd-llc/libtracer/issues/336)) surfaced during
-the 2026-07-08 architecture grilling, when the adopter side (strawberry-fw device-graph
+the 2026-07-08 architecture grilling, when the adopter side (a downstream device-graph
 migration) *appeared* to need range-slice binding targets. The need dissolved on inspection:
 
 1. **Named groups are expressible today via field promotion** (CONTEXT.md *Field promotion*).
@@ -29,7 +29,7 @@ unification).
 
 An application that genuinely wants *ad-hoc, caller-chosen* sub-ranges (not a fixed set of
 named zones) can still express them **app-side**: the slice bounds travel in the payload the
-device applies at its offset, exactly as strawberry-fw's own hardware logic already does.
+device applies at its offset, exactly as that adopter's own hardware logic already does.
 The graph stays shape-agnostic; the app owns the slice semantics.
 
 Reconsider only if a concrete need appears that promotion provably cannot express — an

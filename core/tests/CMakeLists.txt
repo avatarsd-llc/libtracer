@@ -358,6 +358,29 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     set_tests_properties(httpd_ws_eviction_lock
         PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
+    # #957 — the httpd WS link NOTICES a peer that vanished without a FIN. The seam none
+    # of the suites above reaches is the SOCKET OPTION one: `setsockopt` is interposed
+    # here for the descriptors the fake hands out, so what admission applies to a peer's
+    # socket is a measurement. Nothing else in the binary is affected — descriptors the
+    # fake did not hand out fall through to the real syscall, the `--wrap=send` rule.
+    add_executable(httpd_ws_keepalive_test
+        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_keepalive_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
+    target_include_directories(httpd_ws_keepalive_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(httpd_ws_keepalive_test PRIVATE libtracer)
+    target_link_options(httpd_ws_keepalive_test PRIVATE
+        "-Wl,--wrap=send" "-Wl,--wrap=shutdown" "-Wl,--wrap=setsockopt")
+    libtracer_test_warnings(httpd_ws_keepalive_test)
+    add_test(NAME httpd_ws_keepalive COMMAND httpd_ws_keepalive_test)
+    # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
+    # every case here constructs an adopting link — same exemption as the suites above.
+    set_tests_properties(httpd_ws_keepalive
+        PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+
     # #900 + #901 — the WS *CLIENT* link's receive path, on the same construction: the
     # chip TU (integrations/esp-idf/libtracer/esp_ws_client_link.cpp) compiled against a
     # host fake of esp_transport_ws's frame stream and esp_pthread's stack-sizing seam.
@@ -408,6 +431,31 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     # and two 1.5 s reconnect backoffs to straddle a pair of handle rebuilds).
     # Generous against a loaded runner, and still far under CTest's default.
     set_tests_properties(esp_ws_client_teardown PROPERTIES TIMEOUT 60)
+
+    # #957 — the WS CLIENT link's PEER-DEATH seam, on the same TU and the same fake:
+    # whether a dial asks the stack to notice a peer that vanished without a FIN, and
+    # whether the link REPORTS a departure to the router at all (it used to fire
+    # notify_down from nowhere, so a peer reboot left this node producing into a session
+    # that no longer existed). Unlike the two client suites above, this one opts the fake
+    # into answering a descriptor NUMBER from esp_transport_get_socket and interposes
+    # `setsockopt`, which is what makes the link's best-effort option block observable.
+    # Still no socket: nothing is opened and no option reaches the kernel (#947).
+    add_executable(esp_ws_client_liveness_test
+        "${LIBTRACER_ESP_DIR}/tests/host/esp_ws_client_liveness_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_esp_transport.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/esp_ws_client_link.cpp")
+    target_include_directories(esp_ws_client_liveness_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(esp_ws_client_liveness_test PRIVATE libtracer)
+    target_link_options(esp_ws_client_liveness_test PRIVATE "-Wl,--wrap=setsockopt")
+    libtracer_test_warnings(esp_ws_client_liveness_test)
+    add_test(NAME esp_ws_client_liveness COMMAND esp_ws_client_liveness_test)
+    # Two cases spend real reconnect backoffs on purpose (1.5 s each, twice over for the
+    # failed-dial case). Generous against a loaded runner, still far under CTest's default.
+    set_tests_properties(esp_ws_client_liveness PROPERTIES TIMEOUT 60)
 
     # #962 — the TWAI link's TX BACKPRESSURE window, on the same construction: the chip
     # TU (integrations/esp-idf/libtracer/twai_link.cpp) compiled against a host fake of
