@@ -115,8 +115,8 @@ with `EOPNOTSUPP`, so on silicon it silently drops every data frame. See
 The minimum-feature module set — `frame`, `tlv_arena`, `backend_set`, `mem_pool`, `mem_source`,
 `rope`, `path` — targets **≤ 16 KiB of stripped flash** on
 `arm-none-eabi-g++ -std=c++23 -Os -fno-exceptions -fno-rtti -mcpu=cortex-m0` with
-`--specs=nano.specs` (`tools/cortexm0_footprint.py:57` for the module list, `:87-91` for the
-compile flags, `:107` for the link spec). One committed sentinel
+`--specs=nano.specs` (`tools/cortexm0_footprint.py:65` for the module list, `tools/cortexm0_footprint.py:94-110` for the
+compile flags, `tools/cortexm0_footprint.py:115` for the link spec). One committed sentinel
 measures against it: `tools/cortexm0_footprint.py`, driven by `.github/workflows/footprint-cortexm0.yml`
 over the `core/tests/footprint/sentinel_node.cpp` fixture. A second tool, `tools/esp_size_gate.py`,
 *reports* the component's flash and static-RAM contribution to the esp32c3/c6 **full-node** image

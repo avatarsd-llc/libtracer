@@ -25,6 +25,7 @@ Run with ``python3 -m unittest discover -s tools/tests`` (no third-party deps).
 """
 import os
 import pathlib
+import re
 import shutil
 import sys
 import tempfile
@@ -549,6 +550,90 @@ class NonSourceDirTest(unittest.TestCase):
         """The exclusions must not be so broad that real ambiguity stops being reported."""
         m = self._tree_with("examples/a/app_main.cpp", "examples/b/app_main.cpp")
         self.assertEqual(len(m["app_main.cpp"]), 2)
+
+
+FOOTPRINT = "tools/cortexm0_footprint.py"
+TESTS_CMAKE = "core/tests/CMakeLists.txt"
+
+
+class CitableBuildPathTest(unittest.TestCase):
+    """The build/tooling allowlist (#1052).
+
+    A build file is not a source, so a citation into one used to match nothing here and
+    could not be pinned. `docs/modules/segment.md` spelled `LIBTRACER_NO_ATOMIC` in three
+    places and the gate checked only the header one, while the footprint-script and
+    test-CMake ones had both drifted onto unrelated lines.
+    """
+
+    def test_an_enrolled_tooling_path_is_a_citation(self):
+        self.assertEqual(locs(f"`{FOOTPRINT}:101`"), {f"{FOOTPRINT}:101"})
+
+    def test_an_enrolled_build_path_reads_a_comma_list_and_a_range(self):
+        self.assertEqual(locs(f"`{TESTS_CMAKE}:1055,1068-1069`"),
+                         {f"{TESTS_CMAKE}:1055", f"{TESTS_CMAKE}:1068", f"{TESTS_CMAKE}:1069"})
+
+    def test_an_enrolled_path_does_NOT_become_the_running_file(self):
+        # The knob table walks `config.hpp.in` in bare refs with build-file citations in
+        # between. Enrolment must not turn one of those asides into the running file.
+        self.assertEqual(locs(f"`config.hpp.in:86` | `{TESTS_CMAKE}:1055` |\n| `:109` |"),
+                         {"core/include/libtracer/config.hpp.in:86",
+                          f"{TESTS_CMAKE}:1055",
+                          "core/include/libtracer/config.hpp.in:109"})
+
+    def test_an_unenrolled_tooling_path_is_still_not_a_citation(self):
+        # Enrolment is an allowlist, not `.py`: covering build files wholesale is a
+        # maintainer's call and is not what this table answers.
+        self.assertEqual(locs("`tools/sync-version.py:42`"), set())
+
+    def test_a_repin_leaves_an_enrolled_path_alone(self):
+        # `revision_line_maps` derives maps from sources only, so there is no map to move
+        # these by. Leaving doc and anchor in step is what makes the gate's DRIFT report
+        # the whole fix rather than half of it.
+        self.assertEqual(repinned(f"`{FOOTPRINT}:101`", {FOOTPRINT: {101: 120}}),
+                         f"`{FOOTPRINT}:101`")
+
+
+class EnrolledPathsArePinnedTest(unittest.TestCase):
+    """Enrolment is only worth having if the citations it exposes are actually pinned.
+
+    Reads the real doc set, so it fails three separate ways: if a pin is dropped, if a
+    citing page is reverted to a line no pin covers, or if a new citation into an enrolled
+    file lands without one. That last case is the whole failure mode of #1052 — a citation
+    sitting beside a verified one and reading as if it were verified too.
+    """
+
+    def test_every_citation_into_an_enrolled_path_has_a_pinned_head(self):
+        pinned = {entry[0] for entry in cdc.ANCHORS}
+        filemap = cdc.source_map()
+        unpinned = []
+        for doc in cdc.all_docs():
+            try:
+                text = doc.read_text()
+            except (OSError, UnicodeDecodeError):
+                continue
+            rel = os.path.relpath(str(doc), REPO).replace(os.sep, "/")
+            spans, _ = cdc.citation_spans(text, filemap)
+            unpinned += [f"{rel} cites {p}:{lo}" for p, lo, _ in spans
+                         if p in cdc.CITABLE_BUILD_PATHS and f"{p}:{lo}" not in pinned]
+        self.assertEqual(unpinned, [], "an enrolled build/tooling citation with no pin")
+
+    def test_every_enrolled_path_carries_at_least_one_pin(self):
+        pinned_paths = {entry[0].rsplit(":", 1)[0] for entry in cdc.ANCHORS}
+        for path in cdc.CITABLE_BUILD_PATHS:
+            self.assertIn(path, pinned_paths)
+
+    def test_the_gate_workflow_runs_when_an_enrolled_path_changes(self):
+        # A pin only gates if the job fires on the commit that moved the anchor. The
+        # workflow's `paths:` is an allowlist, and `tools/**` is not in it: a script
+        # outside it could shift a pinned line with the gate never running (the failure
+        # shape `quic.yml`'s filter has already produced in this repo).
+        wf = os.path.join(REPO, ".github", "workflows", "doc-citations.yml")
+        with open(wf) as fh:
+            entries = re.findall(r'^\s*-\s*"([^"]+)"\s*$', fh.read(), re.MULTILINE)
+        for path in cdc.CITABLE_BUILD_PATHS:
+            covered = any(e == path or (e.endswith("/**") and path.startswith(e[:-2]))
+                          for e in entries)
+            self.assertTrue(covered, f"{path} is pinned but the gate never runs on it")
 
 
 if __name__ == "__main__":

@@ -36,6 +36,12 @@ on:
       - "examples/**"
       - "tools/check_doc_citations.py"
       - "tools/tests/test_check_doc_citations.py"
+      # An anchor may now name a tooling script (#1052). `tools/**` is deliberately NOT
+      # the entry — most of this tree cannot move a cited line — so every enrolled path
+      # UNDER `tools/` is listed one by one, and `EnrolledPathsArePinnedTest` fails if one
+      # is missed. The other enrolled build path, `core/tests/CMakeLists.txt`, needs no
+      # entry of its own: the `core/**` filter above already covers it.
+      - "tools/cortexm0_footprint.py"
       - "tools/check_config_keys.py"
       - "tools/tests/test_check_config_keys.py"
       - ".github/workflows/doc-citations.yml"
@@ -51,6 +57,7 @@ on:
       - "examples/**"
       - "tools/check_doc_citations.py"
       - "tools/tests/test_check_doc_citations.py"
+      - "tools/cortexm0_footprint.py"
       - "tools/check_config_keys.py"
       - "tools/tests/test_check_config_keys.py"
       - ".github/workflows/doc-citations.yml"
