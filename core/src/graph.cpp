@@ -779,9 +779,13 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
     // The trusted channel is the EMPTY caller context — a local API call — settled HERE,
     // before the resolver runs (#905). It used to be a resolver return value (`nullopt`),
     // whose natural reading ("I cannot name this caller") meant "grant everything", WRITE_ACL
-    // and CREATE included. A FULL-ROUTE remote op carries the inbound link's NAME
-    // (`ensure_remote().caller`) so it cannot spell this arm — but the COMPACT fast path does
-    // not, writing unattributed and landing here (#974). No new write path may omit a caller.
+    // and CREATE included. A remote op carries the inbound link's NAME, so it cannot spell
+    // this arm: the full-route form through `ensure_remote().caller`, and — since #974 — the
+    // COMPACT delivery fast path, whose two terminus write arms in `fwd_router_t::on_compact`
+    // pass `inbound_name` too. #974 was that second one missing: unattributed, it landed here
+    // and was waved through every ACE the first is checked against. Any further net-plane
+    // write path must carry a caller for the same reason — which is why
+    // `fwd_router_t::deliver_local` takes its own as a REQUIRED, undefaulted parameter.
     if (caller.empty()) return true;
     const std::expected<subject_token_t, wire::err_t> subject = subject_resolver_(caller);
     if (!subject) return false;  // the resolver DENIED this caller — PERMISSION_DENIED
@@ -1726,9 +1730,24 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
             if (!s.target_key) return std::unexpected(status_t::TYPE_MISMATCH);
             s.source_view = value;  // retain the SUBSCRIBER TLV zero-copy (refcount clone) so a
                                     // later :subscribers[] read ropes it into the REPLY (ADR-0035).
-            if (!caller.empty())    // the fan-in gate context for this edge's deliveries (#81);
-                                    // the empty (local) context needs no cold half
-                s.ensure_remote().caller.assign(caller);
+            // The fan-in gate context for this edge's deliveries (#81); the empty (local)
+            // context needs no cold half. It is ALSO what makes the edge reclaimable: this
+            // door leaves `subscriber_remote_t::link` empty (there is no return route to
+            // deliver over — the edge fans out to a LOCAL target), so
+            // `vertex_t::evict_link_edges` falls back to this context to find the link the
+            // edge was admitted over (#943). Do NOT "fix" that by assigning `link` here:
+            // `graph_t::dispatch_edge` gates its remote leg on `!e.link.empty()`, so a
+            // non-empty link would add a phantom `FWD{WRITE}` per publish carrying an EMPTY
+            // return route.
+            //
+            // Reachability, as of this commit: the ONE in-tree wire door
+            // (`op_resolve_walk.hpp`'s WRITE case) routes a remote `:subscribers[]` append
+            // bearing a SUBSCRIBER to `subscribe_wire` instead (its `remote_sub` test), and
+            // any other payload fails the TYPE_MISMATCH above — so the non-empty branch is
+            // reached only through the public `graph_t::write(v, field, value, caller)`,
+            // which an embedder may drive with an inbound link name. The `[N]` arm below has
+            // no such diversion and IS reached from the wire.
+            if (!caller.empty()) s.ensure_remote().caller.assign(caller);
             // The single admission step (ADR-0049): SUBSCRIBE gate → append → latch.
             // A field-write subscribe returns no host handle — discard the slot.
             if (const auto r = admit_subscriber(v, std::move(s), caller); !r)
@@ -1773,6 +1792,9 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
             parse_subscriber_tlv(*tlv, s);  // the shared door parse (ADR-0049)
             if (!s.target_key) return std::unexpected(status_t::TYPE_MISMATCH);
             s.source_view = value;  // retain the SUBSCRIBER TLV zero-copy, as the append arm does
+            // As in the append arm: the stored context is also the link this edge was
+            // admitted over, which is what `vertex_t::evict_link_edges` falls back to when
+            // the cold half carries no delivery link (#943).
             if (!caller.empty()) s.ensure_remote().caller.assign(caller);
             // Through the SAME admission door as an append, so a replace passes the
             // SUBSCRIBE gate — §D.1's "admitted through the same admission door".
