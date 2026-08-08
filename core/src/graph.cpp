@@ -779,9 +779,13 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
     // The trusted channel is the EMPTY caller context — a local API call — settled HERE,
     // before the resolver runs (#905). It used to be a resolver return value (`nullopt`),
     // whose natural reading ("I cannot name this caller") meant "grant everything", WRITE_ACL
-    // and CREATE included. A FULL-ROUTE remote op carries the inbound link's NAME
-    // (`ensure_remote().caller`) so it cannot spell this arm — but the COMPACT fast path does
-    // not, writing unattributed and landing here (#974). No new write path may omit a caller.
+    // and CREATE included. A remote op carries the inbound link's NAME, so it cannot spell
+    // this arm: the full-route form through `ensure_remote().caller`, and — since #974 — the
+    // COMPACT delivery fast path, whose two terminus write arms in `fwd_router_t::on_compact`
+    // pass `inbound_name` too. #974 was that second one missing: unattributed, it landed here
+    // and was waved through every ACE the first is checked against. Any further net-plane
+    // write path must carry a caller for the same reason — which is why
+    // `fwd_router_t::deliver_local` takes its own as a REQUIRED, undefaulted parameter.
     if (caller.empty()) return true;
     const std::expected<subject_token_t, wire::err_t> subject = subject_resolver_(caller);
     if (!subject) return false;  // the resolver DENIED this caller — PERMISSION_DENIED

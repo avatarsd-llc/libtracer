@@ -910,13 +910,23 @@ class fwd_router_t {
                     std::span<const std::byte> payload_bytes);
     /** @brief Re-advertise an egress binding in response to a downstream HANDLE_NACK. */
     void on_nack(std::string_view inbound_name, std::uint16_t label);
-    /** @brief Resolve a bound local route and apply the delivered write (delivery-is-a-write). */
     /** @brief The vertex a bound route names, or nullopt — the memoizable half of
      *         `deliver_local`, shared so a cached handle cannot diverge from it. */
     [[nodiscard]] std::optional<graph::vertex_handle_t> resolve_route_vertex(
         std::span<const std::byte> route_path) const;
+    /**
+     * @brief Apply a bound route's delivery as a write under @p caller's ACL context.
+     *
+     * @param caller The ACL subject context — the inbound link's NAME for a COMPACT that
+     *               arrived on the wire, matching what the equivalent full-route
+     *               `FWD{WRITE}` presents (RFC-0004 §F gates the target vertex at the final
+     *               hop, and both spellings of one delivery must present one subject).
+     *               Required, not defaulted: an empty caller is the local-trusted
+     *               short-circuit in `graph_t::acl_allows`, and #974 was exactly a delivery
+     *               path inheriting it by omission.
+     */
     [[nodiscard]] bool deliver_local(std::span<const std::byte> route_path,
-                                     std::span<const std::byte> payload);
+                                     std::span<const std::byte> payload, std::string_view caller);
     /**
      * @brief The graph remote-delivery sink (#136): emit one producer delivery to @p sub.
      *
