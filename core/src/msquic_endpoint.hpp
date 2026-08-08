@@ -60,6 +60,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <span>
 #include <string>
@@ -115,8 +116,10 @@ struct tsan_cb_guard_t {
     ~tsan_cb_guard_t() { tsan_release(p); }
 };
 
-/** @brief The u32-LE length prefix (transport framing) — 4 bytes. */
-inline constexpr std::size_t kPrefixBytes = 4;
+/** @brief The u32-LE length prefix TX writes (transport framing) — the SAME
+ *         constant the RX reassembler consumes, aliased so the two widths
+ *         cannot drift (transport_tcp.cpp does it this way too). */
+inline constexpr std::size_t kPrefixBytes = length_prefix_framer::kPrefixBytes;
 /** @brief App-layer connection-shutdown code: framing lost on the frame stream. */
 inline constexpr std::uint64_t kAppErrMalformed = 0x1;
 /** @brief Dial-constructor rendezvous budget per stage (milliseconds). */
@@ -381,35 +384,55 @@ class msquic_endpoint_t {
         delete static_cast<send_ctx_t*>(client_ctx);
     }
 
-    /** @brief Send raw @p bytes (H3 handshake material — no prefix) on
-     *         @p stream; msquic owns the buffer until SEND_COMPLETE. */
-    void send_raw(HQUIC stream, std::vector<std::uint8_t> bytes) {
-        auto ctx = std::make_unique<send_ctx_t>(std::move(bytes));
+    /**
+     * @brief The ownership-transfer dance, in ONE place: hand a filled
+     *        @ref send_ctx_t to msquic on @p stream.
+     *
+     * On success msquic owns the buffer until SEND_COMPLETE (which deletes the
+     * ctx); on failure no event will ever fire, so the unique_ptr frees it
+     * here. Every send on this endpoint — raw handshake bytes and both
+     * length-prefixed record overloads — funnels through this, so a correction
+     * to the dance is made once.
+     */
+    void submit(HQUIC stream, std::unique_ptr<send_ctx_t> ctx) {
         tsan_release(ctx.get());  // pairs with SEND_COMPLETE's acquire
         if (QUIC_SUCCEEDED(api->StreamSend(stream, &ctx->buf, 1, QUIC_SEND_FLAG_NONE, ctx.get())))
             (void)ctx.release();
     }
 
     /**
+     * @brief Submit a filled length-prefixed record on the live peer's frame
+     *        stream — the locked half both @ref send_frame overloads share.
+     *
+     * No-op until a peer's frame stream is up (and after teardown) — drop, like
+     * tcp. Thread-safe: the stream slot is read under @ref conn_m.
+     */
+    void submit_frame(std::unique_ptr<send_ctx_t> ctx) {
+        const std::lock_guard lock(conn_m);
+        if (frame_stream == nullptr) return;  // no peer stream (yet / anymore) — drop
+        submit(frame_stream, std::move(ctx));
+    }
+
+    /** @brief Send raw @p bytes (H3 handshake material — no prefix) on
+     *         @p stream; msquic owns the buffer until SEND_COMPLETE. */
+    void send_raw(HQUIC stream, std::vector<std::uint8_t> bytes) {
+        submit(stream, std::make_unique<send_ctx_t>(std::move(bytes)));
+    }
+
+    /**
      * @brief Send @p frame as one length-prefixed record on the frame stream.
      *
-     * ONE copy into the buffer msquic owns until SEND_COMPLETE. No-op until a
-     * peer's frame stream is up (and after teardown) — drop, like tcp.
-     * Thread-safe (the stream slot is read under @ref conn_m).
+     * ONE copy into the buffer msquic owns until SEND_COMPLETE; the locked
+     * hand-off is @ref submit_frame's (shared with the scatter-gather
+     * overload, so both produce the same record and the same ownership
+     * transfer).
      */
     void send_frame(std::span<const std::byte> frame) {
         if (frame.size() > kMaxFrame) return;  // the peer would reject it as malformed
         auto ctx = std::make_unique<send_ctx_t>(frame.size());
         if (!frame.empty())
             std::memcpy(ctx->bytes.data() + kPrefixBytes, frame.data(), frame.size());
-        const std::lock_guard lock(conn_m);
-        if (frame_stream == nullptr) return;  // no peer stream (yet / anymore) — drop
-        // On success msquic owns the buffer until SEND_COMPLETE (which deletes
-        // the ctx); on failure no event will fire, so the unique_ptr frees it.
-        tsan_release(ctx.get());  // pairs with SEND_COMPLETE's acquire
-        if (QUIC_SUCCEEDED(
-                api->StreamSend(frame_stream, &ctx->buf, 1, QUIC_SEND_FLAG_NONE, ctx.get())))
-            (void)ctx.release();
+        submit_frame(std::move(ctx));
     }
 
     /**
@@ -432,12 +455,7 @@ class msquic_endpoint_t {
             std::memcpy(ctx->bytes.data() + off, s.data(), s.size());
             off += s.size();
         }
-        const std::lock_guard lock(conn_m);
-        if (frame_stream == nullptr) return;
-        tsan_release(ctx.get());  // pairs with SEND_COMPLETE's acquire
-        if (QUIC_SUCCEEDED(
-                api->StreamSend(frame_stream, &ctx->buf, 1, QUIC_SEND_FLAG_NONE, ctx.get())))
-            (void)ctx.release();
+        submit_frame(std::move(ctx));
     }
     /** @} */
 

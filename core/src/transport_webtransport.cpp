@@ -157,45 +157,76 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
     }
 
     /**
-     * @brief Open a local unidirectional stream on @p on_conn and write
-     *        @p bytes on it (the control and QPACK encoder/decoder streams).
+     * @brief Open ONE locally-initiated stream on the live connection, write
+     *        @p preamble on it, and publish its ctx — the whole sequence under
+     *        conn_m, for every local open this endpoint performs (the H3 face,
+     *        the dial's extended CONNECT, and the dial's frame channel).
      *
-     * Runs entirely under conn_m and only while @p on_conn is STILL the live
-     * connection, so a teardown/replacement racing this open can never orphan
-     * the handle: the ctx joins ctxs under the same lock the harvester takes.
+     * The liveness RECHECK is why the three sites share one body: `conn` is
+     * read under the same lock the harvesters (the destructor's
+     * harvest_and_close_streams, the listener's replace_peer) take to null it,
+     * so an open can never be issued on a connection they have already claimed,
+     * and the ctx joins `ctxs` before the lock is dropped — never orphaned
+     * between StreamOpen and publication. The dial constructor open-coded this
+     * sequence twice without the recheck; the invariant is now local to one
+     * function instead of restated per site.
+     *
+     * @param flags    QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL, or NONE for a
+     *                 bidirectional stream.
+     * @param kind     The ctx's classification (LOCAL / CONNECT_CLIENT /
+     *                 FRAME). A FRAME open also adopts the stream as THE frame
+     *                 channel, under the same lock.
+     * @param preamble Bytes written on the stream immediately after it starts
+     *                 (the stream-type varint, the CONNECT request, or the
+     *                 0x41 + session-id header).
+     * @param expect   The connection the caller means — a callback's event
+     *                 handle, refusing the open if the peer has since been
+     *                 replaced. Null means "whatever connection is live now"
+     *                 (the dial constructor, which holds no event handle).
+     * @return The started stream handle, or null when nothing was opened.
      */
-    void open_local_uni(HQUIC on_conn, std::vector<std::uint8_t> bytes) {
+    HQUIC open_stream(QUIC_STREAM_OPEN_FLAGS flags, stream_ctx_t::kind_t kind,
+                      std::vector<std::uint8_t> preamble, HQUIC expect = nullptr) {
         const std::lock_guard lock(conn_m);
-        if (conn != on_conn || on_conn == nullptr) return;  // tearing down / replaced
+        HQUIC on_conn = conn;
+        if (on_conn == nullptr) return nullptr;                      // tearing down
+        if (expect != nullptr && expect != on_conn) return nullptr;  // replaced
         auto ctx = std::make_unique<stream_ctx_t>();
         ctx->owner = this;
-        ctx->kind = stream_ctx_t::kind_t::LOCAL;
+        ctx->kind = kind;
         HQUIC s = nullptr;
-        if (QUIC_FAILED(api->StreamOpen(on_conn, QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL, &stream_cb,
-                                        ctx.get(), &s)))
-            return;
+        if (QUIC_FAILED(api->StreamOpen(on_conn, flags, &stream_cb, ctx.get(), &s))) return nullptr;
         ctx->h = s;
         tsan_release(ctx.get());  // publish the ctx to its callbacks (see the base header)
         if (QUIC_FAILED(api->StreamStart(s, QUIC_STREAM_START_FLAG_NONE))) {
             api->StreamClose(s);
-            return;
+            return nullptr;
         }
-        send_raw(s, std::move(bytes));
+        send_raw(s, std::move(preamble));
+        // Only after the preamble is queued: a send() racing this open must not
+        // slip a length-prefixed record in front of the 0x41 header.
+        if (kind == stream_ctx_t::kind_t::FRAME) frame_stream = s;
         ctxs.push_back(ctx.release());
+        return s;
     }
 
     /** @brief The endpoint's H3 face on @p on_conn: the control stream
      *         (SETTINGS) plus the two mandatory QPACK streams (RFC 9204 §4.2 —
      *         empty beyond their type byte, since the dynamic table stays at
-     *         capacity 0). */
-    void open_h3_face(HQUIC on_conn) {
-        open_local_uni(on_conn, wt_h3::control_stream_bytes());
+     *         capacity 0). Null @p on_conn = the live connection (the dial
+     *         constructor); the LISTEN side passes its CONNECTED event handle. */
+    void open_h3_face(HQUIC on_conn = nullptr) {
+        using kind_t = stream_ctx_t::kind_t;
+        (void)open_stream(QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL, kind_t::LOCAL,
+                          wt_h3::control_stream_bytes(), on_conn);
         std::vector<std::uint8_t> enc;
         wt_h3::append_varint(enc, wt_h3::kStreamTypeQpackEncoder);
-        open_local_uni(on_conn, std::move(enc));
+        (void)open_stream(QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL, kind_t::LOCAL, std::move(enc),
+                          on_conn);
         std::vector<std::uint8_t> dec;
         wt_h3::append_varint(dec, wt_h3::kStreamTypeQpackDecoder);
-        open_local_uni(on_conn, std::move(dec));
+        (void)open_stream(QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL, kind_t::LOCAL, std::move(dec),
+                          on_conn);
     }
 
     // ---- inbound stream classification + the H3 handshake ----
@@ -626,33 +657,22 @@ webtransport_transport_t::webtransport_transport_t(const std::string& peer_host,
                 tls.insecure_no_verify, peer_host, peer_port))
         return;
 
-    // Our H3 face (control + QPACK streams), then the extended CONNECT.
-    i.open_h3_face(i.conn);
-    auto connect_ctx = std::make_unique<impl_t::stream_ctx_t>();
-    connect_ctx->owner = &i;
-    connect_ctx->kind = impl_t::stream_ctx_t::kind_t::CONNECT_CLIENT;
-    HQUIC connect_stream = nullptr;
-    if (QUIC_FAILED(i.api->StreamOpen(i.conn, QUIC_STREAM_OPEN_FLAG_NONE, &impl_t::stream_cb,
-                                      connect_ctx.get(), &connect_stream)))
-        return;
-    connect_ctx->h = connect_stream;
-    tsan_release(connect_ctx.get());  // publish the ctx to its callbacks (see the base header)
-    if (QUIC_FAILED(i.api->StreamStart(connect_stream, QUIC_STREAM_START_FLAG_NONE))) {
-        i.api->StreamClose(connect_stream);
-        return;
-    }
-    {
-        const std::lock_guard lock(i.conn_m);
-        i.ctxs.push_back(connect_ctx.release());
-    }
+    // Our H3 face (control + QPACK streams), then the extended CONNECT — every
+    // open through impl_t::open_stream, which rechecks the connection under
+    // conn_m and publishes the ctx before dropping it.
+    i.open_h3_face();
+    std::vector<std::uint8_t> req;
+    wt_h3::append_h3_frame(req, wt_h3::kFrameHeaders,
+                           wt_h3::encode_connect_field_section(i.authority, i.path));
+    HQUIC connect_stream = i.open_stream(
+        QUIC_STREAM_OPEN_FLAG_NONE, impl_t::stream_ctx_t::kind_t::CONNECT_CLIENT, std::move(req));
+    if (connect_stream == nullptr) return;
+    // The id is read AFTER the request is queued (the request never carries it);
+    // the 0x41 frame-channel header below is what needs it.
     std::uint64_t sid = 0;
     std::uint32_t sz = sizeof(sid);
     if (QUIC_SUCCEEDED(i.api->GetParam(connect_stream, QUIC_PARAM_STREAM_ID, &sz, &sid)))
         i.connect_stream_id = sid;
-    std::vector<std::uint8_t> req;
-    wt_h3::append_h3_frame(req, wt_h3::kFrameHeaders,
-                           wt_h3::encode_connect_field_section(i.authority, i.path));
-    i.send_raw(connect_stream, std::move(req));
 
     // Stage 2: the 200 (the session).
     if (!i.wait_stage(i.session_done, i.session_ok)) return;
@@ -660,28 +680,12 @@ webtransport_transport_t::webtransport_transport_t(const std::string& peer_host,
     // Open THE frame channel: a bidirectional WebTransport stream announcing
     // itself with 0x41 + the CONNECT stream's id (the browser
     // createBidirectionalStream() wire shape), then length-prefixed records.
-    auto frame_ctx = std::make_unique<impl_t::stream_ctx_t>();
-    frame_ctx->owner = &i;
-    frame_ctx->kind = impl_t::stream_ctx_t::kind_t::FRAME;
-    HQUIC fs = nullptr;
-    if (QUIC_FAILED(i.api->StreamOpen(i.conn, QUIC_STREAM_OPEN_FLAG_NONE, &impl_t::stream_cb,
-                                      frame_ctx.get(), &fs)))
-        return;
-    frame_ctx->h = fs;
-    tsan_release(frame_ctx.get());  // publish the ctx to its callbacks (see the base header)
-    if (QUIC_FAILED(i.api->StreamStart(fs, QUIC_STREAM_START_FLAG_NONE))) {
-        i.api->StreamClose(fs);
-        return;
-    }
     std::vector<std::uint8_t> preamble;
     wt_h3::append_varint(preamble, wt_h3::kFrameWtStream);
     wt_h3::append_varint(preamble, i.connect_stream_id);
-    i.send_raw(fs, std::move(preamble));
-    {
-        const std::lock_guard lock(i.conn_m);
-        i.ctxs.push_back(frame_ctx.release());
-        i.frame_stream = fs;
-    }
+    if (i.open_stream(QUIC_STREAM_OPEN_FLAG_NONE, impl_t::stream_ctx_t::kind_t::FRAME,
+                      std::move(preamble)) == nullptr)
+        return;
     i.open_ok = true;
 }
 
