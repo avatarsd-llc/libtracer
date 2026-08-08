@@ -338,12 +338,35 @@ struct asm_buf_t {
  * sessions still holding the pointer is unknowable, the gate is LEAKED there (one small
  * block, teardown-only — the same leak-rather-than-free discipline #815 established for
  * the TX pool). Owning mode frees it: `httpd_stop` deletes every session first.
+ *
+ * LOCK ORDER, recorded because it was previously established only by code (#960):
+ * `m` may be taken while holding nothing, and `peers_m_` may be taken under it — never
+ * the reverse. NO callback installed from outside this link runs while `m` is held —
+ * neither the routing plane's departure notifier nor an app sink. (The IDF calls
+ * @ref httpd_ws_link_t::condemn makes under it are not an exception to that: they go
+ * *into* the server, are bounded by it, and re-enter nothing of ours.) That is a rule,
+ * not an accident: `m` is what each of the four callbacks the server latched resolves the
+ * link through — @ref httpd_ws_link_t::ws_handler, @ref httpd_ws_link_t::on_session_closed,
+ * @ref httpd_ws_link_t::send_guarded, @ref httpd_ws_link_t::tx_work — and what a
+ * destructor blocks on, so an ordering edge from it into the routing plane's locks would
+ * make any `graph → m` path a hard ABBA. Work that must outlive the lock — a bounded send,
+ * an unbounded departure notification — registers on @ref depth and runs with `m`
+ * released. That keeps the destructor's join intact without giving the mutex an ordering
+ * constraint on a foreign lock. It does NOT make destroying a link from under a lock its
+ * in-flight work needs safe: that deadlocks on the join, here as in the URI-handler case
+ * and as in `transport_ws_server`, whose destructor joins its poll thread for the same
+ * reason.
  */
 struct httpd_ws_link_t::gate_t {
     std::mutex m;                    /**< @brief Guards every member below. */
     std::condition_variable cv;      /**< @brief Signalled as @ref depth falls. */
     httpd_ws_link_t* link = nullptr; /**< @brief The link, or null once it is going. */
-    unsigned depth = 0;              /**< @brief Live URI-handler frames inside the link. */
+    /**
+     * @brief Frames the destructor must join: live URI-handler frames, plus a departure
+     *        notification in flight with `m` released (@ref
+     *        httpd_ws_link_t::on_session_closed).
+     */
+    unsigned depth = 0;
     /**
      * @brief The socket whose request the in-flight handler frame is servicing, or -1.
      *
@@ -748,7 +771,9 @@ void httpd_ws_link_t::close_gate() {
     // fallback for the link itself, so a handler frame still reading peers_m_ /
     // rx_scratch_ / slots_ has to be joined, not out-waited. It is bounded in practice by
     // the app callback the delivery runs, and the one way it could wait on itself is the
-    // case skipped above.
+    // case skipped above. Since #960 a departure notification in flight is joined here
+    // too: it dereferences the link and hands the routing plane a name, and it runs with
+    // `m` released precisely so this wait — not the mutex — is what holds it.
     if (!on_server_task) gate_->cv.wait(lock, [this] { return gate_->depth == 0; });
 }
 
@@ -793,9 +818,9 @@ httpd_ws_link_t::tx_slot_t* httpd_ws_link_t::claim_tx_slot() {
  * @brief Reclaim TX pool slots whose work item the control socket silently binned (#944).
  *
  * @note Unrelated to @ref httpd_ws_link_t::reclaim_slot despite the shared verb: that one
- *       recycles a departed PEER's session slot and fires the routing plane's eviction
- *       notifier (the lock-ordering question #960 raises about it is untouched here). This
- *       one recycles a TX work slot, holds no mutex, and notifies nothing.
+ *       recycles a departed PEER's session slot and names the peer the routing plane's
+ *       eviction notifier is owed for. This one recycles a TX work slot, holds no mutex,
+ *       and notifies nothing.
  */
 void httpd_ws_link_t::sweep_tx_slots() {
     // The window: every OTHER slot in the pool ahead of you, each stalled to this link's
@@ -971,6 +996,10 @@ void httpd_ws_link_t::detach_sessions() {
     if (gate_ != nullptr) {
         int serving_fd = -1;
         {
+            // `depth` counts departure notifications too since #960, so it alone no longer
+            // implies a request scope — but `serving_fd` is set and cleared by @ref
+            // ws_handler under this same lock and is -1 for every other holder, so the
+            // pair still names exactly the request-scoped session and nothing else.
             const std::lock_guard lock(gate_->m);
             if (gate_->depth != 0) serving_fd = gate_->serving_fd;
         }
@@ -1325,19 +1354,50 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
 void httpd_ws_link_t::on_session_closed(void* ctx) {
     auto* const slot = static_cast<session_t*>(ctx);
     if (slot == nullptr || slot->gate == nullptr) return;
-    // Resolve the link through the gate, and hold the gate for the whole callback. That
-    // is what makes this safe against a concurrent teardown: a destructor can only shut
-    // the gate by taking this same lock, so either the reclaim completes first with the
-    // link provably alive, or it finds a null link and is inert. A slot reached here
-    // after its link is gone is one a teardown deliberately leaked (@ref
-    // abandon_sessions) — landing on valid, inert memory rather than a freed shell.
-    const std::lock_guard lock(slot->gate->m);
-    httpd_ws_link_t* const owner = slot->gate->link;
-    if (owner == nullptr) return;
-    owner->reclaim_slot(slot);
+    gate_t* const gate = slot->gate;
+    httpd_ws_link_t* owner = nullptr;
+    std::string departed;
+    {
+        // Resolve the link through the gate. That is what makes this safe against a
+        // concurrent teardown: a destructor can only shut the gate by taking this same
+        // lock, so either the reclaim completes first with the link provably alive, or it
+        // finds a null link and is inert. A slot reached here after its link is gone is
+        // one a teardown deliberately leaked (@ref abandon_sessions) — landing on valid,
+        // inert memory rather than a freed shell.
+        const std::lock_guard lock(gate->m);
+        owner = gate->link;
+        if (owner == nullptr) return;
+        departed = owner->reclaim_slot(slot);
+        if (departed.empty()) return;  // nothing owed to the routing plane
+        // A departure IS owed, and it is fired below with `m` RELEASED (#960). The mutex
+        // is the wrong instrument to hold it under: it is the one each of the server's
+        // four latched callbacks resolves this link through and the one a destructor
+        // blocks on, while the notifier is a foreign callback that re-enters router →
+        // graph and is bounded by nothing this link owns. Holding it across that is also
+        // what `bus_link_t::notify_peer_down` documents must not happen ("with none of its
+        // internal locks held"), and what the same reasoning already keeps `tx_work` from
+        // doing across a send.
+        //
+        // What must NOT be dropped with it is the LIFETIME guarantee holding it supplied:
+        // `owner` is dereferenced below, and the notifier's ctx is the routing plane the
+        // teardown may be dismantling. So register on the gate's existing barrier instead
+        // — the same `depth`/`cv` pair a URI-handler frame uses — and the destructor's
+        // @ref close_gate still cannot return while this notification is in flight. The
+        // wait moves from the mutex to the condition variable; it does not disappear.
+        ++gate->depth;
+    }
+    owner->notify_departed(departed);
+    {
+        // `owner` may be DESTROYED by now, exactly as at the tail of @ref ws_handler: the
+        // notifier can drive an app teardown, and the barrier above is what let it start.
+        // Only `gate`, which deliberately outlives the link, may be touched from here on.
+        const std::lock_guard lock(gate->m);
+        --gate->depth;
+    }
+    gate->cv.notify_all();
 }
 
-void httpd_ws_link_t::reclaim_slot(session_t* slot) {
+std::string httpd_ws_link_t::reclaim_slot(session_t* slot) {
     std::string departed;
     bool was_open;
     {
@@ -1357,23 +1417,30 @@ void httpd_ws_link_t::reclaim_slot(session_t* slot) {
         // strictly precedes any reuse.
         slot->dead = false;
     }
-    // Departure seam (RFC-0009 §D extended to peer departure): a browser tab that
-    // hung up leaves its subscriber edges behind — fire the routing plane's eviction
-    // hook (fwd_router_t::link_down via the installed notifier) LAST, with peers_m_
-    // released (the notifier re-enters router → graph locks). Only a session that
-    // completed its handshake (open) can have flowed subscribes. A TX-failure-triggered
-    // close (tx_work / note_tx_result) arrives here through the same free_ctx path, so
-    // the departed peer's subscriber edges are evicted too; was_open (flipped under
-    // peers_m_ on the first pass) keeps the notifier single-fire per session. No
-    // teardown test is needed to suppress it: the caller holds the gate, so reaching
-    // here at all means the destructor has not shut it and the routing plane the
-    // notifier targets is still standing.
-    if (was_open && !departed.empty()) {
-        if (peer_named_)
-            notify_peer_down(departed);
-        else
-            notify_down();
-    }
+    // Departure seam (RFC-0009 §D extended to peer departure): a browser tab that hung up
+    // leaves its subscriber edges behind, so the routing plane's eviction hook
+    // (fwd_router_t::link_down via the installed notifier) is owed one call. It is NOT
+    // fired here — the name is handed back to @ref on_session_closed, which fires it with
+    // BOTH of this link's mutexes released (#960). Only a session that completed its
+    // handshake (open) can have flowed subscribes. A TX-failure-triggered close (tx_work /
+    // note_tx_result) arrives here through the same free_ctx path, so the departed peer's
+    // subscriber edges are evicted too; was_open (flipped under peers_m_ on the first
+    // pass) keeps the notification single-fire per session. No teardown test is needed to
+    // suppress it: the caller resolved this link through the gate, so reaching here at all
+    // means the destructor has not shut it, and the barrier it registers on keeps the
+    // routing plane the notifier targets standing for the call.
+    if (!was_open) return {};
+    return departed;
+}
+
+void httpd_ws_link_t::notify_departed(std::string_view peer) {
+    // Peer-named mode evicts just the departed peer's edges; flat mode has one peer's
+    // departure BE the whole link down — the same fork transport_ws_server::teardown_slot
+    // takes, and for the same reason (which sink the router installed).
+    if (peer_named_)
+        notify_peer_down(peer);
+    else
+        notify_down();
 }
 
 void httpd_ws_link_t::deliver(std::string_view peer, std::span<const std::byte> frame) {
