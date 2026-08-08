@@ -29,6 +29,56 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`esp_ws_client_link_t` got a bounded-blocking discipline: a derived write bound, an
+  interruptible backoff, and a teardown barrier** (#952). Three defects on one seam —
+  `write_m_` and `stop_` were treated as if the operations under them were prompt.
+  (1) `send()` held `write_m_` across a 4000 ms write timeout that IDF's `_ws_write`
+  spends up to three times over (poll, header, payload), so a peer with a closed TCP
+  window parked the *calling* task for up to 12 s against a typical 5 s task watchdog —
+  a panic, not a dropped frame — and blocked the recv thread, which serializes its reads
+  on the same mutex, from even seeing the CLOSE. Both blocking bounds are now derived
+  from `CONFIG_ESP_TASK_WDT_TIMEOUT_S` the way the server sibling's send bound already
+  is (#835): a dial gets half a watchdog window and one whole `send()` a quarter of one,
+  and `SO_SNDTIMEO` is set on the socket next to the existing `TCP_NODELAY` so the
+  blocking write leg is bounded too. **Behaviour change:** a peer that cannot accept a
+  small frame within that budget now has its connection torn down and re-dialed instead
+  of parking the sender; a dial that does not complete within half a watchdog window is
+  retried rather than waited out. (2) The reconnect backoff was a plain `sleep_for`, so
+  the destructor's join waited out the full 1.5 s of exactly the unreachable peer a
+  re-dial exists for; it is now a condition-variable wait the destructor signals.
+  (3) The destructor destroyed the transport handles with `write_m_` held nowhere, on
+  the premise that the joined recv thread was the only handle user — which this type's
+  own contract contradicts (`send()` may be called from any task), so a sender queued
+  behind a stalled write woke up owning a destroyed handle. Teardown now disarms the
+  link, destroys the handles under `write_m_`, and waits out every sender that had
+  already *announced itself on the in-flight tally* — raised at the top of `send()`,
+  before it queues on that mutex. That tally is the covered boundary, and it is the most
+  a barrier inside the object can cover: a caller that has not reached it when the
+  destructor reads it for the last time is not waited out, whether it is a `send()` that
+  *starts* after the destructor returns or one that entered `send()` and is still short
+  of the raise. Both stay the embedder's lifetime problem. A sender also reads the
+  transport handle only behind the `connected_` acquire gate that pairs with the recv
+  thread's release store: the re-dial rebuilds the handles holding no lock, so `write_m_`
+  alone does not order that rewrite against a sender's read. No API change; a teardown
+  that lands mid-dial still costs one dial bound, since `esp_transport_connect` takes no
+  cancellation.
+
+- **`httpd_ws_link_t::send` (the broadcast) no longer allocates, so a fan-out during a
+  heap trough drops a frame instead of aborting the node** (#961). The fan-out opened by
+  building a `std::vector` of destinations under `peers_m_` — the one container shape the
+  rest of that translation unit is written to avoid, because under `-fno-exceptions` its
+  throwing allocator turns a failed growth into `abort()` inside libstdc++'s `bad_alloc`
+  stub. It sat AHEAD of every `new (std::nothrow)` fallback the TX path has, so the
+  drop-on-OOM backpressure the header advertises was void on the one path every
+  subscription push takes, and the failure was silent: no counter moves, no OOM log, just
+  an unexplained reboot. The destinations are now snapshotted into a fixed on-stack chunk
+  (`kFanoutChunk`, sized at the link's own `kDefaultPeerCap` socket budget) with the scan
+  resuming where it stopped, so a broadcast to any number of peers takes no heap arm at
+  all — there is nothing left to fail, hence no new drop counter and no sizing policy for
+  the unbounded-`max_peers` case. A broadcast at or under the chunk still takes exactly
+  one `peers_m_` hold; past it, one more uncontended acquisition per chunk. No API change;
+  the header's steady-state allocation contract now covers fan-out explicitly.
+
 - **`twai_link_t`'s TX backpressure window is spent PER FRAME again, and teardown no
   longer queues behind it** (#962). `write_raw` took `write_m_` and only then parked on
   the free-slot semaphore that *is* the FULL policy's backpressure point, so the window

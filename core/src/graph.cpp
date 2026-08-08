@@ -2232,6 +2232,12 @@ result_t<rope_t> graph_t::read_children_folded(vertex_handle_t vh) const {
     view::segment_ptr_t oseg = folded_point_header(hdr_backend, members_len);
     if (!oseg) return std::unexpected(status_t::BACKPRESSURE);
     rope_t out{view::view_t::over(std::move(oseg))};
+    // The member count is already in hand, so take the join as ONE sized growth instead of
+    // the geometric push_back ladder (a wide listing is 2 links per child). Best effort:
+    // on soft-fail the concat below still produces the right chain, it just pays the
+    // ordinary growth path. `concat` no longer reserves for us — that guard belongs to the
+    // caller that knows the count, not to every 1-link delivery clone (#1022).
+    static_cast<void>(out.try_reserve(members.link_count()));
     out.concat(members);  // empty members (no children) => header-only rope, len 0
     return out;
 }

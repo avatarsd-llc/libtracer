@@ -28,6 +28,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   the client is constructed with the new trailing
   `defer_recv` flag, so a direct `transport_ws_client(host, port)` behaves exactly as before.
 
+### Changed
+
+- **`view::rope_t::concat` no longer reserves on the cross-rope path — the self-concat
+  guards are charged to the aliasing case alone (#1022).** The `r.concat(r)` safety added in
+  #971 (an up-front `try_reserve` plus an indexed re-read of the source each step) was paid
+  by *every* call, including the 1–2-link delivery clone on the path-target dispatch leg;
+  that cost `inproc-target-handler` +3.5% and `inproc-target-stored` +10.1%. Source and
+  destination storage can overlap in exactly one way — `&other == this` — so `concat` now
+  branches on that: the aliasing arm keeps both guards verbatim, and the cross-rope arm
+  walks the source span once, as it did before #971. The resulting chain is identical in
+  both arms; what changes is that a *long* cross-rope `concat` takes the geometric
+  `push_back` ladder again unless the caller reserves. Callers that know their final link
+  count still call `try_reserve` themselves — the delivery clone and the composed-read reply
+  builder already did, and `read_children_folded` now does at its own call site.
+
 ### Fixed
 
 - **`graph_t::evict_link_edges` / `vertex_t::evict_link_edges` now reclaim an edge admitted

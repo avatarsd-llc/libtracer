@@ -92,4 +92,61 @@ void push_frames(std::vector<frame_t> frames);
  */
 [[nodiscard]] bool cfg_restored();
 
+/** @name The blocking-discipline levers (#952). */
+/** @{ */
+
+/** @brief Make every dial FAIL immediately, so the link spends its reconnect backoff. */
+void fail_connects(bool on);
+
+/**
+ * @brief Make every dial BLOCK for the timeout it asked for, then fail.
+ *
+ * What a dial to an unreachable peer does on silicon, and the only way to put the recv
+ * thread inside `esp_transport_connect` while a test tears the link down.
+ */
+void hang_connects(bool on);
+
+/** @brief The `timeout_ms` the last dial asked for — the bound the link chose. */
+[[nodiscard]] int last_connect_timeout_ms();
+
+/**
+ * @brief Park every `esp_transport_write` for the timeout the caller asked for,
+ *        modelling a peer whose TCP window has closed. Passing false releases whoever
+ *        is parked, as a peer that starts accepting again would.
+ *
+ * This is what makes "the send serializer is held across the write" observable: while a
+ * writer is parked here it is holding the link's `write_m_`, which is exactly the state
+ * the destructor used to ignore. The park honours the caller's timeout, so how long a
+ * held write can hold that serializer is the LINK's own bound — pre-#952, three times a
+ * 4 s literal.
+ */
+void hold_writes(bool on);
+
+/** @brief How many callers are parked inside `esp_transport_write` right now. */
+[[nodiscard]] int writers_inside();
+
+/** @brief How many `esp_transport_write` calls have been ENTERED since the reset —
+ *         counted before any handle check, so a call on a dead handle still counts. */
+[[nodiscard]] int writes_started();
+
+/** @brief The `timeout_ms` the last write asked for — IDF spends it up to three times
+ *         over inside one call, which is the multiplier the link's bound must respect. */
+[[nodiscard]] int last_write_timeout_ms();
+
+/**
+ * @brief Operations that touched a handle they must not have — the use-after-free
+ *        counter, and the whole point of the teardown suite.
+ *
+ * Three things count: an operation on a NULL handle, an operation on a handle already
+ * passed to `esp_transport_destroy`, and a write that was INSIDE the transport when its
+ * handle was destroyed under it (the real call dereferences the handle throughout, so a
+ * destroy mid-call is a use-after-free even though the pointer was live on entry).
+ */
+[[nodiscard]] int handle_misuse();
+
+/** @brief Payload bytes the last completed write carried, for the ordinary-path control. */
+[[nodiscard]] std::vector<std::byte> last_write_payload();
+
+/** @} */
+
 }  // namespace fake_ws
