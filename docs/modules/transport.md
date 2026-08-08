@@ -268,7 +268,11 @@ they are the reason a new binding is small.
   shutdown. `stream_endpoint_t` adds what only the *stream* transports need — the
   peer-fd atomic, the write mutex, and the teardown-under-write-lock ordering
   that keeps a concurrent send from writing to a reused descriptor. UDP keeps its
-  datagram shape and uses only the base.
+  datagram shape and uses only the base. `slot_server_t` is one tier further up,
+  for the MULTI-peer stream servers: it owns the slot vector, the accept/poll/
+  teardown machinery and the `bus_link_t` query trio, so `transport_tcp_server`
+  and `transport_ws_server` differ only in their framing and handshake — the two
+  hooks it dispatches into them.
 - **`register_builtin_transports`** is how a node's transport catalog gets
   populated. Each `register_*_transport` lives in its own translation unit,
   compiled only when that transport is enabled, so a build that drops a transport
@@ -312,6 +316,12 @@ they are the reason a new binding is small.
 ```
 
 ```{doxygenclass} tr::net::stream_endpoint_t
+:project: libtracer
+:members:
+:protected-members:
+```
+
+```{doxygenclass} tr::net::slot_server_t
 :project: libtracer
 :members:
 :protected-members:
