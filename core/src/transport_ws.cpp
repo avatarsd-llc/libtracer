@@ -496,8 +496,8 @@ bool transport_ws_server::drain_frames(session_t& s) {
         ws::decode_result_t decoded = ws::decode_frame_checked(s.buf, cap);
         if (decoded.status == ws::decode_status_t::NEED_MORE) return true;
         if (decoded.status == ws::decode_status_t::PROTOCOL_ERROR) {
-            // An over-cap declared length or a §5.5 control breach: a stream we refuse to
-            // keep reading. Count it, then tear down through the one teardown path.
+            // An over-cap length, a §5.5 control breach or a §5.2 reserved opcode: a stream
+            // we refuse to keep reading. Count it, then tear down through the one teardown.
             malformed_rx_.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
@@ -562,7 +562,7 @@ bool transport_ws_server::drain_frames(session_t& s) {
             case ws::opcode_t::CLOSE:
                 return false;  // tear this one connection down
             default:
-                break;  // TEXT / PONG: ignored
+                break;  // TEXT / PONG: ignored (a RESERVED opcode never gets here: #1060)
         }
     }
 }
@@ -822,7 +822,7 @@ void transport_ws_client::serve(int fd, std::vector<std::byte> pipelined) {
             // RFC 6455 §7.1.7: a protocol violation FAILS the connection — the same
             // teardown a peer CLOSE takes, not an unbounded wait for legal bytes. That
             // now covers a declared length past the receive cap, which is what stops the
-            // server we dialled from naming our memory budget (#872).
+            // server we dialled from naming our memory budget (#872), and §5.2 (#1060).
             if (decoded.status == ws::decode_status_t::PROTOCOL_ERROR) {
                 malformed_rx_.fetch_add(1, std::memory_order_relaxed);
                 goto teardown;
@@ -875,7 +875,7 @@ void transport_ws_client::serve(int fd, std::vector<std::byte> pipelined) {
                 case ws::opcode_t::CLOSE:
                     goto teardown;  // peer asked to close
                 default:
-                    break;  // TEXT / PONG: ignored
+                    break;  // TEXT / PONG: ignored (a RESERVED opcode dies at decode: #1060)
             }
         }
 
