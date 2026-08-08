@@ -476,15 +476,17 @@ void test_fwd_read_round_trip() {
 
 /**
  * @brief SPEC{ NAME "type" <type>, NAME "name" <name>, SETTINGS "config"{ role,
- *        port, kind=webtransport [, addr] [, cert, key] [, ca] [, insecure] } }.
+ *        port, kind=webtransport [, addr] [, cert, key] [, ca] [, insecure]
+ *        [, path] } }.
  *
  * The quic_test conn_spec shape, including the DIAL-side trust pair
- * `ca`/`insecure` (#918).
+ * `ca`/`insecure` (#918) and the DIAL-side extended CONNECT `:path` (#1023).
  */
 view_t conn_spec(std::string_view type, std::string_view name, tr::net::conn_role_t role,
                  std::uint16_t port, std::string_view addr = {}, std::string_view cert = {},
                  std::string_view key = {}, std::string_view hijack_key = {},
-                 std::string_view ca = {}, std::optional<bool> insecure = std::nullopt) {
+                 std::string_view ca = {}, std::optional<bool> insecure = std::nullopt,
+                 std::string_view wt_path = {}) {
     std::vector<std::byte> cfg;
     tr::wire::emit_name(cfg, "role");
     const std::byte r{static_cast<std::uint8_t>(role)};
@@ -523,6 +525,10 @@ view_t conn_spec(std::string_view type, std::string_view name, tr::net::conn_rol
         tr::wire::emit_name(cfg, "insecure");
         const std::byte iv{static_cast<std::uint8_t>(*insecure ? 1 : 0)};
         tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, std::span<const std::byte>(&iv, 1));
+    }
+    if (!wt_path.empty()) {
+        tr::wire::emit_name(cfg, "path");
+        tr::wire::emit_name(cfg, wt_path);
     }
 
     std::vector<std::byte> body;
@@ -678,6 +684,60 @@ void test_spec_dial_trust_keys() {
         path_t("/net:children[]"), conn_spec("client", "wrongca", tr::net::conn_role_t::DIAL, 47164,
                                              "127.0.0.1", {}, {}, {}, g_other_cert));
     check(!wrong_ca.has_value(), "A: `ca = <an unrelated CA>` is REFUSED — the bundle is applied");
+}
+
+/**
+ * @brief #1023 — the DIAL-side `path` key carries the extended CONNECT `:path`.
+ *
+ * The observable is the path THAT REACHED THE SERVER, read off the listener's
+ * accepted CONNECT (`session_path()`), not the config value round-tripped back
+ * out of the dialer: the defect was that the factory hard-coded `"/"` into the
+ * constructor, so every SPEC-created dialer requested the root whatever its
+ * config said, and a server serving its session anywhere else was unreachable
+ * without abandoning the creation SPEC for `provide_link`.
+ *
+ * The listeners are constructed DIRECTLY (not from a SPEC) because the test has
+ * to HOLD the server object to interrogate it; the dialer — the thing under
+ * test — goes through the real `:children[]` SPEC wire path every time. One
+ * listener per leg: a webtransport endpoint carries one session at a time.
+ */
+void test_spec_dial_connect_path() {
+    std::printf("SPEC dial extended-CONNECT :path (#1023):\n");
+    graph_t node_a;
+    tr::net::fwd_router_t router_a(node_a);
+    tr::net::transport_vertex_t net_a(node_a, router_a);
+    net_a.register_transport_type("webtransport", tr::net::webtransport_transport_factory());
+    (void)net_a.register_module("webtransport-client", "webtransport", tr::net::conn_role_t::DIAL);
+
+    webtransport_transport_t served(std::uint16_t{0}, g_cert, g_key);
+    check(served.ok(), "a directly-constructed listener is up");
+    check(served.session_path().empty(), "no session yet — the listener has accepted no CONNECT");
+
+    // 1. `path = "/tracer"` — the key reaches the wire. Verification stays ON
+    //    (`ca` = the peer's own self-signed cert), so this is a real session.
+    const auto named =
+        node_a.write(path_t("/net:children[]"),
+                     conn_spec("client", "named", tr::net::conn_role_t::DIAL, served.local_port(),
+                               "127.0.0.1", {}, {}, {}, g_cert, std::nullopt, "/tracer"));
+    check(named.has_value(), "A: SPEC{client, ..., path=\"/tracer\"} constructs the dialer");
+    check(served.session_path() == "/tracer",
+          "the CONNECT that reached the server named /tracer — the SPEC key is on the wire");
+
+    // 2. No `path` key: the "/" default the factory used to hard-code is preserved.
+    webtransport_transport_t defaulted(std::uint16_t{0}, g_cert, g_key);
+    const auto plain =
+        node_a.write(path_t("/net:children[]"),
+                     conn_spec("client", "plain", tr::net::conn_role_t::DIAL,
+                               defaulted.local_port(), "127.0.0.1", {}, {}, {}, g_cert));
+    check(plain.has_value(), "A: a SPEC with no `path` key still constructs the dialer");
+    check(defaulted.session_path() == "/", "a SPEC with no `path` key dials the / default");
+
+    // 3. The empty-string normalisation the factory leans on (an absent key
+    //    parses to an empty string, which the constructor turns into "/").
+    webtransport_transport_t empty_path(std::uint16_t{0}, g_cert, g_key);
+    webtransport_transport_t dialer("127.0.0.1", empty_path.local_port(), "", dev_tls());
+    check(dialer.ok(), "a direct dial with an EMPTY path establishes its session");
+    check(empty_path.session_path() == "/", "an empty path is normalised to / before the CONNECT");
 }
 
 // ---- a raw msquic H3 client: the test's hand on the LISTEN-side classifier ----
@@ -1242,6 +1302,7 @@ int main() {
     test_fwd_read_round_trip();
     test_config_constructed_webtransport();
     test_spec_dial_trust_keys();
+    test_spec_dial_connect_path();
     test_frame_stream_adoption_gate();
     test_unknown_h3_frames_skipped();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,

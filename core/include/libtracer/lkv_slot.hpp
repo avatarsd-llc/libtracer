@@ -264,14 +264,49 @@ inline constexpr std::size_t kNoIndex = static_cast<std::size_t>(-1);
  * bound being right — by a different mechanism: overflow threads share this one extra index
  * under a spin lock, so they serialize with each other and with nobody else.
  *
- * The containment is a property of the **layout**, not just of the algorithm, and it was broken
- * once: an over-capacity thread re-probes the claim table on every operation, and while that
- * table lived inside `%cell_t` each probe took an in-capacity reader's announcement line
- * exclusive (#899). The two are separate storage now, and the probe is a load — but read the
- * claim as scoped to what it says: the claim table and the announcement cells. An overflow
- * thread still shares `overflow_lock`'s line with `orphans`, which in-capacity threads read.
+ * The containment is a property of the **layout**, not just of the algorithm, and the layout
+ * broke it twice. The claim table lived inside `%cell_t`, so an over-capacity thread's re-probe
+ * — one per operation — took an in-capacity reader's announcement line exclusive (#899); and the
+ * spin lock below shared its line with `registry_t::orphans`, which in-capacity threads load in
+ * `%scan` and in `%retire_and_flush` (#1027). Each now has padded storage of its own — `%claims_t`,
+ * `%overflow_lock_t` — asserted here by `alignas` and in `lkv_slot_test` by what an over-capacity
+ * thread writes: no byte of the announcement table for the first, none of `orphans`' line for the
+ * second.
+ *
+ * What is left is TRUE sharing, and inherent: a scan must read every announcement cell, this
+ * index's included, because a pin announced there is exactly what stops a node being freed.
+ * No layout hides that, and none should.
  */
 inline constexpr std::size_t kOverflowIndex = kHazardReaderSlots;
+
+/**
+ * @brief The spin lock serializing users of `%kOverflowIndex` — on a line of its own (#1027).
+ *
+ * Padded for the reason the claim table is, against a different reader. A thread that could not
+ * claim an index takes and drops this flag **once per operation** — a `test_and_set` at one end
+ * of its `%ticket_t` and a `clear` at the other, so two unconditional read-modify-writes per
+ * load, store and clear. Unpadded, it landed eight bytes past `registry_t::orphans`, on the same
+ * `kDomainAlign` line, and `orphans` is LOADED by threads that are
+ * inside the budget — `%scan` opens with one, and `%retire_and_flush` does too, so once per
+ * `%hazard_slot_t` destruction. An over-capacity thread therefore took a line exclusive that
+ * in-capacity threads read, which is the containment `%kOverflowIndex` promises leaking again.
+ *
+ * A wrapper type rather than an `alignas` on the member, so the alignment is `static_assert`-able
+ * the way `%cell_t`'s and `%claims_t`'s already are. Parking the flag in the overflow index's own
+ * `%cell_t` was the other option and is not better: `%scan` reads EVERY announcement cell, this
+ * index's included, so that line is not private to the overflow population either.
+ *
+ * Cost is one padded line in a `constinit` registry that is already `(kHazardReaderSlots + 1)`
+ * cells and lists wide, and none at all on a single-core profile, where @ref
+ * tr::graph::kCacheLineBytes is 0 and `kDomainAlign` collapses to `alignof(std::size_t)`.
+ */
+struct alignas(kDomainAlign) overflow_lock_t {
+    std::atomic_flag flag{}; /**< @brief Set while some thread is using `%kOverflowIndex`. */
+};
+
+static_assert(alignof(overflow_lock_t) == kDomainAlign,
+              "the overflow lock's alignas was silently dropped — it must not share the line "
+              "in-capacity threads read `orphans` on");
 
 /**
  * @brief How many nodes a participant parks before it scans.
@@ -295,15 +330,20 @@ struct final_sweep_t {
  * variable and is never destroyed, so a `thread_local` participant unwinding at process
  * exit can always reach it — the ordering hazard that a `std::vector` or a `std::mutex`
  * in here would create. Cost: `(kHazardReaderSlots + 1) * 128` bytes plus one padded claim
- * table, and **zero** for a target that does not bind this slot, since nothing then
- * references `registry()`.
+ * table and one padded lock, and **zero** for a target that does not bind this slot, since
+ * nothing then references `registry()`.
+ *
+ * The member ORDER is load-bearing at the tail. `%claims_t` ahead of `orphans` is padded to a
+ * whole number of lines and `%overflow_lock_t` behind it is line-aligned, so `orphans` — which
+ * every in-capacity thread loads on the paths `%overflow_lock_t` names — ends up alone on a
+ * line without needing a wrapper of its own.
  */
 struct registry_t {
     std::array<cell_t, kHazardReaderSlots + 1> cells{};  /**< @brief Announcements. */
     std::array<lists_t, kHazardReaderSlots + 1> lists{}; /**< @brief Parked + recycled nodes. */
     claims_t claims{};                     /**< @brief Which indices are owned (#899). */
     std::atomic<node_t*> orphans{nullptr}; /**< @brief Left by exited threads; adopted by scans. */
-    std::atomic_flag overflow_lock{};      /**< @brief Serializes users of `kOverflowIndex`. */
+    overflow_lock_t overflow_lock{};       /**< @brief Serializes `%kOverflowIndex` (#1027). */
 };
 
 /**
@@ -411,8 +451,8 @@ class ticket_t {
         idx_ = self().claim();
         if (idx_ != kNoIndex) return;
         registry_t& r = registry();
-        while (r.overflow_lock.test_and_set(std::memory_order_acquire)) {
-            r.overflow_lock.wait(true, std::memory_order_relaxed);
+        while (r.overflow_lock.flag.test_and_set(std::memory_order_acquire)) {
+            r.overflow_lock.flag.wait(true, std::memory_order_relaxed);
         }
         overflow_ = true;
         idx_ = kOverflowIndex;
@@ -505,8 +545,8 @@ inline ticket_t::~ticket_t() {
     if (!overflow_) return;
     registry_t& r = registry();
     if (r.lists[kOverflowIndex].retired != nullptr) scan(r, r.lists[kOverflowIndex]);
-    r.overflow_lock.clear(std::memory_order_release);
-    r.overflow_lock.notify_one();
+    r.overflow_lock.flag.clear(std::memory_order_release);
+    r.overflow_lock.flag.notify_one();
 }
 
 /** @brief Park a displaced node on this participant's list, scanning once the batch fills. */
@@ -672,7 +712,7 @@ inline final_sweep_t::~final_sweep_t() {
 
     std::array<bool, kHazardReaderSlots + 1> mine{};
     for (std::size_t i = 0; i < kHazardReaderSlots; ++i) mine[i] = try_claim(r, i);
-    mine[kOverflowIndex] = !r.overflow_lock.test_and_set(std::memory_order_acquire);
+    mine[kOverflowIndex] = !r.overflow_lock.flag.test_and_set(std::memory_order_acquire);
 
     // Adopt the orphans, then read the announcements behind `scan`'s `seq_cst` fence and for
     // `scan`'s reason: a live reader can be mid-`load()`, announcing a node that has just been
@@ -714,8 +754,8 @@ inline final_sweep_t::~final_sweep_t() {
         if (mine[i]) release_claim(r, i);
     }
     if (mine[kOverflowIndex]) {
-        r.overflow_lock.clear(std::memory_order_release);
-        r.overflow_lock.notify_one();
+        r.overflow_lock.flag.clear(std::memory_order_release);
+        r.overflow_lock.flag.notify_one();
     }
 }
 

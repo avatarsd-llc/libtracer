@@ -354,6 +354,15 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::b
     // staging would be gone, so a retry once the pressure clears would no longer find its
     // link and would fail NOT_FOUND instead of succeeding.
     if (pl != pending_links_.end()) pending_links_.erase(pl);
+    // LAST WIRING STEP (#1025): the link may now deliver. Everything an inbound frame needs
+    // is in place — the registry entry is published and `add_child` has installed the
+    // receiver and the down-notifier — so this is the first instant at which a decoded frame
+    // has somewhere to land. A transport that started its receive thread in its own
+    // constructor takes the base's no-op default; one that can defer it (the built-in `ws`
+    // DIAL, which the factory constructs with `defer_recv`) spawns it here, which is what
+    // stops a server's push-on-connect message being decoded into an empty sink and dropped.
+    // Unconditional by design: the owner should not have to know which kinds defer.
+    link->start_receiving();
     // A config-constructed socket is live once built: publish its liveness so an awaiter
     // on /net/<name> sees the bring-up. A DIAL socket is `UP`; a LISTEN socket that bound
     // is `LISTENING` (a bind failure returns an error from the factory above, so a

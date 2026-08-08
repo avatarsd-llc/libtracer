@@ -331,7 +331,7 @@ links report listen-socket reachability with the last two, never a per-accepted-
 value is a 1-byte `VALUE` on the vertex, so it is `await`-able and subscribable: `subscribe
 /net/<module>/<name>` streams every transition. The liveness *engine* that would drive these
 automatically is not implemented — the value is set by the caller, and a config-constructed socket
-reports `UP` or `LISTENING` at creation (`core/src/transport_vertex.cpp:361-363`).
+reports `UP` or `LISTENING` at creation (`core/src/transport_vertex.cpp:370-372`).
 
 **The accepted direction, and what is not realised.** RFC-0014 replaces the single global
 `/net:children[]` catalog with a **per-module creator endpoint** at `/net/<module>/conn`, whose own

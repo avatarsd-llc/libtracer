@@ -177,6 +177,42 @@ The swept axes (`bench_common.hpp`): payload **1..8192 B**, fan-out
 keep the comparison fair and the wall-clock bounded, each run targets a roughly
 constant number of *deliveries* (high fan-out does proportionally fewer publishes).
 
+The `inproc` fan-out sweep additionally runs the **mid arms 16/32/64/256/512**
+(`kFanoutsMid`, #844), appended after every other row. A publish costs about
+`fixed + F x marginal` (~118 ns + ~16 ns per delivery on this host), and two arms already
+determine a straight line — so extra arms pay for themselves only where the line KINKS.
+The dispatch path kinks at **`vertex_t::kInlineFanout` (8)**: fan-8 is the last width that
+snapshots into the raw stack buffer and fan-9 is the first that spills to the overflow
+vector. The coarse ladder samples that boundary from below and then jumps 16x past it, and
+a cost paid only on the overflow path decays as 1/F — so it is **largest at the first width
+past the boundary and already amortized toward noise by fan-128**.
+
+Measured, against a build with the per-publish overflow allocation deliberately
+reintroduced (#844's non-vacuity check — 15 interleaved pairs, alternating start, pinned;
+an A/A null in the same window spans 0.955x..1.041x on the mean with coin-flip pair counts):
+
+| fan | 1 | 8 | **16** | **32** | 64 | 128 | 256 | 512 | 1024 | 8192 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| mean | 0.980x | 1.003x | **1.101x** | **1.068x** | 1.011x | 0.974x | 0.992x | 1.002x | 0.968x | 0.956x |
+| 1/throughput | 0.966x | 1.010x | **1.077x** | **1.070x** | 1.010x | 0.993x | 0.989x | 1.020x | 0.970x | 0.970x |
+| pairs worse (mean) | 3/15 | 4/15 | **12/15** | **11/15** | 9/15 | 6/15 | 5/15 | 7/15 | 3/15 | 2/15 |
+
+Both instruments move together at 16 and 32 and a majority of pairs breach on their own;
+every arm the coarse ladder already had reads inside the A/A null with a coin-flip pair
+count. **Fan-16 and fan-32 are the arms that resolve this shape — fan-64 does not** (+1.1 %,
+9/15), which is worth recording because a single fan-64 point was the original proposal.
+The other three arms are included on a stated rationale rather than a measured one: they
+make the 8 -> 128 and 128 -> 1024 octaves resolvable at <= 2x steps, so a wide-band step can
+be *located* instead of only detected — #841's regression was a bytes-streamed defect in the
+band where `F * sizeof(edge_view_t)` outgrows L1, and the gate saw it as one number at
+fan-1024 with no neighbour to place it against.
+
+The arms are **charted, not gated**. An 8-10 % step is inside the gate's noise-calibrated
+thresholds (+15 % p50 / +12 % mean / -12 % deliveries) and the run above never produced
+disjoint [min..max] ranges, so a gated arm here would add a false-fail surface without
+adding detection. `bench_libtracer fan` runs the whole ladder (coarse + mid, ascending) in
+about 1.7 s, which is the mode to A/B anything that touches dispatch width.
+
 Module compositions are surfaced as distinct `mode`s — "different approaches to
 craft libtracer":
 

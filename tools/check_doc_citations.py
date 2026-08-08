@@ -77,6 +77,18 @@ SOURCE_SUFFIXES = (".hpp.in", ".hpp", ".cpp", ".cc", ".hh", ".h")
 
 # Directories that hold no citable source: build output, vendored deps, worktrees.
 NON_SOURCE_DIRS = ("_build", "build", "node_modules", ".claude", ".git", "target", "dist")
+# ...and the same, for any `build-<something>` sibling. The exact name "build" is not the
+# only one that appears: this repo's agent workflow mandates `build-agent` (`.gitignore`
+# covers `build-*/`), and a generated `build-agent/generated/include/libtracer/config.hpp`
+# makes `config.hpp` an AMBIGUOUS basename, which the gate reports as stale citations that
+# do not exist. Green-vs-red then depended on whether someone had configured a build in the
+# tree, which is exactly the kind of environment-sensitivity a gate must not have.
+NON_SOURCE_DIR_PREFIXES = ("build-",)
+
+
+def _is_non_source_part(part: str) -> bool:
+    """@brief True if a path component names a directory holding no citable source."""
+    return part in NON_SOURCE_DIRS or part.startswith(NON_SOURCE_DIR_PREFIXES)
 
 # (cited location, substring the target line must contain[, scope])
 #
@@ -124,8 +136,8 @@ ANCHORS = [
     ("core/src/transport_vertex.cpp:350", "return std::unexpected(status_t::BACKPRESSURE);",
      "if (!router_.add_child(qualified, *link))"),
     ("core/src/transport_vertex.cpp:356", "pending_links_.erase(pl)"),
-    ("core/src/transport_vertex.cpp:361", "if (constructed)"),
-    ("core/src/transport_vertex.cpp:363", "link_state_t::LISTENING : link_state_t::UP"),
+    ("core/src/transport_vertex.cpp:370", "if (constructed)"),
+    ("core/src/transport_vertex.cpp:372", "link_state_t::LISTENING : link_state_t::UP"),
     ("core/include/libtracer/transport_vertex.hpp:267", "result_t<void> register_module"),
     ("core/include/libtracer/transport_vertex.hpp:96", "enum class link_state_t"),
     ("core/src/graph.cpp:1719", "field.steps.size() != 1", 'step0.name == "subscribers"'),
@@ -423,7 +435,7 @@ ANCHORS = [
     ('core/include/libtracer/transport.hpp:65', 'class bus_link_t {'),
     ('core/include/libtracer/transport.hpp:256',
      'virtual void send(std::span<const std::span<const std::byte>> iov) {'),
-    ('core/include/libtracer/transport.hpp:354',
+    ('core/include/libtracer/transport.hpp:373',
      '[[nodiscard]] virtual bool delivers_ropes() const { return false; }',
      'rx_.set_rope([](void* c, view::rope_t f) { (*static_cast<F*>(c))(std::move(f)); }, &sink);'),
     # core/include/libtracer/transport_can.hpp
@@ -454,13 +466,13 @@ ANCHORS = [
     ('core/include/libtracer/transport_vertex.hpp:142',
      'std::uint32_t connect_timeout_ms = 0; /**< @brief DIAL connect-attempt deadline (RFC-0014 §4):'),
     # core/include/libtracer/transport_webtransport.hpp
-    ('core/include/libtracer/transport_webtransport.hpp:156',
+    ('core/include/libtracer/transport_webtransport.hpp:158',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }'),
     # core/include/libtracer/transport_ws.hpp
     ('core/include/libtracer/transport_ws.hpp:217',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'void send(std::span<const std::span<const std::byte>> iov) override;'),
-    ('core/include/libtracer/transport_ws.hpp:412',
+    ('core/include/libtracer/transport_ws.hpp:439',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'transport_ws_client& operator=(const transport_ws_client&) = delete;'),
     # core/include/libtracer/vertex.hpp
@@ -614,7 +626,7 @@ ANCHORS = [
      'listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);'),
     ('core/src/transport_ws.cpp:406', 'std::array<std::byte, 4096> chunk;',
      'void transport_ws_server::service_peer(session_t& s) {'),
-    ('core/src/transport_ws.cpp:771', 'std::array<std::byte, 4096> chunk;',
+    ('core/src/transport_ws.cpp:793', 'std::array<std::byte, 4096> chunk;',
      'void transport_ws_client::serve(int fd, std::vector<std::byte> pipelined) {'),
     # core/tests/registry_teardown_test.cpp
     ('core/tests/registry_teardown_test.cpp:289', 'void test_digest_paths_agree() {'),
@@ -670,7 +682,7 @@ def source_map(root: pathlib.Path = None) -> dict:
         if not path.is_file() or not path.name.endswith(SOURCE_SUFFIXES):
             continue
         rel = path.relative_to(root)
-        if any(d in rel.parts for d in NON_SOURCE_DIRS):
+        if any(_is_non_source_part(p) for p in rel.parts):
             continue
         out.setdefault(path.name, []).append(rel.as_posix())
     return {name: sorted(paths) for name, paths in out.items()}
@@ -1056,7 +1068,8 @@ def revision_line_maps(rev: str, root: pathlib.Path = None) -> tuple:
                              capture_output=True, text=True, check=True).stdout.split("\n")
     maps, notes = {}, []
     for rel in (c.strip() for c in changed if c.strip()):
-        if not rel.endswith(SOURCE_SUFFIXES) or any(d in pathlib.PurePosixPath(rel).parts for d in NON_SOURCE_DIRS):
+        if not rel.endswith(SOURCE_SUFFIXES) or any(
+                _is_non_source_part(p) for p in pathlib.PurePosixPath(rel).parts):
             continue
         old = subprocess.run(git + ["show", f"{rev}:{rel}"], capture_output=True, text=True)
         if old.returncode != 0:

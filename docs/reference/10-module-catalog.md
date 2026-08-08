@@ -289,9 +289,17 @@ bool tx_delivers_ropes (const transport_t *t);
    protocol close, or a fatal receive error. The forwarder uses it to
    evict the link's subscriber edges. */
 void tx_set_down_notifier (transport_t *t, void (*fn)(void *ctx), void *ctx);
+
+/* Begin delivering: the second half of a two-phase bring-up, and what
+   makes "set before frames flow" above achievable at all. A no-op for a
+   transport already receiving from the moment it was created; idempotent,
+   so an owner calls it unconditionally as the LAST wiring step. */
+void tx_start_receiving (transport_t *t);
 ```
 
 Two ingress flavours exist and they are one capability, not two tiers. A **borrowed** delivery hands up a span valid only for the duration of the callback. An **owning** delivery hands up a rope of refcounted links the receiver may pin, sub-range or forward beyond the callback; a contiguous frame is the trivial single-link case. A transport that honours the owning form declares the capability so the forwarder installs the matching sink. There is deliberately **no adapter** that wraps a borrowed span in a rope: its refcounts would lie about lifetime ([ADR-0042 — refcounted receiver seam](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md), generalized to ropes by [ADR-0053 — lazy rope-backed decode](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0053-lazy-rope-backed-decode-view-partial-path-routing.md)).
+
+**The sinks are only "set before frames flow" if something gives the owner that window.** A transport that connects and starts its receive loop in one step does not: a DIAL link's peer is provoked into pushing by our own connect, so its first frame can be decoded while the owner is still installing sinks, and an empty sink drops it with no counter moving. So the bring-up is two-phase — create (connect, handshake), wire (sinks, down-notifier, and the forwarder's registry entry), then *start receiving* — and the start step is a no-op for any transport that was already receiving, so the owner never has to know which kinds defer. The reference implementation's `ws` DIAL connection is the case that needs it ([#1025](https://github.com/avatarsd-llc/libtracer/issues/1025)).
 
 On egress, where a payload lives as a rope scattered across segments, the forwarder lowers it at the transport boundary: a scatter-gather-capable transport consumes the lowered spans directly, and a contiguous-only transport receives one frame the forwarder produced by flattening — one copy, at egress, not per subscriber. The reference implementation's C++ form of this seam is in [../modules/transport.md](../modules/transport.md).
 

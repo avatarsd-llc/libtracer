@@ -383,10 +383,21 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
      *             capacity — see transport_ws_server's constructor.
      * @param recv_stack Recv-thread stack size in bytes, 0 = platform default
      *             (`posix_endpoint_t::start`).
+     * @param defer_recv Two-phase bring-up (#1025): with `true` the handshake still runs
+     *             HERE (so ok() answers on return) but the recv thread is NOT spawned —
+     *             nothing can be decoded, let alone delivered, until @ref start_receiving
+     *             is called. That is the only ordering in which
+     *             `%transport_t::set_receiver`'s "must be set before frames flow" is
+     *             satisfiable on a DIAL socket: a server that pushes its state the instant
+     *             the handshake completes has its first message in flight before this
+     *             constructor returns, and the default (`false`, the historical shape)
+     *             decodes it on the recv thread into whatever sink is installed by then —
+     *             possibly none, in which case it is dropped with no counter moving.
      */
     transport_ws_client(const std::string& host, std::uint16_t port,
                         mem::mem_backend_t* backend = &mem::heap_backend(),
-                        std::size_t max_frame = 0, std::size_t recv_stack = 0);
+                        std::size_t max_frame = 0, std::size_t recv_stack = 0,
+                        bool defer_recv = false);
 
     /** @brief Stop the recv thread and close the socket. */
     ~transport_ws_client() override;
@@ -404,6 +415,22 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
      * @param frame A complete TLV's bytes.
      */
     void send(std::span<const std::byte> frame) override;
+
+    /**
+     * @brief Spawn the recv thread a `defer_recv` construction held back (#1025).
+     *
+     * The second phase of the two-phase bring-up: the socket is connected and handshaken,
+     * the bytes the server pipelined behind its `101` are held, and NOTHING has been
+     * decoded yet — so a sink installed before this call cannot have missed a frame. From
+     * here the client behaves exactly as a one-phase one: the thread's first act is to
+     * drain what the handshake carried over.
+     *
+     * Idempotent and safe on a one-phase client (the thread is already running → no-op) and
+     * on a failed handshake (`ok()` false → no-op, nothing to serve). A `defer_recv` client
+     * that is never started never receives, never answers a PING and never reports the link
+     * down; it is simply an open socket until it is destroyed.
+     */
+    void start_receiving() override;
 
     /** @brief True — WS reassembles fragmented messages into ropes (ADR-0053 §5):
      *         each message crosses the seam as a `rope_t`, one owning link per WS
@@ -468,6 +495,18 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
      */
     mem::block_array_t<std::byte> tx_buf_{mem::heap_source()};
     bool connected_ = false;
+    /**
+     * @brief The bytes the server pipelined behind its `101`, parked between the handshake
+     *        and @ref start_receiving (moved into the recv thread there, empty after).
+     *
+     * Written by the constructor, read once by the thread-spawning `start_receiving`; the
+     * recv thread never touches this member (it owns its own copy).
+     */
+    std::vector<std::byte> pipelined_;
+    std::size_t recv_stack_ = 0; /**< @brief The stack hint, held for `start_receiving`. */
+    /** @brief One-shot latch making @ref start_receiving idempotent — `start()` may be
+     *         called at most once per endpoint. */
+    std::atomic<bool> recv_started_{false};
 };
 
 }  // namespace tr::net

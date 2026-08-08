@@ -14,7 +14,40 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Added
+
+- **`net::transport_t::start_receiving()` — the second half of a two-phase link bring-up
+  (#1025).** A virtual whose default is a no-op, so every existing transport and every
+  embedder's is unaffected and an owner may call it unconditionally. It exists because
+  `set_receiver` / `set_rope_receiver` / `set_down_notifier` all document "must be set before
+  frames flow", and for a DIAL transport that spawns its receive thread inside its own
+  constructor that contract is unsatisfiable from the outside: the thread is already draining
+  the socket while the owner is still installing its sinks. Outside the tests,
+  `transport_ws_client` is the only override under `core/include` + `core/src` +
+  `integrations/` + `bindings/` today (`grep -rn start_receiving`); it takes effect only when
+  the client is constructed with the new trailing
+  `defer_recv` flag, so a direct `transport_ws_client(host, port)` behaves exactly as before.
+
 ### Fixed
+
+- **A SPEC-created `ws` DIAL connection no longer drops a message the server pushes on
+  connect (#1025).** `transport_ws_client`'s constructor dials, runs the opening handshake
+  AND spawns the recv thread before it returns, so nothing the owner does can run first.
+  `transport_vertex_t::make_connection` only wires the receiver several steps later
+  (register the identity vertex, insert the connection, then `fwd_router_t::add_child`) —
+  and for a DIAL link the peer's push is triggered by our own connect, so its first message
+  is in flight through that whole window. Decoded before the sink exists, it hit
+  `receiver_slot_t`'s empty-slot path and was dropped silently: no `dropped_rx()`, no
+  `malformed_rx()`, a healthy connection. This is the door #1020's frame goes out of once
+  the handshake stops eating it. The built-in `ws` factory now constructs its DIAL client
+  with `defer_recv`, and creation arms the link with `start_receiving()` as its last wiring
+  step, so the ordering the base class documents is the ordering that actually happens. A
+  directly-constructed `transport_ws_client` keeps the historical one-phase shape unless it
+  opts in. Guarded from both ends: `core/tests/ws_transport_test.cpp` has a peer write the
+  `101`, a PING and a COMPLETE pushed message in ONE `send` and asserts the deferred client
+  answers nothing at all until `start_receiving()`, then delivers the message; and
+  `core/tests/transport_vertex_test.cpp` pins that creation arms the link only once its
+  receiver is already installed.
 
 - **A `net::fwd_router_t` sink can be installed or cleared while frames flow without
   handing the new callback the old context (#914).** The router's five observer/terminus
@@ -73,6 +106,23 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `core/tests/ws_transport_test.cpp` writes the `101`, a PING, and the first fragment of a
   BINARY message in ONE `send`, and asserts both the PONG and the assembled message; the
   100 ms pause that masked this in `core/tests/ws_rx_bound_test.cpp` is removed.
+
+- **The hazard domain's overflow spin lock no longer shares a cache line with `orphans`
+  (#1027).** `detail_hp::registry_t` ended with two unpadded members, so `overflow_lock` landed
+  eight bytes past `orphans` — one `kDomainAlign` line for both (offsets +8384 and +8392,
+  measured on x86-64 with `kCacheLineBytes = 64` and `kHazardReaderSlots = 64`). A thread that
+  could not claim an index takes and drops that flag once per load, store and clear — a
+  `test_and_set` at one end of its `ticket_t` and a `clear` at the other, two unconditional
+  read-modify-writes; `orphans` is LOADED by threads inside the budget — `detail_hp::scan` opens
+  with one and `retire_and_flush` does too, so once per `~hazard_slot_t`. An over-capacity
+  thread therefore took exclusive a line that in-capacity threads read: the same class as #899
+  against a different pair of fields, and the residue that PR named rather than claimed away.
+  The flag moves into `detail_hp::overflow_lock_t`, a `kDomainAlign`-aligned wrapper whose
+  alignment is `static_assert`ed the way `cell_t`'s and `claims_t`'s are; `orphans` ends up
+  alone on its line as a consequence, since the padded claim table precedes it. Cost is 64
+  bytes of `.bss` in a registry that was already 8,448 (now 8,512), and none on a single-core
+  profile, where `kCacheLineBytes` is 0. No public signature changed and no behaviour changed —
+  this is storage, and `sp_atomic_slot_t`, the default binding, emits none of it.
 
 - **An over-capacity `hazard_slot_t` thread no longer CAS-sweeps every reader's announcement
   line on every operation (#899).** `detail_hp::cell_t` packed the claim flag into the same
@@ -386,6 +436,30 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   at write time instead of a grant that differs from what they wrote.
 
 ### Added
+
+- **A SPEC-created `webtransport` dialer can name its extended CONNECT `:path` (#1023).**
+  `webtransport_transport_t`'s DIAL constructor has always taken the CONNECT `:path`, but
+  the catalog factory hard-coded `"/"` and `parse_wt_config` read four keys — `cert`, `key`,
+  `ca`, `insecure` — none of which was it. So an in-band
+  `write /net:children[] += SPEC{kind=webtransport, …}` could reach only a server that
+  serves its session at the root; anything else had to abandon the creation SPEC for the
+  direct constructor plus `provide_link`, and the difference was not reported — the dial
+  simply went to the wrong resource and creation answered `NOT_FOUND`. A fifth
+  kind-PRIVATE key, `path` (`NAME`, DIAL, default `/`, empty normalised to `/`), now carries
+  it, parsed by `parse_wt_config` alongside the others so nothing lands on the shared
+  `conn_settings_t` (the ADR-0043 §5 leanness ruling). It is the one key `webtransport` does
+  not share with `quic`, which has no HTTP layer to carry a resource; it does **not** collide
+  with the `can` kind's unrelated `path` (kind-private namespaces are disjoint), and
+  `docs/modules/connection-config.md` now says so on both rows. Same *shape* of gap as #918,
+  one parameter over. **New public API:** `webtransport_transport_t::session_path()` returns
+  the session's CONNECT `:path` — on LISTEN, the path the ACCEPTED CONNECT named (empty until
+  one is accepted); on DIAL, the path this endpoint requests. The listener still serves every
+  path (it validates `:method`/`:protocol` only), so this is an observation, not an admission
+  decision — and it is what makes the fix testable over the real wire rather than by reading
+  a config value back out of the dialer. `core/tests/webtransport_test.cpp` drives three
+  legs through the real `:children[]` SPEC path against a directly-held listener:
+  `path = "/tracer"` arrives as `/tracer`, an absent key still dials `/`, and an empty path
+  normalises to `/`.
 
 - **The `can_link_t` seam owns its admission rule, so the two ports can no longer disagree
   about which frames are real (#931).** `twai_link_t` filtered remote-request and 11-bit

@@ -26,9 +26,10 @@
  *     which is the RAM argument that chose hazard over epoch;
  *   - **exhaustion** — with every hazard index claimed, readers and writers still agree,
  *     which is the fallback ADR-0069 §3 promised (by a different mechanism; see the header);
- *   - **containment of an over-capacity thread** (#899) — claiming an index writes no byte of
- *     the announcement table, and a thread that could not claim one stops re-probing every
- *     index on every operation; both are what makes "costs the overflow threads and nothing
+ *   - **containment of an over-capacity thread** (#899, #1027) — claiming an index writes no
+ *     byte of the announcement table, a thread that could not claim one stops re-probing every
+ *     index on every operation, and taking the overflow spin lock writes no byte of the line
+ *     `orphans` is read on; the three are what makes "costs the overflow threads and nothing
  *     else" a property rather than an aspiration;
  *   - **a declined publish is reported** — the whole point of `store` returning `bool`, driven
  *     here by replacing this binary's nothrow `operator new` rather than by inspection;
@@ -300,6 +301,62 @@ void overflow_thread_stops_sweeping_the_claim_table() {
 }
 
 /**
+ * @brief The overflow spin lock must not write the line `orphans` lives on (#1027).
+ *
+ * The sibling of the claim-table finding, against a different reader. A thread that could not
+ * claim an index takes and drops this flag once per operation — two read-modify-writes, one at
+ * each end of its ticket — while threads inside the budget LOAD `orphans`, in `scan` and in
+ * `retire_and_flush` on every slot destruction. Unpadded, the flag sat eight bytes past
+ * `orphans`, so an over-capacity thread took a line in-capacity threads read exclusive.
+ *
+ * Asserted as bytes rather than as addresses, because the address arithmetic alone would not
+ * say the lock ever WRITES anything: the line is snapshotted, the flag is taken and left held,
+ * and the snapshot is compared. The "the lock was free" check ahead of it is what stops the
+ * comparison passing vacuously — a `test_and_set` on an already-set flag writes the same value
+ * back and would dirty nothing even with the two on one line. The line-disjointness check that
+ * follows is the layout half, and the header's `alignas` assertion carries it into every build.
+ *
+ * Single-threaded by construction: it reads the registry's bytes directly.
+ */
+void the_overflow_lock_does_not_dirty_the_orphan_line() {
+    namespace hp = tr::graph::detail_hp;
+    std::printf("hazard_slot_t — taking the overflow lock leaves the orphan line alone:\n");
+    if constexpr (tr::graph::kCacheLineBytes == 0) {
+        std::printf("    single-core profile: no cache lines to share, nothing to assert\n");
+    } else {
+        constexpr std::size_t kLine = tr::graph::kCacheLineBytes;
+        auto& reg = hp::registry();
+        const auto* base = reinterpret_cast<const unsigned char*>(&reg);
+        check(reinterpret_cast<std::uintptr_t>(base) % kLine == 0,
+              "the registry itself starts on a line, so its offsets are line offsets");
+
+        // The whole line `orphans` sits on, clipped to the registry so nothing past it is read.
+        const auto orphans_off =
+            static_cast<std::size_t>(reinterpret_cast<const unsigned char*>(&reg.orphans) - base);
+        const std::size_t lo = orphans_off - orphans_off % kLine;
+        const std::size_t hi = std::min(lo + kLine, sizeof(hp::registry_t));
+
+        std::vector<unsigned char> before(hi - lo);
+        std::vector<unsigned char> after(hi - lo);
+        std::memcpy(before.data(), base + lo, before.size());
+        const bool was_free = !reg.overflow_lock.flag.test_and_set(std::memory_order_acquire);
+        std::memcpy(after.data(), base + lo, after.size());
+        if (was_free) reg.overflow_lock.flag.clear(std::memory_order_release);
+
+        const auto flag_off = static_cast<std::size_t>(
+            reinterpret_cast<const unsigned char*>(&reg.overflow_lock.flag) - base);
+        std::printf("    orphans at +%zu (line %zu), overflow lock flag at +%zu (line %zu)\n",
+                    orphans_off, orphans_off / kLine, flag_off, flag_off / kLine);
+
+        check(was_free, "the lock was free, so this really did write it (never a no-op compare)");
+        check(std::memcmp(before.data(), after.data(), before.size()) == 0,
+              "taking the overflow lock modified no byte of the line orphans is read on");
+        check(flag_off / kLine != orphans_off / kLine,
+              "and the flag the lock writes is not on the line orphans is read on");
+    }
+}
+
+/**
  * @brief The exit sweep must not free the lists of a participant that is still live (#898).
  *
  * The sweep is a static-destruction object, so the honest instrument is an **injected
@@ -503,6 +560,7 @@ int main() {
     check(g_live.load() == 0, "the overflow run freed every rope too");
     overflow_thread_stops_sweeping_the_claim_table();
     check(g_live.load() == 0, "the over-capacity probe freed every rope too");
+    the_overflow_lock_does_not_dirty_the_orphan_line();
 
     sweep_spares_a_live_participant();
     sweep_races_a_live_writer(200);
