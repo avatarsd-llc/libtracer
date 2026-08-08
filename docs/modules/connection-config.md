@@ -180,7 +180,7 @@ one with a resource to name:
 | `key` | `NAME` utf-8 | LISTEN | — (required) | PEM private-key path matching `cert`. |
 | `ca` | `NAME` utf-8 | DIAL | empty ⇒ the system trust store | PEM CA-bundle to verify the peer against. |
 | `insecure` | `VALUE` u8 (flag) | DIAL | `0` | **DEV ONLY.** Skips server-certificate validation. |
-| `path` | `NAME` utf-8 | DIAL | `/` | The extended CONNECT `:path` — which resource the WebTransport session is opened on (`new WebTransport("https://host:port/here")`). Empty is normalised to `/`. **This is an HTTP URL path, not a libtracer graph path**, and it is *not* the `can` kind's `path` key (an advertised group path): kind-private namespaces do not collide, but the two spellings are identical, so read the section heading before copying a row. The LISTEN side of this kind serves every path — it validates `:method`/`:protocol` only — so the key matters when dialing someone else's server (#1023). |
+| `path` | `NAME` utf-8 | DIAL | `/` | The extended CONNECT `:path` — which resource the WebTransport session is opened on (`new WebTransport("https://host:port/here")`). Empty is normalised to `/`. **This is an HTTP URL path, not a libtracer graph path**, and it is *not* the `can` kind's `path` key (an advertised group path): kind-private namespaces do not collide, but the two spellings are identical, so read the section heading before copying a row. The LISTEN side of this kind serves every path — it validates `:method`/`:protocol` only — so the key matters when dialing someone else's server (#1023). The accepted shape is **origin-form**: absent, empty (⇒ `/`), or `/`-prefixed. A non-empty value that does not begin with `/` answers `TYPE_MISMATCH` at creation, before any socket or TLS work, because an `https` request's `:path` is `/`-prefixed in origin-form (RFC 9114 §4.3.1 / RFC 9113 §8.3.1) — nothing beyond that leading `/` is judged (#1039). |
 
 <!-- config-keys:end -->
 
@@ -188,7 +188,10 @@ one with a resource to name:
 
 A dial to the wrong resource is not a distinguishable failure: the server refuses
 the CONNECT, the session never establishes, and creation answers `TRANSPORT_DOWN` — the
-same status a certificate rejection gives. Before [#1023] there was no key at all
+same status a certificate rejection gives. That holds for a *well-formed* path
+naming a resource the server does not serve; the one case taken out of it by
+[#1039] is a path that is not origin-form at all, which is refused at creation
+with `TYPE_MISMATCH` rather than dialled. Before [#1023] there was no key at all
 and the factory hard-coded `/`, so a SPEC could reach only a root-served session
 and any other server needed the direct constructor plus `provide_link`. On the
 LISTEN side, `webtransport_transport_t::session_path()` reports the `:path` the
@@ -293,3 +296,4 @@ tools/check_config_keys.py --list     # the derived inventory, one key per line
 [#902]: https://github.com/avatarsd-llc/libtracer/issues/902
 [#918]: https://github.com/avatarsd-llc/libtracer/issues/918
 [#1023]: https://github.com/avatarsd-llc/libtracer/issues/1023
+[#1039]: https://github.com/avatarsd-llc/libtracer/issues/1039

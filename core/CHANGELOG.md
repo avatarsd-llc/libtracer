@@ -50,6 +50,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **The `webtransport` factory refuses a DIAL `path` that is not origin-form (#1039).** A
+  config whose `path` key is non-empty and does not begin with `/` — `path = "tracer"` — used
+  to construct a dialer and emit that string as the extended CONNECT `:path`; it now answers
+  `graph::status_t::TYPE_MISMATCH` from `net::webtransport_transport_factory`'s DIAL branch,
+  beside the existing empty-`addr` / zero-`port` preconditions, so no socket or TLS work
+  happens. An `https` request's `:path` is non-empty and, in origin-form, `/`-prefixed (RFC
+  9114 §4.3.1 / RFC 9113 §8.3.1), so such a value could only ever draw a `400` from a
+  conformant server — which this side reports as a failed session, indistinguishable from a
+  rejected certificate. Absent and empty still normalise to `/`, a `/`-prefixed value is
+  passed through unchanged, and nothing beyond the leading `/` is judged (no percent-encoding,
+  control-character or length rules). The `webtransport_transport_t` constructors, the CONNECT
+  field-section encoder and the LISTEN-side accept arm are untouched — a direct
+  `webtransport_transport_t(host, port, "tracer", …)` still dials as before, and this
+  library's listener still serves every resource it is asked for.
+
 - **`view::rope_t::try_reserve` keeps only its no-op arm in the inlinable body; the spilling
   arm moved to an out-of-line private member (#1065).** Signature, return values and
   observable effects are unchanged — the spilling arm is the previous body verbatim, and

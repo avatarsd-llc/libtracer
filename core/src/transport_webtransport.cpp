@@ -803,7 +803,16 @@ transport_vertex_t::transport_factory_t webtransport_transport_factory(
         const wt_private_cfg_t priv = parse_wt_config(raw_config);
         std::unique_ptr<webtransport_transport_t> t;
         if (s.role == conn_role_t::DIAL) {
-            if (s.addr.empty() || s.port == 0)
+            // #1039: an `https` request's `:path` is non-empty and, in origin-form,
+            // begins with "/" (RFC 9114 §4.3.1 / RFC 9113 §8.3.1), so a value like
+            // "tracer" cannot be right. It is refused HERE, with the other
+            // creation-time preconditions, because the alternative is a 400 from a
+            // conformant server that this side reports as a failed session —
+            // indistinguishable from a rejected certificate or an unreachable peer.
+            // Empty still means "unset" and normalises to "/" in the constructor;
+            // nothing beyond the leading "/" is judged.
+            const bool bad_path = !priv.path.empty() && !priv.path.starts_with('/');
+            if (s.addr.empty() || s.port == 0 || bad_path)
                 return std::unexpected(graph::status_t::TYPE_MISMATCH);
             // Secure by default (#918): absent both keys this verifies the server
             // certificate against the system trust store. `insecure = 1` is the
