@@ -453,8 +453,8 @@ ANCHORS = [
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'transport_tcp_server& operator=(const transport_tcp_server&) = delete;'),
     # core/include/libtracer/transport_udp.hpp
-    ('core/include/libtracer/transport_udp.hpp:55', 'static constexpr std::size_t kMaxDatagram = 65536;'),
-    ('core/include/libtracer/transport_udp.hpp:91',
+    ('core/include/libtracer/transport_udp.hpp:66', 'static constexpr std::size_t kMaxDatagram = 65536;'),
+    ('core/include/libtracer/transport_udp.hpp:111',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }'),
     # core/include/libtracer/transport_vertex.hpp
     ('core/include/libtracer/transport_vertex.hpp:77',
@@ -600,7 +600,7 @@ ANCHORS = [
     ('core/src/transport_tcp.cpp:457', 'std::array<std::byte, 4096> chunk;',
      'void transport_tcp_server::service_peer(session_t& s) {'),
     # core/src/transport_udp.cpp
-    ('core/src/transport_udp.cpp:138',
+    ('core/src/transport_udp.cpp:132',
      'const std::size_t rx_cap = std::min(kMaxDatagram, backend_->max_segment_size());'),
     # core/src/transport_vertex.cpp
     ('core/src/transport_vertex.cpp:53',
@@ -633,11 +633,11 @@ ANCHORS = [
     # core/tests/tlv_arena_test.cpp
     ('core/tests/tlv_arena_test.cpp:293', 'const std::vector<std::byte> deep_bytes = encode(nested(100));'),
     # integrations/esp-idf/libtracer/httpd_ws_link.cpp
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:69',
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:70',
      '* reply, and (the deep path) the whole /unit batch-apply transaction. The device'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:76', 'constexpr std::size_t kHttpdTaskStack = 12288;'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:318', 'if (chunk.empty()) return true;'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:324',
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:77', 'constexpr std::size_t kHttpdTaskStack = 12288;'),
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:295', 'if (chunk.empty()) return true;'),
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:301',
      'if (len_ != 0) std::memcpy(grown.get(), bytes_.get(), len_);'),
     # integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp
     ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:48',

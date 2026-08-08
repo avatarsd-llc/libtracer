@@ -12,6 +12,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`tr::net::link_counters_t`** (`libtracer_esp/link_stats.hpp`) plus
+  **`esp_ws_client_link_t::stats()`** and **`httpd_ws_link_t::enumerate_peer_stats()`** —
+  per-link passive traffic counters (#942): rx/tx messages and payload bytes, rx/tx drops,
+  and `esp_timer` stamps for the last delivered message and for when the connection came
+  up. Counts MESSAGES, not WebSocket fragments, so a client's `tx_frames` is directly
+  comparable with the server's `rx_frames` across a link. The client's snapshot also
+  carries `reconnects` (completed handshakes — the only externally-observable signal that
+  a transient drop happened, since `drop()` deliberately suppresses `notify_down`) and
+  `connect_ms` (the last handshake's duration; an upper bound on ~2 round-trips sampled
+  only at re-dial, never an RTT). Server-side counters are per SESSION and are handed out
+  with the slot's claim generation, so a consumer differencing successive snapshots can
+  tell "same connection, N more frames" from "a different peer landed on that slot".
+
+  `stats().c.rx_drops` is not a second tally: it is read from the existing
+  `dropped_rx()` below, so the client link keeps exactly one inbound-drop truth.
+
+  Scope is deliberately narrow — `transport_t` grows no `counters()` virtual and
+  `fwd_router_t` no per-child accounting, because the only consumers are hosts that
+  enumerate the two concrete link types they constructed themselves. A polymorphic hook
+  would put a counter bump on core's hot `deliver_remote` path and buy nothing.
+
 - **`httpd_ws_link_t::tx_strands()` / `tx_slots_busy()` / `tx_slot_capacity()`** — TX work
   slot observability (#944). `tx_strands()` counts slots reclaimed from a work item the
   control socket accepted and then silently binned; `tx_slots_busy()` is the pool's live

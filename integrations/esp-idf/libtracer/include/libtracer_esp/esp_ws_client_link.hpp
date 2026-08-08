@@ -100,6 +100,16 @@
  *     frame may be shared with the concurrent server link — so the caller's (const,
  *     possibly shared) bytes must not be transiently mutated. RX is zero-copy; the
  *     one TX copy is the irreducible cost of client masking on shared bytes.
+ *   - NO CALLBACK INTO THE EMBEDDER EVER RUNS UNDER `write_m_` or `st_m_`. Deliveries
+ *     are made with both released; the counter bumps and @ref stats only touch this
+ *     object's own fields. That is the invariant a host relies on when it holds its
+ *     own lock across a `stats()` call — it keeps the lock order acyclic, so keep
+ *     any future work under either mutex strictly local.
+ *   - The counters live under their OWN mutex (`st_m_`), not the write serializer.
+ *     `write_m_` is held across a transport write for up to `kWriteTimeoutMs`, so
+ *     `stats()` under it would block for seconds on a stalled peer and recv delivery
+ *     would queue behind slow sends. `st_m_` is only ever held for a bump or a copy,
+ *     which is what makes `stats()` safe to call from a periodic task.
  *
  * NO per-frame heap: the rx/tx buffers are allocated ONCE at construction (bounded,
  * tunable); steady-state send/recv touch neither the global heap nor a per-frame
@@ -120,6 +130,7 @@
 
 #include "esp_transport.h"
 #include "libtracer/transport.hpp"
+#include "libtracer_esp/link_stats.hpp"
 
 namespace tr::net {
 
@@ -222,6 +233,42 @@ class esp_ws_client_link_t : public transport_t {
     }
 
     /**
+     * @brief One coherent snapshot of this link's passive counters plus the two
+     *        dial facts only the link can know.
+     *
+     * `reconnects` counts COMPLETED handshakes since construction (the first dial
+     * included), which is the only externally-observable signal that a transient
+     * drop happened at all: @ref drop deliberately does NOT fire `notify_down`, so
+     * the routing plane keeps the peer's subscriber edges across a blip and nothing
+     * upstream ever sees the transition. That suppression is load-bearing and stays;
+     * the counter is the observational replacement for it.
+     *
+     * `connect_ms` is the duration of the LAST successful `esp_transport_connect`,
+     * i.e. the TCP connect plus the RFC 6455 opening handshake. It is an UPPER BOUND
+     * on roughly two round-trips, sampled only at (re)dial — it can be days stale and
+     * it is NOT an RTT measurement. A host surfacing it should label it "handshake".
+     *
+     * `c.rx_drops` is NOT a second tally: it is read straight from @ref dropped_rx, so
+     * this link has exactly one inbound-drop truth and both spellings always agree.
+     */
+    struct stats_t {
+        link_counters_t c;            /**< @brief Traffic counters (see link_stats.hpp). */
+        std::uint32_t reconnects = 0; /**< @brief Completed handshakes since construction. */
+        std::uint32_t connect_ms = 0; /**< @brief Last handshake duration, ms (0 = never). */
+        bool up = false;              /**< @brief @ref ok at the instant of the snapshot. */
+    };
+
+    /**
+     * @brief Copy out @ref stats_t under a brief hold of the counter mutex.
+     *
+     * Callable from ANY task. It takes `st_m_` only for the struct copy — no syscall, no
+     * allocation, and it NEVER calls back into the embedder, which is what lets a host
+     * hold its own lock across this call without introducing a cycle (a downstream
+     * publisher holds its own dial mutex across this call).
+     */
+    [[nodiscard]] stats_t stats() const;
+
+    /**
      * @brief Set (or clear, with an empty string) extra HTTP header lines appended to the
      *        opening-handshake request. Each line must be `Name: value\r\n`-terminated
      *        (`esp_transport_ws` emits them verbatim). Applied on the NEXT dial.
@@ -276,6 +323,25 @@ class esp_ws_client_link_t : public transport_t {
      *         `sleep_for` (#952). Never taken with `write_m_` held. */
     std::mutex backoff_m_;
     std::condition_variable backoff_cv_; /**< @brief Signalled by the destructor. */
+    /**
+     * @brief Guards the counter block below, and NOTHING else.
+     *
+     * Deliberately not `write_m_`: that one is held across `esp_transport_write` for
+     * up to `kWriteTimeoutMs` (4 s) on a stalled socket, so counters riding it would
+     * make @ref stats block for seconds on a peer with a zero window — and a host
+     * that holds its own mutex across `stats()` would drag that lock into the wait
+     * too. This mutex is only ever taken for a bump or the snapshot copy, so it is
+     * uncontended and syscall-free from any task. Nesting is always
+     * `write_m_ -> st_m_`, never the reverse. `mutable` for the const snapshot.
+     */
+    mutable std::mutex st_m_;
+    /** @brief Passive traffic counters — st_m_. `rx_drops` is filled from `dropped_rx_`
+     *         at snapshot time and is never bumped here. See @ref stats. */
+    link_counters_t st_;
+    /** @brief Completed handshakes since construction — st_m_. */
+    std::uint32_t reconnects_ = 0;
+    /** @brief Last successful dial's handshake duration in ms — st_m_. */
+    std::uint32_t connect_ms_ = 0;
     std::atomic<bool> connected_{false};
     std::atomic<bool> stop_{false};
     /** @brief Receive-path message drops — see @ref dropped_rx. Written only by the recv

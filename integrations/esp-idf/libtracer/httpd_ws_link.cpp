@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -461,6 +462,15 @@ struct httpd_ws_link_t::session_t {
      */
     bool dead = false;
     peer_endpoint_t endpoint; /**< @brief The directed facade `peer_link` returns. */
+    /**
+     * @brief Passive traffic counters for the session currently holding this slot
+     *        (peers_m_, like everything else cross-thread here) — see link_stats.hpp.
+     *
+     * Zeroed on the CLAIM edge, not on reclaim: a reclaimed slot keeps its last
+     * session's numbers until something takes it over, and enumeration skips closed
+     * slots anyway, so there is nothing to hide and one less write on the close path.
+     */
+    link_counters_t st;
 };
 
 /**
@@ -1234,6 +1244,11 @@ esp_err_t httpd_ws_link_t::on_handshake(httpd_req_t* req) {
         // departed peer fails its check instead of resolving onto this one (#954).
         ++slot->gen;
         slot->open = true;
+        // The claim edge: this connection starts now, with fresh counters. `gen` was
+        // just bumped above, which is what lets a consumer tell a recycled slot from a
+        // continuing session.
+        slot->st = {};
+        slot->st.connected_at_us = esp_timer_get_time();
     }
     // Reclaim the slot when httpd tears this session down (the free_ctx_fn fires on the
     // httpd task at close — the departure signal).
@@ -1332,6 +1347,12 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
             slot->fd = fd;
             ++slot->gen;  // the other claim edge — see on_handshake (#954)
             slot->open = true;
+            // On IDF v6 the opening GET never reaches this handler, so THIS lazy
+            // first-frame claim is the establish edge — the only honest place to stamp
+            // "connected at" and to start this connection's counters (see on_handshake,
+            // which stamps the same way on any IDF that does call the GET handler).
+            slot->st = {};
+            slot->st.connected_at_us = esp_timer_get_time();
             newly_claimed = true;
         }
         peer = slot->name;
@@ -1349,7 +1370,8 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
     // Reassembly — asm_buf is httpd-task-only, so no lock. The SPA sends one whole TLV
     // per unfragmented BINARY frame (the fast path); a fragmented message chains here.
     if (frame.type == HTTPD_WS_TYPE_BINARY && frame.final && slot->asm_buf.empty()) {
-        deliver(peer, body);  // unfragmented: deliver borrowed, no extra copy
+        note_rx_message(slot, body.size());  // BEFORE the delivery — see note_rx_message
+        deliver(peer, body);                 // unfragmented: deliver borrowed, no extra copy
         return ESP_OK;
     }
     if (frame.type == HTTPD_WS_TYPE_CONTINUE && slot->asm_buf.empty())
@@ -1358,9 +1380,11 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
         slot->asm_buf.clear();  // a BINARY mid-assembly discards the stale partial
     if (slot->asm_buf.size() + body.size() > kMaxFrameBytes) {
         slot->asm_buf.clear();
+        note_rx_drop(slot);
         return ESP_OK;  // reassembly would exceed the cap — drop the message
     }
     if (!slot->asm_buf.append(body)) {
+        note_rx_drop(slot);
         ESP_LOGW(kTag, "reassembly alloc failed - message dropped");
         return ESP_OK;  // nothrow growth failed: drop the message, keep the peer
     }
@@ -1370,6 +1394,7 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
         // other member is freed, so the old clear()-after-deliver was a use-after-free on
         // the fragmented path. Nothing owned by the link is touched past this point.
         const asm_buf_t message = slot->asm_buf.take();
+        note_rx_message(slot, message.bytes().size());  // last touch of `slot` — see below
         deliver(peer, message.bytes());
     }
     return ESP_OK;
@@ -1465,6 +1490,18 @@ void httpd_ws_link_t::notify_departed(std::string_view peer) {
         notify_peer_down(peer);
     else
         notify_down();
+}
+
+void httpd_ws_link_t::note_rx_message(session_t* slot, std::size_t bytes) {
+    const std::lock_guard lock(peers_m_);
+    ++slot->st.rx_frames;
+    slot->st.rx_bytes += static_cast<std::uint32_t>(bytes);
+    slot->st.last_rx_us = esp_timer_get_time();
+}
+
+void httpd_ws_link_t::note_rx_drop(session_t* slot) {
+    const std::lock_guard lock(peers_m_);
+    ++slot->st.rx_drops;
 }
 
 void httpd_ws_link_t::deliver(std::string_view peer, std::span<const std::byte> frame) {
@@ -1637,6 +1674,20 @@ void httpd_ws_link_t::condemn(int fd) {
         ESP_LOGD(kTag, "trigger_close not queued fd=%d (the shutdown carries the close)", fd);
 }
 
+void httpd_ws_link_t::note_tx_skip(const session_ref_t& to) {
+    const std::lock_guard lock(peers_m_);
+    if (to.slot == nullptr) return;
+    // The same identity test @ref live_fd makes, for the same reason. A skip fires
+    // precisely when the peer just departed, which is exactly when lwIP recycles its
+    // descriptor number and this slot is reclaimed for someone else — so charging by fd,
+    // or by slot pointer alone, hands a brand-new healthy session the departed one's lost
+    // frame, and a drop that appears is supposed to be a signal (#954). Dereferencing
+    // needs no further proof: slots are recycled in place and never freed while the link
+    // lives, and reaching here through the gate is what establishes that it does.
+    if (to.slot->gen != to.gen) return;  // the session departed; nobody left to charge
+    ++to.slot->st.tx_drops;
+}
+
 void httpd_ws_link_t::note_tx_result(const session_ref_t& to, bool sent, std::size_t bytes) {
     bool close_now = false;
     std::string peer;
@@ -1653,9 +1704,15 @@ void httpd_ws_link_t::note_tx_result(const session_ref_t& to, bool sent, std::si
         if (!slot->open) return;          // departed between the snapshot and now
         if (slot->dead) return;           // already condemned — no further evidence is wanted
         if (sent) {
+            ++slot->st.tx_frames;
+            slot->st.tx_bytes += static_cast<std::uint32_t>(bytes);
             slot->tx_drops = 0;  // a failure streak is CONSECUTIVE — any success resets it
             return;
         }
+        // Two counts, two questions. The cumulative one below answers "did anything get
+        // lost toward this peer?"; the streak byte answers "is this peer broken RIGHT
+        // NOW?" and its #835 3-strike semantics are untouched by the addition.
+        ++slot->st.tx_drops;
         if (slot->tx_drops < kMaxConsecutiveTxDrops) ++slot->tx_drops;
         close_now = slot->tx_drops >= kMaxConsecutiveTxDrops;
         peer = slot->name;
@@ -1891,10 +1948,20 @@ void httpd_ws_link_t::tx_work(void* arg) {
     const session_ref_t to = work->to;
     const std::size_t len = work->len;
     release_tx_work(work);  // recycle the pool slot, or free the heap-fallback shell
-    // A skipped send is not evidence about anyone: no result. Every skip qualifies — the
+    // A skipped send is not evidence for the STREAK: no result. Every skip qualifies — the
     // peer departed, a different session now holds its slot, or it was condemned and the
-    // verdict is already in.
-    if (!live || gate == nullptr) return;
+    // verdict is already in. It is still a frame the peer never got, so the CUMULATIVE
+    // tally takes it (note_tx_skip): the streak asks "is this session broken?", the tally
+    // asks "how much has this session lost?", and a skip answers only the second.
+    if (!live) {
+        if (gate != nullptr) {
+            const std::lock_guard lock(gate->m);
+            if (httpd_ws_link_t* const owner = gate->link; owner != nullptr)
+                owner->note_tx_skip(to);
+        }
+        return;
+    }
+    if (gate == nullptr) return;
     // Resolve the link through the gate — the same contract on_session_closed uses. Held
     // for the whole call, so a concurrent destructor either waits here or finds the gate
     // already shut and this outcome has nobody to inform.
@@ -1982,6 +2049,17 @@ void httpd_ws_link_t::enumerate_peers(const peer_visitor_t& visit) const {
     const std::lock_guard lock(peers_m_);
     for (const auto& s : slots_)
         if (s->open && !s->name.empty()) visit(s->name);
+}
+
+void httpd_ws_link_t::enumerate_peer_stats(const peer_stats_visitor_t& visit) const {
+    const std::lock_guard lock(peers_m_);
+    for (std::size_t i = 0; i < slots_.size(); ++i) {
+        const auto& s = slots_[i];
+        if (!s->open) continue;  // a reclaimed slot keeps stale numbers — never report it
+        // The counters are COPIED into the visitor's argument; only `name` borrows, and
+        // only for the duration of the call (same contract as enumerate_peers).
+        visit(peer_stats_t{s->name, i, s->gen, s->st});
+    }
 }
 
 transport_t* httpd_ws_link_t::peer_link(std::string_view peer) {
