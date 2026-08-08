@@ -50,6 +50,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`httpd_ws_link_t` closes a session whose frame was announced on the wire and then cut
+  off, instead of dropping it as a recoverable frame** (#951). `esp_http_server` writes one
+  WebSocket frame as TWO calls to the session's send function — the header, then the
+  payload — and reports either failure as the same `ESP_FAIL`, so the link could not tell a
+  frame that never started from one truncated after its header had gone out. It treated
+  both as the #481 whole-frame loss: drop the frame, keep the socket. For the second that
+  is unsound. The peer holds a header promising bytes that never arrive and consumes every
+  later frame as this one's missing payload, so delivery stops on a socket both ends still
+  consider open, and the very next small frame that succeeds resets the failure streak, so
+  no teardown ever follows. The send override now brackets each frame and judges the FRAME:
+  a failed write with bytes of that frame already on the wire is a stream desynchronisation
+  and closes the session at once (the short-write response), while a failure with nothing
+  written stays the droppable case it was. Behaviour change for consumers: such a peer now
+  gets a close — and therefore an `onclose` and a reconnect — where it previously went
+  silent. The desync log line names its cause (`short write` / `frame truncated`) and the
+  bytes on each side, and no longer shares wording with the benign drop.
+
 - **Both WS links now detect a peer that vanishes without a FIN, and the client link
   reports its departure** (#957). Two halves of one gap.
   (1) **Detection, both links.** Nothing in either link noticed a peer that stopped

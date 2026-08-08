@@ -167,6 +167,12 @@ class server_t {
      *
      * The only lever #835 needs from the socket layer: a peer whose window is full
      * (TIMEOUT), a peer whose window drains mid-frame (SHORT), and a healthy one (FULL).
+     *
+     * One entry is one WRITE, and one frame is TWO writes — header then payload, as
+     * `httpd_ws_send_frame_async` does it (an empty frame is header-only, so one). A
+     * script of `{FULL, TIMEOUT}` therefore stages a frame ANNOUNCED on the wire and then
+     * abandoned, which is a different fault from `{TIMEOUT}` — a frame that never started
+     * (#951). Counting writes per frame is what makes the two expressible at all.
      */
     void set_send_script(int fd, std::vector<send_result_t> script);
     /** @brief How many socket writes @p fd has taken, whatever they returned. */

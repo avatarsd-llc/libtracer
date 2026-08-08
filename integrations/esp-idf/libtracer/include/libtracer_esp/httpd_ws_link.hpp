@@ -540,20 +540,33 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * turns a short write into an error AND closes the session at once — the one case
      * where "drop the frame, keep the socket" is unsound, and one a short bound makes
      * more likely rather than less.
+     *
+     * It judges the FRAME, not just the buffer (#951). `esp_http_server` writes one frame
+     * as two calls to this function — the header, then the payload — so a write that puts
+     * nothing on the wire loses a whole frame only when it is the frame's first. A failure
+     * on the second leaves the peer holding a header promising bytes that never arrive,
+     * which is the same unparseable stream a short write produces and is judged the same
+     * way. The frame boundary comes from @ref tx_work, which brackets the send.
      */
     static int send_guarded(httpd_handle_t handle, int fd, const char* buf, std::size_t len,
                             int flags);
 
     /**
-     * @brief Handle a detected short write on @p slot's socket: log it and close that
-     *        session immediately, bypassing the streak (takes @ref peers_m_).
+     * @brief Handle a detected stream desynchronisation on @p slot's socket: log it and
+     *        close that session immediately, bypassing the streak (takes @ref peers_m_).
      *
      * Takes the SLOT, not the fd. @ref send_guarded is inside the write when it calls
      * this, on the httpd task, so the server's own session table is authoritative about
      * who owns that descriptor at that instant and hands the slot over directly — no
      * generation check is needed here, and no fd-keyed rescan either (#954).
+     *
+     * @param cause    Which shape it was, for the log: a short write, or a frame truncated
+     *                 after its header reached the wire (#951). One verdict, two causes.
+     * @param on_wire  Bytes of the frame the socket accepted before the failure.
+     * @param lost     Bytes of it that never left, and never will.
      */
-    void note_send_desync(session_t* slot, std::size_t written, std::size_t len);
+    void note_send_desync(session_t* slot, const char* cause, std::size_t on_wire,
+                          std::size_t lost);
 
     /**
      * @brief Allocate the handler-admission gate and point it at this link; false when

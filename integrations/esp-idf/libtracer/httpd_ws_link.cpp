@@ -461,6 +461,48 @@ struct httpd_ws_link_t::session_t {
      * on the httpd task, before that task can accept anything onto the number.
      */
     bool dead = false;
+    /**
+     * @brief A frame write is OPEN on this session: bytes landed since @ref open_tx_frame
+     *        belong to a frame the peer has been promised in full (httpd task only).
+     *
+     * `esp_http_server` writes ONE WebSocket frame as TWO calls to the session's send
+     * function — the header, then the payload (httpd_ws.c) — so the override cannot tell,
+     * from one buffer, whether a failure loses a whole frame or truncates one already
+     * announced on the wire. That distinction is the difference between the two policies
+     * this link runs (#951), and nothing IDF hands the override carries it. So the frame
+     * boundary is marked here, by the one caller that knows it: @ref
+     * httpd_ws_link_t::tx_work brackets the async send.
+     *
+     * Not under `peers_m_`, unlike every other cross-thread member of this slot, and not
+     * atomic: all four touch points — the two brackets and the override's accumulate and
+     * verdict — run on the httpd task, and `httpd_ws_send_frame_async` is synchronous, so
+     * the window cannot interleave with another frame's. Same confinement `asm_buf` has
+     * on the receive side.
+     */
+    bool tx_frame_open = false;
+    /**
+     * @brief Bytes of that frame the socket has already accepted (httpd task only).
+     *
+     * Zero with @ref tx_frame_open set means the frame's FIRST write is the one being
+     * judged, which is exactly the case #481's "drop the frame, keep the socket" was
+     * written for: nothing of it reached the peer.
+     */
+    std::size_t tx_frame_bytes = 0;
+    /** @brief Open a frame-write window — the bracket @ref httpd_ws_link_t::tx_work opens. */
+    void open_tx_frame() noexcept {
+        tx_frame_bytes = 0;
+        tx_frame_open = true;
+    }
+    /**
+     * @brief Close it, and report how many bytes of that frame reached the wire.
+     *
+     * Non-zero on a FAILED send is the whole finding: the peer is holding a header whose
+     * payload will never arrive.
+     */
+    [[nodiscard]] std::size_t close_tx_frame() noexcept {
+        tx_frame_open = false;
+        return tx_frame_bytes;
+    }
     peer_endpoint_t endpoint; /**< @brief The directed facade `peer_link` returns. */
     /**
      * @brief Passive traffic counters for the session currently holding this slot
@@ -1465,6 +1507,14 @@ std::string httpd_ws_link_t::reclaim_slot(session_t* slot) {
         // httpd task — before that task can accept anything onto it — so the clear
         // strictly precedes any reuse.
         slot->dead = false;
+        // The frame bracket goes with them (#951). No send can be in flight here — both
+        // halves of the bracket are in ONE tx_work call with a synchronous send between
+        // them, on this same task — so this is hygiene for a recycled slot rather than a
+        // live hazard: a slot handed to a new peer carries no TX state of its
+        // predecessor's, the rule the dead mark above is here for having broken twice. Left
+        // standing, an open bracket would let the FIRST failed write to the next peer read
+        // as a truncation of a frame that peer was never sent.
+        (void)slot->close_tx_frame();
     }
     // Departure seam (RFC-0009 §D extended to peer departure): a browser tab that hung up
     // leaves its subscriber edges behind, so the routing plane's eviction hook
@@ -1817,31 +1867,57 @@ int httpd_ws_link_t::send_guarded(httpd_handle_t handle, int fd, const char* buf
     // override (that is what an override is), and the default is private to the
     // component. So the write happens here and the return value is inspected here.
     if (buf == nullptr) return HTTPD_SOCK_ERR_INVALID;
+    // The session this socket belongs to, read BEFORE the write: it carries the frame
+    // bracket tx_work opened, which is the only way this override can tell which write of
+    // a frame it is on. Resolved the same way every other latched callback resolves its
+    // state — through the server's own session table, on the httpd task, so the answer is
+    // authoritative for that instant and needs no generation check (#954). It costs one
+    // session-table lookup per write instead of per detected fault, which is not a new
+    // order of cost on this path: `httpd_socket_send` performs the IDENTICAL lookup (a
+    // scan of at most `max_open_sockets` descriptors) immediately before every call it
+    // makes to this function, and the bounded `::send` below dominates both.
+    auto* const slot = static_cast<session_t*>(httpd_sess_get_ctx(handle, fd));
     const int ret = static_cast<int>(::send(fd, buf, len, flags));
-    if (ret < 0) {
-        const int err = errno;
-        return err == EAGAIN || err == EWOULDBLOCK || err == EINTR ? HTTPD_SOCK_ERR_TIMEOUT
-                                                                   : HTTPD_SOCK_ERR_FAIL;
-    }
-    if (static_cast<std::size_t>(ret) >= len) return ret;
+    // A failed write that is NOT the frame's first one leaves the peer holding a header
+    // promising bytes that never arrive (#951). esp_http_server writes one frame as two
+    // calls to this function — header, then payload — and reports either failure as one
+    // `ESP_FAIL`, so the caller cannot tell "the frame never started" from "the frame was
+    // announced and then truncated". Only the second is a lost frame the peer can retry;
+    // the first is the same unparseable stream a short write produces, and the peer will
+    // consume every later frame as this one's missing payload.
+    const bool truncated =
+        ret < 0 && slot != nullptr && slot->tx_frame_open && slot->tx_frame_bytes != 0;
+    if (ret >= 0 && slot != nullptr && slot->tx_frame_open)
+        slot->tx_frame_bytes += static_cast<std::size_t>(ret);
     // A SHORT write: the bound expired with SOME of this buffer already on the wire.
     // esp_http_server checks only `ret < 0`, so returning the partial count here would
     // report a half-written WebSocket frame as a delivered one and leave the peer parsing
     // the remainder of the frame as the next frame's header — silent stream corruption,
     // for as long as the socket lives.
-    //
-    // Resolve the link the same way every other latched callback does: through the
-    // session's slot and its gate, both of which deliberately outlive the link.
-    auto* const slot = static_cast<session_t*>(httpd_sess_get_ctx(handle, fd));
+    const bool short_write = ret >= 0 && static_cast<std::size_t>(ret) < len;
+    if (!truncated && !short_write) {
+        if (ret >= 0) return ret;
+        const int err = errno;
+        return err == EAGAIN || err == EWOULDBLOCK || err == EINTR ? HTTPD_SOCK_ERR_TIMEOUT
+                                                                   : HTTPD_SOCK_ERR_FAIL;
+    }
+    // One verdict for both shapes, because they are one fault: the peer's byte stream no
+    // longer parses. Resolve the link the same way every other latched callback does —
+    // through the session's slot and its gate, both of which deliberately outlive the
+    // link — and never while the write is in flight.
     if (slot != nullptr && slot->gate != nullptr) {
         const std::lock_guard lock(slot->gate->m);
         if (httpd_ws_link_t* const owner = slot->gate->link; owner != nullptr)
-            owner->note_send_desync(slot, static_cast<std::size_t>(ret), len);
+            owner->note_send_desync(
+                slot, truncated ? "frame truncated" : "short write",
+                slot->tx_frame_open ? slot->tx_frame_bytes : static_cast<std::size_t>(ret),
+                truncated ? len : len - static_cast<std::size_t>(ret));
     }
     return HTTPD_SOCK_ERR_FAIL;  // and report the failure IDF would otherwise have missed
 }
 
-void httpd_ws_link_t::note_send_desync(session_t* slot, std::size_t written, std::size_t len) {
+void httpd_ws_link_t::note_send_desync(session_t* slot, const char* cause, std::size_t on_wire,
+                                       std::size_t lost) {
     std::string peer;
     int fd = -1;
     {
@@ -1857,12 +1933,16 @@ void httpd_ws_link_t::note_send_desync(session_t* slot, std::size_t written, std
         fd = slot->fd;
     }
     // Named from the slot, not from the socket — see note_tx_result.
-    ESP_LOGE(kTag, "short write peer=%s fd=%d (%u of %u bytes) - closing: stream desynchronised",
-             peer.c_str(), fd, (unsigned)written, (unsigned)len);
+    ESP_LOGE(kTag,
+             "%s peer=%s fd=%d (%u B of the frame on the wire, %u B lost) - closing: stream "
+             "desynchronised",
+             cause, peer.c_str(), fd, (unsigned)on_wire, (unsigned)lost);
     // NOT the streak: a different fault class. The streak means "this peer keeps missing
     // whole frames"; this means "the byte stream is no longer parseable", and one
     // occurrence is already proof. Dropping the frame and keeping the socket — the #481
-    // response — is only sound when ZERO bytes of it reached the wire.
+    // response — is only sound when ZERO bytes of it reached the wire, which is the
+    // precondition @ref send_guarded now ESTABLISHES per frame rather than assumes (#951):
+    // a header that went out with its payload lost fails it just as a short write does.
     //
     // This close is ONE-SHOT by construction (the mark above makes a second call return
     // early), so it may not be an operation that can silently fail to happen — which the
@@ -1919,8 +1999,23 @@ void httpd_ws_link_t::tx_work(void* arg) {
         f.type = HTTPD_WS_TYPE_BINARY;
         f.payload = reinterpret_cast<std::uint8_t*>(work->payload);
         f.len = work->len;
+        // Bracket the send: everything the override lands between these two calls belongs
+        // to THIS frame, which is what lets it tell a frame that never started from one it
+        // announced and could not finish (#951). Only the caller knows that boundary —
+        // esp_http_server splits the frame into a header write and a payload write and
+        // tells the override nothing about the split. The slot is the one live_fd just
+        // vouched for, so no further identity test is owed here, and both calls run on the
+        // httpd task with the synchronous send between them.
+        session_t* const slot = work->to.slot;
+        if (slot != nullptr) slot->open_tx_frame();
         err = httpd_ws_send_frame_async(work->handle, fd, &f);
-        if (err != ESP_OK) {
+        const std::size_t on_wire = slot != nullptr ? slot->close_tx_frame() : 0;
+        // `on_wire != 0` is the OTHER failure, and it is not this one's: the frame was
+        // announced and then cut off, the stream no longer parses, and the session has
+        // already been condemned inside the write (note_send_desync logs it at ERROR with
+        // the byte counts). It must not also be reported below — the two used to produce
+        // the same line, which is why a desynchronised session looked benign in the field.
+        if (err != ESP_OK && on_wire == 0) {
             // DROP the frame; do NOT close the session on THIS failure alone (#481). One
             // failed async send means the peer missed ONE frame it can retry — not that
             // the socket is dead. The load-bearing case: a large reply (e.g. the
@@ -1938,6 +2033,11 @@ void httpd_ws_link_t::tx_work(void* arg) {
             // a broken session — is finally the one that gets torn down. It used to be
             // the refused ENQUEUES that closed sessions, and those name the shared control
             // queue rather than any peer (see note_enqueue_drop).
+            //
+            // #951 supersedes nothing here either, and narrows the GUARD instead: "the peer
+            // missed one frame it can retry" is only true while none of it reached the
+            // wire, and that is now a measured precondition (`on_wire == 0`) rather than a
+            // property assumed of every ESP_FAIL.
             ESP_LOGW(kTag, "ws send failed (%s) fd=%d len=%u - frame dropped", esp_err_to_name(err),
                      fd, (unsigned)work->len);
         }
