@@ -17,6 +17,9 @@
 
 namespace fake_httpd {
 
+// #1082 probe: a deliberate compile break in a source only the host suites compile.
+static_assert(false, "#1082 probe — this file must fail to compile");
+
 namespace {
 
 /** @brief The frame the current thread is delivering, consumed by httpd_ws_recv_frame's
