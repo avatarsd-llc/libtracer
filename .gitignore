@@ -97,3 +97,13 @@ bench/vendor
 integrations/esp-idf/examples/*/sdkconfig
 integrations/esp-idf/examples/*/sdkconfig.old
 integrations/esp-idf/examples/*/dependencies.lock
+
+# PlatformIO packaging fixture (tests/packaging/pio_esp32_can). The fixture IS
+# platformio.ini + src/main.cpp; everything else there is produced by the
+# `pio-esp32-can` job — the packed package under test, PlatformIO's own generated
+# IDF project files, and the sdkconfig it renders per target.
+tests/packaging/pio_esp32_can/libtracer-pkg.tar.gz
+tests/packaging/pio_esp32_can/.pio/
+tests/packaging/pio_esp32_can/CMakeLists.txt
+tests/packaging/pio_esp32_can/src/CMakeLists.txt
+tests/packaging/pio_esp32_can/sdkconfig.*

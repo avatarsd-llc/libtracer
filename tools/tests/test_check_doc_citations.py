@@ -24,6 +24,8 @@ handling for that spelling is taken back out.
 Run with ``python3 -m unittest discover -s tools/tests`` (no third-party deps).
 """
 import os
+import pathlib
+import shutil
 import sys
 import tempfile
 import unittest
@@ -508,6 +510,45 @@ class CitationIndexTest(unittest.TestCase):
     def test_two_pages_citing_one_line_are_both_named(self):
         index = cdc.citation_index([("a.md", "`graph.cpp:12`"), ("b.md", "`core/src/graph.cpp:12`")], FILEMAP)
         self.assertEqual(index[f"{GRAPH}:12"], ["a.md", "b.md"])
+class NonSourceDirTest(unittest.TestCase):
+    """Directories that hold a SECOND copy of the tree must not make basenames ambiguous.
+
+    The gate resolves a bare `graph.cpp:42` by basename, so any directory carrying a copy
+    of the sources turns every such citation into an "ambiguous" error. Which copies exist
+    depends on what the developer happened to build or unpack, so without these exclusions
+    the gate is green or red by accident. `.pio` is PlatformIO's per-project cache: a
+    `pio run` in the packaging fixture unpacks the library under test into
+    `.pio/libdeps/<env>/libtracer/` (#965).
+    """
+
+    def _tree_with(self, *rel_paths):
+        """@brief Build a temp tree containing each path, and return its source map."""
+        root = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        for rel in rel_paths:
+            p = root / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("// x\n")
+        return cdc.source_map(root)
+
+    def test_a_pio_libdeps_copy_does_not_make_a_basename_ambiguous(self):
+        m = self._tree_with(
+            "core/src/graph.cpp",
+            "tests/packaging/pio_esp32_can/.pio/libdeps/esp32c6/libtracer/core/src/graph.cpp",
+        )
+        self.assertEqual(m["graph.cpp"], ["core/src/graph.cpp"])
+
+    def test_a_build_agent_copy_does_not_make_a_basename_ambiguous(self):
+        m = self._tree_with(
+            "core/include/libtracer/config.hpp",
+            "build-agent/generated/include/libtracer/config.hpp",
+        )
+        self.assertEqual(m["config.hpp"], ["core/include/libtracer/config.hpp"])
+
+    def test_a_genuine_second_copy_IS_still_ambiguous(self):
+        """The exclusions must not be so broad that real ambiguity stops being reported."""
+        m = self._tree_with("examples/a/app_main.cpp", "examples/b/app_main.cpp")
+        self.assertEqual(len(m["app_main.cpp"]), 2)
 
 
 if __name__ == "__main__":
