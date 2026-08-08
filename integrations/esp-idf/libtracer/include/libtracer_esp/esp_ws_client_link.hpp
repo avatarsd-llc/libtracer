@@ -76,6 +76,25 @@
  *     with the `connected_` store. So a handle is only ever read behind an ACQUIRE that
  *     observed `true` — a check ahead of that gate races the rebuild, whatever lock it
  *     holds.
+ *   - The DEPARTURE SEAM is reported (#957). The recv loop's "not connected" arm is
+ *     downstream of all three sites that clear `connected_` — `drop()` (peer CLOSE, a
+ *     poll error, a read error), `send()`'s failed/short-write arm, and the destructor —
+ *     so it fires `notify_down()` once per connection that was up, with no transport lock
+ *     held, before it re-dials. A LOCAL teardown reports nothing (core's `stop_` rule,
+ *     and the third of those three sites). It used to fire from nowhere, on
+ *     the premise that a blip's subscriber edges should survive the reconnect; that
+ *     premise only holds for a blip the far side also survives, and the link cannot tell
+ *     one from a peer that rebooted and forgot every subscription and label it issued.
+ *     So a reconnect is a NEW session to the routing plane: the router evicts this
+ *     child's edges and label bindings and both sides re-establish, instead of this node
+ *     producing into a session that no longer exists.
+ *   - The link also has to NOTICE a peer that vanishes without a FIN (#957). Nothing in
+ *     the loop does: `esp_transport_poll_read` reports "no data" forever, so `ok()` would
+ *     answer true for a dead peer indefinitely on an idle link. Every dialed socket
+ *     therefore gets `SO_KEEPALIVE` plus the idle/interval/count tunables ESP-IDF
+ *     documents for `esp_http_server`'s own keepalive — the same three the server sibling
+ *     applies to accepted sockets — so a vanished peer surfaces as an ordinary poll/read
+ *     error within tens of seconds and takes the drop path above.
  *   - `send()` COPIES the frame into a reusable tx scratch before writing, because
  *     `esp_transport_write` masks IN-PLACE (RFC 6455 client rule) and a delivered
  *     frame may be shared with the concurrent server link — so the caller's (const,
@@ -188,7 +207,15 @@ class esp_ws_client_link_t : public transport_t {
     /** @brief Point-to-point link — no bus/peer-enumeration facet. */
     [[nodiscard]] bus_link_t* bus() override { return nullptr; }
 
-    /** @brief True once the opening handshake has completed (and while connected). */
+    /**
+     * @brief True once the opening handshake has completed (and while connected).
+     *
+     * A POLL, not a notification — and bounded in staleness only by what the stack can
+     * detect: a peer that vanishes without a FIN is noticed by the keepalive probes the
+     * dial arms (#957), so this answers `true` for a dead peer for at most that window.
+     * A layer that needs the transition rather than the state takes the departure seam
+     * (`transport_t::set_down_notifier`), which this link now fires on every death path.
+     */
     [[nodiscard]] bool ok() const noexcept { return connected_.load(std::memory_order_acquire); }
 
     /**
@@ -257,10 +284,13 @@ class esp_ws_client_link_t : public transport_t {
    private:
     /** @brief The recv thread body: (re)connect, then poll+read+deliver until stopped. */
     void recv_loop();
-    /** @brief One dial attempt: (lazily) build the tcp+ws transports, connect, mark up.
+    /** @brief One dial attempt: (lazily) build the tcp+ws transports, connect, apply the
+     *         per-socket policy (Nagle off, bounded write, keepalive probes), mark up.
      *         @return true on a completed handshake. */
     bool connect_once();
-    /** @brief Close the connection and mark down; the next recv_loop turn re-dials. */
+    /** @brief Close the connection and mark down; the next recv_loop turn reports the
+     *         departure and re-dials. The report is NOT made here — this runs under the
+     *         syscall serializer, and the notifier re-enters the routing plane. */
     void drop();
 
     const std::string host_;
