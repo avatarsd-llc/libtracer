@@ -313,9 +313,13 @@ out of the raw config TLV it already receives, and in a block on this page. Not 
   is simply inert there.
 - **`peer_named` is off by default**, so a SPEC-created `tcp`/`ws` listener is a
   broadcast link and one request over it draws one reply *per peer*.
-- **There is no public builder for this grammar yet.** Every emitter hand-writes
-  the pairs ([#902]), so a key's spelling is only as good as the string literal
-  next to it.
+- **The builder types the universal keys, not the kind-private ones.**
+  `conn_spec_t`'s named setters ([#902]) make `kind`, `addr`, `port`, `role` and the
+  four u32s unmisspellable, and they replaced the sixteen hand-written emitters that
+  used to exist. A kind's PRIVATE keys still go through the generic
+  `text`/`u8`/`u16`/`u32`/`flag` pairs — the builder cannot know them without the
+  coupling ADR-0043 §5 forbids — so for those, a key's spelling is still only as good
+  as the string literal next to it.
 
 ## How this page is kept true
 
