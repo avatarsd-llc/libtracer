@@ -332,6 +332,31 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     libtracer_test_warnings(esp_ws_client_recv_test)
     add_test(NAME esp_ws_client_recv COMMAND esp_ws_client_recv_test)
 
+    # #952 — the WS CLIENT link's BOUNDED-BLOCKING discipline, on the same TU and the
+    # same fake: what a send may cost with the send serializer held, what a teardown may
+    # cost, and who may still be inside the transport when the handles are destroyed.
+    # The receive-path suite above scripts the fake's inbound frames; this one scripts
+    # its BLOCKING (a dial that hangs, a dial that fails, a write that parks), because
+    # every defect here is a wait nobody bounded. The use-after-free observable is the
+    # fake's handle LIVENESS: its parked write re-checks it on the way out, which is what
+    # makes "the handles were destroyed under a sender" a measurement rather than a code
+    # reading. Still no socket anywhere (#947).
+    add_executable(esp_ws_client_teardown_test
+        "${LIBTRACER_ESP_DIR}/tests/host/esp_ws_client_teardown_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_esp_transport.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/esp_ws_client_link.cpp")
+    target_include_directories(esp_ws_client_teardown_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(esp_ws_client_teardown_test PRIVATE libtracer)
+    libtracer_test_warnings(esp_ws_client_teardown_test)
+    add_test(NAME esp_ws_client_teardown COMMAND esp_ws_client_teardown_test)
+    # Two cases spend a real wait on purpose (a 600 ms held write, a 2.5 s hung dial).
+    # Generous against a loaded runner, and still far under CTest's default.
+    set_tests_properties(esp_ws_client_teardown PROPERTIES TIMEOUT 60)
+
     # #962 — the TWAI link's TX BACKPRESSURE window, on the same construction: the chip
     # TU (integrations/esp-idf/libtracer/twai_link.cpp) compiled against a host fake of
     # esp_driver_twai's node API plus the FreeRTOS counting semaphore and queue it is
