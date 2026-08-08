@@ -25,7 +25,7 @@ code changes. Architecture and rationale: **[ADR-0023](../../docs/adr/0023-ros2-
 | message type name | `:schema` POINT (introspection only) |
 | `rmw_qos_profile_t` | **no single carrier** — see [QoS](#qos-there-is-no-settings-to-map-onto) below |
 | publisher | a writer handle on the topic path |
-| subscription | `subscribe(path)` — an edge appended to the *producer* vertex; delivery is a push, and the retained history is that **vertex's** STREAM ring (owner-sized and with no wire surface at all — `core/include/libtracer/graph.hpp:772-780`), never a per-subscriber queue |
+| subscription | `subscribe(path)` — an edge appended to the *producer* vertex; delivery is a push, and the retained history is that **vertex's** STREAM ring (owner-sized and with no wire surface at all — `core/include/libtracer/graph.hpp:764-772`), never a per-subscriber queue |
 | service / client | a `…/_request` + `…/_response` path pair |
 
 ## RMW entry points → graph operations (the implementation checklist)
@@ -74,7 +74,7 @@ What `qos.c` maps onto instead — **three carriers, not one**:
 | `rmw_qos_profile_t` field | libtracer carrier | where |
 | --- | --- | --- |
 | `reliability`, `durability` (libtracer packs a third bit-field, `priority`, that ROS has no profile member for) | the **subscription's** packed 16-bit `delivery_policy`, set at `rmw_create_subscription` time and carried in the `SUBSCRIBER`'s existing `SETTINGS` child as `NAME "delivery_policy" VALUE u16` | `core/include/libtracer/vertex.hpp:227`, decoded at `core/src/graph.cpp:1477`, RFC-0022 §3.A |
-| `history` + `depth` | **owner-side** ring depth — the topic's owner calls `graph_t::set_history_depth`; a remote subscriber cannot set it | `core/include/libtracer/graph.hpp:780` |
+| `history` + `depth` | **owner-side** ring depth — the topic's owner calls `graph_t::set_history_depth`; a remote subscriber cannot set it | `core/include/libtracer/graph.hpp:772` |
 | `deadline`, `liveliness`, `lifespan` | **no mapping at all** | — |
 
 This is *closer* to DDS than the retracted shape, not further: DDS puts reliability and
