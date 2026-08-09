@@ -19,8 +19,8 @@
  *      the notifier walks every subscribed vertex under the graph's own locks and is
  *      bounded by nothing this link owns. `bus_link_t::notify_peer_down` documents the
  *      precondition outright ("with none of its internal locks held"), and both core
- *      reference servers (`transport_ws_server::teardown_slot`,
- *      `transport_tcp_server::teardown_slot`) honour it. This link did not.
+ *      reference servers honour it — one implementation since #871,
+ *      `slot_server_t::teardown_slot`, inherited by both. This link did not.
  *
  *   2. the destructor still JOINS a notification in flight. That is the lifetime half:
  *      the notifier dereferences the link and hands a name to the routing plane, whose

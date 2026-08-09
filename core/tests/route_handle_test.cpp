@@ -440,17 +440,21 @@ void cross_link_sweep() {
 
 /**
  * @brief Model `fwd_router_t::on_advertise`'s FORWARDING leg, with @p mid run in the window
- *        between retaining the egress route and binding the ingress swap.
+ *        between taking the out-label and binding the ingress swap.
  *
- * The three calls and their order are the router's, not the test's: mint this hop's own
- * out-label on the downstream link, retain the stripped egress route so a NACK can
- * re-advertise, then bind the inbound label to that swap. @p mid is where a reconnect on the
- * DOWNSTREAM link lands — the #827 window. Passing a no-op models the uncontended path.
+ * The calls and their order are the router's, not the test's: sample the downstream epoch,
+ * take this hop's out-label on the downstream link (one per (link, route) since #913, which
+ * retains the stripped egress route in the same critical section), bind the inbound label to
+ * that swap, and — since #833 — hand the take back when the bind refuses. @p mid is where a
+ * reconnect on the DOWNSTREAM link lands: the #827 window. A no-op models the uncontended path.
  *
- * @return `{out_label, bound}` — the label minted downstream, and whether the swap was bound.
+ * It used to spell the take as `alloc_label` + `record_egress`; #913 replaced that pair in the
+ * router, and this model followed it so the window under test stays the shipped one.
+ *
+ * @return `{out_label, bound}` — the label taken downstream, and whether the swap was bound.
  */
 struct advertise_leg_t {
-    std::uint16_t out_label = 0; /**< @brief The downstream label this hop minted (0 ⇒ none). */
+    std::uint16_t out_label = 0; /**< @brief The downstream label this hop took (0 ⇒ none). */
     bool bound = false;          /**< @brief Whether the ingress swap was actually recorded. */
 };
 
@@ -459,13 +463,14 @@ advertise_leg_t advertise_forwarding_leg(route_handle_t& h, std::string_view in_
                                          const std::vector<std::byte>& route,
                                          const std::function<void()>& mid) {
     const std::uint32_t epoch = h.link_epoch(down);
-    const std::uint16_t out = h.alloc_label(down);
+    const std::uint16_t out = h.ensure_egress(down, route).first;
     if (out == 0) return {};
-    if (!h.record_egress(down, out, route)) return {out, false};
-    mid();  // a (re)connect on `down` lands HERE — after the mint, before the bind
+    mid();  // a (re)connect on `down` lands HERE — after the take, before the bind
     handle_binding_t fwd = forward_binding(down);
     fwd.out_label = out;
-    return {out, h.bind_ingress_forward(in_link, in_label, std::move(fwd), epoch)};
+    if (h.bind_ingress_forward(in_link, in_label, std::move(fwd), epoch)) return {out, true};
+    h.release_egress(down, out, route);
+    return {out, false};
 }
 
 /**
@@ -576,6 +581,90 @@ void reconnect_race_invariant() {
     if (violations != 0) std::printf("       (%d of %d rounds)\n", violations, kRounds);
 }
 
+/**
+ * @brief #833 — a REFUSED forwarding bind leaves no label and no route behind, and takes
+ *        nothing away from the flows that share the entry.
+ *
+ * The order is forced: the swap binding names the out-label, so the label must be taken
+ * before the bind can be attempted. When the bind then refuses — a full ingress table here,
+ * the #827 epoch guard in the field — the hop returns WITHOUT advertising, so what it took
+ * aliases a route no binding aims at and no peer has ever seen. It stayed in the live
+ * downstream table until that link's next `clear_link`.
+ *
+ * The bound is 2 per table, and the two takes ahead of the refusal name the SAME route: that
+ * is what fills the INGRESS table (one binding per inbound label) while leaving the EGRESS
+ * table at one entry (#913 dedups by route), which is the only arrangement in which the bind
+ * is the step that refuses. With distinct routes the egress table fills in step and
+ * `ensure_egress` refuses first — a path that mints nothing and was never the leak.
+ */
+void refused_bind_unwinds_the_take() {
+    std::printf(" #833 a refused forwarding bind strands neither label nor route:\n");
+    const auto nop = []() {};
+
+    {
+        route_handle_t h(std::pmr::get_default_resource(), 2);
+        // Two established flows through the same stripped route: ingress "up" is now AT the
+        // bound with a single egress entry behind both.
+        const advertise_leg_t a =
+            advertise_forwarding_leg(h, "up", 10, "down", route_bytes(1), nop);
+        const advertise_leg_t b =
+            advertise_forwarding_leg(h, "up", 11, "down", route_bytes(1), nop);
+        check(a.bound && b.bound && a.out_label == b.out_label,
+              "setup: two inbound labels share ONE downstream label (#913)");
+        check(h.ingress_count() == 2 && h.egress_count() == 1, "setup: ingress full, egress at 1");
+
+        // The refusal. A NEW route takes a fresh downstream label, then the bind refuses
+        // because "up" is at its bound.
+        const advertise_leg_t r =
+            advertise_forwarding_leg(h, "up", 12, "down", route_bytes(2), nop);
+        std::printf("    census: taken label %u | egress %zu | ingress %zu\n", r.out_label,
+                    h.egress_count(), h.ingress_count());
+        check(!r.bound && r.out_label != 0, "the bind is refused after the label was taken");
+        check(h.egress_count() == 1, "the refused take left NO egress entry behind");
+        check(!h.egress_route("down", r.out_label).has_value(),
+              "and no retained route under the label it took");
+        check(h.ingress_count() == 2, "and no ingress binding, which is the refusal itself");
+
+        // The label SPACE came back too, not just the table slot: the next new flow on this
+        // link — driven from a second inbound link, whose own ingress table is empty — is
+        // handed the very label the refusal gave up.
+        const advertise_leg_t n =
+            advertise_forwarding_leg(h, "up2", 1, "down", route_bytes(3), nop);
+        check(n.bound && n.out_label == r.out_label,
+              "the next new flow is handed the label the refusal gave back");
+    }
+    {
+        // The established-flow half of the gate: a flow that SHARES an entry must not be
+        // unwound by a newcomer's refusal. "up2" reuses "down"'s existing label for the same
+        // route and is refused (its own ingress table is full through another downstream
+        // link), so the release lands on an entry that is not its own mint.
+        route_handle_t h(std::pmr::get_default_resource(), 1);
+        const advertise_leg_t est =
+            advertise_forwarding_leg(h, "up", 10, "down", route_bytes(1), nop);
+        const advertise_leg_t fill =
+            advertise_forwarding_leg(h, "up2", 20, "down2", route_bytes(9), nop);
+        check(est.bound && fill.bound, "setup: one established flow, and \"up2\" at its bound");
+
+        const advertise_leg_t r =
+            advertise_forwarding_leg(h, "up2", 21, "down", route_bytes(1), nop);
+        check(!r.bound && r.out_label == est.out_label,
+              "the newcomer REUSED the established label and was then refused");
+        check(h.egress_route("down", est.out_label) == route_bytes(1),
+              "the established flow keeps its label and its retained route");
+        check(h.lookup_ingress("up", 10).has_value(), "and keeps its ingress binding");
+        check(h.egress_count() == 2, "no entry was erased on either link");
+    }
+    {
+        // A release must not RESURRECT a link shell. The reconnect case is the common
+        // companion of a refusal, and it has already erased the whole downstream table.
+        route_handle_t h;
+        const advertise_leg_t r = advertise_forwarding_leg(h, "up", 5, "down", route_bytes(1),
+                                                           [&h]() { h.clear_link("down"); });
+        check(!r.bound, "the epoch guard refuses the swap (#827)");
+        check(h.link_count() == 1, "the release created no empty shell for the cleared link");
+    }
+}
+
 int main() {
     std::printf("route_handle_t (Brick 4 — per-connection pmr label tables):\n");
 
@@ -604,6 +693,7 @@ int main() {
     cross_link_sweep();
     reconnect_inside_advertise();
     reconnect_race_invariant();
+    refused_bind_unwinds_the_take();
 
     if (g_failures == 0) {
         std::printf("route_handle: ALL PASS\n");

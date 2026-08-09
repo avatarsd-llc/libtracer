@@ -277,34 +277,9 @@ std::vector<std::byte> array_value(std::size_t n, std::uint8_t fill) {
  * SPEC{ NAME "type" <type>, NAME "name" <name>, SETTINGS "config"{ NAME "role" VALUE u8,
  *       NAME "port" VALUE u16, NAME "kind" NAME "tcp" [, NAME "addr" NAME <addr>] } }
  */
-view_t conn_spec(std::string_view type, std::string_view name, tr::net::conn_role_t role,
-                 std::uint16_t port, std::string_view addr = {}) {
-    std::vector<std::byte> cfg;
-    tr::wire::emit_name(cfg, "role");
-    const std::byte r{static_cast<std::uint8_t>(role)};
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, std::span<const std::byte>(&r, 1));
-    tr::wire::emit_name(cfg, "port");
-    std::vector<std::byte> pb(2);
-    tr::detail::store_le(pb, port, 2);
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, pb);
-    tr::wire::emit_name(cfg, "kind");
-    tr::wire::emit_name(cfg, "tcp");
-    if (!addr.empty()) {
-        tr::wire::emit_name(cfg, "addr");
-        tr::wire::emit_name(cfg, addr);
-    }
-
-    std::vector<std::byte> body;
-    tr::wire::emit_name(body, "type");
-    tr::wire::emit_name(body, type);
-    tr::wire::emit_name(body, "name");
-    tr::wire::emit_name(body, name);
-    tr::wire::emit_name(body, "config");
-    tr::wire::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true}, cfg);
-
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
-    return owned(out);
+view_t tcp_conn_spec(std::string_view type, std::string_view name, tr::net::conn_role_t role,
+                     std::uint16_t port, std::string_view addr = {}) {
+    return tr::net::conn_spec(type, name, role, port, "tcp", addr);
 }
 
 /** @brief FWD{ op=WRITE, dst=<segs...>, src=<empty>, payload } — a remote write (ADR-0040). */
@@ -464,8 +439,8 @@ int peer_main(int cmd_fd, int rsp_fd) {
             &sink);
 
         const auto w = g.write(path_t("/net:children[]"),
-                               conn_spec("client", "srv", tr::net::conn_role_t::DIAL,
-                                         static_cast<std::uint16_t>(port), "127.0.0.1"));
+                               tcp_conn_spec("client", "srv", tr::net::conn_role_t::DIAL,
+                                             static_cast<std::uint16_t>(port), "127.0.0.1"));
         if (!w.has_value()) {
             (void)write_all(rsp_fd, "FAIL\n", 5);
             continue;
@@ -569,7 +544,7 @@ sample_t run_census(mix_t mix, std::size_t ops, int cmd_fd, int rsp_fd) {
     (void)net.register_module(std::string(tr::net::kTcpServerSuggestedModule), "tcp",
                               tr::net::conn_role_t::LISTEN);
     const auto wl = g.write(path_t("/net:children[]"),
-                            conn_spec("listener", "peer", tr::net::conn_role_t::LISTEN, port));
+                            tcp_conn_spec("listener", "peer", tr::net::conn_role_t::LISTEN, port));
     if (!wl.has_value()) return s;
     if (router.registry().by_name("net/tcp-server/peer") == nullptr) return s;
     quiesce();

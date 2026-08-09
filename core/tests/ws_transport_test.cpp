@@ -185,7 +185,8 @@ bool raw_handshake(int cfd) {
  * @brief A peer is OPEN to senders the instant its `101` is on the wire — the handshake
  *        window is closed, proven by holding it open rather than by racing for it.
  *
- * `service_peer` writes the `101 Switching Protocols` response and publishes the slot
+ * `transport_ws_server::on_readable` writes the `101 Switching Protocols` response and
+ * publishes the slot
  * (`open = true`) inside ONE `write_m_` critical section. Store `open` after that lock is
  * released and there is a window in which the peer has already read the response — so it
  * believes the connection is up — while every `send` still skips the slot as not-open and
@@ -887,7 +888,8 @@ void append_server_frame(std::vector<std::byte>& out, ws::opcode_t op,
  * straight after it — which is what a server that pushes state on connect does. Those
  * bytes are off the socket; if the handshake drops them nothing can ever read them back,
  * and the frame vanishes with no counter moving. The accept side has carried them over
- * since it grew a second peer (`service_peer`); this is the DIAL side of that rule.
+ * since it grew a second peer (`transport_ws_server::on_readable`); this is the DIAL side
+ * of that rule.
  *
  * The peer here writes the `101`, a complete PING, and the FIRST fragment of a BINARY
  * message in ONE `::send`, so all three land in one `recv` on the client — the shape the

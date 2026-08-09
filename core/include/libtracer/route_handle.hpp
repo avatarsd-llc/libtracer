@@ -313,8 +313,15 @@ class route_handle_t {
      * ADVERTISE once); subsequent deliveries find the same label and return `fresh ==
      * false` (send only the COMPACT). @ref clear_link drops the binding so a post-reconnect
      * delivery re-advertises — the self-heal, with no transport "up" event. Since #913 the
-     * forwarding-hop swap and `fwd_router_t::advertise` mint here too: @ref alloc_label +
-     * @ref record_egress mint unconditionally, burning one per re-advertise cycle.
+     * forwarding-hop swap and `fwd_router_t::advertise` mint here too, in place of an
+     * @ref alloc_label + @ref record_egress pair that minted unconditionally and burned one
+     * label per re-advertise cycle.
+     *
+     * A fresh entry is born RECLAIMABLE and the first *reuse* of it clears that (#833): while
+     * the mint is the only take of a label, the minter may still hand it back with
+     * @ref release_egress. The steady-state delivery path pays one byte-load and a
+     * not-taken branch for that — the store happens at most once per entry, on the first
+     * reuse — and never a store on an entry a second caller has already taken.
      *
      * @param out_link This node's NAME for the downstream link.
      * @param route    A complete PATH TLV's bytes — the delivery route the label aliases.
@@ -327,6 +334,39 @@ class route_handle_t {
      */
     [[nodiscard]] std::pair<std::uint16_t, bool> ensure_egress(std::string_view out_link,
                                                                std::span<const std::byte> route);
+
+    /**
+     * @brief Hand back a label + egress route taken from @ref ensure_egress and **never put
+     *        on the wire** — the refused-bind unwind (#833).
+     *
+     * A forwarding hop mints its out-label and retains its stripped egress route BEFORE it
+     * binds the ingress swap, because the binding names the label. When that bind refuses —
+     * a full ingress table, or the #827 epoch guard — the hop returns without advertising,
+     * so the label it minted aliases a route no ingress binding aims at and no peer has ever
+     * seen. Nothing reclaimed it short of the downstream link's next @ref clear_link. This
+     * gives it back: the entry is erased, and the label itself returns to the allocator when
+     * it is still the most recently minted one.
+     *
+     * **Only the MINT is reclaimable.** Since #913 an egress entry is SHARED — one label
+     * serves every ingress flow whose stripped route is identical — so erasing it on one
+     * claimant's refusal would strand every other. The entry therefore carries "the mint is
+     * still the only take of this label", set when @ref ensure_egress creates it and cleared
+     * by the first reuse, and this call erases nothing once that is false. That is what
+     * makes the two-thread interleaving safe without holding a lock across the bind: an
+     * advertise on another link's rx thread that reuses the label between this caller's mint
+     * and its refusal has already cleared the flag, so the entry it now depends on survives.
+     * An established flow is untouched by construction — its take was a reuse.
+     *
+     * @param out_link This node's NAME for the downstream link the label was minted on.
+     * @param label    The label @ref ensure_egress returned. `0` is ignored.
+     * @param route    The route bytes that were passed to @ref ensure_egress; an entry whose
+     *                 route has since been replaced (@ref record_egress) is left alone.
+     * @note A no-op when the link has no tables — a release must not CREATE a link shell,
+     *       which is the state @ref link_count bounds (#488). So the common companion of a
+     *       refusal, a downstream reconnect that erased the whole table, costs nothing here.
+     */
+    void release_egress(std::string_view out_link, std::uint16_t label,
+                        std::span<const std::byte> route);
 
     /**
      * @brief The route this node advertised over @p out_link under @p label (for re-advertise).
@@ -425,6 +465,9 @@ class route_handle_t {
     };
     struct egress_entry_t {
         std::uint16_t label = 0;
+        // Declared HERE, between the label and the route, so it lands in the padding the
+        // u16 already leaves ahead of the vector — the entry's size is unchanged (#833).
+        bool sole_take = false; /**< @brief The mint is still the only take of this label. */
         std::pmr::vector<std::byte> route;
     };
     struct link_tables_t {

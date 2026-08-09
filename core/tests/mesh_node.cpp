@@ -118,56 +118,22 @@ view_t value_u32(std::uint32_t v) {
  * @brief A connection-creation SPEC (ADR-0027 / reference/05), with the ws-private
  *        `peer_named` / `max_peers` keys (ADR-0043 §5).
  *
- * Copied from `core/tests/transport_vertex_test.cpp` rather than shared: `conn_spec` is a
- * test/example-local helper in six places today and is deliberately NOT a shipped header
- * (`tree_of_ropes.cpp` says the same). Promoting it is its own change, not #408's.
- *
- * SPEC{ NAME "type" <type>, NAME "name" <name>, NAME "config" SETTINGS{ NAME "role" VALUE u8,
- *       NAME "port" VALUE u16 [, NAME "kind" NAME <kind>][, NAME "addr" NAME <addr>]
- *       [, NAME "peer_named" VALUE u8, NAME "max_peers" VALUE u32] } }
+ * The hand-emitted copy this used to be is gone (#902): the SPEC grammar now has ONE public
+ * encoder, `tr::net::conn_spec_t`, and this is a call-shape adapter over it. The two
+ * ws-private keys are spelled through the generic pair setters, because a kind's private
+ * vocabulary is the kind factory's business and never the builder's (ADR-0043 §5).
  *
  * The TS `encodeConnSpec` is byte-pinned against this exact layout.
  */
-view_t conn_spec(std::string_view type, std::string_view name, conn_role_t role, std::uint16_t port,
-                 std::string_view kind = {}, std::string_view addr = {}, bool peer_named = false,
-                 std::uint32_t max_peers = 0) {
-    std::vector<std::byte> cfg;
-    tr::wire::emit_name(cfg, "role");
-    const std::byte r{static_cast<std::uint8_t>(role)};
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, std::span<const std::byte>(&r, 1));
-    tr::wire::emit_name(cfg, "port");
-    std::vector<std::byte> pb(2);
-    tr::detail::store_le(pb, port, 2);
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, pb);
-    if (!kind.empty()) {
-        tr::wire::emit_name(cfg, "kind");
-        tr::wire::emit_name(cfg, kind);
-    }
-    if (!addr.empty()) {
-        tr::wire::emit_name(cfg, "addr");
-        tr::wire::emit_name(cfg, addr);
-    }
-    if (peer_named) {
-        tr::wire::emit_name(cfg, "peer_named");
-        const std::byte pn{1};
-        tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, std::span<const std::byte>(&pn, 1));
-        tr::wire::emit_name(cfg, "max_peers");
-        std::vector<std::byte> mb(4);
-        tr::detail::store_le(mb, max_peers, 4);
-        tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, mb);
-    }
-
-    std::vector<std::byte> body;
-    tr::wire::emit_name(body, "type");
-    tr::wire::emit_name(body, type);
-    tr::wire::emit_name(body, "name");
-    tr::wire::emit_name(body, name);
-    tr::wire::emit_name(body, "config");
-    tr::wire::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true}, cfg);
-
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
-    return owned(out);
+view_t ws_conn_spec(std::string_view type, std::string_view name, conn_role_t role,
+                    std::uint16_t port, std::string_view kind = {}, std::string_view addr = {},
+                    bool peer_named = false, std::uint32_t max_peers = 0) {
+    tr::net::conn_spec_t spec(type, name);
+    spec.role(role).port(port);
+    if (!kind.empty()) spec.kind(kind);
+    if (!addr.empty()) spec.addr(addr);
+    if (peer_named) spec.flag("peer_named", true).u32("max_peers", max_peers);
+    return spec.view();
 }
 
 /** @brief One `--listen name:port` request parsed from argv. */
@@ -309,8 +275,8 @@ int main(int argc, char** argv) {
     // — same op_resolver, same make_connection, same factory. No provide_link anywhere.
     for (const auto& ls : g_listens) {
         const auto w = graph.write(path_t("/net:children[]"),
-                                   conn_spec("listener", ls.name, conn_role_t::LISTEN, ls.port,
-                                             "ws", {}, ls.peer_named, ls.max_peers));
+                                   ws_conn_spec("listener", ls.name, conn_role_t::LISTEN, ls.port,
+                                                "ws", {}, ls.peer_named, ls.max_peers));
         if (!w) {
             std::fprintf(stderr, "mesh_node[%s]: listener %s:%u FAILED (status %d)\n",
                          g_name.c_str(), ls.name.c_str(), static_cast<unsigned>(ls.port),
@@ -322,7 +288,7 @@ int main(int argc, char** argv) {
     // ----- the ctrl listener, LAST (the readiness barrier; see the file header) -------
     const auto ctrl =
         graph.write(path_t("/net:children[]"),
-                    conn_spec("listener", "ctrl", conn_role_t::LISTEN, g_ctrl_port, "ws"));
+                    ws_conn_spec("listener", "ctrl", conn_role_t::LISTEN, g_ctrl_port, "ws"));
     if (!ctrl) {
         std::fprintf(stderr, "mesh_node[%s]: ctrl listener :%u FAILED (status %d)\n",
                      g_name.c_str(), static_cast<unsigned>(g_ctrl_port),

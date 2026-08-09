@@ -39,7 +39,7 @@
  * ## What this harness deliberately does NOT gate: three sites, named
  *
  * **The two PING→PONG call sites.** The two PONG replies
- * (`transport_ws_server::drain_frames`'s `PING` case — reached only from `service_peer` —
+ * (`transport_ws_server::drain_frames`'s `PING` case — reached only from `on_readable` —
  * and the client `serve` loop's) build
  * their frame with `ws::encode_server_control` / `ws::encode_client_control` into a stack
  * `std::array`. That the ENCODERS allocate nothing is gated — `bench_failable_census guard`
@@ -365,7 +365,7 @@ bool raw_handshake(int cfd) {
  * @brief Block until @p server counts at least @p want OPEN peers.
  *
  * `raw_handshake` returning means the CLIENT read the 101 — which is one instruction earlier
- * than the server publishing the slot, since `service_peer` writes the response and stores
+ * than the server publishing the slot, since `on_readable` writes the response and stores
  * `open = true` as two steps of one `write_m_` critical section. A sender can only reach the
  * fd through that same lock, so a `send` here cannot in fact be lost (`ws_transport_test`
  * proves it by parking the server in that instant). This barrier stays anyway because it
@@ -619,7 +619,9 @@ void test_ws_client_send_drops_then_recovers() {
 
 // ---------------------------------------------------------------------------
 // TCP — the two sites the issue's inventory missed: `prefixed_iov_t`'s record table
-// (transport_tcp.cpp:71, acquired at :81) and the broadcast's per-peer scratch (:355/:356).
+// (transport_tcp.cpp:68, acquired at :78) and the broadcast's per-peer scratch, which #871
+// moved into the shared fan-out (posix_endpoint.cpp:366, acquired at :367 — one store for
+// both servers now, so this vector exercises the ws one too).
 // Both were a THROWING `resize` before #848 (base 3479051: :78 and :358).
 // ---------------------------------------------------------------------------
 

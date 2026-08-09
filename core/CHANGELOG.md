@@ -16,8 +16,39 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`tr::net::conn_spec_t` + `tr::net::conn_spec(...)` (`libtracer/conn_spec.hpp`) — the
+  connection-creation SPEC finally has a public ENCODER (#902).** `transport_vertex_t` has
+  always shipped the decoder for the `/net:children[]` grammar
+  `SPEC{NAME type, NAME name, SETTINGS config{role, port[, kind][, addr] …}}`, but nothing
+  emitted it: every consumer of the production first-wiring step hand-built the TLVs from
+  `wire::emit_tlv` / `wire::emit_name` and reached into the INTERNAL `tr::detail::store_le`
+  to encode the port. Sixteen private near-copies existed across `core/tests`, `bench`,
+  `core/examples/tree_of_ropes.cpp` and the ESP-IDF `full_node` example, and they had already
+  drifted — `tree_of_ropes`' copy could not spell `kind` or `addr`, i.e. the example for
+  "mount a transport" could not express the field that decides which MODULE the connection
+  mounts under. `conn_spec_t` is a fluent builder that appends `(NAME key, value)` pairs in
+  call order (`role`/`port`/`kind`/`addr`/`keepalive_ms`/`max_frame`/`backoff_ms`/
+  `connect_timeout_ms`, plus generic `text`/`u8`/`u16`/`u32`/`flag` for a kind's PRIVATE keys,
+  named to mirror `config_reader_t`'s accessors); a builder on which no setter ran emits no
+  `config` at all, which is the `provide_link` spelling. `conn_spec(type, name, role, port,
+  kind = {}, addr = {})` is the one-call sugar over it. **No wire surface changes** — the
+  bytes are pinned byte-for-byte against the pre-existing hand-emit in
+  `transport_vertex_test`, and the TypeScript client's `encodeConnSpec` (#408) already shipped
+  this same grammar, so the C++ core was the odd one out. There is no `module` key and the
+  builder invents none: a SPEC names its module through `kind` + `role`, resolved by the
+  application's `register_module` declaration before any staged link is consulted (#883).
+
+- **`tr::wire::emit_value_le<T>(out, value, width = sizeof(T))` (`libtracer/tlv_emit.hpp`) —
+  the public way to write an integer VALUE TLV (#902).** The decode half of the
+  `(NAME key, VALUE u8/u16/u32)` config pair has been public since `config_reader_t`; the
+  encode half was not, so a consumer sized its own buffer and called `detail::store_le` or
+  hand-rolled a shift loop. It lives in `tr::wire` because it turns a wire type into wire
+  bytes; the layer-free LE byte primitive it builds on (`detail::append_le`, `byteorder.hpp`)
+  stays in `tr::detail`, per that header's own layering note.
+
 - **`tr::net::detail::tcp_peer_publishing_hook` (`libtracer/transport_tcp.hpp`) — a TEST-ONLY
-  seam, null in production (#891).** Run by `transport_tcp_server::accept_peer` at the instant
+  seam, null in production (#891).** Run by the shared accept path
+  (`slot_server_t::accept_peer`, through this server's `on_slot_publishing` override) at the instant
   a new peer's fd is published and its slot is one store from open, inside the `write_m_`
   hold. The window a racing test would have to hit is two instructions wide; the hook lets a
   test HOLD that instant open, broadcast into it, and check the frame arrives at the peer
@@ -100,6 +131,47 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   TABLES (`ensure_egress`, `bind_ingress*`) and `on_advertise`'s route deep-copy and
   `wire::encode` re-encode still allocate through throwing paths, so `on_advertise` remains
   a peer-reachable abort under `-fno-exceptions` for reasons this change does not touch.
+- **`net::route_handle_t::release_egress(out_link, label, route)` — hand back a label taken
+  from `ensure_egress` that never went on the wire (#833).** The unwind a refused forwarding
+  bind needs: the egress entry is erased and, when the label is still the allocator's most
+  recent, `next_label` walks back so the 16-bit space is returned too. It erases **only a
+  MINT**, which is what makes it safe now that an egress entry is SHARED across every ingress
+  flow with an identical stripped route (#913): an entry carries "the mint is still the only
+  take of this label", set by `ensure_egress` when it creates the entry and cleared by the
+  first reuse, and this call erases nothing once that is false. So an established flow — whose
+  take was a reuse — is never unwound by a newcomer's refusal, and neither is an entry a
+  second advertise took between this caller's mint and its refusal. A release for a link with
+  no tables, a label that is not there, or a route the entry no longer holds is a no-op, and a
+  release never CREATES a link shell. No wire surface moves: a refused bind advertises
+  nothing, so a released label is one no peer has ever seen.
+
+### Changed
+
+- **`tr::net::slot_server_t` (`libtracer/posix_endpoint.hpp`) — the multi-peer slot/poll
+  machinery is now ONE base class, and `transport_tcp_server` / `transport_ws_server` derive
+  from it (#871).** Both servers used to restate the whole connection layer line-for-line
+  (~230 lines, with byte-identical `run()` bodies): the slot struct and its threading rule,
+  the bind/listen/getsockname bring-up, the free-slot-or-grow accept with its `max_peers`
+  refusal and `p<slot>` naming, the poll loop, the two-phase `teardown_slot`, the
+  `bus_link_t` query trio, the destructor slot sweep and the broadcast's
+  pristine-iovec-copy-per-peer fan-out. All of that now lives once, in `slot_server_t`
+  (the tier above `stream_endpoint_t`, the shape `msquic_endpoint_t` already uses for
+  quic + webtransport), parameterised by two variance points — a per-accept setup/handshake
+  hook and a per-readable-chunk framing hook. **No behaviour change on either wire**, and the
+  ingress/egress surface of both servers is unchanged.
+
+  **Source-compatible for callers**, but the class hierarchy is public API: the servers were
+  `public transport_t, public bus_link_t, private stream_endpoint_t` and are now
+  `public slot_server_t`, which is `public transport_t, public bus_link_t, protected
+  stream_endpoint_t`. Every existing conversion (`transport_t*`, `bus_link_t*`, the
+  `dynamic_cast` back to the concrete server) still compiles and still resolves; a
+  `sizeof(transport_tcp_server)` or a member-offset assumption does not, since the shared
+  members moved into the base. `ok()`, `local_port()`, `bus()`, `enumerate_peers()`,
+  `peer_link()` and `close_peer()` are inherited rather than redeclared — same names, same
+  signatures, same semantics, now with one implementation instead of two. The per-server
+  `dropped_rx()` / `malformed_rx()` accessors, `transport_ws_server::effective_max_frame()`
+  and both `kMaxFrame` constants stay where they were: they belong to the framing, which is
+  what each server still owns.
 
 - **A refused bus-NAME hop's error reply now carries TRAILER-LESS route bytes, like every
   other addressed error this library emits (#887).** `fwd_router_t`'s rejection built its
@@ -198,6 +270,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   to fail, and `tests/conformance/ws_diff_fuzz.py` holds it against the TypeScript decoder.
 
 ### Fixed
+
+- **A refused forwarding bind no longer strands the out-label and egress route it had to take
+  first (#833).** `on_advertise`'s forwarding arm takes its downstream label before it can bind
+  the inbound swap, because the binding names that label. When the bind refuses — a full
+  ingress table, or the #827 epoch guard — the hop returns **without advertising**, so what it
+  took stayed in the LIVE downstream table with no ingress binding aiming at it and no peer
+  that had ever seen it, reclaimable only by that link's next `clear_link`. Per refused route
+  that cost one label out of the saturating 16-bit space, the retained route bytes, and — on a
+  node with `max_label_bindings_per_link` set — one of the downstream table's bounded slots,
+  which is enough to make a later legitimate flow refuse for want of room. The arm now hands
+  the take back (`route_handle_t::release_egress`). The established-flow reuse path is
+  untouched by construction: only a MINT is reclaimable, and an established flow's take is a
+  reuse. Nothing on the wire changes in either direction — the refusal still advertises
+  nothing and the upstream's next `COMPACT` still draws the ordinary stale-label
+  `HANDLE_NACK`.
 
 - **A connection SPEC now resolves its MODULE before its link, so a `provide_link` staging can
   no longer be picked by leaf NAME alone (#883).** `provide_link` keys its staging
