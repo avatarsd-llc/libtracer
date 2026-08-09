@@ -328,10 +328,13 @@ void test_the_fanout_reaches_every_open_peer_exactly_once() {
 
     check_eq(fake_httpd::instance().frames_sent() - sent_before, open_fds.size(),
              "the fan-out delivered exactly one frame per OPEN peer, and none besides");
+    // Two writes per peer, not one: `httpd_ws_send_frame_async` puts a frame on the socket
+    // as a header write and a payload write (see fake_httpd's transcription of it). What is
+    // pinned here is still "exactly one FRAME each" — the count is per write.
     for (std::size_t i = 0; i < open_fds.size(); ++i) {
         char what[96];
-        std::snprintf(what, sizeof(what), "peer fd=%d was written exactly once", open_fds[i]);
-        check_eq(fake_httpd::instance().writes(open_fds[i]) - writes_before[i], 1, what);
+        std::snprintf(what, sizeof(what), "peer fd=%d was written exactly one frame", open_fds[i]);
+        check_eq(fake_httpd::instance().writes(open_fds[i]) - writes_before[i], 2, what);
     }
 
     reset(link);
