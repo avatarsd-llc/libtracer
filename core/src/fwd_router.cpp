@@ -210,7 +210,12 @@ template <class SegAt, class Retain>
     // exactly still forwards, with an empty residual.
     const std::optional<std::string_view> next = at(k);
     if (!next) return {};
-    if (c->multi_peer.load(std::memory_order_relaxed)) {
+    // ONE snapshot of link + shape (#882). Read as two fields, a reconnect rebind that FLIPS
+    // this name's shape could pair a stale point-to-point shape with the fresh BUS link and
+    // send a directed request over the bus's broadcasting `send()` — the very fall-through
+    // the rejected branch below exists to stop.
+    const child_registry_t::egress_t eg = c->egress();
+    if (eg.multi_peer) {
         if (!next->empty()) {
             if (transport_t* const p = child_registry_t::resolve_peer(*c, *next)) {
                 const std::string_view peer = retain(k);
@@ -218,7 +223,7 @@ template <class SegAt, class Retain>
             }
         }
         // ADR-0073 §3 (RFC-0020): the bus link's own NAME is not a routable next-hop.
-        // Falling through to `c->link` here egressed over the bus transport's `send()`,
+        // Falling through to the slot's link here egressed over the bus transport's `send()`,
         // which fans out to EVERY open peer — one directed request drew N replies and
         // scrambled FIFO reply correlation (#409). Only the link's peer names route;
         // fan-out belongs to the subscription plane.
@@ -226,7 +231,7 @@ template <class SegAt, class Retain>
         rej.rejected = true;
         return rej;
     }
-    return mount_hit_t{c->link.load(std::memory_order_acquire), {}, k, c->name};
+    return mount_hit_t{eg.link, {}, k, c->name};
 }
 
 /**
@@ -975,11 +980,14 @@ transport_t* fwd_router_t::bound_egress(wire::path_ref_element_t e, std::string_
     const child_rx_ctx_t* const ctx = ctx_by_conn_slot(e.index);
     if (ctx == nullptr) return nullptr;  // a vertex, but not one of this node's egresses
     // The child's registry slot, cached at registration — no per-frame name scan. The slot's
-    // ADDRESS is fixed for the registry's lifetime; its CONTENTS are not, so `multi_peer` and
-    // `link` are still read atomically and a tombstone still drops the frame here.
+    // ADDRESS is fixed for the registry's lifetime; its CONTENTS are not, so the link and its
+    // shape are still read atomically — as ONE word, so this reader cannot pair one
+    // publication's shape with another's link (#882) — and a tombstone still drops the frame.
     const child_registry_t::child_t* const child = ctx->entry;
-    if (child == nullptr || child->multi_peer.load(std::memory_order_relaxed)) return nullptr;
-    return child->link.load(std::memory_order_acquire);  // null ⇒ tombstoned ⇒ drop
+    if (child == nullptr) return nullptr;
+    const child_registry_t::egress_t eg = child->egress();
+    if (eg.multi_peer) return nullptr;
+    return eg.link;  // null ⇒ tombstoned ⇒ drop
 }
 
 bool fwd_router_t::adopt_binding(graph::path_t& path, std::string_view link_name,
@@ -1756,7 +1764,7 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
     // The tombstone IS the invalidation; no generation and no teardown sweep are needed.
     if (rb.warm && rb.down_slot != nullptr) {
         const auto* const slot = static_cast<const child_registry_t::child_t*>(rb.down_slot);
-        if (transport_t* const down = slot->link.load(std::memory_order_acquire)) {
+        if (transport_t* const down = slot->link()) {
             emit_compact(*down, rb.out_label, payload_bytes);
             return;
         }
@@ -1765,7 +1773,7 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
     const std::optional<handle_binding_t> binding = handles_.lookup_ingress(inbound_name, label);
     if (!binding) return;
     if (const child_registry_t::child_t* const slot = registry_.entry_by_name(binding->down_link)) {
-        if (transport_t* const down = slot->link.load(std::memory_order_acquire)) {
+        if (transport_t* const down = slot->link()) {
             emit_compact(*down, binding->out_label, payload_bytes);
             resolved_binding_t fill = rb;
             fill.warm = true;

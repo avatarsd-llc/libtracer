@@ -55,11 +55,13 @@ namespace tr::net {
  * a module declares it. It cannot: `ws-server`'s `peer_named` config decides whether the
  * bus facet is exposed, so two connections in one module may differ. The shape is
  * therefore captured ONCE at @ref add time from `link.bus()` and stored on the slot, which
- * still honours the ADR's actual requirement — no `bus()` probe on the forward path.
+ * still honours the ADR's actual requirement — no `bus()` probe on the forward path. It is
+ * stored IN the link's own word (#882, ADR-0063 erratum 6), so a reader can never pair one
+ * publication's shape with another's link.
  *
  * **Mutation model (#494).** The table was add-only, which left a retired link's
  * `name → transport_t*` resident and dangling. @ref erase closes that, and it does so by
- * **tombstoning in place** — the slot's `link` is nulled and its NAME kept — never by
+ * **tombstoning in place** — the slot's link pointer is nulled and its NAME kept — never by
  * erasing from `children_`. That is deliberate: shifting the vector under a concurrent
  * lock-free reader is a hard use-after-free, whereas a tombstone leaves the slot in place
  * and a racing reader sees either the old pointer or `nullptr`. A
@@ -99,12 +101,37 @@ class child_registry_t {
     }
 
     /**
-     * @brief One registered child: its qualified mount name, its link, and its shape.
+     * @brief ONE read of a slot's egress: WHERE it sends, and WHAT SHAPE that link is.
+     *
+     * The two facts are only ever meaningful together — the shape decides which branch of
+     * the mount descent a link is routed down, so a reader that pairs one slot's shape with
+     * another publication's link routes a BUS link point-to-point and its `send()` fans out
+     * to every open peer (#882, the #409 misroute). They are therefore read as a pair, by
+     * @ref child_t::egress, and never field-by-field on any path.
+     */
+    struct egress_t {
+        transport_t* link = nullptr; /**< @brief The link; nullptr marks a TOMBSTONE (#494). */
+        bool multi_peer = false;     /**< @brief The shape published WITH that link. */
+    };
+
+    /**
+     * @brief The SHAPE bit an egress word carries in the link pointer's spare low bit.
+     *
+     * Set ⇒ the link is MULTI-PEER (it exposes @ref transport_t::bus). The shape is still
+     * captured once at @ref add time, so the forward path still never probes `bus()` — what
+     * changed (#882) is that it is captured IN the same word as the pointer it describes.
+     */
+    static constexpr std::uintptr_t kBusShapeBit = 1;
+    static_assert(alignof(transport_t) >= 2,
+                  "the egress word carries the shape in the link pointer's low bit");
+
+    /**
+     * @brief One registered child: its qualified mount name, and its egress word.
      *
      * `name` is `"<module>/<name>"` (RFC-0014's `/net/<module>/<name>` minus the constant
-     * `net` root). `link == nullptr` marks a TOMBSTONE (#494) — the slot is dead but stays
-     * put so a concurrent lock-free reader's iteration remains valid. `multi_peer` is the
-     * shape captured once at @ref add time, so the forward path never probes `bus()`.
+     * `net` root). A null link marks a TOMBSTONE (#494) — the slot is dead but stays put so
+     * a concurrent lock-free reader's iteration remains valid. The link and its shape are
+     * ONE atomic word and are read through @ref egress; see `egress_` for why.
      */
     struct child_t {
         /**
@@ -122,10 +149,12 @@ class child_registry_t {
          * **Declared FIRST, beside @ref name_digest.** These two are the ONLY fields the scan's
          * hot loop reads, once per slot; everything else is touched for the single slot that
          * wins. Appended at the END of the struct they grew `child_t` from 80 to 88 bytes, and
-         * 64 slots of that is eight extra cache lines the scan walks per frame. Tucked into
-         * `multi_peer`'s tail padding instead (offset 44, digest at 48) the size came back, but
-         * the PAIR then straddled a 64-byte boundary on one slot in every four. Here it is 16
-         * bytes at offsets 0/8, so the size is 80 AND every slot's hot read is one line.
+         * 64 slots of that is eight extra cache lines the scan walks per frame. An earlier
+         * placement that tucked this field into the shape bool's tail padding (offset 44,
+         * digest at 48) got the size back, but the PAIR then straddled a 64-byte boundary on
+         * one slot in every four. Here it is 16 bytes at offsets 0/8, so the size is 80 AND
+         * every slot's hot read is one line. (The separate shape bool is gone since #882 —
+         * folding it into `egress_` left both this offset and the 80-byte size unchanged.)
          *
          * Honest about what that last move bought: it was made to remove the straddle and the
          * A/B moved by ~1 ns at `W = 3`, `N = 64` — inside the run-to-run range, so it is a
@@ -135,23 +164,15 @@ class child_registry_t {
          * `resolve_mount_deep` in `fwd_router.cpp`).
          */
         std::uint32_t seg_count = 0;
-        /** @brief Shape, captured at @ref add time. ATOMIC for the same reason `link` is, and
-         *         it was missed the first time: @ref add REBINDS an existing slot on the
-         *         tombstone-reuse path that RFC-0014 create/remove churn takes constantly, and
-         *         that rebind writes this field while a lock-free forward read is testing it
-         *         (`fwd_router.cpp`'s mount descent). A plain write against a plain read is a
-         *         data race however benign the codegen looks on a given target (ADR-0063
-         *         erratum 3). Relaxed suffices: the value is an independent bool, published
-         *         BEFORE the `link` release-store that makes the slot resolvable at all. */
-        std::atomic<bool> multi_peer{false};
         /**
          * @brief A cheap digest of @ref name, computed once at @ref add time.
          *
          * A pure function of the slot's own name, so it has NO invalidation contract: a name
          * has exactly one slot and @ref add writes the name only on the append path, before
-         * the slot is published. Tombstoning nulls @ref link and leaves this untouched, which
-         * is what lets the scan test it BEFORE the acquire-load — a stale-looking hash can
-         * only ever cause an extra @ref live check, never a wrong answer.
+         * the slot is published. Tombstoning nulls the link in `egress_` and leaves this
+         * untouched, which is what lets the scan test it BEFORE the acquire-load — a
+         * stale-looking hash can only ever cause an extra @ref live check, never a wrong
+         * answer.
          *
          * Why it exists: the scan's per-candidate work was an acquire-load plus a string
          * compare, so a wide table paid a real cost per frame even though at most one slot
@@ -160,14 +181,28 @@ class child_registry_t {
          */
         std::uint64_t name_digest = 0;
         std::string name; /**< @brief Qualified mount name, `"<module>/<name>"`. */
-        /** @brief The link; nullptr marks a TOMBSTONE (#494). ATOMIC because teardown nulls
-         *         it in place while a lock-free forward read may be dereferencing the slot
-         *         (ADR-0063): the reader sees the old pointer or `nullptr`, never a tear. */
-        std::atomic<transport_t*> link{nullptr};
-        /** @brief True while this slot still resolves — i.e. it is not a tombstone. */
-        [[nodiscard]] bool live() const noexcept {
-            return link.load(std::memory_order_acquire) != nullptr;
+        /**
+         * @brief This slot's link AND its shape, from ONE acquire load.
+         *
+         * The only way to read either fact. A routing decision needs BOTH — the shape picks
+         * the branch, the link is what that branch sends over — and reading them as two
+         * loads let a rebind that FLIPS a name's shape hand a forward one publication's
+         * shape with another's link (#882). The dangerous pairing is a stale
+         * point-to-point shape with a fresh BUS link: the descent then returns the bus link
+         * as a directed egress and its `send()` fans out to every open peer, which is the
+         * one-request/N-replies misroute (#409) the descent's rejected-hit branch exists to
+         * prevent. One word, one load, and that pairing cannot be spelled.
+         */
+        [[nodiscard]] egress_t egress() const noexcept {
+            const std::uintptr_t w = egress_.load(std::memory_order_acquire);
+            return egress_t{reinterpret_cast<transport_t*>(w & ~kBusShapeBit),
+                            (w & kBusShapeBit) != 0};
         }
+        /** @brief This slot's link alone (nullptr ⇒ TOMBSTONE) — for the shape-agnostic
+         *         callers (identity lookups, teardown sweeps). */
+        [[nodiscard]] transport_t* link() const noexcept { return egress().link; }
+        /** @brief True while this slot still resolves — i.e. it is not a tombstone. */
+        [[nodiscard]] bool live() const noexcept { return link() != nullptr; }
         /** @brief The mount path PRE-ENCODED as a run of NAME TLVs (#508), built once here so
          *         a forward hop emits the grown `src` prefix as ONE span with no per-segment
          *         work — and so no fixed buffer bounds how long a NAME may be.
@@ -181,6 +216,23 @@ class child_registry_t {
          *         a use-after-free on the reader (#684). Slot reuse under a DIFFERENT name
          *         (should teardown ever recycle slots) inherits this invariant. */
         std::vector<std::byte> mount_tlv;
+
+       private:
+        friend class child_registry_t;
+        /**
+         * @brief The egress WORD: the link pointer with @ref kBusShapeBit in its low bit.
+         *
+         * ATOMIC because teardown nulls it in place while a lock-free forward read may be
+         * dereferencing the slot (ADR-0063): the reader sees the old word or the tombstoned
+         * one, never a tear. ONE word rather than a pointer beside a bool because the two
+         * facts are only correct TOGETHER — see @ref egress, and ADR-0063 erratum 6, which
+         * supersedes decision 4's separate `std::atomic<bool> multi_peer` (#882).
+         *
+         * A tombstone clears the pointer and KEEPS the shape bit: a dead bus mount must
+         * still reject a residual segment rather than fall through to the local terminus
+         * (ADR-0073 §3), which is what it did while the shape lived in its own field.
+         */
+        std::atomic<std::uintptr_t> egress_{0};
     };
 
     /**
@@ -207,7 +259,10 @@ class child_registry_t {
      *         the ONE caller that must not is `add_child`.
      */
     bool add(std::string name, transport_t& link) {
-        const bool multi_peer = link.bus() != nullptr;
+        // Shape and link become ONE word here, so no reader can ever see one without the
+        // other (#882). `bus()` is probed exactly once, on this control-plane call.
+        const std::uintptr_t egress =
+            reinterpret_cast<std::uintptr_t>(&link) | (link.bus() != nullptr ? kBusShapeBit : 0);
         child_t* hit = nullptr;
         for_each([&](const child_t& c) {
             if (c.name == name) {
@@ -223,8 +278,7 @@ class child_registry_t {
             // would write are identical anyway — `encode_mount_name` is pure and the
             // slot was matched by name. The assert pins that purity invariant.
             assert(hit->mount_tlv == encode_mount_name(name));
-            hit->multi_peer.store(multi_peer, std::memory_order_relaxed);
-            hit->link.store(&link, std::memory_order_release);
+            hit->egress_.store(egress, std::memory_order_release);
             // A tombstone coming back to life changes what a `dst` prefix resolves to, so it
             // moves the mount shape exactly as a fresh append does (#765).
             bump_generation();
@@ -236,9 +290,8 @@ class child_registry_t {
         slot->name = std::move(name);
         slot->name_digest = digest_name(slot->name);
         slot->seg_count = static_cast<std::uint32_t>(segment_count(slot->name));
-        slot->multi_peer.store(multi_peer, std::memory_order_relaxed);
         slot->mount_tlv = std::move(mount);
-        slot->link.store(&link, std::memory_order_release);
+        slot->egress_.store(egress, std::memory_order_release);
         publish(slot);
         bump_generation();
         return true;
@@ -456,9 +509,9 @@ class child_registry_t {
      * @return The directed per-peer endpoint, or nullptr if this child has no such peer.
      */
     [[nodiscard]] static transport_t* resolve_peer(const child_t& child, std::string_view peer) {
-        transport_t* const l = child.link.load(std::memory_order_acquire);
-        if (!child.multi_peer.load(std::memory_order_relaxed) || l == nullptr) return nullptr;
-        bus_link_t* const bus = l->bus();
+        const egress_t eg = child.egress();
+        if (!eg.multi_peer || eg.link == nullptr) return nullptr;
+        bus_link_t* const bus = eg.link->bus();
         return bus == nullptr ? nullptr : bus->peer_link(peer);
     }
 
@@ -474,7 +527,14 @@ class child_registry_t {
         bool erased = false;
         for_each([&](const child_t& c) {
             if (c.live() && c.name == name) {
-                const_cast<child_t&>(c).link.store(nullptr, std::memory_order_release);
+                // Clear the pointer, KEEP the shape bit: a tombstoned BUS mount must still
+                // reject a residual segment rather than fall through to the local terminus
+                // (ADR-0073 §3). Writers are serialized by the caller, so the load/store
+                // pair needs no RMW.
+                child_t& slot = const_cast<child_t&>(c);
+                const std::uintptr_t shape =
+                    slot.egress_.load(std::memory_order_relaxed) & kBusShapeBit;
+                slot.egress_.store(shape, std::memory_order_release);
                 erased = true;  // keep going: belt-and-braces against any shadow slot
             }
             return false;
@@ -521,14 +581,14 @@ class child_registry_t {
         transport_t* hit = nullptr;
         for_each([&](const child_t& c) {
             if (c.live() && c.name == name) {
-                hit = c.link.load(std::memory_order_acquire);
+                hit = c.link();
                 return true;
             }
             return false;
         });
         if (hit != nullptr) return hit;
         for_each([&](const child_t& c) {
-            transport_t* const l = c.link.load(std::memory_order_acquire);
+            transport_t* const l = c.link();
             if (l == nullptr) return false;  // tombstone (#494) — no link to ask
             if (bus_link_t* const bus = l->bus()) {
                 if (transport_t* const peer = bus->peer_link(name)) {

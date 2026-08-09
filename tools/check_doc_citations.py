@@ -149,13 +149,13 @@ ANCHORS = [
     ("core/include/libtracer/fwd_router.hpp:177", "explicit fwd_router_t"),
     ("core/include/libtracer/fwd_router.hpp:246", "bool add_child"),
     ("core/include/libtracer/fwd_router.hpp:405", "using reply_fn_t"),
-    ("core/include/libtracer/child_registry.hpp:209", "bool add(std::string name"),
-    ("core/include/libtracer/child_registry.hpp:458", "resolve_peer"),
-    ("core/include/libtracer/child_registry.hpp:473", "bool erase"),
-    ("core/include/libtracer/child_registry.hpp:499", "entry_by_name"),
-    ("core/include/libtracer/child_registry.hpp:520", "by_name"),
-    ("core/include/libtracer/child_registry.hpp:561", "std::size_t size()"),
-    ("core/include/libtracer/child_registry.hpp:571", "live_size"),
+    ("core/include/libtracer/child_registry.hpp:261", "bool add(std::string name"),
+    ("core/include/libtracer/child_registry.hpp:511", "resolve_peer"),
+    ("core/include/libtracer/child_registry.hpp:526", "bool erase"),
+    ("core/include/libtracer/child_registry.hpp:559", "entry_by_name"),
+    ("core/include/libtracer/child_registry.hpp:580", "by_name"),
+    ("core/include/libtracer/child_registry.hpp:621", "std::size_t size()"),
+    ("core/include/libtracer/child_registry.hpp:631", "live_size"),
     ("core/src/transport_vertex.cpp:170", "transport_vertex_t::provide_link"),
     ("core/src/transport_vertex.cpp:248", "routing key IS the mount path"),
     ("core/src/transport_vertex.cpp:255", "qualified += name"),
@@ -721,11 +721,11 @@ ANCHORS = [
     ('tools/cortexm0_footprint.py:94', 'cxx_flags = ['),
     ('tools/cortexm0_footprint.py:101', '"-DLIBTRACER_NO_ATOMIC",'),
     ('tools/cortexm0_footprint.py:115', '"--specs=nano.specs",'),
-    ('core/tests/CMakeLists.txt:1098', 'add_executable(substrate_test_no_atomic'),
-    ('core/tests/CMakeLists.txt:1111', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
+    ('core/tests/CMakeLists.txt:1107', 'add_executable(substrate_test_no_atomic'),
+    ('core/tests/CMakeLists.txt:1120', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
     # The leading indent is load-bearing: the bare token also appears in the comment
     # three lines above the executable, and an anchor that matches both is not an anchor.
-    ('core/tests/CMakeLists.txt:1112', '    LIBTRACER_NO_ATOMIC'),
+    ('core/tests/CMakeLists.txt:1121', '    LIBTRACER_NO_ATOMIC'),
 
     # --- #1095: the rest of the non-source citations, now that a line-numbered citation
     # of an unverifiable file is an ERROR rather than a false green.
