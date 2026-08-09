@@ -789,9 +789,10 @@ void test_server_max_peers_cap() {
  * @brief A broadcast that lands INSIDE the accept publish reaches the peer being accepted —
  *        `open ⇒ fd valid`, proven by holding that instant open rather than by racing for it.
  *
- * `accept_peer` publishes a slot's two sender-visible fields under `write_m_` (the lock
- * `teardown_slot` resets them under), fd FIRST. Store them unlocked with `open` first — what
- * this server did before #891 — and a broadcast holding `write_m_` can read `open == true`
+ * `slot_server_t::accept_peer` publishes a slot's two sender-visible fields under `write_m_`
+ * (the lock `slot_server_t::teardown_slot` resets them under), fd FIRST. Store them unlocked
+ * with `open` first — what this server did before #891 — and a broadcast holding
+ * `write_m_` can read `open == true`
  * next to `fd == -1` and hand the record to `write_all_iov(-1)`, which drops it on the floor.
  * In production that window is two instructions wide, so a racing test cannot pin it.
  *

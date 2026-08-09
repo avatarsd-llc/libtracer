@@ -47,7 +47,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   stays in `tr::detail`, per that header's own layering note.
 
 - **`tr::net::detail::tcp_peer_publishing_hook` (`libtracer/transport_tcp.hpp`) — a TEST-ONLY
-  seam, null in production (#891).** Run by `transport_tcp_server::accept_peer` at the instant
+  seam, null in production (#891).** Run by the shared accept path
+  (`slot_server_t::accept_peer`, through this server's `on_slot_publishing` override) at the instant
   a new peer's fd is published and its slot is one store from open, inside the `write_m_`
   hold. The window a racing test would have to hit is two instructions wide; the hook lets a
   test HOLD that instant open, broadcast into it, and check the frame arrives at the peer
@@ -98,6 +99,32 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   dropped with no counter moving.
 
 ### Changed
+
+- **`tr::net::slot_server_t` (`libtracer/posix_endpoint.hpp`) — the multi-peer slot/poll
+  machinery is now ONE base class, and `transport_tcp_server` / `transport_ws_server` derive
+  from it (#871).** Both servers used to restate the whole connection layer line-for-line
+  (~230 lines, with byte-identical `run()` bodies): the slot struct and its threading rule,
+  the bind/listen/getsockname bring-up, the free-slot-or-grow accept with its `max_peers`
+  refusal and `p<slot>` naming, the poll loop, the two-phase `teardown_slot`, the
+  `bus_link_t` query trio, the destructor slot sweep and the broadcast's
+  pristine-iovec-copy-per-peer fan-out. All of that now lives once, in `slot_server_t`
+  (the tier above `stream_endpoint_t`, the shape `msquic_endpoint_t` already uses for
+  quic + webtransport), parameterised by two variance points — a per-accept setup/handshake
+  hook and a per-readable-chunk framing hook. **No behaviour change on either wire**, and the
+  ingress/egress surface of both servers is unchanged.
+
+  **Source-compatible for callers**, but the class hierarchy is public API: the servers were
+  `public transport_t, public bus_link_t, private stream_endpoint_t` and are now
+  `public slot_server_t`, which is `public transport_t, public bus_link_t, protected
+  stream_endpoint_t`. Every existing conversion (`transport_t*`, `bus_link_t*`, the
+  `dynamic_cast` back to the concrete server) still compiles and still resolves; a
+  `sizeof(transport_tcp_server)` or a member-offset assumption does not, since the shared
+  members moved into the base. `ok()`, `local_port()`, `bus()`, `enumerate_peers()`,
+  `peer_link()` and `close_peer()` are inherited rather than redeclared — same names, same
+  signatures, same semantics, now with one implementation instead of two. The per-server
+  `dropped_rx()` / `malformed_rx()` accessors, `transport_ws_server::effective_max_frame()`
+  and both `kMaxFrame` constants stay where they were: they belong to the framing, which is
+  what each server still owns.
 
 - **A refused bus-NAME hop's error reply now carries TRAILER-LESS route bytes, like every
   other addressed error this library emits (#887).** `fwd_router_t`'s rejection built its

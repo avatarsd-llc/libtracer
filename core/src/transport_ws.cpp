@@ -7,7 +7,6 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
-#include <poll.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <unistd.h>
@@ -18,6 +17,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
@@ -186,35 +186,18 @@ std::pair<::iovec*, std::size_t> build_server_iov(
 }  // namespace
 
 /**
- * @brief One peer slot: the connection state of a single inbound WebSocket client.
+ * @brief One peer slot: the WebSocket half of a single inbound client's connection
+ *        state.
  *
- * Slots are recycled in place across connections (the header's bounded-steady-state
- * contract) and never freed before the server, so the @ref endpoint facade
- * `peer_link` hands out stays pointer-valid for the server's lifetime. Threading, ONE
- * rule for every half of the lifecycle: @ref fd / @ref open are atomics MUTATED only
- * under `write_m_` — accept publishes them, the 101 flips `open`, teardown resets them
- * — and read by senders under that same lock, so a sender never sees a half-published
- * slot; the destructor's closing sweep is the single mutation outside it, and runs
- * after the recv thread is joined. @ref name is guarded by `peers_m_` (cross-thread
- * reads from `peer_link`/`enumerate_peers`, which read @ref open too and never touch
- * the fd); the buffers and the assembler are recv-thread-only. Every access to the two
- * atomics is `relaxed`: the lock, not the memory order, is what orders them.
+ * The protocol-agnostic half — fd/open/name/endpoint and the threading rule that
+ * governs them — is `slot_server_t::session_base_t`'s; this adds the handshake
+ * accumulation, the frame-stream buffer, the fragment reassembler and the directed
+ * facade object. Those four are recv-thread-only, like every protocol buffer a slot
+ * carries. WS reads the shared rule with ONE addition of its own: the slot is
+ * published NOT-open and its `open` store is the `101`'s, taken under the same
+ * `write_m_` the response write holds (`on_readable` below).
  */
-struct transport_ws_server::session_t {
-    std::atomic<int> fd{-1};       /**< @brief The peer socket; -1 ⇒ free slot. */
-    std::atomic<bool> open{false}; /**< @brief True once the 101 handshake completed. */
-    /** @brief The peer's routable NAME, `p<slot>` — a pure function of the slot index
-     *         (ADR-0073 §2), stamped at accept and moved out by teardown (the eviction
-     *         seam), so a reused slot gets the SAME name back. A legal path segment,
-     *         which `<ip>:<port>` (two reserved characters) never was — that name was
-     *         enumerable but unaddressable and tainted every accumulated return route
-     *         (#426). It identifies a SESSION, not a device: a reconnecting peer may
-     *         land in a different slot. Device-stable identity is a named link
-     *         (RFC-0014). */
-    std::string name;
-    /** @brief The remote `<ip>:<port>` — DIAGNOSTIC only, never a name and never in the
-     *         graph (#584 owns any future per-peer facet). Refreshed per accept. */
-    std::string endpoint_str;
+struct transport_ws_server::session_t : slot_server_t::session_base_t {
     std::string hs_buf;         /**< @brief HTTP Upgrade request accumulation. */
     std::vector<std::byte> buf; /**< @brief Stream bytes → frame reassembly. */
     ws_assembler_t assembler;   /**< @brief RFC 6455 fragment reassembly. */
@@ -224,41 +207,45 @@ struct transport_ws_server::session_t {
 transport_ws_server::transport_ws_server(std::uint16_t bind_port, mem::mem_backend_t* backend,
                                          std::size_t max_frame, std::size_t max_peers,
                                          bool peer_named, std::size_t recv_stack)
-    : max_peers_(max_peers), peer_named_(peer_named), backend_(backend) {
+    : slot_server_t(max_peers, peer_named), backend_(backend) {
     if (max_frame != 0) max_frame_ = max_frame;
-    listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (listen_fd_ < 0) return;
-
-    const int one = 1;
-    ::setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-
-    sockaddr_in local{};
-    local.sin_family = AF_INET;
-    local.sin_addr.s_addr = htonl(INADDR_ANY);
-    local.sin_port = htons(bind_port);
-    // SOMAXCONN: the OS's own accept-queue bound — admission is per-connection in
-    // accept_peer (the max_peers deployment cap), never a synthetic backlog of 1.
-    if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&local), sizeof(local)) < 0 ||
-        ::listen(listen_fd_, SOMAXCONN) < 0) {
-        ::close(listen_fd_);
-        listen_fd_ = -1;
-        return;
-    }
-    sockaddr_in bound{};
-    socklen_t blen = sizeof(bound);
-    if (::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&bound), &blen) == 0)
-        bound_port_ = ntohs(bound.sin_port);
-
+    if (!bind_listen(bind_port)) return;
     start([this] { run(); }, recv_stack);
 }
 
 transport_ws_server::~transport_ws_server() {
-    stop_and_join();  // FIRST: the run() thread touches the fds closed below
-    if (listen_fd_ >= 0) ::close(listen_fd_);
-    for (const std::unique_ptr<session_t>& s : slots_) {  // thread joined — nothing races
-        const int fd = s->fd.exchange(-1, std::memory_order_relaxed);
-        if (fd >= 0) ::close(fd);
-    }
+    // FIRST: the run() thread dispatches this class's variance points, so it must be
+    // joined while the derived object is still whole. ~slot_server_t closes the listen
+    // socket and sweeps the slot fds after this body.
+    stop_and_join();
+}
+
+std::unique_ptr<slot_server_t::session_base_t> transport_ws_server::make_session() {
+    auto slot = std::make_unique<session_t>();
+    slot->endpoint.owner_ = this;
+    slot->endpoint.slot_ = slot.get();
+    slot->peer_endpoint = &slot->endpoint;
+    return slot;
+}
+
+bool transport_ws_server::on_accept(session_base_t& base, int fd) {
+    (void)fd;  // no per-socket option: WS rides the shared stream setup
+    session_t& s = static_cast<session_t&>(base);
+    s.hs_buf.clear();
+    s.buf.clear();
+    s.assembler.reset();
+    // A WS slot is published NOT-open: its 101 has not been written yet, so nothing may
+    // send on it. `on_readable` flips `open` inside the same write_m_ hold as the
+    // response write — the handshake variance, localised here and there alone.
+    return false;
+}
+
+void transport_ws_server::on_slot_reset(session_base_t& base) {
+    session_t& s = static_cast<session_t&>(base);
+    s.buf.clear();
+    s.buf.shrink_to_fit();
+    s.hs_buf.clear();
+    s.assembler.reset();
 }
 
 void transport_ws_server::send(std::span<const std::byte> frame) {
@@ -282,27 +269,16 @@ void transport_ws_server::send(std::span<const std::span<const std::byte>> iov) 
     std::array<std::byte, ws::kMaxServerFrameHeader> header{};
     const std::size_t hlen = ws::encode_frame_header(header, ws::opcode_t::BINARY, total);
 
-    std::array<::iovec, kMaxServerIov + 1> inline_vec;
-    iov_table_t<::iovec> table(inline_vec);
-    const auto [pristine, n] = build_server_iov(table, header, hlen, iov);
+    std::array<::iovec, kMaxServerIov + 1> pristine_inline;
+    iov_table_t<::iovec> pristine_table(pristine_inline);
+    const auto [pristine, n] = build_server_iov(pristine_table, header, hlen, iov);
     if (pristine == nullptr) return;  // gather store exhausted => drop the frame
 
-    // write_all_iov CONSUMES its iovec array (advances base/len on partial writes),
-    // so each peer must write from a fresh COPY of the pristine gather — otherwise
-    // peer 2+ would writev a consumed/zeroed array. peer_endpoint_t::send is
-    // single-fd and needs no such copy.
-    std::array<::iovec, kMaxServerIov + 1> scratch_inline;
-    iov_table_t<::iovec> scratch_table(scratch_inline);
-    ::iovec* scratch = scratch_table.acquire(n);
-    if (scratch == nullptr) return;  // same store, same answer: drop, never truncate
-
-    const std::lock_guard plock(peers_m_);
-    const std::lock_guard wlock(write_m_);
-    for (const std::unique_ptr<session_t>& s : slots_) {
-        if (!s->open.load(std::memory_order_relaxed)) continue;
-        std::copy_n(pristine, n, scratch);
-        write_all_iov(s->fd.load(std::memory_order_relaxed), scratch, n);
-    }
+    // The shared fan-out takes the per-peer copy write_all_iov's in-place consumption
+    // requires (otherwise peer 2+ would writev a consumed/zeroed array) under the header
+    // lock order, peers_m_ → write_m_. peer_endpoint_t::send is single-fd and needs no
+    // such copy.
+    broadcast_iov(pristine, n);
 }
 
 void transport_ws_server::peer_endpoint_t::send(std::span<const std::byte> frame) {
@@ -332,101 +308,13 @@ void transport_ws_server::peer_endpoint_t::send(std::span<const std::span<const 
     write_all_iov(slot_->fd.load(std::memory_order_relaxed), vec, n);
 }
 
-void transport_ws_server::enumerate_peers(const peer_visitor_t& visit) const {
-    const std::lock_guard lock(peers_m_);
-    for (const std::unique_ptr<session_t>& s : slots_)
-        if (s->open.load(std::memory_order_relaxed) && !s->name.empty()) visit(s->name);
-}
-
-transport_t* transport_ws_server::peer_link(std::string_view peer) {
-    const std::lock_guard lock(peers_m_);
-    for (const std::unique_ptr<session_t>& s : slots_)
-        if (s->open.load(std::memory_order_relaxed) && s->name == peer) return &s->endpoint;
-    return nullptr;
-}
-
-bool transport_ws_server::close_peer(std::string_view peer) {
-    // Find the named open peer under the same lock order senders use
-    // (peers_m_ → write_m_), then ::shutdown its socket. We deliberately do NOT
-    // call teardown_slot here: it clears the recv-thread-only buffers/assembler,
-    // so it must run only on the recv thread. The shutdown wakes that thread's
-    // next poll, ::recv returns 0, and the IDENTICAL remote-FIN path recycles the
-    // slot — no duplicate teardown logic, no off-thread buffer touch.
-    const std::lock_guard plock(peers_m_);
-    for (const std::unique_ptr<session_t>& s : slots_) {
-        if (!s->open.load(std::memory_order_relaxed) || s->name != peer) continue;
-        const std::lock_guard wlock(write_m_);
-        const int fd = s->fd.load(std::memory_order_relaxed);
-        if (fd >= 0) ::shutdown(fd, SHUT_RDWR);
-        return true;
-    }
-    return false;
-}
-
-void transport_ws_server::accept_peer() {
-    sockaddr_in remote{};
-    socklen_t rlen = sizeof(remote);
-    const int fd = ::accept(listen_fd_, reinterpret_cast<sockaddr*>(&remote), &rlen);
-    if (fd < 0) return;
-
-    session_t* slot = nullptr;
-    {
-        const std::lock_guard lock(peers_m_);
-        std::size_t idx = 0;
-        for (std::size_t i = 0; i < slots_.size(); ++i)
-            if (slots_[i]->fd.load(std::memory_order_relaxed) < 0) {
-                slot = slots_[i].get();
-                idx = i;
-                break;
-            }
-        if (slot == nullptr) {
-            if (max_peers_ != 0 && slots_.size() >= max_peers_) {
-                ::close(fd);  // clean refusal at the deployment cap, not a hung SYN
-                return;
-            }
-            slots_.push_back(std::make_unique<session_t>());
-            slot = slots_.back().get();
-            slot->endpoint.owner_ = this;
-            slot->endpoint.slot_ = slot;
-            idx = slots_.size() - 1;
-        }
-        // The routable NAME is the slot index — `p<slot>`, legal by construction and a
-        // pure function of the slot's position (ADR-0073 §2), so a reused slot gets the
-        // SAME name back (teardown_slot moved the old string out for the eviction seam).
-        slot->name = 'p' + std::to_string(idx);
-        char ip[INET_ADDRSTRLEN] = {};
-        ::inet_ntop(AF_INET, &remote.sin_addr, ip, sizeof(ip));
-        slot->endpoint_str = std::string(ip) + ':' + std::to_string(ntohs(remote.sin_port));
-    }
-    slot->hs_buf.clear();
-    slot->buf.clear();
-    slot->assembler.reset();
-    // The accept-side half of the slot rule (#891): `open`/`fd` are mutated only under
-    // write_m_ — the lock teardown_slot resets them under, and the lock `service_peer` holds
-    // when it flips `open` true past the 101.  A WS slot is published NOT-open (its 101 has
-    // not been written yet), so the hold is what keeps the pair one step for a broadcast
-    // holding write_m_, not the order of the two stores.  Accept is cold; relaxed stores
-    // because the lock is what orders them.
-    {
-        const std::lock_guard lock(write_m_);
-        slot->open.store(false, std::memory_order_relaxed);
-        slot->fd.store(fd, std::memory_order_relaxed);
-    }
-}
-
-void transport_ws_server::service_peer(session_t& s) {
-    const int fd = s.fd.load(std::memory_order_relaxed);
-    if (fd < 0) return;
-    std::array<std::byte, 4096> chunk;
-    const ssize_t n = ::recv(fd, chunk.data(), chunk.size(), 0);
-    if (n <= 0) {  // peer closed the TCP connection, or error
-        teardown_slot(s);
-        return;
-    }
-
+void transport_ws_server::on_readable(session_base_t& base, const std::byte* data,
+                                      std::size_t len) {
+    session_t& s = static_cast<session_t&>(base);
     if (!s.open.load(std::memory_order_relaxed)) {
+        const int fd = s.fd.load(std::memory_order_relaxed);
         // Opening handshake: accumulate the HTTP Upgrade request until CRLFCRLF.
-        s.hs_buf.append(reinterpret_cast<const char*>(chunk.data()), static_cast<std::size_t>(n));
+        s.hs_buf.append(reinterpret_cast<const char*>(data), len);
         if (s.hs_buf.size() > 16384) {  // runaway request guard
             teardown_slot(s);
             return;
@@ -479,7 +367,7 @@ void transport_ws_server::service_peer(session_t& s) {
         return;
     }
 
-    s.buf.insert(s.buf.end(), chunk.data(), chunk.data() + n);
+    s.buf.insert(s.buf.end(), data, data + len);
     if (!drain_frames(s)) teardown_slot(s);
 }
 
@@ -564,77 +452,6 @@ bool transport_ws_server::drain_frames(session_t& s) {
             default:
                 break;  // TEXT / PONG: ignored (a RESERVED opcode never gets here: #1060)
         }
-    }
-}
-
-void transport_ws_server::teardown_slot(session_t& s) {
-    std::string departed;
-    {
-        // Stop peer_link/enumerate resolution FIRST, so no new sender targets
-        // the dying slot by name. Keep the name: it identifies the departed
-        // session to the eviction seam below.
-        const std::lock_guard lock(peers_m_);
-        departed = std::move(s.name);
-        s.name.clear();
-    }
-    int fd;
-    bool was_open;
-    {
-        // The stream teardown-under-write-lock invariant, per slot: reset the fd
-        // and the open flag under write_m_ BEFORE ::close, so an in-flight send
-        // either finished against the still-open fd or observes the reset.  The
-        // mirror image of the accept-side publish — same lock, same relaxed stores.
-        const std::lock_guard lock(write_m_);
-        was_open = s.open.load(std::memory_order_relaxed);
-        s.open.store(false, std::memory_order_relaxed);
-        fd = s.fd.exchange(-1, std::memory_order_relaxed);
-    }
-    if (fd >= 0) ::close(fd);
-    s.buf.clear();
-    s.buf.shrink_to_fit();
-    s.hs_buf.clear();
-    s.assembler.reset();
-    // Departure seam (RFC-0009 §D extended to peer departure): only a session that
-    // completed its handshake can have flowed frames (subscriptions), and only then.
-    // Fired LAST, with no transport lock held — the notifier re-enters the routing
-    // plane (router → graph locks). Peer-named mode reports the peer's own name;
-    // flat mode reports the whole link down.
-    if (was_open && !departed.empty()) {
-        if (peer_rx_.has_any())
-            notify_peer_down(departed);
-        else
-            notify_down();
-    }
-}
-
-void transport_ws_server::run() {
-    // ONE poll pass multiplexes the listen socket and every live peer — no
-    // per-peer thread (the MCU-shaped choice, #362), bounded to 100 ms so the
-    // loop stays shutdown-responsive (the posix_endpoint_t idiom).
-    std::vector<pollfd> pfds;
-    std::vector<session_t*> pslots;
-    while (!stop_.load(std::memory_order_relaxed)) {
-        pfds.clear();
-        pslots.clear();
-        pfds.push_back(pollfd{listen_fd_, POLLIN, 0});
-        {
-            const std::lock_guard lock(peers_m_);
-            for (const std::unique_ptr<session_t>& s : slots_) {
-                const int fd = s->fd.load(std::memory_order_relaxed);
-                if (fd >= 0) {
-                    pfds.push_back(pollfd{fd, POLLIN, 0});
-                    pslots.push_back(s.get());
-                }
-            }
-        }
-        const int pr = ::poll(pfds.data(), static_cast<nfds_t>(pfds.size()), 100);
-        if (pr <= 0) continue;  // timeout or transient error → re-check stop_
-        if (stop_.load(std::memory_order_relaxed)) break;
-        // Peers first (their events are bound to this pass's fd list), then the
-        // accept (which may add a slot).
-        for (std::size_t i = 1; i < pfds.size(); ++i)
-            if ((pfds[i].revents & (POLLIN | POLLHUP | POLLERR)) != 0) service_peer(*pslots[i - 1]);
-        if ((pfds[0].revents & POLLIN) != 0) accept_peer();
     }
 }
 
@@ -796,7 +613,7 @@ bool transport_ws_client::handshake(int fd, const std::string& host, std::uint16
 
     // Bytes pipelined past the header are the start of the frame stream — they are already
     // off the socket, so `serve` can never read them again. Carry them over, exactly as
-    // `transport_ws_server::service_peer` does on the accept side.
+    // `transport_ws_server::on_readable` does on the accept side.
     const auto* rest = reinterpret_cast<const std::byte*>(resp.data()) + hdr_end + 4;
     pipelined.assign(rest, rest + (resp.size() - hdr_end - 4));
     return true;

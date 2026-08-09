@@ -6,7 +6,8 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * `transport_tcp_server::run` (`core/src/transport_tcp.cpp`) is one thread that, per wakeup,
+ * `slot_server_t::run` (`core/src/posix_endpoint.cpp`, the poll loop the tcp
+ * and ws servers have shared since #871) is one thread that, per wakeup,
  * rebuilds a `pollfd` vector over every live session **under `peers_m_`** and calls `::poll`
  * on all of them. Three costs hide in that sentence and they are independent:
  *
@@ -29,7 +30,8 @@
  * **`idle-fanout` — the decisive arm.** ONE active sender at full rate, while the number of
  * CONNECTED-BUT-SILENT peers sweeps. Idle peers are raw `::connect`ed sockets: no dialer thread,
  * no client CPU, no frames. The server treats them as live sessions regardless — it has no
- * handshake, so a peer is in the poll set the moment it is accepted (`transport_tcp.cpp:433`).
+ * handshake, so a peer is in the poll set the moment it is accepted
+ * (`slot_server_t::accept_peer`, `core/src/posix_endpoint.cpp`).
  *
  * Therefore **every nanosecond this arm loses is scanning overhead**, limits 2 and 3, with the
  * work held exactly constant. If the active peer's rate is flat across the sweep, those two

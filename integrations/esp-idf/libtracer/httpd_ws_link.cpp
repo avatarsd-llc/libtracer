@@ -1484,7 +1484,7 @@ std::string httpd_ws_link_t::reclaim_slot(session_t* slot) {
 
 void httpd_ws_link_t::notify_departed(std::string_view peer) {
     // Peer-named mode evicts just the departed peer's edges; flat mode has one peer's
-    // departure BE the whole link down — the same fork transport_ws_server::teardown_slot
+    // departure BE the whole link down — the same fork slot_server_t::teardown_slot
     // takes, and for the same reason (which sink the router installed).
     if (peer_named_)
         notify_peer_down(peer);
