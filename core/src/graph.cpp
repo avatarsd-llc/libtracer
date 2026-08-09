@@ -1765,15 +1765,15 @@ result_t<subscription_t> graph_t::subscribe(const path_t& src, subscriber_fn_t f
 }
 
 result_t<void> graph_t::unsubscribe(const subscription_t& sub) {
-    if (sub.vertex == nullptr) return std::unexpected(status_t::NOT_FOUND);
+    if (sub.vertex_ == nullptr) return std::unexpected(status_t::NOT_FOUND);
     // The in-process counterpart of the wire ":subscribers[N] clear" (field_write below):
     // deactivate the slot, then unwind the RFC-0005 listener bookkeeping — the SAME order and
     // the SAME helper the wire path uses, so both doors leave identical counters. clear_edge
     // RECLAIMS the slot's retained state (target key, segment pin, cold remote half) and
     // leaves an inert, index-stable shell that add_edge reuses; an in-flight delivery already
     // snapshotted the edge (ADR-0041 §2) and completes untouched.
-    if (!sub.vertex->clear_edge(sub.slot)) return std::unexpected(status_t::NOT_FOUND);
-    note_subscriber_removed(sub.vertex);
+    if (!sub.vertex_->clear_edge(sub.slot_)) return std::unexpected(status_t::NOT_FOUND);
+    note_subscriber_removed(sub.vertex_);
     return {};
 }
 

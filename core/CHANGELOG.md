@@ -125,6 +125,26 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **`tr::graph::subscription_t` is OPAQUE — it no longer hands out the producer `vertex_t*`
+  (#867).** The handle was a `struct` with two public members, `vertex_t* vertex` and
+  `std::size_t slot`, so `sub.vertex->store(...)` and `sub.vertex->mark_unregistered()`
+  compiled for any API user (`fill`, `refresh_registered_child` and `add_child` sit in the same
+  public section of `vertex.hpp`). Those are lock-contract mutators — valid only under the
+  graph's map/stripe locks, and not ACL-gated — so the handle was a documented-as-opaque door
+  straight past the discipline `graph_t` exists to enforce.
+  Aggregate initialization also let a caller FORGE `{any_pointer, any_index}` and feed it to
+  `unsubscribe()`. It is now a `class` shaped exactly like `vertex_handle_t` (ADR-0056): both
+  members private, `graph_t` the sole `friend` — the only code that can build one and the only
+  code that can read the pair back. **Public surface kept:** default construction (still the
+  `NOT_FOUND` no-op handle), copy/pass-by-value (`static_assert`ed trivially copyable, so
+  privatizing costs no wrapper), and a new `operator==` — two handles compare equal iff they
+  name the same slot on the same producer, which is how a caller now observes RFC-0009 §D.2
+  slot reuse. **Public surface removed:** `.vertex` and `.slot`, and aggregate/2-arg
+  construction. A caller that read either member (both in-tree readers were tests asserting
+  slot reuse) migrates to `==`; there is no accessor to migrate to, by design. Doc-only
+  entities and generated docs move with it (`doxygenstruct` → `doxygenclass`). Zero runtime
+  cost: `graph.cpp.o`'s `.text` is byte-identical across the change.
+
 - **BEHAVIOUR: `bus_link_t`'s peer-named wiring calls are REFUSED on a link that is not
   `peer_named()`, and a peer-named link no longer downgrades to flat delivery (#889).**
   `set_peer_receiver`, `set_peer_rope_receiver` and `set_peer_down_notifier` now return

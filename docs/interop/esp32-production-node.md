@@ -65,7 +65,7 @@ std::pmr::synchronized_pool_resource shared{&arena};
 
 Those are the three injection points of `graph_t`'s constructor — the pmr resource,
 the value backend and the failable control source
-(`core/include/libtracer/graph.hpp:294-296`) — and the **four** of
+(`core/include/libtracer/graph.hpp:317-319`) — and the **four** of
 `fwd_router_t`: the pmr resource, the failable `rx` source, the `flat` byte backend
 its rope flattens draw from, and the `egress` byte backend the terminus reply head
 draws from (`core/include/libtracer/fwd_router.hpp:177-182`; `egress` is #795 /
@@ -329,8 +329,8 @@ itself, described via `:schema` like any other data
 ```
 
 The backpressure counters come from `graph_t::delivery_drops()`
-(`core/include/libtracer/graph.hpp:1304`), which snapshots four per-cause totals —
-`no_target`, `denied`, `out_of_memory`, `fan_out_truncated` (`graph.hpp:1282-1294`). Each
+(`core/include/libtracer/graph.hpp:1327`), which snapshots four per-cause totals —
+`no_target`, `denied`, `out_of_memory`, `fan_out_truncated` (`graph.hpp:1305-1317`). Each
 counts shed **deliveries**, not events, so a fan-out shed whole under memory pressure moves
 them by its width. They are counted and
 never enforced: nothing in the library reads them, so the deployment decides what to

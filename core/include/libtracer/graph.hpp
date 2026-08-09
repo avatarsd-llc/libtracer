@@ -111,17 +111,40 @@ struct remote_delivery_t {
  * @brief An opaque handle to ONE in-process subscription — the token @ref graph_t::unsubscribe
  *        removes it by (ADR-0049 host-SDK sugar for the wire `:subscribers[N]` clear).
  *
- * Returned by the callback-form @ref graph_t::subscribe overloads. The producer @ref vertex is
- * pinned for the graph's lifetime (ADR-0057 — vertices are never freed), so the handle stays
- * valid until it is unsubscribed; @ref slot is that edge's `:subscribers[]` index. Trivially
- * copyable and pointer-sized-plus-index — pass it by value. Do NOT dereference @ref vertex; treat
- * the whole struct as opaque. A default-constructed handle (`vertex == nullptr`) unsubscribes to a
- * `NOT_FOUND` no-op.
+ * Returned by the callback-form @ref graph_t::subscribe overloads. It names a producer vertex and
+ * one of that vertex's `:subscribers[]` slots; the vertex is pinned for the graph's lifetime
+ * (ADR-0057 — vertices are never freed), so the handle stays valid until it is unsubscribed.
+ * Trivially copyable and pointer-sized-plus-index — pass it by value.
+ *
+ * Opaque the same way @ref vertex_handle_t is, and for the same reason (ADR-0056): the pair it
+ * carries is `graph_t`'s state, not the caller's. `graph_t` is the sole `friend` — the only code
+ * that can build one from a vertex and a slot, and the only code that can read either back — so a
+ * caller can neither reach the `vertex_t` behind a live subscription (whose slot mutators are only
+ * valid under the graph's locks) nor forge a handle from an arbitrary pointer and index and hand
+ * it to @ref graph_t::unsubscribe. A default-constructed handle names no subscription and
+ * unsubscribes to a `NOT_FOUND` no-op; @ref operator== is the only observation a caller has.
  */
-struct subscription_t {
-    vertex_t* vertex = nullptr; /**< @brief Opaque: the producer vertex the edge lives on. */
-    std::size_t slot = 0;       /**< @brief Opaque: the `:subscribers[]` slot index. */
+class subscription_t {
+   public:
+    /** @brief A handle naming no subscription — @ref graph_t::unsubscribe answers `NOT_FOUND`. */
+    subscription_t() = default;
+
+    /** @brief Two handles compare equal iff they name the same slot on the same producer vertex.
+     *         (`!=` is synthesized.) */
+    [[nodiscard]] friend bool operator==(const subscription_t& a,
+                                         const subscription_t& b) noexcept {
+        return a.vertex_ == b.vertex_ && a.slot_ == b.slot_;
+    }
+
+   private:
+    friend class graph_t;  // sole constructor + the only code that reads the pair back.
+    subscription_t(vertex_t* vertex, std::size_t slot) noexcept : vertex_(vertex), slot_(slot) {}
+    vertex_t* vertex_ = nullptr; /**< @brief The producer vertex the edge lives on. */
+    std::size_t slot_ = 0;       /**< @brief The `:subscribers[]` slot index. */
 };
+
+// Pass-by-value, as the doc comment above promises: privatizing the pair costs no wrapper.
+static_assert(std::is_trivially_copyable_v<subscription_t>);
 
 /**
  * @brief One node-scoped vertex reference — a slot index AND the generation stamping it
@@ -1010,7 +1033,7 @@ class graph_t {
      *
      * The host-SDK-sugar counterpart of the wire `:subscribers[N]` clear (ADR-0049): it
      * deactivates the edge slot and unwinds the RFC-0005 listener bookkeeping (descendants'
-     * writes stop bubbling to @p sub.vertex), exactly as the wire path does. The slot shell
+     * writes stop bubbling to the producer @p sub names), exactly as the wire path does. The shell
      * stays (index-stable) and a later @ref subscribe reuses it. Idempotent-ish: a
      * default-constructed or already-cleared handle returns `NOT_FOUND`. Only DEACTIVATES —
      * an in-flight delivery already snapshotted the edge and completes (ADR-0041 §2), so the
