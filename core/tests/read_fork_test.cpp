@@ -35,6 +35,7 @@
 #include <vector>
 
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -43,12 +44,7 @@ using tr::graph::path_t;
 using tr::graph::role_t;
 using tr::graph::vertex_handle_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /** @brief A one-byte value living in its own heap segment. */
 [[nodiscard]] tr::view::view_t val_u8(std::uint8_t b) {
@@ -375,7 +371,5 @@ int main() {
     test_subtree_retire();
     test_idempotent_retire();
     test_concurrent_fork();
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("read_fork");
 }

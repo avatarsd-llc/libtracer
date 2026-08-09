@@ -31,6 +31,7 @@
 
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -41,12 +42,7 @@ using tr::net::child_registry_t;
 using tr::net::fwd_router_t;
 using tr::net::transport_vertex_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /** @brief A transport that only records what it was handed — no socket, no thread. */
 class sink_link_t : public tr::net::transport_t {
@@ -332,7 +328,5 @@ int main() {
     test_duplicate_add_rebinds();
     test_slot_addresses_are_stable();
     test_digest_paths_agree();
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("registry_teardown");
 }

@@ -39,6 +39,7 @@
 
 #include "libtracer/mem_pool.hpp"
 #include "libtracer/segment.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -47,13 +48,7 @@ using tr::mem::synchronized_pool_t;
 using tr::view::segment_ptr_t;
 using tr::view::segment_t;
 
-int g_failures = 0;
-void check(bool ok, std::string_view what) {
-    if (!ok) {
-        ++g_failures;
-        std::printf("FAIL: %.*s\n", static_cast<int>(what.size()), what.data());
-    }
-}
+using tr::testing::check;
 
 /**
  * @brief A host sync policy that COUNTS its acquisitions — the instrument for check 1.
@@ -163,6 +158,5 @@ int main() {
 #ifdef LIBTRACER_ABLATE_POOL_SYNC
     std::printf("mem_sync_policy_test: ABLATION build (critical section removed)\n");
 #endif
-    if (g_failures == 0) std::printf("mem_sync_policy_test: OK\n");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("mem_sync_policy");
 }

@@ -37,6 +37,7 @@
 #include "libtracer/route_handle.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -46,15 +47,10 @@ using tr::net::transport_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
+using tr::testing::check;
 
 /** @brief The per-link table bound this node is built with — ingress AND egress (#603). */
 constexpr std::size_t kBound = 2;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
 
 /** @brief A PATH TLV over @p segs, built with the production emitters. */
 std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
@@ -221,6 +217,5 @@ int main() {
     std::printf("== fwd_bind_refusal_unwind_test (#833) ==\n");
     refused_bind_leaves_no_strand();
     established_flow_survives_a_refusal();
-    std::printf("%s\n", g_failures == 0 ? "ALL PASS" : "FAILURES");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("fwd_bind_refusal_unwind");
 }

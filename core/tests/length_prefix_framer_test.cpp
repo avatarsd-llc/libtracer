@@ -20,14 +20,11 @@
 #include "libtracer/byteorder.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/view.hpp"
+#include "test_support.hpp"
 
 namespace {
 
-int g_failures = 0;
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 using bytes_t = std::vector<std::byte>;
 
@@ -208,7 +205,5 @@ int main() {
               "on_prefix: ACCEPT carries a segment holding the frame");
     }
 
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("length_prefix_framer");
 }

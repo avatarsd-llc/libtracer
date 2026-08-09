@@ -44,6 +44,7 @@
 #include "libtracer/mem_borrowed.hpp"
 #include "libtracer/mem_pool.hpp"
 #include "libtracer/segment.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -56,15 +57,7 @@ using tr::mem::synchronized_pool_t;
 using tr::view::segment_ptr_t;
 using tr::view::segment_t;
 
-int g_failures = 0;
-
-/** @brief Record a check; a failure prints its label and reddens the run. */
-void check(bool ok, std::string_view what) {
-    if (!ok) {
-        ++g_failures;
-        std::printf("FAIL: %.*s\n", static_cast<int>(what.size()), what.data());
-    }
-}
+using tr::testing::check;
 
 /**
  * @brief A sync policy that COUNTS acquisitions of the real host critical section.
@@ -207,16 +200,11 @@ int main() {
         std::printf(
             "pool_only_dispatch: FAILED (%d) — the synchronized pool's locked destroy was "
             "bypassed; skipping the checks whose ablation corrupts memory\n",
-            g_failures);
+            tr::testing::failures());
         return 1;
     }
     user_backend_virtual_destroy();
     borrowed_segment_reclaim();
 
-    if (g_failures != 0) {
-        std::printf("pool_only_dispatch: FAILED (%d)\n", g_failures);
-        return 1;
-    }
-    std::printf("pool_only_dispatch: OK\n");
-    return 0;
+    return tr::testing::summary("pool_only_dispatch");
 }

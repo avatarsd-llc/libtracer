@@ -50,6 +50,7 @@
 #include "libtracer/op_resolve.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -134,12 +135,7 @@ using tr::wire::type_t;
 /** @brief The minted `PATH_REF` reply trailer's byte length (one element): 4-byte header + 8. */
 constexpr std::size_t kMintBytes = tr::wire::path_ref_wire_bytes(1);
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /**
  * @brief A `mem_backend_t` that serves from an upstream backend until its serve budget runs out,
@@ -553,6 +549,5 @@ int main() {
     std::printf("\n");
     test_default_egress_unchanged();
 
-    std::printf("\n%s\n", g_failures == 0 ? "all checks passed" : "FAILURES");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("terminus_egress_backend");
 }

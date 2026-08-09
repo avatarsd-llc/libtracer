@@ -36,18 +36,14 @@
 #include "libtracer/transport_tcp.hpp"
 #include "libtracer/transport_udp.hpp"
 #include "libtracer/transport_ws.hpp"
+#include "test_support.hpp"
 
 namespace {
 
 using namespace std::chrono_literals;
 using tr::net::transport_t;
 
-int g_failures = 0;
-void check(bool ok, std::string_view what) {
-    std::printf("    [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()),
-                what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 using bytes_t = std::vector<std::byte>;
 
@@ -266,7 +262,5 @@ int main() {
     run_contract<udp_pair>();
     run_contract<tcp_pair>();
     run_contract<ws_pair>();
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("transport_conformance");
 }

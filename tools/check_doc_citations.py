@@ -667,9 +667,9 @@ ANCHORS = [
     ('core/src/transport_ws.cpp:625', 'std::array<std::byte, 4096> chunk;',
      'void transport_ws_client::serve(int fd, std::vector<std::byte> pipelined) {'),
     # core/tests/registry_teardown_test.cpp
-    ('core/tests/registry_teardown_test.cpp:279', 'void test_digest_paths_agree() {'),
+    ('core/tests/registry_teardown_test.cpp:275', 'void test_digest_paths_agree() {'),
     # core/tests/tlv_arena_test.cpp
-    ('core/tests/tlv_arena_test.cpp:293', 'const std::vector<std::byte> deep_bytes = encode(nested(100));'),
+    ('core/tests/tlv_arena_test.cpp:289', 'const std::vector<std::byte> deep_bytes = encode(nested(100));'),
     # integrations/esp-idf/libtracer/httpd_ws_link.cpp
     ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:70',
      '* reply, and (the deep path) the whole /unit batch-apply transaction. The device'),

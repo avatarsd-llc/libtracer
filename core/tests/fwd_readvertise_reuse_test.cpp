@@ -38,6 +38,7 @@
 #include "libtracer/route_handle.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -49,15 +50,10 @@ using tr::net::transport_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
+using tr::testing::check;
 
 /** @brief #884's shape: drive 51 cycles, and every count under test must still read one. */
 constexpr int kCycles = 51;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
 
 // --- wire builders (canonical bytes via the production emit helpers) ----------
 std::vector<std::byte> b_name(std::string_view s) {
@@ -265,6 +261,5 @@ int main() {
     test_forwarding_arm_reuses_one_downstream_label();
     test_producer_advertise_reuses_its_label();
     test_chain_flap_grows_no_state();
-    std::printf("%s\n", g_failures == 0 ? "ALL PASS" : "FAILURES");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("fwd_readvertise_reuse");
 }

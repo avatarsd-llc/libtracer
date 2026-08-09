@@ -47,6 +47,8 @@
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport_ws.hpp"
+#include "test_support.hpp"
+#include "test_values.hpp"
 
 namespace {
 
@@ -63,12 +65,9 @@ using tr::wire::opt_t;
 using tr::wire::tlv_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
+using tr::testing::mailbox_t;
+using tr::testing::make_value;
 
 // --- wire builders (canonical bytes via the production emit helpers) ---------
 std::vector<std::byte> b_name(std::string_view s) {
@@ -95,40 +94,7 @@ std::vector<std::byte> b_value_u32(std::uint32_t v) {
 }
 using tr::testing::b_fwd;
 
-tr::view::view_t make_value(std::span<const std::byte> bytes) {
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
-    if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
-    return tr::view::view_t::over(std::move(seg));
-}
-
 std::uint8_t value_u8(const tlv_t& v) { return tr::detail::load_le<std::uint8_t>(v.payload); }
-
-/**
- * @brief A bounded reply mailbox: the client's reply sink pushes the encoded REPLY here; the test
- *        thread waits with a deadline.
- *
- * No fixed sleeps.
- */
-struct mailbox_t {
-    std::mutex m;
-    std::condition_variable cv;
-    std::vector<std::vector<std::byte>> q;
-
-    void push(std::vector<std::byte> v) {
-        {
-            const std::lock_guard lock(m);
-            q.push_back(std::move(v));
-        }
-        cv.notify_all();
-    }
-    std::optional<std::vector<std::byte>> wait(std::chrono::milliseconds budget) {
-        std::unique_lock lock(m);
-        if (!cv.wait_for(lock, budget, [&] { return !q.empty(); })) return std::nullopt;
-        std::vector<std::byte> v = std::move(q.front());
-        q.erase(q.begin());
-        return v;
-    }
-};
 
 /**
  * @brief What B saw inbound for the last request — captured byte-exact for the dst-shrink / src-
@@ -290,9 +256,7 @@ int main() {
               "ERROR payload == STATUS{ ERROR{ VALUE u16=0x0020 tr::path::not_found } }");
     }
 
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("fwd_multihop");
     // RAII teardown: client transport -> router_c -> A transports -> router_a ->
     // B transport -> router_b, each dtor stop->join->close (bounded poll).
 }

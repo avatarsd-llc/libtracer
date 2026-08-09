@@ -50,6 +50,7 @@
 #include "libtracer/route_handle.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -61,12 +62,7 @@ using tr::net::transport_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 // --- wire builders (canonical bytes via the production emit helpers) ----------
 std::vector<std::byte> b_name(std::string_view s) {
@@ -341,6 +337,5 @@ int main() {
     test_midchain_reconnect_self_heals();
     test_terminus_binding_is_not_swept();
     test_sweep_is_scoped_to_the_cleared_link();
-    std::printf("%s\n", g_failures == 0 ? "ALL PASS" : "FAILURES");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("fwd_reconnect_selfheal");
 }

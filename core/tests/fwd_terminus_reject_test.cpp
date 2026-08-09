@@ -52,6 +52,7 @@
 #include "libtracer/mem_source.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -64,12 +65,7 @@ using tr::graph::status_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 std::vector<std::byte> b_name(std::string_view s) {
     std::vector<std::byte> out;
@@ -272,6 +268,5 @@ int main() {
     check(!g.read(*g.find(path_t::parse("/sensor")->key())).has_value(),
           "no malformed frame wrote a value into /sensor");
 
-    std::printf("\n%s\n", g_failures == 0 ? "terminus reject: PASS" : "terminus reject: FAIL");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("fwd_terminus_reject");
 }

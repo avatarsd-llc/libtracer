@@ -38,6 +38,12 @@ on:
       - "core/tests/webtransport_test.cpp"
       - "core/tests/wt_interop_server.cpp"
       - "core/tests/tsan-msquic.supp"
+      # #874 — the shared test runner. quic_test.cpp and webtransport_test.cpp now take their
+      # runner, their frame collector AND their TSan happens-before shims from this header, so
+      # a change confined to it can break both of these TUs without touching either. This
+      # allowlist is the ONLY thing that decides whether they get compiled on a PR.
+      - "core/tests/test_support.hpp"
+      - "core/tests/test_values.hpp"
       - "core/CMakeLists.txt"
       - "core/tests/CMakeLists.txt"
       - "tools/gen-dev-cert.sh"

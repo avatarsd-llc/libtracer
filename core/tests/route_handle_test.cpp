@@ -33,17 +33,13 @@
 #include <vector>
 
 #include "libtracer/mem_heap.hpp"
+#include "test_support.hpp"
 
 namespace {
 
 using namespace tr::net;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 std::vector<std::byte> route_bytes(std::uint8_t tag) {
     return {std::byte{0x06}, std::byte{0x40}, std::byte{0x01}, std::byte{0x00}, std::byte{tag}};
@@ -695,10 +691,5 @@ int main() {
     reconnect_race_invariant();
     refused_bind_unwinds_the_take();
 
-    if (g_failures == 0) {
-        std::printf("route_handle: ALL PASS\n");
-        return 0;
-    }
-    std::printf("route_handle: %d FAILURE(S)\n", g_failures);
-    return 1;
+    return tr::testing::summary("route_handle");
 }

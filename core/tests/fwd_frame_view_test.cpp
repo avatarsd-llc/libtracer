@@ -32,6 +32,8 @@
 #include "libtracer/route_handle.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/view.hpp"
+#include "test_support.hpp"
+#include "test_values.hpp"
 
 namespace {
 
@@ -41,13 +43,8 @@ using tr::wire::type_t;
 using tr::wire::grammar::rope_cursor;
 using tr::wire::grammar::span_cursor;
 
-int g_failures = 0;
-
-/** @brief Print + tally one check. */
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
+using tr::testing::make_value;
 
 using bytes_t = std::vector<std::byte>;
 
@@ -91,13 +88,6 @@ bytes_t b_op(fwd_op_t op) {
 }
 
 using tr::testing::b_fwd;
-
-/** @brief An owned single-link view holding a copy of @p bytes. */
-tr::view::view_t make_value(std::span<const std::byte> bytes) {
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
-    if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
-    return tr::view::view_t::over(std::move(seg));
-}
 
 /** @brief A rope over @p bytes split at the given cut points (each cut a link boundary). */
 tr::view::rope_t rope_split(std::span<const std::byte> bytes, std::span<const std::size_t> cuts) {
@@ -359,7 +349,5 @@ int main() {
               "stack_writer: an oversize body auto-widens to the u32 LL header");
     }
 
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("fwd_frame_view");
 }

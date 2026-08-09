@@ -42,21 +42,11 @@
 #include <vector>
 
 #include "libtracer/posix_endpoint.hpp"
+#include "test_support.hpp"
 
 namespace {
 
-int g_failures = 0;
-
-/**
- * @brief Report one assertion (PASS/FAIL line + failure tally).
- *
- * @param ok   The asserted condition.
- * @param what What the condition proves.
- */
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /**
  * @brief Test shim republishing the two protected full-write helpers.
@@ -238,6 +228,5 @@ int main() {
 
     check(tr::detail::write_fault_inject_hook == nullptr, "the injection seam is left disarmed");
 
-    std::printf("%s\n", g_failures == 0 ? "ALL PASS" : "FAILURES");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("write_fault_class");
 }

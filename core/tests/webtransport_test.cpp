@@ -48,49 +48,9 @@
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport_webtransport.hpp"
-
-// The raw msquic H3 client below crosses the same non-TSan-instrumented library
-// boundary as transport_webtransport.cpp: restate msquic's StreamSend ->
-// SEND_COMPLETE and callback-serialization happens-before edges for TSan (see
-// the matching annotations + rationale in src/msquic_endpoint.hpp). No-ops
-// outside TSan.
-#if defined(__SANITIZE_THREAD__)
-#define LIBTRACER_TSAN 1
-#elif defined(__has_feature)
-#if __has_feature(thread_sanitizer)
-#define LIBTRACER_TSAN 1
-#endif
-#endif
-#ifdef LIBTRACER_TSAN
-#include <sanitizer/tsan_interface.h>
-#endif
+#include "test_support.hpp"
 
 namespace {
-
-/** @brief Publish everything written so far to whoever acquires @p p next. */
-inline void tsan_release(void* p) {
-#ifdef LIBTRACER_TSAN
-    __tsan_release(p);
-#else
-    (void)p;
-#endif
-}
-
-/** @brief Take the writes published by the last release on @p p. */
-inline void tsan_acquire(void* p) {
-#ifdef LIBTRACER_TSAN
-    __tsan_acquire(p);
-#else
-    (void)p;
-#endif
-}
-
-/** @brief RAII edge for one msquic callback invocation: acquire in, release out. */
-struct tsan_cb_guard_t {
-    void* p; /**< @brief The object the edge is annotated on. */
-    explicit tsan_cb_guard_t(void* ptr) : p(ptr) { tsan_acquire(p); }
-    ~tsan_cb_guard_t() { tsan_release(p); }
-};
 
 using namespace std::chrono_literals;
 using tr::graph::graph_t;
@@ -102,11 +62,15 @@ using tr::view::view_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
+using tr::testing::frame_sink_t;
+// The raw msquic H3 client below crosses the same non-TSan-instrumented library boundary
+// transport_webtransport.cpp does: restate msquic's StreamSend -> SEND_COMPLETE and
+// callback-serialization happens-before edges for TSan (the matching annotations and their
+// rationale are in src/msquic_endpoint.hpp). No-ops outside a TSan build.
+using tr::testing::tsan_acquire;
+using tr::testing::tsan_cb_guard_t;
+using tr::testing::tsan_release;
 
 /** @brief Dev cert paths — generated once in main() by tools/gen-dev-cert.sh. */
 std::string g_cert;
@@ -119,35 +83,6 @@ std::string g_other_cert;
 webtransport_dial_tls_t dev_tls() {
     return webtransport_dial_tls_t{.ca_file = {}, .insecure_no_verify = true};
 }
-
-/**
- * @brief A collecting sink: frames delivered on an msquic worker thread, read from the test thread.
- */
-struct sink_t {
-    std::mutex m;
-    std::vector<std::vector<std::byte>> frames;
-
-    void push(std::span<const std::byte> f) {
-        const std::lock_guard lock(m);
-        frames.emplace_back(f.begin(), f.end());
-    }
-    [[nodiscard]] std::size_t count() {
-        const std::lock_guard lock(m);
-        return frames.size();
-    }
-    [[nodiscard]] std::vector<std::byte> at(std::size_t i) {
-        const std::lock_guard lock(m);
-        return frames.at(i);
-    }
-    [[nodiscard]] bool wait_for_count(std::size_t n, std::chrono::milliseconds budget) {
-        const auto deadline = std::chrono::steady_clock::now() + budget;
-        while (count() < n) {
-            if (std::chrono::steady_clock::now() > deadline) return false;
-            std::this_thread::sleep_for(5ms);
-        }
-        return true;
-    }
-};
 
 std::vector<std::byte> test_frame(std::size_t len, std::uint8_t seed) {
     std::vector<std::byte> f(len);
@@ -260,7 +195,7 @@ void test_session_and_raw_duplex() {
     std::printf("WebTransport — session establishment + raw frames both ways:\n");
     // Sinks + named receiver lambdas BEFORE the transports: the slot binds the
     // callable by address, and the transport dtor drains msquic callbacks.
-    sink_t at_listener, at_dialer;
+    frame_sink_t at_listener, at_dialer;
     auto listener_rx = [&](std::span<const std::byte> f) { at_listener.push(f); };
     auto dialer_rx = [&](std::span<const std::byte> f) { at_dialer.push(f); };
     webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key);
@@ -292,7 +227,7 @@ void test_session_and_raw_duplex() {
 
 void test_big_frame_chunking() {
     std::printf("WebTransport — a big frame arrives through many RECEIVE chunks:\n");
-    sink_t sink;
+    frame_sink_t sink;
     auto rx = [&](std::span<const std::byte> f) { sink.push(f); };
     webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key);
     listener.set_receiver(rx);
@@ -325,7 +260,7 @@ void test_big_frame_chunking() {
  */
 void test_send_overload_parity() {
     std::printf("WebTransport — span and scatter-gather sends agree on the wire:\n");
-    sink_t sink;
+    frame_sink_t sink;
     auto rx = [&](std::span<const std::byte> f) { sink.push(f); };
     webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key);
     listener.set_receiver(rx);
@@ -422,7 +357,7 @@ void test_view_delivery_and_backpressure() {
 
     // Backpressure: the first two allocations fail; the third frame delivers.
     recording_backend_t starved(2);
-    sink_t sink;
+    frame_sink_t sink;
     auto rope_rx2 = [&](tr::view::rope_t f) { sink.push(f.links()[0].bytes()); };
     webtransport_transport_t listener2(std::uint16_t{0}, g_cert, g_key, &starved);
     listener2.set_rope_receiver(rope_rx2);
@@ -1124,7 +1059,7 @@ void test_frame_stream_adoption_gate() {
 
     // Guard 1: a 0x41 stream BEFORE the extended CONNECT — the handshake bypass.
     {
-        sink_t sink;
+        frame_sink_t sink;
         auto rx = [&](std::span<const std::byte> f) { sink.push(f); };
         webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key);
         listener.set_receiver(rx);
@@ -1155,7 +1090,7 @@ void test_frame_stream_adoption_gate() {
 
     // Guard 2: a 0x41 stream naming a session id that is not the CONNECT stream's.
     {
-        sink_t sink;
+        frame_sink_t sink;
         auto rx = [&](std::span<const std::byte> f) { sink.push(f); };
         webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key);
         listener.set_receiver(rx);
@@ -1182,7 +1117,7 @@ void test_frame_stream_adoption_gate() {
 
     // Guard 3: a SECOND 0x41 stream after adoption — the framer-corruption arm.
     {
-        sink_t sink;
+        frame_sink_t sink;
         auto rx = [&](std::span<const std::byte> f) { sink.push(f); };
         webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key);
         listener.set_receiver(rx);
@@ -1233,7 +1168,7 @@ void test_unknown_h3_frames_skipped() {
 
     // Chrome's real shape: reserved frames ahead of the extended CONNECT.
     {
-        sink_t sink;
+        frame_sink_t sink;
         auto rx = [&](std::span<const std::byte> f) { sink.push(f); };
         webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key);
         listener.set_receiver(rx);
@@ -1352,7 +1287,5 @@ int main() {
     test_spec_dial_connect_path();
     test_frame_stream_adoption_gate();
     test_unknown_h3_frames_skipped();
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("webtransport");
 }

@@ -28,15 +28,11 @@
 #include "libtracer/rope.hpp"
 #include "libtracer/view.hpp"
 #include "libtracer/view_can.hpp"
+#include "test_support.hpp"
 
 namespace {
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 std::vector<std::byte> bytes_of(std::initializer_list<std::uint8_t> vals) {
     std::vector<std::byte> v;
@@ -307,6 +303,5 @@ int main() {
         check(!decode_advertise(bad).has_value(), "wrong magic is rejected");
     }
 
-    std::printf(g_failures == 0 ? "\nCAN: PASS\n" : "\nCAN: FAIL (%d)\n", g_failures);
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("can_frames");
 }

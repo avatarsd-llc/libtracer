@@ -41,16 +41,11 @@
 #include <string_view>
 
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
-int g_failures = 0;
-
-/** @brief Record one assertion. */
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /**
  * @brief A link that counts what it is asked to send and can say whether it was WIRED.
@@ -135,6 +130,5 @@ void test_open_allocator_still_registers() {
 int main() {
     test_refused_registration_reports_failure();
     test_open_allocator_still_registers();
-    std::printf("%s\n", g_failures == 0 ? "ALL PASS" : "FAILURES");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("mount_add_oom");
 }

@@ -58,6 +58,7 @@
 
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -71,13 +72,7 @@ using tr::view::view_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-/** @brief Record one assertion. */
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /** @brief Live instances of @ref fake_link_t — the rollback must leave this at zero. */
 int g_links_alive = 0;
@@ -275,6 +270,5 @@ int main() {
     test_refused_wiring_rolls_back();
     test_open_allocator_creates();
     test_refused_wiring_leaves_staged_link_reusable();
-    std::printf("%s\n", g_failures == 0 ? "ALL PASS" : "FAILURES");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("conn_add_oom");
 }

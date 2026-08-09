@@ -27,6 +27,7 @@
 #include <expected>
 #include <initializer_list>
 #include <optional>
+#include <source_location>
 #include <span>
 #include <string>
 #include <string_view>
@@ -34,6 +35,8 @@
 
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
+#include "test_values.hpp"
 
 namespace {
 
@@ -62,26 +65,8 @@ std::expected<tr::graph::subject_token_t, tr::wire::err_t> caller_is_subject(
     return as_bytes(caller);
 }
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
-
-/** @brief A view_t over a fresh, owned heap segment holding @p bytes. */
-tr::view::view_t make_value(std::span<const std::byte> bytes) {
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
-    if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
-    return tr::view::view_t::over(std::move(seg));
-}
-
-tr::view::view_t make_value(std::initializer_list<std::uint8_t> bytes) {
-    std::vector<std::byte> v;
-    v.reserve(bytes.size());
-    for (std::uint8_t b : bytes) v.push_back(std::byte{b});
-    return make_value(v);
-}
+using tr::testing::check;
+using tr::testing::make_value;
 
 /** @brief A SUBSCRIBER TLV naming a single-segment target path. */
 tr::view::view_t subscriber_tlv(std::string_view target_segment) {
@@ -212,14 +197,24 @@ const char* name_of(outcome_t o) {
     }
 }
 
-void expect(outcome_t got, outcome_t want, std::string_view what) {
+/**
+ * @brief `check`, but a mismatch names the two outcomes rather than only the claim.
+ *
+ * @p loc is defaulted and forwarded, so the FAIL line still points at the CALLER's row of the
+ * matrix below and not at this wrapper.
+ */
+void expect(outcome_t got, outcome_t want, std::string_view what,
+            const std::source_location loc = std::source_location::current()) {
     if (got == want) {
-        check(true, what);
+        check(true, what, loc);
         return;
     }
-    std::printf("  [FAIL] %.*s — got %s, want %s\n", static_cast<int>(what.size()), what.data(),
-                name_of(got), name_of(want));
-    ++g_failures;
+    std::string detail(what);
+    detail += " — got ";
+    detail += name_of(got);
+    detail += ", want ";
+    detail += name_of(want);
+    check(false, detail, loc);
 }
 
 /**
@@ -523,6 +518,5 @@ int main() {
     test_field_wildcard_divergence();
     test_subscriber_door_parity();
     test_append_plus_wildcard_is_refused();
-    std::printf("%s: %d failure(s)\n", g_failures ? "FAILED" : "OK", g_failures);
-    return g_failures ? 1 : 0;
+    return tr::testing::summary("field_dispatch");
 }

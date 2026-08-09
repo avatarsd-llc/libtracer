@@ -46,6 +46,8 @@
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
+#include "test_values.hpp"
 
 namespace {
 
@@ -59,12 +61,8 @@ using tr::wire::opt_t;
 using tr::wire::tlv_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
+using tr::testing::make_value;
 
 // --- wire builders (canonical bytes via the production emit helpers) ---------
 void append(std::vector<std::byte>& dst, const std::vector<std::byte>& src) {
@@ -138,12 +136,6 @@ std::vector<std::byte> b_subscriber(const std::vector<std::byte>& target, bool c
     return out;
 }
 using tr::testing::b_fwd;
-
-tr::view::view_t make_value(std::span<const std::byte> bytes) {
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
-    if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
-    return tr::view::view_t::over(std::move(seg));
-}
 
 /** @brief One captured egress span — its ORIGIN pointer + size (NOT a copy of the bytes). */
 struct span_rec_t {
@@ -558,6 +550,5 @@ int main() {
     test_compact_auto_promote();
     test_compact_delivery_is_gathered();
     test_concurrent_writer_vs_clear();
-    std::printf("%s\n", g_failures == 0 ? "ALL PASS" : "FAILURES");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("fwd_fanout");
 }

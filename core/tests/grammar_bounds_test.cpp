@@ -32,16 +32,11 @@
 
 #include "libtracer/error.hpp"
 #include "libtracer/grammar.hpp"
+#include "test_support.hpp"
 
 namespace {
 
-int g_failures = 0;
-
-/** @brief Report one assertion, tallying failures for the process exit code. */
-void check(bool ok, const char* what) {
-    std::printf("  [%s] %s\n", ok ? "PASS" : "FAIL", what);
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /** @brief The bound at an explicit @p Size width, with the out-param folded away. */
 template <class Size>
@@ -174,6 +169,5 @@ int main() {
               "a well-formed TLV still parses (total = 7)");
     }
 
-    std::printf("%s\n", g_failures == 0 ? "ALL PASS" : "FAILURES");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("grammar_bounds");
 }

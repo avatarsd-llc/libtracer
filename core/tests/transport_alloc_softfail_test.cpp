@@ -104,6 +104,7 @@
 #include "libtracer/view.hpp"
 #include "libtracer/view_can.hpp"
 #include "libtracer/ws.hpp"
+#include "test_support.hpp"
 
 // --- the fail-the-k-th-allocation injector (this TU owns the override) -------
 
@@ -178,13 +179,7 @@ using namespace std::chrono_literals;
 namespace ws = tr::net::ws;
 namespace can = tr::net::can;
 
-int g_failures = 0;
-
-/** @brief Record one assertion result. */
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /** @brief One armed window: allocation @p fail_at on THIS thread returns null / throws. */
 struct arm_t {
@@ -1329,6 +1324,5 @@ int main() {
     test_ws_reserved_control_opcode_fails_the_connection();
     test_control_encoders_are_byte_identical();
     test_try_encode_client_frame();
-    std::printf("%s (%d failure(s))\n", g_failures == 0 ? "OK" : "FAILED", g_failures);
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("transport_alloc_softfail");
 }

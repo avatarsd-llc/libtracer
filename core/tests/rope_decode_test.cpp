@@ -24,15 +24,11 @@
 #include "libtracer/frame.hpp"
 #include "libtracer/mem_borrowed.hpp"
 #include "libtracer/view.hpp"
+#include "test_support.hpp"
 
 namespace {
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /**
  * @brief Owns the per-link byte copies and the rope viewing them (borrowed, not copied again) — the
@@ -192,6 +188,5 @@ int main() {
         assert_matches_decode("type 0x00 -> FRAME_INVALID (any cut)", f);
     }
 
-    std::printf("%s\n", g_failures == 0 ? "ALL PASS" : "FAILURES PRESENT");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("rope_decode");
 }

@@ -311,7 +311,7 @@ links (95% removed)**, with the fixed-position hop itself unchanged within ±2 n
 (`core/CHANGELOG.md:1509-1513`). The digest is a filter and never a decision — `live()` and the full
 compare still gate every answer — and the two digest functions are pinned against each other
 directly by `test_digest_paths_agree`
-(`core/tests/registry_teardown_test.cpp:279`), because a disagreement would throw nothing and
+(`core/tests/registry_teardown_test.cpp:275`), because a disagreement would throw nothing and
 break no obvious test; the registry would simply stop resolving the affected name, which reads
 as a routing bug arbitrarily far away. Tracked at
 [#660](https://github.com/avatarsd-llc/libtracer/pull/660). The record for this figure names its

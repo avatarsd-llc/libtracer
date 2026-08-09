@@ -43,47 +43,9 @@
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport_quic.hpp"
-
-// The raw msquic test client crosses the same non-TSan-instrumented library
-// boundary as transport_quic.cpp: restate msquic's StreamSend -> SEND_COMPLETE
-// and callback-serialization happens-before edges for TSan (see the matching
-// annotations + rationale in src/transport_quic.cpp). No-ops outside TSan.
-#if defined(__SANITIZE_THREAD__)
-#define LIBTRACER_TSAN 1
-#elif defined(__has_feature)
-#if __has_feature(thread_sanitizer)
-#define LIBTRACER_TSAN 1
-#endif
-#endif
-#ifdef LIBTRACER_TSAN
-#include <sanitizer/tsan_interface.h>
-#endif
+#include "test_support.hpp"
 
 namespace {
-
-inline void tsan_release(void* p) {
-#ifdef LIBTRACER_TSAN
-    __tsan_release(p);
-#else
-    (void)p;
-#endif
-}
-
-inline void tsan_acquire(void* p) {
-#ifdef LIBTRACER_TSAN
-    __tsan_acquire(p);
-#else
-    (void)p;
-#endif
-}
-
-// RAII edge for one msquic callback invocation (the src/transport_quic.cpp
-// tsan_cb_guard_t): acquire on entry, release on exit.
-struct tsan_cb_guard_t {
-    void* p;
-    explicit tsan_cb_guard_t(void* ptr) : p(ptr) { tsan_acquire(p); }
-    ~tsan_cb_guard_t() { tsan_release(p); }
-};
 
 using namespace std::chrono_literals;
 using tr::graph::graph_t;
@@ -95,11 +57,15 @@ using tr::view::view_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
+using tr::testing::frame_sink_t;
+// The raw msquic test client crosses the same non-TSan-instrumented library boundary
+// transport_quic.cpp does: restate msquic's StreamSend -> SEND_COMPLETE and
+// callback-serialization happens-before edges for TSan (the matching annotations and their
+// rationale are in src/transport_quic.cpp). No-ops outside a TSan build.
+using tr::testing::tsan_acquire;
+using tr::testing::tsan_cb_guard_t;
+using tr::testing::tsan_release;
 
 // Dev cert paths — generated once in main() by tools/gen-dev-cert.sh.
 std::string g_cert;
@@ -110,34 +76,6 @@ std::string g_key;
 std::string g_other_cert;
 
 quic_dial_tls_t dev_tls() { return quic_dial_tls_t{.ca_file = {}, .insecure_no_verify = true}; }
-
-// A collecting sink: frames delivered on an msquic worker thread, read from the
-// test thread.
-struct sink_t {
-    std::mutex m;
-    std::vector<std::vector<std::byte>> frames;
-
-    void push(std::span<const std::byte> f) {
-        const std::lock_guard lock(m);
-        frames.emplace_back(f.begin(), f.end());
-    }
-    [[nodiscard]] std::size_t count() {
-        const std::lock_guard lock(m);
-        return frames.size();
-    }
-    [[nodiscard]] std::vector<std::byte> at(std::size_t i) {
-        const std::lock_guard lock(m);
-        return frames.at(i);
-    }
-    [[nodiscard]] bool wait_for_count(std::size_t n, std::chrono::milliseconds budget) {
-        const auto deadline = std::chrono::steady_clock::now() + budget;
-        while (count() < n) {
-            if (std::chrono::steady_clock::now() > deadline) return false;
-            std::this_thread::sleep_for(5ms);
-        }
-        return true;
-    }
-};
 
 // A raw msquic client — the test's hand on the stream (the tcp raw_client_t
 // role): it writes arbitrary bytes with NO framing, so prefixes can be split,
@@ -287,7 +225,7 @@ void test_raw_frame_duplex() {
     std::printf("QUIC transport — raw frames both ways over localhost:\n");
     // Sinks + named receiver lambdas BEFORE the transports: the slot binds the
     // callable by address, and the transport dtor drains msquic callbacks.
-    sink_t at_listener, at_dialer;
+    frame_sink_t at_listener, at_dialer;
     auto listener_rx = [&](std::span<const std::byte> f) { at_listener.push(f); };
     auto dialer_rx = [&](std::span<const std::byte> f) { at_dialer.push(f); };
     quic_transport_t listener(std::uint16_t{0}, g_cert, g_key);
@@ -313,7 +251,7 @@ void test_raw_frame_duplex() {
 
 void test_split_and_coalesced() {
     std::printf("QUIC transport — split sends reassemble, coalesced sends split:\n");
-    sink_t sink;
+    frame_sink_t sink;
     auto rx = [&](std::span<const std::byte> f) { sink.push(f); };
     quic_transport_t listener(std::uint16_t{0}, g_cert, g_key);
     listener.set_receiver(rx);
@@ -351,7 +289,7 @@ void test_split_and_coalesced() {
 
 void test_big_frame_chunking() {
     std::printf("QUIC transport — a big frame arrives through many RECEIVE chunks:\n");
-    sink_t sink;
+    frame_sink_t sink;
     auto rx = [&](std::span<const std::byte> f) { sink.push(f); };
     quic_transport_t listener(std::uint16_t{0}, g_cert, g_key);
     listener.set_receiver(rx);
@@ -479,7 +417,7 @@ void test_view_delivery_segment_identity() {
 void test_backpressure_drain() {
     std::printf("QUIC transport — backend exhaustion drains the frame, sync survives:\n");
     recording_backend_t rec(2);  // the first two allocations fail
-    sink_t sink;
+    frame_sink_t sink;
     auto rope_rx = [&](tr::view::rope_t f) { sink.push(f.links()[0].bytes()); };
     quic_transport_t listener(std::uint16_t{0}, g_cert, g_key, &rec);
     listener.set_rope_receiver(rope_rx);
@@ -501,7 +439,7 @@ void test_backpressure_drain() {
 
 void test_scatter_gather() {
     std::printf("QUIC transport — scatter-gather send (rope -> one record, one gather copy):\n");
-    sink_t sink;
+    frame_sink_t sink;
     auto rx = [&](std::span<const std::byte> f) { sink.push(f); };
     quic_transport_t listener(std::uint16_t{0}, g_cert, g_key);
     listener.set_receiver(rx);
@@ -823,7 +761,5 @@ int main() {
     test_two_nodes_over_quic();
     test_config_constructed_quic();
     test_spec_dial_trust_keys();
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("quic");
 }

@@ -23,6 +23,7 @@
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tlv_view.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -34,12 +35,7 @@ using tr::view::view_t;
 using tr::wire::tlv_view_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 bool same_bytes(const view_t& a, const view_t& b) {
     return a.bytes().size() == b.bytes().size() &&
@@ -177,7 +173,5 @@ int main() {
     test_varied_name_lengths();
     test_in_band_created_children();
 
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("folded_children");
 }

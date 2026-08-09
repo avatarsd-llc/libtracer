@@ -49,6 +49,8 @@
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport_ws.hpp"
+#include "test_support.hpp"
+#include "test_values.hpp"
 
 namespace {
 
@@ -64,12 +66,9 @@ using tr::wire::opt_t;
 using tr::wire::tlv_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
+using tr::testing::mailbox_t;
+using tr::testing::make_value;
 
 // --- wire builders (canonical bytes via the production emit helpers) ---------
 std::vector<std::byte> b_name(std::string_view s) {
@@ -130,37 +129,6 @@ std::vector<std::byte> b_subscriber(const std::vector<std::byte>& target, bool c
     return out;
 }
 using tr::testing::b_fwd;
-
-tr::view::view_t make_value(std::span<const std::byte> bytes) {
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
-    if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
-    return tr::view::view_t::over(std::move(seg));
-}
-
-/** @brief An ordered, bounded mailbox: a receive thread pushes; the test waits with a deadline. */
-struct mailbox_t {
-    std::mutex m;
-    std::condition_variable cv;
-    std::vector<std::vector<std::byte>> q;
-
-    void push(std::vector<std::byte> v) {
-        {
-            const std::lock_guard lock(m);
-            q.push_back(std::move(v));
-        }
-        cv.notify_all();
-    }
-    /** @brief Wait until at least `n` items have arrived (or the deadline lapses); returns size. */
-    std::size_t wait_for_count(std::size_t n, std::chrono::milliseconds budget) {
-        std::unique_lock lock(m);
-        cv.wait_for(lock, budget, [&] { return q.size() >= n; });
-        return q.size();
-    }
-    std::size_t size() {
-        const std::lock_guard lock(m);
-        return q.size();
-    }
-};
 
 constexpr auto kBudget = 5000ms;
 
@@ -432,7 +400,5 @@ int main() {
     check(router_a.handles().ingress_count() == a_ingress,
           "the one-shot added no label bindings — only the compact flow holds state");
 
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("fwd_compact");
 }

@@ -51,18 +51,11 @@
 #include <vector>
 
 #include "libtracer/mem_heap.hpp"
+#include "test_support.hpp"
 
 namespace {
 
-int g_failures = 0;
-
-/** @brief Record a check; a failure prints its label and reddens the run. */
-void check(bool ok, std::string_view what) {
-    if (!ok) {
-        ++g_failures;
-        std::printf("FAIL: %.*s\n", static_cast<int>(what.size()), what.data());
-    }
-}
+using tr::testing::check;
 
 /** @brief Allocations at least this large are subject to the refusal regime. */
 constexpr std::size_t kBigBytes = 1u << 13;
@@ -279,10 +272,5 @@ int main() {
     probe_hook_still_gates();
     race_leg();
 
-    if (g_failures != 0) {
-        std::printf("try_grow_race: FAILED (%d)\n", g_failures);
-        return 1;
-    }
-    std::printf("try_grow_race: OK\n");
-    return 0;
+    return tr::testing::summary("try_grow_race");
 }
