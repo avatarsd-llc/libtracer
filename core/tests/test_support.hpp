@@ -7,13 +7,15 @@
  *
  * `core/tests/` had no shared runner at all. The `int g_failures; void check(bool, ...)`
  * micro-runner was re-declared in **97 of the 104 test translation units** — 83 of them
- * byte-identical, the other 14 differing only in spelling (`const char*` instead of
- * `std::string_view`, `"ok"` instead of `"PASS"`, or printing nothing on a pass). Around it
- * the same three helpers had been copied too: `make_value` in 25 files, a cv-guarded
- * `mailbox_t` in 5, and a **5 ms-polling** frame `sink_t` in 3 (`tcp_test.cpp`,
- * `quic_test.cpp`, `webtransport_test.cpp`). Any improvement to a helper — a file:line on a
- * failure, a poll loop that becomes a real wait — was a 97-file synchronised edit, so none
- * was ever made.
+ * byte-identical and 10 more differing only in spelling (`const char*` instead of
+ * `std::string_view`, `"ok"` instead of `"PASS"`, a 4-space indent, a `cond` parameter
+ * name). The remaining **4 were not a spelling variant: they printed nothing on a pass**,
+ * and that is a behavioural difference, not a cosmetic one — see @ref tr::testing::check_quiet,
+ * which is what those four call. Around the runner the same three helpers had been copied
+ * too: `make_value` in 25 files, a cv-guarded `mailbox_t` in 5, and a **5 ms-polling** frame
+ * `sink_t` in 3 (`tcp_test.cpp`, `quic_test.cpp`, `webtransport_test.cpp`). Any improvement
+ * to a helper — a file:line on a failure, a poll loop that becomes a real wait — was a
+ * 97-file synchronised edit, so none was ever made.
  *
  * What the centralisation buys, beyond one definition:
  *
@@ -79,6 +81,19 @@ constexpr std::string_view basename(std::string_view path) {
     return slash == std::string_view::npos ? path : path.substr(slash + 1);
 }
 
+/**
+ * @brief Count one failure and print it with the call site @p loc names.
+ *
+ * The one failure path both @ref tr::testing::check and @ref tr::testing::check_quiet take,
+ * so the two forms differ in exactly one thing: whether a PASS is audible.
+ */
+inline void fail(std::string_view what, const std::source_location& loc) {
+    g_failures.fetch_add(1, std::memory_order_relaxed);
+    const std::string_view file = basename(loc.file_name());
+    std::printf("  [FAIL] %.*s  (%.*s:%u)\n", static_cast<int>(what.size()), what.data(),
+                static_cast<int>(file.size()), file.data(), static_cast<unsigned>(loc.line()));
+}
+
 }  // namespace detail
 
 /**
@@ -95,10 +110,32 @@ inline void check(bool ok, std::string_view what,
         std::printf("  [PASS] %.*s\n", static_cast<int>(what.size()), what.data());
         return;
     }
-    g_failures.fetch_add(1, std::memory_order_relaxed);
-    const std::string_view file = detail::basename(loc.file_name());
-    std::printf("  [FAIL] %.*s  (%.*s:%u)\n", static_cast<int>(what.size()), what.data(),
-                static_cast<int>(file.size()), file.data(), static_cast<unsigned>(loc.line()));
+    detail::fail(what, loc);
+}
+
+/**
+ * @brief @ref check with the PASS line suppressed: same counter, same FAIL line, silent when
+ *        the claim holds.
+ *
+ * Four suites (`try_grow_race`, `pool_only_dispatch`, `mem_sync_policy`, `mem_sync_pool`) had
+ * a deliberately quiet micro-runner before #874, and they keep it. `try_grow_race` is the
+ * binding case: its assertions sit next to a 300,000-iteration loop that runs concurrently
+ * with a racing allocator thread, where a PASS line per iteration would be ~15 MB of output
+ * on a green run — every core-ci leg runs `ctest --output-on-failure`, so the next REAL
+ * failure anywhere in that suite would arrive buried under it.
+ *
+ * Use this only where the pass volume is genuinely unbounded. The loud @ref check stays the
+ * default: 93 of the 97 migrated suites print their passes, and a suite that prints nothing
+ * on a green run offers nothing to read when someone is deciding whether it ran at all.
+ *
+ * @param ok   The claim under test.
+ * @param what What the claim IS — printed only if @p ok is false.
+ * @param loc  Defaulted, therefore the **caller's** location; named on the failure line.
+ */
+inline void check_quiet(bool ok, std::string_view what,
+                        const std::source_location loc = std::source_location::current()) {
+    if (ok) return;
+    detail::fail(what, loc);
 }
 
 /**

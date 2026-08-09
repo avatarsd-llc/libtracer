@@ -55,7 +55,7 @@
 
 namespace {
 
-using tr::testing::check;
+using tr::testing::check_quiet;
 
 /** @brief Allocations at least this large are subject to the refusal regime. */
 constexpr std::size_t kBigBytes = 1u << 13;
@@ -163,22 +163,22 @@ void one_token_reserve() {
     arm(1);
     const bool ok = tr::detail::try_reserve(v, kBigElems);
     disarm();
-    check(ok, "try_reserve succeeds when exactly ONE large allocation is available");
-    check(v.capacity() >= kBigElems, "the capacity really landed");
+    check_quiet(ok, "try_reserve succeeds when exactly ONE large allocation is available");
+    check_quiet(v.capacity() >= kBigElems, "the capacity really landed");
 }
 
 /** @brief Instrument 1b — `try_push_back`'s capacity-doubling growth, one token. */
 void one_token_push_back() {
     std::vector<std::byte> v;
-    check(tr::detail::try_reserve(v, kBigElems), "pre-growth (disarmed) succeeds");
+    check_quiet(tr::detail::try_reserve(v, kBigElems), "pre-growth (disarmed) succeeds");
     v.resize(v.capacity());  // full: the next push_back must grow
     const std::size_t was = v.size();
     arm(1);
     std::byte x{0x5a};
     const bool ok = tr::detail::try_push_back(v, std::move(x));
     disarm();
-    check(ok, "try_push_back succeeds when exactly ONE large allocation is available");
-    check(v.size() == was + 1, "the element really landed");
+    check_quiet(ok, "try_push_back succeeds when exactly ONE large allocation is available");
+    check_quiet(v.size() == was + 1, "the element really landed");
 }
 
 /** @brief Instrument 1c — the growing `try_assign(std::string&, …)`, one token. */
@@ -188,8 +188,8 @@ void one_token_assign_string() {
     arm(1);
     const bool ok = tr::detail::try_assign(dst, std::string_view(src));
     disarm();
-    check(ok, "try_assign(string) succeeds when exactly ONE large allocation is available");
-    check(dst.size() == src.size(), "the string really landed");
+    check_quiet(ok, "try_assign(string) succeeds when exactly ONE large allocation is available");
+    check_quiet(dst.size() == src.size(), "the string really landed");
 }
 
 /** @brief The soft-fail contract is unchanged: no tokens at all means `false`, not a crash. */
@@ -198,16 +198,16 @@ void zero_token_soft_fail() {
     arm(0);
     const bool ok = tr::detail::try_reserve(v, kBigElems);
     disarm();
-    check(!ok, "try_reserve soft-fails when NO large allocation is available");
-    check(v.capacity() == 0, "a refused try_reserve leaves the vector untouched");
+    check_quiet(!ok, "try_reserve soft-fails when NO large allocation is available");
+    check_quiet(v.capacity() == 0, "a refused try_reserve leaves the vector untouched");
 
     std::string dst;
     const std::string src(kBigBytes + 8, 'x');
     arm(0);
     const bool sok = tr::detail::try_assign(dst, std::string_view(src));
     disarm();
-    check(!sok, "try_assign(string) soft-fails when NO large allocation is available");
-    check(dst.empty(), "a refused try_assign leaves the string untouched");
+    check_quiet(!sok, "try_assign(string) soft-fails when NO large allocation is available");
+    check_quiet(dst.empty(), "a refused try_assign leaves the string untouched");
 }
 
 /** @brief The OOM-injection seam still reaches these paths after the rework. */
@@ -216,8 +216,9 @@ void probe_hook_still_gates() {
     tr::detail::probe_fail_hook = [](std::size_t) noexcept { return false; };
     const bool ok = tr::detail::try_reserve(v, 1024);
     tr::detail::probe_fail_hook = nullptr;
-    check(!ok, "probe_fail_hook still forces try_reserve to soft-fail");
-    check(tr::detail::try_reserve(v, 1024), "and the same call succeeds once the hook is off");
+    check_quiet(!ok, "probe_fail_hook still forces try_reserve to soft-fail");
+    check_quiet(tr::detail::try_reserve(v, 1024),
+                "and the same call succeeds once the hook is off");
 }
 
 /**
@@ -243,13 +244,18 @@ void race_leg() {
         }
     });
 
+    // Violations are COUNTED here and asserted once below, not asserted per iteration: this
+    // loop runs 300k times against a live racer thread, so a per-iteration assertion would
+    // emit up to 300k identical FAIL lines (and do 300k std::printf calls inside the race)
+    // for one broken property. One assertion, one line, and the count says how bad it was.
+    int short_grants = 0;
     for (int i = 0; i < kIterations; ++i) {
         std::vector<std::byte> v;
         arm(2);
         const bool ok = tr::detail::try_reserve(v, kBigElems);
         disarm();
         (ok ? granted : refused).fetch_add(1, std::memory_order_relaxed);
-        if (ok) check(v.capacity() >= kBigElems, "a granted racing try_reserve really grew");
+        if (ok && v.capacity() < kBigElems) ++short_grants;
     }
 
     stop.store(true, std::memory_order_release);
@@ -258,7 +264,10 @@ void race_leg() {
 
     const int g = granted.load(std::memory_order_relaxed);
     const int r = refused.load(std::memory_order_relaxed);
-    check(g + r == kIterations, "every racing try_reserve returned a value (no terminate)");
+    check_quiet(short_grants == 0, "every granted racing try_reserve really grew");
+    if (short_grants != 0)
+        std::printf("       %d granted try_reserves did not grow\n", short_grants);
+    check_quiet(g + r == kIterations, "every racing try_reserve returned a value (no terminate)");
     std::printf("       race: %d granted, %d refused over %d iterations\n", g, r, kIterations);
 }
 

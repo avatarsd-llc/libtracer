@@ -24,6 +24,9 @@
  * The properties asserted:
  *
  *   1. a passing check does NOT move the counter, and a failing one moves it by exactly one;
+ *   1b. @ref tr::testing::check_quiet prints NOTHING on a pass, and still counts a failure and
+ *      still names its call site — a quiet form that swallowed failures would be far worse than
+ *      the PASS noise it exists to avoid;
  *   2. `summary` answers 0 for a zero count and 1 for a nonzero one;
  *   3. a FAIL line names the CALLER's file and line, not the runner's;
  *   4. the shared collectors block for a real arrival and give up on one that never comes —
@@ -116,6 +119,32 @@ void counting() {
     tr::testing::g_failures.store(before, std::memory_order_relaxed);  // undo the probe
     must(counted, "check(false) increments the failure counter by exactly one");
     must(failed.find("[FAIL]") != std::string::npos, "a failing check prints a FAIL line");
+}
+
+/**
+ * @brief Property 1b — the quiet form is silent on a pass and LOUD on a failure.
+ *
+ * The four suites that stayed quiet-on-pass through #874 (`try_grow_race` above all, whose
+ * assertions sit beside a 300k-iteration racing loop) report only through this function. If it
+ * ever stopped counting, or stopped printing, those four would go green silently.
+ */
+void quiet_form() {
+    const int before = tr::testing::failures();
+    const std::string passed =
+        capture_stdout([] { tr::testing::check_quiet(true, "(probe) a passing quiet claim"); });
+    must(passed.empty(), "check_quiet(true) prints NOTHING — the regression #874 nearly shipped");
+    must(tr::testing::failures() == before, "check_quiet(true) does not move the failure counter");
+
+    // Same adjacency contract as failure_names_its_call_site(): `line` is the probe's line.
+    const unsigned line = static_cast<unsigned>(__LINE__) + 2;
+    const std::string failed = capture_stdout(
+        [] { tr::testing::check_quiet(false, "(probe) a deliberately false quiet claim"); });
+    const bool counted = tr::testing::failures() == before + 1;
+    tr::testing::g_failures.store(before, std::memory_order_relaxed);  // undo the probe
+    must(counted, "check_quiet(false) increments the failure counter by exactly one");
+    must(failed.find("[FAIL]") != std::string::npos, "a failing check_quiet prints a FAIL line");
+    must(failed.find("test_support_test.cpp:" + std::to_string(line)) != std::string::npos,
+         "and that FAIL line names the caller's file:line, exactly as the loud form does");
 }
 
 /** @brief Property 3 — the FAIL line carries the CALLER's file:line. */
@@ -227,6 +256,7 @@ int main() {
     std::printf("test_support: the runner is the SUBJECT here, so these checks report through a\n");
     std::printf("              private counter; the `(probe)` lines below are expected.\n");
     counting();
+    quiet_form();
     failure_names_its_call_site();
     summary_maps_the_count();
     mailbox_waits();
