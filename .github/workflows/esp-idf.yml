@@ -257,11 +257,11 @@ jobs:
   # `linux` target, executed — the device node and an in-process host peer talk
   # over REAL loopback datagrams (config-created udp connections via
   # :children[] SPECs), driving read / subscribe / latch / fan-out / await end
-  # to end. This is the runtime proof CI can give without silicon. Same v5.3 +
+  # to end. This is the runtime proof CI can give without silicon. Same v5.5 +
   # g++-12 arrangement as host-build (see the NOTE there re v6.0 linux target).
   full-node-host:
     runs-on: ubuntu-24.04
-    container: espressif/idf:release-v5.3
+    container: espressif/idf:release-v5.5
     steps:
       - uses: actions/checkout@v4
 
@@ -296,15 +296,21 @@ jobs:
   # we pin g++-12 (C++23 <expected>) so the build is independent of the image's
   # default. A produced ELF that runs register/write/read IS the gate.
   #
-  # NOTE: still on release-v5.3. The v6.0 `linux` target fails component
+  # NOTE: on release-v5.5, not v6.0. The v6.0 `linux` target fails component
   # resolution (esp_driver_ana_cmpr → esp_hal_ana_cmpr, a chip-specific HAL not
   # registered for linux) — an IDF v6.0 linux-target issue, not libtracer. The
   # GCC-15 host gate now lives in core-ci.yml (build-test-gcc15), where a plain
   # host build of the core belongs; migrate this IDF-component example to v6.0
   # once an IDF patch fixes the linux component graph.
+  #
+  # It was release-v5.3 until #949 raised the component's floor to idf >=5.5.5
+  # (a TX-path correctness floor — see idf_component.yml). The component manager
+  # enforces that constraint on a local component too, so a v5.3 image can no
+  # longer resolve this example at all; the two `linux`-target jobs move to the
+  # oldest release branch that satisfies the floor.
   host-build:
     runs-on: ubuntu-24.04
-    container: espressif/idf:release-v5.3
+    container: espressif/idf:release-v5.5
     steps:
       - uses: actions/checkout@v4
 

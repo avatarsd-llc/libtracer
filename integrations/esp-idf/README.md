@@ -129,7 +129,7 @@ The value is delivered as the ordinary constexpr `tr::graph::kVertexLockStripes`
 
 ## Requirements
 
-- **ESP-IDF v6.0** (tested in CI; matches the origin firmware's IDF v6.0-dev / GCC 15 toolchain) — libtracer's core is **C++23** (`std::expected`, `std::span`), which needs GCC 13+ (i.e. IDF ≥ 5.3); CI pins `release-v6.0`. The TWAI link uses the `esp_driver_twai` node API (IDF ≥ 5.5).
+- **ESP-IDF v6.0** (tested in CI; matches the origin firmware's IDF v6.0-dev / GCC 15 toolchain) — libtracer's core is **C++23** (`std::expected`, `std::span`), which needs GCC 13+; CI pins `release-v6.0` for the chip targets and `release-v5.5` for the two `linux`-target jobs. The **component's** floor is `idf >=5.5.5` (see *Supported ESP-IDF versions* above) — above both the C++23 compiler floor and the `esp_driver_twai` node API's IDF ≥ 5.5.
 - `PRIV_REQUIRES pthread, lwip, esp_driver_twai` (chip targets) — all **private**: libtracer's public headers expose only libstdc++ headers, never `<pthread.h>` or lwIP/driver headers, so nothing propagates to dependents. On the `linux` target only pthread is required (sockets come from glibc).
 - **Exceptions / RTTI** stay at the ESP-IDF default (**OFF**). Two of the three parts of that are true and one is not, and the distinction matters most on exactly this target:
   - **RTTI-free — true.** No `typeid`, no `dynamic_cast` anywhere in `core/include` or `core/src`.
