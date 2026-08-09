@@ -317,24 +317,27 @@ void server_t::set_ctx(int fd, void* ctx, httpd_free_ctx_fn_t free_fn) {
 
 /**
  * @brief The shared enqueue behind `httpd_queue_work` and `httpd_sess_trigger_close` —
- *        ONE control socket, and its two distinct failure modes.
+ *        ONE control socket, and both of its failure modes OBSERVABLE.
  *
- * Transcribed from `httpd_queue_work` (httpd_main.c, release/v5.9bb7aa84fe): a refusal
- * from `cs_send_to_ctrl_sock` is reported as `ESP_FAIL`, but an enqueue past the receiving
- * UDP mbox's depth is dropped INSIDE lwIP with `sendto` still returning success. The
- * caller therefore cannot distinguish "queued" from "silently discarded", which is what a
- * link that treats `ESP_OK` as proof of a close gets wrong.
+ * Transcribed from `httpd_queue_work` (httpd_main.c) as it stands at the ESP-IDF floor the
+ * component requires, `>=5.5.5`: the mbox slot is reserved through a counting semaphore
+ * sized `CONFIG_LWIP_UDP_RECVMBOX_SIZE` BEFORE the `sendto`, so a full control queue is an
+ * `ESP_FAIL` the caller sees, exactly as a refusal from `cs_send_to_ctrl_sock` is.
+ *
+ * The fake used to model the older shape as well — an enqueue past the mbox discarded
+ * inside lwIP while `sendto` still returned success, which no caller could distinguish
+ * from "queued". That mode is GONE with the floor (#949): keeping a lever for a condition
+ * the supported ESP-IDF versions cannot produce would only let a suite prove the link
+ * survives something it will never meet.
  *
  * @pre `m_` is held.
- * @retval false The caller must report ESP_FAIL (the observable refusal only).
+ * @retval false The caller must report ESP_FAIL — a full queue, or the explicit refusal.
  */
-bool server_t::enqueue_locked(std::function<void()> item, bool* dropped) {
-    *dropped = false;
+bool server_t::enqueue_locked(std::function<void()> item) {
     if (queue_refusing_) return false;
     if (queue_cap_ != 0 && queue_.size() >= queue_cap_) {
-        *dropped = true;  // lost in lwIP; the caller is told ESP_OK
-        ++queue_drops_;
-        return true;
+        ++queue_drops_;  // the counting semaphore could not be taken
+        return false;
     }
     queue_.push_back(std::move(item));
     return true;
@@ -342,8 +345,7 @@ bool server_t::enqueue_locked(std::function<void()> item, bool* dropped) {
 
 esp_err_t server_t::queue_work(httpd_work_fn_t work, void* arg) {
     const std::lock_guard lock(m_);
-    bool dropped = false;
-    if (!enqueue_locked([work, arg]() { work(arg); }, &dropped)) return ESP_FAIL;
+    if (!enqueue_locked([work, arg]() { work(arg); })) return ESP_FAIL;
     return ESP_OK;
 }
 
@@ -351,16 +353,14 @@ esp_err_t server_t::trigger_close(int fd) {
     const std::lock_guard lock(m_);
     if (sessions_.find(fd) == sessions_.end()) return ESP_ERR_NOT_FOUND;
     // `httpd_sess_trigger_close` IS `httpd_queue_work(httpd_sess_close, sd)`
-    // (httpd_sess.c:476-481) — the same socket, the same queue, the same silent drop.
-    bool dropped = false;
-    if (!enqueue_locked([this, fd]() { close_session(fd); }, &dropped)) return ESP_FAIL;
+    // (httpd_sess.c:476-481) — the same socket, the same queue, the same refusal.
+    if (!enqueue_locked([this, fd]() { close_session(fd); })) return ESP_FAIL;
     return ESP_OK;
 }
 
 void server_t::post(std::function<void()> action) {
     const std::lock_guard lock(m_);
-    bool dropped = false;
-    (void)enqueue_locked(std::move(action), &dropped);
+    (void)enqueue_locked(std::move(action));
 }
 
 bool server_t::run_one() {

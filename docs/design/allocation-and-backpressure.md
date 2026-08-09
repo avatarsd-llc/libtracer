@@ -358,13 +358,16 @@ and an allocation failure becomes the same drop the link's send contract defines
 The copy is structural; the *allocation* is not. `httpd_ws_link_t` fronts the gather with a
 once-per-link pool of TX work slots claimed lock-free (a CAS scan — senders run on any task, the
 httpd task releases the slot as the send drains): a steady-state frame gathers straight into the
-slot's inline payload and allocates nothing. The nothrow-end-to-end heap shape above remains as the
-fallback — a frame past the inline capacity keeps the pooled shell and takes a nothrow heap
-payload; a momentarily exhausted pool takes the full heap work item — with the identical
-drop-on-OOM contract on every arm. The RX mirror is a once-per-link scratch buffer: a frame that
-fits reads into it and is delivered borrowed (the httpd task is the only RX thread and delivery is
-synchronous, so one scratch needs no lock); only an oversized frame takes the exact-size nothrow
-allocation.
+slot's inline payload and allocates nothing. The nothrow-end-to-end heap shape above remains for
+exactly one arm — a frame past the inline capacity keeps its pooled shell and takes a nothrow heap
+payload — with the drop-on-OOM contract on it. A momentarily exhausted pool has **no** arm: the
+pool is the link's outstanding-send bound, and a send that finds it full is dropped and counted
+rather than posted from a heap work item, because the fallback bounded the in-flight depth by the
+heap instead of by the queue behind it and left the event unobservable (#949; the exhaustion
+policy is ADR-0039 §4 / ADR-0042 §2, drop and count). The RX mirror is a once-per-link scratch
+buffer: a frame that fits reads into it and is delivered borrowed (the httpd task is the only RX
+thread and delivery is synchronous, so one scratch needs no lock); only an oversized frame takes
+the exact-size nothrow allocation.
 
 ## Pitfalls
 

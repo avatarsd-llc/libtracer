@@ -10,6 +10,40 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — BREAKING
+
+- **The component now requires ESP-IDF `>=5.5.5`** (`idf_component.yml`, was `>=5.3`) — a
+  TX-path correctness floor, not a packaging preference (#949). Below it `httpd_queue_work`
+  is a bare non-blocking `sendto` on `esp_http_server`'s loopback control socket, so an
+  enqueue past `CONFIG_LWIP_UDP_RECVMBOX_SIZE` is discarded inside lwIP while the call
+  still returns `ESP_OK`: the frame is lost with nothing observable anywhere, and the work
+  item that would have released its TX pool slot never runs. From 5.5.5 the mbox slot is
+  reserved through a counting semaphore before the `sendto` (`httpd_main.c`), so a full
+  control queue is an `ESP_FAIL` the caller sees. **Consumers on 5.3.x, 5.4.x and
+  5.5.0–5.5.4 are dropped**; a project on those versions must either upgrade or pin the
+  previous component release.
+
+- **`httpd_ws_link_t::tx_strands()` is REMOVED**, together with the machinery it reported
+  on: the four-state TX slot lifetime, its age stamp, and the exhausted-claim sweep (#949).
+  Above the new floor a slot cannot be pinned by an enqueue that silently never runs, so
+  there is nothing to reclaim and nothing to count. `tx_slots_busy()` and
+  `tx_slot_capacity()` stay. A consumer polling `tx_strands()` should drop the call;
+  `enqueue_drops()` is now the whole TX-loss surface.
+
+- **An exhausted TX slot pool drops the frame and counts it, instead of falling back to a
+  heap work item** (#949, and #953's part B). The pool is the link's outstanding-send bound
+  — `tx_slot_capacity()` sends in flight at once — and exceeding it increments
+  `enqueue_drops()` and logs, on the same path a refused enqueue takes. The old arm posted
+  an unbounded number of heap-allocated work items into a control mbox drained one message
+  per server pass, which is a bounded and observable condition traded for an unbounded and
+  invisible one; the exhaustion policy the record already rules is drop-and-count
+  (ADR-0039 §4, ADR-0042 §2). **Consumer-visible consequence**: a broadcast to more peers
+  than `tx_slot_capacity()` now delivers a pool's worth per pass and counts the rest as
+  drops, where it previously heap-queued them. On a device the httpd task drains
+  concurrently, so how much of a wide fan-out lands is a scheduling question — but it is no
+  longer bounded by the heap, and every loss is on a counter. A host that fans out wider
+  than the pool should read `enqueue_drops()`.
+
 ### Added
 
 - **`tr::net::link_counters_t`** (`libtracer_esp/link_stats.hpp`) plus
@@ -33,13 +67,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   enumerate the two concrete link types they constructed themselves. A polymorphic hook
   would put a counter bump on core's hot `deliver_remote` path and buy nothing.
 
-- **`httpd_ws_link_t::tx_strands()` / `tx_slots_busy()` / `tx_slot_capacity()`** — TX work
-  slot observability (#944). `tx_strands()` counts slots reclaimed from a work item the
-  control socket accepted and then silently binned; `tx_slots_busy()` is the pool's live
-  occupancy and `tx_slot_capacity()` its size, so a caller can see the pool being starved
-  rather than infer it from allocation pressure. The existing `enqueue_drops()` could not
-  cover this: it counts the enqueue failures that are *observable* (`ESP_FAIL`), and the
-  binned ones are, by construction, not.
+- **`httpd_ws_link_t::tx_slots_busy()` / `tx_slot_capacity()`** — TX work slot
+  observability (#944): the pool's live occupancy and its size, so a caller can see the
+  pool being starved rather than infer it from allocation pressure. (This entry originally
+  also introduced `tx_strands()`; that accessor was removed again before release — see the
+  BREAKING section above — and neither it nor the sweep it reported on ever shipped in a
+  tagged component.)
 
 - **`esp_ws_client_link_t::dropped_rx()`** — inbound messages the receive path refused,
   spelled the way core's transports already spell it (`transport_can::dropped_rx()`).

@@ -244,23 +244,28 @@ void test_send_bound_derivation() {
  *     exists to clear, on the one task that drains it;
  *   - each backlog item ahead of it spends the full derived send bound on a stalled
  *     socket, so "behind the backlog" is seconds per entry, not microseconds;
- *   - `httpd_queue_work` is a bare `sendto` on a loopback UDP socket (httpd_main.c), and
- *     an enqueue past that socket's mbox is dropped by lwIP with success returned — so
- *     `ESP_OK` is not evidence the close was queued at all.
+ *   - `httpd_queue_work` posts to that socket's mbox (`CONFIG_LWIP_UDP_RECVMBOX_SIZE`
+ *     entries), and a full mbox refuses the enqueue — so asking it for a close when it is
+ *     full does not queue one.
  *
  * So the close cannot be something the link ASKS the jammed queue for. What this pins is
  * the alternative: the fd is marked dead in the link's own state at the moment of the
  * decision, the queued backlog to it drains at queue speed instead of at socket speed,
  * new frames to it are refused, and the socket is shut so httpd's select arm — the one
  * arm with no control message on it — reaps the session.
+ *
+ * The backlog is a POOL's worth of frames, not a mailbox's worth (#949): with the heap
+ * work-item fallback deleted, `tx_slot_capacity()` is how many sends this link can have
+ * outstanding at once, so that is the deepest undrained backlog it can build. The control
+ * queue is capped to the same number, which is what makes it full.
  */
 void test_jammed_queue_still_closes_the_doomed_fd() {
     std::printf("a peer found broken with its backlog already queued, control queue full:\n");
     auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
     claim(700);
     claim(701);
-    // The mbox depth behind the control socket (CONFIG_LWIP_UDP_RECVMBOX_SIZE default).
-    constexpr std::size_t kCtrlDepth = 6;
+    // The deepest backlog this link can build: one queued send per TX pool slot.
+    const std::size_t kCtrlDepth = httpd_ws_link_t::tx_slot_capacity();
     fake_httpd::instance().set_queue_capacity(kCtrlDepth);
     fake_httpd::instance().set_send_script(700, {send_result_t::SHORT});
     fake_httpd::instance().set_send_script(701, {send_result_t::FULL});

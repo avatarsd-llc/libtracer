@@ -50,15 +50,21 @@
  *     -> httpd_ws_send_frame_async() (the documented async-send pattern). All
  *     socket writes therefore happen on the one httpd task, so there is NO
  *     cross-thread write to a socket the task may be closing, and no write
- *     interleave — the payload is heap-copied into the work item and freed after
- *     the send. send() may be called from any task (subscription pushes on the
- *     io/event threads, a reply on the httpd task itself); all funnel through the
- *     same queue. TX failure is never silent, and each kind is aimed at what it is
- *     actually evidence about (#835): a failed SEND strikes its DESTINATION — the
- *     peer that did not drain — and kMaxConsecutiveTxDrops of them in a row, with
- *     no success between, closes that session; a failed ENQUEUE is evidence about
- *     the shared control queue and nobody's peer, so it is a dropped frame on a
- *     link-level counter (@ref enqueue_drops) and strikes no session at all.
+ *     interleave — the payload is copied into a pooled work item and the slot is
+ *     released after the send. send() may be called from any task (subscription
+ *     pushes on the io/event threads, a reply on the httpd task itself); all funnel
+ *     through the same queue. Every enqueue failure is OBSERVABLE, which is a
+ *     property of the ESP-IDF floor this component requires (>=5.5.5, see
+ *     idf_component.yml) and not of this file: below it a full control mbox
+ *     discarded the datagram inside lwIP with ESP_OK returned, and the link carried
+ *     compensation for that until #949 deleted it with the floor raised. Each
+ *     failure kind is aimed at what it is actually evidence about (#835): a failed
+ *     SEND strikes its DESTINATION — the peer that did not drain — and
+ *     kMaxConsecutiveTxDrops of them in a row, with no success between, closes that
+ *     session; a refused ENQUEUE (or an exhausted TX pool) is evidence about the
+ *     shared control queue and this link's own in-flight depth, not about any one
+ *     peer, so it is a dropped frame on a link-level counter (@ref enqueue_drops)
+ *     and strikes no session at all.
  *   - Every upgraded socket gets a SHORT, derived SO_SNDTIMEO of its own (@ref
  *     send_timeout_ms) plus a send override that rejects a SHORT write. Without
  *     the bound one full-window peer parks the httpd task — the task that owns
@@ -75,9 +81,12 @@
  *     kMaxFrameBytes abuse cap) fall back to an exact-size nothrow buffer.
  *   - TX: a send claims a pool slot lock-free (CAS) and gathers straight into its
  *     inline payload. A frame past the inline capacity keeps the pooled shell and
- *     takes a nothrow heap payload; a momentarily exhausted pool falls back to a
- *     fully heap work item. Every fallback is `new (std::nothrow)` with
- *     drop-on-OOM backpressure — never an abort.
+ *     takes a nothrow heap payload (`new (std::nothrow)`, drop-on-OOM backpressure —
+ *     never an abort). An exhausted pool has NO fallback: the pool is this link's
+ *     outstanding-send bound, and a send that finds it full is dropped and counted
+ *     (@ref enqueue_drops) rather than posted from a heap-allocated work item, which
+ *     bounded the in-flight depth by the heap instead of by the queue behind it
+ *     (#949).
  *   - FAN-OUT: a broadcast (`send()` — the path a subscription push takes) snapshots
  *     its destinations into a FIXED on-stack chunk and resumes the scan for the next
  *     one, so the peer set is walked with no container of its own. Until #961 that
@@ -191,14 +200,15 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
 
     /**
      * @brief Broadcast a scattered frame: gather @p iov once, straight into a
-     *        pre-allocated tx work slot (nothrow heap fallback), one BINARY message
-     *        per open peer.
+     *        pre-allocated tx work slot (nothrow heap payload only past its inline
+     *        capacity), one BINARY message per open peer.
      *
      * Overrides the base gather-into-a-temporary default: the reply rope's iovec is
-     * copied exactly ONCE (into the queued work slot/item), so a large reply is
-     * never double-buffered (gather temp + tx copy) on the heap — the transient
-     * that exhausted the chip heap under concurrent SPA asset GETs. On allocation
-     * failure the frame is dropped (backpressure), never an abort.
+     * copied exactly ONCE (into the queued work slot), so a large reply is never
+     * double-buffered (gather temp + tx copy) on the heap — the transient that
+     * exhausted the chip heap under concurrent SPA asset GETs. With no slot free, or
+     * on allocation failure, the frame is dropped and counted (backpressure), never
+     * an abort.
      */
     void send(std::span<const std::span<const std::byte>> iov) override;
 
@@ -279,41 +289,32 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     [[nodiscard]] std::uint32_t send_timeout_ms() const noexcept { return send_timeout_ms_; }
 
     /**
-     * @brief Frames dropped because the shared control queue refused them (or the work
-     *        item could not be allocated), for this link's life.
+     * @brief Frames this link never handed to a socket, for its life: the shared control
+     *        queue refused the enqueue, the TX slot pool was exhausted, or an oversize
+     *        payload could not be allocated.
      *
-     * A LINK-level count on purpose. A refused enqueue says the httpd control queue is
-     * saturated — which under #835's failure shape is caused by whichever peer is
-     * stalling the task, not by the peer whose frame is being enqueued at that instant.
-     * Charging it to that peer closed HEALTHY sessions while the culprit never accrued a
-     * strike; the per-session streak now counts failed SENDS, which do name their peer.
+     * A LINK-level count on purpose, and all three causes are link-level facts. A refused
+     * enqueue says the httpd control queue is saturated — which under #835's failure shape
+     * is caused by whichever peer is stalling the task, not by the peer whose frame is
+     * being enqueued at that instant. Charging it to that peer closed HEALTHY sessions
+     * while the culprit never accrued a strike; the per-session streak now counts failed
+     * SENDS, which do name their peer. An exhausted pool says the same thing about this
+     * link's own in-flight depth (@ref tx_slots_busy against @ref tx_slot_capacity).
+     *
+     * This is the whole TX-loss surface above the component's ESP-IDF floor. Below that
+     * floor it was not: a full control mbox discarded the datagram inside lwIP while
+     * reporting success, so the loss was unobservable by construction — see
+     * `idf_component.yml` and #949.
      */
     [[nodiscard]] std::uint32_t enqueue_drops() const noexcept {
         return enqueue_drops_.load(std::memory_order_relaxed);
     }
 
-    /**
-     * @brief TX work slots reclaimed because the control socket silently binned their
-     *        work item, for this link's life (#944).
-     *
-     * The failure @ref enqueue_drops does NOT cover, and could not: a refused enqueue is
-     * observable and already recycles its slot, whereas `httpd_queue_work` on the default
-     * path is a bare `sendto` to a loopback UDP socket, so an enqueue past the receiver's
-     * mbox is dropped by lwIP while the call still reports ESP_OK. That work item never
-     * runs and used to pin its slot for the rest of the boot — four of them killed the
-     * pool, after which every frame took two global-heap allocations. Non-zero here means
-     * the control queue is being overrun; the link recovers, but the node is losing
-     * frames somewhere.
-     */
-    [[nodiscard]] std::uint32_t tx_strands() const noexcept {
-        return tx_strands_.load(std::memory_order_relaxed);
-    }
-
-    /** @brief TX work slots claimed RIGHT NOW (filling, queued, or sending) — the pool
-     *         occupancy a strand used to raise permanently. */
+    /** @brief TX work slots claimed RIGHT NOW (filling, queued, or sending). */
     [[nodiscard]] std::size_t tx_slots_busy() const noexcept;
 
-    /** @brief Total TX work slots in the per-link pool; a send past it heap-falls-back. */
+    /** @brief Total TX work slots in the per-link pool — this link's outstanding-send
+     *         bound; a send past it is dropped and counted (@ref enqueue_drops). */
     [[nodiscard]] static std::size_t tx_slot_capacity() noexcept;
 
     /**
@@ -395,28 +396,22 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      */
     void notify_departed(std::string_view peer);
     void deliver(std::string_view peer, std::span<const std::byte> frame);
-    // ONE gather-copy (into a pool slot, else a nothrow heap item) + httpd_queue_work;
-    // drops the frame on OOM (never aborts). The destination is a SESSION, never a bare
-    // fd — see @ref session_ref_t.
+    // ONE gather-copy into a pool slot + httpd_queue_work; drops the frame (counted, never
+    // aborting) when no slot is free, when the enqueue is refused, or on OOM. The
+    // destination is a SESSION, never a bare fd — see @ref session_ref_t.
     void queue_send(const session_ref_t& to, std::span<const std::span<const std::byte>> iov);
     void queue_send(const session_ref_t& to,
                     std::span<const std::byte> frame);  // one-span sugar over the gather
 
-    /** @brief Allocate the once-per-link RX scratch + TX slot pool (nothrow; on failure
-     *         the link still works — every frame takes the per-frame heap fallback). */
+    /** @brief Allocate the once-per-link RX scratch + TX slot pool (nothrow). RX failure is
+     *         survivable (per-frame nothrow buffer); a link with no TX pool drops every
+     *         send on the counted path — see @ref enqueue_drops. */
     void alloc_buffers();
-    /** @brief Claim a free TX work slot lock-free (a CAS scan); nullptr when the pool
-     *         is exhausted or absent — the caller falls back to a heap work item. Sweeps
-     *         once (@ref sweep_tx_slots) before giving up. */
+    /** @brief Claim a free TX work slot lock-free (a CAS scan); nullptr when the pool is
+     *         exhausted or absent — the caller drops the frame and counts it. */
     [[nodiscard]] tx_slot_t* claim_tx_slot();
-    /**
-     * @brief Reclaim every slot whose work item was silently binned by the control socket
-     *        (#944). Called ONLY from @ref claim_tx_slot's exhausted path — a strand costs
-     *        nothing until the pool runs out, so this needs no timer and no steady-state work.
-     */
-    void sweep_tx_slots();
-    /** @brief Return a drained/failed work item: recycle its pool slot (dropping any
-     *         overflow heap payload) or delete the heap-fallback shell. */
+    /** @brief Return a drained/failed work item: drop any oversize heap payload and
+     *         recycle its pool slot. */
     static void release_tx_work(tx_work_t* work);
 
     /**
@@ -649,12 +644,9 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     void* admission_ctx_ = nullptr;
     /** @brief The per-socket send bound applied at admission — see @ref send_timeout_ms. */
     std::uint32_t send_timeout_ms_ = 0;
-    /** @brief Frames the control queue refused, for this link's life — see @ref
+    /** @brief Frames that never reached a socket, for this link's life — see @ref
      *         enqueue_drops. Relaxed: a diagnostic count, ordered against nothing. */
     std::atomic<std::uint32_t> enqueue_drops_{0};
-    /** @brief TX slots reclaimed from a silently-binned work item — see @ref tx_strands.
-     *         Relaxed for the same reason: the slot's own state word carries the ordering. */
-    std::atomic<std::uint32_t> tx_strands_{0};
     bool peer_named_;
     bool owns_httpd_ = true;  // false when adopting an external server (dtor must not httpd_stop)
     /** @brief Set at destructor entry: refuses new TX slot claims so the pool drain

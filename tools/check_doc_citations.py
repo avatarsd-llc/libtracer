@@ -674,8 +674,8 @@ ANCHORS = [
     ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:70',
      '* reply, and (the deep path) the whole /unit batch-apply transaction. The device'),
     ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:77', 'constexpr std::size_t kHttpdTaskStack = 12288;'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:319', 'if (chunk.empty()) return true;'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:325',
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:320', 'if (chunk.empty()) return true;'),
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:326',
      'if (len_ != 0) std::memcpy(grown.get(), bytes_.get(), len_);'),
     # integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp
     ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:48',

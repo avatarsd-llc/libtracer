@@ -184,7 +184,7 @@ The module ABI itself is an **implementation** concern, not a protocol property 
 
 ## Implementation-language portability
 
-The reference implementation is C++23 (chosen for `std::expected`, `std::span`, `std::byte`, designated initializers, `constexpr`, three-way comparison, `[[nodiscard]]`, and `<atomic>`; built `-fno-exceptions -fno-rtti` for the constrained profile). The choice is pragmatic: a freestanding-friendly C++23 subset produces a small portable binary, has broad MCU toolchain coverage (GCC 13+, Clang 18+, ESP-IDF 5.3+, arm-none-eabi-g++ 14.x), and exposes a clean `extern "C"` FFI surface for higher-level wrappers. The wire format itself is language-neutral, so a C, Rust, or Zig node interoperates byte-for-byte.
+The reference implementation is C++23 (chosen for `std::expected`, `std::span`, `std::byte`, designated initializers, `constexpr`, three-way comparison, `[[nodiscard]]`, and `<atomic>`; built `-fno-exceptions -fno-rtti` for the constrained profile). The choice is pragmatic: a freestanding-friendly C++23 subset produces a small portable binary, has broad MCU toolchain coverage (GCC 13+, Clang 18+, ESP-IDF 5.3+ as a *compiler* floor, arm-none-eabi-g++ 14.x), and exposes a clean `extern "C"` FFI surface for higher-level wrappers. The wire format itself is language-neutral, so a C, Rust, or Zig node interoperates byte-for-byte.
 
 The protocol itself is implementable in **any language** with:
 
