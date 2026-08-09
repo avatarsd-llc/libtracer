@@ -400,13 +400,22 @@ class slot_server_t : public transport_t, public bus_link_t, protected stream_en
      *        every open peer.
      * @note Departure eviction (RFC-0009 §D.5) follows the same split: peer-named mode
      *       evicts just the departed peer's edges (`notify_peer_down(name)`), while FLAT
-     *       mode reports the whole link down (`notify_down()`) on ANY single session's
-     *       close — so one flat session leaving evicts EVERY edge under the link name.
-     *       That coarseness is unreachable under `fwd_router` (which wires the peer-named
-     *       facet whenever it fans a link to many peers); it matters only to a manual
-     *       wiring that fed a flat server multiple concurrent peers (#889).
+     *       mode reports the whole link down (`notify_down()`) — but only when the LAST
+     *       open session departs (#889). A flat link has ONE routing identity for all its
+     *       peers (the registered child NAME), so firing that on a mid-life close would
+     *       evict the surviving peers' edges too.
      */
     [[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }
+
+    /**
+     * @brief The mode authority (#889): the `peer_named` this server was constructed with.
+     *
+     * The ONE answer to "which mode is this link in" — @ref bus, the two servers' per-frame
+     * tier select, and the departure branch in @ref teardown_slot all key off this flag (not
+     * off whether a peer sink happens to be installed), and `bus_link_t` refuses every
+     * peer-named wiring call while it is false.
+     */
+    [[nodiscard]] bool peer_named() const noexcept override { return peer_named_; }
 
     /** @brief Visit the currently-OPEN peers' names, `p<slot>` (#426). */
     void enumerate_peers(const peer_visitor_t& visit) const override;
@@ -520,7 +529,9 @@ class slot_server_t : public transport_t, public bus_link_t, protected stream_en
      * in-flight send either finished against the still-open fd or observes the reset).
      * @ref on_slot_reset clears the protocol buffers, and the departure seam
      * (RFC-0009 §D.5) fires LAST with no transport lock held — the notifier re-enters the
-     * routing plane.
+     * routing plane. Which seam depends on @ref peer_named() — the departed peer's own name
+     * when peer-named, the whole link when flat, and then only once no open session is
+     * left (#889).
      *
      * @param s The slot to recycle.
      */
@@ -617,6 +628,13 @@ class slot_server_t : public transport_t, public bus_link_t, protected stream_en
 
     /** @brief One readable pass on @p s: `recv` a chunk, or tear the slot down. */
     void service_peer(session_base_t& s);
+
+    /**
+     * @brief True while ANY slot is still open — the flat mode's "is the link still up"
+     *        question (#889), asked by @ref teardown_slot after the departing slot has
+     *        already been closed, so it never counts itself.
+     */
+    [[nodiscard]] bool any_open_session() const;
 };
 
 }  // namespace tr::net

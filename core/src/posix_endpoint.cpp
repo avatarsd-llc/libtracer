@@ -477,14 +477,32 @@ void slot_server_t::teardown_slot(session_base_t& s) {
     on_slot_reset(s);
     // Departure seam (RFC-0009 §D.5): fired LAST, with no transport lock held — the
     // notifier re-enters the routing plane. Only a session that reached `open` can have
-    // flowed frames (subscriptions), and only then. Peer-named mode reports the peer's own
-    // name; flat mode reports the whole link down (#889 owns that coarseness).
+    // flowed frames (subscriptions), and only then.
+    //
+    // WHICH seam is the constructed mode's answer, not "is a peer sink installed" (#889):
+    // peer-named mode evicts exactly the departed peer's edges under its own name, while a
+    // FLAT link has ONE routing identity for every peer it carries — the registered child
+    // NAME — so its only seam is the whole link. Firing that on a mid-life close evicts the
+    // SURVIVING peers' edges too, which is why it waits for the last open session to go.
+    // The check runs on the poll thread with both transport locks released: `open` is
+    // mutated only here and in accept_peer, both on this thread, so no session can appear
+    // or vanish between the answer and the notification.
     if (was_open && !departed.empty()) {
-        if (peer_rx_.has_any())
+        if (peer_named_)
             notify_peer_down(departed);
-        else
+        else if (!any_open_session())
             notify_down();
     }
+}
+
+bool slot_server_t::any_open_session() const {
+    // peers_m_ guards the slot VECTOR against the cross-thread readers (enumerate_peers /
+    // peer_link); the `open` loads are relaxed for the same reason they are everywhere else
+    // — the lock, not the memory order, is what orders them.
+    const std::lock_guard lock(peers_m_);
+    for (const std::unique_ptr<session_base_t>& s : slots_)
+        if (s->open.load(std::memory_order_relaxed)) return true;
+    return false;
 }
 
 void slot_server_t::run() {

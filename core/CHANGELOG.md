@@ -16,6 +16,16 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`tr::net::bus_link_t::peer_named()` — the multi-peer MODE AUTHORITY, asked once
+  (#889).** A virtual query, default `true`, overridden by `tr::net::slot_server_t` to return
+  the `peer_named` its listener was constructed with. Before it, "which mode is this link in"
+  had two answers that only coincided by wiring accident: `peer_named_` gated `bus()` and
+  nothing else, while every runtime decision — the tcp/ws servers' per-frame tier select and
+  the shared departure branch — keyed off `peer_rx_.has_any()`, i.e. off whether a peer sink
+  happened to be installed. A kind that is a bus by construction (the CAN binding) keeps the
+  default and is unaffected. Cold path only: an implementation's own per-frame tier select
+  reads its stored flag, never this virtual.
+
 - **`tr::net::conn_spec_t` + `tr::net::conn_spec(...)` (`libtracer/conn_spec.hpp`) — the
   connection-creation SPEC finally has a public ENCODER (#902).** `transport_vertex_t` has
   always shipped the decoder for the `/net:children[]` grammar
@@ -114,6 +124,22 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   tooling and conformance vectors rather than for an egress path.
 
 ### Changed
+
+- **BEHAVIOUR: `bus_link_t`'s peer-named wiring calls are REFUSED on a link that is not
+  `peer_named()`, and a peer-named link no longer downgrades to flat delivery (#889).**
+  `set_peer_receiver`, `set_peer_rope_receiver` and `set_peer_down_notifier` now return
+  without installing when the link reports `peer_named() == false`. `bus_link_t` is a PUBLIC
+  base, so those setters were reachable on a FLAT tcp/ws listener by an explicit upcast past
+  the null `bus()` — and landing one silently flipped the server into peer-named delivery
+  that the `bus() == nullptr` contract said did not exist. The refusal lives in `bus_link_t`
+  itself, not in a derived shadow, so the upcast cannot dodge it. The mirror change: the
+  tcp/ws servers' per-frame tier select now reads the constructed mode, so a **peer-named**
+  server with only a flat `transport_t` receiver wired DROPS its inbound frames instead of
+  delivering them untagged — an untagged frame off a many-peer link grows a return route that
+  names the LINK, and a bus mount's own name is not a routable next-hop (RFC-0020 /
+  ADR-0073 §3): its `send()` BROADCASTS, so the reply would go to every peer. In-tree nothing
+  changes: `fwd_router_t::add_child` installs the peer receiver strictly inside
+  `if (link.bus())`, so the two conditions already coincided everywhere the router wires.
 
 - **The label control plane emits ADVERTISE and HANDLE_NACK by scatter-gather, not by
   building a frame (#885).** Four sites — `fwd_router_t::advertise` (the producer door),
@@ -287,6 +313,20 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   to fail, and `tests/conformance/ws_diff_fuzz.py` holds it against the TypeScript decoder.
 
 ### Fixed
+
+- **A FLAT multi-peer server no longer reports the WHOLE LINK down when one of its several
+  sessions closes (#889).** `slot_server_t::teardown_slot` fired the RFC-0009 §D.5 departure
+  seam on every session close, and in flat mode that seam is `transport_t::notify_down` —
+  which `fwd_router_t::link_down` answers by evicting every subscriber edge and label binding
+  registered under the link's NAME. A flat listener admits unbounded concurrent peers by
+  default (`max_peers = 0`), so one client's hangup evicted the routing state the peers still
+  connected were relying on, silently and with nothing on the wire to explain it. The whole-
+  link seam now waits for the LAST open session to depart; a mid-life close notifies nothing
+  and the survivors keep routing. Peer-named mode is unchanged — it evicts exactly the
+  departed peer (`notify_peer_down(name)`), which is the finer seam and always was. The rule
+  lives once, in the slot layer both stream servers share since #871. Admission was NOT
+  clamped to one peer instead: a flat server's `send()` broadcast to every open peer is a
+  used surface, not an accident.
 
 - **A refused forwarding bind no longer strands the out-label and egress route it had to take
   first (#833).** `on_advertise`'s forwarding arm takes its downstream label before it can bind

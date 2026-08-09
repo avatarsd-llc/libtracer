@@ -786,6 +786,174 @@ void test_server_max_peers_cap() {
 }
 
 /**
+ * @brief #889 — a FLAT multi-peer server reports the link down only when its LAST
+ *        session departs, never on a mid-life close.
+ *
+ * A flat server (`peer_named=false`, the default) admits N concurrent peers and has ONE
+ * routing identity for all of them — the registered child NAME. Its departure seam is
+ * therefore `transport_t::notify_down` (whole link), which `fwd_router_t::link_down`
+ * answers by evicting every subscriber edge under that name. Fire it on one peer's hangup
+ * and the surviving peers' routing state is evicted underneath them, which is what this
+ * guards: the notifier must stay silent while any session is still open, and fire exactly
+ * once when the last one goes.
+ *
+ * The rule lives in `slot_server_t::teardown_slot` (`posix_endpoint.cpp`), shared verbatim
+ * with `transport_ws_server` since #871 — one home, so it is guarded once, here.
+ */
+void test_flat_server_down_only_on_last_session() {
+    std::printf("TCP transport — flat server: notify_down only on the LAST departure (#889):\n");
+
+    sink_t srv_rx_sink;
+    auto srv_rx = [&](std::span<const std::byte> f) { srv_rx_sink.push(f); };
+    std::atomic<int> downs{0};
+
+    tr::net::transport_tcp_server server(0, &tr::mem::heap_backend(), 0, /*max_peers=*/0);
+    check(server.ok(), "flat server bound");
+    check(server.bus() == nullptr, "flat server exposes no bus facet (peer_named=false)");
+    server.set_receiver(srv_rx);
+    server.set_down_notifier([](void* c) { static_cast<std::atomic<int>*>(c)->fetch_add(1); },
+                             &downs);
+    const std::uint16_t port = server.local_port();
+
+    sink_t at_a;
+    auto a_rx = [&](std::span<const std::byte> f) { at_a.push(f); };
+    std::optional<tcp_transport_t> a;
+    a.emplace("127.0.0.1", port);
+    a->set_receiver(a_rx);
+    std::optional<tcp_transport_t> b;
+    b.emplace("127.0.0.1", port);
+    check(a->ok() && b->ok(), "two concurrent dialers on the flat server");
+
+    // Drive one frame from each so BOTH slots are provably open before the close — an
+    // assertion about "the last session" is vacuous if the second never got admitted.
+    a->send(test_frame(2, 0xA1));
+    b->send(test_frame(2, 0xB1));
+    check(srv_rx_sink.wait_for_count(2, 2s), "both dialers' frames reached the flat receiver");
+
+    // --- the mid-life close: one of two peers hangs up ---
+    b.reset();
+    // Wait on the SLOT recycle, not on a sleep: enumerate_peers visits exactly the open,
+    // named slots, so 1 means the teardown (and its departure seam) has already run.
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    std::size_t live = 2;
+    while (std::chrono::steady_clock::now() < deadline) {
+        live = 0;
+        server.enumerate_peers([&](std::string_view) { ++live; });
+        if (live == 1) break;
+        std::this_thread::sleep_for(20ms);
+    }
+    check(live == 1, "the departed peer's slot was recycled (its teardown ran)");
+    check(downs.load() == 0, "a mid-life close did NOT report the whole link down (#889)");
+
+    // …and the survivor still routes: the broadcast reaches it after the departure.
+    const auto bc = test_frame(3, 0xCC);
+    server.send(bc);
+    check(at_a.wait_for_count(1, 2s), "the surviving peer still receives after the close");
+    check(at_a.at(0) == bc, "the survivor's frame is intact");
+    a->send(test_frame(2, 0xA2));
+    check(srv_rx_sink.wait_for_count(3, 2s), "…and inbound from the survivor still delivers");
+
+    // --- the last close: NOW the link is down, exactly once ---
+    a.reset();
+    const auto ldeadline = std::chrono::steady_clock::now() + 2s;
+    while (downs.load() == 0 && std::chrono::steady_clock::now() < ldeadline)
+        std::this_thread::sleep_for(20ms);
+    check(downs.load() == 1, "the LAST session's departure reported the link down exactly once");
+    // Nothing else may fire it: give the poll loop a few passes to prove the count is stable.
+    std::this_thread::sleep_for(300ms);
+    check(downs.load() == 1, "…and no further notification followed");
+}
+
+/**
+ * @brief #889 — a FLAT server refuses peer-named wiring: `set_peer_receiver` is rejected
+ *        and inbound keeps reaching the flat `transport_t` receiver.
+ *
+ * `bus()` returning nullptr is the contract "this link has no peer-named tier". But
+ * `bus_link_t` is a PUBLIC base, so the setter is reachable by an explicit upcast — and
+ * before #889 that silently flipped the server into peer-named delivery the contract said
+ * did not exist. The mode authority is the constructed `peer_named` flag alone: the wiring
+ * is refused, and delivery keys off the flag rather than off "a peer sink happens to be
+ * installed".
+ */
+void test_flat_server_rejects_peer_receiver() {
+    std::printf("TCP transport — flat server refuses peer-named wiring (#889):\n");
+
+    sink_t flat_sink;
+    auto flat_rx = [&](std::span<const std::byte> f) { flat_sink.push(f); };
+    peer_sink_t peer_sink;
+
+    tr::net::transport_tcp_server server(0, &tr::mem::heap_backend(), 0, /*max_peers=*/0);
+    check(server.ok(), "flat server bound");
+    check(server.bus() == nullptr, "flat server exposes no bus facet");
+    server.set_receiver(flat_rx);
+    // The out-of-contract path itself: the public base, named explicitly. A member-shadowing
+    // guard would not catch this call, so the refusal has to live in bus_link_t.
+    static_cast<tr::net::bus_link_t&>(server).set_peer_receiver(peer_sink);
+
+    tcp_transport_t a("127.0.0.1", server.local_port());
+    check(a.ok(), "dialer connected");
+    const auto f = test_frame(4, 0x91);
+    a.send(f);
+
+    check(flat_sink.wait_for_count(1, 2s), "inbound still reached the FLAT transport_t receiver");
+    check(flat_sink.count() == 1 && flat_sink.at(0) == f, "the flat delivery is byte-intact");
+    {
+        const std::lock_guard lock(peer_sink.m);
+        check(peer_sink.frames.empty(), "the forced peer-named sink received NOTHING");
+    }
+}
+
+/**
+ * @brief #889, the other direction — a PEER-NAMED server never downgrades to flat
+ *        delivery just because only a flat receiver happens to be installed.
+ *
+ * This is the half the mode authority owns on its own. Before #889 the tier select read
+ * `peer_rx_.has_any()`, so a peer-named link with no peer sink wired handed its frames to
+ * the plain `transport_t` receiver — UNTAGGED. On a link that carries many peers under one
+ * name that is a misroute waiting to happen: the return route grown from an untagged frame
+ * names the LINK, and a bus mount's own name is not a routable next-hop (RFC-0020 /
+ * ADR-0073 §3) — its `send()` BROADCASTS, so the reply would go to every peer. The mode
+ * says peer-named, so the peer tier is the only tier; an unwired one drops.
+ *
+ * The negative half is paired with a live control: the same connection, the right tier
+ * wired, delivers — so "nothing arrived" cannot be a dead link passing by accident.
+ */
+void test_peer_named_server_does_not_downgrade_to_flat() {
+    std::printf("TCP transport — a peer-named server does not downgrade to flat (#889):\n");
+
+    sink_t flat_sink;
+    auto flat_rx = [&](std::span<const std::byte> f) { flat_sink.push(f); };
+    peer_sink_t peer_sink;
+
+    tr::net::transport_tcp_server server(0, &tr::mem::heap_backend(), 0, /*max_peers=*/0,
+                                         /*peer_named=*/true);
+    check(server.ok(), "peer-named server bound");
+    check(server.bus() != nullptr, "peer-named server exposes the bus facet");
+    // The WRONG tier for this mode, and the only one wired.
+    server.set_receiver(flat_rx);
+
+    tcp_transport_t a("127.0.0.1", server.local_port());
+    check(a.ok(), "dialer connected");
+    a.send(test_frame(4, 0x31));
+    check(!flat_sink.wait_for_count(1, 500ms),
+          "the peer-named link did NOT deliver to the flat transport_t receiver");
+
+    // The control: same connection, the RIGHT tier wired — so the silence above was the
+    // tier decision, not a dead link.
+    server.bus()->set_peer_receiver(peer_sink);
+    const auto f2 = test_frame(4, 0x32);
+    a.send(f2);
+    check(peer_sink.wait_count(1, 2s), "…and the peer-named tier delivers once it is wired");
+    {
+        const std::lock_guard lock(peer_sink.m);
+        check(peer_sink.frames.size() == 1 && peer_sink.frames[0].second == f2 &&
+                  peer_sink.frames[0].first == "p0",
+              "the delivered frame is intact and tagged with the p<slot> peer name");
+    }
+    check(flat_sink.count() == 0, "the flat receiver never received anything on this link");
+}
+
+/**
  * @brief A broadcast that lands INSIDE the accept publish reaches the peer being accepted —
  *        `open ⇒ fd valid`, proven by holding that instant open rather than by racing for it.
  *
@@ -1108,6 +1276,9 @@ int main() {
     test_config_constructed_tcp();
     test_server_multi_peer_bus();
     test_server_max_peers_cap();
+    test_flat_server_down_only_on_last_session();
+    test_flat_server_rejects_peer_receiver();
+    test_peer_named_server_does_not_downgrade_to_flat();
     test_accept_publish_is_atomic_to_senders();
     test_push_on_connect_waits_for_start_receiving();
     test_start_receiving_is_idempotent();

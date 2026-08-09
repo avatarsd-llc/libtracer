@@ -395,17 +395,21 @@ bool transport_ws_server::drain_frames(session_t& s) {
         switch (frame.op) {
             case ws::opcode_t::BINARY:
             case ws::opcode_t::CONT: {
-                // Peer-named slot first (the ADR-0044 bus precedence — the router's
-                // wiring), flat transport_t slot as the point-to-point fallback.
-                // Tier select per frame (receiver_slot.hpp), so a sink installed
-                // mid-stream takes effect on the next data frame. Unfragmented
+                // Tier select per frame: the constructed MODE picks the slot (#889)
+                // — peer-named servers deliver tagged with the sending peer's name
+                // (the ADR-0044 bus precedence, what the router wires), flat servers
+                // deliver point-to-point under the link's own registered name.
+                // Reading the stored flag, not `peer_rx_.has_any()`: a mode is a
+                // wiring-time fact, not a per-frame consequence of which sink someone
+                // happened to install. WITHIN the chosen tier a sink installed
+                // mid-stream still takes effect on the next data frame. Unfragmented
                 // fast path on the span tier: borrowed payload, no owning copy.
-                const bool peer_named = peer_rx_.has_any();
-                const bool want_rope = peer_named ? peer_rx_.has_rope() : rx_.has_rope();
+                const bool to_peer = peer_named_;
+                const bool want_rope = to_peer ? peer_rx_.has_rope() : rx_.has_rope();
                 if (frame.op == ws::opcode_t::BINARY && frame.fin && !s.assembler.assembling &&
                     !want_rope) {
                     const std::span<const std::byte> payload(frame.payload);
-                    if (peer_named)
+                    if (to_peer)
                         peer_rx_.deliver_borrowed(s.name, payload);
                     else
                         rx_.deliver_borrowed(payload);
@@ -427,7 +431,7 @@ bool transport_ws_server::drain_frames(session_t& s) {
                 // The reassembled message IS a rope — one owning link per
                 // fragment (ADR-0053 §5): the rope sink takes it as-is; only
                 // a span-only sink pays the one materialize (in the slot).
-                if (peer_named)
+                if (to_peer)
                     peer_rx_.deliver_rope(s.name, std::move(msg.message));
                 else
                     rx_.deliver_rope(std::move(msg.message));
