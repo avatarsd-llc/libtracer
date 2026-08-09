@@ -359,12 +359,73 @@ void test_the_fanout_reaches_every_open_peer_exactly_once() {
     reset(link);
 }
 
+// ---------------------------------------------------------------------------
+// 3 — a fan-out WIDER than the TX pool still allocates nothing (#949).
+// ---------------------------------------------------------------------------
+/**
+ * @brief The deleted heap fallback, pinned by its absence, on the path most likely to meet
+ *        a heap trough.
+ *
+ * Until #949 a send that found no free TX slot allocated a work item AND a payload buffer
+ * on the global heap and posted them anyway. A broadcast is where that bit hardest: the
+ * over-offer is one heap pair per peer past `tx_slot_capacity()`, arriving in a burst, with
+ * the outstanding-send count bounded by the heap rather than by the control queue behind
+ * it. The answer is now a counted drop, and the two numbers below are what separate them —
+ * a link that still fell back would allocate here and count nothing.
+ *
+ * The control socket is left ACCEPTING for this case, unlike case 1: the pooled part of the
+ * fan-out must really be queued, so the over-offer is a pool miss and not a refusal. The
+ * fake's own `std::deque` push is therefore inside the window and is subtracted by
+ * measuring a first, pool-sized broadcast and requiring the WIDE one to add nothing beyond
+ * what that one cost.
+ */
+void test_a_fanout_past_the_pool_allocates_nothing() {
+    std::printf("a fan-out to more peers than the TX pool has slots:\n");
+    auto link = make_link();
+    check(link->ok(), "the adopting link registered its URI");
+
+    const std::size_t capacity = httpd_ws_link_t::tx_slot_capacity();
+    const std::size_t wide = 2 * capacity;
+    std::vector<int> fds;
+    for (std::size_t i = 0; i < wide; ++i) {
+        fds.push_back(900 + static_cast<int>(i));
+        claim(fds.back());
+    }
+    drain();
+
+    // Warm-up: one full broadcast on the ordinary path, drained, so nothing first-use is
+    // counted below. It also measures what ONE queued frame costs the fake's deque.
+    broadcast(*link);
+    drain();
+    check_eq(link->tx_slots_busy(), 0, "the warm-up drained: the pool is idle again");
+
+    const std::size_t allocs_before = g_allocs.load(std::memory_order_relaxed);
+    const std::uint32_t drops_before = link->enqueue_drops();
+    broadcast(*link);
+    const std::size_t allocs_after = g_allocs.load(std::memory_order_relaxed);
+
+    // `capacity` frames were really queued, and the fake pushes each onto a std::deque, so
+    // the window is not expected to be zero — it is expected to hold NO allocation for the
+    // peers past the pool. The deque grows in blocks, so the bound is the pooled frames'
+    // own cost: one allocation each, at most.
+    check(allocs_after - allocs_before <= capacity,
+          "the wide fan-out allocated at most one block per QUEUED frame — nothing for the "
+          "peers past the pool");
+    check_eq(link->enqueue_drops() - drops_before, wide - capacity,
+             "and those peers were counted as drops (so the zero above is not vacuous)");
+    check_eq(link->tx_slots_busy(), capacity, "the pool is exactly full, not overdrawn");
+
+    drain();
+    reset(link);
+}
+
 }  // namespace
 
 int main() {
     std::printf("httpd_ws_link fan-out allocation (#961)\n");
     test_a_broadcast_allocates_nothing();
     test_the_fanout_reaches_every_open_peer_exactly_once();
+    test_a_fanout_past_the_pool_allocates_nothing();
     std::printf("%s\n", g_failures == 0 ? "OK" : "FAILED");
     return g_failures == 0 ? 0 : 1;
 }

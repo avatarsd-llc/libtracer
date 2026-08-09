@@ -23,9 +23,13 @@
  *   1. a full control queue never costs a slot — the refusal recycles it, so a link can
  *      absorb any number of refusals and still be serving afterwards. This is the case the
  *      strand suite's headline becomes above the floor;
- *   2. a burst past the pool is DROPPED and counted, and it allocates nothing. This is the
- *      deleted fallback's replacement, and the one that fails loudest against the old code,
- *      which posted a heap work item instead and counted nothing;
+ *   2. a burst past the pool is DROPPED and counted, and nothing of it is offered to the
+ *      control socket. This is the deleted fallback's replacement, and the one that fails
+ *      loudest against the old code, which posted a heap work item instead and counted
+ *      nothing. That the drop also ALLOCATES nothing is measured next door, in the fan-out
+ *      suite: that file replaces the whole global `operator new`/`delete` family, which a
+ *      suite must do WHOLE (a subset makes ASan abort on a mismatched pair), so the
+ *      instrument lives there and is not duplicated here;
  *   3. the drop is a bound, not a cliff: the pooled frames of that same burst are all
  *      delivered, so property 2 is not satisfied by a link that drops everything;
  *   4. claims, refusals and drains racing for real wedge no slot — the transitions are
@@ -35,9 +39,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdio>
-#include <cstdlib>
 #include <memory>
-#include <new>
 #include <span>
 #include <string>
 #include <string_view>
@@ -53,9 +55,6 @@ using fake_httpd::send_result_t;
 using tr::net::httpd_ws_link_t;
 
 int g_failures = 0;
-
-/** @brief Global-heap allocation count — the instrument property 2 is measured with. */
-std::atomic<std::size_t> g_allocs{0};
 
 /** @brief Record one assertion's verdict. */
 void check(bool ok, std::string_view what) {
@@ -158,7 +157,7 @@ void test_refused_enqueues_never_cost_a_slot() {
 }
 
 // ---------------------------------------------------------------------------
-// 2 — a burst past the pool is dropped, counted, and allocates NOTHING.
+// 2 — a burst past the pool is dropped and counted, and never offered.
 // ---------------------------------------------------------------------------
 /**
  * @brief The deleted fallback, pinned by its absence.
@@ -169,12 +168,13 @@ void test_refused_enqueues_never_cost_a_slot() {
  * pool is filled with frames that are genuinely queued (nothing drains in between), and
  * four more sends are offered on top.
  *
- * Two measurements, and both are needed. The counter says the drop happened; the
- * allocation count says it was a DROP and not a quieter fallback — a link that still heap
- * fell back would satisfy neither, and one that fell back without counting would satisfy
- * only the second.
+ * Two measurements, and both are needed. The counter says the drop happened; the control
+ * queue's depth says nothing of the over-offer was posted — a link that still heap fell back
+ * would fail both, and one that fell back without counting would fail the first. The heap
+ * half of the same property is `test_a_fanout_past_the_pool_allocates_nothing` in the
+ * fan-out suite.
  */
-void test_a_burst_past_the_pool_drops_and_allocates_nothing() {
+void test_a_burst_past_the_pool_drops_and_counts() {
     std::printf("four sends offered to a pool that is already full:\n");
     auto link = make_link();
     claim(kFd);
@@ -195,14 +195,10 @@ void test_a_burst_past_the_pool_drops_and_allocates_nothing() {
     check_eq(link->tx_slots_busy(), capacity, "the pool is fully claimed, all of it live");
 
     const std::uint32_t drops_before = link->enqueue_drops();
-    const std::size_t allocs_before = g_allocs.load(std::memory_order_relaxed);
     for (std::size_t i = 0; i < capacity; ++i) peer->send(std::span<const std::byte>(kBody));
-    const std::size_t allocs_after = g_allocs.load(std::memory_order_relaxed);
 
     check_eq(link->enqueue_drops() - drops_before, capacity,
              "every send past the pool was counted as a drop");
-    check_eq(allocs_after - allocs_before, 0,
-             "and none of them touched the global heap: there is no fallback left");
     check_eq(fake_httpd::instance().queue_depth(), capacity,
              "the control queue holds the pooled frames only — the drops were never offered");
 
@@ -309,24 +305,10 @@ void test_concurrent_claims_refusals_and_drains_wedge_nothing() {
 
 }  // namespace
 
-/** @brief Counting `operator new` — the global-heap instrument case 2 reads. */
-void* operator new(std::size_t n) {
-    g_allocs.fetch_add(1, std::memory_order_relaxed);
-    void* const p = std::malloc(n == 0 ? 1 : n);
-    if (p == nullptr) std::abort();  // this suite is built without exceptions
-    return p;
-}
-
-/** @brief The matching `operator delete`. */
-void operator delete(void* p) noexcept { std::free(p); }
-
-/** @brief Sized `operator delete` — C++14 onwards emits this form. */
-void operator delete(void* p, std::size_t) noexcept { std::free(p); }
-
 int main() {
     std::printf("httpd_ws_link TX slot-pool host suite (#949):\n");
     test_refused_enqueues_never_cost_a_slot();
-    test_a_burst_past_the_pool_drops_and_allocates_nothing();
+    test_a_burst_past_the_pool_drops_and_counts();
     test_the_pooled_frames_of_an_over_offer_all_go_out();
     test_concurrent_claims_refusals_and_drains_wedge_nothing();
     std::printf(g_failures == 0 ? "\nALL PASS\n" : "\n%d FAILURE(S)\n", g_failures);
