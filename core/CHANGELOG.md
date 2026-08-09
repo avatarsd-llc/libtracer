@@ -16,6 +16,36 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`tr::net::conn_spec_t` + `tr::net::conn_spec(...)` (`libtracer/conn_spec.hpp`) — the
+  connection-creation SPEC finally has a public ENCODER (#902).** `transport_vertex_t` has
+  always shipped the decoder for the `/net:children[]` grammar
+  `SPEC{NAME type, NAME name, SETTINGS config{role, port[, kind][, addr] …}}`, but nothing
+  emitted it: every consumer of the production first-wiring step hand-built the TLVs from
+  `wire::emit_tlv` / `wire::emit_name` and reached into the INTERNAL `tr::detail::store_le`
+  to encode the port. Sixteen private near-copies existed across `core/tests`, `bench`,
+  `core/examples/tree_of_ropes.cpp` and the ESP-IDF `full_node` example, and they had already
+  drifted — `tree_of_ropes`' copy could not spell `kind` or `addr`, i.e. the example for
+  "mount a transport" could not express the field that decides which MODULE the connection
+  mounts under. `conn_spec_t` is a fluent builder that appends `(NAME key, value)` pairs in
+  call order (`role`/`port`/`kind`/`addr`/`keepalive_ms`/`max_frame`/`backoff_ms`/
+  `connect_timeout_ms`, plus generic `text`/`u8`/`u16`/`u32`/`flag` for a kind's PRIVATE keys,
+  named to mirror `config_reader_t`'s accessors); a builder on which no setter ran emits no
+  `config` at all, which is the `provide_link` spelling. `conn_spec(type, name, role, port,
+  kind = {}, addr = {})` is the one-call sugar over it. **No wire surface changes** — the
+  bytes are pinned byte-for-byte against the pre-existing hand-emit in
+  `transport_vertex_test`, and the TypeScript client's `encodeConnSpec` (#408) already shipped
+  this same grammar, so the C++ core was the odd one out. There is no `module` key and the
+  builder invents none: a SPEC names its module through `kind` + `role`, resolved by the
+  application's `register_module` declaration before any staged link is consulted (#883).
+
+- **`tr::wire::emit_value_le<T>(out, value, width = sizeof(T))` (`libtracer/tlv_emit.hpp`) —
+  the public way to write an integer VALUE TLV (#902).** The decode half of the
+  `(NAME key, VALUE u8/u16/u32)` config pair has been public since `config_reader_t`; the
+  encode half was not, so a consumer sized its own buffer and called `detail::store_le` or
+  hand-rolled a shift loop. It lives in `tr::wire` because it turns a wire type into wire
+  bytes; the layer-free LE byte primitive it builds on (`detail::append_le`, `byteorder.hpp`)
+  stays in `tr::detail`, per that header's own layering note.
+
 - **`tr::net::detail::tcp_peer_publishing_hook` (`libtracer/transport_tcp.hpp`) — a TEST-ONLY
   seam, null in production (#891).** Run by `transport_tcp_server::accept_peer` at the instant
   a new peer's fd is published and its slot is one store from open, inside the `write_m_`

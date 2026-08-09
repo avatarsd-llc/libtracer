@@ -115,22 +115,7 @@ std::vector<std::byte> b_path_ref(std::span<const path_ref_element_t> elements) 
 
 /** @brief A connection-creation SPEC with no transport `kind` (every link is provided). */
 view_t conn_spec(std::string_view type, std::string_view name) {
-    std::vector<std::byte> cfg;
-    tr::wire::emit_name(cfg, "role");
-    const std::byte r{static_cast<std::uint8_t>(conn_role_t::DIAL)};
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, std::span<const std::byte>(&r, 1));
-
-    std::vector<std::byte> body;
-    tr::wire::emit_name(body, "type");
-    tr::wire::emit_name(body, type);
-    tr::wire::emit_name(body, "name");
-    tr::wire::emit_name(body, name);
-    tr::wire::emit_name(body, "config");
-    tr::wire::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true}, cfg);
-
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
-    return owned(out);
+    return tr::net::conn_spec_t(type, name).role(conn_role_t::DIAL).view();
 }
 
 /**
