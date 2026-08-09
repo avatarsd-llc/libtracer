@@ -74,6 +74,8 @@
 #include "bench_common.hpp"
 #include "libtracer/can.hpp"
 #include "libtracer/frame.hpp"
+#include "libtracer/fwd_router.hpp"
+#include "libtracer/graph.hpp"
 #include "libtracer/iov_table.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
@@ -221,6 +223,35 @@ std::vector<std::byte> make_route(std::size_t segs) {
 }
 
 /**
+ * @brief A link that DISCARDS every send, overriding BOTH forms so it allocates nothing.
+ *
+ * Overriding the gather form is the load-bearing half: `transport_t::send(iov)`'s base
+ * implementation concatenates into a temporary, so a link that inherited it would charge the
+ * router for a buffer the router did not ask for and make a NOALLOC arm unreadable. Sizes are
+ * kept so an arm can prove the frame was really emitted rather than silently dropped.
+ */
+class null_link_t final : public tr::net::transport_t {
+   public:
+    void send(std::span<const std::byte> frame) override {
+        last_ = frame.size();
+        ++sends_;
+    }
+    void send(std::span<const std::span<const std::byte>> iov) override {
+        last_ = 0;
+        for (const std::span<const std::byte> s : iov) last_ += s.size();
+        ++sends_;
+    }
+    /** @brief Total bytes of the last send. */
+    [[nodiscard]] std::size_t last() const noexcept { return last_; }
+    /** @brief Sends seen so far. */
+    [[nodiscard]] std::size_t sends() const noexcept { return sends_; }
+
+   private:
+    std::size_t last_ = 0;  /**< @brief Bytes of the last send. */
+    std::size_t sends_ = 0; /**< @brief Sends seen. */
+};
+
+/**
  * @brief The block census of the route-handle control path.
  *
  * Each armed window brackets exactly one peer-driven operation repeated @p n times, on a
@@ -351,8 +382,9 @@ int run_blocks() {
         print_census("egress_route_lookup", c, kN, "on_nack:owning_copy_to_GLOBAL_heap");
     }
 
-    // (6) The control-frame encoders `on_advertise` / `on_compact` / `on_nack` call: the
-    //     THROWING pair, then the nothrow pair that already exists beside them.
+    // (6) What an ADVERTISE emission costs, before and after #885. The BUILDER is retained
+    //     for tests and tooling and measured here as the reference; the router's own door,
+    //     which is what a peer provokes, is measured next to it.
     {
         census_t c;
         g_allocs = g_frees = g_bytes = 0;
@@ -364,22 +396,30 @@ int run_blocks() {
         g_armed = false;
         c.heap_blocks = g_allocs;
         c.heap_bytes = g_bytes;
-        print_census("encode_advertise_throwing", c, kN, "body+out:UNGUARDED_on_peer_path");
+        print_census("encode_advertise_builder", c, kN, "body+out:retained_for_tests_only");
     }
     {
+        // The production door since #885: a WARM `advertise` (the label is already bound, so
+        // `ensure_egress` reuses it) writes a 12-byte head on the stack, references the
+        // caller's route, and hands the link two spans. Nothing is built and nothing escapes
+        // to the heap — the link below overrides the gather form, so the count is the
+        // ROUTER's, not a transport's concatenation.
         census_t c;
-        std::vector<std::byte> out;
+        tr::graph::graph_t g;
+        tr::net::fwd_router_t router(g);
+        null_link_t link;
+        router.add_child("down", link);
+        (void)router.advertise("down", route);  // mint + record, outside the window
         g_allocs = g_frees = g_bytes = 0;
         g_armed = true;
         for (std::size_t i = 0; i < kN; ++i) {
-            (void)tr::net::try_encode_advertise(out, 1, route);
-            asm volatile("" : : "r"(out.data()) : "memory");
+            const std::uint16_t l = router.advertise("down", route);
+            asm volatile("" : : "r"(l) : "memory");
         }
         g_armed = false;
         c.heap_blocks = g_allocs;
         c.heap_bytes = g_bytes;
-        print_census("try_encode_advertise_guarded", c, kN,
-                     "reused_out_buffer:one_refusable_alloc_per_call");
+        print_census("fwd_router_warm_advertise", c, kN, "gathered_off_a_stack_head:NO_alloc");
     }
     {
         census_t c;
@@ -536,6 +576,20 @@ int run_guard() {
         a.path = "node/sensor/temperature";
         return a;
     }();
+    // The label plane's fixture, PRIMED here: the router, its (non-allocating) link, the
+    // egress binding the warm-advertise arm reuses, and a COMPACT for a label nothing binds.
+    // Construction and the first advertise are outside every armed window on purpose — the
+    // arms measure the steady state, which is what a peer drives.
+    static tr::graph::graph_t label_graph;
+    static tr::net::fwd_router_t label_router_obj(label_graph);
+    static null_link_t label_link_obj;
+    static tr::net::fwd_router_t* const label_router = [] {
+        label_router_obj.add_child("down", label_link_obj);
+        (void)label_router_obj.advertise("down", route);
+        return &label_router_obj;
+    }();
+    static null_link_t* const label_link = &label_link_obj;
+    static const std::vector<std::byte> stale_compact = tr::net::encode_compact(0x4242, route);
 
     const arm_t arms[] = {
         // The CONTROL arm: the retained THROWING server encoder, which nothing on a
@@ -590,12 +644,23 @@ int run_guard() {
              ::iovec* v = table.acquire(inline_vec.size() + 8);  // past the inline bound
              asm volatile("" : : "r"(v) : "memory");
          }},
-        // #603's nothrow label encoder, already shipped — kept under the same gate.
-        {"try_encode_advertise", expect_t::GUARDED,
+        // #885 — the label plane's three egress arms, driven through the ROUTER's own doors
+        // rather than through a re-spelled copy of the emitter, so a call site that reverts
+        // to the retained builder reddens here even though the emitter itself is fine.
+        //
+        // The producer door, warm: the label is already bound (primed above), so
+        // `ensure_egress` reuses it and the only work left is putting the frame on the link.
+        {"fwd_router_warm_advertise", expect_t::NOALLOC,
          [] {
-             std::vector<std::byte> out;  // fresh, for the same reason
-             (void)tr::net::try_encode_advertise(out, 1, route);
-             asm volatile("" : : "r"(out.data()) : "memory");
+             const std::uint16_t l = label_router->advertise("down", route);
+             asm volatile("" : : "r"(l) : "memory");
+         }},
+        // The peer-provoked half: a COMPACT naming a label this node never bound. The answer
+        // is ten fixed bytes off the stack.
+        {"fwd_router_stale_label_nack", expect_t::NOALLOC,
+         [] {
+             label_router->on_frame("down", stale_compact);
+             asm volatile("" : : "r"(label_link->last()) : "memory");
          }},
     };
 
