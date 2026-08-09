@@ -176,6 +176,9 @@ bool route_handle_t::record_egress(std::string_view out_link, std::uint16_t labe
         refused_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
+    // `sole_take` keeps its `false` default here: this door records a label the caller already
+    // holds by other means, so there is no `ensure_egress` take to hand back and
+    // `release_egress` must never erase what it created (#833).
     t->egress.push_back(egress_entry_t{
         .label = label, .route = std::pmr::vector<std::byte>(route.begin(), route.end(), mr_)});
     return true;
@@ -214,10 +217,18 @@ std::pair<std::uint16_t, bool> route_handle_t::ensure_egress(std::string_view ou
     const std::lock_guard lock(t->m);
     // Reuse: the egress table doubles as the route -> label index (a link carries
     // few compact flows; a linear route compare beats a third keyed-by-bytes map).
-    for (const egress_entry_t& e : t->egress) {
-        if (e.route.size() == route.size() &&
-            std::equal(e.route.begin(), e.route.end(), route.begin()))
-            return {e.label, false};  // already advertised on this link - reuse the label
+    for (egress_entry_t& e : t->egress) {
+        if (e.route.size() != route.size() ||
+            !std::equal(e.route.begin(), e.route.end(), route.begin()))
+            continue;
+        // A SECOND take of this label — from here on the mint is no longer alone on it, so
+        // the minter may no longer hand it back (#833). Guarded by the load rather than
+        // stored unconditionally: this is the per-delivery compact egress leg
+        // (`deliver_remote`), and an unconditional store would dirty an entry line every
+        // delivery that a shared read leaves alone. The store happens at most once per
+        // entry, on the first reuse after its mint.
+        if (e.sole_take) e.sole_take = false;
+        return {e.label, false};  // already advertised on this link - reuse the label
     }
     // Saturate, never wrap (#603): a wrapped `next_label` handed out the reserved 0 and
     // then re-issued 1, 2, ... while those labels still aliased LIVE routes — a delivery
@@ -235,7 +246,49 @@ std::pair<std::uint16_t, bool> route_handle_t::ensure_egress(std::string_view ou
     const std::uint16_t label = t->next_label++;
     t->egress.push_back(egress_entry_t{
         .label = label, .route = std::pmr::vector<std::byte>(route.begin(), route.end(), mr_)});
+    // Stamped after the insert, not inside the brace, so the initializer above stays the one
+    // four documents cite. A MINT is reclaimable: until some other caller takes this label,
+    // the minter may still hand it back (@ref release_egress, #833).
+    t->egress.back().sole_take = true;
     return {label, true};
+}
+
+void route_handle_t::release_egress(std::string_view out_link, std::uint16_t label,
+                                    std::span<const std::byte> route) {
+    if (label == 0) return;  // the reserved "none" — never an entry, never an allocation
+    // `find_tables`, never `tables()`: a release must not CREATE a link shell. The refusal
+    // this pairs with is often a downstream reconnect, whose `clear_link` erased the whole
+    // table — re-creating it here would trade a stranded label for a stranded shell, which
+    // is the growth #488 bounds.
+    const std::shared_ptr<link_tables_t> t = find_tables(out_link);
+    if (!t) return;
+    const std::lock_guard lock(t->m);
+    for (auto it = t->egress.begin(); it != t->egress.end(); ++it) {
+        if (it->label != label) continue;
+        // Someone else took this label between the mint and this call — since #913 that is
+        // the DESIGNED sharing (one label per (link, route), not per advertise), and their
+        // binding now depends on the entry. Leave it. An established flow lands here too:
+        // its take was a reuse, so its entry never carries the flag at all.
+        if (!it->sole_take) return;
+        // Identity, not just the label: `record_egress` can replace a route in place under
+        // the same label, and an entry that no longer holds the route this caller minted for
+        // is not the one it is handing back.
+        if (it->route.size() != route.size() ||
+            !std::equal(it->route.begin(), it->route.end(), route.begin()))
+            return;
+        t->egress.erase(it);
+        // And the label itself, when it is still the allocator's most recent — the common
+        // case, because a refusal follows its own mint. A concurrent mint on the same link
+        // moved `next_label` past it, and then the label stays spent: reclaiming a hole
+        // would need a free list, and the entry is gone either way. 65535 is deliberately
+        // not walked back — `next_label` is 0 there, the saturated state @ref alloc_label
+        // documents as permanent, and un-saturating it is the one direction that could
+        // re-issue a live label.
+        if (t->next_label != 0 &&
+            static_cast<std::uint32_t>(t->next_label) == static_cast<std::uint32_t>(label) + 1u)
+            t->next_label = label;
+        return;
+    }
 }
 
 std::uint16_t route_handle_t::alloc_label(std::string_view link) {

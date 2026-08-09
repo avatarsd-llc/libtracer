@@ -41,7 +41,7 @@ exhaustive:
 | Site | Code | Who provokes it |
 | --- | --- | --- |
 | CAN egress window table | `core/include/libtracer/view_can.hpp:100` — `frames_.push_back` in `view_can_frames_t::split`, reached on every send (`core/src/transport_can.cpp:313`) | the sender: one `push_back` per frame the payload splits into |
-| Label-table binds (#603) | `core/src/route_handle.cpp:82`, `:179`, `:236` — `std::pmr::vector::push_back` and the route copy beside it | a **peer**: an ingress `ADVERTISE` binds a label. `max_label_bindings_per_link` bounds the entry *count*, not the allocation's failure mode |
+| Label-table binds (#603) | `core/src/route_handle.cpp:82`, `:182`, `:247` — `std::pmr::vector::push_back` and the route copy beside it | a **peer**: an ingress `ADVERTISE` binds a label. `max_label_bindings_per_link` bounds the entry *count*, not the allocation's failure mode |
 | `try_reserve` on `-fno-exceptions` (#923, #850) | `core/include/libtracer/mem_heap.hpp:157-171` — `try_grow` catches the container's own allocation failure where it can; where it cannot (`-fno-exceptions`, where `reserve` `abort()`s with nothing to catch) it falls back to probe-then-commit | on the MCU profile only, anything concurrent — a FreeRTOS context switch between the probe's free and the `reserve` is enough. The hosted profile no longer has the window; the exception-free one closes it by migrating the site to the ADR-0065 failable seam, not by a better `try_reserve` |
 
 The nothrow seams and the status legs described below are real and are what makes each *covered*
@@ -230,8 +230,8 @@ defines for "exceeds this receiver's decode resources".
 | Branch-write root key render (`try_build_key`) | `core/src/graph.cpp:1285-1286` | `false` → `BACKPRESSURE` |
 | Branch-write parse-key copy (`detail::try_assign`) | `core/src/graph.cpp:1288` | `false` → `BACKPRESSURE` |
 | Branch-write decode arena | `core/src/graph.cpp:1266-1269` | decode error → `TYPE_MISMATCH` |
-| Per-delivery COMPACT flatten (egress) | `core/src/fwd_router.cpp:1830-1831` | the delivery is **dropped** |
-| Per-delivery frame build | `core/src/fwd_router.cpp:1835` | the delivery is **dropped** |
+| Per-delivery COMPACT flatten (egress) | `core/src/fwd_router.cpp:1841-1842` | the delivery is **dropped** |
+| Per-delivery frame build | `core/src/fwd_router.cpp:1846` | the delivery is **dropped** |
 | Ingress `ADVERTISE` route flatten | flatten `core/src/fwd_router.cpp:1473` (the make-contiguous seam the ADVERTISE arm asks at `:1427`), answered at `:1434` | the empty flatten **fails the `wire::decode`** ⇒ the frame is **dropped**; the label stays **unbound** (the peer's COMPACTs draw a `HANDLE_NACK`) |
 | Ingress `COMPACT` payload flatten | flatten `core/src/fwd_router.cpp:1473` (the same seam, asked at `:1446`), answered at `:1453` | the delivery is **dropped**; the subscriber keeps its last-known value |
 | Bus-name rejection reply flatten (cold) | flatten `core/src/fwd_router.cpp:994`, answered by the `wire::decode` opening `reject_bus_name_hop` | the frame is **dropped** by value — no reply |
@@ -288,7 +288,7 @@ The remote-delivery leg answers differently on purpose. A stored write that reac
 succeeded; the fan-out to one subscriber is a separate obligation, and a subscriber missing
 one value under heap exhaustion is valid delivery behaviour where failing the write is not. Every
 per-delivery allocation on that writer-thread leg is nothrow, and a failed flatten or frame build
-drops that one delivery (`core/src/fwd_router.cpp:1830-1831`). Dropping *invisibly* is the part that
+drops that one delivery (`core/src/fwd_router.cpp:1841-1842`). Dropping *invisibly* is the part that
 needs an answer, which is why `graph_t::delivery_drops()` exists
 (`core/include/libtracer/graph.hpp:1304`): four relaxed monotonic counters — `no_target`, `denied`,
 `out_of_memory`, `fan_out_truncated` (`graph.hpp:1282-1294`) — incremented only on a drop, so the
@@ -299,7 +299,7 @@ still returns success (`core/src/graph.cpp:1208`), so it moves the counter by th
 rather than by one (#896).
 
 A dropped fresh ADVERTISE on the COMPACT leg self-heals: the peer answers the unknown label with
-`HANDLE_NACK` and the next delivery re-advertises (`fwd_router.cpp:1813`).
+`HANDLE_NACK` and the next delivery re-advertises (`fwd_router.cpp:1824`).
 
 ## Legs that throw, and their nothrow twins
 

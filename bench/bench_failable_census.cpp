@@ -579,9 +579,11 @@ int run_guard() {
              const bool ok = can::encode_advertise_header(header, adv, adv.path);
              asm volatile("" : : "r"(ok), "r"(header.data()) : "memory");
          }},
-        // B1/B2 — the ONE overflow gather behind all five `acquire` call sites:
-        // transport_ws.cpp:142 (build_server_iov, for both WS send overrides) and :256,
-        // transport_tcp.cpp:81 and :356, transport_udp.cpp:105.
+        // B1/B2 — the ONE overflow gather behind all four `acquire` call sites:
+        // transport_ws.cpp:175 (build_server_iov, for both WS send overrides),
+        // transport_tcp.cpp:78, transport_udp.cpp:109, and posix_endpoint.cpp:367 — the
+        // broadcast's per-peer scratch, ONE store for both servers since #871 folded their
+        // fan-out into slot_server_t::broadcast_iov (it was two sites before that).
         {"iov_table_overflow_gather", expect_t::GUARDED,
          [] {
              tr::net::iov_table_t<::iovec> table(inline_vec);

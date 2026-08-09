@@ -10,7 +10,8 @@
  * as the number of simultaneous peers rises.
  *
  * That gap matters because of a deliberate design choice whose cost has never been priced.
- * `transport_tcp_server::run` (`core/src/transport_tcp.cpp`) is a **single thread** that rebuilds a
+ * `slot_server_t::run` (`core/src/posix_endpoint.cpp`, the poll loop the tcp
+ * and ws servers have shared since #871) is a **single thread** that rebuilds a
  * `pollfd` vector over every live session and calls `::poll` on all of them. Its own comment names
  * the reasoning — *"per-peer thread (the MCU-shaped choice, #362)"* — and for a 16 KB single-core
  * MCU it is plainly right: one thread, one stack, no per-peer scheduling.

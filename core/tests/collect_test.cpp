@@ -318,17 +318,7 @@ class bus_capable_link_t : public tr::net::transport_t, public bus_link_t {
 
 /** @brief SPEC{ type, name } with no config — the provide_link-staged connection form. */
 tr::view::view_t conn_spec(std::string_view type, std::string_view name) {
-    std::vector<std::byte> body;
-    tr::wire::emit_name(body, "type");
-    tr::wire::emit_name(body, type);
-    tr::wire::emit_name(body, "name");
-    tr::wire::emit_name(body, name);
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, tr::wire::type_t::SPEC, tr::wire::opt_t{.pl = true},
-                       std::span<const std::byte>(body));
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(out.size());
-    if (!out.empty()) std::memcpy(seg->bytes.data(), out.data(), out.size());
-    return tr::view::view_t::over(std::move(seg));
+    return tr::net::conn_spec_t(type, name).view();
 }
 
 /** @brief The module staged connections mount under here. */

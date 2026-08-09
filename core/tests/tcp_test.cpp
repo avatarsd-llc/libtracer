@@ -494,40 +494,10 @@ view_t owned(std::span<const std::byte> bytes) {
     return view_t::over(std::move(seg));
 }
 
-/**
- * @brief A connection-creation spec (ADR-0027 / reference/05), the transport_vertex_test shape.
- *
- * SPEC{ NAME "type" <type>, NAME "name" <name>, SETTINGS "config"{ NAME "role" VALUE u8,
- *       NAME "port" VALUE u16, NAME "kind" NAME "tcp" [, NAME "addr" NAME <addr>] } }
- */
-view_t conn_spec(std::string_view type, std::string_view name, tr::net::conn_role_t role,
-                 std::uint16_t port, std::string_view addr = {}) {
-    std::vector<std::byte> cfg;
-    tr::wire::emit_name(cfg, "role");
-    const std::byte r{static_cast<std::uint8_t>(role)};
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, std::span<const std::byte>(&r, 1));
-    tr::wire::emit_name(cfg, "port");
-    std::vector<std::byte> pb(2);
-    tr::detail::store_le(pb, port, 2);
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, pb);
-    tr::wire::emit_name(cfg, "kind");
-    tr::wire::emit_name(cfg, "tcp");
-    if (!addr.empty()) {
-        tr::wire::emit_name(cfg, "addr");
-        tr::wire::emit_name(cfg, addr);
-    }
-
-    std::vector<std::byte> body;
-    tr::wire::emit_name(body, "type");
-    tr::wire::emit_name(body, type);
-    tr::wire::emit_name(body, "name");
-    tr::wire::emit_name(body, name);
-    tr::wire::emit_name(body, "config");
-    tr::wire::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true}, cfg);
-
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
-    return owned(out);
+/** @brief `kind = "tcp"` bound into the library's own SPEC builder (#902). */
+view_t tcp_conn_spec(std::string_view type, std::string_view name, tr::net::conn_role_t role,
+                     std::uint16_t port, std::string_view addr = {}) {
+    return tr::net::conn_spec(type, name, role, port, "tcp", addr);
 }
 
 void test_config_constructed_tcp() {
@@ -583,8 +553,9 @@ void test_config_constructed_tcp() {
     const std::byte tb{0x2A};
     tr::wire::emit_tlv(tv, type_t::VALUE, opt_t{}, std::span<const std::byte>(&tb, 1));
     (void)node_b.write(path_t("/temp"), owned(tv));
-    const auto wb = node_b.write(path_t("/net:children[]"),
-                                 conn_spec("listener", "a", tr::net::conn_role_t::LISTEN, port));
+    const auto wb =
+        node_b.write(path_t("/net:children[]"),
+                     tcp_conn_spec("listener", "a", tr::net::conn_role_t::LISTEN, port));
     check(wb.has_value(), "B: SPEC{listener, kind=tcp, port} constructs the bound socket");
     check(router_b.registry().by_name("net/tcp-server/a") != nullptr,
           "B: the socket is wired into the router");
@@ -592,7 +563,7 @@ void test_config_constructed_tcp() {
     // A: a tcp CLIENT dialing B's port — a SYNCHRONOUS connect from config.
     const auto wa =
         node_a.write(path_t("/net:children[]"),
-                     conn_spec("client", "b", tr::net::conn_role_t::DIAL, port, "127.0.0.1"));
+                     tcp_conn_spec("client", "b", tr::net::conn_role_t::DIAL, port, "127.0.0.1"));
     check(wa.has_value(), "A: SPEC{client, kind=tcp, addr, port} constructs the dialing socket");
     const auto* s = net_a.settings_of("net/tcp-client/b");
     check(s != nullptr && s->kind == "tcp" && s->addr == "127.0.0.1" && s->port == port,
@@ -818,9 +789,10 @@ void test_server_max_peers_cap() {
  * @brief A broadcast that lands INSIDE the accept publish reaches the peer being accepted —
  *        `open ⇒ fd valid`, proven by holding that instant open rather than by racing for it.
  *
- * `accept_peer` publishes a slot's two sender-visible fields under `write_m_` (the lock
- * `teardown_slot` resets them under), fd FIRST. Store them unlocked with `open` first — what
- * this server did before #891 — and a broadcast holding `write_m_` can read `open == true`
+ * `slot_server_t::accept_peer` publishes a slot's two sender-visible fields under `write_m_`
+ * (the lock `slot_server_t::teardown_slot` resets them under), fd FIRST. Store them unlocked
+ * with `open` first — what this server did before #891 — and a broadcast holding
+ * `write_m_` can read `open == true`
  * next to `fd == -1` and hand the record to `write_all_iov(-1)`, which drops it on the floor.
  * In production that window is two instructions wide, so a racing test cannot pin it.
  *

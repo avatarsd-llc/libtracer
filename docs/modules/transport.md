@@ -65,8 +65,8 @@ the rope form for an owning link, the span form otherwise (`fwd_router.cpp:665,6
 `fwd_router.cpp:619,626` for the peer-named bus equivalent).
 
 Every socket transport in the tree declares the owning tier: UDP
-(`transport_udp.hpp:111`), TCP client and server (`transport_tcp.hpp:205,336`),
-WebSocket server and client (`transport_ws.hpp:217,439`), CAN
+(`transport_udp.hpp:111`), TCP client and server (`transport_tcp.hpp:207,339`),
+WebSocket server and client (`transport_ws.hpp:221,393`), CAN
 (`transport_can.hpp:475`), QUIC (`transport_quic.hpp:153`) and WebTransport
 (`transport_webtransport.hpp:158`). The borrowed-span path is the base-class default
 and the tier an out-of-tree transport gets for free.
@@ -86,8 +86,8 @@ peer and no peer state is stored.
 
 `transport_t::bus()` returns the facet or `nullptr`. CAN always returns it
 (`transport_can.hpp:456`); the TCP and WebSocket **servers** return it when
-configured peer-named (`transport_tcp.hpp:343`, `transport_ws.hpp:233`); every other
-kind keeps the `nullptr` default.
+configured peer-named — one implementation, on the slot-server base both of them
+inherit (`posix_endpoint.hpp:409`); every other kind keeps the `nullptr` default.
 
 ## QUIC and WebTransport
 
@@ -268,7 +268,11 @@ they are the reason a new binding is small.
   shutdown. `stream_endpoint_t` adds what only the *stream* transports need — the
   peer-fd atomic, the write mutex, and the teardown-under-write-lock ordering
   that keeps a concurrent send from writing to a reused descriptor. UDP keeps its
-  datagram shape and uses only the base.
+  datagram shape and uses only the base. `slot_server_t` is one tier further up,
+  for the MULTI-peer stream servers: it owns the slot vector, the accept/poll/
+  teardown machinery and the `bus_link_t` query trio, so `transport_tcp_server`
+  and `transport_ws_server` differ only in their framing and handshake — the two
+  hooks it dispatches into them.
 - **`register_builtin_transports`** is how a node's transport catalog gets
   populated. Each `register_*_transport` lives in its own translation unit,
   compiled only when that transport is enabled, so a build that drops a transport
@@ -312,6 +316,12 @@ they are the reason a new binding is small.
 ```
 
 ```{doxygenclass} tr::net::stream_endpoint_t
+:project: libtracer
+:members:
+:protected-members:
+```
+
+```{doxygenclass} tr::net::slot_server_t
 :project: libtracer
 :members:
 :protected-members:
