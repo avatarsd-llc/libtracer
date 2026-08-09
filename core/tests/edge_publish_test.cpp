@@ -190,7 +190,9 @@ void test_unsubscribe_stops_delivery_at_once() {
     // the reused slot back up rather than keep publishing the shell.
     sink_t d;
     const auto sd = g.subscribe(src, on_value, &d);
-    check(sd.has_value() && sd->slot == sb->slot, "the re-subscribe reuses the cleared slot");
+    // The handle is opaque, so the reuse is observed the only way a caller can observe it:
+    // the fresh handle compares EQUAL to the cleared one — same producer, same slot index.
+    check(sd.has_value() && *sd == *sb, "the re-subscribe reuses the cleared slot");
     (void)g.write(src, p.view());
     check(d.hits == 1, "the reused slot delivers");
     check(b.hits == 1, "and the departed edge still receives nothing");

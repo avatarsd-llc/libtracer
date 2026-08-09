@@ -51,22 +51,22 @@ egress gather) does not close them either.
 ## The three injected seams
 
 `graph_t`'s constructor takes all three, each defaulted so an unconfigured host gets the platform
-heap and byte-identical behaviour (`core/include/libtracer/graph.hpp:294-296`).
+heap and byte-identical behaviour (`core/include/libtracer/graph.hpp:317-319`).
 
 | Seam | Type | What it allocates | Exhaustion |
 | --- | --- | --- | --- |
-| `mr_` (`graph.hpp:1552`) | `std::pmr::memory_resource*` | the small control *objects* of a stored write: the `shared_ptr` control block and the `rope_t` wrapping the value's links | throws — structurally cannot report by value |
-| `value_backend_` (`graph.hpp:1561`) | `mem::mem_backend_t*` | the graph's **payload** byte `segment`s: the durable buffer holding a vertex's last-known value when the write path must own its bytes, and (since #831) **both** folded READs' POINT headers — the composed root's per-node header and the `":children"` listing's per-member + outer header | `nullptr` → the operation answers `BACKPRESSURE` |
-| `ctl_` (`graph.hpp:1626`) | `mem::block_source_t*` | every allocation a peer can provoke | `nullptr` → the operation answers a status |
+| `mr_` (`graph.hpp:1575`) | `std::pmr::memory_resource*` | the small control *objects* of a stored write: the `shared_ptr` control block and the `rope_t` wrapping the value's links | throws — structurally cannot report by value |
+| `value_backend_` (`graph.hpp:1584`) | `mem::mem_backend_t*` | the graph's **payload** byte `segment`s: the durable buffer holding a vertex's last-known value when the write path must own its bytes, and (since #831) **both** folded READs' POINT headers — the composed root's per-node header and the `":children"` listing's per-member + outer header | `nullptr` → the operation answers `BACKPRESSURE` |
+| `ctl_` (`graph.hpp:1649`) | `mem::block_source_t*` | every allocation a peer can provoke | `nullptr` → the operation answers a status |
 
 Three seams rather than one because the three contracts differ: cache hooks, `owns_bytes` and
 ISR-safety belong to a byte buffer; object construction belongs to `std::pmr`; reporting exhaustion
 by value belongs to `block_source_t`. `ctl_` is deliberately a *different C++ type* from `mr_` so
 the two contracts — may-be-null versus must-not-be-null — cannot be transposed by a one-token edit,
-and so retiring `mr_` later is a compile error rather than a silent rebind (`graph.hpp:281-293`,
-restated at `graph.hpp:1617-1618`). `ctl_` is declared last in the object on purpose: no hot path
+and so retiring `mr_` later is a compile error rather than a silent rebind (`graph.hpp:304-316`,
+restated at `graph.hpp:1640-1641`). `ctl_` is declared last in the object on purpose: no hot path
 reads it, so placing it there leaves every other member at the byte offset it had before the seam
-existed, which keeps the forward-hop bench measuring the same layout (`graph.hpp:1620-1624`).
+existed, which keeps the forward-hop bench measuring the same layout (`graph.hpp:1643-1647`).
 
 `fwd_router_t` carries the same failable seam separately as its `rx` parameter
 (`core/include/libtracer/fwd_router.hpp:179`), because the terminus arena decode belongs to the
@@ -290,8 +290,8 @@ one value under heap exhaustion is valid delivery behaviour where failing the wr
 per-delivery allocation on that writer-thread leg is nothrow, and a failed flatten or frame build
 drops that one delivery (`core/src/fwd_router.cpp:1929-1930`). Dropping *invisibly* is the part that
 needs an answer, which is why `graph_t::delivery_drops()` exists
-(`core/include/libtracer/graph.hpp:1304`): four relaxed monotonic counters — `no_target`, `denied`,
-`out_of_memory`, `fan_out_truncated` (`graph.hpp:1282-1294`) — incremented only on a drop, so the
+(`core/include/libtracer/graph.hpp:1327`): four relaxed monotonic counters — `no_target`, `denied`,
+`out_of_memory`, `fan_out_truncated` (`graph.hpp:1305-1317`) — incremented only on a drop, so the
 delivering path is byte-identical while nothing drops. Nothing in the library reads them; a
 deployment chooses whether to alarm. What they count is shed **deliveries**: the sharpest OOM shed
 is a HANDLER write whose notify clone fails, which abandons the vertex's whole subscriber set and

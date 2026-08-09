@@ -199,7 +199,7 @@ mem::bump_source_t src(stack, *ctl_);
 
 `bump_source_t` (`core/include/libtracer/mem_source.hpp:184`) carves from that stack buffer and,
 past it, falls back to the graph's injected control seam `ctl_`
-(`core/include/libtracer/graph.hpp:307`, `control_source()`), whose default is the NOTHROW heap
+(`core/include/libtracer/graph.hpp:330`, `control_source()`), whose default is the NOTHROW heap
 source. Capability is unchanged — a branch tree larger than the slab still decodes — and
 **exhaustion is a value, not an abort**: the write soft-fails as `TYPE_MISMATCH`
 (`core/src/graph.cpp:1273`), which is *not* `BACKPRESSURE` — this decode cannot distinguish "the
