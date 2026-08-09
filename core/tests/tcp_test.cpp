@@ -799,6 +799,15 @@ void test_server_max_peers_cap() {
  *
  * The rule lives in `slot_server_t::teardown_slot` (`posix_endpoint.cpp`), shared verbatim
  * with `transport_ws_server` since #871 — one home, so it is guarded once, here.
+ *
+ * Both `downs` reads are taken behind an INBOUND-FRAME BARRIER, never on a slot-recycle
+ * transition and never after a sleep. `teardown_slot` clears the slot name in its first
+ * critical section and fires the departure seam last, so every state the test can poll for
+ * becomes visible while the seam is still ahead — read `downs` there and the guard is a
+ * coin flip. A frame written after that state was observed cannot be delivered by the poll
+ * pass that is running the teardown (`run()` snapshots revents once per pass), so its
+ * arrival orders the read strictly after the seam. That is what makes the two assertions
+ * naming #889 bite every run instead of one in five.
  */
 void test_flat_server_down_only_on_last_session() {
     std::printf("TCP transport — flat server: notify_down only on the LAST departure (#889):\n");
@@ -843,7 +852,6 @@ void test_flat_server_down_only_on_last_session() {
         std::this_thread::sleep_for(20ms);
     }
     check(live == 1, "the departed peer's slot was recycled (its teardown ran)");
-    check(downs.load() == 0, "a mid-life close did NOT report the whole link down (#889)");
 
     // …and the survivor still routes: the broadcast reaches it after the departure.
     const auto bc = test_frame(3, 0xCC);
@@ -853,15 +861,44 @@ void test_flat_server_down_only_on_last_session() {
     a->send(test_frame(2, 0xA2));
     check(srv_rx_sink.wait_for_count(3, 2s), "…and inbound from the survivor still delivers");
 
+    // The `downs` read is taken HERE — one poll-thread step past the teardown — and never on
+    // the slot-recycle transition above. `teardown_slot` clears the name in its FIRST
+    // critical section and fires the departure seam LAST, so `live == 1` is observable while
+    // the seam is still ahead: a read there races the teardown and misses a reintroduced
+    // whole-link notify most runs. The survivor's frame closes the race instead of a sleep.
+    // It was written after `live == 1` was observed, so the poll pass that carried it cannot
+    // be the pass that ran `teardown_slot` — `run()` snapshots revents once per pass, and
+    // that pass polled before the frame existed. Its arrival is therefore ordered strictly
+    // after the whole teardown, seam included.
+    check(downs.load() == 0, "a mid-life close did NOT report the whole link down (#889)");
+
     // --- the last close: NOW the link is down, exactly once ---
     a.reset();
     const auto ldeadline = std::chrono::steady_clock::now() + 2s;
-    while (downs.load() == 0 && std::chrono::steady_clock::now() < ldeadline)
+    while (std::chrono::steady_clock::now() < ldeadline) {
+        live = 0;
+        server.enumerate_peers([&](std::string_view) { ++live; });
+        if (live == 0) break;
         std::this_thread::sleep_for(20ms);
-    check(downs.load() == 1, "the LAST session's departure reported the link down exactly once");
-    // Nothing else may fire it: give the poll loop a few passes to prove the count is stable.
-    std::this_thread::sleep_for(300ms);
-    check(downs.load() == 1, "…and no further notification followed");
+    }
+    check(live == 0, "the last peer's slot was recycled too");
+
+    // The same barrier, built the only way left once every session is gone: a FRESH dialer.
+    // Connecting it after `live == 0` puts its accept in a later pass than `teardown_slot`
+    // (this pass's listen revents were snapshotted before the connect), and `run()` services
+    // peers before it accepts, so its frame lands a pass later still. When that frame
+    // arrives, `downs` is final — no sleep is standing in for the ordering, and the window
+    // it certifies contains an accept and a delivery, so "nothing further fired" is a
+    // statement about a poll loop that demonstrably kept running.
+    std::optional<tcp_transport_t> c;
+    c.emplace("127.0.0.1", port);
+    check(c->ok(), "a fresh dialer connects to the now-idle flat server");
+    c->send(test_frame(2, 0xC1));
+    check(srv_rx_sink.wait_for_count(4, 2s),
+          "the fresh dialer's frame proves the poll thread ran past the LAST teardown");
+    check(downs.load() >= 1, "the LAST session's departure reported the link down");
+    check(downs.load() == 1,
+          "…exactly once — the mid-life close added nothing, and nothing followed (#889)");
 }
 
 /**
