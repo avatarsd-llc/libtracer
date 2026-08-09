@@ -782,7 +782,7 @@ void test_server_max_peers_cap() {
 void test_flat_server_down_only_on_last_session() {
     std::printf("TCP transport — flat server: notify_down only on the LAST departure (#889):\n");
 
-    sink_t srv_rx_sink;
+    frame_sink_t srv_rx_sink;
     auto srv_rx = [&](std::span<const std::byte> f) { srv_rx_sink.push(f); };
     std::atomic<int> downs{0};
 
@@ -794,7 +794,7 @@ void test_flat_server_down_only_on_last_session() {
                              &downs);
     const std::uint16_t port = server.local_port();
 
-    sink_t at_a;
+    frame_sink_t at_a;
     auto a_rx = [&](std::span<const std::byte> f) { at_a.push(f); };
     std::optional<tcp_transport_t> a;
     a.emplace("127.0.0.1", port);
@@ -885,7 +885,7 @@ void test_flat_server_down_only_on_last_session() {
 void test_flat_server_rejects_peer_receiver() {
     std::printf("TCP transport — flat server refuses peer-named wiring (#889):\n");
 
-    sink_t flat_sink;
+    frame_sink_t flat_sink;
     auto flat_rx = [&](std::span<const std::byte> f) { flat_sink.push(f); };
     peer_sink_t peer_sink;
 
@@ -928,7 +928,7 @@ void test_flat_server_rejects_peer_receiver() {
 void test_peer_named_server_does_not_downgrade_to_flat() {
     std::printf("TCP transport — a peer-named server does not downgrade to flat (#889):\n");
 
-    sink_t flat_sink;
+    frame_sink_t flat_sink;
     auto flat_rx = [&](std::span<const std::byte> f) { flat_sink.push(f); };
     peer_sink_t peer_sink;
 
