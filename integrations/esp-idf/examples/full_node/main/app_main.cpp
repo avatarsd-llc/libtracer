@@ -72,6 +72,7 @@ using tr::graph::graph_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
 using tr::net::conn_role_t;
+using tr::net::conn_spec;
 using tr::net::fwd_router_t;
 using tr::net::transport_vertex_t;
 using tr::view::view_t;
@@ -97,17 +98,14 @@ view_t owned(std::span<const std::byte> bytes) {
 }
 
 std::vector<std::byte> b_value_u32(std::uint32_t v) {
-    std::vector<std::byte> p(4);
-    tr::detail::store_le<std::uint32_t>(p, v);
     std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::VALUE, opt_t{}, p);
+    tr::wire::emit_value_le(out, v);
     return out;
 }
 
 std::vector<std::byte> b_value_u8(std::uint8_t v) {
-    const std::byte b{v};
     std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::VALUE, opt_t{}, std::span<const std::byte>(&b, 1));
+    tr::wire::emit_value_le(out, v);
     return out;
 }
 
@@ -121,42 +119,6 @@ std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
 
 void append(std::vector<std::byte>& dst, const std::vector<std::byte>& src) {
     dst.insert(dst.end(), src.begin(), src.end());
-}
-
-/**
- * @brief SPEC{ NAME "type", NAME "name", SETTINGS "config"{ role, port [, kind][, addr] } }
- * — a connection-creation spec (ADR-0027 / reference/05), written to /net:children[].
- *
- * This is THE production wiring path: the connection vertex constructs and
- * owns the real socket from this config.
- */
-view_t conn_spec(std::string_view type, std::string_view name, conn_role_t role, std::uint16_t port,
-                 std::string_view kind, std::string_view addr = {}) {
-    std::vector<std::byte> cfg;
-    tr::wire::emit_name(cfg, "role");
-    append(cfg, b_value_u8(static_cast<std::uint8_t>(role)));
-    tr::wire::emit_name(cfg, "port");
-    std::vector<std::byte> pb(2);
-    tr::detail::store_le(pb, port, 2);
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, pb);
-    tr::wire::emit_name(cfg, "kind");
-    tr::wire::emit_name(cfg, kind);
-    if (!addr.empty()) {
-        tr::wire::emit_name(cfg, "addr");
-        tr::wire::emit_name(cfg, addr);
-    }
-
-    std::vector<std::byte> body;
-    tr::wire::emit_name(body, "type");
-    tr::wire::emit_name(body, type);
-    tr::wire::emit_name(body, "name");
-    tr::wire::emit_name(body, name);
-    tr::wire::emit_name(body, "config");
-    tr::wire::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true}, cfg);
-
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
-    return owned(out);
 }
 
 /** @brief FIELD{ NAME "subscribers", VALUE u8 index_mode=ELEMENT } — ":subscribers[]" append. */

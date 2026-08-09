@@ -17,6 +17,7 @@
 
 #include "libtracer/backend.hpp"
 #include "libtracer/child_registry.hpp"
+#include "libtracer/conn_spec.hpp"
 #include "libtracer/crc.hpp"
 #include "libtracer/error.hpp"
 #include "libtracer/frame.hpp"

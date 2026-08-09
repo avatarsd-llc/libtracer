@@ -11,6 +11,7 @@
 #include <sys/socket.h>
 
 #include <cerrno>
+#include <cstdint>
 #include <cstring>
 #include <utility>
 #include <vector>
@@ -523,13 +524,32 @@ esp_err_t httpd_ws_recv_frame(httpd_req_t* req, httpd_ws_frame_t* frame, std::si
 
 esp_err_t httpd_ws_send_frame_async(httpd_handle_t handle, int fd, httpd_ws_frame_t* frame) {
     (void)handle;
-    // httpd_ws.c writes the frame through the session's send fn and calls the send a
-    // success on ANY non-negative return — the check that turns a short write into a
-    // silently-lost half frame. Transcribed as-is: the fake must reproduce the bug, not
-    // the intent. The header bytes are not modelled; only the payload write is.
-    const int ret = fake_httpd::instance().socket_send(
-        fd, reinterpret_cast<const char*>(frame->payload), frame->len, 0);
-    if (ret < 0) return ESP_FAIL;
+    // httpd_ws.c writes ONE frame as TWO calls to the session's send fn — the header, then
+    // the payload — and calls the send a success on ANY non-negative return
+    // (httpd_ws.c:447-458, release/v5.5). Transcribed as-is, both halves: the fake must
+    // reproduce the bug, not the intent. The non-negative test is what turns a short write
+    // into a silently-lost half frame, and the SPLIT is what lets a frame be announced on
+    // the wire and then abandoned, with one indistinguishable ESP_FAIL for both (#951).
+    //
+    // A server-to-client frame is never masked, so the header is 2 bytes plus the extended
+    // length — 2 more for 126..65535, 8 more above. Its BYTES are not modelled (the fake's
+    // socket layer only ever sees a length); its length is, because that is what a peer
+    // has been promised once the write lands.
+    std::size_t header_len = 2;
+    if (frame->len > 0xFFFFU)
+        header_len = 10;
+    else if (frame->len >= 126U)
+        header_len = 4;
+    const std::uint8_t header[10] = {};
+    if (fake_httpd::instance().socket_send(fd, reinterpret_cast<const char*>(header), header_len,
+                                           0) < 0)
+        return ESP_FAIL;
+    // Exactly httpd_ws.c's guard: an empty frame is header-only, so it takes ONE write.
+    if (frame->len > 0 && frame->payload != nullptr) {
+        const int ret = fake_httpd::instance().socket_send(
+            fd, reinterpret_cast<const char*>(frame->payload), frame->len, 0);
+        if (ret < 0) return ESP_FAIL;
+    }
     fake_httpd::instance().note_sent();
     return ESP_OK;
 }

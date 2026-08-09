@@ -44,6 +44,7 @@
 #include <vector>
 
 #include "libtracer/backend.hpp"
+#include "libtracer/config_reader.hpp"
 #include "libtracer/error.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/tlv_emit.hpp"
@@ -83,53 +84,15 @@ view_t owned(std::span<const std::byte> bytes) {
 }
 
 /**
- * @brief A connection-creation spec (ADR-0027 / reference/05). `kind`/`addr` empty = omitted.
+ * @brief The connection-creation SPEC, from the library's own public builder (#902).
  *
- * SPEC{ NAME "type" <type>, NAME "name" <name>, SETTINGS "config"{ NAME "role" VALUE u8,
- *       NAME "port" VALUE u16 [, NAME "kind" NAME <kind>][, NAME "addr" NAME <addr>] } }
+ * The hand-emitted near-copy this file used to carry is gone: `tr::net::conn_spec` IS the
+ * shape below, so the test now exercises the encoder a consumer actually ships with rather
+ * than a private lookalike that could drift away from it. Extra config keys — the u32s
+ * below, and any kind-private pair — are spelled with @ref tr::net::conn_spec_t directly.
  */
-view_t conn_spec(std::string_view type, std::string_view name, conn_role_t role, std::uint16_t port,
-                 std::string_view kind = {}, std::string_view addr = {}, std::uint32_t backoff = 0,
-                 std::uint32_t connect_timeout = 0, std::uint32_t max_frame = 0) {
-    std::vector<std::byte> cfg;
-    tr::wire::emit_name(cfg, "role");
-    const std::byte r{static_cast<std::uint8_t>(role)};
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, std::span<const std::byte>(&r, 1));
-    tr::wire::emit_name(cfg, "port");
-    std::vector<std::byte> pb(2);
-    tr::detail::store_le(pb, port, 2);
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, pb);
-    if (!kind.empty()) {
-        tr::wire::emit_name(cfg, "kind");
-        tr::wire::emit_name(cfg, kind);
-    }
-    if (!addr.empty()) {
-        tr::wire::emit_name(cfg, "addr");
-        tr::wire::emit_name(cfg, addr);
-    }
-    const auto emit_u32 = [&cfg](std::string_view key, std::uint32_t val) {
-        tr::wire::emit_name(cfg, key);
-        std::vector<std::byte> vb(4);
-        tr::detail::store_le(vb, val, 4);
-        tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, vb);
-    };
-    if (backoff != 0) emit_u32("backoff", backoff);
-    if (connect_timeout != 0) emit_u32("connect_timeout", connect_timeout);
-    if (max_frame != 0) emit_u32("max_frame", max_frame);
-
-    std::vector<std::byte> body;
-    tr::wire::emit_name(body, "type");
-    tr::wire::emit_name(body, type);
-    tr::wire::emit_name(body, "name");
-    tr::wire::emit_name(body, name);
-    tr::wire::emit_name(body,
-                        "config");  // the "config" key preceding its SETTINGS (reference/05)
-    tr::wire::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true}, cfg);
-
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
-    return owned(out);
-}
+using tr::net::conn_spec;
+using tr::net::conn_spec_t;
 
 /**
  * @brief This test application's module declarations (ADR-0073 §4: declared-only).
@@ -266,8 +229,12 @@ void test_backoff_connect_timeout_parsed() {
     transport_vertex_t net(node, router);
     tr::net::loopback_channel_t channel;
     net.provide_link("ws-client", "c", channel.a());
-    (void)node.write(path_t("/net:children[]"),
-                     conn_spec("client", "c", conn_role_t::DIAL, 0, {}, {}, 250, 3000));
+    (void)node.write(path_t("/net:children[]"), conn_spec_t("client", "c")
+                                                    .role(conn_role_t::DIAL)
+                                                    .port(0)
+                                                    .backoff_ms(250)
+                                                    .connect_timeout_ms(3000)
+                                                    .view());
     const auto* s = net.settings_of("net/ws-client/c");
     check(s != nullptr && s->backoff_ms == 250 && s->connect_timeout_ms == 3000,
           "backoff=250 / connect_timeout=3000 parsed into the transport-private settings");
@@ -1317,35 +1284,13 @@ void test_link_name_collision_placeholder_parent() {
  */
 view_t ws_listener_spec(std::string_view name, std::uint16_t port, bool peer_named,
                         std::uint32_t max_peers) {
-    std::vector<std::byte> cfg;
-    tr::wire::emit_name(cfg, "role");
-    const std::byte r{static_cast<std::uint8_t>(conn_role_t::LISTEN)};
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, std::span<const std::byte>(&r, 1));
-    tr::wire::emit_name(cfg, "port");
-    std::vector<std::byte> pb(2);
-    tr::detail::store_le(pb, port, 2);
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, pb);
-    tr::wire::emit_name(cfg, "kind");
-    tr::wire::emit_name(cfg, "ws");
-    tr::wire::emit_name(cfg, "peer_named");
-    const std::byte pn{static_cast<std::uint8_t>(peer_named ? 1 : 0)};
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, std::span<const std::byte>(&pn, 1));
-    tr::wire::emit_name(cfg, "max_peers");
-    std::vector<std::byte> mb(4);
-    tr::detail::store_le(mb, max_peers, 4);
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, mb);
-
-    std::vector<std::byte> body;
-    tr::wire::emit_name(body, "type");
-    tr::wire::emit_name(body, "listener");
-    tr::wire::emit_name(body, "name");
-    tr::wire::emit_name(body, name);
-    tr::wire::emit_name(body, "config");
-    tr::wire::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true}, cfg);
-
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
-    return owned(out);
+    return conn_spec_t("listener", name)
+        .role(conn_role_t::LISTEN)
+        .port(port)
+        .kind("ws")
+        .flag("peer_named", peer_named)
+        .u32("max_peers", max_peers)
+        .view();
 }
 
 /** @brief The NAME of every POINT member of a synthesized listing. */
@@ -1421,9 +1366,9 @@ void test_udp_max_frame_reaches_the_transport() {
     declare_builtin_modules(net);
 
     // The CONTROL: no max_frame in the config => the transport's own kMaxDatagram ceiling.
-    const auto plain = node.write(
-        path_t("/net:children[]"),
-        conn_spec("listener", "plain", conn_role_t::LISTEN, free_port(), "udp", {}, 0, 0, 0));
+    const auto plain =
+        node.write(path_t("/net:children[]"),
+                   conn_spec("listener", "plain", conn_role_t::LISTEN, free_port(), "udp"));
     check(plain.has_value(), "SPEC{listener, kind=udp} with no max_frame constructs the socket");
     auto* const plain_link =
         dynamic_cast<tr::net::udp_transport_t*>(net.link_of("net/udp-server/plain"));
@@ -1432,9 +1377,12 @@ void test_udp_max_frame_reaches_the_transport() {
           "without the key the connection carries the full datagram ceiling");
 
     // The SUBJECT: the same write plus `max_frame = 4096`.
-    const auto capped = node.write(path_t("/net:children[]"),
-                                   conn_spec("listener", "capped", conn_role_t::LISTEN, free_port(),
-                                             "udp", {}, 0, 0, /*max_frame=*/4096));
+    const auto capped = node.write(path_t("/net:children[]"), conn_spec_t("listener", "capped")
+                                                                  .role(conn_role_t::LISTEN)
+                                                                  .port(free_port())
+                                                                  .kind("udp")
+                                                                  .max_frame(4096)
+                                                                  .view());
     check(capped.has_value(), "SPEC{listener, kind=udp, max_frame=4096} constructs the socket");
     const auto* const s = net.settings_of("net/udp-server/capped");
     check(s != nullptr && s->max_frame == 4096, "the key was parsed into conn_settings_t");
@@ -1739,9 +1687,127 @@ void test_wire_name_reaches_add_child() {
     check(net.link_of("net/udp-client/a:b") == nullptr, "no link was constructed for a bad name");
 }
 
+/** @brief Lowercase hex of a byte buffer, for the golden-SPEC comparisons below. */
+std::string to_hex(std::span<const std::byte> bytes) {
+    static constexpr char kDigits[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(bytes.size() * 2);
+    for (std::byte b : bytes) {
+        const auto v = std::to_integer<std::uint8_t>(b);
+        out.push_back(kDigits[v >> 4]);
+        out.push_back(kDigits[v & 0x0F]);
+    }
+    return out;
+}
+
+/**
+ * @brief The public builder's bytes, PINNED — `conn_spec_t` emits exactly what the sixteen
+ *        hand-emitted near-copies emitted before #902 replaced them.
+ *
+ * These goldens were captured from the pre-#902 hand-emit and are the whole reason the
+ * migration is safe to make in one commit: they are the wire, not a re-encode of the
+ * builder's own output, so a future edit to the builder that changes a byte fails HERE
+ * rather than in whichever transport test happens to notice. They also pin the two
+ * structural choices a reader would otherwise have to infer: an untouched builder emits NO
+ * `config` (the `provide_link` spelling), and setters append in CALL order.
+ */
+void test_conn_spec_bytes_pinned() {
+    std::printf("conn_spec_t bytes (#902): pinned against the pre-builder hand-emit:\n");
+    check(to_hex(conn_spec_t("client", "up").bytes()) ==
+              "0e402000020004007479706502000600636c69656e74020004006e616d65020002007570",
+          "no setter ran => SPEC{type, name} with no config at all");
+    check(to_hex(conn_spec_t("client", "up").role(conn_role_t::DIAL).port(8080).bytes()) ==
+              "0e404900020004007479706502000600636c69656e74020004006e616d6502000200757002000600"
+              "636f6e6669670b401b0002000400726f6c65010001000002000400706f727401000200901f",
+          "role=DIAL + port=8080");
+    check(to_hex(conn_spec_t("listener", "srv")
+                     .role(conn_role_t::LISTEN)
+                     .port(47131)
+                     .kind("udp")
+                     .bytes()) ==
+              "0e405b000200040074797065020008006c697374656e6572020004006e616d6502000300737276020006"
+              "00636f6e6669670b402a0002000400726f6c65010001000102000400706f7274010002001bb802000400"
+              "6b696e6402000300756470",
+          "role=LISTEN + port + kind");
+    check(to_hex(conn_spec_t("client", "cli")
+                     .role(conn_role_t::DIAL)
+                     .port(47131)
+                     .kind("udp")
+                     .addr("127.0.0.1")
+                     .bytes()) ==
+              "0e406e00020004007479706502000600636c69656e74020004006e616d6502000300636c690200060063"
+              "6f6e6669670b403f0002000400726f6c65010001000002000400706f7274010002001bb8020004006b69"
+              "6e64020003007564700200040061646472020009003132372e302e302e31",
+          "role + port + kind + addr");
+    check(to_hex(conn_spec_t("client", "c")
+                     .role(conn_role_t::DIAL)
+                     .port(0)
+                     .keepalive_ms(1)
+                     .max_frame(2)
+                     .backoff_ms(3)
+                     .connect_timeout_ms(4)
+                     .bytes()) ==
+              "0e40a000020004007479706502000600636c69656e74020004006e616d6502000100630200060063"
+              "6f6e6669670b40730002000400726f6c65010001000002000400706f727401000200000002000900"
+              "6b656570616c6976650100040001000000020009006d61785f6672616d65010004000200000002"
+              "0007006261636b6f6666010004000300000002000f00636f6e6e6563745f74696d656f7574010004"
+              "0004000000",
+          "all four u32 keys, in call order");
+    // The one-call sugar is the same encoder, not a second one.
+    check(
+        to_hex(conn_spec("client", "cli", conn_role_t::DIAL, 47131, "udp", "127.0.0.1").bytes()) ==
+            to_hex(conn_spec_t("client", "cli")
+                       .role(conn_role_t::DIAL)
+                       .port(47131)
+                       .kind("udp")
+                       .addr("127.0.0.1")
+                       .bytes()),
+        "conn_spec(...) delegates to conn_spec_t — same bytes");
+}
+
+/**
+ * @brief Every field combination decodes back through the CONSUMER's own reader.
+ *
+ * `transport_vertex_t::parse_config` is a `config_reader_t` walk over the SPEC's `config`
+ * SETTINGS, so running that reader over the builder's output is the encoder↔decoder
+ * round-trip for the whole universal-key vocabulary — including the combinations no
+ * transport test happens to create (a LISTEN carrying an `addr`, a kind-less DIAL). The
+ * creation path proper is covered by the config-constructed tests above, which now write
+ * these very bytes.
+ */
+void test_conn_spec_round_trips_through_the_reader() {
+    std::printf("conn_spec_t (#902): round-trips through config_reader_t, all combinations:\n");
+    for (const conn_role_t role : {conn_role_t::DIAL, conn_role_t::LISTEN}) {
+        for (const std::string_view kind : {std::string_view{}, std::string_view{"udp"}}) {
+            for (const std::string_view addr :
+                 {std::string_view{}, std::string_view{"127.0.0.1"}}) {
+                const view_t spec = conn_spec("client", "x", role, 47000, kind, addr);
+                const auto decoded = tr::wire::decode(spec);
+                if (!decoded) {
+                    check(false, "the built SPEC decodes");
+                    continue;
+                }
+                const tr::wire::tlv_t* config = nullptr;
+                for (const tr::wire::tlv_t& child : decoded->children) {
+                    if (child.type == type_t::SETTINGS) config = &child;
+                }
+                const tr::net::config_reader_t cfg(config);
+                const bool ok = config != nullptr && cfg.u8("role") &&
+                                *cfg.u8("role") == static_cast<std::uint8_t>(role) &&
+                                cfg.u16("port") && *cfg.u16("port") == 47000 &&
+                                cfg.name("kind").value_or(std::string_view{}) == kind &&
+                                cfg.name("addr").value_or(std::string_view{}) == addr;
+                check(ok, "role/port/kind/addr survive the encode→decode round trip");
+            }
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
+    test_conn_spec_bytes_pinned();
+    test_conn_spec_round_trips_through_the_reader();
     test_create_connection_vertex();
     test_await_link_state();
     test_liveness_enum_value();

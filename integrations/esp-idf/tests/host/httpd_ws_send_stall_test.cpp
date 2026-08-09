@@ -24,6 +24,13 @@
  *      desynchronised and the session closes at once, bypassing the streak — the one
  *      case where "drop the frame, keep the socket" (#481) is unsound.
  *
+ * #951 widened the third: "half a frame is on the wire" is not only a partial buffer.
+ * `esp_http_server` writes one frame as a header call and a payload call, so a payload
+ * write that puts NOTHING on the wire truncates a frame the header already announced —
+ * indistinguishable, at the caller, from a frame that never started. The precondition the
+ * drop response rests on is now measured per frame rather than assumed, and the two are
+ * pinned as the pair they are (cases 9 and 10).
+ *
  * The fourth was added after the first on-silicon gate, which passed 1-3 and still failed:
  *   4. deciding to close a session is not closing it. The decision must take effect in the
  *      link's OWN state at the instant it is reached — refusing new frames to that fd and
@@ -158,15 +165,23 @@ void test_interleaved_success_never_closes() {
     claim(500);
     // The shipped #481 shape: the big reply times out, the small frames around it go out
     // fine. A drop streak is CONSECUTIVE, so this peer must never reach the cap.
+    //
+    // The script is per WRITE and a frame is two writes, so a frame that fails at its
+    // HEADER spends one entry and a frame that goes out spends two. That is not
+    // bookkeeping: it is the whole distinction #951 turns on. Every failure staged here is
+    // a frame whose first write never landed — nothing of it reached the peer — which is
+    // precisely the loss #481's drop-and-keep response is sound for.
     fake_httpd::instance().set_send_script(
-        500, {send_result_t::TIMEOUT, send_result_t::TIMEOUT, send_result_t::FULL,
-              send_result_t::TIMEOUT, send_result_t::TIMEOUT, send_result_t::FULL,
-              send_result_t::TIMEOUT, send_result_t::TIMEOUT, send_result_t::FULL});
+        500,
+        {send_result_t::TIMEOUT, send_result_t::TIMEOUT, send_result_t::FULL, send_result_t::FULL,
+         send_result_t::TIMEOUT, send_result_t::TIMEOUT, send_result_t::FULL, send_result_t::FULL,
+         send_result_t::TIMEOUT, send_result_t::TIMEOUT, send_result_t::FULL, send_result_t::FULL});
     for (int i = 0; i < 9; ++i) broadcast(*link);
 
     check(fake_httpd::instance().has_session(500),
           "interleaved successes reset the streak: the session survives");
-    check(fake_httpd::instance().writes(500) == 9, "every frame was still attempted");
+    check(fake_httpd::instance().writes(500) == 12,
+          "every frame was still attempted (6 lost at the header + 3 delivered x 2 writes)");
 
     link.reset();
     fake_httpd::instance().close_all();
@@ -179,7 +194,10 @@ void test_short_write_closes_immediately() {
     std::printf("a write that expires MID-frame:\n");
     auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
     claim(600);
-    fake_httpd::instance().set_send_script(600, {send_result_t::SHORT});
+    // Header out in full, payload half-written — where a bounded write actually expires
+    // mid-buffer on silicon, since a 2-byte header either fits the remaining window or
+    // does not. (The short HEADER write is staged by case 6, on fd 700.)
+    fake_httpd::instance().set_send_script(600, {send_result_t::FULL, send_result_t::SHORT});
 
     const std::size_t sent_before = fake_httpd::instance().frames_sent();
     broadcast(*link);
@@ -318,7 +336,7 @@ void test_dead_mark_does_not_outlive_its_session() {
     fake_httpd::instance().set_send_script(800, {send_result_t::FULL});
     const std::size_t before = fake_httpd::instance().writes(800);
     broadcast(*link);
-    check(fake_httpd::instance().writes(800) == before + 1,
+    check(fake_httpd::instance().writes(800) == before + 2,
           "the recycled fd is not muted by the previous session's dead mark");
     check(fake_httpd::instance().has_session(800), "and the new session survives");
 
@@ -393,6 +411,83 @@ void test_peer_name_on_an_ipv6_socket() {
     ::close(listener);
 }
 
+// ---------------------------------------------------------------------------
+// 9 — a frame ANNOUNCED on the wire and then abandoned is not a droppable frame.
+// ---------------------------------------------------------------------------
+/**
+ * @brief The header write lands, the payload write does not: the peer's stream is gone.
+ *
+ * `httpd_ws_send_frame_async` writes one frame as TWO calls to the session's send function
+ * — the header, then the payload — and reports either failure as the same `ESP_FAIL`. The
+ * shape staged here is the ordinary one for a stalled peer, not an exotic one: the 2-byte
+ * header fits whatever room the send window has left and, with Nagle off, leaves as its own
+ * segment; the large payload behind it finds no room, waits out `SO_SNDTIMEO` with nothing
+ * written, and comes back `EWOULDBLOCK`.
+ *
+ * What the peer is left holding is a header promising N bytes that will never arrive, so it
+ * consumes every LATER frame as this one's payload — an open socket that delivers nothing,
+ * with no close event at either end. Treating that as the #481 whole-frame loss keeps a
+ * session that cannot carry another message (#951); the response has to be the short-write
+ * one, and on the FIRST occurrence, because one is already proof.
+ */
+void test_truncated_frame_closes_the_session() {
+    std::printf("a frame whose header went out and whose payload did not:\n");
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    claim(900);
+    fake_httpd::instance().set_send_script(900, {send_result_t::FULL, send_result_t::TIMEOUT});
+
+    const std::size_t sent_before = fake_httpd::instance().frames_sent();
+    broadcast(*link);
+    drain();
+
+    check(fake_httpd::instance().writes(900) == 2,
+          "both writes were attempted: the header landed, the payload did not");
+    check(fake_httpd::instance().frames_sent() == sent_before,
+          "a truncated frame is NOT reported as delivered");
+    check(!fake_httpd::instance().has_session(900),
+          "ONE truncated frame closes the session — the peer can no longer parse the stream");
+
+    link.reset();
+    fake_httpd::instance().close_all();
+}
+
+// ---------------------------------------------------------------------------
+// 10 — and the #481 drop still survives: a frame that never STARTED is not fatal.
+// ---------------------------------------------------------------------------
+/**
+ * @brief The guard against the fix above being applied to everything.
+ *
+ * Case 9 is satisfied by a link that condemns on any failed send at all — which is the
+ * behaviour #481 removed, and the dead-web-ui churn it removed it for. The precondition
+ * "ZERO bytes of this frame reached the wire" is what separates them, so it is measured
+ * here on the same socket: the frame's FIRST write fails, nothing was announced, the peer
+ * missed one frame it can retry, and the session must still be there to carry the next one.
+ */
+void test_a_frame_that_never_started_is_still_only_dropped() {
+    std::printf("a frame whose very first write fails:\n");
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    claim(901);
+    fake_httpd::instance().set_send_script(901, {send_result_t::TIMEOUT});
+
+    broadcast(*link);
+    drain();
+    check(fake_httpd::instance().writes(901) == 1,
+          "the payload write is never reached: the header did not go out");
+    check(fake_httpd::instance().has_session(901),
+          "nothing of the frame reached the wire, so the session is kept (#481)");
+
+    // And it is kept in working order, not merely alive: the next frame is delivered.
+    fake_httpd::instance().set_send_script(901, {send_result_t::FULL});
+    const std::size_t sent_before = fake_httpd::instance().frames_sent();
+    broadcast(*link);
+    drain();
+    check(fake_httpd::instance().frames_sent() == sent_before + 1,
+          "the same socket still delivers the frame after it");
+
+    link.reset();
+    fake_httpd::instance().close_all();
+}
+
 }  // namespace
 
 int main() {
@@ -405,6 +500,8 @@ int main() {
     test_jammed_queue_still_closes_the_doomed_fd();
     test_dead_mark_does_not_outlive_its_session();
     test_peer_name_on_an_ipv6_socket();
+    test_truncated_frame_closes_the_session();
+    test_a_frame_that_never_started_is_still_only_dropped();
     if (g_failures != 0) {
         std::printf("FAILED: %d check(s)\n", g_failures);
         return 1;

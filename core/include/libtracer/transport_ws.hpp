@@ -15,7 +15,8 @@
  * TLV) handed to the receiver — tagged with the SENDING peer's name through the
  * bus_link_t facet (ADR-0044), so return routes name the right browser tab; PING
  * is answered with a stack-built PONG. Every connection dies down ONE path
- * (transport_ws_server::teardown_slot, five call sites in `service_peer`): the
+ * (slot_server_t::teardown_slot — one home, shared with transport_tcp_server since
+ * #871; five call sites in this server's `on_readable` framing hook): the
  * peer closing the socket or a read error, at either phase; on an ESTABLISHED
  * stream a CLOSE or an RFC 6455 violation the checked decode reports (an
  * oversized or non-final control frame, §5.5/§7.1.7, or a DATA frame declaring
@@ -75,7 +76,7 @@ namespace tr::net {
 namespace detail {
 
 /**
- * @brief TEST SEAM: run by `transport_ws_server::service_peer` at the exact instant a peer's
+ * @brief TEST SEAM: run by `transport_ws_server::on_readable` at the exact instant a peer's
  *        `101 Switching Protocols` response is on the wire AND its slot is published open.
  *
  * The handshake's two visible transitions — "the peer may believe the connection is up" and
@@ -122,9 +123,12 @@ inline constexpr std::string_view kWsServerSuggestedModule = "ws-server";
  * Peer lifecycle: peers occupy SLOTS. A departed peer's slot is recycled for
  * the next accept, so steady-state memory is bounded by the maximum number of
  * CONCURRENT peers ever reached (or by @p max_peers when set — the RFC-0006
- * injected bound), never by the number of connections ever served.
+ * injected bound), never by the number of connections ever served. That whole
+ * slot/poll layer is @ref slot_server_t, shared verbatim with
+ * transport_tcp_server since #871; what this class adds is the RFC 6455
+ * packaging — the opening handshake and the frame codec.
  */
-class transport_ws_server : public transport_t, public bus_link_t, private stream_endpoint_t {
+class transport_ws_server : public slot_server_t {
    public:
     /** @brief The largest MESSAGE a peer may announce — the shared
      *         length_prefix_framer::kDefaultMaxFrame (16 MiB) unless `:settings max_frame`
@@ -216,55 +220,6 @@ class transport_ws_server : public transport_t, public bus_link_t, private strea
      *         bus_link_t facets (one override, same contract). */
     [[nodiscard]] bool delivers_ropes() const override { return true; }
 
-    /** @brief The @ref bus_link_t facet (ADR-0044) when constructed `peer_named`,
-     *         else `nullptr`. With the facet, the router tags inbound frames per
-     *         peer (each browser tab gets its own return-route identity and the
-     *         registry routes a `dst` segment to that one tab); without it, this
-     *         link keeps point-to-point hop naming — inbound frames carry the
-     *         registered child NAME, and `send()` fans out to every open peer.
-     * @note Departure eviction (RFC-0009 §D.5) follows the same split: peer-named
-     *       mode evicts just the departed peer's edges (`notify_peer_down(name)`),
-     *       while FLAT mode reports the whole link down (`notify_down()`) on ANY
-     *       single session's close — so one flat session leaving evicts EVERY
-     *       edge under the link name. That coarseness is unreachable under
-     *       `fwd_router` (which wires the peer-named facet whenever it fans a
-     *       link to many peers); it matters only to a manual wiring that fed a
-     *       flat server multiple concurrent peers. */
-    [[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }
-
-    /** @brief Visit the currently-OPEN (handshaken) peers' names, `p<slot>` (#426). */
-    void enumerate_peers(const peer_visitor_t& visit) const override;
-
-    /**
-     * @brief Resolve an open peer's name to its directed sending endpoint.
-     *
-     * The returned endpoint sends to THAT peer only; it is owned by the peer's
-     * slot and stays pointer-valid for this server's lifetime (slots are never
-     * freed, only recycled). After the peer departs, its sends no-op until the
-     * slot is reused.
-     * @retval nullptr @p peer names no currently-open connection.
-     */
-    [[nodiscard]] transport_t* peer_link(std::string_view peer) override;
-
-    /**
-     * @brief Close the open peer named @p peer, freeing its slot for the next accept.
-     *
-     * Shuts the peer's socket down (`SHUT_RDWR`); the recv thread's next poll pass
-     * observes the close and runs the SAME teardown as a remote hangup — so the
-     * recycle is asynchronous (the slot leaves @ref enumerate_peers within one poll
-     * bound) and never touches the recv-thread-only buffers off-thread. A subsequent
-     * accept reuses exactly the freed slot.
-     * @retval true  @p peer named an open connection and its socket was shut down.
-     * @retval false @p peer names no currently-open connection.
-     */
-    [[nodiscard]] bool close_peer(std::string_view peer) override;
-
-    /** @brief True if the listen socket is bound and listening. */
-    [[nodiscard]] bool ok() const noexcept { return listen_fd_ >= 0; }
-
-    /** @brief The actual bound TCP port (resolves an ephemeral 0 request). */
-    [[nodiscard]] std::uint16_t local_port() const noexcept { return bound_port_; }
-
     /** @brief Messages dropped because the RX backend was exhausted (backpressure,
      *         ADR-0039 §4 / ADR-0042 §2) — shed mid-reassembly, never an OOM. Summed
      *         over every peer this server has served. */
@@ -320,34 +275,33 @@ class transport_ws_server : public transport_t, public bus_link_t, private strea
         session_t* slot_ = nullptr;            /**< @brief The peer slot this sends to. */
     };
 
-    void run();                        // the ONE poll/accept/serve thread
-    void accept_peer();                // admit into a free (or new) slot
-    void service_peer(session_t& s);   // one readable pass: recv + drain frames
-    bool drain_frames(session_t& s);   // decode buffered frames; false ⇒ teardown
-    void teardown_slot(session_t& s);  // close + free the slot for reuse
+    /** @brief One fresh slot with its handshake/frame buffers, reassembler and facade. */
+    std::unique_ptr<session_base_t> make_session() override;
 
-    int listen_fd_ = -1;
-    std::uint16_t bound_port_ = 0;
-    std::size_t max_peers_ = 0;  // 0 = unbounded (deployment-injected, RFC-0006)
-    bool peer_named_ = false;    // expose bus() — wiring-time deployment choice
+    /** @brief Per-accept setup: clear the slot's handshake and frame buffers. Returns
+     *         false — a WS session only carries frames PAST its `101`, which
+     *         `on_readable` publishes (that ordering is deliberate, not drift). */
+    bool on_accept(session_base_t& s, int fd) override;
 
+    /** @brief Framing: the opening handshake while the slot is not yet open, then
+     *         RFC 6455 decode of every complete frame the chunk finished. */
+    void on_readable(session_base_t& s, const std::byte* data, std::size_t len) override;
+
+    /** @brief Teardown: release the slot's buffers and reset its reassembler. */
+    void on_slot_reset(session_base_t& s) override;
+
+    bool drain_frames(session_t& s);  // decode buffered frames; false ⇒ teardown
+
+    // The slot vector, the listen socket, the accept/poll/teardown machinery and the
+    // bus_link_t query trio all live in slot_server_t (#871); what stays here is the
+    // RFC 6455 packaging and its ingress bound.
+    //
     // RX segment source for message reassembly (ADR-0042 §2) + the ingress bound and
     // its counters — the same four members tcp/quic/webtransport carry.
     mem::mem_backend_t* backend_;
     std::size_t max_frame_ = kMaxFrame;  // per-connection receive cap (:settings; 0 => kMaxFrame)
     std::atomic<std::uint64_t> dropped_rx_{0};
     std::atomic<std::uint64_t> malformed_rx_{0};
-    /**
-     * @brief Guards the slot vector and every slot's NAME (the cross-thread
-     *        reads: enumerate_peers / peer_link vs the recv thread's
-     *        accept/teardown). Per-slot fds are atomics read under `write_m_`
-     *        by senders; buffers/assembler are recv-thread-only. Lock order
-     *        where nested: peers_m_ → write_m_.
-     */
-    mutable std::mutex peers_m_;
-    std::vector<std::unique_ptr<session_t>> slots_;  // insert-only; recycled in place
-    // write_m_ (stream_endpoint_t) serializes ALL socket writes (any peer);
-    // conn_fd_ is unused by the multi-peer server (each slot owns its fd).
 };
 
 /**
@@ -467,7 +421,7 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
      * first frame in that same segment. Those bytes are the start of the frame stream, so
      * they are moved into @p pipelined (cleared first, empty in the common case) for
      * `serve` to decode; dropping them loses that frame silently. The server half has
-     * carried them over since it grew a second peer (`service_peer`'s `s.buf.assign`) —
+     * carried them over since it grew a second peer (`on_readable`'s `s.buf.assign`) —
      * this is the DIAL half of the same rule (#1020).
      */
     bool handshake(int fd, const std::string& host, std::uint16_t port,

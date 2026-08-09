@@ -15,6 +15,7 @@
  */
 #pragma once
 
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -66,6 +67,30 @@ inline void emit_tlv(std::vector<std::byte>& out, type_t type, opt_t opt,
 /** @brief Append a NAME TLV over opaque bytes — the PATH-segment / metadata-tag workhorse. */
 inline void emit_name(std::vector<std::byte>& out, std::span<const std::byte> name) {
     emit_tlv(out, type_t::NAME, opt_t{}, name);
+}
+
+/**
+ * @brief Append a VALUE TLV whose body is @p value, little-endian, in @p width bytes — the
+ *        PUBLIC spelling of "an integer as a VALUE".
+ *
+ * The u8 / u16 / u32 integer VALUE is the other half of every `(NAME key, value)` config
+ * pair (`config_reader_t::u8`/`u16`/`u32` decodes it), and until #902 there was no public
+ * way to write one: a consumer building a connection SPEC had to size its own buffer and
+ * call `detail::store_le` — an internal primitive — or hand-roll a shift loop. This is the
+ * encode counterpart of those accessors, in `tr::wire` because it produces wire bytes from a
+ * wire type; the layer-free LE byte helper it builds on (`detail::append_le`,
+ * byteorder.hpp) stays in `tr::detail`.
+ *
+ * The width is explicit and defaults to `sizeof(T)`, so the emitted payload length is the
+ * caller's decision — the reader is tolerant of a narrower payload (`detail::load_le` zero-
+ * fills), but the SPEC keys documented as u16/u32 are pinned by their emitted width here.
+ *
+ * Precondition: `width <= sizeof(T)`.
+ */
+template <std::unsigned_integral T>
+inline void emit_value_le(std::vector<std::byte>& out, T value, std::size_t width = sizeof(T)) {
+    emit_header(out, type_t::VALUE, opt_t{}, width);
+    detail::append_le(out, value, width);
 }
 
 /**
