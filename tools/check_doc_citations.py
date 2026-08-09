@@ -720,11 +720,11 @@ ANCHORS = [
     ('tools/cortexm0_footprint.py:94', 'cxx_flags = ['),
     ('tools/cortexm0_footprint.py:101', '"-DLIBTRACER_NO_ATOMIC",'),
     ('tools/cortexm0_footprint.py:115', '"--specs=nano.specs",'),
-    ('core/tests/CMakeLists.txt:1098', 'add_executable(substrate_test_no_atomic'),
-    ('core/tests/CMakeLists.txt:1111', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
+    ('core/tests/CMakeLists.txt:1107', 'add_executable(substrate_test_no_atomic'),
+    ('core/tests/CMakeLists.txt:1120', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
     # The leading indent is load-bearing: the bare token also appears in the comment
     # three lines above the executable, and an anchor that matches both is not an anchor.
-    ('core/tests/CMakeLists.txt:1112', '    LIBTRACER_NO_ATOMIC'),
+    ('core/tests/CMakeLists.txt:1121', '    LIBTRACER_NO_ATOMIC'),
 
     # --- #1095: the rest of the non-source citations, now that a line-numbered citation
     # of an unverifiable file is an ERROR rather than a false green.
