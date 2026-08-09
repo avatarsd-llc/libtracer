@@ -383,14 +383,18 @@ void transport_tcp_server::on_readable(session_base_t& base, const std::byte* da
                                        std::size_t len) {
     session_t& s = static_cast<session_t&>(base);
     // Feed the chunk through the slot's reassembler; each completed frame is
-    // delivered inline.  Tier select per frame (receiver_slot.hpp): the
-    // peer-named slot first (the ADR-0044 bus precedence — the router's
-    // wiring), flat transport_t slot as the point-to-point fallback.
+    // delivered inline.  Tier select per frame: the constructed MODE picks the
+    // slot (#889) — peer-named servers deliver tagged with the sending peer's
+    // name (the ADR-0044 bus precedence, what the router wires), flat servers
+    // deliver point-to-point under the link's own registered name.  Reading the
+    // stored flag, not `peer_rx_.has_any()`: a mode is a wiring-time fact, not a
+    // per-frame consequence of which sink someone happened to install — and this
+    // reads a member instead of taking the slot's mutex once per frame.
     const auto res = s.framer.feed(*backend_, max_frame_, data, len,
                                    [this, &s](view::segment_ptr_t seg, std::size_t flen) {
                                        // aggregate init — no handle copy (#845)
                                        view::view_t frame{std::move(seg), 0, flen};
-                                       if (peer_rx_.has_any())
+                                       if (peer_named_)
                                            peer_rx_.deliver(s.name, std::move(frame));
                                        else
                                            rx_.deliver(std::move(frame));

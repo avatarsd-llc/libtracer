@@ -50,7 +50,7 @@ A transport that can hand up *owning* frames implements the rope-receiver seam
 view delivery](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md),
 generalized to ropes by [ADR-0053 — lazy rope-backed decode, view partial-path
 routing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0053-lazy-rope-backed-decode-view-partial-path-routing.md)):
-it overrides `delivers_ropes()` (`core/include/libtracer/transport.hpp:373`) and
+it overrides `delivers_ropes()` (`core/include/libtracer/transport.hpp:418`) and
 delivers each inbound frame as a `rope_t` of refcounted links over segments drawn
 from a host-injected `mem_backend_t`. A contiguous frame is the single-link case; a
 scattered one — a CAN reassembly group, a fragmented WebSocket message — crosses the
@@ -87,7 +87,31 @@ peer and no peer state is stored.
 `transport_t::bus()` returns the facet or `nullptr`. CAN always returns it
 (`transport_can.hpp:456`); the TCP and WebSocket **servers** return it when
 configured peer-named — one implementation, on the slot-server base both of them
-inherit (`posix_endpoint.hpp:409`); every other kind keeps the `nullptr` default.
+inherit (`posix_endpoint.hpp:408`); every other kind keeps the `nullptr` default.
+
+Whether a link's peer-named tier exists is one query, `bus_link_t::peer_named()`
+(`transport.hpp:137`): the constructed flag for the two stream servers
+(`posix_endpoint.hpp:418`), `true` by construction for a kind that is a bus outright.
+`bus_link_t` **refuses** each of its peer-named wiring calls — `set_peer_receiver`,
+`set_peer_rope_receiver`, `set_peer_down_notifier` — while it is false. That refusal matters
+because `bus_link_t` is a public base: on a flat server the setters are reachable by an
+explicit upcast past the null `bus()`, and admitting one used to flip the link into
+peer-named delivery the null `bus()` had denied.
+
+For the two stream servers, whose mode is a wiring-time choice, the same flag is the whole
+answer: `bus()`, the per-frame tier select and the departure seam all read it, so a
+**peer-named** server delivers only on the peer tier (an unwired one drops rather than
+handing a many-peer link's frame up untagged) and a **flat** one only on the flat tier. A
+kind that is a bus outright keeps its own delivery precedence — CAN still falls back to the
+flat sink for a single-peer consumer that wired no bus facet, which the gate does not
+disturb because `peer_named()` is true there.
+
+Departure follows the same split. A **peer-named** server evicts exactly the departed peer
+(`notify_peer_down(name)`); a **flat** server has one routing identity for every peer it
+carries — the registered child NAME — so its only seam is the whole link
+(`transport_t::notify_down`), and it therefore waits until the **last** open session departs
+(`posix_endpoint.cpp:493`). Firing it on a mid-life close would evict the surviving peers'
+edges along with the departed one's.
 
 ## QUIC and WebTransport
 
@@ -244,7 +268,7 @@ flowchart LR
   and a callable destroyed early dangles exactly like a stale `ctx`.
 - **Overriding `send(iov)` is not optional for a scatter-gather wire.** The base
   implementation gathers into a temporary buffer and, when that allocation fails,
-  **drops the frame** rather than aborting (`transport.hpp:256`). A transport with a
+  **drops the frame** rather than aborting (`transport.hpp:301`). A transport with a
   native `sendmsg`/`writev` that does not override it silently pays a copy per
   forward hop and inherits a drop path it did not intend.
 - **The link-down notifier is a routing seam, not a log hook.** It re-enters the

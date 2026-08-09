@@ -46,6 +46,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`httpd_ws_link_t::peer_named()`** — the `bus_link_t` mode-authority override (#889).
+  The same constructed flag `bus()` keys off, published so the base can REFUSE its
+  peer-named wiring calls (`set_peer_receiver`, `set_peer_rope_receiver`,
+  `set_peer_down_notifier`) on a FLAT link: `bus_link_t` is a public base, so those setters
+  are reachable by an upcast past the null `bus()`. This link's delivery and departure
+  paths already read the flag directly, so nothing else about it moves.
+
 - **`tr::net::link_counters_t`** (`libtracer_esp/link_stats.hpp`) plus
   **`esp_ws_client_link_t::stats()`** and **`httpd_ws_link_t::enumerate_peer_stats()`** —
   per-link passive traffic counters (#942): rx/tx messages and payload bytes, rx/tx drops,
@@ -82,6 +89,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the receive path refusing a message.
 
 ### Fixed
+
+- **A FLAT `httpd_ws_link_t` no longer reports the WHOLE LINK down when one of its several
+  sessions closes (#889).** `notify_departed` forked on the constructed mode correctly —
+  peer-named evicts just the departed peer — but the FLAT arm fired
+  `transport_t::notify_down` on **every** session close, and that hook is
+  `fwd_router_t::link_down`: it drops every subscriber edge and label binding registered
+  under the link's one NAME. Both defaults that make this reachable are the defaults
+  (`peer_named = false`, `max_peers = 0` unbounded), so a two-tab deployment that never
+  asked for the bus facet had one tab's hangup evict the other tab's subscriptions. The
+  flat arm now waits for the LAST open session to depart (`any_open_session()`); a mid-life
+  close notifies nothing and the survivors keep routing. This is the same rule
+  `slot_server_t::teardown_slot` gained in core, in the one link that cannot inherit it —
+  the issue named only the core servers, so this instance would otherwise have shipped
+  unfixed.
 
 - **`httpd_ws_link_t` closes a session whose frame was announced on the wire and then cut
   off, instead of dropping it as a recoverable frame** (#951). `esp_http_server` writes one

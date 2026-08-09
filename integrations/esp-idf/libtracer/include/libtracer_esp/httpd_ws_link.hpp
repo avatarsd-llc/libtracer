@@ -219,6 +219,16 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     /** @brief The @ref bus_link_t facet when constructed `peer_named`, else nullptr. */
     [[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }
 
+    /**
+     * @brief The mode authority (#889): the `peer_named` this link was constructed with.
+     *
+     * The same flag @ref bus keys off, published so `bus_link_t` can REFUSE its
+     * peer-named wiring calls on a flat link — that base is public, so those setters are
+     * reachable by an upcast past the null `bus()`. Delivery (@ref deliver) and the
+     * departure fork already read the flag directly.
+     */
+    [[nodiscard]] bool peer_named() const noexcept override { return peer_named_; }
+
     /** @brief Visit the currently-open peers' names, `<ip>:<port>`. */
     void enumerate_peers(const peer_visitor_t& visit) const override;
 
@@ -393,8 +403,19 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * MUST be called with neither `peers_m_` nor the handler gate's mutex held — the
      * precondition `bus_link_t::notify_peer_down` documents. The caller keeps the link
      * alive across it by registering on the gate's barrier, not by holding its lock.
+     * In FLAT mode the hook is the WHOLE link's, so it waits for the last open session
+     * (@ref any_open_session, #889).
      */
     void notify_departed(std::string_view peer);
+    /**
+     * @brief True while ANY slot is still open — the flat mode's "is the link still up"
+     *        question (#889).
+     *
+     * Asked by @ref notify_departed after @ref reclaim_slot has already cleared the
+     * departing slot's `open` under `peers_m_`, so it never counts the departed session.
+     * Takes `peers_m_`; must not be called holding it.
+     */
+    [[nodiscard]] bool any_open_session() const;
     void deliver(std::string_view peer, std::span<const std::byte> frame);
     // ONE gather-copy into a pool slot + httpd_queue_work; drops the frame (counted, never
     // aborting) when no slot is free, when the enqueue is refused, or on OOM. The

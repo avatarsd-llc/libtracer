@@ -470,9 +470,9 @@ ANCHORS = [
     # core/include/libtracer/transport.hpp
     ('core/include/libtracer/transport.hpp:35', 'using peer_id_t = std::array<std::byte, 16>;'),
     ('core/include/libtracer/transport.hpp:65', 'class bus_link_t {'),
-    ('core/include/libtracer/transport.hpp:256',
+    ('core/include/libtracer/transport.hpp:301',
      'virtual void send(std::span<const std::span<const std::byte>> iov) {'),
-    ('core/include/libtracer/transport.hpp:373',
+    ('core/include/libtracer/transport.hpp:418',
      '[[nodiscard]] virtual bool delivers_ropes() const { return false; }',
      'rx_.set_rope([](void* c, view::rope_t f) { (*static_cast<F*>(c))(std::move(f)); }, &sink);'),
     # core/include/libtracer/transport_can.hpp
@@ -664,7 +664,7 @@ ANCHORS = [
     # scope entirely instead, because the array is now spelled `pristine_inline` here and
     # `inline_vec` only in the directed facade — one anchor, one hit, no positional filter.
     ('core/src/transport_ws.cpp:272', 'std::array<::iovec, kMaxServerIov + 1> pristine_inline;'),
-    ('core/src/transport_ws.cpp:625', 'std::array<std::byte, 4096> chunk;',
+    ('core/src/transport_ws.cpp:629', 'std::array<std::byte, 4096> chunk;',
      'void transport_ws_client::serve(int fd, std::vector<std::byte> pipelined) {'),
     # core/tests/registry_teardown_test.cpp
     ('core/tests/registry_teardown_test.cpp:279', 'void test_digest_paths_agree() {'),
@@ -693,7 +693,7 @@ ANCHORS = [
     ('core/include/libtracer/path.hpp:156', 'explicit path_t(std::string_view text);'),
     # ONE `bus()` since #871: both stream servers inherit slot_server_t's (they used to
     # restate it, cited as transport_tcp.hpp:343 and transport_ws.hpp:233).
-    ('core/include/libtracer/posix_endpoint.hpp:409',
+    ('core/include/libtracer/posix_endpoint.hpp:408',
      '[[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }'),
     ('core/include/libtracer/edge_pin.hpp:153', 'class pin_t {'),
     ('core/src/fwd_router.cpp:739', 'link.set_rope_receiver('),
