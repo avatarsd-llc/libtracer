@@ -213,11 +213,11 @@ ANCHORS = [
     ("core/src/graph.cpp:1416", "value.materialize(*value_backend_)", "field_write read it back"),
     ("core/src/graph.cpp:1711", "result_t<void> graph_t::field_write"),
     ("core/src/graph.cpp:1868", "acl_right_t::CREATE", 'step0.name == "children"'),
-    ("core/src/fwd_router.cpp:1876", "fwd_router_t::deliver_remote"),
-    ("core/src/fwd_router.cpp:1910", "value.materialize(*flat_)"),
-    ("core/src/fwd_router.cpp:1911", "flatten OOM"),
-    ("core/src/fwd_router.cpp:1913", "emit_compact", "fwd_router_t::deliver_remote"),
-    ("core/src/fwd_router.cpp:1944", "std::vector<std::span<const std::byte>> iov;", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:1887", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:1921", "value.materialize(*flat_)"),
+    ("core/src/fwd_router.cpp:1922", "flatten OOM"),
+    ("core/src/fwd_router.cpp:1924", "emit_compact", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:1955", "std::vector<std::span<const std::byte>> iov;", "fwd_router_t::deliver_remote"),
     # #730 — the two INGRESS flatten guards. Anchored because the whole point of the
     # seam is that these are testable; a citation to them silently rotting would be the
     # first step back to "the guard nobody can prove still works".
@@ -555,20 +555,12 @@ ANCHORS = [
     ('core/src/fwd_router.cpp:1222', '// A REPLY that reaches its originator here is handed to the sink'),
     ('core/src/fwd_router.cpp:1533',
      'void fwd_router_t::on_control_rope(std::string_view inbound_name, view::rope_t frame) {'),
-<<<<<<< HEAD
     ('core/src/fwd_router.cpp:1484', 'const auto head = peek_control(cur, wire::grammar::crc_check_t::VERIFY);'),
     ('core/src/fwd_router.cpp:1498', 'const std::span<const std::byte> route = contig(head->child1_off, head->child1_total);'),
     ('core/src/fwd_router.cpp:1544', 'hold = frame.subrope(off, total).materialize(*flat_);'),
-    ('core/src/fwd_router.cpp:1893',
+    ('core/src/fwd_router.cpp:1904',
      "// else. A dropped fresh ADVERTISE self-heals via the peer's HANDLE_NACK (§E.1). NOT yet"),
-    ('core/src/fwd_router.cpp:1928',
-=======
-    ('core/src/fwd_router.cpp:1413', 'const auto head = peek_control(cur, wire::grammar::crc_check_t::VERIFY);'),
-    ('core/src/fwd_router.cpp:1427', 'const std::span<const std::byte> route = contig(head->child1_off, head->child1_total);'),
-    ('core/src/fwd_router.cpp:1473', 'hold = frame.subrope(off, total).materialize(*flat_);'),
-    ('core/src/fwd_router.cpp:1824', "// dropped fresh ADVERTISE self-heals via the peer's HANDLE_NACK (§E.1)."),
-    ('core/src/fwd_router.cpp:1862',
->>>>>>> origin/main
+    ('core/src/fwd_router.cpp:1939',
      'constexpr std::array<std::byte, 5> op_tlv{std::byte{0x01}, std::byte{0x00}, std::byte{0x01},'),
     # core/src/graph.cpp
     ('core/src/graph.cpp:163', 'const view_t& frame_view, std::vector<std::byte> key,'),
