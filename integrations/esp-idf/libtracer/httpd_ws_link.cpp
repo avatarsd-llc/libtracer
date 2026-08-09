@@ -372,6 +372,15 @@ struct asm_buf_t {
  * block, teardown-only — the same leak-rather-than-free discipline #815 established for
  * the TX pool). Owning mode frees it: `httpd_stop` deletes every session first.
  *
+ * A FIFTH entry point resolves the link through this gate and is NOT one of the latched
+ * four: @ref httpd_ws_link_t::ws_pre_handshake, the `ws_pre_handshake_cb` both constructors
+ * register (#958). The asymmetry is the URI table's: `httpd_uri.c` reads that callback out
+ * of the registration on every handshake and frees it with the entry on unregister, where
+ * `handler`/`user_ctx` were copied into each session and survive. So it needs the gate for
+ * the SAME reason — it dereferences the link, and only the barrier makes that safe against
+ * a concurrent destructor — but unlike the handler it cannot outlive the URI, so it is not
+ * part of what makes the gate's lifetime longer than the link's.
+ *
  * LOCK ORDER, recorded because it was previously established only by code (#960):
  * `m` may be taken while holding nothing, and `peers_m_` may be taken under it — never
  * the reverse. NO callback installed from outside this link runs while `m` is held —
