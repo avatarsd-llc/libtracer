@@ -2,6 +2,10 @@
 
 Packages the libtracer C++ reference core as an [ESP-IDF](https://docs.espressif.com/projects/esp-idf/) component, so an ESP-IDF project can depend on libtracer through the component manager.
 
+## Supported ESP-IDF versions
+
+**ESP-IDF `>=5.5.5`** (`idf_component.yml`). This is a TX-path correctness floor, not a packaging preference ([#949](https://github.com/avatarsd-llc/libtracer/issues/949)): below it `httpd_queue_work` is a bare non-blocking `sendto` on `esp_http_server`'s loopback control socket, so an enqueue past `CONFIG_LWIP_UDP_RECVMBOX_SIZE` is discarded inside lwIP while the call still reports success — a WebSocket frame lost with nothing observable anywhere. From 5.5.5 the mbox slot is reserved through a counting semaphore before the `sendto` (`httpd_main.c`), so a full control queue is an `ESP_FAIL` the caller sees and `httpd_ws_link_t` can report every dropped frame on `enqueue_drops()`. The link is written for that guarantee and carries no compensation for its absence, so 5.3.x, 5.4.x and 5.5.0–5.5.4 are **not** supported.
+
 ## Use
 
 ### As a local component (vendored)
