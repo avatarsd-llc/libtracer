@@ -63,7 +63,7 @@ per-vertex `:settings` container — `:settings.reliability`, `:settings.durabil
 `:settings.<knob>` **write** surface: a write to any of the seven names now answers
 `SCHEMA_NOT_FOUND`, caller-independently (`core/src/graph.cpp:1914-1920`). The `:settings`
 **read** container survives with its shape and none
-of its knobs — `SETTINGS{ [NAME "app" SETTINGS{…}] }`, `core/src/graph.cpp:2060` — so
+of its knobs — `SETTINGS{ [NAME "app" SETTINGS{…}] }`, `core/src/graph.cpp:2212` — so
 there is nothing left for QoS to round-trip through, and no wire surface a namespaced
 extension could ride. See [ADR-0023](../../docs/adr/0023-ros2-binding-via-rmw-tracer.md)'s
 two errata. Nothing shipped against the old mapping: this package has one real TU
@@ -92,7 +92,7 @@ Two consequences `qos.c` has to live with:
 - **A libtracer-only delivery mode is `rmw_tracer`-local, not a QoS extension.**
   `delivery_mode_t` (`vertex.hpp:577` — `IF_NEWER` / `UNCONDITIONAL` / `EXPLICIT`; there is
   no `ON_CHANGE` member) is owner-side and wiring-time via `graph_t::set_delivery_mode`
-  (`core/src/graph.cpp:1386`) with no wire spelling. `rmw_tracer` may set it on vertices it
+  (`core/src/graph.cpp:1469`) with no wire spelling. `rmw_tracer` may set it on vertices it
   owns; it cannot round-trip it to a remote peer.
 
 ## Transports & the differentiators

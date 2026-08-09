@@ -846,6 +846,15 @@ target_link_libraries(app_fields_test PRIVATE libtracer)
 libtracer_test_warnings(app_fields_test)
 add_test(NAME app_fields COMMAND app_fields_test)
 
+# #869 — the field surface's READ/WRITE dispatch parity. The full field x selector matrix
+# through both doors (the characterization net behind the shared shape classifiers), the
+# three-door subscriber admission parity, and the pinned read/write divergences
+# (:subscribers[*], :acl[0], :settings[0].app.<name>) that need an RFC to close.
+add_executable(field_dispatch_test field_dispatch_test.cpp)
+target_link_libraries(field_dispatch_test PRIVATE libtracer)
+libtracer_test_warnings(field_dispatch_test)
+add_test(NAME field_dispatch COMMAND field_dispatch_test)
+
 # RFC-0022 (as amended) — the per-subscription delivery policy, the removed vertex knobs,
 # and §3.F: the two surviving storage declarations are owner-side and inherited by NOBODY.
 add_executable(qos_policy_test qos_policy_test.cpp)
