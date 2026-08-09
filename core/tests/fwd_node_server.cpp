@@ -47,8 +47,11 @@
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport_ws.hpp"
+#include "test_values.hpp"
 
 namespace {
+
+using tr::testing::make_value;
 
 using namespace std::chrono_literals;
 
@@ -69,12 +72,6 @@ std::vector<std::byte> value_u32(std::uint32_t v) {
     std::vector<std::byte> out;
     tr::wire::emit_tlv(out, tr::wire::type_t::VALUE, tr::wire::opt_t{}, p);
     return out;
-}
-
-tr::view::view_t make_value(std::span<const std::byte> bytes) {
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
-    if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
-    return tr::view::view_t::over(std::move(seg));
 }
 
 /** @brief Minimal argv parsing: --port N (default 0 = ephemeral), --timeout-ms N. */

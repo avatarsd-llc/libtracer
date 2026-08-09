@@ -48,6 +48,7 @@
 #include <vector>
 
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -58,13 +59,7 @@ using tr::graph::subscription_t;
 using tr::view::rope_t;
 using tr::view::view_t;
 
-int g_failures = 0;
-
-/** @brief Assert-independent check (RelWithDebInfo defines NDEBUG). */
-void check(bool ok, const char* what) {
-    std::printf("  [%s] %s\n", ok ? "ok" : "FAIL", what);
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /** @brief A subscriber context that can prove it was not delivered to after teardown. */
 struct sink_t {
@@ -334,6 +329,5 @@ int main() {
     test_concurrent_publish_and_churn(tr::graph::kEdgePinSlots + 4,
                                       "more publishers than kEdgePinSlots — mutex fallback");
     test_teardown_flushes_the_retire_list();
-    std::printf("\n%s\n", g_failures == 0 ? "edge_publish_test: OK" : "edge_publish_test: FAILED");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("edge_publish");
 }

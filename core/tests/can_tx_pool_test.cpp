@@ -40,15 +40,13 @@
 #include <thread>
 #include <vector>
 
+#include "test_support.hpp"
+
 namespace {
 
 using namespace std::chrono_literals;
 
-int g_failures = 0;
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /** @brief A stand-in for twai_link_t's tx_slot_t: payload + an ownership probe. */
 struct slot_t {
@@ -245,10 +243,5 @@ int main() {
     test_exhaustion_and_reuse();
     test_cross_thread_ownership();
     test_full_policy();
-    if (g_failures != 0) {
-        std::printf("FAILED: %d check(s)\n", g_failures);
-        return 1;
-    }
-    std::printf("all checks passed\n");
-    return 0;
+    return tr::testing::summary("can_tx_pool");
 }

@@ -1203,3 +1203,13 @@ if(LIBTRACER_WITH_CUDA)
     libtracer_test_warnings(cuda_test)
     add_test(NAME cuda COMMAND cuda_test)
 endif()
+
+# #874 — the shared runner (test_support.hpp), under test by itself. Every other harness
+# here reports its verdict THROUGH that header, so a runner that stopped counting would
+# turn the whole suite green at once and no other target could see it. Registered last on
+# purpose: this file's line numbers are cited by docs/modules/segment.md and pinned in
+# tools/check_doc_citations.py, so new targets append rather than insert.
+add_executable(test_support_test test_support_test.cpp)
+target_link_libraries(test_support_test PRIVATE libtracer Threads::Threads)
+libtracer_test_warnings(test_support_test)
+add_test(NAME test_support COMMAND test_support_test)

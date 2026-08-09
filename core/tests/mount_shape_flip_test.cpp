@@ -54,6 +54,7 @@
 #include "fwd_frame_builder.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -65,12 +66,7 @@ using tr::net::transport_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /** @brief A point-to-point endpoint — no `bus()`, so a directed `dst` egresses over it. */
 struct p2p_link_t : transport_t {
@@ -265,10 +261,5 @@ int main() {
     std::printf("mount-descent shape flip (#882):\n");
     shape_snapshot_is_coherent();
     forward_never_broadcasts();
-    if (g_failures != 0) {
-        std::printf("FAILED: %d check(s)\n", g_failures);
-        return 1;
-    }
-    std::printf("OK\n");
-    return 0;
+    return tr::testing::summary("mount_shape_flip");
 }

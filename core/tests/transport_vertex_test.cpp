@@ -53,6 +53,7 @@
 #include "libtracer/transport_udp.hpp"
 #include "libtracer/transport_ws.hpp"
 #include "libtracer/ws.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -70,12 +71,7 @@ using tr::view::view_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 view_t owned(std::span<const std::byte> bytes) {
     tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
@@ -1835,7 +1831,5 @@ int main() {
     test_wire_name_reaches_add_child();
     test_app_chosen_root_and_module();
 
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("transport_vertex");
 }

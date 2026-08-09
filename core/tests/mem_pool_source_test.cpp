@@ -27,14 +27,11 @@
 
 #include "libtracer/mem_source.hpp"
 #include "libtracer/mem_source_sync.hpp"
+#include "test_support.hpp"
 
 namespace {
 
-int g_failures = 0;
-void check(bool ok, const char* what) {
-    std::printf("  [%s] %s\n", ok ? "PASS" : "FAIL", what);
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 using tr::mem::pool_source_t;
 using tr::mem::size_class_t;
@@ -222,7 +219,5 @@ int main() {
     reports_what_to_size_against();
     hosted_sync_policy_works();
 
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("mem_pool_source");
 }

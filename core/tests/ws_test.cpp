@@ -24,14 +24,11 @@
 #include <string_view>
 #include <vector>
 
+#include "test_support.hpp"
+
 namespace {
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 std::vector<std::byte> bytes_of(std::initializer_list<std::uint8_t> vals) {
     std::vector<std::byte> v;
@@ -224,6 +221,5 @@ int main() {
               "§5.5 still rejects a non-final control frame");
     }
 
-    std::printf(g_failures == 0 ? "\nWS: PASS\n" : "\nWS: FAIL (%d)\n", g_failures);
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("ws");
 }

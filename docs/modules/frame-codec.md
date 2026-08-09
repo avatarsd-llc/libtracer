@@ -111,7 +111,7 @@ them:
 | `decode_into` → `tlv_arena_t` | 8 (`core/src/tlv_arena.cpp:130`) | the caller's `mem::block_source_t` (`tlv_arena.cpp:131`) | whatever resource the caller injected |
 
 The 8 is the typical FWD nesting (three to four levels) with headroom, not a
-ceiling: the arena test decodes a frame nested 100 deep (`core/tests/tlv_arena_test.cpp:293`).
+ceiling: the arena test decodes a frame nested 100 deep (`core/tests/tlv_arena_test.cpp:289`).
 A receiver that wants a hard bound gets one by injecting a small source: a
 stack-buffer `mem::bump_source_t` makes that buffer the whole decode budget
 (`mem_source.hpp`), and exhaustion is then a returned `err_t` rather than an

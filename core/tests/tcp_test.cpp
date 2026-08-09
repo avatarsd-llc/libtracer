@@ -44,6 +44,7 @@
 #include "libtracer/byteorder.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -56,39 +57,8 @@ using tr::view::view_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
-
-/** @brief A collecting sink: frames delivered on the recv thread, read from the test thread. */
-struct sink_t {
-    std::mutex m;
-    std::vector<std::vector<std::byte>> frames;
-
-    void push(std::span<const std::byte> f) {
-        const std::lock_guard lock(m);
-        frames.emplace_back(f.begin(), f.end());
-    }
-    [[nodiscard]] std::size_t count() {
-        const std::lock_guard lock(m);
-        return frames.size();
-    }
-    [[nodiscard]] std::vector<std::byte> at(std::size_t i) {
-        const std::lock_guard lock(m);
-        return frames.at(i);
-    }
-    /** @brief Wait until `n` frames arrived (or the deadline passes). */
-    [[nodiscard]] bool wait_for_count(std::size_t n, std::chrono::milliseconds budget) {
-        const auto deadline = std::chrono::steady_clock::now() + budget;
-        while (count() < n) {
-            if (std::chrono::steady_clock::now() > deadline) return false;
-            std::this_thread::sleep_for(5ms);
-        }
-        return true;
-    }
-};
+using tr::testing::check;
+using tr::testing::frame_sink_t;
 
 /**
  * @brief A raw POSIX TCP client — the test's hand on the wire, so writes can be split and coalesced
@@ -163,7 +133,7 @@ void test_raw_frame_duplex() {
     // Sinks + named receiver lambdas BEFORE the transports: the slot binds the
     // callable by address, and ~tcp_transport_t joins the recv thread, so the
     // callable must outlive the transport.
-    sink_t at_listener, at_dialer;
+    frame_sink_t at_listener, at_dialer;
     auto listener_rx = [&](std::span<const std::byte> f) { at_listener.push(f); };
     auto dialer_rx = [&](std::span<const std::byte> f) { at_dialer.push(f); };
     tcp_transport_t listener(std::uint16_t{0});
@@ -188,7 +158,7 @@ void test_raw_frame_duplex() {
 
 void test_partial_and_coalesced() {
     std::printf("TCP transport — split writes reassemble, coalesced writes split:\n");
-    sink_t sink;
+    frame_sink_t sink;
     auto rx = [&](std::span<const std::byte> f) { sink.push(f); };
     tcp_transport_t listener(std::uint16_t{0});
     listener.set_receiver(rx);
@@ -364,7 +334,7 @@ void test_view_delivery_segment_identity() {
 void test_backpressure_drain() {
     std::printf("TCP transport — backend exhaustion drains the frame, sync survives:\n");
     recording_backend_t rec(2);  // the first two allocations fail
-    sink_t sink;
+    frame_sink_t sink;
     auto rope_rx = [&](tr::view::rope_t f) { sink.push(f.links()[0].bytes()); };
     tcp_transport_t listener(std::uint16_t{0}, &rec);
     listener.set_rope_receiver(rope_rx);
@@ -386,7 +356,7 @@ void test_backpressure_drain() {
 
 void test_scatter_gather() {
     std::printf("TCP transport — scatter-gather send (rope -> one record, no flatten):\n");
-    sink_t sink;
+    frame_sink_t sink;
     auto rx = [&](std::span<const std::byte> f) { sink.push(f); };
     tcp_transport_t listener(std::uint16_t{0});
     listener.set_receiver(rx);
@@ -620,7 +590,7 @@ void test_server_multi_peer_bus() {
 
     // Sinks BEFORE the transports (the file's destruction-order idiom).
     peer_sink_t srv_sink;
-    sink_t at_a, at_b;
+    frame_sink_t at_a, at_b;
     auto a_rx = [&](std::span<const std::byte> f) { at_a.push(f); };
     auto b_rx = [&](std::span<const std::byte> f) { at_b.push(f); };
 
@@ -713,7 +683,7 @@ void test_server_multi_peer_bus() {
     }
     std::optional<tcp_transport_t> c;
     c.emplace("127.0.0.1", port);
-    sink_t at_c;
+    frame_sink_t at_c;
     auto c_rx = [&](std::span<const std::byte> f) { at_c.push(f); };
     c->set_receiver(c_rx);
     check(c->ok(), "third dialer connected after the departure");
@@ -740,7 +710,7 @@ void test_server_multi_peer_bus() {
 void test_server_max_peers_cap() {
     std::printf("TCP transport — server max_peers admission cap (flat mode):\n");
 
-    sink_t srv_rx_sink;
+    frame_sink_t srv_rx_sink;
     auto srv_rx = [&](std::span<const std::byte> f) { srv_rx_sink.push(f); };
     tr::net::transport_tcp_server server(0, &tr::mem::heap_backend(), 0, /*max_peers=*/1);
     check(server.ok(), "capped server bound");
@@ -1163,7 +1133,7 @@ void test_push_on_connect_waits_for_start_receiving() {
     });
 
     // The sink outlives the transport that delivers to it (this file's destruction idiom).
-    sink_t sink;
+    frame_sink_t sink;
     auto rx = [&](std::span<const std::byte> f) { sink.push(f); };
     {
         tcp_transport_t dialer("127.0.0.1", peer_listener.port, &tr::mem::heap_backend(),
@@ -1212,7 +1182,7 @@ void test_start_receiving_is_idempotent() {
 
     // (a) a one-phase DIAL + (b) a LISTEN link: both started their thread in the constructor.
     {
-        sink_t at_listener, at_dialer;
+        frame_sink_t at_listener, at_dialer;
         auto listener_rx = [&](std::span<const std::byte> f) { at_listener.push(f); };
         auto dialer_rx = [&](std::span<const std::byte> f) { at_dialer.push(f); };
         tcp_transport_t listener(std::uint16_t{0});
@@ -1286,7 +1256,7 @@ void test_recv_stack_sized() {
     // Sized down from the ~8 MiB host default, yet ample under the sanitizers for
     // a one-frame round-trip; the point is that a non-default size is honored.
     constexpr std::size_t kStack = 512 * 1024;
-    sink_t at_listener;
+    frame_sink_t at_listener;
     auto listener_rx = [&](std::span<const std::byte> f) { at_listener.push(f); };
     tcp_transport_t listener(std::uint16_t{0}, &tr::mem::heap_backend(), 0, kStack);
     check(listener.ok(), "listener bound with a sized recv stack");
@@ -1319,7 +1289,5 @@ int main() {
     test_accept_publish_is_atomic_to_senders();
     test_push_on_connect_waits_for_start_receiving();
     test_start_receiving_is_idempotent();
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("tcp");
 }

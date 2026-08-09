@@ -57,6 +57,7 @@
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport_vertex.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -70,12 +71,7 @@ using tr::view::view_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /** @brief A link that counts sends and never blocks — the churn must not be I/O-bound. */
 struct sink_t : tr::net::transport_t {
@@ -353,7 +349,5 @@ int main() {
 
     transport_vertex_control_plane_churn();
 
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("net_control_plane_race");
 }

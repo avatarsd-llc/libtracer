@@ -40,6 +40,8 @@
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
+#include "test_values.hpp"
 
 namespace {
 
@@ -58,12 +60,8 @@ using tr::wire::path_ref_element_t;
 using tr::wire::tlv_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
+using tr::testing::make_value;
 
 // --- wire builders ----------------------------------------------------------
 
@@ -106,13 +104,6 @@ tr::graph::result_t<tr::view::rope_t> resolve_bytes(op_resolver_t& resolver,
     const auto arena = tr::wire::decode_into(fwd, tr::mem::heap_source());
     if (!arena) return std::unexpected(tr::graph::status_t::INVALID_PATH);
     return resolver.resolve(*arena, inbound_link);
-}
-
-/** @brief A `view_t` over a fresh owned heap segment holding @p bytes. */
-tr::view::view_t make_value(std::span<const std::byte> bytes) {
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
-    if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
-    return tr::view::view_t::over(std::move(seg));
 }
 
 /** @brief The flattened reply bytes (the consumer's one allowed copy). */
@@ -664,6 +655,5 @@ int main() {
     test_unmasked_op_byte_still_routes();
     test_path_binding_slot();
     test_conformance_vectors();
-    std::printf("%s\n", g_failures == 0 ? "ALL PASS" : "FAILURES");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("bound_path");
 }

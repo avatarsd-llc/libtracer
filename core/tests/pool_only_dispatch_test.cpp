@@ -44,6 +44,7 @@
 #include "libtracer/mem_borrowed.hpp"
 #include "libtracer/mem_pool.hpp"
 #include "libtracer/segment.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -56,15 +57,7 @@ using tr::mem::synchronized_pool_t;
 using tr::view::segment_ptr_t;
 using tr::view::segment_t;
 
-int g_failures = 0;
-
-/** @brief Record a check; a failure prints its label and reddens the run. */
-void check(bool ok, std::string_view what) {
-    if (!ok) {
-        ++g_failures;
-        std::printf("FAIL: %.*s\n", static_cast<int>(what.size()), what.data());
-    }
-}
+using tr::testing::check_quiet;
 
 /**
  * @brief A sync policy that COUNTS acquisitions of the real host critical section.
@@ -118,16 +111,16 @@ void plain_pool_fast_path() {
     std::vector<std::byte> slab(4096);
     pool_t pool(std::span<std::byte>(slab), 64);
     const std::size_t cap = pool.capacity();
-    check(cap >= 2, "the test slab carves at least two slots");
+    check_quiet(cap >= 2, "the test slab carves at least two slots");
 
     segment_t* raw = pool.alloc(32);
-    check(raw != nullptr, "pool_t::alloc hands out a slot");
-    check(raw->btag == backend_tag::POOL, "a pool segment carries the POOL tag");
+    check_quiet(raw != nullptr, "pool_t::alloc hands out a slot");
+    check_quiet(raw->btag == backend_tag::POOL, "a pool segment carries the POOL tag");
     {
         segment_ptr_t held = segment_ptr_t::adopt(raw);
-        check(pool.available() == cap - 1, "the slot is out while the handle lives");
+        check_quiet(pool.available() == cap - 1, "the slot is out while the handle lives");
     }
-    check(pool.available() == cap, "POOL_ONLY reclaim returns the slot to the free list");
+    check_quiet(pool.available() == cap, "POOL_ONLY reclaim returns the slot to the free list");
 }
 
 /**
@@ -144,17 +137,18 @@ bool synchronized_pool_takes_the_lock() {
 
     counting_sync_t::acquisitions.store(0, std::memory_order_relaxed);
     segment_t* raw = pool.alloc(32);
-    check(raw != nullptr, "synchronized_pool_t::alloc hands out a slot");
+    check_quiet(raw != nullptr, "synchronized_pool_t::alloc hands out a slot");
     if (raw == nullptr) return false;
-    check(raw->btag == backend_tag::UNKNOWN,
-          "a synchronized-pool segment is re-tagged UNKNOWN for the virtual leg");
-    check(raw->backend == static_cast<mem_backend_t*>(&pool),
-          "a synchronized-pool segment is re-pointed at the synchronized pool");
+    check_quiet(raw->btag == backend_tag::UNKNOWN,
+                "a synchronized-pool segment is re-tagged UNKNOWN for the virtual leg");
+    check_quiet(raw->backend == static_cast<mem_backend_t*>(&pool),
+                "a synchronized-pool segment is re-pointed at the synchronized pool");
     { segment_ptr_t held = segment_ptr_t::adopt(raw); }
 
     const std::size_t locks = counting_sync_t::acquisitions.load(std::memory_order_relaxed);
-    check(locks == 2, "reclaim entered the critical section (alloc + destroy == 2 acquisitions)");
-    check(pool.capacity() == cap, "the inner pool's slot count survived the reclaim");
+    check_quiet(locks == 2,
+                "reclaim entered the critical section (alloc + destroy == 2 acquisitions)");
+    check_quiet(pool.capacity() == cap, "the inner pool's slot count survived the reclaim");
     if (locks != 2 || pool.capacity() != cap) {
         std::printf("       locks=%zu (want 2), capacity=%zu (want %zu)\n", locks, pool.capacity(),
                     cap);
@@ -165,7 +159,7 @@ bool synchronized_pool_takes_the_lock() {
     std::vector<segment_ptr_t> held;
     for (std::size_t i = 0; i < cap; ++i) {
         segment_t* s = pool.alloc(32);
-        check(s != nullptr, "every slot is re-allocatable after a synchronized reclaim");
+        check_quiet(s != nullptr, "every slot is re-allocatable after a synchronized reclaim");
         if (s == nullptr) return false;
         held.push_back(segment_ptr_t::adopt(s));
     }
@@ -180,7 +174,7 @@ void user_backend_virtual_destroy() {
         segment_ptr_t held =
             segment_ptr_t::adopt(new segment_t(&backend, std::span<std::byte>(bytes)));
     }
-    check(backend.destroys == 1, "a user backend's virtual destroy ran under POOL_ONLY");
+    check_quiet(backend.destroys == 1, "a user backend's virtual destroy ran under POOL_ONLY");
 }
 
 /** @brief Check 4 — a borrowed segment reclaims its control block and leaves the bytes alone. */
@@ -189,14 +183,15 @@ void borrowed_segment_reclaim() {
     for (std::size_t i = 0; i < bytes.size(); ++i) bytes[i] = static_cast<std::byte>(i + 1);
     {
         segment_ptr_t held = tr::view::borrow(std::span<std::byte>(bytes));
-        check(static_cast<bool>(held), "borrow() produced a segment");
-        check(held->btag == backend_tag::BORROWED, "a borrowed segment carries the BORROWED tag");
+        check_quiet(static_cast<bool>(held), "borrow() produced a segment");
+        check_quiet(held->btag == backend_tag::BORROWED,
+                    "a borrowed segment carries the BORROWED tag");
     }
     bool intact = true;
     for (std::size_t i = 0; i < bytes.size(); ++i) {
         intact = intact && bytes[i] == static_cast<std::byte>(i + 1);
     }
-    check(intact, "borrowed bytes are untouched by the POOL_ONLY reclaim");
+    check_quiet(intact, "borrowed bytes are untouched by the POOL_ONLY reclaim");
 }
 
 }  // namespace
@@ -207,16 +202,11 @@ int main() {
         std::printf(
             "pool_only_dispatch: FAILED (%d) — the synchronized pool's locked destroy was "
             "bypassed; skipping the checks whose ablation corrupts memory\n",
-            g_failures);
+            tr::testing::failures());
         return 1;
     }
     user_backend_virtual_destroy();
     borrowed_segment_reclaim();
 
-    if (g_failures != 0) {
-        std::printf("pool_only_dispatch: FAILED (%d)\n", g_failures);
-        return 1;
-    }
-    std::printf("pool_only_dispatch: OK\n");
-    return 0;
+    return tr::testing::summary("pool_only_dispatch");
 }

@@ -49,6 +49,8 @@
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport.hpp"
+#include "test_support.hpp"
+#include "test_values.hpp"
 
 namespace {
 
@@ -67,28 +69,8 @@ using tr::view::view_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-/** @brief One PASS/FAIL line; failures accumulate into the process exit code. */
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
-
-/** @brief A view_t over a fresh, owned heap segment holding @p bytes. */
-view_t make_value(std::span<const std::byte> bytes) {
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
-    if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
-    return view_t::over(std::move(seg));
-}
-
-/** @brief Byte-list sugar over @ref make_value. */
-view_t make_value(std::initializer_list<std::uint8_t> bytes) {
-    std::vector<std::byte> v;
-    v.reserve(bytes.size());
-    for (const std::uint8_t b : bytes) v.push_back(std::byte{b});
-    return make_value(v);
-}
+using tr::testing::check;
+using tr::testing::make_value;
 
 /** @brief Concatenate pre-encoded TLV byte runs. */
 void append(std::vector<std::byte>& dst, const std::vector<std::byte>& src) {
@@ -737,10 +719,5 @@ int main() {
     test_empty_link_name_evicts_nothing();
     test_departure_notifier_seam();
     test_concurrent_evict_vs_writes();
-    if (g_failures != 0) {
-        std::printf("FAILED: %d check(s)\n", g_failures);
-        return 1;
-    }
-    std::printf("all checks passed\n");
-    return 0;
+    return tr::testing::summary("edge_eviction");
 }

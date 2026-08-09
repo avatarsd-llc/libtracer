@@ -58,6 +58,8 @@
 #include <vector>
 
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
+#include "test_values.hpp"
 
 namespace {
 
@@ -81,19 +83,8 @@ constexpr int kSweeps = 20000;
  *         keeps a loaded CI runner from stalling the suite. */
 constexpr int kRunCeilingMs = 60000;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
-
-/** @brief A view_t over a fresh, owned heap segment holding `bytes`. */
-tr::view::view_t make_value(std::span<const std::byte> bytes) {
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
-    if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
-    return tr::view::view_t::over(std::move(seg));
-}
+using tr::testing::check;
+using tr::testing::make_value;
 
 /** @brief Deliveries of the racing leaf inside the sweep currently in flight. Atomic only
  *         so the sanitizer legs judge the graph rather than this counter — every store and
@@ -168,6 +159,5 @@ void test_no_double_delivery_across_a_mode_flip() {
 
 int main() {
     test_no_double_delivery_across_a_mode_flip();
-    std::printf("%s\n", g_failures == 0 ? "ALL PASS" : "FAILURES");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("delivery_mode_race");
 }

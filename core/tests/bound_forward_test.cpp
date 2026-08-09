@@ -52,6 +52,7 @@
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -72,12 +73,8 @@ using tr::wire::path_ref_element_t;
 using tr::wire::tlv_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
+using tr::testing::mailbox_t;
 
 /** @brief A heap-owned view over @p bytes (the graph stores owning views). */
 view_t owned(std::span<const std::byte> bytes) {
@@ -161,28 +158,6 @@ struct hop_probe_t {
     std::vector<std::byte> snap_src() {
         const std::lock_guard lock(m);
         return src;
-    }
-};
-
-/** @brief A bounded mailbox for the client's terminating REPLY frames. */
-struct mailbox_t {
-    std::mutex m;
-    std::condition_variable cv;
-    std::vector<std::vector<std::byte>> q;
-
-    void push(std::vector<std::byte> v) {
-        {
-            const std::lock_guard lock(m);
-            q.push_back(std::move(v));
-        }
-        cv.notify_all();
-    }
-    std::optional<std::vector<std::byte>> wait(std::chrono::milliseconds budget) {
-        std::unique_lock lock(m);
-        if (!cv.wait_for(lock, budget, [this] { return !q.empty(); })) return std::nullopt;
-        auto v = std::move(q.front());
-        q.erase(q.begin());
-        return v;
     }
 };
 
@@ -762,7 +737,5 @@ int main() {
     ch_cli.shutdown();
     ch_ab.shutdown();
 
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("bound_forward");
 }

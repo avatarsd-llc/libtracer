@@ -36,18 +36,14 @@
 
 #include "libtracer/frame.hpp"
 #include "libtracer/tlv_emit.hpp"
+#include "test_support.hpp"
 
 namespace {
 
 namespace fs = std::filesystem;
 using namespace tr::wire;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 std::vector<std::byte> read_file(const fs::path& p) {
     std::ifstream f(p, std::ios::binary);
@@ -443,10 +439,5 @@ int main() {
               "a 64 B bump over a null upstream => TLV_NESTING_TOO_DEEP, never an abort");
     }
 
-    if (g_failures == 0) {
-        std::printf("tlv_arena: ALL PASS\n");
-        return 0;
-    }
-    std::printf("tlv_arena: %d FAILURE(S)\n", g_failures);
-    return 1;
+    return tr::testing::summary("tlv_arena");
 }

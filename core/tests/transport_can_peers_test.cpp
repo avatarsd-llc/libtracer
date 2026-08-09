@@ -48,6 +48,7 @@
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport_can.hpp"
 #include "libtracer/view_can.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -65,11 +66,8 @@ using tr::wire::opt_t;
 using tr::wire::tlv_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
+using tr::testing::mailbox_t;
 
 constexpr auto kBudget = 5000ms;
 
@@ -244,28 +242,6 @@ bool wait_until(Pred pred, std::chrono::milliseconds budget) {
     }
     return pred();
 }
-
-/** @brief A bounded reply mailbox for the raw loopback client. */
-struct mailbox_t {
-    std::mutex m;
-    std::condition_variable cv;
-    std::vector<std::vector<std::byte>> q;
-
-    void push(std::vector<std::byte> v) {
-        {
-            const std::lock_guard lock(m);
-            q.push_back(std::move(v));
-        }
-        cv.notify_all();
-    }
-    std::optional<std::vector<std::byte>> wait(std::chrono::milliseconds budget) {
-        std::unique_lock lock(m);
-        if (!cv.wait_for(lock, budget, [&] { return !q.empty(); })) return std::nullopt;
-        std::vector<std::byte> v = std::move(q.front());
-        q.erase(q.begin());
-        return v;
-    }
-};
 
 std::uint8_t value_u8(const tlv_t& v) { return tr::detail::load_le<std::uint8_t>(v.payload); }
 
@@ -494,7 +470,5 @@ int main() {
     test_enumeration_and_forwarding();
     test_peer_expiry();
     test_peer_table_growth();
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("transport_can_peers");
 }

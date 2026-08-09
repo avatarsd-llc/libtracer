@@ -38,6 +38,8 @@
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
+#include "test_values.hpp"
 
 namespace {
 
@@ -53,27 +55,8 @@ using tr::view::view_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
-
-/** @brief A view_t over a fresh, owned heap segment holding `bytes`. */
-view_t make_value(std::span<const std::byte> bytes) {
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
-    if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
-    return view_t::over(std::move(seg));
-}
-
-/** @brief A view_t over an owned heap segment holding the given literal bytes. */
-view_t make_value(std::initializer_list<std::uint8_t> bytes) {
-    std::vector<std::byte> v;
-    v.reserve(bytes.size());
-    for (const std::uint8_t b : bytes) v.push_back(std::byte{b});
-    return make_value(v);
-}
+using tr::testing::check;
+using tr::testing::make_value;
 
 /** @brief A VALUE TLV over raw payload bytes. */
 std::vector<std::byte> value_tlv(std::span<const std::byte> payload) {
@@ -544,6 +527,5 @@ int main() {
     test_non_value_tlv_verbatim();
     test_names_only_topology();
     test_zero_copy_link_structure();
-    std::printf(g_failures == 0 ? "ALL PASS\n" : "%d FAILURES\n", g_failures);
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("subtree_read");
 }
