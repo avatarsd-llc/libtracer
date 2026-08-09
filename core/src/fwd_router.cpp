@@ -1564,7 +1564,18 @@ void fwd_router_t::on_advertise(std::string_view inbound_name, std::uint16_t lab
         // whose egress route died with the erased table. The refusal takes the same path a
         // full table takes — the upstream's next COMPACT misses and draws the ordinary
         // stale-label HANDLE_NACK, which prompts it to re-advertise onto the new tables.
-        if (!handles_.bind_ingress_forward(inbound_name, label, std::move(fwd), down_epoch)) return;
+        if (!handles_.bind_ingress_forward(inbound_name, label, std::move(fwd), down_epoch)) {
+            // Hand the take back (#833). A refusal returns without advertising, so the label
+            // this hop just took aliases a route no ingress binding aims at and no peer has
+            // ever seen — it sat in the LIVE downstream table until that link's next
+            // clear_link, one label plus its route bytes per refused route, and it also spent
+            // one of the downstream table's bounded slots. `release_egress` erases only what
+            // THIS call minted: a label some other advertise has since taken (#913's sharing)
+            // is left exactly where it is, so an established flow cannot be unwound by a new
+            // one's refusal. Nothing goes on the wire either way.
+            handles_.release_egress(down_name, out_label, stripped_bytes);
+            return;
+        }
         const std::vector<std::byte> adv2 = encode_advertise(out_label, stripped_bytes);
         hit.link->send(std::span<const std::byte>(adv2));
         return;

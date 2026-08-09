@@ -98,6 +98,20 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   peer's push-on-connect frame is delivered instead of being decoded into an empty sink and
   dropped with no counter moving.
 
+- **`net::route_handle_t::release_egress(out_link, label, route)` — hand back a label taken
+  from `ensure_egress` that never went on the wire (#833).** The unwind a refused forwarding
+  bind needs: the egress entry is erased and, when the label is still the allocator's most
+  recent, `next_label` walks back so the 16-bit space is returned too. It erases **only a
+  MINT**, which is what makes it safe now that an egress entry is SHARED across every ingress
+  flow with an identical stripped route (#913): an entry carries "the mint is still the only
+  take of this label", set by `ensure_egress` when it creates the entry and cleared by the
+  first reuse, and this call erases nothing once that is false. So an established flow — whose
+  take was a reuse — is never unwound by a newcomer's refusal, and neither is an entry a
+  second advertise took between this caller's mint and its refusal. A release for a link with
+  no tables, a label that is not there, or a route the entry no longer holds is a no-op, and a
+  release never CREATES a link shell. No wire surface moves: a refused bind advertises
+  nothing, so a released label is one no peer has ever seen.
+
 ### Changed
 
 - **`tr::net::slot_server_t` (`libtracer/posix_endpoint.hpp`) — the multi-peer slot/poll
@@ -223,6 +237,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   to fail, and `tests/conformance/ws_diff_fuzz.py` holds it against the TypeScript decoder.
 
 ### Fixed
+
+- **A refused forwarding bind no longer strands the out-label and egress route it had to take
+  first (#833).** `on_advertise`'s forwarding arm takes its downstream label before it can bind
+  the inbound swap, because the binding names that label. When the bind refuses — a full
+  ingress table, or the #827 epoch guard — the hop returns **without advertising**, so what it
+  took stayed in the LIVE downstream table with no ingress binding aiming at it and no peer
+  that had ever seen it, reclaimable only by that link's next `clear_link`. Per refused route
+  that cost one label out of the saturating 16-bit space, the retained route bytes, and — on a
+  node with `max_label_bindings_per_link` set — one of the downstream table's bounded slots,
+  which is enough to make a later legitimate flow refuse for want of room. The arm now hands
+  the take back (`route_handle_t::release_egress`). The established-flow reuse path is
+  untouched by construction: only a MINT is reclaimable, and an established flow's take is a
+  reuse. Nothing on the wire changes in either direction — the refusal still advertises
+  nothing and the upstream's next `COMPACT` still draws the ordinary stale-label
+  `HANDLE_NACK`.
 
 - **A connection SPEC now resolves its MODULE before its link, so a `provide_link` staging can
   no longer be picked by leaf NAME alone (#883).** `provide_link` keys its staging

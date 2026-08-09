@@ -213,11 +213,11 @@ ANCHORS = [
     ("core/src/graph.cpp:1416", "value.materialize(*value_backend_)", "field_write read it back"),
     ("core/src/graph.cpp:1711", "result_t<void> graph_t::field_write"),
     ("core/src/graph.cpp:1868", "acl_right_t::CREATE", 'step0.name == "children"'),
-    ("core/src/fwd_router.cpp:1798", "fwd_router_t::deliver_remote"),
-    ("core/src/fwd_router.cpp:1830", "value.materialize(*flat_)"),
-    ("core/src/fwd_router.cpp:1831", "flatten OOM"),
-    ("core/src/fwd_router.cpp:1835", "try_encode_compact", "fwd_router_t::deliver_remote"),
-    ("core/src/fwd_router.cpp:1867", "std::vector<std::span<const std::byte>> iov;", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:1809", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:1841", "value.materialize(*flat_)"),
+    ("core/src/fwd_router.cpp:1842", "flatten OOM"),
+    ("core/src/fwd_router.cpp:1846", "try_encode_compact", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:1878", "std::vector<std::span<const std::byte>> iov;", "fwd_router_t::deliver_remote"),
     # #730 — the two INGRESS flatten guards. Anchored because the whole point of the
     # seam is that these are testable; a citation to them silently rotting would be the
     # first step back to "the guard nobody can prove still works".
@@ -558,8 +558,8 @@ ANCHORS = [
     ('core/src/fwd_router.cpp:1413', 'const auto head = peek_control(cur, wire::grammar::crc_check_t::VERIFY);'),
     ('core/src/fwd_router.cpp:1427', 'const std::span<const std::byte> route = contig(head->child1_off, head->child1_total);'),
     ('core/src/fwd_router.cpp:1473', 'hold = frame.subrope(off, total).materialize(*flat_);'),
-    ('core/src/fwd_router.cpp:1813', "// dropped fresh ADVERTISE self-heals via the peer's HANDLE_NACK (§E.1)."),
-    ('core/src/fwd_router.cpp:1851',
+    ('core/src/fwd_router.cpp:1824', "// dropped fresh ADVERTISE self-heals via the peer's HANDLE_NACK (§E.1)."),
+    ('core/src/fwd_router.cpp:1862',
      'constexpr std::array<std::byte, 5> op_tlv{std::byte{0x01}, std::byte{0x00}, std::byte{0x01},'),
     # core/src/graph.cpp
     ('core/src/graph.cpp:163', 'const view_t& frame_view, std::vector<std::byte> key,'),
@@ -703,8 +703,8 @@ ANCHORS = [
     ('core/src/path.cpp:96', 'if (!valid_segment(seg)) return std::unexpected(status_t::INVALID_PATH);'),
     ('core/src/path.cpp:112', 'if (step.empty()) return std::unexpected(status_t::INVALID_PATH);'),
     ('core/src/route_handle.cpp:82', 't.ingress.push_back(ingress_entry_t{.label = label, .binding = std::move(binding)});'),
-    ('core/src/route_handle.cpp:179', 't->egress.push_back(egress_entry_t{', 'bool route_handle_t::record_egress(std::string_view out_link, std::uint16_t label,'),
-    ('core/src/route_handle.cpp:236', 't->egress.push_back(egress_entry_t{', 'std::pair<std::uint16_t, bool> route_handle_t::ensure_egress(std::string_view out_link,'),
+    ('core/src/route_handle.cpp:182', 't->egress.push_back(egress_entry_t{', 'bool route_handle_t::record_egress(std::string_view out_link, std::uint16_t label,'),
+    ('core/src/route_handle.cpp:247', 't->egress.push_back(egress_entry_t{', 'std::pair<std::uint16_t, bool> route_handle_t::ensure_egress(std::string_view out_link,'),
     ('core/src/transport_can.cpp:313', 'tr::view::view_can_frames_t::split(*payload, cfg_.mode);'),
     # --- #1052: the build/tooling citations, now readable (@ref CITABLE_NON_SOURCE_PATHS).
     # `LIBTRACER_NO_ATOMIC` is spelled in three places outside `segment.hpp`, and the two
@@ -720,11 +720,11 @@ ANCHORS = [
     ('tools/cortexm0_footprint.py:94', 'cxx_flags = ['),
     ('tools/cortexm0_footprint.py:101', '"-DLIBTRACER_NO_ATOMIC",'),
     ('tools/cortexm0_footprint.py:115', '"--specs=nano.specs",'),
-    ('core/tests/CMakeLists.txt:1079', 'add_executable(substrate_test_no_atomic'),
-    ('core/tests/CMakeLists.txt:1092', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
+    ('core/tests/CMakeLists.txt:1089', 'add_executable(substrate_test_no_atomic'),
+    ('core/tests/CMakeLists.txt:1102', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
     # The leading indent is load-bearing: the bare token also appears in the comment
     # three lines above the executable, and an anchor that matches both is not an anchor.
-    ('core/tests/CMakeLists.txt:1093', '    LIBTRACER_NO_ATOMIC'),
+    ('core/tests/CMakeLists.txt:1103', '    LIBTRACER_NO_ATOMIC'),
 
     # --- #1095: the rest of the non-source citations, now that a line-numbered citation
     # of an unverifiable file is an ERROR rather than a false green.
