@@ -35,6 +35,14 @@
  *     tried on — the write wins the race every time there. Read that case as pinning the
  *     OBSERVABLE (the first recorded dial carries the token), which a fix applying the
  *     headers only on a rebuild would break, and as pinning nothing about ordering.
+ *   - WHAT THAT COUNT IS AND IS NOT EVIDENCE FOR. The reconstruction assigns INSIDE the
+ *     ctor, on the line after the spawn. That is a SMALLER write-to-read window than the
+ *     surface it stands in for — a setter the wiring task called once the ctor had already
+ *     returned — so it is the arrangement most favourable to the write winning, and the
+ *     rate is an upper bound rather than a characterisation of the old call pattern. It is
+ *     also one host, one scheduler, one load. The count is evidence that the write won the
+ *     runs that were made; it is not evidence that the opposite interleaving cannot happen,
+ *     which is exactly why the ordering is guarded by the compile break and not by a rate.
  *   - The race itself is closed by CONSTRUCTION: there is no longer a write to race, so
  *     the `tsan` leg of this target has nothing to find on this seam. A test that hammered
  *     a setter would be pinning the setter, and the setter is what was removed.
@@ -100,7 +108,7 @@ concept has_post_ctor_header_setter =
  */
 static_assert(!has_post_ctor_header_setter<tr::net::esp_ws_client_link_t>,
               "#959: handshake headers are a ctor argument — a setter necessarily runs after "
-              "the recv thread has already dialed");
+              "the recv thread has already been spawned");
 
 /**
  * @brief #959 — the headers occupy the FOURTH constructor slot, and a buffer size cannot

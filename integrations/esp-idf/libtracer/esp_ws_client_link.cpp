@@ -174,7 +174,7 @@ esp_ws_client_link_t::esp_ws_client_link_t(std::string host, std::uint16_t port,
     // Every member the recv thread reads is initialized ABOVE this line, which is the
     // whole of #959: the thread spawned below dials at once, so a knob delivered after the
     // spawn is a data race, and for a handshake token it also leaves it undefined whether
-    // the first dial carries one — which a peer's admission hook refuses.
+    // the first dial carries one — and a dial WITHOUT one is what an admission hook refuses.
     // `handshake_headers_` was that knob; it is a ctor argument and `const` now, so the
     // ordering is a property of the type rather than a request in a doc comment. Nothing
     // may be added between here and the spawn that the recv thread also reads.

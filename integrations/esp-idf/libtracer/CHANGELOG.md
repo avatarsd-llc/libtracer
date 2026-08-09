@@ -287,8 +287,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   before the next dial. That is what made first-dial liveness nondeterministic by
   construction. Which side wins in practice is a scheduler property, not an API one: it
   was never measured on chip, and on the host fake a rebuilt pre-fix ordering had the write
-  win **20 of 20** measured runs. A tokenless first dial is therefore what the old surface
-  *permitted*; it is not a behaviour recorded here as observed.
+  win **20 of 20** measured runs. That reconstruction assigns inside the constructor
+  immediately after the thread spawn — a *narrower* write-to-read window than the setter it
+  stands in for — so the rate is the arrangement most favourable to the write winning, on
+  one host and one scheduler. It says the write won the runs that were made; it does not say
+  the opposite interleaving cannot occur. A tokenless first dial is therefore what the old
+  surface *permitted*; it is not a behaviour recorded here as observed.
 
   The headers are now the **fourth** constructor parameter (after `ws_path`, completing
   the "what the handshake requests" group) and the member is `const`: written before the

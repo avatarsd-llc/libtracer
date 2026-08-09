@@ -55,8 +55,11 @@
  *     admission, costing a `kReconnectBackoffMs` flap before the next dial, which is what
  *     made first-dial liveness nondeterministic by construction. (Which side actually wins
  *     is a scheduler property, not an API one. It was never measured on chip; on the host
- *     fake, a rebuilt pre-fix ordering had the write win 20 of 20 measured runs, so a
- *     tokenless first dial is what the old surface PERMITTED rather than an observed
+ *     fake, a rebuilt pre-fix ordering had the write win 20 of 20 measured runs — on a
+ *     reconstruction whose write-to-read window is NARROWER than the setter it stands in
+ *     for, so read that rate as an upper bound; the scope note in
+ *     `esp_ws_client_dial_test.cpp`'s file header says what it is and is not evidence for.
+ *     So a tokenless first dial is what the old surface PERMITTED rather than an observed
  *     behaviour.) "Set it before the link first dials"
  *     was not a contract the API could express, only one it could ask for; a ctor argument
  *     makes it structural. A knob that must be applied before the thread starts belongs in

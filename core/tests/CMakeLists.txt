@@ -459,8 +459,8 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
 
     # #959 — the WS CLIENT link's DIAL/CONFIG surface, on the same TU and the same fake.
     # The seam none of the client suites above reaches is ORDERING at construction: the
-    # ctor spawns the thread that dials, so anything a caller supplied afterwards was both
-    # a race and — for a handshake token — a first dial the peer's admission hook refuses.
+    # ctor spawns the thread that dials, so anything a caller supplied afterwards raced that
+    # dial — for a token, leaving UNDEFINED whether dial ONE carried what admission gates on.
     # The fake's observable is therefore PER DIAL (fake_ws::dial_headers), because "the
     # LAST dial carried the token" is exactly what the broken surface would also report. No
     # socket and no setsockopt interposition here (#947), unlike the liveness target above:

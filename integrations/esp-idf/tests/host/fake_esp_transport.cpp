@@ -298,9 +298,9 @@ int esp_transport_connect(esp_transport_handle_t t, const char* host, int port, 
     if (!handle_usable(t)) return -1;
     ++st().connects;
     // Sampled HERE, not read back later: what dial N requested is a fact only dial N can
-    // report, and the defect under test was a first dial that differed from every one
-    // after it (#959). Recorded for failed and hung dials too — a dial that goes out
-    // without its token is a dial that went out wrong, whether or not it landed.
+    // report, and what #959 left undefined was whether the first dial requested the same
+    // headers as every one after it. Recorded for failed and hung dials too — what a dial
+    // asked for is what it asked for, whether or not it landed.
     st().dialed_headers.push_back(st().headers);
     st().connect_timeout_ms = timeout_ms;
     if (st().hang_connect) {
