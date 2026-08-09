@@ -248,7 +248,7 @@ void test_slot_addresses_are_stable() {
     for (std::size_t i = 0; i < kN; ++i) {
         const std::string name = "net/ws-client/l" + std::to_string(i);
         if (reg.entry_by_name(name) != slots[i]) stable = false;
-        if (slots[i]->link.load() != links[i].get()) resolves = false;
+        if (slots[i]->link() != links[i].get()) resolves = false;
     }
     check(stable, "the address captured at add time is STILL the slot's address");
     check(resolves, "and each slot still points at its own link");
@@ -262,7 +262,7 @@ void test_slot_addresses_are_stable() {
             stable_after = false;
     }
     check(stable_after, "a tombstone leaves every other slot address untouched");
-    check(slots[0]->link.load() == nullptr, "and the tombstoned slot reads null in place");
+    check(slots[0]->link() == nullptr, "and the tombstoned slot reads null in place");
 }
 
 /**

@@ -1,6 +1,7 @@
 # The connection table is lock-free to read and mutex-serialized to write: an append-only chunked list, plus one control-plane lock
 
-Status: **accepted; implemented** — decisions 1–4 all landed: the append-only chunked `children_` (`core/include/libtracer/child_registry.hpp:705`), permanently stable slot addresses (now depended on by ADR-0062's forward cache), the two control-plane `std::mutex`es (`transport_vertex.hpp:395`, `fwd_router.hpp:872`, with the lock order documented at `transport_vertex.hpp:392`) and `std::atomic<bool> child_t::multi_peer` (`child_registry.hpp:146`). **Corrects the load-bearing premise of [ADR-0061](0061-per-transport-mount-routing-strip-k-l5-demux.md)** — that the connection table is "immutable after setup" — which [RFC-0014](../spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md) invalidated by making connection create/remove a *runtime* operation. Originally reused [ADR-0060](0060-lkv-copy-store-injected-value-backend.md) §2's arch-selected sync trait; **Erratum 1 retires that** in favour of a plain `std::mutex`, which is the primitive the rest of the codebase already serializes with. Upholds [ADR-0038](0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md) §3 (the FWD demux is lock-free) and its invariant #2 (zero-heap forward). Resolves [#521](https://github.com/avatarsd-llc/libtracer/issues/521) and unblocks [#512](https://github.com/avatarsd-llc/libtracer/issues/512). Grounded by a `/grill-with-docs` session against the code and fresh measurement.
+Status: **accepted; implemented** — decisions 1–4 all landed: the append-only chunked `children_` (`core/include/libtracer/child_registry.hpp:705`), permanently stable slot addresses (now depended on by ADR-0062's forward cache), the two control-plane `std::mutex`es (`transport_vertex.hpp:395`, `fwd_router.hpp:872`, with the lock order documented at `transport_vertex.hpp:392`) and a race-free `child_t` shape bit (`child_registry.hpp:122` — originally
+`std::atomic<bool> multi_peer`, folded into the link word by Erratum 6). **Corrects the load-bearing premise of [ADR-0061](0061-per-transport-mount-routing-strip-k-l5-demux.md)** — that the connection table is "immutable after setup" — which [RFC-0014](../spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md) invalidated by making connection create/remove a *runtime* operation. Originally reused [ADR-0060](0060-lkv-copy-store-injected-value-backend.md) §2's arch-selected sync trait; **Erratum 1 retires that** in favour of a plain `std::mutex`, which is the primitive the rest of the codebase already serializes with. Upholds [ADR-0038](0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md) §3 (the FWD demux is lock-free) and its invariant #2 (zero-heap forward). Resolves [#521](https://github.com/avatarsd-llc/libtracer/issues/521) and unblocks [#512](https://github.com/avatarsd-llc/libtracer/issues/512). Grounded by a `/grill-with-docs` session against the code and fresh measurement.
 
 ## Context
 
@@ -26,7 +27,7 @@ Exploring the write side found the problem is wider than the registry. `transpor
 
 3. **The control plane serializes writers with a plain `std::mutex`** — one on `transport_vertex_t`, one on `fwd_router_t` — covering `make_connection` / `remove_connection` / `provide_link` and `add_child` / `remove_child` in full, and **never taken by the forward path**. *(Revised — see Erratum 1. This decision originally specified the ADR-0060 §2 arch-selected sync trait; that was wrong, and the reasons are recorded below rather than quietly dropped.)*
 
-4. **`child_t::multi_peer` becomes atomic.** Increment 1 made the *append* publish safely, but `add()` also **rebinds** an existing slot (the tombstone-reuse path that RFC-0014 create/remove churn takes constantly), and that rebind plainly writes `multi_peer` while the forward path plainly reads it (`fwd_router.cpp:212`, and the ADR-0062 cache probe at `:790`). Only `link` was atomic, so this was a genuine reader-vs-writer data race that increment 1 did not close — see Erratum 3.
+4. **`child_t::multi_peer` becomes atomic.** Increment 1 made the *append* publish safely, but `add()` also **rebinds** an existing slot (the tombstone-reuse path that RFC-0014 create/remove churn takes constantly), and that rebind plainly writes `multi_peer` while the forward path plainly reads it (`fwd_router.cpp:212`, and the ADR-0062 cache probe at `:790`). Only `link` was atomic, so this was a genuine reader-vs-writer data race that increment 1 did not close — see Erratum 3. *(Superseded — see Erratum 6: the shape is no longer its own field. The requirement stands; the mechanism changed.)*
 
 5. **`graph_t`'s vertex map stays as it is**, under `map_mutex_`. Making it lock-free is explicitly out of scope; see Considered Options.
 
@@ -106,6 +107,25 @@ simply carried forward. The "roughly 1%" ratio beside it was derived from the re
 is **not** re-derived here: no timing was taken, only allocation counts. The rejection is unaffected
 — six allocations still dominate an uncontended 3 ns lock by orders of magnitude — but a reader must
 not quote 937, or the 1%, as measured.
+
+**Erratum 6 (2026-08-09) — an atomic `multi_peer` BESIDE an atomic `link` was not enough; the two
+are now ONE word.** Decision 4 closed the data race and stopped there. It did not close the
+*pairing*: `add`'s rebind published two atomics, so a reader could observe one publication's shape
+with another's link. The mount descent read them in the more dangerous order — shape first
+(`fwd_router.cpp:213` at the time), link second (`:229`) — which pairs a stale point-to-point shape
+with a fresh **bus** link and returns that link as a directed egress; its `send()` broadcasts, which
+is the one-request/N-replies misroute of [#409](https://github.com/avatarsd-llc/libtracer/issues/409).
+`bound_egress` had the same shape. [#882](https://github.com/avatarsd-llc/libtracer/issues/882)
+ruled the minimal fix to be reading the link first, matching `resolve_peer`. **Measured, that is
+insufficient**: with a reader loading link-then-shape, a *second* rebind landing between the two
+loads still pairs the first publication's bus link with the second's point-to-point shape, and a
+storm that alternates shape reproduces it at the same order of rate as the original order does. So
+the alternative the issue offered is what shipped: the shape bit lives in the link pointer's spare
+low bit (`child_registry_t::kBusShapeBit`), `child_t::egress()` is the only reader, and the invalid
+pairing is unrepresentable rather than merely unlikely. `std::atomic<bool> child_t::multi_peer` no
+longer exists; decision 4's *requirement* — the shape must not be a plain field written under a
+lock-free read — is upheld more strongly, its *mechanism* is superseded. `sizeof(child_t)` is
+unchanged at 80 bytes and the forward path now takes one load where it took two.
 
 ## Considered options
 

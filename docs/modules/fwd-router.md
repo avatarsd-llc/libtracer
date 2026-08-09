@@ -166,9 +166,13 @@ class fwd_router_t {
 };
 
 class child_registry_t {                 // the one NAME -> link demux table (ADR-0037)
-    struct child_t { std::string name; std::atomic<transport_t*> link; /* tombstone = null */
-                     std::atomic<bool> multi_peer; std::uint64_t name_digest;
-                     std::vector<std::byte> mount_tlv; bool live() const noexcept; };
+    // The link and its SHAPE are ONE atomic word (#882): read as a pair or a rebind that
+    // flips a name's shape hands a forward one publication's shape with another's link.
+    struct egress_t { transport_t* link; bool multi_peer; };  // tombstone = null link
+    struct child_t { std::string name; std::uint64_t name_digest;
+                     std::vector<std::byte> mount_tlv;
+                     egress_t egress() const noexcept;  transport_t* link() const noexcept;
+                     bool live() const noexcept; };
     bool add(std::string name, transport_t& link);        // rebinds; false = no slot
     bool erase(std::string_view name);                    // tombstones in place
     // ONE pass, each slot matched against the prefix of its OWN seg_count (#523) — so a
@@ -184,8 +188,8 @@ class child_registry_t {                 // the one NAME -> link demux table (AD
 
 Signature source: `core/include/libtracer/fwd_router.hpp:177` (constructor), `:246`
 (`add_child`), `:302` (`subscribe_toward`), `:404-416` (the sink function-pointer types);
-`core/include/libtracer/child_registry.hpp:209` (`add`), `:458` (`resolve_peer`), `:473`
-(`erase`), `:499` (`entry_by_name`), `:520` (`by_name`), `:561`/`:571` (`size`/`live_size`).
+`core/include/libtracer/child_registry.hpp:261` (`add`), `:511` (`resolve_peer`), `:526`
+(`erase`), `:559` (`entry_by_name`), `:580` (`by_name`), `:621`/`:631` (`size`/`live_size`).
 
 ## Routing one inbound frame
 
@@ -219,8 +223,8 @@ flowchart TB
   consumer that did not need contiguity. `m` must stay alive while its span is read.
 - **The default delivery leg copies nothing.** A full-route `FWD{WRITE}` fan-out scatter-gathers a
   fresh stack head, the stored return-route bytes, an empty `src`, and one span per link of the
-  stored value (`core/src/fwd_router.cpp:1866`). The `COMPACT` leg is the one that flattens,
-  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:1829`) — single-link, that
+  stored value (`core/src/fwd_router.cpp:1874`). The `COMPACT` leg is the one that flattens,
+  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:1837`) — single-link, that
   flatten is a zero-copy adopt, and multi-link it draws from the router's injected `flat` backend
   (#730), not the global heap.
 - **All rope flattens on the forward AND terminus paths draw from the injected seam.** `flat`
@@ -251,8 +255,8 @@ flowchart TB
   instead of raising an exception that `-fno-exceptions` would turn into `abort()`. A dropped fresh
   `ADVERTISE` self-heals through the peer's `HANDLE_NACK`. The residual is the label store: a
   **compact-flagged** flow's first delivery on a link resolves its label *before* those three steps
-  (`fwd_router.cpp:1831`), and that allocates its `link_tables_t` and its egress entry from the
-  `std::pmr::memory_resource` (`route_handle.cpp:34-42`, `:247-248`), which reports exhaustion by
+  (`fwd_router.cpp:1839`), and that allocates its `link_tables_t` and its egress entry from the
+  `std::pmr::memory_resource` (`route_handle.cpp:34-42`, `:236-237`), which reports exhaustion by
   throwing — so that one leg can still abort under `-fno-exceptions`
   ([#603](https://github.com/avatarsd-llc/libtracer/issues/603)). A flow that is not
   compact-flagged never reaches it. See
@@ -316,7 +320,7 @@ adopt; `/net` itself is likewise only the recommended root convention (a constru
 vertex, insert the `conns_` entry, wire the link into the router's `child_registry_t` — and only
 the last can be refused: `add_child` answers `false` when the registry cannot grow, and it is the
 only place that can say so (`core/include/libtracer/fwd_router.hpp:246`,
-`core/include/libtracer/child_registry.hpp:209`). A refusal unwinds the first two in reverse —
+`core/include/libtracer/child_registry.hpp:261`). A refusal unwinds the first two in reverse —
 retire the vertex, then erase the entry, which destroys the config-constructed socket — publishes
 no liveness, and answers `BACKPRESSURE` (`core/src/transport_vertex.cpp:373-376`). Discarding that
 `bool` left a connection reporting `UP` that no `dst` resolved, no inbound frame reached, and
