@@ -213,18 +213,18 @@ ANCHORS = [
     ("core/src/graph.cpp:1499", "value.materialize(*value_backend_)", "field_write read it back"),
     ("core/src/graph.cpp:1827", "result_t<void> graph_t::field_write"),
     ("core/src/graph.cpp:2014", "acl_right_t::CREATE", 'step0.name == "children"'),
-    ("core/src/fwd_router.cpp:1887", "fwd_router_t::deliver_remote"),
-    ("core/src/fwd_router.cpp:1921", "value.materialize(*flat_)"),
-    ("core/src/fwd_router.cpp:1922", "flatten OOM"),
-    ("core/src/fwd_router.cpp:1924", "emit_compact", "fwd_router_t::deliver_remote"),
-    ("core/src/fwd_router.cpp:1955", "std::vector<std::span<const std::byte>> iov;", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:1895", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:1929", "value.materialize(*flat_)"),
+    ("core/src/fwd_router.cpp:1930", "flatten OOM"),
+    ("core/src/fwd_router.cpp:1932", "emit_compact", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:1963", "std::vector<std::span<const std::byte>> iov;", "fwd_router_t::deliver_remote"),
     # #730 — the two INGRESS flatten guards. Anchored because the whole point of the
     # seam is that these are testable; a citation to them silently rotting would be the
     # first step back to "the guard nobody can prove still works".
-    ("core/src/fwd_router.cpp:1505", "if (route.empty() && head->child1_total != 0) return;"),
-    ("core/src/fwd_router.cpp:1524", "if (payload.empty() && head->child1_total != 0) return;"),
-    ("core/src/fwd_router.cpp:1517", "const std::span<const std::byte> payload = contig(head->child1_off, head->child1_total);"),
-    ("core/src/fwd_router.cpp:1204", "frame.subrope(0, frame.total_length()).materialize"),
+    ("core/src/fwd_router.cpp:1513", "if (route.empty() && head->child1_total != 0) return;"),
+    ("core/src/fwd_router.cpp:1532", "if (payload.empty() && head->child1_total != 0) return;"),
+    ("core/src/fwd_router.cpp:1525", "const std::span<const std::byte> payload = contig(head->child1_off, head->child1_total);"),
+    ("core/src/fwd_router.cpp:1212", "frame.subrope(0, frame.total_length()).materialize"),
     # #766/#793 — the terminus resolver's three rope-tier draws, and the two allocations the
     # seam docs name as NOT covered by `flat`. These were cited by four doc pages and anchored
     # by none, so #793's own edits to `op_resolve_view.cpp` shifted every one of them without
@@ -236,7 +236,7 @@ ANCHORS = [
     ("core/src/op_resolve_view.cpp:254", "wire().materialize(backend())"),
     ("core/src/fwd_reply.cpp:104", "view::segment_alloc(egress, head_len)"),
     ("core/src/op_resolve_walk.hpp:494", "rope_t or_backpressure"),
-    ("core/src/fwd_router.cpp:1423", "decode_into(frame, rx_for(inbound_ctx))"),
+    ("core/src/fwd_router.cpp:1431", "decode_into(frame, rx_for(inbound_ctx))"),
     # `vertex.hpp:<parent_>` was pinned here TWICE, and the only doc that cites it is
     # `docs/spec/rfcs/0019` — a historical genre this tool's own header excludes from
     # pinning ("dated records of a decision ... pinning them would demand rewriting
@@ -547,20 +547,20 @@ ANCHORS = [
     ('core/src/frame.cpp:119', 'std::array<grammar::walk_frame_t<grammar::span_cursor>, 8> slots;'),
     ('core/src/frame.cpp:120', 'grammar::walk_stack_t<grammar::span_cursor> stack(slots, &mem::heap_source());'),
     # core/src/fwd_router.cpp
-    ('core/src/fwd_router.cpp:627',
+    ('core/src/fwd_router.cpp:632',
      'bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_source_t* rx) {'),
-    ('core/src/fwd_router.cpp:1173',
+    ('core/src/fwd_router.cpp:1181',
      'void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_t frame,'),
-    ('core/src/fwd_router.cpp:1179', 'if (frame.link_count() == 1) {'),
-    ('core/src/fwd_router.cpp:1222', '// A REPLY that reaches its originator here is handed to the sink'),
-    ('core/src/fwd_router.cpp:1533',
+    ('core/src/fwd_router.cpp:1187', 'if (frame.link_count() == 1) {'),
+    ('core/src/fwd_router.cpp:1230', '// A REPLY that reaches its originator here is handed to the sink'),
+    ('core/src/fwd_router.cpp:1541',
      'void fwd_router_t::on_control_rope(std::string_view inbound_name, view::rope_t frame) {'),
-    ('core/src/fwd_router.cpp:1484', 'const auto head = peek_control(cur, wire::grammar::crc_check_t::VERIFY);'),
-    ('core/src/fwd_router.cpp:1498', 'const std::span<const std::byte> route = contig(head->child1_off, head->child1_total);'),
-    ('core/src/fwd_router.cpp:1544', 'hold = frame.subrope(off, total).materialize(*flat_);'),
-    ('core/src/fwd_router.cpp:1904',
+    ('core/src/fwd_router.cpp:1492', 'const auto head = peek_control(cur, wire::grammar::crc_check_t::VERIFY);'),
+    ('core/src/fwd_router.cpp:1506', 'const std::span<const std::byte> route = contig(head->child1_off, head->child1_total);'),
+    ('core/src/fwd_router.cpp:1552', 'hold = frame.subrope(off, total).materialize(*flat_);'),
+    ('core/src/fwd_router.cpp:1912',
      "// else. A dropped fresh ADVERTISE self-heals via the peer's HANDLE_NACK (§E.1). NOT yet"),
-    ('core/src/fwd_router.cpp:1939',
+    ('core/src/fwd_router.cpp:1947',
      'constexpr std::array<std::byte, 5> op_tlv{std::byte{0x01}, std::byte{0x00}, std::byte{0x01},'),
     # core/src/graph.cpp
     ('core/src/graph.cpp:246', 'const view_t& frame_view, std::vector<std::byte> key,'),
@@ -696,8 +696,8 @@ ANCHORS = [
     ('core/include/libtracer/posix_endpoint.hpp:409',
      '[[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }'),
     ('core/include/libtracer/edge_pin.hpp:153', 'class pin_t {'),
-    ('core/src/fwd_router.cpp:734', 'link.set_rope_receiver('),
-    ('core/src/fwd_router.cpp:688', 'bus->set_peer_rope_receiver('),
+    ('core/src/fwd_router.cpp:739', 'link.set_rope_receiver('),
+    ('core/src/fwd_router.cpp:693', 'bus->set_peer_rope_receiver('),
     ('core/src/graph.cpp:772', 'vertex_t* graph_t::find_ptr(std::span<const std::byte> key) const {'),
     ('core/src/graph.cpp:773', 'const std::shared_lock lock(map_mutex_);'),
     ('core/src/graph.cpp:1813', 's.target_key.reset();'),
