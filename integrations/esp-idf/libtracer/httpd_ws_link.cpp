@@ -1533,13 +1533,28 @@ std::string httpd_ws_link_t::reclaim_slot(session_t* slot) {
 }
 
 void httpd_ws_link_t::notify_departed(std::string_view peer) {
-    // Peer-named mode evicts just the departed peer's edges; flat mode has one peer's
-    // departure BE the whole link down — the same fork slot_server_t::teardown_slot
-    // takes, and for the same reason (which sink the router installed).
-    if (peer_named_)
+    // Peer-named mode evicts just the departed peer's edges. A FLAT link has ONE routing
+    // identity for every peer it carries — the registered child NAME — so its only seam is
+    // the whole link, and firing that on a MID-LIFE close would evict the surviving tabs'
+    // edges along with the departed one's. It waits for the last open session (#889) —
+    // the same fork slot_server_t::teardown_slot takes, for the same reason.
+    if (peer_named_) {
         notify_peer_down(peer);
-    else
+    } else if (!any_open_session()) {
         notify_down();
+    }
+}
+
+bool httpd_ws_link_t::any_open_session() const {
+    // reclaim_slot cleared the departing slot's `open` under this same lock before handing
+    // the name up, so the departed session is not counted. A peer admitted between this
+    // answer and the notification would be evicted with edges it has not had time to grow
+    // — nothing to lose — which is why the two need not be one critical section (and must
+    // not be: notify_down runs with no lock of this link's held).
+    const std::lock_guard lock(peers_m_);
+    for (const std::unique_ptr<session_t>& s : slots_)
+        if (s->open) return true;
+    return false;
 }
 
 void httpd_ws_link_t::note_rx_message(session_t* slot, std::size_t bytes) {

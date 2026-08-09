@@ -118,8 +118,8 @@ class bus_link_t {
      * Each of the five peer-named wiring calls declared below — @ref set_peer_receiver and
      * @ref set_peer_rope_receiver (both spellings each) and @ref set_peer_down_notifier —
      * passes this gate, so a link that reports false ends up with an empty
-     * @ref peer_rx_ and no peer-departure notifier. (A DERIVED class can still reach the
-     * protected @ref peer_rx_ directly; the gate governs this interface's own doors.)
+     * `peer_rx_` and no peer-departure notifier. (A DERIVED class can still reach the
+     * protected `peer_rx_` directly; the gate governs this interface's own doors.)
      * It is a query, not a knob: `bus_link_t` is a PUBLIC base, so a flat link's
      * `set_peer_receiver` is reachable by an explicit upcast past the null `bus()`, and
      * before this gate that call silently flipped the link into peer-named delivery the
