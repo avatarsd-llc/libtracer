@@ -39,8 +39,12 @@
  * behind the request-plane admission gate with no wiring change.
  *
  * Threading (the review-critical part):
- *   - RX runs on the `esp_http_server` task: the WS URI handler is invoked once at
- *     the opening handshake (HTTP GET) and again for each subsequent data frame.
+ *   - RX runs on the `esp_http_server` task. The server answers the opening
+ *     WebSocket GET ITSELF and, having answered it, does not call the URI handler
+ *     for that request at all (`httpd_uri.c` returns from the handshake branch
+ *     before `uri->handler`), so the handler is invoked ONLY for data frames; the
+ *     opening GET is seen through the server's `ws_pre_handshake_cb` instead
+ *     (@ref set_admission_cb), which runs before the 101 is written.
  *     A data frame is read with httpd_ws_recv_frame() and delivered to the graph
  *     SYNCHRONOUSLY on that task — the router services the request (decode /
  *     resolve / reply) in-call, exactly as the raw server delivered on its recv
@@ -132,9 +136,11 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *        URI handler at "/"; confirm with @ref ok.
      *
      * @param bind_port  TCP port to serve the graph WS on (the node's WS port).
-     * @param max_peers  Concurrent-peer admission cap; 0 = unbounded. Beyond it a
-     *                   new handshake is refused (the handler fails, httpd closes
-     *                   the socket) — a clean refusal, mirroring transport_ws_server.
+     * @param max_peers  Concurrent-peer admission cap; 0 = unbounded. Beyond it the
+     *                   peer is refused on its FIRST frame (the handler fails, httpd
+     *                   closes the socket) — a clean refusal, mirroring
+     *                   transport_ws_server, but landing one step later than the
+     *                   handshake because that is where this link claims a slot.
      * @param peer_named Expose the @ref bus_link_t facet: each inbound peer gets its
      *                   own `<ip>:<port>` return-route identity (the browser-tabs
      *                   deployment). Off keeps point-to-point hop naming (send()
@@ -163,9 +169,11 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * @param uri        WS URI pattern to register the handler at (e.g. "/ws"). Register
      *                   it BEFORE any wildcard route so registration-order precedence
      *                   routes it to the WS handler; keep it an exact literal.
-     * @param max_peers  Concurrent-peer admission cap; 0 = unbounded. Beyond it a
-     *                   new handshake is refused (the handler fails, httpd closes
-     *                   the socket) — a clean refusal, mirroring transport_ws_server.
+     * @param max_peers  Concurrent-peer admission cap; 0 = unbounded. Beyond it the
+     *                   peer is refused on its FIRST frame (the handler fails, httpd
+     *                   closes the socket) — a clean refusal, mirroring
+     *                   transport_ws_server, but landing one step later than the
+     *                   handshake because that is where this link claims a slot.
      * @param peer_named Expose the @ref bus_link_t facet: each inbound peer gets its
      *                   own `<ip>:<port>` return-route identity (the browser-tabs
      *                   deployment). Off keeps point-to-point hop naming (send()
@@ -328,23 +336,41 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     [[nodiscard]] static std::size_t tx_slot_capacity() noexcept;
 
     /**
-     * @brief Admission predicate: given the opening-handshake request, return true to
-     *        admit the peer or false to refuse it — a clean refusal that closes the
-     *        socket, exactly as the @ref max_peers cap does. @p ctx is the opaque
-     *        pointer registered alongside it in @ref set_admission_cb.
+     * @brief Admission predicate: given the parsed opening GET, return true to admit the
+     *        peer or false to refuse it. A refusal is `ESP_FAIL` back to
+     *        `esp_http_server`, which abandons the upgrade and closes the socket. @p ctx
+     *        is the opaque pointer registered alongside it in @ref set_admission_cb.
+     *
+     * @p req is a REQUEST-scoped `httpd_req_t*`: `httpd_req_get_hdr_value_str`,
+     * `httpd_req_get_url_query_str` and `req->uri` all answer for this handshake. It is
+     * valid for the duration of the call and no longer.
      */
     using admission_fn_t = bool (*)(void* ctx, httpd_req_t* req);
 
     /**
-     * @brief Install (or clear, with `nullptr`) an admission predicate consulted at the
-     *        top of every opening handshake, BEFORE the peer-cap check and any slot
-     *        allocation. Unset (the default) admits every peer — the historical behavior.
+     * @brief Install (or clear, with `nullptr`) an admission predicate consulted on every
+     *        opening handshake, in the server's WebSocket PRE-handshake callback — before
+     *        the 101 is written, before the session is upgraded, and therefore before any
+     *        slot of this link's exists. Unset (the default) admits every peer.
      *
      * The seam a host uses to authenticate the graph WS the same way it gates the rest of
      * its HTTP surface: inspect the handshake request's headers (a session cookie, a
      * shared token) and refuse an unauthenticated peer before it can read or write a
      * single vertex. NOT synchronized — set it once at wiring time, before the link
      * serves; the hook is read on the httpd task with no lock.
+     *
+     * WHERE it runs is not a detail. `esp_http_server` answers the WebSocket handshake
+     * internally and then returns WITHOUT calling the URI handler for that request
+     * (`httpd_uri.c`), so a predicate placed in the handler sees only data frames on an
+     * ALREADY upgraded socket — never the opening GET, and never in time to stop the
+     * upgrade. The server's `ws_pre_handshake_cb` is the one call that gets the parsed
+     * GET, so that is where this link installs its thunk, at both registration sites
+     * (own-server and adopted-server). The component's `Kconfig` `select`s
+     * `HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT` for that reason; the member is present at the
+     * component's ESP-IDF floor, so there is no fallback tier.
+     *
+     * In ADOPTED mode the predicate is scoped to THIS link's WS URI. Registration is
+     * per-URI, so the rest of the caller's HTTP surface on that server is not affected.
      */
     void set_admission_cb(admission_fn_t fn, void* ctx) noexcept {
         admission_fn_ = fn;
@@ -379,13 +405,22 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     };
 
     // --- httpd trampolines (static; recover `this` from req->user_ctx / work arg) ---
-    static esp_err_t ws_handler(httpd_req_t* req);  // the WS URI handler (handshake + frames)
+    static esp_err_t ws_handler(httpd_req_t* req);  // the WS URI handler (data frames)
+    /**
+     * @brief `ws_pre_handshake_cb`: run @ref set_admission_cb's predicate against the
+     *        parsed opening GET, before the server writes the 101.
+     *
+     * Registered at BOTH construction sites. Like @ref ws_handler it recovers the link
+     * through the gate (`req->user_ctx`) and registers on the gate's barrier for the
+     * duration of the predicate, so a concurrent destructor joins it instead of freeing
+     * the members it reads.
+     */
+    static esp_err_t ws_pre_handshake(httpd_req_t* req);
     static void on_session_closed(void* slot_ctx);  // free_ctx_fn: a peer departed
     static void tx_work(void* work_arg);            // httpd_queue_work fn: one queued send
     static void detach_work(void* req_arg);         // httpd_queue_work fn: teardown detach
 
     // --- instance handlers (run on the httpd task) ---
-    esp_err_t on_handshake(httpd_req_t* req);   // admit or refuse a new peer
     esp_err_t on_data_frame(httpd_req_t* req);  // recv one WS frame, (reassemble,) deliver
     /**
      * @brief Recycle a departed peer's slot and report what the routing plane is still
@@ -660,7 +695,8 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     std::uint16_t port_;
     std::size_t max_peers_;
     /** @brief Opening-handshake admission predicate + its opaque ctx; null admits every
-     *         peer (the default). Read on the httpd task — see @ref set_admission_cb. */
+     *         peer (the default). Read on the httpd task, from @ref ws_pre_handshake —
+     *         see @ref set_admission_cb. */
     admission_fn_t admission_fn_ = nullptr;
     void* admission_ctx_ = nullptr;
     /** @brief The per-socket send bound applied at admission — see @ref send_timeout_ms. */

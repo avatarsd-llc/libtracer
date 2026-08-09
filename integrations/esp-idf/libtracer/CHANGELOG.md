@@ -90,6 +90,49 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`httpd_ws_link_t::set_admission_cb`'s predicate now runs where the opening GET actually
+  arrives — the server's WebSocket PRE-handshake callback — and its refusal stops the
+  upgrade (#958).** `esp_http_server` answers the WebSocket handshake internally and returns
+  from `httpd_uri()` *before* calling `uri->handler`, so a predicate consulted from the URI
+  handler was never handed the opening GET at all: the handler is entered only for data
+  frames, on an already-upgraded socket, and the peer is claimed there. The link now
+  registers a `ws_pre_handshake_cb` thunk at **both** construction sites (own-server and
+  adopted-server) which is called with the parsed opening GET — method, URI and every header
+  readable through the ordinary `httpd_req_get_*` accessors — before the 101 is written and
+  before the session latches the WS route. Returning `false` refuses the peer: no 101, no
+  session, no slot, no per-socket policy, no entry in `enumerate_peers`. Unset (still the
+  default) admits every peer, so an unconfigured link is unchanged. In adopted mode the
+  predicate is scoped to this link's WS URI — registration is per-URI, so the rest of the
+  caller's HTTP surface is untouched.
+
+  **Consumer-visible consequences.** (1) The component's `Kconfig` now
+  `select`s `HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT` when `CONFIG_HTTPD_WS_SUPPORT` is on — that
+  is where the `httpd_uri_t` member lives, and it is present at this component's ESP-IDF
+  floor (`>=5.5.5`), so there is no fallback tier and no second code path. (2) The
+  predicate's `httpd_req_t*` is now a *handshake* request rather than a data-frame one,
+  which is what makes header inspection meaningful; a hook that read nothing off it is
+  unaffected. (3) A predicate is consulted once per CONNECTION, at the handshake, instead of
+  once per opening-GET dispatch that never happened.
+
+- **Documentation erratum, shipped in the same change (#958).** The header's threading
+  section claimed "the WS URI handler is invoked once at the opening handshake (HTTP GET)
+  and again for each subsequent data frame", and `set_admission_cb` / the `max_peers`
+  parameter documented a refusal "at the top of every opening handshake". Neither described
+  the code: the handler is never invoked for the opening GET, and both the admission
+  predicate and the `max_peers` cap were reached only on a peer's FIRST DATA FRAME. The
+  admission half is now true because the code moved; the `max_peers` text is corrected to
+  say where that check really happens (first frame — this change does not move it). The
+  0.7.1 `set_admission_cb` entry below is left as the historical record and is superseded
+  by this one.
+
+- **The dead opening-GET handler path is deleted (#958).** `on_handshake` — a second peer
+  claim site, a second `max_peers` check and a second `bound_socket` call — was unreachable
+  for a real WebSocket peer at the component's ESP-IDF floor, and reachable only by a plain
+  non-upgrade GET on the WS URI, which it answered by claiming a peer slot for a socket that
+  was not a WebSocket. Such a request now falls through to the frame path, where
+  `httpd_ws_recv_frame` answers `ESP_ERR_INVALID_STATE` on a socket with no handshake done
+  and the server closes it. `on_data_frame` is now the ONE claim site.
+
 - **A FLAT `httpd_ws_link_t` no longer reports the WHOLE LINK down when one of its several
   sessions closes (#889).** `notify_departed` forked on the constructed mode correctly —
   peer-named evicts just the departed peer — but the FLAT arm fired

@@ -243,8 +243,15 @@ constexpr std::size_t kFanoutChunk = kDefaultPeerCap;
  * saw in the strike log, and it made the strike unattributable to a peer at exactly the
  * moment the attribution mattered. A v4-mapped v6 address (`::ffff:a.b.c.d`) is unwrapped
  * so a dual-stack node keeps naming its IPv4 peers the way the census always has.
+ *
+ * `noinline` because it runs ONCE per connection — on the claim edge inside
+ * @ref httpd_ws_link_t::on_data_frame, which is otherwise the per-FRAME hot path. It is a
+ * large body (`getpeername` + `inet_ntop` + a `std::string` build), and with the opening-GET
+ * claim site gone it has a single caller, which is precisely the shape that invites the
+ * inliner to fold it into that hot function. Keeping the call is what keeps the per-frame
+ * path's code layout the size it was.
  */
-[[nodiscard]] std::string peer_name(int fd) {
+[[gnu::noinline]] [[nodiscard]] std::string peer_name(int fd) {
     sockaddr_storage addr = {};
     socklen_t len = sizeof(addr);
     if (::getpeername(fd, reinterpret_cast<sockaddr*>(&addr), &len) == 0) {
@@ -364,6 +371,15 @@ struct asm_buf_t {
  * sessions still holding the pointer is unknowable, the gate is LEAKED there (one small
  * block, teardown-only — the same leak-rather-than-free discipline #815 established for
  * the TX pool). Owning mode frees it: `httpd_stop` deletes every session first.
+ *
+ * A FIFTH entry point resolves the link through this gate and is NOT one of the latched
+ * four: @ref httpd_ws_link_t::ws_pre_handshake, the `ws_pre_handshake_cb` both constructors
+ * register (#958). The asymmetry is the URI table's: `httpd_uri.c` reads that callback out
+ * of the registration on every handshake and frees it with the entry on unregister, where
+ * `handler`/`user_ctx` were copied into each session and survive. So it needs the gate for
+ * the SAME reason — it dereferences the link, and only the barrier makes that safe against
+ * a concurrent destructor — but unlike the handler it cannot outlive the URI, so it is not
+ * part of what makes the gate's lifetime longer than the link's.
  *
  * LOCK ORDER, recorded because it was previously established only by code (#960):
  * `m` may be taken while holding nothing, and `peers_m_` may be taken under it — never
@@ -695,8 +711,8 @@ httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, std::size_t max_peers,
     }
     uri_ = "/";            // owns_httpd_ stays true; the dtor stops the server, but keep uri_
                            // coherent with the adopting path (both register the same handler).
-    httpd_uri_t uri = {};  // zero-init, then set fields by name (robust to optional
-    uri.uri = "/";         // ws_pre/post_handshake_cb members behind extra Kconfig)
+    httpd_uri_t uri = {};  // zero-init, then set fields by name (the struct's tail members
+    uri.uri = "/";         // sit behind Kconfig, so positional init would not be stable)
     uri.method = HTTP_GET;
     uri.handler = &httpd_ws_link_t::ws_handler;
     // The GATE, never `this` — esp_http_server latches this pointer into every upgraded
@@ -704,6 +720,11 @@ httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, std::size_t max_peers,
     // be long after this link is gone. See gate_t.
     uri.user_ctx = gate_;
     uri.is_websocket = true;
+    // The ONE call that sees the opening GET: the server answers the handshake itself and
+    // returns without invoking `handler` for it, so the admission predicate has to sit
+    // here or it never sees a peer's credentials at all. Present unconditionally — the
+    // component's Kconfig selects CONFIG_HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT.
+    uri.ws_pre_handshake_cb = &httpd_ws_link_t::ws_pre_handshake;
     uri.handle_ws_control_frames = false;  // httpd answers PING/PONG and tracks CLOSE
     if (httpd_register_uri_handler(handle_, &uri) != ESP_OK) {
         httpd_stop(handle_);
@@ -736,12 +757,16 @@ httpd_ws_link_t::httpd_ws_link_t(httpd_handle_t external, const char* uri_patter
     port_ = 0;
     uri_ = uri_pattern;
 
-    httpd_uri_t uri = {};    // zero-init, then set fields by name (robust to optional
-    uri.uri = uri_.c_str();  // ws_pre/post_handshake_cb members behind extra Kconfig)
+    httpd_uri_t uri = {};    // zero-init, then set fields by name (the struct's tail members
+    uri.uri = uri_.c_str();  // sit behind Kconfig, so positional init would not be stable)
     uri.method = HTTP_GET;
     uri.handler = &httpd_ws_link_t::ws_handler;
     uri.user_ctx = gate_;  // the GATE, never `this` — see gate_t
     uri.is_websocket = true;
+    // Same admission point as the owning ctor, and per-URI: registering it here gates the
+    // handshake for THIS link's WS URI only, leaving the adopted server's other routes
+    // exactly as its owner configured them.
+    uri.ws_pre_handshake_cb = &httpd_ws_link_t::ws_pre_handshake;
     uri.handle_ws_control_frames = false;  // httpd answers PING/PONG and tracks CLOSE
     if (httpd_register_uri_handler(external, &uri) != ESP_OK) {
         handle_ = nullptr;  // ok() stays false; do NOT httpd_stop — we do not own the server
@@ -1086,10 +1111,14 @@ esp_err_t httpd_ws_link_t::ws_handler(httpd_req_t* req) {
     // the only reader is a destructor asking whether it is itself that task — and then the
     // store and the load are on one task, so no ordering is at stake.
     self->server_task_.store(current_task(), std::memory_order_relaxed);
-    // The opening HTTP GET Upgrade arrives as method GET (httpd has already sent the
-    // 101); every subsequent data frame re-enters here with method != GET.
-    const esp_err_t err =
-        req->method == HTTP_GET ? self->on_handshake(req) : self->on_data_frame(req);
+    // Data frames, and only data frames. esp_http_server answers the opening GET itself
+    // and returns from httpd_uri() BEFORE `uri->handler`, so the handshake never arrives
+    // here; the opening GET is serviced by ws_pre_handshake instead. A request that does
+    // reach this handler with method GET is therefore a plain HTTP request on the WS URI,
+    // not a peer — httpd_ws_recv_frame answers ESP_ERR_INVALID_STATE on a socket with no
+    // handshake done, which fails the handler and closes it. That is the right answer and
+    // it costs no branch of ours.
+    const esp_err_t err = self->on_data_frame(req);
     // `self` may be DESTROYED by now: the delivery above runs the app in-call and the app
     // may tear this link down (#814). Only `gate`, which deliberately outlives it, may be
     // touched from here on.
@@ -1102,69 +1131,53 @@ esp_err_t httpd_ws_link_t::ws_handler(httpd_req_t* req) {
     return err;
 }
 
-esp_err_t httpd_ws_link_t::on_handshake(httpd_req_t* req) {
-    const int fd = httpd_req_to_sockfd(req);
-    if (fd < 0) return ESP_FAIL;
-    // Admission hook (optional): let the host refuse an unauthenticated peer before any
-    // slot is touched. Consulted FIRST so a refusal costs nothing, and returns ESP_FAIL
-    // (httpd closes the socket) — the same clean refusal path as the max_peers cap. A
-    // null hook admits every peer, preserving the historical open-graph behavior.
-    if (admission_fn_ != nullptr && !admission_fn_(admission_ctx_, req)) {
-        ESP_LOGW(kTag, "peer refused by admission hook (fd=%d)", fd);
-        return ESP_FAIL;
-    }
-    // No teardown test here: reaching this point already means the handler gate admitted
-    // this frame, and the destructor's barrier will not take its session snapshot until
-    // this frame has left. So a session armed here — however late — is still IN that
-    // snapshot, and refusing the frame would only lose a message the link can still serve.
-    session_t* slot = nullptr;
+esp_err_t httpd_ws_link_t::ws_pre_handshake(httpd_req_t* req) {
+    // The admission point. esp_http_server calls this from httpd_uri() with the opening
+    // GET fully parsed — method, URI and every header readable through the ordinary
+    // httpd_req_get_* accessors — and BEFORE it writes the 101 or latches the WS route
+    // into the session. Answering anything but ESP_OK abandons the upgrade and closes the
+    // socket, so a refusal costs the peer one HTTP request and this link nothing: no slot,
+    // no session ctx, no socket policy, no entry in the peer set.
+    //
+    // It is registered with the same `user_ctx` the handler is — the GATE, never `this`
+    // (see gate_t) — and resolves the link through it the same way, because the ONLY
+    // thing that makes it safe to dereference the link here is the barrier the gate
+    // supplies: a concurrent destructor takes `m` to null the link and then joins on
+    // `depth`, so either this call finds a null link and refuses, or the destructor waits
+    // for the predicate to return.
+    auto* const gate = static_cast<gate_t*>(req->user_ctx);
+    if (gate == nullptr) return ESP_FAIL;
+    admission_fn_t fn = nullptr;
+    void* ctx = nullptr;
     {
-        const std::lock_guard lock(peers_m_);
-        // Admission cap: refuse the new peer cleanly (ESP_FAIL => httpd closes the
-        // socket). A clean refusal at the cap, not an evicted live peer.
-        if (max_peers_ != 0) {
-            std::size_t open_n = 0;
-            for (const auto& s : slots_)
-                if (s->open) ++open_n;
-            if (open_n >= max_peers_) {
-                ESP_LOGW(kTag, "peer refused: at max_peers=%u", (unsigned)max_peers_);
-                return ESP_FAIL;
-            }
-        }
-        // Reuse a departed slot, else grow (push_back keeps existing slots' addresses
-        // stable — endpoints handed out by peer_link stay valid).
-        for (const auto& s : slots_)
-            if (s->fd < 0) {
-                slot = s.get();
-                break;
-            }
-        if (slot == nullptr) {
-            auto s = std::make_unique<session_t>();
-            slot = s.get();
-            slot->gate = gate_;
-            slot->endpoint.owner_ = this;
-            slot->endpoint.slot_ = slot;
-            slots_.push_back(std::move(s));
-        }
-        slot->name = peer_name(fd);
-        slot->asm_buf.clear();
-        slot->fd = fd;
-        // A NEW session begins here, in a slot the previous one may still be addressed by:
-        // bump the generation before the slot goes live, so every reference minted for the
-        // departed peer fails its check instead of resolving onto this one (#954).
-        ++slot->gen;
-        slot->open = true;
-        // The claim edge: this connection starts now, with fresh counters. `gen` was
-        // just bumped above, which is what lets a consumer tell a recycled slot from a
-        // continuing session.
-        slot->st = {};
-        slot->st.connected_at_us = esp_timer_get_time();
+        const std::lock_guard lock(gate->m);
+        if (gate->link == nullptr) return ESP_FAIL;
+        httpd_ws_link_t* const self = gate->link;
+        // Latch the server's task identity for the same reason ws_handler does: a
+        // predicate is a foreign callback and may tear this link down in-call, and
+        // close_gate needs to recognise that it is running ON the task whose frame it
+        // would otherwise wait for.
+        self->server_task_.store(current_task(), std::memory_order_relaxed);
+        fn = self->admission_fn_;
+        ctx = self->admission_ctx_;
+        // Register on the barrier for the duration of the predicate. `serving_fd` stays
+        // -1 deliberately: it names the session an in-flight handler frame is servicing
+        // so detach_sessions can skip it, and there is no session here yet — nothing to
+        // detach, nothing to abandon.
+        ++gate->depth;
     }
-    // Reclaim the slot when httpd tears this session down (the free_ctx_fn fires on the
-    // httpd task at close — the departure signal).
-    httpd_sess_set_ctx(req->handle, fd, slot, &httpd_ws_link_t::on_session_closed);
-    bound_socket(fd);  // WS admission is the ONLY place the send bound is applied (#835)
-    return ESP_OK;
+    // The predicate runs with `m` RELEASED — it is host code, bounded by nothing this
+    // link owns, and the gate mutex is the one every latched callback resolves through
+    // (the lock-order rule recorded on gate_t). A null hook admits every peer, which is
+    // the historical open-graph behavior.
+    const bool admit = fn == nullptr || fn(ctx, req);
+    if (!admit) ESP_LOGW(kTag, "peer refused by admission hook (fd=%d)", httpd_req_to_sockfd(req));
+    {
+        const std::lock_guard lock(gate->m);
+        --gate->depth;
+    }
+    gate->cv.notify_all();
+    return admit ? ESP_OK : ESP_FAIL;
 }
 
 esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
@@ -1212,10 +1225,12 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
     // Resolve the slot (peer name for the bus tag + the reassembly buffer). Copy the
     // name out under the lock — the deliver below is synchronous, so a local string
     // outlives the whole in-call servicing.
-    // esp_http_server responds the WS handshake INTERNALLY and (IDF v6) does NOT call the
-    // URI handler for the opening GET — so on_handshake never fires. Claim the peer LAZILY
-    // here, on its first data frame; an existing slot for `fd` is reused (idempotent, so the
-    // on_handshake path still works on any IDF that does call the GET handler).
+    // esp_http_server responds the WS handshake INTERNALLY and does NOT call the URI
+    // handler for the opening GET, so this is the ONE claim site: the peer is claimed
+    // LAZILY, on its first data frame. An existing slot for `fd` is reused, which is what
+    // makes every later frame of the session free of this block. Admission is decided
+    // earlier and elsewhere — ws_pre_handshake, before the upgrade — so a peer that
+    // reaches here has already been admitted.
     session_t* slot = nullptr;
     std::string peer;
     bool newly_claimed = false;
@@ -1227,8 +1242,8 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
                 break;
             }
         if (slot == nullptr) {
-            // No teardown test (see on_handshake): the gate admitted this frame, so the
-            // barrier has not snapshotted yet and a session armed here is still caught.
+            // No teardown test: the gate admitted this frame, so the barrier has not
+            // snapshotted yet and a session armed here is still caught.
             // Admission cap: refuse cleanly (ESP_FAIL => httpd closes the socket).
             if (max_peers_ != 0) {
                 std::size_t open_n = 0;
@@ -1255,12 +1270,11 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
             slot->name = peer_name(fd);
             slot->asm_buf.clear();
             slot->fd = fd;
-            ++slot->gen;  // the other claim edge — see on_handshake (#954)
+            ++slot->gen;  // a NEW session in a recycled slot: fail every stale ref (#954)
             slot->open = true;
-            // On IDF v6 the opening GET never reaches this handler, so THIS lazy
-            // first-frame claim is the establish edge — the only honest place to stamp
-            // "connected at" and to start this connection's counters (see on_handshake,
-            // which stamps the same way on any IDF that does call the GET handler).
+            // The opening GET never reaches this handler, so THIS lazy first-frame claim
+            // is the establish edge — the only honest place to stamp "connected at" and to
+            // start this connection's counters.
             slot->st = {};
             slot->st.connected_at_us = esp_timer_get_time();
             newly_claimed = true;
@@ -1271,9 +1285,8 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
     // httpd task at close). Outside peers_m_ so no httpd lock nests under ours.
     if (newly_claimed) {
         httpd_sess_set_ctx(req->handle, fd, slot, &httpd_ws_link_t::on_session_closed);
-        // The other admission point, and the one that actually fires on IDF v6 (the
-        // opening GET never reaches the handler there) — so the bound is applied here
-        // too, on the same first-claim edge, and exactly once per session.
+        // The claim edge is also where the per-socket policy is applied — once per
+        // session, on the socket that just became a peer's.
         bound_socket(fd);
     }
 
@@ -1953,8 +1966,8 @@ void httpd_ws_link_t::send(std::span<const std::span<const std::byte>> iov) {
     // the peer set (#961) — see kFanoutChunk for why a `std::vector` here was an abort
     // waiting for a heap trough. Resuming at `next` after releasing the lock is sound
     // because a slot's INDEX never moves while the link is serving: the only in-service
-    // mutation of `slots_` is the APPEND at the two admission sites (the push_back in
-    // on_handshake and the one in on_data_frame), and the two sites that remove entries —
+    // mutation of `slots_` is the APPEND at the single claim site (the push_back in
+    // on_data_frame), and the two sites that remove entries —
     // abandon_sessions' clear() and abandon_session's erase() — are reachable only through
     // detach_sessions(), which nothing but the destructor calls. So no peer can be visited
     // twice, and a departed slot is a hole the scan steps over. A peer that ARRIVES

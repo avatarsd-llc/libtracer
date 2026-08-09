@@ -82,14 +82,24 @@ struct session_t {
 class server_t {
    public:
     /**
-     * @brief Admit a socket into the session table (the accept the fake skips) and latch
-     *        the currently-registered WS route into it, as the handshake does.
+     * @brief Perform the opening handshake for a socket: run the registered
+     *        `ws_pre_handshake_cb`, and — only if it answered `ESP_OK` — admit the socket
+     *        into the session table and latch the WS route into it.
+     *
+     * The order is `httpd_uri.c`'s and it is the whole point: the predicate runs BEFORE
+     * the 101 and before `sd->ws_handler` / `sd->ws_user_ctx` are set, so a refusal leaves
+     * a socket with no session and no latched route — nothing a later frame could
+     * dispatch through. The refusal itself is the server's (`return ESP_FAIL` from
+     * `httpd_uri`, socket closed); the fake models it as "no session appears".
      *
      * @param ctx      Optional pre-existing session context — a CO-TENANT's, when the
      *                 test is exercising descriptor reuse on the shared server.
      * @param free_fn  Its destructor, run when that session closes or changes ctx.
+     * @return True when the handshake was answered and the session exists. Ignorable: the
+     *         suites that predate the predicate register none, and a route without one
+     *         admits unconditionally, exactly as an unset `ws_pre_handshake_cb` does.
      */
-    void open_session(int fd, void* ctx = nullptr, httpd_free_ctx_fn_t free_fn = nullptr);
+    bool open_session(int fd, void* ctx = nullptr, httpd_free_ctx_fn_t free_fn = nullptr);
     /** @brief The context currently stored for @p fd (nullptr if none / no session). */
     [[nodiscard]] void* session_ctx(int fd);
     /** @brief True while @p fd is in the session table. */
@@ -266,6 +276,14 @@ server_t& instance();
 struct route_t {
     esp_err_t (*handler)(httpd_req_t*) = nullptr; /**< @brief The URI handler. */
     void* user_ctx = nullptr;                     /**< @brief Its registered `user_ctx`. */
+    /**
+     * @brief The registration's `ws_pre_handshake_cb`, run by @ref server_t::open_session.
+     *
+     * Unlike @ref handler this is NOT latched into the session: `httpd_uri.c` reads it out
+     * of the URI table on each handshake, so an unregister retires it immediately. That
+     * asymmetry is why it lives on the route and is consulted only at open time.
+     */
+    esp_err_t (*pre_handshake)(httpd_req_t*) = nullptr;
 };
 
 /** @brief The route a handshake would latch right now (null handler => unregistered). */

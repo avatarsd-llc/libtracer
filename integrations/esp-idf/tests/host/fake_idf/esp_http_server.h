@@ -21,6 +21,11 @@
  *     (httpd_uri.c:351-354) and survive `httpd_unregister_uri_handler`, so a frame on
  *     an already-upgraded socket still dispatches after the URI is gone
  *     (httpd_parse.c:796,824);
+ *   - the opening GET is answered by the SERVER and the URI handler is NOT called for
+ *     it: `httpd_uri` returns as soon as it has written the 101 and latched the route.
+ *     The one call a registration gets on that request is `ws_pre_handshake_cb`, which
+ *     runs BEFORE the 101 with `req->user_ctx` already attached, and whose non-`ESP_OK`
+ *     return abandons the upgrade;
  *   - closing a session calls `free_ctx` once and nulls the stored ctx, so a second
  *     close is a no-op;
  *   - sessions are resolved by socket DESCRIPTOR only (`httpd_sess_get`), and a
@@ -84,6 +89,16 @@ typedef struct httpd_uri {
     void* user_ctx;                       /**< @brief Passed through on every call. */
     bool is_websocket;                    /**< @brief WS upgrade route. */
     bool handle_ws_control_frames;        /**< @brief Deliver control frames too. */
+    /**
+     * @brief Called with the PARSED opening GET before the handshake is answered; a
+     *        non-`ESP_OK` return abandons the upgrade and closes the socket.
+     *
+     * Behind `CONFIG_HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT` upstream, which the component's
+     * own Kconfig `select`s — so the member is unconditionally present wherever
+     * `httpd_ws_link.cpp` compiles, and unconditionally present here. `req->user_ctx` is
+     * already the registration's, as `httpd_uri.c` sets it before this branch.
+     */
+    esp_err_t (*ws_pre_handshake_cb)(httpd_req_t* r);
 } httpd_uri_t;
 
 /** @brief Server configuration (the fields the owning ctor sets). */
