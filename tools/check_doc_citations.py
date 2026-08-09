@@ -674,11 +674,11 @@ ANCHORS = [
     ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:70',
      '* reply, and (the deep path) the whole /unit batch-apply transaction. The device'),
     ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:77', 'constexpr std::size_t kHttpdTaskStack = 12288;'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:320', 'if (chunk.empty()) return true;'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:326',
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:327', 'if (chunk.empty()) return true;'),
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:333',
      'if (len_ != 0) std::memcpy(grown.get(), bytes_.get(), len_);'),
     # integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp
-    ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:48',
+    ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:52',
      '*     apply overflows the 4 KB httpd default — see kHttpdTaskStack).'),
 
     # --- re-added from the v0.7.1 docs sweep (absent from main's table) ---
@@ -721,11 +721,11 @@ ANCHORS = [
     ('tools/cortexm0_footprint.py:94', 'cxx_flags = ['),
     ('tools/cortexm0_footprint.py:101', '"-DLIBTRACER_NO_ATOMIC",'),
     ('tools/cortexm0_footprint.py:115', '"--specs=nano.specs",'),
-    ('core/tests/CMakeLists.txt:1107', 'add_executable(substrate_test_no_atomic'),
-    ('core/tests/CMakeLists.txt:1120', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
+    ('core/tests/CMakeLists.txt:1131', 'add_executable(substrate_test_no_atomic'),
+    ('core/tests/CMakeLists.txt:1144', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
     # The leading indent is load-bearing: the bare token also appears in the comment
     # three lines above the executable, and an anchor that matches both is not an anchor.
-    ('core/tests/CMakeLists.txt:1121', '    LIBTRACER_NO_ATOMIC'),
+    ('core/tests/CMakeLists.txt:1145', '    LIBTRACER_NO_ATOMIC'),
 
     # --- #1095: the rest of the non-source citations, now that a line-numbered citation
     # of an unverifiable file is an ERROR rather than a false green.

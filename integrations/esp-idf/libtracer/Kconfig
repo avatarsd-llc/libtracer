@@ -31,9 +31,24 @@ menu "libtracer"
     config LIBTRACER_TRANSPORT_WS
         bool "Build the WebSocket transport"
         default y
+        select HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT if HTTPD_WS_SUPPORT
         help
             Compile the WebSocket plane. ON by default. Turn OFF on a node that
             neither serves nor dials a WebSocket link.
+
+            The `select` is what makes httpd_ws_link_t's admission predicate
+            (set_admission_cb) reachable: esp_http_server answers the opening
+            WebSocket GET itself and, once it has, does NOT call the URI handler
+            for it (httpd_uri.c returns before `uri->handler` on the handshake
+            branch), so the ONLY point at which a registered handler sees the
+            parsed opening GET — method, URI and headers — is the server's
+            ws_pre_handshake_cb, and that member exists only behind
+            CONFIG_HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT. It is present at this
+            component's ESP-IDF floor (>=5.5.5, see idf_component.yml), so there
+            is no second tier behind it. Conditioned on CONFIG_HTTPD_WS_SUPPORT
+            because the upstream symbol depends on it and because that same
+            config already gates whether httpd_ws_link.cpp compiles at all; a
+            build without it selects nothing.
 
             WHICH plane you get is decided by the TARGET, not by this bool (#947):
 

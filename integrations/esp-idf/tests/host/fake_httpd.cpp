@@ -59,15 +59,29 @@ server_t& instance() {
     return server;
 }
 
-void server_t::open_session(int fd, void* ctx, httpd_free_ctx_fn_t free_fn) {
+bool server_t::open_session(int fd, void* ctx, httpd_free_ctx_fn_t free_fn) {
+    // The pre-handshake predicate first, and OUTSIDE m_ — it re-enters the link (the
+    // gate's mutex), and the fake never holds its own lock across a call into the link.
+    // The request it gets is the opening GET as httpd_uri.c hands it over: the
+    // registration's user_ctx already attached, method GET, on this socket.
+    const route_t route = g_route;
+    if (route.pre_handshake != nullptr) {
+        httpd_req_t req = {};
+        req.handle = static_cast<httpd_handle_t>(this);
+        req.method = HTTP_GET;
+        req.user_ctx = route.user_ctx;
+        req.fd = fd;
+        if (route.pre_handshake(&req) != ESP_OK) return false;  // no 101, no session
+    }
     const std::lock_guard lock(m_);
     session_t sess;
     sess.ctx = ctx;
     sess.free_ctx = free_fn;
     // The handshake latches the route INTO the session; nothing later can revoke it.
-    sess.ws_handler = g_route.handler;
-    sess.ws_user_ctx = g_route.user_ctx;
+    sess.ws_handler = route.handler;
+    sess.ws_user_ctx = route.user_ctx;
     sessions_[fd] = sess;
+    return true;
 }
 
 void* server_t::session_ctx(int fd) {
@@ -470,7 +484,7 @@ esp_err_t httpd_stop(httpd_handle_t handle) {
 
 esp_err_t httpd_register_uri_handler(httpd_handle_t handle, const httpd_uri_t* uri) {
     (void)handle;
-    fake_httpd::set_registered_route({uri->handler, uri->user_ctx});
+    fake_httpd::set_registered_route({uri->handler, uri->user_ctx, uri->ws_pre_handshake_cb});
     return ESP_OK;
 }
 
