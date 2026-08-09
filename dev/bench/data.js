@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786276896002,
+  "lastUpdate": 1786276900003,
   "repoUrl": "https://github.com/avatarsd-llc/libtracer",
   "entries": {
     "libtracer in-process latency (ns, smaller is better)": [
@@ -650306,6 +650306,600 @@ window.BENCHMARK_DATA = {
           {
             "name": "zenoh inproc-path 64B/fan1/8192ep throughput",
             "value": 3174028,
+            "unit": "deliveries/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "15184545+AvatarSD@users.noreply.github.com",
+            "name": "avatarsd",
+            "username": "AvatarSD"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "7343667b2d36ebfdac3870e4d72a480274f40b1f",
+          "message": "Merge pull request #1133 from avatarsd-llc/refactor/graph/867-opaque-subscription-handle\n\nrefactor(graph): subscription_t stops handing out the producer vertex_t* (#867)",
+          "timestamp": "2026-08-09T14:54:07+03:00",
+          "tree_id": "b586dfe69cdb28b97edb86ada41292b26efafe1a",
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/7343667b2d36ebfdac3870e4d72a480274f40b1f"
+        },
+        "date": 1786276899362,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "inproc 64B/fan1/1ep throughput",
+            "value": 6373774,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc 64B/fan8/1ep throughput",
+            "value": 24048458,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc 64B/fan128/1ep throughput",
+            "value": 48497931,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc 64B/fan1024/1ep throughput",
+            "value": 46520838,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc 64B/fan8192/1ep throughput",
+            "value": 45199588,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc 1B/fan1/1ep throughput",
+            "value": 6433042,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc 8B/fan1/1ep throughput",
+            "value": 6417760,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc 1024B/fan1/1ep throughput",
+            "value": 5958093,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc 8192B/fan1/1ep throughput",
+            "value": 4374685,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-borrow 1B/fan1/1ep throughput",
+            "value": 7389031,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-borrow 8B/fan1/1ep throughput",
+            "value": 7407228,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-borrow 64B/fan1/1ep throughput",
+            "value": 7358810,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-borrow 1024B/fan1/1ep throughput",
+            "value": 7355719,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-borrow 8192B/fan1/1ep throughput",
+            "value": 7358720,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-path 64B/fan1/1ep throughput",
+            "value": 4548535,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-path 64B/fan1/8ep throughput",
+            "value": 3973145,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-path 64B/fan1/128ep throughput",
+            "value": 3619631,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-path 64B/fan1/1024ep throughput",
+            "value": 3453322,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-path 64B/fan1/8192ep throughput",
+            "value": 3204366,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "mixed 0B/fan6/128ep throughput",
+            "value": 18557406,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "path-parse 2B/fan1/1ep throughput",
+            "value": 28731243,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "path-parse 12B/fan2/1ep throughput",
+            "value": 18293741,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "path-parse 23B/fan4/1ep throughput",
+            "value": 13531960,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "path-parse 16B/fan8/1ep throughput",
+            "value": 10713196,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-mt1 64B/fan1/1ep throughput",
+            "value": 9654990,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-mt2 64B/fan1/2ep throughput",
+            "value": 19266723,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-mt4 64B/fan1/4ep throughput",
+            "value": 19971618,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "eptype-lean 64B/fan1/1ep throughput",
+            "value": 6306816,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "eptype-lean-cached 64B/fan1/1ep throughput",
+            "value": 7263575,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "eptype-stream 64B/fan1/1ep throughput",
+            "value": 4510863,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "acl-inherit-d4 64B/fan1/1ep throughput",
+            "value": 15170039,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "acl-inherit-d4-mt4 64B/fan1/4ep throughput",
+            "value": 11413099,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "fold-b1 512B/fan1/1ep throughput",
+            "value": 242495610,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "fold-b2 512B/fan1/1ep throughput",
+            "value": 153015211,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "fold-b4 512B/fan1/1ep throughput",
+            "value": 87712489,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "fold-b8 512B/fan1/1ep throughput",
+            "value": 46970894,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-deliver 64B/fan1/1ep throughput",
+            "value": 11612108,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-deliver 64B/fan8/1ep throughput",
+            "value": 29735372,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-deliver 64B/fan128/1ep throughput",
+            "value": 51578864,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-deliver 64B/fan1024/1ep throughput",
+            "value": 47693873,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-deliver 64B/fan8192/1ep throughput",
+            "value": 46910332,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "lkv-alloc-heap 64B/fan1/1ep throughput",
+            "value": 30816522,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "lkv-alloc-pool 64B/fan1/1ep throughput",
+            "value": 173307522,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "lkv-store-heap 64B/fan1/1ep throughput",
+            "value": 23007647,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "lkv-store-pool 64B/fan1/1ep throughput",
+            "value": 62065214,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "lkv-alloc-heap 1024B/fan1/1ep throughput",
+            "value": 30746450,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "lkv-alloc-pool 1024B/fan1/1ep throughput",
+            "value": 173143683,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "lkv-store-heap 1024B/fan1/1ep throughput",
+            "value": 19647973,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "lkv-store-pool 1024B/fan1/1ep throughput",
+            "value": 41647500,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-pool 1B/fan1/1ep throughput",
+            "value": 6075341,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-pool 8B/fan1/1ep throughput",
+            "value": 6051192,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-pool 64B/fan1/1ep throughput",
+            "value": 6018637,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-pool 1024B/fan1/1ep throughput",
+            "value": 5555152,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-pool 8192B/fan1/1ep throughput",
+            "value": 3888475,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-pool-borrow 1B/fan1/1ep throughput",
+            "value": 7085774,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-pool-borrow 8B/fan1/1ep throughput",
+            "value": 7145681,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-pool-borrow 64B/fan1/1ep throughput",
+            "value": 7113689,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-pool-borrow 1024B/fan1/1ep throughput",
+            "value": 7141883,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-pool-borrow 8192B/fan1/1ep throughput",
+            "value": 7154953,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "poolalloc-mt1 64B/fan1/1ep throughput",
+            "value": 12664742,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "heapalloc-mt1 64B/fan1/1ep throughput",
+            "value": 11934447,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "poolalloc-mt2 64B/fan1/1ep throughput",
+            "value": 10653681,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "heapalloc-mt2 64B/fan1/1ep throughput",
+            "value": 16767031,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "poolalloc-mt4 64B/fan1/1ep throughput",
+            "value": 3453563,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "heapalloc-mt4 64B/fan1/1ep throughput",
+            "value": 22700507,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-target-stored 64B/fan1/1ep throughput",
+            "value": 3705859,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-target-stored 64B/fan8/1ep throughput",
+            "value": 6817868,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-target-stored 64B/fan128/1ep throughput",
+            "value": 6796870,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-target-stored 64B/fan1024/1ep throughput",
+            "value": 5565953,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-target-stored 64B/fan8192/1ep throughput",
+            "value": 4739798,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-target-handler 64B/fan1/1ep throughput",
+            "value": 4131058,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-target-handler 64B/fan8/1ep throughput",
+            "value": 9481258,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-target-handler 64B/fan128/1ep throughput",
+            "value": 9941955,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-target-handler 64B/fan1024/1ep throughput",
+            "value": 7616695,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc-target-handler 64B/fan8192/1ep throughput",
+            "value": 5815114,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc 64B/fan16/1ep throughput",
+            "value": 35643686,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc 64B/fan32/1ep throughput",
+            "value": 41062833,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc 64B/fan64/1ep throughput",
+            "value": 45536728,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc 64B/fan256/1ep throughput",
+            "value": 47947554,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "inproc 64B/fan512/1ep throughput",
+            "value": 45217483,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "fwd-demux-fixed 79B/fan1/1ep throughput",
+            "value": 4712675,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "fwd-demux-fixed 79B/fan2/1ep throughput",
+            "value": 4707465,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "fwd-demux-fixed 79B/fan4/1ep throughput",
+            "value": 4609861,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "fwd-demux-fixed 79B/fan8/1ep throughput",
+            "value": 4351784,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "fwd-demux-fixed 79B/fan16/1ep throughput",
+            "value": 3931106,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "fwd-demux-fixed 79B/fan32/1ep throughput",
+            "value": 3694250,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "fwd-demux-fixed 79B/fan64/1ep throughput",
+            "value": 3022207,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "fwd-demux-scan 79B/fan1/1ep throughput",
+            "value": 4763713,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "fwd-demux-scan 79B/fan2/2ep throughput",
+            "value": 4715764,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "fwd-demux-scan 79B/fan4/4ep throughput",
+            "value": 4512530,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "fwd-demux-scan 79B/fan8/8ep throughput",
+            "value": 4447305,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "fwd-demux-scan 79B/fan16/16ep throughput",
+            "value": 4176134,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "fwd-demux-scan 79B/fan32/32ep throughput",
+            "value": 3707914,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "fwd-demux-scan 79B/fan64/64ep throughput",
+            "value": 2983213,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "compact-terminus 4B/fan1/1ep throughput",
+            "value": 4749347,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "compact-forward 4B/fan1/1ep throughput",
+            "value": 9757353,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "compact-terminus 64B/fan1/1ep throughput",
+            "value": 4507282,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "compact-forward 64B/fan1/1ep throughput",
+            "value": 9751141,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "compact-terminus 512B/fan1/1ep throughput",
+            "value": 4392768,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "compact-forward 512B/fan1/1ep throughput",
+            "value": 9755717,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "zenoh inproc 64B/fan1/1ep throughput",
+            "value": 5268583,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "zenoh inproc 64B/fan8/1ep throughput",
+            "value": 11785643,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "zenoh inproc 64B/fan128/1ep throughput",
+            "value": 13764732,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "zenoh inproc 64B/fan1024/1ep throughput",
+            "value": 13544947,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "zenoh inproc 64B/fan8192/1ep throughput",
+            "value": 13643522,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "zenoh inproc 1B/fan1/1ep throughput",
+            "value": 5194323,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "zenoh inproc 8B/fan1/1ep throughput",
+            "value": 5234301,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "zenoh inproc 1024B/fan1/1ep throughput",
+            "value": 4938885,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "zenoh inproc 8192B/fan1/1ep throughput",
+            "value": 3141611,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "zenoh inproc-path 64B/fan1/1ep throughput",
+            "value": 5228102,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "zenoh inproc-path 64B/fan1/8ep throughput",
+            "value": 4844822,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "zenoh inproc-path 64B/fan1/128ep throughput",
+            "value": 4401163,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "zenoh inproc-path 64B/fan1/1024ep throughput",
+            "value": 3682550,
+            "unit": "deliveries/s"
+          },
+          {
+            "name": "zenoh inproc-path 64B/fan1/8192ep throughput",
+            "value": 2880977,
             "unit": "deliveries/s"
           }
         ]
