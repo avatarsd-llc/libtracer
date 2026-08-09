@@ -123,22 +123,22 @@ class server_t {
     /** @brief Items currently sitting in the control queue. */
     [[nodiscard]] std::size_t queue_depth() const;
     /**
-     * @brief Enqueues lwIP swallowed because the control mbox was full, ever.
+     * @brief Enqueues the FULL control mbox refused, ever.
      *
-     * The counter a host test needs to tell "the link refused this frame itself" apart
-     * from "the link handed it to a control socket that silently binned it" — two
-     * outcomes that look identical from the queue's depth, and only one of which leaves
-     * the httpd task free.
+     * The counter a host test needs to tell "the link refused this frame itself, before
+     * the control socket was ever asked" apart from "the link offered it and the mbox had
+     * no room" — two outcomes that look identical from the queue's depth.
      */
     [[nodiscard]] std::size_t queue_drops() const;
     /**
      * @brief Cap the control queue at @p cap entries (0 = unbounded, the default).
      *
-     * The cap models `CONFIG_LWIP_UDP_RECVMBOX_SIZE`: `httpd_queue_work` is a bare
-     * `sendto` to a loopback UDP socket, so an enqueue past the receiver's mbox is
-     * DROPPED by lwIP while `sendto` — and therefore `httpd_queue_work` — still reports
-     * success (httpd_main.c, release/v5.5). See @ref set_queue_refusing for the other,
-     * observable, enqueue failure.
+     * The cap models `CONFIG_LWIP_UDP_RECVMBOX_SIZE` at the component's ESP-IDF floor
+     * (`>=5.5.5`): `httpd_queue_work` reserves an mbox slot through a counting semaphore
+     * of that size before its `sendto`, so an enqueue past the cap FAILS FAST and the
+     * caller is told `ESP_FAIL` (httpd_main.c). It is therefore the same verdict as
+     * @ref set_queue_refusing, reached by a different route — the pre-5.5.5 silent bin,
+     * which reported success and lost the datagram, is not modelled any more (#949).
      */
     void set_queue_capacity(std::size_t cap);
 
@@ -197,14 +197,14 @@ class server_t {
     [[nodiscard]] httpd_ws_client_info_t fd_info(int fd);
     void note_sent();
     /**
-     * @brief Refuse further enqueues with an OBSERVABLE failure — `cs_send_to_ctrl_sock`
-     *        returning < 0, which `httpd_queue_work` maps to `ESP_FAIL`.
+     * @brief Refuse further enqueues unconditionally — `cs_send_to_ctrl_sock` returning
+     *        < 0, which `httpd_queue_work` maps to `ESP_FAIL`.
      *
-     * The distinction from @ref set_queue_capacity is the whole point: this failure the
-     * caller can see, the capacity drop it cannot. `httpd_sess_trigger_close` rides the
-     * same socket, so it is refused too — the pre-#835-round-2 fake exempted it on the
-     * theory that a full queue only DELAYS a close, and the on-silicon run refuted that
-     * theory (the close never landed at all).
+     * The socket-level refusal, as opposed to @ref set_queue_capacity's full-mbox one:
+     * same verdict to the caller, and only @ref queue_drops tells them apart.
+     * `httpd_sess_trigger_close` rides the same socket, so it is refused too — the
+     * pre-#835-round-2 fake exempted it on the theory that a full queue only DELAYS a
+     * close, and the on-silicon run refuted that theory (the close never landed at all).
      */
     void set_queue_refusing(bool refusing);
     /** @brief Install a session's send override (`httpd_sess_set_send_override`). */
@@ -240,7 +240,7 @@ class server_t {
     std::size_t reap_shut();
     /** @brief The one control-socket enqueue both `httpd_queue_work` and
      *         `httpd_sess_trigger_close` go through (`m_` held). */
-    bool enqueue_locked(std::function<void()> item, bool* dropped);
+    bool enqueue_locked(std::function<void()> item);
 
     mutable std::mutex m_;
     std::map<int, session_t> sessions_;
@@ -251,7 +251,7 @@ class server_t {
     std::map<int, std::size_t> writes_;
     bool queue_refusing_ = false;
     std::size_t queue_cap_ = 0;   /**< @brief 0 = unbounded; see set_queue_capacity. */
-    std::size_t queue_drops_ = 0; /**< @brief Enqueues lost to a full mbox. */
+    std::size_t queue_drops_ = 0; /**< @brief Enqueues a full mbox refused. */
 };
 
 /** @brief The one fake server; its address IS the `httpd_handle_t` the link adopts. */

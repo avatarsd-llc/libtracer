@@ -288,26 +288,26 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     set_tests_properties(httpd_ws_session_identity
         PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
-    # #944 — the TX WORK SLOT's lifetime, on the same fake. The event the three suites
-    # above never spend is the one the fake already models: an enqueue DROPPED inside
-    # lwIP while httpd_queue_work still returns ESP_OK (set_queue_capacity). The work
-    # item never runs, and it used to be the only thing that could release the slot it
-    # had claimed — four of those and the pool was dead for the rest of the boot.
-    add_executable(httpd_ws_tx_strand_test
-        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_tx_strand_test.cpp"
+    # #949 — the TX SLOT POOL as the link's outstanding-send bound, on the same fake.
+    # It replaces the #944 strand suite: above the component's ESP-IDF floor (>=5.5.5) a
+    # full control mbox refuses the enqueue instead of binning it in silence, so the slot
+    # always comes back, and a send that finds no free slot is dropped and counted rather
+    # than posted from a heap work item.
+    add_executable(httpd_ws_tx_pool_test
+        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_tx_pool_test.cpp"
         "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
         "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
-    target_include_directories(httpd_ws_tx_strand_test PRIVATE
+    target_include_directories(httpd_ws_tx_pool_test PRIVATE
         "${LIBTRACER_ESP_DIR}/tests/host"
         "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
         "${LIBTRACER_ESP_DIR}/libtracer/include")
-    target_link_libraries(httpd_ws_tx_strand_test PRIVATE libtracer)
-    target_link_options(httpd_ws_tx_strand_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
-    libtracer_test_warnings(httpd_ws_tx_strand_test)
-    add_test(NAME httpd_ws_tx_strand COMMAND httpd_ws_tx_strand_test)
+    target_link_libraries(httpd_ws_tx_pool_test PRIVATE libtracer)
+    target_link_options(httpd_ws_tx_pool_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    libtracer_test_warnings(httpd_ws_tx_pool_test)
+    add_test(NAME httpd_ws_tx_pool COMMAND httpd_ws_tx_pool_test)
     # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
     # every case here constructs an adopting link — same exemption as the suites above.
-    set_tests_properties(httpd_ws_tx_strand
+    set_tests_properties(httpd_ws_tx_pool
         PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
     # #961 — the FAN-OUT path's allocation, on the same fake. The instrument is what is

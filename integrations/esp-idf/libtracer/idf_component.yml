@@ -12,4 +12,12 @@ targets:
   - esp32c6
   - linux
 dependencies:
-  idf: ">=5.3"
+  # >=5.5.5 is a TX-path correctness floor, not a packaging preference. Below it
+  # `httpd_queue_work` is a bare non-blocking `sendto` on the loopback control socket, so an
+  # enqueue past CONFIG_LWIP_UDP_RECVMBOX_SIZE is discarded inside lwIP while the call still
+  # returns ESP_OK — the frame is lost with nothing observable anywhere. From 5.5.5 the
+  # control mbox is reserved through a counting semaphore first (esp_http_server
+  # httpd_main.c), so a full queue is ESP_FAIL to the caller and the silent bin cannot occur.
+  # httpd_ws_link_t's TX path is written for that guarantee and carries no compensation for
+  # its absence (#949).
+  idf: ">=5.5.5"
