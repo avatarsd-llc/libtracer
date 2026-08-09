@@ -1320,7 +1320,17 @@ class graph_t {
     // Hands back the exact published LKV pointer (null for a Handler-role write —
     // the user handler consumed the value, nothing was stored), so the eager write
     // path delivers precisely what was stored (RFC-0008 §D) without a rope reclone.
-    result_t<std::shared_ptr<const rope_t>> store_value(vertex_t* v, rope_t value);
+    // Takes `rope_t&&`, NOT by value (#1116). By value, a caller holding an lvalue built
+    // a move-constructed temporary at the call site and destroyed it again — on the
+    // per-delivery path-target leg that is once per subscriber per publish. Whether
+    // that move was a few SSE stores or an out-of-line call depended on the inliner's
+    // budget for this TU, which is what made an unrelated header change measurable as
+    // a latency regression (#888/#1086). An rvalue reference binds what the caller
+    // already owns, so there is no temporary to build and none to destroy.
+    // NOTE the asymmetry this creates: the Handler leg never moves from `value`, so the
+    // CALLER's rope now survives the call on that path holding its refcounts, where the
+    // by-value temporary used to die at the call. Destruction count is unchanged.
+    result_t<std::shared_ptr<const rope_t>> store_value(vertex_t* v, rope_t&& value);
     // Branch-write decomposition (RFC-0005): a POINT payload written to `v` lands
     // each value-carrying node at the corresponding descendant vertex as a
     // refcount SUBVIEW of the written frame (creating missing vertices, CREATE-

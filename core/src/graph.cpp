@@ -1122,7 +1122,7 @@ void graph_t::fan_out(vertex_t* v, const rope_t& value) {
         for (const edge_view_t& e : heap_buf) dispatch_edge(e, value);
 }
 
-result_t<std::shared_ptr<const rope_t>> graph_t::store_value(vertex_t* v, rope_t value) {
+result_t<std::shared_ptr<const rope_t>> graph_t::store_value(vertex_t* v, rope_t&& value) {
     if (v->role() == role_t::HANDLER) {
         const value_handlers_t& h = v->handlers();  // load once — a retire may swap it out
         if (!h.on_write) return std::unexpected(status_t::NOT_FOUND);
@@ -1190,7 +1190,10 @@ result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, std::string_view c
         // deliver the exact published pointer store_value hands back instead. The
         // clone is NOTHROW (try_clone_rope, #477): on failure the handler still runs
         // (the write succeeds) and only the subscriber delivery drops.
-        rope_t notify;  // refcount clone — store_value consumes `value`
+        // Refcount clone taken BEFORE the call: store_value moves from `value` on the
+        // storing legs. It does not on the Handler leg — that one only reads `value` and
+        // returns — so since #1116 (`rope_t&&`) the caller's rope survives that path.
+        rope_t notify;
         const bool can_notify = try_clone_rope(notify, value);
         const result_t<std::shared_ptr<const rope_t>> stored = store_value(v, std::move(value));
         if (!stored) return std::unexpected(stored.error());
