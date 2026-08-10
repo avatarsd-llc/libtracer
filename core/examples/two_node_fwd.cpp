@@ -88,8 +88,15 @@ int main() {
 
     // B owns the target vertex; A knows its link to B as "b", B knows its link back as "a".
     (void)node_b.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
-    router_a.add_child("b", channel.a());  // a `dst` starting with "b" routes over the wire
-    router_b.add_child("a", channel.b());  // B's name for the inbound link (src accumulation)
+    // `add_child` is checked rather than `(void)`-ed, and an example is the one place that
+    // must model it: false means NOTHING was registered — either the name is unaddressable or
+    // the child table could not grow — and a router that reports UP with no route resolvable
+    // is the ghost-child shape #930 shipped. A composed name rules out the first half only.
+    if (!router_a.add_child("b", channel.a()) ||  // a `dst` starting with "b" goes on the wire
+        !router_b.add_child("a", channel.b())) {  // B's name for the inbound link (src accum.)
+        std::fprintf(stderr, "two_node_fwd: add_child failed — nothing was registered\n");
+        return 1;
+    }
 
     // B's subscriber signals each delivery; we count them and keep the last payload.
     std::mutex m;

@@ -116,7 +116,10 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "fwd_node_server: ws server failed to bind/listen\n");
         return 1;
     }
-    router.add_child("client", server);
+    if (!router.add_child("client", server)) {
+        std::fprintf(stderr, "fwd_node_server: add_child(\"client\") registered nothing\n");
+        return 1;
+    }
     // The producer fan-out (subscribe latch + write-driven deliveries) is wired by the
     // fwd_router_t sink itself (#136) — no observer hook here. A subscribe binds a remote
     // subscriber; the transient-local latch and any later WRITE drive real deliveries.

@@ -93,7 +93,7 @@ void test_warm_terminus_delivers() {
     (void)g.register_vertex(*path_t::parse("/sink"), role_t::STORED_VALUE);
     fwd_router_t router{g};
     rec_link_t up;
-    router.add_child("net/ws-client/up", up);
+    (void)router.add_child("net/ws-client/up", up);
 
     const std::vector<std::byte> route = path_tlv({"sink"});
     router.on_frame("net/ws-client/up", tr::net::encode_advertise(5, route));
@@ -119,7 +119,7 @@ void test_retire_invalidates_cached_handle() {
     const auto v = g.register_vertex(*path_t::parse("/sink"), role_t::STORED_VALUE);
     fwd_router_t router{g};
     rec_link_t up;
-    router.add_child("net/ws-client/up", up);
+    (void)router.add_child("net/ws-client/up", up);
 
     router.on_frame("net/ws-client/up", tr::net::encode_advertise(7, path_tlv({"sink"})));
     router.on_frame("net/ws-client/up", tr::net::encode_compact(7, value_tlv(1)));
@@ -143,8 +143,8 @@ void test_link_teardown_invalidates_cached_slot() {
     fwd_router_t router{g};
     rec_link_t up;
     rec_link_t down;
-    router.add_child("net/ws-client/up", up);
-    router.add_child("net/ws-server/down", down);
+    (void)router.add_child("net/ws-client/up", up);
+    (void)router.add_child("net/ws-server/down", down);
 
     // A route BELOW the down mount ⇒ a forwarding binding, not a terminus.
     router.on_frame("net/ws-client/up",
@@ -182,7 +182,7 @@ void test_corrupt_crc_compact_is_dropped() {
     (void)g.register_vertex(*path_t::parse("/sink"), role_t::STORED_VALUE);
     fwd_router_t router{g};
     rec_link_t up;
-    router.add_child("net/ws-client/up", up);
+    (void)router.add_child("net/ws-client/up", up);
     router.on_frame("net/ws-client/up", tr::net::encode_advertise(3, path_tlv({"sink"})));
 
     // A good frame first — both to warm the binding and to prove the vehicle works.
@@ -249,7 +249,7 @@ void test_gathered_advertise_matches_the_built_frame() {
     graph_t g;
     fwd_router_t router(g);
     gather_rec_link_t link;
-    router.add_child("net/ws-server/down", link);
+    (void)router.add_child("net/ws-server/down", link);
 
     int mismatches = 0;
     int no_label = 0;
@@ -292,8 +292,8 @@ void test_forwarding_hop_advertise_is_gathered() {
     fwd_router_t router(g);
     gather_rec_link_t up;
     gather_rec_link_t down;
-    router.add_child("up", up);
-    router.add_child("down", down);
+    (void)router.add_child("up", up);
+    (void)router.add_child("down", down);
 
     router.on_frame("up", tr::net::encode_advertise(7, path_tlv({"down", "sensor"})));
     check(down.gathers == 1 && down.contiguous == 0,
@@ -324,7 +324,7 @@ void test_gathered_handle_nack_matches_the_built_frame() {
     graph_t g;
     fwd_router_t router(g);
     gather_rec_link_t link;
-    router.add_child("net/ws-client/up", link);
+    (void)router.add_child("net/ws-client/up", link);
 
     int mismatches = 0;
     int silent = 0;
@@ -416,7 +416,7 @@ void test_gathered_egress_matches_the_built_frame() {
     graph_t g;
     tr::net::fwd_router_t router(g);
     recording_link_t link;
-    router.add_child("net/ws-server/down", link);
+    (void)router.add_child("net/ws-server/down", link);
 
     int mismatches = 0;
     for (const std::size_t n : {std::size_t{0}, std::size_t{1}, std::size_t{64}, std::size_t{4096},
@@ -497,7 +497,7 @@ void test_advertise_with_non_name_child_binds_nothing() {
     (void)g.register_vertex(*path_t::parse("/sink"), role_t::STORED_VALUE);
     fwd_router_t router{g};
     rec_link_t up;
-    router.add_child("net/ws-client/up", up);
+    (void)router.add_child("net/ws-client/up", up);
 
     // PATH{ VALUE "sink" } — same payload bytes as the legal PATH{ NAME "sink" }, illegal child
     // type. `docs/reference/05-protocol-tlvs.md` states the rule: "Each child MUST be a NAME TLV

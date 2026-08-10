@@ -112,8 +112,8 @@ void test_tombstone_not_erase() {
     child_registry_t reg;
     sink_link_t a;
     sink_link_t b;
-    reg.add("a", a);
-    reg.add("b", b);
+    (void)reg.add("a", a);
+    (void)reg.add("b", b);
     check(reg.size() == 2 && reg.live_size() == 2, "two live children");
 
     check(reg.erase("a"), "erase reports it removed a live child");
@@ -131,18 +131,18 @@ void test_churn_reuses_tombstones() {
     child_registry_t reg;
     sink_link_t a;
     sink_link_t b;
-    reg.add("conn", a);
+    (void)reg.add("conn", a);
     for (int i = 0; i < 50; ++i) {
         reg.erase("conn");
-        reg.add("conn", (i % 2 == 0) ? b : a);
+        (void)reg.add("conn", (i % 2 == 0) ? b : a);
     }
     reg.erase("conn");
-    reg.add("conn", b);
+    (void)reg.add("conn", b);
     check(reg.size() == 1, "51 create/remove rounds on one NAME still occupy ONE slot");
     check(reg.by_name("conn") == &b, "and the NAME resolves to the CURRENT link");
 
     sink_link_t c;
-    reg.add("other", c);
+    (void)reg.add("other", c);
     check(reg.size() == 2, "a genuinely new NAME appends");
 }
 
@@ -195,8 +195,8 @@ void test_duplicate_add_rebinds() {
     child_registry_t reg;
     sink_link_t a;
     sink_link_t b;
-    reg.add("net/ws-client/x", a);
-    reg.add("net/ws-client/x", a);
+    (void)reg.add("net/ws-client/x", a);
+    (void)reg.add("net/ws-client/x", a);
     check(reg.size() == 1, "a repeated add does not grow the table");
     check(reg.live_size() == 1, "and leaves exactly one live child");
 
@@ -205,8 +205,8 @@ void test_duplicate_add_rebinds() {
           "and NOTHING resolves afterwards — no shadow slot keeps the freed link reachable");
 
     // Rebinding to a different link must take effect, not resolve the stale one.
-    reg.add("net/ws-client/x", a);
-    reg.add("net/ws-client/x", b);
+    (void)reg.add("net/ws-client/x", a);
+    (void)reg.add("net/ws-client/x", b);
     check(reg.by_name("net/ws-client/x") == &b, "a re-add rebinds the name to the NEW link");
     check(reg.live_size() == 1, "still one slot for the name");
 }
@@ -234,7 +234,7 @@ void test_slot_addresses_are_stable() {
     for (std::size_t i = 0; i < kN; ++i) {
         links.push_back(std::make_unique<sink_link_t>());
         const std::string name = "net/ws-client/l" + std::to_string(i);
-        reg.add(name, *links.back());
+        (void)reg.add(name, *links.back());
         slots.push_back(reg.entry_by_name(name));
     }
     check(slots.size() == kN && slots[0] != nullptr, "every child registered");

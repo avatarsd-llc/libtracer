@@ -287,7 +287,7 @@ void test_compact_flatten_oom_preserves_last_known_value() {
     arming_backend_t fb;
     fwd_router_t router(g, std::pmr::get_default_resource(), &tr::mem::heap_source(), &fb);
     rec_link_t up(/*ropes=*/true);
-    router.add_child("up", up);
+    (void)router.add_child("up", up);
 
     constexpr std::uint16_t kLabel = 0x0444u;
     constexpr std::uint32_t kFirst = 0x11223344u;
@@ -330,7 +330,7 @@ void test_advertise_flatten_oom_binds_nothing() {
     arming_backend_t fb;
     fwd_router_t router(g, std::pmr::get_default_resource(), &tr::mem::heap_source(), &fb);
     rec_link_t up(/*ropes=*/true);
-    router.add_child("up", up);
+    (void)router.add_child("up", up);
 
     constexpr std::uint16_t kLabel = 0x0555u;
     constexpr std::uint32_t kVal = 0x9ABCDEF0u;
@@ -371,7 +371,7 @@ void test_delivery_flatten_oom_sends_nothing() {
     arming_backend_t fb;
     fwd_router_t router(g, std::pmr::get_default_resource(), &tr::mem::heap_source(), &fb);
     rec_link_t client;
-    router.add_child("client", client);
+    (void)router.add_child("client", client);
 
     const vertex_handle_t feed =
         g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
@@ -437,8 +437,8 @@ void test_bus_name_reject_flatten_oom_drops_the_frame() {
     p2p_link_t alice;
     bus.peers.emplace_back("alice", &alice);
     rec_link_t in(/*ropes=*/true);
-    router.add_child("net/ws-server/srv", bus);
-    router.add_child("net/ws-client/in", in);
+    (void)router.add_child("net/ws-server/srv", bus);
+    (void)router.add_child("net/ws-client/in", in);
 
     // `srv` is the bus link's own NAME and `sensor` names no peer on it — the ADR-0073 §3
     // rejection. `src` is intact, so a well-formed frame is ANSWERED rather than dropped,
@@ -489,7 +489,7 @@ void test_default_backend_unchanged() {
     const vertex_handle_t sink = g.register_vertex(*path_t::parse("/sink"), role_t::STORED_VALUE);
     fwd_router_t router(g);  // no backend argument at all
     rec_link_t up(/*ropes=*/true);
-    router.add_child("up", up);
+    (void)router.add_child("up", up);
 
     constexpr std::uint16_t kLabel = 0x0666u;
     constexpr std::uint32_t kVal = 0x0BADF00Du;

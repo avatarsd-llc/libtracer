@@ -150,8 +150,8 @@ void test_forwarding_arm_reuses_one_downstream_label() {
     fwd_router_t node(g);
     fake_link_t up;
     fake_link_t down;
-    node.add_child("up", up);
-    node.add_child("down", down);
+    (void)node.add_child("up", up);
+    (void)node.add_child("down", down);
 
     constexpr std::uint16_t kUpLabel = 7;
     const std::vector<std::byte> adv =
@@ -185,7 +185,7 @@ void test_producer_advertise_reuses_its_label() {
     graph_t g;
     fwd_router_t node(g);
     fake_link_t down;
-    node.add_child("down", down);
+    (void)node.add_child("down", down);
 
     const std::vector<std::byte> route = b_path({"sensor"});
     std::set<std::uint16_t> returned;
@@ -226,10 +226,10 @@ void test_chain_flap_grows_no_state() {
     m_up.connect(a_down);
     m_down.connect(c_up);
     c_up.connect(m_down);
-    a.add_child("down", a_down);
-    m.add_child("up", m_up);
-    m.add_child("down", m_down);
-    c.add_child("up", c_up);
+    (void)a.add_child("down", a_down);
+    (void)m.add_child("up", m_up);
+    (void)m.add_child("down", m_down);
+    (void)c.add_child("up", c_up);
     const tr::graph::vertex_handle_t sensor =
         gc.register_vertex(*path_t::parse("/sensor"), role_t::STORED_VALUE);
 

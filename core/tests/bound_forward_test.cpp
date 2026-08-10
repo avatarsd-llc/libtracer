@@ -468,8 +468,8 @@ int main() {
         fwd_router_t r(g);
         span_sink_t cli;
         span_sink_t up;
-        r.add_child("cli", cli);
-        r.add_child("up", up);
+        (void)r.add_child("cli", cli);
+        (void)r.add_child("up", up);
 
         const path_ref_element_t route[2] = {{.index = 1, .generation = 0},
                                              {.index = 0x0000BEEFu, .generation = 7}};
@@ -529,8 +529,8 @@ int main() {
             fwd_router_t r(g);
             span_sink_t cli;
             span_sink_t up;
-            r.add_child("cli", cli);
-            r.add_child("up", up);
+            (void)r.add_child("cli", cli);
+            (void)r.add_child("up", up);
             r.on_frame("up", reply);  // the reply comes back over the link the request left on
             return std::move(cli.sent);
         };
@@ -609,8 +609,8 @@ int main() {
             fwd_router_t r(g);
             span_sink_t cli;
             span_sink_t up;
-            r.add_child("cli", cli);
-            r.add_child("up", up);
+            (void)r.add_child("cli", cli);
+            (void)r.add_child("up", up);
             r.on_frame("up", reply);
             return std::move(cli.sent);
         };
@@ -653,8 +653,8 @@ int main() {
             fwd_router_t r(g);
             span_sink_t cli;
             span_sink_t up;
-            r.add_child("cli", cli);
-            r.add_child("up", up);
+            (void)r.add_child("cli", cli);
+            (void)r.add_child("up", up);
             const path_ref_element_t route[2] = {{.index = 1, .generation = 0},
                                                  {.index = 0x0000BEEFu, .generation = 7}};
             r.on_frame("cli", b_fwd_raw_op(op_byte, b_path_ref(route), b_path({"reply-ep"}), {},
@@ -701,8 +701,8 @@ int main() {
             fwd_router_t r(g);
             span_sink_t cli;
             span_sink_t up;
-            r.add_child("cli", cli);
-            r.add_child("up", up);
+            (void)r.add_child("cli", cli);
+            (void)r.add_child("up", up);
             if (retire_it) (void)g.retire(up_v);
             r.on_frame("up", reply);
             return std::move(cli.sent);

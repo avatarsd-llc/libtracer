@@ -386,7 +386,7 @@ class graph_t {
      * retired. There is **no wire operation** that reaches here — a peer goes through the
      * device's own logic (§A.1 / §A.1.1), which is what calls this.
      */
-    result_t<void> retire(vertex_handle_t vh);
+    [[nodiscard]] result_t<void> retire(vertex_handle_t vh);
 
     /**
      * @brief @p vh's retirement generation — the stamp a cached resolution carries (ADR-0062).
@@ -1337,7 +1337,7 @@ class graph_t {
     // `caller` is the ACL caller context gating the WRITE right (the API caller's
     // for a direct write; a delivered subscription's stored context terminates at
     // its target instead — see dispatch_edge_target, ADR-0051).
-    result_t<void> write_impl(vertex_t* v, rope_t value, std::string_view caller);
+    [[nodiscard]] result_t<void> write_impl(vertex_t* v, rope_t value, std::string_view caller);
     // The store half of a write (LKV/history/handler + seq bump + await wake),
     // WITHOUT fan-out — shared by write_impl and the branch-write apply (RFC-0005).
     // Hands back the exact published LKV pointer (null for a Handler-role write —
@@ -1353,7 +1353,7 @@ class graph_t {
     // NOTE the asymmetry this creates: the Handler leg never moves from `value`, so the
     // CALLER's rope now survives the call on that path holding its refcounts, where the
     // by-value temporary used to die at the call. Destruction count is unchanged.
-    result_t<std::shared_ptr<const rope_t>> store_value(vertex_t* v, rope_t&& value);
+    [[nodiscard]] result_t<std::shared_ptr<const rope_t>> store_value(vertex_t* v, rope_t&& value);
     // Branch-write decomposition (RFC-0005): a POINT payload written to `v` lands
     // each value-carrying node at the corresponding descendant vertex as a
     // refcount SUBVIEW of the written frame (creating missing vertices, CREATE-
@@ -1364,8 +1364,8 @@ class graph_t {
     // value-carrying node at the corresponding descendant vertex. `notify` picks the
     // half: true (the `write` path) delivers each covered site + bubbles; false (the
     // `assign` path) marks each landed vertex for the next sweep and delivers nothing.
-    result_t<void> write_branch(vertex_t* v, const rope_t& value, std::string_view caller,
-                                bool notify);
+    [[nodiscard]] result_t<void> write_branch(vertex_t* v, const rope_t& value,
+                                              std::string_view caller, bool notify);
     void fan_out(vertex_t* v, const rope_t& value);
     // The ONE dispatch of a subscription edge's three legs (in-process callback, local
     // target re-dispatch, remote sink) — shared by fan_out and the admission durability
@@ -1429,8 +1429,9 @@ class graph_t {
     // the edge's kind) → RFC-0005 bookkeeping. Every door — the two subscribe() sugars,
     // the local `:subscribers[]` field-write, and the wire subscribe_wire — ends here,
     // so gate and latch semantics cannot diverge per entry point.
-    result_t<subscription_t> admit_subscriber(vertex_t* v, subscriber_t s, std::string_view caller,
-                                              std::optional<std::size_t> slot = std::nullopt);
+    [[nodiscard]] result_t<subscription_t> admit_subscriber(
+        vertex_t* v, subscriber_t s, std::string_view caller,
+        std::optional<std::size_t> slot = std::nullopt);
     // Fire the external-subscription observer for ONE slot mutation (set_subscription_observer).
     // Returns immediately when no observer is installed or `caller` is EMPTY — the latter is
     // the whole external/local discrimination, in one place. `sub_tlv` is the slot's stored
@@ -1448,8 +1449,8 @@ class graph_t {
     }
     // Field surface: ":settings.<f>", ":settings.app.<name…>" (RFC-0010),
     // ":subscribers[]" / "[N]", ":children[]".
-    result_t<void> field_write(vertex_t* v, const field_path_t& field, const view_t& value,
-                               std::string_view caller);
+    [[nodiscard]] result_t<void> field_write(vertex_t* v, const field_path_t& field,
+                                             const view_t& value, std::string_view caller);
     // The ACL gate (#81, ADR-0018/0020): true iff `caller` may exercise `right` on
     // `v`. True with no resolver installed (one null check — enforcement off), for the
     // trusted EMPTY (local) caller — settled before the resolver runs, #905 — or when
@@ -1470,7 +1471,7 @@ class graph_t {
     // ":children[]" append: instantiate a child from a SPEC via the type catalog (#82,
     // ADR-0017). Composes the child key (parent key + the SPEC `name` NAME), dispatches
     // on the SPEC `type`. Unknown type => SCHEMA_NOT_FOUND; duplicate name => PATH_IN_USE.
-    result_t<void> create_child(vertex_t* parent, const view_t& spec_value);
+    [[nodiscard]] result_t<void> create_child(vertex_t* parent, const view_t& spec_value);
     // ":schema" read => a POINT descriptor (name + settings).
     [[nodiscard]] result_t<view_t> read_schema(vertex_t* v) const;
     // ":identity" read => the node-scoped SETTINGS{kind,key} record (RFC-0011 §B), or

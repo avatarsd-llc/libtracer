@@ -47,6 +47,29 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **`[[nodiscard]]` on the fallible control-plane returns (#892).** `fwd_router_t::add_child`,
+  `child_registry_t::add` and `graph_t::retire` now carry the attribute, as do six private
+  `graph.hpp` `result_t` helpers. SOURCE-BREAKING only for a caller that discards one of these
+  results: the fix is `(void)` and a note saying why, and no ABI, signature or behaviour
+  changes.
+
+  Two of the three had a doc block that explicitly **declined** the attribute, and both stated
+  reasons turned out to be arguments *for* it. `add_child`'s said "every existing call site
+  registers a name it composed itself, so it stays correct ignoring it" — true of the
+  unaddressable-name half of the return and false of the other half, since
+  `child_registry_t::add` also returns false when the table could not grow, which no composed
+  name rules out. That is precisely what `make_connection` discarded when it minted a
+  connection published UP and resolvable by no `dst` (#930).
+
+  `result_t` itself **cannot** carry a type-level `[[nodiscard]]` — it is an alias template and
+  C++ gives the attribute no such target — so the sweep is per-function, and `retire` was the
+  only public fallible signature still missing it.
+
+  In-tree call sites: 217 warned. 214 are tests that deliberately ignore a control-plane
+  failure and now say so with `(void)`; the three that are not tests
+  (`core/examples/two_node_fwd.cpp` ×2, `core/tests/fwd_node_server.cpp`) got a real check,
+  because sample code that ignores a registration failure teaches the bug.
+
 - **`view::view_can_frames_t` no longer stores its window table — `frames()` is replaced by
   `frame(i)` (#1110).** BREAKING for any caller of `frames()`: the accessor returned
   `const std::vector<view_t>&` and there is no longer a vector to return. `frame_count()`,

@@ -202,9 +202,9 @@ void test_longest_match_wins() {
     // Registered SHALLOW FIRST so a pass that returned the first hit rather than the widest
     // would answer wrongly — the old descent got this right only by starting at the widest
     // width, which is exactly the loop the single pass replaces.
-    router.add_child("net/a/b", shallow);
-    router.add_child("net/a/b/c/d", deep);
-    router.add_child("in", in);
+    (void)router.add_child("net/a/b", shallow);
+    (void)router.add_child("net/a/b/c/d", deep);
+    (void)router.add_child("in", in);
 
     router.on_frame("in", make_fwd(std::vector<std::string>{"net", "a", "b", "c", "d", "x"},
                                    std::vector<std::string>{"o"}));
@@ -222,8 +222,8 @@ void test_segment_boundaries() {
     tr::net::fwd_router_t router{graph};
     recording_link_t abc;
     recording_link_t in;
-    router.add_child("net/abc", abc);
-    router.add_child("in", in);
+    (void)router.add_child("net/abc", abc);
+    (void)router.add_child("in", in);
 
     // "net/ab" is a byte prefix of "net/abc"; "net"+"ab" as segments must NOT match it.
     router.on_frame(
@@ -241,8 +241,8 @@ void test_exact_mount_terminates() {
     tr::net::fwd_router_t router{graph};
     recording_link_t down;
     recording_link_t in;
-    router.add_child("net/a/b/c/d/e", down);
-    router.add_child("in", in);
+    (void)router.add_child("net/a/b/c/d/e", down);
+    (void)router.add_child("in", in);
 
     router.on_frame("in", make_fwd(std::vector<std::string>{"net", "a", "b", "c", "d", "e"},
                                    std::vector<std::string>{"o"}));
@@ -260,9 +260,9 @@ void test_narrow_after_wide() {
     // Order matters: the pass reaches `wide` first and walks the dst out to width 6, then
     // must walk BACK to width 1 for `narrow`. A walker that only ever moved forward would
     // answer the second slot from a stale cursor.
-    router.add_child("q0/q1/q2/q3/q4/q5", wide);
-    router.add_child("solo", narrow);
-    router.add_child("in", in);
+    (void)router.add_child("q0/q1/q2/q3/q4/q5", wide);
+    (void)router.add_child("solo", narrow);
+    (void)router.add_child("in", in);
 
     router.on_frame("in",
                     make_fwd(std::vector<std::string>{"solo", "x"}, std::vector<std::string>{"o"}));
@@ -300,8 +300,8 @@ void test_deep_mount_planes_agree() {
     tr::net::fwd_router_t router{graph};
     recording_link_t down;
     recording_link_t in;
-    router.add_child("net/ws/s/rack/slot", down);  // 5 segments — past the old window
-    router.add_child("in", in);
+    (void)router.add_child("net/ws/s/rack/slot", down);  // 5 segments — past the old window
+    (void)router.add_child("in", in);
 
     // Plane 1 — a full FWD.
     router.on_frame("in", make_fwd(std::vector<std::string>{"net", "ws", "s", "rack", "slot", "v"},
@@ -355,8 +355,8 @@ void test_shape_change_is_seen() {
     recording_link_t in;
     stale_log_t log;
     router.on_stale_label(&on_stale, &log);
-    router.add_child("net/ws/s", shallow);
-    router.add_child("in", in);
+    (void)router.add_child("net/ws/s", shallow);
+    (void)router.add_child("in", in);
 
     std::vector<std::byte> route;
     emit_path(route, std::vector<std::string>{"net", "ws", "s", "rack", "v"});
@@ -371,7 +371,7 @@ void test_shape_change_is_seen() {
 
     // The move: a deeper mount under the same prefix. Both links are alive, both targets are
     // what they always were — only the SPLIT moved.
-    router.add_child("net/ws/s/rack", deeper);
+    (void)router.add_child("net/ws/s/rack", deeper);
 
     // FWD plane: resolves the new, deeper mount.
     router.on_frame("in", make_fwd(std::vector<std::string>{"net", "ws", "s", "rack", "v"},

@@ -127,8 +127,8 @@ void raw_sink_flip_race() {
     fwd_router_t router(g);
     counting_link_t cli;
     counting_link_t up;
-    router.add_child("cli", cli);
-    router.add_child("up", up);
+    (void)router.add_child("cli", cli);
+    (void)router.add_child("up", up);
 
     probe_t a{'A'};
     probe_t b{'B'};
@@ -176,7 +176,7 @@ void stale_sink_flip_race() {
     graph_t g;
     fwd_router_t router(g);
     counting_link_t in;
-    router.add_child("in", in);
+    (void)router.add_child("in", in);
 
     probe_t a{'A'};
     probe_t b{'B'};

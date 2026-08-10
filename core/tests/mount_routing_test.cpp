@@ -154,8 +154,8 @@ void test_module_scoping() {
     child_registry_t reg;
     p2p_link_t ws;
     p2p_link_t tcp;
-    reg.add("ws-client/foo", ws);
-    reg.add("tcp-client/foo", tcp);
+    (void)reg.add("ws-client/foo", ws);
+    (void)reg.add("tcp-client/foo", tcp);
 
     const auto* a = find(reg, {"ws-client", "foo"});
     const auto* b = find(reg, {"tcp-client", "foo"});
@@ -174,7 +174,7 @@ void test_no_prefix_confusion() {
     std::printf("qualified-key boundaries\n");
     child_registry_t reg;
     p2p_link_t a;
-    reg.add("ws/client-foo", a);
+    (void)reg.add("ws/client-foo", a);
     check(find(reg, {"ws", "client-foo"}) != nullptr, "the exact split matches");
     check(find(reg, {"ws/client", "foo"}) == nullptr, "a differently-placed separator does not");
     check(find(reg, {"ws", "client", "foo"}) == nullptr, "nor does a different arity");
@@ -191,9 +191,9 @@ void test_scoped_peer_resolution() {
     p2p_link_t client;
     ws_srv.peers.emplace_back("alice", &alice_ws);
     tcp_srv.peers.emplace_back("alice", &alice_tcp);
-    reg.add("ws-server/s", ws_srv);
-    reg.add("tcp-server/s", tcp_srv);
-    reg.add("ws-client/c", client);
+    (void)reg.add("ws-server/s", ws_srv);
+    (void)reg.add("tcp-server/s", tcp_srv);
+    (void)reg.add("ws-client/c", client);
 
     const auto* ws = find(reg, {"ws-server", "s"});
     const auto* tcp = find(reg, {"tcp-server", "s"});
@@ -322,8 +322,8 @@ void test_advertise_descends_the_mount() {
     tr::net::fwd_router_t router{graph};
     recording_link_t up;
     recording_link_t down;
-    router.add_child("net/ws-client/up", up);
-    router.add_child("net/ws-server/down", down);
+    (void)router.add_child("net/ws-client/up", up);
+    (void)router.add_child("net/ws-server/down", down);
 
     std::vector<std::byte> route;
     emit_path(route, {"net", "ws-server", "down", "sink"});
@@ -369,8 +369,8 @@ void test_bus_peer_src_carries_the_mount() {
         std::string child(module);
         child += '/';
         child += conn;
-        router.add_child(std::string("net/") + child, bus);
-        router.add_child("net/ws-client/out", out);
+        (void)router.add_child(std::string("net/") + child, bus);
+        (void)router.add_child("net/ws-client/out", out);
 
         // The bus hands the frame up tagged with the sending peer's name; the router's
         // per-child ctx is what supplies the mount. Driving it through set_peer_receiver
@@ -413,8 +413,8 @@ void test_grown_src_round_trips() {
 
     tr::graph::graph_t graph;
     tr::net::fwd_router_t router{graph};
-    router.add_child("net/can/can0", bus);
-    router.add_child("net/ws-client/out", out);
+    (void)router.add_child("net/can/can0", bus);
+    (void)router.add_child("net/ws-client/out", out);
 
     bus.deliver("n5", make_fwd({"net", "ws-client", "out", "sensor"}, {"origin"}));
     check(out.sent.size() == 1, "the peer's frame forwarded");
@@ -543,8 +543,8 @@ void test_bus_name_hop_is_rejected() {
 
     tr::graph::graph_t graph;
     tr::net::fwd_router_t router{graph};
-    router.add_child("net/ws-server/srv", bus);
-    router.add_child("net/ws-client/in", in);
+    (void)router.add_child("net/ws-server/srv", bus);
+    (void)router.add_child("net/ws-client/in", in);
 
     // The broadcast shape: the bus NAME with a residual below it that names NO peer.
     router.on_frame("net/ws-client/in",
@@ -595,8 +595,8 @@ void test_bus_name_hop_masks_the_op_byte() {
 
     tr::graph::graph_t graph;
     tr::net::fwd_router_t router{graph};
-    router.add_child("net/ws-server/srv", bus);
-    router.add_child("net/ws-client/in", in);
+    (void)router.add_child("net/ws-server/srv", bus);
+    (void)router.add_child("net/ws-client/in", in);
 
     const std::initializer_list<std::string_view> dst{"net", "ws-server", "srv", "sensor", "temp"};
     const std::initializer_list<std::string_view> src{"origin"};
@@ -632,7 +632,7 @@ void test_bus_name_hop_reject_from_peer() {
 
     tr::graph::graph_t graph;
     tr::net::fwd_router_t router{graph};
-    router.add_child("net/ws-server/srv", bus);
+    (void)router.add_child("net/ws-server/srv", bus);
 
     // alice addresses her OWN bus's NAME with a residual naming no peer.
     bus.deliver("alice", make_fwd({"net", "ws-server", "srv", "zzz"}, {"origin"}));
@@ -688,8 +688,8 @@ void test_bus_name_hop_rejected_rope_arm() {
 
     tr::graph::graph_t graph;
     tr::net::fwd_router_t router{graph};
-    router.add_child("net/ws-server/srv", bus);
-    router.add_child("net/ws-client/in", in);
+    (void)router.add_child("net/ws-server/srv", bus);
+    (void)router.add_child("net/ws-client/in", in);
 
     // The broadcast shape, delivered as a MULTI-LINK rope split mid-header (an
     // adversarial boundary the rope cursor must stitch across).
@@ -733,8 +733,8 @@ void test_bus_name_hop_reply_bytes_are_pinned() {
 
     tr::graph::graph_t graph;
     tr::net::fwd_router_t router{graph};
-    router.add_child("net/ws-server/srv", bus);
-    router.add_child("net/ws-client/in", in);
+    (void)router.add_child("net/ws-server/srv", bus);
+    (void)router.add_child("net/ws-client/in", in);
 
     router.on_frame("net/ws-client/in",
                     make_fwd({"net", "ws-server", "srv", "sensor", "temp"}, {"origin"}));
@@ -784,8 +784,8 @@ void test_reject_and_terminus_agree_on_trailered_routes() {
 
     tr::graph::graph_t graph;
     tr::net::fwd_router_t router{graph};
-    router.add_child("net/ws-server/srv", bus);
-    router.add_child("net/ws-client/in", in);
+    (void)router.add_child("net/ws-server/srv", bus);
+    (void)router.add_child("net/ws-client/in", in);
 
     // A `src` route carrying a CRC-16 trailer. `wire::encode` computes the CRC, so this is a
     // frame a conformant peer could really put on the wire — not a hand-corrupted one.
@@ -850,8 +850,8 @@ void test_advertise_exact_mount_terminates() {
     tr::net::fwd_router_t router{graph};
     recording_link_t up;
     recording_link_t down;
-    router.add_child("net/ws-client/up", up);
-    router.add_child("net/ws-server/down", down);
+    (void)router.add_child("net/ws-client/up", up);
+    (void)router.add_child("net/ws-server/down", down);
 
     std::vector<std::byte> route;
     emit_path(route, {"net", "ws-server", "down"});

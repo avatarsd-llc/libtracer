@@ -375,8 +375,8 @@ void test_router_link_down() {
     graph_t g;
     fwd_router_t router(g);
     fake_link_t cli, other;
-    router.add_child("cli", cli);
-    router.add_child("other", other);
+    (void)router.add_child("cli", cli);
+    (void)router.add_child("other", other);
 
     (void)g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
     // A compact-flagged subscribe over 'cli' (so label state forms), a plain one over
@@ -424,8 +424,8 @@ void test_departure_notifier_seam() {
     fwd_router_t router(g);
     fake_link_t p2p;
     fake_bus_t bus;
-    router.add_child("p2p", p2p);
-    router.add_child("bus", bus);
+    (void)router.add_child("p2p", p2p);
+    (void)router.add_child("bus", bus);
 
     (void)g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
     p2p.inject(b_fwd(fwd_op_t::WRITE, b_path({"s"}), b_path({"p2p"}), b_field_subscribers_append(),
@@ -477,7 +477,7 @@ void test_evict_reaches_field_write_admitted_edges() {
     graph_t g;
     fwd_router_t router(g);
     fake_link_t cli;
-    router.add_child("cli", cli);
+    (void)router.add_child("cli", cli);
 
     (void)g.register_vertex(path_t("/p"), role_t::STORED_VALUE);
     (void)g.register_vertex(path_t("/t"), role_t::STORED_VALUE);

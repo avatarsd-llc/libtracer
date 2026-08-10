@@ -1052,7 +1052,7 @@ void test_stale_label_nack_allocates_nothing() {
     tr::graph::graph_t g;
     tr::net::fwd_router_t router(g);
     silent_link_t up;
-    router.add_child("up", up);
+    (void)router.add_child("up", up);
 
     // Nothing is bound on this router, so every label is stale. The frame is built OUTSIDE
     // the armed window — the peer's allocation is not the node's.
@@ -1083,7 +1083,7 @@ void test_warm_advertise_allocates_nothing() {
     tr::graph::graph_t g;
     tr::net::fwd_router_t router(g);
     silent_link_t down;
-    router.add_child("down", down);
+    (void)router.add_child("down", down);
 
     const std::vector<std::byte> route = label_route("sensor");
     const std::uint16_t first = router.advertise("down", route);  // mints + records, unarmed
@@ -1114,7 +1114,7 @@ void test_nack_readvertise_adds_no_allocation() {
     tr::graph::graph_t g;
     tr::net::fwd_router_t router(g);
     silent_link_t up;
-    router.add_child("up", up);
+    (void)router.add_child("up", up);
 
     const std::vector<std::byte> route = label_route("sensor");
     const std::uint16_t label = router.advertise("up", route);
