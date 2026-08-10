@@ -313,12 +313,21 @@ of work per operation*.
 - **ACL is disabled in the comparison rows.** No subject resolver is installed, so
   the access gate is a single null check. The *cost of enforcement* is measured
   separately (the `acl-inherit` rows), never hidden inside the comparison.
-- **There is no network throughput comparison.** A valid one needs a real subscriber in
-  a second process on **both** sides, with deliveries counted at the receiver rather
+- **No network throughput comparison is published.** A valid one needs a real subscriber
+  in a second process on **both** sides, with deliveries counted at the receiver rather
   than sends counted at the publisher — an engine whose publisher has no peer emits
   nothing to the wire at all, and a per-send rate multiplied by a composition width is
-  arithmetic, not a measurement. Until such a bench exists the chapter states the gap;
-  it does not show a number.
+  arithmetic, not a measurement. That bench now **exists** (`bench/run_compose.sh`): two
+  processes per engine over real loopback UDP, the composition width K swept on both
+  sides, and every rate taken from the subscriber's own count over the subscriber's own
+  clock. It carries two guards, and reports nothing unless both hold — the receiver emits
+  no row at all when it observed no values, any malformed record, or fewer throughput
+  datagrams than the sample floor the driver hands it, and a **wire-use audit** runs the
+  publisher under `strace` and fails the point below a send-syscall floor (`COMPOSE_SEND_FLOOR`,
+  default 50), which is exactly the check whose absence let the withdrawn version report a
+  rate for an engine that had only ever emitted scouting beacons. What is still absent is
+  the **chart**: publishing this comparison is a claim, so it is a separate, reviewed step,
+  and until it is taken the chapter states the gap rather than showing a number.
 - **Network latency is the surviving network comparison**, and it is fair: a
   single-value, two-process, same-clock measurement over the real loopback kernel path,
   identical topology for both engines. **p50**, the **p99 tail** and the **p999 deep

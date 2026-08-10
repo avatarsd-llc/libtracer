@@ -237,6 +237,22 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "are estimated by the same code from the same number of samples.",
         "ns p50 / p99 / p999 / max, one-way · samples per point",
         "—"),
+    instrument_t(
+        "bench_compose_net.cpp", "net", (),
+        "libtracer's composition-throughput arm: a publisher process ships a K-link rope as one "
+        "`sendmsg(iovec)` and a subscriber process counts the values it observes arriving, swept "
+        "over K. The rate is the receiver's own count over the receiver's own clock, and the run "
+        "is refused outright if it observed no values or any malformed record. Its numbers reach "
+        "no chart here: the comparison's publication is a separate, reviewed step.",
+        "values/s and messages/s observed · values per message · ns one-way per K-value group"),
+    instrument_t(
+        "bench_zenoh_compose.cpp", "net", (),
+        "The Zenoh arm of the same measurement, over a configured loopback UDP endpoint with "
+        "multicast scouting disabled. It has no composite send, so the same K values are K puts; "
+        "it shares the subscriber-side counter with the libtracer arm, so a value means the same "
+        "thing on both sides. Its publisher is audited for wire use before any number is taken, "
+        "so a run in which it never transmitted cannot report one.",
+        "values/s and messages/s observed · values per message · ns one-way per K-value group"),
     # -- the wire plane, run on demand --------------------------------------
     instrument_t(
         "bench_forward_rope.cpp", "framed", (),
