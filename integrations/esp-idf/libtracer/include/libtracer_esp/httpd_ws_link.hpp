@@ -39,8 +39,12 @@
  * behind the request-plane admission gate with no wiring change.
  *
  * Threading (the review-critical part):
- *   - RX runs on the `esp_http_server` task: the WS URI handler is invoked once at
- *     the opening handshake (HTTP GET) and again for each subsequent data frame.
+ *   - RX runs on the `esp_http_server` task. The server answers the opening
+ *     WebSocket GET ITSELF and, having answered it, does not call the URI handler
+ *     for that request at all (`httpd_uri.c` returns from the handshake branch
+ *     before `uri->handler`), so the handler is invoked ONLY for data frames; the
+ *     opening GET is seen through the server's `ws_pre_handshake_cb` instead
+ *     (@ref set_admission_cb), which runs before the 101 is written.
  *     A data frame is read with httpd_ws_recv_frame() and delivered to the graph
  *     SYNCHRONOUSLY on that task — the router services the request (decode /
  *     resolve / reply) in-call, exactly as the raw server delivered on its recv
@@ -50,15 +54,21 @@
  *     -> httpd_ws_send_frame_async() (the documented async-send pattern). All
  *     socket writes therefore happen on the one httpd task, so there is NO
  *     cross-thread write to a socket the task may be closing, and no write
- *     interleave — the payload is heap-copied into the work item and freed after
- *     the send. send() may be called from any task (subscription pushes on the
- *     io/event threads, a reply on the httpd task itself); all funnel through the
- *     same queue. TX failure is never silent, and each kind is aimed at what it is
- *     actually evidence about (#835): a failed SEND strikes its DESTINATION — the
- *     peer that did not drain — and kMaxConsecutiveTxDrops of them in a row, with
- *     no success between, closes that session; a failed ENQUEUE is evidence about
- *     the shared control queue and nobody's peer, so it is a dropped frame on a
- *     link-level counter (@ref enqueue_drops) and strikes no session at all.
+ *     interleave — the payload is copied into a pooled work item and the slot is
+ *     released after the send. send() may be called from any task (subscription
+ *     pushes on the io/event threads, a reply on the httpd task itself); all funnel
+ *     through the same queue. Every enqueue failure is OBSERVABLE, which is a
+ *     property of the ESP-IDF floor this component requires (>=5.5.5, see
+ *     idf_component.yml) and not of this file: below it a full control mbox
+ *     discarded the datagram inside lwIP with ESP_OK returned, and the link carried
+ *     compensation for that until #949 deleted it with the floor raised. Each
+ *     failure kind is aimed at what it is actually evidence about (#835): a failed
+ *     SEND strikes its DESTINATION — the peer that did not drain — and
+ *     kMaxConsecutiveTxDrops of them in a row, with no success between, closes that
+ *     session; a refused ENQUEUE (or an exhausted TX pool) is evidence about the
+ *     shared control queue and this link's own in-flight depth, not about any one
+ *     peer, so it is a dropped frame on a link-level counter (@ref enqueue_drops)
+ *     and strikes no session at all.
  *   - Every upgraded socket gets a SHORT, derived SO_SNDTIMEO of its own (@ref
  *     send_timeout_ms) plus a send override that rejects a SHORT write. Without
  *     the bound one full-window peer parks the httpd task — the task that owns
@@ -75,9 +85,12 @@
  *     kMaxFrameBytes abuse cap) fall back to an exact-size nothrow buffer.
  *   - TX: a send claims a pool slot lock-free (CAS) and gathers straight into its
  *     inline payload. A frame past the inline capacity keeps the pooled shell and
- *     takes a nothrow heap payload; a momentarily exhausted pool falls back to a
- *     fully heap work item. Every fallback is `new (std::nothrow)` with
- *     drop-on-OOM backpressure — never an abort.
+ *     takes a nothrow heap payload (`new (std::nothrow)`, drop-on-OOM backpressure —
+ *     never an abort). An exhausted pool has NO fallback: the pool is this link's
+ *     outstanding-send bound, and a send that finds it full is dropped and counted
+ *     (@ref enqueue_drops) rather than posted from a heap-allocated work item, which
+ *     bounded the in-flight depth by the heap instead of by the queue behind it
+ *     (#949).
  *   - FAN-OUT: a broadcast (`send()` — the path a subscription push takes) snapshots
  *     its destinations into a FIXED on-stack chunk and resumes the scan for the next
  *     one, so the peer set is walked with no container of its own. Until #961 that
@@ -123,9 +136,11 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *        URI handler at "/"; confirm with @ref ok.
      *
      * @param bind_port  TCP port to serve the graph WS on (the node's WS port).
-     * @param max_peers  Concurrent-peer admission cap; 0 = unbounded. Beyond it a
-     *                   new handshake is refused (the handler fails, httpd closes
-     *                   the socket) — a clean refusal, mirroring transport_ws_server.
+     * @param max_peers  Concurrent-peer admission cap; 0 = unbounded. Beyond it the
+     *                   peer is refused on its FIRST frame (the handler fails, httpd
+     *                   closes the socket) — a clean refusal, mirroring
+     *                   transport_ws_server, but landing one step later than the
+     *                   handshake because that is where this link claims a slot.
      * @param peer_named Expose the @ref bus_link_t facet: each inbound peer gets its
      *                   own `<ip>:<port>` return-route identity (the browser-tabs
      *                   deployment). Off keeps point-to-point hop naming (send()
@@ -154,9 +169,11 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * @param uri        WS URI pattern to register the handler at (e.g. "/ws"). Register
      *                   it BEFORE any wildcard route so registration-order precedence
      *                   routes it to the WS handler; keep it an exact literal.
-     * @param max_peers  Concurrent-peer admission cap; 0 = unbounded. Beyond it a
-     *                   new handshake is refused (the handler fails, httpd closes
-     *                   the socket) — a clean refusal, mirroring transport_ws_server.
+     * @param max_peers  Concurrent-peer admission cap; 0 = unbounded. Beyond it the
+     *                   peer is refused on its FIRST frame (the handler fails, httpd
+     *                   closes the socket) — a clean refusal, mirroring
+     *                   transport_ws_server, but landing one step later than the
+     *                   handshake because that is where this link claims a slot.
      * @param peer_named Expose the @ref bus_link_t facet: each inbound peer gets its
      *                   own `<ip>:<port>` return-route identity (the browser-tabs
      *                   deployment). Off keeps point-to-point hop naming (send()
@@ -191,14 +208,15 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
 
     /**
      * @brief Broadcast a scattered frame: gather @p iov once, straight into a
-     *        pre-allocated tx work slot (nothrow heap fallback), one BINARY message
-     *        per open peer.
+     *        pre-allocated tx work slot (nothrow heap payload only past its inline
+     *        capacity), one BINARY message per open peer.
      *
      * Overrides the base gather-into-a-temporary default: the reply rope's iovec is
-     * copied exactly ONCE (into the queued work slot/item), so a large reply is
-     * never double-buffered (gather temp + tx copy) on the heap — the transient
-     * that exhausted the chip heap under concurrent SPA asset GETs. On allocation
-     * failure the frame is dropped (backpressure), never an abort.
+     * copied exactly ONCE (into the queued work slot), so a large reply is never
+     * double-buffered (gather temp + tx copy) on the heap — the transient that
+     * exhausted the chip heap under concurrent SPA asset GETs. With no slot free, or
+     * on allocation failure, the frame is dropped and counted (backpressure), never
+     * an abort.
      */
     void send(std::span<const std::span<const std::byte>> iov) override;
 
@@ -208,6 +226,16 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
 
     /** @brief The @ref bus_link_t facet when constructed `peer_named`, else nullptr. */
     [[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }
+
+    /**
+     * @brief The mode authority (#889): the `peer_named` this link was constructed with.
+     *
+     * The same flag @ref bus keys off, published so `bus_link_t` can REFUSE its
+     * peer-named wiring calls on a flat link — that base is public, so those setters are
+     * reachable by an upcast past the null `bus()`. Delivery (@ref deliver) and the
+     * departure fork already read the flag directly.
+     */
+    [[nodiscard]] bool peer_named() const noexcept override { return peer_named_; }
 
     /** @brief Visit the currently-open peers' names, `<ip>:<port>`. */
     void enumerate_peers(const peer_visitor_t& visit) const override;
@@ -279,61 +307,70 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     [[nodiscard]] std::uint32_t send_timeout_ms() const noexcept { return send_timeout_ms_; }
 
     /**
-     * @brief Frames dropped because the shared control queue refused them (or the work
-     *        item could not be allocated), for this link's life.
+     * @brief Frames this link never handed to a socket, for its life: the shared control
+     *        queue refused the enqueue, the TX slot pool was exhausted, or an oversize
+     *        payload could not be allocated.
      *
-     * A LINK-level count on purpose. A refused enqueue says the httpd control queue is
-     * saturated — which under #835's failure shape is caused by whichever peer is
-     * stalling the task, not by the peer whose frame is being enqueued at that instant.
-     * Charging it to that peer closed HEALTHY sessions while the culprit never accrued a
-     * strike; the per-session streak now counts failed SENDS, which do name their peer.
+     * A LINK-level count on purpose, and all three causes are link-level facts. A refused
+     * enqueue says the httpd control queue is saturated — which under #835's failure shape
+     * is caused by whichever peer is stalling the task, not by the peer whose frame is
+     * being enqueued at that instant. Charging it to that peer closed HEALTHY sessions
+     * while the culprit never accrued a strike; the per-session streak now counts failed
+     * SENDS, which do name their peer. An exhausted pool says the same thing about this
+     * link's own in-flight depth (@ref tx_slots_busy against @ref tx_slot_capacity).
+     *
+     * This is the whole TX-loss surface above the component's ESP-IDF floor. Below that
+     * floor it was not: a full control mbox discarded the datagram inside lwIP while
+     * reporting success, so the loss was unobservable by construction — see
+     * `idf_component.yml` and #949.
      */
     [[nodiscard]] std::uint32_t enqueue_drops() const noexcept {
         return enqueue_drops_.load(std::memory_order_relaxed);
     }
 
-    /**
-     * @brief TX work slots reclaimed because the control socket silently binned their
-     *        work item, for this link's life (#944).
-     *
-     * The failure @ref enqueue_drops does NOT cover, and could not: a refused enqueue is
-     * observable and already recycles its slot, whereas `httpd_queue_work` on the default
-     * path is a bare `sendto` to a loopback UDP socket, so an enqueue past the receiver's
-     * mbox is dropped by lwIP while the call still reports ESP_OK. That work item never
-     * runs and used to pin its slot for the rest of the boot — four of them killed the
-     * pool, after which every frame took two global-heap allocations. Non-zero here means
-     * the control queue is being overrun; the link recovers, but the node is losing
-     * frames somewhere.
-     */
-    [[nodiscard]] std::uint32_t tx_strands() const noexcept {
-        return tx_strands_.load(std::memory_order_relaxed);
-    }
-
-    /** @brief TX work slots claimed RIGHT NOW (filling, queued, or sending) — the pool
-     *         occupancy a strand used to raise permanently. */
+    /** @brief TX work slots claimed RIGHT NOW (filling, queued, or sending). */
     [[nodiscard]] std::size_t tx_slots_busy() const noexcept;
 
-    /** @brief Total TX work slots in the per-link pool; a send past it heap-falls-back. */
+    /** @brief Total TX work slots in the per-link pool — this link's outstanding-send
+     *         bound; a send past it is dropped and counted (@ref enqueue_drops). */
     [[nodiscard]] static std::size_t tx_slot_capacity() noexcept;
 
     /**
-     * @brief Admission predicate: given the opening-handshake request, return true to
-     *        admit the peer or false to refuse it — a clean refusal that closes the
-     *        socket, exactly as the @ref max_peers cap does. @p ctx is the opaque
-     *        pointer registered alongside it in @ref set_admission_cb.
+     * @brief Admission predicate: given the parsed opening GET, return true to admit the
+     *        peer or false to refuse it. A refusal is `ESP_FAIL` back to
+     *        `esp_http_server`, which abandons the upgrade and closes the socket. @p ctx
+     *        is the opaque pointer registered alongside it in @ref set_admission_cb.
+     *
+     * @p req is a REQUEST-scoped `httpd_req_t*`: `httpd_req_get_hdr_value_str`,
+     * `httpd_req_get_url_query_str` and `req->uri` all answer for this handshake. It is
+     * valid for the duration of the call and no longer.
      */
     using admission_fn_t = bool (*)(void* ctx, httpd_req_t* req);
 
     /**
-     * @brief Install (or clear, with `nullptr`) an admission predicate consulted at the
-     *        top of every opening handshake, BEFORE the peer-cap check and any slot
-     *        allocation. Unset (the default) admits every peer — the historical behavior.
+     * @brief Install (or clear, with `nullptr`) an admission predicate consulted on every
+     *        opening handshake, in the server's WebSocket PRE-handshake callback — before
+     *        the 101 is written, before the session is upgraded, and therefore before any
+     *        slot of this link's exists. Unset (the default) admits every peer.
      *
      * The seam a host uses to authenticate the graph WS the same way it gates the rest of
      * its HTTP surface: inspect the handshake request's headers (a session cookie, a
      * shared token) and refuse an unauthenticated peer before it can read or write a
      * single vertex. NOT synchronized — set it once at wiring time, before the link
      * serves; the hook is read on the httpd task with no lock.
+     *
+     * WHERE it runs is not a detail. `esp_http_server` answers the WebSocket handshake
+     * internally and then returns WITHOUT calling the URI handler for that request
+     * (`httpd_uri.c`), so a predicate placed in the handler sees only data frames on an
+     * ALREADY upgraded socket — never the opening GET, and never in time to stop the
+     * upgrade. The server's `ws_pre_handshake_cb` is the one call that gets the parsed
+     * GET, so that is where this link installs its thunk, at both registration sites
+     * (own-server and adopted-server). The component's `Kconfig` `select`s
+     * `HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT` for that reason; the member is present at the
+     * component's ESP-IDF floor, so there is no fallback tier.
+     *
+     * In ADOPTED mode the predicate is scoped to THIS link's WS URI. Registration is
+     * per-URI, so the rest of the caller's HTTP surface on that server is not affected.
      */
     void set_admission_cb(admission_fn_t fn, void* ctx) noexcept {
         admission_fn_ = fn;
@@ -368,13 +405,22 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     };
 
     // --- httpd trampolines (static; recover `this` from req->user_ctx / work arg) ---
-    static esp_err_t ws_handler(httpd_req_t* req);  // the WS URI handler (handshake + frames)
+    static esp_err_t ws_handler(httpd_req_t* req);  // the WS URI handler (data frames)
+    /**
+     * @brief `ws_pre_handshake_cb`: run @ref set_admission_cb's predicate against the
+     *        parsed opening GET, before the server writes the 101.
+     *
+     * Registered at BOTH construction sites. Like @ref ws_handler it recovers the link
+     * through the gate (`req->user_ctx`) and registers on the gate's barrier for the
+     * duration of the predicate, so a concurrent destructor joins it instead of freeing
+     * the members it reads.
+     */
+    static esp_err_t ws_pre_handshake(httpd_req_t* req);
     static void on_session_closed(void* slot_ctx);  // free_ctx_fn: a peer departed
     static void tx_work(void* work_arg);            // httpd_queue_work fn: one queued send
     static void detach_work(void* req_arg);         // httpd_queue_work fn: teardown detach
 
     // --- instance handlers (run on the httpd task) ---
-    esp_err_t on_handshake(httpd_req_t* req);   // admit or refuse a new peer
     esp_err_t on_data_frame(httpd_req_t* req);  // recv one WS frame, (reassemble,) deliver
     /**
      * @brief Recycle a departed peer's slot and report what the routing plane is still
@@ -392,31 +438,36 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * MUST be called with neither `peers_m_` nor the handler gate's mutex held — the
      * precondition `bus_link_t::notify_peer_down` documents. The caller keeps the link
      * alive across it by registering on the gate's barrier, not by holding its lock.
+     * In FLAT mode the hook is the WHOLE link's, so it waits for the last open session
+     * (@ref any_open_session, #889).
      */
     void notify_departed(std::string_view peer);
+    /**
+     * @brief True while ANY slot is still open — the flat mode's "is the link still up"
+     *        question (#889).
+     *
+     * Asked by @ref notify_departed after @ref reclaim_slot has already cleared the
+     * departing slot's `open` under `peers_m_`, so it never counts the departed session.
+     * Takes `peers_m_`; must not be called holding it.
+     */
+    [[nodiscard]] bool any_open_session() const;
     void deliver(std::string_view peer, std::span<const std::byte> frame);
-    // ONE gather-copy (into a pool slot, else a nothrow heap item) + httpd_queue_work;
-    // drops the frame on OOM (never aborts). The destination is a SESSION, never a bare
-    // fd — see @ref session_ref_t.
+    // ONE gather-copy into a pool slot + httpd_queue_work; drops the frame (counted, never
+    // aborting) when no slot is free, when the enqueue is refused, or on OOM. The
+    // destination is a SESSION, never a bare fd — see @ref session_ref_t.
     void queue_send(const session_ref_t& to, std::span<const std::span<const std::byte>> iov);
     void queue_send(const session_ref_t& to,
                     std::span<const std::byte> frame);  // one-span sugar over the gather
 
-    /** @brief Allocate the once-per-link RX scratch + TX slot pool (nothrow; on failure
-     *         the link still works — every frame takes the per-frame heap fallback). */
+    /** @brief Allocate the once-per-link RX scratch + TX slot pool (nothrow). RX failure is
+     *         survivable (per-frame nothrow buffer); a link with no TX pool drops every
+     *         send on the counted path — see @ref enqueue_drops. */
     void alloc_buffers();
-    /** @brief Claim a free TX work slot lock-free (a CAS scan); nullptr when the pool
-     *         is exhausted or absent — the caller falls back to a heap work item. Sweeps
-     *         once (@ref sweep_tx_slots) before giving up. */
+    /** @brief Claim a free TX work slot lock-free (a CAS scan); nullptr when the pool is
+     *         exhausted or absent — the caller drops the frame and counts it. */
     [[nodiscard]] tx_slot_t* claim_tx_slot();
-    /**
-     * @brief Reclaim every slot whose work item was silently binned by the control socket
-     *        (#944). Called ONLY from @ref claim_tx_slot's exhausted path — a strand costs
-     *        nothing until the pool runs out, so this needs no timer and no steady-state work.
-     */
-    void sweep_tx_slots();
-    /** @brief Return a drained/failed work item: recycle its pool slot (dropping any
-     *         overflow heap payload) or delete the heap-fallback shell. */
+    /** @brief Return a drained/failed work item: drop any oversize heap payload and
+     *         recycle its pool slot. */
     static void release_tx_work(tx_work_t* work);
 
     /**
@@ -540,20 +591,33 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * turns a short write into an error AND closes the session at once — the one case
      * where "drop the frame, keep the socket" is unsound, and one a short bound makes
      * more likely rather than less.
+     *
+     * It judges the FRAME, not just the buffer (#951). `esp_http_server` writes one frame
+     * as two calls to this function — the header, then the payload — so a write that puts
+     * nothing on the wire loses a whole frame only when it is the frame's first. A failure
+     * on the second leaves the peer holding a header promising bytes that never arrive,
+     * which is the same unparseable stream a short write produces and is judged the same
+     * way. The frame boundary comes from @ref tx_work, which brackets the send.
      */
     static int send_guarded(httpd_handle_t handle, int fd, const char* buf, std::size_t len,
                             int flags);
 
     /**
-     * @brief Handle a detected short write on @p slot's socket: log it and close that
-     *        session immediately, bypassing the streak (takes @ref peers_m_).
+     * @brief Handle a detected stream desynchronisation on @p slot's socket: log it and
+     *        close that session immediately, bypassing the streak (takes @ref peers_m_).
      *
      * Takes the SLOT, not the fd. @ref send_guarded is inside the write when it calls
      * this, on the httpd task, so the server's own session table is authoritative about
      * who owns that descriptor at that instant and hands the slot over directly — no
      * generation check is needed here, and no fd-keyed rescan either (#954).
+     *
+     * @param cause    Which shape it was, for the log: a short write, or a frame truncated
+     *                 after its header reached the wire (#951). One verdict, two causes.
+     * @param on_wire  Bytes of the frame the socket accepted before the failure.
+     * @param lost     Bytes of it that never left, and never will.
      */
-    void note_send_desync(session_t* slot, std::size_t written, std::size_t len);
+    void note_send_desync(session_t* slot, const char* cause, std::size_t on_wire,
+                          std::size_t lost);
 
     /**
      * @brief Allocate the handler-admission gate and point it at this link; false when
@@ -631,17 +695,15 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     std::uint16_t port_;
     std::size_t max_peers_;
     /** @brief Opening-handshake admission predicate + its opaque ctx; null admits every
-     *         peer (the default). Read on the httpd task — see @ref set_admission_cb. */
+     *         peer (the default). Read on the httpd task, from @ref ws_pre_handshake —
+     *         see @ref set_admission_cb. */
     admission_fn_t admission_fn_ = nullptr;
     void* admission_ctx_ = nullptr;
     /** @brief The per-socket send bound applied at admission — see @ref send_timeout_ms. */
     std::uint32_t send_timeout_ms_ = 0;
-    /** @brief Frames the control queue refused, for this link's life — see @ref
+    /** @brief Frames that never reached a socket, for this link's life — see @ref
      *         enqueue_drops. Relaxed: a diagnostic count, ordered against nothing. */
     std::atomic<std::uint32_t> enqueue_drops_{0};
-    /** @brief TX slots reclaimed from a silently-binned work item — see @ref tx_strands.
-     *         Relaxed for the same reason: the slot's own state word carries the ordering. */
-    std::atomic<std::uint32_t> tx_strands_{0};
     bool peer_named_;
     bool owns_httpd_ = true;  // false when adopting an external server (dtor must not httpd_stop)
     /** @brief Set at destructor entry: refuses new TX slot claims so the pool drain

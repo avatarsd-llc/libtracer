@@ -17,15 +17,13 @@
 #include <cstdio>
 #include <vector>
 
+#include "test_support.hpp"
+
 namespace {
 
 using namespace tr::detail;
 
-int g_failures = 0;
-void check(bool ok, const char* what) {
-    std::printf("  [%s] %s\n", ok ? "PASS" : "FAIL", what);
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 std::uint8_t at(const std::vector<std::byte>& v, std::size_t i) {
     return std::to_integer<std::uint8_t>(v[i]);
@@ -60,7 +58,5 @@ int main() {
     check(trunc.size() == 2 && at(trunc, 0) == 0xDD && at(trunc, 1) == 0xCC,
           "append_le honors width < sizeof(T)");
 
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("byteorder");
 }

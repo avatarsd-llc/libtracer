@@ -37,6 +37,8 @@
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
+#include "test_values.hpp"
 
 namespace {
 
@@ -52,23 +54,13 @@ using tr::graph::vertex_handle_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
+using tr::testing::make_value;
 
 std::vector<std::byte> as_bytes(std::string_view s) {
     std::vector<std::byte> out(s.size());
     if (!s.empty()) std::memcpy(out.data(), s.data(), s.size());
     return out;
-}
-
-tr::view::view_t make_value(std::span<const std::byte> bytes) {
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
-    if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
-    return tr::view::view_t::over(std::move(seg));
 }
 
 tr::view::view_t val_u8(std::uint8_t b) {
@@ -391,7 +383,5 @@ int main() {
     test_retire_generation();
     test_concurrent_read_vs_retire();
 
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("retire");
 }

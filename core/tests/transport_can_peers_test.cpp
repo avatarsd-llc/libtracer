@@ -48,6 +48,7 @@
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport_can.hpp"
 #include "libtracer/view_can.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -65,11 +66,8 @@ using tr::wire::opt_t;
 using tr::wire::tlv_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
+using tr::testing::mailbox_t;
 
 constexpr auto kBudget = 5000ms;
 
@@ -206,14 +204,7 @@ view_t owned(std::span<const std::byte> bytes) {
 
 /** @brief SPEC{ type, name } with no config — the provide_link-staged connection form. */
 view_t conn_spec(std::string_view type, std::string_view name) {
-    std::vector<std::byte> body;
-    tr::wire::emit_name(body, "type");
-    tr::wire::emit_name(body, type);
-    tr::wire::emit_name(body, "name");
-    tr::wire::emit_name(body, name);
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
-    return owned(out);
+    return tr::net::conn_spec_t(type, name).view();
 }
 
 /** @brief The peer names inside a members POINT (POINT{ POINT{NAME}... }) view/TLV. */
@@ -251,28 +242,6 @@ bool wait_until(Pred pred, std::chrono::milliseconds budget) {
     }
     return pred();
 }
-
-/** @brief A bounded reply mailbox for the raw loopback client. */
-struct mailbox_t {
-    std::mutex m;
-    std::condition_variable cv;
-    std::vector<std::vector<std::byte>> q;
-
-    void push(std::vector<std::byte> v) {
-        {
-            const std::lock_guard lock(m);
-            q.push_back(std::move(v));
-        }
-        cv.notify_all();
-    }
-    std::optional<std::vector<std::byte>> wait(std::chrono::milliseconds budget) {
-        std::unique_lock lock(m);
-        if (!cv.wait_for(lock, budget, [&] { return !q.empty(); })) return std::nullopt;
-        std::vector<std::byte> v = std::move(q.front());
-        q.erase(q.begin());
-        return v;
-    }
-};
 
 std::uint8_t value_u8(const tlv_t& v) { return tr::detail::load_le<std::uint8_t>(v.payload); }
 
@@ -501,7 +470,5 @@ int main() {
     test_enumeration_and_forwarding();
     test_peer_expiry();
     test_peer_table_growth();
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("transport_can_peers");
 }

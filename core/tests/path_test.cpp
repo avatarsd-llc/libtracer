@@ -18,18 +18,14 @@
 #include <string_view>
 
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
 using tr::graph::path_t;
 using tr::graph::status_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 void ok_parse(std::string_view text) {
     const auto r = path_t::parse(text);
@@ -110,6 +106,5 @@ int main() {
               "a held path_t is stable across reuse (field tail preserved)");
     }
 
-    std::printf(g_failures == 0 ? "\nPATH: PASS\n" : "\nPATH: FAIL (%d)\n", g_failures);
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("path");
 }

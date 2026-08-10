@@ -37,6 +37,8 @@
 #include "libtracer/tlv.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
+#include "test_values.hpp"
 
 namespace {
 
@@ -50,12 +52,8 @@ using tr::graph::subject_token_t;
 using tr::graph::vertex_handle_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
+using tr::testing::make_value;
 
 std::vector<std::byte> as_bytes(std::string_view s) {
     std::vector<std::byte> out(s.size());
@@ -71,12 +69,6 @@ std::vector<std::byte> as_bytes(std::string_view s) {
  */
 std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(std::string_view caller) {
     return as_bytes(caller);
-}
-
-tr::view::view_t make_value(std::span<const std::byte> bytes) {
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
-    if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
-    return tr::view::view_t::over(std::move(seg));
 }
 
 /** @brief A recognisable 32-byte ed25519-shaped key: 0x00,0x01,…,0x1F. */
@@ -341,7 +333,5 @@ int main() {
     test_no_write_surface();
     test_record_has_no_sub_addressing();
 
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("identity");
 }

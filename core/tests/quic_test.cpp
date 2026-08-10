@@ -43,47 +43,9 @@
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport_quic.hpp"
-
-// The raw msquic test client crosses the same non-TSan-instrumented library
-// boundary as transport_quic.cpp: restate msquic's StreamSend -> SEND_COMPLETE
-// and callback-serialization happens-before edges for TSan (see the matching
-// annotations + rationale in src/transport_quic.cpp). No-ops outside TSan.
-#if defined(__SANITIZE_THREAD__)
-#define LIBTRACER_TSAN 1
-#elif defined(__has_feature)
-#if __has_feature(thread_sanitizer)
-#define LIBTRACER_TSAN 1
-#endif
-#endif
-#ifdef LIBTRACER_TSAN
-#include <sanitizer/tsan_interface.h>
-#endif
+#include "test_support.hpp"
 
 namespace {
-
-inline void tsan_release(void* p) {
-#ifdef LIBTRACER_TSAN
-    __tsan_release(p);
-#else
-    (void)p;
-#endif
-}
-
-inline void tsan_acquire(void* p) {
-#ifdef LIBTRACER_TSAN
-    __tsan_acquire(p);
-#else
-    (void)p;
-#endif
-}
-
-// RAII edge for one msquic callback invocation (the src/transport_quic.cpp
-// tsan_cb_guard_t): acquire on entry, release on exit.
-struct tsan_cb_guard_t {
-    void* p;
-    explicit tsan_cb_guard_t(void* ptr) : p(ptr) { tsan_acquire(p); }
-    ~tsan_cb_guard_t() { tsan_release(p); }
-};
 
 using namespace std::chrono_literals;
 using tr::graph::graph_t;
@@ -95,11 +57,15 @@ using tr::view::view_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
+using tr::testing::frame_sink_t;
+// The raw msquic test client crosses the same non-TSan-instrumented library boundary
+// transport_quic.cpp does: restate msquic's StreamSend -> SEND_COMPLETE and
+// callback-serialization happens-before edges for TSan (the matching annotations and their
+// rationale are in src/transport_quic.cpp). No-ops outside a TSan build.
+using tr::testing::tsan_acquire;
+using tr::testing::tsan_cb_guard_t;
+using tr::testing::tsan_release;
 
 // Dev cert paths — generated once in main() by tools/gen-dev-cert.sh.
 std::string g_cert;
@@ -110,34 +76,6 @@ std::string g_key;
 std::string g_other_cert;
 
 quic_dial_tls_t dev_tls() { return quic_dial_tls_t{.ca_file = {}, .insecure_no_verify = true}; }
-
-// A collecting sink: frames delivered on an msquic worker thread, read from the
-// test thread.
-struct sink_t {
-    std::mutex m;
-    std::vector<std::vector<std::byte>> frames;
-
-    void push(std::span<const std::byte> f) {
-        const std::lock_guard lock(m);
-        frames.emplace_back(f.begin(), f.end());
-    }
-    [[nodiscard]] std::size_t count() {
-        const std::lock_guard lock(m);
-        return frames.size();
-    }
-    [[nodiscard]] std::vector<std::byte> at(std::size_t i) {
-        const std::lock_guard lock(m);
-        return frames.at(i);
-    }
-    [[nodiscard]] bool wait_for_count(std::size_t n, std::chrono::milliseconds budget) {
-        const auto deadline = std::chrono::steady_clock::now() + budget;
-        while (count() < n) {
-            if (std::chrono::steady_clock::now() > deadline) return false;
-            std::this_thread::sleep_for(5ms);
-        }
-        return true;
-    }
-};
 
 // A raw msquic client — the test's hand on the stream (the tcp raw_client_t
 // role): it writes arbitrary bytes with NO framing, so prefixes can be split,
@@ -287,7 +225,7 @@ void test_raw_frame_duplex() {
     std::printf("QUIC transport — raw frames both ways over localhost:\n");
     // Sinks + named receiver lambdas BEFORE the transports: the slot binds the
     // callable by address, and the transport dtor drains msquic callbacks.
-    sink_t at_listener, at_dialer;
+    frame_sink_t at_listener, at_dialer;
     auto listener_rx = [&](std::span<const std::byte> f) { at_listener.push(f); };
     auto dialer_rx = [&](std::span<const std::byte> f) { at_dialer.push(f); };
     quic_transport_t listener(std::uint16_t{0}, g_cert, g_key);
@@ -313,7 +251,7 @@ void test_raw_frame_duplex() {
 
 void test_split_and_coalesced() {
     std::printf("QUIC transport — split sends reassemble, coalesced sends split:\n");
-    sink_t sink;
+    frame_sink_t sink;
     auto rx = [&](std::span<const std::byte> f) { sink.push(f); };
     quic_transport_t listener(std::uint16_t{0}, g_cert, g_key);
     listener.set_receiver(rx);
@@ -351,7 +289,7 @@ void test_split_and_coalesced() {
 
 void test_big_frame_chunking() {
     std::printf("QUIC transport — a big frame arrives through many RECEIVE chunks:\n");
-    sink_t sink;
+    frame_sink_t sink;
     auto rx = [&](std::span<const std::byte> f) { sink.push(f); };
     quic_transport_t listener(std::uint16_t{0}, g_cert, g_key);
     listener.set_receiver(rx);
@@ -479,7 +417,7 @@ void test_view_delivery_segment_identity() {
 void test_backpressure_drain() {
     std::printf("QUIC transport — backend exhaustion drains the frame, sync survives:\n");
     recording_backend_t rec(2);  // the first two allocations fail
-    sink_t sink;
+    frame_sink_t sink;
     auto rope_rx = [&](tr::view::rope_t f) { sink.push(f.links()[0].bytes()); };
     quic_transport_t listener(std::uint16_t{0}, g_cert, g_key, &rec);
     listener.set_rope_receiver(rope_rx);
@@ -501,7 +439,7 @@ void test_backpressure_drain() {
 
 void test_scatter_gather() {
     std::printf("QUIC transport — scatter-gather send (rope -> one record, one gather copy):\n");
-    sink_t sink;
+    frame_sink_t sink;
     auto rx = [&](std::span<const std::byte> f) { sink.push(f); };
     quic_transport_t listener(std::uint16_t{0}, g_cert, g_key);
     listener.set_receiver(rx);
@@ -607,55 +545,23 @@ view_t owned(std::span<const std::byte> bytes) {
  * @brief SPEC{ NAME "type" <type>, NAME "name" <name>, SETTINGS "config"{ role,
  *        port, kind=quic [, addr] [, cert, key] [, ca] [, insecure] } }.
  *
- * The tcp_test conn_spec shape plus the four TLS-carrying quic-private config
- * keys: `cert`/`key` the LISTEN factory requires, and the DIAL-side trust pair
- * `ca`/`insecure` (#918).
+ * `kind = "quic"` bound into the library's public SPEC builder (#902), plus the four
+ * TLS-carrying quic-private config keys: `cert`/`key` the LISTEN factory requires, and the
+ * DIAL-side trust pair `ca`/`insecure` (#918).
  */
-view_t conn_spec(std::string_view type, std::string_view name, tr::net::conn_role_t role,
-                 std::uint16_t port, std::string_view addr = {}, std::string_view cert = {},
-                 std::string_view key = {}, std::string_view ca = {},
-                 std::optional<bool> insecure = std::nullopt) {
-    std::vector<std::byte> cfg;
-    tr::wire::emit_name(cfg, "role");
-    const std::byte r{static_cast<std::uint8_t>(role)};
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, std::span<const std::byte>(&r, 1));
-    tr::wire::emit_name(cfg, "port");
-    std::vector<std::byte> pb(2);
-    tr::detail::store_le(pb, port, 2);
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, pb);
-    tr::wire::emit_name(cfg, "kind");
-    tr::wire::emit_name(cfg, "quic");
-    if (!addr.empty()) {
-        tr::wire::emit_name(cfg, "addr");
-        tr::wire::emit_name(cfg, addr);
-    }
-    if (!cert.empty()) {
-        tr::wire::emit_name(cfg, "cert");
-        tr::wire::emit_name(cfg, cert);
-        tr::wire::emit_name(cfg, "key");
-        tr::wire::emit_name(cfg, key);
-    }
-    if (!ca.empty()) {
-        tr::wire::emit_name(cfg, "ca");
-        tr::wire::emit_name(cfg, ca);
-    }
-    if (insecure) {
-        tr::wire::emit_name(cfg, "insecure");
-        const std::byte iv{static_cast<std::uint8_t>(*insecure ? 1 : 0)};
-        tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, std::span<const std::byte>(&iv, 1));
-    }
-
-    std::vector<std::byte> body;
-    tr::wire::emit_name(body, "type");
-    tr::wire::emit_name(body, type);
-    tr::wire::emit_name(body, "name");
-    tr::wire::emit_name(body, name);
-    tr::wire::emit_name(body, "config");
-    tr::wire::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true}, cfg);
-
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
-    return owned(out);
+view_t quic_conn_spec(std::string_view type, std::string_view name, tr::net::conn_role_t role,
+                      std::uint16_t port, std::string_view addr = {}, std::string_view cert = {},
+                      std::string_view key = {}, std::string_view ca = {},
+                      std::optional<bool> insecure = std::nullopt) {
+    tr::net::conn_spec_t spec(type, name);
+    spec.role(role).port(port).kind("quic");
+    if (!addr.empty()) spec.addr(addr);
+    // The four quic-private keys go through the generic pair setters: a kind's private
+    // vocabulary is its factory's business, never the shared builder's (ADR-0043 §5).
+    if (!cert.empty()) spec.text("cert", cert).text("key", key);
+    if (!ca.empty()) spec.text("ca", ca);
+    if (insecure) spec.flag("insecure", *insecure);
+    return spec.view();
 }
 
 void test_config_constructed_quic() {
@@ -698,14 +604,15 @@ void test_config_constructed_quic() {
     (void)node_b.write(path_t("/temp"), owned(tv));
     const auto wb = node_b.write(
         path_t("/net:children[]"),
-        conn_spec("listener", "a", tr::net::conn_role_t::LISTEN, 47131, {}, g_cert, g_key));
+        quic_conn_spec("listener", "a", tr::net::conn_role_t::LISTEN, 47131, {}, g_cert, g_key));
     check(wb.has_value(), "B: SPEC{listener, kind=quic, port, cert, key} constructs the listener");
     check(router_b.registry().by_name("net/quic-server/a") != nullptr,
           "B: the socket is wired into the router");
 
     // A missing cert/key on a quic LISTEN is a TYPE_MISMATCH (the kind requires them).
-    const auto bad = node_b.write(path_t("/net:children[]"),
-                                  conn_spec("listener", "bad", tr::net::conn_role_t::LISTEN, 0));
+    const auto bad =
+        node_b.write(path_t("/net:children[]"),
+                     quic_conn_spec("listener", "bad", tr::net::conn_role_t::LISTEN, 0));
     check(!bad.has_value(), "B: a quic listener without cert/key fails creation");
 
     // A: a quic CLIENT dialing B's port — a synchronous handshake from config.
@@ -713,9 +620,9 @@ void test_config_constructed_quic() {
     // which chains to nothing in the system trust store, so this e2e names that very
     // file as its `ca` bundle. Without a trust key the handshake would be refused —
     // which is the point of the fix, and is asserted in test_spec_dial_trust_keys.
-    const auto wa = node_a.write(
-        path_t("/net:children[]"),
-        conn_spec("client", "b", tr::net::conn_role_t::DIAL, 47131, "127.0.0.1", {}, {}, g_cert));
+    const auto wa = node_a.write(path_t("/net:children[]"),
+                                 quic_conn_spec("client", "b", tr::net::conn_role_t::DIAL, 47131,
+                                                "127.0.0.1", {}, {}, g_cert));
     check(wa.has_value(),
           "A: SPEC{client, kind=quic, addr, port, ca} constructs the dialing socket");
     const auto* s = net_a.settings_of("net/quic-client/b");
@@ -770,7 +677,7 @@ void test_spec_dial_trust_keys() {
                                    {"l5", 47144}}) {
         const auto w = node_b.write(
             path_t("/net:children[]"),
-            conn_spec("listener", nm, tr::net::conn_role_t::LISTEN, port, {}, g_cert, g_key));
+            quic_conn_spec("listener", nm, tr::net::conn_role_t::LISTEN, port, {}, g_cert, g_key));
         listening = listening && w.has_value();
     }
     check(listening, "B: five self-signed dev-cert listeners are up");
@@ -779,9 +686,9 @@ void test_spec_dial_trust_keys() {
     //    against nothing, so the handshake is REFUSED and creation reports the
     //    socket-did-not-come-up status. This is the write that SUCCEEDED before
     //    the fix, when the factory hardcoded insecure_no_verify = true.
-    const auto plain =
-        node_a.write(path_t("/net:children[]"),
-                     conn_spec("client", "verify", tr::net::conn_role_t::DIAL, 47140, "127.0.0.1"));
+    const auto plain = node_a.write(
+        path_t("/net:children[]"),
+        quic_conn_spec("client", "verify", tr::net::conn_role_t::DIAL, 47140, "127.0.0.1"));
     check(!plain.has_value() && plain.error() == tr::graph::status_t::TRANSPORT_DOWN,
           "A: a SPEC dial carrying no trust key is REFUSED — the peer cert does not validate");
     check(router_a.registry().by_name("net/quic-client/verify") == nullptr,
@@ -789,31 +696,31 @@ void test_spec_dial_trust_keys() {
 
     // 2. `insecure = 1` — the explicit DEV-ONLY opt-out reaches the dialer.
     const auto insec = node_a.write(path_t("/net:children[]"),
-                                    conn_spec("client", "insec", tr::net::conn_role_t::DIAL, 47141,
-                                              "127.0.0.1", {}, {}, {}, true));
+                                    quic_conn_spec("client", "insec", tr::net::conn_role_t::DIAL,
+                                                   47141, "127.0.0.1", {}, {}, {}, true));
     check(insec.has_value(), "A: `insecure = 1` connects to that same unvalidatable peer");
 
     // 3. `ca = <the peer's own cert>` — verification stays ON, against a private
     //    bundle rather than the system trust store. The secure way to reach a
     //    self-signed or privately-issued peer.
     const auto with_ca = node_a.write(
-        path_t("/net:children[]"),
-        conn_spec("client", "ca", tr::net::conn_role_t::DIAL, 47142, "127.0.0.1", {}, {}, g_cert));
+        path_t("/net:children[]"), quic_conn_spec("client", "ca", tr::net::conn_role_t::DIAL, 47142,
+                                                  "127.0.0.1", {}, {}, g_cert));
     check(with_ca.has_value(), "A: `ca = <the peer's cert>` connects with verification ON");
 
     // 4. `insecure = 0` is the explicit "verify" spelling, not a weaker opt-out —
     //    a stale key left at zero must not disable validation by accident.
     const auto zero = node_a.write(path_t("/net:children[]"),
-                                   conn_spec("client", "zero", tr::net::conn_role_t::DIAL, 47143,
-                                             "127.0.0.1", {}, {}, {}, false));
+                                   quic_conn_spec("client", "zero", tr::net::conn_role_t::DIAL,
+                                                  47143, "127.0.0.1", {}, {}, {}, false));
     check(!zero.has_value(), "A: `insecure = 0` still verifies — the dial is REFUSED");
 
     // 5. `ca = <an UNRELATED bundle>` — the bundle is genuinely consulted, not
     //    merely accepted: one that does not certify this peer still refuses. This
     //    is what keeps leg 3 from passing for the wrong reason.
     const auto wrong_ca = node_a.write(
-        path_t("/net:children[]"), conn_spec("client", "wrongca", tr::net::conn_role_t::DIAL, 47144,
-                                             "127.0.0.1", {}, {}, g_other_cert));
+        path_t("/net:children[]"), quic_conn_spec("client", "wrongca", tr::net::conn_role_t::DIAL,
+                                                  47144, "127.0.0.1", {}, {}, g_other_cert));
     check(!wrong_ca.has_value(), "A: `ca = <an unrelated CA>` is REFUSED — the bundle is applied");
 }
 
@@ -854,7 +761,5 @@ int main() {
     test_two_nodes_over_quic();
     test_config_constructed_quic();
     test_spec_dial_trust_keys();
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("quic");
 }

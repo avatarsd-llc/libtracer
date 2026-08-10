@@ -28,6 +28,7 @@
 
 #include "libtracer/mem_pool.hpp"
 #include "libtracer/segment.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -35,13 +36,7 @@ using tr::mem::sync_pool_t;
 using tr::view::segment_ptr_t;
 using tr::view::segment_t;
 
-int g_failures = 0;
-void check(bool ok, std::string_view what) {
-    if (!ok) {
-        ++g_failures;
-        std::printf("FAIL: %.*s\n", static_cast<int>(what.size()), what.data());
-    }
-}
+using tr::testing::check_quiet;
 
 /** @brief Scenario 1: N threads hammer alloc+destroy; each verifies it owns its slot. */
 void contended_alloc_destroy() {
@@ -73,9 +68,9 @@ void contended_alloc_destroy() {
         });
     }
     for (auto& th : ts) th.join();
-    check(mismatches.load() == 0, "scenario1: a slot was handed to two live segments");
-    check(allocs.load() > 0, "scenario1: no allocations succeeded");
-    check(pool.capacity() > 0, "scenario1: pool has slots");
+    check_quiet(mismatches.load() == 0, "scenario1: a slot was handed to two live segments");
+    check_quiet(allocs.load() > 0, "scenario1: no allocations succeeded");
+    check_quiet(pool.capacity() > 0, "scenario1: pool has slots");
 }
 
 /** @brief Scenario 2: alloc on producers, destroy on consumers (ADR-0060 §2 reclaim). */
@@ -140,8 +135,9 @@ void cross_thread_reclaim() {
         consumed.fetch_add(q.size(), std::memory_order_relaxed);
         q.clear();  // drain any stragglers (release on this thread)
     }
-    check(produced.load() == consumed.load(), "scenario2: produced != consumed (leak/double)");
-    check(produced.load() > 0, "scenario2: nothing produced");
+    check_quiet(produced.load() == consumed.load(),
+                "scenario2: produced != consumed (leak/double)");
+    check_quiet(produced.load() > 0, "scenario2: nothing produced");
 }
 
 }  // namespace
@@ -149,6 +145,5 @@ void cross_thread_reclaim() {
 int main() {
     contended_alloc_destroy();
     cross_thread_reclaim();
-    if (g_failures == 0) std::printf("mem_sync_pool_test: OK\n");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("mem_sync_pool");
 }

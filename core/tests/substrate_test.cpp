@@ -29,17 +29,13 @@
 #include <vector>
 
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
 namespace fs = std::filesystem;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 std::vector<std::byte> read_file(const fs::path& p) {
     std::ifstream f(p, std::ios::binary);
@@ -291,7 +287,5 @@ int main() {
 #ifdef LIBTRACER_NO_ATOMIC
     std::printf("\n(built with LIBTRACER_NO_ATOMIC — single-threaded refcount)\n");
 #endif
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("substrate");
 }

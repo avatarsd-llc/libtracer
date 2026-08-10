@@ -43,6 +43,8 @@
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
+#include "test_values.hpp"
 
 namespace {
 
@@ -61,18 +63,8 @@ using tr::wire::opt_t;
 using tr::wire::tlv_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
-
-tr::view::view_t make_value(std::span<const std::byte> bytes) {
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
-    if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
-    return tr::view::view_t::over(std::move(seg));
-}
+using tr::testing::check;
+using tr::testing::make_value;
 
 std::vector<std::byte> as_bytes(std::string_view s) {
     std::vector<std::byte> out(s.size());
@@ -1324,6 +1316,5 @@ int main() {
     test_deny_arm_stops_remote_fan_in();
     test_empty_caller_is_trusted_without_the_resolver();
     test_reserved_wildcard_subject_is_refused();
-    std::printf(g_failures == 0 ? "\nACL: PASS\n" : "\nACL: FAIL (%d)\n", g_failures);
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("acl");
 }

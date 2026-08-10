@@ -38,6 +38,7 @@
 #include "fwd_frame_builder.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -48,12 +49,7 @@ using tr::net::transport_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 // --- wire builders (canonical bytes via the production emit helpers) ----------
 std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
@@ -134,10 +130,5 @@ void rebind_race() {
 int main() {
     std::printf("registry rebind vs forward (#684 — mount run immutable after publish):\n");
     rebind_race();
-    if (g_failures != 0) {
-        std::printf("FAILED: %d check(s)\n", g_failures);
-        return 1;
-    }
-    std::printf("OK\n");
-    return 0;
+    return tr::testing::summary("registry_rebind_race");
 }

@@ -42,6 +42,7 @@
 #include "libtracer/route_handle.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -52,12 +53,7 @@ using tr::net::transport_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /** @brief A sink context that knows which sink it belongs to. */
 struct probe_t {
@@ -224,10 +220,5 @@ int main() {
     std::printf("router sink publish coherence (#914):\n");
     raw_sink_flip_race();
     stale_sink_flip_race();
-    if (g_failures != 0) {
-        std::printf("FAILED: %d check(s)\n", g_failures);
-        return 1;
-    }
-    std::printf("OK\n");
-    return 0;
+    return tr::testing::summary("fwd_sink_race");
 }

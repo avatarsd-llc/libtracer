@@ -52,16 +52,11 @@
 #include "libtracer/rope.hpp"
 #include "libtracer/rope_decode.hpp"
 #include "libtracer/view.hpp"
+#include "test_support.hpp"
 
 namespace {
 
-int g_failures = 0;
-
-/** @brief Record one check result. */
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 using tr::view::rope_t;
 using tr::view::view_t;
@@ -227,10 +222,5 @@ void test_out_of_range_aborts() {
 int main() {
     test_in_bounds_unaffected();
     test_out_of_range_aborts();
-    if (g_failures == 0) {
-        std::printf("ALL PASS\n");
-        return 0;
-    }
-    std::printf("%d FAILURE(S)\n", g_failures);
-    return 1;
+    return tr::testing::summary("rope_cursor_assert");
 }

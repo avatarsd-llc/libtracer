@@ -39,6 +39,8 @@
 #include "fwd_frame_builder.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
+#include "test_values.hpp"
 
 namespace {
 
@@ -50,12 +52,8 @@ using tr::graph::role_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
+using tr::testing::make_value;
 
 // --- wire builders (canonical, trailer-less bytes via the production helpers) --
 std::vector<std::byte> b_name(std::string_view s) {
@@ -114,13 +112,6 @@ std::vector<std::byte> b_field_subscribers_append() {
     return out;
 }
 using tr::testing::b_fwd;
-
-/** @brief A view_t over a fresh owned heap segment holding `bytes`. */
-tr::view::view_t make_value(std::span<const std::byte> bytes) {
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
-    if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
-    return tr::view::view_t::over(std::move(seg));
-}
 
 /**
  * @brief Build a rope over `bytes` split at the given cut points (each cut a link boundary) — every
@@ -409,7 +400,5 @@ int main() {
               "the rejected WRITE created no vertex (rejection precedes write-create)");
     }
 
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("op_resolve_view");
 }

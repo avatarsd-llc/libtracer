@@ -61,19 +61,14 @@
 #include "libtracer/mem_pool.hpp"
 #include "libtracer/transport_ws.hpp"
 #include "libtracer/ws.hpp"
+#include "test_support.hpp"
 
 namespace {
 
 using namespace std::chrono_literals;
 namespace ws = tr::net::ws;
 
-int g_failures = 0; /**< @brief Failed checks so far (the process exit code). */
-
-/** @brief Report one assertion. */
-void check(bool cond, const char* what) {
-    std::printf("  [%s] %s\n", cond ? "PASS" : "FAIL", what);
-    if (!cond) ++g_failures;
-}
+using tr::testing::check;
 
 // --- the memory instrument --------------------------------------------------
 
@@ -646,6 +641,5 @@ int main() {
     test_effective_cap_is_the_min_of_the_two_seams();
     test_backend_exhaustion_is_counted_backpressure();
     test_client_refuses_an_oversize_server_frame();
-    std::printf("%s (%d failure(s))\n", g_failures == 0 ? "OK" : "FAILED", g_failures);
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("ws_rx_bound");
 }

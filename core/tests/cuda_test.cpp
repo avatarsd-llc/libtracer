@@ -18,13 +18,10 @@
 #include "libtracer/mem_cuda.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/view.hpp"
+#include "test_support.hpp"
 
 namespace {
-int g_failures = 0;
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 }  // namespace
 
 int main() {
@@ -62,7 +59,5 @@ int main() {
     check(rope.flatten().empty(), "flatten() refuses the heterogeneous rope (no device deref)");
     check(rope.total_length() == 4 + 64, "rope spans header(4) + device payload(64)");
 
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("cuda");
 }

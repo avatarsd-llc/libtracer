@@ -24,11 +24,15 @@
  *   - the `add_child`-installed departure notifiers (point-to-point down, bus
  *     peer-down) reach the same hook — the seam every transport teardown fires;
  *   - eviction racing a writer thread is crash/TSan-clean (the concurrency gate);
- *   - plain subscribe/deliver still works after eviction (regression).
+ *   - plain subscribe/deliver still works after eviction (regression);
+ *   - the `subscription_t` handle is OPAQUE (#867) — neither half of the `{producer vertex,
+ *     slot}` pair is readable, and the pair cannot be forged and fed to `unsubscribe` —
+ *     asserted at compile time, which is the only place a visibility change is observable.
  */
 
 #include <algorithm>
 #include <atomic>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -41,6 +45,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -49,6 +54,8 @@
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport.hpp"
+#include "test_support.hpp"
+#include "test_values.hpp"
 
 namespace {
 
@@ -67,28 +74,8 @@ using tr::view::view_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-/** @brief One PASS/FAIL line; failures accumulate into the process exit code. */
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
-
-/** @brief A view_t over a fresh, owned heap segment holding @p bytes. */
-view_t make_value(std::span<const std::byte> bytes) {
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
-    if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
-    return view_t::over(std::move(seg));
-}
-
-/** @brief Byte-list sugar over @ref make_value. */
-view_t make_value(std::initializer_list<std::uint8_t> bytes) {
-    std::vector<std::byte> v;
-    v.reserve(bytes.size());
-    for (const std::uint8_t b : bytes) v.push_back(std::byte{b});
-    return make_value(v);
-}
+using tr::testing::check;
+using tr::testing::make_value;
 
 /** @brief Concatenate pre-encoded TLV byte runs. */
 void append(std::vector<std::byte>& dst, const std::vector<std::byte>& src) {
@@ -676,6 +663,48 @@ void test_clear_edge_releases_the_slot_pin() {
     check(refs() == held, "clearing RELEASES the pin — the segment is no longer retained");
 }
 
+/** @brief True iff `T` hands a caller the producer vertex under its pre-#867 member name. */
+template <typename T>
+concept reads_producer_vertex = requires(T& s) { s.vertex; };
+
+/** @brief True iff `T` hands a caller the `:subscribers[]` index under its pre-#867 name. */
+template <typename T>
+concept reads_slot_index = requires(T& s) { s.slot; };
+
+/** @brief True iff either half of the pair is reachable under its post-#867 name. */
+template <typename T>
+concept reads_renamed_pair = requires(T& s) { s.vertex_; } || requires(T& s) { s.slot_; };
+
+/**
+ * @brief The #867 encapsulation guard: `subscription_t` is opaque exactly as `vertex_handle_t`
+ *        is — the producer `vertex_t*` and the slot index are `graph_t`'s state, not the API
+ *        user's, and the compiler is what enforces that.
+ *
+ * Access checking happens during substitution, so an inaccessible member makes a
+ * requires-expression FALSE rather than ill-formed: these assertions observe the visibility
+ * itself, which no runtime test can. Before the change the handle was an aggregate of two PUBLIC
+ * members, so `sub.vertex->store(...)` and `sub.vertex->mark_unregistered()` compiled for any
+ * caller — lock-contract mutators the graph's own locking discipline owns — and a forged
+ * `subscription_t{any_ptr, any_index}` could be fed to `unsubscribe()`. Reverting the header hunk
+ * turns this TU into a compile error on all of these EXCEPT @ref reads_renamed_pair, which guards
+ * the other direction: re-publishing the members under their current names.
+ */
+static_assert(!reads_producer_vertex<subscription_t>,
+              "#867: the producer vertex must not be reachable through a subscription handle");
+static_assert(!reads_slot_index<subscription_t>,
+              "#867: the :subscribers[] slot index must not be readable from a handle");
+static_assert(!reads_renamed_pair<subscription_t>,
+              "#867: renaming the members does not make them public again");
+static_assert(!std::is_constructible_v<subscription_t, tr::graph::vertex_t*, std::size_t>,
+              "#867: a caller must not be able to forge a handle from a pointer and an index");
+static_assert(!std::is_aggregate_v<subscription_t>,
+              "#867: aggregate init is the forging route a public pair leaves open");
+
+/** @brief What deliberately STAYS public: default-construct, pass by value, compare. */
+static_assert(std::is_default_constructible_v<subscription_t>);
+static_assert(std::is_trivially_copyable_v<subscription_t>);
+static_assert(std::equality_comparable<subscription_t>);
+
 }  // namespace
 
 /** @brief Entry: run every eviction sub-test; exit nonzero on any failure. */
@@ -720,7 +749,9 @@ void test_local_unsubscribe() {
     std::size_t again = 0;
     auto on_again = [&](const rope_t&) { ++again; };
     const auto sub2 = g.subscribe(path_t("/a"), on_again);
-    check(sub2.has_value() && sub.has_value() && sub2->slot == sub->slot,
+    // The handle is opaque, so the reuse is observed the only way a caller can observe it:
+    // the fresh handle compares EQUAL to the retired one — same producer, same slot index.
+    check(sub2.has_value() && sub.has_value() && *sub2 == *sub,
           "re-subscribe reuses the freed slot (index stability §D.2)");
     check(g.write(a, make_value({0x05})).has_value(), "write /a after re-subscribe");
     check(again == 1 && local == 0, "the new subscriber delivers; the old one stays silent");
@@ -737,10 +768,5 @@ int main() {
     test_empty_link_name_evicts_nothing();
     test_departure_notifier_seam();
     test_concurrent_evict_vs_writes();
-    if (g_failures != 0) {
-        std::printf("FAILED: %d check(s)\n", g_failures);
-        return 1;
-    }
-    std::printf("all checks passed\n");
-    return 0;
+    return tr::testing::summary("edge_eviction");
 }

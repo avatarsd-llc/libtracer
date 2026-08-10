@@ -30,6 +30,8 @@
 #include <vector>
 
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
+#include "test_values.hpp"
 
 namespace {
 
@@ -45,26 +47,8 @@ using tr::graph::status_t;
  *         what used to be the producer's `settings.durability == 1`. */
 constexpr delivery_policy_t kDurableSub{delivery_policy_t::kDurabilityRequest};
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
-
-/** @brief A view_t over a fresh, owned heap segment holding `bytes`. */
-tr::view::view_t make_value(std::span<const std::byte> bytes) {
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
-    if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
-    return tr::view::view_t::over(std::move(seg));
-}
-
-tr::view::view_t make_value(std::initializer_list<std::uint8_t> bytes) {
-    std::vector<std::byte> v;
-    v.reserve(bytes.size());
-    for (std::uint8_t b : bytes) v.push_back(std::byte{b});
-    return make_value(v);
-}
+using tr::testing::check;
+using tr::testing::make_value;
 
 void test_path_parse() {
     std::printf("path_t parse / canonicalize / field tail:\n");
@@ -906,7 +890,5 @@ int main() {
     test_for_each_vertex_concurrent_register();
     test_concurrent_stress();
 
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("graph");
 }

@@ -44,6 +44,7 @@
 #include "libtracer/byteorder.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -56,39 +57,8 @@ using tr::view::view_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
-
-/** @brief A collecting sink: frames delivered on the recv thread, read from the test thread. */
-struct sink_t {
-    std::mutex m;
-    std::vector<std::vector<std::byte>> frames;
-
-    void push(std::span<const std::byte> f) {
-        const std::lock_guard lock(m);
-        frames.emplace_back(f.begin(), f.end());
-    }
-    [[nodiscard]] std::size_t count() {
-        const std::lock_guard lock(m);
-        return frames.size();
-    }
-    [[nodiscard]] std::vector<std::byte> at(std::size_t i) {
-        const std::lock_guard lock(m);
-        return frames.at(i);
-    }
-    /** @brief Wait until `n` frames arrived (or the deadline passes). */
-    [[nodiscard]] bool wait_for_count(std::size_t n, std::chrono::milliseconds budget) {
-        const auto deadline = std::chrono::steady_clock::now() + budget;
-        while (count() < n) {
-            if (std::chrono::steady_clock::now() > deadline) return false;
-            std::this_thread::sleep_for(5ms);
-        }
-        return true;
-    }
-};
+using tr::testing::check;
+using tr::testing::frame_sink_t;
 
 /**
  * @brief A raw POSIX TCP client — the test's hand on the wire, so writes can be split and coalesced
@@ -163,7 +133,7 @@ void test_raw_frame_duplex() {
     // Sinks + named receiver lambdas BEFORE the transports: the slot binds the
     // callable by address, and ~tcp_transport_t joins the recv thread, so the
     // callable must outlive the transport.
-    sink_t at_listener, at_dialer;
+    frame_sink_t at_listener, at_dialer;
     auto listener_rx = [&](std::span<const std::byte> f) { at_listener.push(f); };
     auto dialer_rx = [&](std::span<const std::byte> f) { at_dialer.push(f); };
     tcp_transport_t listener(std::uint16_t{0});
@@ -188,7 +158,7 @@ void test_raw_frame_duplex() {
 
 void test_partial_and_coalesced() {
     std::printf("TCP transport — split writes reassemble, coalesced writes split:\n");
-    sink_t sink;
+    frame_sink_t sink;
     auto rx = [&](std::span<const std::byte> f) { sink.push(f); };
     tcp_transport_t listener(std::uint16_t{0});
     listener.set_receiver(rx);
@@ -364,7 +334,7 @@ void test_view_delivery_segment_identity() {
 void test_backpressure_drain() {
     std::printf("TCP transport — backend exhaustion drains the frame, sync survives:\n");
     recording_backend_t rec(2);  // the first two allocations fail
-    sink_t sink;
+    frame_sink_t sink;
     auto rope_rx = [&](tr::view::rope_t f) { sink.push(f.links()[0].bytes()); };
     tcp_transport_t listener(std::uint16_t{0}, &rec);
     listener.set_rope_receiver(rope_rx);
@@ -386,7 +356,7 @@ void test_backpressure_drain() {
 
 void test_scatter_gather() {
     std::printf("TCP transport — scatter-gather send (rope -> one record, no flatten):\n");
-    sink_t sink;
+    frame_sink_t sink;
     auto rx = [&](std::span<const std::byte> f) { sink.push(f); };
     tcp_transport_t listener(std::uint16_t{0});
     listener.set_receiver(rx);
@@ -494,40 +464,10 @@ view_t owned(std::span<const std::byte> bytes) {
     return view_t::over(std::move(seg));
 }
 
-/**
- * @brief A connection-creation spec (ADR-0027 / reference/05), the transport_vertex_test shape.
- *
- * SPEC{ NAME "type" <type>, NAME "name" <name>, SETTINGS "config"{ NAME "role" VALUE u8,
- *       NAME "port" VALUE u16, NAME "kind" NAME "tcp" [, NAME "addr" NAME <addr>] } }
- */
-view_t conn_spec(std::string_view type, std::string_view name, tr::net::conn_role_t role,
-                 std::uint16_t port, std::string_view addr = {}) {
-    std::vector<std::byte> cfg;
-    tr::wire::emit_name(cfg, "role");
-    const std::byte r{static_cast<std::uint8_t>(role)};
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, std::span<const std::byte>(&r, 1));
-    tr::wire::emit_name(cfg, "port");
-    std::vector<std::byte> pb(2);
-    tr::detail::store_le(pb, port, 2);
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, pb);
-    tr::wire::emit_name(cfg, "kind");
-    tr::wire::emit_name(cfg, "tcp");
-    if (!addr.empty()) {
-        tr::wire::emit_name(cfg, "addr");
-        tr::wire::emit_name(cfg, addr);
-    }
-
-    std::vector<std::byte> body;
-    tr::wire::emit_name(body, "type");
-    tr::wire::emit_name(body, type);
-    tr::wire::emit_name(body, "name");
-    tr::wire::emit_name(body, name);
-    tr::wire::emit_name(body, "config");
-    tr::wire::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true}, cfg);
-
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
-    return owned(out);
+/** @brief `kind = "tcp"` bound into the library's own SPEC builder (#902). */
+view_t tcp_conn_spec(std::string_view type, std::string_view name, tr::net::conn_role_t role,
+                     std::uint16_t port, std::string_view addr = {}) {
+    return tr::net::conn_spec(type, name, role, port, "tcp", addr);
 }
 
 void test_config_constructed_tcp() {
@@ -583,8 +523,9 @@ void test_config_constructed_tcp() {
     const std::byte tb{0x2A};
     tr::wire::emit_tlv(tv, type_t::VALUE, opt_t{}, std::span<const std::byte>(&tb, 1));
     (void)node_b.write(path_t("/temp"), owned(tv));
-    const auto wb = node_b.write(path_t("/net:children[]"),
-                                 conn_spec("listener", "a", tr::net::conn_role_t::LISTEN, port));
+    const auto wb =
+        node_b.write(path_t("/net:children[]"),
+                     tcp_conn_spec("listener", "a", tr::net::conn_role_t::LISTEN, port));
     check(wb.has_value(), "B: SPEC{listener, kind=tcp, port} constructs the bound socket");
     check(router_b.registry().by_name("net/tcp-server/a") != nullptr,
           "B: the socket is wired into the router");
@@ -592,7 +533,7 @@ void test_config_constructed_tcp() {
     // A: a tcp CLIENT dialing B's port — a SYNCHRONOUS connect from config.
     const auto wa =
         node_a.write(path_t("/net:children[]"),
-                     conn_spec("client", "b", tr::net::conn_role_t::DIAL, port, "127.0.0.1"));
+                     tcp_conn_spec("client", "b", tr::net::conn_role_t::DIAL, port, "127.0.0.1"));
     check(wa.has_value(), "A: SPEC{client, kind=tcp, addr, port} constructs the dialing socket");
     const auto* s = net_a.settings_of("net/tcp-client/b");
     check(s != nullptr && s->kind == "tcp" && s->addr == "127.0.0.1" && s->port == port,
@@ -649,7 +590,7 @@ void test_server_multi_peer_bus() {
 
     // Sinks BEFORE the transports (the file's destruction-order idiom).
     peer_sink_t srv_sink;
-    sink_t at_a, at_b;
+    frame_sink_t at_a, at_b;
     auto a_rx = [&](std::span<const std::byte> f) { at_a.push(f); };
     auto b_rx = [&](std::span<const std::byte> f) { at_b.push(f); };
 
@@ -742,7 +683,7 @@ void test_server_multi_peer_bus() {
     }
     std::optional<tcp_transport_t> c;
     c.emplace("127.0.0.1", port);
-    sink_t at_c;
+    frame_sink_t at_c;
     auto c_rx = [&](std::span<const std::byte> f) { at_c.push(f); };
     c->set_receiver(c_rx);
     check(c->ok(), "third dialer connected after the departure");
@@ -769,7 +710,7 @@ void test_server_multi_peer_bus() {
 void test_server_max_peers_cap() {
     std::printf("TCP transport — server max_peers admission cap (flat mode):\n");
 
-    sink_t srv_rx_sink;
+    frame_sink_t srv_rx_sink;
     auto srv_rx = [&](std::span<const std::byte> f) { srv_rx_sink.push(f); };
     tr::net::transport_tcp_server server(0, &tr::mem::heap_backend(), 0, /*max_peers=*/1);
     check(server.ok(), "capped server bound");
@@ -815,12 +756,218 @@ void test_server_max_peers_cap() {
 }
 
 /**
+ * @brief #889 — a FLAT multi-peer server reports the link down only when its LAST
+ *        session departs, never on a mid-life close.
+ *
+ * A flat server (`peer_named=false`, the default) admits N concurrent peers and has ONE
+ * routing identity for all of them — the registered child NAME. Its departure seam is
+ * therefore `transport_t::notify_down` (whole link), which `fwd_router_t::link_down`
+ * answers by evicting every subscriber edge under that name. Fire it on one peer's hangup
+ * and the surviving peers' routing state is evicted underneath them, which is what this
+ * guards: the notifier must stay silent while any session is still open, and fire exactly
+ * once when the last one goes.
+ *
+ * The rule lives in `slot_server_t::teardown_slot` (`posix_endpoint.cpp`), shared verbatim
+ * with `transport_ws_server` since #871 — one home, so it is guarded once, here.
+ *
+ * Both `downs` reads are taken behind an INBOUND-FRAME BARRIER, never on a slot-recycle
+ * transition and never after a sleep. `teardown_slot` clears the slot name in its first
+ * critical section and fires the departure seam last, so every state the test can poll for
+ * becomes visible while the seam is still ahead — read `downs` there and the guard is a
+ * coin flip. A frame written after that state was observed cannot be delivered by the poll
+ * pass that is running the teardown (`run()` snapshots revents once per pass), so its
+ * arrival orders the read strictly after the seam. That is what makes the two assertions
+ * naming #889 bite every run instead of one in five.
+ */
+void test_flat_server_down_only_on_last_session() {
+    std::printf("TCP transport — flat server: notify_down only on the LAST departure (#889):\n");
+
+    frame_sink_t srv_rx_sink;
+    auto srv_rx = [&](std::span<const std::byte> f) { srv_rx_sink.push(f); };
+    std::atomic<int> downs{0};
+
+    tr::net::transport_tcp_server server(0, &tr::mem::heap_backend(), 0, /*max_peers=*/0);
+    check(server.ok(), "flat server bound");
+    check(server.bus() == nullptr, "flat server exposes no bus facet (peer_named=false)");
+    server.set_receiver(srv_rx);
+    server.set_down_notifier([](void* c) { static_cast<std::atomic<int>*>(c)->fetch_add(1); },
+                             &downs);
+    const std::uint16_t port = server.local_port();
+
+    frame_sink_t at_a;
+    auto a_rx = [&](std::span<const std::byte> f) { at_a.push(f); };
+    std::optional<tcp_transport_t> a;
+    a.emplace("127.0.0.1", port);
+    a->set_receiver(a_rx);
+    std::optional<tcp_transport_t> b;
+    b.emplace("127.0.0.1", port);
+    check(a->ok() && b->ok(), "two concurrent dialers on the flat server");
+
+    // Drive one frame from each so BOTH slots are provably open before the close — an
+    // assertion about "the last session" is vacuous if the second never got admitted.
+    a->send(test_frame(2, 0xA1));
+    b->send(test_frame(2, 0xB1));
+    check(srv_rx_sink.wait_for_count(2, 2s), "both dialers' frames reached the flat receiver");
+
+    // --- the mid-life close: one of two peers hangs up ---
+    b.reset();
+    // Wait on the SLOT recycle, not on a sleep: enumerate_peers visits exactly the open,
+    // named slots, so 1 means the teardown (and its departure seam) has already run.
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    std::size_t live = 2;
+    while (std::chrono::steady_clock::now() < deadline) {
+        live = 0;
+        server.enumerate_peers([&](std::string_view) { ++live; });
+        if (live == 1) break;
+        std::this_thread::sleep_for(20ms);
+    }
+    check(live == 1, "the departed peer's slot was recycled (its teardown ran)");
+
+    // …and the survivor still routes: the broadcast reaches it after the departure.
+    const auto bc = test_frame(3, 0xCC);
+    server.send(bc);
+    check(at_a.wait_for_count(1, 2s), "the surviving peer still receives after the close");
+    check(at_a.at(0) == bc, "the survivor's frame is intact");
+    a->send(test_frame(2, 0xA2));
+    check(srv_rx_sink.wait_for_count(3, 2s), "…and inbound from the survivor still delivers");
+
+    // The `downs` read is taken HERE — one poll-thread step past the teardown — and never on
+    // the slot-recycle transition above. `teardown_slot` clears the name in its FIRST
+    // critical section and fires the departure seam LAST, so `live == 1` is observable while
+    // the seam is still ahead: a read there races the teardown and misses a reintroduced
+    // whole-link notify most runs. The survivor's frame closes the race instead of a sleep.
+    // It was written after `live == 1` was observed, so the poll pass that carried it cannot
+    // be the pass that ran `teardown_slot` — `run()` snapshots revents once per pass, and
+    // that pass polled before the frame existed. Its arrival is therefore ordered strictly
+    // after the whole teardown, seam included.
+    check(downs.load() == 0, "a mid-life close did NOT report the whole link down (#889)");
+
+    // --- the last close: NOW the link is down, exactly once ---
+    a.reset();
+    const auto ldeadline = std::chrono::steady_clock::now() + 2s;
+    while (std::chrono::steady_clock::now() < ldeadline) {
+        live = 0;
+        server.enumerate_peers([&](std::string_view) { ++live; });
+        if (live == 0) break;
+        std::this_thread::sleep_for(20ms);
+    }
+    check(live == 0, "the last peer's slot was recycled too");
+
+    // The same barrier, built the only way left once every session is gone: a FRESH dialer.
+    // Connecting it after `live == 0` puts its accept in a later pass than `teardown_slot`
+    // (this pass's listen revents were snapshotted before the connect), and `run()` services
+    // peers before it accepts, so its frame lands a pass later still. When that frame
+    // arrives, `downs` is final — no sleep is standing in for the ordering, and the window
+    // it certifies contains an accept and a delivery, so "nothing further fired" is a
+    // statement about a poll loop that demonstrably kept running.
+    std::optional<tcp_transport_t> c;
+    c.emplace("127.0.0.1", port);
+    check(c->ok(), "a fresh dialer connects to the now-idle flat server");
+    c->send(test_frame(2, 0xC1));
+    check(srv_rx_sink.wait_for_count(4, 2s),
+          "the fresh dialer's frame proves the poll thread ran past the LAST teardown");
+    check(downs.load() >= 1, "the LAST session's departure reported the link down");
+    check(downs.load() == 1,
+          "…exactly once — the mid-life close added nothing, and nothing followed (#889)");
+}
+
+/**
+ * @brief #889 — a FLAT server refuses peer-named wiring: `set_peer_receiver` is rejected
+ *        and inbound keeps reaching the flat `transport_t` receiver.
+ *
+ * `bus()` returning nullptr is the contract "this link has no peer-named tier". But
+ * `bus_link_t` is a PUBLIC base, so the setter is reachable by an explicit upcast — and
+ * before #889 that silently flipped the server into peer-named delivery the contract said
+ * did not exist. The mode authority is the constructed `peer_named` flag alone: the wiring
+ * is refused, and delivery keys off the flag rather than off "a peer sink happens to be
+ * installed".
+ */
+void test_flat_server_rejects_peer_receiver() {
+    std::printf("TCP transport — flat server refuses peer-named wiring (#889):\n");
+
+    frame_sink_t flat_sink;
+    auto flat_rx = [&](std::span<const std::byte> f) { flat_sink.push(f); };
+    peer_sink_t peer_sink;
+
+    tr::net::transport_tcp_server server(0, &tr::mem::heap_backend(), 0, /*max_peers=*/0);
+    check(server.ok(), "flat server bound");
+    check(server.bus() == nullptr, "flat server exposes no bus facet");
+    server.set_receiver(flat_rx);
+    // The out-of-contract path itself: the public base, named explicitly. A member-shadowing
+    // guard would not catch this call, so the refusal has to live in bus_link_t.
+    static_cast<tr::net::bus_link_t&>(server).set_peer_receiver(peer_sink);
+
+    tcp_transport_t a("127.0.0.1", server.local_port());
+    check(a.ok(), "dialer connected");
+    const auto f = test_frame(4, 0x91);
+    a.send(f);
+
+    check(flat_sink.wait_for_count(1, 2s), "inbound still reached the FLAT transport_t receiver");
+    check(flat_sink.count() == 1 && flat_sink.at(0) == f, "the flat delivery is byte-intact");
+    {
+        const std::lock_guard lock(peer_sink.m);
+        check(peer_sink.frames.empty(), "the forced peer-named sink received NOTHING");
+    }
+}
+
+/**
+ * @brief #889, the other direction — a PEER-NAMED server never downgrades to flat
+ *        delivery just because only a flat receiver happens to be installed.
+ *
+ * This is the half the mode authority owns on its own. Before #889 the tier select read
+ * `peer_rx_.has_any()`, so a peer-named link with no peer sink wired handed its frames to
+ * the plain `transport_t` receiver — UNTAGGED. On a link that carries many peers under one
+ * name that is a misroute waiting to happen: the return route grown from an untagged frame
+ * names the LINK, and a bus mount's own name is not a routable next-hop (RFC-0020 /
+ * ADR-0073 §3) — its `send()` BROADCASTS, so the reply would go to every peer. The mode
+ * says peer-named, so the peer tier is the only tier; an unwired one drops.
+ *
+ * The negative half is paired with a live control: the same connection, the right tier
+ * wired, delivers — so "nothing arrived" cannot be a dead link passing by accident.
+ */
+void test_peer_named_server_does_not_downgrade_to_flat() {
+    std::printf("TCP transport — a peer-named server does not downgrade to flat (#889):\n");
+
+    frame_sink_t flat_sink;
+    auto flat_rx = [&](std::span<const std::byte> f) { flat_sink.push(f); };
+    peer_sink_t peer_sink;
+
+    tr::net::transport_tcp_server server(0, &tr::mem::heap_backend(), 0, /*max_peers=*/0,
+                                         /*peer_named=*/true);
+    check(server.ok(), "peer-named server bound");
+    check(server.bus() != nullptr, "peer-named server exposes the bus facet");
+    // The WRONG tier for this mode, and the only one wired.
+    server.set_receiver(flat_rx);
+
+    tcp_transport_t a("127.0.0.1", server.local_port());
+    check(a.ok(), "dialer connected");
+    a.send(test_frame(4, 0x31));
+    check(!flat_sink.wait_for_count(1, 500ms),
+          "the peer-named link did NOT deliver to the flat transport_t receiver");
+
+    // The control: same connection, the RIGHT tier wired — so the silence above was the
+    // tier decision, not a dead link.
+    server.bus()->set_peer_receiver(peer_sink);
+    const auto f2 = test_frame(4, 0x32);
+    a.send(f2);
+    check(peer_sink.wait_count(1, 2s), "…and the peer-named tier delivers once it is wired");
+    {
+        const std::lock_guard lock(peer_sink.m);
+        check(peer_sink.frames.size() == 1 && peer_sink.frames[0].second == f2 &&
+                  peer_sink.frames[0].first == "p0",
+              "the delivered frame is intact and tagged with the p<slot> peer name");
+    }
+    check(flat_sink.count() == 0, "the flat receiver never received anything on this link");
+}
+
+/**
  * @brief A broadcast that lands INSIDE the accept publish reaches the peer being accepted —
  *        `open ⇒ fd valid`, proven by holding that instant open rather than by racing for it.
  *
- * `accept_peer` publishes a slot's two sender-visible fields under `write_m_` (the lock
- * `teardown_slot` resets them under), fd FIRST. Store them unlocked with `open` first — what
- * this server did before #891 — and a broadcast holding `write_m_` can read `open == true`
+ * `slot_server_t::accept_peer` publishes a slot's two sender-visible fields under `write_m_`
+ * (the lock `slot_server_t::teardown_slot` resets them under), fd FIRST. Store them unlocked
+ * with `open` first — what this server did before #891 — and a broadcast holding
+ * `write_m_` can read `open == true`
  * next to `fd == -1` and hand the record to `write_all_iov(-1)`, which drops it on the floor.
  * In production that window is two instructions wide, so a racing test cannot pin it.
  *
@@ -986,7 +1133,7 @@ void test_push_on_connect_waits_for_start_receiving() {
     });
 
     // The sink outlives the transport that delivers to it (this file's destruction idiom).
-    sink_t sink;
+    frame_sink_t sink;
     auto rx = [&](std::span<const std::byte> f) { sink.push(f); };
     {
         tcp_transport_t dialer("127.0.0.1", peer_listener.port, &tr::mem::heap_backend(),
@@ -1035,7 +1182,7 @@ void test_start_receiving_is_idempotent() {
 
     // (a) a one-phase DIAL + (b) a LISTEN link: both started their thread in the constructor.
     {
-        sink_t at_listener, at_dialer;
+        frame_sink_t at_listener, at_dialer;
         auto listener_rx = [&](std::span<const std::byte> f) { at_listener.push(f); };
         auto dialer_rx = [&](std::span<const std::byte> f) { at_dialer.push(f); };
         tcp_transport_t listener(std::uint16_t{0});
@@ -1109,7 +1256,7 @@ void test_recv_stack_sized() {
     // Sized down from the ~8 MiB host default, yet ample under the sanitizers for
     // a one-frame round-trip; the point is that a non-default size is honored.
     constexpr std::size_t kStack = 512 * 1024;
-    sink_t at_listener;
+    frame_sink_t at_listener;
     auto listener_rx = [&](std::span<const std::byte> f) { at_listener.push(f); };
     tcp_transport_t listener(std::uint16_t{0}, &tr::mem::heap_backend(), 0, kStack);
     check(listener.ok(), "listener bound with a sized recv stack");
@@ -1136,10 +1283,11 @@ int main() {
     test_config_constructed_tcp();
     test_server_multi_peer_bus();
     test_server_max_peers_cap();
+    test_flat_server_down_only_on_last_session();
+    test_flat_server_rejects_peer_receiver();
+    test_peer_named_server_does_not_downgrade_to_flat();
     test_accept_publish_is_atomic_to_senders();
     test_push_on_connect_waits_for_start_receiving();
     test_start_receiving_is_idempotent();
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("tcp");
 }

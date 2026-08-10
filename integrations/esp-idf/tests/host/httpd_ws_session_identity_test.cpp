@@ -283,8 +283,8 @@ void test_a_live_peer_still_receives_its_queued_frame() {
     const std::size_t sent_before = fake_httpd::instance().frames_sent();
     to_a->send(std::span<const std::byte>(kBody));
     drain();
-    check(fake_httpd::instance().writes(kFd) == writes_before + 1,
-          "the live peer's socket took the write");
+    check(fake_httpd::instance().writes(kFd) == writes_before + 2,
+          "the live peer's socket took the frame's two writes (header, payload)");
     check(fake_httpd::instance().frames_sent() == sent_before + 1, "the frame was delivered");
 
     // And the broadcast producer, on the same live peer.

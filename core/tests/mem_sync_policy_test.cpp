@@ -39,6 +39,7 @@
 
 #include "libtracer/mem_pool.hpp"
 #include "libtracer/segment.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -47,13 +48,7 @@ using tr::mem::synchronized_pool_t;
 using tr::view::segment_ptr_t;
 using tr::view::segment_t;
 
-int g_failures = 0;
-void check(bool ok, std::string_view what) {
-    if (!ok) {
-        ++g_failures;
-        std::printf("FAIL: %.*s\n", static_cast<int>(what.size()), what.data());
-    }
-}
+using tr::testing::check_quiet;
 
 /**
  * @brief A host sync policy that COUNTS its acquisitions — the instrument for check 1.
@@ -107,7 +102,7 @@ constexpr std::size_t kIters = 20000;
 void contended_policy_seam() {
     std::vector<std::byte> slab((kThreads + 2) * (kSlotPayload + sizeof(segment_t) + 64));
     counted_pool_t pool(slab, kSlotPayload);
-    check(pool.capacity() >= kThreads, "pool must hold at least one slot per thread");
+    check_quiet(pool.capacity() >= kThreads, "pool must hold at least one slot per thread");
 
     counting_sync_t::acquisitions.store(0, std::memory_order_relaxed);
     std::atomic<std::size_t> mismatches{0};
@@ -133,27 +128,28 @@ void contended_policy_seam() {
     for (auto& th : ts) th.join();
 
     // 1. The policy is the mechanism: one lock per alloc + one per destroy.
-    check(counting_sync_t::acquisitions.load() == 2 * ops.load(),
-          "policy seam: the injected critical section was not taken on every alloc/destroy");
-    check(ops.load() > 0, "policy seam: no allocation succeeded");
+    check_quiet(counting_sync_t::acquisitions.load() == 2 * ops.load(),
+                "policy seam: the injected critical section was not taken on every alloc/destroy");
+    check_quiet(ops.load() > 0, "policy seam: no allocation succeeded");
     // 2. No slot was live in two segments at once.
-    check(mismatches.load() == 0, "policy seam: a slot was handed to two live segments");
+    check_quiet(mismatches.load() == 0, "policy seam: a slot was handed to two live segments");
 
     // 3. The free list survived: every slot is handed out again, exactly once.
     std::vector<segment_ptr_t> held;
     std::vector<std::byte*> bases;
     for (std::size_t i = 0; i < pool.capacity(); ++i) {
         segment_t* raw = pool.alloc(kSlotPayload);
-        check(raw != nullptr, "free-list integrity: a slot went missing after the storm");
+        check_quiet(raw != nullptr, "free-list integrity: a slot went missing after the storm");
         if (raw == nullptr) break;
         bases.push_back(raw->bytes.data());
         held.push_back(segment_ptr_t::adopt(raw));
     }
-    check(pool.alloc(kSlotPayload) == nullptr,
-          "free-list integrity: the pool handed out more slots than it owns");
+    check_quiet(pool.alloc(kSlotPayload) == nullptr,
+                "free-list integrity: the pool handed out more slots than it owns");
     for (std::size_t i = 0; i < bases.size(); ++i)
         for (std::size_t j = i + 1; j < bases.size(); ++j)
-            check(bases[i] != bases[j], "free-list integrity: one slot appeared twice in the list");
+            check_quiet(bases[i] != bases[j],
+                        "free-list integrity: one slot appeared twice in the list");
 }
 
 }  // namespace
@@ -163,6 +159,5 @@ int main() {
 #ifdef LIBTRACER_ABLATE_POOL_SYNC
     std::printf("mem_sync_policy_test: ABLATION build (critical section removed)\n");
 #endif
-    if (g_failures == 0) std::printf("mem_sync_policy_test: OK\n");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("mem_sync_policy");
 }

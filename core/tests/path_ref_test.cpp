@@ -35,15 +35,11 @@
 #include "libtracer/grammar.hpp"
 #include "libtracer/tlv.hpp"
 #include "libtracer/tlv_emit.hpp"
+#include "test_support.hpp"
 
 namespace {
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /** @brief Encode a `PATH_REF` over @p elements, or an empty buffer past the §4.3 bound. */
 std::vector<std::byte> emit(std::span<const tr::wire::path_ref_element_t> elements) {
@@ -233,6 +229,5 @@ int main() {
               "emit_path_ref reproduces path-ref/ref-empty's input.bin (4 B, H = 0)");
     }
 
-    std::printf(g_failures == 0 ? "\nPATH_REF: PASS\n" : "\nPATH_REF: FAIL (%d)\n", g_failures);
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("path_ref");
 }

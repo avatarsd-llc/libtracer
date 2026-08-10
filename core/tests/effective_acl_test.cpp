@@ -30,6 +30,8 @@
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
+#include "test_values.hpp"
 
 namespace {
 
@@ -47,13 +49,8 @@ using tr::graph::status_t;
 using tr::graph::subject_token_t;
 using tr::graph::vertex_handle_t;
 
-int g_failures = 0;
-
-/** @brief Print and count one PASS/FAIL check line. */
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
+using tr::testing::make_value;
 
 /** @brief Copy a string's bytes into a std::byte vector (subject tokens). */
 std::vector<std::byte> as_bytes(std::string_view s) {
@@ -208,13 +205,6 @@ void test_ordering() {
  */
 std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(std::string_view caller) {
     return as_bytes(caller);
-}
-
-/** @brief Heap-copy bytes into a value view. */
-tr::view::view_t make_value(std::span<const std::byte> bytes) {
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
-    if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
-    return tr::view::view_t::over(std::move(seg));
 }
 
 /** @brief A one-byte VALUE TLV write under a caller context. */
@@ -418,7 +408,5 @@ int main() {
     test_placeholder_and_new_vertices();
     test_concurrent_rewrite_race();
     test_concurrent_rewrite_stale_publish();
-    std::printf(g_failures == 0 ? "\neffective_acl: PASS\n" : "\neffective_acl: FAIL (%d)\n",
-                g_failures);
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("effective_acl");
 }

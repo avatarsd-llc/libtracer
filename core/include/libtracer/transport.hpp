@@ -105,6 +105,37 @@ class bus_link_t {
         return false;
     }
 
+    /**
+     * @brief The MODE AUTHORITY: true iff this link's peer-named tier exists (#889).
+     *
+     * A kind that is a bus by construction (the CAN binding) keeps the default `true`.
+     * A kind whose multi-peer surface is a WIRING-TIME choice — the tcp/ws listeners,
+     * constructed `peer_named` or FLAT — reports that choice here, and its
+     * `transport_t::bus()` returns null for the same reason: without the facet the link
+     * keeps point-to-point hop naming, inbound frames carry the registered child NAME,
+     * and `send()` fans out to every open peer.
+     *
+     * Each of the five peer-named wiring calls declared below — @ref set_peer_receiver and
+     * @ref set_peer_rope_receiver (both spellings each) and @ref set_peer_down_notifier —
+     * passes this gate, so a link that reports false ends up with an empty
+     * `peer_rx_` and no peer-departure notifier. (A DERIVED class can still reach the
+     * protected `peer_rx_` directly; the gate governs this interface's own doors.)
+     * It is a query, not a knob: `bus_link_t` is a PUBLIC base, so a flat link's
+     * `set_peer_receiver` is reachable by an explicit upcast past the null `bus()`, and
+     * before this gate that call silently flipped the link into peer-named delivery the
+     * `bus() == nullptr` contract said did not exist.
+     *
+     * A kind whose mode is CONSTRUCTED — the tcp/ws listeners, i.e. `slot_server_t` —
+     * additionally routes its per-frame tier select and its departure seam through the same
+     * flag, so for those two "which mode is this link in" has one answer. A kind that is a
+     * bus outright keeps its own delivery precedence (the CAN binding still falls back to
+     * the flat sink for a single-peer consumer that wired no bus facet), which this gate
+     * does not disturb: `peer_named()` is true there.
+     * @note Cold path only (wiring frequency, ADR-0047 §4) — an implementation's own
+     *       per-frame tier select reads its stored mode directly, never this virtual.
+     */
+    [[nodiscard]] virtual bool peer_named() const noexcept { return true; }
+
     /** @brief The peer-departure notifier fn: (ctx, the departed peer's NAME). */
     using peer_down_fn_t = void (*)(void* ctx, std::string_view peer);
 
@@ -120,10 +151,13 @@ class bus_link_t {
      * subscriber edges and label state (`fwd_router_t::link_down`). Must be set before
      * frames flow, like the receivers; a kind with no departure concept simply never
      * fires it.
+     * @note REFUSED on a link that is not @ref peer_named — a flat link's departure is the
+     *       whole link's (`transport_t::set_down_notifier`), so this wiring would be dead.
      * @param fn  The notifier; @p ctx is passed back as its first argument.
      * @param ctx Caller-owned context; must outlive every possible notification.
      */
     void set_peer_down_notifier(peer_down_fn_t fn, void* ctx) noexcept {
+        if (!peer_named()) return;
         // Publish ctx-before-fn with a release store on fn: a transport thread
         // that observes a non-null fn (acquire, in notify_peer_down) is
         // guaranteed to see the paired ctx. Atomic because an internal transport
@@ -139,23 +173,30 @@ class bus_link_t {
      *
      * Must be set before frames flow; delivery may occur on an internal transport
      * thread. When set, it takes precedence over a flat @ref transport_t receiver.
+     * @note REFUSED on a link that is not @ref peer_named (#889): a flat link has no
+     *       peer-named tier to install into, and admitting the sink here is exactly the
+     *       silent mode flip the null `bus()` contract denied.
      * @param fn  The sink; @p ctx is passed back as its first argument.
      * @param ctx Caller-owned context; must outlive every possible delivery.
      */
-    void set_peer_receiver(peer_receiver_fn_t fn, void* ctx) noexcept { peer_rx_.set(fn, ctx); }
+    void set_peer_receiver(peer_receiver_fn_t fn, void* ctx) noexcept {
+        if (!peer_named()) return;
+        peer_rx_.set(fn, ctx);
+    }
 
     /**
      * @brief Register the peer-named inbound sink from a caller-owned callable.
      *
      * Zero-erasure sugar over the `{fn, ctx}` form: @p sink is bound by address
      * (lvalues only — a temporary would dangle) and MUST outlive every delivery.
+     * Routed through the `{fn, ctx}` overload, so the mode gate is stated once.
      */
     template <typename F>
         requires std::invocable<F&, std::string_view, std::span<const std::byte>>
     void set_peer_receiver(F& sink) noexcept {
-        peer_rx_.set([](void* c, std::string_view peer,
-                        std::span<const std::byte> f) { (*static_cast<F*>(c))(peer, f); },
-                     &sink);
+        set_peer_receiver([](void* c, std::string_view peer,
+                             std::span<const std::byte> f) { (*static_cast<F*>(c))(peer, f); },
+                          &sink);
     }
 
     /**
@@ -167,10 +208,13 @@ class bus_link_t {
      * flatten memcpy; transport padding is trimmed by shortening the tail link.
      * A span-only bus never dispatches to this sink (the honesty rule of
      * `transport_t::set_rope_receiver`): install per @ref delivers_ropes.
+     * @note REFUSED on a link that is not @ref peer_named (#889), for the same reason
+     *       @ref set_peer_receiver is.
      * @param fn  The sink; @p ctx is passed back as its first argument.
      * @param ctx Caller-owned context; must outlive every possible delivery.
      */
     void set_peer_rope_receiver(peer_rope_receiver_fn_t fn, void* ctx) noexcept {
+        if (!peer_named()) return;
         peer_rx_.set_rope(fn, ctx);
     }
 
@@ -179,13 +223,14 @@ class bus_link_t {
      *
      * Zero-erasure sugar over the `{fn, ctx}` form: @p sink is bound by address
      * (lvalues only — a temporary would dangle) and MUST outlive every delivery.
+     * Routed through the `{fn, ctx}` overload, so the mode gate is stated once.
      */
     template <typename F>
         requires std::invocable<F&, std::string_view, view::rope_t>
     void set_peer_rope_receiver(F& sink) noexcept {
-        peer_rx_.set_rope([](void* c, std::string_view peer,
-                             view::rope_t f) { (*static_cast<F*>(c))(peer, std::move(f)); },
-                          &sink);
+        set_peer_rope_receiver([](void* c, std::string_view peer,
+                                  view::rope_t f) { (*static_cast<F*>(c))(peer, std::move(f)); },
+                               &sink);
     }
 
     /** @brief True iff this bus delivers OWNING ropes to the peer-named rope sink

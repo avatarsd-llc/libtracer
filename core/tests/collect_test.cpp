@@ -48,6 +48,7 @@
 
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -61,13 +62,7 @@ using tr::net::bus_link_t;
 using tr::net::fwd_router_t;
 using tr::net::transport_vertex_t;
 
-int g_failures = 0;
-
-/** @brief Report one assertion, tallying failures for main's exit status. */
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /** @brief An inert `on_read` seam — enough to make a vertex allocate a `value_handlers_t`. */
 tr::graph::result_t<tr::view::rope_t> inert_read() { return std::unexpected(status_t::NOT_FOUND); }
@@ -318,17 +313,7 @@ class bus_capable_link_t : public tr::net::transport_t, public bus_link_t {
 
 /** @brief SPEC{ type, name } with no config — the provide_link-staged connection form. */
 tr::view::view_t conn_spec(std::string_view type, std::string_view name) {
-    std::vector<std::byte> body;
-    tr::wire::emit_name(body, "type");
-    tr::wire::emit_name(body, type);
-    tr::wire::emit_name(body, "name");
-    tr::wire::emit_name(body, name);
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, tr::wire::type_t::SPEC, tr::wire::opt_t{.pl = true},
-                       std::span<const std::byte>(body));
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(out.size());
-    if (!out.empty()) std::memcpy(seg->bytes.data(), out.data(), out.size());
-    return tr::view::view_t::over(std::move(seg));
+    return tr::net::conn_spec_t(type, name).view();
 }
 
 /** @brief The module staged connections mount under here. */
@@ -429,7 +414,5 @@ int main() {
     test_remove_connection_parks_only_over_a_bus_link();
     test_churn_is_bounded_by_collect();
 
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("collect");
 }

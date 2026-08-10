@@ -54,6 +54,7 @@
 #include "libtracer/loopback.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -71,13 +72,8 @@ using tr::wire::opt_t;
 using tr::wire::tlv_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-/** @brief Record one assertion's outcome on stdout and in the process exit status. */
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
+using tr::testing::mailbox_t;
 
 /** @brief A heap-owned @ref tr::view::view_t over @p bytes (the graph stores owning views). */
 view_t owned(std::span<const std::byte> bytes) {
@@ -114,26 +110,7 @@ using tr::testing::b_fwd;
  * construction — so the SPEC carries only what selects the catalog type and the NAME.
  */
 view_t conn_spec(std::string_view type, std::string_view name) {
-    std::vector<std::byte> cfg;
-    tr::wire::emit_name(cfg, "role");
-    const std::byte r{static_cast<std::uint8_t>(conn_role_t::DIAL)};
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, std::span<const std::byte>(&r, 1));
-    tr::wire::emit_name(cfg, "port");
-    std::vector<std::byte> pb(2);
-    tr::detail::store_le<std::uint16_t>(pb, 0);
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, pb);
-
-    std::vector<std::byte> body;
-    tr::wire::emit_name(body, "type");
-    tr::wire::emit_name(body, type);
-    tr::wire::emit_name(body, "name");
-    tr::wire::emit_name(body, name);
-    tr::wire::emit_name(body, "config");
-    tr::wire::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true}, cfg);
-
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
-    return owned(out);
+    return tr::net::conn_spec(type, name, conn_role_t::DIAL, 0);
 }
 
 /**
@@ -172,30 +149,6 @@ struct hop_probe_t {
     bool wait(std::chrono::milliseconds budget) {
         std::unique_lock lock(m);
         return cv.wait_for(lock, budget, [this] { return seen; });
-    }
-};
-
-/** @brief A bounded mailbox for the client's terminating REPLY frames. */
-struct mailbox_t {
-    std::mutex m;
-    std::condition_variable cv;
-    std::vector<std::vector<std::byte>> q;
-
-    /** @brief Push one encoded REPLY and wake a waiter. */
-    void push(std::vector<std::byte> v) {
-        {
-            const std::lock_guard lock(m);
-            q.push_back(std::move(v));
-        }
-        cv.notify_all();
-    }
-    /** @brief Pop the oldest REPLY, waiting up to @p budget for one to arrive. */
-    std::optional<std::vector<std::byte>> wait(std::chrono::milliseconds budget) {
-        std::unique_lock lock(m);
-        if (!cv.wait_for(lock, budget, [this] { return !q.empty(); })) return std::nullopt;
-        auto v = std::move(q.front());
-        q.erase(q.begin());
-        return v;
     }
 };
 
@@ -336,6 +289,5 @@ int main() {
     ch_ab.shutdown();
     ch_cli.shutdown();
 
-    std::printf("%s\n", g_failures == 0 ? "OK" : "FAILURES");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("fwd_two_mount");
 }

@@ -313,8 +313,15 @@ class route_handle_t {
      * ADVERTISE once); subsequent deliveries find the same label and return `fresh ==
      * false` (send only the COMPACT). @ref clear_link drops the binding so a post-reconnect
      * delivery re-advertises — the self-heal, with no transport "up" event. Since #913 the
-     * forwarding-hop swap and `fwd_router_t::advertise` mint here too: @ref alloc_label +
-     * @ref record_egress mint unconditionally, burning one per re-advertise cycle.
+     * forwarding-hop swap and `fwd_router_t::advertise` mint here too, in place of an
+     * @ref alloc_label + @ref record_egress pair that minted unconditionally and burned one
+     * label per re-advertise cycle.
+     *
+     * A fresh entry is born RECLAIMABLE and the first *reuse* of it clears that (#833): while
+     * the mint is the only take of a label, the minter may still hand it back with
+     * @ref release_egress. The steady-state delivery path pays one byte-load and a
+     * not-taken branch for that — the store happens at most once per entry, on the first
+     * reuse — and never a store on an entry a second caller has already taken.
      *
      * @param out_link This node's NAME for the downstream link.
      * @param route    A complete PATH TLV's bytes — the delivery route the label aliases.
@@ -327,6 +334,39 @@ class route_handle_t {
      */
     [[nodiscard]] std::pair<std::uint16_t, bool> ensure_egress(std::string_view out_link,
                                                                std::span<const std::byte> route);
+
+    /**
+     * @brief Hand back a label + egress route taken from @ref ensure_egress and **never put
+     *        on the wire** — the refused-bind unwind (#833).
+     *
+     * A forwarding hop mints its out-label and retains its stripped egress route BEFORE it
+     * binds the ingress swap, because the binding names the label. When that bind refuses —
+     * a full ingress table, or the #827 epoch guard — the hop returns without advertising,
+     * so the label it minted aliases a route no ingress binding aims at and no peer has ever
+     * seen. Nothing reclaimed it short of the downstream link's next @ref clear_link. This
+     * gives it back: the entry is erased, and the label itself returns to the allocator when
+     * it is still the most recently minted one.
+     *
+     * **Only the MINT is reclaimable.** Since #913 an egress entry is SHARED — one label
+     * serves every ingress flow whose stripped route is identical — so erasing it on one
+     * claimant's refusal would strand every other. The entry therefore carries "the mint is
+     * still the only take of this label", set when @ref ensure_egress creates it and cleared
+     * by the first reuse, and this call erases nothing once that is false. That is what
+     * makes the two-thread interleaving safe without holding a lock across the bind: an
+     * advertise on another link's rx thread that reuses the label between this caller's mint
+     * and its refusal has already cleared the flag, so the entry it now depends on survives.
+     * An established flow is untouched by construction — its take was a reuse.
+     *
+     * @param out_link This node's NAME for the downstream link the label was minted on.
+     * @param label    The label @ref ensure_egress returned. `0` is ignored.
+     * @param route    The route bytes that were passed to @ref ensure_egress; an entry whose
+     *                 route has since been replaced (@ref record_egress) is left alone.
+     * @note A no-op when the link has no tables — a release must not CREATE a link shell,
+     *       which is the state @ref link_count bounds (#488). So the common companion of a
+     *       refusal, a downstream reconnect that erased the whole table, costs nothing here.
+     */
+    void release_egress(std::string_view out_link, std::uint16_t label,
+                        std::span<const std::byte> route);
 
     /**
      * @brief The route this node advertised over @p out_link under @p label (for re-advertise).
@@ -425,6 +465,9 @@ class route_handle_t {
     };
     struct egress_entry_t {
         std::uint16_t label = 0;
+        // Declared HERE, between the label and the route, so it lands in the padding the
+        // u16 already leaves ahead of the vector — the entry's size is unchanged (#833).
+        bool sole_take = false; /**< @brief The mint is still the only take of this label. */
         std::pmr::vector<std::byte> route;
     };
     struct link_tables_t {
@@ -467,18 +510,28 @@ class route_handle_t {
 
 /**
  * @brief Encode an ADVERTISE frame: `ADVERTISE{ VALUE label(u16), PATH route }`.
+ *
+ * A frame BUILDER, not an emitter. It returns an owning vector and so allocates through the
+ * throwing global heap; on the shipping `-fno-exceptions` profile that is an `abort()`. Since
+ * #885 nothing in the router calls it: a label-plane frame is put on a link by
+ * `fwd_router.cpp`'s scatter-gather emitters, which write the 12-byte head on the stack and
+ * reference the route. Use this only where a frame is wanted as a VALUE and the caller is not
+ * on a peer-provoked path — conformance vectors, tests, tools.
  * @param label      The per-link label being bound (this hop's outbound label).
  * @param route_path A complete PATH TLV's bytes — the dst route the label aliases.
- * @return The framed ADVERTISE TLV bytes, ready for transport_t::send.
+ * @return The framed ADVERTISE TLV bytes.
  */
 [[nodiscard]] std::vector<std::byte> encode_advertise(std::uint16_t label,
                                                       std::span<const std::byte> route_path);
 
 /**
  * @brief Encode a COMPACT delivery: `COMPACT{ VALUE label(u16), <payload TLV> }`.
+ *
+ * A frame BUILDER on the same terms as `encode_advertise` — owning, throwing, and called by
+ * no production path since #885.
  * @param label   The per-link label naming the established route (no route bytes ride).
  * @param payload A complete payload TLV's bytes (the delivered VALUE).
- * @return The framed COMPACT TLV bytes, ready for transport_t::send.
+ * @return The framed COMPACT TLV bytes.
  */
 [[nodiscard]] std::vector<std::byte> encode_compact(std::uint16_t label,
                                                     std::span<const std::byte> payload);
@@ -489,40 +542,22 @@ class route_handle_t {
  * The label child is a fixed-shape run — opaque (`opt.PL=0`), 2-byte length — so it needs no
  * header emitter and no growable buffer. Returning it lets a SCATTER-GATHER egress build a
  * frame head entirely on the stack (`tr::net::stack_writer`) while keeping the byte layout
- * at ONE locus: `encode_compact` and friends emit it through here too, so a gathered frame
- * and a built one cannot drift apart.
+ * at ONE locus: the builders below emit it through here too, so a gathered frame and a built
+ * one cannot drift apart. Since #885 every ADVERTISE, COMPACT and HANDLE_NACK the router
+ * sends is gathered off a head that starts with these six bytes.
  * @param label The per-link label naming the established route.
  * @return `{VALUE, opt=0, len=2 (u16 LE), label (u16 LE)}`.
  */
 [[nodiscard]] std::array<std::byte, 6> label_tlv(std::uint16_t label) noexcept;
 
 /**
- * @brief NOTHROW `encode_advertise` — build the frame into @p out, soft-failing on OOM
- *        instead of a bad_alloc `abort()` under `-fno-exceptions` (#477).
- *
- * For the writer-thread delivery path (a compact flow's first delivery re-advertises); the
- * throwing form stays for setup-time callers. A dropped ADVERTISE self-heals: the peer's
- * HANDLE_NACK on the unknown label prompts a re-advertise (RFC-0004 §E.1).
- * @retval false The frame buffer could not be allocated — @p out is left empty.
- */
-[[nodiscard]] bool try_encode_advertise(std::vector<std::byte>& out, std::uint16_t label,
-                                        std::span<const std::byte> route_path) noexcept;
-
-/**
- * @brief NOTHROW `encode_compact` — build the frame into @p out, soft-failing on OOM
- *        instead of a bad_alloc `abort()` under `-fno-exceptions` (#477).
- *
- * For the writer-thread per-delivery egress: on OOM the delivery drops (a subscriber
- * missing one value under heap exhaustion is valid delivery behavior), never an abort.
- * @retval false The frame buffer could not be allocated — @p out is left empty.
- */
-[[nodiscard]] bool try_encode_compact(std::vector<std::byte>& out, std::uint16_t label,
-                                      std::span<const std::byte> payload) noexcept;
-
-/**
  * @brief Encode a HANDLE_NACK: `HANDLE_NACK{ VALUE label(u16) }` (stale-label signal).
+ *
+ * A frame BUILDER on the same terms as `encode_advertise` — owning, throwing, and called by
+ * no production path since #885. The router answers a stale label from a stack buffer instead:
+ * the frame is a fixed ten bytes, so there is nothing to allocate.
  * @param label The unknown/stale label that prompted the NACK.
- * @return The framed HANDLE_NACK TLV bytes, sent back over the inbound link.
+ * @return The framed HANDLE_NACK TLV bytes.
  */
 [[nodiscard]] std::vector<std::byte> encode_handle_nack(std::uint16_t label);
 

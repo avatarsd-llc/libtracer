@@ -52,6 +52,7 @@
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -72,12 +73,8 @@ using tr::wire::path_ref_element_t;
 using tr::wire::tlv_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
+using tr::testing::mailbox_t;
 
 /** @brief A heap-owned view over @p bytes (the graph stores owning views). */
 view_t owned(std::span<const std::byte> bytes) {
@@ -115,22 +112,7 @@ std::vector<std::byte> b_path_ref(std::span<const path_ref_element_t> elements) 
 
 /** @brief A connection-creation SPEC with no transport `kind` (every link is provided). */
 view_t conn_spec(std::string_view type, std::string_view name) {
-    std::vector<std::byte> cfg;
-    tr::wire::emit_name(cfg, "role");
-    const std::byte r{static_cast<std::uint8_t>(conn_role_t::DIAL)};
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, std::span<const std::byte>(&r, 1));
-
-    std::vector<std::byte> body;
-    tr::wire::emit_name(body, "type");
-    tr::wire::emit_name(body, type);
-    tr::wire::emit_name(body, "name");
-    tr::wire::emit_name(body, name);
-    tr::wire::emit_name(body, "config");
-    tr::wire::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true}, cfg);
-
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
-    return owned(out);
+    return tr::net::conn_spec_t(type, name).role(conn_role_t::DIAL).view();
 }
 
 /**
@@ -176,28 +158,6 @@ struct hop_probe_t {
     std::vector<std::byte> snap_src() {
         const std::lock_guard lock(m);
         return src;
-    }
-};
-
-/** @brief A bounded mailbox for the client's terminating REPLY frames. */
-struct mailbox_t {
-    std::mutex m;
-    std::condition_variable cv;
-    std::vector<std::vector<std::byte>> q;
-
-    void push(std::vector<std::byte> v) {
-        {
-            const std::lock_guard lock(m);
-            q.push_back(std::move(v));
-        }
-        cv.notify_all();
-    }
-    std::optional<std::vector<std::byte>> wait(std::chrono::milliseconds budget) {
-        std::unique_lock lock(m);
-        if (!cv.wait_for(lock, budget, [this] { return !q.empty(); })) return std::nullopt;
-        auto v = std::move(q.front());
-        q.erase(q.begin());
-        return v;
     }
 };
 
@@ -777,7 +737,5 @@ int main() {
     ch_cli.shutdown();
     ch_ab.shutdown();
 
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("bound_forward");
 }

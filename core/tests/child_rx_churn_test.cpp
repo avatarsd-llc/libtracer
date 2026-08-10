@@ -52,6 +52,7 @@
 #include "fwd_frame_builder.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -65,13 +66,7 @@ using tr::wire::opt_t;
 using tr::wire::path_ref_element_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-/** @brief Record one assertion's outcome on stdout and in the process exit status. */
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /** @brief A transport that only counts and keeps what it was handed — no socket, no thread. */
 class sink_link_t : public tr::net::transport_t {
@@ -283,6 +278,5 @@ int main() {
     test_churn_does_not_grow_the_chain();
     test_duplicate_add_rebinds();
     test_forward_reaches_the_new_link();
-    if (g_failures != 0) std::printf("\n%d check(s) FAILED\n", g_failures);
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("child_rx_churn");
 }

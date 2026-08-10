@@ -58,19 +58,14 @@
 #include "libtracer/route_handle.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-/** @brief Record one assertion. */
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /** @brief A link that records every frame it is asked to send. */
 struct recording_link_t : tr::net::transport_t {
@@ -413,6 +408,5 @@ int main() {
     test_narrow_after_wide();
     test_deep_mount_planes_agree();
     test_shape_change_is_seen();
-    std::printf("%s\n", g_failures == 0 ? "ALL PASS" : "FAILURES");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("mount_width");
 }

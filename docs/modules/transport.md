@@ -50,7 +50,7 @@ A transport that can hand up *owning* frames implements the rope-receiver seam
 view delivery](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md),
 generalized to ropes by [ADR-0053 — lazy rope-backed decode, view partial-path
 routing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0053-lazy-rope-backed-decode-view-partial-path-routing.md)):
-it overrides `delivers_ropes()` (`core/include/libtracer/transport.hpp:373`) and
+it overrides `delivers_ropes()` (`core/include/libtracer/transport.hpp:418`) and
 delivers each inbound frame as a `rope_t` of refcounted links over segments drawn
 from a host-injected `mem_backend_t`. A contiguous frame is the single-link case; a
 scattered one — a CAN reassembly group, a fragmented WebSocket message — crosses the
@@ -59,14 +59,14 @@ the borrowed span dies when the callback returns, so a receiver that must outliv
 the callback needs this tier.
 
 There is deliberately no adapter that wraps a borrowed span into a rope; such a rope's
-refcounts would lie about lifetime. `fwd_router_t::add_child` (`core/src/fwd_router.cpp:522`)
+refcounts would lie about lifetime. `fwd_router_t::add_child` (`core/src/fwd_router.cpp:632`)
 therefore branches on the link's declared capability and installs exactly one sink —
-the rope form for an owning link, the span form otherwise (`fwd_router.cpp:629,636`, and
-`fwd_router.cpp:583,590` for the peer-named bus equivalent).
+the rope form for an owning link, the span form otherwise (`fwd_router.cpp:739,676`, and
+`fwd_router.cpp:693,700` for the peer-named bus equivalent).
 
 Every socket transport in the tree declares the owning tier: UDP
-(`transport_udp.hpp:111`), TCP client and server (`transport_tcp.hpp:205,336`),
-WebSocket server and client (`transport_ws.hpp:217,439`), CAN
+(`transport_udp.hpp:111`), TCP client and server (`transport_tcp.hpp:207,339`),
+WebSocket server and client (`transport_ws.hpp:221,393`), CAN
 (`transport_can.hpp:475`), QUIC (`transport_quic.hpp:153`) and WebTransport
 (`transport_webtransport.hpp:158`). The borrowed-span path is the base-class default
 and the tier an out-of-tree transport gets for free.
@@ -86,13 +86,37 @@ peer and no peer state is stored.
 
 `transport_t::bus()` returns the facet or `nullptr`. CAN always returns it
 (`transport_can.hpp:456`); the TCP and WebSocket **servers** return it when
-configured peer-named (`transport_tcp.hpp:343`, `transport_ws.hpp:233`); every other
-kind keeps the `nullptr` default.
+configured peer-named — one implementation, on the slot-server base both of them
+inherit (`posix_endpoint.hpp:408`); every other kind keeps the `nullptr` default.
+
+Whether a link's peer-named tier exists is one query, `bus_link_t::peer_named()`
+(`transport.hpp:137`): the constructed flag for the two stream servers
+(`posix_endpoint.hpp:418`), `true` by construction for a kind that is a bus outright.
+`bus_link_t` **refuses** each of its peer-named wiring calls — `set_peer_receiver`,
+`set_peer_rope_receiver`, `set_peer_down_notifier` — while it is false. That refusal matters
+because `bus_link_t` is a public base: on a flat server the setters are reachable by an
+explicit upcast past the null `bus()`, and admitting one used to flip the link into
+peer-named delivery the null `bus()` had denied.
+
+For the two stream servers, whose mode is a wiring-time choice, the same flag is the whole
+answer: `bus()`, the per-frame tier select and the departure seam all read it, so a
+**peer-named** server delivers only on the peer tier (an unwired one drops rather than
+handing a many-peer link's frame up untagged) and a **flat** one only on the flat tier. A
+kind that is a bus outright keeps its own delivery precedence — CAN still falls back to the
+flat sink for a single-peer consumer that wired no bus facet, which the gate does not
+disturb because `peer_named()` is true there.
+
+Departure follows the same split. A **peer-named** server evicts exactly the departed peer
+(`notify_peer_down(name)`); a **flat** server has one routing identity for every peer it
+carries — the registered child NAME — so its only seam is the whole link
+(`transport_t::notify_down`), and it therefore waits until the **last** open session departs
+(`posix_endpoint.cpp:493`). Firing it on a mid-life close would evict the surviving peers'
+edges along with the departed one's.
 
 ## QUIC and WebTransport
 
 Both live in the separate `libtracer_quic` target, configured by
-`LIBTRACER_WITH_QUIC` (`core/CMakeLists.txt:299`, default `OFF` because msquic must
+`LIBTRACER_WITH_QUIC` (`core/CMakeLists.txt:300`, default `OFF` because msquic must
 be installed). Core itself contains no `#ifdef` and no msquic reference: the module
 extends the transport catalog through `register_transport_type`, registering
 `quic_transport_factory()` under kind `quic` and `webtransport_transport_factory()`
@@ -244,7 +268,7 @@ flowchart LR
   and a callable destroyed early dangles exactly like a stale `ctx`.
 - **Overriding `send(iov)` is not optional for a scatter-gather wire.** The base
   implementation gathers into a temporary buffer and, when that allocation fails,
-  **drops the frame** rather than aborting (`transport.hpp:256`). A transport with a
+  **drops the frame** rather than aborting (`transport.hpp:301`). A transport with a
   native `sendmsg`/`writev` that does not override it silently pays a copy per
   forward hop and inherits a drop path it did not intend.
 - **The link-down notifier is a routing seam, not a log hook.** It re-enters the
@@ -268,7 +292,11 @@ they are the reason a new binding is small.
   shutdown. `stream_endpoint_t` adds what only the *stream* transports need — the
   peer-fd atomic, the write mutex, and the teardown-under-write-lock ordering
   that keeps a concurrent send from writing to a reused descriptor. UDP keeps its
-  datagram shape and uses only the base.
+  datagram shape and uses only the base. `slot_server_t` is one tier further up,
+  for the MULTI-peer stream servers: it owns the slot vector, the accept/poll/
+  teardown machinery and the `bus_link_t` query trio, so `transport_tcp_server`
+  and `transport_ws_server` differ only in their framing and handshake — the two
+  hooks it dispatches into them.
 - **`register_builtin_transports`** is how a node's transport catalog gets
   populated. Each `register_*_transport` lives in its own translation unit,
   compiled only when that transport is enabled, so a build that drops a transport
@@ -312,6 +340,12 @@ they are the reason a new binding is small.
 ```
 
 ```{doxygenclass} tr::net::stream_endpoint_t
+:project: libtracer
+:members:
+:protected-members:
+```
+
+```{doxygenclass} tr::net::slot_server_t
 :project: libtracer
 :members:
 :protected-members:

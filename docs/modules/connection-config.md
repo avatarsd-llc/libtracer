@@ -61,6 +61,52 @@ mistyped key.* `insecrue = 1` and `insecure = "1"` (a `NAME` value where a `VALU
 belongs) both create a connection that silently took the default. The gate against
 that is reading the table below, not a status code.
 
+## Writing one — `tr::net::conn_spec_t`
+
+The library ships the encoder as well as the reader (`libtracer/conn_spec.hpp`).
+`conn_spec_t` is a fluent builder over the shape above: each setter appends one
+`(NAME key, value)` pair and returns `*this`, and the terminal `bytes()` / `view()`
+wrap the pairs in the `config` SETTINGS and the whole thing in the `SPEC`.
+
+```cpp
+using tr::net::conn_role_t;
+using tr::net::conn_spec_t;
+
+// The one-call form — the 90% case.
+graph.write(*path_t::parse("/net:children[]"),
+            tr::net::conn_spec("client", "up", conn_role_t::DIAL, 8080, "ws", "127.0.0.1"));
+
+// The builder, for the rest: universal keys by name, kind-private keys as pairs.
+graph.write(*path_t::parse("/net:children[]"), conn_spec_t("listener", "srv")
+                                                   .role(conn_role_t::LISTEN)
+                                                   .port(8080)
+                                                   .kind("ws")
+                                                   .max_frame(4096)
+                                                   .flag("peer_named", true)   // ws-private
+                                                   .u32("max_peers", 8)        // ws-private
+                                                   .view());
+```
+
+The named setters are exactly the universal keys of the next section; the generic
+`text` / `u8` / `u16` / `u32` / `flag` pairs carry a kind's private vocabulary,
+which the builder deliberately does not know (that coupling is what
+[ADR-0043](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0043-quic-webtransport-optional-module-msquic.md)
+§5 forbids). Their names mirror `config_reader_t`'s accessors, so the encode and
+decode vocabularies cannot drift apart.
+
+Two properties are worth knowing before you build one:
+
+- **A builder on which no setter ran emits no `config` at all** — that is the
+  `provide_link`-staged spelling, where the module comes from the staging rather
+  than from a `kind`.
+- **There is no `module` key, and the builder invents none.** A SPEC names its
+  module through `kind` together with `role`; see the `kind` row below.
+
+The builder does **not** validate a key against a kind — it cannot, for the reason
+above — so the misspelling hazard in the paragraph before this section is unchanged.
+What it removes is the *other* failure mode: a private near-copy of the encoder per
+call site, each free to drift.
+
 ## Universal keys — parsed into `conn_settings_t`
 
 Read once, centrally, for every kind (`core/src/transport_vertex.cpp`). A kind's
@@ -267,9 +313,13 @@ out of the raw config TLV it already receives, and in a block on this page. Not 
   is simply inert there.
 - **`peer_named` is off by default**, so a SPEC-created `tcp`/`ws` listener is a
   broadcast link and one request over it draws one reply *per peer*.
-- **There is no public builder for this grammar yet.** Every emitter hand-writes
-  the pairs ([#902]), so a key's spelling is only as good as the string literal
-  next to it.
+- **The builder types the universal keys, not the kind-private ones.**
+  `conn_spec_t`'s named setters ([#902]) make `kind`, `addr`, `port`, `role` and the
+  four u32s unmisspellable, and they replaced the sixteen hand-written emitters that
+  used to exist. A kind's PRIVATE keys still go through the generic
+  `text`/`u8`/`u16`/`u32`/`flag` pairs — the builder cannot know them without the
+  coupling ADR-0043 §5 forbids — so for those, a key's spelling is still only as good
+  as the string literal next to it.
 
 ## How this page is kept true
 

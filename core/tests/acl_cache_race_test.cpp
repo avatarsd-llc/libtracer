@@ -79,6 +79,8 @@
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/vertex.hpp"
+#include "test_support.hpp"
+#include "test_values.hpp"
 
 namespace {
 
@@ -93,13 +95,8 @@ using tr::graph::subject_token_t;
 using tr::graph::vertex_handle_t;
 using tr::graph::vertex_t;
 
-int g_failures = 0;
-
-/** @brief Print one PASS/FAIL line for @p what and tally the failures. */
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
+using tr::testing::make_value;
 
 /** @brief The bytes of @p s, the opaque-token spelling this test uses for subjects. */
 std::vector<std::byte> as_bytes(std::string_view s) {
@@ -111,13 +108,6 @@ std::vector<std::byte> as_bytes(std::string_view s) {
 /** @brief The test resolver (ADR-0018): the caller context IS the subject token. */
 std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(std::string_view caller) {
     return as_bytes(caller);
-}
-
-/** @brief A single-segment view over a copy of @p bytes. */
-tr::view::view_t make_value(std::span<const std::byte> bytes) {
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
-    if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
-    return tr::view::view_t::over(std::move(seg));
 }
 
 /** @brief The subject the prober presents; an EVEN epoch grants it READ, an ODD one does not. */
@@ -540,6 +530,5 @@ int main() {
     // shipped CAS's window (#1043).
     test_ancestor_rewrite_vs_descendant_eval(0, "TOP");
     test_ancestor_rewrite_vs_descendant_eval(kChainDepth, "NEAREST");
-    std::printf("%s\n", g_failures == 0 ? "OK" : "FAILURES");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("acl_cache_race");
 }

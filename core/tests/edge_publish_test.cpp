@@ -48,6 +48,7 @@
 #include <vector>
 
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -58,13 +59,7 @@ using tr::graph::subscription_t;
 using tr::view::rope_t;
 using tr::view::view_t;
 
-int g_failures = 0;
-
-/** @brief Assert-independent check (RelWithDebInfo defines NDEBUG). */
-void check(bool ok, const char* what) {
-    std::printf("  [%s] %s\n", ok ? "ok" : "FAIL", what);
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /** @brief A subscriber context that can prove it was not delivered to after teardown. */
 struct sink_t {
@@ -195,7 +190,9 @@ void test_unsubscribe_stops_delivery_at_once() {
     // the reused slot back up rather than keep publishing the shell.
     sink_t d;
     const auto sd = g.subscribe(src, on_value, &d);
-    check(sd.has_value() && sd->slot == sb->slot, "the re-subscribe reuses the cleared slot");
+    // The handle is opaque, so the reuse is observed the only way a caller can observe it:
+    // the fresh handle compares EQUAL to the cleared one — same producer, same slot index.
+    check(sd.has_value() && *sd == *sb, "the re-subscribe reuses the cleared slot");
     (void)g.write(src, p.view());
     check(d.hits == 1, "the reused slot delivers");
     check(b.hits == 1, "and the departed edge still receives nothing");
@@ -334,6 +331,5 @@ int main() {
     test_concurrent_publish_and_churn(tr::graph::kEdgePinSlots + 4,
                                       "more publishers than kEdgePinSlots — mutex fallback");
     test_teardown_flushes_the_retire_list();
-    std::printf("\n%s\n", g_failures == 0 ? "edge_publish_test: OK" : "edge_publish_test: FAILED");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("edge_publish");
 }
