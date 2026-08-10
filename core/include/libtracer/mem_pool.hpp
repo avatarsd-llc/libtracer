@@ -171,7 +171,7 @@ struct spin_sync_t {
 template <pool_sync_policy Sync>
 class synchronized_pool_t final : public mem_backend_t {
     // The one policy this library ships that spin-waits. On a target that says spin-waiting is
-    // unsafe (@ref kSpinWaitSafe), binding it here is not "slower" — it is a hang, and only the
+    // unsafe (`kSpinWaitSafe`), binding it here is not "slower" — it is a hang, and only the
     // build knows which target this is. Checked on INSTANTIATION, so the `sync_pool_t` alias
     // below still names the type freely; declaring or constructing one is what trips the guard.
     static_assert(kSpinWaitSafe || !std::is_same_v<Sync, spin_sync_t>,
@@ -233,7 +233,7 @@ class synchronized_pool_t final : public mem_backend_t {
  *
  * The name predates the policy seam and is kept as the host default (ADR-0060 §2's
  * spinlock variant); a single-core MCU wants the critical-section policy instead — and
- * because the short name is the discoverable one, a build that sets @ref kSpinWaitSafe to
+ * because the short name is the discoverable one, a build that sets `kSpinWaitSafe` to
  * false rejects this instantiation outright rather than shipping a hang.
  */
 using sync_pool_t = synchronized_pool_t<spin_sync_t>;
