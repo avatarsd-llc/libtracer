@@ -683,7 +683,6 @@ ANCHORS = [
      '*     task stack (the batch apply overflows the 4 KB httpd default). The PORT-BINDING'),
 
     # --- re-added from the v0.7.1 docs sweep (absent from main's table) ---
-    ('core/include/libtracer/view_can.hpp:100', 'out.frames_.push_back(payload.subview(off, n));'),
     ('core/include/libtracer/fwd_frame_view.hpp:846', 'inline constexpr std::size_t kFwdMaxIov = 9;'),
     ('core/include/libtracer/graph.hpp:1002', '* @param ctx Caller-owned context; must outlive every possible delivery (edges are'),
     ('core/include/libtracer/graph.hpp:1225', '[[nodiscard]] result_t<value_ref_t> read(const path_t& path) const;'),
@@ -707,7 +706,6 @@ ANCHORS = [
     ('core/src/route_handle.cpp:82', 't.ingress.push_back(ingress_entry_t{.label = label, .binding = std::move(binding)});'),
     ('core/src/route_handle.cpp:182', 't->egress.push_back(egress_entry_t{', 'bool route_handle_t::record_egress(std::string_view out_link, std::uint16_t label,'),
     ('core/src/route_handle.cpp:247', 't->egress.push_back(egress_entry_t{', 'std::pair<std::uint16_t, bool> route_handle_t::ensure_egress(std::string_view out_link,'),
-    ('core/src/transport_can.cpp:313', 'tr::view::view_can_frames_t::split(*payload, cfg_.mode);'),
     # --- #1052: the build/tooling citations, now readable (@ref CITABLE_NON_SOURCE_PATHS).
     # `LIBTRACER_NO_ATOMIC` is spelled in three places outside `segment.hpp`, and the two
     # in build files had both rotted: the footprint script's citation (`:93`) had landed on

@@ -116,7 +116,7 @@ int main() {
             const auto framed =
                 view_can_frames_t::split(view_over(payload), can_frame_mode_t::CLASSIC);
             check(framed.frame_count() == 3, "20-byte payload => 3 classic CAN frames (8+8+4)");
-            check(framed.frames()[0].length == 8 && framed.frames()[2].length == 4,
+            check(framed.frame(0).length == 8 && framed.frame(2).length == 4,
                   "  classic frames are 8,8,4 bytes");
             check(rope_bytes(framed.to_rope()) == payload, "  multi classic frame round-trips");
         }
@@ -125,7 +125,7 @@ int main() {
             const std::vector<std::byte> payload = ramp(100);
             const auto framed = view_can_frames_t::split(view_over(payload), can_frame_mode_t::FD);
             check(framed.frame_count() == 2, "100-byte payload => 2 CAN-FD frames (64+36)");
-            check(framed.frames()[0].length == 64, "  first FD frame is 64 bytes");
+            check(framed.frame(0).length == 64, "  first FD frame is 64 bytes");
             check(rope_bytes(framed.to_rope()) == payload, "  multi CAN-FD frame round-trips");
         }
         // CAN-FD DLC lattice helper.
@@ -147,13 +147,13 @@ int main() {
         // Feed slices OUT OF ORDER: 2, 0, 1.
         tr::net::can_reassembly_t reasm;
         reasm.set_expected_count(key, 3);
-        reasm.add_slice(key, 2, framed.frames()[2]);
-        reasm.add_slice(key, 0, framed.frames()[0]);
+        reasm.add_slice(key, 2, framed.frame(2));
+        reasm.add_slice(key, 0, framed.frame(0));
         check(!reasm.is_complete(key), "group incomplete with slice 1 missing");
         check(reasm.has_interior_gap(key), "interior gap detected (have 0,2 not 1)");
         check(!reasm.assemble(key).has_value(), "assemble() returns nullopt while incomplete");
 
-        reasm.add_slice(key, 1, framed.frames()[1]);
+        reasm.add_slice(key, 1, framed.frame(1));
         check(!reasm.has_interior_gap(key), "no interior gap once slice 1 arrives");
         check(reasm.is_complete(key), "group complete: all 3 slices present + expected set");
 
@@ -164,9 +164,9 @@ int main() {
 
         // Totality opt-in: without expected_count, completeness is undecidable.
         tr::net::can_reassembly_t no_total;
-        no_total.add_slice(key, 0, framed.frames()[0]);
-        no_total.add_slice(key, 1, framed.frames()[1]);
-        no_total.add_slice(key, 2, framed.frames()[2]);
+        no_total.add_slice(key, 0, framed.frame(0));
+        no_total.add_slice(key, 1, framed.frame(1));
+        no_total.add_slice(key, 2, framed.frame(2));
         check(!no_total.is_complete(key),
               "no expected_count => not complete (trailing-drop blind)");
         no_total.erase(key);
@@ -188,10 +188,10 @@ int main() {
         // Bound live groups at 2; a third distinct group evicts the oldest (ts=1),
         // never OOM (the no-synthetic-limits doctrine: bounded drop + a counter).
         tr::net::can_reassembly_t bounded(std::pmr::new_delete_resource(), /*max_groups=*/2);
-        bounded.add_slice(key_ts(1), 0, framed.frames()[0]);
-        bounded.add_slice(key_ts(2), 0, framed.frames()[0]);
+        bounded.add_slice(key_ts(1), 0, framed.frame(0));
+        bounded.add_slice(key_ts(2), 0, framed.frame(0));
         check(bounded.dropped_groups() == 0, "no eviction while within the group bound");
-        bounded.add_slice(key_ts(3), 0, framed.frames()[0]);  // exceeds 2 => evict oldest (ts=1)
+        bounded.add_slice(key_ts(3), 0, framed.frame(0));  // exceeds 2 => evict oldest (ts=1)
         check(bounded.dropped_groups() == 1, "a 3rd group evicts one (dropped_groups == 1)");
         check(!bounded.contains(key_ts(1)), "the oldest group (ts=1) was evicted");
         check(bounded.contains(key_ts(2)) && bounded.contains(key_ts(3)),
@@ -216,8 +216,8 @@ int main() {
 
         tr::net::can_reassembly_t aging;
         aging.set_now(1000);
-        aging.set_expected_count(key_ts(1), 3);             // an advertise promising 3 slices
-        aging.add_slice(key_ts(1), 0, framed.frames()[0]);  // ... only 1 of which lands
+        aging.set_expected_count(key_ts(1), 3);          // an advertise promising 3 slices
+        aging.add_slice(key_ts(1), 0, framed.frame(0));  // ... only 1 of which lands
         check(!aging.is_complete(key_ts(1)), "the group is incomplete (a slice was lost)");
 
         aging.set_now(1100);
@@ -228,7 +228,7 @@ int main() {
         // A live group keeps its place: a touch restamps it, so only groups that
         // stopped making progress age out.
         aging.set_now(1400);
-        aging.add_slice(key_ts(1), 1, framed.frames()[1]);
+        aging.add_slice(key_ts(1), 1, framed.frame(1));
         aging.set_now(1800);
         check(aging.sweep_stale(500) == 0,
               "a group still receiving slices is restamped, not swept");

@@ -935,6 +935,23 @@ void test_can_send_advertise_allocates_nothing() {
     });
     check(owned.has_value() && windows.frame_count() == 3, "the budget's two steps ran");
 
+    // #1110 — split itself now allocates NOTHING, asserted directly. The derived budget
+    // above cannot say this: it is a count, and it would go on passing at 2 as contentedly
+    // as at 1. The payload here is deliberately large, because the growth this replaced
+    // scaled with the payload — 4096 bytes is 512 CLASSIC windows, i.e. ~9 reallocations of
+    // a std::vector<view_t> on a count the SENDING PEER chooses, and a THROWING push_back
+    // on the -fno-exceptions profile. Deriving the windows makes that the same zero.
+    const std::vector<std::byte> wide_payload(4096, std::byte{0x5A});
+    const auto wide_owned = tr::view::over_bytes(wide_payload);
+    check(wide_owned.has_value(), "the wide payload block was taken (outside the count)");
+    tr::view::view_can_frames_t wide_windows;
+    const std::size_t split_allocs = count_allocs(
+        [&] { wide_windows = tr::view::view_can_frames_t::split(*wide_owned, cfg.mode); });
+    check(split_allocs == 0, "view_can_frames_t::split allocates NOTHING, at any frame count");
+    check(wide_windows.frame_count() == 512, "  ...and still derives all 512 CLASSIC windows");
+    check(wide_windows.frame(511).length == 8 && wide_windows.frame(0).length == 8,
+          "  ...whose first and last windows are the right size");
+
     raw->reset();  // forget the join hello — measure one send
     const std::size_t actual = count_allocs([&] { can_tx.send(payload); });
     check(actual == budget,

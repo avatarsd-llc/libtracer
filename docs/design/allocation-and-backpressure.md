@@ -29,9 +29,11 @@ pointer, and the caller has no branch to write.
 ### Where the rule is not met today
 
 The rule above is an obligation, not a description of the tree — read it as "must", never as
-"does". Three sites still report exhaustion by throwing, so **"nothing on the delivery path can
-abort" is false as of v0.7.1** and a doc sentence asserting it is wrong. Only one of the three is
-reached from a *peer's* bytes — read the "who provokes it" column per row rather than treating the
+"does". Two sites still report exhaustion by throwing, so **"nothing on the delivery path can
+abort" is false** and a doc sentence asserting it is wrong. (There were three: the CAN egress
+window table went away in #1110, which deleted the table rather than bounding it — the windows
+are derivable from the payload length and the mode, so `split` allocates nothing at all.) One of
+the two is reached from a *peer's* bytes — read the "who provokes it" column per row rather than treating the
 set as uniformly peer-driven, because the provoker is what decides whether a bound is an
 admission-control problem or a sizing one. They
 are named here so a bounded deployment prices them rather than rediscovers them; this list is the
@@ -40,12 +42,11 @@ exhaustive:
 
 | Site | Code | Who provokes it |
 | --- | --- | --- |
-| CAN egress window table | `core/include/libtracer/view_can.hpp:100` — `frames_.push_back` in `view_can_frames_t::split`, reached on every send (`core/src/transport_can.cpp:313`) | the sender: one `push_back` per frame the payload splits into |
 | Label-table binds (#603) | `core/src/route_handle.cpp:82`, `:182`, `:247` — `std::pmr::vector::push_back` and the route copy beside it | a **peer**: an ingress `ADVERTISE` binds a label. `max_label_bindings_per_link` bounds the entry *count*, not the allocation's failure mode |
 | `try_reserve` on `-fno-exceptions` (#923, #850) | `core/include/libtracer/mem_heap.hpp:157-171` — `try_grow` catches the container's own allocation failure where it can; where it cannot (`-fno-exceptions`, where `reserve` `abort()`s with nothing to catch) it falls back to probe-then-commit | on the MCU profile only, anything concurrent — a FreeRTOS context switch between the probe's free and the `reserve` is enough. The hosted profile no longer has the window; the exception-free one closes it by migrating the site to the ADR-0065 failable seam, not by a better `try_reserve` |
 
 The nothrow seams and the status legs described below are real and are what makes each *covered*
-site answer by value. They do not make the three rows above go away, and #848 (the WS/TCP/UDP/CAN
+site answer by value. They do not make the two rows above go away, and #848 (the WS/TCP/UDP/CAN
 egress gather) does not close them either.
 
 ## The three injected seams
