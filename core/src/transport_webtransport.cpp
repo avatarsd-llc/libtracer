@@ -56,6 +56,7 @@
 #include <algorithm>
 #include <cstring>
 #include <memory>
+#include <new>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -64,6 +65,7 @@
 #include "libtracer/byteorder.hpp"
 #include "libtracer/config_reader.hpp"
 #include "libtracer/frame.hpp"
+#include "libtracer/mem_heap.hpp"
 #include "msquic_endpoint.hpp"
 #include "wt_h3.hpp"
 
@@ -192,7 +194,12 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
         HQUIC on_conn = conn;
         if (on_conn == nullptr) return nullptr;                      // tearing down
         if (expect != nullptr && expect != on_conn) return nullptr;  // replaced
-        auto ctx = std::make_unique<stream_ctx_t>();
+        // Not peer-reachable (local opens only), but it shares `ctxs` with the peer-driven
+        // path, so the capacity is taken here too and BEFORE `StreamOpen` — a throw at the
+        // `push_back` below would strand a started stream whose ctx msquic already holds.
+        if (!detail::try_reserve(ctxs, ctxs.size() + 1)) return nullptr;
+        auto ctx = std::unique_ptr<stream_ctx_t>(new (std::nothrow) stream_ctx_t());
+        if (!ctx) return nullptr;
         ctx->owner = this;
         ctx->kind = kind;
         HQUIC s = nullptr;
@@ -239,7 +246,21 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
             shutdown_conn(kAppErrBadRequest);
             return false;
         }
-        c.acc.insert(c.acc.end(), p, p + n);
+        // PEER-SIZED, so the growth goes through the failable seam (#1108). The cap above
+        // bounds how MANY bytes a peer may make us hold; it does not make the allocation
+        // that holds them succeed.
+        //
+        // The two failures get DIFFERENT scopes on purpose. Exceeding the cap is a
+        // statement about the PEER — it sent more handshake than the protocol allows — so
+        // it stays connection-fatal, as it always was. Running out of memory is a statement
+        // about US, and taking down a session the peer already established because our heap
+        // is tight is exactly the over-broad refusal #919 removed. So an OOM aborts just
+        // this stream and returns true: the connection, and any live session on it, stay up.
+        if (!detail::try_reserve(c.acc, c.acc.size() + n)) {
+            refuse_stream(c);
+            return true;
+        }
+        c.acc.insert(c.acc.end(), p, p + n);  // within capacity — cannot reallocate
         return true;
     }
 
@@ -334,10 +355,19 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
                     return true;  // the session stays up
                 }
                 c.kind = stream_ctx_t::kind_t::FRAME;
-                const std::vector<std::uint8_t> leftover(rest.begin() + sid->consumed, rest.end());
+                // The bytes after the 0x41 preamble are the first frame-channel data, and
+                // they live in `c.acc` — which must be released before the reassembler runs.
+                // MOVE the buffer out rather than copying the tail into a fresh one (#1108):
+                // a vector move transfers the heap block without touching it, so `rest` stays
+                // valid over the same addresses, and the peer-SIZED allocation that stood here
+                // is DELETED rather than made nothrow. The moved-from vector is then cleared
+                // and shrunk explicitly, since a moved-from `std::vector` is only guaranteed
+                // valid, not empty.
+                const std::vector<std::uint8_t> held = std::move(c.acc);
                 c.acc.clear();
                 c.acc.shrink_to_fit();
-                if (!leftover.empty()) return on_rx_chunk(leftover.data(), leftover.size());
+                const auto tail = rest.subspan(sid->consumed);
+                if (!tail.empty()) return on_rx_chunk(tail.data(), tail.size());
                 return true;
             }
 
@@ -626,7 +656,21 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
     QUIC_STATUS on_peer_stream_started(HQUIC c_h, QUIC_CONNECTION_EVENT* ev) override {
         const std::lock_guard lock(conn_m);
         if (conn != c_h) return QUIC_STATUS_ABORTED;  // tearing down / replaced
-        auto* c = new stream_ctx_t{};
+        // PEER-DRIVEN — one ctx per stream the peer opens, so both allocations here are
+        // made failable (#1108), in the order that keeps the handle accounted for:
+        //   1. the list's CAPACITY first, so the `push_back` below is in-capacity and cannot
+        //      throw. Growing it after the ctx has been handed to `SetCallbackHandler` would
+        //      strand a ctx msquic already points at — which is what a bare `push_back` does
+        //      today on a failed reallocation.
+        //   2. the ctx itself, through nothrow `new`.
+        // Either failure aborts JUST this stream. That is #919's refusal scope: a peer
+        // stream we cannot afford must not take down a session the peer already
+        // established. `ctxs` is bounded by the concurrency caps in `session_settings` plus
+        // the per-stream reclamation added in #1163, so this is a growth of a SMALL list —
+        // the point is the disposition on failure, not the size.
+        if (!detail::try_reserve(ctxs, ctxs.size() + 1)) return QUIC_STATUS_ABORTED;
+        auto* c = new (std::nothrow) stream_ctx_t{};
+        if (c == nullptr) return QUIC_STATUS_ABORTED;
         c->owner = this;
         c->h = ev->PEER_STREAM_STARTED.Stream;
         c->kind = (ev->PEER_STREAM_STARTED.Flags & QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL) != 0
