@@ -31,10 +31,21 @@ menu "libtracer"
     config LIBTRACER_TRANSPORT_WS
         bool "Build the WebSocket transport"
         default y
+        select HTTPD_WS_SUPPORT
         select HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT if HTTPD_WS_SUPPORT
         help
             Compile the WebSocket plane. ON by default. Turn OFF on a node that
             neither serves nor dials a WebSocket link.
+
+            HTTPD_WS_SUPPORT is SELECTED, not merely depended on (#963). It
+            defaults n in ESP-IDF, and httpd_ws_link.cpp is gated on it in
+            CMakeLists.txt — so before this select, a stock project that left
+            this option at its default y got the WS client link, no WS SERVER
+            link, and a bare `undefined reference to
+            tr::net::httpd_ws_link_t::httpd_ws_link_t(...)` at link time naming
+            no cause. The public header stays includable either way (it only
+            names httpd_handle_t / httpd_req_t), so nothing fails earlier. This
+            option's help promised the server link; now it delivers it.
 
             The `select` is what makes httpd_ws_link_t's admission predicate
             (set_admission_cb) reachable: esp_http_server answers the opening

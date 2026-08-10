@@ -850,10 +850,15 @@ httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, std::size_t max_peers,
         send_timeout_ms != 0 ? send_timeout_ms : derive_send_timeout_ms(peers),
         cfg.send_wait_timeout);
 
-    if (httpd_start(&handle_, &cfg) != ESP_OK) {
-        handle_ = nullptr;  // ok() stays false
+    httpd_handle_t started = nullptr;
+    if (httpd_start(&started, &cfg) != ESP_OK) {
+        handle_.store(nullptr, std::memory_order_relaxed);  // ok() stays false
         return;
     }
+    // Publish only once httpd_start has filled it. `handle_` is atomic since #963, so it
+    // cannot be handed to the API by address any more — and that is the better shape
+    // regardless: no producer can observe a half-initialised handle.
+    handle_.store(started, std::memory_order_relaxed);
     uri_ = "/";            // owns_httpd_ stays true; the dtor stops the server, but keep uri_
                            // coherent with the adopting path (both register the same handler).
     httpd_uri_t uri = {};  // zero-init, then set fields by name (the struct's tail members
@@ -863,7 +868,7 @@ httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, std::size_t max_peers,
     // The GATE, never `this` — esp_http_server latches this pointer into every upgraded
     // session and keeps dispatching through it until that session is deleted, which can
     // be long after this link is gone. See gate_t.
-    uri.user_ctx = gate_;
+    uri.user_ctx = gate_.load(std::memory_order_relaxed);
     uri.is_websocket = true;
     // The ONE call that sees the opening GET: the server answers the handshake itself and
     // returns without invoking `handler` for it, so the admission predicate has to sit
@@ -871,9 +876,9 @@ httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, std::size_t max_peers,
     // component's Kconfig selects CONFIG_HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT.
     uri.ws_pre_handshake_cb = &httpd_ws_link_t::ws_pre_handshake;
     uri.handle_ws_control_frames = false;  // httpd answers PING/PONG and tracks CLOSE
-    if (httpd_register_uri_handler(handle_, &uri) != ESP_OK) {
-        httpd_stop(handle_);
-        handle_ = nullptr;
+    if (httpd_register_uri_handler(handle_.load(std::memory_order_relaxed), &uri) != ESP_OK) {
+        httpd_stop(handle_.load(std::memory_order_relaxed));
+        handle_.store(nullptr, std::memory_order_relaxed);
         return;
     }
     alloc_buffers();
@@ -913,7 +918,7 @@ httpd_ws_link_t::httpd_ws_link_t(httpd_handle_t external, const char* uri_patter
     // NOT own the server, so port_ is 0 (no bind of ours) and the dtor must never
     // httpd_stop it — only unregister the URI. No cfg / ctrl_port / httpd_start here: with
     // one server the control-UDP-port clash the owning ctor guards against cannot arise.
-    handle_ = external;
+    handle_.store(external, std::memory_order_relaxed);
     owns_httpd_ = false;
     port_ = 0;
     uri_ = uri_pattern;
@@ -922,7 +927,8 @@ httpd_ws_link_t::httpd_ws_link_t(httpd_handle_t external, const char* uri_patter
     uri.uri = uri_.c_str();  // sit behind Kconfig, so positional init would not be stable)
     uri.method = HTTP_GET;
     uri.handler = &httpd_ws_link_t::ws_handler;
-    uri.user_ctx = gate_;  // the GATE, never `this` — see gate_t
+    uri.user_ctx = gate_.load(std::memory_order_relaxed);  // the GATE, never `this` — see
+                                                           // gate_t
     uri.is_websocket = true;
     // Same admission point as the owning ctor, and per-URI: registering it here gates the
     // handshake for THIS link's WS URI only, leaving the adopted server's other routes
@@ -930,7 +936,8 @@ httpd_ws_link_t::httpd_ws_link_t(httpd_handle_t external, const char* uri_patter
     uri.ws_pre_handshake_cb = &httpd_ws_link_t::ws_pre_handshake;
     uri.handle_ws_control_frames = false;  // httpd answers PING/PONG and tracks CLOSE
     if (httpd_register_uri_handler(external, &uri) != ESP_OK) {
-        handle_ = nullptr;  // ok() stays false; do NOT httpd_stop — we do not own the server
+        handle_.store(nullptr, std::memory_order_relaxed);  // ok() stays false; do NOT httpd_stop —
+                                                            // we do not own the server
         return;
     }
     alloc_buffers();
@@ -940,25 +947,26 @@ bool httpd_ws_link_t::open_gate() {
     // Nothrow, and load-bearing: the gate is what makes the registered handler safe to
     // dispatch after this link dies, so a link that could not allocate one must not
     // register a handler at all. Both constructors bail to ok() == false on failure.
-    gate_ = new (std::nothrow) gate_t;
-    if (gate_ == nullptr) return false;
-    gate_->link = this;
+    gate_t* const g = new (std::nothrow) gate_t;
+    if (g == nullptr) return false;
+    g->link = this;
+    gate_.store(g, std::memory_order_relaxed);
     return true;
 }
 
 void httpd_ws_link_t::close_gate() {
-    if (gate_ == nullptr) return;
+    if (gate_.load(std::memory_order_relaxed) == nullptr) return;
     // A destructor reached from INSIDE the URI handler — an app teardown driven by the
     // very frame being serviced (#814) — IS the in-flight frame, so waiting for `depth`
     // to reach zero would wait on a stack frame below this one. Running on the server's
     // task is the proof of that, and equally the proof that no OTHER frame can be in
     // flight: esp_http_server dispatches every request from that one task.
     const bool on_server_task = server_task_.load(std::memory_order_relaxed) == current_task();
-    std::unique_lock lock(gate_->m);
+    std::unique_lock lock(gate_.load(std::memory_order_relaxed)->m);
     // From here no dispatch can enter the link — ws_handler refuses (httpd closes that
     // socket) and on_session_closed is inert. Both were reachable a moment ago through
     // pointers the adopted server latched and no API of ours can revoke.
-    gate_->link = nullptr;
+    gate_.load(std::memory_order_relaxed)->link = nullptr;
     // Unbounded BY DESIGN, unlike the two drains: there is no leak-instead-of-free
     // fallback for the link itself, so a handler frame still reading peers_m_ /
     // rx_scratch_ / slots_ has to be joined, not out-waited. It is bounded in practice by
@@ -966,7 +974,10 @@ void httpd_ws_link_t::close_gate() {
     // case skipped above. Since #960 a departure notification in flight is joined here
     // too: it dereferences the link and hands the routing plane a name, and it runs with
     // `m` released precisely so this wait — not the mutex — is what holds it.
-    if (!on_server_task) gate_->cv.wait(lock, [this] { return gate_->depth == 0; });
+    if (!on_server_task)
+        gate_.load(std::memory_order_relaxed)->cv.wait(lock, [this] {
+            return gate_.load(std::memory_order_relaxed)->depth == 0;
+        });
 }
 
 void httpd_ws_link_t::alloc_buffers() {
@@ -1019,18 +1030,19 @@ httpd_ws_link_t::~httpd_ws_link_t() {
     stopping_.store(true, std::memory_order_relaxed);
     // Shut the handler gate FIRST and join whatever frame is inside it. Unregistering the
     // URI does NOT do this: esp_http_server latched the route into each upgraded session,
-    // so frames keep arriving at the handler regardless (see gate_t). Once close_gate
-    // returns, no dispatch can reach a single member of this link — which is also what
-    // makes the session snapshot below COMPLETE, since no handler can still be about to
-    // claim a slot behind it.
+    // so frames keep arriving at the handler regardless (see
+    // gate_t). Once close_gate returns, no dispatch can reach a
+    // single member of this link — which is also what makes the session snapshot below COMPLETE,
+    // since no handler can still be about to claim a slot behind it.
     close_gate();
-    if (handle_ != nullptr) {
+    if (handle_.load(std::memory_order_relaxed) != nullptr) {
         if (owns_httpd_) {
-            httpd_stop(handle_);
+            httpd_stop(handle_.load(std::memory_order_relaxed));
         } else {
             // Courtesy only, now that the gate is shut: it stops new handshakes from
             // latching the route, so the population of stale sessions cannot grow.
-            httpd_unregister_uri_handler(handle_, uri_.c_str(), HTTP_GET);
+            httpd_unregister_uri_handler(handle_.load(std::memory_order_relaxed), uri_.c_str(),
+                                         HTTP_GET);
             detach_sessions();
         }
     }
@@ -1070,13 +1082,13 @@ httpd_ws_link_t::~httpd_ws_link_t() {
     // demand, so it is LEAKED — one small block, teardown-only, and the price of a
     // handler that stays safe to dispatch forever. Nothing was registered when the
     // constructor failed, so that case frees it too.
-    if (owns_httpd_ || handle_ == nullptr) {
-        delete gate_;
+    if (owns_httpd_ || handle_.load(std::memory_order_relaxed) == nullptr) {
+        delete gate_.load(std::memory_order_relaxed);
     } else {
         ESP_LOGD(kTag, "handler gate leaked at teardown: the adopted server still routes to it");
     }
-    gate_ = nullptr;
-    handle_ = nullptr;
+    gate_.store(nullptr, std::memory_order_relaxed);
+    handle_.store(nullptr, std::memory_order_relaxed);
 }
 
 void httpd_ws_link_t::detach_work(void* req_arg) {
@@ -1123,15 +1135,16 @@ void httpd_ws_link_t::detach_sessions() {
     // this slot are gone). Calling it there would arm exactly the use-after-free this
     // path exists to remove, so that slot is neutralised-and-leaked instead and its
     // session left as it is: with the gate shut, the callback it still holds is inert.
-    if (gate_ != nullptr) {
+    if (gate_.load(std::memory_order_relaxed) != nullptr) {
         int serving_fd = -1;
         {
             // `depth` counts departure notifications too since #960, so it alone no longer
             // implies a request scope — but `serving_fd` is set and cleared by @ref
             // ws_handler under this same lock and is -1 for every other holder, so the
             // pair still names exactly the request-scoped session and nothing else.
-            const std::lock_guard lock(gate_->m);
-            if (gate_->depth != 0) serving_fd = gate_->serving_fd;
+            const std::lock_guard lock(gate_.load(std::memory_order_relaxed)->m);
+            if (gate_.load(std::memory_order_relaxed)->depth != 0)
+                serving_fd = gate_.load(std::memory_order_relaxed)->serving_fd;
         }
         if (serving_fd >= 0) abandon_session(serving_fd);
     }
@@ -1164,7 +1177,7 @@ void httpd_ws_link_t::detach_sessions() {
             }
         req->n = i;
     }
-    req->handle = handle_;
+    req->handle = handle_.load(std::memory_order_relaxed);
     req->fds = std::move(fds);
     req->ctxs = std::move(ctxs);
 
@@ -1180,7 +1193,8 @@ void httpd_ws_link_t::detach_sessions() {
         // permission detach_work needs, so run it right here instead.
         detach_work(raw);
         detached = true;
-    } else if (httpd_queue_work(handle_, &httpd_ws_link_t::detach_work, raw) != ESP_OK) {
+    } else if (httpd_queue_work(handle_.load(std::memory_order_relaxed),
+                                &httpd_ws_link_t::detach_work, raw) != ESP_OK) {
         ESP_LOGE(kTag, "session detach could not be queued (ctrl queue full)");
         delete raw;  // never queued => nobody else can own it
         raw = nullptr;
@@ -1249,10 +1263,10 @@ void httpd_ws_link_t::neutralise(session_t* slot) {
 // ---------------------------------------------------------------------------
 
 esp_err_t httpd_ws_link_t::ws_handler(httpd_req_t* req) {
-    // req->user_ctx is the GATE (see gate_t), because esp_http_server keeps dispatching
-    // through this pointer for as long as the SESSION lives — unregistering the URI does
-    // not revoke it, and the link may be long gone. Resolving the link through the gate
-    // is the admission test AND the barrier registration.
+    // req->user_ctx is the GATE (see gate_t), because
+    // esp_http_server keeps dispatching through this pointer for as long as the SESSION lives —
+    // unregistering the URI does not revoke it, and the link may be long gone. Resolving the link
+    // through the gate is the admission test AND the barrier registration.
     auto* const gate = static_cast<gate_t*>(req->user_ctx);
     if (gate == nullptr) return ESP_FAIL;
     const int fd = httpd_req_to_sockfd(req);
@@ -1301,11 +1315,11 @@ esp_err_t httpd_ws_link_t::ws_pre_handshake(httpd_req_t* req) {
     // no session ctx, no socket policy, no entry in the peer set.
     //
     // It is registered with the same `user_ctx` the handler is — the GATE, never `this`
-    // (see gate_t) — and resolves the link through it the same way, because the ONLY
-    // thing that makes it safe to dereference the link here is the barrier the gate
-    // supplies: a concurrent destructor takes `m` to null the link and then joins on
-    // `depth`, so either this call finds a null link and refuses, or the destructor waits
-    // for the predicate to return.
+    // (see gate_t) — and resolves the link through it the same way,
+    // because the ONLY thing that makes it safe to dereference the link here is the barrier the
+    // gate supplies: a concurrent destructor takes `m` to null the link and then joins on `depth`,
+    // so either this call finds a null link and refuses, or the destructor waits for the predicate
+    // to return.
     auto* const gate = static_cast<gate_t*>(req->user_ctx);
     if (gate == nullptr) return ESP_FAIL;
     admission_fn_t fn = nullptr;
@@ -1329,8 +1343,8 @@ esp_err_t httpd_ws_link_t::ws_pre_handshake(httpd_req_t* req) {
     }
     // The predicate runs with `m` RELEASED — it is host code, bounded by nothing this
     // link owns, and the gate mutex is the one every latched callback resolves through
-    // (the lock-order rule recorded on gate_t). A null hook admits every peer, which is
-    // the historical open-graph behavior.
+    // (the lock-order rule recorded on gate_t). A null hook admits
+    // every peer, which is the historical open-graph behavior.
     const bool admit = fn == nullptr || fn(ctx, req);
     if (!admit) ESP_LOGW(kTag, "peer refused by admission hook (fd=%d)", httpd_req_to_sockfd(req));
     {
@@ -1391,8 +1405,9 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
         if (err != ESP_OK) return err;
     }
     const std::span<const std::byte> body(payload, frame.len);
-    // Only data frames carry a TLV (control frames are httpd's — handle_ws_control_frames
-    // is off); a stray TEXT/PONG is now drained and ignored.
+    // Only data frames carry a TLV (control frames are httpd's —
+    // handle_.load(std::memory_order_relaxed)ws_control_frames is off); a stray TEXT/PONG is now
+    // drained and ignored.
     if (frame.type != HTTPD_WS_TYPE_BINARY && frame.type != HTTPD_WS_TYPE_CONTINUE) return ESP_OK;
 
     const int fd = httpd_req_to_sockfd(req);
@@ -1442,7 +1457,7 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
             if (slot == nullptr) {
                 auto s = std::make_unique<session_t>();
                 slot = s.get();
-                slot->gate = gate_;
+                slot->gate = gate_.load(std::memory_order_relaxed);
                 slot->endpoint.owner_ = this;
                 slot->endpoint.slot_ = slot;
                 slots_.push_back(std::move(s));
@@ -1692,7 +1707,12 @@ void httpd_ws_link_t::deliver(std::string_view peer, std::span<const std::byte> 
 
 void httpd_ws_link_t::queue_send(const session_ref_t& to,
                                  std::span<const std::span<const std::byte>> iov) {
-    if (handle_ == nullptr) return;
+    // ONE load of each member, into a local (#963). The plain reads these replace raced
+    // the destructor's writes outright — UB by the memory model — and re-reading them
+    // across the gather let one send act on two different values of the same member.
+    const httpd_handle_t h = handle_.load(std::memory_order_relaxed);
+    gate_t* const g = gate_.load(std::memory_order_relaxed);
+    if (h == nullptr) return;
     // Re-resolve the destination HERE rather than trusting the fd the caller looked at:
     // a departed or condemned peer takes no more frames, and is refused at this end of the
     // queue rather than the far one. Queueing to it would be worse than useless: the
@@ -1732,8 +1752,8 @@ void httpd_ws_link_t::queue_send(const session_ref_t& to,
     std::byte* dst = nullptr;
     if (tx_slot_t* const slot = claim_tx_slot(); slot != nullptr) {
         work = &slot->work;
-        work->handle = handle_;
-        work->gate = gate_;
+        work->handle = h;
+        work->gate = g;
         work->to = to;
         work->len = total;
         if (total <= kTxInlineBytes) {
@@ -1761,7 +1781,7 @@ void httpd_ws_link_t::queue_send(const session_ref_t& to,
             if (!part.empty()) std::memcpy(p, part.data(), part.size());
             p += part.size();
         }
-        queued = httpd_queue_work(handle_, &httpd_ws_link_t::tx_work, work) == ESP_OK;
+        queued = httpd_queue_work(h, &httpd_ws_link_t::tx_work, work) == ESP_OK;
         // A refused enqueue is the only enqueue failure that exists above the ESP-IDF floor
         // this component requires, and it hands the slot straight back: the item was never
         // posted, so nothing else can be reading it (see tx_slot_t).
@@ -1861,7 +1881,7 @@ void httpd_ws_link_t::condemn(int fd) {
     // Best-effort belt: if the control socket does have room, this reaps the session a
     // select cycle sooner. Its return is deliberately not trusted — see above — so a
     // failure is logged at debug and nothing depends on it.
-    if (httpd_sess_trigger_close(handle_, fd) != ESP_OK)
+    if (httpd_sess_trigger_close(handle_.load(std::memory_order_relaxed), fd) != ESP_OK)
         ESP_LOGD(kTag, "trigger_close not queued fd=%d (the shutdown carries the close)", fd);
 }
 
@@ -2000,7 +2020,8 @@ void httpd_ws_link_t::bound_socket(int fd) const {
     // The short-write guard is not optional decoration: a BOUNDED write is exactly the
     // one that can expire mid-buffer, so shortening the bound raises the rate of the case
     // esp_http_server reports as success. See send_guarded.
-    if (httpd_sess_set_send_override(handle_, fd, &httpd_ws_link_t::send_guarded) != ESP_OK)
+    if (httpd_sess_set_send_override(handle_.load(std::memory_order_relaxed), fd,
+                                     &httpd_ws_link_t::send_guarded) != ESP_OK)
         ESP_LOGW(kTag, "send override not installed fd=%d (short writes unguarded)", fd);
 }
 
@@ -2352,8 +2373,16 @@ void httpd_ws_link_t::peer_endpoint_t::send(std::span<const std::span<const std:
 
 void httpd_ws_link_t::enumerate_peers(const peer_visitor_t& visit) const {
     const std::lock_guard lock(peers_m_);
+    // `!dead` as well as `open` (#963): condemn() shuts the socket and marks the slot
+    // dead, then WAITS for httpd's select loop to notice EOF and run free_ctx. Through
+    // that gap every sending path already refuses the peer — send()'s snapshot filters
+    // !dead, queue_send re-resolves through live_fd, tx_work skips a doomed slot — so a
+    // census that still lists it makes the link answer "this peer exists" and "this peer
+    // is unreachable" at the same instant. The facet reports REACHABILITY, not table
+    // occupancy. The gap is one select round when the server is healthy, and condemn()
+    // exists precisely for when it is not.
     for (const auto& s : slots_)
-        if (s->open && !s->name.empty()) visit(s->name);
+        if (s->open && !s->dead && !s->name.empty()) visit(s->name);
 }
 
 void httpd_ws_link_t::enumerate_peer_stats(const peer_stats_visitor_t& visit) const {
@@ -2369,8 +2398,12 @@ void httpd_ws_link_t::enumerate_peer_stats(const peer_stats_visitor_t& visit) co
 
 transport_t* httpd_ws_link_t::peer_link(std::string_view peer) {
     const std::lock_guard lock(peers_m_);
+    // `!dead` for the reason on enumerate_peers (#963): the endpoint this used to hand
+    // out for a condemned slot was a guaranteed no-op, so a router lookup succeeded and
+    // every frame through it was silently discarded. Refusing here turns that into an
+    // honest "no such peer" the caller can act on.
     for (const auto& s : slots_)
-        if (s->open && s->name == peer) return &s->endpoint;
+        if (s->open && !s->dead && s->name == peer) return &s->endpoint;
     return nullptr;
 }
 

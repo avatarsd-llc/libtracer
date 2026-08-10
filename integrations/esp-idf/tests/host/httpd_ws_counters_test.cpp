@@ -270,6 +270,63 @@ void test_condemn_is_counted() {
 }
 
 // ---------------------------------------------------------------------------
+// 5b — #963.1: a CONDEMNED session leaves the bus facet at once, not when httpd reaps it.
+// ---------------------------------------------------------------------------
+void test_condemned_peer_leaves_the_facet() {
+    std::printf("#963 a condemned peer stops being visible before httpd reaps it:\n");
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    claim(760);
+    drain();
+
+    std::string name;
+    link->enumerate_peers([&](std::string_view p) { name = std::string(p); });
+    check(!name.empty(), "the peer is in the census while it is healthy");
+    check(link->peer_link(name) != nullptr, "and resolves to an endpoint");
+
+    // Condemn it WITHOUT letting httpd run its select loop — this is the whole gap. The
+    // slot is dead and shut, but free_ctx has not run, so the slot is still occupied.
+    fake_httpd::instance().set_send_script(760, {fake_httpd::send_result_t::SHORT});
+    tr::net::transport_t* const to = link->peer_link(name);
+    if (to != nullptr) {
+        to->send(std::span<const std::byte>(kBody));
+        // EXACTLY ONE work item, and the count matters. That item is the tx_work whose
+        // short write condemns the peer; condemn() then enqueues httpd_sess_trigger_close
+        // BEHIND it, and running that second item deletes the session, runs free_ctx ->
+        // reclaim_slot, and clears `open` — closing the very gap under test.
+        //
+        // Both earlier versions of this case got that wrong and were caught by ablation,
+        // not by review: drain() reaped through reap_shut(), and a run_one() LOOP ran the
+        // queued close. Each passed with the fix reverted, because by the time they
+        // looked, the slot was no longer `open` and the `!dead` filter was irrelevant.
+        // One step leaves the session exactly where condemn() leaves it on silicon: shut
+        // and dead, still holding its slot, waiting for a select round that has not come.
+        check(fake_httpd::instance().run_one(), "the queued send ran");
+    }
+    check(link->stats().sessions_condemned == 1, "the peer was condemned");
+
+    // The two facet readers must now agree with every SENDING path, all of which already
+    // refused this peer. Before #963 they did not: the census listed it and peer_link
+    // handed out an endpoint that was a guaranteed no-op.
+    // The precondition this case rests on: the slot is still OCCUPIED. Without this the
+    // two checks below pass vacuously against a reaped slot.
+    bool present_at_all = false;
+    link->enumerate_peer_stats(
+        [&](const httpd_ws_link_t::peer_stats_t&) { present_at_all = true; });
+    check(present_at_all, "the slot is still occupied — this IS the condemn->reap gap");
+
+    bool still_listed = false;
+    link->enumerate_peers([&](std::string_view p) {
+        if (p == name) still_listed = true;
+    });
+    check(!still_listed, "a condemned peer is OUT of the census immediately");
+    check(link->peer_link(name) == nullptr,
+          "and peer_link refuses it rather than handing out a no-op endpoint");
+
+    link.reset();
+    fake_httpd::instance().close_all();
+}
+
+// ---------------------------------------------------------------------------
 // 6 — the snapshot is a snapshot: cheap, lock-free, and it re-reads.
 // ---------------------------------------------------------------------------
 void test_stats_snapshot_tracks() {
@@ -300,6 +357,7 @@ int main() {
     test_pool_miss_is_a_labelled_subset();
     test_pool_exhaustion_is_counted();
     test_condemn_is_counted();
+    test_condemned_peer_leaves_the_facet();
     test_stats_snapshot_tracks();
     if (g_failures != 0) {
         std::printf("FAILED: %d check(s)\n", g_failures);

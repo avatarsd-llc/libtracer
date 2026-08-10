@@ -10,6 +10,57 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Public headers now propagate their ESP-IDF dependencies (#963.4).** `esp_http_server`,
+  `tcp_transport` and `esp_driver_twai` moved from `PRIV_REQUIRES` to **`REQUIRES`**. Those
+  three are named by headers under `include/libtracer_esp/` (`httpd_ws_link.hpp:119`,
+  `esp_ws_client_link.hpp:157`, `twai_link.hpp:36-37`), and `PRIV_REQUIRES` does not
+  propagate include dirs — so a dependent that included one of ours without independently
+  requiring the base component died with `esp_http_server.h: No such file or directory` and
+  no hint that libtracer was the cause. `lwip` and `esp_driver_gpio` stay private: they are
+  named only from `.cpp`. The CMakeLists' prose claim that libtracer's public headers expose
+  no IDF types was true of `core/` and false of `libtracer_esp/`; it is now scoped.
+
+- **`CONFIG_LIBTRACER_TRANSPORT_WS` now delivers the WS server link it advertises (#963.5).**
+  The option's help promised `httpd_ws_link_t`, but the TU was gated on
+  `CONFIG_HTTPD_WS_SUPPORT`, which defaults **n** in ESP-IDF and which the Kconfig neither
+  selected nor mentioned. A stock project taking the default got the WS *client* link, no
+  server link, and a bare `undefined reference to httpd_ws_link_t::httpd_ws_link_t(...)` at
+  link time naming no cause — the public header stays includable either way, so nothing
+  failed earlier. Kconfig now `select`s `HTTPD_WS_SUPPORT`, and the CMake gate emits a
+  `message(WARNING)` naming the symbol when an existing sdkconfig pins it off.
+
+- **`handle_` and `gate_` are atomic — the TX path no longer races the destructor
+  (#963.2).** `claim_tx_slot`'s teardown gate documents the TX path as safe to run past the
+  destructor, but `queue_send` read two **plain** members the destructor concurrently
+  writes: a data race and UB by the memory model on every build. Both are now
+  `std::atomic`, loaded **once** each into a local at the top of `queue_send` (they were
+  read up to three times per send, so one send could act on two different values of the
+  same member). Every other cross-thread member in the class was already atomic; these two
+  had simply not been made to match.
+
+  **This closes the UB, not the lifetime window.** A producer can still load a handle the
+  destructor is about to `httpd_stop`, or a gate it is about to `delete`. What bounds that
+  is the gate's existing `depth`/`cv` barrier, not the atomicity — and making these atomic
+  is the precondition for reasoning about that barrier at all.
+
+- **A condemned session leaves the bus facet immediately (#963.1).** `enumerate_peers` and
+  `peer_link` filtered on `open` alone and ignored `dead`, while *every* sending path
+  already refused a dead slot. Through the condemn→reap gap the link therefore answered
+  "this peer exists" and "this peer is unreachable" at the same instant, and `peer_link`
+  handed out an endpoint that was a guaranteed no-op. Both readers now also require
+  `!dead`: the facet reports **reachability**, not table occupancy.
+
+  **Behaviour change:** `peer_link` returns `nullptr` for a condemned-but-unreaped peer
+  where it previously returned a live pointer that silently discarded every frame.
+
+  **Cost, measured** (`-Os`): `httpd_ws_link.cpp.o` `.text` **13631 → 13833 B (+202,
+  +1.5%)**, A/A null exactly 0 (byte-identical rebuilds). The per-frame paths are
+  **unchanged** — `queue_send` and `tx_work` are byte-for-byte identical, because a relaxed
+  atomic load of a pointer is a plain load. `peer_link` +9 B, `on_data_frame` +8 B; the
+  destructor takes +417 B, which is teardown-only.
+
 ### Added
 
 - **`httpd_ws_link_t::stats()` — the link-level failure tally (#953).** A new

@@ -834,7 +834,14 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *         the link lands on valid, inert memory. Caller holds @ref peers_m_. */
     static void neutralise(session_t* slot);
 
-    httpd_handle_t handle_ = nullptr;  // nullptr => the instance never started
+    /**
+     * @brief The server handle. ATOMIC because the TX path is documented as safe to run
+     *        past the destructor (@ref claim_tx_slot's teardown gate) and the destructor
+     *        writes this while a producer task may be reading it — a data race, and UB by
+     *        the memory model, on every build until #963. Relaxed: this orders nothing,
+     *        it only makes the concurrent access defined.
+     */
+    std::atomic<httpd_handle_t> handle_{nullptr};  // nullptr => the instance never started
     std::uint16_t port_;
     std::size_t max_peers_;
     /** @brief Opening-handshake admission predicate + its opaque ctx; null admits every
@@ -909,7 +916,9 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * deleted and no API of ours can force that. The destructor frees it only when it
      * can prove nothing still holds it (owning mode, after `httpd_stop`).
      */
-    gate_t* gate_ = nullptr;
+    /** @brief The latched-callback gate. ATOMIC for the reason on @ref handle_ — the
+     *         destructor stores nullptr here while a producer may be reading it (#963). */
+    std::atomic<gate_t*> gate_{nullptr};
 };
 
 }  // namespace tr::net

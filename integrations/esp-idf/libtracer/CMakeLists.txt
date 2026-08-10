@@ -201,6 +201,16 @@ if(NOT IDF_TARGET STREQUAL "linux")
     # CONFIG_HTTPD_WS_SUPPORT=y; there is no portable fallback behind it any more.
     if(CONFIG_LIBTRACER_TRANSPORT_WS AND CONFIG_HTTPD_WS_SUPPORT)
         list(APPEND LIBTRACER_SRCS "httpd_ws_link.cpp")
+    elseif(CONFIG_LIBTRACER_TRANSPORT_WS)
+        # Reachable only when an existing sdkconfig pins CONFIG_HTTPD_WS_SUPPORT=n
+        # explicitly — the Kconfig now SELECTs it, so a fresh configure cannot land here.
+        # Say so rather than letting the build go green and fail at link with an
+        # undefined httpd_ws_link_t constructor naming no cause (#963).
+        message(WARNING
+            "libtracer: CONFIG_LIBTRACER_TRANSPORT_WS=y but CONFIG_HTTPD_WS_SUPPORT=n — "
+            "httpd_ws_link_t (the WebSocket SERVER link) is NOT being compiled. The client "
+            "link is unaffected. Set CONFIG_HTTPD_WS_SUPPORT=y, or turn off "
+            "CONFIG_LIBTRACER_TRANSPORT_WS if this node neither serves nor dials WebSocket.")
     endif()
     # Chip targets: the esp_transport_ws-backed WS *client* link (esp_ws_client_link_t) — the
     # embedded-native replacement for core's raw-socket transport_ws_client (which fails the
@@ -223,7 +233,24 @@ if(NOT IDF_TARGET STREQUAL "linux")
     # --gc-sections drops the link dep and libtracer.a is byte-identical (no footprint change
     # to a transport-trimmed build the sentinel measures). lwip stays unconditional for the
     # same reason (the socket transports' <sys/socket.h> resolves into it).
-    list(APPEND LIBTRACER_PRIV_REQUIRES lwip esp_driver_twai esp_driver_gpio esp_http_server tcp_transport)
+    # PUBLIC vs PRIVATE, and the split is decided by ONE test: does a header under
+    # `include/libtracer_esp/` name that component's header? PRIV_REQUIRES does not
+    # propagate include dirs, so a dependent that includes one of ours and does not
+    # independently require the base component dies with "esp_http_server.h: No such file
+    # or directory" and no hint that libtracer is the cause (#963).
+    #
+    # Three do, and they are REQUIRES:
+    #   esp_http_server   <- include/libtracer_esp/httpd_ws_link.hpp:119
+    #   tcp_transport     <- include/libtracer_esp/esp_ws_client_link.hpp:157
+    #   esp_driver_twai   <- include/libtracer_esp/twai_link.hpp:36-37
+    # Two do not, and stay private: lwip (the socket transports' <sys/socket.h> resolves
+    # into it, from .cpp only) and esp_driver_gpio (twai_link.cpp names its pins).
+    #
+    # Unconditional for the reason above this line — a Kconfig-gated REQUIRES evaluates
+    # false in the early expansion pass — and free when the TU is absent: nothing
+    # references the symbols, so --gc-sections drops the link dep.
+    list(APPEND LIBTRACER_REQUIRES esp_http_server tcp_transport esp_driver_twai)
+    list(APPEND LIBTRACER_PRIV_REQUIRES lwip esp_driver_gpio)
     # compat/include: POSIX headers IDF's libc spells differently (<poll.h> ->
     # <sys/poll.h>) — private, so core sources stay pure POSIX and dependents
     # never see the shim.
@@ -277,13 +304,16 @@ idf_component_register(
         "${LIBTRACER_ROOT}/core/include"
         "include"
     PRIV_INCLUDE_DIRS ${LIBTRACER_PRIV_INCLUDE_DIRS}
+    REQUIRES ${LIBTRACER_REQUIRES}
     PRIV_REQUIRES ${LIBTRACER_PRIV_REQUIRES}
 )
 
-# pthread is a PRIVATE requirement, not a public (REQUIRES) one. libtracer's
-# *public* headers expose only libstdc++ headers (<atomic>, <mutex>,
-# <shared_mutex>, <thread>) — never ESP-IDF's <pthread.h> — so the component
-# does not propagate a pthread dependency to its dependents. The pthread symbols
+# pthread is a PRIVATE requirement, not a public (REQUIRES) one. CORE's public
+# headers expose only libstdc++ headers (<atomic>, <mutex>, <shared_mutex>,
+# <thread>) — never ESP-IDF's <pthread.h> — so the component does not propagate a
+# pthread dependency to its dependents. (Scoped to `core/` deliberately: the
+# `libtracer_esp/` headers DO expose IDF types, which is why three components moved
+# to REQUIRES above — #963. The pthread claim is unaffected by that.) The pthread symbols
 # (pthread_create, etc.) are pulled in by libstdc++'s gthread threading, which
 # the *.cpp objects need at link time; that's exactly what PRIV_REQUIRES models.
 # (The old `REQUIRES pthread` over-declared it as a public dependency.)

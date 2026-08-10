@@ -770,11 +770,11 @@ ANCHORS = [
     ('integrations/esp-idf/libtracer/CMakeLists.txt:172', 'if(CONFIG_LIBTRACER_TRANSPORT_CAN)'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:173',
      'list(APPEND LIBTRACER_SRCS "${LIBTRACER_ROOT}/core/src/transport_can.cpp")'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:246', 'set(LIBTRACER_ACL_POLICY allow_only_policy_t)'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:247', 'set(LIBTRACER_LKV_SLOT sp_atomic_slot_t)'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:248', 'set(LIBTRACER_HAZARD_READER_SLOTS 64)'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:258', 'set(LIBTRACER_EDGE_PIN_SLOTS 8)'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:263', 'if(CONFIG_FREERTOS_UNICORE)'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:273', 'set(LIBTRACER_ACL_POLICY allow_only_policy_t)'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:274', 'set(LIBTRACER_LKV_SLOT sp_atomic_slot_t)'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:275', 'set(LIBTRACER_HAZARD_READER_SLOTS 64)'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:285', 'set(LIBTRACER_EDGE_PIN_SLOTS 8)'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:290', 'if(CONFIG_FREERTOS_UNICORE)'),
 ]
 
 
