@@ -115,7 +115,7 @@ what the `stripe1` bench topology exists to measure.
 
 ### 2.3 The LKV slot — per vertex, policy-selected
 
-`lkv_slot_t` is a compile-time policy (`core/include/libtracer/config.hpp.in:237`,
+`lkv_slot_t` is a compile-time policy (`core/include/libtracer/config.hpp.in:252`,
 [ADR-0069 — LKV slot is a compile-time policy](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0069-lkv-slot-is-a-compile-time-policy-hazard-reclamation.md)).
 Two bindings ship:
 

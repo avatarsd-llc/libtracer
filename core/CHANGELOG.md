@@ -14,6 +14,28 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Changed
+
+- **`config_t::kMaxVertexBytes64` 120 -> 96 and `kMaxVertexBytes32` 80 -> 72 — the RAM-diet
+  bounds become RATCHETS pinned to the measured size (#361 §8).** Public constants, so the
+  values are part of the API surface; nothing else moves and no runtime behaviour changes.
+  `sizeof(vertex_t)` measured **96 B on 64-bit** and **72 B on rv32** (`-Os -fno-exceptions
+  -fno-rtti`, `rv32imac_zicsr_zifencei`/`ilp32`), identical across all three configuration
+  legs (`acl_full` OFF/ON, both `lkv_slot_t` bindings), so no supported build loses slack.
+
+  The old numbers were ceilings held *above* the measurement, and a ceiling cannot express
+  "keep this lean": both 112 B and 96 B satisfied the 120 B bound, so the 16 B the diet won
+  after #380 §1 were invisible to every build and free for anyone to spend again. The 32-bit
+  arm had drifted further — its own comment claimed rv32 "sits exactly on 80 with zero
+  headroom" while the struct had already shrunk to 72, an assertion that stayed wrong because
+  the `static_assert` beside it still passed. Pinning to the measurement keeps every reclaimed
+  byte by construction and makes the prose re-derivable rather than remembered.
+
+  The cost is one number to lower in whichever commit shrinks the struct; that is now stated
+  in both `@brief` blocks and in both `static_assert` messages. Verified by ablation: adding
+  one `std::uint64_t` member to `vertex_t` fails the build on the 64-bit assert, with the
+  intended message.
+
 ### Added
 
 - **`tr::net::bus_link_t::peer_named()` — the multi-peer MODE AUTHORITY, asked once
