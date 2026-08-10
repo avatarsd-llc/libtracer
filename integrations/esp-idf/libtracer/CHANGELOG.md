@@ -10,6 +10,197 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-08-10
+
+### Added
+
+- **`httpd_ws_link_t::stats()` — the link-level failure tally (#953).** A new
+  `stats_t` snapshot covering the drop classes that had **no session to charge** and were
+  therefore invisible from every published surface: `peers_refused` (the admission
+  predicate and the `max_peers` ceiling, both of which turn a peer away before it owns a
+  slot), `sessions_condemned` (the only record of the link *killing* a session as opposed
+  to a peer leaving), `rx_dropped_oversize` (the abuse cap, applied before the slot lookup
+  — it had neither a log nor a counter), `rx_dropped_alloc`, `tx_to_dead_peer` (a frame
+  aimed at a session that had already gone), and `tx_pool_misses`.
+
+  `tx_pool_misses` is a **labelled subset of `enqueue_drops`, not a second tally** — the
+  total is unchanged. It exists because the three causes folded into `enqueue_drops` mean
+  different things: a pool miss is this link's own outstanding-send depth (read it against
+  `tx_slot_capacity()`), while a refused enqueue names the shared control queue and an OOM
+  names the heap. Their one log line said "queue refused / pool exhausted / OOM" and left
+  the reader to guess.
+
+  `enqueue_drops()` is unchanged and keeps working; `stats().enqueue_drops` returns the
+  same number, and a test pins the two spellings together so they cannot drift.
+
+  Two drops that were **entirely silent** — no log, no counter — now say so: the inbound
+  abuse cap and the reassembly cap.
+
+  **Scope note.** Most of what #953 reported as missing had already shipped: per-peer
+  `rx_frames`/`rx_bytes`/`tx_frames`/`tx_bytes`/`rx_drops`/`tx_drops` are carried by
+  `link_counters_t` through `enumerate_peer_stats`, `esp_ws_client_link_t` already has its
+  own `stats()`, and #949 removed the unbounded heap fallback the issue's part B was
+  written against. This change is the genuine residual.
+
+  **Cost, measured** (`-Os`, the level the component ships at): `httpd_ws_link.cpp.o`
+  `.text` **13079 → 13631 B (+552, +4.2%)**. Nothing was added to a per-frame path — every
+  counter sits on a refusal, a teardown or a drop. `tx_work` and `queue_send` are byte-for-byte
+  unchanged; `on_data_frame` moves **+23 B**, and that number is the point: it was **+350 B**
+  until the two new log call sites were moved out of line behind `[[gnu::noinline]]`
+  helpers, the same inlining trap #994 paid for. Compile is deterministic (two builds of
+  the same source are byte-identical), so the A/A null here is exactly 0.
+
+- **`httpd_ws_link_t::peer_named()`** — the `bus_link_t` mode-authority override (#889).
+  The same constructed flag `bus()` keys off, published so the base can REFUSE its
+  peer-named wiring calls (`set_peer_receiver`, `set_peer_rope_receiver`,
+  `set_peer_down_notifier`) on a FLAT link: `bus_link_t` is a public base, so those setters
+  are reachable by an upcast past the null `bus()`. This link's delivery and departure
+  paths already read the flag directly, so nothing else about it moves.
+
+- **`httpd_ws_link_t::kRequiredHttpdStack`** — the httpd task stack this link's in-call
+  servicing needs (12288 bytes), promoted from a constant in the `.cpp`'s anonymous
+  namespace to a public `static constexpr` on the class (#955). The port-binding
+  constructor applies it itself; the ADOPTING constructor cannot — it takes an
+  already-started server, so there is no `httpd_config_t` left to write and
+  `esp_http_server` exposes no reader for a running server's config either. The figure was
+  therefore unreadable by the one party who can act on it, which is how an integration came
+  to start its shared `:80` server with 8192. Write
+  `config.stack_size = tr::net::httpd_ws_link_t::kRequiredHttpdStack;` before `httpd_start`.
+
+  The adopting constructor's documentation now also states the other two server-level
+  settings the port-binding one establishes and it cannot — `lru_purge_enable = false` and
+  a socket budget consistent with `max_peers` — and what each one costs when it is wrong.
+  Neither can be verified from inside the link; they are stated where the person who can
+  apply them reads.
+
+- **`tr::net::link_counters_t`** (`libtracer_esp/link_stats.hpp`) plus
+  **`esp_ws_client_link_t::stats()`** and **`httpd_ws_link_t::enumerate_peer_stats()`** —
+  per-link passive traffic counters (#942): rx/tx messages and payload bytes, rx/tx drops,
+  and `esp_timer` stamps for the last delivered message and for when the connection came
+  up. Counts MESSAGES, not WebSocket fragments, so a client's `tx_frames` is directly
+  comparable with the server's `rx_frames` across a link. The client's snapshot also
+  carries `reconnects` (completed handshakes — the only externally-observable signal that
+  a transient drop happened, since `drop()` deliberately suppresses `notify_down`) and
+  `connect_ms` (the last handshake's duration; an upper bound on ~2 round-trips sampled
+  only at re-dial, never an RTT). Server-side counters are per SESSION and are handed out
+  with the slot's claim generation, so a consumer differencing successive snapshots can
+  tell "same connection, N more frames" from "a different peer landed on that slot".
+
+  `stats().c.rx_drops` is not a second tally: it is read from the existing
+  `dropped_rx()` below, so the client link keeps exactly one inbound-drop truth.
+
+  Scope is deliberately narrow — `transport_t` grows no `counters()` virtual and
+  `fwd_router_t` no per-child accounting, because the only consumers are hosts that
+  enumerate the two concrete link types they constructed themselves. A polymorphic hook
+  would put a counter bump on core's hot `deliver_remote` path and buy nothing.
+
+- **`httpd_ws_link_t::tx_slots_busy()` / `tx_slot_capacity()`** — TX work slot
+  observability (#944): the pool's live occupancy and its size, so a caller can see the
+  pool being starved rather than infer it from allocation pressure. (This entry originally
+  also introduced `tx_strands()`; that accessor was removed again before release — see the
+  BREAKING section above — and neither it nor the sweep it reported on ever shipped in a
+  tagged component.)
+
+- **`esp_ws_client_link_t::dropped_rx()`** — inbound messages the receive path refused,
+  spelled the way core's transports already spell it (`transport_can::dropped_rx()`).
+  It counts the two refusals that were previously logs-only (#953): a message that does
+  not fit `rx_bytes`, and a stray WebSocket CONTINUATION arriving with no message open.
+  A frame lost to a connection drop is not counted — that is the link going down, not
+  the receive path refusing a message.
+
+### Changed
+
+- **BREAKING: `esp_ws_client_link_t`'s handshake headers moved into the constructor and
+  `set_handshake_headers()` is gone** (#959). The setter could not work: the constructor
+  spawns the recv thread, the recv thread dials at once, and the setter necessarily ran
+  after both. So the *only* ordering the API permitted was the racy one — a `std::string`
+  assigned by the wiring task while `connect_once()` read it with `.empty()`/`.c_str()`,
+  where a reallocating assignment can hand `esp_transport_ws_set_config` a `cfg.headers`
+  that is already freed. Nothing in the API decided which side of that race won, so
+  whether the FIRST dial carried the token was **undefined** — and a dial without one is
+  refused by a peer whose graph WS gates admission, costing a 1.5 s reconnect backoff
+  before the next dial. That is what made first-dial liveness nondeterministic by
+  construction. Which side wins in practice is a scheduler property, not an API one: it
+  was never measured on chip, and on the host fake a rebuilt pre-fix ordering had the write
+  win **20 of 20** measured runs. That reconstruction assigns inside the constructor
+  immediately after the thread spawn — a *narrower* write-to-read window than the setter it
+  stands in for — so the rate is the arrangement most favourable to the write winning, on
+  one host and one scheduler. It says the write won the runs that were made; it does not say
+  the opposite interleaving cannot occur. A tokenless first dial is therefore what the old
+  surface *permitted*; it is not a behaviour recorded here as observed.
+
+  The headers are now the **fourth** constructor parameter (after `ws_path`, completing
+  the "what the handshake requests" group) and the member is `const`: written before the
+  thread that reads it exists, re-read on every re-dial, no lock and no snapshot. Empty
+  still leaves `cfg.headers` NULL, so a dial without a token is byte-for-byte the
+  historical request. Placing it fourth rather than last is deliberate — appending it
+  would have forced any caller wanting a token to restate `rx_bytes`/`tx_bytes`/
+  `recv_stack` positionally, pinning today's defaults into call sites that never meant to
+  choose them.
+
+  **What breaks:** `link.set_handshake_headers(tok)` after construction no longer compiles;
+  move `tok` into the construction site. A call that passed buffer sizes positionally
+  (`{host, port, "/ws", 4096, 4096, 12288}`) also no longer compiles — `std::string` is not
+  constructible from `std::size_t`, so a size in the fourth slot is a hard error.
+  **One exception, and it is silent:** a literal `0` in that slot is a null-pointer
+  constant, binds to `std::string(const char*)` and yields `std::string(nullptr)`, which is
+  UB at run time — `L(host, 8080, "/ws", 0, 0, 0)` compiles clean under
+  `g++ -std=c++20 -Wall -Wextra`. Grep call sites for a literal `0` in the old `rx_bytes`
+  position before trusting the compiler here.
+  `libtracer_esp/esp_ws_client_link.hpp` is the only file involved.
+
+  This is deliberately NOT a `start()` split. Deferring the recv thread would make the
+  whole "set X before the first dial" family expressible, but its other motivation (#900's
+  discarded `recv_stack`) was already answered by honouring the knob at spawn time, and
+  the shape of a deferral on this link — which dials, re-dials and delivers on one thread —
+  is the open contract question in #1102, not something to settle as a side effect here.
+
+- **`esp_ws_client_link_t` now LOGS an outbound frame that exceeds `tx_bytes`**, with both
+  sizes, alongside the `tx_drops` bump that landed with #942 (#959). `transport_t::send`
+  returns void, so the router cannot be told the frame died; `tx_drops` says one did, but
+  `send()`'s peer-down and short-write arms bump that same counter, so a bump does not even
+  say which drop happened, let alone which knob was too small. A per-frame ceiling nobody
+  can see is how a blob-carrying value or a composed reply vanishes with clean logs on both
+  ends. The log is the new channel and the only one that names a size; the counter is
+  unchanged. The 2048-byte defaults are unchanged — they are documented as modest on
+  purpose and raising them costs RAM on every dialed peer; what was wrong was the silence
+  around exceeding them, not the number.
+
+- **BREAKING (chip targets): the portable `ws` transport is no longer built, and no `ws`
+  entry is registered in the built-in transport catalog.** ESP-IDF WebSocket must never
+  use POSIX sockets (#947 ruling). Core's `transport_ws_server` / `transport_ws_client`
+  are the HOST implementation; on lwIP they are not merely unreachable but *unusable* —
+  their scatter-gather egress asks `sendmsg` for `MSG_NOSIGNAL`, `lwip_sendmsg` rejects
+  any flag outside `MSG_DONTWAIT|MSG_MORE` with `EOPNOTSUPP`, and `write_all_iov` reads
+  that as peer-gone, so every data frame is silently discarded while the opening
+  handshake and PING/PONG still answer (#948). They are therefore **absent**, not fixed.
+  The sanctioned plane is the IDF-native links this component already ships:
+  `httpd_ws_link_t` (on `esp_http_server`, needs `CONFIG_HTTPD_WS_SUPPORT=y`) and
+  `esp_ws_client_link_t` (on `esp_transport_ws`), both bound by the application through
+  `transport_vertex_t::provide_link`.
+
+  Selection is by **which TU compiles**, not a feature macro — the rule
+  `socketcan_link.cpp` vs. `socketcan_link_stub.cpp` already follows. The `linux` (POSIX
+  host) target is unchanged and keeps the portable pair; it has glibc's `sendmsg` and no
+  `esp_http_server`.
+
+  **What breaks:** a `:children[]` SPEC carrying `kind=ws` with no staged link now
+  answers `SCHEMA_NOT_FOUND` on a chip target instead of constructing a portable
+  socket server that could not deliver anyway. Nodes already staging an IDF-native link
+  with `provide_link` are unaffected. `CONFIG_LIBTRACER_TRANSPORT_WS` keeps its meaning
+  ("build the WebSocket plane") — only *which* plane it builds is now target-decided.
+
+  Measured on `examples/full_node`, esp32c6, `-Os`, ESP-IDF v6.0-dev: `nm` on the linked
+  ELF went from **46** `transport_ws_server`/`transport_ws_client` symbols to **0**, and
+  flash fell 394,146 → 381,098 B (**−13,048 B**; `libtracer.a` −12,769 B, image `.bin`
+  −13,040 B). Flash here is tracked, never gated. `tools/check_esp_ws_plane.py` is the
+  standing gate.
+
+- **`examples/full_node` now sets `CONFIG_HTTPD_WS_SUPPORT=y`,** so `httpd_ws_link.cpp`
+  — the sanctioned chip WebSocket *server* — is compiled by CI. It previously had no
+  compile coverage anywhere: the config it is gated on defaults to `n`, and the portable
+  server it replaces was silently filling in.
+
 ### Fixed
 
 - **A chip build can no longer instantiate the spinlock pool (#1158, #963.3).** The component
@@ -84,46 +275,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   atomic load of a pointer is a plain load. `peer_link` +9 B, `on_data_frame` +8 B; the
   destructor takes +417 B, which is teardown-only.
 
-### Added
-
-- **`httpd_ws_link_t::stats()` — the link-level failure tally (#953).** A new
-  `stats_t` snapshot covering the drop classes that had **no session to charge** and were
-  therefore invisible from every published surface: `peers_refused` (the admission
-  predicate and the `max_peers` ceiling, both of which turn a peer away before it owns a
-  slot), `sessions_condemned` (the only record of the link *killing* a session as opposed
-  to a peer leaving), `rx_dropped_oversize` (the abuse cap, applied before the slot lookup
-  — it had neither a log nor a counter), `rx_dropped_alloc`, `tx_to_dead_peer` (a frame
-  aimed at a session that had already gone), and `tx_pool_misses`.
-
-  `tx_pool_misses` is a **labelled subset of `enqueue_drops`, not a second tally** — the
-  total is unchanged. It exists because the three causes folded into `enqueue_drops` mean
-  different things: a pool miss is this link's own outstanding-send depth (read it against
-  `tx_slot_capacity()`), while a refused enqueue names the shared control queue and an OOM
-  names the heap. Their one log line said "queue refused / pool exhausted / OOM" and left
-  the reader to guess.
-
-  `enqueue_drops()` is unchanged and keeps working; `stats().enqueue_drops` returns the
-  same number, and a test pins the two spellings together so they cannot drift.
-
-  Two drops that were **entirely silent** — no log, no counter — now say so: the inbound
-  abuse cap and the reassembly cap.
-
-  **Scope note.** Most of what #953 reported as missing had already shipped: per-peer
-  `rx_frames`/`rx_bytes`/`tx_frames`/`tx_bytes`/`rx_drops`/`tx_drops` are carried by
-  `link_counters_t` through `enumerate_peer_stats`, `esp_ws_client_link_t` already has its
-  own `stats()`, and #949 removed the unbounded heap fallback the issue's part B was
-  written against. This change is the genuine residual.
-
-  **Cost, measured** (`-Os`, the level the component ships at): `httpd_ws_link.cpp.o`
-  `.text` **13079 → 13631 B (+552, +4.2%)**. Nothing was added to a per-frame path — every
-  counter sits on a refusal, a teardown or a drop. `tx_work` and `queue_send` are byte-for-byte
-  unchanged; `on_data_frame` moves **+23 B**, and that number is the point: it was **+350 B**
-  until the two new log call sites were moved out of line behind `[[gnu::noinline]]`
-  helpers, the same inlining trap #994 paid for. Compile is deterministic (two builds of
-  the same source are byte-identical), so the A/A null here is exactly 0.
-
-### Fixed
-
 - **The derived WS send bound now accounts for IDF's two writes per frame, and can no
   longer derive to "block forever" (#956).** Two further corrections to
   `derive_send_timeout_ms`, on top of the strike cap (#840):
@@ -175,114 +326,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   peer that cannot absorb a frame within the tighter bound
   accrues a strike sooner, so a genuinely stalled session is torn down faster; a healthy one
   is unaffected, since any completing send resets the streak.
-
-### Changed — BREAKING
-
-- **`httpd_ws_link_t` names accepted sessions `p<slot>`, not `<ip>:<port>`** (#994,
-  ADR-0073 §2, #426). The old name could be ENUMERATED and never ADDRESSED:
-  `graph::valid_segment` rejects both `.` and `:`, so a peer listed by the link's
-  synthesized `:children[]` could not be spelled back in a `dst` path, and every FWD
-  descent into one answered `INVALID_PATH (0x0021)`. That broke the enumerable⇒addressable
-  invariant RFC-0020 §6 names as the precondition for its NAME-hop rejection — on every
-  ESP-IDF node, while core's own bus servers had shipped `p<slot>` since #426.
-  **Anything holding an `<ip>:<port>` peer name must re-resolve it**: `peer_link()`,
-  `enumerate_peers()`, the departure seam and `peer_stats_t::name` all carry the slot name
-  now. The physical address is not lost — it moved to the new
-  `peer_stats_t::endpoint_str`, and the strike log prints both.
-
-- **The component now requires ESP-IDF `>=5.5.5`** (`idf_component.yml`, was `>=5.3`) — a
-  TX-path correctness floor, not a packaging preference (#949). Below it `httpd_queue_work`
-  is a bare non-blocking `sendto` on `esp_http_server`'s loopback control socket, so an
-  enqueue past `CONFIG_LWIP_UDP_RECVMBOX_SIZE` is discarded inside lwIP while the call
-  still returns `ESP_OK`: the frame is lost with nothing observable anywhere, and the work
-  item that would have released its TX pool slot never runs. From 5.5.5 the mbox slot is
-  reserved through a counting semaphore before the `sendto` (`httpd_main.c`), so a full
-  control queue is an `ESP_FAIL` the caller sees. **Consumers on 5.3.x, 5.4.x and
-  5.5.0–5.5.4 are dropped**; a project on those versions must either upgrade or pin the
-  previous component release.
-
-- **`httpd_ws_link_t::tx_strands()` is REMOVED**, together with the machinery it reported
-  on: the four-state TX slot lifetime, its age stamp, and the exhausted-claim sweep (#949).
-  Above the new floor a slot cannot be pinned by an enqueue that silently never runs, so
-  there is nothing to reclaim and nothing to count. `tx_slots_busy()` and
-  `tx_slot_capacity()` stay. A consumer polling `tx_strands()` should drop the call;
-  `enqueue_drops()` is now the whole TX-loss surface.
-
-- **An exhausted TX slot pool drops the frame and counts it, instead of falling back to a
-  heap work item** (#949, and #953's part B). The pool is the link's outstanding-send bound
-  — `tx_slot_capacity()` sends in flight at once — and exceeding it increments
-  `enqueue_drops()` and logs, on the same path a refused enqueue takes. The old arm posted
-  an unbounded number of heap-allocated work items into a control mbox drained one message
-  per server pass, which is a bounded and observable condition traded for an unbounded and
-  invisible one; the exhaustion policy the record already rules is drop-and-count
-  (ADR-0039 §4, ADR-0042 §2). **Consumer-visible consequence**: a broadcast to more peers
-  than `tx_slot_capacity()` now delivers a pool's worth per pass and counts the rest as
-  drops, where it previously heap-queued them. On a device the httpd task drains
-  concurrently, so how much of a wide fan-out lands is a scheduling question — but it is no
-  longer bounded by the heap, and every loss is on a counter. A host that fans out wider
-  than the pool should read `enqueue_drops()`.
-
-### Added
-
-- **`httpd_ws_link_t::peer_named()`** — the `bus_link_t` mode-authority override (#889).
-  The same constructed flag `bus()` keys off, published so the base can REFUSE its
-  peer-named wiring calls (`set_peer_receiver`, `set_peer_rope_receiver`,
-  `set_peer_down_notifier`) on a FLAT link: `bus_link_t` is a public base, so those setters
-  are reachable by an upcast past the null `bus()`. This link's delivery and departure
-  paths already read the flag directly, so nothing else about it moves.
-
-- **`httpd_ws_link_t::kRequiredHttpdStack`** — the httpd task stack this link's in-call
-  servicing needs (12288 bytes), promoted from a constant in the `.cpp`'s anonymous
-  namespace to a public `static constexpr` on the class (#955). The port-binding
-  constructor applies it itself; the ADOPTING constructor cannot — it takes an
-  already-started server, so there is no `httpd_config_t` left to write and
-  `esp_http_server` exposes no reader for a running server's config either. The figure was
-  therefore unreadable by the one party who can act on it, which is how an integration came
-  to start its shared `:80` server with 8192. Write
-  `config.stack_size = tr::net::httpd_ws_link_t::kRequiredHttpdStack;` before `httpd_start`.
-
-  The adopting constructor's documentation now also states the other two server-level
-  settings the port-binding one establishes and it cannot — `lru_purge_enable = false` and
-  a socket budget consistent with `max_peers` — and what each one costs when it is wrong.
-  Neither can be verified from inside the link; they are stated where the person who can
-  apply them reads.
-
-- **`tr::net::link_counters_t`** (`libtracer_esp/link_stats.hpp`) plus
-  **`esp_ws_client_link_t::stats()`** and **`httpd_ws_link_t::enumerate_peer_stats()`** —
-  per-link passive traffic counters (#942): rx/tx messages and payload bytes, rx/tx drops,
-  and `esp_timer` stamps for the last delivered message and for when the connection came
-  up. Counts MESSAGES, not WebSocket fragments, so a client's `tx_frames` is directly
-  comparable with the server's `rx_frames` across a link. The client's snapshot also
-  carries `reconnects` (completed handshakes — the only externally-observable signal that
-  a transient drop happened, since `drop()` deliberately suppresses `notify_down`) and
-  `connect_ms` (the last handshake's duration; an upper bound on ~2 round-trips sampled
-  only at re-dial, never an RTT). Server-side counters are per SESSION and are handed out
-  with the slot's claim generation, so a consumer differencing successive snapshots can
-  tell "same connection, N more frames" from "a different peer landed on that slot".
-
-  `stats().c.rx_drops` is not a second tally: it is read from the existing
-  `dropped_rx()` below, so the client link keeps exactly one inbound-drop truth.
-
-  Scope is deliberately narrow — `transport_t` grows no `counters()` virtual and
-  `fwd_router_t` no per-child accounting, because the only consumers are hosts that
-  enumerate the two concrete link types they constructed themselves. A polymorphic hook
-  would put a counter bump on core's hot `deliver_remote` path and buy nothing.
-
-- **`httpd_ws_link_t::tx_slots_busy()` / `tx_slot_capacity()`** — TX work slot
-  observability (#944): the pool's live occupancy and its size, so a caller can see the
-  pool being starved rather than infer it from allocation pressure. (This entry originally
-  also introduced `tx_strands()`; that accessor was removed again before release — see the
-  BREAKING section above — and neither it nor the sweep it reported on ever shipped in a
-  tagged component.)
-
-- **`esp_ws_client_link_t::dropped_rx()`** — inbound messages the receive path refused,
-  spelled the way core's transports already spell it (`transport_can::dropped_rx()`).
-  It counts the two refusals that were previously logs-only (#953): a message that does
-  not fit `rx_bytes`, and a stray WebSocket CONTINUATION arriving with no message open.
-  A frame lost to a connection drop is not counted — that is the link going down, not
-  the receive path refusing a message.
-
-### Fixed
 
 - **`httpd_ws_link_t::set_admission_cb`'s predicate now runs where the opening GET actually
   arrives — the server's WebSocket PRE-handshake callback — and its refusal stops the
@@ -609,98 +652,51 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   already applies), and an **exact-fit** message — `off == rx_bytes` with `fin` — is
   delivered instead of being swept into the overflow branch.
 
-### Changed
+### Changed — BREAKING
 
-- **BREAKING: `esp_ws_client_link_t`'s handshake headers moved into the constructor and
-  `set_handshake_headers()` is gone** (#959). The setter could not work: the constructor
-  spawns the recv thread, the recv thread dials at once, and the setter necessarily ran
-  after both. So the *only* ordering the API permitted was the racy one — a `std::string`
-  assigned by the wiring task while `connect_once()` read it with `.empty()`/`.c_str()`,
-  where a reallocating assignment can hand `esp_transport_ws_set_config` a `cfg.headers`
-  that is already freed. Nothing in the API decided which side of that race won, so
-  whether the FIRST dial carried the token was **undefined** — and a dial without one is
-  refused by a peer whose graph WS gates admission, costing a 1.5 s reconnect backoff
-  before the next dial. That is what made first-dial liveness nondeterministic by
-  construction. Which side wins in practice is a scheduler property, not an API one: it
-  was never measured on chip, and on the host fake a rebuilt pre-fix ordering had the write
-  win **20 of 20** measured runs. That reconstruction assigns inside the constructor
-  immediately after the thread spawn — a *narrower* write-to-read window than the setter it
-  stands in for — so the rate is the arrangement most favourable to the write winning, on
-  one host and one scheduler. It says the write won the runs that were made; it does not say
-  the opposite interleaving cannot occur. A tokenless first dial is therefore what the old
-  surface *permitted*; it is not a behaviour recorded here as observed.
+- **`httpd_ws_link_t` names accepted sessions `p<slot>`, not `<ip>:<port>`** (#994,
+  ADR-0073 §2, #426). The old name could be ENUMERATED and never ADDRESSED:
+  `graph::valid_segment` rejects both `.` and `:`, so a peer listed by the link's
+  synthesized `:children[]` could not be spelled back in a `dst` path, and every FWD
+  descent into one answered `INVALID_PATH (0x0021)`. That broke the enumerable⇒addressable
+  invariant RFC-0020 §6 names as the precondition for its NAME-hop rejection — on every
+  ESP-IDF node, while core's own bus servers had shipped `p<slot>` since #426.
+  **Anything holding an `<ip>:<port>` peer name must re-resolve it**: `peer_link()`,
+  `enumerate_peers()`, the departure seam and `peer_stats_t::name` all carry the slot name
+  now. The physical address is not lost — it moved to the new
+  `peer_stats_t::endpoint_str`, and the strike log prints both.
 
-  The headers are now the **fourth** constructor parameter (after `ws_path`, completing
-  the "what the handshake requests" group) and the member is `const`: written before the
-  thread that reads it exists, re-read on every re-dial, no lock and no snapshot. Empty
-  still leaves `cfg.headers` NULL, so a dial without a token is byte-for-byte the
-  historical request. Placing it fourth rather than last is deliberate — appending it
-  would have forced any caller wanting a token to restate `rx_bytes`/`tx_bytes`/
-  `recv_stack` positionally, pinning today's defaults into call sites that never meant to
-  choose them.
+- **The component now requires ESP-IDF `>=5.5.5`** (`idf_component.yml`, was `>=5.3`) — a
+  TX-path correctness floor, not a packaging preference (#949). Below it `httpd_queue_work`
+  is a bare non-blocking `sendto` on `esp_http_server`'s loopback control socket, so an
+  enqueue past `CONFIG_LWIP_UDP_RECVMBOX_SIZE` is discarded inside lwIP while the call
+  still returns `ESP_OK`: the frame is lost with nothing observable anywhere, and the work
+  item that would have released its TX pool slot never runs. From 5.5.5 the mbox slot is
+  reserved through a counting semaphore before the `sendto` (`httpd_main.c`), so a full
+  control queue is an `ESP_FAIL` the caller sees. **Consumers on 5.3.x, 5.4.x and
+  5.5.0–5.5.4 are dropped**; a project on those versions must either upgrade or pin the
+  previous component release.
 
-  **What breaks:** `link.set_handshake_headers(tok)` after construction no longer compiles;
-  move `tok` into the construction site. A call that passed buffer sizes positionally
-  (`{host, port, "/ws", 4096, 4096, 12288}`) also no longer compiles — `std::string` is not
-  constructible from `std::size_t`, so a size in the fourth slot is a hard error.
-  **One exception, and it is silent:** a literal `0` in that slot is a null-pointer
-  constant, binds to `std::string(const char*)` and yields `std::string(nullptr)`, which is
-  UB at run time — `L(host, 8080, "/ws", 0, 0, 0)` compiles clean under
-  `g++ -std=c++20 -Wall -Wextra`. Grep call sites for a literal `0` in the old `rx_bytes`
-  position before trusting the compiler here.
-  `libtracer_esp/esp_ws_client_link.hpp` is the only file involved.
+- **`httpd_ws_link_t::tx_strands()` is REMOVED**, together with the machinery it reported
+  on: the four-state TX slot lifetime, its age stamp, and the exhausted-claim sweep (#949).
+  Above the new floor a slot cannot be pinned by an enqueue that silently never runs, so
+  there is nothing to reclaim and nothing to count. `tx_slots_busy()` and
+  `tx_slot_capacity()` stay. A consumer polling `tx_strands()` should drop the call;
+  `enqueue_drops()` is now the whole TX-loss surface.
 
-  This is deliberately NOT a `start()` split. Deferring the recv thread would make the
-  whole "set X before the first dial" family expressible, but its other motivation (#900's
-  discarded `recv_stack`) was already answered by honouring the knob at spawn time, and
-  the shape of a deferral on this link — which dials, re-dials and delivers on one thread —
-  is the open contract question in #1102, not something to settle as a side effect here.
-
-- **`esp_ws_client_link_t` now LOGS an outbound frame that exceeds `tx_bytes`**, with both
-  sizes, alongside the `tx_drops` bump that landed with #942 (#959). `transport_t::send`
-  returns void, so the router cannot be told the frame died; `tx_drops` says one did, but
-  `send()`'s peer-down and short-write arms bump that same counter, so a bump does not even
-  say which drop happened, let alone which knob was too small. A per-frame ceiling nobody
-  can see is how a blob-carrying value or a composed reply vanishes with clean logs on both
-  ends. The log is the new channel and the only one that names a size; the counter is
-  unchanged. The 2048-byte defaults are unchanged — they are documented as modest on
-  purpose and raising them costs RAM on every dialed peer; what was wrong was the silence
-  around exceeding them, not the number.
-
-- **BREAKING (chip targets): the portable `ws` transport is no longer built, and no `ws`
-  entry is registered in the built-in transport catalog.** ESP-IDF WebSocket must never
-  use POSIX sockets (#947 ruling). Core's `transport_ws_server` / `transport_ws_client`
-  are the HOST implementation; on lwIP they are not merely unreachable but *unusable* —
-  their scatter-gather egress asks `sendmsg` for `MSG_NOSIGNAL`, `lwip_sendmsg` rejects
-  any flag outside `MSG_DONTWAIT|MSG_MORE` with `EOPNOTSUPP`, and `write_all_iov` reads
-  that as peer-gone, so every data frame is silently discarded while the opening
-  handshake and PING/PONG still answer (#948). They are therefore **absent**, not fixed.
-  The sanctioned plane is the IDF-native links this component already ships:
-  `httpd_ws_link_t` (on `esp_http_server`, needs `CONFIG_HTTPD_WS_SUPPORT=y`) and
-  `esp_ws_client_link_t` (on `esp_transport_ws`), both bound by the application through
-  `transport_vertex_t::provide_link`.
-
-  Selection is by **which TU compiles**, not a feature macro — the rule
-  `socketcan_link.cpp` vs. `socketcan_link_stub.cpp` already follows. The `linux` (POSIX
-  host) target is unchanged and keeps the portable pair; it has glibc's `sendmsg` and no
-  `esp_http_server`.
-
-  **What breaks:** a `:children[]` SPEC carrying `kind=ws` with no staged link now
-  answers `SCHEMA_NOT_FOUND` on a chip target instead of constructing a portable
-  socket server that could not deliver anyway. Nodes already staging an IDF-native link
-  with `provide_link` are unaffected. `CONFIG_LIBTRACER_TRANSPORT_WS` keeps its meaning
-  ("build the WebSocket plane") — only *which* plane it builds is now target-decided.
-
-  Measured on `examples/full_node`, esp32c6, `-Os`, ESP-IDF v6.0-dev: `nm` on the linked
-  ELF went from **46** `transport_ws_server`/`transport_ws_client` symbols to **0**, and
-  flash fell 394,146 → 381,098 B (**−13,048 B**; `libtracer.a` −12,769 B, image `.bin`
-  −13,040 B). Flash here is tracked, never gated. `tools/check_esp_ws_plane.py` is the
-  standing gate.
-
-- **`examples/full_node` now sets `CONFIG_HTTPD_WS_SUPPORT=y`,** so `httpd_ws_link.cpp`
-  — the sanctioned chip WebSocket *server* — is compiled by CI. It previously had no
-  compile coverage anywhere: the config it is gated on defaults to `n`, and the portable
-  server it replaces was silently filling in.
+- **An exhausted TX slot pool drops the frame and counts it, instead of falling back to a
+  heap work item** (#949, and #953's part B). The pool is the link's outstanding-send bound
+  — `tx_slot_capacity()` sends in flight at once — and exceeding it increments
+  `enqueue_drops()` and logs, on the same path a refused enqueue takes. The old arm posted
+  an unbounded number of heap-allocated work items into a control mbox drained one message
+  per server pass, which is a bounded and observable condition traded for an unbounded and
+  invisible one; the exhaustion policy the record already rules is drop-and-count
+  (ADR-0039 §4, ADR-0042 §2). **Consumer-visible consequence**: a broadcast to more peers
+  than `tx_slot_capacity()` now delivers a pool's worth per pass and counts the rest as
+  drops, where it previously heap-queued them. On a device the httpd task drains
+  concurrently, so how much of a wide fan-out lands is a scheduling question — but it is no
+  longer bounded by the heap, and every loss is on a counter. A host that fans out wider
+  than the pool should read `enqueue_drops()`.
 
 ## [0.8.0] — 2026-08-06
 

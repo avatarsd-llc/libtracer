@@ -14,6 +14,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-08-10
+
 ### Added
 
 - **`mem::kSpinWaitSafe` — a build-configuration constant that makes the wrong pool a compile
@@ -45,31 +47,243 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   which compiles one probe TU against both renderings of the config header and asserts both
   arms: the allowed one compiles, the forbidden one fails *and* names `critical_pool_t`.
 
-### Fixed
+- **`tr::net::bus_link_t::peer_named()` — the multi-peer MODE AUTHORITY, asked once
+  (#889).** A virtual query, default `true`, overridden by `tr::net::slot_server_t` to return
+  the `peer_named` its listener was constructed with. Before it, "which mode is this link in"
+  had two answers that only coincided by wiring accident: `peer_named_` gated `bus()` and
+  nothing else, while every runtime decision — the tcp/ws servers' per-frame tier select and
+  the shared departure branch — keyed off `peer_rx_.has_any()`, i.e. off whether a peer sink
+  happened to be installed. A kind that is a bus by construction (the CAN binding) keeps the
+  default and is unaffected. Cold path only: an implementation's own per-frame tier select
+  reads its stored flag, never this virtual.
 
-- **WebTransport: a peer-opened stream is reclaimed when it finishes (#1163).** `impl_t::ctxs`
-  had **no `erase` anywhere** in the TU: the only frees were two wholesale harvests (peer
-  replacement, endpoint teardown), so every stream a peer opened and closed leaked its
-  `stream_ctx_t`, its accumulator buffer and its unreleased msquic handle for the life of the
-  *session* — and the peer chooses how many that is. `PeerBidiStreamCount`/`PeerUnidiStreamCount`
-  do not bound it: they cap how many streams may be open **at once**, not how many may be opened
-  over a session's life, so open/close cycling grows the list as fast as RTT allows. The refuse
-  path made it worse, not better — the cheapest thing a peer could do was also a leak.
+- **`tr::net::conn_spec_t` + `tr::net::conn_spec(...)` (`libtracer/conn_spec.hpp`) — the
+  connection-creation SPEC finally has a public ENCODER (#902).** `transport_vertex_t` has
+  always shipped the decoder for the `/net:children[]` grammar
+  `SPEC{NAME type, NAME name, SETTINGS config{role, port[, kind][, addr] …}}`, but nothing
+  emitted it: every consumer of the production first-wiring step hand-built the TLVs from
+  `wire::emit_tlv` / `wire::emit_name` and reached into the INTERNAL `tr::detail::store_le`
+  to encode the port. Sixteen private near-copies existed across `core/tests`, `bench`,
+  `core/examples/tree_of_ropes.cpp` and the ESP-IDF `full_node` example, and they had already
+  drifted — `tree_of_ropes`' copy could not spell `kind` or `addr`, i.e. the example for
+  "mount a transport" could not express the field that decides which MODULE the connection
+  mounts under. `conn_spec_t` is a fluent builder that appends `(NAME key, value)` pairs in
+  call order (`role`/`port`/`kind`/`addr`/`keepalive_ms`/`max_frame`/`backoff_ms`/
+  `connect_timeout_ms`, plus generic `text`/`u8`/`u16`/`u32`/`flag` for a kind's PRIVATE keys,
+  named to mirror `config_reader_t`'s accessors); a builder on which no setter ran emits no
+  `config` at all, which is the `provide_link` spelling. `conn_spec(type, name, role, port,
+  kind = {}, addr = {})` is the one-call sugar over it. **No wire surface changes** — the
+  bytes are pinned byte-for-byte against the pre-existing hand-emit in
+  `transport_vertex_test`, and the TypeScript client's `encodeConnSpec` (#408) already shipped
+  this same grammar, so the C++ core was the odd one out. There is no `module` key and the
+  builder invents none: a SPEC names its module through `kind` + `role`, resolved by the
+  application's `register_module` declaration before any staged link is consulted (#883).
 
-  `stream_cb` now handles `QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE`, the one point at which msquic
-  guarantees no further callback for the stream. Exactly one side frees: whichever of the
-  shutdown and a harvest reaches `conn_m` first takes the ctx, and the loser sees that decision
-  through the existing `harvested` flag. Because a harvest releases `conn_m` before calling
-  `StreamClose` — which blocks until in-flight callbacks return — there is no deadlock.
+- **`tr::wire::emit_value_le<T>(out, value, width = sizeof(T))` (`libtracer/tlv_emit.hpp`) —
+  the public way to write an integer VALUE TLV (#902).** The decode half of the
+  `(NAME key, VALUE u8/u16/u32)` config pair has been public since `config_reader_t`; the
+  encode half was not, so a consumer sized its own buffer and called `detail::store_le` or
+  hand-rolled a shift loop. It lives in `tr::wire` because it turns a wire type into wire
+  bytes; the layer-free LE byte primitive it builds on (`detail::append_le`, `byteorder.hpp`)
+  stays in `tr::detail`, per that header's own layering note.
 
-  **New public accessor:** `webtransport_transport_t::live_streams()`, the count of stream
-  contexts the live session holds. A count that only ever rises is the signature of this bug
-  class and a deployment could not see it otherwise, the same reason `dropped_rx()` and
-  `malformed_rx()` are public. It is a gauge, not a monotonic counter.
+- **`tr::net::detail::tcp_peer_publishing_hook` (`libtracer/transport_tcp.hpp`) — a TEST-ONLY
+  seam, null in production (#891).** Run by the shared accept path
+  (`slot_server_t::accept_peer`, through this server's `on_slot_publishing` override) at the instant
+  a new peer's fd is published and its slot is one store from open, inside the `write_m_`
+  hold. The window a racing test would have to hit is two instructions wide; the hook lets a
+  test HOLD that instant open, broadcast into it, and check the frame arrives at the peer
+  being accepted (`tcp_test`). Same shape and same rules as `ws_peer_published_hook`: install
+  it before the peer that should trip it connects, clear it before the test returns. The
+  production cost is one predictable null-check per accepted connection on the cold accept
+  path.
 
-  Measured: 40 open/close cycles hold the count at its baseline of 7 (peak 8). With the
-  reclamation ablated the same vector reads **peak 47, after 47** — exactly baseline + one
-  entry per stream ever opened. Clean under TSan and ASan/UBSan.
+- **`graph::status_t::TRANSPORT_DOWN` — a link that could not come up now has its own status
+  (#929).** The L4 status set had eight members and no transport member, so every
+  dial/bind/handshake failure was reported as `NOT_FOUND` and `error_code(status_t)` — the
+  total L4→wire map — could never emit `wire::err_t::TRANSPORT_DOWN` (0x0060). The new member
+  maps to it. **Source-compatible in the direction that matters** (a caller comparing against
+  the existing members still compiles), but a `switch` over `status_t` with no `default:` —
+  the shape this library uses on purpose — gains an unhandled enumerator and, under
+  `-Werror=switch`, will name itself at compile time. `to_string(status_t)` answers
+  `"transport_down"`.
+
+- **`net::transport_t::start_receiving()` — the second half of a two-phase link bring-up
+  (#1025).** A virtual whose default is a no-op, so every existing transport and every
+  embedder's is unaffected and an owner may call it unconditionally. It exists because
+  `set_receiver` / `set_rope_receiver` / `set_down_notifier` all document "must be set before
+  frames flow", and for a DIAL transport that spawns its receive thread inside its own
+  constructor that contract is unsatisfiable from the outside: the thread is already draining
+  the socket while the owner is still installing its sinks. Outside the tests,
+  `transport_ws_client` and (since #1045) `tcp_transport_t` are the overrides under
+  `core/include` + `core/src` + `integrations/` + `bindings/` today
+  (`grep -rn start_receiving`); each takes effect only when constructed with its trailing
+  `defer_recv` flag, so a direct `transport_ws_client(host, port)` behaves exactly as before.
+
+- **`net::tcp_transport_t` takes the two-phase bring-up: a trailing `defer_recv` DIAL
+  constructor flag and a `start_receiving()` override (#1045).** The `transport_ws_client`
+  shape (#1025) applied to the transport this issue is scoped to, and nothing else — quic,
+  webtransport, the ESP-IDF-native WS client link and CAN are untouched, and each has its own
+  follow-up issue. `defer_recv` defaults to `false`, so a direct
+  `tcp_transport_t(host, port)` behaves exactly as before and no existing call site HAS to
+  change to keep compiling; the one that does change is the built-in `tcp` DIAL factory
+  (`core/src/builtin_transport_tcp.cpp`), deliberately, so a SPEC-created dialer gets the
+  deferred form. The LISTEN constructor is untouched. With `true` the connect still happens in the
+  constructor and `ok()` still answers for it, but no receive thread exists and no byte is
+  read until the owner calls `start_receiving()`. The override is idempotent and inert
+  wherever there is nothing to arm — a second call, a one-phase link, a LISTEN link, and a
+  link whose dial failed — because `transport_vertex_t::make_connection` calls it
+  unconditionally on every link it wires. The built-in `tcp` kind's DIAL factory
+  (`core/src/builtin_transport_tcp.cpp`) now constructs the deferred form, so a connection
+  created by the in-band creating write is armed only once its receiver is installed and a
+  peer's push-on-connect frame is delivered instead of being decoded into an empty sink and
+  dropped with no counter moving.
+
+- **A SPEC-created `webtransport` dialer can name its extended CONNECT `:path` (#1023).**
+  `webtransport_transport_t`'s DIAL constructor has always taken the CONNECT `:path`, but
+  the catalog factory hard-coded `"/"` and `parse_wt_config` read four keys — `cert`, `key`,
+  `ca`, `insecure` — none of which was it. So an in-band
+  `write /net:children[] += SPEC{kind=webtransport, …}` could reach only a server that
+  serves its session at the root; anything else had to abandon the creation SPEC for the
+  direct constructor plus `provide_link`, and the difference was not reported — the dial
+  simply went to the wrong resource and creation answered `NOT_FOUND`. A fifth
+  kind-PRIVATE key, `path` (`NAME`, DIAL, default `/`, empty normalised to `/`), now carries
+  it, parsed by `parse_wt_config` alongside the others so nothing lands on the shared
+  `conn_settings_t` (the ADR-0043 §5 leanness ruling). It is the one key `webtransport` does
+  not share with `quic`, which has no HTTP layer to carry a resource; it does **not** collide
+  with the `can` kind's unrelated `path` (kind-private namespaces are disjoint), and
+  `docs/modules/connection-config.md` now says so on both rows. Same *shape* of gap as #918,
+  one parameter over. **New public API:** `webtransport_transport_t::session_path()` returns
+  the session's CONNECT `:path` — on LISTEN, the path the ACCEPTED CONNECT named (empty until
+  one is accepted); on DIAL, the path this endpoint requests. The listener still serves every
+  path (it validates `:method`/`:protocol` only), so this is an observation, not an admission
+  decision — and it is what makes the fix testable over the real wire rather than by reading
+  a config value back out of the dialer. `core/tests/webtransport_test.cpp` drives three
+  legs through the real `:children[]` SPEC path against a directly-held listener:
+  `path = "/tracer"` arrives as `/tracer`, an absent key still dials `/`, and an empty path
+  normalises to `/`.
+
+- **The `can_link_t` seam owns its admission rule, so the two ports can no longer disagree
+  about which frames are real (#931).** `twai_link_t` filtered remote-request and 11-bit
+  standard frames on ingress and bounded classic length on egress; `socketcan_link_t` did
+  neither. A `CAN_RAW` socket carries no filter by default, so an RTR frame reached
+  `socketcan_link_t`'s receiver as a data slice whose DLC promised bytes it never carried —
+  and on egress a classic frame declaring 9–64 bytes `memcpy`'d straight past the 8-byte
+  kernel `struct can_frame` on the stack, held back only by the seam's precondition. Rather
+  than copy the twai checks into the sibling, the rule now lives at the seam itself, in
+  `transport_can.hpp`: `tr::net::can_rx_admissible(extended, remote, error)` and
+  `tr::net::can_tx_admissible(frame)`, over `tr::net::can_max_len(fd)` — a thin adapter onto
+  the L1 widths in `tr::view::can_max_data`, so the seam adds no second copy of the numbers
+  (`can_frame_data_t::data` is likewise sized from `tr::view::kCanFdMaxData` now). Both
+  *bus* ports call them; each still decodes the flags from its own driver's representation,
+  but the verdict is reached in one place. (The in-memory test links are exempt by
+  construction — their carrier cannot express RTR, an 11-bit identifier, or an error flag.)
+  Behaviour change: a `socketcan_link_t` receiver no longer sees RTR or 11-bit standard
+  frames, and an over-length classic frame is dropped rather than emitted. Error frames are
+  covered by the same predicate but were never a behaviour that existed here: the socket
+  requests no `CAN_RAW_ERR_FILTER`, so the kernel's default zero mask has always withheld
+  them. The check is the seam's rule holding for a port that does ask, not a change.
+
+- **`fwd_router_t::receiver_ctx_count()` (#884).** How many per-child receiver contexts the
+  router holds — one per NAME ever registered, live or tombstoned. The twin of
+  `child_registry_t::size()` and introduced for the same reason: it is the length of the chain
+  every name-keyed and slot-keyed lookup walks, so "create/remove churn does not grow it" is
+  assertable rather than merely intended. Takes the control lock; never a per-frame call.
+
+- **`delivery_drops()` counts the three drop sites it was missing, and counts them by
+  DELIVERY (#896).** `graph_t::delivery_drops()` promised drop observability while three
+  paths shed deliveries invisibly, so a node under memory pressure reported zero drops
+  while an arbitrary number were shed. The worst read success on a write that delivered
+  nothing at all: `write_impl`'s handler branch skips the whole fan-out when its notify
+  clone cannot be allocated — every subscriber of the vertex, not one edge — and
+  incremented nothing. The other two live in the fan-out snapshot: an edge whose owning
+  copies (link NAME / stored caller) cannot be allocated is skipped, and a wide fan-out
+  whose overflow buffer cannot be reserved is truncated to the inline prefix.
+
+  Three changes to the public surface:
+  - `delivery_drops_t` gains **`fan_out_truncated`** — deliveries shed by the capacity
+    degrade, kept apart from `out_of_memory` so an operator can tell a buffer that could
+    not be widened from a delivery whose clone failed.
+  - `vertex_t::snapshot_edges` takes a third argument, **`vertex_t::snapshot_drops_t&`**
+    (new nested type), reporting what the snapshot shed; `graph_t::fan_out` folds it into
+    the graph's counters. The parameter is a required reference, not an optional pointer:
+    a caller that cannot see the shed count is the defect being fixed.
+  - Every drop **on the fan-out / dispatch plane** now goes through one internal counting
+    door, so a path there that abandons an admitted delivery without counting it is a
+    visible omission. That scope is deliberate and not yet the whole vertex: a STREAM
+    ring-append shed under allocation pressure still abandons the write's entire fan-out
+    uncounted, and `mark_pending`'s OOM legs shed a deferred IF_NEWER delivery the same
+    way. Both are pre-existing, outside this change's sites, and tracked separately.
+
+  Counts are **deliveries, not events**: a shed fan-out of N counts N. Nothing is added to
+  the delivering path — the fold is one predicted-not-taken test per snapshot and the
+  counters are touched only on a drop. No wire change.
+
+- **`transport_can` exposes the sibling drop counters, and its RX state is bounded and
+  aged (#912).** The CAN ingress buffers grew on the receive thread with nothing expiring
+  and nothing counting a drop, unlike every sibling transport. Three parts:
+  - **The injected-bound seam is reachable at last.** `can_reassembly_t` was
+    *default-constructed* inside the transport, so `max_groups` was `0` and its
+    evict-oldest could never fire however a deployment was configured. It is now
+    constructed from new `transport_can_config_t` fields — `reasm_mr` (a
+    `std::pmr::memory_resource*`, default the process heap), `max_groups`, `max_pending`
+    and `rx_ttl` — and the pending-slice queue draws from the same injected resource, so
+    the RX thread no longer reaches the global heap. The `can` factory parses
+    `max_groups`, `max_pending` and `rx_ttl_ms` from the connection's config SETTINGS
+    TLV (`0` = unbounded, host-bounded per RFC-0006, matching `max_peers`), and
+    `can_transport_factory` takes an optional `std::pmr::memory_resource*` — a resource
+    is a pointer, not a wire value, so it is injected at registration time.
+  - **`pending_` is bounded and aged.** A data frame with no matching binding was parked
+    forever: the only drain is `learn_advertise`'s covered-range re-drive, so a peer that
+    never advertises (or a bus that dropped the advertise — the exact failure CAN
+    produces) grew it without limit. It is now capped by `max_pending` (evict-oldest and
+    count) and swept of entries older than `rx_ttl`.
+  - **An incomplete reassembly group no longer pins its slices forever.** `erase` is
+    reached only after `is_complete`, so any lost data slice left a group buffered for the
+    transport's life. `can_reassembly_t` gains `set_now(std::uint64_t)` and
+    `sweep_stale(std::uint64_t max_age)` — the buffer stays clock-free, the caller stamps
+    it — and `transport_can` sweeps on every inbound advertise.
+
+  New public accessors on `transport_can`: `dropped_rx()` (inbound slices reclaimed by the
+  cap or the age-out), `dropped_tx()` (a send that never reached the bus: allocation
+  failure, an empty split, or an unencodable manifest), `dropped_groups()` (reassembly
+  groups reclaimed before delivery — the accessor the buffer's own counter never had) and
+  `pending_slices()`. `rx_ttl` left at `0` tracks the configured `peer_ttl` rather than
+  introducing a second window: a peer already considered gone cannot complete RX state.
+  Unlike the opt-in count caps the age-out is **always live**, so it is the bound that
+  holds under the shipped default config. That "always" is now literal: a `peer_ttl` of
+  `0` derives an `rx_ttl` of `0`, which the peer enumeration and the reassembly sweep both
+  read as *instantly expired* — the pending age-out used to read the same `0` as *sweep
+  disabled* and return early, so one degenerate config value silently re-opened the
+  unbounded growth this entry closes. Zero now means the same thing to all three, and a
+  negative window (previously cast to `std::uint64_t` and compared against ~1.8e19, so it
+  reclaimed nothing at all) is normalized to zero at construction. No wire change.
+
+- **`tr::net::write_fault_stats()` / `write_fault_stats_t` — the malformed-call write-fault
+  tally (#948).** Process-wide (the full-write helpers are static and shared by every stream
+  transport, and what it counts is a defect in libtracer's OWN syscall arguments, not a
+  property of a connection): how many `send`/`sendmsg` attempts were rejected with an errno
+  that means "this call was malformed" rather than "this socket is dead", and the errno of the
+  most recent one. **Non-zero is always a bug** — on a supported host it stays 0 forever.
+  `tr::detail::write_fault_inject_hook` accompanies it as the test seam that makes those arms
+  reachable at all (a host kernel emits none of those errnos here); it is null in production,
+  exactly like its neighbour `probe_fail_hook`.
+
+- **`transport_can_config_t::rx_backend` and `kCanMaxGroupSlices` (#910/#911).**
+  `rx_backend` (a `tr::mem::mem_backend_t*`, default `nullptr` = the process heap) is the
+  byte seam an inbound CAN data slice is copied into before it enters the reassembly
+  buffer — the companion to `reasm_mr`, which bounds the reassembly *structure* while this
+  bounds the slice *bytes*. It is also the second, defaulted parameter of
+  `can_transport_factory`, for the reason `reasm_mr` is: a backend is a pointer, not a wire
+  value, so it cannot ride the config TLV and is injected at registration instead. A
+  bounded backend (`mem::pool_t`) makes ingress exhaustion a by-value refusal on the RX
+  thread rather than a reach into the global heap. `kCanMaxGroupSlices` is the largest
+  address-shift group a node can place, DERIVED from the CAN-ID field widths
+  (`can::kEndpointMax` minus the reserved control slot), not chosen.
+  `can_reassembly_t::discard(key)` joins `erase` as its counted twin: `erase` is the
+  post-delivery release (nothing lost, nothing counted), `discard` is the caller-side
+  abandon of a group that will never complete, and it ticks `dropped_groups`. No wire
+  change.
 
 ### Changed
 
@@ -186,117 +400,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   one `std::uint64_t` member to `vertex_t` fails the build on the 64-bit assert, with the
   intended message.
 
-### Added
-
-- **`tr::net::bus_link_t::peer_named()` — the multi-peer MODE AUTHORITY, asked once
-  (#889).** A virtual query, default `true`, overridden by `tr::net::slot_server_t` to return
-  the `peer_named` its listener was constructed with. Before it, "which mode is this link in"
-  had two answers that only coincided by wiring accident: `peer_named_` gated `bus()` and
-  nothing else, while every runtime decision — the tcp/ws servers' per-frame tier select and
-  the shared departure branch — keyed off `peer_rx_.has_any()`, i.e. off whether a peer sink
-  happened to be installed. A kind that is a bus by construction (the CAN binding) keeps the
-  default and is unaffected. Cold path only: an implementation's own per-frame tier select
-  reads its stored flag, never this virtual.
-
-- **`tr::net::conn_spec_t` + `tr::net::conn_spec(...)` (`libtracer/conn_spec.hpp`) — the
-  connection-creation SPEC finally has a public ENCODER (#902).** `transport_vertex_t` has
-  always shipped the decoder for the `/net:children[]` grammar
-  `SPEC{NAME type, NAME name, SETTINGS config{role, port[, kind][, addr] …}}`, but nothing
-  emitted it: every consumer of the production first-wiring step hand-built the TLVs from
-  `wire::emit_tlv` / `wire::emit_name` and reached into the INTERNAL `tr::detail::store_le`
-  to encode the port. Sixteen private near-copies existed across `core/tests`, `bench`,
-  `core/examples/tree_of_ropes.cpp` and the ESP-IDF `full_node` example, and they had already
-  drifted — `tree_of_ropes`' copy could not spell `kind` or `addr`, i.e. the example for
-  "mount a transport" could not express the field that decides which MODULE the connection
-  mounts under. `conn_spec_t` is a fluent builder that appends `(NAME key, value)` pairs in
-  call order (`role`/`port`/`kind`/`addr`/`keepalive_ms`/`max_frame`/`backoff_ms`/
-  `connect_timeout_ms`, plus generic `text`/`u8`/`u16`/`u32`/`flag` for a kind's PRIVATE keys,
-  named to mirror `config_reader_t`'s accessors); a builder on which no setter ran emits no
-  `config` at all, which is the `provide_link` spelling. `conn_spec(type, name, role, port,
-  kind = {}, addr = {})` is the one-call sugar over it. **No wire surface changes** — the
-  bytes are pinned byte-for-byte against the pre-existing hand-emit in
-  `transport_vertex_test`, and the TypeScript client's `encodeConnSpec` (#408) already shipped
-  this same grammar, so the C++ core was the odd one out. There is no `module` key and the
-  builder invents none: a SPEC names its module through `kind` + `role`, resolved by the
-  application's `register_module` declaration before any staged link is consulted (#883).
-
-- **`tr::wire::emit_value_le<T>(out, value, width = sizeof(T))` (`libtracer/tlv_emit.hpp`) —
-  the public way to write an integer VALUE TLV (#902).** The decode half of the
-  `(NAME key, VALUE u8/u16/u32)` config pair has been public since `config_reader_t`; the
-  encode half was not, so a consumer sized its own buffer and called `detail::store_le` or
-  hand-rolled a shift loop. It lives in `tr::wire` because it turns a wire type into wire
-  bytes; the layer-free LE byte primitive it builds on (`detail::append_le`, `byteorder.hpp`)
-  stays in `tr::detail`, per that header's own layering note.
-
-- **`tr::net::detail::tcp_peer_publishing_hook` (`libtracer/transport_tcp.hpp`) — a TEST-ONLY
-  seam, null in production (#891).** Run by the shared accept path
-  (`slot_server_t::accept_peer`, through this server's `on_slot_publishing` override) at the instant
-  a new peer's fd is published and its slot is one store from open, inside the `write_m_`
-  hold. The window a racing test would have to hit is two instructions wide; the hook lets a
-  test HOLD that instant open, broadcast into it, and check the frame arrives at the peer
-  being accepted (`tcp_test`). Same shape and same rules as `ws_peer_published_hook`: install
-  it before the peer that should trip it connects, clear it before the test returns. The
-  production cost is one predictable null-check per accepted connection on the cold accept
-  path.
-
-- **`graph::status_t::TRANSPORT_DOWN` — a link that could not come up now has its own status
-  (#929).** The L4 status set had eight members and no transport member, so every
-  dial/bind/handshake failure was reported as `NOT_FOUND` and `error_code(status_t)` — the
-  total L4→wire map — could never emit `wire::err_t::TRANSPORT_DOWN` (0x0060). The new member
-  maps to it. **Source-compatible in the direction that matters** (a caller comparing against
-  the existing members still compiles), but a `switch` over `status_t` with no `default:` —
-  the shape this library uses on purpose — gains an unhandled enumerator and, under
-  `-Werror=switch`, will name itself at compile time. `to_string(status_t)` answers
-  `"transport_down"`.
-
-- **`net::transport_t::start_receiving()` — the second half of a two-phase link bring-up
-  (#1025).** A virtual whose default is a no-op, so every existing transport and every
-  embedder's is unaffected and an owner may call it unconditionally. It exists because
-  `set_receiver` / `set_rope_receiver` / `set_down_notifier` all document "must be set before
-  frames flow", and for a DIAL transport that spawns its receive thread inside its own
-  constructor that contract is unsatisfiable from the outside: the thread is already draining
-  the socket while the owner is still installing its sinks. Outside the tests,
-  `transport_ws_client` and (since #1045) `tcp_transport_t` are the overrides under
-  `core/include` + `core/src` + `integrations/` + `bindings/` today
-  (`grep -rn start_receiving`); each takes effect only when constructed with its trailing
-  `defer_recv` flag, so a direct `transport_ws_client(host, port)` behaves exactly as before.
-
-- **`net::tcp_transport_t` takes the two-phase bring-up: a trailing `defer_recv` DIAL
-  constructor flag and a `start_receiving()` override (#1045).** The `transport_ws_client`
-  shape (#1025) applied to the transport this issue is scoped to, and nothing else — quic,
-  webtransport, the ESP-IDF-native WS client link and CAN are untouched, and each has its own
-  follow-up issue. `defer_recv` defaults to `false`, so a direct
-  `tcp_transport_t(host, port)` behaves exactly as before and no existing call site HAS to
-  change to keep compiling; the one that does change is the built-in `tcp` DIAL factory
-  (`core/src/builtin_transport_tcp.cpp`), deliberately, so a SPEC-created dialer gets the
-  deferred form. The LISTEN constructor is untouched. With `true` the connect still happens in the
-  constructor and `ok()` still answers for it, but no receive thread exists and no byte is
-  read until the owner calls `start_receiving()`. The override is idempotent and inert
-  wherever there is nothing to arm — a second call, a one-phase link, a LISTEN link, and a
-  link whose dial failed — because `transport_vertex_t::make_connection` calls it
-  unconditionally on every link it wires. The built-in `tcp` kind's DIAL factory
-  (`core/src/builtin_transport_tcp.cpp`) now constructs the deferred form, so a connection
-  created by the in-band creating write is armed only once its receiver is installed and a
-  peer's push-on-connect frame is delivered instead of being decoded into an empty sink and
-  dropped with no counter moving.
-
-### Removed
-
-- **`tr::net::try_encode_advertise` / `tr::net::try_encode_compact`
-  (`libtracer/route_handle.hpp`) — deleted (#885).** They existed to make a per-frame
-  allocation on the label plane *refusable* rather than fatal. That allocation no longer
-  exists: since this change every ADVERTISE, COMPACT and HANDLE_NACK the router puts on a
-  link is written as a 12-byte head on the stack with the route or payload referenced, so
-  there is nothing left to refuse and machinery that made the residual affordable outlives
-  the residual. Their two production call sites (`fwd_router_t::deliver_remote`'s
-  auto-promote leg) now emit through the same gather locus the forwarding hop already used.
-  A caller that genuinely wants a frame as a VALUE keeps
-  `encode_advertise` / `encode_compact` / `encode_handle_nack`, which are unchanged in
-  signature and in the bytes they produce and are now documented as builders for tests,
-  tooling and conformance vectors rather than for an egress path.
-
-### Changed
-
 - **`tr::graph::subscription_t` is OPAQUE — it no longer hands out the producer `vertex_t*`
   (#867).** The handle was a `struct` with two public members, `vertex_t* vertex` and
   `std::size_t slot`, so `sub.vertex->store(...)` and `sub.vertex->mark_unregistered()`
@@ -362,8 +465,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   no tables, a label that is not there, or a route the entry no longer holds is a no-op, and a
   release never CREATES a link shell. No wire surface moves: a refused bind advertises
   nothing, so a released label is one no peer has ever seen.
-
-### Changed
 
 - **BREAKING: `net::child_registry_t::child_t` publishes its link and its SHAPE as ONE atomic
   word; the `link` and `multi_peer` data members are replaced by `egress()` / `link()`
@@ -504,7 +605,221 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `ws::decode_frame` is unchanged and still decodes reserved opcodes — it owns no connection
   to fail, and `tests/conformance/ws_diff_fuzz.py` holds it against the TypeScript decoder.
 
+- **`fwd_router_t::advertise` now REUSES the label already bound to an identical route
+  instead of minting a fresh one per call (#913).** Both of the router's label-minting sites
+  — this producer door and `on_advertise`'s mid-chain forwarding arm — called
+  `route_handle_t::alloc_label` + `record_egress` unconditionally, with no reuse scan. Since
+  re-advertising *is* the RFC-0004 §E.1 self-heal, a peer drives that path as often as its
+  link flaps, and every cycle consumed one more of the link's 16-bit labels and appended one
+  more egress entry. Neither is reclaimed individually: only a whole-link `clear_link` gives
+  them back, so a reconnect loop walked a long-lived node to label exhaustion (permanent loss
+  of compaction) and its egress table to `max_bindings_per_link`. Both sites now go through
+  `route_handle_t::ensure_egress`, the primitive `deliver_remote` already used, which finds
+  the label for an identical route under the egress table's own lock and mints only for a
+  genuinely new route. The bound therefore comes from the route set the peer actually
+  advertises, not from a cap on how often it may re-advertise. **Observable change:** repeated
+  `advertise(link, route)` calls for the same route return the SAME label rather than
+  successive ones; a new route still mints. The ADVERTISE frame still goes out on every call,
+  so no peer sees a behaviour change and the wire is untouched. Minting and recording in one
+  critical section also retires the old pair's split outcome — a label minted, then burned for
+  nothing when the record was refused — and, because the reuse scan runs ahead of the table
+  bound, a re-advertise of an ESTABLISHED flow now survives a full egress table.
+  `core/tests/fwd_readvertise_reuse_test.cpp` counts the state: 51 identical re-advertise
+  cycles left 51 distinct labels and 51 egress entries at every node of a two-hop chain, and
+  now leave 1.
+
+- **A vertex stores its `:acl` as ACEs and NOTHING else: `vertex_t::set_acl` takes only the
+  parsed list, `vertex_t::acl_bytes` is REMOVED, and `vertex_t::with_acl` replaces it (#907).**
+  The vertex used to keep the written TLV bytes *beside* the parsed ACEs, and `:acl` reads
+  served those bytes verbatim while the gates walked the list — two artifacts that could
+  describe different policies. They did: an outer `ACL` TLV whose `opt.PL` bit was clear
+  carried its whole ACE collection as opaque **payload**, so it decoded with zero children,
+  parsed as an **empty** ACE list, and was stored — clearing enforcement — while a read of
+  `:acl` still returned the payload. An auditor saw ACEs present, which under the
+  any-present-ACE-closes rule means *closed*, on a vertex that had just been thrown open.
+  Two changes close it, and only the second is general:
+  - The `:acl` write branch now requires a **structured** outer ACL; a primitive one is
+    `TYPE_MISMATCH`, per the same rule #906 applied inside an ACE — a shape the builder never
+    emits is refused, because leniency in an ACL widens a grant rather than losing a field.
+    An **empty container** (`opt.PL=1`, zero children) remains the sanctioned clear.
+  - `graph_t::read_acl` **re-encodes** the stored ACEs through `encode_acl`, so read-back is
+    canonical by construction and there is no second copy left to disagree with the list
+    `acl_allows` evaluates — for this shape or any future one. A read therefore returns the
+    canonical spelling whichever accepted spelling was written (the two-byte `access_mask` of
+    the `acl/acl-aces` vector comes back as four). Same cost class as the copy it replaces,
+    on a control-plane-rare path.
+
+  `vertex_ext_t::acl` (the byte copy) is gone, replaced by an `acl_present` bit that lands in
+  existing padding: an ACL written **empty** still reads back as an empty container, distinct
+  from the `NOT_FOUND` of a vertex that never had one. `with_acl(f)` hands `f` that bit and
+  the ACE list together under one hold, since a clear landing between two accessors would
+  otherwise be served as an ACL that no longer exists.
+
+- **`vertex_ext_t::acl_cache_dirty` is REMOVED; ACL-cache validity is now the parity of
+  `vertex_ext_t::acl_gen` (#880, [ADR-0078](../docs/adr/0078-acl-cache-coherence-is-a-published-generation-stamp-not-a-dirty-flag.md)).**
+  The effective-ACE merge was guarded by a `{acl_gen, acl_cache_dirty}` pair: invalidators
+  bumped the counter and stored the boolean **lock-free**, while the rebuilder cleared that
+  same boolean under the stripe lock. A mark landing between the rebuilder's generation
+  recheck and its clear was therefore **overwritten** — the cache stayed flagged clean over
+  a pre-write ancestor chain, and every later `acl_allows` on that vertex evaluated the
+  stale merge until the next `:acl` mutation anywhere in the chain. On the authorization
+  path that is a revoked policy that keeps being enforced, in whichever direction the stale
+  merge happens to point. Validity is now derived from the counter alone: `acl_gen` **odd**
+  means the merge is stale, **even** means `eff_aces` is the merge published for exactly
+  that value. Every invalidator advances it to the next odd value with one lock-free CAS,
+  and the rebuilder publishes with `compare_exchange_strong(snapshot, snapshot + 1)` — so
+  the recheck and the publish are the SAME atomic operation and there is no second store to
+  lose. `acl_gen` starts at `1` (was `0`), a never-built cache being stale. The evaluation
+  fast path stays at ONE atomic load plus a parity test, which is what the removed boolean
+  cost — a separate stamp word measured ~1 % slower on the `acl-inherit-d4` gate bench and
+  was rejected for it (ADR-0078 Erratum 1); the shipped form measures ~1 % *faster* than
+  the pre-fix baseline, and `vertex_ext_t` loses 4 bytes. `vertex_t`'s verbs (`set_acl`,
+  `mark_acl_cache_dirty`, `with_effective_aces`) keep their names and signatures; the
+  removed `vertex_ext_t` field is the only source-visible change. The new
+  `invalidate_acl_cache` helper that carries the counter advance is **private** — the
+  adversarial pass caught it landing in `vertex_t`'s public section, which would have made
+  that sentence false; nothing outside `vertex_t` calls it, and the build confirms it.
+  Regression:
+  `core/tests/acl_cache_race_test.cpp`, an ancestor `:acl` rewriter racing a descendant's
+  gated evaluation.
+
+- **SECURITY — a SPEC-created `quic` / `webtransport` dialer now VERIFIES the server
+  certificate, and two new DIAL-side config keys say how (#918).** Every connection built
+  through the `:children[]` SPEC path — `quic_transport_factory` and
+  `webtransport_transport_factory`, i.e. every config-created dialer there is — hardcoded
+  `insecure_no_verify = true` and passed an empty CA bundle, so the handshake accepted **any**
+  server certificate, a MITM's included. The dial side already supported real verification
+  (`quic_dial_tls_t` / `webtransport_dial_tls_t` both default secure, and the msquic
+  credential honours both `ca_file` and the flag); a hand-constructed transport could reach it,
+  the factory could not, and no config key existed to ask for it. Two things change:
+  - **The default is verification.** Both factories now dial with the trust struct's declared
+    defaults, so with no trust key present the handshake validates against the **system trust
+    store** and a certificate that does not chain to it is refused — creation answers
+    `TRANSPORT_DOWN`, the did-not-come-up status (this bullet said `NOT_FOUND` when #918
+    landed; #929, later in this same unreleased cycle, gave the condition its own member).
+    (Ruled over the issue's refuse-by-omission proposal: msquic with neither the flag nor a
+    CA file performs default platform validation, which is the standard TLS-client convention
+    and costs nothing for the dial-a-publicly-certified-endpoint case.)
+  - **Two new kind-PRIVATE config keys, identical in both kinds**: `ca` (NAME, a PEM CA-bundle
+    path) verifies against that bundle instead of the system store — the way to reach a
+    self-signed or privately-issued peer while still authenticating it; and `insecure` (VALUE
+    u8, default 0) set to `1` skips validation entirely, DEV ONLY and deliberately explicit.
+    Both are read through `net::config_reader_t` (the pair-consuming #927 walk), and both
+    factories now parse the config **before** the role split — the DIAL branch used to return
+    before `parse_quic_config` / `parse_wt_config` ever ran, which is why the dial side had no
+    reachable keys at all. `conn_settings_t` is untouched (ADR-0043 §5 leanness).
+
+  **This is a behaviour break for anything that SPEC-dialed a self-signed peer** — the
+  in-tree `quic_test` / `webtransport_test` e2e vectors did, and now pass `ca = <the dev
+  cert>`; a dev or interop harness doing the same must add `ca` or `insecure = 1`. The
+  breakage is the fix: a dialer that silently skipped validation because the test suite found
+  it convenient is the defect. Hand-constructed transports (`quic_transport_t(host, port,
+  tls)`) are unaffected — that constructor always took an explicit trust struct.
+- **`graph::parse_acl` rejects the non-canonical width, pairing and key shapes that used to
+  read leniently (#906).** Not *every* shape the builder never emits — a two-byte
+  `access_mask` and a non-canonical key ordering are both unemitted and both still parse, on
+  purpose. The `:acl` write gate read its fields leniently, and on a security surface
+  leniency does not lose a field — it changes what the document grants. Four arms are closed, each with its
+  own rejection vector in `core/tests/security_acl_test.cpp`:
+  - **Width-tolerant numeric reads inverted a decision.** `detail::load_le` reads the low
+    `min(size, sizeof(T))` bytes, so a `type` sent big-endian as `u16` `0x0001` (DENY)
+    read as its low byte `0x00` — **ALLOW** — and passed the `t > 1` gate, while a `u64`
+    `access_mask` was truncated to `u32` with its high bytes dropped and `has_mask` still
+    set. A numeric field's payload must now be non-empty and no **wider** than the field
+    (`type`/`flags` u8, `access_mask` u32, `expires_ns` u64); anything wider is
+    `TYPE_MISMATCH`. A **narrower** payload is still accepted — little-endian
+    zero-extension is exact, and it is the canonical spelling: reference/05 §`0x0A`
+    declares `access_mask` as `u16` and the `acl/acl-aces` conformance vector (and the
+    Rust core's builder) emit two bytes where `encode_acl` emits four.
+  - **A known key carrying the wrong value TLV type was silently skipped**, so an
+    `expires_ns` paired with a non-`VALUE` child left `expires_ns = 0` and a time-limited
+    grant became permanent. It is now `TYPE_MISMATCH`.
+  - **Unknown keys were ignored**, dropping whatever restriction a newer writer meant to
+    add. They are now `TYPE_MISMATCH` — the deliberate OPPOSITE of `net::config_reader_t`
+    (#927), which skips them: config is where a newer peer legitimately sends more than
+    the receiver understands, an ACL is not.
+  - **The field scan visited every offset**, so a `NAME`-typed value (the legal
+    `OWNER@`/`EVERYONE@` subject spelling) was re-read as the next key and bound the
+    *following* key's name as the subject. The walk is now **pair-consuming**, the
+    mechanics of `config_reader_t`: a non-`NAME` in a key slot, an odd child count (a
+    trailing key with no value), and a repeated key within one ACE are all
+    `TYPE_MISMATCH`.
+
+  Not a wire change: `encode_acl`'s output and the published `acl/acl-aces` vector both
+  still parse. Callers that hand-built a non-canonical `:acl` blob now get `TYPE_MISMATCH`
+  at write time instead of a grant that differs from what they wrote.
+
+- **BREAKING — `subject_resolver_t` gains a DENY channel; an unresolvable caller is no
+  longer trusted (#905).** The type in `graph.hpp` changes from
+  `std::function<std::optional<subject_token_t>(std::string_view)>` to
+  `std::function<std::expected<subject_token_t, wire::err_t>(std::string_view)>`. The
+  error arm means **deny**: the operation fails `status_t::PERMISSION_DENIED`
+  (`tr::access::denied`, 0x0050 on the wire).
+
+  Before this, the resolver had exactly one non-token answer — `nullopt` — and the graph
+  read it as *fully trusted*, skipping every ACE check. The natural reading of that value
+  ("I cannot name this caller") therefore granted **every** right on the vertex, including
+  `WRITE_ACL` and `CREATE`, at every gate: READ, WRITE, SUBSCRIBE, CREATE, WRITE_ACL,
+  READ_ACL, and remote-edge fan-in delivery. A resolver bug, a revoked peer, or an unknown
+  remote identity bypassed all ACLs on protected vertices. There was no way for a resolver
+  to say *deny*.
+
+  **The trusted channel moved out of the resolver.** `acl_allows` now settles the EMPTY
+  caller context — the local-API convention — as trusted **before** invoking the resolver,
+  so the resolver is never called with an empty caller and a remote op (which always
+  carries its inbound link NAME) cannot reach the trusted arm.
+
+  *Migration:* a resolver of the form
+  `if (caller.empty()) return std::nullopt; return token;` becomes
+  `return token;` — the empty case is now handled by the graph. Any *other* former
+  `nullopt` return was silently granting everything and should become
+  `return std::unexpected(wire::err_t::ACCESS_DENIED);`. The signature change is
+  deliberately recompile-visible: keeping `std::optional` and inverting `nullopt`'s meaning
+  would have flipped the semantics of every existing resolver in silence.
+
+  No change to the enforcement-disabled path: the `!subject_resolver_` early-out remains
+  the only check when no resolver is installed.
+
+### Removed
+
+- **`tr::net::try_encode_advertise` / `tr::net::try_encode_compact`
+  (`libtracer/route_handle.hpp`) — deleted (#885).** They existed to make a per-frame
+  allocation on the label plane *refusable* rather than fatal. That allocation no longer
+  exists: since this change every ADVERTISE, COMPACT and HANDLE_NACK the router puts on a
+  link is written as a 12-byte head on the stack with the route or payload referenced, so
+  there is nothing left to refuse and machinery that made the residual affordable outlives
+  the residual. Their two production call sites (`fwd_router_t::deliver_remote`'s
+  auto-promote leg) now emit through the same gather locus the forwarding hop already used.
+  A caller that genuinely wants a frame as a VALUE keeps
+  `encode_advertise` / `encode_compact` / `encode_handle_nack`, which are unchanged in
+  signature and in the bytes they produce and are now documented as builders for tests,
+  tooling and conformance vectors rather than for an egress path.
+
 ### Fixed
+
+- **WebTransport: a peer-opened stream is reclaimed when it finishes (#1163).** `impl_t::ctxs`
+  had **no `erase` anywhere** in the TU: the only frees were two wholesale harvests (peer
+  replacement, endpoint teardown), so every stream a peer opened and closed leaked its
+  `stream_ctx_t`, its accumulator buffer and its unreleased msquic handle for the life of the
+  *session* — and the peer chooses how many that is. `PeerBidiStreamCount`/`PeerUnidiStreamCount`
+  do not bound it: they cap how many streams may be open **at once**, not how many may be opened
+  over a session's life, so open/close cycling grows the list as fast as RTT allows. The refuse
+  path made it worse, not better — the cheapest thing a peer could do was also a leak.
+
+  `stream_cb` now handles `QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE`, the one point at which msquic
+  guarantees no further callback for the stream. Exactly one side frees: whichever of the
+  shutdown and a harvest reaches `conn_m` first takes the ctx, and the loser sees that decision
+  through the existing `harvested` flag. Because a harvest releases `conn_m` before calling
+  `StreamClose` — which blocks until in-flight callbacks return — there is no deadlock.
+
+  **New public accessor:** `webtransport_transport_t::live_streams()`, the count of stream
+  contexts the live session holds. A count that only ever rises is the signature of this bug
+  class and a deployment could not see it otherwise, the same reason `dropped_rx()` and
+  `malformed_rx()` are public. It is a gauge, not a monotonic counter.
+
+  Measured: 40 open/close cycles hold the count at its baseline of 7 (peak 8). With the
+  reclamation ablated the same vector reads **peak 47, after 47** — exactly baseline + one
+  entry per stream ever opened. Clean under TSan and ASan/UBSan.
 
 - **A FLAT multi-peer server no longer reports the WHOLE LINK down when one of its several
   sessions closes (#889).** `slot_server_t::teardown_slot` fired the RFC-0009 §D.5 departure
@@ -983,302 +1298,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   frames whose own advertises were lost. Both are bounded by `rx_ttl`; a generation rides
   the advertise and a data frame carries none, so it is silent for both.
 
-### Changed
-
-- **`fwd_router_t::advertise` now REUSES the label already bound to an identical route
-  instead of minting a fresh one per call (#913).** Both of the router's label-minting sites
-  — this producer door and `on_advertise`'s mid-chain forwarding arm — called
-  `route_handle_t::alloc_label` + `record_egress` unconditionally, with no reuse scan. Since
-  re-advertising *is* the RFC-0004 §E.1 self-heal, a peer drives that path as often as its
-  link flaps, and every cycle consumed one more of the link's 16-bit labels and appended one
-  more egress entry. Neither is reclaimed individually: only a whole-link `clear_link` gives
-  them back, so a reconnect loop walked a long-lived node to label exhaustion (permanent loss
-  of compaction) and its egress table to `max_bindings_per_link`. Both sites now go through
-  `route_handle_t::ensure_egress`, the primitive `deliver_remote` already used, which finds
-  the label for an identical route under the egress table's own lock and mints only for a
-  genuinely new route. The bound therefore comes from the route set the peer actually
-  advertises, not from a cap on how often it may re-advertise. **Observable change:** repeated
-  `advertise(link, route)` calls for the same route return the SAME label rather than
-  successive ones; a new route still mints. The ADVERTISE frame still goes out on every call,
-  so no peer sees a behaviour change and the wire is untouched. Minting and recording in one
-  critical section also retires the old pair's split outcome — a label minted, then burned for
-  nothing when the record was refused — and, because the reuse scan runs ahead of the table
-  bound, a re-advertise of an ESTABLISHED flow now survives a full egress table.
-  `core/tests/fwd_readvertise_reuse_test.cpp` counts the state: 51 identical re-advertise
-  cycles left 51 distinct labels and 51 egress entries at every node of a two-hop chain, and
-  now leave 1.
-
-- **A vertex stores its `:acl` as ACEs and NOTHING else: `vertex_t::set_acl` takes only the
-  parsed list, `vertex_t::acl_bytes` is REMOVED, and `vertex_t::with_acl` replaces it (#907).**
-  The vertex used to keep the written TLV bytes *beside* the parsed ACEs, and `:acl` reads
-  served those bytes verbatim while the gates walked the list — two artifacts that could
-  describe different policies. They did: an outer `ACL` TLV whose `opt.PL` bit was clear
-  carried its whole ACE collection as opaque **payload**, so it decoded with zero children,
-  parsed as an **empty** ACE list, and was stored — clearing enforcement — while a read of
-  `:acl` still returned the payload. An auditor saw ACEs present, which under the
-  any-present-ACE-closes rule means *closed*, on a vertex that had just been thrown open.
-  Two changes close it, and only the second is general:
-  - The `:acl` write branch now requires a **structured** outer ACL; a primitive one is
-    `TYPE_MISMATCH`, per the same rule #906 applied inside an ACE — a shape the builder never
-    emits is refused, because leniency in an ACL widens a grant rather than losing a field.
-    An **empty container** (`opt.PL=1`, zero children) remains the sanctioned clear.
-  - `graph_t::read_acl` **re-encodes** the stored ACEs through `encode_acl`, so read-back is
-    canonical by construction and there is no second copy left to disagree with the list
-    `acl_allows` evaluates — for this shape or any future one. A read therefore returns the
-    canonical spelling whichever accepted spelling was written (the two-byte `access_mask` of
-    the `acl/acl-aces` vector comes back as four). Same cost class as the copy it replaces,
-    on a control-plane-rare path.
-
-  `vertex_ext_t::acl` (the byte copy) is gone, replaced by an `acl_present` bit that lands in
-  existing padding: an ACL written **empty** still reads back as an empty container, distinct
-  from the `NOT_FOUND` of a vertex that never had one. `with_acl(f)` hands `f` that bit and
-  the ACE list together under one hold, since a clear landing between two accessors would
-  otherwise be served as an ACL that no longer exists.
-
-- **`vertex_ext_t::acl_cache_dirty` is REMOVED; ACL-cache validity is now the parity of
-  `vertex_ext_t::acl_gen` (#880, [ADR-0078](../docs/adr/0078-acl-cache-coherence-is-a-published-generation-stamp-not-a-dirty-flag.md)).**
-  The effective-ACE merge was guarded by a `{acl_gen, acl_cache_dirty}` pair: invalidators
-  bumped the counter and stored the boolean **lock-free**, while the rebuilder cleared that
-  same boolean under the stripe lock. A mark landing between the rebuilder's generation
-  recheck and its clear was therefore **overwritten** — the cache stayed flagged clean over
-  a pre-write ancestor chain, and every later `acl_allows` on that vertex evaluated the
-  stale merge until the next `:acl` mutation anywhere in the chain. On the authorization
-  path that is a revoked policy that keeps being enforced, in whichever direction the stale
-  merge happens to point. Validity is now derived from the counter alone: `acl_gen` **odd**
-  means the merge is stale, **even** means `eff_aces` is the merge published for exactly
-  that value. Every invalidator advances it to the next odd value with one lock-free CAS,
-  and the rebuilder publishes with `compare_exchange_strong(snapshot, snapshot + 1)` — so
-  the recheck and the publish are the SAME atomic operation and there is no second store to
-  lose. `acl_gen` starts at `1` (was `0`), a never-built cache being stale. The evaluation
-  fast path stays at ONE atomic load plus a parity test, which is what the removed boolean
-  cost — a separate stamp word measured ~1 % slower on the `acl-inherit-d4` gate bench and
-  was rejected for it (ADR-0078 Erratum 1); the shipped form measures ~1 % *faster* than
-  the pre-fix baseline, and `vertex_ext_t` loses 4 bytes. `vertex_t`'s verbs (`set_acl`,
-  `mark_acl_cache_dirty`, `with_effective_aces`) keep their names and signatures; the
-  removed `vertex_ext_t` field is the only source-visible change. The new
-  `invalidate_acl_cache` helper that carries the counter advance is **private** — the
-  adversarial pass caught it landing in `vertex_t`'s public section, which would have made
-  that sentence false; nothing outside `vertex_t` calls it, and the build confirms it.
-  Regression:
-  `core/tests/acl_cache_race_test.cpp`, an ancestor `:acl` rewriter racing a descendant's
-  gated evaluation.
-
-- **SECURITY — a SPEC-created `quic` / `webtransport` dialer now VERIFIES the server
-  certificate, and two new DIAL-side config keys say how (#918).** Every connection built
-  through the `:children[]` SPEC path — `quic_transport_factory` and
-  `webtransport_transport_factory`, i.e. every config-created dialer there is — hardcoded
-  `insecure_no_verify = true` and passed an empty CA bundle, so the handshake accepted **any**
-  server certificate, a MITM's included. The dial side already supported real verification
-  (`quic_dial_tls_t` / `webtransport_dial_tls_t` both default secure, and the msquic
-  credential honours both `ca_file` and the flag); a hand-constructed transport could reach it,
-  the factory could not, and no config key existed to ask for it. Two things change:
-  - **The default is verification.** Both factories now dial with the trust struct's declared
-    defaults, so with no trust key present the handshake validates against the **system trust
-    store** and a certificate that does not chain to it is refused — creation answers
-    `TRANSPORT_DOWN`, the did-not-come-up status (this bullet said `NOT_FOUND` when #918
-    landed; #929, later in this same unreleased cycle, gave the condition its own member).
-    (Ruled over the issue's refuse-by-omission proposal: msquic with neither the flag nor a
-    CA file performs default platform validation, which is the standard TLS-client convention
-    and costs nothing for the dial-a-publicly-certified-endpoint case.)
-  - **Two new kind-PRIVATE config keys, identical in both kinds**: `ca` (NAME, a PEM CA-bundle
-    path) verifies against that bundle instead of the system store — the way to reach a
-    self-signed or privately-issued peer while still authenticating it; and `insecure` (VALUE
-    u8, default 0) set to `1` skips validation entirely, DEV ONLY and deliberately explicit.
-    Both are read through `net::config_reader_t` (the pair-consuming #927 walk), and both
-    factories now parse the config **before** the role split — the DIAL branch used to return
-    before `parse_quic_config` / `parse_wt_config` ever ran, which is why the dial side had no
-    reachable keys at all. `conn_settings_t` is untouched (ADR-0043 §5 leanness).
-
-  **This is a behaviour break for anything that SPEC-dialed a self-signed peer** — the
-  in-tree `quic_test` / `webtransport_test` e2e vectors did, and now pass `ca = <the dev
-  cert>`; a dev or interop harness doing the same must add `ca` or `insecure = 1`. The
-  breakage is the fix: a dialer that silently skipped validation because the test suite found
-  it convenient is the defect. Hand-constructed transports (`quic_transport_t(host, port,
-  tls)`) are unaffected — that constructor always took an explicit trust struct.
-- **`graph::parse_acl` rejects the non-canonical width, pairing and key shapes that used to
-  read leniently (#906).** Not *every* shape the builder never emits — a two-byte
-  `access_mask` and a non-canonical key ordering are both unemitted and both still parse, on
-  purpose. The `:acl` write gate read its fields leniently, and on a security surface
-  leniency does not lose a field — it changes what the document grants. Four arms are closed, each with its
-  own rejection vector in `core/tests/security_acl_test.cpp`:
-  - **Width-tolerant numeric reads inverted a decision.** `detail::load_le` reads the low
-    `min(size, sizeof(T))` bytes, so a `type` sent big-endian as `u16` `0x0001` (DENY)
-    read as its low byte `0x00` — **ALLOW** — and passed the `t > 1` gate, while a `u64`
-    `access_mask` was truncated to `u32` with its high bytes dropped and `has_mask` still
-    set. A numeric field's payload must now be non-empty and no **wider** than the field
-    (`type`/`flags` u8, `access_mask` u32, `expires_ns` u64); anything wider is
-    `TYPE_MISMATCH`. A **narrower** payload is still accepted — little-endian
-    zero-extension is exact, and it is the canonical spelling: reference/05 §`0x0A`
-    declares `access_mask` as `u16` and the `acl/acl-aces` conformance vector (and the
-    Rust core's builder) emit two bytes where `encode_acl` emits four.
-  - **A known key carrying the wrong value TLV type was silently skipped**, so an
-    `expires_ns` paired with a non-`VALUE` child left `expires_ns = 0` and a time-limited
-    grant became permanent. It is now `TYPE_MISMATCH`.
-  - **Unknown keys were ignored**, dropping whatever restriction a newer writer meant to
-    add. They are now `TYPE_MISMATCH` — the deliberate OPPOSITE of `net::config_reader_t`
-    (#927), which skips them: config is where a newer peer legitimately sends more than
-    the receiver understands, an ACL is not.
-  - **The field scan visited every offset**, so a `NAME`-typed value (the legal
-    `OWNER@`/`EVERYONE@` subject spelling) was re-read as the next key and bound the
-    *following* key's name as the subject. The walk is now **pair-consuming**, the
-    mechanics of `config_reader_t`: a non-`NAME` in a key slot, an odd child count (a
-    trailing key with no value), and a repeated key within one ACE are all
-    `TYPE_MISMATCH`.
-
-  Not a wire change: `encode_acl`'s output and the published `acl/acl-aces` vector both
-  still parse. Callers that hand-built a non-canonical `:acl` blob now get `TYPE_MISMATCH`
-  at write time instead of a grant that differs from what they wrote.
-
-### Added
-
-- **A SPEC-created `webtransport` dialer can name its extended CONNECT `:path` (#1023).**
-  `webtransport_transport_t`'s DIAL constructor has always taken the CONNECT `:path`, but
-  the catalog factory hard-coded `"/"` and `parse_wt_config` read four keys — `cert`, `key`,
-  `ca`, `insecure` — none of which was it. So an in-band
-  `write /net:children[] += SPEC{kind=webtransport, …}` could reach only a server that
-  serves its session at the root; anything else had to abandon the creation SPEC for the
-  direct constructor plus `provide_link`, and the difference was not reported — the dial
-  simply went to the wrong resource and creation answered `NOT_FOUND`. A fifth
-  kind-PRIVATE key, `path` (`NAME`, DIAL, default `/`, empty normalised to `/`), now carries
-  it, parsed by `parse_wt_config` alongside the others so nothing lands on the shared
-  `conn_settings_t` (the ADR-0043 §5 leanness ruling). It is the one key `webtransport` does
-  not share with `quic`, which has no HTTP layer to carry a resource; it does **not** collide
-  with the `can` kind's unrelated `path` (kind-private namespaces are disjoint), and
-  `docs/modules/connection-config.md` now says so on both rows. Same *shape* of gap as #918,
-  one parameter over. **New public API:** `webtransport_transport_t::session_path()` returns
-  the session's CONNECT `:path` — on LISTEN, the path the ACCEPTED CONNECT named (empty until
-  one is accepted); on DIAL, the path this endpoint requests. The listener still serves every
-  path (it validates `:method`/`:protocol` only), so this is an observation, not an admission
-  decision — and it is what makes the fix testable over the real wire rather than by reading
-  a config value back out of the dialer. `core/tests/webtransport_test.cpp` drives three
-  legs through the real `:children[]` SPEC path against a directly-held listener:
-  `path = "/tracer"` arrives as `/tracer`, an absent key still dials `/`, and an empty path
-  normalises to `/`.
-
-- **The `can_link_t` seam owns its admission rule, so the two ports can no longer disagree
-  about which frames are real (#931).** `twai_link_t` filtered remote-request and 11-bit
-  standard frames on ingress and bounded classic length on egress; `socketcan_link_t` did
-  neither. A `CAN_RAW` socket carries no filter by default, so an RTR frame reached
-  `socketcan_link_t`'s receiver as a data slice whose DLC promised bytes it never carried —
-  and on egress a classic frame declaring 9–64 bytes `memcpy`'d straight past the 8-byte
-  kernel `struct can_frame` on the stack, held back only by the seam's precondition. Rather
-  than copy the twai checks into the sibling, the rule now lives at the seam itself, in
-  `transport_can.hpp`: `tr::net::can_rx_admissible(extended, remote, error)` and
-  `tr::net::can_tx_admissible(frame)`, over `tr::net::can_max_len(fd)` — a thin adapter onto
-  the L1 widths in `tr::view::can_max_data`, so the seam adds no second copy of the numbers
-  (`can_frame_data_t::data` is likewise sized from `tr::view::kCanFdMaxData` now). Both
-  *bus* ports call them; each still decodes the flags from its own driver's representation,
-  but the verdict is reached in one place. (The in-memory test links are exempt by
-  construction — their carrier cannot express RTR, an 11-bit identifier, or an error flag.)
-  Behaviour change: a `socketcan_link_t` receiver no longer sees RTR or 11-bit standard
-  frames, and an over-length classic frame is dropped rather than emitted. Error frames are
-  covered by the same predicate but were never a behaviour that existed here: the socket
-  requests no `CAN_RAW_ERR_FILTER`, so the kernel's default zero mask has always withheld
-  them. The check is the seam's rule holding for a port that does ask, not a change.
-
-- **`fwd_router_t::receiver_ctx_count()` (#884).** How many per-child receiver contexts the
-  router holds — one per NAME ever registered, live or tombstoned. The twin of
-  `child_registry_t::size()` and introduced for the same reason: it is the length of the chain
-  every name-keyed and slot-keyed lookup walks, so "create/remove churn does not grow it" is
-  assertable rather than merely intended. Takes the control lock; never a per-frame call.
-
-- **`delivery_drops()` counts the three drop sites it was missing, and counts them by
-  DELIVERY (#896).** `graph_t::delivery_drops()` promised drop observability while three
-  paths shed deliveries invisibly, so a node under memory pressure reported zero drops
-  while an arbitrary number were shed. The worst read success on a write that delivered
-  nothing at all: `write_impl`'s handler branch skips the whole fan-out when its notify
-  clone cannot be allocated — every subscriber of the vertex, not one edge — and
-  incremented nothing. The other two live in the fan-out snapshot: an edge whose owning
-  copies (link NAME / stored caller) cannot be allocated is skipped, and a wide fan-out
-  whose overflow buffer cannot be reserved is truncated to the inline prefix.
-
-  Three changes to the public surface:
-  - `delivery_drops_t` gains **`fan_out_truncated`** — deliveries shed by the capacity
-    degrade, kept apart from `out_of_memory` so an operator can tell a buffer that could
-    not be widened from a delivery whose clone failed.
-  - `vertex_t::snapshot_edges` takes a third argument, **`vertex_t::snapshot_drops_t&`**
-    (new nested type), reporting what the snapshot shed; `graph_t::fan_out` folds it into
-    the graph's counters. The parameter is a required reference, not an optional pointer:
-    a caller that cannot see the shed count is the defect being fixed.
-  - Every drop **on the fan-out / dispatch plane** now goes through one internal counting
-    door, so a path there that abandons an admitted delivery without counting it is a
-    visible omission. That scope is deliberate and not yet the whole vertex: a STREAM
-    ring-append shed under allocation pressure still abandons the write's entire fan-out
-    uncounted, and `mark_pending`'s OOM legs shed a deferred IF_NEWER delivery the same
-    way. Both are pre-existing, outside this change's sites, and tracked separately.
-
-  Counts are **deliveries, not events**: a shed fan-out of N counts N. Nothing is added to
-  the delivering path — the fold is one predicted-not-taken test per snapshot and the
-  counters are touched only on a drop. No wire change.
-
-- **`transport_can` exposes the sibling drop counters, and its RX state is bounded and
-  aged (#912).** The CAN ingress buffers grew on the receive thread with nothing expiring
-  and nothing counting a drop, unlike every sibling transport. Three parts:
-  - **The injected-bound seam is reachable at last.** `can_reassembly_t` was
-    *default-constructed* inside the transport, so `max_groups` was `0` and its
-    evict-oldest could never fire however a deployment was configured. It is now
-    constructed from new `transport_can_config_t` fields — `reasm_mr` (a
-    `std::pmr::memory_resource*`, default the process heap), `max_groups`, `max_pending`
-    and `rx_ttl` — and the pending-slice queue draws from the same injected resource, so
-    the RX thread no longer reaches the global heap. The `can` factory parses
-    `max_groups`, `max_pending` and `rx_ttl_ms` from the connection's config SETTINGS
-    TLV (`0` = unbounded, host-bounded per RFC-0006, matching `max_peers`), and
-    `can_transport_factory` takes an optional `std::pmr::memory_resource*` — a resource
-    is a pointer, not a wire value, so it is injected at registration time.
-  - **`pending_` is bounded and aged.** A data frame with no matching binding was parked
-    forever: the only drain is `learn_advertise`'s covered-range re-drive, so a peer that
-    never advertises (or a bus that dropped the advertise — the exact failure CAN
-    produces) grew it without limit. It is now capped by `max_pending` (evict-oldest and
-    count) and swept of entries older than `rx_ttl`.
-  - **An incomplete reassembly group no longer pins its slices forever.** `erase` is
-    reached only after `is_complete`, so any lost data slice left a group buffered for the
-    transport's life. `can_reassembly_t` gains `set_now(std::uint64_t)` and
-    `sweep_stale(std::uint64_t max_age)` — the buffer stays clock-free, the caller stamps
-    it — and `transport_can` sweeps on every inbound advertise.
-
-  New public accessors on `transport_can`: `dropped_rx()` (inbound slices reclaimed by the
-  cap or the age-out), `dropped_tx()` (a send that never reached the bus: allocation
-  failure, an empty split, or an unencodable manifest), `dropped_groups()` (reassembly
-  groups reclaimed before delivery — the accessor the buffer's own counter never had) and
-  `pending_slices()`. `rx_ttl` left at `0` tracks the configured `peer_ttl` rather than
-  introducing a second window: a peer already considered gone cannot complete RX state.
-  Unlike the opt-in count caps the age-out is **always live**, so it is the bound that
-  holds under the shipped default config. That "always" is now literal: a `peer_ttl` of
-  `0` derives an `rx_ttl` of `0`, which the peer enumeration and the reassembly sweep both
-  read as *instantly expired* — the pending age-out used to read the same `0` as *sweep
-  disabled* and return early, so one degenerate config value silently re-opened the
-  unbounded growth this entry closes. Zero now means the same thing to all three, and a
-  negative window (previously cast to `std::uint64_t` and compared against ~1.8e19, so it
-  reclaimed nothing at all) is normalized to zero at construction. No wire change.
-
-- **`tr::net::write_fault_stats()` / `write_fault_stats_t` — the malformed-call write-fault
-  tally (#948).** Process-wide (the full-write helpers are static and shared by every stream
-  transport, and what it counts is a defect in libtracer's OWN syscall arguments, not a
-  property of a connection): how many `send`/`sendmsg` attempts were rejected with an errno
-  that means "this call was malformed" rather than "this socket is dead", and the errno of the
-  most recent one. **Non-zero is always a bug** — on a supported host it stays 0 forever.
-  `tr::detail::write_fault_inject_hook` accompanies it as the test seam that makes those arms
-  reachable at all (a host kernel emits none of those errnos here); it is null in production,
-  exactly like its neighbour `probe_fail_hook`.
-
-- **`transport_can_config_t::rx_backend` and `kCanMaxGroupSlices` (#910/#911).**
-  `rx_backend` (a `tr::mem::mem_backend_t*`, default `nullptr` = the process heap) is the
-  byte seam an inbound CAN data slice is copied into before it enters the reassembly
-  buffer — the companion to `reasm_mr`, which bounds the reassembly *structure* while this
-  bounds the slice *bytes*. It is also the second, defaulted parameter of
-  `can_transport_factory`, for the reason `reasm_mr` is: a backend is a pointer, not a wire
-  value, so it cannot ride the config TLV and is injected at registration instead. A
-  bounded backend (`mem::pool_t`) makes ingress exhaustion a by-value refusal on the RX
-  thread rather than a reach into the global heap. `kCanMaxGroupSlices` is the largest
-  address-shift group a node can place, DERIVED from the CAN-ID field widths
-  (`can::kEndpointMax` minus the reserved control slot), not chosen.
-  `can_reassembly_t::discard(key)` joins `erase` as its counted twin: `erase` is the
-  post-delivery release (nothing lost, nothing counted), `discard` is the caller-side
-  abandon of a group that will never complete, and it ticks `dropped_groups`. No wire
-  change.
-
-### Fixed
-
 - **`fwd_router_t` resolves a re-added child NAME to its current tenancy, and connection
   churn no longer grows its receiver chain (#884).** `remove_child` left the child's
   `child_rx_ctx_t` on the published receiver chain and `add_child` of the same NAME appended
@@ -1594,39 +1613,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   the caller's to keep.** No signature changed; every in-bounds caller is unaffected. Giving
   `byte_at` a **release** guarantee (an `optional` or a poisoned flag mapped to
   `FRAME_TRUNCATED`) is a separate design decision, not taken here.
-
-### Changed
-
-- **BREAKING — `subject_resolver_t` gains a DENY channel; an unresolvable caller is no
-  longer trusted (#905).** The type in `graph.hpp` changes from
-  `std::function<std::optional<subject_token_t>(std::string_view)>` to
-  `std::function<std::expected<subject_token_t, wire::err_t>(std::string_view)>`. The
-  error arm means **deny**: the operation fails `status_t::PERMISSION_DENIED`
-  (`tr::access::denied`, 0x0050 on the wire).
-
-  Before this, the resolver had exactly one non-token answer — `nullopt` — and the graph
-  read it as *fully trusted*, skipping every ACE check. The natural reading of that value
-  ("I cannot name this caller") therefore granted **every** right on the vertex, including
-  `WRITE_ACL` and `CREATE`, at every gate: READ, WRITE, SUBSCRIBE, CREATE, WRITE_ACL,
-  READ_ACL, and remote-edge fan-in delivery. A resolver bug, a revoked peer, or an unknown
-  remote identity bypassed all ACLs on protected vertices. There was no way for a resolver
-  to say *deny*.
-
-  **The trusted channel moved out of the resolver.** `acl_allows` now settles the EMPTY
-  caller context — the local-API convention — as trusted **before** invoking the resolver,
-  so the resolver is never called with an empty caller and a remote op (which always
-  carries its inbound link NAME) cannot reach the trusted arm.
-
-  *Migration:* a resolver of the form
-  `if (caller.empty()) return std::nullopt; return token;` becomes
-  `return token;` — the empty case is now handled by the graph. Any *other* former
-  `nullopt` return was silently granting everything and should become
-  `return std::unexpected(wire::err_t::ACCESS_DENIED);`. The signature change is
-  deliberately recompile-visible: keeping `std::optional` and inverting `nullopt`'s meaning
-  would have flipped the semantics of every existing resolver in silence.
-
-  No change to the enforcement-disabled path: the `!subject_resolver_` early-out remains
-  the only check when no resolver is installed.
 
 ## [0.8.0] — 2026-08-06
 
