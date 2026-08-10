@@ -11,6 +11,7 @@
 #include <sys/socket.h>
 
 #include <cerrno>
+#include <cstdint>
 #include <cstring>
 #include <utility>
 #include <vector>
@@ -65,18 +66,32 @@ server_t& instance() {
     return server;
 }
 
-void server_t::open_session(int fd, void* ctx, httpd_free_ctx_fn_t free_fn) {
+bool server_t::open_session(int fd, void* ctx, httpd_free_ctx_fn_t free_fn) {
+    // The pre-handshake predicate first, and OUTSIDE m_ — it re-enters the link (the
+    // gate's mutex), and the fake never holds its own lock across a call into the link.
+    // The request it gets is the opening GET as httpd_uri.c hands it over: the
+    // registration's user_ctx already attached, method GET, on this socket.
+    const route_t route = g_route;
+    if (route.pre_handshake != nullptr) {
+        httpd_req_t req = {};
+        req.handle = static_cast<httpd_handle_t>(this);
+        req.method = HTTP_GET;
+        req.user_ctx = route.user_ctx;
+        req.fd = fd;
+        if (route.pre_handshake(&req) != ESP_OK) return false;  // no 101, no session
+    }
     const std::lock_guard lock(m_);
     session_t sess;
     sess.ctx = ctx;
     sess.free_ctx = free_fn;
     // The handshake latches the route INTO the session; nothing later can revoke it.
-    sess.ws_handler = g_route.handler;
-    sess.ws_user_ctx = g_route.user_ctx;
+    sess.ws_handler = route.handler;
+    sess.ws_user_ctx = route.user_ctx;
     // httpd_sess_new seeds the session from the server's clock WITHOUT advancing it, so a
     // brand-new session starts level with the oldest existing one rather than ahead of it.
     sess.lru_counter = lru_clock_;
     sessions_[fd] = sess;
+    return true;
 }
 
 void* server_t::session_ctx(int fd) {
@@ -352,24 +367,27 @@ void server_t::set_ctx(int fd, void* ctx, httpd_free_ctx_fn_t free_fn) {
 
 /**
  * @brief The shared enqueue behind `httpd_queue_work` and `httpd_sess_trigger_close` —
- *        ONE control socket, and its two distinct failure modes.
+ *        ONE control socket, and both of its failure modes OBSERVABLE.
  *
- * Transcribed from `httpd_queue_work` (httpd_main.c, release/v5.9bb7aa84fe): a refusal
- * from `cs_send_to_ctrl_sock` is reported as `ESP_FAIL`, but an enqueue past the receiving
- * UDP mbox's depth is dropped INSIDE lwIP with `sendto` still returning success. The
- * caller therefore cannot distinguish "queued" from "silently discarded", which is what a
- * link that treats `ESP_OK` as proof of a close gets wrong.
+ * Transcribed from `httpd_queue_work` (httpd_main.c) as it stands at the ESP-IDF floor the
+ * component requires, `>=5.5.5`: the mbox slot is reserved through a counting semaphore
+ * sized `CONFIG_LWIP_UDP_RECVMBOX_SIZE` BEFORE the `sendto`, so a full control queue is an
+ * `ESP_FAIL` the caller sees, exactly as a refusal from `cs_send_to_ctrl_sock` is.
+ *
+ * The fake used to model the older shape as well — an enqueue past the mbox discarded
+ * inside lwIP while `sendto` still returned success, which no caller could distinguish
+ * from "queued". That mode is GONE with the floor (#949): keeping a lever for a condition
+ * the supported ESP-IDF versions cannot produce would only let a suite prove the link
+ * survives something it will never meet.
  *
  * @pre `m_` is held.
- * @retval false The caller must report ESP_FAIL (the observable refusal only).
+ * @retval false The caller must report ESP_FAIL — a full queue, or the explicit refusal.
  */
-bool server_t::enqueue_locked(std::function<void()> item, bool* dropped) {
-    *dropped = false;
+bool server_t::enqueue_locked(std::function<void()> item) {
     if (queue_refusing_) return false;
     if (queue_cap_ != 0 && queue_.size() >= queue_cap_) {
-        *dropped = true;  // lost in lwIP; the caller is told ESP_OK
-        ++queue_drops_;
-        return true;
+        ++queue_drops_;  // the counting semaphore could not be taken
+        return false;
     }
     queue_.push_back(std::move(item));
     return true;
@@ -377,8 +395,7 @@ bool server_t::enqueue_locked(std::function<void()> item, bool* dropped) {
 
 esp_err_t server_t::queue_work(httpd_work_fn_t work, void* arg) {
     const std::lock_guard lock(m_);
-    bool dropped = false;
-    if (!enqueue_locked([work, arg]() { work(arg); }, &dropped)) return ESP_FAIL;
+    if (!enqueue_locked([work, arg]() { work(arg); })) return ESP_FAIL;
     return ESP_OK;
 }
 
@@ -386,16 +403,14 @@ esp_err_t server_t::trigger_close(int fd) {
     const std::lock_guard lock(m_);
     if (sessions_.find(fd) == sessions_.end()) return ESP_ERR_NOT_FOUND;
     // `httpd_sess_trigger_close` IS `httpd_queue_work(httpd_sess_close, sd)`
-    // (httpd_sess.c:476-481) — the same socket, the same queue, the same silent drop.
-    bool dropped = false;
-    if (!enqueue_locked([this, fd]() { close_session(fd); }, &dropped)) return ESP_FAIL;
+    // (httpd_sess.c:476-481) — the same socket, the same queue, the same refusal.
+    if (!enqueue_locked([this, fd]() { close_session(fd); })) return ESP_FAIL;
     return ESP_OK;
 }
 
 void server_t::post(std::function<void()> action) {
     const std::lock_guard lock(m_);
-    bool dropped = false;
-    (void)enqueue_locked(std::move(action), &dropped);
+    (void)enqueue_locked(std::move(action));
 }
 
 bool server_t::run_one() {
@@ -514,7 +529,7 @@ esp_err_t httpd_stop(httpd_handle_t handle) {
 
 esp_err_t httpd_register_uri_handler(httpd_handle_t handle, const httpd_uri_t* uri) {
     (void)handle;
-    fake_httpd::set_registered_route({uri->handler, uri->user_ctx});
+    fake_httpd::set_registered_route({uri->handler, uri->user_ctx, uri->ws_pre_handshake_cb});
     return ESP_OK;
 }
 
@@ -573,13 +588,32 @@ esp_err_t httpd_ws_recv_frame(httpd_req_t* req, httpd_ws_frame_t* frame, std::si
 
 esp_err_t httpd_ws_send_frame_async(httpd_handle_t handle, int fd, httpd_ws_frame_t* frame) {
     (void)handle;
-    // httpd_ws.c writes the frame through the session's send fn and calls the send a
-    // success on ANY non-negative return — the check that turns a short write into a
-    // silently-lost half frame. Transcribed as-is: the fake must reproduce the bug, not
-    // the intent. The header bytes are not modelled; only the payload write is.
-    const int ret = fake_httpd::instance().socket_send(
-        fd, reinterpret_cast<const char*>(frame->payload), frame->len, 0);
-    if (ret < 0) return ESP_FAIL;
+    // httpd_ws.c writes ONE frame as TWO calls to the session's send fn — the header, then
+    // the payload — and calls the send a success on ANY non-negative return
+    // (httpd_ws.c:447-458, release/v5.5). Transcribed as-is, both halves: the fake must
+    // reproduce the bug, not the intent. The non-negative test is what turns a short write
+    // into a silently-lost half frame, and the SPLIT is what lets a frame be announced on
+    // the wire and then abandoned, with one indistinguishable ESP_FAIL for both (#951).
+    //
+    // A server-to-client frame is never masked, so the header is 2 bytes plus the extended
+    // length — 2 more for 126..65535, 8 more above. Its BYTES are not modelled (the fake's
+    // socket layer only ever sees a length); its length is, because that is what a peer
+    // has been promised once the write lands.
+    std::size_t header_len = 2;
+    if (frame->len > 0xFFFFU)
+        header_len = 10;
+    else if (frame->len >= 126U)
+        header_len = 4;
+    const std::uint8_t header[10] = {};
+    if (fake_httpd::instance().socket_send(fd, reinterpret_cast<const char*>(header), header_len,
+                                           0) < 0)
+        return ESP_FAIL;
+    // Exactly httpd_ws.c's guard: an empty frame is header-only, so it takes ONE write.
+    if (frame->len > 0 && frame->payload != nullptr) {
+        const int ret = fake_httpd::instance().socket_send(
+            fd, reinterpret_cast<const char*>(frame->payload), frame->len, 0);
+        if (ret < 0) return ESP_FAIL;
+    }
     fake_httpd::instance().note_sent();
     return ESP_OK;
 }

@@ -15,9 +15,10 @@
  * Three shapes: tcp_transport_t DIAL (connect out to host:port, synchronously
  * at construction), tcp_transport_t LISTEN (accept ONE inbound peer at a time,
  * re-accepting after a peer departs), and transport_tcp_server (the MULTI-peer
- * listener — the transport_ws_server slot/poll machinery over raw length-prefix
- * framing, with the ADR-0044 bus_link_t facet; the `kind=tcp` listener factory
- * builds this one). POSIX sockets; a receive thread reassembles each frame and
+ * listener — the shared slot_server_t slot/poll machinery (`%posix_endpoint.hpp`,
+ * one home with transport_ws_server since #871) over raw length-prefix framing,
+ * with the ADR-0044 bus_link_t facet; the `kind=tcp` listener factory builds
+ * this one). POSIX sockets; a receive thread reassembles each frame and
  * delivers it. Per ADR-0042 §4 a stream frame is reassembled into ONE contiguous
  * segment (the rope overload arrives with rope-aware decode, not before).
  * Reconnect is out of scope — link-down is a torn connection reported via
@@ -45,7 +46,8 @@ namespace tr::net {
 namespace detail {
 
 /**
- * @brief TEST SEAM: run by `transport_tcp_server::accept_peer` at the exact instant a new
+ * @brief TEST SEAM: run by the shared accept path (`slot_server_t::accept_peer`, through
+ *        this server's `on_slot_publishing` override) at the exact instant a new
  *        peer's fd has been published and its slot is ONE store away from open — inside the
  *        `write_m_` hold that makes the two stores atomic to senders.
  *
@@ -103,9 +105,10 @@ class tcp_transport_t : public transport_t, private stream_endpoint_t {
      * @brief DIAL mode: connect to @p peer_host:@p peer_port (synchronous).
      *
      * The TCP connect happens in the constructor (the transport_ws_client
-     * shape) — confirm with ok(); on failure no thread is spawned. On success
+     * shape) — confirm with ok(); on failure no thread is spawned. By default
      * the receive thread starts immediately, so receivers must be installed
-     * before frames flow (the set_receiver contract).
+     * before frames flow (the set_receiver contract); @p defer_recv is what
+     * makes that contract satisfiable on this socket at all.
      *
      * @param peer_host Dotted-quad IPv4 address of the peer (e.g. "127.0.0.1").
      * @param peer_port TCP port of the peer (host byte order).
@@ -119,10 +122,22 @@ class tcp_transport_t : public transport_t, private stream_endpoint_t {
      * @param recv_stack Recv-thread stack size in bytes, 0 = platform default
      *                  (`posix_endpoint_t::start`). Non-zero right-sizes this
      *                  transport's recv thread on an MCU.
+     * @param defer_recv Two-phase bring-up (#1045, the transport_ws_client
+     *                  contract verbatim): with `true` the connect still runs
+     *                  HERE (so ok() answers for it on return) but the recv
+     *                  thread is NOT spawned — not one byte is read off the
+     *                  socket until @ref start_receiving. That is the ordering in
+     *                  which the set_receiver contract above is satisfiable on a
+     *                  DIAL socket: a peer that pushes the instant our connect
+     *                  completes has its first frame in flight before this
+     *                  constructor returns, and the default (`false`, the
+     *                  historical shape) decodes it on the recv thread into
+     *                  whatever sink is installed by then — possibly none, in
+     *                  which case it is dropped with no counter moving.
      */
     tcp_transport_t(const std::string& peer_host, std::uint16_t peer_port,
                     mem::mem_backend_t* backend = &mem::heap_backend(), std::size_t max_frame = 0,
-                    std::size_t recv_stack = 0);
+                    std::size_t recv_stack = 0, bool defer_recv = false);
 
     /**
      * @brief LISTEN mode: bind+listen on @p bind_port, accept ONE inbound peer.
@@ -169,6 +184,23 @@ class tcp_transport_t : public transport_t, private stream_endpoint_t {
      */
     void send(std::span<const std::span<const std::byte>> iov) override;
 
+    /**
+     * @brief Spawn the recv thread a `defer_recv` DIAL construction held back (#1045).
+     *
+     * The second phase of the two-phase bring-up: the socket is connected and NOTHING has
+     * been read off it, so a sink installed before this call cannot have missed a frame.
+     * From here the link behaves exactly as a one-phase one.
+     *
+     * IDEMPOTENT, and a no-op wherever there is nothing to arm — a one-phase DIAL link
+     * (its thread is already running), a LISTEN link (its accept loop started in the
+     * constructor), and a link whose dial failed (`ok()` false, no socket to serve) — so an
+     * owner may call it unconditionally on every link it wires, which is what
+     * `%transport_vertex_t::make_connection` does. A `defer_recv` link that is never armed
+     * never receives and never reports the link down; it is simply an open socket until it
+     * is destroyed.
+     */
+    void start_receiving() override;
+
     /** @brief True — this transport honors @ref set_rope_receiver (ADR-0042):
      *         one frame = one refcounted segment from the injected backend,
      *         handed up owning; a span-only sink gets the same bytes borrowed. */
@@ -209,6 +241,11 @@ class tcp_transport_t : public transport_t, private stream_endpoint_t {
     std::size_t max_frame_ = kMaxFrame;  // per-connection receive cap (:settings; 0 => kMaxFrame)
     std::atomic<std::uint64_t> dropped_rx_{0};
     std::atomic<std::uint64_t> malformed_rx_{0};
+    std::size_t recv_stack_ = 0; /**< @brief The stack hint, held for @ref start_receiving. */
+    /** @brief One-shot latch making @ref start_receiving idempotent — `start()` may be
+     *         called at most once per endpoint. DIAL only; a LISTEN link spends its one
+     *         `start` on the accept loop and never enters the latched path at all. */
+    std::atomic<bool> recv_started_{false};
     // conn_fd_ + write_m_ (and their teardown discipline) live in stream_endpoint_t.
 };
 
@@ -217,19 +254,20 @@ class tcp_transport_t : public transport_t, private stream_endpoint_t {
  *        one listener and exposes them through the @ref bus_link_t facet
  *        (ADR-0044).
  *
- * The raw-stream sibling of transport_ws_server (#362): the same slot/poll
- * machinery — ONE poll-based thread accepts clients and serves every open
- * connection concurrently; peers occupy SLOTS recycled on departure, so
- * steady-state memory is bounded by the maximum concurrent peers ever reached
- * (or @p max_peers, the RFC-0006 injected bound) — with the WS protocol layer
- * replaced by the shared u32-LE length-prefix stream framing (one chunk-fed
- * length_prefix_framer per slot).  There is NO handshake phase: a peer is open
- * (named `p<slot>`, ADR-0073 §2 / #426) from the moment its connection is accepted.  The
- * board↔board listener shape: leaner than WS packaging (no HTTP upgrade, no
- * frame masking) with the same per-peer return-route identity when
- * @p peer_named.
+ * The raw-stream sibling of transport_ws_server (#362): LITERALLY the same
+ * slot/poll machinery, since #871 shared as @ref slot_server_t — ONE
+ * poll-based thread accepts clients and serves every open connection
+ * concurrently; peers occupy SLOTS recycled on departure, so steady-state
+ * memory is bounded by the maximum concurrent peers ever reached (or @p
+ * max_peers, the RFC-0006 injected bound).  What this class adds to that base
+ * is its FRAMING: the shared u32-LE length prefix (one chunk-fed
+ * length_prefix_framer per slot) where WS has RFC 6455 packaging.  There is NO
+ * handshake phase: a peer is open (named `p<slot>`, ADR-0073 §2 / #426) from
+ * the moment its connection is accepted.  The board↔board listener shape:
+ * leaner than WS packaging (no HTTP upgrade, no frame masking) with the same
+ * per-peer return-route identity when @p peer_named.
  */
-class transport_tcp_server : public transport_t, public bus_link_t, private stream_endpoint_t {
+class transport_tcp_server : public slot_server_t {
    public:
     /**
      * @brief Bind+listen on @p bind_port (0 = ephemeral; see local_port()).
@@ -300,43 +338,6 @@ class transport_tcp_server : public transport_t, public bus_link_t, private stre
      *         sink gets the same bytes borrowed.  Covers both facets. */
     [[nodiscard]] bool delivers_ropes() const override { return true; }
 
-    /** @brief The @ref bus_link_t facet (ADR-0044) when constructed
-     *         `peer_named`, else `nullptr` — the transport_ws_server contract
-     *         verbatim, including the RFC-0009 §D.5 departure-eviction split
-     *         (peer-named evicts the departed peer's edges; FLAT mode reports
-     *         the whole link down on any session's close). */
-    [[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }
-
-    /** @brief Visit the currently-OPEN peers' names, `p<slot>` (#426). */
-    void enumerate_peers(const peer_visitor_t& visit) const override;
-
-    /**
-     * @brief Resolve an open peer's name to its directed sending endpoint.
-     *
-     * Owned by the peer's slot; pointer-valid for this server's lifetime
-     * (slots are never freed, only recycled).  After the peer departs its
-     * sends no-op until the slot is reused.
-     * @retval nullptr @p peer names no currently-open connection.
-     */
-    [[nodiscard]] transport_t* peer_link(std::string_view peer) override;
-
-    /**
-     * @brief Close the open peer named @p peer, freeing its slot for reuse.
-     *
-     * Shuts the socket down (`SHUT_RDWR`); the poll thread observes the close
-     * and runs the SAME teardown as a remote hangup (recycle is asynchronous,
-     * within one poll bound) — never touching poll-thread-only state here.
-     * @retval true  @p peer named an open connection and was shut down.
-     * @retval false @p peer names no currently-open connection.
-     */
-    [[nodiscard]] bool close_peer(std::string_view peer) override;
-
-    /** @brief True if the listen socket is bound and listening. */
-    [[nodiscard]] bool ok() const noexcept { return listen_fd_ >= 0; }
-
-    /** @brief The actual bound TCP port (resolves an ephemeral 0 request). */
-    [[nodiscard]] std::uint16_t local_port() const noexcept { return bound_port_; }
-
     /** @brief Frames dropped to RX-backend exhaustion (backpressure), summed
      *         over all peers. */
     [[nodiscard]] std::uint64_t dropped_rx() const noexcept {
@@ -373,37 +374,31 @@ class transport_tcp_server : public transport_t, public bus_link_t, private stre
         session_t* slot_ = nullptr;             /**< @brief The peer slot this sends to. */
     };
 
-    void run();                        // the ONE poll/accept/serve thread
-    void accept_peer();                // admit into a free (or new) slot
-    void service_peer(session_t& s);   // one readable pass: recv + framer feed
-    void teardown_slot(session_t& s);  // close + free the slot for reuse
+    /** @brief One fresh slot with its length-prefix framer and directed facade. */
+    std::unique_ptr<session_base_t> make_session() override;
 
-    int listen_fd_ = -1;
-    std::uint16_t bound_port_ = 0;
+    /** @brief Per-accept setup: TCP_NODELAY + a reset framer.  Returns true — a raw
+     *         stream peer has no handshake, so it is open the moment it is accepted. */
+    bool on_accept(session_base_t& s, int fd) override;
+
+    /** @brief Framing: feed the chunk through the slot's u32-LE reassembler and deliver
+     *         each completed frame (tearing the slot down on a desynced stream). */
+    void on_readable(session_base_t& s, const std::byte* data, std::size_t len) override;
+
+    /** @brief Teardown: reset the slot's framer as it is recycled. */
+    void on_slot_reset(session_base_t& s) override;
+
+    /** @brief Fire `detail::tcp_peer_publishing_hook` inside the accept-side `write_m_`
+     *         hold — the mid-publish instant a test holds open (#891). */
+    void on_slot_publishing() override;
+
+    // The slot vector, the listen socket, the accept/poll/teardown machinery and the
+    // bus_link_t query trio all live in slot_server_t (#871); what stays here is the
+    // length-prefix framing and its ingress bound.
     mem::mem_backend_t* backend_;
     std::size_t max_frame_ = tcp_transport_t::kMaxFrame;
-    std::size_t max_peers_ = 0;  // 0 = unbounded (deployment-injected, RFC-0006)
-    bool peer_named_ = false;    // expose bus() — wiring-time deployment choice
     std::atomic<std::uint64_t> dropped_rx_{0};
     std::atomic<std::uint64_t> malformed_rx_{0};
-    /**
-     * @brief Guards the slot vector and every slot's NAME (cross-thread reads:
-     *        enumerate_peers / peer_link vs the poll thread's accept/teardown).
-     *
-     *        ONE rule for a slot's mutable state, both halves of its lifecycle:
-     *        `open`/`fd` are mutated ONLY under `write_m_` (accept publishes them,
-     *        teardown resets them; the destructor's closing sweep is the single
-     *        exception and runs after the poll thread is joined) and read by
-     *        senders under the same lock, so a sender sees a slot either fully
-     *        live or not live at all; `name` is guarded by peers_m_; each slot's
-     *        framer is poll-thread-only.  The two atomics carry `relaxed` on
-     *        every access — the lock, not the memory order, is what orders them.
-     *        Lock order where nested: peers_m_ → write_m_.
-     */
-    mutable std::mutex peers_m_;
-    std::vector<std::unique_ptr<session_t>> slots_;  // insert-only; recycled in place
-    // write_m_ (stream_endpoint_t) serializes ALL socket writes (any peer);
-    // conn_fd_ is unused by the multi-peer server (each slot owns its fd).
 };
 
 }  // namespace tr::net

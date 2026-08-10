@@ -25,6 +25,7 @@
 #include <type_traits>
 
 #include "libtracer/graph.hpp"
+#include "test_support.hpp"
 
 // ASan/TSan intercept `operator new` and treat a request past their allocator cap
 // as a fatal error rather than returning null, so the one probe that asks for an
@@ -42,11 +43,7 @@
 
 namespace {
 
-int g_failures = 0;
-void check(bool ok, const char* what) {
-    std::printf("  [%s] %s\n", ok ? "PASS" : "FAIL", what);
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /**
  * @brief A counting source with a hard block budget — the bounded-node stand-in and
@@ -169,7 +166,5 @@ int main() {
         check(injected.served_ == 0, "constructing a graph draws no control blocks");
     }
 
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("mem_source");
 }

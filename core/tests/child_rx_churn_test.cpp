@@ -49,8 +49,10 @@
 #include <string_view>
 #include <vector>
 
+#include "fwd_frame_builder.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -64,13 +66,7 @@ using tr::wire::opt_t;
 using tr::wire::path_ref_element_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-/** @brief Record one assertion's outcome on stdout and in the process exit status. */
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /** @brief A transport that only counts and keeps what it was handed — no socket, no thread. */
 class sink_link_t : public tr::net::transport_t {
@@ -103,18 +99,7 @@ std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     return out;
 }
 
-/** @brief `FWD{ op, dst, src }` — an origin frame arriving from upstream. */
-std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
-                             const std::vector<std::byte>& src) {
-    std::vector<std::byte> body;
-    const std::byte ob{static_cast<std::uint8_t>(op)};
-    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&ob, 1));
-    body.insert(body.end(), dst.begin(), dst.end());
-    body.insert(body.end(), src.begin(), src.end());
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
-    return out;
-}
+using tr::testing::b_fwd;
 
 /** @brief The mount run the tests churn, and the vertex key that is its connection vertex. */
 constexpr std::string_view kMount = "net/mod/a";
@@ -293,6 +278,5 @@ int main() {
     test_churn_does_not_grow_the_chain();
     test_duplicate_add_rebinds();
     test_forward_reaches_the_new_link();
-    if (g_failures != 0) std::printf("\n%d check(s) FAILED\n", g_failures);
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("child_rx_churn");
 }

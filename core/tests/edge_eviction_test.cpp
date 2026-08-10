@@ -24,11 +24,15 @@
  *   - the `add_child`-installed departure notifiers (point-to-point down, bus
  *     peer-down) reach the same hook — the seam every transport teardown fires;
  *   - eviction racing a writer thread is crash/TSan-clean (the concurrency gate);
- *   - plain subscribe/deliver still works after eviction (regression).
+ *   - plain subscribe/deliver still works after eviction (regression);
+ *   - the `subscription_t` handle is OPAQUE (#867) — neither half of the `{producer vertex,
+ *     slot}` pair is readable, and the pair cannot be forged and fed to `unsubscribe` —
+ *     asserted at compile time, which is the only place a visibility change is observable.
  */
 
 #include <algorithm>
 #include <atomic>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -41,13 +45,17 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
+#include "fwd_frame_builder.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport.hpp"
+#include "test_support.hpp"
+#include "test_values.hpp"
 
 namespace {
 
@@ -66,28 +74,8 @@ using tr::view::view_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-/** @brief One PASS/FAIL line; failures accumulate into the process exit code. */
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
-
-/** @brief A view_t over a fresh, owned heap segment holding @p bytes. */
-view_t make_value(std::span<const std::byte> bytes) {
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
-    if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
-    return view_t::over(std::move(seg));
-}
-
-/** @brief Byte-list sugar over @ref make_value. */
-view_t make_value(std::initializer_list<std::uint8_t> bytes) {
-    std::vector<std::byte> v;
-    v.reserve(bytes.size());
-    for (const std::uint8_t b : bytes) v.push_back(std::byte{b});
-    return make_value(v);
-}
+using tr::testing::check;
+using tr::testing::make_value;
 
 /** @brief Concatenate pre-encoded TLV byte runs. */
 void append(std::vector<std::byte>& dst, const std::vector<std::byte>& src) {
@@ -140,6 +128,23 @@ std::vector<std::byte> b_subscriber(std::string_view marker) {
     return out;
 }
 
+/**
+ * @brief SUBSCRIBER{ PATH @p marker, SETTINGS qos{ NAME "delivery_compact" VALUE u8 1 } } —
+ *        the RFC-0004 §E.1 opt-in, which is what forces a cold half onto the slot.
+ */
+std::vector<std::byte> b_subscriber_compact(std::string_view marker) {
+    std::vector<std::byte> body = b_path({marker});
+    std::vector<std::byte> qos;
+    append(qos, b_name("delivery_compact"));
+    append(qos, b_value_u8(1));
+    std::vector<std::byte> settings;
+    tr::wire::emit_tlv(settings, type_t::SETTINGS, opt_t{.pl = true}, qos);
+    append(body, settings);
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, type_t::SUBSCRIBER, opt_t{.pl = true}, body);
+    return out;
+}
+
 /** @brief FIELD{ NAME "subscribers", VALUE u8 ELEMENT } — the ":subscribers[]" append. */
 std::vector<std::byte> b_field_subscribers_append() {
     std::vector<std::byte> body;
@@ -164,21 +169,7 @@ std::vector<std::byte> b_field_subscribers_index(std::uint32_t n) {
     return out;
 }
 
-/** @brief A FWD frame: op, dst, optional field, src, optional payload. */
-std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
-                             const std::vector<std::byte>& src,
-                             const std::vector<std::byte>& field = {},
-                             const std::vector<std::byte>& payload = {}) {
-    std::vector<std::byte> body;
-    append(body, b_value_u8(static_cast<std::uint8_t>(op)));
-    append(body, dst);
-    if (!field.empty()) append(body, field);
-    append(body, src);
-    if (!payload.empty()) append(body, payload);
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
-    return out;
-}
+using tr::testing::b_fwd;
 
 /** @brief Bind one wire subscriber at @p v arriving over @p link, tagged @p marker. */
 bool wire_sub(graph_t& g, vertex_handle_t v, std::string_view link, std::string_view marker) {
@@ -532,6 +523,68 @@ void test_evict_reaches_field_write_admitted_edges() {
     check(g.evict_link_edges("cli") == 0, "a second eviction for 'cli' finds nothing left");
 }
 
+/**
+ * @brief #1056 — an eviction keyed on the EMPTY link name matches nothing.
+ *
+ * The predicate keys on the link an edge was ADMITTED over: `subscriber_remote_t::link` when
+ * the cold half carries one, the stored `caller` gate context otherwise (#943). A LOCAL door
+ * passes the empty context, so a local edge's admitting spelling is empty too — and an empty
+ * PARAMETER compared equal to it, reclaiming the edge. The case is reachable because a local
+ * edge CAN carry a cold half: the shared SUBSCRIBER parse calls `ensure_remote()` for the
+ * `delivery_compact` opt-in at every door, local ones included.
+ *
+ * `graph_t::evict_link_edges` returns a count and has no error channel, so the empty key is a
+ * no-op returning 0, not a new status. Two arms, and the CONTROL arm is what identifies the
+ * mechanism: the compact edge (cold half, both spellings empty) is the one that was reclaimed;
+ * the plain edge (no cold half at all, so `s.remote == nullptr` skips it) never was, and
+ * asserting on it alone would pass no matter what the predicate did.
+ */
+void test_empty_link_name_evicts_nothing() {
+    std::printf("an eviction keyed on the EMPTY link name matches nothing (#1056):\n");
+    graph_t g;
+    vertex_handle_t p = g.register_vertex(path_t("/p"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/tc"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/tp"), role_t::STORED_VALUE);
+
+    /** @brief The flat stored bytes at @p at (empty on error). */
+    const auto value_of = [&](const char* at) -> std::vector<std::byte> {
+        const auto r = g.read(path_t(at));
+        return r ? rope_bytes(**r) : std::vector<std::byte>{};
+    };
+
+    // Both admitted through the LOCAL `:subscribers[]` field-write door — the 3-arg write, so
+    // the caller context is empty. `/tc` opts into delivery_compact (⇒ a cold half whose `link`
+    // AND `caller` are both empty); `/tp` carries no settings at all (⇒ no cold half).
+    const auto append_fp = path_t::parse("/p:subscribers[]");
+    check(append_fp.has_value(), "the :subscribers[] append field-path parses");
+    check(append_fp.has_value() &&
+              g.write(p, append_fp->field(), make_value(b_subscriber_compact("tc"))).has_value(),
+          "admit a LOCAL delivery_compact subscriber under an empty caller");
+    check(append_fp.has_value() &&
+              g.write(p, append_fp->field(), make_value(b_subscriber("tp"))).has_value(),
+          "admit a plain LOCAL subscriber under an empty caller");
+
+    check(g.write(path_t("/p"), rope_t{make_value(b_value_u8(0x61))}).has_value(), "write /p");
+    check(value_of("/tc") == b_value_u8(0x61),
+          "the compact local edge IS delivering (the test is not vacuous)");
+    check(value_of("/tp") == b_value_u8(0x61), "the plain local edge IS delivering");
+
+    check(g.evict_link_edges("") == 0, "evict('') reclaims nothing and reports 0");
+
+    check(g.write(path_t("/p"), rope_t{make_value(b_value_u8(0x62))}).has_value(),
+          "write /p after the empty-key eviction");
+    check(value_of("/tc") == b_value_u8(0x62),
+          "the compact local edge STILL delivers after evict('')");
+    check(value_of("/tp") == b_value_u8(0x62), "the plain local edge still delivers");
+
+    // The listener bookkeeping must be untouched too: a DESCENDANT write still bubbles to /p's
+    // edges (RFC-0005). A silent over-unwind here would strand the counters below zero.
+    vertex_handle_t pd = g.register_vertex(path_t("/p/d"), role_t::STORED_VALUE);
+    check(g.write(pd, make_value(b_value_u8(0x63))).has_value(), "descendant write /p/d");
+    check(value_of("/tc") == b_value_u8(0x63) && value_of("/tp") == b_value_u8(0x63),
+          "a descendant write still bubbles to both edges (RFC-0005 counters intact)");
+}
+
 /** @brief Eviction concurrent with writes: no crash, no deadlock, coherent finish (TSan gate). */
 void test_concurrent_evict_vs_writes() {
     std::printf("concurrent writer x evict/re-subscribe (TSan gate):\n");
@@ -610,6 +663,48 @@ void test_clear_edge_releases_the_slot_pin() {
     check(refs() == held, "clearing RELEASES the pin — the segment is no longer retained");
 }
 
+/** @brief True iff `T` hands a caller the producer vertex under its pre-#867 member name. */
+template <typename T>
+concept reads_producer_vertex = requires(T& s) { s.vertex; };
+
+/** @brief True iff `T` hands a caller the `:subscribers[]` index under its pre-#867 name. */
+template <typename T>
+concept reads_slot_index = requires(T& s) { s.slot; };
+
+/** @brief True iff either half of the pair is reachable under its post-#867 name. */
+template <typename T>
+concept reads_renamed_pair = requires(T& s) { s.vertex_; } || requires(T& s) { s.slot_; };
+
+/**
+ * @brief The #867 encapsulation guard: `subscription_t` is opaque exactly as `vertex_handle_t`
+ *        is — the producer `vertex_t*` and the slot index are `graph_t`'s state, not the API
+ *        user's, and the compiler is what enforces that.
+ *
+ * Access checking happens during substitution, so an inaccessible member makes a
+ * requires-expression FALSE rather than ill-formed: these assertions observe the visibility
+ * itself, which no runtime test can. Before the change the handle was an aggregate of two PUBLIC
+ * members, so `sub.vertex->store(...)` and `sub.vertex->mark_unregistered()` compiled for any
+ * caller — lock-contract mutators the graph's own locking discipline owns — and a forged
+ * `subscription_t{any_ptr, any_index}` could be fed to `unsubscribe()`. Reverting the header hunk
+ * turns this TU into a compile error on all of these EXCEPT @ref reads_renamed_pair, which guards
+ * the other direction: re-publishing the members under their current names.
+ */
+static_assert(!reads_producer_vertex<subscription_t>,
+              "#867: the producer vertex must not be reachable through a subscription handle");
+static_assert(!reads_slot_index<subscription_t>,
+              "#867: the :subscribers[] slot index must not be readable from a handle");
+static_assert(!reads_renamed_pair<subscription_t>,
+              "#867: renaming the members does not make them public again");
+static_assert(!std::is_constructible_v<subscription_t, tr::graph::vertex_t*, std::size_t>,
+              "#867: a caller must not be able to forge a handle from a pointer and an index");
+static_assert(!std::is_aggregate_v<subscription_t>,
+              "#867: aggregate init is the forging route a public pair leaves open");
+
+/** @brief What deliberately STAYS public: default-construct, pass by value, compare. */
+static_assert(std::is_default_constructible_v<subscription_t>);
+static_assert(std::is_trivially_copyable_v<subscription_t>);
+static_assert(std::equality_comparable<subscription_t>);
+
 }  // namespace
 
 /** @brief Entry: run every eviction sub-test; exit nonzero on any failure. */
@@ -654,7 +749,9 @@ void test_local_unsubscribe() {
     std::size_t again = 0;
     auto on_again = [&](const rope_t&) { ++again; };
     const auto sub2 = g.subscribe(path_t("/a"), on_again);
-    check(sub2.has_value() && sub.has_value() && sub2->slot == sub->slot,
+    // The handle is opaque, so the reuse is observed the only way a caller can observe it:
+    // the fresh handle compares EQUAL to the retired one — same producer, same slot index.
+    check(sub2.has_value() && sub.has_value() && *sub2 == *sub,
           "re-subscribe reuses the freed slot (index stability §D.2)");
     check(g.write(a, make_value({0x05})).has_value(), "write /a after re-subscribe");
     check(again == 1 && local == 0, "the new subscriber delivers; the old one stays silent");
@@ -668,12 +765,8 @@ int main() {
     test_slot_reuse_and_index_stability();
     test_router_link_down();
     test_evict_reaches_field_write_admitted_edges();
+    test_empty_link_name_evicts_nothing();
     test_departure_notifier_seam();
     test_concurrent_evict_vs_writes();
-    if (g_failures != 0) {
-        std::printf("FAILED: %d check(s)\n", g_failures);
-        return 1;
-    }
-    std::printf("all checks passed\n");
-    return 0;
+    return tr::testing::summary("edge_eviction");
 }

@@ -68,6 +68,89 @@ void emit_value(std::vector<std::byte>& out, std::uint64_t value, int width) {
     return !s.indexed && !s.append && !s.wildcard;
 }
 
+/**
+ * @brief True iff @p field is the "served whole" shape — exactly one plain NAME step.
+ *
+ * The single shape rule behind every field the protocol serves as ONE record with no member
+ * and no slot addressing. Four sites consult it (#869): `field_write`'s `:acl` arm, and
+ * `read`'s `:acl`, `:identity` and `:schema` arms. Before it the read door spelled it
+ * `plain_step(steps[0]) && steps.size() == 1` and the write door
+ * `steps.size() != 1 || !plain_step(step0)` — the same rule written two ways.
+ */
+[[nodiscard]] bool whole_field(const field_path_t& field) noexcept {
+    return field.steps.size() == 1 && plain_step(field.steps[0]);
+}
+
+/**
+ * @brief The selector shape of an array-addressed field's leading step (`:subscribers`,
+ *        `:children`) — the ONE classification both the read and the write door switch on.
+ *
+ * The shapes are the addressing grammar's, not a per-field policy: WHICH of them a given
+ * field accepts, and with what answer, stays at each door (that read/write asymmetry is
+ * real — `:children[]` creates on a write and enumerates on a read). What is shared is the
+ * decoding of the selector itself, which before #869 existed as sequential `append` /
+ * `wildcard` / `indexed` branches on the write side and one `indexed && !append &&
+ * !wildcard` conjunction on the read side.
+ */
+enum class field_sel_t : std::uint8_t {
+    TAIL,     /**< @brief More than one step — a tail below an array field names nothing. */
+    WILDCARD, /**< @brief `[*]` — index_mode WILDCARD (`indexed` set, no index assigned). */
+    APPEND,   /**< @brief `[]` — index_mode ELEMENT with no index. */
+    SLOT,     /**< @brief `[N]` — one addressed slot. */
+    WHOLE,    /**< @brief bare `:name` — no selector at all. */
+};
+
+/**
+ * @brief Classify @p field's leading step per @ref field_sel_t.
+ *
+ * `wildcard` is tested FIRST among the selector bits, so a step carrying the wildcard marker
+ * can never be mistaken for an append or a slot. That ordering is #579's rule — a `[*]`
+ * marker must never be ignored — applied once here instead of once per door. Neither
+ * producer of a `field_step_t` can set `append` and `wildcard` together (`path_t::parse`
+ * never sets `wildcard`; the wire decoder's ELEMENT and WILDCARD are exclusive switch arms),
+ * so the ordering is observable only to an in-process caller that hand-builds the step.
+ */
+[[nodiscard]] field_sel_t field_selector(const field_path_t& field) noexcept {
+    if (field.steps.size() != 1) return field_sel_t::TAIL;
+    const field_step_t& s = field.steps[0];
+    if (s.wildcard) return field_sel_t::WILDCARD;
+    if (s.append) return field_sel_t::APPEND;
+    if (s.indexed) return field_sel_t::SLOT;
+    return field_sel_t::WHOLE;
+}
+
+/** @brief What a field path names under `:settings` (RFC-0010 §A / RFC-0022 §3.B). */
+enum class app_sel_t : std::uint8_t {
+    NONE,      /**< @brief Bare `:settings` — the container itself. */
+    CORE_KNOB, /**< @brief `:settings.<name>…` with `<name> != "app"` — the EMPTY core
+                *          namespace (RFC-0022 §3.B), so an unknown name on both doors. */
+    MALFORMED, /**< @brief `app` carries a selector, or a `[...]` step sits below it. */
+    CONTAINER, /**< @brief `:settings.app` — the app container. */
+    NAMED,     /**< @brief `:settings.app.<name…>` — one declared owner field. */
+};
+
+/**
+ * @brief Resolve the `settings.…` sub-shape ONCE for both doors (#869).
+ *
+ * Only steps [1..) are classified. Whether `steps[0]` itself must be plain is deliberately
+ * NOT folded in: the two doors disagree about that today (the read door requires
+ * `plain_step(steps[0])`, the write door does not) and unifying them would change an answer
+ * that leaves the device — see the `:settings[0].app.<name>` note on `graph_t::field_write`.
+ *
+ * @param key Assigned the flat descriptor-table key on `NAMED`, left untouched otherwise —
+ *            an out-param rather than a `{kind, key}` return, which measured 1408 bytes of
+ *            graph.cpp `.text` larger at -O3 across the two doors.
+ */
+[[nodiscard]] app_sel_t app_field_sel(const field_path_t& field, std::string& key) {
+    if (field.steps.size() < 2) return app_sel_t::NONE;
+    if (field.steps[1].name != "app") return app_sel_t::CORE_KNOB;
+    if (!plain_step(field.steps[1])) return app_sel_t::MALFORMED;
+    if (field.steps.size() == 2) return app_sel_t::CONTAINER;
+    key = app_field_key(field);
+    if (key.empty()) return app_sel_t::MALFORMED;
+    return app_sel_t::NAMED;
+}
+
 // The flat protocol-knob name table is GONE (RFC-0022 §3.B): `settings_t` is deleted, so
 // the vertex `:settings` core namespace has no writable member left. All seven historical
 // names — `reliability`, `priority`, `durability`, `deadline_ns`, `queue_max_bytes`,
@@ -1039,7 +1122,7 @@ void graph_t::fan_out(vertex_t* v, const rope_t& value) {
         for (const edge_view_t& e : heap_buf) dispatch_edge(e, value);
 }
 
-result_t<std::shared_ptr<const rope_t>> graph_t::store_value(vertex_t* v, rope_t value) {
+result_t<std::shared_ptr<const rope_t>> graph_t::store_value(vertex_t* v, rope_t&& value) {
     if (v->role() == role_t::HANDLER) {
         const value_handlers_t& h = v->handlers();  // load once — a retire may swap it out
         if (!h.on_write) return std::unexpected(status_t::NOT_FOUND);
@@ -1107,7 +1190,10 @@ result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, std::string_view c
         // deliver the exact published pointer store_value hands back instead. The
         // clone is NOTHROW (try_clone_rope, #477): on failure the handler still runs
         // (the write succeeds) and only the subscriber delivery drops.
-        rope_t notify;  // refcount clone — store_value consumes `value`
+        // Refcount clone taken BEFORE the call: store_value moves from `value` on the
+        // storing legs. It does not on the Handler leg — that one only reads `value` and
+        // returns — so since #1116 (`rope_t&&`) the caller's rope survives that path.
+        rope_t notify;
         const bool can_notify = try_clone_rope(notify, value);
         const result_t<std::shared_ptr<const rope_t>> stored = store_value(v, std::move(value));
         if (!stored) return std::unexpected(stored.error());
@@ -1481,6 +1567,34 @@ void parse_subscriber_tlv(const tlv_t& sub, subscriber_t& s) {
     }
 }
 
+/**
+ * @brief The wire→`subscriber_t` admission parse, hand-rolled at three doors before #869:
+ *        type-check the decoded record, then parse it ONCE (ADR-0049).
+ *
+ * The three doors are `graph_t::subscribe_wire` and `graph_t::field_write`'s `:subscribers[]`
+ * append and `:subscribers[N]` replace arms. What is deliberately NOT in here is everything
+ * the doors disagree about: the `[N]` arm's `acl_allows(WRITE)` gate and its empty-STATUS
+ * eviction sentinel (both of which must run before this), the two field-write arms' `require
+ * a PATH child` rule, and `subscribe_wire`'s inverse — it CLEARS `target_key`, because a
+ * PATH child there names the consumer at ITS origin and delivery rides the return route.
+ *
+ * The zero-copy `source_view` retain stays at each door on purpose. Taking the record by
+ * value here so the retain could be shared too measured **+1980 bytes** of graph.cpp `.text`
+ * at -O3 — a `view_t` move plus its destructor and landing pad, duplicated at each of the
+ * two `field_write` inline sites — for one assignment saved.
+ *
+ * @param tlv The decoded record. Not re-decoded here: the `[N]` arm must inspect the decode
+ *            before this, to discriminate the eviction sentinel.
+ * @param s   Filled on success; untouched on the type refusal.
+ * @return False iff @p tlv is not a SUBSCRIBER — the doors' one shared TYPE_MISMATCH. A
+ *         `bool` rather than a `result_t<void>` because there is exactly one failure.
+ */
+[[nodiscard]] bool parse_wire_subscriber(const tlv_t& tlv, subscriber_t& s) {
+    if (tlv.type != type_t::SUBSCRIBER) return false;
+    parse_subscriber_tlv(tlv, s);
+    return true;
+}
+
 }  // namespace
 
 result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
@@ -1651,15 +1765,15 @@ result_t<subscription_t> graph_t::subscribe(const path_t& src, subscriber_fn_t f
 }
 
 result_t<void> graph_t::unsubscribe(const subscription_t& sub) {
-    if (sub.vertex == nullptr) return std::unexpected(status_t::NOT_FOUND);
+    if (sub.vertex_ == nullptr) return std::unexpected(status_t::NOT_FOUND);
     // The in-process counterpart of the wire ":subscribers[N] clear" (field_write below):
     // deactivate the slot, then unwind the RFC-0005 listener bookkeeping — the SAME order and
     // the SAME helper the wire path uses, so both doors leave identical counters. clear_edge
     // RECLAIMS the slot's retained state (target key, segment pin, cold remote half) and
     // leaves an inert, index-stable shell that add_edge reuses; an in-flight delivery already
     // snapshotted the edge (ADR-0041 §2) and completes untouched.
-    if (!sub.vertex->clear_edge(sub.slot)) return std::unexpected(status_t::NOT_FOUND);
-    note_subscriber_removed(sub.vertex);
+    if (!sub.vertex_->clear_edge(sub.slot_)) return std::unexpected(status_t::NOT_FOUND);
+    note_subscriber_removed(sub.vertex_);
     return {};
 }
 
@@ -1688,16 +1802,21 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view_t source_view, v
     // parse (the resolver's parallel subscriber_compact() is retired); the tlv_t borrows
     // source_view's bytes, which the slot then retains zero-copy.
     const auto sub = wire::decode(source_view);
-    if (!sub || sub->type != type_t::SUBSCRIBER) return std::unexpected(status_t::TYPE_MISMATCH);
+    if (!sub) return std::unexpected(status_t::TYPE_MISMATCH);
     subscriber_t s;
-    parse_subscriber_tlv(*sub, s);
+    // The shared door parse (ADR-0049, #869) — type check + parse. The retain stays here;
+    // `sub`'s spans survive the move (a `view_t` move transfers the segment, not the bytes)
+    // and are not read again after it.
+    if (!parse_wire_subscriber(*sub, s)) return std::unexpected(status_t::TYPE_MISMATCH);
+    s.source_view = std::move(source_view);
     // A PATH child names the consumer at ITS origin — never a local re-dispatch target;
-    // remote delivery rides the return route over the link (RFC-0004 §D).
+    // remote delivery rides the return route over the link (RFC-0004 §D). This door is the
+    // one that CLEARS the key the two field-write arms REQUIRE, so it stays out of the
+    // shared helper.
     s.target_key.reset();
     subscriber_remote_t& r = s.ensure_remote();  // a wire subscriber always carries the cold half
     r.caller = link;  // the fan-in gate context this edge's deliveries run under (#81)
     r.return_route = std::move(return_route);
-    s.source_view = std::move(source_view);
     r.link = std::move(link);
     const std::string gate_ctx = r.caller;  // survives the move above (the SUBSCRIBE gate
                                             // runs under the inbound link, #81/ADR-0026)
@@ -1729,16 +1848,24 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
         // is not an access question. Note that leaves the `[]` / `[N]` shapes untouched, so
         // `plain_step` — the `:acl` guard's second half — must NOT be used here: an append
         // is `append == true` and a clear is `indexed == true`, and both are legal.
-        if (field.steps.size() != 1) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-        if (step0.append) {
+        //
+        // The selector decode itself is `field_selector` (#869) — the SAME classification the
+        // read door switches on, so the two halves can no longer drift on WHICH shape they
+        // are looking at. They still disagree on the ANSWER per shape, deliberately: that
+        // asymmetry (a `[]` write subscribes, a `[]` read enumerates; a `[*]` write is
+        // INVALID_PATH, a `[*]` read is SCHEMA_NOT_FOUND) is what each arm below states.
+        const field_sel_t sel = field_selector(field);
+        if (sel == field_sel_t::TAIL) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+        if (sel == field_sel_t::APPEND) {
             const auto sub = wire::decode(value);
-            if (!sub || sub->type != type_t::SUBSCRIBER)
-                return std::unexpected(status_t::TYPE_MISMATCH);
+            if (!sub) return std::unexpected(status_t::TYPE_MISMATCH);
             subscriber_t s;
-            parse_subscriber_tlv(*sub, s);  // the shared door parse (ADR-0049)
+            // The shared door parse (ADR-0049, #869): type check + parse. Then retain the
+            // SUBSCRIBER TLV zero-copy (a refcount clone of `value`) so a later
+            // `:subscribers[]` read ropes it into the REPLY (ADR-0035).
+            if (!parse_wire_subscriber(*sub, s)) return std::unexpected(status_t::TYPE_MISMATCH);
+            s.source_view = value;
             if (!s.target_key) return std::unexpected(status_t::TYPE_MISMATCH);
-            s.source_view = value;  // retain the SUBSCRIBER TLV zero-copy (refcount clone) so a
-                                    // later :subscribers[] read ropes it into the REPLY (ADR-0035).
             // The fan-in gate context for this edge's deliveries (#81); the empty (local)
             // context needs no cold half. It is ALSO what makes the edge reclaimable: this
             // door leaves `subscriber_remote_t::link` empty (there is no return route to
@@ -1767,10 +1894,20 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
         // arrives here with `index == 0`, OUTSIDE the validity window path.hpp declares
         // ("valid when indexed && !append && !wildcard"). Testing `indexed` alone therefore
         // clears SLOT 0 and answers RESULT: silent data loss reported as success (#579).
+        // `field_selector` is what keeps that from ever being retried: WILDCARD is decided
+        // before APPEND and SLOT, so no arm below can see a wildcard step at all.
         // The WRITE grammar has no wildcard axis, so a write bearing one is a malformed
         // address, not a missing schema entry — `:subscribers` plainly exists.
-        if (step0.wildcard) return std::unexpected(status_t::INVALID_PATH);
-        if (step0.indexed) {  // `[N]` — clear or replace, per RFC-0009 §D.1
+        //
+        // DIVERGENCE (#869), pinned NOT fixed: the READ door answers `:subscribers[*]`
+        // SCHEMA_NOT_FOUND, and it answers it BELOW the READ gate, so a denied caller is
+        // told PERMISSION_DENIED. Which of the two codes is right is a wire question —
+        // docs/reference/03-addressing.md §`[*]` treated as `[0]` calls `[*]` "legal only
+        // where the field chain's first step is subscribers" and reads it as "every slot",
+        // which points at an enumerating READ rather than at either error — so unifying it
+        // needs an RFC, not this refactor. `field_wildcard_divergence` pins both answers.
+        if (sel == field_sel_t::WILDCARD) return std::unexpected(status_t::INVALID_PATH);
+        if (sel == field_sel_t::SLOT) {  // `[N]` — clear or replace, per RFC-0009 §D.1
             if (!acl_allows(v, caller, acl_right_t::WRITE))
                 return std::unexpected(status_t::PERMISSION_DENIED);
             // §D.1 is payload-DISCRIMINATING. Before this, every indexed write cleared the
@@ -1796,11 +1933,13 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
                 }
                 return {};
             }
-            if (tlv->type != type_t::SUBSCRIBER) return std::unexpected(status_t::TYPE_MISMATCH);
             subscriber_t s;
-            parse_subscriber_tlv(*tlv, s);  // the shared door parse (ADR-0049)
-            if (!s.target_key) return std::unexpected(status_t::TYPE_MISMATCH);
+            // The shared door parse (ADR-0049, #869) — the same two steps the append arm and
+            // `subscribe_wire` run. It sits AFTER the WRITE gate and AFTER the sentinel
+            // discrimination above, which are this arm's alone.
+            if (!parse_wire_subscriber(*tlv, s)) return std::unexpected(status_t::TYPE_MISMATCH);
             s.source_view = value;  // retain the SUBSCRIBER TLV zero-copy, as the append arm does
+            if (!s.target_key) return std::unexpected(status_t::TYPE_MISMATCH);
             // As in the append arm: the stored context is also the link this edge was
             // admitted over, which is what `vertex_t::evict_link_edges` falls back to when
             // the cold half carries no delivery link (#943).
@@ -1826,8 +1965,14 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
         // `:acl[0]` / `:acl[]` all reached it and silently replaced the whole list. There is
         // no member or slot addressing (an ACE is not separately writable), so any other
         // shape names nothing: SCHEMA_NOT_FOUND, resolved BEFORE the gate like any field.
-        if (field.steps.size() != 1 || !plain_step(step0))
-            return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+        // `whole_field` is that rule, shared with the read door (#869).
+        //
+        // DIVERGENCE (#869), pinned NOT fixed: the READ door resolves an unaccepted `:acl`
+        // shape BELOW its READ gate, so `:acl[0]` is SCHEMA_NOT_FOUND here (caller-
+        // independent) but PERMISSION_DENIED there for a denied caller. Moving the read's
+        // resolution above its gate changes a code that leaves the device; `field_shape_matrix`
+        // pins both answers.
+        if (!whole_field(field)) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         if (!acl_allows(v, caller, acl_right_t::WRITE_ACL))
             return std::unexpected(status_t::PERMISSION_DENIED);
         const auto acl = wire::decode(value);
@@ -1863,25 +2008,35 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
         // vertex and wired it into the router. The READ of the byte-identical selector
         // already answered SCHEMA_NOT_FOUND, so the two halves disagreed; this makes them
         // agree. Before the CREATE gate, like `:acl`.
-        if (field.steps.size() != 1) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-        if (step0.append) {
-            if (!acl_allows(v, caller, acl_right_t::CREATE))
-                return std::unexpected(status_t::PERMISSION_DENIED);
-            return create_child(v, value);
-        }
-        return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+        //
+        // Same `field_selector` classification the read door uses for `:children` (#869) —
+        // the shapes are one rule, the answers are per side: `[]` CREATES here and
+        // ENUMERATES there, and `:children` bare has no write surface at all.
+        if (field_selector(field) != field_sel_t::APPEND)
+            return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+        if (!acl_allows(v, caller, acl_right_t::CREATE))
+            return std::unexpected(status_t::PERMISSION_DENIED);
+        return create_child(v, value);
     }
 
-    if (step0.name == "settings" && field.steps.size() >= 2 && field.steps[1].name == "app") {
+    if (step0.name != "settings") return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+    // The `settings.…` sub-shape, resolved by the SAME `app_field_sel` the read door uses
+    // (#869) — one place that knows what `app`, `app.<name…>` and a core knob name look like.
+    std::string app_key;
+    if (app_field_sel(field, app_key) == app_sel_t::NAMED) {
         // Owner-declared application fields under the reserved `app` subkey (RFC-0010
         // §A). This branch owns the whole `settings.app.` subtree — the protocol never
         // minted (and per the RFC must never mint) a knob named `app`. A bare
         // `:settings.app` container write and any `[...]`-selector step have no write
-        // surface.
-        if (field.steps.size() < 3 || !plain_step(field.steps[1]))
-            return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-        const std::string key = app_field_key(field);
-        if (key.empty()) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+        // surface — CONTAINER and MALFORMED fall through to the terminal SCHEMA_NOT_FOUND
+        // below, the same answer the pre-#869 in-arm guard gave.
+        //
+        // DIVERGENCE (#869), pinned NOT fixed: `step0`'s OWN shape is not tested here, so
+        // `:settings[0].app.<name>` WRITES the field, while the read door — which does test
+        // `plain_step(steps[0])` — answers it SCHEMA_NOT_FOUND. Tightening the write is a
+        // change to what leaves the device for that spelling; `field_shape_matrix` pins
+        // both answers.
+        const std::string& key = app_key;
         const std::optional<app_access_t> access = v->app_field_access(key);
         if (!access)  // undeclared stays ENOTTY — the table opens only its own names
             return std::unexpected(status_t::SCHEMA_NOT_FOUND);
@@ -2391,12 +2546,17 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, const field_path_t& field,
     // materialized listing (`folded_children_test` gates the differential against
     // `read_children_materialized`). It bypasses the single-view wrap below, which would
     // re-flatten the fold back into one buffer. A single "[N]" slot has no meaning here
-    // (members are named, not indexed) and falls through to SCHEMA_NOT_FOUND.
-    if (field.steps.size() == 1 && field.steps[0].name == "children" && !field.steps[0].wildcard &&
-        (field.steps[0].append || !field.steps[0].indexed)) {
-        if (!acl_allows(v, caller, acl_right_t::READ))
-            return std::unexpected(status_t::PERMISSION_DENIED);
-        return read_children_folded(vh);
+    // (members are named, not indexed) and falls through to SCHEMA_NOT_FOUND, as does
+    // `[*]` — the same `field_selector` classification the write door switches on (#869),
+    // so the two halves cannot drift on which shape they are looking at. The ANSWER stays
+    // per side: `[]` enumerates here and CREATES there.
+    if (field.steps[0].name == "children") {
+        const field_sel_t sel = field_selector(field);
+        if (sel == field_sel_t::WHOLE || sel == field_sel_t::APPEND) {
+            if (!acl_allows(v, caller, acl_right_t::READ))
+                return std::unexpected(status_t::PERMISSION_DENIED);
+            return read_children_folded(vh);
+        }
     }
     // A field read serves a contiguous control TLV; it crosses back as a single-link
     // rope (ADR-0053 §6 — the data API returns ropes). Compute the control view, then
@@ -2406,7 +2566,11 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, const field_path_t& field,
         // Served whole — no member or slot addressing, so `:acl[N]` names nothing
         // (an ACE is not separately addressable). Resolving the shape here keeps
         // `:acl[7]` from being served the entire ACE collection under an OK status.
-        if (field.steps[0].name == "acl" && plain_step(field.steps[0]) && field.steps.size() == 1) {
+        // `whole_field` is the shared shape rule (#869), the same predicate the write
+        // door's `:acl` arm uses — note only the SHAPE is shared: this door gates on
+        // READ_ACL and that one on WRITE_ACL, and an UNACCEPTED shape resolves below the
+        // gate here and above it there (the divergence pinned by `field_shape_matrix`).
+        if (field.steps[0].name == "acl" && whole_field(field)) {
             if (!acl_allows(v, caller, acl_right_t::READ_ACL))
                 return std::unexpected(status_t::PERMISSION_DENIED);
             return read_acl(v);
@@ -2427,8 +2591,7 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, const field_path_t& field,
         // §C.4. Nothing is disclosed by the narrower answer — the record itself is
         // world-readable by design one line down.
         if (field.steps[0].name == "identity") {
-            if (field.steps.size() != 1 || !plain_step(field.steps[0]))
-                return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+            if (!whole_field(field)) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
             return read_identity();
         }
         // An UNKNOWN core-namespace `:settings` NAME resolves HERE, above the READ gate —
@@ -2449,15 +2612,20 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, const field_path_t& field,
         // narrower answer discloses only what docs/reference/05 already states. Bare
         // `:settings` (the container) and the whole `settings.app.` subtree are untouched —
         // both are KNOWN names and keep their gates.
-        if (field.steps[0].name == "settings" && field.steps.size() >= 2 &&
-            field.steps[1].name != "app")
-            return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+        //
+        // The `settings.…` sub-shape is `app_field_sel` (#869) — resolved ONCE here and
+        // reused below the gate, and the SAME classification the write door switches on.
+        // A CORE_KNOB is the RFC-0022 §3.B empty namespace on both doors; the write door
+        // reaches its terminal SCHEMA_NOT_FOUND for exactly this kind.
+        std::string app_key;
+        const app_sel_t app =
+            field.steps[0].name == "settings" ? app_field_sel(field, app_key) : app_sel_t::NONE;
+        if (app == app_sel_t::CORE_KNOB) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         if (!acl_allows(v, caller, acl_right_t::READ))
             return std::unexpected(status_t::PERMISSION_DENIED);
         // One synthesized POINT, served whole — not an array field, so no `[N]` surface.
-        if (field.steps.size() == 1 && field.steps[0].name == "schema" &&
-            plain_step(field.steps[0]))
-            return read_schema(v);
+        // The shared `whole_field` shape rule (#869).
+        if (field.steps[0].name == "schema" && whole_field(field)) return read_schema(v);
         if (field.steps[0].name == "settings" && plain_step(field.steps[0])) {
             // The RFC-0010 §A.4 read surfaces. Bare ":settings" — the container
             // (RFC-0022 §4: the nested app record, and nothing else); ":settings.app" —
@@ -2465,11 +2633,15 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, const field_path_t& field,
             // stored TLV verbatim. A per-knob protocol read (":settings.deadline_ns")
             // names nothing and falls through to SCHEMA_NOT_FOUND, exactly as its write
             // now does.
-            if (field.steps.size() == 1) return read_settings(v);
-            if (field.steps[1].name == "app" && plain_step(field.steps[1])) {
-                if (field.steps.size() == 2) return read_settings_app(v);
-                const std::string key = app_field_key(field);
-                if (key.empty()) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+            //
+            // DIVERGENCE (#869), pinned NOT fixed: `plain_step(steps[0])` above is tested
+            // HERE and not on the write door, so `:settings[0].app.<name>` is
+            // SCHEMA_NOT_FOUND on a read and a successful WRITE. See `field_write`'s
+            // settings arm; `field_shape_matrix` pins both answers.
+            if (app == app_sel_t::NONE) return read_settings(v);
+            if (app == app_sel_t::CONTAINER) return read_settings_app(v);
+            if (app == app_sel_t::NAMED) {
+                const std::string& key = app_key;
                 std::vector<std::byte> bytes;
                 switch (v->app_field_get(key, bytes)) {
                     case vertex_t::app_read_t::UNDECLARED:  // ENOTTY (undeclared) …
@@ -2490,9 +2662,15 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, const field_path_t& field,
             }
         }
         // ":children" is handled above the lambda (folded rope — see read_children_folded).
-        // A single slot ":subscribers[N]" — serve the stored SUBSCRIBER view (clone).
-        if (field.steps.size() == 1 && field.steps[0].name == "subscribers" &&
-            field.steps[0].indexed && !field.steps[0].append && !field.steps[0].wildcard) {
+        // A single slot ":subscribers[N]" — serve the stored SUBSCRIBER view (clone). The
+        // shape is the shared `field_selector` classification (#869), replacing the
+        // `indexed && !append && !wildcard` conjunction that restated path.hpp's `[N]`
+        // validity window a second time. Every other `:subscribers` shape reaches the
+        // terminal SCHEMA_NOT_FOUND below — including `[*]`, which the WRITE door answers
+        // INVALID_PATH (the pinned #869 divergence; see `field_write`'s WILDCARD arm), and
+        // including `[]`, whose whole-array read the wire door serves through
+        // `read_subscribers` before ever reaching here.
+        if (field.steps[0].name == "subscribers" && field_selector(field) == field_sel_t::SLOT) {
             if (std::optional<view_t> sv = v->edge_source(field.steps[0].index))
                 return *sv;  // clone (refcount bump, no byte copy)
             return std::unexpected(status_t::NOT_FOUND);

@@ -43,10 +43,12 @@
 #include <thread>
 #include <vector>
 
+#include "fwd_frame_builder.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport_can.hpp"
 #include "libtracer/view_can.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -64,11 +66,8 @@ using tr::wire::opt_t;
 using tr::wire::tlv_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
+using tr::testing::mailbox_t;
 
 constexpr auto kBudget = 5000ms;
 
@@ -195,19 +194,7 @@ std::vector<std::byte> b_field_children() {
     return out;
 }
 
-std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
-                             const std::vector<std::byte>& src,
-                             const std::vector<std::byte>& field = {}) {
-    std::vector<std::byte> body;
-    const std::byte ob{static_cast<std::uint8_t>(op)};
-    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&ob, 1));
-    body.insert(body.end(), dst.begin(), dst.end());
-    body.insert(body.end(), field.begin(), field.end());
-    body.insert(body.end(), src.begin(), src.end());
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
-    return out;
-}
+using tr::testing::b_fwd;
 
 view_t owned(std::span<const std::byte> bytes) {
     tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
@@ -217,14 +204,7 @@ view_t owned(std::span<const std::byte> bytes) {
 
 /** @brief SPEC{ type, name } with no config — the provide_link-staged connection form. */
 view_t conn_spec(std::string_view type, std::string_view name) {
-    std::vector<std::byte> body;
-    tr::wire::emit_name(body, "type");
-    tr::wire::emit_name(body, type);
-    tr::wire::emit_name(body, "name");
-    tr::wire::emit_name(body, name);
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
-    return owned(out);
+    return tr::net::conn_spec_t(type, name).view();
 }
 
 /** @brief The peer names inside a members POINT (POINT{ POINT{NAME}... }) view/TLV. */
@@ -262,28 +242,6 @@ bool wait_until(Pred pred, std::chrono::milliseconds budget) {
     }
     return pred();
 }
-
-/** @brief A bounded reply mailbox for the raw loopback client. */
-struct mailbox_t {
-    std::mutex m;
-    std::condition_variable cv;
-    std::vector<std::vector<std::byte>> q;
-
-    void push(std::vector<std::byte> v) {
-        {
-            const std::lock_guard lock(m);
-            q.push_back(std::move(v));
-        }
-        cv.notify_all();
-    }
-    std::optional<std::vector<std::byte>> wait(std::chrono::milliseconds budget) {
-        std::unique_lock lock(m);
-        if (!cv.wait_for(lock, budget, [&] { return !q.empty(); })) return std::nullopt;
-        std::vector<std::byte> v = std::move(q.front());
-        q.erase(q.begin());
-        return v;
-    }
-};
 
 std::uint8_t value_u8(const tlv_t& v) { return tr::detail::load_le<std::uint8_t>(v.payload); }
 
@@ -399,18 +357,8 @@ void test_enumeration_and_forwarding() {
     // ----- 4) FWD WRITE through: the peer's LKV updates, RESULT acks. ---------
     const std::uint32_t kWritten = 0x0BADF00Du;
     {
-        std::vector<std::byte> body;
-        const std::byte ob{static_cast<std::uint8_t>(fwd_op_t::WRITE)};
-        tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&ob, 1));
-        const std::vector<std::byte> dst = b_path({"net", "can", "can0", "n5", "a", "b"});
-        const std::vector<std::byte> src = b_path({"reply-ep"});
-        const std::vector<std::byte> payload = b_value_u32(kWritten);
-        body.insert(body.end(), dst.begin(), dst.end());
-        body.insert(body.end(), src.begin(), src.end());
-        body.insert(body.end(), payload.begin(), payload.end());
-        std::vector<std::byte> out;
-        tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
-        channel.b().send(out);
+        channel.b().send(b_fwd(fwd_op_t::WRITE, b_path({"net", "can", "can0", "n5", "a", "b"}),
+                               b_path({"reply-ep"}), {}, b_value_u32(kWritten)));
     }
     const auto r_write = inbox.wait(kBudget);
     check(r_write.has_value(), "client received a REPLY for the forwarded WRITE via n5");
@@ -522,7 +470,5 @@ int main() {
     test_enumeration_and_forwarding();
     test_peer_expiry();
     test_peer_table_growth();
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("transport_can_peers");
 }

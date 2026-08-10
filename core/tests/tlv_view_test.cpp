@@ -24,15 +24,11 @@
 #include "libtracer/mem_borrowed.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/view.hpp"
+#include "test_support.hpp"
 
 namespace {
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /** @brief Owns the per-link byte copies and the rope viewing them (borrowed links). */
 struct split_rope_t {
@@ -311,10 +307,5 @@ int main() {
     test_bounds_and_grammar_errors();
     test_zero_copy_and_ownership();
     test_materialize_and_timestamp();
-    if (g_failures != 0) {
-        std::printf("%d FAILURE(S)\n", g_failures);
-        return 1;
-    }
-    std::printf("ALL PASS\n");
-    return 0;
+    return tr::testing::summary("tlv_view");
 }

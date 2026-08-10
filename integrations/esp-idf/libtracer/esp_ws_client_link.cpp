@@ -162,13 +162,23 @@ class sender_exit_t {
 }  // namespace
 
 esp_ws_client_link_t::esp_ws_client_link_t(std::string host, std::uint16_t port,
-                                           std::string ws_path, std::size_t rx_bytes,
-                                           std::size_t tx_bytes, std::size_t recv_stack)
+                                           std::string ws_path, std::string handshake_headers,
+                                           std::size_t rx_bytes, std::size_t tx_bytes,
+                                           std::size_t recv_stack)
     : host_(std::move(host)),
       port_(port),
       ws_path_(std::move(ws_path)),
+      handshake_headers_(std::move(handshake_headers)),
       rx_buf_(rx_bytes),
       tx_buf_(tx_bytes) {
+    // Every member the recv thread reads is initialized ABOVE this line, which is the
+    // whole of #959: the thread spawned below dials at once, so a knob delivered after the
+    // spawn is a data race, and for a handshake token it also leaves it undefined whether
+    // the first dial carries one — and a dial WITHOUT one is what an admission hook refuses.
+    // `handshake_headers_` was that knob; it is a ctor argument and `const` now, so the
+    // ordering is a property of the type rather than a request in a doc comment. Nothing
+    // may be added between here and the spawn that the recv thread also reads.
+    //
     // The recv thread owns dialing + the read loop; the ctor never blocks on the
     // network. recv_stack==0 uses the pthread default; any other value is APPLIED —
     // this thread runs in-call delivery through the graph's on_write seam, so a node
@@ -261,6 +271,13 @@ bool esp_ws_client_link_t::connect_once() {
     // Optional handshake auth: extra header lines a peer's admission hook can gate on (a
     // b2b dial carries no browser cookie). esp_transport_ws appends them verbatim; empty
     // leaves the field null so the handshake is byte-for-byte the historical one.
+    //
+    // Read with no lock and no copy, which is sound because the member is `const` and was
+    // set before this thread existed (#959). The pointer therefore cannot dangle, and the
+    // FIRST dial carries the header. It used to be an ordinary member a setter assigned
+    // after construction, unsynchronized with this read: which side won was undefined, so
+    // whether dial one carried a token was undefined too. Every re-dial re-reads the same
+    // bytes, so a reconnect re-authenticates.
     if (!handshake_headers_.empty()) cfg.headers = handshake_headers_.c_str();
     esp_transport_ws_set_config(ws_, &cfg);
 
@@ -410,6 +427,20 @@ void esp_ws_client_link_t::send(std::span<const std::byte> frame) {
     // This early-out stays AHEAD of the sender tally and of write_m_ (#952 ordering): it
     // reads nothing the destructor can be racing. Counted without any lock held.
     if (frame.empty() || frame.size() > tx_buf_.size()) {  // drop oversize/empty
+        // The oversize half is the `tx_bytes` CEILING, and this is the only place that can
+        // name it. `transport_t::send` returns void, so the router cannot be told the frame
+        // died; `st_.tx_drops` says one did, but the `!connected_` arm and the short-write
+        // arm below bump that same counter, so a bump alone does not even say WHICH drop
+        // this was, let alone which knob was too small. A per-frame ceiling nobody can see
+        // is how a blob-carrying value or a composed reply vanishes with clean logs on both
+        // ends (#959). Logged every time, exactly like the
+        // rx-buffer arm in recv_loop: this firing means the link emits NOTHING at this
+        // frame size, which is a misconfiguration to fix, not a rate to live with. The
+        // empty half needs no log — there is nothing to put on the wire and no knob to
+        // name — but it is the same drop and is counted the same way.
+        if (!frame.empty())
+            ESP_LOGW(kTag, "outbound frame %u B exceeds %u B tx buffer — dropped",
+                     static_cast<unsigned>(frame.size()), static_cast<unsigned>(tx_buf_.size()));
         bump([this] { ++st_.tx_drops; });
         return;
     }
@@ -498,6 +529,24 @@ void esp_ws_client_link_t::recv_loop() {
     // link that was never alive). It is a plain local because this thread is the only
     // writer of `connected_ == true`: a dial is the sole way up, and it happens here.
     bool was_up = false;
+    // Whether the connection currently standing has ever had a MESSAGE from the peer
+    // delivered out of it — the test that separates a refusal from a working link (#1128).
+    //
+    // INBOUND, deliberately, and not "did we connect" or "did we send". A post-101
+    // admission refusal is a successful transport connect by construction: the refusal can
+    // only be expressed after `101 Switching Protocols` is on the wire, so
+    // `esp_transport_connect` returns 0 and `connect_once()` reports success. Nor can the
+    // outbound side tell: a send into a socket the peer has already decided to close still
+    // succeeds locally. A message ARRIVING is the one event that proves the peer admitted
+    // this session at the application level, because a refusing peer emits nothing but the
+    // CLOSE. So a connection that comes up and goes down having delivered nothing is
+    // counted as a failed attempt, and pays the same backoff a failed dial does.
+    //
+    // The false positive it accepts: a genuinely idle-but-admitted link that the peer
+    // closes without ever having sent anything also reads as unproductive, and re-dials
+    // one backoff later instead of at once. That is the harmless direction — the cost is
+    // one interval on a link that was silent anyway, against a spin that reboots the node.
+    bool exchanged = false;
     while (!stop_.load(std::memory_order_relaxed)) {
         if (!connected_.load(std::memory_order_acquire)) {
             off = 0;
@@ -512,8 +561,15 @@ void esp_ws_client_link_t::recv_loop() {
             // break is what keeps the destructor's `connected_` store from re-opening
             // the handle rewrite underneath a sender that observed the previous `true`.
             if (stop_.load(std::memory_order_acquire)) break;
+            // Set by either arm below — a connection that produced nothing, or a dial that
+            // did not land. Both are failed attempts and both spend the SAME interval;
+            // there is one backoff site so they cannot drift apart.
+            bool backoff_now = false;
             if (was_up) {
                 was_up = false;
+                // Captured before notify_down: the seam runs app code, which may send, and
+                // nothing it does retroactively makes this connection productive.
+                backoff_now = !exchanged;
                 // The departure seam (RFC-0009 §D extended to peer departure), and the
                 // reason it is reported at all (#957). This arm is downstream of all
                 // three sites that clear `connected_` — drop() (peer CLOSE, a poll
@@ -536,9 +592,19 @@ void esp_ws_client_link_t::recv_loop() {
                 // teardown is not a peer departure and reports nothing.
                 notify_down();
             }
-            if (connect_once()) {
-                was_up = true;  // there is now a connection whose death is reportable
-            } else {
+            exchanged = false;
+            // An unproductive connection backs off INSTEAD of re-dialing this turn; the
+            // dial happens on the next one, past the wait. Dialing first and sleeping
+            // after would leave the spin intact for exactly one more cycle, which on the
+            // failing peer is the cycle that matters.
+            if (!backoff_now) {
+                if (connect_once()) {
+                    was_up = true;  // there is now a connection whose death is reportable
+                } else {
+                    backoff_now = true;
+                }
+            }
+            if (backoff_now) {
                 // Interruptible backoff. `sleep_for` was not: the destructor's join
                 // inherited the whole 1.5 s on exactly the unreachable peer a re-dial
                 // exists for. What remains uninterruptible is the dial itself —
@@ -658,6 +724,11 @@ void esp_ws_client_link_t::recv_loop() {
                     st_.rx_bytes += static_cast<std::uint32_t>(off);
                     st_.last_rx_us = esp_timer_get_time();
                 }
+                // This connection has now proved the peer admitted it, so its eventual
+                // death is a DROP to retry at once rather than a refusal to back off from
+                // (#1128). Set before the delivery: the router runs the app in-call here
+                // and the app may tear the link down from this very stack.
+                exchanged = true;
                 rx_.deliver_borrowed(std::span<const std::byte>(rx_buf_.data(), off));
             }
             off = 0;

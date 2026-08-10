@@ -11,6 +11,10 @@
  * stream_endpoint_t below owns that layer (the peer-fd atomic, the write
  * mutex, the teardown-under-write-lock ordering, the one-peer accept loop);
  * udp keeps its datagram shape (one connectionless fd, no peer teardown).
+ * The MULTI-peer stream servers (tcp / ws) layer one more tier on top —
+ * slot_server_t, the slot vector + accept/poll/teardown machinery and the
+ * bus_link_t query trio (#871); only their framing and handshake differ, and
+ * those are its two variance points.
  */
 #pragma once
 
@@ -20,8 +24,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <span>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "libtracer/transport.hpp"
 
 /** @brief The POSIX scatter-gather descriptor (`<sys/uio.h>`), forward-declared
  *         so this header need not pull the system socket headers in. */
@@ -339,6 +349,292 @@ class stream_endpoint_t : protected posix_endpoint_t {
     std::mutex write_m_;           /**< @brief Serializes writes to @ref conn_fd_ (see the
                                                write-serialization invariant). */
     std::atomic<int> conn_fd_{-1}; /**< @brief The live peer connection (-1 = none). */
+};
+
+/**
+ * @brief The MULTI-peer slot/poll machinery every stream SERVER shares
+ *        (transport_tcp_server, transport_ws_server) — one listener, N
+ *        recycled peer slots, one poll thread (#871).
+ *
+ * The tier above @ref stream_endpoint_t — that one owns a single peer fd, this
+ * one owns a VECTOR of them. Everything the two servers used to restate
+ * line-for-line lives here exactly once — the slot struct and its threading
+ * rule, the bind/listen/getsockname bring-up, the free-slot-or-grow accept
+ * with its @p max_peers refusal and `p<slot>` naming, the poll loop, the
+ * two-phase teardown, the @ref bus_link_t query trio, and the broadcast's
+ * pristine-iovec-copy-per-peer fan-out. Only the FRAMING and the HANDSHAKE
+ * differ between the two servers, and those are the variance points below
+ * (the `msquic_endpoint_t` shape: runtime virtuals, appropriate per ADR-0047
+ * §4 because peer arrival/departure is wiring-frequency, not hot path).
+ *
+ * **Slot threading rule, ONE rule for both halves of a slot's lifecycle:**
+ * @ref session_base_t::fd / @ref session_base_t::open are atomics MUTATED
+ * only under `write_m_` — accept publishes them (fd FIRST, so "open ⇒ fd
+ * valid" is an invariant, #891), teardown resets them (open first) — and read
+ * by senders under that same lock, so a sender never sees a half-published
+ * slot. @ref session_base_t::name is guarded by @ref peers_m_; every
+ * protocol buffer a slot carries is poll-thread-only. The destructor's
+ * closing sweep is the one mutation outside the lock and runs after the poll
+ * thread is joined. Every access to the two atomics is `relaxed`: the lock,
+ * not the memory order, is what orders them. Lock order where nested:
+ * @ref peers_m_ → `write_m_`.
+ *
+ * @warning A derived destructor MUST call `stop_and_join()` as its FIRST act:
+ *          the poll thread dispatches the variance points below into the
+ *          derived object, which must still be alive when it does.
+ */
+class slot_server_t : public transport_t, public bus_link_t, protected stream_endpoint_t {
+   public:
+    /** @brief True if the listen socket is bound and listening. */
+    [[nodiscard]] bool ok() const noexcept { return listen_fd_ >= 0; }
+
+    /** @brief The actual bound TCP port (resolves an ephemeral 0 request). */
+    [[nodiscard]] std::uint16_t local_port() const noexcept { return bound_port_; }
+
+    /**
+     * @brief The @ref bus_link_t facet (ADR-0044) when constructed `peer_named`, else
+     *        `nullptr`. With the facet the router tags inbound frames per peer (each
+     *        peer gets its own return-route identity and a `dst` segment routes back to
+     *        that one session); without it the link keeps point-to-point hop naming —
+     *        inbound frames carry the registered child NAME and `send()` fans out to
+     *        every open peer.
+     * @note Departure eviction (RFC-0009 §D.5) follows the same split: peer-named mode
+     *       evicts just the departed peer's edges (`notify_peer_down(name)`), while FLAT
+     *       mode reports the whole link down (`notify_down()`) — but only when the LAST
+     *       open session departs (#889). A flat link has ONE routing identity for all its
+     *       peers (the registered child NAME), so firing that on a mid-life close would
+     *       evict the surviving peers' edges too.
+     */
+    [[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }
+
+    /**
+     * @brief The mode authority (#889): the `peer_named` this server was constructed with.
+     *
+     * The ONE answer to "which mode is this link in" — @ref bus, the two servers' per-frame
+     * tier select, and the departure branch in @ref teardown_slot all key off this flag (not
+     * off whether a peer sink happens to be installed), and `bus_link_t` refuses every
+     * peer-named wiring call while it is false.
+     */
+    [[nodiscard]] bool peer_named() const noexcept override { return peer_named_; }
+
+    /** @brief Visit the currently-OPEN peers' names, `p<slot>` (#426). */
+    void enumerate_peers(const peer_visitor_t& visit) const override;
+
+    /**
+     * @brief Resolve an open peer's name to its directed sending endpoint.
+     *
+     * Owned by the peer's slot and pointer-valid for this server's lifetime (slots are
+     * never freed, only recycled). After the peer departs its sends no-op until the slot
+     * is reused.
+     * @retval nullptr @p peer names no currently-open connection.
+     */
+    [[nodiscard]] transport_t* peer_link(std::string_view peer) override;
+
+    /**
+     * @brief Close the open peer named @p peer, freeing its slot for reuse.
+     *
+     * Shuts the socket down (`SHUT_RDWR`) under the sender lock order
+     * (@ref peers_m_ → `write_m_`); the poll thread's next pass observes the close and
+     * runs the IDENTICAL remote-FIN teardown, so the recycle is asynchronous (within one
+     * poll bound) and no poll-thread-only buffer is ever touched off-thread.
+     * @retval true  @p peer named an open connection and its socket was shut down.
+     * @retval false @p peer names no currently-open connection.
+     */
+    [[nodiscard]] bool close_peer(std::string_view peer) override;
+
+   protected:
+    /**
+     * @brief The protocol-agnostic half of ONE peer slot.
+     *
+     * Slots are never destroyed while the server lives — recycled in place on departure
+     * — so the endpoint facade @ref peer_link hands out stays pointer-valid for the
+     * server's lifetime. A derived server extends this with its own framing state
+     * (a length-prefix framer, a WS reassembler + byte buffers) and owns the concrete
+     * @ref peer_endpoint facade object. See the class-level threading rule for who may
+     * touch what.
+     */
+    struct session_base_t {
+        /** @brief Constructs a free slot (no fd, not open, unnamed). */
+        session_base_t() = default;
+        /** @brief Virtual: the base owns the slot vector and deletes derived slots. */
+        virtual ~session_base_t() = default;
+        session_base_t(const session_base_t&) = delete;
+        session_base_t& operator=(const session_base_t&) = delete;
+
+        std::atomic<int> fd{-1};       /**< @brief The peer socket; -1 ⇒ free slot. */
+        std::atomic<bool> open{false}; /**< @brief True while the session may carry frames. */
+        /** @brief The peer's routable NAME, `p<slot>` — a pure function of the slot index
+         *         (ADR-0073 §2, #426): stamped at accept, moved out by teardown (the
+         *         eviction seam), so a reused slot gets the SAME name back. A legal path
+         *         segment, unlike the old `<ip>:<port>`. It identifies a SESSION, not a
+         *         device — a reconnecting peer may land in a different slot; device-stable
+         *         identity is a named link (RFC-0014). */
+        std::string name;
+        /** @brief The remote `<ip>:<port>` — DIAGNOSTIC only, never a name and never in
+         *         the graph (#584 owns any future per-peer facet). Refreshed per accept. */
+        std::string endpoint_str;
+        /** @brief The directed facade @ref peer_link returns — the derived slot's own
+         *         member, registered here by @ref make_session. */
+        transport_t* peer_endpoint = nullptr;
+    };
+
+    /**
+     * @brief Constructs inert: no listen socket, no slots, no thread.
+     *
+     * @param max_peers  Concurrent-peer admission cap; 0 = unbounded (host default). A
+     *                   deployment-injected bound (RFC-0006) — a connection beyond it is
+     *                   accepted and immediately closed (a clean refusal, not a hung SYN).
+     * @param peer_named Expose the @ref bus_link_t facet (see @ref bus).
+     */
+    slot_server_t(std::size_t max_peers, bool peer_named)
+        : max_peers_(max_peers), peer_named_(peer_named) {}
+
+    /**
+     * @brief Closes the listen socket and sweeps every slot's fd.
+     *
+     * Runs AFTER the derived destructor, whose first act was `stop_and_join` — the poll
+     * thread is gone, so nothing races this sweep and no virtual is dispatched from it.
+     */
+    ~slot_server_t();
+
+    /**
+     * @brief The shared bring-up: socket + SO_REUSEADDR + bind + listen(SOMAXCONN) +
+     *        getsockname, publishing @ref listen_fd_ and @ref bound_port_.
+     *
+     * SOMAXCONN is the OS's own accept-queue bound — admission is per-connection in the
+     * accept path (the @p max_peers deployment cap), never a synthetic backlog.
+     *
+     * @param bind_port TCP port to listen on (host byte order; 0 → ephemeral, resolved
+     *                  into @ref local_port).
+     * @retval false The socket could not be bound/listened; the caller must NOT spawn the
+     *               poll thread (`ok()` stays false).
+     */
+    bool bind_listen(std::uint16_t bind_port);
+
+    /**
+     * @brief The ONE poll thread body: one `poll(2)` pass multiplexes the listen socket
+     *        and every live peer — no per-peer thread (the MCU-shaped choice, #362),
+     *        bounded to 100 ms so the loop stays shutdown-responsive.
+     *
+     * Spawn it from the DERIVED constructor (`start([this] { run(); }, recv_stack)`),
+     * last, once every member the variance points touch is initialized.
+     */
+    void run();
+
+    /**
+     * @brief Tear one slot down and free it for reuse (poll thread only).
+     *
+     * Two phases: stop name resolution under @ref peers_m_ (so no new sender targets the
+     * dying slot), then reset `open`/`fd` under `write_m_` BEFORE `close(2)` (so an
+     * in-flight send either finished against the still-open fd or observes the reset).
+     * @ref on_slot_reset clears the protocol buffers, and the departure seam
+     * (RFC-0009 §D.5) fires LAST with no transport lock held — the notifier re-enters the
+     * routing plane. Which seam depends on @ref peer_named() — the departed peer's own name
+     * when peer-named, the whole link when flat, and then only once no open session is
+     * left (#889).
+     *
+     * @param s The slot to recycle.
+     */
+    void teardown_slot(session_base_t& s);
+
+    /**
+     * @brief Fan one already-encoded gathered record to EVERY open peer.
+     *
+     * `write_all_iov` CONSUMES its iovec array (it advances base/len on partial writes),
+     * so each peer writes from a fresh COPY of the pristine gather taken here — the
+     * copy store is the shared `%iov_table.hpp` one, and its exhaustion DROPS the frame
+     * rather than truncating it (#848). Takes @ref peers_m_ → `write_m_`, the header
+     * lock order.
+     *
+     * @param pristine The assembled record (framing entry first, payload spans after).
+     * @param count    The number of entries in @p pristine.
+     */
+    void broadcast_iov(const ::iovec* pristine, std::size_t count);
+
+    /**
+     * @name Variance points (runtime virtuals — ADR-0047 §4 wiring-frequency).
+     * @{
+     */
+
+    /**
+     * @brief Allocate one fresh slot of the derived server's session type, with its
+     *        @ref session_base_t::peer_endpoint facade wired to this server.
+     *
+     * Called under @ref peers_m_ when no free slot exists and the cap allows growth.
+     */
+    virtual std::unique_ptr<session_base_t> make_session() = 0;
+
+    /**
+     * @brief Per-accept setup: socket options and the slot's protocol buffers, run after
+     *        the slot is named and before its fd is published.
+     *
+     * @param s  The slot being admitted (named, not yet published).
+     * @param fd The accepted socket.
+     * @return The slot's INITIAL `open` value — true where the protocol has no handshake
+     *         (a raw stream peer is open the moment it is accepted), false where the
+     *         session only carries frames past a handshake the framing hook completes
+     *         (WS holds `open` until its 101 is on the wire).
+     */
+    virtual bool on_accept(session_base_t& s, int fd) = 0;
+
+    /**
+     * @brief Per-readable-chunk framing: hand @p len bytes just read off @p s 's socket
+     *        to the derived server's reassembler (or its handshake parser).
+     *
+     * Runs on the poll thread with no transport lock held. The hook owns the decision to
+     * @ref teardown_slot on a framing violation; a peer that simply closed is torn down
+     * by the caller before this is reached.
+     *
+     * @param s    The slot the bytes arrived on.
+     * @param data The chunk (borrowed; valid only for this call).
+     * @param len  The chunk length, always > 0.
+     */
+    virtual void on_readable(session_base_t& s, const std::byte* data, std::size_t len) = 0;
+
+    /**
+     * @brief Reset the slot's protocol buffers as it is recycled (teardown side).
+     *
+     * @param s The slot being freed; its fd is already closed.
+     */
+    virtual void on_slot_reset(session_base_t& s) = 0;
+
+    /**
+     * @brief TEST SEAM dispatch: run inside the accept-side `write_m_` hold, with the fd
+     *        published and the slot ONE store from open.
+     *
+     * Default: nothing. A derived server overrides it to fire its own hook pointer — the
+     * instant a test holds open to prove the two stores are atomic to senders (#891).
+     */
+    virtual void on_slot_publishing() {}
+    /** @} */
+
+    /**
+     * @brief Guards the slot vector and every slot's NAME — the cross-thread reads
+     *        (@ref enumerate_peers / @ref peer_link) against the poll thread's
+     *        accept/teardown. See the class-level threading rule; lock order where
+     *        nested: this → `write_m_`.
+     */
+    mutable std::mutex peers_m_;
+    /** @brief The peer slots: insert-only, recycled in place, never freed early. */
+    std::vector<std::unique_ptr<session_base_t>> slots_;
+    int listen_fd_ = -1;           /**< @brief The bound+listening socket (-1 = not bound). */
+    std::uint16_t bound_port_ = 0; /**< @brief The resolved bound port (see local_port()). */
+    std::size_t max_peers_ = 0;    /**< @brief Admission cap; 0 = unbounded (RFC-0006). */
+    bool peer_named_ = false;      /**< @brief Expose bus() — a wiring-time deployment choice. */
+
+   private:
+    /** @brief Admit one inbound connection into a free (or newly grown) slot. */
+    void accept_peer();
+
+    /** @brief One readable pass on @p s: `recv` a chunk, or tear the slot down. */
+    void service_peer(session_base_t& s);
+
+    /**
+     * @brief True while ANY slot is still open — the flat mode's "is the link still up"
+     *        question (#889), asked by @ref teardown_slot after the departing slot has
+     *        already been closed, so it never counts itself.
+     */
+    [[nodiscard]] bool any_open_session() const;
 };
 
 }  // namespace tr::net

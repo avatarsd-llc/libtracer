@@ -23,15 +23,13 @@
 #include <string_view>
 #include <vector>
 
+#include "test_support.hpp"
+
 namespace {
 
 using tr::wire::key_view_t;
 
-int g_failures = 0;
-void check(bool ok, const char* what) {
-    std::printf("  [%s] %s\n", ok ? "PASS" : "FAIL", what);
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /** @brief One NAME TLV record: [type=0x02, opt=0x00, u16 len (LE), payload...]. */
 std::vector<std::byte> name_rec(std::string_view s) {
@@ -158,6 +156,5 @@ int main() {
         check(ragged_levels.empty(), "ragged split appends nothing");
     }
 
-    std::printf("%s\n", g_failures == 0 ? "ALL PASS" : "FAILURES");
-    return g_failures;
+    return tr::testing::summary("key_view");
 }

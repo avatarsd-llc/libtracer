@@ -111,17 +111,40 @@ struct remote_delivery_t {
  * @brief An opaque handle to ONE in-process subscription — the token @ref graph_t::unsubscribe
  *        removes it by (ADR-0049 host-SDK sugar for the wire `:subscribers[N]` clear).
  *
- * Returned by the callback-form @ref graph_t::subscribe overloads. The producer @ref vertex is
- * pinned for the graph's lifetime (ADR-0057 — vertices are never freed), so the handle stays
- * valid until it is unsubscribed; @ref slot is that edge's `:subscribers[]` index. Trivially
- * copyable and pointer-sized-plus-index — pass it by value. Do NOT dereference @ref vertex; treat
- * the whole struct as opaque. A default-constructed handle (`vertex == nullptr`) unsubscribes to a
- * `NOT_FOUND` no-op.
+ * Returned by the callback-form @ref graph_t::subscribe overloads. It names a producer vertex and
+ * one of that vertex's `:subscribers[]` slots; the vertex is pinned for the graph's lifetime
+ * (ADR-0057 — vertices are never freed), so the handle stays valid until it is unsubscribed.
+ * Trivially copyable and pointer-sized-plus-index — pass it by value.
+ *
+ * Opaque the same way @ref vertex_handle_t is, and for the same reason (ADR-0056): the pair it
+ * carries is `graph_t`'s state, not the caller's. `graph_t` is the sole `friend` — the only code
+ * that can build one from a vertex and a slot, and the only code that can read either back — so a
+ * caller can neither reach the `vertex_t` behind a live subscription (whose slot mutators are only
+ * valid under the graph's locks) nor forge a handle from an arbitrary pointer and index and hand
+ * it to @ref graph_t::unsubscribe. A default-constructed handle names no subscription and
+ * unsubscribes to a `NOT_FOUND` no-op; @ref operator== is the only observation a caller has.
  */
-struct subscription_t {
-    vertex_t* vertex = nullptr; /**< @brief Opaque: the producer vertex the edge lives on. */
-    std::size_t slot = 0;       /**< @brief Opaque: the `:subscribers[]` slot index. */
+class subscription_t {
+   public:
+    /** @brief A handle naming no subscription — @ref graph_t::unsubscribe answers `NOT_FOUND`. */
+    subscription_t() = default;
+
+    /** @brief Two handles compare equal iff they name the same slot on the same producer vertex.
+     *         (`!=` is synthesized.) */
+    [[nodiscard]] friend bool operator==(const subscription_t& a,
+                                         const subscription_t& b) noexcept {
+        return a.vertex_ == b.vertex_ && a.slot_ == b.slot_;
+    }
+
+   private:
+    friend class graph_t;  // sole constructor + the only code that reads the pair back.
+    subscription_t(vertex_t* vertex, std::size_t slot) noexcept : vertex_(vertex), slot_(slot) {}
+    vertex_t* vertex_ = nullptr; /**< @brief The producer vertex the edge lives on. */
+    std::size_t slot_ = 0;       /**< @brief The `:subscribers[]` slot index. */
 };
+
+// Pass-by-value, as the doc comment above promises: privatizing the pair costs no wrapper.
+static_assert(std::is_trivially_copyable_v<subscription_t>);
 
 /**
  * @brief One node-scoped vertex reference — a slot index AND the generation stamping it
@@ -405,10 +428,10 @@ class graph_t {
      *        subscriber on a strict ancestor (RFC-0005)?
      *
      * The gate for a demand-driven producer that wants to skip *delivery work*. It joins the
-     * two gates `deliver_vertex`, the eager per-vertex delivery unit, applies — `fan_out`'s
-     * own self-gate on the own count, then the `listeners_above` gate `deliver_vertex` holds
-     * over `bubble_up` — so a producer that skips a `deliver_vertex` on `false` skips exactly
-     * what that call would have found no receiver for. (A decomposing BRANCH write is not one
+     * two gates `deliver_vertex`, the per-vertex delivery unit, applies — `fan_out`'s own
+     * self-gate on the own count, then the `listeners_above` gate `deliver_vertex` holds over
+     * `bubble_up` — so a producer that skips a `deliver_vertex` on `false` skips exactly what
+     * that call would have found no receiver for. (A decomposing BRANCH write is not one
      * `deliver_vertex`: it fans out at each descendant landing site under that site's own
      * gate, which this predicate does not answer for.) Gating on the own-slot count alone
      * silently drops every subtree subscriber, which is why @ref own_subs carries a warning
@@ -422,25 +445,17 @@ class graph_t {
      *          skips the VALUE STORE starves every awaiter (no `write_seq_` bump to wake
      *          them) and freezes the LKV for every reader.
      *
-     * @warning A skipped publish is not recovered by ADR-0049's durability latch. That
-     *          argument belongs to @ref vertex_t::own_subs_ordered's fan-out skip, whose
-     *          protocol is *store the LKV, THEN load the count*; a producer that skips on
-     *          this predicate never reaches the store, so there is no new value to latch.
-     *          And the latch is **opt-in**: it fills only for a subscriber whose policy sets
-     *          RFC-0022 §3.A bit 5 (`durability_request`) — a default `policy = {}` latches
-     *          nothing at all. One that did ask latches whatever the LKV then holds, which is
-     *          whatever last wrote that slot, not necessarily this producer's prior publish;
-     *          if nothing has ever stored, it latches nothing. What the `seq_cst` own half
-     *          does buy is narrower: a subscribe that lands is globally ordered before the
-     *          producer's NEXT read, so at most one round is skipped. The
-     *          ancestor half is not even that — `listeners_above` is relaxed with no
-     *          `seq_cst` twin, so this predicate is exactly as ordered as `deliver_vertex`'s
-     *          own `listeners_above` gate and no more. It neither adds that hazard nor
-     *          closes it.
+     * @warning **A skip here has no durability-latch backstop.** ADR-0049's latch belongs to
+     *          @ref vertex_t::own_subs_ordered's fan-out skip, whose protocol is *store the
+     *          LKV, THEN load the count*; a producer that skips on this predicate never
+     *          reaches the store, so there is no new value to latch. What ordering this
+     *          predicate does give is just its two loads' — the `seq_cst`
+     *          @ref vertex_t::own_subs_ordered and the relaxed `listeners_above` — making it
+     *          exactly as ordered as `deliver_vertex`'s own two gates and no more. The
+     *          `seq_cst` half's argument is documented there; it is not restated here.
      *
-     * @note No test covers the `seq_cst` own half: swapping it for the relaxed
-     *       @ref vertex_t::own_subs leaves the whole suite green, so its presence here rests
-     *       on the argument above, not on coverage.
+     * @note Swapping the `seq_cst` own half for the relaxed @ref vertex_t::own_subs leaves
+     *       the whole suite green, so its presence here rests on that argument, not coverage.
      */
     [[nodiscard]] bool has_subscribers(vertex_handle_t vh) const noexcept {
         const vertex_t* const v = vh.get();
@@ -660,7 +675,14 @@ class graph_t {
      * hold (never across vertices), so concurrent writes/deliveries interleave
      * freely; an in-flight delivery keeps its route alive by refcount clone
      * (ADR-0041 §2). Safe to call for a link that never subscribed (a no-op).
-     * @param link_name This node's NAME for the departed link.
+     *
+     * An EMPTY @p link_name matches nothing and returns 0. This entry point reports a
+     * COUNT and has no error channel, so a nameless link is a no-op rather than a
+     * status: a link with no name never subscribed anything. It is a rule, not a
+     * coincidence of the comparison — a LOCAL admission stores the empty caller
+     * context, so before #1056 an empty key compared equal to every local edge that
+     * carried a cold half (the `delivery_compact` opt-in) and reclaimed it graph-wide.
+     * @param link_name This node's NAME for the departed link; empty ⇒ no-op, 0.
      * @return The number of edges evicted, summed over the graph.
      */
     std::size_t evict_link_edges(std::string_view link_name);
@@ -1011,7 +1033,7 @@ class graph_t {
      *
      * The host-SDK-sugar counterpart of the wire `:subscribers[N]` clear (ADR-0049): it
      * deactivates the edge slot and unwinds the RFC-0005 listener bookkeeping (descendants'
-     * writes stop bubbling to @p sub.vertex), exactly as the wire path does. The slot shell
+     * writes stop bubbling to the producer @p sub names), exactly as the wire path does. The shell
      * stays (index-stable) and a later @ref subscribe reuses it. Idempotent-ish: a
      * default-constructed or already-cleared handle returns `NOT_FOUND`. Only DEACTIVATES —
      * an in-flight delivery already snapshotted the edge and completes (ADR-0041 §2), so the
@@ -1321,7 +1343,17 @@ class graph_t {
     // Hands back the exact published LKV pointer (null for a Handler-role write —
     // the user handler consumed the value, nothing was stored), so the eager write
     // path delivers precisely what was stored (RFC-0008 §D) without a rope reclone.
-    result_t<std::shared_ptr<const rope_t>> store_value(vertex_t* v, rope_t value);
+    // Takes `rope_t&&`, NOT by value (#1116). By value, a caller holding an lvalue built
+    // a move-constructed temporary at the call site and destroyed it again — on the
+    // per-delivery path-target leg that is once per subscriber per publish. Whether
+    // that move was a few SSE stores or an out-of-line call depended on the inliner's
+    // budget for this TU, which is what made an unrelated header change measurable as
+    // a latency regression (#888/#1086). An rvalue reference binds what the caller
+    // already owns, so there is no temporary to build and none to destroy.
+    // NOTE the asymmetry this creates: the Handler leg never moves from `value`, so the
+    // CALLER's rope now survives the call on that path holding its refcounts, where the
+    // by-value temporary used to die at the call. Destruction count is unchanged.
+    result_t<std::shared_ptr<const rope_t>> store_value(vertex_t* v, rope_t&& value);
     // Branch-write decomposition (RFC-0005): a POINT payload written to `v` lands
     // each value-carrying node at the corresponding descendant vertex as a
     // refcount SUBVIEW of the written frame (creating missing vertices, CREATE-

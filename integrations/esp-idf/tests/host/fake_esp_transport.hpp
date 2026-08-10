@@ -38,6 +38,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -77,6 +78,19 @@ void push_frames(std::vector<frame_t> frames);
 
 /** @brief The `ws_path` the last dial requested. */
 [[nodiscard]] std::string last_ws_path();
+
+/**
+ * @brief The `headers` standing at each `esp_transport_connect`, in dial order —
+ *        `std::nullopt` for a dial whose config left the field null.
+ *
+ * PER DIAL, not "the last one", and that is the #959 observable: the only way to supply a
+ * handshake token ran after the recv thread had already been spawned, which left it
+ * UNDEFINED whether the FIRST dial carried one. A `last_headers()` accessor cannot answer
+ * that either way — by the time a test read it the second dial would have carried the
+ * header and the link would look correct. Sampled at connect (config is applied immediately
+ * before it), so entry `n` is what dial `n` actually requested.
+ */
+[[nodiscard]] std::vector<std::optional<std::string>> dial_headers();
 
 /**
  * @brief Make `esp_transport_get_socket` answer @p fd instead of -1 (reset restores -1).

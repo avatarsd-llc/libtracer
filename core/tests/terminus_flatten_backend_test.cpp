@@ -68,10 +68,12 @@
 #include <utility>
 #include <vector>
 
+#include "fwd_frame_builder.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/mem_pool.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -177,12 +179,7 @@ using tr::wire::opt_t;
 using tr::wire::tlv_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /**
  * @brief A `mem_backend_t` that serves from an upstream backend until its serve budget runs
@@ -277,11 +274,6 @@ class rec_link_t : public transport_t {
 
 // --- wire builders (the fwd_flatten_backend_test shapes) -----------------------------
 
-/** @brief Append @p src to @p dst. */
-void append(std::vector<std::byte>& dst, const std::vector<std::byte>& src) {
-    dst.insert(dst.end(), src.begin(), src.end());
-}
-
 /** @brief A `PATH` TLV over the given `/`-segments. */
 std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> body;
@@ -311,27 +303,7 @@ std::vector<std::byte> b_value_filled(std::size_t n, std::uint8_t fill) {
     return out;
 }
 
-/** @brief An opaque `VALUE` TLV holding one byte. */
-std::vector<std::byte> b_value_u8(std::uint8_t v) {
-    const std::byte b{v};
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::VALUE, opt_t{}, std::span<const std::byte>(&b, 1));
-    return out;
-}
-
-/** @brief A `FWD` frame with the RFC-0004 §B child order. */
-std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
-                             const std::vector<std::byte>& src,
-                             const std::vector<std::byte>& payload = {}) {
-    std::vector<std::byte> body;
-    append(body, b_value_u8(static_cast<std::uint8_t>(op)));
-    append(body, dst);
-    append(body, src);
-    if (!payload.empty()) append(body, payload);
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
-    return out;
-}
+using tr::testing::b_fwd;
 
 /**
  * @brief A rope over @p bytes split into @p links links — the multi-link shape is what makes
@@ -585,7 +557,7 @@ void test_terminus_write_refusal_stores_nothing() {
     router.add_child("in", n.in);
 
     const std::vector<std::byte> write = b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}),
-                                               b_path({"origin"}), b_value_u32(kSecond));
+                                               b_path({"origin"}), {}, b_value_u32(kSecond));
 
     seam.arm();
     n.in.inject(as_rope(write, 4));
@@ -686,7 +658,7 @@ struct split_write_t {
 split_write_t split_write() {
     const std::vector<std::byte> payload = b_value_filled(kOwnPayloadBytes, kOwnFill);
     split_write_t w;
-    w.frame = b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"origin"}), payload);
+    w.frame = b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"origin"}), {}, payload);
     w.split = w.frame.size() - payload.size();
     return w;
 }
@@ -916,7 +888,7 @@ bool within(std::span<const std::byte> inner, std::span<const std::byte> outer) 
 
 /** @brief The #801 fixture: a CONTIGUOUS terminus WRITE, delivered as a borrowed SPAN. */
 std::vector<std::byte> arena_write() {
-    return b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"origin"}),
+    return b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"origin"}), {},
                  b_value_filled(kOwnPayloadBytes, kOwnFill));
 }
 
@@ -1195,6 +1167,5 @@ int main() {
     std::printf("\n");
     test_default_backend_unchanged();
 
-    std::printf("\n%s\n", g_failures == 0 ? "all checks passed" : "FAILURES");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("terminus_flatten_backend");
 }

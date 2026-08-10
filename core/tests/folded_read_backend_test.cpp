@@ -57,6 +57,7 @@
 
 #include "libtracer/mem_pool.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -134,12 +135,7 @@ using tr::graph::vertex_handle_t;
 using tr::view::rope_t;
 using tr::view::view_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /**
  * @brief The short-form POINT header width `read_subtree_folded` emits for a body under 64 KiB —
@@ -458,6 +454,5 @@ int main() {
         check(a == b, "pool-backed and default :children listings are byte-identical");
     }
 
-    std::printf("%s\n", g_failures == 0 ? "ALL PASS" : "FAILURES");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("folded_read_backend");
 }

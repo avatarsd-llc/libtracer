@@ -47,17 +47,14 @@
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_pool.hpp"
 #include "libtracer/view_can.hpp"
+#include "test_support.hpp"
 
 namespace {
 
 using namespace std::chrono_literals;
 namespace can = tr::net::can;
 
-int g_failures = 0;
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 // ---------------------------------------------------------------------------
 // In-memory fake CAN bus + link (the test seam impl of can_link_t).
@@ -1106,7 +1103,5 @@ int main() {
     test_rx_slice_refusal_drops_the_group_and_counts();
     test_rx_zero_length_slice_drops_the_group_and_counts();
     test_endpoint_wraparound_does_not_alias_stale_state();
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("transport_can");
 }

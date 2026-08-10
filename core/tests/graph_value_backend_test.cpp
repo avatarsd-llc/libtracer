@@ -26,6 +26,7 @@
 
 #include "libtracer/mem_pool.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -36,11 +37,7 @@ using tr::graph::status_t;
 using tr::view::rope_t;
 using tr::view::view_t;
 
-int g_failures = 0;
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /** @brief The raw bytes of a VALUE TLV carrying @p payload (the field-write shape). */
 std::vector<std::byte> value_tlv_bytes(std::span<const std::byte> payload) {
@@ -142,7 +139,5 @@ int main() {
               "the identical write on the default-heap graph accepts (contrast: seam is live)");
     }
 
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("graph_value_backend");
 }

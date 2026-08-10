@@ -38,9 +38,11 @@
 #include <thread>
 #include <vector>
 
+#include "fwd_frame_builder.hpp"
 #include "libtracer/route_handle.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -51,12 +53,7 @@ using tr::net::transport_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /** @brief A sink context that knows which sink it belongs to. */
 struct probe_t {
@@ -95,17 +92,7 @@ std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     return out;
 }
 
-std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
-                             const std::vector<std::byte>& src) {
-    std::vector<std::byte> body;
-    const std::byte ob{static_cast<std::uint8_t>(op)};
-    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&ob, 1));
-    body.insert(body.end(), dst.begin(), dst.end());
-    body.insert(body.end(), src.begin(), src.end());
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
-    return out;
-}
+using tr::testing::b_fwd;
 
 /** @brief A span link that only counts — the frame path must keep working under the storm. */
 class counting_link_t : public transport_t {
@@ -233,10 +220,5 @@ int main() {
     std::printf("router sink publish coherence (#914):\n");
     raw_sink_flip_race();
     stale_sink_flip_race();
-    if (g_failures != 0) {
-        std::printf("FAILED: %d check(s)\n", g_failures);
-        return 1;
-    }
-    std::printf("OK\n");
-    return 0;
+    return tr::testing::summary("fwd_sink_race");
 }

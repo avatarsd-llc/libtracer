@@ -23,6 +23,8 @@ handling for that spelling is taken back out.
 
 Run with ``python3 -m unittest discover -s tools/tests`` (no third-party deps).
 """
+import contextlib
+import io
 import os
 import pathlib
 import re
@@ -546,6 +548,22 @@ class NonSourceDirTest(unittest.TestCase):
         )
         self.assertEqual(m["config.hpp"], ["core/include/libtracer/config.hpp"])
 
+    def test_a_bench_agent_copy_does_not_make_a_basename_ambiguous(self):
+        """The `bench-` half of NON_SOURCE_DIR_PREFIXES (#1050).
+
+        Sibling of the `build-agent` case above. A `cmake -S bench -B bench-agent` renders
+        the same generated `config.hpp` one level deeper than a core build does, so the
+        nesting differs from the `build-` case and is worth its own case rather than a
+        parametrisation. Without this, reverting `NON_SOURCE_DIR_PREFIXES` to
+        `("build-",)` leaves the whole suite green — the prefix was added with no
+        mechanized guard, and a real `bench-*` tree never exists in CI.
+        """
+        m = self._tree_with(
+            "core/include/libtracer/config.hpp",
+            "bench-agent/core/generated/include/libtracer/config.hpp",
+        )
+        self.assertEqual(m["config.hpp"], ["core/include/libtracer/config.hpp"])
+
     def test_a_genuine_second_copy_IS_still_ambiguous(self):
         """The exclusions must not be so broad that real ambiguity stops being reported."""
         m = self._tree_with("examples/a/app_main.cpp", "examples/b/app_main.cpp")
@@ -554,10 +572,11 @@ class NonSourceDirTest(unittest.TestCase):
 
 FOOTPRINT = "tools/cortexm0_footprint.py"
 TESTS_CMAKE = "core/tests/CMakeLists.txt"
+CORE_CI = ".github/workflows/core-ci.yml"
 
 
-class CitableBuildPathTest(unittest.TestCase):
-    """The build/tooling allowlist (#1052).
+class CitableNonSourcePathTest(unittest.TestCase):
+    """The non-source allowlist (#1052).
 
     A build file is not a source, so a citation into one used to match nothing here and
     could not be pinned. `docs/modules/segment.md` spelled `LIBTRACER_NO_ATOMIC` in three
@@ -592,6 +611,136 @@ class CitableBuildPathTest(unittest.TestCase):
         self.assertEqual(repinned(f"`{FOOTPRINT}:101`", {FOOTPRINT: {101: 120}}),
                          f"`{FOOTPRINT}:101`")
 
+    def test_a_repin_REPORTS_the_enrolled_path_it_declined(self):
+        # #1095 acceptance: `--repin` either handles what is newly enrolled or says
+        # plainly that it will not. It declines (above); this is the saying-so.
+        _, _, held = cdc.repin_document(f"`{FOOTPRINT}:101`", {FOOTPRINT: {101: 120}}, FILEMAP)
+        self.assertEqual(held, [(FOOTPRINT, "101")])
+
+    def test_a_partial_path_resolves_to_the_enrolled_file(self):
+        # `integrations/esp-idf/README.md` cites its own component as
+        # `libtracer/CMakeLists.txt:172`. An exact-path allowlist reads that as nothing.
+        self.assertEqual(locs("`libtracer/CMakeLists.txt:172`"),
+                         {"integrations/esp-idf/libtracer/CMakeLists.txt:172"})
+
+    def test_a_bare_basename_resolves_to_the_enrolled_file(self):
+        # `tests/testbed/README.md` cites the mesh driver by basename alone.
+        self.assertEqual(locs("`mesh-testbed.test.mjs:24-25`"),
+                         {"bindings/typescript/packages/client/test/mesh-testbed.test.mjs:24",
+                          "bindings/typescript/packages/client/test/mesh-testbed.test.mjs:25"})
+
+    def test_a_spelling_naming_two_enrolled_paths_resolves_to_neither(self):
+        # `CMakeLists.txt` is the basename of four enrolled paths. Guessing one is the
+        # failure mode the source resolver already refuses.
+        self.assertEqual(locs("`CMakeLists.txt:172`"), set())
+
+
+class UnverifiableCitationTest(unittest.TestCase):
+    """A line number in a file the gate cannot read is an ERROR, not silence (#1095).
+
+    The gate verified only `SOURCE_SUFFIXES`, so a line-numbered citation of anything else
+    exited 0 whether it resolved or not. #1088 shifted `core-ci.yml` 18 lines under a
+    design page citing `:95-106` for the ThreadSanitizer job; the range came to name a
+    different job's matrix, the gate stayed green, and the PR read that silence as "no
+    cited file shifted lines".
+    """
+
+    def test_an_ambiguous_non_source_basename_is_reported_not_silently_accepted(self):
+        """The same false green, one step earlier — the case the first fix left open.
+
+        `unverifiable_citations` reported only when the basename resolved to exactly ONE
+        tree file. An AMBIGUOUS one resolves to none, so it fell through and was accepted
+        in silence: `CMakeLists.txt:172` has 15 candidate carriers in this repo and kept
+        the gate at exit 0, which is verbatim the thing #1095 exists to stop.
+        """
+        found = cdc.unverifiable_citations("built at `CMakeLists.txt:172`")
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("ambiguous", found[0])
+        self.assertIn("CMakeLists.txt:172", found[0])
+
+    def test_an_unresolvable_basename_is_still_NOT_reported(self):
+        """The one stated exemption has to survive the fix above.
+
+        A token naming no file in the tree is an address or something outside the repo;
+        reporting it would make every `127.0.0.1:8080` in the docs an error.
+        """
+        self.assertEqual(cdc.unverifiable_citations("reach it at `127.0.0.1:8080`"), [])
+
+    def test_a_line_cited_in_an_unenrolled_real_file_is_reported(self):
+        found = cdc.unverifiable_citations("see `.github/workflows/quic.yml:12`")
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("cannot verify", found[0])
+
+    def test_the_report_names_the_two_ways_out(self):
+        found = cdc.unverifiable_citations("`.github/workflows/quic.yml:12`")
+        self.assertIn("CITABLE_NON_SOURCE_PATHS", found[0])
+        self.assertIn("drop the line number", found[0])
+
+    def test_an_enrolled_path_is_not_reported(self):
+        self.assertEqual(cdc.unverifiable_citations(f"`{CORE_CI}:113-124`"), [])
+
+    def test_a_source_file_is_not_reported(self):
+        self.assertEqual(cdc.unverifiable_citations("`core/src/graph.cpp:956`"), [])
+
+    def test_a_cited_markdown_page_is_not_reported(self):
+        # A doc-to-doc citation is out of scope: `docs/reference/07-host-embedding.md:79`
+        # is a pointer into prose, not into code this gate can anchor.
+        self.assertEqual(cdc.unverifiable_citations("`docs/reference/00-overview.md:12`"), [])
+
+    def test_a_host_and_port_is_not_a_citation(self):
+        # The discriminator is "does this name a real file", precisely so the testbed
+        # README's `127.0.0.1:47301` and a `wss://robot.local:9000` URL stay quiet. A rule
+        # that rejected the FORM alone would fire on both.
+        self.assertEqual(cdc.unverifiable_citations("bind `127.0.0.1:47301` and "
+                                                    "`wss://robot.local:9000`"), [])
+
+    def test_a_file_outside_the_repo_is_not_reported(self):
+        self.assertEqual(cdc.unverifiable_citations("`/etc/systemd/system/foo.service:12`"), [])
+
+    def test_a_citation_with_no_line_number_is_not_reported(self):
+        # A bare path is a pointer, not an anchor — it cannot rot onto another line.
+        self.assertEqual(cdc.unverifiable_citations("`.github/workflows/quic.yml`"), [])
+
+
+class UnverifiableCitationGateTest(unittest.TestCase):
+    """That `main` actually RUNS the check — the same bug shape, one level up.
+
+    `unverifiable_citations` can be perfect and the gate still exit 0 if nothing calls it.
+    Reverting the call site alone left every other test in this file passing, which is
+    precisely the "green while measuring nothing" failure #1095 exists to end. These
+    assert on the gate's OUTPUT rather than its exit code: a stand-in doc set makes every
+    anchor read as uncited, so the exit code is 1 either way and proves nothing.
+    """
+
+    @contextlib.contextmanager
+    def _gate_over(self, relative_dir, body):
+        """Run `main` over a single throwaway doc at `relative_dir`, yielding its output."""
+        directory = os.path.join(REPO, relative_dir)
+        os.makedirs(directory, exist_ok=True)
+        doc = os.path.join(directory, "zz-1095-probe.md")
+        with open(doc, "w") as fh:
+            fh.write(body)
+        real_all_docs, buf = cdc.all_docs, io.StringIO()
+        try:
+            cdc.all_docs = lambda: [pathlib.Path(doc)]
+            with contextlib.redirect_stdout(buf):
+                cdc.main([])
+            yield buf.getvalue()
+        finally:
+            cdc.all_docs = real_all_docs
+            os.remove(doc)
+
+    def test_the_gate_reports_an_unverifiable_citation(self):
+        with self._gate_over("docs/design", "see `.github/workflows/quic.yml:12`\n") as out:
+            self.assertIn("cannot verify", out)
+            self.assertIn("quic.yml:12", out)
+
+    def test_the_gate_leaves_a_dated_record_alone(self):
+        # An ADR cites the tree AS IT STOOD; demanding today's line be verifiable would
+        # demand rewriting the record.
+        with self._gate_over("docs/adr", "see `.github/workflows/quic.yml:12`\n") as out:
+            self.assertNotIn("cannot verify", out)
+
 
 class EnrolledPathsArePinnedTest(unittest.TestCase):
     """Enrolment is only worth having if the citations it exposes are actually pinned.
@@ -612,15 +761,44 @@ class EnrolledPathsArePinnedTest(unittest.TestCase):
             except (OSError, UnicodeDecodeError):
                 continue
             rel = os.path.relpath(str(doc), REPO).replace(os.sep, "/")
+            # The dated genres are exempt, for the reason the tool never anchors them: an
+            # ADR cites the tree AS IT STOOD. `docs/adr/0071` cites
+            # `integrations/esp-idf/libtracer/CMakeLists.txt:85-86` and that citation has
+            # already drifted onto an unrelated comment — pinning it would mean editing
+            # the record every time the component's source list moves. Before #1095 no
+            # ADR cited either enrolled path, so this exemption had nothing to exclude.
+            if cdc.is_historical(rel):
+                continue
             spans, _ = cdc.citation_spans(text, filemap)
             unpinned += [f"{rel} cites {p}:{lo}" for p, lo, _ in spans
-                         if p in cdc.CITABLE_BUILD_PATHS and f"{p}:{lo}" not in pinned]
-        self.assertEqual(unpinned, [], "an enrolled build/tooling citation with no pin")
+                         if p in cdc.CITABLE_NON_SOURCE_PATHS and f"{p}:{lo}" not in pinned]
+        self.assertEqual(unpinned, [], "an enrolled non-source citation with no pin")
 
     def test_every_enrolled_path_carries_at_least_one_pin(self):
         pinned_paths = {entry[0].rsplit(":", 1)[0] for entry in cdc.ANCHORS}
-        for path in cdc.CITABLE_BUILD_PATHS:
+        for path in cdc.CITABLE_NON_SOURCE_PATHS:
             self.assertIn(path, pinned_paths)
+
+    def test_every_enrolled_path_exists(self):
+        # Enrolment is hand-maintained, so a rename can leave a path behind. An anchor on
+        # a missing file fails the gate loudly, but the ALLOWLIST entry alone would not.
+        for path in cdc.CITABLE_NON_SOURCE_PATHS:
+            self.assertTrue(os.path.isfile(os.path.join(REPO, path)), path)
+
+    def test_no_live_doc_carries_an_unverifiable_citation(self):
+        # The #1095 gate, over the real doc set. The dated genres are exempt for the same
+        # reason they are never anchored: an ADR cites the tree AS IT STOOD.
+        offenders = []
+        for doc in cdc.all_docs():
+            try:
+                text = doc.read_text()
+            except (OSError, UnicodeDecodeError):
+                continue
+            rel = os.path.relpath(str(doc), REPO).replace(os.sep, "/")
+            if cdc.is_historical(rel):
+                continue
+            offenders += [f"{rel}: {e}" for e in cdc.unverifiable_citations(text)]
+        self.assertEqual(offenders, [])
 
     def test_the_gate_workflow_runs_when_an_enrolled_path_changes(self):
         # A pin only gates if the job fires on the commit that moved the anchor. The
@@ -630,7 +808,7 @@ class EnrolledPathsArePinnedTest(unittest.TestCase):
         wf = os.path.join(REPO, ".github", "workflows", "doc-citations.yml")
         with open(wf) as fh:
             entries = re.findall(r'^\s*-\s*"([^"]+)"\s*$', fh.read(), re.MULTILINE)
-        for path in cdc.CITABLE_BUILD_PATHS:
+        for path in cdc.CITABLE_NON_SOURCE_PATHS:
             covered = any(e == path or (e.endswith("/**") and path.startswith(e[:-2]))
                           for e in entries)
             self.assertTrue(covered, f"{path} is pinned but the gate never runs on it")

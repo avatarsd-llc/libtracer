@@ -97,7 +97,19 @@ void inbound(int fd) { (void)fake_httpd::instance().deliver_frame(fd, kBody); }
 /** @brief Push one frame to @p fd alone, through the directed endpoint `peer_link` hands
  *         out, and let the httpd task drain it. */
 void push_to(httpd_ws_link_t& link, int fd) {
-    tr::net::transport_t* const to = link.peer_link("fd" + std::to_string(fd));
+    // Two names, and this needs both (#994). Since `p<slot>` naming the peer's graph NAME
+    // is its slot index, which says nothing about which socket it is; the `<ip>:<port>`
+    // diagnostics field is what still identifies the descriptor — and on the fake
+    // `getpeername` fails, so it holds the `fd<n>` fallback. Resolve the socket through
+    // the address, then route through the name, which is exactly the split the rename
+    // introduced. Spelling `"fd" + fd` as the NAME is what this used to do, and it stopped
+    // resolving the moment sessions became addressable.
+    const std::string want = "fd" + std::to_string(fd);
+    std::string routable;
+    link.enumerate_peer_stats([&](const httpd_ws_link_t::peer_stats_t& s) {
+        if (s.endpoint_str == want) routable = std::string(s.name);
+    });
+    tr::net::transport_t* const to = routable.empty() ? nullptr : link.peer_link(routable);
     if (to == nullptr) {
         check(false, "the directed endpoint resolved");
         return;

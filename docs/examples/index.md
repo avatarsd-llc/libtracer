@@ -48,7 +48,7 @@ mismatch: `ctest --test-dir build -R example_`.
 
 Two of the seven targets need the FWD routing plane and exist only when
 `LIBTRACER_NET_PLANE` is on: `two_node_fwd` and `tree_of_ropes` are declared inside
-`if(LIBTRACER_NET_PLANE)` blocks (`core/examples/CMakeLists.txt:58,73`), and so are
+`if(LIBTRACER_NET_PLANE)` blocks (`core/examples/CMakeLists.txt:59,74`), and so are
 their test registrations (`core/examples/CMakeLists.txt:87-96`). The option defaults to
 `ON` (`core/CMakeLists.txt:63-65`), so the recipe above builds all seven. Configured with
 `-DLIBTRACER_NET_PLANE=OFF`, those two binaries are never produced and

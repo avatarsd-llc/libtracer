@@ -57,6 +57,7 @@
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport_vertex.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -70,12 +71,7 @@ using tr::view::view_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /** @brief A link that counts sends and never blocks — the churn must not be I/O-bound. */
 struct sink_t : tr::net::transport_t {
@@ -144,13 +140,6 @@ constexpr std::size_t kNamesPerWriter = 4;
 /** @name The #881 `transport_vertex_t` half */
 /**@{*/
 
-/** @brief An owned view over @p bytes — the value shape `graph_t::write` takes. */
-view_t owned(std::span<const std::byte> bytes) {
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
-    if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
-    return view_t::over(std::move(seg));
-}
-
 /**
  * @brief `SPEC{ NAME "type" "client", NAME "name" <name>, SETTINGS "config"{ role=DIAL } }`.
  *
@@ -159,22 +148,7 @@ view_t owned(std::span<const std::byte> bytes) {
  * a peer's CREATE does rather than a private back door (the RFC-0014 lesson).
  */
 view_t conn_spec(std::string_view name) {
-    std::vector<std::byte> cfg;
-    tr::wire::emit_name(cfg, "role");
-    const std::byte r{static_cast<std::uint8_t>(conn_role_t::DIAL)};
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, std::span<const std::byte>(&r, 1));
-
-    std::vector<std::byte> body;
-    tr::wire::emit_name(body, "type");
-    tr::wire::emit_name(body, "client");
-    tr::wire::emit_name(body, "name");
-    tr::wire::emit_name(body, name);
-    tr::wire::emit_name(body, "config");
-    tr::wire::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true}, cfg);
-
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
-    return owned(out);
+    return tr::net::conn_spec_t("client", name).role(conn_role_t::DIAL).view();
 }
 
 /** @brief Create/remove cycles the connection writer runs — bounded, so CI cannot hang. */
@@ -375,7 +349,5 @@ int main() {
 
     transport_vertex_control_plane_churn();
 
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("net_control_plane_race");
 }

@@ -1107,48 +1107,110 @@ void run_path_parse() {
     }
 }
 
+namespace {
+
+/** @brief `acl`: the ACL-gate rows alone (A/B runs) — uncontended, then contended at 4. */
+void run_mode_acl() {
+    run_acl_gated();
+    run_acl_gated_mt(4);
+}
+
+/** @brief `deliver`: the deliver-only (`propagate`) fan sweep alone (A/B runs). */
+void run_mode_deliver() {
+    for (std::size_t F : kFanouts) run_inproc_deliver(kRefSize, F);
+}
+
+/** @brief `target`: the two path-target dispatch legs alone (A/B runs). */
+void run_mode_target() {
+    for (std::size_t F : kFanouts)
+        run_inproc_target(kRefSize, F, target_kind_t::STORED, "inproc-target-stored");
+    for (std::size_t F : kFanouts)
+        run_inproc_target(kRefSize, F, target_kind_t::HANDLER, "inproc-target-handler");
+}
+
+/**
+ * @brief `fan`: the `inproc` fan-out LADDER alone, ascending.
+ *
+ * Coarse (`kFanouts`) merged with the mid arms (`kFanoutsMid`) so one short run reads as a
+ * single curve (#844). This is the A/B mode for anything that touches dispatch width:
+ * measured on this host the ladder runs in ~1.7 s against ~30 s for the default sweep,
+ * nearly all of which is off this axis — which is what made a hand-added mid arm the path
+ * of least resistance for #841's verify (that line was scaffolding and was never
+ * committed). Ascending here rather than coarse-then-mid because nothing joins on this
+ * mode's row ORDER — only the default run feeds perf_gate.py and the history store, and
+ * that run keeps every pre-existing ordinal exactly where it was.
+ */
+void run_mode_fan() {
+    constexpr std::size_t kLadder[] = {1, 8, 16, 32, 64, 128, 256, 512, 1024, 8192};
+    static_assert(std::size(kLadder) == std::size(kFanouts) + std::size(kFanoutsMid),
+                  "kLadder must be the union of kFanouts and kFanoutsMid — an arm added "
+                  "to either without being added here would be missing from `fan` runs");
+    for (std::size_t F : kLadder)
+        run_inproc(kRefSize, F, kRefEndpoints, alloc_t::HEAP, false, "inproc");
+}
+
+/** @brief One selectable isolated sweep: its `argv[1]` spelling and the runner behind it. */
+struct bench_mode_t {
+    std::string_view name; /**< What `argv[1]` must equal to select this sweep. */
+    void (*run)();         /**< The sweep this mode runs, and nothing else. */
+};
+
+/**
+ * @brief Every mode `argv[1]` accepts — the ONE source dispatch and the usage text share.
+ *
+ * The dispatch used to be a chain of `if (argv[1] == "...") { ...; return 0; }` tests with
+ * no terminating else, so an argument matching none of them fell through into the DEFAULT
+ * sweep and exited 0 (#1040). That is a measurement hazard rather than a CLI nit: these
+ * modes exist for A/B runs, an A/B run builds one arm from a DIFFERENT commit, and a mode
+ * added after that commit does not exist in it — so the candidate ran one axis for seconds
+ * while the baseline ran every axis for minutes, both emitting well-formed RESULT rows
+ * under the same `(mode, size, fan, ep)` keys for a harness to join on.
+ *
+ * A table rather than a chain because the usage text is now GENERATED from it: a mode that
+ * is dispatchable is a mode that is listed, and a name that is listed is a name that runs
+ * its sweep, with no second list to keep in step.
+ */
+constexpr bench_mode_t kModes[] = {
+    {"grid", run_grid},          {"acl", run_mode_acl}, {"deliver", run_mode_deliver},
+    {"target", run_mode_target}, {"fan", run_mode_fan}, {"lkv", run_lkv_store_gate},
+};
+
+/** @brief The usage text, on stderr, listing every entry of @ref kModes. */
+void print_usage(const char* argv0) {
+    std::fprintf(stderr,
+                 "usage: %s [mode]\n"
+                 "  no mode:  the full default sweep (what CI and perf_gate.py run)\n"
+                 "  modes:    ",
+                 argv0 != nullptr ? argv0 : "bench_libtracer");
+    for (const bench_mode_t& m : kModes)
+        std::fprintf(stderr, "%s%.*s", &m == &kModes[0] ? "" : " | ",
+                     static_cast<int>(m.name.size()), m.name.data());
+    std::fprintf(stderr, "  (one isolated sweep each, for A/B runs)\n");
+}
+
+}  // namespace
+
 int main(int argc, char** argv) {
-    if (argc > 1 && std::string_view(argv[1]) == "grid") {
-        run_grid();
-        return 0;
-    }
-    if (argc > 1 && std::string_view(argv[1]) == "acl") {  // the ACL rows alone (A/B runs)
-        run_acl_gated();
-        run_acl_gated_mt(4);
-        return 0;
-    }
-    if (argc > 1 && std::string_view(argv[1]) == "deliver") {  // deliver-only rows (A/B runs)
-        for (std::size_t F : kFanouts) run_inproc_deliver(kRefSize, F);
-        return 0;
-    }
-    if (argc > 1 && std::string_view(argv[1]) == "target") {  // path-target rows alone (A/B runs)
-        for (std::size_t F : kFanouts)
-            run_inproc_target(kRefSize, F, target_kind_t::STORED, "inproc-target-stored");
-        for (std::size_t F : kFanouts)
-            run_inproc_target(kRefSize, F, target_kind_t::HANDLER, "inproc-target-handler");
-        return 0;
-    }
-    // The `inproc` fan-out LADDER alone, ascending — coarse (`kFanouts`) merged with the
-    // mid arms (`kFanoutsMid`) so one short run reads as a single curve (#844). This is the
-    // A/B mode for anything that touches dispatch width: measured on this host the ladder
-    // runs in ~1.7 s against ~30 s for the default sweep, nearly all of which is off this
-    // axis — which is what made a hand-added mid arm the path of least resistance for
-    // #841's verify (that line was scaffolding and was never committed).
-    // Ascending here rather than coarse-then-mid because nothing joins on this
-    // mode's row ORDER — only the default run feeds perf_gate.py and the history store, and
-    // that run keeps every pre-existing ordinal exactly where it was.
-    if (argc > 1 && std::string_view(argv[1]) == "fan") {
-        constexpr std::size_t kLadder[] = {1, 8, 16, 32, 64, 128, 256, 512, 1024, 8192};
-        static_assert(std::size(kLadder) == std::size(kFanouts) + std::size(kFanoutsMid),
-                      "kLadder must be the union of kFanouts and kFanoutsMid — an arm added "
-                      "to either without being added here would be missing from `fan` runs");
-        for (std::size_t F : kLadder)
-            run_inproc(kRefSize, F, kRefEndpoints, alloc_t::HEAP, false, "inproc");
-        return 0;
-    }
-    if (argc > 1 && std::string_view(argv[1]) == "lkv") {  // ADR-0060 alloc gate alone (fast)
-        run_lkv_store_gate();
-        return 0;
+    if (argc > 1) {
+        const std::string_view want{argv[1]};
+        for (const bench_mode_t& m : kModes) {
+            if (m.name != want) continue;
+            // The marker goes to STDERR, ahead of the first row: stdout is the RESULT
+            // stream perf_gate.py, perf_emit_benchmark.py and collate.py parse, and the
+            // acceptance rule for this fix is that every run's stdout keeps the row set,
+            // row order and line shape it had before. stderr already carries the harness's
+            // own `SKIP mode=...` and `LKV-GATE ...` lines, so an A/B driver that wants to
+            // assert it got the arm it asked for reads it there.
+            std::fprintf(stderr, "MODE %.*s\n", static_cast<int>(m.name.size()), m.name.data());
+            m.run();
+            return 0;
+        }
+        // Unrecognised: say so and exit non-zero WITHOUT emitting a row. Silence plus a
+        // zero status is what let a typo (`taget`) and a cross-commit mode both answer
+        // with the full default sweep.
+        std::fprintf(stderr, "error: unknown mode '%s'\n", argv[1]);
+        print_usage(argv[0]);
+        return 2;
     }
     for (std::size_t F : kFanouts)
         run_inproc(kRefSize, F, kRefEndpoints, alloc_t::HEAP, false, "inproc");

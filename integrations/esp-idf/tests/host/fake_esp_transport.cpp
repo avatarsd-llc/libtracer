@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <utility>
 
@@ -44,6 +45,10 @@ struct state_t {
     bool connected = false; /**< @brief Between connect and close. */
     int connects = 0;       /**< @brief Dial count. */
     std::string ws_path;    /**< @brief The last dial's requested path. */
+    /** @brief The `headers` the last set_config carried; nullopt = the field was null. */
+    std::optional<std::string> headers;
+    /** @brief One entry per dial ENTERED, latched from `headers` — see dial_headers. */
+    std::vector<std::optional<std::string>> dialed_headers;
     /** @brief What esp_transport_get_socket answers — see fake_ws::set_socket_fd. */
     int socket_fd = -1;
 
@@ -139,6 +144,8 @@ void reset() {
     st().connected = false;
     st().connects = 0;
     st().ws_path.clear();
+    st().headers.reset();
+    st().dialed_headers.clear();
     st().socket_fd = -1;
     st().armed_stack = 0;
     st().armed_name.clear();
@@ -167,6 +174,11 @@ int connect_count() {
 std::string last_ws_path() {
     const std::lock_guard<std::mutex> lk(st().m);
     return st().ws_path;
+}
+
+std::vector<std::optional<std::string>> dial_headers() {
+    const std::lock_guard<std::mutex> lk(st().m);
+    return st().dialed_headers;
 }
 
 void set_socket_fd(int fd) {
@@ -260,6 +272,12 @@ esp_err_t esp_transport_ws_set_config(esp_transport_handle_t t,
     (void)t;
     const std::lock_guard<std::mutex> lk(st().m);
     if (config != nullptr && config->ws_path != nullptr) st().ws_path = config->ws_path;
+    // Latched, null included: "the field was left null" and "the field was an empty
+    // string" are different handshakes on the wire, and the link's contract is that no
+    // headers means the byte-for-byte historical request (#959).
+    st().headers = (config != nullptr && config->headers != nullptr)
+                       ? std::optional<std::string>(config->headers)
+                       : std::nullopt;
     return ESP_OK;
 }
 
@@ -279,6 +297,11 @@ int esp_transport_connect(esp_transport_handle_t t, const char* host, int port, 
     std::unique_lock<std::mutex> lk(st().m);
     if (!handle_usable(t)) return -1;
     ++st().connects;
+    // Sampled HERE, not read back later: what dial N requested is a fact only dial N can
+    // report, and what #959 left undefined was whether the first dial requested the same
+    // headers as every one after it. Recorded for failed and hung dials too — what a dial
+    // asked for is what it asked for, whether or not it landed.
+    st().dialed_headers.push_back(st().headers);
     st().connect_timeout_ms = timeout_ms;
     if (st().hang_connect) {
         // What an unreachable peer does: spend the whole bound, then fail. Nothing

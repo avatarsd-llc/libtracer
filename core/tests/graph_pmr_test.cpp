@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -31,11 +32,7 @@ using tr::graph::graph_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
 
-int g_failures = 0;
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /** @brief A pass-through resource that counts live allocations and bytes. */
 class counting_resource_t final : public std::pmr::memory_resource {
@@ -112,7 +109,5 @@ int main() {
     }
     check(idle.allocs == 0, "a default-constructed graph never touches a foreign resource");
 
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("graph_pmr");
 }

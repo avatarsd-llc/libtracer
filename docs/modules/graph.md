@@ -65,7 +65,8 @@ struct handlers_t {                                       // four seams, not two
 };
 
 using subscriber_fn_t = void (*)(void* ctx, const rope_t& value);
-struct subscription_t { /* opaque: producer vertex + :subscribers[] slot index */ };
+class  subscription_t { /* opaque: producer vertex + :subscribers[] slot index; graph_t is the
+                           sole friend. Public: default-construct, copy, operator==. */ };
 
 class graph_t {
     explicit graph_t(std::pmr::memory_resource* mr    = std::pmr::get_default_resource(),
@@ -142,8 +143,8 @@ Subscription edges are never destroyed while the graph lives. `unsubscribe` only
 **deactivates** the slot; an in-flight delivery has already snapshotted the edge and
 completes. The caller-owned `ctx` (or, for the templated overload, the callable itself)
 must therefore stay alive past any delivery that may still be running, not merely past
-the `unsubscribe` call (`core/include/libtracer/graph.hpp:980-981`, `:1000` for the
-callable-by-address form, `:1013`).
+the `unsubscribe` call (`core/include/libtracer/graph.hpp:1002-1003`, `:1022` for the
+callable-by-address form, `:1035`).
 ```
 
 ```{admonition} No strings on the hot path
@@ -193,7 +194,7 @@ for (...) g.write(v, p.field(), setpoint_tlv);           // hot loop — zero st
 ## What a read hands back
 
 `read` and `await` return `result_t<value_ref_t>`, not `result_t<rope_t>`
-(`core/include/libtracer/graph.hpp:770,857` by handle, `:1203,1209` by path;
+(`core/include/libtracer/graph.hpp:792,879` by handle, `:1225,1231` by path;
 `value_ref_t` at `core/include/libtracer/vertex.hpp:170`). A `value_ref_t` is an **owning
 reference** to the value the vertex published: the LKV slot holds it as a
 `std::shared_ptr<const rope_t>`, so handing that reference back costs a refcount clone of
@@ -302,7 +303,7 @@ remote-delivery sink, which is a `tr::net` concern. See
 `status_t` (`core/include/libtracer/status.hpp:25-44`) is the error side of every
 `result_t`. When the operation arrived over the wire, the FWD resolver maps it to the
 registered `tr::` error code the `kind=ERROR` reply carries (`error_code(status_t)`,
-`core/src/op_resolve_walk.hpp:76-117` — a private header under `src/`, not part of the
+`core/src/fwd_reply.cpp:32-76` — a private TU under `src/`, not part of the
 public API).
 
 The table below is a **total** map, and the compiler keeps it that way: `error_code` is a
@@ -547,7 +548,7 @@ a reply already being assembled.
 :members:
 ```
 
-```{doxygenstruct} tr::graph::subscription_t
+```{doxygenclass} tr::graph::subscription_t
 :project: libtracer
 :members:
 ```

@@ -57,11 +57,14 @@
 #include <string_view>
 #include <vector>
 
+#include "fwd_frame_builder.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/route_handle.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
+#include "test_values.hpp"
 
 namespace {
 
@@ -77,12 +80,8 @@ using tr::net::transport_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
+using tr::testing::make_value;
 
 /** @brief A link that records the frames the router sends back to it. */
 class rec_link_t : public transport_t {
@@ -117,35 +116,7 @@ std::vector<std::byte> b_value_u32(std::uint32_t v) {
     return out;
 }
 
-/** @brief An opaque `VALUE` TLV holding one byte. */
-std::vector<std::byte> b_value_u8(std::uint8_t v) {
-    const std::byte b{v};
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::VALUE, opt_t{}, std::span<const std::byte>(&b, 1));
-    return out;
-}
-
-/** @brief A `FWD` frame with the RFC-0004 §B child order. */
-std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
-                             const std::vector<std::byte>& src,
-                             const std::vector<std::byte>& payload) {
-    std::vector<std::byte> body;
-    const std::vector<std::byte> opv = b_value_u8(static_cast<std::uint8_t>(op));
-    body.insert(body.end(), opv.begin(), opv.end());
-    body.insert(body.end(), dst.begin(), dst.end());
-    body.insert(body.end(), src.begin(), src.end());
-    body.insert(body.end(), payload.begin(), payload.end());
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
-    return out;
-}
-
-/** @brief A rope over @p bytes (single link) — the shape `graph_t::write` takes. */
-tr::view::view_t make_value(std::span<const std::byte> bytes) {
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
-    if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
-    return tr::view::view_t::over(std::move(seg));
-}
+using tr::testing::b_fwd;
 
 /** @brief The `u32` a vertex currently holds, or `nullopt` if it holds nothing usable. */
 std::optional<std::uint32_t> stored_u32(const graph_t& g, vertex_handle_t v) {
@@ -232,7 +203,7 @@ void test_compact_denied_on_the_cold_arm() {
     // Positive control #2 — the full-route form of the same write, from the same denied
     // link, to the same vertex. This is the disagreement #974 named: after the fix the two
     // forms agree, and this check is what would catch them diverging again.
-    router.on_frame("peer-h", b_fwd(fwd_op_t::WRITE, b_path({"sink"}), b_path({"peer-h"}),
+    router.on_frame("peer-h", b_fwd(fwd_op_t::WRITE, b_path({"sink"}), b_path({"peer-h"}), {},
                                     b_value_u32(kAttack)));
     check(stored_u32(g, sink) == kAllowed,
           "and the full-route FWD{WRITE} from that link is denied too — the forms agree");
@@ -322,6 +293,5 @@ int main() {
     std::printf("\n");
     test_no_resolver_still_delivers();
 
-    std::printf("\n%s\n", g_failures == 0 ? "all checks passed" : "FAILURES");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("fwd_compact_acl");
 }

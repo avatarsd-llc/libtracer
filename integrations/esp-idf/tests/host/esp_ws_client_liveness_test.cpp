@@ -144,8 +144,8 @@ fake_ws::frame_t close_frame() {
 
 /** @brief Build a link and wait for its first dial. */
 std::unique_ptr<tr::net::esp_ws_client_link_t> dialed_link() {
-    auto link = std::make_unique<tr::net::esp_ws_client_link_t>("127.0.0.1", 8080, "/ws", kBufBytes,
-                                                                kBufBytes, 0);
+    auto link = std::make_unique<tr::net::esp_ws_client_link_t>(
+        "127.0.0.1", 8080, "/ws", /*handshake_headers=*/std::string{}, kBufBytes, kBufBytes, 0);
     check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "the link dialed");
     return link;
 }
@@ -244,8 +244,8 @@ void test_failed_dials_report_nothing() {
     down_counter_t down;
     {
         fake_ws::fail_connects(true);
-        auto link = std::make_unique<tr::net::esp_ws_client_link_t>("127.0.0.1", 8080, "/ws",
-                                                                    kBufBytes, kBufBytes, 0);
+        auto link = std::make_unique<tr::net::esp_ws_client_link_t>(
+            "127.0.0.1", 8080, "/ws", /*handshake_headers=*/std::string{}, kBufBytes, kBufBytes, 0);
         link->set_down_notifier(&down_counter_t::fire, &down);
         check(wait_until([] { return fake_ws::connect_count() >= 2; }, 6s),
               "the link retried its dial at least twice");
@@ -253,6 +253,72 @@ void test_failed_dials_report_nothing() {
         check(down.count() == 0, "no departure was reported for a link that was never up");
     }
     fake_ws::fail_connects(false);
+}
+
+// ---------------------------------------------------------------------------
+// 6 — BACKOFF: a connection that produced nothing is a failed attempt (#1128).
+// ---------------------------------------------------------------------------
+/**
+ * @brief A post-101 refusal must spend the reconnect backoff, not spin.
+ *
+ * The shipped failure: a server that accepts the upgrade and then closes — an admission
+ * refusal, which can only be expressed after `101 Switching Protocols` — looked like a
+ * successful connection that later dropped, so the loop re-dialed with NO delay. On a LAN
+ * that is a dial every few milliseconds; on a single-core target it starved the idle task
+ * and the board panic-rebooted, resuming the dial on the next boot.
+ *
+ * Measured as the GAP between the close and the next dial, because that is the quantity
+ * the defect is about. The threshold is a lower bound well inside the 1500 ms interval and
+ * far outside the microseconds the spin took, so it cannot pass for either reason by
+ * accident.
+ */
+void test_refused_connection_backs_off() {
+    std::printf("#1128 a connection that delivered nothing backs off before re-dialing:\n");
+    fake_ws::reset();
+    {
+        auto link = dialed_link();
+        const int dials_before = fake_ws::connect_count();
+        const auto closed_at = std::chrono::steady_clock::now();
+        // The refusal: the peer closes without ever having sent a message.
+        fake_ws::push_frames({close_frame()});
+        check(wait_until([&] { return fake_ws::connect_count() > dials_before; }, 5s),
+              "the link re-dialed eventually");
+        const auto gap = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - closed_at)
+                             .count();
+        std::printf("       re-dial gap: %lld ms\n", static_cast<long long>(gap));
+        check(gap >= 1000, "and it waited the backoff first, instead of spinning");
+    }
+}
+
+/**
+ * @brief The other side of the same condition: a WORKING link still re-dials at once.
+ *
+ * Without this case the suite would pass just as happily for "back off unconditionally on
+ * every re-dial", which is the crude fix #1128 explicitly ranks last — it would add 1.5 s
+ * of blackout to every transient network blip on a healthy link. What makes the backoff
+ * correct is that it is CONDITIONAL, so the condition is what gets measured.
+ */
+void test_productive_connection_redials_at_once() {
+    std::printf("#1128 a connection that delivered a message re-dials immediately:\n");
+    fake_ws::reset();
+    {
+        auto link = dialed_link();
+        // One complete inbound message: this connection is now proven admitted.
+        fake_ws::push_frames(
+            {fake_ws::make_frame(WS_TRANSPORT_OPCODES_BINARY, /*fin=*/true, /*len=*/8,
+                                 /*seed=*/0x42)});
+        const int dials_before = fake_ws::connect_count();
+        const auto closed_at = std::chrono::steady_clock::now();
+        fake_ws::push_frames({close_frame()});
+        check(wait_until([&] { return fake_ws::connect_count() > dials_before; }, 5s),
+              "the link re-dialed after the drop");
+        const auto gap = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - closed_at)
+                             .count();
+        std::printf("       re-dial gap: %lld ms\n", static_cast<long long>(gap));
+        check(gap < 1000, "and it did NOT pay the backoff — the retry is still immediate");
+    }
 }
 
 }  // namespace
@@ -285,6 +351,8 @@ int main() {
     test_second_death_reports_again();
     test_destructor_reports_nothing();
     test_failed_dials_report_nothing();
+    test_refused_connection_backs_off();
+    test_productive_connection_redials_at_once();
     if (g_failures != 0) {
         std::printf("FAILED: %d check(s)\n", g_failures);
         return 1;

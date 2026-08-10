@@ -195,30 +195,55 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::b
     settings.role = role;  // the type default; config may override
     parse_config(config, settings);
 
-    // Which MODULE does this connection mount under (RFC-0014 §1, ADR-0061)? A staged link
-    // carries no `kind`, so the module is the one it was staged under; otherwise it follows
-    // from (kind, role). The connection then lives at `/net/<module>/<name>` and routes by
-    // that same path.
+    // Which MODULE does this connection mount under (RFC-0014 §1, ADR-0061)? The SPEC decides
+    // whenever it can: a `kind` names a declared (kind, role) module (ADR-0073 §4). Only the
+    // kind-less SPEC — the `provide_link` spelling — takes its module from the staged set,
+    // and then only when the leaf NAME identifies exactly ONE staging. The connection lives
+    // at `/net/<module>/<name>` and routes by that same path.
+    //
+    // The module half of a staging key is now COMPARED, never merely read back out of the
+    // first hit (#883). The old scan matched the leaf NAME alone and adopted the module of
+    // whichever key came first in map order — the creating SPEC's own intent was the only
+    // thing that knew better, and the scan never looked at it. Two silent mis-binds followed:
+    // with `mod-a/x` and `mod-b/x` staged, the SPEC meaning `mod-b` mounted at `net/mod-a/x`
+    // over `mod-a`'s transport (wrong module AND wrong link); and because the scan ran BEFORE
+    // the (kind, role) lookup, a SPEC naming a kind was captured by any staging sharing its
+    // leaf NAME — the kind's factory never ran. One defect: a key composed of two halves,
+    // matched on one.
     std::string module;
-    std::string staged_key;
-    for (const auto& [key, l] : pending_links_) {
-        const std::size_t slash = key.rfind('/');
-        if (slash != std::string::npos && key.compare(slash + 1, std::string::npos, name) == 0) {
-            module = key.substr(0, slash);
-            staged_key = key;
-            break;
-        }
-    }
-    if (module.empty()) {
-        // Neither a staged link nor a construction kind — nothing can carry the bytes
-        // (checked before module resolution: a kind-less SPEC has no module to look up).
-        if (settings.kind.empty()) return std::unexpected(status_t::NOT_FOUND);
+    if (!settings.kind.empty()) {
         auto declared = module_for_locked(settings.kind, settings.role);
         // Declared-only (ADR-0073 §4): a kind the application never mapped to a module
         // fails creation explicitly instead of mounting under a library-derived name.
         if (!declared) return std::unexpected(declared.error());
         module = std::move(*declared);
+    } else {
+        // Kind-less: the staged set is the ONLY module source, so count the leaf-NAME hits
+        // rather than taking the first. Iteration order is lexicographic and carries no
+        // intent — two stagings sharing a leaf NAME are genuinely ambiguous here.
+        std::size_t hits = 0;
+        for (const auto& [key, staged] : pending_links_) {
+            const std::size_t slash = key.rfind('/');
+            if (slash == std::string::npos) continue;
+            if (key.compare(slash + 1, std::string::npos, name) != 0) continue;
+            if (++hits > 1) break;
+            module.assign(key, 0, slash);
+        }
+        // Neither a staged link nor a construction kind — nothing can carry the bytes.
+        if (hits == 0) return std::unexpected(status_t::NOT_FOUND);
+        // Ambiguous: refuse instead of picking by map order. The SPEC must carry a `kind`
+        // whose declared module says WHICH staging it meant. TYPE_MISMATCH is the config-is-
+        // underspecified answer this creation path already uses (a DIAL missing `addr`/`port`
+        // answers the same), and it goes out PERMANENT — re-sending this SPEC cannot help.
+        if (hits > 1) return std::unexpected(status_t::TYPE_MISMATCH);
     }
+
+    // With the module resolved, the staging is a DIRECT lookup: `pending_links_` is keyed by
+    // exactly this string (see `provide_link`). No scan, and no way to reach a key whose
+    // module half is not the one this connection mounts under.
+    std::string staged_key = module;
+    staged_key.push_back('/');
+    staged_key += name;
 
     // The routing key IS the mount path (ADR-0061): `net/<module>/<name>`. Keeping the root
     // segment in the key means the registry's precomputed run is exactly the prefix a hop
@@ -258,12 +283,13 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::b
         }
     }
 
-    // Resolve the connection's link. Precedence: a provide_link-staged transport wins
-    // (the test/manual seam); otherwise the config `kind` selects a factory and the
-    // real socket is CONSTRUCTED here and owned by the connection.
+    // Resolve the connection's link. Precedence, WITHIN the module resolved above: a
+    // provide_link-staged transport wins (the test/manual seam); otherwise the config `kind`
+    // selects a factory and the real socket is CONSTRUCTED here and owned by the connection.
+    // A staging under a DIFFERENT module is a different connection and is not considered.
     transport_t* link = nullptr;
     std::unique_ptr<transport_t> owned;
-    const auto pl = staged_key.empty() ? pending_links_.end() : pending_links_.find(staged_key);
+    const auto pl = pending_links_.find(staged_key);
     if (pl != pending_links_.end()) {
         link = pl->second;
     } else if (!settings.kind.empty()) {

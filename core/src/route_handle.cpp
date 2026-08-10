@@ -176,6 +176,9 @@ bool route_handle_t::record_egress(std::string_view out_link, std::uint16_t labe
         refused_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
+    // `sole_take` keeps its `false` default here: this door records a label the caller already
+    // holds by other means, so there is no `ensure_egress` take to hand back and
+    // `release_egress` must never erase what it created (#833).
     t->egress.push_back(egress_entry_t{
         .label = label, .route = std::pmr::vector<std::byte>(route.begin(), route.end(), mr_)});
     return true;
@@ -214,10 +217,18 @@ std::pair<std::uint16_t, bool> route_handle_t::ensure_egress(std::string_view ou
     const std::lock_guard lock(t->m);
     // Reuse: the egress table doubles as the route -> label index (a link carries
     // few compact flows; a linear route compare beats a third keyed-by-bytes map).
-    for (const egress_entry_t& e : t->egress) {
-        if (e.route.size() == route.size() &&
-            std::equal(e.route.begin(), e.route.end(), route.begin()))
-            return {e.label, false};  // already advertised on this link - reuse the label
+    for (egress_entry_t& e : t->egress) {
+        if (e.route.size() != route.size() ||
+            !std::equal(e.route.begin(), e.route.end(), route.begin()))
+            continue;
+        // A SECOND take of this label — from here on the mint is no longer alone on it, so
+        // the minter may no longer hand it back (#833). Guarded by the load rather than
+        // stored unconditionally: this is the per-delivery compact egress leg
+        // (`deliver_remote`), and an unconditional store would dirty an entry line every
+        // delivery that a shared read leaves alone. The store happens at most once per
+        // entry, on the first reuse after its mint.
+        if (e.sole_take) e.sole_take = false;
+        return {e.label, false};  // already advertised on this link - reuse the label
     }
     // Saturate, never wrap (#603): a wrapped `next_label` handed out the reserved 0 and
     // then re-issued 1, 2, ... while those labels still aliased LIVE routes — a delivery
@@ -235,7 +246,49 @@ std::pair<std::uint16_t, bool> route_handle_t::ensure_egress(std::string_view ou
     const std::uint16_t label = t->next_label++;
     t->egress.push_back(egress_entry_t{
         .label = label, .route = std::pmr::vector<std::byte>(route.begin(), route.end(), mr_)});
+    // Stamped after the insert, not inside the brace, so the initializer above stays the one
+    // four documents cite. A MINT is reclaimable: until some other caller takes this label,
+    // the minter may still hand it back (@ref release_egress, #833).
+    t->egress.back().sole_take = true;
     return {label, true};
+}
+
+void route_handle_t::release_egress(std::string_view out_link, std::uint16_t label,
+                                    std::span<const std::byte> route) {
+    if (label == 0) return;  // the reserved "none" — never an entry, never an allocation
+    // `find_tables`, never `tables()`: a release must not CREATE a link shell. The refusal
+    // this pairs with is often a downstream reconnect, whose `clear_link` erased the whole
+    // table — re-creating it here would trade a stranded label for a stranded shell, which
+    // is the growth #488 bounds.
+    const std::shared_ptr<link_tables_t> t = find_tables(out_link);
+    if (!t) return;
+    const std::lock_guard lock(t->m);
+    for (auto it = t->egress.begin(); it != t->egress.end(); ++it) {
+        if (it->label != label) continue;
+        // Someone else took this label between the mint and this call — since #913 that is
+        // the DESIGNED sharing (one label per (link, route), not per advertise), and their
+        // binding now depends on the entry. Leave it. An established flow lands here too:
+        // its take was a reuse, so its entry never carries the flag at all.
+        if (!it->sole_take) return;
+        // Identity, not just the label: `record_egress` can replace a route in place under
+        // the same label, and an entry that no longer holds the route this caller minted for
+        // is not the one it is handing back.
+        if (it->route.size() != route.size() ||
+            !std::equal(it->route.begin(), it->route.end(), route.begin()))
+            return;
+        t->egress.erase(it);
+        // And the label itself, when it is still the allocator's most recent — the common
+        // case, because a refusal follows its own mint. A concurrent mint on the same link
+        // moved `next_label` past it, and then the label stays spent: reclaiming a hole
+        // would need a free list, and the entry is gone either way. 65535 is deliberately
+        // not walked back — `next_label` is 0 there, the saturated state @ref alloc_label
+        // documents as permanent, and un-saturating it is the one direction that could
+        // re-issue a live label.
+        if (t->next_label != 0 &&
+            static_cast<std::uint32_t>(t->next_label) == static_cast<std::uint32_t>(label) + 1u)
+            t->next_label = label;
+        return;
+    }
 }
 
 std::uint16_t route_handle_t::alloc_label(std::string_view link) {
@@ -329,7 +382,15 @@ std::size_t route_handle_t::link_count() const {
     return links_.size();
 }
 
-// --- transport-plane frame codec ---------------------------------------------
+// --- transport-plane frame BUILDERS -------------------------------------------
+//
+// These three return owning byte vectors and therefore allocate through the throwing global
+// heap. Since #885 NO production path calls them: every ADVERTISE / COMPACT / HANDLE_NACK the
+// router puts on a link is scatter-gathered off a stack head (`fwd_router.cpp`'s
+// `emit_advertise` / `emit_compact` / `emit_handle_nack`), which is what removed the last
+// peer-provoked throwing allocation from the label plane. What survives here is the
+// bytes-in-hand form: conformance vectors, the test suite's frame injection, and benches that
+// need a frame as a value rather than as a send. Do not reach for them from a receive thread.
 
 namespace {
 
@@ -349,10 +410,11 @@ void emit_label(std::vector<std::byte>& out, std::uint16_t label) {
 std::array<std::byte, 6> label_tlv(std::uint16_t label) noexcept {
     // The one spelling of the label child's bytes: a 2-byte opaque VALUE. Written field by
     // field rather than as a literal so the length and the payload keep the wire's
-    // little-endian order by construction. `emit_label` (and therefore every throwing and
-    // nothrow encoder) goes through here, so a gathered frame head and a built frame cannot
-    // disagree; `compact_cache_test` pins these bytes against `wire::emit_tlv` independently,
-    // since a shared locus alone would let a wrong layout pass a self-comparison.
+    // little-endian order by construction. `emit_label` (and therefore every built encoder
+    // below) goes through here, and so does every gather emitter in `fwd_router.cpp`, so a
+    // gathered frame head and a built frame cannot disagree; `compact_cache_test` pins these
+    // bytes against `wire::emit_tlv` independently, since a shared locus alone would let a
+    // wrong layout pass a self-comparison.
     std::array<std::byte, 6> out{};
     out[0] = static_cast<std::byte>(std::to_underlying(type_t::VALUE));
     out[1] = static_cast<std::byte>(opt_t{}.encode());
@@ -386,42 +448,6 @@ std::vector<std::byte> encode_handle_nack(std::uint16_t label) {
     std::vector<std::byte> out;
     wire::emit_tlv(out, type_t::HANDLE_NACK, opt_t{.pl = true}, body);
     return out;
-}
-
-namespace {
-
-/**
- * @brief The shared NOTHROW `<frame>{ VALUE label(u16), tail }` builder behind
- *        @ref try_encode_advertise / @ref try_encode_compact (#477): reserve body and
- *        frame exactly (≤ 6-byte headers, even LL-widened), then the emits below cannot
- *        reallocate — so nothing here can throw. One non-template locus (the footprint-
- *        sentinel discipline).
- * @retval false A buffer could not be reserved — @p out is left empty.
- */
-[[nodiscard]] bool try_encode_labeled(std::vector<std::byte>& out, type_t frame,
-                                      std::uint16_t label,
-                                      std::span<const std::byte> tail) noexcept {
-    out.clear();
-    constexpr std::size_t kLabelTlv = 6;  // 4-byte VALUE header + u16 label
-    std::vector<std::byte> body;
-    if (!detail::try_reserve(body, kLabelTlv + tail.size())) return false;
-    emit_label(body, label);
-    body.insert(body.end(), tail.begin(), tail.end());  // within capacity
-    if (!detail::try_reserve(out, 6 + body.size())) return false;
-    wire::emit_tlv(out, frame, opt_t{.pl = true}, body);  // within capacity
-    return true;
-}
-
-}  // namespace
-
-bool try_encode_advertise(std::vector<std::byte>& out, std::uint16_t label,
-                          std::span<const std::byte> route_path) noexcept {
-    return try_encode_labeled(out, type_t::ADVERTISE, label, route_path);
-}
-
-bool try_encode_compact(std::vector<std::byte>& out, std::uint16_t label,
-                        std::span<const std::byte> payload) noexcept {
-    return try_encode_labeled(out, type_t::COMPACT, label, payload);
 }
 
 }  // namespace tr::net

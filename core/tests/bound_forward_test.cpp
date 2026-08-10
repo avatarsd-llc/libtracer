@@ -46,11 +46,13 @@
 #include <string_view>
 #include <vector>
 
+#include "fwd_frame_builder.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/loopback.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -71,12 +73,8 @@ using tr::wire::path_ref_element_t;
 using tr::wire::tlv_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
+using tr::testing::mailbox_t;
 
 /** @brief A heap-owned view over @p bytes (the graph stores owning views). */
 view_t owned(std::span<const std::byte> bytes) {
@@ -103,20 +101,7 @@ std::vector<std::byte> b_value_u32(std::uint32_t v) {
     return out;
 }
 
-/** @brief `FWD{ op, dst, src, payload? }` with a RAW op byte (the mint flag is a flag bit). */
-std::vector<std::byte> b_fwd_raw(std::uint8_t op_byte, const std::vector<std::byte>& dst,
-                                 const std::vector<std::byte>& src,
-                                 const std::vector<std::byte>& payload = {}) {
-    std::vector<std::byte> body;
-    const std::byte ob{op_byte};
-    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&ob, 1));
-    body.insert(body.end(), dst.begin(), dst.end());
-    body.insert(body.end(), src.begin(), src.end());
-    body.insert(body.end(), payload.begin(), payload.end());
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
-    return out;
-}
+using tr::testing::b_fwd_raw_op;
 
 /** @brief A `PATH_REF` TLV over @p elements — the bound spelling of an address. */
 std::vector<std::byte> b_path_ref(std::span<const path_ref_element_t> elements) {
@@ -127,22 +112,7 @@ std::vector<std::byte> b_path_ref(std::span<const path_ref_element_t> elements) 
 
 /** @brief A connection-creation SPEC with no transport `kind` (every link is provided). */
 view_t conn_spec(std::string_view type, std::string_view name) {
-    std::vector<std::byte> cfg;
-    tr::wire::emit_name(cfg, "role");
-    const std::byte r{static_cast<std::uint8_t>(conn_role_t::DIAL)};
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, std::span<const std::byte>(&r, 1));
-
-    std::vector<std::byte> body;
-    tr::wire::emit_name(body, "type");
-    tr::wire::emit_name(body, type);
-    tr::wire::emit_name(body, "name");
-    tr::wire::emit_name(body, name);
-    tr::wire::emit_name(body, "config");
-    tr::wire::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true}, cfg);
-
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
-    return owned(out);
+    return tr::net::conn_spec_t(type, name).role(conn_role_t::DIAL).view();
 }
 
 /**
@@ -188,28 +158,6 @@ struct hop_probe_t {
     std::vector<std::byte> snap_src() {
         const std::lock_guard lock(m);
         return src;
-    }
-};
-
-/** @brief A bounded mailbox for the client's terminating REPLY frames. */
-struct mailbox_t {
-    std::mutex m;
-    std::condition_variable cv;
-    std::vector<std::vector<std::byte>> q;
-
-    void push(std::vector<std::byte> v) {
-        {
-            const std::lock_guard lock(m);
-            q.push_back(std::move(v));
-        }
-        cv.notify_all();
-    }
-    std::optional<std::vector<std::byte>> wait(std::chrono::milliseconds budget) {
-        std::unique_lock lock(m);
-        if (!cv.wait_for(lock, budget, [this] { return !q.empty(); })) return std::nullopt;
-        auto v = std::move(q.front());
-        q.erase(q.begin());
-        return v;
     }
 };
 
@@ -341,7 +289,7 @@ int main() {
     // ===== 1) the canonical mint round trip, and what each host contributed ==============
     std::printf("The mint accumulates on the reply's way back (§7.1):\n");
     const std::vector<std::byte> canonical_dst = b_path({"net", "uplink", "b", "sensor", "temp"});
-    ch_cli.a().send(b_fwd_raw(kRead | kMint, canonical_dst, b_path({"reply-ep"})));
+    ch_cli.a().send(b_fwd_raw_op(kRead | kMint, canonical_dst, b_path({"reply-ep"})));
 
     check(at_b.wait_for_count(1, kBudget), "B received the canonical request A forwarded");
     const std::vector<std::byte> canonical_src_at_b = at_b.snap_src();
@@ -398,7 +346,7 @@ int main() {
           "and puts the RESIDUAL on the wire — its own element is consumed here, not sent");
     if (dispatch) {
         dispatch->link->send(
-            b_fwd_raw(kWrite, dispatch->dst, b_path({"reply-ep"}), b_value_u32(kWritten)));
+            b_fwd_raw_op(kWrite, dispatch->dst, b_path({"reply-ep"}), {}, b_value_u32(kWritten)));
     }
     check(at_b.wait_for_count(2, kBudget), "B received the frame A forwarded on the BOUND route");
     const path_ref_element_t only_b[1] = {elem_b};
@@ -431,8 +379,8 @@ int main() {
         const std::size_t before_cli = at_cli.count();
         const path_ref_element_t stale[2] = {
             {.index = elem_a.index, .generation = elem_a.generation + 1}, elem_b};
-        ch_cli.a().send(
-            b_fwd_raw(kWrite, b_path_ref(stale), b_path({"reply-ep"}), b_value_u32(0xDEADBEEFu)));
+        ch_cli.a().send(b_fwd_raw_op(kWrite, b_path_ref(stale), b_path({"reply-ep"}), {},
+                                     b_value_u32(0xDEADBEEFu)));
         check(!at_b.wait_for_count(before + 1, kDropBudget),
               "B never sees it — A refused the element it was asked to consume");
         check(!at_cli.wait_for_count(before_cli + 1, kDropBudget),
@@ -444,8 +392,8 @@ int main() {
         const std::size_t before = at_b.count();
         const std::size_t before_cli = at_cli.count();
         const path_ref_element_t absurd[2] = {{.index = 0xFFFFFFFFu, .generation = 0}, elem_b};
-        ch_cli.a().send(
-            b_fwd_raw(kWrite, b_path_ref(absurd), b_path({"reply-ep"}), b_value_u32(0xDEADBEEFu)));
+        ch_cli.a().send(b_fwd_raw_op(kWrite, b_path_ref(absurd), b_path({"reply-ep"}), {},
+                                     b_value_u32(0xDEADBEEFu)));
         check(!at_b.wait_for_count(before + 1, kDropBudget),
               "a peer-chosen u32 maximum mid-chain drops at A rather than faulting");
         check(!at_cli.wait_for_count(before_cli + 1, kDropBudget),
@@ -462,8 +410,8 @@ int main() {
         const path_ref_element_t wrong[2] = {{.index = root_slot ? root_slot->index : 0u,
                                               .generation = root_slot ? root_slot->generation : 0u},
                                              elem_b};
-        ch_cli.a().send(
-            b_fwd_raw(kWrite, b_path_ref(wrong), b_path({"reply-ep"}), b_value_u32(0xDEADBEEFu)));
+        ch_cli.a().send(b_fwd_raw_op(kWrite, b_path_ref(wrong), b_path({"reply-ep"}), {},
+                                     b_value_u32(0xDEADBEEFu)));
         check(!at_b.wait_for_count(before + 1, kDropBudget),
               "a VALID element that names no egress drops — a vref is an address, not a route");
         check(!at_cli.wait_for_count(before_cli + 1, kDropBudget),
@@ -475,8 +423,8 @@ int main() {
         const auto again = r_cli.bound_dispatch(target, acl_right_t::WRITE);
         check(again.has_value(), "the binding is still good");
         if (again)
-            again->link->send(
-                b_fwd_raw(kWrite, again->dst, b_path({"reply-ep"}), b_value_u32(0x0BADF00Du)));
+            again->link->send(b_fwd_raw_op(kWrite, again->dst, b_path({"reply-ep"}), {},
+                                           b_value_u32(0x0BADF00Du)));
         check(at_b.wait_for_count(before + 1, kBudget),
               "the SAME frame with a sound mid-chain element lands — every drop above is real");
         (void)inbox.wait(kBudget);
@@ -494,13 +442,13 @@ int main() {
         const std::size_t before = at_b.count();
         const auto denied = r_cli.bound_dispatch(target, acl_right_t::WRITE);
         if (denied)
-            denied->link->send(
-                b_fwd_raw(kWrite, denied->dst, b_path({"reply-ep"}), b_value_u32(0xFEEDFACEu)));
+            denied->link->send(b_fwd_raw_op(kWrite, denied->dst, b_path({"reply-ep"}), {},
+                                            b_value_u32(0xFEEDFACEu)));
         check(!at_b.wait_for_count(before + 1, kDropBudget),
               "a bound WRITE through a relay that grants only READ drops at that relay");
 
         const auto allowed = r_cli.bound_dispatch(target, acl_right_t::READ);
-        if (allowed) allowed->link->send(b_fwd_raw(kRead, allowed->dst, b_path({"reply-ep"})));
+        if (allowed) allowed->link->send(b_fwd_raw_op(kRead, allowed->dst, b_path({"reply-ep"})));
         check(at_b.wait_for_count(before + 1, kBudget),
               "and the bound READ the SAME ACL grants goes through — the denial is the ACL's");
         (void)inbox.wait(kBudget);
@@ -526,7 +474,7 @@ int main() {
         const path_ref_element_t route[2] = {{.index = 1, .generation = 0},
                                              {.index = 0x0000BEEFu, .generation = 7}};
         const std::vector<std::byte> inbound =
-            b_fwd_raw(kRead, b_path_ref(route), b_path({"reply-ep"}), b_value_u32(9));
+            b_fwd_raw_op(kRead, b_path_ref(route), b_path({"reply-ep"}), {}, b_value_u32(9));
         r.on_frame("cli", inbound);
         check(up.sent.size() == 1, "the hop forwarded exactly one frame");
         check(inbound == vector_bytes("fwd/fwd-bound-forward"),
@@ -709,8 +657,8 @@ int main() {
             r.add_child("up", up);
             const path_ref_element_t route[2] = {{.index = 1, .generation = 0},
                                                  {.index = 0x0000BEEFu, .generation = 7}};
-            r.on_frame("cli",
-                       b_fwd_raw(op_byte, b_path_ref(route), b_path({"reply-ep"}), b_value_u32(9)));
+            r.on_frame("cli", b_fwd_raw_op(op_byte, b_path_ref(route), b_path({"reply-ep"}), {},
+                                           b_value_u32(9)));
             return up.sent.size();
         };
         check(forward_op(kRead) == 1, "the known opcode forwards — the route itself is sound");
@@ -789,7 +737,5 @@ int main() {
     ch_cli.shutdown();
     ch_ab.shutdown();
 
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("bound_forward");
 }

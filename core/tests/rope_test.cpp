@@ -29,15 +29,11 @@
 #include "libtracer/mem_borrowed.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/view.hpp"
+#include "test_support.hpp"
 
 namespace {
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 using tr::view::rope_t;
 using tr::view::view_t;
@@ -304,10 +300,5 @@ int main() {
     test_self_concat();
     test_accessors();
     test_nothrow_growth();
-    if (g_failures == 0) {
-        std::printf("ALL PASS\n");
-        return 0;
-    }
-    std::printf("%d FAILURE(S)\n", g_failures);
-    return 1;
+    return tr::testing::summary("rope");
 }

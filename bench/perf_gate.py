@@ -66,13 +66,29 @@ BASELINE = HERE / "perf_baseline.json"
 
 # Canonical points: (mode, size, fanout, endpoints). RESULT cols (collate.py):
 # RESULT sys mode size fan ep pub_s deliv_s mb_s p50ns p99ns meanns
-# One point per hot-path family, so a regression anywhere on the dispatch
-# surface is gated — not just the 1:1 write:
+# One point per GATED family, so a regression on any of these legs is caught —
+# not just the 1:1 write. This is NOT the whole dispatch surface: the path-target
+# legs (inproc-target-stored / inproc-target-handler) are charted and published but
+# ungated, as are inproc-deliver, the eptype-* sweep and the -batch twins. Do not
+# restate this list as "anywhere on the dispatch surface" — docs/methodology.md did,
+# and that sentence reaches the public performance page (#1041):
 #   inproc / inproc-borrow  — the canonical zero-copy / loaned 1:1 writes
 #   fan-out 1024            — the subscriber fan-out loop
 #   inproc-path @ 8192 ep   — the resolver canary (registry lookup per write)
 #   mixed                   — the composed realistic topology
 #   fold-b4                 — the L0 inline-fold codec tier (batch-amortized)
+#
+# EDITORS: this list is the answer to "how many points does the per-PR gate watch?",
+# and `docs/methodology.md` (§What actually stops a regression) states that count and
+# names every entry — by its `mode/size/fan/ep` key — in prose. That doc is HAND-WRITTEN
+# and is spliced into the published performance page by `gen_results_page.py`, so a
+# stale count is not an internal note: it is the PUBLIC description of what the gate
+# covers. The same generator's instrument registry states the count a second time, in
+# the table at the top of that page. Neither can track this list on its own — the
+# sibling MEM_POINTS count rotted exactly that way, silently, until #792. Adding to or
+# removing from POINTS means editing docs/methodology.md AND that registry row in the
+# same commit; `PointsAreDocumented` in bench/test_perf_gate.py fails until it does
+# (#1041).
 POINTS = [
     ("inproc", 64, 1, 1),
     ("inproc-borrow", 64, 1, 1),

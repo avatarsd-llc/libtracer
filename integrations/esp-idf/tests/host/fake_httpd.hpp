@@ -91,14 +91,24 @@ struct session_t {
 class server_t {
    public:
     /**
-     * @brief Admit a socket into the session table (the accept the fake skips) and latch
-     *        the currently-registered WS route into it, as the handshake does.
+     * @brief Perform the opening handshake for a socket: run the registered
+     *        `ws_pre_handshake_cb`, and — only if it answered `ESP_OK` — admit the socket
+     *        into the session table and latch the WS route into it.
+     *
+     * The order is `httpd_uri.c`'s and it is the whole point: the predicate runs BEFORE
+     * the 101 and before `sd->ws_handler` / `sd->ws_user_ctx` are set, so a refusal leaves
+     * a socket with no session and no latched route — nothing a later frame could
+     * dispatch through. The refusal itself is the server's (`return ESP_FAIL` from
+     * `httpd_uri`, socket closed); the fake models it as "no session appears".
      *
      * @param ctx      Optional pre-existing session context — a CO-TENANT's, when the
      *                 test is exercising descriptor reuse on the shared server.
      * @param free_fn  Its destructor, run when that session closes or changes ctx.
+     * @return True when the handshake was answered and the session exists. Ignorable: the
+     *         suites that predate the predicate register none, and a route without one
+     *         admits unconditionally, exactly as an unset `ws_pre_handshake_cb` does.
      */
-    void open_session(int fd, void* ctx = nullptr, httpd_free_ctx_fn_t free_fn = nullptr);
+    bool open_session(int fd, void* ctx = nullptr, httpd_free_ctx_fn_t free_fn = nullptr);
     /** @brief The context currently stored for @p fd (nullptr if none / no session). */
     [[nodiscard]] void* session_ctx(int fd);
     /** @brief True while @p fd is in the session table. */
@@ -132,22 +142,22 @@ class server_t {
     /** @brief Items currently sitting in the control queue. */
     [[nodiscard]] std::size_t queue_depth() const;
     /**
-     * @brief Enqueues lwIP swallowed because the control mbox was full, ever.
+     * @brief Enqueues the FULL control mbox refused, ever.
      *
-     * The counter a host test needs to tell "the link refused this frame itself" apart
-     * from "the link handed it to a control socket that silently binned it" — two
-     * outcomes that look identical from the queue's depth, and only one of which leaves
-     * the httpd task free.
+     * The counter a host test needs to tell "the link refused this frame itself, before
+     * the control socket was ever asked" apart from "the link offered it and the mbox had
+     * no room" — two outcomes that look identical from the queue's depth.
      */
     [[nodiscard]] std::size_t queue_drops() const;
     /**
      * @brief Cap the control queue at @p cap entries (0 = unbounded, the default).
      *
-     * The cap models `CONFIG_LWIP_UDP_RECVMBOX_SIZE`: `httpd_queue_work` is a bare
-     * `sendto` to a loopback UDP socket, so an enqueue past the receiver's mbox is
-     * DROPPED by lwIP while `sendto` — and therefore `httpd_queue_work` — still reports
-     * success (httpd_main.c, release/v5.5). See @ref set_queue_refusing for the other,
-     * observable, enqueue failure.
+     * The cap models `CONFIG_LWIP_UDP_RECVMBOX_SIZE` at the component's ESP-IDF floor
+     * (`>=5.5.5`): `httpd_queue_work` reserves an mbox slot through a counting semaphore
+     * of that size before its `sendto`, so an enqueue past the cap FAILS FAST and the
+     * caller is told `ESP_FAIL` (httpd_main.c). It is therefore the same verdict as
+     * @ref set_queue_refusing, reached by a different route — the pre-5.5.5 silent bin,
+     * which reported success and lost the datagram, is not modelled any more (#949).
      */
     void set_queue_capacity(std::size_t cap);
 
@@ -176,6 +186,12 @@ class server_t {
      *
      * The only lever #835 needs from the socket layer: a peer whose window is full
      * (TIMEOUT), a peer whose window drains mid-frame (SHORT), and a healthy one (FULL).
+     *
+     * One entry is one WRITE, and one frame is TWO writes — header then payload, as
+     * `httpd_ws_send_frame_async` does it (an empty frame is header-only, so one). A
+     * script of `{FULL, TIMEOUT}` therefore stages a frame ANNOUNCED on the wire and then
+     * abandoned, which is a different fault from `{TIMEOUT}` — a frame that never started
+     * (#951). Counting writes per frame is what makes the two expressible at all.
      */
     void set_send_script(int fd, std::vector<send_result_t> script);
     /** @brief How many socket writes @p fd has taken, whatever they returned. */
@@ -200,14 +216,14 @@ class server_t {
     [[nodiscard]] httpd_ws_client_info_t fd_info(int fd);
     void note_sent();
     /**
-     * @brief Refuse further enqueues with an OBSERVABLE failure — `cs_send_to_ctrl_sock`
-     *        returning < 0, which `httpd_queue_work` maps to `ESP_FAIL`.
+     * @brief Refuse further enqueues unconditionally — `cs_send_to_ctrl_sock` returning
+     *        < 0, which `httpd_queue_work` maps to `ESP_FAIL`.
      *
-     * The distinction from @ref set_queue_capacity is the whole point: this failure the
-     * caller can see, the capacity drop it cannot. `httpd_sess_trigger_close` rides the
-     * same socket, so it is refused too — the pre-#835-round-2 fake exempted it on the
-     * theory that a full queue only DELAYS a close, and the on-silicon run refuted that
-     * theory (the close never landed at all).
+     * The socket-level refusal, as opposed to @ref set_queue_capacity's full-mbox one:
+     * same verdict to the caller, and only @ref queue_drops tells them apart.
+     * `httpd_sess_trigger_close` rides the same socket, so it is refused too — the
+     * pre-#835-round-2 fake exempted it on the theory that a full queue only DELAYS a
+     * close, and the on-silicon run refuted that theory (the close never landed at all).
      */
     void set_queue_refusing(bool refusing);
     /** @brief Install a session's send override (`httpd_sess_set_send_override`). */
@@ -256,7 +272,7 @@ class server_t {
     std::size_t reap_shut();
     /** @brief The one control-socket enqueue both `httpd_queue_work` and
      *         `httpd_sess_trigger_close` go through (`m_` held). */
-    bool enqueue_locked(std::function<void()> item, bool* dropped);
+    bool enqueue_locked(std::function<void()> item);
 
     mutable std::mutex m_;
     std::map<int, session_t> sessions_;
@@ -267,7 +283,7 @@ class server_t {
     std::map<int, std::size_t> writes_;
     bool queue_refusing_ = false;
     std::size_t queue_cap_ = 0;   /**< @brief 0 = unbounded; see set_queue_capacity. */
-    std::size_t queue_drops_ = 0; /**< @brief Enqueues lost to a full mbox. */
+    std::size_t queue_drops_ = 0; /**< @brief Enqueues a full mbox refused. */
     std::uint64_t lru_clock_ = 0; /**< @brief httpd's `httpd_data::lru_counter`. */
 };
 
@@ -296,6 +312,14 @@ httpd_config_t& start_config_slot();
 struct route_t {
     esp_err_t (*handler)(httpd_req_t*) = nullptr; /**< @brief The URI handler. */
     void* user_ctx = nullptr;                     /**< @brief Its registered `user_ctx`. */
+    /**
+     * @brief The registration's `ws_pre_handshake_cb`, run by @ref server_t::open_session.
+     *
+     * Unlike @ref handler this is NOT latched into the session: `httpd_uri.c` reads it out
+     * of the URI table on each handshake, so an unregister retires it immediately. That
+     * asymmetry is why it lives on the route and is consulted only at open time.
+     */
+    esp_err_t (*pre_handshake)(httpd_req_t*) = nullptr;
 };
 
 /** @brief The route a handshake would latch right now (null handler => unregistered). */

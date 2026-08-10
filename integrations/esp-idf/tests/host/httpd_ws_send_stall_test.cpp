@@ -24,6 +24,13 @@
  *      desynchronised and the session closes at once, bypassing the streak — the one
  *      case where "drop the frame, keep the socket" (#481) is unsound.
  *
+ * #951 widened the third: "half a frame is on the wire" is not only a partial buffer.
+ * `esp_http_server` writes one frame as a header call and a payload call, so a payload
+ * write that puts NOTHING on the wire truncates a frame the header already announced —
+ * indistinguishable, at the caller, from a frame that never started. The precondition the
+ * drop response rests on is now measured per frame rather than assumed, and the two are
+ * pinned as the pair they are (cases 9 and 10).
+ *
  * The fourth was added after the first on-silicon gate, which passed 1-3 and still failed:
  *   4. deciding to close a session is not closing it. The decision must take effect in the
  *      link's OWN state at the instant it is reached — refusing new frames to that fd and
@@ -53,6 +60,7 @@
 #include <vector>
 
 #include "fake_httpd.hpp"
+#include "libtracer/path.hpp"
 #include "libtracer_esp/httpd_ws_link.hpp"
 
 namespace {
@@ -158,15 +166,23 @@ void test_interleaved_success_never_closes() {
     claim(500);
     // The shipped #481 shape: the big reply times out, the small frames around it go out
     // fine. A drop streak is CONSECUTIVE, so this peer must never reach the cap.
+    //
+    // The script is per WRITE and a frame is two writes, so a frame that fails at its
+    // HEADER spends one entry and a frame that goes out spends two. That is not
+    // bookkeeping: it is the whole distinction #951 turns on. Every failure staged here is
+    // a frame whose first write never landed — nothing of it reached the peer — which is
+    // precisely the loss #481's drop-and-keep response is sound for.
     fake_httpd::instance().set_send_script(
-        500, {send_result_t::TIMEOUT, send_result_t::TIMEOUT, send_result_t::FULL,
-              send_result_t::TIMEOUT, send_result_t::TIMEOUT, send_result_t::FULL,
-              send_result_t::TIMEOUT, send_result_t::TIMEOUT, send_result_t::FULL});
+        500,
+        {send_result_t::TIMEOUT, send_result_t::TIMEOUT, send_result_t::FULL, send_result_t::FULL,
+         send_result_t::TIMEOUT, send_result_t::TIMEOUT, send_result_t::FULL, send_result_t::FULL,
+         send_result_t::TIMEOUT, send_result_t::TIMEOUT, send_result_t::FULL, send_result_t::FULL});
     for (int i = 0; i < 9; ++i) broadcast(*link);
 
     check(fake_httpd::instance().has_session(500),
           "interleaved successes reset the streak: the session survives");
-    check(fake_httpd::instance().writes(500) == 9, "every frame was still attempted");
+    check(fake_httpd::instance().writes(500) == 12,
+          "every frame was still attempted (6 lost at the header + 3 delivered x 2 writes)");
 
     link.reset();
     fake_httpd::instance().close_all();
@@ -179,7 +195,10 @@ void test_short_write_closes_immediately() {
     std::printf("a write that expires MID-frame:\n");
     auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
     claim(600);
-    fake_httpd::instance().set_send_script(600, {send_result_t::SHORT});
+    // Header out in full, payload half-written — where a bounded write actually expires
+    // mid-buffer on silicon, since a 2-byte header either fits the remaining window or
+    // does not. (The short HEADER write is staged by case 6, on fd 700.)
+    fake_httpd::instance().set_send_script(600, {send_result_t::FULL, send_result_t::SHORT});
 
     const std::size_t sent_before = fake_httpd::instance().frames_sent();
     broadcast(*link);
@@ -199,11 +218,19 @@ void test_short_write_closes_immediately() {
 // ---------------------------------------------------------------------------
 void test_send_bound_derivation() {
     std::printf("the per-socket send bound:\n");
+    // 5000 ms / (4 peers * 3 strikes). The strike cap is in the divisor because a peer
+    // costs a FULL bound on each of the three consecutive failures it takes to condemn
+    // it, so the worst case the watchdog window has to contain is peers*strikes bounds,
+    // not one round of peers (#840).
     const httpd_ws_link_t derived(handle(), "/ws", 4, true);
-    check(derived.send_timeout_ms() == 1250,
-          "default = task-watchdog period / peer cap (5000 ms / 4 peers)");
+    check(derived.send_timeout_ms() == 416,
+          "default = watchdog period / (peer cap * strike cap) (5000 ms / (4 * 3))");
     const httpd_ws_link_t capless(handle(), "/ws", 0, true);
-    check(capless.send_timeout_ms() == 1250, "an unbounded cap derives from the socket budget");
+    check(capless.send_timeout_ms() == 416, "an unbounded cap derives from the socket budget");
+    // The property that motivates the shape: one peer set, fully stalled, cannot hold the
+    // httpd task for a whole watchdog window before every one of them is condemned.
+    check(4u * 3u * derived.send_timeout_ms() <= 5000u,
+          "worst-case pre-verdict occupancy fits inside one watchdog window");
     const httpd_ws_link_t injected(handle(), "/ws", 4, true, 200);
     check(injected.send_timeout_ms() == 200, "an injected bound is honoured verbatim");
     const httpd_ws_link_t clamped(handle(), "/ws", 4, true, 60000);
@@ -226,30 +253,37 @@ void test_send_bound_derivation() {
  *     exists to clear, on the one task that drains it;
  *   - each backlog item ahead of it spends the full derived send bound on a stalled
  *     socket, so "behind the backlog" is seconds per entry, not microseconds;
- *   - `httpd_queue_work` is a bare `sendto` on a loopback UDP socket (httpd_main.c), and
- *     an enqueue past that socket's mbox is dropped by lwIP with success returned — so
- *     `ESP_OK` is not evidence the close was queued at all.
+ *   - `httpd_queue_work` posts to that socket's mbox (`CONFIG_LWIP_UDP_RECVMBOX_SIZE`
+ *     entries), and a full mbox refuses the enqueue — so asking it for a close when it is
+ *     full does not queue one.
  *
  * So the close cannot be something the link ASKS the jammed queue for. What this pins is
  * the alternative: the fd is marked dead in the link's own state at the moment of the
  * decision, the queued backlog to it drains at queue speed instead of at socket speed,
  * new frames to it are refused, and the socket is shut so httpd's select arm — the one
  * arm with no control message on it — reaps the session.
+ *
+ * The backlog is a POOL's worth of frames, not a mailbox's worth (#949): with the heap
+ * work-item fallback deleted, `tx_slot_capacity()` is how many sends this link can have
+ * outstanding at once, so that is the deepest undrained backlog it can build. The control
+ * queue is capped to the same number, which is what makes it full.
  */
 void test_jammed_queue_still_closes_the_doomed_fd() {
     std::printf("a peer found broken with its backlog already queued, control queue full:\n");
     auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
     claim(700);
     claim(701);
-    // The mbox depth behind the control socket (CONFIG_LWIP_UDP_RECVMBOX_SIZE default).
-    constexpr std::size_t kCtrlDepth = 6;
+    // The deepest backlog this link can build: one queued send per TX pool slot.
+    const std::size_t kCtrlDepth = httpd_ws_link_t::tx_slot_capacity();
     fake_httpd::instance().set_queue_capacity(kCtrlDepth);
     fake_httpd::instance().set_send_script(700, {send_result_t::SHORT});
     fake_httpd::instance().set_send_script(701, {send_result_t::FULL});
 
     // Fill the control queue with frames for the peer that is about to be found
     // desynchronised — the fan-out backlog, undrained.
-    auto* const doomed = link->peer_link("fd700");
+    // `p0` — the routable slot name (#994). This used to spell the `fd<n>` fallback, which
+    // was the peer's name only because a fake fd has no `getpeername` to decode.
+    auto* const doomed = link->peer_link("p0");
     check(doomed != nullptr, "the doomed peer resolves through the bus facet");
     for (std::size_t i = 0; i < kCtrlDepth; ++i) doomed->send(std::span<const std::byte>(kBody));
     check(fake_httpd::instance().queue_depth() == kCtrlDepth, "the control queue is full");
@@ -318,7 +352,7 @@ void test_dead_mark_does_not_outlive_its_session() {
     fake_httpd::instance().set_send_script(800, {send_result_t::FULL});
     const std::size_t before = fake_httpd::instance().writes(800);
     broadcast(*link);
-    check(fake_httpd::instance().writes(800) == before + 1,
+    check(fake_httpd::instance().writes(800) == before + 2,
           "the recycled fd is not muted by the previous session's dead mark");
     check(fake_httpd::instance().has_session(800), "and the new session survives");
 
@@ -327,10 +361,16 @@ void test_dead_mark_does_not_outlive_its_session() {
 }
 
 // ---------------------------------------------------------------------------
-// 8 — the peer NAME, over a real AF_INET6 socket.
+// 8 — the peer's ADDRESS, over a real AF_INET6 socket (and the routable name beside it).
 // ---------------------------------------------------------------------------
 /**
- * @brief A peer on an IPv6 socket must be named by its address, not by zeroes.
+ * @brief A peer on an IPv6 socket must have its address decoded, not read as zeroes.
+ *
+ * Since #994 the address is no longer the peer's graph NAME — that is `p<slot>`, asserted
+ * here too so the two cannot drift apart — but the decode this case exists for still has
+ * to work, because the address is what the strike log and `enumerate_peer_stats` report.
+ * Moving the subject from `enumerate_peers` to `peer_stats_t::endpoint_str` is the whole
+ * of the change: the sockaddr_in6 misdecode below is the regression this still guards.
  *
  * With `CONFIG_LWIP_IPV6` on (the default here) `esp_http_server` binds `PF_INET6`, so
  * every accepted WS socket is AF_INET6 and `getpeername` returns a `sockaddr_in6`.
@@ -381,16 +421,106 @@ void test_peer_name_on_an_ipv6_socket() {
     claim(peer_fd);
     std::string named;
     link->enumerate_peers([&named](std::string_view p) { named = std::string(p); });
-    std::printf("       peer named \"%s\"\n", named.c_str());
-    check(named.rfind("0.0.0.0", 0) != 0, "an IPv6 peer is NOT named 0.0.0.0");
-    check(named.rfind("fd", 0) != 0 && !named.empty(), "getpeername was decoded, not given up on");
-    check(named.rfind("::1:", 0) == 0, "the name carries the loopback address it connected from");
+    std::string endpoint;
+    link->enumerate_peer_stats([&endpoint](const httpd_ws_link_t::peer_stats_t& s) {
+        endpoint = std::string(s.endpoint_str);
+    });
+    std::printf("       peer named \"%s\", address \"%s\"\n", named.c_str(), endpoint.c_str());
+    check(endpoint.rfind("0.0.0.0", 0) != 0, "an IPv6 peer's address is NOT 0.0.0.0");
+    check(endpoint.rfind("fd", 0) != 0 && !endpoint.empty(),
+          "getpeername was decoded, not given up on");
+    check(endpoint.rfind("::1:", 0) == 0, "the address carries the loopback it connected from");
+    // #994: the NAME is the routable slot index, and it must be spellable as a path
+    // segment — the whole point of moving the address off it.
+    check(named == "p0", "the peer's graph name is its slot, p0");
+    // Asserted through THE predicate (ADR-0073 §1), not a hand-rolled character list: this
+    // is the exact function the wire boundary and the path parser call, so the test cannot
+    // pass while a real `dst` would still be rejected. The old `<ip>:<port>` name fails it.
+    check(tr::graph::valid_segment(named), "and it passes valid_segment, so a dst can spell it");
+    check(!tr::graph::valid_segment(endpoint), "while the address it replaced could never be one");
 
     link.reset();
     fake_httpd::instance().close_all();
     ::close(peer_fd);
     ::close(client);
     ::close(listener);
+}
+
+// ---------------------------------------------------------------------------
+// 9 — a frame ANNOUNCED on the wire and then abandoned is not a droppable frame.
+// ---------------------------------------------------------------------------
+/**
+ * @brief The header write lands, the payload write does not: the peer's stream is gone.
+ *
+ * `httpd_ws_send_frame_async` writes one frame as TWO calls to the session's send function
+ * — the header, then the payload — and reports either failure as the same `ESP_FAIL`. The
+ * shape staged here is the ordinary one for a stalled peer, not an exotic one: the 2-byte
+ * header fits whatever room the send window has left and, with Nagle off, leaves as its own
+ * segment; the large payload behind it finds no room, waits out `SO_SNDTIMEO` with nothing
+ * written, and comes back `EWOULDBLOCK`.
+ *
+ * What the peer is left holding is a header promising N bytes that will never arrive, so it
+ * consumes every LATER frame as this one's payload — an open socket that delivers nothing,
+ * with no close event at either end. Treating that as the #481 whole-frame loss keeps a
+ * session that cannot carry another message (#951); the response has to be the short-write
+ * one, and on the FIRST occurrence, because one is already proof.
+ */
+void test_truncated_frame_closes_the_session() {
+    std::printf("a frame whose header went out and whose payload did not:\n");
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    claim(900);
+    fake_httpd::instance().set_send_script(900, {send_result_t::FULL, send_result_t::TIMEOUT});
+
+    const std::size_t sent_before = fake_httpd::instance().frames_sent();
+    broadcast(*link);
+    drain();
+
+    check(fake_httpd::instance().writes(900) == 2,
+          "both writes were attempted: the header landed, the payload did not");
+    check(fake_httpd::instance().frames_sent() == sent_before,
+          "a truncated frame is NOT reported as delivered");
+    check(!fake_httpd::instance().has_session(900),
+          "ONE truncated frame closes the session — the peer can no longer parse the stream");
+
+    link.reset();
+    fake_httpd::instance().close_all();
+}
+
+// ---------------------------------------------------------------------------
+// 10 — and the #481 drop still survives: a frame that never STARTED is not fatal.
+// ---------------------------------------------------------------------------
+/**
+ * @brief The guard against the fix above being applied to everything.
+ *
+ * Case 9 is satisfied by a link that condemns on any failed send at all — which is the
+ * behaviour #481 removed, and the dead-web-ui churn it removed it for. The precondition
+ * "ZERO bytes of this frame reached the wire" is what separates them, so it is measured
+ * here on the same socket: the frame's FIRST write fails, nothing was announced, the peer
+ * missed one frame it can retry, and the session must still be there to carry the next one.
+ */
+void test_a_frame_that_never_started_is_still_only_dropped() {
+    std::printf("a frame whose very first write fails:\n");
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    claim(901);
+    fake_httpd::instance().set_send_script(901, {send_result_t::TIMEOUT});
+
+    broadcast(*link);
+    drain();
+    check(fake_httpd::instance().writes(901) == 1,
+          "the payload write is never reached: the header did not go out");
+    check(fake_httpd::instance().has_session(901),
+          "nothing of the frame reached the wire, so the session is kept (#481)");
+
+    // And it is kept in working order, not merely alive: the next frame is delivered.
+    fake_httpd::instance().set_send_script(901, {send_result_t::FULL});
+    const std::size_t sent_before = fake_httpd::instance().frames_sent();
+    broadcast(*link);
+    drain();
+    check(fake_httpd::instance().frames_sent() == sent_before + 1,
+          "the same socket still delivers the frame after it");
+
+    link.reset();
+    fake_httpd::instance().close_all();
 }
 
 }  // namespace
@@ -405,6 +535,8 @@ int main() {
     test_jammed_queue_still_closes_the_doomed_fd();
     test_dead_mark_does_not_outlive_its_session();
     test_peer_name_on_an_ipv6_socket();
+    test_truncated_frame_closes_the_session();
+    test_a_frame_that_never_started_is_still_only_dropped();
     if (g_failures != 0) {
         std::printf("FAILED: %d check(s)\n", g_failures);
         return 1;

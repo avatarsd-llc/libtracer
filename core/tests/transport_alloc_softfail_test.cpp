@@ -39,7 +39,7 @@
  * ## What this harness deliberately does NOT gate: three sites, named
  *
  * **The two PING→PONG call sites.** The two PONG replies
- * (`transport_ws_server::drain_frames`'s `PING` case — reached only from `service_peer` —
+ * (`transport_ws_server::drain_frames`'s `PING` case — reached only from `on_readable` —
  * and the client `serve` loop's) build
  * their frame with `ws::encode_server_control` / `ws::encode_client_control` into a stack
  * `std::array`. That the ENCODERS allocate nothing is gated — `bench_failable_census guard`
@@ -91,9 +91,12 @@
 #include <vector>
 
 #include "libtracer/can.hpp"
+#include "libtracer/fwd_router.hpp"
+#include "libtracer/graph.hpp"
 #include "libtracer/iov_table.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
+#include "libtracer/route_handle.hpp"
 #include "libtracer/transport_can.hpp"
 #include "libtracer/transport_tcp.hpp"
 #include "libtracer/transport_udp.hpp"
@@ -101,6 +104,7 @@
 #include "libtracer/view.hpp"
 #include "libtracer/view_can.hpp"
 #include "libtracer/ws.hpp"
+#include "test_support.hpp"
 
 // --- the fail-the-k-th-allocation injector (this TU owns the override) -------
 
@@ -175,13 +179,7 @@ using namespace std::chrono_literals;
 namespace ws = tr::net::ws;
 namespace can = tr::net::can;
 
-int g_failures = 0;
-
-/** @brief Record one assertion result. */
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /** @brief One armed window: allocation @p fail_at on THIS thread returns null / throws. */
 struct arm_t {
@@ -362,7 +360,7 @@ bool raw_handshake(int cfd) {
  * @brief Block until @p server counts at least @p want OPEN peers.
  *
  * `raw_handshake` returning means the CLIENT read the 101 — which is one instruction earlier
- * than the server publishing the slot, since `service_peer` writes the response and stores
+ * than the server publishing the slot, since `on_readable` writes the response and stores
  * `open = true` as two steps of one `write_m_` critical section. A sender can only reach the
  * fd through that same lock, so a `send` here cannot in fact be lost (`ws_transport_test`
  * proves it by parking the server in that instant). This barrier stays anyway because it
@@ -616,7 +614,9 @@ void test_ws_client_send_drops_then_recovers() {
 
 // ---------------------------------------------------------------------------
 // TCP — the two sites the issue's inventory missed: `prefixed_iov_t`'s record table
-// (transport_tcp.cpp:71, acquired at :81) and the broadcast's per-peer scratch (:355/:356).
+// (transport_tcp.cpp:68, acquired at :78) and the broadcast's per-peer scratch, which #871
+// moved into the shared fan-out (posix_endpoint.cpp:366, acquired at :367 — one store for
+// both servers now, so this vector exercises the ws one too).
 // Both were a THROWING `resize` before #848 (base 3479051: :78 and :358).
 // ---------------------------------------------------------------------------
 
@@ -954,6 +954,174 @@ void test_can_send_advertise_allocates_nothing() {
 }
 
 // ---------------------------------------------------------------------------
+// #885 — the LABEL control plane's egress, on the same injector
+//
+// The label plane (ADVERTISE / COMPACT / HANDLE_NACK) is not a transport, but its emissions
+// run on the SAME transport receive threads and are entirely peer-provoked, and until #885
+// three of them built their frame with the throwing `tr::net::encode_*` family. The injector
+// this TU owns is the instrument that can see that, for the reason the file header gives:
+// those were unguarded `std::vector` growths, which `probe_fail_hook` never observes.
+//
+// These cases drive the ROUTER's own doors — `on_frame` for the two peer-provoked arms, the
+// public `advertise` for the producer one — never a re-spelled copy of the emitter, so a call
+// site that reverts to the built encoder reddens here even though the emitter itself is fine.
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief A link that records into a FIXED buffer, so the RECORDING never allocates.
+ *
+ * A `std::vector`-backed recorder would add its own growth to every count below and make the
+ * budgets unreadable. It overrides BOTH send forms: the base `transport_t::send(iov)` gather
+ * allocates a concatenation buffer, which would likewise show up as the router's allocation.
+ */
+class silent_link_t final : public tr::net::transport_t {
+   public:
+    void send(std::span<const std::byte> frame) override {
+        n_ = 0;
+        append(frame);
+        ++spans_;
+    }
+    void send(std::span<const std::span<const std::byte>> iov) override {
+        n_ = 0;
+        for (const std::span<const std::byte> s : iov) append(s);
+        ++gathers_;
+    }
+    /** @brief The bytes of the last send (truncated at the buffer bound). */
+    [[nodiscard]] std::span<const std::byte> last() const { return {buf_.data(), n_}; }
+    /** @brief Sends taken through the contiguous overload. */
+    [[nodiscard]] std::size_t spans() const noexcept { return spans_; }
+    /** @brief Sends taken through the scatter-gather overload. */
+    [[nodiscard]] std::size_t gathers() const noexcept { return gathers_; }
+    /** @brief Forget everything recorded so far. */
+    void reset() noexcept {
+        n_ = 0;
+        spans_ = 0;
+        gathers_ = 0;
+    }
+
+   private:
+    /** @brief Copy @p s into the fixed buffer, clamped — never grows, never allocates. */
+    void append(std::span<const std::byte> s) {
+        const std::size_t k = s.size() < buf_.size() - n_ ? s.size() : buf_.size() - n_;
+        std::memcpy(buf_.data() + n_, s.data(), k);
+        n_ += k;
+    }
+    std::array<std::byte, 4096> buf_{}; /**< @brief Fixed capacity: no growth, no allocation. */
+    std::size_t n_ = 0;                 /**< @brief Bytes of the last send. */
+    std::size_t spans_ = 0;             /**< @brief Contiguous-send count. */
+    std::size_t gathers_ = 0;           /**< @brief Gather-send count. */
+};
+
+/** @brief A `PATH{NAME ...}` TLV, built outside every armed window. */
+std::vector<std::byte> label_route(std::string_view seg) {
+    std::vector<std::byte> body;
+    tr::wire::emit_name(body, seg);
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, tr::wire::type_t::PATH, tr::wire::opt_t{.pl = true}, body);
+    return out;
+}
+
+/**
+ * @brief The stale-label HANDLE_NACK costs the router ZERO allocations (#885).
+ *
+ * The cheapest arm a hostile peer can reach: a COMPACT naming a label this node never bound.
+ * It consults a trivially-copyable resolution, misses, finds the inbound link by name, and
+ * answers ten fixed bytes. Nothing on it is variable-length, so the budget is not derived —
+ * it is ZERO, and that is the whole claim. Before #885 it built the frame with the throwing
+ * `encode_handle_nack`, whose two `std::vector`s show up here as a non-zero count.
+ */
+void test_stale_label_nack_allocates_nothing() {
+    std::printf("label plane — a stale-label HANDLE_NACK costs ZERO allocations (#885):\n");
+    tr::graph::graph_t g;
+    tr::net::fwd_router_t router(g);
+    silent_link_t up;
+    router.add_child("up", up);
+
+    // Nothing is bound on this router, so every label is stale. The frame is built OUTSIDE
+    // the armed window — the peer's allocation is not the node's.
+    const std::vector<std::byte> stale =
+        tr::net::encode_compact(0x4242, label_route("ignored-payload-shape"));
+    router.on_frame("up", stale);  // warm-up: any lazy table creation happens here, unarmed
+    check(up.spans() == 1 && !up.last().empty(), "the stale COMPACT drew a NACK at all");
+
+    up.reset();
+    const std::size_t allocs = count_allocs([&] { router.on_frame("up", stale); });
+    check(allocs == 0, "an unbound label is answered without a single allocation");
+    check(up.spans() == 1, "and it was answered — a silent drop would make the count vacuous");
+    check(up.last().size() == 10, "the answer is the fixed 10-byte HANDLE_NACK");
+}
+
+/**
+ * @brief The producer door's re-advertise costs ZERO allocations once the label exists (#885).
+ *
+ * `fwd_router_t::advertise` is documented as the self-heal door a producer calls on every
+ * (re)connect, so it runs far more often than once per flow. The FIRST call mints the label
+ * and records the egress binding — that allocates, and #603 owns it. Every call after it
+ * reuses the binding, which is the steady state this measures: the only work left is putting
+ * the frame on the link, and since #885 that is a stack head plus a reference to the caller's
+ * route. The throwing `encode_advertise` it replaced shows up here as two allocations.
+ */
+void test_warm_advertise_allocates_nothing() {
+    std::printf("label plane — a warm advertise costs ZERO allocations (#885):\n");
+    tr::graph::graph_t g;
+    tr::net::fwd_router_t router(g);
+    silent_link_t down;
+    router.add_child("down", down);
+
+    const std::vector<std::byte> route = label_route("sensor");
+    const std::uint16_t first = router.advertise("down", route);  // mints + records, unarmed
+    check(first != 0, "the first advertise minted a label");
+
+    down.reset();
+    std::uint16_t again = 0;
+    const std::size_t allocs = count_allocs([&] { again = router.advertise("down", route); });
+    check(allocs == 0, "a re-advertise of an established route allocates nothing at all");
+    check(again == first, "and it reused the label rather than minting a second one");
+    check(down.gathers() == 1 && down.spans() == 0,
+          "the frame went out GATHERED — a contiguous send would mean it was built");
+}
+
+/**
+ * @brief `on_nack`'s re-advertise adds NOTHING to the one allocation it legitimately owns.
+ *
+ * This arm cannot be zero: answering a peer's HANDLE_NACK means reading the stored egress
+ * route back out from under the table's lock, and `route_handle_t::egress_route` returns it
+ * as an owning vector. That copy is already NOTHROW (#603) — exhaustion returns the same
+ * `nullopt` an unbound label does — but it is an allocation, so the budget is DERIVED from it
+ * exactly as the CAN case above derives its two steps, rather than hard-coded. The frame
+ * build that used to sit on top of it is what #885 removed, and restoring it puts the count
+ * over budget on every NACK.
+ */
+void test_nack_readvertise_adds_no_allocation() {
+    std::printf("label plane — on_nack allocates for its route copy and NOTHING else (#885):\n");
+    tr::graph::graph_t g;
+    tr::net::fwd_router_t router(g);
+    silent_link_t up;
+    router.add_child("up", up);
+
+    const std::vector<std::byte> route = label_route("sensor");
+    const std::uint16_t label = router.advertise("up", route);
+    check(label != 0, "a label is bound on the link the NACK will arrive on");
+
+    // The budget: the owning read `on_nack` performs, run standalone on its own table. The
+    // result outlives the lambda so the optimizer cannot elide the allocation being counted.
+    tr::net::route_handle_t rh;
+    (void)rh.record_egress("up", label, route);
+    std::optional<std::vector<std::byte>> owned;
+    const std::size_t budget = count_allocs([&] { owned = rh.egress_route("up", label); });
+    check(owned.has_value() && *owned == route, "the budget's one step ran and copied the route");
+
+    const std::vector<std::byte> nack = tr::net::encode_handle_nack(label);
+    router.on_frame("up", nack);  // warm-up, unarmed
+    up.reset();
+    const std::size_t allocs = count_allocs([&] { router.on_frame("up", nack); });
+    check(allocs == budget, "a NACK costs the owning route copy ONLY — the re-advertise adds none");
+    check(up.gathers() == 1, "and the re-advertise was actually emitted, gathered");
+    check(up.last().size() == 6 + route.size() + 4,
+          "carrying the whole stored route back: ADVERTISE hdr + label child + route");
+}
+
+// ---------------------------------------------------------------------------
 // RFC 6455 §5.5 — the PONG is unfailable because the control frame is bounded
 //
 // These three drive the SERVER. Their CLIENT mirror — a raw socket acting as a hostile
@@ -1146,6 +1314,9 @@ int main() {
     test_can_over_long_path_refused();
     test_can_emit_advertise_wire_identical();
     test_can_send_advertise_allocates_nothing();
+    test_stale_label_nack_allocates_nothing();
+    test_warm_advertise_allocates_nothing();
+    test_nack_readvertise_adds_no_allocation();
     test_ws_ping_at_the_bound_is_answered();
     test_ws_oversized_ping_fails_the_connection();
     test_ws_fragmented_control_fails_the_connection();
@@ -1153,6 +1324,5 @@ int main() {
     test_ws_reserved_control_opcode_fails_the_connection();
     test_control_encoders_are_byte_identical();
     test_try_encode_client_frame();
-    std::printf("%s (%d failure(s))\n", g_failures == 0 ? "OK" : "FAILED", g_failures);
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("transport_alloc_softfail");
 }

@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "fwd_reply.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/error.hpp"
 #include "libtracer/fwd_frame_view.hpp"
@@ -209,7 +210,12 @@ template <class SegAt, class Retain>
     // exactly still forwards, with an empty residual.
     const std::optional<std::string_view> next = at(k);
     if (!next) return {};
-    if (c->multi_peer.load(std::memory_order_relaxed)) {
+    // ONE snapshot of link + shape (#882). Read as two fields, a reconnect rebind that FLIPS
+    // this name's shape could pair a stale point-to-point shape with the fresh BUS link and
+    // send a directed request over the bus's broadcasting `send()` — the very fall-through
+    // the rejected branch below exists to stop.
+    const child_registry_t::egress_t eg = c->egress();
+    if (eg.multi_peer) {
         if (!next->empty()) {
             if (transport_t* const p = child_registry_t::resolve_peer(*c, *next)) {
                 const std::string_view peer = retain(k);
@@ -217,7 +223,7 @@ template <class SegAt, class Retain>
             }
         }
         // ADR-0073 §3 (RFC-0020): the bus link's own NAME is not a routable next-hop.
-        // Falling through to `c->link` here egressed over the bus transport's `send()`,
+        // Falling through to the slot's link here egressed over the bus transport's `send()`,
         // which fans out to EVERY open peer — one directed request drew N replies and
         // scrambled FIFO reply correlation (#409). Only the link's peer names route;
         // fan-out belongs to the subscription plane.
@@ -225,7 +231,7 @@ template <class SegAt, class Retain>
         rej.rejected = true;
         return rej;
     }
-    return mount_hit_t{c->link.load(std::memory_order_acquire), {}, k, c->name};
+    return mount_hit_t{eg.link, {}, k, c->name};
 }
 
 /**
@@ -380,15 +386,16 @@ template <class Cursor>
  *        steady-state egress, allocating NOTHING in the router.
  *
  * A COMPACT is a 6-byte frame header, a 6-byte label child, and a payload that is ALREADY
- * contiguous in the caller's storage. `try_encode_compact` nonetheless built the whole frame
+ * contiguous in the caller's storage. The built encoders nonetheless assembled the whole frame
  * into two `std::vector`s, copying the payload twice to produce bytes the transport was about
  * to gather anyway. Here the 12-byte head is written on the stack and the payload is REFERENCED,
- * so the router's per-frame allocation count on this leg is zero.
+ * so the router's per-frame allocation count on this leg is zero. Since #885 this is the ONLY
+ * COMPACT emission in the router: the writer thread's `deliver_remote` reaches it too.
  *
  * The bytes are unchanged: `stack_writer::header` and `wire::emit_header` share the `> 0xFFFF`
  * LL-widening rule and the same little-endian order, and the label child comes from
  * @ref tr::net::label_tlv, the same locus the built encoders use. Frames carry no trailer here
- * (`encode_compact` emits no CR bit), so nothing is left uncomputed.
+ * (no emitter in this family sets the CR bit), so nothing is left uncomputed.
  *
  * What this does NOT promise is zero allocations in the TRANSPORT. A link that overrides the
  * gather form (tcp, udp, ws-server) writes these spans straight to the socket; one that does
@@ -412,6 +419,105 @@ void emit_compact(transport_t& down, std::uint16_t label, std::span<const std::b
 }
 
 /**
+ * @brief Emit `ADVERTISE{ VALUE label(u16), PATH route }` over @p link by SCATTER-GATHER —
+ *        the ADVERTISE half of @ref emit_compact, allocating NOTHING in the router.
+ *
+ * The four production ADVERTISE emissions used to reach for the THROWING
+ * `tr::net::encode_advertise`, which built a body vector and a frame vector and copied the
+ * route into both (#885). THREE of the four run on a transport RECEIVE thread and are entirely
+ * peer-provoked — the forwarding hop's re-advertise in @ref fwd_router_t::on_advertise and the
+ * re-advertise in @ref fwd_router_t::on_nack — so on the shipping `-fno-exceptions` profile
+ * each was a peer-reachable `abort()`. The route TLV is already contiguous at every one of
+ * them (a stripped re-encode the hop is about to store, the caller's own span at the producer
+ * door, the owning copy `route_handle_t::egress_route` hands back on a NACK), so the ONLY
+ * bytes that needed building were the 12-byte head — which fits on the stack.
+ *
+ * The bytes are unchanged for the same reason @ref emit_compact's are: `stack_writer::header`
+ * and `wire::emit_header` share the `> 0xFFFF` LL-widening rule and the little-endian order,
+ * and the label child comes from @ref tr::net::label_tlv, the same locus the built encoder
+ * uses. `compact_cache_test` pins the concatenation against `encode_advertise` across the
+ * widening boundary, driving the real router door.
+ *
+ * As with COMPACT, this promises nothing about the TRANSPORT: a link that overrides the gather
+ * form writes the two spans straight out, one that does not falls into
+ * `transport_t::send(iov)`'s default concatenation — ONE allocation, and a NOTHROW one
+ * (#848). Either way no throwing allocation remains on the path.
+ *
+ * @param link       The link to emit over.
+ * @param label      The out-label being advertised on that link.
+ * @param route_path A complete PATH TLV's bytes; must outlive the call (every in-tree
+ *                   transport either writes synchronously or gather-copies before returning).
+ */
+void emit_advertise(transport_t& link, std::uint16_t label, std::span<const std::byte> route_path) {
+    const std::array<std::byte, 6> lbl = tr::net::label_tlv(label);
+    stack_writer<12> head;  // ADVERTISE header (<=6) + the 6-byte label child
+    head.header(type_t::ADVERTISE, lbl.size() + route_path.size());
+    head.raw(lbl);
+    if (!head.ok()) return;  // cannot happen at N=12; drop rather than emit a truncated frame
+    const std::array<std::span<const std::byte>, 2> iov{head.span(), route_path};
+    link.send(std::span<const std::span<const std::byte>>(iov));
+}
+
+/**
+ * @brief Emit `HANDLE_NACK{ VALUE label(u16) }` over @p link — a FIXED 10-byte frame written
+ *        entirely on the stack, so the stale-label answer allocates NOTHING anywhere.
+ *
+ * The one arm this router runs on a peer-provoked receive thread that is now allocation-free
+ * END TO END: @ref fwd_router_t::on_compact's unknown/stale-label case reads a trivially
+ * copyable resolution, compares one generation, finds the inbound link by name, and emits
+ * these ten bytes. It used to build them with the throwing `tr::net::encode_handle_nack`
+ * (two `std::vector`s for a frame whose size is a compile-time constant), which made the
+ * cheapest possible answer to a hostile peer — "I do not know that label" — the one that
+ * could `abort()` the node under `-fno-exceptions` (#885).
+ *
+ * A NACK has no variable-length child, so unlike ADVERTISE and COMPACT there is nothing to
+ * gather: the whole frame is contiguous in the stack buffer and goes out through the plain
+ * span `send`, exactly as the built form did. No transport sees a shape it did not before.
+ *
+ * @param link  The link the stale COMPACT arrived on — the NACK goes back the way it came.
+ * @param label The unknown/stale label that prompted it.
+ */
+void emit_handle_nack(transport_t& link, std::uint16_t label) {
+    const std::array<std::byte, 6> lbl = tr::net::label_tlv(label);
+    stack_writer<12> frame;  // HANDLE_NACK header (4) + the 6-byte label child
+    frame.header(type_t::HANDLE_NACK, lbl.size());
+    frame.raw(lbl);
+    if (!frame.ok()) return;  // cannot happen at N=12; drop rather than emit a truncated frame
+    link.send(frame.span());
+}
+
+/**
+ * @brief The trailer-EXCLUDED whole-TLV wire bytes of a decoded route node — the span shape
+ *        @ref tr::graph::assemble_error_reply copies into the reply head (ADR-0041 §4).
+ *
+ * `wire::encode` re-emits a trailer whenever the node carries one, so a peer that timestamped
+ * or CRC'd its route TLV had those bytes echoed back INSIDE the reply's address. That is
+ * exactly where the router's retired hand-rolled encoder diverged from the resolver, whose
+ * route copies are trailer-sliced at rest (#887). Clearing the trailer BITS and dropping the
+ * trailer VALUES is one operation, never two: a copy whose opt byte claims bytes the copy no
+ * longer carries is unparseable.
+ *
+ * The trailer-less fast path is not a guard: it is the universal case answered without
+ * deep-copying a peer-sized subtree. The two arms are not byte-identical in general — the
+ * fast arm gates on `!ts && !cr` and returns the opt byte as-is, while `without_trailer()`
+ * also clears CW and TF — so a route with opt `0x44` (PL|CW) and no trailer bytes takes the
+ * fast arm and keeps the CW bit the slow arm would drop. That difference is unobservable
+ * downstream because the assembler re-slices the route before it reaches the wire, but the
+ * arms must not be described as interchangeable.
+ *
+ * @param route A decoded route node (a `PATH`).
+ * @return Its whole-TLV bytes with the OUTER trailer removed, or an EMPTY vector when
+ *         `wire::encode` refuses the node (an ill-formed `PATH_REF` descendant).
+ */
+[[nodiscard]] std::vector<std::byte> route_wire_trailer_less(const tlv_t& route) {
+    if (!route.opt.ts && !route.opt.cr) return wire::encode(route);
+    tlv_t sliced = route;
+    sliced.opt = sliced.opt.without_trailer();
+    sliced.trailer.reset();
+    return wire::encode(sliced);
+}
+
+/**
  * @brief Answer a bus-NAME-hop rejection (ADR-0073 §3 / RFC-0020) with an ADDRESSED
  *        `FWD{REPLY, kind=ERROR, STATUS{ERROR{tr::path::invalid}}}` over the inbound link.
  *
@@ -423,13 +529,26 @@ void emit_compact(transport_t& down, std::uint16_t label, std::span<const std::b
  * (the resolver's own rule), and this is a COLD path, so the owning `wire::decode` is
  * within the ADR-0039 allocation budget exactly as the control-frame decodes above are.
  *
- * The reply mirrors the resolver's assembled-error grammar byte for byte:
+ * The reply bytes are not mirrored from the resolver's grammar — they ARE the resolver's
+ * grammar (#887): @ref tr::graph::assemble_error_reply is the one definition of
  * `FWD{ VALUE op=REPLY, PATH dst=req.src, PATH src=req.dst, VALUE kind=ERROR,
  * STATUS{ ERROR{ VALUE u16 LE code } } }` (RFC-0004 §D with the RFC-0002 §C registered-code
- * identity, `tr::path::invalid` = 0x0021).
+ * identity, `tr::path::invalid` = 0x0021). This function's job is reduced to the two things
+ * only it knows: which frame earns a rejection, and where the two route TLVs come from.
+ *
+ * @warning Sharing the encoder does NOT make this path nothrow. The owning `wire::decode`
+ *          on the first line still allocates through a throwing `std::vector` on the same
+ *          peer-provoked path; the RX-thread allocation policy is #885's, not this
+ *          function's. What is now shared is the SHAPE.
+ *
+ * @param registry     The child registry the answer is routed back through.
+ * @param inbound_name This node's name for the link the refused frame arrived on.
+ * @param frame        The refused frame's bytes.
+ * @param egress       The byte backend the reply head draws from (#795, ADR-0074) — the
+ *                     router's own egress seam, so a bounded node bounds this reply too.
  */
 void reject_bus_name_hop(const child_registry_t& registry, std::string_view inbound_name,
-                         std::span<const std::byte> frame) {
+                         std::span<const std::byte> frame, mem::mem_backend_t& egress) {
     const auto dec = wire::decode(frame);
     if (!dec) return;  // malformed ⇒ drop by value
     const tlv_t* op = nullptr;
@@ -460,34 +579,25 @@ void reject_bus_name_hop(const child_registry_t& registry, std::string_view inbo
     if (static_cast<fwd_op_t>(u8(op->payload[0]) & graph::kFwdOpcodeMask) == fwd_op_t::REPLY)
         return;
 
-    const std::uint16_t code = std::to_underlying(wire::err_t::PATH_INVALID);
-    const std::array<std::byte, 2> le{static_cast<std::byte>(code & 0xFFu),
-                                      static_cast<std::byte>(code >> 8)};
-    std::vector<std::byte> err_body;
-    wire::emit_tlv(err_body, type_t::VALUE, opt_t{}, std::span<const std::byte>(le));
-    std::vector<std::byte> status_body;
-    wire::emit_tlv(status_body, type_t::ERROR, opt_t{.pl = true}, err_body);
-
-    std::vector<std::byte> body;
-    const std::byte opb{static_cast<std::uint8_t>(fwd_op_t::REPLY)};
-    wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&opb, 1));
     // Reply routes swapped, as the resolver assembles them: reply dst = request src (the
     // accumulated return route), reply src = request dst (the refused spelling — what the
     // peer asked for, echoed so it can correlate).
-    const std::vector<std::byte> rdst = wire::encode(*src);
-    const std::vector<std::byte> rsrc = wire::encode(*dst);
-    body.insert(body.end(), rdst.begin(), rdst.end());
-    body.insert(body.end(), rsrc.begin(), rsrc.end());
-    const std::byte kind{static_cast<std::uint8_t>(graph::reply_kind_t::ERROR)};
-    wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&kind, 1));
-    wire::emit_tlv(body, type_t::STATUS, opt_t{.pl = true}, status_body);
-    std::vector<std::byte> out;
-    wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
+    const std::vector<std::byte> rdst = route_wire_trailer_less(*src);
+    const std::vector<std::byte> rsrc = route_wire_trailer_less(*dst);
+    // A route `wire::encode` refuses is no address at all, and a head sized around an empty
+    // span would announce a body length no bytes occupy. Drop by value, as for a missing src.
+    if (rdst.empty() || rsrc.empty()) return;
+    const view::rope_t reply =
+        graph::assemble_error_reply(rdst, rsrc, graph::status_t::INVALID_PATH, egress);
+    // Exactly one link by construction: an error reply carries no shared payload and no mint
+    // trailer, so `assemble_error_reply` yields the head segment alone and it egresses
+    // contiguously — the single `send(span)` this path has always made. A zero-link rope is
+    // the egress refusal; drop rather than emit a headerless frame.
+    if (reply.link_count() != 1) return;
     // `by_name` includes the bus-peer fallback, so a frame that arrived FROM a peer (whose
     // inbound_name is the peer's own name) answers back over that peer's directed endpoint —
     // the same lookup resolve_terminus uses for its replies.
-    if (transport_t* const up = registry.by_name(inbound_name))
-        up->send(std::span<const std::byte>(out));
+    if (transport_t* const up = registry.by_name(inbound_name)) up->send(reply.links()[0].bytes());
 }
 
 /**
@@ -717,8 +827,10 @@ std::uint16_t fwd_router_t::advertise(std::string_view link_name,
     // space is exhausted or its egress table is full (#603) — nothing recorded, no frame.
     const std::uint16_t label = handles_.ensure_egress(link_name, route_path).first;
     if (label == 0) return 0;  // no label, no binding, no frame — the full-route form instead
-    const std::vector<std::byte> adv = encode_advertise(label, route_path);
-    link->send(std::span<const std::byte>(adv));
+    // The producer-side door shares the router's gather locus with the forwarding hop, exactly
+    // as `send_compact` below does — so the public API and the peer-provoked re-advertise emit
+    // the same bytes by construction and neither builds a frame (#885).
+    emit_advertise(*link, label, route_path);
     return label;
 }
 
@@ -868,11 +980,14 @@ transport_t* fwd_router_t::bound_egress(wire::path_ref_element_t e, std::string_
     const child_rx_ctx_t* const ctx = ctx_by_conn_slot(e.index);
     if (ctx == nullptr) return nullptr;  // a vertex, but not one of this node's egresses
     // The child's registry slot, cached at registration — no per-frame name scan. The slot's
-    // ADDRESS is fixed for the registry's lifetime; its CONTENTS are not, so `multi_peer` and
-    // `link` are still read atomically and a tombstone still drops the frame here.
+    // ADDRESS is fixed for the registry's lifetime; its CONTENTS are not, so the link and its
+    // shape are still read atomically — as ONE word, so this reader cannot pair one
+    // publication's shape with another's link (#882) — and a tombstone still drops the frame.
     const child_registry_t::child_t* const child = ctx->entry;
-    if (child == nullptr || child->multi_peer.load(std::memory_order_relaxed)) return nullptr;
-    return child->link.load(std::memory_order_acquire);  // null ⇒ tombstoned ⇒ drop
+    if (child == nullptr) return nullptr;
+    const child_registry_t::egress_t eg = child->egress();
+    if (eg.multi_peer) return nullptr;
+    return eg.link;  // null ⇒ tombstoned ⇒ drop
 }
 
 bool fwd_router_t::adopt_binding(graph::path_t& path, std::string_view link_name,
@@ -1102,7 +1217,7 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
                     // the codec's leniency. The SEAM on the line above is the testable part,
                     // and `fwd_flatten_backend_test` pins it.
                     if (flat.empty()) return;
-                    reject_bus_name_hop(registry_, inbound_name, flat.bytes());
+                    reject_bus_name_hop(registry_, inbound_name, flat.bytes(), *egress_);
                 },
                 /* terminus */
                 [&] {
@@ -1148,7 +1263,7 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
                         sink.fn(sink.ctx, inbound_name, *dec);
                 }
             },
-            /* reject */ [&] { reject_bus_name_hop(registry_, inbound_name, frame); },
+            /* reject */ [&] { reject_bus_name_hop(registry_, inbound_name, frame, *egress_); },
             /* terminus */ [&] { resolve_terminus(inbound_name, frame, frame_view, inbound_ctx); },
             /* reply */
             [&] {
@@ -1372,7 +1487,7 @@ void fwd_router_t::dispatch_control(std::string_view inbound_name, const Cursor&
     // span tier the owning `wire::decode` this replaced verified every node's CRC, so
     // deferring here would silently start ACCEPTING a COMPACT whose root trailer says its
     // payload is corrupt. The cost is zero allocations and, on our own traffic, zero cycles:
-    // `encode_compact` emits no CR bit. A peer may legally set one, which is exactly why the
+    // `emit_compact` emits no CR bit. A peer may legally set one, which is exactly why the
     // check must be explicit. Fragmenting a frame must not change whether it is applied.
     const auto head = peek_control(cur, wire::grammar::crc_check_t::VERIFY);
     if (!head) return;  // malformed / not a control frame / CRC failure ⇒ drop
@@ -1403,7 +1518,7 @@ void fwd_router_t::dispatch_control(std::string_view inbound_name, const Cursor&
         }
         case type_t::COMPACT: {
             if (head->child1_off == 0) return;
-            // The payload is stored (deliver_local) or re-wrapped (encode_compact) as
+            // The payload is stored (deliver_local) or re-wrapped (emit_compact) as
             // contiguous bytes — a transport-egress / local-store boundary (ADR-0055 §2). The
             // caller's seam holds whatever ownership that costs on its tier for the duration
             // of this call.
@@ -1528,9 +1643,23 @@ void fwd_router_t::on_advertise(std::string_view inbound_name, std::uint16_t lab
         // whose egress route died with the erased table. The refusal takes the same path a
         // full table takes — the upstream's next COMPACT misses and draws the ordinary
         // stale-label HANDLE_NACK, which prompts it to re-advertise onto the new tables.
-        if (!handles_.bind_ingress_forward(inbound_name, label, std::move(fwd), down_epoch)) return;
-        const std::vector<std::byte> adv2 = encode_advertise(out_label, stripped_bytes);
-        hit.link->send(std::span<const std::byte>(adv2));
+        if (!handles_.bind_ingress_forward(inbound_name, label, std::move(fwd), down_epoch)) {
+            // Hand the take back (#833). A refusal returns without advertising, so the label
+            // this hop just took aliases a route no ingress binding aims at and no peer has
+            // ever seen — it sat in the LIVE downstream table until that link's next
+            // clear_link, one label plus its route bytes per refused route, and it also spent
+            // one of the downstream table's bounded slots. `release_egress` erases only what
+            // THIS call minted: a label some other advertise has since taken (#913's sharing)
+            // is left exactly where it is, so an established flow cannot be unwound by a new
+            // one's refusal. Nothing goes on the wire either way.
+            handles_.release_egress(down_name, out_label, stripped_bytes);
+            return;
+        }
+        // Gathered, not built (#885): this arm runs on the INBOUND link's receive thread and is
+        // reached only because a peer sent an ADVERTISE, so the frame build it used to do here
+        // was a peer-provoked throwing allocation. The stripped route is already contiguous —
+        // it has to be, `ensure_egress` above stored a copy of exactly these bytes.
+        emit_advertise(*hit.link, out_label, stripped_bytes);
         return;
     }
 
@@ -1568,10 +1697,10 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
         // (self-heal). Never a crash — the route is simply re-learned (RFC-0004 §E.1).
         if (const auto sink = stale_.get(); sink.fn != nullptr)
             sink.fn(sink.ctx, inbound_name, label);
-        if (transport_t* const up = registry_.by_name(inbound_name)) {
-            const std::vector<std::byte> nack = encode_handle_nack(label);
-            up->send(std::span<const std::byte>(nack));
-        }
+        // Ten bytes off the stack (#885). This is the arm a hostile peer reaches for free —
+        // one unbound label per frame, no state to consult — so it is the one that must not
+        // be able to exhaust anything. It now allocates NOTHING at all, on any tier.
+        if (transport_t* const up = registry_.by_name(inbound_name)) emit_handle_nack(*up, label);
         return;
     }
 
@@ -1635,7 +1764,7 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
     // The tombstone IS the invalidation; no generation and no teardown sweep are needed.
     if (rb.warm && rb.down_slot != nullptr) {
         const auto* const slot = static_cast<const child_registry_t::child_t*>(rb.down_slot);
-        if (transport_t* const down = slot->link.load(std::memory_order_acquire)) {
+        if (transport_t* const down = slot->link()) {
             emit_compact(*down, rb.out_label, payload_bytes);
             return;
         }
@@ -1644,7 +1773,7 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
     const std::optional<handle_binding_t> binding = handles_.lookup_ingress(inbound_name, label);
     if (!binding) return;
     if (const child_registry_t::child_t* const slot = registry_.entry_by_name(binding->down_link)) {
-        if (transport_t* const down = slot->link.load(std::memory_order_acquire)) {
+        if (transport_t* const down = slot->link()) {
             emit_compact(*down, binding->out_label, payload_bytes);
             resolved_binding_t fill = rb;
             fill.warm = true;
@@ -1657,12 +1786,16 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
 void fwd_router_t::on_nack(std::string_view inbound_name, std::uint16_t label) {
     // A downstream peer lost the binding for `label` on this link — re-advertise the
     // route we hold for it so the flow self-heals without a setup handshake.
+    // `egress_route` is the ONE allocation left on this peer-provoked arm: an owning copy of
+    // the stored route out from under the egress table's lock. It is already NOTHROW (#603) —
+    // exhaustion returns the same `nullopt` an unbound label returns, and the peer simply gets
+    // no re-advertise. The frame build that used to follow it is gone (#885), so the arm's
+    // whole allocation budget is now that one guarded copy; `transport_alloc_softfail_test`
+    // derives the budget from it rather than hard-coding a number.
     const std::optional<std::vector<std::byte>> route = handles_.egress_route(inbound_name, label);
     if (!route) return;
-    if (transport_t* const link = registry_.by_name(inbound_name)) {
-        const std::vector<std::byte> adv = encode_advertise(label, *route);
-        link->send(std::span<const std::byte>(adv));
-    }
+    if (transport_t* const link = registry_.by_name(inbound_name))
+        emit_advertise(*link, label, *route);
 }
 
 std::optional<graph::vertex_handle_t> fwd_router_t::resolve_route_vertex(
@@ -1768,13 +1901,15 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const vie
         // Auto-promote (Q5 / RFC-0004 §E.1): advertise the label once per flow, then stream
         // lean COMPACT. ensure_egress is idempotent per (link,route); clear_link on a
         // reconnect drops the binding so the next delivery re-advertises (self-heal).
-        // A COMPACT wraps a CONTIGUOUS payload (encode_compact), so a multi-link value pays
-        // one flatten here — single-link, the common case, is a zero-copy adopt. The
-        // scatter-gather win is the default full-route path below (the hot fan-out leg).
-        // The flatten/frame-build allocations on this writer-thread leg are NOTHROW (#477):
-        // a failed flatten or frame build DROPS the delivery (the subscriber misses one
-        // value under heap exhaustion — valid delivery behavior), never an abort. A
-        // dropped fresh ADVERTISE self-heals via the peer's HANDLE_NACK (§E.1). NOT yet
+        // A COMPACT wraps a CONTIGUOUS payload, so a multi-link value pays one flatten here
+        // — single-link, the common case, is a zero-copy adopt. The scatter-gather win is
+        // the default full-route path below (the hot fan-out leg).
+        // The flatten on this writer-thread leg is NOTHROW (#477): a failed flatten DROPS
+        // the delivery (the subscriber misses one value under heap exhaustion — valid
+        // delivery behavior), never an abort. The two frame BUILDS that used to follow it
+        // are gone (#885) — this leg now emits through the same gather locus the forwarding
+        // hop and the producer doors use, so it allocates for the flatten and nothing
+        // else. A dropped fresh ADVERTISE self-heals via the peer's HANDLE_NACK (§E.1). NOT yet
         // nothrow: ensure_egress below still records the egress binding through a throwing
         // std::pmr allocation (#603 defect 1) — an ADVERTISE-driven abort under
         // -fno-exceptions until the label tables migrate to the failable seam.
@@ -1793,11 +1928,8 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const vie
             // must be thread-safe (ADR-0060 §2).
             const view_t flat = value.materialize(*flat_);
             if (flat.empty() && value.total_length() != 0) return;  // flatten OOM — drop
-            std::vector<std::byte> frame;
-            if (fresh && try_encode_advertise(frame, label, route))
-                link->send(std::span<const std::byte>(frame));
-            if (!try_encode_compact(frame, label, flat.bytes())) return;  // OOM — drop
-            link->send(std::span<const std::byte>(frame));
+            if (fresh) emit_advertise(*link, label, route);
+            emit_compact(*link, label, flat.bytes());
             return;
         }
         // label == 0: this link has issued all 65535 labels. Compaction is an optimization

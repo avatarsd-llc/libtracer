@@ -33,6 +33,7 @@
 #include <cstdio>
 #include <cstring>
 #include <future>
+#include <memory>
 #include <memory_resource>
 #include <mutex>
 #include <set>
@@ -43,6 +44,7 @@
 #include <vector>
 
 #include "libtracer/backend.hpp"
+#include "libtracer/config_reader.hpp"
 #include "libtracer/error.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/tlv_emit.hpp"
@@ -51,6 +53,7 @@
 #include "libtracer/transport_udp.hpp"
 #include "libtracer/transport_ws.hpp"
 #include "libtracer/ws.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -68,12 +71,7 @@ using tr::view::view_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 view_t owned(std::span<const std::byte> bytes) {
     tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
@@ -82,53 +80,15 @@ view_t owned(std::span<const std::byte> bytes) {
 }
 
 /**
- * @brief A connection-creation spec (ADR-0027 / reference/05). `kind`/`addr` empty = omitted.
+ * @brief The connection-creation SPEC, from the library's own public builder (#902).
  *
- * SPEC{ NAME "type" <type>, NAME "name" <name>, SETTINGS "config"{ NAME "role" VALUE u8,
- *       NAME "port" VALUE u16 [, NAME "kind" NAME <kind>][, NAME "addr" NAME <addr>] } }
+ * The hand-emitted near-copy this file used to carry is gone: `tr::net::conn_spec` IS the
+ * shape below, so the test now exercises the encoder a consumer actually ships with rather
+ * than a private lookalike that could drift away from it. Extra config keys — the u32s
+ * below, and any kind-private pair — are spelled with @ref tr::net::conn_spec_t directly.
  */
-view_t conn_spec(std::string_view type, std::string_view name, conn_role_t role, std::uint16_t port,
-                 std::string_view kind = {}, std::string_view addr = {}, std::uint32_t backoff = 0,
-                 std::uint32_t connect_timeout = 0, std::uint32_t max_frame = 0) {
-    std::vector<std::byte> cfg;
-    tr::wire::emit_name(cfg, "role");
-    const std::byte r{static_cast<std::uint8_t>(role)};
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, std::span<const std::byte>(&r, 1));
-    tr::wire::emit_name(cfg, "port");
-    std::vector<std::byte> pb(2);
-    tr::detail::store_le(pb, port, 2);
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, pb);
-    if (!kind.empty()) {
-        tr::wire::emit_name(cfg, "kind");
-        tr::wire::emit_name(cfg, kind);
-    }
-    if (!addr.empty()) {
-        tr::wire::emit_name(cfg, "addr");
-        tr::wire::emit_name(cfg, addr);
-    }
-    const auto emit_u32 = [&cfg](std::string_view key, std::uint32_t val) {
-        tr::wire::emit_name(cfg, key);
-        std::vector<std::byte> vb(4);
-        tr::detail::store_le(vb, val, 4);
-        tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, vb);
-    };
-    if (backoff != 0) emit_u32("backoff", backoff);
-    if (connect_timeout != 0) emit_u32("connect_timeout", connect_timeout);
-    if (max_frame != 0) emit_u32("max_frame", max_frame);
-
-    std::vector<std::byte> body;
-    tr::wire::emit_name(body, "type");
-    tr::wire::emit_name(body, type);
-    tr::wire::emit_name(body, "name");
-    tr::wire::emit_name(body, name);
-    tr::wire::emit_name(body,
-                        "config");  // the "config" key preceding its SETTINGS (reference/05)
-    tr::wire::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true}, cfg);
-
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
-    return owned(out);
-}
+using tr::net::conn_spec;
+using tr::net::conn_spec_t;
 
 /**
  * @brief This test application's module declarations (ADR-0073 §4: declared-only).
@@ -265,8 +225,12 @@ void test_backoff_connect_timeout_parsed() {
     transport_vertex_t net(node, router);
     tr::net::loopback_channel_t channel;
     net.provide_link("ws-client", "c", channel.a());
-    (void)node.write(path_t("/net:children[]"),
-                     conn_spec("client", "c", conn_role_t::DIAL, 0, {}, {}, 250, 3000));
+    (void)node.write(path_t("/net:children[]"), conn_spec_t("client", "c")
+                                                    .role(conn_role_t::DIAL)
+                                                    .port(0)
+                                                    .backoff_ms(250)
+                                                    .connect_timeout_ms(3000)
+                                                    .view());
     const auto* s = net.settings_of("net/ws-client/c");
     check(s != nullptr && s->backoff_ms == 250 && s->connect_timeout_ms == 3000,
           "backoff=250 / connect_timeout=3000 parsed into the transport-private settings");
@@ -465,18 +429,180 @@ void test_provide_link_wins() {
     graph_t node;
     fwd_router_t router(node);
     transport_vertex_t net(node, router);
+    declare_builtin_modules(net);  // kind=udp + DIAL is declared to mount under udp-client
     tr::net::loopback_channel_t channel;
-    net.provide_link("ws-client", "up", channel.a());  // staged first — must win over kind=udp
+    // Staged under the module `kind=udp` + DIAL resolves to. Precedence is a WITHIN-module
+    // question (#883): the SPEC and the staging have to be talking about the same mount
+    // before "which one wins" is even a question. A staging under some other module is a
+    // different connection — `test_kind_module_beats_unrelated_staging` covers that.
+    net.provide_link(std::string(tr::net::kUdpClientSuggestedModule), "up", channel.a());
 
     const auto w =
         node.write(path_t("/net:children[]"),
                    conn_spec("client", "up", conn_role_t::DIAL, 47121, "udp", "127.0.0.1"));
     check(w.has_value(), "SPEC with kind=udp still creates the connection");
-    check(router.registry().by_name("net/ws-client/up") == &channel.a(),
+    check(router.registry().by_name("net/udp-client/up") == &channel.a(),
           "the staged provide_link transport is the wired one (no socket constructed)");
-    const auto* s = net.settings_of("net/ws-client/up");
+    const auto* s = net.settings_of("net/udp-client/up");
     check(s != nullptr && s->kind == "udp", "the config kind is still parsed into :settings");
     channel.shutdown();
+}
+
+/** @brief A link that carries nothing — enough to be staged, wired and looked up by identity. */
+struct stub_link_t : tr::net::transport_t {
+    /** @brief Egress is not what these tests measure. */
+    void send(std::span<const std::byte> /*frame*/) override {}
+};
+
+/** @brief How many links the `stub_link_t` factory below has constructed. */
+int g_stub_built = 0;
+
+/**
+ * @brief Declare @p kind for @p role under module @p module, with a factory that builds a
+ *        `stub_link_t` and counts itself.
+ *
+ * Registering the module and registering the factory are two different registries: a create
+ * that binds a STAGED link never reaches the factory, so a test that only needs the module
+ * declaration can skip the type. Here both are present so "the factory ran" is observable.
+ */
+void declare_stub_kind(transport_vertex_t& net, std::string module, std::string kind,
+                       conn_role_t role) {
+    (void)net.register_module(std::move(module), kind, role);
+    net.register_transport_type(
+        std::move(kind),
+        [](const tr::net::conn_settings_t&,
+           const tr::wire::tlv_t*) -> tr::graph::result_t<std::unique_ptr<tr::net::transport_t>> {
+            ++g_stub_built;
+            return std::make_unique<stub_link_t>();
+        });
+}
+
+/**
+ * @brief #883 — two stagings sharing a leaf NAME each bind their OWN module.
+ *
+ * `provide_link` keys its staging `<module>/<name>`; the creation path used to match only the
+ * substring after the last `/`, adopt the module of whichever key came first in the map's
+ * lexicographic order, and never compare the module half against anything.
+ *
+ * The order below is what makes this non-vacuous. `mod-a/x` sorts first, so the SPEC created
+ * FIRST here is the one meaning `mod-b` — under the old scan it mounted at `/net/mod-a/x`
+ * wired to `mod-a`'s link, i.e. the wrong module AND the wrong transport, silently. (The
+ * creating SPEC's own intent was the only thing that knew better, and the scan never looked
+ * at it.) The assertions therefore land BETWEEN the two creates: a successful create consumes
+ * its staging, so by the time the second one runs only one staging is left and the wrong
+ * answer has become indistinguishable from the right one.
+ */
+void test_same_leaf_name_under_two_modules() {
+    std::printf("#883: two links staged under different modules, same leaf NAME:\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    declare_stub_kind(net, "mod-a", "stub-a", conn_role_t::DIAL);
+    declare_stub_kind(net, "mod-b", "stub-b", conn_role_t::DIAL);
+
+    stub_link_t link_a;
+    stub_link_t link_b;
+    net.provide_link("mod-a", "x", link_a);
+    net.provide_link("mod-b", "x", link_b);
+    g_stub_built = 0;
+
+    // Each SPEC names the kind whose declared module says WHICH staging it means.
+    const auto wb = node.write(path_t("/net:children[]"),
+                               conn_spec("client", "x", conn_role_t::DIAL, 0, "stub-b"));
+    check(wb.has_value(), "SPEC{name=x, kind=stub-b} creates");
+    check(node.find(path_t::parse("/net/mod-b/x")->key()).has_value(),
+          "it mounts at /net/mod-b/x — the module its kind declares");
+    check(router.registry().by_name("net/mod-b/x") == &link_b,
+          "and is wired to the link staged under mod-b, not to mod-a's by map order");
+    check(!node.find(path_t::parse("/net/mod-a/x")->key()).has_value(),
+          "mod-a gained nothing — its staging is untouched and still stageable");
+
+    const auto wa = node.write(path_t("/net:children[]"),
+                               conn_spec("client", "x", conn_role_t::DIAL, 0, "stub-a"));
+    check(wa.has_value(), "SPEC{name=x, kind=stub-a} then creates too — mod-a/x is not stranded");
+    check(router.registry().by_name("net/mod-a/x") == &link_a,
+          "net/mod-a/x is wired to the link staged under mod-a");
+    check(g_stub_built == 0, "and neither factory ran — both creates found their own staging");
+}
+
+/**
+ * @brief #883 — a kind-less SPEC that two stagings answer to is REFUSED, not bound by map order.
+ *
+ * The map's iteration order is lexicographic and carries no intent, so with `mod-a/x` and
+ * `mod-b/x` staged and nothing in the SPEC to tell them apart, a clear error beats a silent
+ * wrong bind. The refusal must also be total: neither staging is consumed, so naming the
+ * kind afterwards still reaches each one.
+ */
+void test_ambiguous_leaf_name_refused() {
+    std::printf("#883: a kind-less SPEC matching two stagings is refused, not guessed:\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    declare_stub_kind(net, "mod-a", "stub-a", conn_role_t::DIAL);
+    declare_stub_kind(net, "mod-b", "stub-b", conn_role_t::DIAL);
+
+    stub_link_t link_a;
+    stub_link_t link_b;
+    net.provide_link("mod-a", "x", link_a);
+    net.provide_link("mod-b", "x", link_b);
+
+    const auto w =
+        node.write(path_t("/net:children[]"), conn_spec("client", "x", conn_role_t::DIAL, 0));
+    check(!w.has_value() && w.error() == status_t::TYPE_MISMATCH,
+          "an ambiguous kind-less SPEC answers TYPE_MISMATCH");
+    check(!node.find(path_t::parse("/net/mod-a/x")->key()).has_value() &&
+              !node.find(path_t::parse("/net/mod-b/x")->key()).has_value(),
+          "and NEITHER module gained a connection");
+    check(router.registry().live_size() == 0, "nothing entered the router registry");
+
+    // Total refusal: both stagings survive, and the disambiguating SPEC still binds them.
+    const auto wa = node.write(path_t("/net:children[]"),
+                               conn_spec("client", "x", conn_role_t::DIAL, 0, "stub-a"));
+    const auto wb = node.write(path_t("/net:children[]"),
+                               conn_spec("client", "x", conn_role_t::DIAL, 0, "stub-b"));
+    check(wa.has_value() && wb.has_value(), "naming the kind afterwards creates both");
+    check(router.registry().by_name("net/mod-a/x") == &link_a &&
+              router.registry().by_name("net/mod-b/x") == &link_b,
+          "so the refusal consumed neither staging");
+}
+
+/**
+ * @brief #883 — a SPEC's kind decides the module; an unrelated staging cannot capture it.
+ *
+ * The staged scan used to run BEFORE the (kind, role) → module declaration, so a link staged
+ * under `mod-a` swallowed a SPEC naming a kind declared under `mod-b` — the kind's factory
+ * never ran and the connection mounted in the wrong place. The staging is not merely
+ * outvoted here: it is untouched, and still binds its own module afterwards.
+ */
+void test_kind_module_beats_unrelated_staging() {
+    std::printf("#883: a SPEC naming a kind is not captured by an unrelated staging:\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    declare_stub_kind(net, "mod-a", "stub-a", conn_role_t::DIAL);
+    declare_stub_kind(net, "mod-b", "stub-b", conn_role_t::DIAL);
+
+    stub_link_t staged;
+    net.provide_link("mod-a", "x", staged);  // staged under mod-a; the SPEC below names mod-b's
+    g_stub_built = 0;
+
+    const auto w = node.write(path_t("/net:children[]"),
+                              conn_spec("client", "x", conn_role_t::DIAL, 0, "stub-b"));
+    check(w.has_value(), "SPEC{name=x, kind=stub-b} creates");
+    check(node.find(path_t::parse("/net/mod-b/x")->key()).has_value(),
+          "it mounts under mod-b — the kind's declared module");
+    check(g_stub_built == 1, "the kind's FACTORY ran (the staging did not capture the create)");
+    check(router.registry().by_name("net/mod-b/x") != nullptr &&
+              router.registry().by_name("net/mod-b/x") != &staged,
+          "and the wired link is the constructed one, not the staged one");
+    check(!node.find(path_t::parse("/net/mod-a/x")->key()).has_value(),
+          "nothing was mounted under the staging's own module");
+
+    // Untouched: a kind-less SPEC (now the only staging for that leaf NAME) still binds it.
+    const auto w2 =
+        node.write(path_t("/net:children[]"), conn_spec("client", "x", conn_role_t::DIAL, 0));
+    check(w2.has_value() && router.registry().by_name("net/mod-a/x") == &staged,
+          "the staging survived and still binds mod-a/x");
 }
 
 /**
@@ -833,6 +959,187 @@ void test_factory_built_ws_dial_delivers_push_on_connect() {
     ::close(lfd);
 }
 
+/** @brief One length-prefixed record: u32-LE len ++ payload (the M6 tcp transport framing). */
+std::vector<std::byte> tcp_record(std::span<const std::byte> payload) {
+    std::vector<std::byte> out(4);
+    tr::detail::store_le(out, static_cast<std::uint32_t>(payload.size()), 4);
+    out.insert(out.end(), payload.begin(), payload.end());
+    return out;
+}
+
+/**
+ * @brief #1045 — a SPEC-created `kind=tcp` DIAL delivers the frame its peer pushed on connect.
+ *
+ * The `ws` twin above, for the transport this issue is scoped to. The same argument applies
+ * unchanged: `tcp_test`'s raw-peer case constructs `tcp_transport_t` DIRECTLY, so the
+ * factory's argument list is never read, and `test_link_is_armed_after_wiring` goes in through
+ * `provide_link`, which takes the staged-link branch and calls no factory at all. The
+ * `defer_recv` argument the built-in `tcp` factory passes
+ * (`core/src/builtin_transport_tcp.cpp`) sits between them. Drop it and the SPEC-created DIAL
+ * is one-phase again: the recv thread is spawned inside the constructor,
+ * `make_connection`'s `start_receiving()` finds the one-shot latch already set and does
+ * nothing, and the push-on-connect frame is back to racing the receiver install — silently,
+ * because a decode into an empty `receiver_slot_t` moves no counter at all.
+ *
+ * So this drives a raw-peer harness through the PRODUCTION creation path — a graph write of
+ * SPEC{client, kind=tcp, addr, port} — and observes DOWNSTREAM of the link, where a drop
+ * shows. tcp has no handshake, so the peer simply writes ONE complete length-prefixed record
+ * carrying `FWD{WRITE dst=/temp}` the moment it accepts, and then goes quiet. The factory
+ * wires the router as the receiver, so a DELIVERED frame reaches the terminus and lands in
+ * the LKV — `/temp` takes a write it had not taken before. A frame decoded before the wiring
+ * reaches nothing, and `/temp` stays as it was.
+ *
+ * The window is held open on purpose (see @ref map_lock_gate_t) — left to the host it is a
+ * couple of microseconds, so the one-phase shape would usually win the race by accident and
+ * the guard would assert nothing.
+ */
+void test_factory_built_tcp_dial_delivers_push_on_connect() {
+    std::printf("a SPEC-created kind=tcp DIAL delivers the peer's push-on-connect (#1045):\n");
+
+    const int lfd = ::socket(AF_INET, SOCK_STREAM, 0);
+    check(lfd >= 0, "raw listener created");
+    const int one = 1;
+    ::setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    sockaddr_in local{};
+    local.sin_family = AF_INET;
+    local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    local.sin_port = 0;
+    check(::bind(lfd, reinterpret_cast<sockaddr*>(&local), sizeof(local)) == 0, "listener bound");
+    check(::listen(lfd, 1) == 0, "listener listening");
+    sockaddr_in bound{};
+    socklen_t blen = sizeof(bound);
+    ::getsockname(lfd, reinterpret_cast<sockaddr*>(&bound), &blen);
+
+    // The pushed frame: a remote WRITE of one byte into this node's own /temp.
+    const std::byte kPushed{0x6B};
+    const std::vector<std::byte> record = tcp_record(fwd_write({"temp"}, kPushed));
+    // How long the creation path is held between the socket and the wiring. Three orders of
+    // magnitude more than a one-phase recv thread needs to decode what is already sitting in
+    // its socket, so the reverted factory fails here deterministically rather than flakily.
+    constexpr auto kHeld = 200ms;
+
+    std::promise<bool> one_write_done;  // the whole record went out as ONE send
+    std::promise<void> peer_answered;   // ...and it is on the wire NOW (the hold's anchor)
+    std::promise<void> test_done;       // safe to close the peer socket
+    auto one_write_fut = one_write_done.get_future();
+    auto answered_fut = peer_answered.get_future();
+    auto done_fut = test_done.get_future();
+
+    std::thread pusher([&] {
+        const int cfd = ::accept(lfd, nullptr, nullptr);
+        if (cfd < 0) {
+            one_write_done.set_value(false);
+            peer_answered.set_value();
+            return;
+        }
+        // ONE syscall the instant the connection is accepted — the push-on-connect shape,
+        // and what makes the window real.
+        const ssize_t sent = ::send(cfd, record.data(), record.size(), 0);
+        one_write_done.set_value(sent == static_cast<ssize_t>(record.size()));
+        peer_answered.set_value();
+
+        done_fut.wait();
+        ::close(cfd);
+    });
+
+    // Declared before the graph they serve: the gate IS the graph's value backend, and the
+    // counter and its callable outlive the vertex they are subscribed on.
+    map_lock_gate_t gate;
+    std::atomic<int> temp_writes{0};
+    auto on_temp = [&temp_writes](const tr::view::rope_t&) {
+        temp_writes.fetch_add(1, std::memory_order_relaxed);
+    };
+
+    graph_t node(std::pmr::get_default_resource(), &gate);
+    fwd_router_t router(node);
+    (void)node.register_vertex(path_t("/temp"), role_t::STORED_VALUE);
+    (void)node.subscribe(path_t("/temp"), on_temp);
+    // The vertex whose `:children[]` fold parks the gate — it needs one REGISTERED child.
+    const tr::graph::vertex_handle_t gate_v =
+        node.register_vertex(path_t("/gate"), role_t::STORED_VALUE);
+    (void)node.register_vertex(path_t("/gate/x"), role_t::STORED_VALUE);
+    const int before = temp_writes.load(std::memory_order_relaxed);
+
+    {
+        // The FULL ctor — the one that installs the built-in `kind` catalog, so `kind=tcp`
+        // below is served by core/src/builtin_transport_tcp.cpp and by nothing else. Declared
+        // in its own scope so the socket (and its recv thread) is torn down before the router
+        // and graph it delivers into.
+        transport_vertex_t net(node, router);
+        // ADR-0073 §4: the application mints the module name. `declare_builtin_modules` above
+        // covers udp/ws; the tcp DIAL module is declared here, where it is used.
+        check(net.register_module(std::string(tr::net::kTcpClientSuggestedModule), "tcp",
+                                  conn_role_t::DIAL)
+                  .has_value(),
+              "the tcp DIAL module is declared");
+        // Pre-create the `/net/<module>` grouping vertex `make_connection` would otherwise
+        // create lazily. That lazy call is a `register_vertex_key` BEFORE the factory runs, so
+        // leaving it would park the creation path on the gate with no socket built yet — the
+        // held window has to start AFTER the dialer exists to be the window #1045 is about.
+        (void)node.try_register_vertex(path_t("/net/tcp-client"), role_t::STORED_VALUE);
+
+        gate.arm();
+        std::thread holder([&] { (void)node.read_children_folded(gate_v); });
+        check(gate.wait_parked(5s), "the gate parked inside the graph's map lock");
+
+        // The creation path is about to block, so the release cannot come from this thread.
+        // The hold is anchored to the instant the peer's record hit the wire rather than to a
+        // wall-clock guess, so a loaded runner cannot eat the window.
+        std::chrono::steady_clock::time_point released_at;
+        std::thread releaser([&] {
+            (void)answered_fut.wait_for(5s);
+            std::this_thread::sleep_for(kHeld);
+            released_at = std::chrono::steady_clock::now();
+            gate.release();
+        });
+
+        const auto w = node.write(path_t("/net:children[]"),
+                                  conn_spec("client", "up", conn_role_t::DIAL,
+                                            ntohs(bound.sin_port), "tcp", "127.0.0.1"));
+        const auto spec_returned = std::chrono::steady_clock::now();
+        releaser.join();  // ...and with it the happens-before edge on `released_at`
+        holder.join();
+
+        check(w.has_value(), "the SPEC created the connection through the built-in tcp factory");
+        check(net.link_of("net/tcp-client/up") != nullptr,
+              "the link is a CONSTRUCTED one (no provide_link staged anything here)");
+        check(one_write_fut.wait_for(3s) == std::future_status::ready && one_write_fut.get(),
+              "the peer put a COMPLETE pushed record on the wire in ONE write");
+        // Without this the case is vacuous: it would be asserting delivery across a window too
+        // short for either shape to lose, and would pass whatever the factory passes. The write
+        // returning only AFTER the gate let go is what proves it was gated.
+        check(spec_returned >= released_at,
+              "and the creation path was still INSIDE make_connection when the gate let go — "
+              "the window really was held open across it");
+
+        bool delivered = false;
+        const auto deadline = std::chrono::steady_clock::now() + 5s;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (temp_writes.load(std::memory_order_relaxed) > before) {
+                delivered = true;
+                break;
+            }
+            std::this_thread::sleep_for(1ms);
+        }
+        check(delivered,
+              "the pushed frame reached the receiver the factory-built link was wired to: "
+              "/temp took a write it had not taken before the SPEC");
+
+        const auto stored = node.read(path_t("/temp"));
+        bool carried = false;
+        if (stored) {
+            const auto inner = tr::wire::decode((*stored)->only());
+            carried = inner.has_value() && inner->type == type_t::VALUE &&
+                      inner->payload.size() == 1 && inner->payload[0] == kPushed;
+        }
+        check(carried, "carrying the pushed frame's own value");
+    }
+
+    test_done.set_value();
+    pusher.join();
+    ::close(lfd);
+}
+
 void test_creation_errors() {
     std::printf("Creation errors are clean statuses, never crashes:\n");
     graph_t node;
@@ -973,35 +1280,13 @@ void test_link_name_collision_placeholder_parent() {
  */
 view_t ws_listener_spec(std::string_view name, std::uint16_t port, bool peer_named,
                         std::uint32_t max_peers) {
-    std::vector<std::byte> cfg;
-    tr::wire::emit_name(cfg, "role");
-    const std::byte r{static_cast<std::uint8_t>(conn_role_t::LISTEN)};
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, std::span<const std::byte>(&r, 1));
-    tr::wire::emit_name(cfg, "port");
-    std::vector<std::byte> pb(2);
-    tr::detail::store_le(pb, port, 2);
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, pb);
-    tr::wire::emit_name(cfg, "kind");
-    tr::wire::emit_name(cfg, "ws");
-    tr::wire::emit_name(cfg, "peer_named");
-    const std::byte pn{static_cast<std::uint8_t>(peer_named ? 1 : 0)};
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, std::span<const std::byte>(&pn, 1));
-    tr::wire::emit_name(cfg, "max_peers");
-    std::vector<std::byte> mb(4);
-    tr::detail::store_le(mb, max_peers, 4);
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, mb);
-
-    std::vector<std::byte> body;
-    tr::wire::emit_name(body, "type");
-    tr::wire::emit_name(body, "listener");
-    tr::wire::emit_name(body, "name");
-    tr::wire::emit_name(body, name);
-    tr::wire::emit_name(body, "config");
-    tr::wire::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true}, cfg);
-
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
-    return owned(out);
+    return conn_spec_t("listener", name)
+        .role(conn_role_t::LISTEN)
+        .port(port)
+        .kind("ws")
+        .flag("peer_named", peer_named)
+        .u32("max_peers", max_peers)
+        .view();
 }
 
 /** @brief The NAME of every POINT member of a synthesized listing. */
@@ -1077,9 +1362,9 @@ void test_udp_max_frame_reaches_the_transport() {
     declare_builtin_modules(net);
 
     // The CONTROL: no max_frame in the config => the transport's own kMaxDatagram ceiling.
-    const auto plain = node.write(
-        path_t("/net:children[]"),
-        conn_spec("listener", "plain", conn_role_t::LISTEN, free_port(), "udp", {}, 0, 0, 0));
+    const auto plain =
+        node.write(path_t("/net:children[]"),
+                   conn_spec("listener", "plain", conn_role_t::LISTEN, free_port(), "udp"));
     check(plain.has_value(), "SPEC{listener, kind=udp} with no max_frame constructs the socket");
     auto* const plain_link =
         dynamic_cast<tr::net::udp_transport_t*>(net.link_of("net/udp-server/plain"));
@@ -1088,9 +1373,12 @@ void test_udp_max_frame_reaches_the_transport() {
           "without the key the connection carries the full datagram ceiling");
 
     // The SUBJECT: the same write plus `max_frame = 4096`.
-    const auto capped = node.write(path_t("/net:children[]"),
-                                   conn_spec("listener", "capped", conn_role_t::LISTEN, free_port(),
-                                             "udp", {}, 0, 0, /*max_frame=*/4096));
+    const auto capped = node.write(path_t("/net:children[]"), conn_spec_t("listener", "capped")
+                                                                  .role(conn_role_t::LISTEN)
+                                                                  .port(free_port())
+                                                                  .kind("udp")
+                                                                  .max_frame(4096)
+                                                                  .view());
     check(capped.has_value(), "SPEC{listener, kind=udp, max_frame=4096} constructs the socket");
     const auto* const s = net.settings_of("net/udp-server/capped");
     check(s != nullptr && s->max_frame == 4096, "the key was parsed into conn_settings_t");
@@ -1395,9 +1683,127 @@ void test_wire_name_reaches_add_child() {
     check(net.link_of("net/udp-client/a:b") == nullptr, "no link was constructed for a bad name");
 }
 
+/** @brief Lowercase hex of a byte buffer, for the golden-SPEC comparisons below. */
+std::string to_hex(std::span<const std::byte> bytes) {
+    static constexpr char kDigits[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(bytes.size() * 2);
+    for (std::byte b : bytes) {
+        const auto v = std::to_integer<std::uint8_t>(b);
+        out.push_back(kDigits[v >> 4]);
+        out.push_back(kDigits[v & 0x0F]);
+    }
+    return out;
+}
+
+/**
+ * @brief The public builder's bytes, PINNED — `conn_spec_t` emits exactly what the sixteen
+ *        hand-emitted near-copies emitted before #902 replaced them.
+ *
+ * These goldens were captured from the pre-#902 hand-emit and are the whole reason the
+ * migration is safe to make in one commit: they are the wire, not a re-encode of the
+ * builder's own output, so a future edit to the builder that changes a byte fails HERE
+ * rather than in whichever transport test happens to notice. They also pin the two
+ * structural choices a reader would otherwise have to infer: an untouched builder emits NO
+ * `config` (the `provide_link` spelling), and setters append in CALL order.
+ */
+void test_conn_spec_bytes_pinned() {
+    std::printf("conn_spec_t bytes (#902): pinned against the pre-builder hand-emit:\n");
+    check(to_hex(conn_spec_t("client", "up").bytes()) ==
+              "0e402000020004007479706502000600636c69656e74020004006e616d65020002007570",
+          "no setter ran => SPEC{type, name} with no config at all");
+    check(to_hex(conn_spec_t("client", "up").role(conn_role_t::DIAL).port(8080).bytes()) ==
+              "0e404900020004007479706502000600636c69656e74020004006e616d6502000200757002000600"
+              "636f6e6669670b401b0002000400726f6c65010001000002000400706f727401000200901f",
+          "role=DIAL + port=8080");
+    check(to_hex(conn_spec_t("listener", "srv")
+                     .role(conn_role_t::LISTEN)
+                     .port(47131)
+                     .kind("udp")
+                     .bytes()) ==
+              "0e405b000200040074797065020008006c697374656e6572020004006e616d6502000300737276020006"
+              "00636f6e6669670b402a0002000400726f6c65010001000102000400706f7274010002001bb802000400"
+              "6b696e6402000300756470",
+          "role=LISTEN + port + kind");
+    check(to_hex(conn_spec_t("client", "cli")
+                     .role(conn_role_t::DIAL)
+                     .port(47131)
+                     .kind("udp")
+                     .addr("127.0.0.1")
+                     .bytes()) ==
+              "0e406e00020004007479706502000600636c69656e74020004006e616d6502000300636c690200060063"
+              "6f6e6669670b403f0002000400726f6c65010001000002000400706f7274010002001bb8020004006b69"
+              "6e64020003007564700200040061646472020009003132372e302e302e31",
+          "role + port + kind + addr");
+    check(to_hex(conn_spec_t("client", "c")
+                     .role(conn_role_t::DIAL)
+                     .port(0)
+                     .keepalive_ms(1)
+                     .max_frame(2)
+                     .backoff_ms(3)
+                     .connect_timeout_ms(4)
+                     .bytes()) ==
+              "0e40a000020004007479706502000600636c69656e74020004006e616d6502000100630200060063"
+              "6f6e6669670b40730002000400726f6c65010001000002000400706f727401000200000002000900"
+              "6b656570616c6976650100040001000000020009006d61785f6672616d65010004000200000002"
+              "0007006261636b6f6666010004000300000002000f00636f6e6e6563745f74696d656f7574010004"
+              "0004000000",
+          "all four u32 keys, in call order");
+    // The one-call sugar is the same encoder, not a second one.
+    check(
+        to_hex(conn_spec("client", "cli", conn_role_t::DIAL, 47131, "udp", "127.0.0.1").bytes()) ==
+            to_hex(conn_spec_t("client", "cli")
+                       .role(conn_role_t::DIAL)
+                       .port(47131)
+                       .kind("udp")
+                       .addr("127.0.0.1")
+                       .bytes()),
+        "conn_spec(...) delegates to conn_spec_t — same bytes");
+}
+
+/**
+ * @brief Every field combination decodes back through the CONSUMER's own reader.
+ *
+ * `transport_vertex_t::parse_config` is a `config_reader_t` walk over the SPEC's `config`
+ * SETTINGS, so running that reader over the builder's output is the encoder↔decoder
+ * round-trip for the whole universal-key vocabulary — including the combinations no
+ * transport test happens to create (a LISTEN carrying an `addr`, a kind-less DIAL). The
+ * creation path proper is covered by the config-constructed tests above, which now write
+ * these very bytes.
+ */
+void test_conn_spec_round_trips_through_the_reader() {
+    std::printf("conn_spec_t (#902): round-trips through config_reader_t, all combinations:\n");
+    for (const conn_role_t role : {conn_role_t::DIAL, conn_role_t::LISTEN}) {
+        for (const std::string_view kind : {std::string_view{}, std::string_view{"udp"}}) {
+            for (const std::string_view addr :
+                 {std::string_view{}, std::string_view{"127.0.0.1"}}) {
+                const view_t spec = conn_spec("client", "x", role, 47000, kind, addr);
+                const auto decoded = tr::wire::decode(spec);
+                if (!decoded) {
+                    check(false, "the built SPEC decodes");
+                    continue;
+                }
+                const tr::wire::tlv_t* config = nullptr;
+                for (const tr::wire::tlv_t& child : decoded->children) {
+                    if (child.type == type_t::SETTINGS) config = &child;
+                }
+                const tr::net::config_reader_t cfg(config);
+                const bool ok = config != nullptr && cfg.u8("role") &&
+                                *cfg.u8("role") == static_cast<std::uint8_t>(role) &&
+                                cfg.u16("port") && *cfg.u16("port") == 47000 &&
+                                cfg.name("kind").value_or(std::string_view{}) == kind &&
+                                cfg.name("addr").value_or(std::string_view{}) == addr;
+                check(ok, "role/port/kind/addr survive the encode→decode round trip");
+            }
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
+    test_conn_spec_bytes_pinned();
+    test_conn_spec_round_trips_through_the_reader();
     test_create_connection_vertex();
     test_await_link_state();
     test_liveness_enum_value();
@@ -1407,8 +1813,12 @@ int main() {
     test_local_path_untouched();
     test_config_constructed_udp();
     test_provide_link_wins();
+    test_same_leaf_name_under_two_modules();
+    test_ambiguous_leaf_name_refused();
+    test_kind_module_beats_unrelated_staging();
     test_link_is_armed_after_wiring();
     test_factory_built_ws_dial_delivers_push_on_connect();
+    test_factory_built_tcp_dial_delivers_push_on_connect();
     test_creation_errors();
     test_link_of_accessor();
     test_link_name_collision_rejected();
@@ -1421,7 +1831,5 @@ int main() {
     test_wire_name_reaches_add_child();
     test_app_chosen_root_and_module();
 
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("transport_vertex");
 }

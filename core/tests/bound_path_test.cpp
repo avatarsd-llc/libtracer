@@ -34,11 +34,14 @@
 #include <string_view>
 #include <vector>
 
+#include "fwd_frame_builder.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/fwd_frame_view.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
+#include "test_values.hpp"
 
 namespace {
 
@@ -57,12 +60,8 @@ using tr::wire::path_ref_element_t;
 using tr::wire::tlv_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
+using tr::testing::make_value;
 
 // --- wire builders ----------------------------------------------------------
 
@@ -96,25 +95,7 @@ std::vector<std::byte> b_value(std::initializer_list<std::uint8_t> bytes) {
     return out;
 }
 
-/**
- * @brief Assemble a request `FWD` (RFC-0004 §B child order) with a RAW op byte.
- *
- * The op byte is passed unmasked on purpose: the flag bits (RFC-0024 §7.5) are exactly what
- * several cases here are about, and a builder that took a `fwd_op_t` could not spell them.
- */
-std::vector<std::byte> b_fwd_raw_op(std::uint8_t op_byte, const std::vector<std::byte>& dst,
-                                    const std::vector<std::byte>& src,
-                                    const std::vector<std::byte>& payload = {}) {
-    std::vector<std::byte> body;
-    const std::byte opb[1] = {std::byte{op_byte}};
-    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, opb);
-    body.insert(body.end(), dst.begin(), dst.end());
-    body.insert(body.end(), src.begin(), src.end());
-    body.insert(body.end(), payload.begin(), payload.end());
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
-    return out;
-}
+using tr::testing::b_fwd_raw_op;
 
 /** @brief Arena-decode + resolve — the terminus wiring `fwd_router_t` uses. */
 tr::graph::result_t<tr::view::rope_t> resolve_bytes(op_resolver_t& resolver,
@@ -123,13 +104,6 @@ tr::graph::result_t<tr::view::rope_t> resolve_bytes(op_resolver_t& resolver,
     const auto arena = tr::wire::decode_into(fwd, tr::mem::heap_source());
     if (!arena) return std::unexpected(tr::graph::status_t::INVALID_PATH);
     return resolver.resolve(*arena, inbound_link);
-}
-
-/** @brief A `view_t` over a fresh owned heap segment holding @p bytes. */
-tr::view::view_t make_value(std::span<const std::byte> bytes) {
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
-    if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
-    return tr::view::view_t::over(std::move(seg));
 }
 
 /** @brief The flattened reply bytes (the consumer's one allowed copy). */
@@ -382,7 +356,7 @@ void test_mint_round_trip() {
     // A WRITE mints too — the flag is on the op byte, not on any one opcode.
     const auto wrote =
         resolve_bytes(resolver, b_fwd_raw_op(kWrite | kMint, b_path({"sensor", "temp"}),
-                                             b_path({"back"}), b_value({0x09})));
+                                             b_path({"back"}), {}, b_value({0x09})));
     check(wrote.has_value() && reply_facts(*wrote).kind == reply_kind_t::RESULT &&
               reply_facts(*wrote).has_mint,
           "a mint-flagged WRITE writes AND mints");
@@ -681,6 +655,5 @@ int main() {
     test_unmasked_op_byte_still_routes();
     test_path_binding_slot();
     test_conformance_vectors();
-    std::printf("%s\n", g_failures == 0 ? "ALL PASS" : "FAILURES");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("bound_path");
 }

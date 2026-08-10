@@ -19,8 +19,8 @@
  *      the notifier walks every subscribed vertex under the graph's own locks and is
  *      bounded by nothing this link owns. `bus_link_t::notify_peer_down` documents the
  *      precondition outright ("with none of its internal locks held"), and both core
- *      reference servers (`transport_ws_server::teardown_slot`,
- *      `transport_tcp_server::teardown_slot`) honour it. This link did not.
+ *      reference servers honour it — one implementation since #871,
+ *      `slot_server_t::teardown_slot`, inherited by both. This link did not.
  *
  *   2. the destructor still JOINS a notification in flight. That is the lifetime half:
  *      the notifier dereferences the link and hands a name to the routing plane, whose
@@ -32,6 +32,10 @@
  * is here as a regression pin, not as evidence: a later change that fires the notifier
  * with the gate released AND without registering on the barrier would pass half 1 and
  * fail half 2.
+ *
+ * A third case shares this file because it is the same seam seen from the other mode
+ * (#889): constructed FLAT, this link's only eviction hook is the WHOLE link's, so it must
+ * fire on the LAST session's departure and on no earlier one.
  */
 
 #include <atomic>
@@ -187,7 +191,9 @@ void test_gate_released_across_notifier() {
     check(wait_for([&] { return probe.entered.load(); }, kPatience),
           "the departed peer's session close reached the eviction notifier");
     check(probe.calls.load() > before, "the notification fired for the departure");
-    check(probe.peer == "fd700", "it named the peer that departed, not another one");
+    // `p0` — the departure seam carries the ROUTABLE name (#994), which is what a listener
+    // would have to spell to act on the departure. Peer 700 landed in slot 0.
+    check(probe.peer == "p0", "it named the peer that departed, not another one");
 
     // THE MEASUREMENT. A second acquirer of `gate_t::m`, on another task, while the
     // notifier is still in flight. The URI handler's admission take is the door the fake
@@ -249,11 +255,79 @@ void test_dtor_joins_the_notification() {
     task.run_on_task([] { fake_httpd::instance().close_all(); });
 }
 
+// ---------------------------------------------------------------------------
+// #889 — a FLAT link reports the whole link down only on the LAST departure.
+// ---------------------------------------------------------------------------
+
+/** @brief The `transport_t::down_fn_t` thunk: counts WHOLE-LINK down notifications. */
+void on_link_down(void* ctx) { static_cast<std::atomic<unsigned>*>(ctx)->fetch_add(1); }
+
+/**
+ * @brief #889 — the flat half of the same departure seam the two halves above pin.
+ *
+ * Constructed FLAT (`peer_named=false`, the default) this link has no per-peer routing
+ * identity: every session it carries answers to the ONE registered child NAME, so its only
+ * eviction seam is `transport_t::notify_down`, which `fwd_router_t::link_down` answers by
+ * dropping every subscriber edge under that name. Both defaults that make this reachable
+ * are the defaults — flat mode and `max_peers = 0` — so a two-tab deployment that never
+ * asked for the bus facet had one tab's hangup evict the other tab's subscriptions.
+ *
+ * The notifier must therefore stay silent while any session is still open and fire exactly
+ * once when the last one goes. Same rule as `slot_server_t::teardown_slot`, in the link
+ * that cannot inherit it.
+ */
+void test_flat_link_down_only_on_last_session() {
+    std::printf("flat link: notify_down only on the LAST departure (#889):\n");
+    server_task_t task;
+    std::atomic<unsigned> downs{0};
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, /*peer_named=*/false);
+    check(link->ok(), "the adopting link registered its URI");
+    check(link->bus() == nullptr, "a flat link exposes no bus facet");
+    link->set_down_notifier(&on_link_down, &downs);
+
+    // Both sessions provably claimed before anything closes — an assertion about "the last
+    // session" is vacuous if the second peer never got admitted.
+    claim_session(task, 900);
+    claim_session(task, 901);
+    std::size_t open_peers = 0;
+    link->enumerate_peers([&](std::string_view) { ++open_peers; });
+    check(open_peers == 2, "both peers are open on the flat link");
+
+    // --- the mid-life close ---
+    task.run_on_task([] { fake_httpd::instance().close_session(900); });
+    check(wait_for(
+              [&] {
+                  std::size_t n = 0;
+                  link->enumerate_peers([&](std::string_view) { ++n; });
+                  return n == 1;
+              },
+              kPatience),
+          "the departed peer's slot was reclaimed (its departure seam ran)");
+    check(downs.load() == 0, "a mid-life close did NOT report the whole link down (#889)");
+
+    // …and the survivor still routes: a frame from it is still accepted end to end.
+    // `check` is called back HERE, not inside the posted action: g_failures belongs to
+    // this thread, and the suite's other cases keep it that way too.
+    esp_err_t survivor_rc = ESP_FAIL;
+    task.run_on_task([&] { survivor_rc = deliver(901); });
+    check(survivor_rc == ESP_OK, "the surviving peer still routes after the close");
+
+    // --- the last close: NOW the link is down, exactly once ---
+    task.run_on_task([] { fake_httpd::instance().close_session(901); });
+    check(wait_for([&] { return downs.load() >= 1; }, kPatience),
+          "the LAST session's departure reported the link down");
+    check(downs.load() == 1, "…exactly once");
+
+    link.reset();
+    task.run_on_task([] { fake_httpd::instance().close_all(); });
+}
+
 }  // namespace
 
 int main() {
     test_gate_released_across_notifier();
     test_dtor_joins_the_notification();
+    test_flat_link_down_only_on_last_session();
     std::printf("%s\n", g_failures == 0 ? "OK" : "FAILURES");
     return g_failures == 0 ? 0 : 1;
 }

@@ -1910,7 +1910,10 @@ class vertex_t {
      * like. A local edge still never matches a real link name: a local door passes
      * the EMPTY context and stores no cold half at all (the one exception,
      * `parse_subscriber_tlv`'s `delivery_compact` opt-in, leaves both spellings
-     * empty). Unlike @ref clear_edge, a matched slot
+     * empty). An EMPTY @p link matches nothing at all and returns 0 — a link with no
+     * name never subscribed, and without that rule the empty key compared equal to
+     * exactly those empty spellings and reclaimed every local `delivery_compact`
+     * edge on the vertex (#1056). Unlike @ref clear_edge, a matched slot
      * is RECLAIMED, not just flagged: the stored SUBSCRIBER view, the return-route
      * refcount pin, the target key, and the whole `subscriber_remote_t` block are
      * released in place (the slot shell stays — §D.2 index stability — and
@@ -1921,6 +1924,12 @@ class vertex_t {
      *         from the RFC-0005 listener bookkeeping).
      */
     std::size_t evict_link_edges(std::string_view link) {
+        // The EMPTY key matches NOTHING (#1056). Every local door leaves both spellings empty,
+        // so without this an empty parameter compared EQUAL to a local edge's admitting link
+        // and reclaimed it — reachable for the `delivery_compact` opt-in, the one local shape
+        // that carries a cold half at all. A non-empty key is unaffected: an empty
+        // `admitted_over` can never equal it, so this only ever short-circuits the no-op case.
+        if (link.empty()) return 0;
         edge_block_t* b = nullptr;
         std::size_t n = 0;
         {
@@ -3081,16 +3090,25 @@ class vertex_t {
  * it gated exactly one configuration: the 32-bit arm was never evaluated at all, because no CI
  * leg cross-compiled that test, while the ESP-IDF legs compiled `vertex_t` itself on every PR.
  *
- * The ceilings are members of @ref config_t, so a target that must carry a bigger vertex says so
+ * The bounds are members of @ref config_t, so a target that must carry a bigger vertex says so
  * in its configuration, where the change is visible in a diff, rather than by editing a test
  * until it passes.
+ *
+ * They are RATCHETS, not ceilings: each is pinned to the size actually measured, so the gate
+ * catches the next added byte instead of the next 24. A ceiling held above the measurement
+ * answers only "did you regress past a fixed point" and is silent on whether the type got
+ * leaner — which let 16 B reclaimed on the 64-bit arm, and 8 B on the 32-bit one, sit
+ * unnoticed and re-spendable. Pinning keeps every reclaimed byte by construction, at the cost
+ * of one number to lower in whichever commit shrinks the struct.
  */
 static_assert(sizeof(void*) != 8 || sizeof(vertex_t) <= config_t::kMaxVertexBytes64,
-              "vertex_t grew past the 64-bit RAM-diet gate (#361) — move the new member behind "
-              "vertex_ext_t, don't inline it");
+              "vertex_t grew past the 64-bit RAM-diet ratchet (#361) — move the new member "
+              "behind vertex_ext_t, don't inline it. The ratchet is PINNED to the measured "
+              "size, so it has no headroom by construction: any added member fails here by "
+              "design, and shrinking vertex_t means lowering the number in the same commit");
 static_assert(sizeof(void*) != 4 || sizeof(vertex_t) <= config_t::kMaxVertexBytes32,
-              "vertex_t grew past the 32-bit RAM-diet gate (#361) — move the new member behind "
-              "vertex_ext_t, don't inline it. This ceiling has NO headroom: rv32 sits exactly on "
-              "it, so any added 32-bit member fails here by design");
+              "vertex_t grew past the 32-bit RAM-diet ratchet (#361) — move the new member "
+              "behind vertex_ext_t, don't inline it. Same pinned-to-measurement rule as the "
+              "64-bit arm, and this is the target where the bytes actually matter");
 
 }  // namespace tr::graph

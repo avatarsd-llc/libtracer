@@ -56,10 +56,10 @@ window, so **"the forward hop is heap-free by construction" is false as stated**
   spill to the heap above a fixed inline width. `bench_transport_iov` measures the boundary at
   **17 caller spans / ~288 B**; headroom from the structural `kFwdMaxIov` (9) is 8 regions, and
   a rope source may split any region further. The stub never runs that code, so `allocs=0` says
-  nothing about it (`core/src/transport_tcp.cpp:54-58`).
+  nothing about it (`core/src/transport_tcp.cpp:51-55`).
 - **The multi-link rope arm.** A rope source's sub-span count is the sender's choice and is
   known only at run time, so that arm gathers into a `mem::block_array_t` drawn from the
-  injected receive source (`core/src/fwd_router.cpp:1295`). Nothrow (ADR-0065 — exhaustion
+  injected receive source (`core/src/fwd_router.cpp:1410`). Nothrow (ADR-0065 — exhaustion
   drops the frame rather than aborting), but **not** allocation-free.
 
 Read `bench_forward_heap` and `bench_transport_iov` together; neither is sufficient alone.
@@ -213,6 +213,22 @@ disjoint [min..max] ranges, so a gated arm here would add a false-fail surface w
 adding detection. `bench_libtracer fan` runs the whole ladder (coarse + mid, ascending) in
 about 1.7 s, which is the mode to A/B anything that touches dispatch width.
 
+### Selecting a sweep (`bench_libtracer [mode]`)
+
+Run with **no argument** for the full default sweep — that is what CI, `perf_gate.py` and
+the gh-pages history store consume, and its row set is the one nothing may reorder. A
+single recognised mode name runs that sweep **alone**, announcing itself on stderr as
+`MODE <name>` before its first row so an A/B driver can assert it got the arm it asked
+for. Anything else is **refused**: the binary prints the mode list to stderr and exits
+non-zero without emitting a `RESULT` row.
+
+That refusal is a measurement guard, not a courtesy (#1040). An unrecognised argument used
+to fall through into the default sweep and exit 0 — so in an A/B against a binary built
+from a commit that predates a mode, the candidate ran one axis for seconds while the
+baseline ran every axis for minutes, both emitting well-formed rows under the same
+`(mode, size, fan, ep)` keys for the harness to join on. A typo (`taget`) did the same.
+`bench/test_bench_cli.py` pins it.
+
 Module compositions are surfaced as distinct `mode`s — "different approaches to
 craft libtracer":
 
@@ -237,8 +253,10 @@ craft libtracer":
 > `bridge_t` envelope, deleted with the bridge itself in
 > [ADR-0040](../docs/adr/0040-net-plane-is-explicit-source-routed-only.md) — the net plane is
 > explicit-source-routed `FWD` only. Neither mode is emitted today
-> (`bench_libtracer.cpp:16`, `:1135`); `bridge_t`, `router_wrap`, `router_unwrap`, `kMaxHops`,
-> `export_vertex` and `run_routers` have zero occurrences in `core/` or `bench/`, and the
+> (`bench_libtracer.cpp:16`, `:1235`); `bridge_t`, `router_wrap`, `router_unwrap`, `kMaxHops`,
+> `export_vertex` and `run_routers` survive in `core/` and `bench/` only inside comments
+> and `core/CHANGELOG.md`'s record of their removal — not one declaration, definition or
+> call of any of them is left (`grep -rn` over both trees, 2026-08-08), and the
 > two-process `bench_libtracer_net` was retired with them (`bench/CMakeLists.txt:30`). FWD
 > forward cost is now measured by `bench_forward_heap` + `bench_transport_iov` + the `fwd_*`
 > tests; multi-hop end-to-end delivery is the `net` harness.

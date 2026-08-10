@@ -35,8 +35,10 @@
 #include <thread>
 #include <vector>
 
+#include "fwd_frame_builder.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -47,12 +49,7 @@ using tr::net::transport_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 // --- wire builders (canonical bytes via the production emit helpers) ----------
 std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
@@ -63,17 +60,7 @@ std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     return out;
 }
 
-std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
-                             const std::vector<std::byte>& src) {
-    std::vector<std::byte> body;
-    const std::byte ob{static_cast<std::uint8_t>(op)};
-    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&ob, 1));
-    body.insert(body.end(), dst.begin(), dst.end());
-    body.insert(body.end(), src.begin(), src.end());
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
-    return out;
-}
+using tr::testing::b_fwd;
 
 /** @brief A span link recording every send — the downstream egress under observation. */
 class fake_link_t : public transport_t {
@@ -143,10 +130,5 @@ void rebind_race() {
 int main() {
     std::printf("registry rebind vs forward (#684 — mount run immutable after publish):\n");
     rebind_race();
-    if (g_failures != 0) {
-        std::printf("FAILED: %d check(s)\n", g_failures);
-        return 1;
-    }
-    std::printf("OK\n");
-    return 0;
+    return tr::testing::summary("registry_rebind_race");
 }

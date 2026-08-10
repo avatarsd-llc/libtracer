@@ -50,17 +50,14 @@
 #include "libtracer/rope.hpp"
 #include "libtracer/transport_ws.hpp"
 #include "libtracer/ws.hpp"
+#include "test_support.hpp"
 
 namespace {
 
 using namespace std::chrono_literals;
 namespace ws = tr::net::ws;
 
-int g_failures = 0;
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /**
  * @brief Connect a raw TCP client to 127.0.0.1:port.
@@ -185,7 +182,8 @@ bool raw_handshake(int cfd) {
  * @brief A peer is OPEN to senders the instant its `101` is on the wire — the handshake
  *        window is closed, proven by holding it open rather than by racing for it.
  *
- * `service_peer` writes the `101 Switching Protocols` response and publishes the slot
+ * `transport_ws_server::on_readable` writes the `101 Switching Protocols` response and
+ * publishes the slot
  * (`open = true`) inside ONE `write_m_` critical section. Store `open` after that lock is
  * released and there is a window in which the peer has already read the response — so it
  * believes the connection is up — while every `send` still skips the slot as not-open and
@@ -871,6 +869,102 @@ void test_close_peer() {
     b.reset();
 }
 
+/**
+ * @brief #889 — a FLAT ws server refuses peer-named wiring; delivery keys off the
+ *        constructed mode, not off "a peer sink happens to be installed".
+ *
+ * `bus()` returning nullptr is the contract "this link has no peer-named tier", but
+ * `bus_link_t` is a PUBLIC base, so `set_peer_receiver` is reachable by an explicit upcast
+ * — and before #889 that flipped `transport_ws_server::on_readable` into peer-named
+ * delivery, because its tier select read `peer_rx_.has_any()`. The refusal lives in
+ * `bus_link_t` (so the upcast cannot dodge it) and the tier select reads `peer_named_`.
+ *
+ * The ws twin of the tcp case: the shared teardown/mode plumbing is guarded once in
+ * `tcp_test`, but this file owns THIS server's framing-side tier select.
+ */
+void test_flat_server_rejects_peer_receiver() {
+    std::printf("transport_ws server — flat server refuses peer-named wiring (#889):\n");
+
+    frame_sink_t flat_sink;
+    peer_sink_t forced_peer_sink;
+
+    tr::net::transport_ws_server server(0);
+    check(server.ok(), "flat server bound");
+    check(server.bus() == nullptr, "flat server exposes no bus facet (peer_named=false)");
+    server.set_receiver(flat_sink);
+    // The out-of-contract path itself: the public base, named explicitly. A member-shadowing
+    // guard would not catch this call, so the refusal has to live in bus_link_t.
+    static_cast<tr::net::bus_link_t&>(server).set_peer_receiver(forced_peer_sink);
+
+    tr::net::transport_ws_client client("127.0.0.1", server.local_port());
+    check(client.ok(), "client connected + 101 verified");
+
+    const std::array<std::byte, 3> payload{std::byte{0x01}, std::byte{0x02}, std::byte{0x03}};
+    client.send(payload);
+    check(flat_sink.wait_count(1, 2s), "inbound still reached the FLAT transport_t receiver");
+    {
+        const std::lock_guard lock(flat_sink.m);
+        check(flat_sink.frames.size() == 1 &&
+                  flat_sink.frames[0] == std::vector<std::byte>(payload.begin(), payload.end()),
+              "the flat delivery is byte-intact");
+    }
+    {
+        const std::lock_guard lock(forced_peer_sink.m);
+        check(forced_peer_sink.frames.empty(), "the forced peer-named sink received NOTHING");
+    }
+}
+
+/**
+ * @brief #889, the other direction — a PEER-NAMED ws server never downgrades to flat
+ *        delivery just because only a flat receiver happens to be installed.
+ *
+ * Before #889 the tier select read `peer_rx_.has_any()`, so a peer-named link with no peer
+ * sink wired handed its frames to the plain `transport_t` receiver UNTAGGED — and on a link
+ * carrying many browser tabs under one name, a reply routed back by that untagged name
+ * BROADCASTS to every tab (RFC-0020 / ADR-0073 §3). The mode says peer-named, so the peer
+ * tier is the only tier; an unwired one drops. Paired with a live control on the SAME
+ * connection so "nothing arrived" cannot be a dead link passing by accident.
+ */
+void test_peer_named_server_does_not_downgrade_to_flat() {
+    std::printf("transport_ws server — a peer-named server does not downgrade to flat (#889):\n");
+
+    frame_sink_t flat_sink;
+    peer_sink_t peer_sink;
+
+    tr::net::transport_ws_server server(0, &tr::mem::heap_backend(), /*max_frame=*/0,
+                                        /*max_peers=*/0, /*peer_named=*/true);
+    check(server.ok(), "peer-named server bound");
+    check(server.bus() != nullptr, "peer-named server exposes the bus facet");
+    // The WRONG tier for this mode, and the only one wired.
+    server.set_receiver(flat_sink);
+
+    tr::net::transport_ws_client client("127.0.0.1", server.local_port());
+    check(client.ok(), "client connected + 101 verified");
+    const std::array<std::byte, 2> first{std::byte{0x0A}, std::byte{0x0B}};
+    client.send(first);
+    check(!flat_sink.wait_count(1, 500ms),
+          "the peer-named link did NOT deliver to the flat transport_t receiver");
+
+    // The control: same connection, the RIGHT tier wired — so the silence above was the
+    // tier decision, not a dead link.
+    server.bus()->set_peer_receiver(peer_sink);
+    const std::array<std::byte, 2> second{std::byte{0x0C}, std::byte{0x0D}};
+    client.send(second);
+    check(peer_sink.wait_count(1, 2s), "…and the peer-named tier delivers once it is wired");
+    {
+        const std::lock_guard lock(peer_sink.m);
+        check(peer_sink.frames.size() == 1 &&
+                  peer_sink.frames[0].second ==
+                      std::vector<std::byte>(second.begin(), second.end()) &&
+                  peer_sink.frames[0].first == "p0",
+              "the delivered frame is intact and tagged with the p<slot> peer name");
+    }
+    {
+        const std::lock_guard lock(flat_sink.m);
+        check(flat_sink.frames.empty(), "the flat receiver never received anything on this link");
+    }
+}
+
 /** @brief Append one UNMASKED server→client frame (payload < 126) to @p out. */
 void append_server_frame(std::vector<std::byte>& out, ws::opcode_t op,
                          std::span<const std::byte> payload, bool fin = true) {
@@ -887,7 +981,8 @@ void append_server_frame(std::vector<std::byte>& out, ws::opcode_t op,
  * straight after it — which is what a server that pushes state on connect does. Those
  * bytes are off the socket; if the handshake drops them nothing can ever read them back,
  * and the frame vanishes with no counter moving. The accept side has carried them over
- * since it grew a second peer (`service_peer`); this is the DIAL side of that rule.
+ * since it grew a second peer (`transport_ws_server::on_readable`); this is the DIAL side
+ * of that rule.
  *
  * The peer here writes the `101`, a complete PING, and the FIRST fragment of a BINARY
  * message in ONE `::send`, so all three land in one `recv` on the client — the shape the
@@ -1631,6 +1726,8 @@ int main() {
     test_multi_peer_bus();
     test_max_peers_cap();
     test_close_peer();
+    test_flat_server_rejects_peer_receiver();
+    test_peer_named_server_does_not_downgrade_to_flat();
     test_frame_pipelined_behind_the_101();
     test_push_on_connect_waits_for_start_receiving();
     test_client_answers_a_control_frame_at_the_bound_masked();
@@ -1638,7 +1735,5 @@ int main() {
     test_client_fails_the_connection_on_a_fragmented_control_frame();
     test_client_fails_the_connection_on_a_reserved_data_opcode();
     test_client_fails_the_connection_on_a_reserved_control_opcode();
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("ws_transport");
 }

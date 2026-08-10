@@ -43,6 +43,7 @@
 #include "libtracer/byteorder.hpp"
 #include "libtracer/frame.hpp"
 #include "libtracer/tlv_emit.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -50,13 +51,7 @@ using tr::net::config_reader_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-/** @brief Report one assertion; a failure sets the process exit status. */
-void check(bool ok, const char* what) {
-    std::printf("  [%s] %s\n", ok ? "PASS" : "FAIL", what);
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /** @brief True when @p got holds exactly @p want. */
 bool is(const std::optional<std::string_view>& got, std::string_view want) {
@@ -423,6 +418,5 @@ int main() {
     test_kind_private_keys_unchanged();
     test_repeat_and_illformed_semantics_unchanged();
     test_desync_stops_the_walk();
-    std::printf("\n%s\n", g_failures == 0 ? "ALL PASS" : "FAILURES");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("config_reader");
 }

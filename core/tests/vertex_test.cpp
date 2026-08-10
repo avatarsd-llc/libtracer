@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "libtracer/view.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -42,12 +43,7 @@ using tr::graph::subscriber_t;
 using tr::graph::vertex_t;
 using tr::view::rope_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /** @brief A single-link rope over a fresh owned heap segment holding one byte `b`. */
 rope_t make_value(std::uint8_t b) {
@@ -276,10 +272,5 @@ int main() {
     test_snapshot_under_concurrent_add();
     test_acl_verbs();
     test_bookkeeping_counters();
-    if (g_failures != 0) {
-        std::printf("%d FAILURE(S)\n", g_failures);
-        return 1;
-    }
-    std::printf("all vertex_t verb tests passed\n");
-    return 0;
+    return tr::testing::summary("vertex");
 }

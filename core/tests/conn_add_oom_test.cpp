@@ -58,6 +58,7 @@
 
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -71,20 +72,7 @@ using tr::view::view_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-/** @brief Record one assertion. */
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
-
-/** @brief An owned view over @p bytes (the SPEC is built before the allocator is armed). */
-view_t owned(std::span<const std::byte> bytes) {
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
-    if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
-    return view_t::over(std::move(seg));
-}
+using tr::testing::check;
 
 /** @brief Live instances of @ref fake_link_t — the rollback must leave this at zero. */
 int g_links_alive = 0;
@@ -119,26 +107,10 @@ struct fake_link_t : tr::net::transport_t {
  * module then follows from the staging rather than from a factory selector.
  */
 view_t conn_spec(std::string_view name, std::string_view kind = "fake") {
-    std::vector<std::byte> cfg;
-    tr::wire::emit_name(cfg, "role");
-    const std::byte r{static_cast<std::uint8_t>(conn_role_t::DIAL)};
-    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, std::span<const std::byte>(&r, 1));
-    if (!kind.empty()) {
-        tr::wire::emit_name(cfg, "kind");
-        tr::wire::emit_name(cfg, kind);
-    }
-
-    std::vector<std::byte> body;
-    tr::wire::emit_name(body, "type");
-    tr::wire::emit_name(body, "client");
-    tr::wire::emit_name(body, "name");
-    tr::wire::emit_name(body, name);
-    tr::wire::emit_name(body, "config");
-    tr::wire::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true}, cfg);
-
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
-    return owned(out);
+    tr::net::conn_spec_t spec("client", name);
+    spec.role(conn_role_t::DIAL);
+    if (!kind.empty()) spec.kind(kind);
+    return spec.view();
 }
 
 /**
@@ -298,6 +270,5 @@ int main() {
     test_refused_wiring_rolls_back();
     test_open_allocator_creates();
     test_refused_wiring_leaves_staged_link_reusable();
-    std::printf("%s\n", g_failures == 0 ? "ALL PASS" : "FAILURES");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("conn_add_oom");
 }

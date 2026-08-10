@@ -52,16 +52,13 @@
 
 #include "libtracer/transport_can.hpp"
 #include "libtracer/view_can.hpp"
+#include "test_support.hpp"
 
 namespace {
 
 using namespace std::chrono_literals;
 
-int g_failures = 0;
-void check(bool ok, const char* what) {
-    std::printf("  [%s] %s\n", ok ? "PASS" : "FAIL", what);
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 class sink_t {
    public:
@@ -347,7 +344,5 @@ int main() {
               witnessed->data[0] == 0x5Cu,
           "and it is the legal frame's own payload, not the over-length frame's first 8 bytes");
 
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("transport_can_vcan");
 }

@@ -137,7 +137,8 @@ void test_recv_stack_reaches_the_thread() {
     {
         // 12288 is the depth the sibling SERVER link already sizes this workload at
         // (httpd_ws_link_t's recv stack) — the in-call graph delivery is the same one.
-        tr::net::esp_ws_client_link_t link("127.0.0.1", 8080, "/ws", kRxBytes, kRxBytes, 12288);
+        tr::net::esp_ws_client_link_t link("127.0.0.1", 8080, "/ws", /*handshake_headers=*/{},
+                                           kRxBytes, kRxBytes, 12288);
         check(fake_ws::armed_stack() == 12288, "the requested stack size was armed");
         check(fake_ws::armed_name() == "ws_cli_rx", "the recv thread was named");
         check(fake_ws::cfg_restored(), "the surrounding pthread config was restored");
@@ -150,7 +151,8 @@ void test_zero_recv_stack_arms_nothing() {
     std::printf("#900 recv_stack=0 is the platform default:\n");
     fake_ws::reset();
     {
-        tr::net::esp_ws_client_link_t link("127.0.0.1", 8080, "/ws", kRxBytes, kRxBytes, 0);
+        tr::net::esp_ws_client_link_t link("127.0.0.1", 8080, "/ws", /*handshake_headers=*/{},
+                                           kRxBytes, kRxBytes, 0);
         check(fake_ws::armed_stack() == 0, "no pthread config was armed");
         check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "the link dialed");
     }
@@ -163,8 +165,8 @@ void test_zero_recv_stack_arms_nothing() {
  * fake's `poll_read` reports "no data" until `push_frames` is called.
  */
 std::unique_ptr<tr::net::esp_ws_client_link_t> dialed_link(sink_t& sink) {
-    auto link = std::make_unique<tr::net::esp_ws_client_link_t>("127.0.0.1", 8080, "/ws", kRxBytes,
-                                                                kRxBytes, 0);
+    auto link = std::make_unique<tr::net::esp_ws_client_link_t>(
+        "127.0.0.1", 8080, "/ws", /*handshake_headers=*/std::string{}, kRxBytes, kRxBytes, 0);
     check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "the link dialed");
     link->set_receiver(sink);
     return link;

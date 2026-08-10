@@ -51,8 +51,11 @@
 #include <string_view>
 #include <vector>
 
+#include "fwd_frame_builder.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
+#include "test_values.hpp"
 
 namespace {
 
@@ -70,19 +73,8 @@ using tr::wire::opt_t;
 using tr::wire::tlv_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
-
-/** @brief A view over a fresh owned heap segment holding @p bytes. */
-tr::view::view_t make_value(std::span<const std::byte> bytes) {
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
-    if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
-    return tr::view::view_t::over(std::move(seg));
-}
+using tr::testing::check;
+using tr::testing::make_value;
 
 /** @brief A VALUE TLV holding @p n as a @p width-byte little-endian integer, owned. */
 tr::view::view_t value_le(std::uint64_t n, std::size_t width) {
@@ -435,21 +427,18 @@ std::vector<std::byte> b_field(std::initializer_list<std::string_view> steps) {
     return out;
 }
 
-/** @brief A FWD frame in RFC-0004 §B child order: op, dst, [selector], src, [payload]. */
-std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
-                             const std::vector<std::byte>& selector,
-                             const std::vector<std::byte>& payload) {
-    std::vector<std::byte> body;
-    const std::byte opb{static_cast<std::uint8_t>(op)};
-    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&opb, 1));
-    body.insert(body.end(), dst.begin(), dst.end());
-    body.insert(body.end(), selector.begin(), selector.end());
-    const std::vector<std::byte> src = b_path({"reply-ep"});
-    body.insert(body.end(), src.begin(), src.end());
-    body.insert(body.end(), payload.begin(), payload.end());
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
-    return out;
+/**
+ * @brief A `:settings`-field probe FWD whose `src` is bound to this suite's one reply endpoint.
+ *
+ * A legitimate VARIANT, not a second copy of the layout (#875): every probe here replies to
+ * `/reply-ep`, so spelling that at all six call sites would say nothing, and the parameter it
+ * frees up is the SELECTOR — the child these tests actually vary. The child order, the
+ * op-as-first-VALUE rule and the `.pl` flag all come from @ref tr::testing::b_fwd.
+ */
+std::vector<std::byte> b_fwd_to_reply_ep(fwd_op_t op, const std::vector<std::byte>& dst,
+                                         const std::vector<std::byte>& selector,
+                                         const std::vector<std::byte>& payload) {
+    return tr::testing::b_fwd(op, dst, b_path({"reply-ep"}), selector, payload);
 }
 
 /**
@@ -710,10 +699,13 @@ void test_conformance_vectors() {
             tr::graph::app_field_t{.name = "kp", .access = tr::graph::app_access_t::RW});
         g.set_app_fields(v, std::move(table));
         const std::vector<std::byte> sel = vector_bytes("field/field-nested");
-        check(error_child_bytes(resolver, b_fwd(fwd_op_t::READ, b_path({"fn"}), sel, {})).empty(),
-              "field/field-nested: the vector's own bytes select `:settings.app` and are SERVED");
-        check(!error_child_bytes(resolver, b_fwd(fwd_op_t::READ, b_path({"fn"}),
-                                                 b_field({"settings", "reliability"}), {}))
+        check(
+            error_child_bytes(resolver, b_fwd_to_reply_ep(fwd_op_t::READ, b_path({"fn"}), sel, {}))
+                .empty(),
+            "field/field-nested: the vector's own bytes select `:settings.app` and are SERVED");
+        check(!error_child_bytes(resolver,
+                                 b_fwd_to_reply_ep(fwd_op_t::READ, b_path({"fn"}),
+                                                   b_field({"settings", "reliability"}), {}))
                    .empty(),
               "... while the same shape one NAME away resolves to nothing (the ablation)");
     }
@@ -859,21 +851,21 @@ void test_removed_knob_reply_bytes() {
 
     // §5.4: a WRITE of a removed knob.
     const std::vector<std::byte> knob_err = error_child_bytes(
-        resolver,
-        b_fwd(fwd_op_t::WRITE, b_path({"rk"}), b_field({"settings", "deadline_ns"}), payload));
+        resolver, b_fwd_to_reply_ep(fwd_op_t::WRITE, b_path({"rk"}),
+                                    b_field({"settings", "deadline_ns"}), payload));
     check(knob_err == vector_bytes("settings/removed-knob"),
           "settings/removed-knob == the ERROR child of the reply a `:settings.deadline_ns` "
           "WRITE gets, exactly");
 
     // §5.7: the ring depth, on BOTH halves — the vector's own claim is "read OR write".
-    const std::vector<std::byte> depth_w =
-        error_child_bytes(resolver, b_fwd(fwd_op_t::WRITE, b_path({"hd"}),
-                                          b_field({"settings", "history_keep_last"}), payload));
+    const std::vector<std::byte> depth_w = error_child_bytes(
+        resolver, b_fwd_to_reply_ep(fwd_op_t::WRITE, b_path({"hd"}),
+                                    b_field({"settings", "history_keep_last"}), payload));
     check(depth_w == vector_bytes("stream/history-depth-host-only"),
           "stream/history-depth-host-only == the WRITE reply's ERROR child, exactly");
     const std::vector<std::byte> depth_r = error_child_bytes(
-        resolver,
-        b_fwd(fwd_op_t::READ, b_path({"hd"}), b_field({"settings", "history_keep_last"}), {}));
+        resolver, b_fwd_to_reply_ep(fwd_op_t::READ, b_path({"hd"}),
+                                    b_field({"settings", "history_keep_last"}), {}));
     check(depth_r == vector_bytes("stream/history-depth-host-only"),
           "... and the READ reply's ERROR child is the SAME bytes (the §3.B read/write "
           "agreement, over the wire)");
@@ -882,7 +874,7 @@ void test_removed_knob_reply_bytes() {
     // resolver that answered every request with that constant. A name that IS served must
     // come back as a RESULT, not as this error.
     const std::vector<std::byte> served = error_child_bytes(
-        resolver, b_fwd(fwd_op_t::READ, b_path({"rk"}), b_field({"settings"}), {}));
+        resolver, b_fwd_to_reply_ep(fwd_op_t::READ, b_path({"rk"}), b_field({"settings"}), {}));
     check(served.empty(),
           "ablation: a bare `:settings` READ is NOT an error reply (the resolver still serves)");
 }
@@ -904,7 +896,5 @@ int main() {
     test_replace_door_latches();
     test_qos_settings_pair_scan_cannot_be_hijacked();
     test_removed_knob_reply_bytes();
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("qos_policy");
 }

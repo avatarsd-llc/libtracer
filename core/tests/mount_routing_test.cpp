@@ -38,6 +38,7 @@
 #include "libtracer/route_handle.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -45,12 +46,7 @@ using tr::net::child_registry_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /** @brief A point-to-point transport that records nothing — an identity for the table. */
 struct p2p_link_t : tr::net::transport_t {
@@ -163,8 +159,8 @@ void test_module_scoping() {
 
     const auto* a = find(reg, {"ws-client", "foo"});
     const auto* b = find(reg, {"tcp-client", "foo"});
-    check(a != nullptr && a->link == &ws, "/net/ws-client/foo resolves to the ws link");
-    check(b != nullptr && b->link == &tcp, "/net/tcp-client/foo resolves to the tcp link");
+    check(a != nullptr && a->link() == &ws, "/net/ws-client/foo resolves to the ws link");
+    check(b != nullptr && b->link() == &tcp, "/net/tcp-client/foo resolves to the tcp link");
     check(a != b, "the same NAME in two modules is two distinct children");
     check(find(reg, {"ws-client", "nope"}) == nullptr, "an unknown name in a known module misses");
     check(find(reg, {"nope", "foo"}) == nullptr, "a known name in an unknown module misses");
@@ -202,8 +198,8 @@ void test_scoped_peer_resolution() {
     const auto* ws = find(reg, {"ws-server", "s"});
     const auto* tcp = find(reg, {"tcp-server", "s"});
     const auto* p2p = find(reg, {"ws-client", "c"});
-    check(ws != nullptr && ws->multi_peer, "a bus child records multi_peer at add time");
-    check(p2p != nullptr && !p2p->multi_peer, "a point-to-point child does not");
+    check(ws != nullptr && ws->egress().multi_peer, "a bus child records multi_peer at add time");
+    check(p2p != nullptr && !p2p->egress().multi_peer, "a point-to-point child does not");
 
     check(child_registry_t::resolve_peer(*ws, "alice") == &alice_ws,
           "/net/ws-server/s/alice reaches the ws peer");
@@ -482,6 +478,50 @@ std::array<int, 3> reply_shape(std::span<const std::byte> frame) {
 }
 
 /**
+ * @brief The whole-TLV bytes of a reply's FIRST `PATH` child — its `dst`, i.e. the request's
+ *        `src` copied back — INCLUDING any trailer it still carries.
+ *
+ * Read off the raw frame rather than re-encoded from a decoded node, because the trailer opt
+ * bits ARE the thing under test and a decode→encode round trip launders them.
+ *
+ * The reply head is fixed-shape by construction (RFC-0004 §D): the `FWD` header, then the
+ * 5-byte `op` VALUE, then `dst`.
+ */
+std::vector<std::byte> reply_dst_bytes(std::span<const std::byte> frame) {
+    const auto dec = tr::wire::decode(frame);
+    if (!dec || dec->type != type_t::FWD) return {};
+    const std::size_t at = (dec->opt.ll ? 6u : 4u) + 5u;
+    if (frame.size() < at + 4) return {};
+    const opt_t opt = opt_t::decode(std::to_integer<std::uint8_t>(frame[at + 1]));
+    if (opt.ll) return {};  // no route in this suite is 64 KiB; a widened one is a test bug
+    const std::size_t len = std::to_integer<std::size_t>(frame[at + 2]) |
+                            (std::to_integer<std::size_t>(frame[at + 3]) << 8);
+    std::size_t trailer = 0;
+    if (opt.ts) trailer += opt.tf ? 4u : 8u;
+    if (opt.cr) trailer += opt.cw ? 2u : 4u;
+    const std::size_t total = 4 + len + trailer;
+    if (frame.size() < at + total) return {};
+    return std::vector<std::byte>(frame.begin() + static_cast<std::ptrdiff_t>(at),
+                                  frame.begin() + static_cast<std::ptrdiff_t>(at + total));
+}
+
+/**
+ * @brief The reply's `kind` byte, or `0xFF` if the frame has no readable one.
+ *
+ * A reply's children are `op`, `dst`, `src`, then the `kind` VALUE (RFC-0004 §D), so this
+ * reads child 3. Used to assert that a case named for a REFUSAL actually got `kind=ERROR`
+ * rather than a `RESULT` — the two leave through the same assembler, so a differential over
+ * the route bytes alone cannot tell them apart.
+ */
+std::uint8_t reply_kind_byte(std::span<const std::byte> frame) {
+    const auto dec = tr::wire::decode(frame);
+    if (!dec || dec->type != type_t::FWD || dec->children.size() < 4) return 0xFFu;
+    const auto& kind = dec->children[3];
+    if (kind.type != type_t::VALUE || kind.payload.size() != 1) return 0xFFu;
+    return std::to_integer<std::uint8_t>(kind.payload[0]);
+}
+
+/**
  * @brief An FWD routed THROUGH a bus link's own NAME is rejected, never broadcast (#741).
  *
  * ADR-0073 §3 / RFC-0020, amending RFC-0004 §B for multi-peer links: a `dst` is a directed
@@ -674,6 +714,135 @@ void test_bus_name_hop_rejected_rope_arm() {
     check(bus.broadcasts == 0, "and nothing broadcast");
 }
 
+/**
+ * @brief The bus-NAME rejection's reply bytes, pinned against an INDEPENDENT spelling of the
+ *        RFC-0004 §D error grammar.
+ *
+ * The router no longer owns an encoder of its own (#887) — it calls the resolver's
+ * `assemble_error_reply`. That is only an improvement if the shared encoder still emits the
+ * shipped layout, so this expectation is built here from the grammar itself rather than from
+ * either implementation: `FWD{ VALUE op=REPLY, PATH dst=req.src, PATH src=req.dst,
+ * VALUE kind=ERROR, STATUS{ ERROR{ VALUE u16 LE 0x0021 } } }`.
+ */
+void test_bus_name_hop_reply_bytes_are_pinned() {
+    std::printf("the bus-NAME rejection's reply bytes are the RFC-0004 S D error grammar\n");
+    bus_link_impl_t bus;
+    p2p_link_t alice;
+    bus.peers.emplace_back("alice", &alice);
+    recording_link_t in;
+
+    tr::graph::graph_t graph;
+    tr::net::fwd_router_t router{graph};
+    router.add_child("net/ws-server/srv", bus);
+    router.add_child("net/ws-client/in", in);
+
+    router.on_frame("net/ws-client/in",
+                    make_fwd({"net", "ws-server", "srv", "sensor", "temp"}, {"origin"}));
+
+    std::vector<std::byte> body;
+    const std::byte op{static_cast<std::uint8_t>(tr::graph::fwd_op_t::REPLY)};
+    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
+    emit_path(body, {"origin"});                                     // dst = request src
+    emit_path(body, {"net", "ws-server", "srv", "sensor", "temp"});  // src = request dst
+    const std::byte kind{static_cast<std::uint8_t>(tr::graph::reply_kind_t::ERROR)};
+    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&kind, 1));
+    const std::array<std::byte, 2> code{std::byte{0x21}, std::byte{0x00}};  // tr::path::invalid
+    std::vector<std::byte> err_body;
+    tr::wire::emit_tlv(err_body, type_t::VALUE, opt_t{}, std::span<const std::byte>(code));
+    std::vector<std::byte> status_body;
+    tr::wire::emit_tlv(status_body, type_t::ERROR, opt_t{.pl = true}, err_body);
+    tr::wire::emit_tlv(body, type_t::STATUS, opt_t{.pl = true}, status_body);
+    std::vector<std::byte> expected;
+    tr::wire::emit_tlv(expected, type_t::FWD, opt_t{.pl = true}, body);
+
+    check(in.sent.size() == 1, "the refused hop is answered once");
+    check(in.sent.size() == 1 && in.sent[0] == expected,
+          "byte-identical to the independently spelled error grammar");
+}
+
+/**
+ * @brief The route bytes a TRAILERED request gets back are trailer-sliced, and identical on the
+ *        router's rejection and the terminus resolver's refusal — the #887 drift point, closed.
+ *
+ * The two paths encoded the SAME logical route differently. The resolver copies a route as its
+ * trailer-EXCLUDED whole-TLV bytes with the trailer opt bits cleared (ADR-0041 §4); the
+ * router's retired encoder re-serialized the decoded node with `wire::encode`, which REBUILDS
+ * the trailer — so a peer that CRC'd its `src` got those bytes echoed back inside the reply's
+ * address from one path and not the other. Sharing one encoder is what makes that
+ * unrepresentable, and the assertion is a differential rather than a fixed vector precisely so
+ * it cannot pass by agreeing with a hard-coded copy of one side.
+ *
+ * The trailer on the request is asserted, not assumed: without it both sides trivially agree
+ * and the case would be vacuous.
+ */
+void test_reject_and_terminus_agree_on_trailered_routes() {
+    std::printf("the rejection and the terminus emit the SAME trailer-sliced route (#887)\n");
+    bus_link_impl_t bus;
+    p2p_link_t alice;
+    bus.peers.emplace_back("alice", &alice);
+    recording_link_t in;
+
+    tr::graph::graph_t graph;
+    tr::net::fwd_router_t router{graph};
+    router.add_child("net/ws-server/srv", bus);
+    router.add_child("net/ws-client/in", in);
+
+    // A `src` route carrying a CRC-16 trailer. `wire::encode` computes the CRC, so this is a
+    // frame a conformant peer could really put on the wire — not a hand-corrupted one.
+    tr::wire::tlv_t name{.type = type_t::NAME, .opt = opt_t{}};
+    const std::string origin = "origin";
+    const auto origin_bytes = std::as_bytes(std::span<const char>(origin));
+    name.payload = origin_bytes;
+    tr::wire::tlv_t src{.type = type_t::PATH, .opt = opt_t{.pl = true, .cr = true, .cw = true}};
+    src.children.push_back(name);
+    const std::vector<std::byte> src_wire = tr::wire::encode(src);
+    check(src_wire.size() == 4 + 4 + origin.size() + 2,
+          "the request's src really does carry a 2-byte CRC trailer (the ablation)");
+
+    const auto framed = [&](tr::graph::fwd_op_t operation,
+                            std::initializer_list<std::string_view> dst) {
+        std::vector<std::byte> body;
+        const std::byte op{static_cast<std::uint8_t>(operation)};
+        tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
+        emit_path(body, dst);
+        body.insert(body.end(), src_wire.begin(), src_wire.end());
+        if (operation == tr::graph::fwd_op_t::WRITE) {
+            const std::byte payload[2] = {std::byte{0x01}, std::byte{0x02}};
+            tr::wire::emit_tlv(body, type_t::VALUE, opt_t{},
+                               std::span<const std::byte>(payload, 2));
+        }
+        std::vector<std::byte> frame;
+        tr::wire::emit_tlv(frame, type_t::FWD, opt_t{.pl = true}, body);
+        return frame;
+    };
+
+    // Arm 1: the bus-NAME hop the router rejects. Arm 2: a READ of an unknown LOCAL dst, which
+    // the terminus resolver refuses NOT_FOUND. Different refusals, same route to answer on.
+    //
+    // Arm 2 is a READ on purpose. A WRITE with no field takes `resolve_node`'s
+    // `op == WRITE && !has_field` branch, where `graph.ensure_vertex` CREATES the vertex and
+    // the reply comes back `kind=RESULT` — so the case would still guard (both replies leave
+    // through the same assembler) while advertising terminus-refusal coverage it never ran.
+    router.on_frame("net/ws-client/in",
+                    framed(tr::graph::fwd_op_t::WRITE, {"net", "ws-server", "srv", "zzz"}));
+    router.on_frame("net/ws-client/in", framed(tr::graph::fwd_op_t::READ, {"nosuch"}));
+    check(in.sent.size() == 2, "both refusals are answered");
+    check(in.sent.size() == 2 && reply_kind_byte(in.sent[1]) ==
+                                     static_cast<std::uint8_t>(tr::graph::reply_kind_t::ERROR),
+          "arm 2 really is a terminus REFUSAL (kind=ERROR), not a RESULT");
+    if (in.sent.size() != 2) return;
+
+    const std::vector<std::byte> rejected = reply_dst_bytes(in.sent[0]);
+    const std::vector<std::byte> terminus = reply_dst_bytes(in.sent[1]);
+    check(!rejected.empty() && rejected == terminus,
+          "the two paths emit BYTE-IDENTICAL reply route bytes");
+    check(rejected.size() == 4 + 4 + origin.size(),
+          "and the trailer BYTES are gone — the copy is trailer-sliced at rest");
+    check(!rejected.empty() && !opt_t::decode(std::to_integer<std::uint8_t>(rejected[1])).cr &&
+              !opt_t::decode(std::to_integer<std::uint8_t>(rejected[1])).ts,
+          "with the trailer opt BITS cleared, so the copy stays self-consistent");
+}
+
 /** @brief A route naming the mount EXACTLY still terminates here (ADR-0038 §3a). */
 void test_advertise_exact_mount_terminates() {
     std::printf("ADVERTISE naming the mount exactly\n");
@@ -707,9 +876,9 @@ int main() {
     test_bus_name_hop_masks_the_op_byte();
     test_bus_name_hop_reject_from_peer();
     test_bus_name_hop_rejected_rope_arm();
+    test_bus_name_hop_reply_bytes_are_pinned();
+    test_reject_and_terminus_agree_on_trailered_routes();
     test_advertise_exact_mount_terminates();
 
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("mount_routing");
 }

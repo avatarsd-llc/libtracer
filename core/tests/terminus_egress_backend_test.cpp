@@ -43,12 +43,14 @@
 #include <utility>
 #include <vector>
 
+#include "fwd_frame_builder.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_pool.hpp"
 #include "libtracer/op_resolve.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -120,7 +122,6 @@ namespace {
 
 using tr::graph::fwd_op_t;
 using tr::graph::graph_t;
-using tr::graph::kFwdOpFlagMintRequest;
 using tr::graph::path_t;
 using tr::graph::reply_kind_t;
 using tr::graph::role_t;
@@ -134,12 +135,7 @@ using tr::wire::type_t;
 /** @brief The minted `PATH_REF` reply trailer's byte length (one element): 4-byte header + 8. */
 constexpr std::size_t kMintBytes = tr::wire::path_ref_wire_bytes(1);
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /**
  * @brief A `mem_backend_t` that serves from an upstream backend until its serve budget runs out,
@@ -224,11 +220,6 @@ class rec_link_t : public transport_t {
 
 // --- wire builders (the terminus_flatten_backend_test shapes) ------------------------
 
-/** @brief Append @p src to @p dst. */
-void append(std::vector<std::byte>& dst, const std::vector<std::byte>& src) {
-    dst.insert(dst.end(), src.begin(), src.end());
-}
-
 /** @brief A `PATH` TLV over the given `/`-segments. */
 std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> body;
@@ -247,41 +238,8 @@ std::vector<std::byte> b_value_u32(std::uint32_t v) {
     return out;
 }
 
-/** @brief An opaque `VALUE` TLV holding one byte. */
-std::vector<std::byte> b_value_u8(std::uint8_t v) {
-    const std::byte b{v};
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::VALUE, opt_t{}, std::span<const std::byte>(&b, 1));
-    return out;
-}
-
-/** @brief A `FWD` frame with the RFC-0004 §B child order; the op byte carries @p op_byte raw. */
-std::vector<std::byte> b_fwd_raw(std::uint8_t op_byte, const std::vector<std::byte>& dst,
-                                 const std::vector<std::byte>& src,
-                                 const std::vector<std::byte>& payload = {}) {
-    std::vector<std::byte> body;
-    append(body, b_value_u8(op_byte));
-    append(body, dst);
-    append(body, src);
-    if (!payload.empty()) append(body, payload);
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
-    return out;
-}
-
-/** @brief A plain (non-mint) `FWD` frame. */
-std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
-                             const std::vector<std::byte>& src,
-                             const std::vector<std::byte>& payload = {}) {
-    return b_fwd_raw(static_cast<std::uint8_t>(op), dst, src, payload);
-}
-
-/** @brief A `FWD` frame whose `op` byte carries the RFC-0024 §7.5 mint-request flag. */
-std::vector<std::byte> b_fwd_mint(fwd_op_t op, const std::vector<std::byte>& dst,
-                                  const std::vector<std::byte>& src,
-                                  const std::vector<std::byte>& payload = {}) {
-    return b_fwd_raw(static_cast<std::uint8_t>(op) | kFwdOpFlagMintRequest, dst, src, payload);
-}
+using tr::testing::b_fwd;
+using tr::testing::b_fwd_mint;
 
 /**
  * @brief A rope over @p bytes split into @p links links — the multi-link shape that makes the
@@ -591,6 +549,5 @@ int main() {
     std::printf("\n");
     test_default_egress_unchanged();
 
-    std::printf("\n%s\n", g_failures == 0 ? "all checks passed" : "FAILURES");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("terminus_egress_backend");
 }

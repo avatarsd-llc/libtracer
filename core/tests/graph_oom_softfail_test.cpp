@@ -27,9 +27,12 @@
 #include <string_view>
 #include <vector>
 
+#include "fwd_frame_builder.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
+#include "test_values.hpp"
 
 namespace {
 
@@ -46,20 +49,8 @@ using tr::wire::opt_t;
 using tr::wire::tlv_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
-
-/** @brief A view_t over a fresh, owned heap segment holding @p bytes. */
-view_t make_value(std::initializer_list<std::uint8_t> bytes) {
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
-    std::size_t i = 0;
-    for (const std::uint8_t b : bytes) seg->bytes[i++] = std::byte{b};
-    return view_t::over(std::move(seg));
-}
+using tr::testing::check;
+using tr::testing::make_value;
 
 /** @brief Reject every probe — total heap exhaustion. */
 bool fail_all(std::size_t) noexcept { return false; }
@@ -124,16 +115,7 @@ std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
     return out;
 }
-std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
-                             const std::vector<std::byte>& src) {
-    std::vector<std::byte> body;
-    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::array{static_cast<std::byte>(op)});
-    body.insert(body.end(), dst.begin(), dst.end());
-    body.insert(body.end(), src.begin(), src.end());
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
-    return out;
-}
+using tr::testing::b_fwd;
 
 /** @brief A decoded reply: the flattened backing view kept alongside the borrowing tlv. */
 struct decoded_reply_t {
@@ -536,7 +518,5 @@ int main() {
     test_stream_shed_append_no_redelivery();
     test_stream_drain_defer();
     test_composed_read_reply_backpressure();
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("graph_oom_softfail");
 }

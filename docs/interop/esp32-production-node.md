@@ -65,7 +65,7 @@ std::pmr::synchronized_pool_resource shared{&arena};
 
 Those are the three injection points of `graph_t`'s constructor — the pmr resource,
 the value backend and the failable control source
-(`core/include/libtracer/graph.hpp:294-296`) — and the **four** of
+(`core/include/libtracer/graph.hpp:317-319`) — and the **four** of
 `fwd_router_t`: the pmr resource, the failable `rx` source, the `flat` byte backend
 its rope flattens draw from, and the `egress` byte backend the terminus reply head
 draws from (`core/include/libtracer/fwd_router.hpp:177-182`; `egress` is #795 /
@@ -306,8 +306,8 @@ without the project-side symbol, the line is inert.
   fan-out payload did not fit. A session drop turns one slow subscriber into a
   reconnect storm.
 - **Egress is gather, not copy.** The rope-to-wire path lowers to an iovec `sendmsg`
-  (`core/src/posix_endpoint.cpp:218,136`; the TCP assembly is at
-  `core/src/transport_tcp.cpp:62-78`), and lwIP provides `sendmsg` unmodified. Do not
+  (`core/src/posix_endpoint.cpp:225,143`; the TCP assembly is at
+  `core/src/transport_tcp.cpp:59-75`), and lwIP provides `sendmsg` unmodified. Do not
   flatten payloads before send; the only legitimate flatten is a substrate boundary
   DMA cannot span.
 - **Backpressure beats buffering.** Where a node buffers for a slow subscriber, the
@@ -329,8 +329,8 @@ itself, described via `:schema` like any other data
 ```
 
 The backpressure counters come from `graph_t::delivery_drops()`
-(`core/include/libtracer/graph.hpp:1305`), which snapshots four per-cause totals —
-`no_target`, `denied`, `out_of_memory`, `fan_out_truncated` (`graph.hpp:1283-1295`). Each
+(`core/include/libtracer/graph.hpp:1327`), which snapshots four per-cause totals —
+`no_target`, `denied`, `out_of_memory`, `fan_out_truncated` (`graph.hpp:1305-1317`). Each
 counts shed **deliveries**, not events, so a fan-out shed whole under memory pressure moves
 them by its width. They are counted and
 never enforced: nothing in the library reads them, so the deployment decides what to
@@ -347,11 +347,11 @@ JTAG session.
   resolve before Kconfig runs. Gate **SRCS** on `CONFIG_*`, keep REQUIRES
   unconditional, and keep a CI job building each Kconfig-gated TU.
 - **Every new core source is also appended to the component's `LIBTRACER_SRCS`**
-  (`integrations/esp-idf/libtracer/CMakeLists.txt:41`) or the chip build fails to
+  (`integrations/esp-idf/libtracer/CMakeLists.txt:44`) or the chip build fails to
   link while host builds stay green.
 - **Platform TU selection is a build-system concern, not an `#ifdef`.** Chip targets
   compile `twai_link.cpp` plus a SocketCAN stub; the `linux` target compiles real
-  SocketCAN and no TWAI (`integrations/esp-idf/libtracer/CMakeLists.txt:127-137`).
+  SocketCAN and no TWAI (`integrations/esp-idf/libtracer/CMakeLists.txt:172-181`).
   Extend that pattern rather than adding macros.
 - Build with `-fno-exceptions -fno-rtti` and treat any throwing construct on the
   delivery path as a defect (§1).

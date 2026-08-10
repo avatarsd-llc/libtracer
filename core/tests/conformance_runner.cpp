@@ -33,6 +33,7 @@
 #include "libtracer/path_ref.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -40,12 +41,7 @@ namespace fs = std::filesystem;
 using tr::wire::tlv_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 // --- hex + error helpers (used by the --roundtrip differential-fuzz mode) ----
 /**
@@ -399,7 +395,5 @@ int main(int argc, char** argv) {
               "reserved-bit input rejected as frame::invalid");
     }
 
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("conformance_runner");
 }

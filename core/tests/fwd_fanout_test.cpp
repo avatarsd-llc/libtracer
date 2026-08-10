@@ -40,11 +40,14 @@
 #include <thread>
 #include <vector>
 
+#include "fwd_frame_builder.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/frame.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
+#include "test_values.hpp"
 
 namespace {
 
@@ -58,12 +61,8 @@ using tr::wire::opt_t;
 using tr::wire::tlv_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
+using tr::testing::make_value;
 
 // --- wire builders (canonical bytes via the production emit helpers) ---------
 void append(std::vector<std::byte>& dst, const std::vector<std::byte>& src) {
@@ -136,26 +135,7 @@ std::vector<std::byte> b_subscriber(const std::vector<std::byte>& target, bool c
     tr::wire::emit_tlv(out, type_t::SUBSCRIBER, opt_t{.pl = true}, body);
     return out;
 }
-std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
-                             const std::vector<std::byte>& src,
-                             const std::vector<std::byte>& field = {},
-                             const std::vector<std::byte>& payload = {}) {
-    std::vector<std::byte> body;
-    append(body, b_value_u8(static_cast<std::uint8_t>(op)));
-    append(body, dst);
-    if (!field.empty()) append(body, field);
-    append(body, src);
-    if (!payload.empty()) append(body, payload);
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
-    return out;
-}
-
-tr::view::view_t make_value(std::span<const std::byte> bytes) {
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
-    if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
-    return tr::view::view_t::over(std::move(seg));
-}
+using tr::testing::b_fwd;
 
 /** @brief One captured egress span — its ORIGIN pointer + size (NOT a copy of the bytes). */
 struct span_rec_t {
@@ -488,6 +468,47 @@ void test_compact_auto_promote() {
     check(healed.size() == 2, "post-reconnect delivery re-advertises (ADVERTISE + COMPACT)");
 }
 
+/**
+ * @brief The compact-delivery leg SCATTER-GATHERS both frames — it builds neither (#885).
+ *
+ * @ref test_compact_auto_promote pins WHAT the writer thread emits (an ADVERTISE then a
+ * COMPACT, then COMPACTs alone). This pins HOW. Until #885 this leg was the last caller of the
+ * `try_encode_advertise` / `try_encode_compact` pair: it assembled each frame into a
+ * `std::vector`, copying the payload twice, to produce bytes the transport was about to gather
+ * anyway. Both now go out as a stack head plus a reference, exactly as the forwarding hop's
+ * COMPACT already did — so each send carries TWO iovec entries, and a revert to either builder
+ * collapses that to one.
+ *
+ * The span COUNT is the assertion, not the bytes: `test_compact_auto_promote` already decodes
+ * both frames off the same link, so a shape change that altered the wire would fail there.
+ */
+void test_compact_delivery_is_gathered() {
+    std::printf("delivery_compact egress is scatter-gathered:\n");
+    graph_t graph;
+    fwd_router_t router(graph);
+    fake_link_t link;
+    router.add_child("client", link);
+
+    const auto p = path_t::parse("/sensor/temp");
+    auto v = graph.register_vertex(*p, role_t::STORED_VALUE);
+    link.inject(b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"client"}),
+                      b_field_subscribers_append(), b_subscriber(b_path({"client"}), true)));
+    link.drain();  // discard the subscribe REPLY (and its iov record)
+
+    (void)graph.write(v, make_value(b_value_u32(0xA1A1A1A1)));
+    const auto promote = link.drain_iovs();
+    check(promote.size() == 2, "the promoting delivery is two sends: ADVERTISE then COMPACT");
+    if (promote.size() == 2) {
+        check(promote[0].size() == 2, "the ADVERTISE rode as head + route — gathered, not built");
+        check(promote[1].size() == 2, "the COMPACT rode as head + payload — gathered, not built");
+    }
+
+    (void)graph.write(v, make_value(b_value_u32(0xB2B2B2B2)));
+    const auto steady = link.drain_iovs();
+    check(steady.size() == 1, "the steady-state delivery is one send");
+    if (steady.size() == 1) check(steady[0].size() == 2, "and it is a gathered COMPACT too");
+}
+
 void test_concurrent_writer_vs_clear() {
     std::printf("Concurrent writer x clear_link (TSan gate):\n");
     graph_t graph;
@@ -527,7 +548,7 @@ int main() {
     test_full_route_fanout_zerocopy();
     test_transient_local_latch();
     test_compact_auto_promote();
+    test_compact_delivery_is_gathered();
     test_concurrent_writer_vs_clear();
-    std::printf("%s\n", g_failures == 0 ? "ALL PASS" : "FAILURES");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("fwd_fanout");
 }

@@ -53,17 +53,15 @@
 #include <thread>
 #include <vector>
 
+#include "test_support.hpp"
+
 namespace {
 
 using tr::graph::hazard_slot_t;
 using tr::graph::sp_atomic_slot_t;
 using tr::view::rope_t;
 
-int g_failures = 0;
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /** @brief Shorthand for the order the counters in this test use. */
 constexpr std::memory_order relaxed_ = std::memory_order_relaxed;
@@ -569,7 +567,5 @@ int main() {
     declined_publish();
     check(g_live.load() == 0, "the starvation probes freed every rope too");
 
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
-                g_failures == 1 ? "" : "s");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("lkv_slot");
 }

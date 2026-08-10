@@ -288,26 +288,26 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     set_tests_properties(httpd_ws_session_identity
         PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
-    # #944 — the TX WORK SLOT's lifetime, on the same fake. The event the three suites
-    # above never spend is the one the fake already models: an enqueue DROPPED inside
-    # lwIP while httpd_queue_work still returns ESP_OK (set_queue_capacity). The work
-    # item never runs, and it used to be the only thing that could release the slot it
-    # had claimed — four of those and the pool was dead for the rest of the boot.
-    add_executable(httpd_ws_tx_strand_test
-        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_tx_strand_test.cpp"
+    # #949 — the TX SLOT POOL as the link's outstanding-send bound, on the same fake.
+    # It replaces the #944 strand suite: above the component's ESP-IDF floor (>=5.5.5) a
+    # full control mbox refuses the enqueue instead of binning it in silence, so the slot
+    # always comes back, and a send that finds no free slot is dropped and counted rather
+    # than posted from a heap work item.
+    add_executable(httpd_ws_tx_pool_test
+        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_tx_pool_test.cpp"
         "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
         "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
-    target_include_directories(httpd_ws_tx_strand_test PRIVATE
+    target_include_directories(httpd_ws_tx_pool_test PRIVATE
         "${LIBTRACER_ESP_DIR}/tests/host"
         "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
         "${LIBTRACER_ESP_DIR}/libtracer/include")
-    target_link_libraries(httpd_ws_tx_strand_test PRIVATE libtracer)
-    target_link_options(httpd_ws_tx_strand_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
-    libtracer_test_warnings(httpd_ws_tx_strand_test)
-    add_test(NAME httpd_ws_tx_strand COMMAND httpd_ws_tx_strand_test)
+    target_link_libraries(httpd_ws_tx_pool_test PRIVATE libtracer)
+    target_link_options(httpd_ws_tx_pool_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    libtracer_test_warnings(httpd_ws_tx_pool_test)
+    add_test(NAME httpd_ws_tx_pool COMMAND httpd_ws_tx_pool_test)
     # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
     # every case here constructs an adopting link — same exemption as the suites above.
-    set_tests_properties(httpd_ws_tx_strand
+    set_tests_properties(httpd_ws_tx_pool
         PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
     # #961 — the FAN-OUT path's allocation, on the same fake. The instrument is what is
@@ -379,6 +379,30 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
     # every case here constructs an adopting link — same exemption as the suites above.
     set_tests_properties(httpd_ws_keepalive
+        PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+
+    # #958 — the admission predicate decides the opening HANDSHAKE. The seam none of the
+    # suites above reaches is the pre-handshake one: the fake runs the registration's
+    # ws_pre_handshake_cb before it admits a socket and latches the WS route, the order
+    # httpd_uri.c uses, so whether a refusal actually stops the upgrade is a measurement.
+    # No extra interposition — this suite asks nothing of the socket layer.
+    add_executable(httpd_ws_admission_test
+        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_admission_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
+    target_include_directories(httpd_ws_admission_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(httpd_ws_admission_test PRIVATE libtracer)
+    # The fake's socket layer interposes the ONE ::send the link's send override does;
+    # every target that links fake_httpd.cpp needs it.
+    target_link_options(httpd_ws_admission_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    libtracer_test_warnings(httpd_ws_admission_test)
+    add_test(NAME httpd_ws_admission COMMAND httpd_ws_admission_test)
+    # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
+    # three of the four cases here construct an adopting link — same exemption as above.
+    set_tests_properties(httpd_ws_admission
         PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
     # #955 — what the link owes an ADOPTED server. The facts none of the suites above can
@@ -481,6 +505,33 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     # failed-dial case). Generous against a loaded runner, still far under CTest's default.
     set_tests_properties(esp_ws_client_liveness PROPERTIES TIMEOUT 60)
 
+    # #959 — the WS CLIENT link's DIAL/CONFIG surface, on the same TU and the same fake.
+    # The seam none of the client suites above reaches is ORDERING at construction: the
+    # ctor spawns the thread that dials, so anything a caller supplied afterwards raced that
+    # dial — for a token, leaving UNDEFINED whether dial ONE carried what admission gates on.
+    # The fake's observable is therefore PER DIAL (fake_ws::dial_headers), because "the
+    # LAST dial carried the token" is exactly what the broken surface would also report. No
+    # socket and no setsockopt interposition here (#947), unlike the liveness target above:
+    # this suite is about what the handshake requested, not the socket it went out on.
+    # Registered after the three suites it shares a TU with so their ctest indices do not
+    # move — #1118 tracks a known flake by index as well as by name.
+    add_executable(esp_ws_client_dial_test
+        "${LIBTRACER_ESP_DIR}/tests/host/esp_ws_client_dial_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_esp_transport.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/esp_ws_client_link.cpp")
+    target_include_directories(esp_ws_client_dial_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(esp_ws_client_dial_test PRIVATE libtracer)
+    libtracer_test_warnings(esp_ws_client_dial_test)
+    add_test(NAME esp_ws_client_dial COMMAND esp_ws_client_dial_test)
+    # One case spends a real reconnect backoff on purpose (1.5 s), to make the second dial
+    # a genuine handle rebuild rather than a re-use. Generous against a loaded runner,
+    # still far under CTest's default.
+    set_tests_properties(esp_ws_client_dial PROPERTIES TIMEOUT 60)
+
     # #962 — the TWAI link's TX BACKPRESSURE window, on the same construction: the chip
     # TU (integrations/esp-idf/libtracer/twai_link.cpp) compiled against a host fake of
     # esp_driver_twai's node API plus the FreeRTOS counting semaphore and queue it is
@@ -577,6 +628,15 @@ add_executable(mount_routing_test mount_routing_test.cpp)
 target_link_libraries(mount_routing_test PRIVATE libtracer)
 libtracer_test_warnings(mount_routing_test)
 add_test(NAME mount_routing COMMAND mount_routing_test)
+
+# #882 — a reconnect rebind that FLIPS a mount's shape (point-to-point <-> bus) must never
+# let a forward pair one publication's shape with another's link: that routes a bus link
+# point-to-point and its send() BROADCASTS (the #409 one-request/N-replies misroute).
+add_executable(mount_shape_flip_test mount_shape_flip_test.cpp)
+target_link_libraries(mount_shape_flip_test PRIVATE libtracer Threads::Threads)
+libtracer_test_warnings(mount_shape_flip_test)
+add_test(NAME mount_shape_flip COMMAND mount_shape_flip_test)
+set_tests_properties(mount_shape_flip PROPERTIES RUN_SERIAL TRUE TIMEOUT 300)
 
 # `add_child` under a REFUSING allocator (#523): the registry chunk is the one soft-failing
 # allocation on the control path, and it is driven by replacing the global NOTHROW
@@ -861,6 +921,15 @@ target_link_libraries(app_fields_test PRIVATE libtracer)
 libtracer_test_warnings(app_fields_test)
 add_test(NAME app_fields COMMAND app_fields_test)
 
+# #869 — the field surface's READ/WRITE dispatch parity. The full field x selector matrix
+# through both doors (the characterization net behind the shared shape classifiers), the
+# three-door subscriber admission parity, and the pinned read/write divergences
+# (:subscribers[*], :acl[0], :settings[0].app.<name>) that need an RFC to close.
+add_executable(field_dispatch_test field_dispatch_test.cpp)
+target_link_libraries(field_dispatch_test PRIVATE libtracer)
+libtracer_test_warnings(field_dispatch_test)
+add_test(NAME field_dispatch COMMAND field_dispatch_test)
+
 # RFC-0022 (as amended) — the per-subscription delivery policy, the removed vertex knobs,
 # and §3.F: the two surviving storage declarations are owner-side and inherited by NOBODY.
 add_executable(qos_policy_test qos_policy_test.cpp)
@@ -928,6 +997,16 @@ add_executable(fwd_readvertise_reuse_test fwd_readvertise_reuse_test.cpp)
 target_link_libraries(fwd_readvertise_reuse_test PRIVATE libtracer)
 libtracer_test_warnings(fwd_readvertise_reuse_test)
 add_test(NAME fwd_readvertise_reuse COMMAND fwd_readvertise_reuse_test)
+
+# #833 — a REFUSED forwarding bind strands neither the out-label it took nor the egress route
+# retained with it. Drives the ingress table to its injected bound so the BIND is the step that
+# refuses, then asserts the downstream table returns to its pre-advertise census, the label
+# itself comes back, nothing went on the wire, and the shared entry an established flow rides
+# is left alone.
+add_executable(fwd_bind_refusal_unwind_test fwd_bind_refusal_unwind_test.cpp)
+target_link_libraries(fwd_bind_refusal_unwind_test PRIVATE libtracer)
+libtracer_test_warnings(fwd_bind_refusal_unwind_test)
+add_test(NAME fwd_bind_refusal_unwind COMMAND fwd_bind_refusal_unwind_test)
 
 # RFC-0004 / ADR-0035 slice 4 (#136) — the PRODUCER auto fan-out: a plain graph.write to a
 # vertex with a remote subscriber delivers a full-route FWD{WRITE} (or auto-promoted COMPACT)
@@ -1199,3 +1278,13 @@ if(LIBTRACER_WITH_CUDA)
     libtracer_test_warnings(cuda_test)
     add_test(NAME cuda COMMAND cuda_test)
 endif()
+
+# #874 — the shared runner (test_support.hpp), under test by itself. Every other harness
+# here reports its verdict THROUGH that header, so a runner that stopped counting would
+# turn the whole suite green at once and no other target could see it. Registered last on
+# purpose: this file's line numbers are cited by docs/modules/segment.md and pinned in
+# tools/check_doc_citations.py, so new targets append rather than insert.
+add_executable(test_support_test test_support_test.cpp)
+target_link_libraries(test_support_test PRIVATE libtracer Threads::Threads)
+libtracer_test_warnings(test_support_test)
+add_test(NAME test_support COMMAND test_support_test)

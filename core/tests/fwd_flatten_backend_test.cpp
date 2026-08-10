@@ -59,10 +59,12 @@
 #include <utility>
 #include <vector>
 
+#include "fwd_frame_builder.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/route_handle.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -76,12 +78,7 @@ using tr::net::transport_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-int g_failures = 0;
-
-void check(bool ok, std::string_view what) {
-    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
-    if (!ok) ++g_failures;
-}
+using tr::testing::check;
 
 /**
  * @brief A `mem_backend_t` that serves from the heap until it is armed, then refuses.
@@ -236,21 +233,7 @@ std::vector<std::byte> b_subscriber(const std::vector<std::byte>& target, bool c
     return out;
 }
 
-/** @brief A `FWD` frame with the RFC-0004 §B child order. */
-std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
-                             const std::vector<std::byte>& src,
-                             const std::vector<std::byte>& field = {},
-                             const std::vector<std::byte>& payload = {}) {
-    std::vector<std::byte> body;
-    append(body, b_value_u8(static_cast<std::uint8_t>(op)));
-    append(body, dst);
-    if (!field.empty()) append(body, field);
-    append(body, src);
-    if (!payload.empty()) append(body, payload);
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
-    return out;
-}
+using tr::testing::b_fwd;
 
 /**
  * @brief A rope over @p bytes split into @p links links — the multi-link shape is what
@@ -530,6 +513,5 @@ int main() {
     std::printf("\n");
     test_default_backend_unchanged();
 
-    std::printf("\n%s\n", g_failures == 0 ? "all checks passed" : "FAILURES");
-    return g_failures == 0 ? 0 : 1;
+    return tr::testing::summary("fwd_flatten_backend");
 }
