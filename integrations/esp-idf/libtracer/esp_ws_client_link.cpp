@@ -162,13 +162,23 @@ class sender_exit_t {
 }  // namespace
 
 esp_ws_client_link_t::esp_ws_client_link_t(std::string host, std::uint16_t port,
-                                           std::string ws_path, std::size_t rx_bytes,
-                                           std::size_t tx_bytes, std::size_t recv_stack)
+                                           std::string ws_path, std::string handshake_headers,
+                                           std::size_t rx_bytes, std::size_t tx_bytes,
+                                           std::size_t recv_stack)
     : host_(std::move(host)),
       port_(port),
       ws_path_(std::move(ws_path)),
+      handshake_headers_(std::move(handshake_headers)),
       rx_buf_(rx_bytes),
       tx_buf_(tx_bytes) {
+    // Every member the recv thread reads is initialized ABOVE this line, which is the
+    // whole of #959: the thread spawned below dials at once, so a knob delivered after the
+    // spawn is a data race, and for a handshake token it also leaves it undefined whether
+    // the first dial carries one — and a dial WITHOUT one is what an admission hook refuses.
+    // `handshake_headers_` was that knob; it is a ctor argument and `const` now, so the
+    // ordering is a property of the type rather than a request in a doc comment. Nothing
+    // may be added between here and the spawn that the recv thread also reads.
+    //
     // The recv thread owns dialing + the read loop; the ctor never blocks on the
     // network. recv_stack==0 uses the pthread default; any other value is APPLIED —
     // this thread runs in-call delivery through the graph's on_write seam, so a node
@@ -261,6 +271,13 @@ bool esp_ws_client_link_t::connect_once() {
     // Optional handshake auth: extra header lines a peer's admission hook can gate on (a
     // b2b dial carries no browser cookie). esp_transport_ws appends them verbatim; empty
     // leaves the field null so the handshake is byte-for-byte the historical one.
+    //
+    // Read with no lock and no copy, which is sound because the member is `const` and was
+    // set before this thread existed (#959). The pointer therefore cannot dangle, and the
+    // FIRST dial carries the header. It used to be an ordinary member a setter assigned
+    // after construction, unsynchronized with this read: which side won was undefined, so
+    // whether dial one carried a token was undefined too. Every re-dial re-reads the same
+    // bytes, so a reconnect re-authenticates.
     if (!handshake_headers_.empty()) cfg.headers = handshake_headers_.c_str();
     esp_transport_ws_set_config(ws_, &cfg);
 
@@ -410,6 +427,20 @@ void esp_ws_client_link_t::send(std::span<const std::byte> frame) {
     // This early-out stays AHEAD of the sender tally and of write_m_ (#952 ordering): it
     // reads nothing the destructor can be racing. Counted without any lock held.
     if (frame.empty() || frame.size() > tx_buf_.size()) {  // drop oversize/empty
+        // The oversize half is the `tx_bytes` CEILING, and this is the only place that can
+        // name it. `transport_t::send` returns void, so the router cannot be told the frame
+        // died; `st_.tx_drops` says one did, but the `!connected_` arm and the short-write
+        // arm below bump that same counter, so a bump alone does not even say WHICH drop
+        // this was, let alone which knob was too small. A per-frame ceiling nobody can see
+        // is how a blob-carrying value or a composed reply vanishes with clean logs on both
+        // ends (#959). Logged every time, exactly like the
+        // rx-buffer arm in recv_loop: this firing means the link emits NOTHING at this
+        // frame size, which is a misconfiguration to fix, not a rate to live with. The
+        // empty half needs no log — there is nothing to put on the wire and no knob to
+        // name — but it is the same drop and is counted the same way.
+        if (!frame.empty())
+            ESP_LOGW(kTag, "outbound frame %u B exceeds %u B tx buffer — dropped",
+                     static_cast<unsigned>(frame.size()), static_cast<unsigned>(tx_buf_.size()));
         bump([this] { ++st_.tx_drops; });
         return;
     }

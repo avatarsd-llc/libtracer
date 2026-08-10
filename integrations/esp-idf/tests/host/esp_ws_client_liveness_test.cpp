@@ -144,8 +144,8 @@ fake_ws::frame_t close_frame() {
 
 /** @brief Build a link and wait for its first dial. */
 std::unique_ptr<tr::net::esp_ws_client_link_t> dialed_link() {
-    auto link = std::make_unique<tr::net::esp_ws_client_link_t>("127.0.0.1", 8080, "/ws", kBufBytes,
-                                                                kBufBytes, 0);
+    auto link = std::make_unique<tr::net::esp_ws_client_link_t>(
+        "127.0.0.1", 8080, "/ws", /*handshake_headers=*/std::string{}, kBufBytes, kBufBytes, 0);
     check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "the link dialed");
     return link;
 }
@@ -244,8 +244,8 @@ void test_failed_dials_report_nothing() {
     down_counter_t down;
     {
         fake_ws::fail_connects(true);
-        auto link = std::make_unique<tr::net::esp_ws_client_link_t>("127.0.0.1", 8080, "/ws",
-                                                                    kBufBytes, kBufBytes, 0);
+        auto link = std::make_unique<tr::net::esp_ws_client_link_t>(
+            "127.0.0.1", 8080, "/ws", /*handshake_headers=*/std::string{}, kBufBytes, kBufBytes, 0);
         link->set_down_notifier(&down_counter_t::fire, &down);
         check(wait_until([] { return fake_ws::connect_count() >= 2; }, 6s),
               "the link retried its dial at least twice");
