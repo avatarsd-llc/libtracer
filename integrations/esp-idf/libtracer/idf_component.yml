@@ -5,6 +5,19 @@ repository: "https://github.com/avatarsd-llc/libtracer.git"
 documentation: "https://avatarsd-llc.github.io/libtracer/"
 issues: "https://github.com/avatarsd-llc/libtracer/issues"
 license: "Apache-2.0"
+# The component manager treats a target absent from this list as a HARD INSTALL
+# REJECTION, so the list is a support claim, not a hint. Every entry below is built
+# by the `esp-idf` workflow's `build` and `full-node` matrices — keep the two in sync
+# in both directions, because an unbuilt entry is a promise nothing checks (#1159).
+#
+# Deliberately NOT claimed, and why:
+#   esp32c2, esp32s2 — no TWAI-node peripheral for the `esp_twai` driver, while
+#     CONFIG_LIBTRACER_TRANSPORT_CAN defaults y. Adding them without first making the
+#     CAN TU conditional on target capability would trade this clean rejection for a
+#     compile error inside third-party code, which is strictly worse.
+#   esp32h2, esp32p4, esp32c5 — plausibly fine, but UNVERIFIED: no CI build and no
+#     board. Claiming an untested target is how this list went wrong the first time.
+#     Add the CI matrix entry first, then the claim.
 targets:
   - esp32
   - esp32s3

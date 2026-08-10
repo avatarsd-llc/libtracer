@@ -11,7 +11,18 @@
 # This is a SEPARATE, standalone workflow (mirroring can-vcan-e2e.yml): the
 # required core gates (build-test / sanitizers / format / doxygen) must never
 # depend on the multi-GB ESP-IDF toolchain image. esp32c6 is the required
-# target; esp32c3 is matrixed as a second RISC-V single-core check.
+# target; the rest of the matrix exists so that every target claimed by
+# `integrations/esp-idf/libtracer/idf_component.yml`'s `targets:` list is
+# actually built (#1159). That list is a SUPPORT CLAIM the component manager
+# enforces as a hard install rejection, so an unbuilt entry is a promise nothing
+# checks. esp32c3 is a second RISC-V single-core check; esp32 and esp32s3 are
+# Xtensa, and esp32 is additionally DUAL-core — before #1159 the matrix was
+# RISC-V-only and single-core-only, so two claimed architectures and the whole
+# `CONFIG_FREERTOS_UNICORE=n` configuration were unbuilt.
+#
+# Keep this matrix and that `targets:` list in sync in both directions: adding a
+# target here without adding it there supports nothing, and adding it there
+# without adding it here claims something untested.
 name: esp-idf
 
 on:
@@ -78,7 +89,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [esp32c6, esp32c3]
+        target: [esp32c6, esp32c3, esp32, esp32s3]
     steps:
       - uses: actions/checkout@v4
 
@@ -115,9 +126,9 @@ jobs:
   # Full-node gate (#183): build the full_node example — the FULL component
   # (net plane: fwd_router / transport_vertex / udp / tcp / transport_can + the
   # TWAI can_link_t + the IDF-NATIVE WS links, which since #947 are the chip
-  # WebSocket plane) — for both RISC-V targets. A clean `idf.py build` proves the
+  # WebSocket plane) — for every target `idf_component.yml` claims (#1159). A clean `idf.py build` proves the
   # whole net plane compiles and links against lwIP BSD sockets, esp_http_server
-  # and esp_driver_twai on single-core FreeRTOS; the runtime proof is the linux-
+  # and esp_driver_twai; the runtime proof is the linux-
   # target run below (full-node-host), and bus-/radio-level validation is the
   # on-silicon checklist on #183.
   full-node:
@@ -127,7 +138,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [esp32c6, esp32c3]
+        target: [esp32c6, esp32c3, esp32, esp32s3]
     steps:
       - uses: actions/checkout@v4
 
