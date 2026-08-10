@@ -37,7 +37,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <span>
+#include <string_view>
 #include <vector>
 
 #include "libtracer/op_resolve.hpp"
@@ -78,6 +80,34 @@ inline bytes_t fwd_op_child_empty() {
     tr::wire::emit_tlv(out, tr::wire::type_t::VALUE, tr::wire::opt_t{},
                        std::span<const std::byte>{});
     return out;
+}
+
+/**
+ * @brief A `PATH` TLV over @p segs — the address form the transport tests build (#1115).
+ *
+ * The `b_fwd` family takes already-built `dst`/`src` TLV bytes, which suited the 23 files
+ * #875 migrated because they had `path_t` bytes in hand. The transport and mount tests
+ * instead spell their addresses as segment lists, and each of them re-derived the same two
+ * facts to turn one into the other: a segment is a `NAME`, and the containing `PATH` carries
+ * `opt_t{.pl = true}` because its body is a child list. Those are layout facts, so they
+ * belong here rather than in eight test files.
+ *
+ * An EMPTY @p segs is the reply-route-so-far of an origin hop: a present, zero-length `PATH`
+ * that grows one segment per forwarder. It is emitted, never omitted — a missing `src` child
+ * is a different (malformed) frame.
+ */
+template <class Segs>
+inline bytes_t b_path(const Segs& segs) {
+    bytes_t body;
+    for (std::string_view s : segs) tr::wire::emit_name(body, s);
+    bytes_t out;
+    tr::wire::emit_tlv(out, tr::wire::type_t::PATH, tr::wire::opt_t{.pl = true}, body);
+    return out;
+}
+
+/** @brief @ref b_path over a braced segment list — `b_path({"node", "leaf"})`. */
+inline bytes_t b_path(std::initializer_list<std::string_view> segs) {
+    return b_path<std::initializer_list<std::string_view>>(segs);
 }
 
 namespace detail {

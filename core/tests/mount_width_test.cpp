@@ -55,6 +55,7 @@
 #include <string_view>
 #include <vector>
 
+#include "fwd_frame_builder.hpp"
 #include "libtracer/route_handle.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -83,16 +84,11 @@ void emit_path(std::vector<std::byte>& out, std::span<const std::string> segs) {
 /** @brief A `FWD{WRITE, dst, src, payload}` frame over the given segment lists. */
 std::vector<std::byte> make_fwd(std::span<const std::string> dst,
                                 std::span<const std::string> src) {
-    std::vector<std::byte> body;
-    const std::byte op{static_cast<std::uint8_t>(tr::graph::fwd_op_t::WRITE)};
-    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
-    emit_path(body, dst);
-    emit_path(body, src);
-    const std::byte payload[2] = {std::byte{0x01}, std::byte{0x02}};
-    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(payload, 2));
-    std::vector<std::byte> frame;
-    tr::wire::emit_tlv(frame, type_t::FWD, opt_t{.pl = true}, body);
-    return frame;
+    std::vector<std::byte> payload;
+    const std::byte pv[2] = {std::byte{0x01}, std::byte{0x02}};
+    tr::wire::emit_tlv(payload, type_t::VALUE, opt_t{}, std::span<const std::byte>(pv, 2));
+    return tr::testing::b_fwd(tr::graph::fwd_op_t::WRITE, tr::testing::b_path(dst),
+                              tr::testing::b_path(src), {}, payload);
 }
 
 /** @brief The NAME segments of the PATHs inside a FWD frame — `[dst, src]`. */

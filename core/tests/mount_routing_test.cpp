@@ -34,6 +34,7 @@
 #include <string_view>
 #include <vector>
 
+#include "fwd_frame_builder.hpp"
 #include "libtracer/fwd_frame_view.hpp"
 #include "libtracer/route_handle.hpp"
 #include "libtracer/tlv_emit.hpp"
@@ -103,30 +104,20 @@ void emit_path(std::vector<std::byte>& out, std::initializer_list<std::string_vi
 std::vector<std::byte> make_fwd_op(std::uint8_t op_byte,
                                    std::initializer_list<std::string_view> dst,
                                    std::initializer_list<std::string_view> src) {
-    std::vector<std::byte> body;
-    const std::byte op{op_byte};
-    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
-    emit_path(body, dst);
-    emit_path(body, src);
-    const std::byte payload[2] = {std::byte{0x01}, std::byte{0x02}};
-    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(payload, 2));
-    std::vector<std::byte> frame;
-    tr::wire::emit_tlv(frame, type_t::FWD, opt_t{.pl = true}, body);
-    return frame;
+    std::vector<std::byte> payload;
+    const std::byte pv[2] = {std::byte{0x01}, std::byte{0x02}};
+    tr::wire::emit_tlv(payload, type_t::VALUE, opt_t{}, std::span<const std::byte>(pv, 2));
+    return tr::testing::b_fwd_raw_op(op_byte, tr::testing::b_path(dst), tr::testing::b_path(src),
+                                     {}, payload);
 }
 
 std::vector<std::byte> make_fwd(std::initializer_list<std::string_view> dst,
                                 std::initializer_list<std::string_view> src) {
-    std::vector<std::byte> body;
-    const std::byte op{static_cast<std::uint8_t>(tr::graph::fwd_op_t::WRITE)};
-    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
-    emit_path(body, dst);
-    emit_path(body, src);
-    const std::byte payload[2] = {std::byte{0x01}, std::byte{0x02}};
-    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(payload, 2));
-    std::vector<std::byte> frame;
-    tr::wire::emit_tlv(frame, type_t::FWD, opt_t{.pl = true}, body);
-    return frame;
+    std::vector<std::byte> payload;
+    const std::byte pv[2] = {std::byte{0x01}, std::byte{0x02}};
+    tr::wire::emit_tlv(payload, type_t::VALUE, opt_t{}, std::span<const std::byte>(pv, 2));
+    return tr::testing::b_fwd(tr::graph::fwd_op_t::WRITE, tr::testing::b_path(dst),
+                              tr::testing::b_path(src), {}, payload);
 }
 
 /** @brief The NAME segments of the first PATH inside a rebuilt FWD body (dst), then src. */
@@ -432,19 +423,10 @@ void test_grown_src_round_trips() {
     std::vector<std::byte> reply;
     {
         std::vector<std::byte> body;
-        const std::byte op{static_cast<std::uint8_t>(tr::graph::fwd_op_t::REPLY)};
-        tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
-        std::vector<std::byte> dst;
-        for (std::string_view s : segs) tr::wire::emit_name(dst, s);
-        tr::wire::emit_tlv(body, type_t::PATH, opt_t{.pl = true}, dst);
-        std::vector<std::byte> src;
-        tr::wire::emit_name(src, "net");
-        tr::wire::emit_name(src, "ws-client");
-        tr::wire::emit_name(src, "out");
-        tr::wire::emit_tlv(body, type_t::PATH, opt_t{.pl = true}, src);
-        const std::byte payload[1] = {std::byte{0x07}};
-        tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(payload, 1));
-        tr::wire::emit_tlv(reply, type_t::FWD, opt_t{.pl = true}, body);
+        const std::byte pv[1] = {std::byte{0x07}};
+        tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(pv, 1));
+        reply = tr::testing::b_fwd(tr::graph::fwd_op_t::REPLY, tr::testing::b_path(segs),
+                                   tr::testing::b_path({"net", "ws-client", "out"}), {}, body);
     }
     const std::size_t before = n5.received;
     router.on_frame("net/ws-client/out", reply);
@@ -801,19 +783,12 @@ void test_reject_and_terminus_agree_on_trailered_routes() {
 
     const auto framed = [&](tr::graph::fwd_op_t operation,
                             std::initializer_list<std::string_view> dst) {
-        std::vector<std::byte> body;
-        const std::byte op{static_cast<std::uint8_t>(operation)};
-        tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
-        emit_path(body, dst);
-        body.insert(body.end(), src_wire.begin(), src_wire.end());
+        std::vector<std::byte> payload;
         if (operation == tr::graph::fwd_op_t::WRITE) {
-            const std::byte payload[2] = {std::byte{0x01}, std::byte{0x02}};
-            tr::wire::emit_tlv(body, type_t::VALUE, opt_t{},
-                               std::span<const std::byte>(payload, 2));
+            const std::byte pv[2] = {std::byte{0x01}, std::byte{0x02}};
+            tr::wire::emit_tlv(payload, type_t::VALUE, opt_t{}, std::span<const std::byte>(pv, 2));
         }
-        std::vector<std::byte> frame;
-        tr::wire::emit_tlv(frame, type_t::FWD, opt_t{.pl = true}, body);
-        return frame;
+        return tr::testing::b_fwd(operation, tr::testing::b_path(dst), src_wire, {}, payload);
     };
 
     // Arm 1: the bus-NAME hop the router rejects. Arm 2: a READ of an unknown LOCAL dst, which

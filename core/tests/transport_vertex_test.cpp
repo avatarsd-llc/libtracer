@@ -43,6 +43,7 @@
 #include <thread>
 #include <vector>
 
+#include "fwd_frame_builder.hpp"
 #include "libtracer/backend.hpp"
 #include "libtracer/config_reader.hpp"
 #include "libtracer/error.hpp"
@@ -286,15 +287,10 @@ void test_fwd_still_routes() {
         tr::wire::emit_name(segs, "reply");
         tr::wire::emit_tlv(src, type_t::PATH, opt_t{.pl = true}, segs);
     }
-    std::vector<std::byte> body;
-    const std::byte op{static_cast<std::uint8_t>(tr::graph::fwd_op_t::WRITE)};
-    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
-    body.insert(body.end(), dst.begin(), dst.end());
-    body.insert(body.end(), src.begin(), src.end());
+    std::vector<std::byte> payload;
     const std::byte pv{0x2A};
-    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&pv, 1));
-    std::vector<std::byte> frame;
-    tr::wire::emit_tlv(frame, type_t::FWD, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(payload, type_t::VALUE, opt_t{}, std::span<const std::byte>(&pv, 1));
+    const auto frame = tr::testing::b_fwd(tr::graph::fwd_op_t::WRITE, dst, src, {}, payload);
 
     router_a.on_frame("self", frame);  // "self" names no child => forward via the mount
     check(fut.wait_for(2s) == std::future_status::ready,
@@ -326,18 +322,8 @@ void test_local_path_untouched() {
 /** @brief FWD{ op, dst=<segs...>, src=<segs...> } with no payload — a remote READ request. */
 std::vector<std::byte> fwd_read(std::initializer_list<std::string_view> dst,
                                 std::initializer_list<std::string_view> src) {
-    std::vector<std::byte> body;
-    const std::byte op{static_cast<std::uint8_t>(tr::graph::fwd_op_t::READ)};
-    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
-    std::vector<std::byte> segs;
-    for (std::string_view s : dst) tr::wire::emit_name(segs, s);
-    tr::wire::emit_tlv(body, type_t::PATH, opt_t{.pl = true}, segs);
-    segs.clear();
-    for (std::string_view s : src) tr::wire::emit_name(segs, s);
-    tr::wire::emit_tlv(body, type_t::PATH, opt_t{.pl = true}, segs);
-    std::vector<std::byte> frame;
-    tr::wire::emit_tlv(frame, type_t::FWD, opt_t{.pl = true}, body);
-    return frame;
+    return tr::testing::b_fwd(tr::graph::fwd_op_t::READ, tr::testing::b_path(dst),
+                              tr::testing::b_path(src));
 }
 
 void test_config_constructed_udp() {
@@ -682,19 +668,10 @@ void append_server_frame(std::vector<std::byte>& out, ws::opcode_t op,
 
 /** @brief FWD{ op=WRITE, dst=<segs...>, src=/reply-ep, VALUE @p value } — a terminus write. */
 std::vector<std::byte> fwd_write(std::initializer_list<std::string_view> dst, std::byte value) {
-    std::vector<std::byte> body;
-    const std::byte op{static_cast<std::uint8_t>(tr::graph::fwd_op_t::WRITE)};
-    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
-    std::vector<std::byte> segs;
-    for (std::string_view s : dst) tr::wire::emit_name(segs, s);
-    tr::wire::emit_tlv(body, type_t::PATH, opt_t{.pl = true}, segs);
-    segs.clear();
-    tr::wire::emit_name(segs, "reply-ep");
-    tr::wire::emit_tlv(body, type_t::PATH, opt_t{.pl = true}, segs);
-    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&value, 1));
-    std::vector<std::byte> frame;
-    tr::wire::emit_tlv(frame, type_t::FWD, opt_t{.pl = true}, body);
-    return frame;
+    std::vector<std::byte> payload;
+    tr::wire::emit_tlv(payload, type_t::VALUE, opt_t{}, std::span<const std::byte>(&value, 1));
+    return tr::testing::b_fwd(tr::graph::fwd_op_t::WRITE, tr::testing::b_path(dst),
+                              tr::testing::b_path({"reply-ep"}), {}, payload);
 }
 
 /**
