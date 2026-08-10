@@ -128,6 +128,56 @@ jobs:
         run: python3 bench/symbol_ratchet.py --build bench/build --pins bench/symbol_ratchet.json --emit
       - name: Symbol-size ratchet
         run: python3 bench/symbol_ratchet.py --build bench/build --pins bench/symbol_ratchet.json
+  # --- the composition harness, EXECUTED (audit pass only) -----------------------
+  # bench/run_compose.sh is the two-process, delivery-counted composition harness (#568).
+  # Until #1151 nothing ran it: `grep -rn run_compose .github/` matched one COMMENT. Its two
+  # unit tests above (test_compose_guard.py, test_compose_record) check parsers — neither
+  # starts a process, opens a socket, or counts a delivery, so a refactor could break any of
+  # the harness's three load-bearing properties with every check still green.
+  #
+  # This leg runs the harness's AUDIT pass and nothing else. No rate is taken and none is
+  # published: shared runners vary ~2x in absolute speed, and the audit pass runs the
+  # publisher under strace, where a timing would mean nothing anyway. What it asserts is
+  # deterministic — the publisher reached the wire, the values arrived intact, and
+  # values/message == K, which is the composite send itself.
+  #
+  # The Zenoh arm is optional (bench/fetch_zenoh.sh vendors it) and is not fetched here,
+  # matching how the ratchet job treats the Zenoh control series: absent is not a failure.
+  compose-audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # strace is the instrument. Without it syscall_guard.py reports verdict=UNAVAILABLE,
+      # and check_compose_audit.py treats that as a FAILURE rather than a pass — a guard that
+      # silently downgrades to measuring nothing is the shape this leg exists to remove.
+      - name: Install strace (the wire-use instrument)
+        run: sudo apt-get update && sudo apt-get install -y strace
+      - name: Build the composition arm
+        run: |
+          cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build bench/build --target bench_compose_net -j
+      # The missing-arm contract, asserted rather than assumed: pointed at a build directory
+      # it cannot build into, the harness must exit non-zero instead of reporting on an arm
+      # that is not there. This is a live negative control on every run, not a one-off demo.
+      - name: The harness must fail when the libtracer arm is missing
+        run: |
+          mkdir -p /tmp/no-arm && chmod 555 /tmp/no-arm
+          if COMPOSE_AUDIT_ONLY=1 COMPOSE_WIDTHS="1" ./bench/run_compose.sh /tmp/no-arm; then
+            echo "::error::run_compose.sh exited 0 with no libtracer arm — the guard is vacuous"
+            exit 1
+          fi
+          echo "missing-arm contract holds (non-zero exit)"
+      - name: Composition harness — audit pass (deliveries and wire use, no rate)
+        env:
+          COMPOSE_AUDIT_ONLY: "1"
+          COMPOSE_WIDTHS: "1 4"
+          COMPOSE_AUDIT_GROUPS: "200"
+          COMPOSE_AUDIT_WINDOW_MS: "60000"
+        run: |
+          set -o pipefail
+          ./bench/run_compose.sh ./bench/build 2>&1 | tee compose-audit.log
+      - name: Assert the audit (SYSCALL_AUDIT PASS, bad=0, values/message == K)
+        run: python3 bench/check_compose_audit.py --widths 1 4 --log compose-audit.log
 
   # --- main push: REDUNDANT no-pullback ratchet (3 runners, HEAD vs parent) -------
   # Each replica is a complete same-runner experiment on independently-drawn hardware:
