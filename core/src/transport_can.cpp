@@ -349,7 +349,7 @@ void transport_can::send_impl(std::span<const std::byte> frame, std::uint16_t ta
 
     const bool fd = cfg_.mode == tr::view::can_frame_mode_t::FD;
     for (std::size_t i = 0; i < count; ++i) {
-        const tr::view::view_t& window = frames.frames()[i];
+        const tr::view::view_t window = frames.frame(i);
         const std::span<const std::byte> wb = window.bytes();
         const auto slice_id = can::slice_can_id(base_fields, i);
         if (!slice_id) {

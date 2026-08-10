@@ -14,9 +14,9 @@
  */
 #pragma once
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
-#include <vector>
 
 #include "libtracer/rope.hpp"
 #include "libtracer/view.hpp"
@@ -77,6 +77,22 @@ inline constexpr std::size_t kCanFdMaxData = 64;
  * the reassembled payload. A single-frame payload (≤ the mode limit) yields one
  * window; a larger one yields a frame sequence whose tail window holds the
  * remainder.
+ *
+ * @par The windows are DERIVED, never stored (#1110)
+ * Every window sits at `i * step` and runs to `min(step, total - i * step)`, so the
+ * whole table is a pure function of the payload length and the mode. This class
+ * therefore keeps the payload window, the mode and the count — three words — and
+ * computes each frame in @ref frame on demand.
+ *
+ * It used to accumulate the windows in a `std::vector<view_t>` with a THROWING
+ * `push_back`, on a count that scales with a payload size the *sending peer* chooses;
+ * under `-fno-exceptions` that is `abort()`, not a dropped frame. Bounding that growth
+ * from an injected @ref tr::mem::block_source_t — the answer `tr::net::iov_table_t`
+ * uses for the socket gather tables — is not available here: `block_array_t` requires a
+ * trivially copyable, trivially destructible element and @ref view_t carries an
+ * intrusive refcount. Storing a derivable table was the wrong half of the problem
+ * anyway: with nothing stored there is no allocation to bound, no exhaustion path to
+ * signal, and @ref split cannot fail.
  */
 class view_can_frames_t {
    public:
@@ -85,30 +101,41 @@ class view_can_frames_t {
     /**
      * @brief Split @p payload into CAN data-field windows for @p mode (zero-copy).
      *
+     * O(1) and allocation-free: it records the payload and derives the count.
+     *
      * @param payload The contiguous source window to frame.
      * @param mode    Classic (≤8) or CAN-FD (≤64) framing.
-     * @return The ordered frame windows. An empty @p payload yields zero frames.
+     * @return The frame sequence. An empty @p payload yields zero frames.
      */
-    [[nodiscard]] static view_can_frames_t split(const view_t& payload, can_frame_mode_t mode) {
+    [[nodiscard]] static view_can_frames_t split(const view_t& payload,
+                                                 can_frame_mode_t mode) noexcept {
         view_can_frames_t out;
+        out.payload_ = payload;
         out.mode_ = mode;
         const std::size_t step = can_max_data(mode);
-        std::size_t off = 0;
-        const std::size_t total = payload.length;
-        while (off < total) {
-            const std::size_t n = (total - off < step) ? (total - off) : step;
-            out.frames_.push_back(payload.subview(off, n));
-            off += n;
-        }
+        out.count_ = (payload.length + step - 1) / step;
         return out;
     }
 
     /** @brief The framing mode these windows were split for. */
     [[nodiscard]] can_frame_mode_t mode() const noexcept { return mode_; }
-    /** @brief The ordered CAN data-field windows. */
-    [[nodiscard]] const std::vector<view_t>& frames() const noexcept { return frames_; }
     /** @brief Number of CAN frames the payload occupies. */
-    [[nodiscard]] std::size_t frame_count() const noexcept { return frames_.size(); }
+    [[nodiscard]] std::size_t frame_count() const noexcept { return count_; }
+
+    /**
+     * @brief The @p i-th CAN data-field window, computed on demand (zero-copy).
+     *
+     * @param i Frame index, `0 .. frame_count() - 1`.
+     * @return A subview of the payload; the tail window holds the remainder.
+     */
+    [[nodiscard]] view_t frame(std::size_t i) const {
+        // Precondition, enforced in debug builds exactly as view_t::subview does.
+        assert(i < count_);
+        const std::size_t step = can_max_data(mode_);
+        const std::size_t off = i * step;
+        const std::size_t rest = payload_.length - off;
+        return payload_.subview(off, rest < step ? rest : step);
+    }
 
     /**
      * @brief Chain the frame windows back into one logical @ref rope_t (zero-copy).
@@ -116,13 +143,14 @@ class view_can_frames_t {
      */
     [[nodiscard]] rope_t to_rope() const {
         rope_t r;
-        for (const auto& f : frames_) r.append(f);
+        for (std::size_t i = 0; i < count_; ++i) r.append(frame(i));
         return r;
     }
 
    private:
-    std::vector<view_t> frames_;
-    can_frame_mode_t mode_ = can_frame_mode_t::CLASSIC;
+    view_t payload_{};      /**< @brief The source window every frame is a subview of. */
+    std::size_t count_ = 0; /**< @brief Frames the payload occupies, derived in `split`. */
+    can_frame_mode_t mode_ = can_frame_mode_t::CLASSIC; /**< @brief Data-field limit. */
 };
 
 }  // namespace tr::view

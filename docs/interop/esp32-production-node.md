@@ -191,11 +191,11 @@ Rules that follow:
 - **Allocation failure must not abort.** ESP-IDF's default C++ `new` throws; under
   `-fno-exceptions` that lowers to `abort()`. The seams above are the mechanism for
   alloc-or-backpressure — drop the sample, count it, publish the counter (§6) — but the
-  rule is **not yet met everywhere**: as of v0.7.1 the CAN egress window table
-  (`core/include/libtracer/view_can.hpp:100`, one throwing `push_back` per frame on every
-  CAN send), the peer-driven label-table binds of #603 (`core/src/route_handle.cpp:82`)
-  and `try_reserve`'s throwing second step under concurrency (#850) still abort on
-  exhaustion. Price those three before shipping a `-fno-exceptions` image, and audit any
+  rule is **not yet met everywhere**: the peer-driven label-table binds of #603
+  (`core/src/route_handle.cpp:82`) and `try_reserve`'s throwing second step under
+  concurrency (#850) still abort on exhaustion. (The CAN egress window table was the third
+  until #1110 deleted it — `view_can_frames_t::split` now derives its windows and allocates
+  nothing.) Price those two before shipping a `-fno-exceptions` image, and audit any
   path that calls throwing `new`; the full accounting is in
   [failable allocation and backpressure](../design/allocation-and-backpressure.md).
 - **Size the pool from the transport, not from hope.** `udp_transport_t` sizes RX

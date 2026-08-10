@@ -47,6 +47,49 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **`view::view_can_frames_t` no longer stores its window table — `frames()` is replaced by
+  `frame(i)` (#1110).** BREAKING for any caller of `frames()`: the accessor returned
+  `const std::vector<view_t>&` and there is no longer a vector to return. `frame_count()`,
+  `mode()`, `to_rope()` and `split()` are unchanged in name and meaning; `split()` is now
+  `noexcept`.
+
+  The window table was **derivable all along**: window `i` sits at `i * step` and runs to
+  `min(step, total - i * step)`, so it is a pure function of the payload length and the mode.
+  Storing it bought nothing and cost a `std::vector<view_t>` grown with a **THROWING**
+  `push_back`, on a frame count that scales with a payload size the *sending peer* chooses —
+  which on the `-fno-exceptions` MCU profile is `abort()`, not a dropped frame.
+
+  **Why not the bounded-growth fix the issue asked for.** The established answer for exactly
+  this shape is `net::iov_table_t`: an inline array overflowing into a `mem::block_source_t`
+  whose exhaustion returns `nullptr` so the caller drops the frame. It cannot be used here —
+  `mem::block_array_t` static-asserts a trivially copyable, trivially destructible element and
+  `view_t` carries an intrusive refcounted `segment_ptr_t`. That dead end is the useful signal:
+  machinery to make the residual affordable was the wrong half of the problem. With nothing
+  stored there is no allocation to bound, no exhaustion path to signal, and `split` cannot fail.
+
+  **Measured** (AMD EPYC 9115, fixed 2.6 GHz, pinned, 30 samples/arm trimmed, 3 rotations;
+  A/A null +0.02% / +0.08% / +0.09%, so every figure below clears its null by two orders of
+  magnitude):
+
+  | payload | frames | allocations (was -> now) | split + full iteration |
+  | ---: | ---: | ---: | ---: |
+  | 24 B | 3 | 3 -> **0** | 50.97 -> 39.32 ns (**-22.9%**) |
+  | 512 B | 64 | 7 -> **0** | 749.0 -> 638.6 ns (**-14.7%**) |
+  | 4096 B | 512 | 10 -> **0** | 5795.2 -> 5044.4 ns (**-13.0%**) |
+
+  The allocation count was `ceil(log2(frames)) + 1` — unbounded in the payload. The saving
+  prices out: at 64 frames, 110.4 ns is ~287 cycles for 7 eliminated malloc/free pairs (~41
+  cycles each); at 512 frames the remainder is the 511 element moves the reallocations did.
+
+  **Footprint is neutral**: `transport_can.cpp.o` `.text` 26,695 -> 26,693 B at `-Os`.
+  `send_impl` grows +60 B (the index arithmetic inlines into the emit loop) and the dropped
+  `std::vector<view_t>` destructor instantiation (-132 B) more than pays for it.
+
+  This closes ONE of the two allocating steps a CAN send owns; `view::over_bytes` still takes
+  the owning payload block and still soft-fails to a drop. The end-to-end `send` gain is
+  therefore smaller than the table above, and was not separately measured.
+
+
 - **`config_t::kMaxVertexBytes64` 120 -> 96 and `kMaxVertexBytes32` 80 -> 72 — the RAM-diet
   bounds become RATCHETS pinned to the measured size (#361 §8).** Public constants, so the
   values are part of the API surface; nothing else moves and no runtime behaviour changes.
@@ -1630,7 +1673,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   **Scope:** this removes the advertise's allocations only. A CAN `send` still allocates for
   the owning payload block (`view::over_bytes`, which soft-fails and DROPS) and for
   `view_can_frames_t::split`'s window vector (still a THROWING `push_back` — the remaining
-  `-fno-exceptions` abort risk on this path, not addressed here).
+  `-fno-exceptions` abort risk on this path, not addressed here) *(That residual was filed as
+  #1110 and closed by deleting the window vector outright — see the Unreleased entry.)*
 
 - **`ws::try_encode_client_frame(mem::block_array_t<std::byte>&, …)`.** The nothrow twin of
   `encode_client_frame` — a client frame MUST be masked (§5.1), so its wire bytes are not the

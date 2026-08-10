@@ -66,9 +66,11 @@ inline constexpr std::size_t kMaxInlineIov = 16;
  * This closes the gather tables of the three socket transports named above. It is not the
  * whole forward path: `transport_can` overrides only `send(span)`, so a forward reaching it
  * lands on the base `transport_t::send(iov)` gather and then on
- * `tr::view::view_can_frames_t::split`, whose window `std::vector<view_t>` still grows with
- * a THROWING `push_back` (`%view_can.hpp`). That residual is named in the `#848` scope note
- * in `core/CHANGELOG.md` and is not addressed here.
+ * `tr::view::view_can_frames_t::split` (`%view_can.hpp`). That window table used to grow with
+ * a THROWING `push_back`; #1110 closed it by DELETING the table — the windows are derivable
+ * from the payload length and the mode, so `split` now allocates nothing and cannot fail.
+ * It could not have been closed with this class: `mem::block_array_t` requires a trivially
+ * copyable, trivially destructible element and `view_t` carries an intrusive refcount.
  *
  * The table owns its overflow block for its own (local, per-send) lifetime; the returned
  * pointer aliases either the caller's stack array or that block, so the table must outlive
