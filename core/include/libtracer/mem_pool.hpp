@@ -19,8 +19,10 @@
 #include <concepts>
 #include <cstddef>
 #include <span>
+#include <type_traits>
 
 #include "libtracer/backend.hpp"
+#include "libtracer/config.hpp"
 #include "libtracer/segment.hpp"
 
 /**
@@ -168,6 +170,18 @@ struct spin_sync_t {
  */
 template <pool_sync_policy Sync>
 class synchronized_pool_t final : public mem_backend_t {
+    // The one policy this library ships that spin-waits. On a target that says spin-waiting is
+    // unsafe (`kSpinWaitSafe`), binding it here is not "slower" — it is a hang, and only the
+    // build knows which target this is. Checked on INSTANTIATION, so the `sync_pool_t` alias
+    // below still names the type freely; declaring or constructing one is what trips the guard.
+    static_assert(kSpinWaitSafe || !std::is_same_v<Sync, spin_sync_t>,
+                  "synchronized_pool_t<spin_sync_t> (a.k.a. tr::mem::sync_pool_t) spin-waits, "
+                  "and this build set tr::mem::kSpinWaitSafe = false: a spinner that outranks "
+                  "the lock holder never yields the CPU the holder needs, so the wait is "
+                  "unbounded and the target hangs. Bind the target's interrupt-disable policy "
+                  "instead -- on ESP-IDF that is tr::esp::critical_pool_t "
+                  "(libtracer_esp/critical_pool.hpp).");
+
    public:
     /** @brief Carve @p slab into @p slot_payload-byte slots (see @ref pool_t), thread-safe. */
     synchronized_pool_t(std::span<std::byte> slab, std::size_t slot_payload,
@@ -218,7 +232,9 @@ class synchronized_pool_t final : public mem_backend_t {
  * @brief The multi-core-host spelling of `synchronized_pool_t` — a spinlock-guarded pool.
  *
  * The name predates the policy seam and is kept as the host default (ADR-0060 §2's
- * spinlock variant); a single-core MCU wants the critical-section policy instead.
+ * spinlock variant); a single-core MCU wants the critical-section policy instead — and
+ * because the short name is the discoverable one, a build that sets `kSpinWaitSafe` to
+ * false rejects this instantiation outright rather than shipping a hang.
  */
 using sync_pool_t = synchronized_pool_t<spin_sync_t>;
 

@@ -234,6 +234,15 @@ set(LIBTRACER_HAZARD_READER_SLOTS 64 CACHE STRING
 # bytes of .bss. Undersizing costs throughput on the overflow threads, never correctness.
 set(LIBTRACER_EDGE_PIN_SLOTS 32 CACHE STRING
     "Edge-pin domain size (threads that may publish to one graph concurrently)")
+# May a task spin-wait for a lock another task holds (#1158)? A TARGET fact, not a preference:
+# true on a multi-core host, false on any priority-preemptive scheduler, where a spinner that
+# outranks the holder converts an O(1) section into a watchdog reset. The value is the C++
+# token, as with LIBTRACER_LKV_SLOT — an RTOS-hosted core build passes `false` and the guard in
+# mem_pool.hpp then rejects synchronized_pool_t<spin_sync_t> at compile time. The ESP-IDF
+# component derives it from IDF_TARGET and does not ask (integrations/esp-idf/libtracer/
+# CMakeLists.txt); a bare host build has no scheduler to invert against, hence true by default.
+set(LIBTRACER_SPIN_WAIT_SAFE true CACHE STRING
+    "May a task spin-wait for a lock another task holds? (`true`/`false`; false on an RTOS)")
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/include/libtracer/config.hpp.in
     ${CMAKE_CURRENT_BINARY_DIR}/generated/include/libtracer/config.hpp
@@ -250,12 +259,14 @@ set(_lt_saved_slot "${LIBTRACER_LKV_SLOT}")
 set(_lt_saved_hp "${LIBTRACER_HAZARD_READER_SLOTS}")
 set(_lt_saved_ep "${LIBTRACER_EDGE_PIN_SLOTS}")
 set(_lt_saved_line "${LIBTRACER_CACHE_LINE_BYTES}")
+set(_lt_saved_spin "${LIBTRACER_SPIN_WAIT_SAFE}")
 set(LIBTRACER_VERTEX_LOCK_STRIPES 16)
 set(LIBTRACER_ACL_POLICY allow_only_policy_t)
 set(LIBTRACER_LKV_SLOT sp_atomic_slot_t)
 set(LIBTRACER_HAZARD_READER_SLOTS 64)
 set(LIBTRACER_EDGE_PIN_SLOTS 32)
 set(LIBTRACER_CACHE_LINE_BYTES 64)
+set(LIBTRACER_SPIN_WAIT_SAFE true)
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/include/libtracer/config.hpp.in
     ${CMAKE_CURRENT_BINARY_DIR}/generated/drift-check/config.hpp
@@ -266,6 +277,7 @@ set(LIBTRACER_LKV_SLOT "${_lt_saved_slot}")
 set(LIBTRACER_HAZARD_READER_SLOTS "${_lt_saved_hp}")
 set(LIBTRACER_EDGE_PIN_SLOTS "${_lt_saved_ep}")
 set(LIBTRACER_CACHE_LINE_BYTES "${_lt_saved_line}")
+set(LIBTRACER_SPIN_WAIT_SAFE "${_lt_saved_spin}")
 file(READ ${CMAKE_CURRENT_SOURCE_DIR}/include/libtracer/config.hpp _lt_cfg_default)
 file(READ ${CMAKE_CURRENT_BINARY_DIR}/generated/drift-check/config.hpp _lt_cfg_rendered)
 if(NOT _lt_cfg_default STREQUAL _lt_cfg_rendered)

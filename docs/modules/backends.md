@@ -31,12 +31,12 @@ because many substrates — MMIO, hardware FIFOs — cannot allocate at all.
 | `mem_pool` | a caller slab | returns the slot to a free list | bounded / MCU / deterministic |
 
 A fourth, `mem_cuda`, is compiled only when `LIBTRACER_WITH_CUDA` is set
-(`core/CMakeLists.txt:277-282`); it needs the CUDA toolkit and is not built in CI.
+(`core/CMakeLists.txt:289-294`); it needs the CUDA toolkit and is not built in CI.
 
 `mem_pool` is the bounded "custom allocator": it carves a **caller-owned** slab
 into fixed slots with the free list threaded *through the slab* (no auxiliary
 heap), and returns `nullptr` when full — the BACKPRESSURE signal. `pool_t` is not
-synchronized; `synchronized_pool_t<Sync>` (`core/include/libtracer/mem_pool.hpp:170`)
+synchronized; `synchronized_pool_t<Sync>` (`core/include/libtracer/mem_pool.hpp:172`)
 composes over it and guards the free list with a **compile-time synchronisation policy**,
 which is what any shared seam needs — a segment self-routes its reclaim on whatever thread
 drops the last reference, concurrent with a writer's `alloc`. Two policies ship: the

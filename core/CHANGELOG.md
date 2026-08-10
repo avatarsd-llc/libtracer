@@ -14,6 +14,37 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Added
+
+- **`mem::kSpinWaitSafe` — a build-configuration constant that makes the wrong pool a compile
+  error instead of a hang (#1158, #963.3).** New `inline constexpr bool` in
+  `libtracer/config.hpp` (namespace `tr::mem`, so an L0 header can read it without naming an
+  L4 type), defaulting to **`true`** — every existing build is unchanged and
+  `mem::sync_pool_t` stays exactly as usable as before. CMake: `-DLIBTRACER_SPIN_WAIT_SAFE`,
+  whose value is the C++ token, as with `LIBTRACER_LKV_SLOT`.
+
+  `synchronized_pool_t` now carries a `static_assert` that rejects `Sync = spin_sync_t` when
+  the constant is false, naming `tr::esp::critical_pool_t` as the answer. It fires on
+  **instantiation**, not on the alias declaration, so `using sync_pool_t =
+  synchronized_pool_t<spin_sync_t>;` still compiles everywhere and only declaring or
+  constructing one trips it.
+
+  Why a build knob and not a policy trait: only the BUILD knows the target's concurrency
+  model, and `spin_sync_t::lock()` is a bare `test_and_set` loop with no yield. On a
+  priority-preemptive scheduler a spinner that outranks the lock holder never yields the CPU
+  the holder needs to release it, so the O(1) section becomes unbounded priority inversion and
+  the target hangs in its watchdog rather than merely running slowly — the failure compiles
+  cleanly, survives a smoke test, and only appears under load with a specific priority
+  ordering. The ESP-IDF component derives the value from `IDF_TARGET` (false on every chip,
+  true on `linux`) and does not ask the integrator, the same reasoning that derives
+  `kCacheLineBytes` from `CONFIG_FREERTOS_UNICORE`.
+
+  **Zero cost**: `libtracer.a` is byte-identical before and after at `MinSizeRel` — a
+  `static_assert` and an `inline constexpr bool` emit no code, so there is no footprint,
+  latency, or throughput change to trade against. Covered by the `spin_pool_guard` CTest,
+  which compiles one probe TU against both renderings of the config header and asserts both
+  arms: the allowed one compiles, the forbidden one fails *and* names `critical_pool_t`.
+
 ### Changed
 
 - **`view::view_can_frames_t` no longer stores its window table — `frames()` is replaced by
