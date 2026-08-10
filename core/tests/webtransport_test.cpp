@@ -23,6 +23,7 @@
 
 #include <msquic.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -1034,6 +1035,19 @@ struct raw_wt_client_t {
         return true;
     }
 
+    /**
+     * @brief Abort and close ONE of our streams, so the SERVER sees it finish (#1163).
+     *
+     * The abort is what makes this a stream event rather than a connection one: the vector
+     * needs the server to reach `QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE` for this stream while
+     * the session stays up, which is exactly the state nothing used to reclaim.
+     */
+    void close_stream(wt_stream_t* s) {
+        if (s == nullptr || s->h == nullptr) return;
+        api->StreamShutdown(s->h, QUIC_STREAM_SHUTDOWN_FLAG_ABORT, 0);
+        api->StreamClose(std::exchange(s->h, nullptr));
+    }
+
     /** @brief Block until the server tore the whole CONNECTION down. */
     [[nodiscard]] bool wait_shutdown(std::chrono::milliseconds budget) const {
         const auto deadline = std::chrono::steady_clock::now() + budget;
@@ -1247,6 +1261,67 @@ void test_unknown_h3_frames_skipped() {
     }
 }
 
+/**
+ * @brief #1163 — a peer that opens and closes streams must not grow the endpoint forever.
+ *
+ * The leak: `impl_t::ctxs` gained one entry per peer stream and had no `erase` anywhere in the
+ * TU. The only frees were two WHOLESALE harvests — peer replacement and endpoint teardown — so
+ * every finished stream kept its `stream_ctx_t`, its `acc` buffer and its unreleased msquic
+ * handle for the life of the SESSION, and the peer chooses how many that is.
+ *
+ * Why the msquic caps do not already bound it: `PeerUnidiStreamCount = 8` limits how many
+ * streams may be open AT ONCE, not how many may be opened over a session's life. The vector
+ * below therefore CYCLES — open, close, repeat — because a test that opens N streams once
+ * proves nothing: a single generation stays under the concurrency cap and leaks invisibly.
+ *
+ * Non-vacuity, and why it is not the usual "assert it grew" shape: with the reclamation
+ * reverted, a closed stream's handle is never released, so its flow-control credit is never
+ * returned either. After the 8th cycle the client cannot start another stream, `live_streams()`
+ * stays pinned at its post-handshake baseline + 8, and the settle loop below times out. The
+ * assertion reds rather than hanging because it never waits on the CLIENT to make progress —
+ * only on the server's count to come back down.
+ */
+void test_peer_stream_cycling_is_bounded() {
+    std::printf("WebTransport — cycling peer streams does not grow the endpoint (#1163):\n");
+    webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key);
+    raw_wt_client_t cli(listener.local_port());
+
+    // Establish the session first, so the baseline includes the H3 face and the CONNECT
+    // stream and the cycled streams are the only thing that can move the count.
+    auto* connect = cli.open_bidi();
+    cli.write(connect, connect_frame("127.0.0.1:0"));
+    check(wait_session(listener, 3000ms), "session established (baseline is now stable)");
+
+    const std::size_t base = listener.live_streams();
+    check(base > 0, "the live session holds its own streams (a zero baseline would be vacuous)");
+
+    // 40 cycles is 5x the concurrency cap: enough that a leak cannot hide inside the credit
+    // window, and enough that the pre-fix build is starved long before the last round.
+    constexpr int kCycles = 40;
+    std::size_t peak = base;
+    for (int i = 0; i < kCycles; ++i) {
+        raw_wt_client_t::wt_stream_t* const s = cli.open_stream(true);
+        // One byte of an unknown unidirectional stream type: enough to make the server
+        // classify and hold a ctx, without pretending to be a stream it would adopt.
+        const std::uint8_t kGreaseType = 0x21;
+        cli.write(s, std::span<const std::uint8_t>(&kGreaseType, 1));
+        std::this_thread::sleep_for(10ms);
+        peak = std::max(peak, listener.live_streams());
+        cli.close_stream(s);
+    }
+
+    // Reclamation is a callback on an msquic worker, so settle rather than sample once.
+    const auto deadline = std::chrono::steady_clock::now() + 5000ms;
+    while (listener.live_streams() > base && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(10ms);
+
+    const std::size_t after = listener.live_streams();
+    std::printf("  baseline=%zu peak=%zu after=%zu over %d cycles\n", base, peak, after, kCycles);
+    check(after <= base, "every cycled stream was reclaimed — the count returned to baseline");
+    check(peak < base + kCycles, "the count never accumulated one entry per stream ever opened");
+    check(listener.session_up(), "and the session survived the cycling (stream-scoped, not fatal)");
+}
+
 }  // namespace
 
 int main() {
@@ -1287,5 +1362,6 @@ int main() {
     test_spec_dial_connect_path();
     test_frame_stream_adoption_gate();
     test_unknown_h3_frames_skipped();
+    test_peer_stream_cycling_is_bounded();
     return tr::testing::summary("webtransport");
 }

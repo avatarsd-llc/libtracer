@@ -45,6 +45,32 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   which compiles one probe TU against both renderings of the config header and asserts both
   arms: the allowed one compiles, the forbidden one fails *and* names `critical_pool_t`.
 
+### Fixed
+
+- **WebTransport: a peer-opened stream is reclaimed when it finishes (#1163).** `impl_t::ctxs`
+  had **no `erase` anywhere** in the TU: the only frees were two wholesale harvests (peer
+  replacement, endpoint teardown), so every stream a peer opened and closed leaked its
+  `stream_ctx_t`, its accumulator buffer and its unreleased msquic handle for the life of the
+  *session* — and the peer chooses how many that is. `PeerBidiStreamCount`/`PeerUnidiStreamCount`
+  do not bound it: they cap how many streams may be open **at once**, not how many may be opened
+  over a session's life, so open/close cycling grows the list as fast as RTT allows. The refuse
+  path made it worse, not better — the cheapest thing a peer could do was also a leak.
+
+  `stream_cb` now handles `QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE`, the one point at which msquic
+  guarantees no further callback for the stream. Exactly one side frees: whichever of the
+  shutdown and a harvest reaches `conn_m` first takes the ctx, and the loser sees that decision
+  through the existing `harvested` flag. Because a harvest releases `conn_m` before calling
+  `StreamClose` — which blocks until in-flight callbacks return — there is no deadlock.
+
+  **New public accessor:** `webtransport_transport_t::live_streams()`, the count of stream
+  contexts the live session holds. A count that only ever rises is the signature of this bug
+  class and a deployment could not see it otherwise, the same reason `dropped_rx()` and
+  `malformed_rx()` are public. It is a gauge, not a monotonic counter.
+
+  Measured: 40 open/close cycles hold the count at its baseline of 7 (peak 8). With the
+  reclamation ablated the same vector reads **peak 47, after 47** — exactly baseline + one
+  entry per stream ever opened. Clean under TSan and ASan/UBSan.
+
 ### Changed
 
 - **An undefined FWD opcode now answers an addressed `ERROR` instead of being dropped (#904).**

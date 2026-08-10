@@ -194,6 +194,21 @@ class webtransport_transport_t : public transport_t {
      *         Each one shuts the connection down (framing sync is lost). */
     [[nodiscard]] std::uint64_t malformed_rx() const noexcept;
 
+    /**
+     * @brief Stream contexts the live session currently holds — the leak observable (#1163).
+     *
+     * A peer opens streams and this endpoint keeps one context per stream until the stream
+     * finishes. The count is therefore bounded by what the peer has open *at once*
+     * (`PeerBidiStreamCount` + `PeerUnidiStreamCount` + this endpoint's own H3 streams), and
+     * NOT by how many the peer has ever opened. Before #1163 the second bound was the real
+     * one: nothing reclaimed a finished stream, so open/close cycling grew this without limit.
+     *
+     * Exposed because a count that only ever rises is the signature of that class of bug and a
+     * deployment cannot see it otherwise — the same reason @ref dropped_rx and @ref
+     * malformed_rx are public. It is a live gauge, not a monotonic counter: it falls.
+     */
+    [[nodiscard]] std::size_t live_streams() const noexcept;
+
    private:
     struct impl_t;  // all msquic + H3 state lives in the .cpp
     std::unique_ptr<impl_t> impl_;
