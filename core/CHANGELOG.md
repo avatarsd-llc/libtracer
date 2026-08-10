@@ -14,6 +14,26 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Added
+
+- **`graph::target_binding_t` and `graph_t::target_canonical_resolves()` — local target edges
+  carry a minted vertex binding instead of re-walking the address every delivery (#830).**
+  `dispatch_edge_target` resolved its `target_key` from the root on *every* delivery, and
+  `find_ptr` is linear in the target's address depth: the full `on_frame(FWD{WRITE})` terminus
+  leg was measured at **+21.3 ns/segment** (a deep dst scales the arena decode, the mount peek
+  and the descent), against a flat **~11 ns** slot deref, with the crossover at **D=2**. A
+  subscription edge now carries the RFC-0024 slot pair minted once in `admit_subscriber` —
+  after every door has settled what the target is, so `subscribe_wire`'s deliberate
+  `target_key` clear is honoured — and delivery derefs it. Nothing about routing changes:
+  `deref_vertex_slot` refuses a stale or saturated generation, an out-of-range index and an
+  unregistered placeholder, and every refusal falls back to the canonical `find_ptr` walk
+  rather than dropping, so drop-never-misroute holds and no delivery is lost. **ACL is still
+  evaluated at the deref'd vertex per delivery** (RFC-0024 §6.2) — the mint is a cache of an
+  answer, never of a permission. The new counter reports only the *fallback* walk, so the
+  bound leg carries no atomic at all; a non-zero value means the edge was admitted before its
+  target existed or its binding went stale. `subscriber_t`, `edge_view_t` and `pub_edge_t`
+  each grow one 8-byte trivially-copyable field.
+
 ## [0.9.0] — 2026-08-10
 
 ### Added
