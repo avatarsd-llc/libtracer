@@ -373,7 +373,8 @@ class PointsAreDocumented(unittest.TestCase):
 
     DOC = pathlib.Path(__file__).resolve().parents[1] / "docs" / "methodology.md"
     GEN = pathlib.Path(__file__).resolve().parent / "gen_results_page.py"
-    WORDS = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven"}
+    WORDS = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven",
+             8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve"}
 
     def test_methodology_names_every_point(self):
         if not self.DOC.exists():          # bench/ checked out alone
@@ -388,7 +389,7 @@ class PointsAreDocumented(unittest.TestCase):
                         f"POINTS now has {n} entries and the doc has rotted (#1041)")
         # The key form is the one the gate itself prints (`paired_samples`), so the doc
         # names each point exactly as a failure line will name it.
-        for (mode, size, fan, ep) in pg.POINTS:
+        for (_binary, mode, size, fan, ep) in pg.POINTS:
             key = f"{mode}/{size}/{fan}/{ep}"
             self.assertTrue(f"`{key}`" in text,
                             f"{key} is gated but not named in {self.DOC}")
