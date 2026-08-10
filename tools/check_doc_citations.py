@@ -142,20 +142,25 @@ ANCHORS = [
     # silently (they cited the pre-#739 header). Anchored so they cannot rot again.
     # zero-copy-and-flatten.md's rope-tier citations and ADR-0072's stale-comment pointer —
     # all four had rotted on main and were re-asserted by a mechanical +24 shift (#768 verify).
-    ("core/include/libtracer/fwd_router.hpp:786", "Terminus over a MULTI-LINK rope"),
-    ("core/include/libtracer/fwd_router.hpp:792", "64 KB / 2 links"),
-    ("core/include/libtracer/fwd_router.hpp:838", "The forward hop, read entirely by OFFSET"),
-    ("core/include/libtracer/fwd_router.hpp:604", "Slot addresses are NOT stable"),
+    ("core/include/libtracer/fwd_router.hpp:798", "Terminus over a MULTI-LINK rope"),
+    ("core/include/libtracer/fwd_router.hpp:804", "64 KB / 2 links"),
+    ("core/include/libtracer/fwd_router.hpp:850", "The forward hop, read entirely by OFFSET"),
+    # ("core/include/libtracer/fwd_router.hpp", "Slot addresses are NOT stable") — anchor
+    # DROPPED (#892). Its only citer was ADR-0072's `fwd_router.hpp:596-605`, and an ADR is a
+    # DATED record that `--repin` deliberately never rewrites. So the anchor tracked a line the
+    # live tree moves while its citation is frozen by policy: any edit above it orphans the
+    # anchor and reds the gate, with no correct re-pin available on either side. An anchor
+    # exists to keep a LIVE doc citation from rotting; this text has no live citer left.
     ("core/include/libtracer/fwd_router.hpp:177", "explicit fwd_router_t"),
-    ("core/include/libtracer/fwd_router.hpp:246", "bool add_child"),
-    ("core/include/libtracer/fwd_router.hpp:405", "using reply_fn_t"),
-    ("core/include/libtracer/child_registry.hpp:261", "bool add(std::string name"),
-    ("core/include/libtracer/child_registry.hpp:511", "resolve_peer"),
-    ("core/include/libtracer/child_registry.hpp:526", "bool erase"),
-    ("core/include/libtracer/child_registry.hpp:559", "entry_by_name"),
-    ("core/include/libtracer/child_registry.hpp:580", "by_name"),
-    ("core/include/libtracer/child_registry.hpp:621", "std::size_t size()"),
-    ("core/include/libtracer/child_registry.hpp:631", "live_size"),
+    ("core/include/libtracer/fwd_router.hpp:257", "bool add_child"),
+    ("core/include/libtracer/fwd_router.hpp:417", "using reply_fn_t"),
+    ("core/include/libtracer/child_registry.hpp:267", "bool add(std::string name"),
+    ("core/include/libtracer/child_registry.hpp:517", "resolve_peer"),
+    ("core/include/libtracer/child_registry.hpp:532", "bool erase"),
+    ("core/include/libtracer/child_registry.hpp:565", "entry_by_name"),
+    ("core/include/libtracer/child_registry.hpp:586", "by_name"),
+    ("core/include/libtracer/child_registry.hpp:627", "std::size_t size()"),
+    ("core/include/libtracer/child_registry.hpp:637", "live_size"),
     ("core/src/transport_vertex.cpp:170", "transport_vertex_t::provide_link"),
     ("core/src/transport_vertex.cpp:248", "routing key IS the mount path"),
     ("core/src/transport_vertex.cpp:255", "qualified += name"),
@@ -325,9 +330,9 @@ ANCHORS = [
      'std::pmr::memory_resource* mr = std::pmr::get_default_resource(),'),
     ('core/include/libtracer/fwd_router.hpp:179', 'mem::block_source_t* rx = &mem::heap_source(),'),
     ('core/include/libtracer/fwd_router.hpp:180', 'mem::mem_backend_t* flat = &mem::heap_backend(),'),
-    ('core/include/libtracer/fwd_router.hpp:421',
+    ('core/include/libtracer/fwd_router.hpp:433',
      "* Invoked (with the `FWD{REPLY}` frame as a @ref view::rope_t) when a REPLY's first"),
-    ('core/include/libtracer/fwd_router.hpp:1005',
+    ('core/include/libtracer/fwd_router.hpp:1017',
      '[[nodiscard]] mem::block_source_t& rx_for(const child_rx_ctx_t* ctx) const noexcept {'),
     # core/include/libtracer/grammar.hpp
     ('core/include/libtracer/grammar.hpp:388',
@@ -361,13 +366,13 @@ ANCHORS = [
     ('core/include/libtracer/graph.hpp:1382', 'void dispatch_edge_remote(const edge_view_t& e, const rope_t& value);'),
     ('core/include/libtracer/graph.hpp:1399', 'void bubble_up(vertex_t* v, const rope_t& value);'),
     ('core/include/libtracer/graph.hpp:1403', 'void deliver_vertex(vertex_t* v, const rope_t& value);'),
-    ('core/include/libtracer/graph.hpp:1575', 'std::pmr::memory_resource* mr_ = std::pmr::get_default_resource();'),
-    ('core/include/libtracer/graph.hpp:1584', 'mem::mem_backend_t* value_backend_ = &mem::heap_backend();'),
-    ('core/include/libtracer/graph.hpp:1640',
+    ('core/include/libtracer/graph.hpp:1576', 'std::pmr::memory_resource* mr_ = std::pmr::get_default_resource();'),
+    ('core/include/libtracer/graph.hpp:1585', 'mem::mem_backend_t* value_backend_ = &mem::heap_backend();'),
+    ('core/include/libtracer/graph.hpp:1641',
      '*         to migrate. Kept a DIFFERENT type from `mr_` on purpose (see'),
-    ('core/include/libtracer/graph.hpp:1643',
+    ('core/include/libtracer/graph.hpp:1644',
      '*         LAST on purpose: no hot path reads it, so declaring it here keeps'),
-    ('core/include/libtracer/graph.hpp:1649', 'mem::block_source_t* ctl_ = &mem::heap_source();'),
+    ('core/include/libtracer/graph.hpp:1650', 'mem::block_source_t* ctl_ = &mem::heap_source();'),
     # core/include/libtracer/lkv_slot.hpp
     ('core/include/libtracer/lkv_slot.hpp:100', '* **Lock-free BY CONTRACT, and spin-locked in practice.**'),
     ('core/include/libtracer/lkv_slot.hpp:101',

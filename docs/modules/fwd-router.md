@@ -186,10 +186,10 @@ class child_registry_t {                 // the one NAME -> link demux table (AD
 }  // namespace tr::net
 ```
 
-Signature source: `core/include/libtracer/fwd_router.hpp:177` (constructor), `:246`
-(`add_child`), `:302` (`subscribe_toward`), `:404-416` (the sink function-pointer types);
-`core/include/libtracer/child_registry.hpp:261` (`add`), `:511` (`resolve_peer`), `:526`
-(`erase`), `:559` (`entry_by_name`), `:580` (`by_name`), `:621`/`:631` (`size`/`live_size`).
+Signature source: `core/include/libtracer/fwd_router.hpp:177` (constructor), `:257`
+(`add_child`), `:314` (`subscribe_toward`), `:416-428` (the sink function-pointer types);
+`core/include/libtracer/child_registry.hpp:267` (`add`), `:517` (`resolve_peer`), `:532`
+(`erase`), `:565` (`entry_by_name`), `:586` (`by_name`), `:627`/`:637` (`size`/`live_size`).
 
 ## Routing one inbound frame
 
@@ -216,7 +216,7 @@ flowchart TB
   address size grows with hop count, which is what `ADVERTISE`/`COMPACT` route handles exist to
   amortise on a steady flow.
 - **A reply is delivered as a rope, never flattened by the router**
-  (`core/include/libtracer/fwd_router.hpp:418-427`). A sink that wants contiguous bytes holds
+  (`core/include/libtracer/fwd_router.hpp:430-439`). A sink that wants contiguous bytes holds
   `const view_t m = reply.materialize()` and reads `m.bytes()`; a **single-link reply — the common
   case — is returned zero-copy, no allocation and no copy**, and only a multi-link reply pays one
   flatten, on demand. The escape hatch sits at the consumer, so the router never pays for a
@@ -319,8 +319,8 @@ adopt; `/net` itself is likewise only the recommended root convention (a constru
 **Creation is all-or-nothing.** A connection is built in three steps — register the identity
 vertex, insert the `conns_` entry, wire the link into the router's `child_registry_t` — and only
 the last can be refused: `add_child` answers `false` when the registry cannot grow, and it is the
-only place that can say so (`core/include/libtracer/fwd_router.hpp:246`,
-`core/include/libtracer/child_registry.hpp:261`). A refusal unwinds the first two in reverse —
+only place that can say so (`core/include/libtracer/fwd_router.hpp:257`,
+`core/include/libtracer/child_registry.hpp:267`). A refusal unwinds the first two in reverse —
 retire the vertex, then erase the entry, which destroys the config-constructed socket — publishes
 no liveness, and answers `BACKPRESSURE` (`core/src/transport_vertex.cpp:373-376`). Discarding that
 `bool` left a connection reporting `UP` that no `dst` resolved, no inbound frame reached, and
