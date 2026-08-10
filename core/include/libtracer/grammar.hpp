@@ -93,6 +93,48 @@ struct span_cursor {
 };
 
 /**
+ * @brief The same bound where a sum CAN wrap — 32-bit `Size` (rv32, the primary MCU target).
+ *
+ * Kept as its own function so the wide path above is a single compare with nothing to skip
+ * over, and so `grammar_bounds_test`'s `Size = std::uint32_t` instantiation still exercises
+ * this arithmetic verbatim from a 64-bit host.
+ *
+ * The bound is taken by subtracting FROM @p avail rather than by summing toward it, so no
+ * intermediate can wrap and the whole check stays single-word. Each step is bounded by the
+ * one before:
+ *
+ * 1. `avail >= header` is established here, not assumed, so `avail - header` — the room a
+ *    body plus trailer may occupy — cannot wrap;
+ * 2. `length <= room` is then checked, so `room - length` cannot wrap either;
+ * 3. `ts_size + crc_size` is at most 12 and is checked against that remainder.
+ *
+ * Only once all three hold is `total` formed, and every term of it is by then known to be at
+ * or under @p avail — which is why the result cannot wrap.
+ *
+ * Summing into a `std::uint64_t` and comparing there is equally correct and was the first
+ * shape tried; it lost on measurement. On rv32 (`-O2`, esp-15.2.0) the u64 sum kept the length
+ * decode's high word live, cost +27 instructions and forced a stack frame into a previously
+ * leaf, frame-free header parse — ~40% on the lazy tier's O(header) sibling skip, which is the
+ * traffic `DEFER` exists to keep cheap. This form costs +1 instruction on a trailer-less
+ * header and +3 with a trailer.
+ *
+ * @param total Receives the total encoded size; untouched when the bound fails.
+ * @return False ⇔ the declared TLV does not fit — the caller's FRAME_TRUNCATED.
+ */
+template <class Size>
+[[nodiscard]] constexpr bool total_size_fits_narrow(Size avail, Size header, std::uint32_t length,
+                                                    Size ts_size, Size crc_size,
+                                                    Size& total) noexcept {
+    if (avail < header) return false;
+    const Size room = static_cast<Size>(avail - header);
+    if (length > room) return false;
+    const Size rest = static_cast<Size>(room - static_cast<Size>(length));
+    if (static_cast<Size>(ts_size + crc_size) > rest) return false;
+    total = static_cast<Size>(header + static_cast<Size>(length) + ts_size + crc_size);
+    return true;
+}
+
+/**
  * @brief Does the declared TLV's total encoded size fit in @p avail? — the bound
  *        taken without ever forming a value that can wrap (#921).
  *
@@ -107,27 +149,18 @@ struct span_cursor {
  * 64-bit host: a `Size = std::uint32_t` instantiation runs the identical
  * arithmetic the rv32 build compiles (`grammar_bounds_test`).
  *
- * The bound is taken by subtracting FROM @p avail rather than by summing toward
- * it, so no intermediate can wrap at any `Size` and the whole check stays
- * single-word on a 32-bit target. Each step is bounded by the one before:
+ * TWO SHAPES, PICKED AT COMPILE TIME, because the wrap this guards against is only
+ * reachable at one width. `header` is at most 6, `length` at most `0xFFFFFFFF` and the
+ * trailer at most 12, so the total is under `2^32 + 18`: on any `Size` STRICTLY WIDER
+ * than the 32-bit wire length the sum provably cannot wrap and the bound is the single
+ * compare it always was. Only a 32-bit `Size` needs the wrap-free subtractive chain, and
+ * that lives in @ref total_size_fits_narrow.
  *
- * 1. `avail >= header` is established here, not assumed, so `avail - header` —
- *    the room a body plus trailer may occupy — cannot wrap;
- * 2. `length <= room` is then checked, so `room - length` cannot wrap either;
- * 3. `ts_size + crc_size` is at most 12 and is checked against that remainder.
- *
- * Only once all three hold is `total` formed, and every term of it is by then
- * known to be at or under @p avail — which is why the result cannot wrap.
- *
- * Summing into a `std::uint64_t` and comparing there is equally correct and was
- * the first shape tried; it lost on measurement. On rv32 (`-O2`, esp-15.2.0) the
- * u64 sum kept the length decode's high word live, cost +27 instructions and
- * forced a stack frame into a previously leaf, frame-free header parse — ~40% on
- * the lazy tier's O(header) sibling skip, which is the traffic `DEFER` exists to
- * keep cheap. This form costs +1 instruction on a trailer-less header and +3
- * with a trailer. Step 1 repeats @ref parse_header's own minimum-size check,
- * which cannot move here (the length load must stay behind it) — the compiler
- * folds the dominated repeat, so being self-contained costs nothing.
+ * Running the narrow chain everywhere is what regressed `compact-forward` by **+44%**
+ * (#1173 -> #1177): `parse_header` runs once per TLV, so a few cycles per call multiply
+ * across a frame. The measurement that licensed the original form ("+1 instruction") was
+ * taken on rv32 at `-O2`; it did not hold on x86-64 at `-O3`, and the fix is to stop
+ * paying a 32-bit-only cost on a 64-bit target rather than to weaken the bound.
  *
  * @param total Receives the total encoded size; untouched when the bound fails.
  * @return False ⇔ the declared TLV does not fit — the caller's FRAME_TRUNCATED.
@@ -138,13 +171,20 @@ template <class Size>
     static_assert(!std::numeric_limits<Size>::is_signed,
                   "the bound relies on unsigned subtraction");
     static_assert(sizeof(Size) >= sizeof(std::uint32_t), "a wire length must fit the size type");
-    if (avail < header) return false;
-    const Size room = static_cast<Size>(avail - header);
-    if (length > room) return false;
-    const Size rest = static_cast<Size>(room - static_cast<Size>(length));
-    if (static_cast<Size>(ts_size + crc_size) > rest) return false;
-    total = static_cast<Size>(header + static_cast<Size>(length) + ts_size + crc_size);
-    return true;
+    // WIDER THAN THE WIRE: one compare, because no sum here can wrap. `header` is at most 6,
+    // `length` at most 0xFFFFFFFF and the trailer at most 12, so the total is under 2^32 + 18
+    // — representable in any `Size` strictly wider than the 32-bit wire length. The subtractive
+    // chain below exists solely for the case that bound is NOT free, and running it where it is
+    // provably unnecessary is what cost +44% on `compact-forward` (#1173/#1177): `parse_header`
+    // runs per TLV, so a few cycles per call multiply across a frame.
+    if constexpr (sizeof(Size) > sizeof(std::uint32_t)) {
+        const Size t = static_cast<Size>(header + static_cast<Size>(length) + ts_size + crc_size);
+        if (avail < t) return false;
+        total = t;
+        return true;
+    } else {
+        return total_size_fits_narrow(avail, header, length, ts_size, crc_size, total);
+    }
 }
 
 /**

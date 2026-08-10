@@ -98,9 +98,9 @@ call stack, so the walk keeps one open-node record per open level in a
 `walk_stack_t`. That stack starts in a caller-supplied inline span and, once those
 slots are used, relocates into geometrically grown blocks drawn from a spill
 source. **The inline span is a tuning knob, not a limit — overflowing it changes
-cost, not behaviour** (`grammar.hpp:290-296`). Exhausting the spill source rejects
+cost, not behaviour** (`grammar.hpp:330-336`). Exhausting the spill source rejects
 the frame with `TLV_NESTING_TOO_DEEP`, which means exactly "exceeds this receiver's
-decode resources" (`grammar.hpp:388-392`).
+decode resources" (`grammar.hpp:428-432`).
 
 The two decoders differ only in what they spill to, and therefore in what bounds
 them:
