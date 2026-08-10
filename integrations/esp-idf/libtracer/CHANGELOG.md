@@ -12,6 +12,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **A post-101 refusal now spends the reconnect backoff instead of spinning (#1128).**
+  `esp_ws_client_link_t`'s backoff was gated on `connect_once()` returning false, but an
+  admission refusal can only be expressed *after* `101 Switching Protocols` is on the wire —
+  so `esp_transport_connect` succeeds and the refusal looked like a connection that later
+  dropped, not a failed dial. The loop re-dialed with **no delay at all**, re-allocating a
+  transport pair every cycle; on a single-core target that starved the idle task, tripped the
+  task watchdog, and the board panic-rebooted — resuming the dial on the next boot, so one
+  misconfiguration could sustain a reboot loop. A connection that goes down having never had
+  an inbound message delivered is now treated as a failed attempt and pays the same
+  `kReconnectBackoffMs` a failed dial does. **Inbound is the test** — a send into a socket the
+  peer has already decided to close still succeeds locally, so only a message *arriving*
+  proves the peer admitted the session. A link that has exchanged traffic still retries a
+  genuine drop immediately: the backoff is conditional, not blanket.
+
 - **The derived WS send bound now divides by the strike cap as well as the peer cap
   (#840).** `derive_send_timeout_ms` computed `CONFIG_ESP_TASK_WDT_TIMEOUT_S / peers`, which
   makes ONE fan-out round of fully stalled peers fill the entire watchdog window. But a peer
