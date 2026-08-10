@@ -502,7 +502,7 @@ int main() {
                   "a u16 `access_mask` (the conformance-vector spelling) still parses");
         }
 
-        // 9b. A NAME-typed `subject` is the OWNER@/EVERYONE@ spelling and stays legal —
+        // 9b. A NAME-typed `subject` is the EVERYONE@ spelling and stays legal —
         //     and, being pair-consumed, is no longer re-read as the next key. Before the
         //     fix this ACE bound `subject` to the FOLLOWING key's name ("access_mask")
         //     instead of the token actually written.

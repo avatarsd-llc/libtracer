@@ -437,7 +437,7 @@ pub struct Ace {
     pub ace_type: u8,
     /** @brief `flags` bitfield (INHERIT=0x1, INHERIT_ONLY=0x2, NO_PROPAGATE=0x4, GROUP=0x8). */
     pub flags: u8,
-    /** @brief `subject` token bytes (e.g. `"peer-a"`, or special `"EVERYONE@"` / `"OWNER@"`). */
+    /** @brief `subject` token bytes (e.g. `"peer-a"`, or the one special subject `"EVERYONE@"`). */
     pub subject: Vec<u8>,
     /** @brief `access_mask` u16 bitfield (READ=0x01, WRITE=0x02, SUBSCRIBE=0x04, …). */
     pub access_mask: u16,

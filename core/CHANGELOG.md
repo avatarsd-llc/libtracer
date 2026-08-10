@@ -62,6 +62,18 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   reject sits at the terminus, not the forwarder — an intermediate hop routes on `dst` and stays
   opcode-agnostic.
 
+- **`OWNER@` is withdrawn as a special subject (#1033).** Docs and comments only — no API, ABI,
+  wire or behaviour change, and no conformance vector moves. `EVERYONE@` is now the one special
+  subject everywhere. `OWNER@` was published as special by ADR-0020, reference-05 §`0x0A` and
+  `CONTEXT.md`, but no evaluator ever special-cased it: `ace_applies` branches on exactly one
+  string. So an operator writing `{subject: "OWNER@", access_mask: WRITE_ACL}` got an ACE that
+  matched nobody — and because *any* present ACE closes an otherwise-open vertex, that write
+  **locked** the vertex it was meant to delegate. The name was also impersonable, being an
+  ordinary token a pass-through resolver could mint. Withdrawing removes both at once: with no
+  document telling an operator to write that ACE, an impersonated `OWNER@` has nothing to match.
+  Real owner semantics need a per-vertex owner identity the graph does not hold and would change
+  how a *stored* ACE evaluates — an amendment, not this. `WRITE_OWNER` stays declared in the mask.
+
 - **`[[nodiscard]]` on the fallible control-plane returns (#892).** `fwd_router_t::add_child`,
   `child_registry_t::add` and `graph_t::retire` now carry the attribute, as do six private
   `graph.hpp` `result_t` helpers. SOURCE-BREAKING only for a caller that discards one of these

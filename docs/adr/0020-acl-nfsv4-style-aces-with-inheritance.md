@@ -36,3 +36,49 @@ So **`admin` is precisely `WRITE_ACL`** — the right to modify the ACL / delega
 - The `05` `0x0A` ACL byte layout is revised to the ACE shape (it self-declared revisable for `security_acl`); enforcement remains deferred to the `security_acl` module, with the MCU subset in the required modules.
 - This **extends ADR-0018** (the rights model it left open); the pluggable-subject-token and authz≠authn decisions are unchanged — the `subject` field of an ACE *is* the pluggable token.
 - It is an **L4/module** decision, not a new wire primitive beyond the already-reserved `ACL 0x0A` code.
+
+## Erratum (2026-08-10): `OWNER@` is withdrawn — it was published as special and never evaluated as one
+
+The Decision section reads:
+
+> **Special subjects** `OWNER@` and `EVERYONE@` avoid enumerating principals.
+
+**Only `EVERYONE@` was ever built.** `detail_acl::ace_applies`
+(`core/include/libtracer/security_acl.hpp`) branches on exactly one string; every other
+subject — `OWNER@` included — is compared byte-equal against the resolver's token, and a
+repo-wide grep finds `OWNER@` only in prose, never in a branch. So the name was published as a
+special subject in this ADR, in [reference 05](../reference/05-protocol-tlvs.md) §`0x0A` and in
+[`CONTEXT.md`](../../CONTEXT.md), while behaving as an ordinary opaque token everywhere.
+
+That gap is harmful in two opposite directions, which is why it is corrected rather than left
+as a known gap:
+
+1. **An `OWNER@` ACE is silently inert, and inertness here reads as a lock.** An operator
+   following the old text writes `{subject: "OWNER@", access_mask: WRITE_ACL}` believing the
+   vertex owner keeps admin. No caller's token is those bytes, so the ACE matches nobody — and
+   because *any* present ACE closes an otherwise-open vertex, the write **locks** the vertex it
+   was meant to delegate. A grant that reads as a grant and evaluates as nothing is the failure
+   class [#906](https://github.com/avatarsd-llc/libtracer/issues/906) fixed on the parse side.
+2. **The name is impersonable.** Being an ordinary token, a deployment whose resolver passes a
+   caller-supplied identity through can mint a principal literally named `OWNER@`, matching such
+   an ACE exactly. [#908](https://github.com/avatarsd-llc/libtracer/issues/908) reserved
+   `EVERYONE@` against the resolver's output and deliberately left `OWNER@` alone, on the ground
+   that reserving a name whose semantics do not exist would be inventing those semantics in the
+   wrong place.
+
+**The correction is to withdraw the name, not to reserve it.** `EVERYONE@` is the one special
+subject. `OWNER@` is an ordinary opaque token with no meaning to this core; a deployment may
+still use those bytes as a principal name and must not expect owner semantics from them.
+Withdrawing removes *both* consequences at once — with no document telling an operator to write
+such an ACE, there is nothing for an impersonated `OWNER@` to match.
+
+**This is an erratum, not an amendment.** No wire surface moves: the `subject` field is opaque
+bytes before and after, `encode_acl`/`decode_acl` are untouched, and no conformance vector
+changes. The ACE shape, the `access_mask` (including the still-declared `WRITE_OWNER` bit), the
+inheritance model and the MCU subset are all unchanged.
+
+**Real owner semantics remain open, and are an amendment.** They need a per-vertex owner
+identity the graph does not hold, and they change how a *stored* ACE evaluates — an existing
+`OWNER@` ACE that matches nobody today would start matching somebody. That needs an RFC, and it
+would reserve the token the way #908 reserved `EVERYONE@`. `WRITE_OWNER` stays declared in the
+mask against that day. ([#1033](https://github.com/avatarsd-llc/libtracer/issues/1033).)
