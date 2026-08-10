@@ -405,6 +405,25 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     set_tests_properties(httpd_ws_admission
         PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
+    # #953 — the LINK-level failure tally: the drop classes with no session to charge,
+    # plus the two session-lifecycle facts nothing else records.
+    add_executable(httpd_ws_counters_test
+        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_counters_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
+    target_include_directories(httpd_ws_counters_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(httpd_ws_counters_test PRIVATE libtracer)
+    target_link_options(httpd_ws_counters_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    libtracer_test_warnings(httpd_ws_counters_test)
+    add_test(NAME httpd_ws_counters COMMAND httpd_ws_counters_test)
+    # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent); every
+    # case here constructs an adopting link.
+    set_tests_properties(httpd_ws_counters
+        PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+
     # #955 — what the link owes an ADOPTED server. The facts none of the suites above can
     # see are server-level: the `httpd_config_t` a `httpd_start` was given (the real server
     # keeps it private, which is precisely why the adopting ctor cannot check it) and each

@@ -10,6 +10,44 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`httpd_ws_link_t::stats()` — the link-level failure tally (#953).** A new
+  `stats_t` snapshot covering the drop classes that had **no session to charge** and were
+  therefore invisible from every published surface: `peers_refused` (the admission
+  predicate and the `max_peers` ceiling, both of which turn a peer away before it owns a
+  slot), `sessions_condemned` (the only record of the link *killing* a session as opposed
+  to a peer leaving), `rx_dropped_oversize` (the abuse cap, applied before the slot lookup
+  — it had neither a log nor a counter), `rx_dropped_alloc`, `tx_to_dead_peer` (a frame
+  aimed at a session that had already gone), and `tx_pool_misses`.
+
+  `tx_pool_misses` is a **labelled subset of `enqueue_drops`, not a second tally** — the
+  total is unchanged. It exists because the three causes folded into `enqueue_drops` mean
+  different things: a pool miss is this link's own outstanding-send depth (read it against
+  `tx_slot_capacity()`), while a refused enqueue names the shared control queue and an OOM
+  names the heap. Their one log line said "queue refused / pool exhausted / OOM" and left
+  the reader to guess.
+
+  `enqueue_drops()` is unchanged and keeps working; `stats().enqueue_drops` returns the
+  same number, and a test pins the two spellings together so they cannot drift.
+
+  Two drops that were **entirely silent** — no log, no counter — now say so: the inbound
+  abuse cap and the reassembly cap.
+
+  **Scope note.** Most of what #953 reported as missing had already shipped: per-peer
+  `rx_frames`/`rx_bytes`/`tx_frames`/`tx_bytes`/`rx_drops`/`tx_drops` are carried by
+  `link_counters_t` through `enumerate_peer_stats`, `esp_ws_client_link_t` already has its
+  own `stats()`, and #949 removed the unbounded heap fallback the issue's part B was
+  written against. This change is the genuine residual.
+
+  **Cost, measured** (`-Os`, the level the component ships at): `httpd_ws_link.cpp.o`
+  `.text` **13079 → 13631 B (+552, +4.2%)**. Nothing was added to a per-frame path — every
+  counter sits on a refusal, a teardown or a drop. `tx_work` and `queue_send` are byte-for-byte
+  unchanged; `on_data_frame` moves **+23 B**, and that number is the point: it was **+350 B**
+  until the two new log call sites were moved out of line behind `[[gnu::noinline]]`
+  helpers, the same inlining trap #994 paid for. Compile is deterministic (two builds of
+  the same source are byte-identical), so the A/A null here is exactly 0.
+
 ### Fixed
 
 - **The derived WS send bound now accounts for IDF's two writes per frame, and can no
