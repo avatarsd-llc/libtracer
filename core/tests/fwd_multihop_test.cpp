@@ -146,7 +146,8 @@ int main() {
         std::fprintf(stderr, "node B: ws server failed to bind\n");
         return 1;
     }
-    router_b.add_child("b-in", srv_b);  // B replies back over whatever link a request came in on
+    (void)router_b.add_child("b-in",
+                             srv_b);  // B replies back over whatever link a request came in on
 
     // ----- node A: the forwarder. ws server (for the client) + ws client (to B). -
     graph_t graph_a;  // A holds no local data — it only forwards.
@@ -161,8 +162,9 @@ int main() {
         std::fprintf(stderr, "node A: ws client to B failed to connect\n");
         return 1;
     }
-    router_a.add_child("cli", srv_a);  // A's name for the inbound client link (prepended to src)
-    router_a.add_child("up", a_to_b);  // A's name for the link to B (the dst segment routed)
+    (void)router_a.add_child("cli",
+                             srv_a);  // A's name for the inbound client link (prepended to src)
+    (void)router_a.add_child("up", a_to_b);  // A's name for the link to B (the dst segment routed)
 
     // ----- the client: originator. ws client to A; collects the REPLY. ----------
     graph_t graph_c;
@@ -180,7 +182,8 @@ int main() {
         std::fprintf(stderr, "client: ws client to A failed to connect\n");
         return 1;
     }
-    router_c.add_child("a", c_to_a);  // replies from A arrive here; /reply-ep terminates locally
+    (void)router_c.add_child("a",
+                             c_to_a);  // replies from A arrive here; /reply-ep terminates locally
 
     // ===== 1) READ /up/sensor -> byte-exact dst-shrink / src-grow + round-trip ===
     std::printf("READ forwarded A->B; reply source-routed back:\n");

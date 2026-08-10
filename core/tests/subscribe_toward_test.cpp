@@ -107,7 +107,7 @@ void test_single_hop() {
     graph_t g;
     fwd_router_t router(g);
     fake_link_t b;
-    router.add_child("net/ws-client/b", b);
+    (void)router.add_child("net/ws-client/b", b);
     (void)g.register_vertex(path_t("/light/rgb"), role_t::STORED_VALUE);
 
     // Negative control FIRST: an unbound producer write emits nothing.
@@ -129,7 +129,7 @@ void test_multi_hop_residual() {
     graph_t g;
     fwd_router_t router(g);
     fake_link_t b;
-    router.add_child("net/ws-client/b", b);
+    (void)router.add_child("net/ws-client/b", b);
     (void)g.register_vertex(path_t("/s/t"), role_t::STORED_VALUE);
 
     const auto s =
@@ -146,7 +146,7 @@ void test_rejections() {
     graph_t g;
     fwd_router_t router(g);
     fake_link_t b;
-    router.add_child("net/ws-client/b", b);
+    (void)router.add_child("net/ws-client/b", b);
     (void)g.register_vertex(path_t("/p"), role_t::STORED_VALUE);
 
     const auto no_vertex = router.subscribe_toward(path_t("/nope"), path_t("/net/ws-client/b/x"));

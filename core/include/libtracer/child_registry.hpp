@@ -255,10 +255,16 @@ class child_registry_t {
      *         receiver onto a link the registry does not hold: a GHOST child, audible on its
      *         transport, resolvable by no `dst`, and removable by no `remove_child` — the same
      *         "healthy-looking child that every forward misses" shape #523 was filed about.
-     *         Not `[[nodiscard]]`: the control-plane tests that ignore it are unchanged, and
-     *         the ONE caller that must not is `add_child`.
+     *
+     * `[[nodiscard]]` since #892. It was declined here on the ground that "the control-plane
+     * tests that ignore it are unchanged, and the ONE caller that must not is `add_child`" —
+     * which is an argument for the attribute, not against it. Naming the one caller that must
+     * check is precisely what the compiler should be enforcing, and it was not: `add_child`
+     * discarded this bool and reported success, so `make_connection` minted a ghost UP-but-
+     * unroutable connection under heap exhaustion (#930). Tests that mean to ignore an
+     * allocation failure now write `(void)` and are unchanged in behaviour.
      */
-    bool add(std::string name, transport_t& link) {
+    [[nodiscard]] bool add(std::string name, transport_t& link) {
         // Shape and link become ONE word here, so no reader can ever see one without the
         // other (#882). `bus()` is probed exactly once, on this control-plane call.
         const std::uintptr_t egress =

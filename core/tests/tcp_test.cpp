@@ -430,8 +430,8 @@ void test_two_nodes_over_tcp() {
 
     // B holds the target vertex and a subscriber; A knows the link to B as "b".
     (void)node_b.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
-    router_a.add_child("b", ta);  // A routes a `dst` starting with "b" out over TCP to B
-    router_b.add_child("a", tb);  // B's name for the inbound link (src accumulation)
+    (void)router_a.add_child("b", ta);  // A routes a `dst` starting with "b" out over TCP to B
+    (void)router_b.add_child("a", tb);  // B's name for the inbound link (src accumulation)
 
     std::promise<std::vector<std::byte>> got;
     auto fut = got.get_future();

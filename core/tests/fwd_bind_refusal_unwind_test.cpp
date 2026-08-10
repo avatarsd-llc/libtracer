@@ -115,9 +115,9 @@ void refused_bind_leaves_no_strand() {
     fake_link_t up;
     fake_link_t up2;
     fake_link_t down;
-    node.add_child("up", up);
-    node.add_child("up2", up2);
-    node.add_child("down", down);
+    (void)node.add_child("up", up);
+    (void)node.add_child("up2", up2);
+    (void)node.add_child("down", down);
 
     // Two established flows over ONE downstream route: "up" ends at its ingress bound while
     // "down" holds a single egress entry (#913).
@@ -179,9 +179,9 @@ void established_flow_survives_a_refusal() {
     fake_link_t up;
     fake_link_t up2;
     fake_link_t down;
-    node.add_child("up", up);
-    node.add_child("up2", up2);
-    node.add_child("down", down);
+    (void)node.add_child("up", up);
+    (void)node.add_child("up2", up2);
+    (void)node.add_child("down", down);
 
     const std::vector<std::byte> shared = b_path({"down", "sensor"});
     for (std::uint16_t in : {std::uint16_t{10}, std::uint16_t{11}})
@@ -192,7 +192,7 @@ void established_flow_survives_a_refusal() {
     // A SECOND inbound link fills its own ingress table through another downstream link, so
     // its next advertise reuses "down"'s existing label and is then refused.
     fake_link_t down2;
-    node.add_child("down2", down2);
+    (void)node.add_child("down2", down2);
     for (std::uint16_t in : {std::uint16_t{20}, std::uint16_t{21}})
         up2.inject(tr::net::encode_advertise(in, b_path({"down2", "x"})));
     const std::size_t egress_before = node.handles().egress_count();

@@ -238,12 +238,24 @@ class fwd_router_t {
      * @param rx   Optional per-child failable-block source; null uses the router's. Give
      *             each child its OWN when injecting a bounded one — see ADR-0067 3
      *             for why sharing one across receive threads is the wrong shape.
-     * @return false ⇔ @p name is unaddressable and NOTHING was registered. Deliberately not
-     *         `[[nodiscard]]`: the return is an upgrade from a debug-only assert, and every
-     *         existing call site — which registers a name it composed itself — stays correct
-     *         ignoring it.
+     * @return false ⇔ @p name is unaddressable, or the registry could not grow — either way
+     *         NOTHING was registered.
+     *
+     * `[[nodiscard]]` since #892, and the reason it was NOT is worth recording because it was
+     * wrong in a way that shipped a bug. The attribute was declined on the ground that "every
+     * existing call site registers a name it composed itself, so it stays correct ignoring
+     * it" — true of the *unaddressable-name* half, and false of the other half the return
+     * value also carries. `child_registry_t::add` returns false when the table could not grow,
+     * which no composed name can rule out; `make_connection` discarded exactly that and minted
+     * a connection published UP but resolvable by no `dst` (#930). With the attribute, that
+     * bug is a compile error rather than a silent ghost.
+     *
+     * A caller that genuinely cannot act on the failure writes `(void)` and says so. That is
+     * the point of the attribute: it does not forbid ignoring the result, it makes ignoring it
+     * a deliberate, greppable act instead of the default.
      */
-    bool add_child(std::string name, transport_t& link, mem::block_source_t* rx = nullptr);
+    [[nodiscard]] bool add_child(std::string name, transport_t& link,
+                                 mem::block_source_t* rx = nullptr);
 
     /**
      * @brief Un-register child @p name — it stops resolving, and its routing state goes.

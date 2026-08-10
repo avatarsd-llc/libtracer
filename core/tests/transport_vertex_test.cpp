@@ -253,7 +253,7 @@ void test_fwd_still_routes() {
     tr::net::loopback_channel_t channel;
     net_a.provide_link("ws-client", "up", channel.a());
     (void)node_a.write(path_t("/net:children[]"), conn_spec("client", "up", conn_role_t::DIAL, 0));
-    router_b.add_child("down", channel.b());  // B's side: plain router child (unchanged path)
+    (void)router_b.add_child("down", channel.b());  // B's side: plain router child (unchanged path)
 
     // Observe inbound FWDs on B. A FWD{WRITE dst=/up/temp} from A: A strips "up" and
     // forwards "/temp" over channel.a(); B receives it on "down". (We assert the frame

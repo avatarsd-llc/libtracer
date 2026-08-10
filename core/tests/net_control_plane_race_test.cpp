@@ -280,7 +280,7 @@ int main() {
 
     // The inbound link is registered once and never churned — the reader needs a stable door.
     sink_t inbound;
-    router.add_child("net/in/up", inbound);
+    (void)router.add_child("net/in/up", inbound);
 
     // Every sink outlives the router's use of it: `add_child` stores the address, so a sink
     // destroyed while registered would be a use-after-free unrelated to what is under test.
@@ -296,9 +296,9 @@ int main() {
                 sink_t& s = sinks[static_cast<std::size_t>(w) * kNamesPerWriter + i];
                 // create -> remove -> create of the SAME name: the second add takes the
                 // REBIND path over the tombstone, which is the exposed one.
-                router.add_child(name, s);
+                (void)router.add_child(name, s);
                 (void)router.remove_child(name);
-                router.add_child(name, s);
+                (void)router.add_child(name, s);
             }
         }
     };

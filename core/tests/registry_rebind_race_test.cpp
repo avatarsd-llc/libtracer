@@ -83,8 +83,8 @@ void rebind_race() {
     fwd_router_t router(g);
     fake_link_t cli;
     fake_link_t up;
-    router.add_child("cli", cli);  // the inbound link a "reconnect" re-adds
-    router.add_child("up", up);    // the dst-resolved forward child
+    (void)router.add_child("cli", cli);  // the inbound link a "reconnect" re-adds
+    (void)router.add_child("up", up);    // the dst-resolved forward child
 
     // dst=/up/sensor forwards to "up"; the hop strips "up" and PREPENDS the inbound
     // slot's mount run to src — the read side of the #684 race.
@@ -97,7 +97,7 @@ void rebind_race() {
     std::thread rebinder([&] {
         while (!go.load(std::memory_order_acquire)) {
         }
-        for (int i = 0; i < kIters; ++i) router.add_child("cli", cli);
+        for (int i = 0; i < kIters; ++i) (void)router.add_child("cli", cli);
     });
     std::thread forwarder([&] {
         while (!go.load(std::memory_order_acquire)) {

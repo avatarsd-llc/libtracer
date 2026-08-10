@@ -175,7 +175,7 @@ void reject_and_still_work(const char* what, const std::vector<std::byte>& bad, 
     const tr::graph::vertex_handle_t sink_v = g.register_vertex(*sink, role_t::STORED_VALUE);
     fwd_router_t router(g);
     rec_link_t up(arm == arm_t::ROPE);
-    router.add_child("up", up);
+    (void)router.add_child("up", up);
 
     constexpr std::uint16_t kBad = 0x0111u;
     constexpr std::uint16_t kGood = 0x0222u;
@@ -219,7 +219,7 @@ void test_runt_frames() {
         g.register_vertex(*path_t::parse("/sink"), role_t::STORED_VALUE);
     fwd_router_t router(g);
     rec_link_t up;
-    router.add_child("up", up);
+    (void)router.add_child("up", up);
 
     for (std::size_t n = 0; n < 4; ++n) {
         std::vector<std::byte> runt(n, std::byte{0x11});
@@ -299,7 +299,7 @@ int main() {
                 g.register_vertex(*sink, role_t::STORED_VALUE);
             fwd_router_t router(g);
             rec_link_t up(arm == arm_t::ROPE);
-            router.add_child("up", up);
+            (void)router.add_child("up", up);
             constexpr std::uint16_t kLabel = 0x0333u;
             feed(router, up, "up", tr::net::encode_advertise(kLabel, b_path({"sink"})), arm);
             feed(router, up, "up", b_control(type_t::COMPACT, b_label(kLabel)), arm);

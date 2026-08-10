@@ -184,8 +184,8 @@ void test_compact_denied_on_the_cold_arm() {
     fwd_router_t router(g);
     rec_link_t hostile;  // NOT `peer-z`
     rec_link_t friendly;
-    router.add_child("peer-h", hostile);
-    router.add_child("peer-z", friendly);
+    (void)router.add_child("peer-h", hostile);
+    (void)router.add_child("peer-z", friendly);
 
     // The attack shape: bind a label to the protected route, then stream COMPACT.
     router.on_frame("peer-h", tr::net::encode_advertise(kLabel, b_path({"sink"})));
@@ -231,7 +231,7 @@ void test_compact_denied_on_the_warm_arm() {
 
     fwd_router_t router(g);
     rec_link_t z;
-    router.add_child("peer-z", z);
+    (void)router.add_child("peer-z", z);
 
     router.on_frame("peer-z", tr::net::encode_advertise(kLabel, b_path({"sink"})));
     router.on_frame("peer-z", tr::net::encode_compact(kLabel, b_value_u32(kAllowed)));
@@ -274,7 +274,7 @@ void test_no_resolver_still_delivers() {
 
     fwd_router_t router(g);
     rec_link_t any;
-    router.add_child("peer-h", any);
+    (void)router.add_child("peer-h", any);
     router.on_frame("peer-h", tr::net::encode_advertise(kLabel, b_path({"sink"})));
     router.on_frame("peer-h", tr::net::encode_compact(kLabel, b_value_u32(kAllowed)));
     check(stored_u32(g, sink) == kAllowed, "the cold COMPACT delivers (enforcement disabled)");
