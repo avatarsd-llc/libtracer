@@ -53,6 +53,7 @@
 
 #include <msquic.h>
 
+#include <algorithm>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -489,13 +490,39 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
      *         CONNECT or frame stream goes down. */
     static QUIC_STATUS QUIC_API stream_cb(HQUIC /*stream*/, void* ctx, QUIC_STREAM_EVENT* ev) {
         auto* c = static_cast<stream_ctx_t*>(ctx);
-        // Two TSan edges (see the base header): the ctx guard pairs with the
-        // publication release where the ctx was handed to msquic (and with the
-        // acquire before the harvester deletes it); the impl guard restates
-        // msquic's per-connection callback serialization.
-        const tsan_cb_guard_t ctx_guard(c);
-        impl_t* self = c->owner;
-        const tsan_cb_guard_t guard(self);
+        // `reap` is the ctx this callback took ownership of, and it is freed BELOW the guard
+        // scope on purpose (#1163): `~tsan_cb_guard_t` writes through the ctx pointer, so a
+        // `delete` inside the scope is a use-after-free that only a TSan build reports.
+        stream_ctx_t* reap = nullptr;
+        QUIC_STATUS st = QUIC_STATUS_SUCCESS;
+        {
+            // Two TSan edges (see the base header): the ctx guard pairs with the
+            // publication release where the ctx was handed to msquic (and with the
+            // acquire before the harvester deletes it); the impl guard restates
+            // msquic's per-connection callback serialization.
+            const tsan_cb_guard_t ctx_guard(c);
+            impl_t* self = c->owner;
+            const tsan_cb_guard_t guard(self);
+            st = dispatch_stream_event(*self, *c, ev, reap);
+        }
+        if (reap != nullptr) {
+            tsan_acquire(reap);  // pairs with the ctx guard's release just above
+            delete reap;
+        }
+        return st;
+    }
+
+    /**
+     * @brief The stream-event switch, split out of @ref stream_cb so the ctx can be freed
+     *        after the TSan guards are gone.
+     *
+     * @param reap Out: set to the ctx when this event ended the stream and this call took
+     *             ownership of it. Left null otherwise.
+     */
+    static QUIC_STATUS dispatch_stream_event(impl_t& self_r, stream_ctx_t& c_r,
+                                             QUIC_STREAM_EVENT* ev, stream_ctx_t*& reap) {
+        impl_t* const self = &self_r;
+        stream_ctx_t* const c = &c_r;
         switch (ev->Type) {
             case QUIC_STREAM_EVENT_RECEIVE:
                 for (std::uint32_t i = 0; i < ev->RECEIVE.BufferCount; ++i) {
@@ -518,9 +545,57 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
                     self->session.store(false, std::memory_order_relaxed);
                 }
                 return QUIC_STATUS_SUCCESS;
+            case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE:
+                // The stream is over and msquic guarantees no further callback for it, so
+                // this is the one point at which a callback may take a ctx (#1163). Before
+                // this case existed, nothing did: the only frees were the two WHOLESALE
+                // harvests (peer replacement, endpoint teardown), so every stream a peer
+                // opened and closed leaked its ctx, its `acc` buffer and its msquic handle
+                // for the life of the session. `PeerBidiStreamCount`/`PeerUnidiStreamCount`
+                // do not bound that — they cap how many streams may be open AT ONCE, not how
+                // many may be opened over a session's life, so a peer that opens and closes
+                // in a loop grows the list as fast as RTT allows.
+                //
+                // `AppCloseInProgress` means WE are already inside `StreamClose` on this
+                // handle (a harvester), so the handle must not be closed a second time.
+                reap =
+                    self->detach_finished_stream(*c, ev->SHUTDOWN_COMPLETE.AppCloseInProgress != 0);
+                return QUIC_STATUS_SUCCESS;
             default:
                 return QUIC_STATUS_SUCCESS;
         }
+    }
+
+    /**
+     * @brief Take a finished stream out of the live session, closing its handle (#1163).
+     *
+     * @return The ctx, now owned by the caller and to be deleted once the TSan guards are
+     *         gone — or null when a harvester already claimed it.
+     *
+     * The race this resolves is the harvest. `replace_peer` / `harvest_and_close_streams`
+     * empty `ctxs` and set `harvested` under `conn_m`, then close and delete OUTSIDE the
+     * lock. So whichever of the two reaches `conn_m` first owns the ctx, and the loser sees
+     * its decision: a harvester that went first left `harvested` set and the entry gone, and
+     * this returns null; a shutdown that goes first removes the entry, so the harvest's
+     * `exchange` never sees it. Exactly one side frees.
+     *
+     * Both branches of the harvest release `conn_m` before calling `StreamClose`, which is
+     * what keeps this deadlock-free: `StreamClose` blocks until in-flight callbacks return,
+     * and this callback wants the same lock.
+     */
+    stream_ctx_t* detach_finished_stream(stream_ctx_t& c, bool app_close_in_progress) {
+        {
+            const std::lock_guard lock(conn_m);
+            if (c.harvested) return nullptr;  // a harvester owns it — it will close and free
+            const auto it = std::find(ctxs.begin(), ctxs.end(), &c);
+            if (it == ctxs.end()) return nullptr;  // never adopted, or already taken
+            ctxs.erase(it);
+            if (frame_stream != nullptr && frame_stream == c.h) frame_stream = nullptr;
+        }
+        // Past the erase this ctx is unreachable from any harvest, so the handle is ours.
+        HQUIC h = std::exchange(c.h, nullptr);
+        if (h != nullptr && !app_close_in_progress) api->StreamClose(h);
+        return &c;
     }
 
     /** @brief CONNECTED hook: the server presents its H3 face as soon as QUIC
@@ -744,6 +819,11 @@ std::uint64_t webtransport_transport_t::dropped_rx() const noexcept {
 
 std::uint64_t webtransport_transport_t::malformed_rx() const noexcept {
     return impl_->malformed_rx.load(std::memory_order_relaxed);
+}
+
+std::size_t webtransport_transport_t::live_streams() const noexcept {
+    const std::lock_guard lock(impl_->conn_m);
+    return impl_->ctxs.size();
 }
 
 namespace {

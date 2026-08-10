@@ -593,11 +593,16 @@ class msquic_endpoint_t {
         //    are closed), then the api table itself.
         if (config != nullptr) api->ConfigurationClose(config);
         if (reg != nullptr) api->RegistrationClose(reg);
+        // Every callback has drained (the Closes above block on that) — take their published
+        // writes before the members (framer_ et al.) destruct, AND before the two stores
+        // below. The acquire sits ahead of them deliberately (#1163): `api` is read by
+        // callbacks, so clearing it after this point would be a write with no happens-before
+        // edge to those reads, and TSan reports it as a race against a callback that has in
+        // fact already finished. Nothing here is ordering-sensitive at run time — the Closes
+        // are the real barrier — so the annotation goes where it makes the claim true.
+        tsan_acquire(this);
         MsQuicClose(api);
         api = nullptr;
-        // Every callback has drained (the Closes above block on that) — take
-        // their published writes before the members (framer_ et al.) destruct.
-        tsan_acquire(this);
     }
 
     /**
