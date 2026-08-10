@@ -710,6 +710,10 @@ result_t<vertex_t*> graph_t::ensure_vertex_ptr(std::span<const std::byte> key,
     return leaf;  // never null: the deepest level was just found or created
 }
 
+std::uint64_t graph_t::target_canonical_resolves() const noexcept {
+    return target_canonical_resolves_.load(std::memory_order_relaxed);
+}
+
 std::uint64_t graph_t::ancestor_walks() const noexcept {
     return ancestor_walks_.load(std::memory_order_relaxed);
 }
@@ -989,7 +993,22 @@ namespace {
 }  // namespace
 
 void graph_t::dispatch_edge_target(const edge_view_t& e, const rope_t& value) {
-    vertex_t* target = find_ptr(*e.target_key);
+    // The bound spelling first (#830): a slot deref is a bounds check, a slot load and a
+    // generation compare — flat at every address depth — where `find_ptr` walks the key
+    // segment by segment. `deref_vertex_slot` refuses a stale generation, a saturated one, an
+    // out-of-range index and an unregistered (placeholder) vertex, so a refusal here means
+    // "this answer is no longer trustworthy", NOT "no target": we fall through to the
+    // canonical walk, which is the same resolution the edge did before this cache existed.
+    // Drop-never-misroute (RFC-0024 §5.1) is therefore preserved with no drop added at all.
+    vertex_t* target = nullptr;
+    if (e.binding.bound()) {
+        if (const auto bound = deref_vertex_slot(e.binding.index, e.binding.generation))
+            target = bound->get();
+    }
+    if (target == nullptr) {
+        target_canonical_resolves_.fetch_add(1, std::memory_order_relaxed);
+        target = find_ptr(*e.target_key);
+    }
     // Each of the three drops below is counted before returning (delivery_drops()). The
     // drop itself is specified — this leg fails alone and the write still succeeded — but
     // an UNCOUNTED drop is indistinguishable from a delivery that never had to happen, for
@@ -1607,6 +1626,20 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
     // SUBSCRIBE right on this (the producer's) :acl, under the door's caller context.
     if (!acl_allows(v, caller, acl_right_t::SUBSCRIBE))
         return std::unexpected(status_t::PERMISSION_DENIED);
+
+    // Mint the local target's binding ONCE, here (#830) — after every door has finished
+    // deciding what `s.target_key` is (`subscribe_wire` CLEARS it for a remote binding, so a
+    // mint at any earlier door would bind an edge that has no local target). The canonical
+    // walk this replaces is `find_ptr` per delivery, linear in the target's address depth;
+    // the deref that replaces it is flat. Failure here is not an error: an unbound edge
+    // simply keeps the canonical spelling, which is what a target that does not exist yet,
+    // one that is a placeholder, and one whose generation has saturated all get.
+    if (s.target_key) {
+        if (vertex_t* const target = find_ptr(*s.target_key); target != nullptr) {
+            if (const auto slot = vertex_slot(vertex_handle_t{target}))
+                s.binding = target_binding_t{.index = slot->index, .generation = slot->generation};
+        }
+    }
 
     // Latch the current value to the new subscriber iff THIS SUBSCRIBER asked for it
     // (`policy.durability_request()`, RFC-0022 §3.A) and the producer already holds an LKV

@@ -659,6 +659,39 @@ struct subscriber_remote_t {
 using target_key_t = std::shared_ptr<const std::vector<std::byte>>;
 
 /**
+ * @brief The sentinel slot index meaning "this edge carries no binding" (#830).
+ *
+ * Not `0`: slot 0 is the graph root, a real index. A separate `bool` would cost the same
+ * word after padding and admits the state "bound, but to nothing".
+ */
+inline constexpr std::uint32_t kUnboundTargetSlot = 0xFFFFFFFFu;
+
+/**
+ * @brief A subscription edge's minted binding to its local target vertex (#830, RFC-0024
+ *        machinery used node-locally).
+ *
+ * `dispatch_edge_target` re-resolved `target_key` from the root on EVERY delivery, and
+ * `find_ptr` is linear in address depth (+5.75 ns/segment measured; the full terminus leg
+ * +21.3 ns/segment, because a deep dst also scales the arena decode, the mount peek and the
+ * descent). A slot deref is flat at ~11 ns. So the edge carries the pair minted at admission
+ * and the canonical walk becomes the FALLBACK, taken whenever the binding is absent (the
+ * target did not exist yet, or was unmintable) or stale (`bound_generation_matches` refuses
+ * it after a retire).
+ *
+ * This is a cache of an ANSWER, never of a permission: the deref revalidates the generation
+ * and the registered bit, and `dispatch_edge_target` still evaluates `acl_allows` at the
+ * deref'd vertex per delivery — the RFC-0024 §6.2 hot-path rule. Mismatch drops to canonical
+ * resolution rather than delivering, so the edge can never misroute into a successor tenant.
+ */
+struct target_binding_t {
+    std::uint32_t index = kUnboundTargetSlot; /**< @brief Node-scoped vertex slot index. */
+    std::uint32_t generation = 0;             /**< @brief The slot generation at mint time. */
+
+    /** @brief True iff a mint succeeded for this edge. */
+    [[nodiscard]] constexpr bool bound() const noexcept { return index != kUnboundTargetSlot; }
+};
+
+/**
  * @brief Wrap @p key as a shared `target_key_t`, NOTHROW — null on OOM or empty input.
  *
  * Mirrors `vertex_t::try_make_lkv`'s probe-then-commit discipline (#477): under the MCU
@@ -694,6 +727,7 @@ using target_key_t = std::shared_ptr<const std::vector<std::byte>>;
  */
 struct subscriber_t {
     target_key_t target_key;            /**< @brief Canonical PATH key (null ⇒ callback-only). */
+    target_binding_t binding{};         /**< @brief Minted slot for @ref target_key (#830). */
     subscriber_fn_t callback = nullptr; /**< @brief In-process sink fn; null ⇒ target-only
                                              (ADR-0053 §6 rope value). */
     void* callback_ctx = nullptr;       /**< @brief Caller-owned context passed back to
@@ -752,6 +786,7 @@ struct edge_view_t {
     subscriber_fn_t callback = nullptr; /**< @brief The in-process sink fn (null ⇒ none). */
     void* callback_ctx = nullptr;       /**< @brief The sink's caller-owned context. */
     target_key_t target_key; /**< @brief Local re-dispatch target (refcount share, not a copy). */
+    target_binding_t binding{}; /**< @brief The minted slot for that target, or unbound (#830). */
     std::string link;      /**< @brief Remote-delivery link NAME (owning copy; empty ⇒ local). */
     view_t return_route{}; /**< @brief Consumer return route (refcount clone). */
     bool delivery_compact = false; /**< @brief RFC-0004 §E.1 label-compaction opt-in. */
@@ -860,6 +895,7 @@ struct pub_edge_t {
     subscriber_fn_t callback = nullptr;   /**< @brief In-process sink fn (null ⇒ target-only). */
     void* callback_ctx = nullptr;         /**< @brief The sink's caller-owned context. */
     target_key_t target_key;              /**< @brief Local re-dispatch target (refcount share). */
+    target_binding_t binding{};           /**< @brief The minted slot for that target (#830). */
     std::unique_ptr<pub_remote_t> remote; /**< @brief The cold wire half; null for a local edge. */
     std::atomic<bool> active{true};       /**< @brief Monotone true -> false liveness bit. */
 };
@@ -2637,6 +2673,7 @@ class vertex_t {
         e.callback = s.callback;
         e.callback_ctx = s.callback_ctx;
         e.target_key = s.target_key;
+        e.binding = s.binding;
         if (s.remote != nullptr) {
             e.link = s.remote->link;
             e.return_route = s.remote->return_route;
@@ -2662,6 +2699,7 @@ class vertex_t {
         out.callback = s.callback;
         out.callback_ctx = s.callback_ctx;
         out.target_key = s.target_key;  // refcount clone — nothrow, and no longer a malloc
+        out.binding = s.binding;        // two words, trivially copyable
         if (s.remote != nullptr) {
             if (!tr::detail::try_assign(out.link, s.remote->link) ||
                 !tr::detail::try_assign(out.caller, s.remote->caller))
@@ -2738,7 +2776,8 @@ class vertex_t {
                 }
                 e.callback = s.callback;
                 e.callback_ctx = s.callback_ctx;
-                e.target_key = s.target_key;        // refcount clone — nothrow
+                e.target_key = s.target_key;  // refcount clone — nothrow
+                e.binding = s.binding;
                 if (s.remote == nullptr) continue;  // the plain in-process edge: no cold half
                 e.remote.reset(new (std::nothrow) pub_remote_t{});
                 if (e.remote == nullptr ||
@@ -2817,6 +2856,7 @@ class vertex_t {
         out.callback = in.callback;
         out.callback_ctx = in.callback_ctx;
         out.target_key = in.target_key;  // refcount clone — nothrow
+        out.binding = in.binding;        // two words, trivially copyable
         if (in.remote == nullptr) return true;
         if (!tr::detail::try_assign(out.link, in.remote->link) ||
             !tr::detail::try_assign(out.caller, in.remote->caller))

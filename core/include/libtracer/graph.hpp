@@ -1282,6 +1282,19 @@ class graph_t {
     [[nodiscard]] std::uint64_t ancestor_walks() const noexcept;
 
     /**
+     * @brief How many target-edge deliveries fell back to the canonical `find_ptr` walk
+     *        instead of the minted binding (#830) — instrumentation.
+     *
+     * The inverse of a hit counter ON PURPOSE: this is the only path #830 leaves paying the
+     * O(depth) resolve, so counting it costs the fast path nothing at all — no atomic on the
+     * bound leg. Non-zero means one of: the edge was admitted before its target existed (or
+     * against a placeholder / saturated generation, so no mint was possible), or the binding
+     * went stale and `deref_vertex_slot` refused it. Relaxed monotonic counter, and the
+     * observable an ablation uses to prove the bound leg is the one actually running.
+     */
+    [[nodiscard]] std::uint64_t target_canonical_resolves() const noexcept;
+
+    /**
      * @brief Why a subscription edge's delivery was dropped, counted per cause.
      *
      * A path-target edge — the form a wire `SUBSCRIBER` produces, naming a target PATH —
@@ -1608,6 +1621,9 @@ class graph_t {
     std::vector<std::byte> identity_record_;
     // Bubbling-walk instrumentation (RFC-0005) — see ancestor_walks().
     mutable std::atomic<std::uint64_t> ancestor_walks_{0};
+    // Canonical-fallback instrumentation (#830) — see target_canonical_resolves(). Touched
+    // only when a target edge has no usable binding, so the bound leg pays nothing.
+    mutable std::atomic<std::uint64_t> target_canonical_resolves_{0};
     // Per-cause delivery-drop instrumentation — see delivery_drops(). Touched only on the
     // drop path, so the delivering path is byte-identical while nothing drops.
     mutable std::atomic<std::uint64_t> drops_no_target_{0};
