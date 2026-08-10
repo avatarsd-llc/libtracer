@@ -31,6 +31,12 @@ Usage::
 the four package changelogs. ``--commits-file`` is an optional plain list of commit
 subjects since the previous tag (the workflow produces it with ``git log``); it gives
 the model extra grounding.
+
+The body is capped at ``--max-chars`` (see ``GITHUB_BODY_LIMIT``). A release body over
+GitHub's limit is rejected with ``HTTP 422: body is too long``, which is how the v0.9.0
+release object failed **after all four package registries had already published** — an
+un-retryable half-published state. The cap is therefore the script's job, not the
+workflow's: only the script knows where an entry ends.
 """
 import argparse
 import json
@@ -41,6 +47,12 @@ import urllib.error
 import urllib.request
 
 API_URL = "https://api.anthropic.com/v1/messages"
+
+# GitHub rejects a release body over 125 000 characters (HTTP 422). We stop short of
+# it: the AI summary is generated after the sections are measured, and a few hundred
+# characters of drift between what we count and what the API counts must not cost a
+# release. The margin is the only reason this is not simply 125000.
+GITHUB_BODY_LIMIT = 120_000
 MODEL = os.environ.get("RELEASE_NOTES_MODEL", "claude-haiku-4-5-20251001")
 
 # Every publishable package's changelog. Keep in step with `release.yml`'s publish
@@ -107,15 +119,89 @@ def collect_sections(changelog_paths, version):
     return out
 
 
-def render_sections(sections):
-    """Render the per-package changelog sections as one markdown block."""
+def render_sections(sections, budget=None):
+    """Render the per-package changelog sections as one markdown block.
+
+    With a @p budget (characters), every package is trimmed to a max-min FAIR share
+    rather than first-come-first-served: core is an order of magnitude larger than the
+    bindings, so a running cut would spend the whole budget on core and publish the
+    npm/crates/ESP sections as nothing at all — which is #676's failure exactly, the
+    one this tool exists to prevent. Returns ``(text, truncated)``.
+    """
+    if budget is not None:
+        overhead = sum(len(f"#### {label}\n\n\n") for label, _ in sections)
+        sections = share_budget(sections, max(budget - overhead, 0))
+    truncated = any(t for _, _, t in sections) if budget is not None else False
     out = []
-    for label, section in sections:
+    for label, section, *_ in sections:
         out.append(f"#### {label}")
         out.append("")
         out.append(section)
         out.append("")
-    return "\n".join(out).strip()
+    text = "\n".join(out).strip()
+    return (text, truncated) if budget is not None else text
+
+
+def share_budget(sections, budget):
+    """Max-min fair share of @p budget across @p sections.
+
+    Smallest first: each package may take an equal share of what is left, and a
+    package that needs less than its share hands the surplus to the ones still
+    hungry. The result is that the small binding changelogs always survive whole and
+    only the largest package (core) is cut.
+
+    Returns ``[(label, text, truncated), ...]`` in the input order.
+    """
+    order = sorted(range(len(sections)), key=lambda i: len(sections[i][1]))
+    out = [None] * len(sections)
+    left = budget
+    for n, i in enumerate(order):
+        label, text = sections[i]
+        share = left // (len(order) - n)
+        kept, cut = trim_to_entry_boundary(text, share)
+        out[i] = (label, kept, cut)
+        left -= len(kept)
+    return out
+
+
+def changelog_links(changelog_paths, version):
+    """Return a markdown link per package changelog, pinned to this release's tag."""
+    slug = os.environ.get("GITHUB_REPOSITORY", "avatarsd-llc/libtracer")
+    base = f"https://github.com/{slug}/blob/v{version}/"
+    return [f"[{package_label(p)}]({base}{p.replace(os.sep, '/')})" for p in changelog_paths]
+
+
+def trim_to_entry_boundary(section, budget):
+    """Trim @p section to at most @p budget characters, ending on a whole entry.
+
+    Cutting mid-entry would publish half a sentence as if it were the whole change, so
+    the cut walks back to the last line that OPENS something — a heading or a
+    top-level bullet — and drops that line too, since everything from it on is the
+    partial entry. Returns ``(text, truncated)``; ``truncated`` is False when the
+    section already fits.
+    """
+    if len(section) <= budget:
+        return section, False
+    # Split into blocks first and ACCUMULATE, rather than slicing to the budget and
+    # walking back: only the block list knows whether the entry straddling the cut
+    # ended just after it or ran on for another paragraph.
+    blocks = []
+    for line in section.split("\n"):
+        if not blocks or line.startswith("#") or line.startswith("- "):
+            blocks.append([line])
+        else:
+            blocks[-1].append(line)
+    kept, used = [], 0
+    for block in blocks:
+        text = "\n".join(block)
+        cost = len(text) + (1 if kept else 0)
+        if used + cost > budget:
+            break
+        kept.append(text)
+        used += cost
+    while kept and kept[-1].lstrip().startswith("#"):  # no heading over an empty list
+        kept.pop()
+    return "\n".join(kept).rstrip(), True
 
 
 def ai_summary(version, changelog_section, commits):
@@ -172,9 +258,16 @@ def main():
         help="package changelog path(s); repeatable. Default: every package changelog.",
     )
     ap.add_argument("--commits-file")
+    ap.add_argument(
+        "--max-chars",
+        type=int,
+        default=GITHUB_BODY_LIMIT,
+        help=f"cap the emitted body at this many characters (default {GITHUB_BODY_LIMIT}).",
+    )
     args = ap.parse_args()
 
-    sections = collect_sections(args.changelog or DEFAULT_CHANGELOGS, args.version)
+    paths = args.changelog or DEFAULT_CHANGELOGS
+    sections = collect_sections(paths, args.version)
     section = render_sections(sections)
     commits = ""
     if args.commits_file and os.path.exists(args.commits_file):
@@ -190,9 +283,26 @@ def main():
         out.append("---")
         out.append("")
     if section:
-        out.append(f"### Changelog — {args.version}")
+        heading = f"### Changelog — {args.version}"
+        notice = (
+            "> **Truncated** — the full release body exceeded GitHub's 125 000-character "
+            "limit. Nothing is missing from the repository; the complete changelogs for "
+            "this tag: " + ", ".join(changelog_links(paths, args.version)) + "."
+        )
+        # The summary is never trimmed: it is small, it is the part written FOR this
+        # page, and a reader who loses it loses the only thing the changelogs do not say.
+        budget = args.max_chars - len("\n".join(out + [heading, "", "", notice, ""]))
+        section, truncated = render_sections(sections, max(budget, 0))
+        out.append(heading)
         out.append("")
         out.append(section)
+        if truncated:
+            out.append("")
+            out.append(notice)
+            print(
+                f"gen_release_notes: body over {args.max_chars} chars — changelog truncated",
+                file=sys.stderr,
+            )
     if not out:
         out.append(f"libtracer {args.version}.")
     sys.stdout.write("\n".join(out) + "\n")

@@ -257,17 +257,69 @@ class ReleaseNotesTest(unittest.TestCase):
             p = self._write(tmp, "core/CHANGELOG.md", "# c\n\n## [0.1.0] — d\n\n- old\n")
             self.assertEqual(grn.collect_sections([p], "0.7.0"), [])
 
+    def test_a_fitting_body_is_not_trimmed_at_all(self):
+        """The budgeted path must be a no-op when nothing is over — the control arm."""
+        sections = [("core", "- a\n- b"), ("rust", "- c")]
+        plain = grn.render_sections(sections)
+        text, truncated = grn.render_sections(sections, budget=10_000)
+        self.assertFalse(truncated)
+        self.assertEqual(text, plain)
+
+    def test_the_cut_lands_on_an_entry_boundary(self):
+        """Half an entry published as a whole one is worse than a missing entry."""
+        text, truncated = grn.trim_to_entry_boundary("- one\n  cont\n- two\n  cont", 14)
+        self.assertTrue(truncated)
+        self.assertEqual(text, "- one\n  cont")
+
+    def test_a_huge_core_does_not_starve_the_bindings(self):
+        """#676's failure, restated as a budget: every package must still speak.
+
+        First-come-first-served truncation spends the whole budget on core — the npm
+        and crates consumers this tool exists to reach would read nothing.
+        """
+        sections = [("core", "\n".join(f"- core {i}" for i in range(2000))), ("rust", "- rust one")]
+        text, truncated = grn.render_sections(sections, budget=4_000)
+        self.assertTrue(truncated)
+        self.assertIn("- rust one", text)
+        self.assertIn("- core 0", text)
+        self.assertNotIn("- core 1999", text)
+
+    def test_the_real_090_body_fits_under_githubs_limit(self):
+        """The regression itself: v0.9.0's body was 191 358 characters and 422'd."""
+        cwd = os.getcwd()
+        os.chdir(REPO)
+        try:
+            sections = grn.collect_sections(grn.DEFAULT_CHANGELOGS, "0.9.0")
+            full = grn.render_sections(sections)
+            text, truncated = grn.render_sections(sections, budget=grn.GITHUB_BODY_LIMIT)
+        finally:
+            os.chdir(cwd)
+        self.assertGreater(len(full), 125_000, "fixture is stale — this release no longer overflows")
+        self.assertTrue(truncated)
+        self.assertLessEqual(len(text), grn.GITHUB_BODY_LIMIT)
+        self.assertEqual(text.count("#### "), len(grn.DEFAULT_CHANGELOGS))
+
     def test_unknown_package_falls_back_to_its_directory(self):
         """A new package changelog needs no table edit to get a heading."""
         self.assertEqual(grn.package_label("bindings/python/CHANGELOG.md"), "bindings/python")
 
     def test_defaults_cover_every_changelog_in_the_tree(self):
         """DEFAULT_CHANGELOGS must not go stale as packages are added."""
-        found = set()
-        for root, dirs, files in os.walk(REPO):
-            dirs[:] = [d for d in dirs if d not in (".git", "node_modules", "target", "build", "fixtures")]
-            if "CHANGELOG.md" in files:
-                found.add(os.path.relpath(os.path.join(root, "CHANGELOG.md"), REPO))
+        # TRACKED files only. An `os.walk` also finds untracked copies of the repo —
+        # `.claude/` agent worktrees and ablation trees, `bench/vendor/`'s vendored
+        # changelog — and reddens on local scratch state that no release can publish.
+        # It was green in CI only because CI has none of them.
+        listing = subprocess.run(
+            ["git", "-C", REPO, "ls-files", "*CHANGELOG.md"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        found = {
+            line
+            for line in listing.stdout.split("\n")
+            if line and "tools/tests/fixtures/" not in line  # this file's own inputs
+        }
         self.assertEqual(found, set(grn.DEFAULT_CHANGELOGS))
 
     def test_main_emits_every_package_without_an_api_key(self):
