@@ -292,6 +292,22 @@ if(CONFIG_FREERTOS_UNICORE)
 else()
     set(LIBTRACER_CACHE_LINE_BYTES 64)
 endif()
+# Spin-wait safety (#1158, #963.3) — DERIVED from the target, like the padding above, and for
+# the same reason: the chip already knows and asking would only invite the wrong answer. FALSE
+# on every chip target, because the hazard is priority-preemptive scheduling and not core
+# count: a spinner that outranks the lock holder never yields the CPU the holder needs, so on
+# an SMP chip whose spinner and holder happen to share a core the wedge is identical to a C6's.
+# With this false, mem_pool.hpp refuses to instantiate synchronized_pool_t<spin_sync_t> (the
+# `tr::mem::sync_pool_t` alias) and points at tr::esp::critical_pool_t instead — the mistake
+# becomes a compile error rather than a task_wdt reset found under load. TRUE on the `linux`
+# host target, which has a real preemptive multi-core scheduler. Read from IDF_TARGET, which
+# unlike CONFIG_* is defined in BOTH CMake passes, so the early expansion pass renders the same
+# value the build pass does.
+if(IDF_TARGET STREQUAL "linux")
+    set(LIBTRACER_SPIN_WAIT_SAFE true)
+else()
+    set(LIBTRACER_SPIN_WAIT_SAFE false)
+endif()
 configure_file(
     "${LIBTRACER_ROOT}/core/include/libtracer/config.hpp.in"
     "${CMAKE_CURRENT_BINARY_DIR}/generated/include/libtracer/config.hpp"

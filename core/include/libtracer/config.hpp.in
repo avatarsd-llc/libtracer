@@ -281,3 +281,29 @@ using acl_policy_t = config_t::acl_policy_t;
 using lkv_slot_t = config_t::lkv_slot_t;
 
 }  // namespace tr::graph
+
+// ---------------------------------------------------------------------------------------------
+// L0 (tr::mem) build configuration. Delivered by the same header for the same reason (ADR-0068:
+// one file per build, so every TU agrees); a separate namespace because the fact it states
+// belongs to the memory layer, not the graph.
+
+namespace tr::mem {
+
+/**
+ * @brief Whether a task on this target may SPIN-WAIT for a lock another task holds.
+ *
+ * True on a multi-core host: the holder is running on a different core, so a spinner makes
+ * progress possible and the O(1) section costs less than a mutex round-trip. FALSE on a
+ * priority-preemptive scheduler, where a spinner that outranks the holder never yields the
+ * CPU the holder needs to release the lock — the wait becomes unbounded priority inversion
+ * and the board hangs in the watchdog rather than merely running slowly. That is true of a
+ * single-core chip and equally of an SMP chip whose spinner and holder share a core.
+ *
+ * A target fact, so the BUILD sets it and nothing asks the integrator (the same reasoning
+ * that derives @ref tr::graph::kCacheLineBytes rather than exposing it). Its one consumer
+ * is the guard in `synchronized_pool_t`, which refuses to instantiate the spinlock policy
+ * where spin-waiting is unsafe.
+ */
+inline constexpr bool kSpinWaitSafe = @LIBTRACER_SPIN_WAIT_SAFE@;
+
+}  // namespace tr::mem
