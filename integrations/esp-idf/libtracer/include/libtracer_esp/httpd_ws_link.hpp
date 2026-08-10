@@ -394,6 +394,66 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
         return enqueue_drops_.load(std::memory_order_relaxed);
     }
 
+    /**
+     * @brief The LINK-level failure tally — the events that name this link or the shared
+     *        server, not any one peer (#953).
+     *
+     * Read the per-PEER traffic counters through @ref enumerate_peer_stats instead: frames,
+     * bytes and per-session drops are facts about a session and live on it. What is here is
+     * everything with no session to charge — a peer refused before it ever had a slot, a
+     * frame aimed at a session that had already gone, the TX pool's own depth — plus the
+     * two session-lifecycle events an embedder cannot otherwise reconstruct.
+     *
+     * Every field is a monotone count since construction, sampled with relaxed loads: a
+     * snapshot is cheap and lock-free, but the fields are NOT mutually consistent to a
+     * single instant. Differences across two snapshots are the intended use.
+     */
+    struct stats_t {
+        /** @brief Frames never handed to a socket; the sum of the three causes below.
+         *         Same number @ref enqueue_drops returns. */
+        std::uint32_t enqueue_drops = 0;
+        /**
+         * @brief Of those, the ones that found the TX pool with nothing free.
+         *
+         * Separated because it means something different from the other two (#953): a
+         * pool miss is DEPTH pressure — this link already has @ref tx_slot_capacity sends
+         * outstanding — while a refused enqueue names the shared control queue and an OOM
+         * names the heap. Read against @ref tx_slot_capacity: a rising count with a small
+         * pool is a link that wants a deeper one, not a sick server.
+         */
+        std::uint32_t tx_pool_misses = 0;
+        /**
+         * @brief Frames dropped at the head of the send path because the destination had
+         *        already departed, been condemned, or had its slot reclaimed by a new
+         *        session.
+         *
+         * Not a fault: it is the normal race between a fan-out that already snapshotted
+         * its destinations and a peer leaving underneath it. It is counted because a
+         * silent drop here is indistinguishable from a delivery, and because a LARGE
+         * count means the producer is pushing to sessions long dead.
+         */
+        std::uint32_t tx_to_dead_peer = 0;
+        /** @brief Opening handshakes turned away — by the admission predicate or by
+         *         `max_peers`. These never reach a slot, so no session can carry them. */
+        std::uint32_t peers_refused = 0;
+        /** @brief Sessions this link KILLED (three-strike streak or a rejected short
+         *         write) — the count that separates a peer that left from one torn down. */
+        std::uint32_t sessions_condemned = 0;
+        /** @brief Inbound frames refused at the abuse cap, before any reassembly. The peer
+         *         is dropped with them. No session is charged: the cap is applied before
+         *         the slot is resolved. */
+        std::uint32_t rx_dropped_oversize = 0;
+        /** @brief Inbound frames dropped because the oversize payload buffer could not be
+         *         allocated. The session is closed with them. */
+        std::uint32_t rx_dropped_alloc = 0;
+    };
+
+    /**
+     * @brief Snapshot @ref stats_t. Lock-free, callable from any task, never re-enters the
+     *        embedder — so a host may hold its own lock across it.
+     */
+    [[nodiscard]] stats_t stats() const noexcept;
+
     /** @brief TX work slots claimed RIGHT NOW (filling, queued, or sending). */
     [[nodiscard]] std::size_t tx_slots_busy() const noexcept;
 
@@ -787,6 +847,25 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     /** @brief Frames that never reached a socket, for this link's life — see @ref
      *         enqueue_drops. Relaxed: a diagnostic count, ordered against nothing. */
     std::atomic<std::uint32_t> enqueue_drops_{0};
+    /**
+     * @brief The rest of @ref stats_t. Relaxed like @ref enqueue_drops_ and for the same
+     *        reason: each is a diagnostic tally ordered against nothing, and none of them
+     *        sits on the per-frame path — every one is bumped on a refusal, a teardown, or
+     *        a drop, so the steady-state send and receive legs are untouched (#953).
+     */
+    /** @brief Count+log an over-cap inbound frame, OUT OF LINE — see the definition for
+     *         why the per-frame path must not carry a log call site (#994's lesson). */
+    void note_rx_oversize(std::size_t len);
+    /** @brief Count+log an RX payload allocation failure, out of line. */
+    void note_rx_alloc_fail(std::size_t len);
+    /** @brief Log a reassembly that would pass the cap, out of line. */
+    void note_reassembly_over_cap(std::size_t had, std::size_t adding);
+    std::atomic<std::uint32_t> tx_pool_misses_{0};
+    std::atomic<std::uint32_t> tx_to_dead_peer_{0};
+    std::atomic<std::uint32_t> peers_refused_{0};
+    std::atomic<std::uint32_t> sessions_condemned_{0};
+    std::atomic<std::uint32_t> rx_dropped_oversize_{0};
+    std::atomic<std::uint32_t> rx_dropped_alloc_{0};
     bool peer_named_;
     bool owns_httpd_ = true;  // false when adopting an external server (dtor must not httpd_stop)
     /** @brief Set at destructor entry: refuses new TX slot claims so the pool drain

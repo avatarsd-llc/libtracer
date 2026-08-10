@@ -1335,6 +1335,13 @@ esp_err_t httpd_ws_link_t::ws_pre_handshake(httpd_req_t* req) {
     if (!admit) ESP_LOGW(kTag, "peer refused by admission hook (fd=%d)", httpd_req_to_sockfd(req));
     {
         const std::lock_guard lock(gate->m);
+        // Count the refusal here (#953) rather than beside its log line: this is a STATIC
+        // callback, so the link is only reachable through the gate, and only under `m`.
+        // The raised `depth` above already guarantees the link outlives the predicate, but
+        // re-resolving under the lock is the idiom every other latched callback uses and
+        // costs nothing on a mutex this function was taking anyway.
+        if (!admit && gate->link != nullptr)
+            gate->link->peers_refused_.fetch_add(1, std::memory_order_relaxed);
         --gate->depth;
     }
     gate->cv.notify_all();
@@ -1346,8 +1353,14 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
     // Pass 1 (max_len 0): read the header only — fills frame.len / frame.type. The
     // payload is NOT consumed off the socket here; pass 2 below does that.
     esp_err_t err = httpd_ws_recv_frame(req, &frame, 0);
-    if (err != ESP_OK) return err;                    // socket error => httpd closes the session
-    if (frame.len > kMaxFrameBytes) return ESP_FAIL;  // abusive frame => drop the peer
+    if (err != ESP_OK) return err;  // socket error => httpd closes the session
+    if (frame.len > kMaxFrameBytes) {
+        // Counted and NAMED (#953). No session is charged: the cap is deliberately applied
+        // before the slot lookup, so there is nothing to charge yet — which is also why
+        // this drop was invisible from every published surface until now.
+        note_rx_oversize(frame.len);
+        return ESP_FAIL;  // abusive frame => drop the peer
+    }
 
     // Pass 2: ALWAYS drain the payload — even a frame type we ignore must be consumed,
     // or its bytes stay in the stream and the next recv reads them as a frame header
@@ -1368,7 +1381,7 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
         } else {
             heap_payload.reset(new (std::nothrow) std::byte[frame.len]);
             if (heap_payload == nullptr) {
-                ESP_LOGW(kTag, "rx alloc failed (len=%u) - closing session", (unsigned)frame.len);
+                note_rx_alloc_fail(frame.len);
                 return ESP_FAIL;
             }
             payload = heap_payload.get();
@@ -1411,6 +1424,7 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
                 for (const auto& s : slots_)
                     if (s->open) ++open_n;
                 if (open_n >= max_peers_) {
+                    peers_refused_.fetch_add(1, std::memory_order_relaxed);
                     ESP_LOGW(kTag, "peer refused: at max_peers=%u", (unsigned)max_peers_);
                     return ESP_FAIL;
                 }
@@ -1477,6 +1491,10 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
     if (slot->asm_buf.size() + body.size() > kMaxFrameBytes) {
         slot->asm_buf.clear();
         note_rx_drop(slot);
+        // The peer counter above already had this; what was missing is any way to see it
+        // without polling (#953). Logged at the same level as its sibling alloc failure
+        // just below, which was the only one of the two that ever said anything.
+        note_reassembly_over_cap(slot->asm_buf.size(), body.size());
         return ESP_OK;  // reassembly would exceed the cap — drop the message
     }
     if (!slot->asm_buf.append(body)) {
@@ -1629,6 +1647,36 @@ void httpd_ws_link_t::note_rx_drop(session_t* slot) {
     ++slot->st.rx_drops;
 }
 
+/**
+ * @brief Count and name an over-cap inbound frame.
+ *
+ * `noinline` deliberately, and it is #994's lesson applied before it cost anything:
+ * `on_data_frame` runs on every inbound FRAME, and letting a log call site — format string,
+ * argument marshalling, the call setup — inline into it grew that function by 350 bytes at
+ * `-Os` for branches that are almost never taken. Measured, not assumed.
+ */
+[[gnu::noinline]] void httpd_ws_link_t::note_rx_oversize(std::size_t len) {
+    rx_dropped_oversize_.fetch_add(1, std::memory_order_relaxed);
+    ESP_LOGW(kTag, "rx frame over the abuse cap (len=%u > %u) - dropping the peer", (unsigned)len,
+             (unsigned)kMaxFrameBytes);
+}
+
+/** @brief Count and name an RX payload allocation failure. `noinline` for the reason on
+ *         @ref note_rx_oversize. */
+[[gnu::noinline]] void httpd_ws_link_t::note_rx_alloc_fail(std::size_t len) {
+    rx_dropped_alloc_.fetch_add(1, std::memory_order_relaxed);
+    ESP_LOGW(kTag, "rx alloc failed (len=%u) - closing session", (unsigned)len);
+}
+
+/** @brief Name a reassembly that would pass the cap — the per-peer counter is bumped by the
+ *         caller, which holds the slot; this adds only the log the site never had.
+ *         `noinline` for the reason on @ref note_rx_oversize. */
+[[gnu::noinline]] void httpd_ws_link_t::note_reassembly_over_cap(std::size_t had,
+                                                                 std::size_t adding) {
+    ESP_LOGW(kTag, "reassembly over the cap (%u + %u > %u) - message dropped", (unsigned)had,
+             (unsigned)adding, (unsigned)kMaxFrameBytes);
+}
+
 void httpd_ws_link_t::deliver(std::string_view peer, std::span<const std::byte> frame) {
     // Peer-named bus tag when the facet is on (each tab its own return route); the flat
     // point-to-point sink otherwise — matching what fwd_router_t::add_child installed.
@@ -1655,7 +1703,13 @@ void httpd_ws_link_t::queue_send(const session_ref_t& to,
     // that makes it a property of the seam rather than of its callers, and it costs one
     // uncontended mutex on a path that is about to memcpy a frame and do a syscall.
     const int fd = live_fd(to);
-    if (fd < 0) return;
+    if (fd < 0) {
+        // Counted (#953). Normally benign — a fan-out that snapshotted its destinations
+        // racing a departure — but silent, and a silent drop here reads exactly like a
+        // delivery from outside.
+        tx_to_dead_peer_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     // Gather-copy the payload ONCE: httpd_queue_work is asynchronous, so the caller's
     // spans are gone by the time the httpd task runs tx_work. The destination is a
     // pre-allocated pool slot claimed lock-free (CAS), gathered straight into its inline
@@ -1693,6 +1747,12 @@ void httpd_ws_link_t::queue_send(const session_ref_t& to,
             }
         }
         if (work != nullptr) work->payload = dst;
+    } else {
+        // The pool had nothing free. Still an enqueue_drops below — the total is unchanged
+        // — but recorded separately, because it is evidence about THIS link's outstanding
+        // depth against tx_slot_capacity, while the other two causes name the shared
+        // control queue and the heap (#953).
+        tx_pool_misses_.fetch_add(1, std::memory_order_relaxed);
     }
     bool queued = false;
     if (work != nullptr) {  // work == nullptr => no slot, or OOM: drop this frame
@@ -1719,6 +1779,21 @@ void httpd_ws_link_t::queue_send(const session_ref_t& to, std::span<const std::b
     // One-span sugar over the gather form — the single copy/backpressure locus.
     const std::span<const std::byte> one[] = {frame};
     queue_send(to, std::span<const std::span<const std::byte>>(one));
+}
+
+httpd_ws_link_t::stats_t httpd_ws_link_t::stats() const noexcept {
+    // Relaxed throughout, and deliberately NOT a consistent cut: each field is an
+    // independent tally and taking a lock to align them would put a diagnostic read in
+    // front of the send path. Two snapshots differenced is the intended use (#953).
+    stats_t s;
+    s.enqueue_drops = enqueue_drops_.load(std::memory_order_relaxed);
+    s.tx_pool_misses = tx_pool_misses_.load(std::memory_order_relaxed);
+    s.tx_to_dead_peer = tx_to_dead_peer_.load(std::memory_order_relaxed);
+    s.peers_refused = peers_refused_.load(std::memory_order_relaxed);
+    s.sessions_condemned = sessions_condemned_.load(std::memory_order_relaxed);
+    s.rx_dropped_oversize = rx_dropped_oversize_.load(std::memory_order_relaxed);
+    s.rx_dropped_alloc = rx_dropped_alloc_.load(std::memory_order_relaxed);
+    return s;
 }
 
 std::size_t httpd_ws_link_t::tx_slots_busy() const noexcept {
@@ -1752,6 +1827,10 @@ int httpd_ws_link_t::live_fd(const session_ref_t& to) const {
 }
 
 void httpd_ws_link_t::condemn(int fd) {
+    // Counted (#953): this is the ONLY place the link kills a session of its own accord,
+    // so it is the whole difference between a peer that left and one that was torn down —
+    // a distinction an embedder could not previously make from any published surface.
+    sessions_condemned_.fetch_add(1, std::memory_order_relaxed);
     // The close that does NOT ride the control socket, and the reason this round exists.
     //
     // `httpd_sess_trigger_close` is `httpd_queue_work(httpd_sess_close, sd)`
@@ -2253,7 +2332,15 @@ void httpd_ws_link_t::peer_endpoint_t::send(std::span<const std::span<const std:
     session_ref_t to;
     {
         const std::lock_guard lock(owner_->peers_m_);
-        if (!slot_->open || slot_->dead) return;  // departed or condemned => no-op
+        if (!slot_->open || slot_->dead) {
+            // Counted HERE as well as at queue_send's head (#953), and it has to be: this
+            // early-out is the one a directed reply actually takes, so a counter only at
+            // the queue_send locus would read zero for the very path most likely to race a
+            // departure. Same field either way — it is one event with two detection sites,
+            // and each drops exactly one frame.
+            owner_->tx_to_dead_peer_.fetch_add(1, std::memory_order_relaxed);
+            return;  // departed or condemned => no-op
+        }
         to = session_ref_t{slot_, slot_->gen};
     }
     owner_->queue_send(to, iov);
