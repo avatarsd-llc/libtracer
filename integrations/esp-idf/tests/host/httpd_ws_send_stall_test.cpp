@@ -60,6 +60,7 @@
 #include <vector>
 
 #include "fake_httpd.hpp"
+#include "libtracer/path.hpp"
 #include "libtracer_esp/httpd_ws_link.hpp"
 
 namespace {
@@ -280,7 +281,9 @@ void test_jammed_queue_still_closes_the_doomed_fd() {
 
     // Fill the control queue with frames for the peer that is about to be found
     // desynchronised — the fan-out backlog, undrained.
-    auto* const doomed = link->peer_link("fd700");
+    // `p0` — the routable slot name (#994). This used to spell the `fd<n>` fallback, which
+    // was the peer's name only because a fake fd has no `getpeername` to decode.
+    auto* const doomed = link->peer_link("p0");
     check(doomed != nullptr, "the doomed peer resolves through the bus facet");
     for (std::size_t i = 0; i < kCtrlDepth; ++i) doomed->send(std::span<const std::byte>(kBody));
     check(fake_httpd::instance().queue_depth() == kCtrlDepth, "the control queue is full");
@@ -358,10 +361,16 @@ void test_dead_mark_does_not_outlive_its_session() {
 }
 
 // ---------------------------------------------------------------------------
-// 8 — the peer NAME, over a real AF_INET6 socket.
+// 8 — the peer's ADDRESS, over a real AF_INET6 socket (and the routable name beside it).
 // ---------------------------------------------------------------------------
 /**
- * @brief A peer on an IPv6 socket must be named by its address, not by zeroes.
+ * @brief A peer on an IPv6 socket must have its address decoded, not read as zeroes.
+ *
+ * Since #994 the address is no longer the peer's graph NAME — that is `p<slot>`, asserted
+ * here too so the two cannot drift apart — but the decode this case exists for still has
+ * to work, because the address is what the strike log and `enumerate_peer_stats` report.
+ * Moving the subject from `enumerate_peers` to `peer_stats_t::endpoint_str` is the whole
+ * of the change: the sockaddr_in6 misdecode below is the regression this still guards.
  *
  * With `CONFIG_LWIP_IPV6` on (the default here) `esp_http_server` binds `PF_INET6`, so
  * every accepted WS socket is AF_INET6 and `getpeername` returns a `sockaddr_in6`.
@@ -412,10 +421,23 @@ void test_peer_name_on_an_ipv6_socket() {
     claim(peer_fd);
     std::string named;
     link->enumerate_peers([&named](std::string_view p) { named = std::string(p); });
-    std::printf("       peer named \"%s\"\n", named.c_str());
-    check(named.rfind("0.0.0.0", 0) != 0, "an IPv6 peer is NOT named 0.0.0.0");
-    check(named.rfind("fd", 0) != 0 && !named.empty(), "getpeername was decoded, not given up on");
-    check(named.rfind("::1:", 0) == 0, "the name carries the loopback address it connected from");
+    std::string endpoint;
+    link->enumerate_peer_stats([&endpoint](const httpd_ws_link_t::peer_stats_t& s) {
+        endpoint = std::string(s.endpoint_str);
+    });
+    std::printf("       peer named \"%s\", address \"%s\"\n", named.c_str(), endpoint.c_str());
+    check(endpoint.rfind("0.0.0.0", 0) != 0, "an IPv6 peer's address is NOT 0.0.0.0");
+    check(endpoint.rfind("fd", 0) != 0 && !endpoint.empty(),
+          "getpeername was decoded, not given up on");
+    check(endpoint.rfind("::1:", 0) == 0, "the address carries the loopback it connected from");
+    // #994: the NAME is the routable slot index, and it must be spellable as a path
+    // segment — the whole point of moving the address off it.
+    check(named == "p0", "the peer's graph name is its slot, p0");
+    // Asserted through THE predicate (ADR-0073 §1), not a hand-rolled character list: this
+    // is the exact function the wire boundary and the path parser call, so the test cannot
+    // pass while a real `dst` would still be rejected. The old `<ip>:<port>` name fails it.
+    check(tr::graph::valid_segment(named), "and it passes valid_segment, so a dst can spell it");
+    check(!tr::graph::valid_segment(endpoint), "while the address it replaced could never be one");
 
     link.reset();
     fake_httpd::instance().close_all();

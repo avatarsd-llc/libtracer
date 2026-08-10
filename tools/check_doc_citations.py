@@ -671,11 +671,11 @@ ANCHORS = [
     # core/tests/tlv_arena_test.cpp
     ('core/tests/tlv_arena_test.cpp:289', 'const std::vector<std::byte> deep_bytes = encode(nested(100));'),
     # integrations/esp-idf/libtracer/httpd_ws_link.cpp
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:70',
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:71',
      '* reply, and (the deep path) the whole /unit batch-apply transaction. The device'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:77', 'constexpr std::size_t kHttpdTaskStack = 12288;'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:341', 'if (chunk.empty()) return true;'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:347',
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:78', 'constexpr std::size_t kHttpdTaskStack = 12288;'),
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:396', 'if (chunk.empty()) return true;'),
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:402',
      'if (len_ != 0) std::memcpy(grown.get(), bytes_.get(), len_);'),
     # integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp
     ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:52',

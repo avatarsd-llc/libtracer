@@ -27,6 +27,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed — BREAKING
 
+- **`httpd_ws_link_t` names accepted sessions `p<slot>`, not `<ip>:<port>`** (#994,
+  ADR-0073 §2, #426). The old name could be ENUMERATED and never ADDRESSED:
+  `graph::valid_segment` rejects both `.` and `:`, so a peer listed by the link's
+  synthesized `:children[]` could not be spelled back in a `dst` path, and every FWD
+  descent into one answered `INVALID_PATH (0x0021)`. That broke the enumerable⇒addressable
+  invariant RFC-0020 §6 names as the precondition for its NAME-hop rejection — on every
+  ESP-IDF node, while core's own bus servers had shipped `p<slot>` since #426.
+  **Anything holding an `<ip>:<port>` peer name must re-resolve it**: `peer_link()`,
+  `enumerate_peers()`, the departure seam and `peer_stats_t::name` all carry the slot name
+  now. The physical address is not lost — it moved to the new
+  `peer_stats_t::endpoint_str`, and the strike log prints both.
+
 - **The component now requires ESP-IDF `>=5.5.5`** (`idf_component.yml`, was `>=5.3`) — a
   TX-path correctness floor, not a packaging preference (#949). Below it `httpd_queue_work`
   is a bare non-blocking `sendto` on `esp_http_server`'s loopback control socket, so an
