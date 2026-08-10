@@ -10,6 +10,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-08-10
+
+### Changed
+
+- **Picks up the core's `grammar::total_size_fits` split (#1177).** This component compiles the
+  core C++ sources, so the change reaches it — and this is the target it was careful about.
+  On a 32-bit target (`std::size_t` is 4 bytes on every ESP32 variant this component builds
+  for) the compile-time dispatch selects `total_size_fits_narrow`, which is the #921 wrap-free
+  subtractive chain **verbatim**. The rv32 overflow check against a hostile
+  `length = 0xFFFFFFFF` is byte-for-byte what it was, and the "+1 instruction on a
+  trailer-less header" cost #921 recorded still describes what this component compiles. The
+  speedup #1177 measured is a 64-bit-host effect and does not apply here; nothing regresses.
+
+- **Picks up the core's WebTransport handshake OOM scoping (#1108).** Only relevant to a build
+  that opts into QUIC/WebTransport, which this component does not build by default.
+
 ## [0.9.0] — 2026-08-10
 
 ### Added

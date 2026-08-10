@@ -14,6 +14,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-08-10
+
 ### Added
 
 - **`graph::target_binding_t` and `graph_t::target_canonical_resolves()` — local target edges
@@ -33,6 +35,36 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   bound leg carries no atomic at all; a non-zero value means the edge was admitted before its
   target existed or its binding went stale. `subscriber_t`, `edge_view_t` and `pub_edge_t`
   each grow one 8-byte trivially-copyable field.
+
+### Changed
+
+- **`grammar::total_size_fits` takes its wrap-free bound only at the width that can wrap;
+  the subtractive chain moves to the new `grammar::total_size_fits_narrow` (#1177).** #921
+  replaced a single-compare total-encoded-size bound with a chain that never forms a value
+  able to wrap, and that chain then ran at every `Size`. The defect it closes is real and
+  **32-bit-only**: a wire `length` of `0xFFFFFFFF` overflows a 32-bit `std::size_t`, narrows
+  to 17, passes `avail < total` and hands `walk` a payload span past the buffer. But `header`
+  is at most 6, `length` at most `0xFFFFFFFF` and the trailer at most 12, so the total is
+  under `2^32 + 18` — on any `Size` strictly wider than the 32-bit wire length no sum can
+  wrap and the bound is one compare. `total_size_fits` now dispatches on `sizeof(Size)` at
+  compile time and calls `total_size_fits_narrow` — the #921 body verbatim — only at 32-bit
+  width. **No behavioural change at any width** and no wire-grammar change; the rv32 overflow
+  check is byte-for-byte what it was. `parse_header` runs once per TLV, so the chain's extra
+  compares multiplied across a frame: `compact-forward 64B/fan1/1ep` measured **−30.8% p50 /
+  −31.4% 1-over-throughput** against an A/A null of +3.1%/+4.4% on the pinned bench host,
+  returning the leg to its pre-#921 level. `total_size_fits_narrow` is new public surface only
+  in the sense that it is reachable; callers should keep calling `total_size_fits`.
+
+- **A WebTransport handshake that runs out of memory now aborts one stream instead of the
+  connection (#1108).** `accumulate`'s two failure modes had one disposition. Exceeding
+  `kMaxHandshakeBytes` is a statement about the PEER and remains connection-fatal
+  (`kAppErrBadRequest`), unchanged. Running out of memory is a statement about US, and taking
+  down a session the peer already established because our heap is tight is the over-broad
+  refusal #919 removed — so it now aborts just that stream and leaves the connection and any
+  live session up. Peer-driven allocations on this path (the handshake accumulator and the
+  per-stream context list) go through the failable `tr::detail::try_reserve` seam and nothrow
+  `new`, and the 0x41 frame-channel tail no longer copies at all — its buffer is moved out of
+  the accumulator rather than duplicated.
 
 ## [0.9.0] — 2026-08-10
 
