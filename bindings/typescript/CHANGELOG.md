@@ -7,6 +7,13 @@ versioning/publish strategy.
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-08-10
+
+No changes. This package is an independent native implementation of the protocol —
+it does not compile the C++ core — so nothing in 0.9.1 (a core codec bound, a WebTransport
+allocation scoping, and CI/bench gating) reaches it. Released at 0.9.1 only because one tag
+publishes every package in lockstep.
+
 ## [0.9.0] — 2026-08-10
 
 ### Added
