@@ -53,7 +53,8 @@ jobs:
       - name: Build the PR (candidate) benchmark (Release)
         run: |
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
-          cmake --build bench/build --target bench_libtracer bench_forward_heap -j
+          cmake --build bench/build --target bench_libtracer bench_forward_heap \
+            bench_compact_delivery bench_forward_demux -j
       # A hard, absolute gate (no baseline needed): the FWD forward hop MUST allocate
       # zero heap (ADR-0038 §16KB-RAM), measured by a global operator-new counter.
       - name: Zero-heap forward gate (ADR-0038 §16KB-RAM)
@@ -66,7 +67,8 @@ jobs:
           git fetch --no-tags origin main
           git worktree add --detach ../main-baseline origin/main
           cmake -S ../main-baseline/bench -B ../main-baseline/bench/build -DCMAKE_BUILD_TYPE=Release
-          cmake --build ../main-baseline/bench/build --target bench_libtracer bench_forward_heap -j
+          cmake --build ../main-baseline/bench/build --target bench_libtracer bench_forward_heap \
+            bench_compact_delivery bench_forward_demux -j
       # The gate's OWN decision rules, unit-tested before anything is timed: #763 was a
       # defect in the gate, not in what it measures, so the rules are regression-tested
       # against the recorded false-failure and true-regression sample sets.
@@ -258,7 +260,8 @@ jobs:
           if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
             git worktree add --detach ../parent-baseline HEAD^
             cmake -S ../parent-baseline/bench -B ../parent-baseline/bench/build -DCMAKE_BUILD_TYPE=Release
-            cmake --build ../parent-baseline/bench/build --target bench_libtracer bench_forward_heap -j
+            cmake --build ../parent-baseline/bench/build --target bench_libtracer \
+              bench_forward_heap bench_compact_delivery bench_forward_demux -j
           else
             echo "root commit — no parent to ratchet against"
           fi

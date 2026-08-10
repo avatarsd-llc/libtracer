@@ -62,6 +62,14 @@ import sys
 HERE = pathlib.Path(__file__).resolve().parent
 BENCH = HERE / "build" / "bench_libtracer"
 BENCH_FWD = HERE / "build" / "bench_forward_heap"
+# The gated points no longer all come from one binary (#1173). Each POINTS entry names
+# the binary that produces its RESULT rows; they all emit bench_common's shared 12-column
+# format, so `run_bench_once` reads any of them unchanged.
+BENCH_BY_KEY = {
+    "main": "bench_libtracer",
+    "compact": "bench_compact_delivery",
+    "demux": "bench_forward_demux",
+}
 BASELINE = HERE / "perf_baseline.json"
 
 # Canonical points: (mode, size, fanout, endpoints). RESULT cols (collate.py):
@@ -90,12 +98,16 @@ BASELINE = HERE / "perf_baseline.json"
 # same commit; `PointsAreDocumented` in bench/test_perf_gate.py fails until it does
 # (#1041).
 POINTS = [
-    ("inproc", 64, 1, 1),
-    ("inproc-borrow", 64, 1, 1),
-    ("inproc", 64, 1024, 1),
-    ("inproc-path", 64, 1, 8192),
-    ("mixed", 0, 6, 128),
-    ("fold-b4", 512, 1, 1),
+    ("main", "inproc", 64, 1, 1),
+    ("main", "inproc-borrow", 64, 1, 1),
+    ("main", "inproc", 64, 1024, 1),
+    ("main", "inproc-path", 64, 1, 8192),
+    ("main", "mixed", 0, 6, 128),
+    ("main", "fold-b4", 512, 1, 1),
+    ("compact", "compact-forward", 64, 1, 1),
+    ("compact", "compact-terminus", 64, 1, 1),
+    ("demux", "fwd-demux-fixed", 79, 1, 1),
+    ("demux", "fwd-demux-scan", 79, 64, 64),
 ]
 # No-baseline absolute-floor backstop, per point: a fan-1024 write's p50 is the
 # WHOLE 1024-subscriber fan-out (~13 µs), so the 1 µs 1:1 floor cannot apply.
@@ -381,13 +393,20 @@ def metric(rows, mode, size, fan, ep):
             "mean_ns": int(statistics.median(mean))}
 
 
-def best_of(bench: pathlib.Path, runs: int) -> dict[str, dict]:
-    """Best run per point: min p50, max deliveries/s across `runs` executions."""
+def best_of(binaries: dict[str, pathlib.Path], runs: int) -> dict[str, dict]:
+    """Best run per point: min p50, max deliveries/s across `runs` executions.
+
+    Each BINARY is executed once per run and its rows are matched only against the points
+    that declare it, so adding a point from a new binary costs one extra process per run
+    rather than one per point.
+    """
     cur: dict[str, dict] = {}
     for _ in range(max(1, runs)):
-        rows = run_bench_once(bench)
-        for (m, s, f, e) in POINTS:
-            v = metric(rows, m, s, f, e)
+        rows_by_bin = {b: run_bench_once(path) for b, path in binaries.items()}
+        for (b, m, s, f, e) in POINTS:
+            if b not in rows_by_bin:
+                continue
+            v = metric(rows_by_bin[b], m, s, f, e)
             if not v:
                 continue
             k = f"{m}/{s}/{f}/{e}"
@@ -431,7 +450,7 @@ def best_of(bench: pathlib.Path, runs: int) -> dict[str, dict]:
 PAIRS_DEFAULT = 4
 
 
-def paired_samples(cand: pathlib.Path, base: pathlib.Path,
+def paired_samples(cand: dict[str, pathlib.Path], base: dict[str, pathlib.Path],
                    pairs: int) -> dict[str, dict[str, list[dict]]]:
     """@brief Run candidate and baseline interleaved, alternating which one starts.
 
@@ -445,10 +464,12 @@ def paired_samples(cand: pathlib.Path, base: pathlib.Path,
         order = [("base", base), ("cand", cand)]
         if i % 2:
             order.reverse()
-        for arm, binary in order:
-            rows = run_bench_once(binary)
-            for (m, s, f, e) in POINTS:
-                v = metric(rows, m, s, f, e)
+        for arm, binaries in order:
+            rows_by_bin = {b: run_bench_once(path) for b, path in binaries.items()}
+            for (b, m, s, f, e) in POINTS:
+                if b not in rows_by_bin:
+                    continue
+                v = metric(rows_by_bin[b], m, s, f, e)
                 if v:
                     out[arm].setdefault(f"{m}/{s}/{f}/{e}", []).append(v)
     return out
@@ -512,7 +533,8 @@ def paired_report(v: dict, label: str, unit: str, fmt: str) -> str:
     return line
 
 
-def gate_paired(cand: pathlib.Path, base: pathlib.Path, pairs: int) -> list[str]:
+def gate_paired(cand: dict[str, pathlib.Path], base: dict[str, pathlib.Path],
+                pairs: int) -> list[str]:
     """@brief The interleaved per-PR gate. Prints the full population and returns fails."""
     samples = paired_samples(cand, base, pairs)
     fails: list[str] = []
@@ -525,7 +547,7 @@ def gate_paired(cand: pathlib.Path, base: pathlib.Path, pairs: int) -> list[str]
         print(f"  WARNING: {pairs} pair(s) — the reproducibility rule cannot discriminate "
               f"below 3. Treat a FAIL here as a prompt to re-run at the default.")
     worst_drift = 0.0
-    for (m, s, f, e) in POINTS:
+    for (_b, m, s, f, e) in POINTS:
         k = f"{m}/{s}/{f}/{e}"
         cs, bs = samples["cand"].get(k), samples["base"].get(k)
         if not cs or not bs:
@@ -696,12 +718,31 @@ def _opt(args: list[str], name: str, default: pathlib.Path | None) -> pathlib.Pa
     return pathlib.Path(args[args.index(name) + 1]).resolve() if name in args else default
 
 
+def _siblings(bench: pathlib.Path) -> dict[str, pathlib.Path]:
+    """@brief The gated binaries in @p bench's build directory, keyed as POINTS names them.
+
+    A binary that is absent is OMITTED rather than defaulted, so its points report
+    "absent from one arm — not gated" instead of being compared against a stale build.
+    """
+    out = {}
+    for key, name in BENCH_BY_KEY.items():
+        path = bench if name == bench.name else bench.parent / name
+        if path.exists():
+            out[key] = path
+    return out
+
+
 def main() -> int:
     args = sys.argv[1:]
     bench = _opt(args, "--bench", BENCH)
     bench_fwd = _opt(args, "--bench-fwd", BENCH_FWD)
     base_bench = _opt(args, "--baseline-bench", None)
     base_fwd = _opt(args, "--baseline-bench-fwd", None)
+    # The sibling binaries live beside the one named by --bench, so a caller that points
+    # the gate at a baseline BUILD DIRECTORY gets that build's compact/demux arms too —
+    # rather than silently comparing a candidate's compact binary against the candidate's.
+    cand_bins = _siblings(bench)
+    base_bins = _siblings(base_bench) if base_bench is not None else None
 
     # PAIRED mode — the per-PR gate. Both binaries in hand, so nothing is recorded to
     # or read from perf_baseline.json: the comparison is made against samples drawn in
@@ -712,7 +753,7 @@ def main() -> int:
               f"fail: p50 +{(LAT_REGRESS - 1) * 100:.0f}% / "
               f"mean +{(MEAN_REGRESS - 1) * 100:.0f}% / "
               f"deliv -{(1 - TPUT_REGRESS) * 100:.0f}%):")
-        fails = gate_paired(bench, base_bench, pairs)
+        fails = gate_paired(cand_bins, base_bins, pairs)
         fails += mem_ratchet(bench_fwd, base_fwd)
         fails += lkv_ratio_gate(bench)  # ADR-0060 same-run ratio (no baseline needed)
         print("PERF: PASS" if not fails else "PERF: FAIL")
@@ -721,7 +762,7 @@ def main() -> int:
         return 0 if not fails else 1
 
     runs = int(args[args.index("--runs") + 1]) if "--runs" in args else DEFAULT_RUNS
-    cur = best_of(bench, runs)
+    cur = best_of(cand_bins, runs)
     cur.update(mem_probe(bench_fwd))  # fold the mem:* points into the same baseline dict
     base = json.loads(BASELINE.read_text()) if BASELINE.exists() else None
     fails = []
