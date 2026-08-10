@@ -65,17 +65,31 @@ constexpr int kDrainSliceMs = 5;
 }
 
 /**
- * @brief httpd task stack, in bytes.
+ * @brief The stack size the deep in-call path was measured OVERFLOWING, bytes.
  *
- * The inbound graph request is serviced IN-CALL on this task — decode, resolve,
- * reply, and (the deep path) the whole /unit batch-apply transaction. The device
- * node measured that transaction overflowing an 8 KB stack and needing ~12 KB on
- * the raw ws recv thread (F2b, 2026-07-09); the 4 KB `esp_http_server` default is
- * far too small. Keep parity with that measured figure; httpd's own per-request
- * framing adds a little on top, so HIL should confirm this task's high-water mark
- * under a batch apply and bump it if a stack-protection reboot appears.
+ * The other half of the measurement @ref httpd_ws_link_t::kRequiredHttpdStack carries
+ * (F2b, 2026-07-09): the /unit batch apply overflowed 8 KB and needed ~12 KB. It is named
+ * here so @ref kStackHeadroomFloor is derived from the two figures that one measurement
+ * produced rather than from a fresh number nobody measured.
  */
-constexpr std::size_t kHttpdTaskStack = 12288;
+constexpr std::size_t kMeasuredOverflowStack = 8192;
+
+/**
+ * @brief Free-stack headroom below which @ref httpd_ws_link_t::check_httpd_stack names
+ *        the cause, bytes.
+ *
+ * The margin the required figure buys over the size that was measured to overflow. On a
+ * task sized as this link asks, free headroom under it means the deepest point the task
+ * has ever reached is already past the depth that overflowed 8 KB — the next batch apply
+ * is the stack-protection panic. On a task sized SMALLER (the adopted-server case, where
+ * nothing can read the configured size) it trips sooner, which is the misconfiguration
+ * this exists to name.
+ *
+ * NOT a tunable, and not a synthetic limit: both inputs are the measurement's own two
+ * numbers, so there is no third number to justify and no knob to get wrong.
+ */
+constexpr std::size_t kStackHeadroomFloor =
+    httpd_ws_link_t::kRequiredHttpdStack - kMeasuredOverflowStack;
 
 /**
  * @brief Upper bound on a single inbound message (one frame, or a reassembly).
@@ -821,7 +835,7 @@ httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, std::size_t max_peers,
     // httpd (web_server.c on :80) keeps the default, so offset ours by one or
     // httpd_start fails to bind the control socket.
     cfg.ctrl_port = ESP_HTTPD_DEF_CTRL_PORT + 1;
-    cfg.stack_size = kHttpdTaskStack;
+    cfg.stack_size = kRequiredHttpdStack;
     // Room for `max_peers` clients plus slack (see kInternalSockSlack). 0 = unbounded:
     // pick a sane finite socket budget (the shared lwIP pool is small).
     const std::size_t peers = max_peers != 0 ? max_peers : kDefaultPeerCap;
@@ -1444,6 +1458,9 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
         // The claim edge is also where the per-socket policy is applied — once per
         // session, on the socket that just became a peer's.
         bound_socket(fd);
+        // ...and so is the stack sample (#955). This is now the ONLY claim edge — the
+        // opening-GET one this used to share with was removed, so nothing samples twice.
+        check_httpd_stack();
     }
 
     // Reassembly — asm_buf is httpd-task-only, so no lock. The SPA sends one whole TLV
@@ -1908,6 +1925,35 @@ void httpd_ws_link_t::bound_socket(int fd) const {
         ESP_LOGW(kTag, "send override not installed fd=%d (short writes unguarded)", fd);
 }
 
+void httpd_ws_link_t::check_httpd_stack() {
+    // One report per link, then never again: the answer does not change, and the sample
+    // itself is not free — FreeRTOS computes the mark by scanning the untouched fill
+    // pattern, so it costs a pass over the FREE part of the stack. That is why this sits
+    // on the session-claim edge (once per connection, next to the five setsockopts
+    // admission already pays) and not on the per-frame delivery path.
+    if (stack_named_) return;
+    // BYTES. ESP-IDF's uxTaskGetStackHighWaterMark deliberately diverges from vanilla
+    // FreeRTOS here and its own task.h says so ("in bytes (as opposed to words in the
+    // standard FreeRTOS documentation)"), so the comparison below needs no conversion —
+    // and IDF's FreeRTOSConfig.h defines INCLUDE_uxTaskGetStackHighWaterMark to 1
+    // unconditionally, so the call is available on every target this TU builds for.
+    const std::size_t free_bytes = uxTaskGetStackHighWaterMark(nullptr);
+    if (free_bytes >= kStackHeadroomFloor) return;
+    stack_named_ = true;
+    // ERROR, not warning: the failure this predicts is a stack-protection panic on the
+    // batch-apply path — a reboot, and one that reads as an unrelated flake because it
+    // needs that one workload to appear. Owning mode configured the stack itself, so a
+    // report here means the measured figure is no longer enough (bump
+    // kRequiredHttpdStack); adopting mode means the server this link was handed was
+    // started with too small a stack, which nothing but this sample can observe.
+    ESP_LOGE(kTag,
+             "httpd task free stack %u B < %u B: the in-call graph delivery is close to "
+             "overflowing it%s (needs stack_size >= %u B)",
+             (unsigned)free_bytes, (unsigned)kStackHeadroomFloor,
+             owns_httpd_ ? "" : " - this link ADOPTED the server, so its stack is yours to size",
+             (unsigned)kRequiredHttpdStack);
+}
+
 int httpd_ws_link_t::send_guarded(httpd_handle_t handle, int fd, const char* buf, std::size_t len,
                                   int flags) {
     (void)handle;
@@ -2022,10 +2068,18 @@ void httpd_ws_link_t::tx_work(void* arg) {
     // destructor for the whole bound. Lock order is gate->m then peers_m_, the same order
     // on_session_closed and the accounting below use.
     int fd = -1;
+    bool refresh_lru = false;
     if (work->gate != nullptr) {
         const std::lock_guard lock(work->gate->m);
-        if (httpd_ws_link_t* const owner = work->gate->link; owner != nullptr)
+        if (httpd_ws_link_t* const owner = work->gate->link; owner != nullptr) {
             fd = owner->live_fd(work->to);
+            // Adopted mode only. In owning mode the purge this defends against is off by
+            // construction (the ctor sets lru_purge_enable = false on the cfg it starts
+            // the server with), so the scan below would be measurable cost buying a
+            // counter nobody reads. Read here because this is the one place the link is
+            // already resolved; owns_httpd_ is ctor-set and never written again.
+            refresh_lru = !owner->owns_httpd_;
+        }
     }
     // The server's own verdict, on the socket the LINK just vouched for — kept as the
     // second opinion it always was (a peer mid-CLOSE is a websocket the link still has
@@ -2050,6 +2104,29 @@ void httpd_ws_link_t::tx_work(void* arg) {
         session_t* const slot = work->to.slot;
         if (slot != nullptr) slot->open_tx_frame();
         err = httpd_ws_send_frame_async(work->handle, fd, &f);
+        if (err == ESP_OK && refresh_lru) {
+            // Tell the ADOPTED server this session is not idle (#955). Apart from this very
+            // API, IDF advances a session's LRU counter in one place — the tail of
+            // httpd_sess_process, i.e. inbound request processing — so a server-initiated
+            // push does not touch it. A graph peer that subscribes and thereafter only
+            // RECEIVES therefore ages toward the lowest counter no matter how much this link
+            // is pushing at it, and httpd_accept_conn's victim search (which excludes only
+            // sessions marked for_async_req, never a WS one) picks the lowest. The pure
+            // subscriber was the preferential victim precisely BECAUSE the push stream is
+            // invisible to the counter; refreshing here removes that inversion.
+            //
+            // It is NOT immunity, and must not be described as any: at the host's socket
+            // ceiling some session is still closed, and an evicted peer reaches this link
+            // as an ordinary departure. The inbound direction needs nothing — httpd_sess_process
+            // already covers it, and this handler runs inside it.
+            //
+            // Safe on this task: the function walks hd->hd_sd and bumps hd->lru_counter with
+            // no lock of its own, and tx_work runs on the httpd task (httpd_queue_work put it
+            // there), which is the task that owns that table. The result is dropped on
+            // purpose — ESP_ERR_NOT_FOUND only says the session left between the send and
+            // now, which is neither this frame's business nor actionable.
+            (void)httpd_sess_update_lru_counter(work->handle, fd);
+        }
         const std::size_t on_wire = slot != nullptr ? slot->close_tx_frame() : 0;
         // `on_wire != 0` is the OTHER failure, and it is not this one's: the frame was
         // announced and then cut off, the stream no longer parses, and the session has

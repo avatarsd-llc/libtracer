@@ -672,14 +672,15 @@ ANCHORS = [
     ('core/tests/tlv_arena_test.cpp:289', 'const std::vector<std::byte> deep_bytes = encode(nested(100));'),
     # integrations/esp-idf/libtracer/httpd_ws_link.cpp
     ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:71',
-     '* reply, and (the deep path) the whole /unit batch-apply transaction. The device'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:78', 'constexpr std::size_t kHttpdTaskStack = 12288;'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:428', 'if (chunk.empty()) return true;'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:434',
+     '* (F2b, 2026-07-09): the /unit batch apply overflowed 8 KB and needed ~12 KB. It is named'),
+    ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:160',
+     'static constexpr std::size_t kRequiredHttpdStack = 12288;'),
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:442', 'if (chunk.empty()) return true;'),
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:448',
      'if (len_ != 0) std::memcpy(grown.get(), bytes_.get(), len_);'),
     # integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp
     ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:52',
-     '*     apply overflows the 4 KB httpd default — see kHttpdTaskStack).'),
+     '*     task stack (the batch apply overflows the 4 KB httpd default). The PORT-BINDING'),
 
     # --- re-added from the v0.7.1 docs sweep (absent from main's table) ---
     ('core/include/libtracer/view_can.hpp:100', 'out.frames_.push_back(payload.subview(off, n));'),
@@ -721,11 +722,11 @@ ANCHORS = [
     ('tools/cortexm0_footprint.py:94', 'cxx_flags = ['),
     ('tools/cortexm0_footprint.py:101', '"-DLIBTRACER_NO_ATOMIC",'),
     ('tools/cortexm0_footprint.py:115', '"--specs=nano.specs",'),
-    ('core/tests/CMakeLists.txt:1158', 'add_executable(substrate_test_no_atomic'),
-    ('core/tests/CMakeLists.txt:1171', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
+    ('core/tests/CMakeLists.txt:1182', 'add_executable(substrate_test_no_atomic'),
+    ('core/tests/CMakeLists.txt:1195', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
     # The leading indent is load-bearing: the bare token also appears in the comment
     # three lines above the executable, and an anchor that matches both is not an anchor.
-    ('core/tests/CMakeLists.txt:1172', '    LIBTRACER_NO_ATOMIC'),
+    ('core/tests/CMakeLists.txt:1196', '    LIBTRACER_NO_ATOMIC'),
 
     # --- #1095: the rest of the non-source citations, now that a line-numbered citation
     # of an unverifiable file is an ERROR rather than a false green.

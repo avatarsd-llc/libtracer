@@ -19,6 +19,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <map>
@@ -76,6 +77,14 @@ struct session_t {
      * the entire reason the link uses it (see @ref server_t::run_pending).
      */
     bool shut = false;
+    /**
+     * @brief This session's LRU counter — httpd's `sock_db::lru_counter`.
+     *
+     * Advanced by INBOUND request processing (`httpd_sess_process`) or by an explicit
+     * `httpd_sess_update_lru_counter`, and by nothing else: the send path never touches
+     * it. That asymmetry is the whole subject of @ref server_t::lowest_lru_fd.
+     */
+    std::uint64_t lru_counter = 0;
 };
 
 /** @brief The fake server: one session table, one control queue, no sockets. */
@@ -241,6 +250,19 @@ class server_t {
     int raw_shutdown(int fd);
     /** @brief True while @p fd is one of the fake's sockets (the `--wrap` predicate). */
     [[nodiscard]] bool owns_socket(int fd) const;
+    /** @brief Advance @p fd's LRU counter — `httpd_sess_update_lru_counter`. */
+    esp_err_t update_lru_counter(int fd);
+    /** @brief @p fd's current LRU counter (0 when there is no such session). */
+    [[nodiscard]] std::uint64_t lru_counter(int fd) const;
+    /**
+     * @brief Which session `httpd_accept_conn` would purge right now — the lowest LRU
+     *        counter in the table, or -1 when the table is empty.
+     *
+     * `httpd_sess_close_lru`'s victim search, trimmed to what matters here: it skips only
+     * `for_async_req` sessions, which a libtracer WS session never is, so every session
+     * the fake holds is a candidate. This is the observable the #955 mitigation moves.
+     */
+    [[nodiscard]] int lowest_lru_fd() const;
     /** @brief True once `shutdown` has been called on @p fd. */
     [[nodiscard]] bool is_shut(int fd) const;
 
@@ -262,10 +284,24 @@ class server_t {
     bool queue_refusing_ = false;
     std::size_t queue_cap_ = 0;   /**< @brief 0 = unbounded; see set_queue_capacity. */
     std::size_t queue_drops_ = 0; /**< @brief Enqueues a full mbox refused. */
+    std::uint64_t lru_clock_ = 0; /**< @brief httpd's `httpd_data::lru_counter`. */
 };
 
 /** @brief The one fake server; its address IS the `httpd_handle_t` the link adopts. */
 server_t& instance();
+
+/**
+ * @brief The `httpd_config_t` the last `httpd_start` was given — the only way a host test
+ *        can see what the PORT-BINDING ctor configured.
+ *
+ * The real server keeps its config private (that is precisely why the adopting ctor can
+ * neither read nor check it); the fake keeps a copy so the owning side's settings are a
+ * measurement rather than a code reading.
+ */
+const httpd_config_t& last_start_config();
+
+/** @brief The mutable slot behind @ref last_start_config — written by the fake `httpd_start`. */
+httpd_config_t& start_config_slot();
 
 /**
  * @brief The currently-registered WS route: what a handshake would latch into a session.

@@ -119,6 +119,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   are reachable by an upcast past the null `bus()`. This link's delivery and departure
   paths already read the flag directly, so nothing else about it moves.
 
+- **`httpd_ws_link_t::kRequiredHttpdStack`** — the httpd task stack this link's in-call
+  servicing needs (12288 bytes), promoted from a constant in the `.cpp`'s anonymous
+  namespace to a public `static constexpr` on the class (#955). The port-binding
+  constructor applies it itself; the ADOPTING constructor cannot — it takes an
+  already-started server, so there is no `httpd_config_t` left to write and
+  `esp_http_server` exposes no reader for a running server's config either. The figure was
+  therefore unreadable by the one party who can act on it, which is how an integration came
+  to start its shared `:80` server with 8192. Write
+  `config.stack_size = tr::net::httpd_ws_link_t::kRequiredHttpdStack;` before `httpd_start`.
+
+  The adopting constructor's documentation now also states the other two server-level
+  settings the port-binding one establishes and it cannot — `lru_purge_enable = false` and
+  a socket budget consistent with `max_peers` — and what each one costs when it is wrong.
+  Neither can be verified from inside the link; they are stated where the person who can
+  apply them reads.
+
 - **`tr::net::link_counters_t`** (`libtracer_esp/link_stats.hpp`) plus
   **`esp_ws_client_link_t::stats()`** and **`httpd_ws_link_t::enumerate_peer_stats()`** —
   per-link passive traffic counters (#942): rx/tx messages and payload bytes, rx/tx drops,
@@ -229,6 +245,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   gets a close — and therefore an `onclose` and a reconnect — where it previously went
   silent. The desync log line names its cause (`short write` / `frame truncated`) and the
   bytes on each side, and no longer shares wording with the benign drop.
+
+- **A receive-only graph peer is no longer the preferential LRU purge victim on an adopted
+  server** (#955). Apart from the explicit `httpd_sess_update_lru_counter` API, ESP-IDF
+  advances a session's LRU counter from inbound request processing only
+  (`httpd_sess_process`); a server-initiated push does not touch it. So on a host that
+  runs with `lru_purge_enable = true`, a peer that subscribes and thereafter only RECEIVES
+  ages toward the lowest counter no matter how much this link is pushing to it — and
+  `httpd_accept_conn`'s victim search (which skips only `for_async_req` sessions, never a
+  WebSocket one) picks exactly that peer once the socket table fills. The eviction is
+  well-formed, which is why it was invisible: it reached this link as an ordinary peer
+  departure, indistinguishable from a hang-up. In adopted mode the link now calls
+  `httpd_sess_update_lru_counter` after each successful send.
+
+  Not immunity, and must not be read as any: at the host's socket ceiling some session is
+  still closed. What changes is that the peer this link is actively serving stops being the
+  one chosen first. Owning mode does not make the call — it sets `lru_purge_enable = false`
+  on the config it starts the server with, so there is no purge to defend against and no
+  session-table scan to pay for.
+
+- **A too-small httpd task stack is now NAMED once instead of arriving as an unexplained
+  reboot** (#955). At each session claim (once per connection, beside the socket options
+  admission already applies) the link samples `uxTaskGetStackHighWaterMark` and logs one
+  `ESP_LOGE` if the free headroom has fallen below the margin `kRequiredHttpdStack` buys
+  over the 8 KB the same measurement found overflowing. It cannot prevent the overflow —
+  the mark it reads is already a historical minimum — and it does not verify the
+  precondition above; it converts a stack-protection panic on the batch-apply path from an
+  unrelated-looking flake into a stated cause. The link stops sampling once it has
+  reported.
 
 - **Both WS links now detect a peer that vanishes without a FIN, and the client link
   reports its departure** (#957). Two halves of one gap.

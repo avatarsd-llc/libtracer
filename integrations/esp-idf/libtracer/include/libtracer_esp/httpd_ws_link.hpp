@@ -48,8 +48,11 @@
  *     A data frame is read with httpd_ws_recv_frame() and delivered to the graph
  *     SYNCHRONOUSLY on that task — the router services the request (decode /
  *     resolve / reply) in-call, exactly as the raw server delivered on its recv
- *     thread. The httpd task stack is sized for that in-call servicing (the batch
- *     apply overflows the 4 KB httpd default — see kHttpdTaskStack).
+ *     thread. That servicing needs @ref httpd_ws_link_t::kRequiredHttpdStack bytes of
+ *     task stack (the batch apply overflows the 4 KB httpd default). The PORT-BINDING
+ *     ctor configures that stack itself; the ADOPTING ctor cannot — the task belongs
+ *     to the server it adopts — so the embedder must size it, which is why the figure
+ *     is a public constant rather than a number in the .cpp.
  *   - TX marshals every outbound frame onto the httpd task via httpd_queue_work()
  *     -> httpd_ws_send_frame_async() (the documented async-send pattern). All
  *     socket writes therefore happen on the one httpd task, so there is NO
@@ -132,6 +135,31 @@ namespace tr::net {
 class httpd_ws_link_t : public transport_t, public bus_link_t {
    public:
     /**
+     * @brief Task stack the `esp_http_server` task must have for this link's in-call
+     *        servicing, bytes — what the port-binding ctor configures, and what an
+     *        ADOPTED server's owner has to configure itself.
+     *
+     * The inbound graph request is serviced IN-CALL on the httpd task — decode, resolve,
+     * reply, and (the deep path) the whole /unit batch-apply transaction. The device node
+     * measured that transaction overflowing an 8 KB stack and needing ~12 KB on the raw ws
+     * recv thread (F2b, 2026-07-09); the 4 KB `esp_http_server` default is far too small.
+     *
+     * PUBLIC because the adopting ctor cannot apply it: it takes an already-started
+     * server, so there is no `httpd_config_t` left to write, and `esp_http_server` exposes
+     * no reader for a running server's config either — the link can neither set the stack
+     * nor check it. An embedder writes `config.stack_size =
+     * httpd_ws_link_t::kRequiredHttpdStack;` before `httpd_start` instead of guessing; a
+     * downstream integration guessing 8192 is what put this figure here.
+     *
+     * The number is the MEASUREMENT, not a ceiling: httpd's own per-request framing adds a
+     * little on top, so HIL should confirm the task's high-water mark under a batch apply
+     * and bump this if a stack-protection reboot appears. The link samples that high-water
+     * mark itself at each session claim and names the cause once if it is thin (see the
+     * adopting ctor's preconditions) — a diagnostic, never a guarantee.
+     */
+    static constexpr std::size_t kRequiredHttpdStack = 12288;
+
+    /**
      * @brief Start an `esp_http_server` instance on @p bind_port with a WebSocket
      *        URI handler at "/"; confirm with @ref ok.
      *
@@ -163,6 +191,35 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * on the firmware's existing `:80` SPA server, so a same-origin browser reaches the
      * graph over the one port. The dtor unregisters that URI and leaves the server
      * running — this link never stops a server it did not start.
+     *
+     * PRECONDITIONS ON @p external's `httpd_config_t`. The port-binding ctor sets these
+     * three itself; here they belong to the server's owner, and `esp_http_server` exposes
+     * no reader for a running server's config, so this link can neither apply them nor
+     * verify them. They are stated here because this is where the person who can apply
+     * them reads (#955):
+     *   1. `stack_size >= kRequiredHttpdStack`. The WS handler services the graph request
+     *      in-call on the server's task, so the deep batch-apply path runs on whatever
+     *      stack that server was started with. Too small is a stack-protection panic on
+     *      that path, not an error return. Unverifiable, so the link samples
+     *      `uxTaskGetStackHighWaterMark` at each session claim and logs ONE error if the
+     *      free headroom is thin — it names the cause of a reboot, it cannot prevent one.
+     *   2. `lru_purge_enable = false`. With purge on, `httpd_accept_conn` closes the
+     *      least-recently-used session before each accept once the socket table is full,
+     *      and — apart from the explicit `httpd_sess_update_lru_counter` API — IDF advances
+     *      a session's LRU counter only from `httpd_sess_process` (inbound request
+     *      processing); a server-initiated push does not touch it. A
+     *      graph peer that subscribes and thereafter only RECEIVES therefore ages toward
+     *      the lowest counter, i.e. toward being the victim. The link mitigates this from
+     *      its side in adopted mode — it calls `httpd_sess_update_lru_counter` after each
+     *      successful send, so a peer it is actively pushing to is no longer preferentially
+     *      chosen — but that is not immunity: at the host's socket ceiling SOME session is
+     *      still evicted, and this link reports such an eviction as an ordinary departure.
+     *   3. A socket budget consistent with @p max_peers. The port-binding ctor sizes
+     *      `max_open_sockets` to the cap plus slack; a shared server's budget is its
+     *      owner's, spent on SPA assets and browser keep-alives too. This link's OWN cap
+     *      is still enforced in adopted mode (a peer past @p max_peers is refused at its
+     *      claim, exactly as below), but which peers get accepted at all is the host's
+     *      socket policy, decided before this handler runs.
      *
      * @param external   A started `esp_http_server` handle to host the WS URI on; the
      *                   caller retains ownership and must outlive this link.
@@ -591,6 +648,23 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     void bound_socket(int fd) const;
 
     /**
+     * @brief Sample the httpd task's free-stack high-water mark and, ONCE, name a thin
+     *        one (#955). Runs on the httpd task, at the session-claim edge only.
+     *
+     * The stand-in for a check of precondition 1 of the adopting ctor: nothing can read an
+     * adopted server's configured `stack_size`, but a task's minimum-ever free stack is
+     * readable. The mark is a running MINIMUM, so a sample taken at a claim already
+     * reflects every deep delivery the task has served before it — one connection late,
+     * which is the price of not paying an O(free-stack) scan per frame.
+     *
+     * It cannot prevent the overflow it is looking for; it converts the resulting
+     * stack-protection reboot from an unrelated-looking flake into a named cause. Latched
+     * after one report so a misconfigured node logs once rather than per connection —
+     * and so the scan itself stops once its answer is known.
+     */
+    void check_httpd_stack();
+
+    /**
      * @brief The per-session send override (`httpd_send_func_t`): the default write,
      *        plus the check `esp_http_server` does not do.
      *
@@ -740,6 +814,10 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     /** @brief Once-allocated RX scratch (httpd-task-only, so lock-free by construction):
      *         a frame that fits reads here instead of a per-frame allocation. */
     std::unique_ptr<std::byte[]> rx_scratch_;
+    /** @brief Set once @ref check_httpd_stack has reported a thin stack — it then stops
+     *         sampling. Plain `bool`: written and read only on the httpd task, like
+     *         @ref rx_scratch_ and the reassembly buffer. */
+    bool stack_named_ = false;
     /** @brief Once-allocated TX work-slot pool: claimed lock-free by sending tasks,
      *         released by the httpd task as each send drains. */
     std::unique_ptr<tx_slot_t[]> tx_pool_;
