@@ -8,29 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Fixed
-
-- **`encode` no longer mints a `PATH_REF` frame this crate's own `decode` rejects (#1004).** The
-  grammar has exactly one per-type structural rule — a `PATH_REF` body is a fixed-stride 8-byte
-  record array, so `opt.PL` and `opt.LL` are both forbidden and the length is a bounded multiple
-  of 8 (RFC-0024 §4.2/§4.3) — and `parse_one` has always enforced it. The generic `encode` did
-  not: it serialized any `Tlv` verbatim, so a `PATH_REF` built with `opt.pl` even took the
-  children branch and emitted per-child TLV framing. All four ill-formed shapes produced bytes
-  this crate answers with `Error::FrameInvalid`. The guarded `path_ref` builder satisfies the
-  rule by construction, which left a `Tlv` STRUCT LITERAL as the door — `Tlv`'s fields are all
-  public, so that is the ordinary way to build one here. The four clauses now live in one
-  private predicate that `parse_one` and `encode` share, rather than the encoder gaining a copy.
-
-  The C++ core closed the same asymmetry in #886 and this crate did not, so the three cores
-  diverged on one input tree; that divergence is now closed on this side. No wire change, and no
-  well-formed tree encodes differently.
-
-  **API note — the failure mode is a new `encode` postcondition.** `encode` returns a `Vec<u8>`
-  and has no error channel, so refusal is spelled **emits nothing**: an ill-formed `PATH_REF`
-  anywhere in the tree makes the whole call return an EMPTY `Vec`, and a refused TLV refuses its
-  ancestors rather than being dropped into a frame that DOES decode, one component short. Empty
-  is unambiguous — an accepted TLV always carries at least its 4-byte header, so no well-formed
-  tree encodes to nothing. This matches the C++ core's `wire::encode` exactly.
+## [0.9.0] — 2026-08-10
 
 ### Added
 
@@ -55,19 +33,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   is the **first `ERROR` child of the STATUS, at whatever position**. reference/05 §`0x09` pins no
   order over a STATUS's children; RFC-0002 §C pins position only one level down, inside the ERROR.
   Emitters are unaffected and still write the canonical order.
-
-### Fixed
-
-- **`structured::spec` emitted a SPEC no terminus accepts.** Both field values — `type` and
-  `name` — were wrapped in a `VALUE` (`0x01`) node where the wire form is a `NAME` (`0x02`).
-  The terminus matches each `(NAME key, value)` pair on the value's TYPE and skips any other,
-  so both fields were dropped, the catalog selector came up empty, and every SPEC this crate
-  built was refused with `INVALID_PATH` — a vertex could not be created from Rust at all.
-  Nothing here caught it: the drifted bytes decode and re-encode to themselves, so the
-  conformance harness scored them `ok`, and this crate's own reader accepted whatever payload
-  it found. Both halves are fixed, and both are now byte-pinned against shared vectors.
-
-### Added
 
 - **`spec/create-child` and `spec/conn-client-ws` conformance vectors**, shared with the C++
   and TypeScript cores and pinned in `tests/conformance_vectors.rs`
@@ -112,6 +77,39 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   re-stated SETTINGS key resolves to opposite values. (2) `name`'s segment predicate rejects
   `[` and `]`, which `valid_segment` deliberately admits as the address-index suffix form, so
   the builder refuses a `child_name` a terminus would accept.
+
+### Fixed
+
+- **`encode` no longer mints a `PATH_REF` frame this crate's own `decode` rejects (#1004).** The
+  grammar has exactly one per-type structural rule — a `PATH_REF` body is a fixed-stride 8-byte
+  record array, so `opt.PL` and `opt.LL` are both forbidden and the length is a bounded multiple
+  of 8 (RFC-0024 §4.2/§4.3) — and `parse_one` has always enforced it. The generic `encode` did
+  not: it serialized any `Tlv` verbatim, so a `PATH_REF` built with `opt.pl` even took the
+  children branch and emitted per-child TLV framing. All four ill-formed shapes produced bytes
+  this crate answers with `Error::FrameInvalid`. The guarded `path_ref` builder satisfies the
+  rule by construction, which left a `Tlv` STRUCT LITERAL as the door — `Tlv`'s fields are all
+  public, so that is the ordinary way to build one here. The four clauses now live in one
+  private predicate that `parse_one` and `encode` share, rather than the encoder gaining a copy.
+
+  The C++ core closed the same asymmetry in #886 and this crate did not, so the three cores
+  diverged on one input tree; that divergence is now closed on this side. No wire change, and no
+  well-formed tree encodes differently.
+
+  **API note — the failure mode is a new `encode` postcondition.** `encode` returns a `Vec<u8>`
+  and has no error channel, so refusal is spelled **emits nothing**: an ill-formed `PATH_REF`
+  anywhere in the tree makes the whole call return an EMPTY `Vec`, and a refused TLV refuses its
+  ancestors rather than being dropped into a frame that DOES decode, one component short. Empty
+  is unambiguous — an accepted TLV always carries at least its 4-byte header, so no well-formed
+  tree encodes to nothing. This matches the C++ core's `wire::encode` exactly.
+
+- **`structured::spec` emitted a SPEC no terminus accepts.** Both field values — `type` and
+  `name` — were wrapped in a `VALUE` (`0x01`) node where the wire form is a `NAME` (`0x02`).
+  The terminus matches each `(NAME key, value)` pair on the value's TYPE and skips any other,
+  so both fields were dropped, the catalog selector came up empty, and every SPEC this crate
+  built was refused with `INVALID_PATH` — a vertex could not be created from Rust at all.
+  Nothing here caught it: the drifted bytes decode and re-encode to themselves, so the
+  conformance harness scored them `ok`, and this crate's own reader accepted whatever payload
+  it found. Both halves are fixed, and both are now byte-pinned against shared vectors.
 
 ## [0.8.0] — 2026-08-06
 

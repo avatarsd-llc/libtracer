@@ -7,6 +7,16 @@ versioning/publish strategy.
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-08-10
+
+### Added
+
+- **`firstChild(tlv, type)`** (`@avatarsd-llc/libtracer-client`, `src/tlv.ts`) — the package's one
+  child-by-type accessor, and the mirror of the Rust binding's `Tlv::first_child`: the first
+  **direct** child with the given type code, or `null`. Both cores now answer "the X child of this
+  structured TLV" the same way, so the open-coded `children[0]?.type === TYPE.X` that produced the
+  divergence above has a named replacement.
+
 ### Fixed
 
 - **`encode` no longer mints a `PATH_REF` frame this core's own `decode` rejects (#1004)**
@@ -52,14 +62,6 @@ versioning/publish strategy.
   Pinned by the new shared vector `fwd/fwd-reply-error-after-description`, asserted from **both**
   bindings — a divergence in either core's reader now fails that core's own suite. A test private
   to one language could not have caught this, which is why the drift survived (#878).
-
-### Added
-
-- **`firstChild(tlv, type)`** (`@avatarsd-llc/libtracer-client`, `src/tlv.ts`) — the package's one
-  child-by-type accessor, and the mirror of the Rust binding's `Tlv::first_child`: the first
-  **direct** child with the given type code, or `null`. Both cores now answer "the X child of this
-  structured TLV" the same way, so the open-coded `children[0]?.type === TYPE.X` that produced the
-  divergence above has a named replacement.
 
 ## [0.8.0] — 2026-08-06
 
