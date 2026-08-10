@@ -100,6 +100,35 @@ jobs:
             --baseline-bench ../main-baseline/bench/build/bench_libtracer \
             --baseline-bench-fwd ../main-baseline/bench/build/bench_forward_heap
 
+  # --- symbol-size ratchet on the hot dispatch symbols (#1155) --------------------
+  # A TRIPWIRE, not a proof. `dispatch_edge_target` is where #1065/#1078 landed, then #1086
+  # one day later, then #1129 had to undo the cause — every one of them found by a bench run
+  # AFTER the fact. This leg puts the code-shape half of that signal at review time.
+  #
+  # It cannot flake: compilation is deterministic, so the A/A null on this instrument is
+  # exactly 0, which is what licenses a zero-tolerance comparison. It is also toolchain-bound
+  # (this repo has measured 955 B of spread on a footprint number across toolchains), so the
+  # pin records its compiler and the gate REFUSES an unattributable cross-toolchain compare
+  # rather than reporting a difference it cannot explain. Pinning the runner image is
+  # therefore load-bearing, not cosmetic.
+  #
+  # What it does NOT buy: it measures shape, not time. A regression with no size signature
+  # still needs the bench, and a green ratchet is not a performance verdict.
+  symbol-ratchet:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the bench targets carrying the pinned symbols (Release = -O3 -DNDEBUG)
+        run: |
+          cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build bench/build --target bench_libtracer bench_compact_delivery -j
+      # Printed on every run, pass or fail: the measured sizes are the record, and a gate
+      # whose numbers are only visible when it fails cannot be re-pinned from its own log.
+      - name: Measured symbol sizes (the record, whatever the verdict)
+        run: python3 bench/symbol_ratchet.py --build bench/build --pins bench/symbol_ratchet.json --emit
+      - name: Symbol-size ratchet
+        run: python3 bench/symbol_ratchet.py --build bench/build --pins bench/symbol_ratchet.json
+
   # --- main push: REDUNDANT no-pullback ratchet (3 runners, HEAD vs parent) -------
   # Each replica is a complete same-runner experiment on independently-drawn hardware:
   # build HEAD, build the parent commit, gate HEAD against the parent. fail-fast is
