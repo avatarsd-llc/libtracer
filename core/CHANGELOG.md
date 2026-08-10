@@ -47,6 +47,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **An undefined FWD opcode now answers an addressed `ERROR` instead of being dropped (#904).**
+  `kFwdOpcodeMask` admits `0x00`–`0x3F` and RFC-0004 §B defines four values, so opcodes 4–63
+  fell through `apply_op`'s caseless switch and left by value — which `fwd_router_t` turns into
+  a silent drop. Every other "your frame says something illegal" verdict (bad selector,
+  malformed path, unknown vertex) already answered an addressed `ERROR`; only this one answered
+  nothing, and nothing is the single reply an origin cannot act on, being indistinguishable from
+  a dead link. A terminus with a captured return route now replies
+  `ERROR{tr::schema::type_mismatch}` (`0x0030`) — the verdict
+  `docs/reference/01-data-format.md` already prescribes for an unimplemented core-range type
+  code one level up. **No new status code and no wire surface added**; behaviour-visible to a
+  peer that was previously timing out. Flag bits 7–6 are unaffected: RFC-0024 §9.3 masking still
+  degrades an unrecognised flag to the plain opcode, so `0x80 | READ` remains a `READ`. The
+  reject sits at the terminus, not the forwarder — an intermediate hop routes on `dst` and stays
+  opcode-agnostic.
+
 - **`[[nodiscard]]` on the fallible control-plane returns (#892).** `fwd_router_t::add_child`,
   `child_registry_t::add` and `graph_t::retire` now carry the attribute, as do six private
   `graph.hpp` `result_t` helpers. SOURCE-BREAKING only for a caller that discards one of these

@@ -185,8 +185,8 @@ ANCHORS = [
     ("core/src/graph.cpp:2558", "return read_children_folded(vh);"),
     ("core/src/graph.cpp:2555", "sel == field_sel_t::WHOLE || sel == field_sel_t::APPEND"),
     ("core/src/graph.cpp:2673", "field_selector(field) == field_sel_t::SLOT"),
-    ("core/src/op_resolve_walk.hpp:294", "enum class index_mode_t"),
-    ("core/src/op_resolve_walk.hpp:808", 'field.steps[0].name != "subscribers"'),
+    ("core/src/op_resolve_walk.hpp:310", "enum class index_mode_t"),
+    ("core/src/op_resolve_walk.hpp:848", 'field.steps[0].name != "subscribers"'),
     ("core/include/libtracer/mem_heap.hpp:217", "try_assign"),
     ("core/include/libtracer/view.hpp:26", "namespace tr::view"),
     ("core/include/libtracer/frame.hpp:23", "namespace tr::wire"),
@@ -240,7 +240,7 @@ ANCHORS = [
     ("core/src/op_resolve_view.cpp:146", "over_bytes(sub.only().bytes(), flat)"),
     ("core/src/op_resolve_view.cpp:254", "wire().materialize(backend())"),
     ("core/src/fwd_reply.cpp:104", "view::segment_alloc(egress, head_len)"),
-    ("core/src/op_resolve_walk.hpp:494", "rope_t or_backpressure"),
+    ("core/src/op_resolve_walk.hpp:510", "rope_t or_backpressure"),
     ("core/src/fwd_router.cpp:1431", "decode_into(frame, rx_for(inbound_ctx))"),
     # `vertex.hpp:<parent_>` was pinned here TWICE, and the only doc that cites it is
     # `docs/spec/rfcs/0019` — a historical genre this tool's own header excludes from
@@ -608,10 +608,10 @@ ANCHORS = [
     ('core/src/fwd_reply.cpp:32', "*        the u16 the kind=ERROR reply's ERROR{VALUE} identity carries."),
     ('core/src/fwd_reply.hpp:98', 'void tlv_sliced(std::span<const std::byte> wire) {'),
     ('core/src/fwd_reply.cpp:113', 'out.tlv_sliced(reply_dst_wire);'),
-    ('core/src/op_resolve_walk.hpp:786',
+    ('core/src/op_resolve_walk.hpp:802',
      'if (!req.src.spans_intact()) return std::unexpected(status_t::BACKPRESSURE);'),
-    ('core/src/op_resolve_walk.hpp:873', 'if (!req.dst.spans_intact()) return reply_error(status_t::BACKPRESSURE);'),
-    ('core/src/op_resolve_walk.hpp:706', 'if (value.total_length() == 0)'),
+    ('core/src/op_resolve_walk.hpp:913', 'if (!req.dst.spans_intact()) return reply_error(status_t::BACKPRESSURE);'),
+    ('core/src/op_resolve_walk.hpp:722', 'if (value.total_length() == 0)'),
     # core/src/path.cpp
     # core/src/posix_endpoint.cpp
     ('core/src/posix_endpoint.cpp:225',

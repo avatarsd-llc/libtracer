@@ -222,6 +222,15 @@ struct arena_node {
 template <class N>
 struct parsed_fwd_t {
     fwd_op_t op{};
+    /**
+     * @brief The masked opcode is one of the four `fwd_op_t` values (#904).
+     *
+     * `kFwdOpcodeMask` admits 0–63 and only 0–3 are defined, so 60 values cast to an
+     * `fwd_op_t` that names nothing. @ref op is meaningless when this is false — read it
+     * FIRST. Kept as a flag rather than an `optional<fwd_op_t>` so the four defined arms
+     * pay nothing: every switch on @ref op is already guarded by a check of this field.
+     */
+    bool op_defined = true;
     /** @brief `op` bit 7 was set — the origin asked for a bound-path mint (RFC-0024 §7.5). */
     bool mint_request = false;
     /** @brief `dst` is a `PATH_REF` (`0x14`), not a canonical `PATH` (RFC-0024 §4). */
@@ -254,7 +263,14 @@ template <class N>
     // raw byte is split here, once, so nothing downstream ever sees a flag mixed into the
     // discriminant — a mint-flagged READ is a READ everywhere but at the mint itself.
     const auto op_byte = detail::load_le<std::uint8_t>(op->body());
-    p.op = static_cast<fwd_op_t>(op_byte & kFwdOpcodeMask);
+    const std::uint8_t opcode = op_byte & kFwdOpcodeMask;
+    p.op = static_cast<fwd_op_t>(opcode);
+    // The mask admits 0-63 and RFC-0004 §B defines 0-3, so this records whether the cast
+    // above produced a real enumerator. Recording it is not the same as rejecting it here:
+    // a FORWARDER must stay opcode-agnostic (an intermediate hop routes on dst and never
+    // switches on op), so the reject belongs at the TERMINUS, where a return route has been
+    // captured and the peer can be told. `resolve_node` is where that happens.
+    p.op_defined = opcode <= static_cast<std::uint8_t>(fwd_op_t::REPLY);
     p.mint_request = (op_byte & kFwdOpFlagMintRequest) != 0;
 
     std::optional<N> dst = ch.next();
@@ -795,6 +811,30 @@ template <class N>
         return assemble_error_reply(reply_dst_wire, reply_src_wire,
                                     req.dst.spans_intact() ? s : status_t::BACKPRESSURE, egress);
     };
+
+    // An opcode outside the four defined values gets an ADDRESSED error, not a drop (#904).
+    //
+    // `kFwdOpcodeMask` admits 0-63; RFC-0004 §B defines 0-3. Values 4-63 used to fall through
+    // `apply_op`'s caseless switch to its trailing by-value INVALID_PATH, which the router
+    // turns into a silent drop (`fwd_router.cpp`, the by-value error arm) — so a peer sending
+    // an opcode this build does not implement got NOTHING back, while a malformed selector, a
+    // bad path or an unknown vertex all got an addressed ERROR. Silence is the one answer the
+    // origin cannot act on: it is indistinguishable from a dead link, so the origin retries
+    // the frame this node will never serve instead of falling back.
+    //
+    // RFC-0024's compatibility note already reads the intended behaviour off as a reject —
+    // "a pre-amendment peer sees an unknown opcode and rejects — a clean ERROR, not a
+    // mis-execution" — and §9.3's masking rule exists precisely so an unrecognised FLAG
+    // degrades to the plain opcode INSTEAD of reaching this reject. Flags stay additive; a
+    // genuinely unknown opcode does not.
+    //
+    // `TYPE_MISMATCH` (wire `tr::schema::type_mismatch`) is the code the format's own
+    // forward-extension rule prescribes for the same situation one level up:
+    // docs/reference/01-data-format.md §"Handling unknown type codes" — an unimplemented
+    // core-range code on the outer addressed TLV answers `ERROR{tr::schema::type_mismatch}`
+    // WHEN A RETURN PATH EXISTS. Guard 1 above is exactly that precondition, so the same
+    // verdict is spelled the same way here. No new status code, no wire surface added.
+    if (!req.op_defined) return reply_error(status_t::TYPE_MISMATCH);
 
     // Decode the optional :field selector and the wildcard deferral: a [*] level
     // on a non-subscriber-path target is rejected with INVALID_PATH.

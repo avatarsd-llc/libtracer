@@ -644,6 +644,70 @@ void test_wildcard_and_not_local() {
 }
 
 /**
+ * @brief #904: an opcode outside the defined 0–3 answers an ADDRESSED error, never silence.
+ *
+ * `kFwdOpcodeMask` admits 0–63 and RFC-0004 §B defines four values, so 60 opcodes reached
+ * `apply_op`'s caseless switch and left by value — which the router turns into a DROP. Every
+ * other "your frame says something illegal" verdict (bad selector, malformed path, unknown
+ * vertex) got an addressed ERROR; only this one got nothing, and nothing is the single answer
+ * an origin cannot act on, being indistinguishable from a dead link.
+ *
+ * The two CONTROLs are what separate this from "reject anything with a high bit". Bits 7–6 are
+ * FLAGS (RFC-0024 §9.3) and MUST still degrade to the plain opcode: `0x80 | READ` is a READ,
+ * and a build that rejected the raw byte instead of the masked one would fail them while the
+ * two positive cases still passed.
+ */
+void test_undefined_opcode_answers_addressed_error() {
+    std::printf("#904: an undefined FWD opcode -> ERROR(schema::type_mismatch), never a drop:\n");
+    graph_t g;
+    op_resolver_t resolver(g);
+    const auto path = path_t::parse("/sensor/temp");
+    tr::graph::vertex_handle_t v = g.register_vertex(*path, role_t::STORED_VALUE);
+    (void)g.write(v, make_value(b_value({0x2A, 0x00, 0x00, 0x00})));
+
+    const auto resolve_op = [&](std::uint8_t op_byte) {
+        const auto f =
+            tr::testing::b_fwd_raw_op(op_byte, b_path({"sensor", "temp"}), b_path({"reply-ep"}));
+        return resolve_bytes(resolver, f);
+    };
+
+    // 4 is the first undefined opcode; 0x3F is the largest the mask admits. Both are ordinary
+    // frames in every other respect — same dst, same src, a registered vertex holding a value —
+    // so the only thing under test is the opcode.
+    for (const std::uint8_t op_byte : {std::uint8_t{4}, std::uint8_t{0x3F}}) {
+        auto reply = resolve_op(op_byte);
+        check(reply.has_value(), "undefined opcode produced a REPLY, not a by-value drop");
+        if (!reply) continue;
+        const auto d = decode_reply(*reply);
+        const tlv_t& r = d.tlv;
+        check(value_u8(r.children[3]) == static_cast<std::uint8_t>(reply_kind_t::ERROR),
+              "undefined opcode => kind=ERROR");
+        check(status_error_code(r.children[4]) == 0x0030 /*tr::schema::type_mismatch*/,
+              "... and the code is schema::type_mismatch (the format's unknown-code verdict)");
+    }
+
+    // CONTROL 1 — the masking rule survives: a mint-flagged READ is still a READ. This fails on
+    // a build that rejects the RAW byte instead of `byte & kFwdOpcodeMask`.
+    {
+        auto reply = resolve_op(static_cast<std::uint8_t>(fwd_op_t::READ) |
+                                tr::graph::kFwdOpFlagMintRequest);
+        check(reply.has_value(), "control: flagged READ resolves");
+        const auto d = decode_reply(*reply);
+        check(value_u8(d.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::RESULT),
+              "control: 0x80|READ is a READ — flags degrade, they do not reject");
+    }
+
+    // CONTROL 2 — a plain defined opcode is untouched.
+    {
+        auto reply = resolve_op(static_cast<std::uint8_t>(fwd_op_t::READ));
+        check(reply.has_value(), "control: plain READ resolves");
+        const auto d = decode_reply(*reply);
+        check(value_u8(d.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::RESULT),
+              "control: a defined opcode still answers RESULT");
+    }
+}
+
+/**
  * @brief #929: a `TRANSPORT_DOWN` status leaves this seam as `tr::transport::down` (0x0060).
  *
  * `error_code(status_t)` is the L4→wire cast, and the two enums either side of it are separate
@@ -955,6 +1019,7 @@ int main() {
     test_non_canonical_dst();
     test_wildcard_and_not_local();
     test_out_of_range_index_mode();
+    test_undefined_opcode_answers_addressed_error();
     test_transport_down_reaches_the_wire();
     test_write_creates_remote();
     test_subscription_observer();
