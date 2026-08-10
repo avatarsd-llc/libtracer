@@ -432,7 +432,7 @@ ANCHORS = [
     # core/include/libtracer/rope_decode.hpp
     ('core/include/libtracer/rope_decode.hpp:17',
      '* SINK NOTE: this validates STRUCTURE + CRC over a rope; it does not yet'),
-    ('core/include/libtracer/rope_decode.hpp:57', 'class rope_cursor {'),
+    ('core/include/libtracer/rope_decode.hpp:71', 'class rope_cursor {'),
     # core/include/libtracer/segment.hpp
     ('core/include/libtracer/segment.hpp:21', '#ifndef LIBTRACER_NO_ATOMIC'),
     ('core/include/libtracer/segment.hpp:44', '#ifdef LIBTRACER_NO_ATOMIC'),

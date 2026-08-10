@@ -151,6 +151,26 @@ void test_full_lazy_walk_equals_decode() {
         }
     }
     check(all, "full lazy walk == decode at every 2-link cut");
+
+    // The MANY-link shapes (#917). The 2-link sweep above moves one boundary through
+    // the frame, so a child sweep never has to re-enter the chain more than one link
+    // in; the anchored cursor and the anchored `subrope` only start doing arithmetic
+    // that a 2-link rope cannot exercise once several children each begin in a
+    // different link. One-byte-per-link is the worst case a reassembly path can
+    // produce (and what `bench_forward_rope` sweeps to), so it is the shape pinned.
+    bool many = true;
+    for (const std::size_t stride : {1u, 2u, 3u, 7u}) {
+        std::vector<std::size_t> cuts;
+        for (std::size_t c = stride; c < flat.size(); c += stride) cuts.push_back(c);
+        split_rope_t sr = split_into(flat, cuts);
+        const auto v = tr::wire::tlv_view_t::over(sr.rope);
+        if (!v || !lazy_equals_eager(*v, *eager)) {
+            std::printf("    (diverged at stride=%zu, %zu links)\n", stride, cuts.size() + 1);
+            many = false;
+            break;
+        }
+    }
+    check(many, "full lazy walk == decode at 1/2/3/7-byte-per-link splits");
 }
 
 void test_partial_delivery_semantics() {

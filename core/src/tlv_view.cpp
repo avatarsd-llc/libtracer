@@ -5,9 +5,41 @@
 
 #include "libtracer/tlv_view.hpp"
 
+#include <algorithm>
+#include <cstddef>
+#include <span>
 #include <utility>
 
 namespace tr::wire {
+
+namespace {
+
+/**
+ * @brief `rope_t::subrope(off, len)` resuming from a known link anchor (#917).
+ *
+ * `subrope` takes an absolute offset and re-walks the chain from link 0 to reach it,
+ * so calling it once per child costs Θ(children × links). The lazy child iterator
+ * already holds the anchor of the child it is about to yield, so it carves from there
+ * and the whole sweep costs O(links). Identical result — the covering links, trimmed
+ * with `subview`, refcounted, never copied.
+ */
+[[nodiscard]] view::rope_t subrope_at(std::span<const view::view_t> links, std::size_t li,
+                                      std::size_t intra, std::size_t len) {
+    view::rope_t out;
+    std::size_t remaining = len;
+    for (; remaining > 0 && li < links.size(); ++li, intra = 0) {
+        const std::size_t have = links[li].length;
+        // A zero-length link (or an anchor sitting exactly at a link's end) contributes
+        // nothing and is stepped over — the same skip `subrope`'s own walk performs.
+        const std::size_t avail = have > intra ? have - intra : 0;
+        const std::size_t take = std::min(remaining, avail);
+        if (take > 0) out.append(links[li].subview(intra, take));
+        remaining -= take;
+    }
+    return out;
+}
+
+}  // namespace
 
 std::expected<tlv_view_t, err_t> tlv_view_t::over(view::rope_t frame) {
     // CPU-side lazy reads dereference link bytes, so a DEVICE link is rejected
@@ -25,14 +57,17 @@ std::expected<tlv_view_t, err_t> tlv_view_t::over(view::rope_t frame) {
 
 std::expected<std::optional<tlv_view_t>, err_t> tlv_view_t::children_t::next() {
     if (poisoned_) return std::unexpected(*poisoned_);
-    const std::size_t len = body_.total_length();
-    if (pos_ == len) return std::nullopt;
+    if (pos_ == len_) return std::nullopt;
+
+    const std::span<const view::view_t> links = body_.links();
 
     // Parse exactly ONE child header (CRC deferred). Containment: the cursor
     // region ends at the parent's body end, so a child whose declared total
     // overruns it is FRAME_TRUNCATED — the lazy analogue of decode()'s
-    // subspan-bounded parse_one.
-    const grammar::rope_cursor cur = grammar::rope_cursor{body_}.region(pos_, len - pos_);
+    // subspan-bounded parse_one. The cursor RESUMES at the anchor the previous
+    // call left, so it re-enters the chain at this child instead of walking to it
+    // from link 0 (#917).
+    const grammar::rope_cursor cur = grammar::rope_cursor::at(links, li_, intra_, len_ - pos_);
     const auto h = grammar::parse_header(cur, grammar::crc_check_t::DEFER);
     if (!h) {
         // Child boundaries beyond a malformed header are unknowable: poison.
@@ -40,8 +75,15 @@ std::expected<std::optional<tlv_view_t>, err_t> tlv_view_t::children_t::next() {
         return std::unexpected(*poisoned_);
     }
 
-    tlv_view_t child(body_.subrope(pos_, h->total), *h);
+    tlv_view_t child(subrope_at(links, li_, intra_, h->total), *h);
+    // Step the anchor over the child just yielded — the only walk this call pays,
+    // and it visits each link at most once across the whole sweep.
     pos_ += h->total;
+    intra_ += h->total;
+    while (li_ < links.size() && intra_ >= links[li_].length) {
+        intra_ -= links[li_].length;
+        ++li_;
+    }
     return std::optional<tlv_view_t>(std::move(child));
 }
 

@@ -129,15 +129,22 @@ class tlv_view_t {
          * @brief True when the region is cleanly consumed (@ref next would
          *        yield `std::nullopt`; `false` while poisoned).
          */
-        [[nodiscard]] bool exhausted() const noexcept {
-            return !poisoned_ && pos_ == body_.total_length();
-        }
+        [[nodiscard]] bool exhausted() const noexcept { return !poisoned_ && pos_ == len_; }
 
        private:
         friend class tlv_view_t;
-        explicit children_t(view::rope_t body) : body_(std::move(body)) {}
+        explicit children_t(view::rope_t body)
+            : body_(std::move(body)), len_(body_.total_length()) {}
+
         view::rope_t body_;
-        std::size_t pos_ = 0;
+        std::size_t pos_ = 0; /**< @brief Byte offset of the next child within `body_`. */
+        std::size_t len_ = 0; /**< @brief `body_.total_length()`, walked once (#917). */
+        // The link anchor of `pos_`, carried across calls so a child sweep costs O(links)
+        // once rather than O(links) per child: without it every next() rebuilt a cursor
+        // from link 0 AND re-paid `subrope`'s front walk, making the sweep Θ(children ×
+        // links) on a frame reassembled into many links (CAN ~64 B/link, WS fragments).
+        std::size_t li_ = 0;    /**< @brief Link index holding byte `pos_`. */
+        std::size_t intra_ = 0; /**< @brief Offset of `pos_` within link `li_`. */
         std::optional<err_t> poisoned_{};
     };
 
