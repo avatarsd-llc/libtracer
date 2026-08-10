@@ -159,11 +159,18 @@ struct default_config_t {
     static constexpr std::size_t kEdgePinSlots = @LIBTRACER_EDGE_PIN_SLOTS@;
 
     /**
-     * @brief The RAM-diet ceiling on `sizeof(vertex_t)`, 64-bit targets (#361 §8).
+     * @brief The RAM-diet RATCHET on `sizeof(vertex_t)`, 64-bit targets (#361 §8).
      *
-     * Measured 112 B post-#380 §1; 144 post-packing, 168 post-§3, 160 post-§2, 248 post-§1,
-     * 536 pre-split. The headroom is deliberate: routine churn passes, re-inlining a cold
-     * member (handlers, history, the ACL trio) fails the build.
+     * Pinned to the size actually measured, with NO headroom, so the next byte added is a
+     * build failure. That is the point: the goal is a lean vertex, and a ceiling held above
+     * the measured size cannot express it. A ceiling only answers "did you regress past a
+     * fixed point"; both 112 B and 96 B satisfied the old 120 B ceiling, so the 16 B the diet
+     * won after #380 §1 were invisible to the build and free to be spent again by anyone.
+     * Pinned to the measurement, every byte reclaimed is kept by construction.
+     *
+     * History, newest first: 96 (measured across all three CI legs — `acl_full` OFF/ON and
+     * both `lkv_slot_t` bindings agree), 112 post-#380 §1, 144 post-packing, 168 post-§3,
+     * 160 post-§2, 248 post-§1, 536 pre-split.
      *
      * It lives HERE, in the configuration, because it is a per-target budget — and it is
      * enforced in `%vertex.hpp` beside the type it constrains, so **every** build on **every**
@@ -171,21 +178,29 @@ struct default_config_t {
      * gated exactly one configuration and never the 32-bit one at all (no CI leg compiled that
      * test cross-target, while the ESP-IDF legs compiled `vertex_t` itself on every PR).
      *
-     * Raising one of these is a reviewed decision, not a way to make a build pass.
+     * Two rules follow from pinning it. RAISING one is a reviewed decision, never a way to
+     * make a build pass. LOWERING one is the routine half: a change that shrinks `vertex_t`
+     * lowers the number in the same commit, or the gain is handed back to the next author.
      */
-    static constexpr std::size_t kMaxVertexBytes64 = 120;
+    static constexpr std::size_t kMaxVertexBytes64 = 96;
 
     /**
-     * @brief The RAM-diet ceiling on `sizeof(vertex_t)`, 32-bit (MCU) targets.
+     * @brief The RAM-diet RATCHET on `sizeof(vertex_t)`, 32-bit (MCU) targets.
      *
-     * Pointer-halved with the same headroom. Raised 72 -> 80 with the #380 §2 name-key SBO: the
-     * key's inline buffer adds <= 8 struct bytes on 32-bit but deletes a ~32 B heap block per
-     * named vertex, and the heap is what the C6 measures.
+     * Pointer-halved, and pinned to the measurement on the same terms as
+     * @ref kMaxVertexBytes64 — measured 72 B on rv32 (`-Os -fno-exceptions -fno-rtti`,
+     * `rv32imac_zicsr_zifencei`/`ilp32`), identical across all three configuration legs.
      *
-     * **This one has zero headroom today** — `sizeof(vertex_t)` on rv32 is exactly 80 — so the
-     * next 32-bit member is a build failure by design.
+     * This number was 80 with a note claiming rv32 was "exactly 80" and had zero headroom.
+     * It was 72 by then: the struct had shrunk and the prose had not, which is exactly the
+     * drift a pinned number cannot have — the assert is re-derived from a measurement, while
+     * a sentence describing the size is only as true as the day it was written.
+     *
+     * Earlier: raised 72 -> 80 with the #380 §2 name-key SBO, whose inline buffer adds <= 8
+     * struct bytes on 32-bit but deletes a ~32 B heap block per named vertex — and on this
+     * target the heap is what is actually scarce.
      */
-    static constexpr std::size_t kMaxVertexBytes32 = 80;
+    static constexpr std::size_t kMaxVertexBytes32 = 72;
 
     /**
      * @brief The RFC-0022 §3.D pin/copy amplification ratio — pin the written value as a subview

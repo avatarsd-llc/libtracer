@@ -3090,16 +3090,25 @@ class vertex_t {
  * it gated exactly one configuration: the 32-bit arm was never evaluated at all, because no CI
  * leg cross-compiled that test, while the ESP-IDF legs compiled `vertex_t` itself on every PR.
  *
- * The ceilings are members of @ref config_t, so a target that must carry a bigger vertex says so
+ * The bounds are members of @ref config_t, so a target that must carry a bigger vertex says so
  * in its configuration, where the change is visible in a diff, rather than by editing a test
  * until it passes.
+ *
+ * They are RATCHETS, not ceilings: each is pinned to the size actually measured, so the gate
+ * catches the next added byte instead of the next 24. A ceiling held above the measurement
+ * answers only "did you regress past a fixed point" and is silent on whether the type got
+ * leaner — which let 16 B reclaimed on the 64-bit arm, and 8 B on the 32-bit one, sit
+ * unnoticed and re-spendable. Pinning keeps every reclaimed byte by construction, at the cost
+ * of one number to lower in whichever commit shrinks the struct.
  */
 static_assert(sizeof(void*) != 8 || sizeof(vertex_t) <= config_t::kMaxVertexBytes64,
-              "vertex_t grew past the 64-bit RAM-diet gate (#361) — move the new member behind "
-              "vertex_ext_t, don't inline it");
+              "vertex_t grew past the 64-bit RAM-diet ratchet (#361) — move the new member "
+              "behind vertex_ext_t, don't inline it. The ratchet is PINNED to the measured "
+              "size, so it has no headroom by construction: any added member fails here by "
+              "design, and shrinking vertex_t means lowering the number in the same commit");
 static_assert(sizeof(void*) != 4 || sizeof(vertex_t) <= config_t::kMaxVertexBytes32,
-              "vertex_t grew past the 32-bit RAM-diet gate (#361) — move the new member behind "
-              "vertex_ext_t, don't inline it. This ceiling has NO headroom: rv32 sits exactly on "
-              "it, so any added 32-bit member fails here by design");
+              "vertex_t grew past the 32-bit RAM-diet ratchet (#361) — move the new member "
+              "behind vertex_ext_t, don't inline it. Same pinned-to-measurement rule as the "
+              "64-bit arm, and this is the target where the bytes actually matter");
 
 }  // namespace tr::graph
