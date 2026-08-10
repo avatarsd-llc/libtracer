@@ -1,0 +1,26 @@
+{
+  "_comment": "Symbol-size ratchet pins (#1155). MEASURED values, never round ceilings. Taken at the bench's own flags (Release = -O3 -DNDEBUG -std=c++23) on the toolchain named below; sizes are compiler-bound, so the gate refuses to compare across toolchains. Re-pin with: python3 bench/symbol_ratchet.py --build bench/build --pins bench/symbol_ratchet.json --emit",
+  "toolchain": "g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+  "symbols": [
+    {
+      "binary": "bench_libtracer",
+      "symbol": "tr::graph::graph_t::dispatch_edge_target",
+      "bytes": 481
+    },
+    {
+      "binary": "bench_libtracer",
+      "symbol": "tr::graph::graph_t::dispatch_edge(",
+      "bytes": 305
+    },
+    {
+      "binary": "bench_libtracer",
+      "symbol": "tr::graph::graph_t::find_ptr",
+      "bytes": 557
+    },
+    {
+      "binary": "bench_compact_delivery",
+      "symbol": "void tr::net::fwd_router_t::route_fwd_forward<tr::wire::grammar::rope_cursor>",
+      "bytes": 1959
+    }
+  ]
+}
