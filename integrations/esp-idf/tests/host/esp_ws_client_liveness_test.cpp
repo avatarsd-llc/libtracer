@@ -142,11 +142,26 @@ fake_ws::frame_t close_frame() {
     return fake_ws::make_frame(WS_TRANSPORT_OPCODES_CLOSE, /*fin=*/true, /*len=*/2, /*seed=*/0x11);
 }
 
-/** @brief Build a link and wait for its first dial. */
+/**
+ * @brief Build a link, wait for its first dial, and wait for it to be UP.
+ *
+ * The second wait is not redundant, and its absence was #1118. `connect_count()` is
+ * incremented by the fake INSIDE `esp_transport_connect`, whereas `ok()` reads
+ * `connected_`, which the recv thread stores only after `connect_once()` has returned —
+ * the socket options and the handle publication happen in between. So "the dial was
+ * counted" and "the link is up" are different predicates with a real window between them,
+ * and a caller that waited on the first and then sampled the second was sampling a race.
+ *
+ * It went unnoticed because the window is short at `-O2`: it surfaced under TSAN
+ * (`-fsanitize=thread -g -O1`), where everything runs slower and scheduling changes, at
+ * roughly 3.8% of runs on a REQUIRED check. Waiting on the predicate the cases actually
+ * assert removes the window instead of widening a timeout around it.
+ */
 std::unique_ptr<tr::net::esp_ws_client_link_t> dialed_link() {
     auto link = std::make_unique<tr::net::esp_ws_client_link_t>(
         "127.0.0.1", 8080, "/ws", /*handshake_headers=*/std::string{}, kBufBytes, kBufBytes, 0);
     check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "the link dialed");
+    check(wait_until([&] { return link->ok(); }, 2s), "and came up");
     return link;
 }
 

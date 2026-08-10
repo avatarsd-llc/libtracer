@@ -330,7 +330,7 @@ flatten questions:
   feeding the rope tier an owned segment, let the branch and field decode collapse to refcount
   bumps once the sink is rope-native.
 - **WS reassembly (⑧)** regrows exact-size per fragment
-  (`integrations/esp-idf/libtracer/httpd_ws_link.cpp:410-420`), which is O(n²) in total bytes
+  (`integrations/esp-idf/libtracer/httpd_ws_link.cpp:442-452`), which is O(n²) in total bytes
   copied. Chaining each fragment as an owning rope link makes it O(n) owning copies — the CAN model,
   which is what the host `transport_ws.cpp` does.
 

@@ -127,6 +127,24 @@ constexpr std::size_t kInternalSockSlack = 3;
 constexpr std::uint8_t kMaxConsecutiveTxDrops = 3;
 
 /**
+ * @brief How many times IDF spends the send bound inside ONE `httpd_ws_send_frame_async`.
+ *
+ * `SO_SNDTIMEO` is a per-`send` property, and IDF writes a WS frame in TWO calls to the
+ * session's send function — the header (`components/esp_http_server/src/httpd_ws.c:447`)
+ * and then the payload (`:455`). So the caller's number is a per-LEG bound, never a
+ * per-frame one, and a single stalled peer parks the httpd task for twice what the
+ * derivation used to claim (#956).
+ *
+ * The sibling constant on the client link is `kIdfWriteLegs` in `esp_ws_client_link.cpp`,
+ * which is 3 because `_ws_write` spends it on a poll plus both writes (#952). Same class
+ * of fact, different function, so each states its own — never a shared constant.
+ *
+ * This term disappears if the send path ever becomes a single write (the direction #949
+ * and the frame-atomicity work point at); it is a fact about the API in use, not a policy.
+ */
+constexpr std::uint32_t kIdfWsWriteLegs = 2;
+
+/**
  * @brief The task-watchdog period, seconds — the numerator of the send bound.
  *
  * Not a number of ours: `CONFIG_ESP_TASK_WDT_TIMEOUT_S` is the system's own normative
@@ -181,7 +199,7 @@ constexpr int kKeepProbes = 3;          /**< @brief Unanswered probes before dea
  * @ref kMaxConsecutiveTxDrops consecutive failures, and every one of them costs a full
  * bound. So the worst case is every peer in the cap, each timing out its full streak:
  *
- *     peers * kMaxConsecutiveTxDrops * bound  <=  one watchdog window
+ *     peers * kMaxConsecutiveTxDrops * kIdfWsWriteLegs * bound  <=  one watchdog window
  *
  * Dividing by the peer count alone (what this did before) makes one ROUND fill the window
  * exactly, and the streak then carries the task `kMaxConsecutiveTxDrops` windows past the
@@ -192,12 +210,26 @@ constexpr int kKeepProbes = 3;          /**< @brief Unanswered probes before dea
  * "three send bounds" — that three has to be IN the derivation, not merely acknowledged
  * by it.
  *
- * All three inputs are facts already in hand (@ref kTaskWdtSeconds, the caller's peer cap,
- * @ref kMaxConsecutiveTxDrops), so there is still no knob and no millisecond literal.
+ * `kIdfWsWriteLegs` is the third divisor and the same kind of correction (#956): the bound
+ * is a per-`send_fn` property, and IDF spends it TWICE per frame, so a per-frame stall was
+ * double what this returned.
+ *
+ * All four inputs are facts already in hand (@ref kTaskWdtSeconds, the caller's peer cap,
+ * @ref kMaxConsecutiveTxDrops, @ref kIdfWsWriteLegs), so there is still no knob and no
+ * millisecond literal.
+ *
+ * The floor is a CORRECTNESS clamp, not a policy: `SO_SNDTIMEO = 0` means *block forever*
+ * — precisely the failure this derivation exists to remove — and a large-but-legal
+ * `peer_cap` divides the window to zero (#956). One millisecond is not a useful bound and
+ * is not meant to be; it is the statement that no configuration may reach "unbounded" by
+ * arithmetic. A deployment landing on it has a peer cap its watchdog window cannot cover,
+ * which is a wiring problem the clamp makes survivable rather than silent.
  */
 [[nodiscard]] constexpr std::uint32_t derive_send_timeout_ms(std::size_t peer_cap) noexcept {
     const std::size_t peers = peer_cap != 0 ? peer_cap : kDefaultPeerCap;
-    return static_cast<std::uint32_t>(kTaskWdtSeconds * 1000U / (peers * kMaxConsecutiveTxDrops));
+    const std::size_t legs = peers * kMaxConsecutiveTxDrops * kIdfWsWriteLegs;
+    const auto derived = static_cast<std::uint32_t>(kTaskWdtSeconds * 1000U / legs);
+    return derived != 0 ? derived : 1;
 }
 
 /** @brief Clamp @p want to the server's own per-socket send bound, seconds — the value
@@ -860,6 +892,22 @@ httpd_ws_link_t::httpd_ws_link_t(httpd_handle_t external, const char* uri_patter
     send_timeout_ms_ = clamp_send_timeout_ms(
         send_timeout_ms != 0 ? send_timeout_ms : derive_send_timeout_ms(max_peers),
         defaults.send_wait_timeout);
+    // `max_peers == 0` means two different things to two readers, and ONLY here can they
+    // disagree without limit (#956): to admission it means UNBOUNDED (`on_data_frame`
+    // guards the cap with `if (max_peers_ != 0)`), while the derivation above substitutes
+    // kDefaultPeerCap. The owning constructor is self-consistent — the same substitution
+    // also sets its socket budget, so the assumption is enforced — but an adopted server's
+    // real ceiling is the caller's `max_open_sockets`, and esp_http_server exposes no
+    // reader for it. So the mismatch cannot be detected, only DECLARED: a node whose
+    // adopted server admits more peers than this gets a bound derived for a population it
+    // does not limit, and nothing else would say so. Whether 0 should stay a legal value
+    // in adopted mode at all is an API question this does not decide.
+    if (max_peers == 0 && send_timeout_ms == 0)
+        ESP_LOGW(kTag,
+                 "max_peers=0 on an ADOPTED server: send bound derived against an assumed "
+                 "cap of %u (%u ms), but admission is unbounded — pass the server's real "
+                 "max_open_sockets, or an explicit send_timeout_ms",
+                 (unsigned)kDefaultPeerCap, (unsigned)send_timeout_ms_);
     // Adopt an already-running server (the firmware's :80 SPA httpd): register the WS URI
     // as one more handler on it rather than standing up a second esp_http_server. We do
     // NOT own the server, so port_ is 0 (no bind of ours) and the dtor must never

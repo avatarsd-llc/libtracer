@@ -12,6 +12,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The derived WS send bound now accounts for IDF's two writes per frame, and can no
+  longer derive to "block forever" (#956).** Two further corrections to
+  `derive_send_timeout_ms`, on top of the strike cap (#840):
+  - `SO_SNDTIMEO` is a **per-`send` property**, and `httpd_ws_send_frame_async` writes a
+    frame as a header call plus a payload call (`esp_http_server/src/httpd_ws.c:447`,
+    `:455`), so one frame to one stalled peer parked the httpd task for **twice** what the
+    derivation claimed. `kIdfWsWriteLegs` is now the third divisor.
+  - The division had **no floor**: a large-but-legal `max_peers` truncated it to `0`, and
+    `SO_SNDTIMEO = 0` means *block forever* — exactly the failure the derivation exists to
+    remove. Clamped so no configuration can reach "unbounded" by arithmetic.
+
+  **Behaviour change:** the default derived bound is now **208 ms** at the default cap of 4
+  (was 416 ms after #840, 1250 ms before it). A peer that cannot absorb a frame inside the
+  tighter bound accrues a strike sooner; a healthy peer is unaffected, since any completing
+  send resets the streak. An embedder that wants the old latitude should pass an explicit
+  `send_timeout_ms`.
+
+  Also **logged, not fixed**: on an *adopted* server `max_peers = 0` means "unbounded" to
+  admission but "assume 4" to this derivation, and `esp_http_server` exposes no reader for
+  the real `max_open_sockets` — so the mismatch cannot be detected, only declared. The
+  constructor now warns once. Whether `0` should remain legal in adopted mode is an API
+  question this does not decide.
+
 - **A post-101 refusal now spends the reconnect backoff instead of spinning (#1128).**
   `esp_ws_client_link_t`'s backoff was gated on `connect_once()` returning false, but an
   admission refusal can only be expressed *after* `101 Switching Protocols` is on the wire —
@@ -35,7 +58,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   not one. Downstream HIL measured 4959 ms of a 5000 ms budget consumed (99%), i.e. whether
   the board panics decided by noise. The bound is now
   `watchdog / (peers * kMaxConsecutiveTxDrops)` — 416 ms at the default cap of 4, was
-  1250 ms. **Behaviour change:** a peer that cannot absorb a frame within the tighter bound
+  1250 ms. (#956 above then added IDF's two write legs as a third divisor, taking the
+  shipped value to 208 ms; 416 ms was never released on its own.) **Behaviour change:** a
+  peer that cannot absorb a frame within the tighter bound
   accrues a strike sooner, so a genuinely stalled session is torn down faster; a healthy one
   is unaffected, since any completing send resets the streak.
 
