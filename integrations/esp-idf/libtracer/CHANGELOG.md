@@ -12,6 +12,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **A chip build can no longer instantiate the spinlock pool (#1158, #963.3).** The component
+  compiles `core/src/mem_pool.cpp` into every image, which exports `tr::mem::sync_pool_t` —
+  the shorter, more discoverable name, documented by core as *"the multi-core-host spelling"*
+  — while the correct type for a chip lives in a separate header whose own doc concedes it is
+  opt-in. Nothing failed the build, so reaching for the wrong one compiled cleanly, passed a
+  smoke test, and surfaced only as a `task_wdt` wedge under load with a particular priority
+  ordering.
+
+  The component now derives core's new `LIBTRACER_SPIN_WAIT_SAFE` from `IDF_TARGET` into the
+  generated `config.hpp` — **`false` on every chip target**, `true` on `linux` — and core's
+  guard turns the mistake into a compile error naming `tr::esp::critical_pool_t`. Read from
+  `IDF_TARGET` rather than a `CONFIG_*` symbol deliberately: `CONFIG_*` is undefined in IDF's
+  early requirement-expansion pass, so a Kconfig-derived value would render one way there and
+  another in the build pass.
+
+  `false` on **every** chip, not only the single-core ones: the hazard is priority-preemptive
+  scheduling, not core count, so an SMP chip whose spinner and holder happen to share a core
+  wedges exactly as a C6 does — which is also why `portmux_sync_t` takes the portMUX spinlock
+  in addition to disabling interrupts.
+
+  No footprint change: `libtracer.a` is byte-identical, and `full_node` + `inprocess_mirror`
+  build unchanged for esp32c6 with the guard armed.
+
 - **Public headers now propagate their ESP-IDF dependencies (#963.4).** `esp_http_server`,
   `tcp_transport` and `esp_driver_twai` moved from `PRIV_REQUIRES` to **`REQUIRES`**. Those
   three are named by headers under `include/libtracer_esp/` (`httpd_ws_link.hpp:119`,

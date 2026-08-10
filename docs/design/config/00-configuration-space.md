@@ -149,13 +149,17 @@ type-erasure bloat and template-instantiation bloat alike.
 | `kPinPayloadRatio` (`:227`) | ratio | 0 — the `kPinNever` sentinel | no variable — a preset member | not exposed |
 | `acl_policy_t` (`:236`) | policy type | `allow_only_policy_t` | `-DLIBTRACER_ACL_FULL=ON` | hardcoded to `allow_only_policy_t` (`integrations/esp-idf/libtracer/CMakeLists.txt:273`) — the full policy is not selectable |
 | `lkv_slot_t` (`:252`) | policy type | `sp_atomic_slot_t` | `-DLIBTRACER_LKV_SLOT=<type>` | hardcoded to `sp_atomic_slot_t` (`integrations/esp-idf/libtracer/CMakeLists.txt:274`) — the hazard slot is not selectable |
+| `kSpinWaitSafe` (`:307`) | target fact | `true` | `-DLIBTRACER_SPIN_WAIT_SAFE=false` on an RTOS host | derived from `IDF_TARGET` — `false` on every chip, `true` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:306-310`) |
 
 Each is documented at its declaration with what it costs and when to move it; that header is
-the reference, not this table. What matters here is the shape: **eight knobs, all named, all
+the reference, not this table. What matters here is the shape: **nine knobs, all named, all
 finite.** Three are counts (`kVertexLockStripes`, `kHazardReaderSlots`, `kEdgePinSlots`), one is a
-padding width, one is a per-target RAM ceiling, one is a ratio, and two are type bindings.
+padding width, one is a per-target RAM ceiling, one is a ratio, two are type bindings, and one is a
+target fact rather than a preference — `kSpinWaitSafe` says whether a task on this target may spin
+for a lock another task holds, and the guard in `mem_pool.hpp` reads it to refuse
+`synchronized_pool_t<spin_sync_t>` where the answer is no (#1158).
 
-Two of the eight carry no build-system variable at all. `kMaxVertexBytes64` / `kMaxVertexBytes32`
+Two of the nine carry no build-system variable at all. `kMaxVertexBytes64` / `kMaxVertexBytes32`
 and `kPinPayloadRatio` are preset members: an application moves them by declaring its own traits
 type, not by passing `-D`. `kPinPayloadRatio` is the pin/copy amplification ratio `K` — a
 trailer-less written value is stored as a subview of the inbound frame, rather than copied out,

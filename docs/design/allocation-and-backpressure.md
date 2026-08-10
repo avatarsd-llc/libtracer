@@ -78,7 +78,7 @@ hooks and a refcount, which the block source is not. The split is `graph_t`'s `c
 thread-safe** (ADR-0060 §2): all of those sites but one run on a transport child's receive thread
 and the remaining one on the writer thread, and the `segment` it hands out self-routes its reclaim
 on whichever thread drops the last reference. A bare `pool_t` is not thread-safe and must not be injected here;
-`synchronized_pool_t<Sync>` (`core/include/libtracer/mem_pool.hpp:170`) is the in-tree
+`synchronized_pool_t<Sync>` (`core/include/libtracer/mem_pool.hpp:172`) is the in-tree
 composition, and its critical section is a compile-time policy: `sync_pool_t` for the multi-core
 spinlock, `tr::esp::critical_pool_t` for the single-core interrupt-disable variant.
 

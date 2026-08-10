@@ -1307,3 +1307,22 @@ add_executable(test_support_test test_support_test.cpp)
 target_link_libraries(test_support_test PRIVATE libtracer Threads::Threads)
 libtracer_test_warnings(test_support_test)
 add_test(NAME test_support COMMAND test_support_test)
+
+# #1158 — the spin-pool guard. Not an executable: what is under test is that a build is
+# REJECTED, so the check (cmake/spin_pool_guard.cmake) drives the compiler over one probe TU
+# against two renderings of libtracer/config.hpp and asserts BOTH arms — the allowed one
+# compiles, the forbidden one fails AND names critical_pool_t. Rendered here rather than
+# hand-written so the forbidden config cannot drift from the template.
+set(_lt_probe_saved_spin "${LIBTRACER_SPIN_WAIT_SAFE}")
+set(LIBTRACER_SPIN_WAIT_SAFE false)
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include/libtracer/config.hpp.in
+    ${CMAKE_CURRENT_BINARY_DIR}/spin-forbidden/libtracer/config.hpp
+    @ONLY)
+set(LIBTRACER_SPIN_WAIT_SAFE "${_lt_probe_saved_spin}")
+add_test(NAME spin_pool_guard COMMAND ${CMAKE_COMMAND}
+         -DLT_CXX=${CMAKE_CXX_COMPILER}
+         -DLT_CORE_INCLUDE=${CMAKE_CURRENT_SOURCE_DIR}/../include
+         -DLT_FORBIDDEN_INCLUDE=${CMAKE_CURRENT_BINARY_DIR}/spin-forbidden
+         -DLT_PROBE=${CMAKE_CURRENT_SOURCE_DIR}/spin_pool_guard_probe.cpp
+         -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/spin_pool_guard.cmake)

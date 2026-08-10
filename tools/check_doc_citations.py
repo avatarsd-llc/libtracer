@@ -300,6 +300,8 @@ ANCHORS = [
     ('core/include/libtracer/config.hpp.in:249',
      '* `-DLIBTRACER_LKV_SLOT=<type>`. The named type must satisfy the policy contract in'),
     ('core/include/libtracer/config.hpp.in:252', 'using lkv_slot_t = @LIBTRACER_LKV_SLOT@;'),
+    ('core/include/libtracer/config.hpp.in:307',
+     'inline constexpr bool kSpinWaitSafe = @LIBTRACER_SPIN_WAIT_SAFE@;'),
     ('core/include/libtracer/config.hpp.in:261', 'using config_t = default_config_t;'),
     ('core/include/libtracer/config.hpp.in:263',
      '// ---------------------------------------------------------------------------------------------'),
@@ -377,7 +379,7 @@ ANCHORS = [
     ('core/include/libtracer/mem_heap.hpp:338',
      '[[nodiscard]] inline std::optional<view_t> over_bytes(std::span<const std::byte> bytes) noexcept {'),
     # core/include/libtracer/mem_pool.hpp
-    ('core/include/libtracer/mem_pool.hpp:170', 'class synchronized_pool_t final : public mem_backend_t {'),
+    ('core/include/libtracer/mem_pool.hpp:172', 'class synchronized_pool_t final : public mem_backend_t {'),
     # core/include/libtracer/mem_source.hpp
     ('core/include/libtracer/mem_source.hpp:138', '[[nodiscard]] block_source_t& heap_source() noexcept;'),
     ('core/include/libtracer/mem_source.hpp:159', '[[nodiscard]] block_source_t& null_source() noexcept;'),
@@ -750,11 +752,11 @@ ANCHORS = [
     ('bindings/typescript/packages/client/test/mesh-testbed.test.mjs:24',
      "ADDRESSING: a connection's routing key IS its vertex path"),
     ('core/CMakeLists.txt:63', 'option(LIBTRACER_NET_PLANE'),
-    ('core/CMakeLists.txt:277', 'option(LIBTRACER_WITH_CUDA "Build the mem_cuda GPU backend'),
-    ('core/CMakeLists.txt:300', 'option(LIBTRACER_WITH_QUIC "Configure the libtracer_quic transport module'),
-    ('core/CMakeLists.txt:386', 'write_basic_package_version_file('),
-    ('core/CMakeLists.txt:397', 'if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND EXISTS'),
-    ('core/CMakeLists.txt:404', 'option(LIBTRACER_BUILD_EXAMPLES "Build the core examples"'),
+    ('core/CMakeLists.txt:289', 'option(LIBTRACER_WITH_CUDA "Build the mem_cuda GPU backend'),
+    ('core/CMakeLists.txt:312', 'option(LIBTRACER_WITH_QUIC "Configure the libtracer_quic transport module'),
+    ('core/CMakeLists.txt:398', 'write_basic_package_version_file('),
+    ('core/CMakeLists.txt:409', 'if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND EXISTS'),
+    ('core/CMakeLists.txt:416', 'option(LIBTRACER_BUILD_EXAMPLES "Build the core examples"'),
     # `docs/examples/index.md` cited the two `if(LIBTRACER_NET_PLANE)` lines (58, 73). That
     # text appears THREE times in this file and the scope filter cannot separate 58 from 73
     # — a scope must sit ABOVE its candidate, and everything above 58 is also above 73. The
@@ -772,6 +774,7 @@ ANCHORS = [
      'list(APPEND LIBTRACER_SRCS "${LIBTRACER_ROOT}/core/src/transport_can.cpp")'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:273', 'set(LIBTRACER_ACL_POLICY allow_only_policy_t)'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:274', 'set(LIBTRACER_LKV_SLOT sp_atomic_slot_t)'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:306', 'if(IDF_TARGET STREQUAL "linux")'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:275', 'set(LIBTRACER_HAZARD_READER_SLOTS 64)'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:285', 'set(LIBTRACER_EDGE_PIN_SLOTS 8)'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:290', 'if(CONFIG_FREERTOS_UNICORE)'),
