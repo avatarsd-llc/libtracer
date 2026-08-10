@@ -133,7 +133,7 @@ correspondingly smaller; that figure has not been compiled here and is not asser
 
 ### 3.2 Why the rope cursor does not remove the arena
 
-`rope_cursor` (`core/include/libtracer/rope_decode.hpp:57`) is a **byte source**. It lets the
+`rope_cursor` (`core/include/libtracer/rope_decode.hpp:71`) is a **byte source**. It lets the
 grammar read fields off a scatter-gather rope by stitching straddling headers a byte at a time and
 feeding the CRC link by link, satisfying the same `Cursor` concept as `span_cursor`. But
 `decode_into` does not only read bytes — it stores structure: a random-accessible `arena_tlv_t`

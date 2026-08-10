@@ -46,10 +46,24 @@ namespace tr::wire::grammar {
  * @brief The rope byte-source cursor — the link-walking twin of `span_cursor`.
  *
  * Reads the grammar's bytes across an ordered chain of @ref view::view_t links so
- * the same `parse_header` rules serve a scatter-gather frame. A window
- * `[base, end)` into the rope; @ref region narrows it in O(1) (offsets only, never
- * copying links) to descend into a structured node's children region — the rope
- * analogue of the span cursor's `subspan`.
+ * the same `parse_header` rules serve a scatter-gather frame. A window of @ref size
+ * bytes ANCHORED at a `(link index, intra-link offset)` origin; @ref region narrows
+ * it to descend into a structured node's children region — the rope analogue of the
+ * span cursor's `subspan`.
+ *
+ * ## Why the origin is a link anchor and not an absolute offset (#917)
+ *
+ * The cursor used to hold an absolute `[base, end)` and resolve every read with a
+ * `locate()` that scanned the chain **from link 0**. `region` was then O(1) but every
+ * read through the narrowed cursor re-paid the walk to its origin, so `grammar::walk`
+ * — which regions once per child — cost Θ(children × links), and `load_le` paid one
+ * full scan PER BYTE (a timestamp's 8-byte tail load: eight chain scans).
+ *
+ * Anchoring the origin instead moves that walk to @ref region, where it advances
+ * FORWARD from the parent's own anchor: the whole child sweep costs O(links) once,
+ * not O(links) per child, and a read at a small offset (the header bytes every
+ * `parse_header` starts with) resolves in about one step. Nothing else changes —
+ * the cursor stays trivially copyable, as the walk stack's relocation memcpy needs.
  *
  * @warning Reads dereference link bytes on the CPU, so every link must be HOST
  *          (@ref view::rope_t::all_host). `validate_rope` enforces this.
@@ -61,16 +75,42 @@ class rope_cursor {
 
     /** @brief A cursor over the whole of rope @p r. */
     explicit rope_cursor(const view::rope_t& r) noexcept
-        : links_(r.links()), end_(r.total_length()) {}
+        : links_(r.links()), size_(r.total_length()) {}
+
+    /**
+     * @brief A cursor over @p len bytes of @p links starting at link @p li, byte
+     *        @p intra — the RESUMABLE form.
+     *
+     * Lets a caller that already walked to a position (the lazy child iterator,
+     * `%tlv_view.hpp`) re-enter the chain there instead of from link 0, which is the
+     * same Θ(children × links) the anchored origin removes inside `grammar::walk`.
+     * @note Precondition: the anchor names a byte the chain holds (or its exact end,
+     *       for an empty window) and @p len bytes follow it.
+     */
+    [[nodiscard]] static rope_cursor at(std::span<const view::view_t> links, std::size_t li,
+                                        std::size_t intra, std::size_t len) noexcept {
+        rope_cursor c;
+        c.links_ = links;
+        c.li_ = li;
+        c.intra_ = intra;
+        c.size_ = len;
+        return c;
+    }
 
     /** @brief Number of bytes available from this cursor's origin. */
-    [[nodiscard]] std::size_t size() const noexcept { return end_ - base_; }
+    [[nodiscard]] std::size_t size() const noexcept { return size_; }
+
+    /** @brief This cursor's origin as a `(link index, intra-link offset)` anchor. */
+    [[nodiscard]] std::pair<std::size_t, std::size_t> anchor() const noexcept {
+        return {li_, intra_};
+    }
 
     /**
      * @brief A sub-cursor over the `[off, off + len)` window of this cursor.
      *
-     * O(1) — adjusts the absolute base/end only, sharing the same link chain.
-     * Used to descend into a node's children region exactly as `decode_into`
+     * O(links crossed by @p off) — walks the anchor forward from THIS cursor's origin
+     * (never from link 0) and re-windows, sharing the same link chain and copying no
+     * link. Used to descend into a node's children region exactly as `decode_into`
      * `subspan`s the payload.
      * @note Precondition: `off + len <= size()` (debug-asserted) — the same
      *       containment contract `span_cursor::region` gets for free from
@@ -82,8 +122,25 @@ class rope_cursor {
         // unclamped region would otherwise let a cursor claim bytes that do not exist.
         assert(off + len <= size());
         rope_cursor c = *this;
-        c.base_ += off;
-        c.end_ = c.base_ + len;
+        c.size_ = len;
+        // Fast path — the sub-window opens inside the SAME link. This is what a header
+        // region is on any rope whose links are larger than a TLV header, so it must not
+        // pay a loop: the old absolute-offset cursor made `region` two adds, and charging
+        // even a short walk to every descent cost the 2-link hop ~3% before this branch
+        // existed. Not merely an optimisation of the loop below — it is the case the loop
+        // is amortised over.
+        if (c.li_ < c.links_.size() && off < c.links_[c.li_].length - c.intra_) {
+            c.intra_ += off;
+            return c;
+        }
+        // Advancing the anchor is the only walk the whole descent pays. `off` may land
+        // exactly on the chain's end (an empty region at the tail), which leaves
+        // `li_ == links_.size()` — a legal empty cursor, not a violation.
+        c.intra_ += off;
+        while (c.li_ < c.links_.size() && c.intra_ >= c.links_[c.li_].length) {
+            c.intra_ -= c.links_[c.li_].length;
+            ++c.li_;
+        }
         return c;
     }
 
@@ -97,15 +154,37 @@ class rope_cursor {
         // Precondition, enforced in debug builds (zero release cost; fuzz + sanitizer CI
         // catches a violation): the byte must lie inside this cursor's window.
         assert(off < size());
-        const auto [li, intra] = locate(base_ + off);
+        const auto [li, intra] = seek(off);
         return std::to_integer<std::uint8_t>(links_[li].bytes()[intra]);
     }
 
-    /** @brief Load @p n little-endian bytes at @p off as a u64 (stitched across links). */
+    /**
+     * @brief Load @p n little-endian bytes at @p off as a u64 (stitched across links).
+     *
+     * ONE `seek` then a forward walk — not @p n seeks. The trailer loads
+     * (`parse_header`'s length field, a CRC value, an 8-byte timestamp) are the
+     * cursor's densest reads, and paying the chain walk per byte made a straddling
+     * timestamp cost eight of them.
+     */
     [[nodiscard]] std::uint64_t load_le(std::size_t off, std::size_t n) const noexcept {
+        // Same window containment @ref byte_at asserted once per byte.
+        assert(n == 0 || off + n <= size());
+        if (n == 0) return 0;
         std::uint64_t v = 0;
-        for (std::size_t i = 0; i < n; ++i) {
-            v |= static_cast<std::uint64_t>(byte_at(off + i)) << (8u * i);
+        unsigned shift = 0;
+        std::size_t remaining = n;
+        auto [li, intra] = seek(off);
+        while (remaining > 0 && li < links_.size()) {
+            const std::span<const std::byte> lb = links_[li].bytes();
+            const std::size_t take = std::min(remaining, lb.size() - intra);
+            for (std::size_t k = 0; k < take; ++k) {
+                v |= static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(lb[intra + k]))
+                     << shift;
+                shift += 8u;
+            }
+            remaining -= take;
+            ++li;
+            intra = 0;
         }
         return v;
     }
@@ -119,12 +198,12 @@ class rope_cursor {
      * @note Precondition: `off + n <= size()` (debug-asserted) — the same window
      *       containment @ref region and @ref byte_at carry, and that the sibling
      *       `span_cursor::for_each_span` gets for free from `std::span::subspan`.
-     *       The walk's own guards are chain-end and `locate`'s past-chain assert,
+     *       The walk's own guards are chain-end and `seek`'s past-chain assert,
      *       neither of which sees a feed that overshoots a NARROWED window while
      *       staying inside the chain — without this the caller would be handed
      *       real-but-wrong bytes and told it succeeded.
      * @warning Unlike @ref byte_at there is NO release backstop: `byte_at`'s
-     *          out-of-window read degrades to an out-of-range subscript (`locate`
+     *          out-of-window read degrades to an out-of-range subscript (`seek`
      *          returns the one-past-the-end index) that a sanitizer reports, but
      *          an overshooting feed reads bytes the chain genuinely holds, so a
      *          release (NDEBUG) build walks past the window silently and no
@@ -138,12 +217,12 @@ class rope_cursor {
         // visible in a release build — the overshot bytes really are in the chain, just
         // outside the window — so this assert is the only guard there is.
         assert(off + n <= size());
-        // An empty feed names no byte, so it must not `locate` one: the grammar's CRC
+        // An empty feed names no byte, so it must not `seek` one: the grammar's CRC
         // feed calls this with n == 0 for an absent payload or trailer, at an offset
         // that is legitimately the end of the window.
         if (n == 0) return;
         std::size_t remaining = n;
-        auto [li, intra] = locate(base_ + off);
+        auto [li, intra] = seek(off);
         while (remaining > 0 && li < links_.size()) {
             const std::span<const std::byte> lb = links_[li].bytes();
             const std::size_t take = std::min(remaining, lb.size() - intra);
@@ -157,30 +236,31 @@ class rope_cursor {
     }
 
    private:
-    // Absolute offset -> (link index, intra-link offset). A linear scan: the reads
-    // that use it (header/trailer stitching) are small and bounded; bulk payload
-    // goes through for_each_span, which scans once then walks forward.
-    [[nodiscard]] std::pair<std::size_t, std::size_t> locate(std::size_t a) const noexcept {
-        std::size_t acc = 0;
-        for (std::size_t i = 0; i < links_.size(); ++i) {
-            const std::size_t len = links_[i].length;
-            if (a < acc + len) return {i, a - acc};
-            acc += len;
+    // Window offset -> (link index, intra-link offset), walking FORWARD from this
+    // cursor's own anchor. The reads that use it (header/trailer stitching) sit at
+    // small offsets, so this is about one step; bulk payload goes through
+    // for_each_span, which seeks once then walks forward.
+    [[nodiscard]] std::pair<std::size_t, std::size_t> seek(std::size_t off) const noexcept {
+        std::size_t li = li_;
+        std::size_t intra = intra_ + off;
+        while (li < links_.size() && intra >= links_[li].length) {
+            intra -= links_[li].length;
+            ++li;
         }
         // Precondition, enforced in debug builds (zero release cost; fuzz + sanitizer CI
-        // catches a violation): `a` must name a byte the chain actually holds. This used
-        // to fabricate {links_.size() - 1, 0} — byte 0 of the LAST link, a real but wrong
-        // byte that no sanitizer could see (and, on an empty chain, links_[0] on an empty
-        // span: hard UB). Returning the one-past-the-end index instead makes a violation
-        // an out-of-range subscript in byte_at, which the sanitizers do see, while
-        // for_each_span's `li < links_.size()` guard still stops cleanly on it.
-        assert(false && "rope_cursor: offset is past the end of the link chain");
-        return {links_.size(), 0};
+        // catches a violation): `off` must name a byte the chain actually holds. The walk
+        // above leaves `li == links_.size()` on a violation, which makes it an out-of-range
+        // subscript in byte_at — the form the sanitizers DO see, rather than a real-but-
+        // wrong byte they cannot — while for_each_span's `li < links_.size()` guard still
+        // stops cleanly on it.
+        assert(li < links_.size() && "rope_cursor: offset is past the end of the link chain");
+        return {li, intra};
     }
 
     std::span<const view::view_t> links_;
-    std::size_t base_ = 0;
-    std::size_t end_ = 0;
+    std::size_t li_ = 0;     // link holding the cursor's first byte
+    std::size_t intra_ = 0;  // offset of that byte within link li_
+    std::size_t size_ = 0;   // bytes available from the anchor
 };
 
 }  // namespace tr::wire::grammar
