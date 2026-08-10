@@ -68,9 +68,14 @@ enum class acl_verdict_t : std::uint8_t {
  * refuses to let a resolved subject spell it (see @ref is_reserved_subject), rather than
  * leaving every integrator to know to blacklist it.
  *
- * @note `OWNER@`, the other special subject named in ADR-0020, is deliberately NOT reserved
- *       here: no evaluator in this core special-cases it, so it is an ordinary opaque token
- *       today and reserving it belongs to whatever change gives it its meaning.
+ * @note This is the ONLY special subject. ADR-0020 originally named `OWNER@` alongside it, but
+ *       no evaluator here ever special-cased that string, so an `OWNER@` ACE matched nobody —
+ *       and since any present ACE closes an otherwise-open vertex, such an ACE LOCKED the
+ *       vertex it was written to delegate. ADR-0020's erratum (#1033) withdraws the name
+ *       rather than reserving it: with no document telling an operator to write that ACE,
+ *       there is nothing for an impersonated `OWNER@` principal to match either. It is an
+ *       ordinary opaque token. Real owner semantics need a per-vertex owner identity the graph
+ *       does not hold and would change how a STORED ACE evaluates — an amendment, not this.
  */
 inline constexpr std::string_view kEveryoneSubject = "EVERYONE@";
 
@@ -316,7 +321,7 @@ class effective_acl_t {
  * The walk is **pair-consuming**, the mechanics of `net::config_reader_t` (#927): it
  * steps one whole `(NAME key, value)` pair at a time, so a value can never be re-read
  * as the next key — which a `subject` sent as a `NAME` (a spelling this function
- * accepts, for `OWNER@`/`EVERYONE@`) previously could be. The unknown-key ruling is the
+ * accepts, for `EVERYONE@`) previously could be. The unknown-key ruling is the
  * OPPOSITE of that reader's, deliberately: config is where a newer peer legitimately
  * sends more than the receiver understands, so it skips the pair; an ACL is not, so a
  * silently dropped attribute would widen access.
@@ -373,7 +378,7 @@ template <class Policy = acl_policy_t>
                 has_flags = true;
             } else if (key == "subject") {
                 // The subject token is opaque bytes (ADR-0018) — accept any opaque
-                // TLV's payload (VALUE recommended; NAME for "OWNER@"/"EVERYONE@").
+                // TLV's payload (VALUE recommended; NAME for the "EVERYONE@" spelling).
                 // A structured value decodes to an empty payload, so it lands here.
                 if (has_subject || val.payload.empty())
                     return std::unexpected(status_t::TYPE_MISMATCH);

@@ -32,9 +32,13 @@ to `kEveryoneSubject` therefore matches nothing in either policy, and
 `graph_t::acl_allows` refuses such a caller outright — at every gate, on a
 guarded vertex and on a bare one, the same fail-closed arm the resolver's own
 error return takes. `is_reserved_subject` is public so a resolver can refuse it
-at its own door too. `OWNER@`, the other special subject ADR-0020 names, is *not*
-reserved here: no evaluator special-cases it today, so it is an ordinary opaque
-token until one does.
+at its own door too. `EVERYONE@` is the *only* special subject: ADR-0020 originally
+named `OWNER@` alongside it, but no evaluator here ever special-cased that string,
+so an `OWNER@` ACE matched nobody — and since any present ACE closes an otherwise-open
+vertex, such an ACE **locked** the vertex it was written to delegate. ADR-0020's
+erratum ([#1033](https://github.com/avatarsd-llc/libtracer/issues/1033)) withdraws the
+name rather than reserving it; `OWNER@` is an ordinary opaque token, and real owner
+semantics would need a per-vertex owner identity the graph does not hold.
 
 Evaluation is split in two on purpose:
 

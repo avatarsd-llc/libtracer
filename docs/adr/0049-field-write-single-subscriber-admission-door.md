@@ -30,3 +30,16 @@ The graph stores subscriptions in one place (`vertex_t::subs_`, read back throug
 - Behavior change, called out for release notes: local subscribers gain the durability latch; local sugar subscriptions become ACL-gated (no-op without a resolver installed).
 - `graph.hpp` loses `add_remote_subscriber` from its public surface; the write-context type is the same one the ACL subject resolution already threads.
 - Tests asserting door-specific behavior (the remote-only latch) are updated to assert the uniform semantics; a new test pins "all doors produce byte-identical `:subscribers[]` read-back."
+
+## Erratum (2026-08-10): "`OWNER@`-equivalent subject" names a subject that does not exist
+
+The Decision section says local callers *"resolve to an `OWNER@`-equivalent subject by default,
+so in-process use without a subject resolver is unaffected."*
+
+**The behaviour is right; the name is not.** There is no `OWNER@` principal and never was — no
+evaluator special-cases the string, and ADR-0020's erratum
+([#1033](https://github.com/avatarsd-llc/libtracer/issues/1033)) withdraws it outright. The
+actual mechanism is simpler and has no subject in it: with **no subject resolver installed**,
+`graph_t::acl_allows` does not gate at all, so a local caller is trusted by construction rather
+than by resolving to a privileged token. Read the sentence as *"local calls are ungated until a
+resolver is installed."* Nothing about the decision changes.
