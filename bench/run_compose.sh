@@ -41,7 +41,14 @@
 #      COMPOSE_AUDIT_GROUPS (paced groups in the audit pass, default 400),
 #      COMPOSE_SEND_FLOOR (send syscalls the audit demands, default 50),
 #      COMPOSE_WIDTHS (default "1 8 64 256"), COMPOSE_VALUE_BYTES (default 64),
-#      COMPOSE_WINDOW_MS / COMPOSE_AUDIT_WINDOW_MS (subscriber backstops, default 180000).
+#      COMPOSE_WINDOW_MS / COMPOSE_AUDIT_WINDOW_MS (subscriber backstops, default 180000),
+#      COMPOSE_AUDIT_ONLY (default 0 — see below).
+#
+# COMPOSE_AUDIT_ONLY=1 runs pass 1 and stops, so no rate is measured and none is printed.
+# That is the mode CI runs (issue #1151): the audit is deterministic and asserts deliveries
+# and wire use rather than a rate, which is exactly the part that survives a shared runner
+# whose absolute speed varies ~2x run to run. The measured pass stays a reviewed, off-CI
+# step — publishing the comparison is gated on maintainer sign-off (docs/methodology.md).
 set -uo pipefail
 cd "$(dirname "$0")"
 
@@ -57,6 +64,7 @@ WINDOW_MS="${COMPOSE_WINDOW_MS:-180000}"
 # measured one; its subscriber needs a window sized for that, not for the untraced run.
 AUDIT_WINDOW_MS="${COMPOSE_AUDIT_WINDOW_MS:-180000}"
 LAT_GROUPS="${LIBTRACER_BENCH_COMPOSE_LAT:-4000}"
+AUDIT_ONLY="${COMPOSE_AUDIT_ONLY:-0}"
 
 cmake -S . -B "$BUILD" -DCMAKE_BUILD_TYPE=Release >/dev/null 2>&1 || true
 cmake --build "$BUILD" --target bench_compose_net -j >/dev/null 2>&1 || true
@@ -112,6 +120,13 @@ run_point() {
         echo -e "COMPOSE_POINT_FAIL\t$engine\t$k\tguard=$guard\taudit_sub=$audit_sub" >&2
         echo -e "COMPOSE_POINT_FAIL\t$engine\t$k\tguard=$guard\taudit_sub=$audit_sub"
         status=1
+        return 0
+    fi
+
+    # In audit-only mode the point ends here, having asserted deliveries and wire use and
+    # nothing else. Returning before pass 2 is the whole point: a rate taken on a shared CI
+    # runner would be noise, and the harness must not print one it does not stand behind.
+    if [ "$AUDIT_ONLY" = "1" ]; then
         return 0
     fi
 
