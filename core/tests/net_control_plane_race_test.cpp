@@ -50,6 +50,7 @@
 #include <thread>
 #include <vector>
 
+#include "fwd_frame_builder.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/graph.hpp"
 #include "libtracer/path.hpp"
@@ -92,17 +93,11 @@ void emit_path(std::vector<std::byte>& out, std::span<const std::string_view> se
 
 /** @brief `FWD{ op=WRITE, dst, src, VALUE }` — the frame the forward descent walks. */
 std::vector<std::byte> make_fwd(std::span<const std::string_view> dst) {
-    std::vector<std::byte> body;
-    const std::byte op{static_cast<std::uint8_t>(tr::graph::fwd_op_t::WRITE)};
-    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
-    emit_path(body, dst);
-    const std::string_view reply[] = {"reply"};
-    emit_path(body, std::span<const std::string_view>(reply, 1));
-    const std::byte payload[2] = {std::byte{0xAB}, std::byte{0xCD}};
-    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(payload, 2));
-    std::vector<std::byte> frame;
-    tr::wire::emit_tlv(frame, type_t::FWD, opt_t{.pl = true}, body);
-    return frame;
+    std::vector<std::byte> payload;
+    const std::byte pv[2] = {std::byte{0xAB}, std::byte{0xCD}};
+    tr::wire::emit_tlv(payload, type_t::VALUE, opt_t{}, std::span<const std::byte>(pv, 2));
+    return tr::testing::b_fwd(tr::graph::fwd_op_t::WRITE, tr::testing::b_path(dst),
+                              tr::testing::b_path({"reply"}), {}, payload);
 }
 
 /**
@@ -117,19 +112,15 @@ std::vector<std::byte> make_fwd(std::span<const std::string_view> dst) {
  * frame is dropped after the walk; the walk is the point.
  */
 std::vector<std::byte> make_bound_fwd() {
-    std::vector<std::byte> body;
-    const std::byte op{static_cast<std::uint8_t>(tr::graph::fwd_op_t::WRITE)};
-    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
+    std::vector<std::byte> dst;
     const tr::wire::path_ref_element_t route[2] = {{.index = 3, .generation = 0},
                                                    {.index = 4, .generation = 0}};
-    (void)tr::wire::emit_path_ref(body, std::span<const tr::wire::path_ref_element_t>(route, 2));
-    const std::string_view reply[] = {"reply"};
-    emit_path(body, std::span<const std::string_view>(reply, 1));
-    const std::byte payload[2] = {std::byte{0xAB}, std::byte{0xCD}};
-    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(payload, 2));
-    std::vector<std::byte> frame;
-    tr::wire::emit_tlv(frame, type_t::FWD, opt_t{.pl = true}, body);
-    return frame;
+    (void)tr::wire::emit_path_ref(dst, std::span<const tr::wire::path_ref_element_t>(route, 2));
+    std::vector<std::byte> payload;
+    const std::byte pv[2] = {std::byte{0xAB}, std::byte{0xCD}};
+    tr::wire::emit_tlv(payload, type_t::VALUE, opt_t{}, std::span<const std::byte>(pv, 2));
+    return tr::testing::b_fwd(tr::graph::fwd_op_t::WRITE, dst, tr::testing::b_path({"reply"}), {},
+                              payload);
 }
 
 /** @brief How many create/remove cycles each writer runs — bounded, so CI cannot hang. */

@@ -41,6 +41,7 @@
 #include <utility>
 #include <vector>
 
+#include "fwd_frame_builder.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -386,35 +387,16 @@ void test_scatter_gather() {
  */
 std::vector<std::byte> fwd_write(std::initializer_list<std::string_view> dst,
                                  std::span<const std::byte> payload_value_tlv) {
-    std::vector<std::byte> body;
-    const std::byte op{static_cast<std::uint8_t>(tr::graph::fwd_op_t::WRITE)};
-    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
-    std::vector<std::byte> dst_segs;
-    for (std::string_view s : dst) tr::wire::emit_name(dst_segs, s);
-    tr::wire::emit_tlv(body, type_t::PATH, opt_t{.pl = true}, dst_segs);
-    tr::wire::emit_tlv(body, type_t::PATH, opt_t{.pl = true},
-                       std::span<const std::byte>{});  // src: empty, grows per hop
-    body.insert(body.end(), payload_value_tlv.begin(), payload_value_tlv.end());
-    std::vector<std::byte> frame;
-    tr::wire::emit_tlv(frame, type_t::FWD, opt_t{.pl = true}, body);
-    return frame;
+    return tr::testing::b_fwd(tr::graph::fwd_op_t::WRITE, tr::testing::b_path(dst),
+                              tr::testing::b_path(std::initializer_list<std::string_view>{}), {},
+                              payload_value_tlv);
 }
 
 /** @brief FWD{ op=READ, dst, src } — a remote read whose REPLY source-routes back. */
 std::vector<std::byte> fwd_read(std::initializer_list<std::string_view> dst,
                                 std::initializer_list<std::string_view> src) {
-    std::vector<std::byte> body;
-    const std::byte op{static_cast<std::uint8_t>(tr::graph::fwd_op_t::READ)};
-    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
-    std::vector<std::byte> dst_segs;
-    for (std::string_view s : dst) tr::wire::emit_name(dst_segs, s);
-    tr::wire::emit_tlv(body, type_t::PATH, opt_t{.pl = true}, dst_segs);
-    std::vector<std::byte> src_segs;
-    for (std::string_view s : src) tr::wire::emit_name(src_segs, s);
-    tr::wire::emit_tlv(body, type_t::PATH, opt_t{.pl = true}, src_segs);
-    std::vector<std::byte> frame;
-    tr::wire::emit_tlv(frame, type_t::FWD, opt_t{.pl = true}, body);
-    return frame;
+    return tr::testing::b_fwd(tr::graph::fwd_op_t::READ, tr::testing::b_path(dst),
+                              tr::testing::b_path(src));
 }
 
 void test_two_nodes_over_tcp() {
