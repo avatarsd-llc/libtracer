@@ -218,19 +218,27 @@ void test_short_write_closes_immediately() {
 // ---------------------------------------------------------------------------
 void test_send_bound_derivation() {
     std::printf("the per-socket send bound:\n");
-    // 5000 ms / (4 peers * 3 strikes). The strike cap is in the divisor because a peer
-    // costs a FULL bound on each of the three consecutive failures it takes to condemn
-    // it, so the worst case the watchdog window has to contain is peers*strikes bounds,
-    // not one round of peers (#840).
+    // 5000 ms / (4 peers * 3 strikes * 2 write legs). The strike cap is in the divisor
+    // because a peer costs a FULL bound on each of the three consecutive failures it takes
+    // to condemn it (#840); the write legs are there because SO_SNDTIMEO is a per-`send`
+    // property and IDF writes a frame as a header call plus a payload call, so one frame
+    // to one peer costs TWO bounds, not one (#956, httpd_ws.c:447 and :455).
     const httpd_ws_link_t derived(handle(), "/ws", 4, true);
-    check(derived.send_timeout_ms() == 416,
-          "default = watchdog period / (peer cap * strike cap) (5000 ms / (4 * 3))");
+    check(derived.send_timeout_ms() == 208,
+          "default = watchdog / (peer cap * strike cap * write legs) (5000 / (4*3*2))");
     const httpd_ws_link_t capless(handle(), "/ws", 0, true);
-    check(capless.send_timeout_ms() == 416, "an unbounded cap derives from the socket budget");
-    // The property that motivates the shape: one peer set, fully stalled, cannot hold the
-    // httpd task for a whole watchdog window before every one of them is condemned.
-    check(4u * 3u * derived.send_timeout_ms() <= 5000u,
+    check(capless.send_timeout_ms() == 208, "an unbounded cap derives from the socket budget");
+    // THE property, and the reason the shape is what it is: one peer set, fully stalled,
+    // cannot hold the httpd task for a whole watchdog window before every one of them is
+    // condemned. Every divisor above has to appear here or the guard does not mean it.
+    check(4u * 3u * 2u * derived.send_timeout_ms() <= 5000u,
           "worst-case pre-verdict occupancy fits inside one watchdog window");
+    // #956 defect 3: the division has no natural floor, and SO_SNDTIMEO = 0 means BLOCK
+    // FOREVER — the exact failure this derivation exists to remove, reachable by a
+    // large-but-legal cap. 5000 / (2000*3*2) truncates to 0 without the clamp.
+    const httpd_ws_link_t huge(handle(), "/ws", 2000, true);
+    check(huge.send_timeout_ms() != 0,
+          "a cap large enough to divide the window to zero still yields a BOUNDED send");
     const httpd_ws_link_t injected(handle(), "/ws", 4, true, 200);
     check(injected.send_timeout_ms() == 200, "an injected bound is honoured verbatim");
     const httpd_ws_link_t clamped(handle(), "/ws", 4, true, 60000);
