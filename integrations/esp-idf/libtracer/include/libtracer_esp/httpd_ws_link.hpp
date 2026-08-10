@@ -256,10 +256,19 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * (it is handed out under `peers_m_`, like @ref enumerate_peers' name).
      */
     struct peer_stats_t {
-        std::string_view name; /**< @brief `<ip>:<port>`, valid during the visit only. */
+        std::string_view name; /**< @brief The routable `p<slot>`, valid during the visit only. */
         std::size_t slot = 0;  /**< @brief Slot index, stable while the session is open. */
         std::uint32_t gen = 0; /**< @brief Bumped on every claim of this slot. */
         link_counters_t c;     /**< @brief Traffic counters (see link_stats.hpp). */
+        /**
+         * @brief The peer's `<ip>:<port>`, valid during the visit only — DIAGNOSTICS.
+         *
+         * The physical address that @ref name stopped carrying in #994, kept because
+         * `p3` on its own tells an operator nothing about which client is misbehaving.
+         * Never a path segment: it holds `.` and `:`, which `graph::valid_segment`
+         * rejects, and feeding it back as an address is the defect #994 removed.
+         */
+        std::string_view endpoint_str;
     };
     /** @brief Visitor for @ref enumerate_peer_stats. */
     using peer_stats_visitor_t = std::function<void(const peer_stats_t&)>;

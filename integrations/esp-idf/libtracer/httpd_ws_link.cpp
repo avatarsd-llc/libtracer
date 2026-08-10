@@ -21,6 +21,7 @@
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -245,8 +246,47 @@ constexpr std::size_t kTxInlineBytes = 1600;
 constexpr std::size_t kFanoutChunk = kDefaultPeerCap;
 
 /**
- * @brief `<ip>:<port>` of the far side of @p fd — the peer name (bus tag / census),
- *        byte-compatible with transport_ws_server's naming. Falls back to `fd<n>`.
+ * @brief Bytes a stored `<ip>:<port>` needs, NUL included — the exact bound, not a guess.
+ *
+ * `INET6_ADDRSTRLEN` already counts the longest textual address and its terminator; the
+ * `:` and up to five port digits are what this adds. Sizing it from the platform's own
+ * constant is what keeps it a fact rather than a magic number: a stack that widened its
+ * address text would widen this with it.
+ */
+constexpr std::size_t kEndpointChars = INET6_ADDRSTRLEN + 6;
+
+/**
+ * @brief The peer's routable name for slot @p idx — `p<slot>` (ADR-0073 §2).
+ *
+ * Two measured decisions, both against an A/A null of 0 on this TU's `.text`:
+ *
+ * `noinline` for the SAME reason @ref peer_name is. Folded into
+ * @ref httpd_ws_link_t::on_data_frame — which reaches this once per session and is
+ * otherwise the per-FRAME hot path — it cost **+1962 B in that one function**. Out of line
+ * it costs a call on the claim edge and leaves the frame path's code layout the size it was.
+ *
+ * The digits are written here rather than by `std::to_string` because that instantiation is
+ * **+1456 B** of this TU, and it is NOT shared with the one @ref peer_name already pulls in:
+ * the body is duplicated per call site, so the second use pays full price again (`int` and
+ * `std::size_t` overloads both, measured). A slot index is a small non-negative integer, so
+ * the general path buys nothing here. Core's `slot_server_t` keeps `std::to_string`
+ * (`core/src/posix_endpoint.cpp:406`) — it is host code with no image budget; the STRING is
+ * identical either way, which is all the two have to agree on.
+ */
+[[gnu::noinline]] [[nodiscard]] std::string slot_name(std::size_t idx) {
+    char buf[24];
+    char* p = buf + sizeof(buf);
+    do {
+        *--p = static_cast<char>('0' + (idx % 10));
+        idx /= 10;
+    } while (idx != 0);
+    *--p = 'p';
+    return std::string(p, static_cast<std::size_t>(buf + sizeof(buf) - p));
+}
+
+/**
+ * @brief `<ip>:<port>` of the far side of @p fd — the peer's PHYSICAL address, kept for
+ *        diagnostics only (ADR-0073 §2). Falls back to `fd<n>`.
  *
  * The address family is read from what `getpeername` actually filled, never assumed. With
  * `CONFIG_LWIP_IPV6` on — the default on this target — `esp_http_server` binds its
@@ -256,16 +296,29 @@ constexpr std::size_t kFanoutChunk = kDefaultPeerCap;
  * so every peer on the node was named `0.0.0.0:<port>`. That is what the on-silicon run
  * saw in the strike log, and it made the strike unattributable to a peer at exactly the
  * moment the attribution mattered. A v4-mapped v6 address (`::ffff:a.b.c.d`) is unwrapped
- * so a dual-stack node keeps naming its IPv4 peers the way the census always has.
+ * so a dual-stack node keeps reporting its IPv4 peers the way the census always has.
+ *
+ * This string is NOT the peer's graph name and has not been since #994: it carries `.` and
+ * `:`, both rejected by `graph::valid_segment`, so a session named with it could be listed
+ * and never addressed. @ref httpd_ws_link_t::session_t::name holds the routable `p<slot>`;
+ * this is what an operator needs to tell which physical client that slot is.
+ *
+ * Writes into the caller's buffer rather than returning a `std::string`, which is what made
+ * #994 a NET SHRINK. Measured against an A/A null of 0 on this TU's `.text`: the naming
+ * change on its own cost **+976 B**, and dropping the `std::string` + `std::to_string` build
+ * from this body returned about **6.6 KB**, for **−5648 B net**. It also removed a heap
+ * allocation from every session claim — the old return value outlived the call as the slot's
+ * name, so each session held a heap chunk for its whole life. `snprintf` is already linked
+ * here (every `ESP_LOG` uses it), so the formatting is paid for once for the whole image.
  *
  * `noinline` because it runs ONCE per connection — on the claim edge inside
  * @ref httpd_ws_link_t::on_data_frame, which is otherwise the per-FRAME hot path. It is a
- * large body (`getpeername` + `inet_ntop` + a `std::string` build), and with the opening-GET
- * claim site gone it has a single caller, which is precisely the shape that invites the
- * inliner to fold it into that hot function. Keeping the call is what keeps the per-frame
- * path's code layout the size it was.
+ * large body (`getpeername` + `inet_ntop` + formatting), and with the opening-GET claim site
+ * gone it has a single caller, which is precisely the shape that invites the inliner to fold
+ * it into that hot function. Keeping the call is what keeps the per-frame path's code layout
+ * the size it was.
  */
-[[gnu::noinline]] [[nodiscard]] std::string peer_name(int fd) {
+[[gnu::noinline]] void peer_name(int fd, char (&out)[kEndpointChars]) {
     sockaddr_storage addr = {};
     socklen_t len = sizeof(addr);
     if (::getpeername(fd, reinterpret_cast<sockaddr*>(&addr), &len) == 0) {
@@ -280,15 +333,17 @@ constexpr std::size_t kFanoutChunk = kDefaultPeerCap;
             } else {
                 ::inet_ntop(AF_INET6, &a6.sin6_addr, ip, sizeof(ip));
             }
-            return std::string(ip) + ':' + std::to_string(ntohs(a6.sin6_port));
+            (void)std::snprintf(out, sizeof(out), "%s:%u", ip, (unsigned)ntohs(a6.sin6_port));
+            return;
         }
         if (addr.ss_family == AF_INET) {
             const auto& a4 = reinterpret_cast<const sockaddr_in&>(addr);
             ::inet_ntop(AF_INET, &a4.sin_addr, ip, sizeof(ip));
-            return std::string(ip) + ':' + std::to_string(ntohs(a4.sin_port));
+            (void)std::snprintf(out, sizeof(out), "%s:%u", ip, (unsigned)ntohs(a4.sin_port));
+            return;
         }
     }
-    return std::string("fd") + std::to_string(fd);
+    (void)std::snprintf(out, sizeof(out), "fd%d", fd);
 }
 
 /**
@@ -471,8 +526,38 @@ struct httpd_ws_link_t::session_t {
      * queue, and that item drains within one pass of the httpd task's loop.
      */
     std::uint32_t gen = 0;
-    bool open = false;         /**< @brief True between handshake and close. */
-    std::string name;          /**< @brief `<ip>:<port>` of the peer. */
+    bool open = false; /**< @brief True between handshake and close. */
+    /**
+     * @brief The peer's ROUTABLE name — `p<slot>` (ADR-0073 §2, #426, #994).
+     *
+     * The slot index, and nothing else, because this string is what the graph spells: a
+     * peer-named link's synthesized `:children[]` lists it and a `dst` path addresses the
+     * session back through it. `graph::valid_segment` rejects both `.` and `:`
+     * (`core/include/libtracer/path.hpp:56`), so the `<ip>:<port>` this used to hold could
+     * be ENUMERATED and never ADDRESSED — the enumerable⇒addressable invariant broken on
+     * every node, which is the precondition RFC-0020 §6 states for the NAME-hop rejection.
+     * The physical address did not disappear with it; it moved to @ref endpoint_str.
+     *
+     * A pure function of the slot's position, so a recycled slot gets the SAME name back
+     * (@ref httpd_ws_link_t::reclaim_slot moves the old string out for the eviction seam),
+     * exactly as core's own bus servers do it (`core/src/posix_endpoint.cpp:406`). It also
+     * fits every libstdc++ small-string buffer, so a claim no longer heap-allocates a name.
+     */
+    std::string name;
+    /**
+     * @brief The peer's `<ip>:<port>` — DIAGNOSTICS ONLY, never a path segment.
+     *
+     * ADR-0073 §2's other half: the address string leaves the graph but not the operator's
+     * hands, because `p3` alone cannot be matched to a physical client. Reported through
+     * @ref httpd_ws_link_t::peer_stats_t::endpoint_str and named in the strike log.
+     *
+     * A fixed array rather than a `std::string`: it is written once per claim and read on
+     * a stalled-send path, so the array costs no heap chunk for the session's whole life
+     * and cannot fragment the small-heap targets this link is built for. Stamped at the
+     * claim edge — where the socket is still healthy — because `getpeername` is least
+     * likely to answer at the moment the strike log needs the name.
+     */
+    char endpoint_str[kEndpointChars] = {};
     asm_buf_t asm_buf;         /**< @brief RFC 6455 fragment reassembly (nothrow). */
     std::uint8_t tx_drops = 0; /**< @brief Consecutive failed sends (peers_m_). */
     /**
@@ -1268,9 +1353,14 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
                     return ESP_FAIL;
                 }
             }
-            for (const auto& s : slots_)
-                if (s->fd < 0) {
-                    slot = s.get();
+            // The index is carried out of the search, not recomputed: it IS the peer's
+            // routable name below, so losing it here is what cost every ESP node its
+            // addressability (#994).
+            std::size_t idx = 0;
+            for (std::size_t i = 0; i < slots_.size(); ++i)
+                if (slots_[i]->fd < 0) {
+                    slot = slots_[i].get();
+                    idx = i;
                     break;
                 }  // reuse a departed slot
             if (slot == nullptr) {
@@ -1280,8 +1370,12 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
                 slot->endpoint.owner_ = this;
                 slot->endpoint.slot_ = slot;
                 slots_.push_back(std::move(s));
+                idx = slots_.size() - 1;
             }
-            slot->name = peer_name(fd);
+            // ADR-0073 §2: the routable NAME is the slot index, legal by construction, and
+            // the `<ip>:<port>` goes to the diagnostics field instead of into the graph.
+            slot->name = slot_name(idx);
+            peer_name(fd, slot->endpoint_str);
             slot->asm_buf.clear();
             slot->fd = fd;
             ++slot->gen;  // a NEW session in a recycled slot: fail every stale ref (#954)
@@ -1393,6 +1487,12 @@ std::string httpd_ws_link_t::reclaim_slot(session_t* slot) {
         slot->open = false;
         slot->fd = -1;
         slot->name.clear();
+        // The address goes with the name. Unobservable today (the claim rewrites it before
+        // `open`, and only open slots are reported), but it is the same hygiene the TX
+        // verdicts below get, and for the same reason: a recycled slot must carry nothing
+        // of its predecessor's into a log that a human will read as being about the peer
+        // now in it.
+        slot->endpoint_str[0] = '\0';
         slot->asm_buf.clear();
         slot->tx_drops = 0;
         // Slots are RECYCLED in place, so both TX verdicts about the departed peer must
@@ -1638,6 +1738,7 @@ void httpd_ws_link_t::note_tx_skip(const session_ref_t& to) {
 void httpd_ws_link_t::note_tx_result(const session_ref_t& to, bool sent, std::size_t bytes) {
     bool close_now = false;
     std::string peer;
+    char addr[kEndpointChars] = {};
     int fd = -1;
     {
         const std::lock_guard lock(peers_m_);
@@ -1663,6 +1764,7 @@ void httpd_ws_link_t::note_tx_result(const session_ref_t& to, bool sent, std::si
         if (slot->tx_drops < kMaxConsecutiveTxDrops) ++slot->tx_drops;
         close_now = slot->tx_drops >= kMaxConsecutiveTxDrops;
         peer = slot->name;
+        std::memcpy(addr, slot->endpoint_str, sizeof(addr));
         fd = slot->fd;
         // Condemn UNDER the same lock that reached the verdict. Any later moment is a
         // window in which the fan-out enqueues more frames for a peer already known to be
@@ -1670,11 +1772,14 @@ void httpd_ws_link_t::note_tx_result(const session_ref_t& to, bool sent, std::si
         if (close_now) slot->dead = true;
     }
     if (!close_now) return;  // the drop itself is already logged by tx_work
-    // The peer name comes from the slot, filled at admission. Never `getpeername` here:
-    // the socket is by definition the one that is not working, and naming a peer at the
-    // moment it is being struck must not depend on that socket answering.
-    ESP_LOGW(kTag, "%u consecutive failed sends peer=%s fd=%d len=%u - closing session",
-             (unsigned)kMaxConsecutiveTxDrops, peer.c_str(), fd, (unsigned)bytes);
+    // BOTH names, because after #994 neither one alone identifies the peer: `p<slot>` is
+    // what an operator can address the session by, and `<ip>:<port>` is what tells them
+    // which physical client that slot is. Both come from the slot, filled at admission.
+    // Never `getpeername` here: the socket is by definition the one that is not working,
+    // and naming a peer at the moment it is being struck must not depend on that socket
+    // answering — the reason the address is STORED rather than recomputed.
+    ESP_LOGW(kTag, "%u consecutive failed sends peer=%s (%s) fd=%d len=%u - closing session",
+             (unsigned)kMaxConsecutiveTxDrops, peer.c_str(), addr, fd, (unsigned)bytes);
     // At the streak cap the session is broken, not bursty: close it so the peer's onclose
     // fires and it reconnects, instead of silently missing frames forever. This is what
     // aims the teardown at the peer that is actually stalled — and the dead mark set above
@@ -2046,7 +2151,7 @@ void httpd_ws_link_t::enumerate_peer_stats(const peer_stats_visitor_t& visit) co
         if (!s->open) continue;  // a reclaimed slot keeps stale numbers — never report it
         // The counters are COPIED into the visitor's argument; only `name` borrows, and
         // only for the duration of the call (same contract as enumerate_peers).
-        visit(peer_stats_t{s->name, i, s->gen, s->st});
+        visit(peer_stats_t{s->name, i, s->gen, s->st, s->endpoint_str});
     }
 }
 
