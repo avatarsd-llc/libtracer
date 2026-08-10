@@ -529,6 +529,24 @@ void esp_ws_client_link_t::recv_loop() {
     // link that was never alive). It is a plain local because this thread is the only
     // writer of `connected_ == true`: a dial is the sole way up, and it happens here.
     bool was_up = false;
+    // Whether the connection currently standing has ever had a MESSAGE from the peer
+    // delivered out of it — the test that separates a refusal from a working link (#1128).
+    //
+    // INBOUND, deliberately, and not "did we connect" or "did we send". A post-101
+    // admission refusal is a successful transport connect by construction: the refusal can
+    // only be expressed after `101 Switching Protocols` is on the wire, so
+    // `esp_transport_connect` returns 0 and `connect_once()` reports success. Nor can the
+    // outbound side tell: a send into a socket the peer has already decided to close still
+    // succeeds locally. A message ARRIVING is the one event that proves the peer admitted
+    // this session at the application level, because a refusing peer emits nothing but the
+    // CLOSE. So a connection that comes up and goes down having delivered nothing is
+    // counted as a failed attempt, and pays the same backoff a failed dial does.
+    //
+    // The false positive it accepts: a genuinely idle-but-admitted link that the peer
+    // closes without ever having sent anything also reads as unproductive, and re-dials
+    // one backoff later instead of at once. That is the harmless direction — the cost is
+    // one interval on a link that was silent anyway, against a spin that reboots the node.
+    bool exchanged = false;
     while (!stop_.load(std::memory_order_relaxed)) {
         if (!connected_.load(std::memory_order_acquire)) {
             off = 0;
@@ -543,8 +561,15 @@ void esp_ws_client_link_t::recv_loop() {
             // break is what keeps the destructor's `connected_` store from re-opening
             // the handle rewrite underneath a sender that observed the previous `true`.
             if (stop_.load(std::memory_order_acquire)) break;
+            // Set by either arm below — a connection that produced nothing, or a dial that
+            // did not land. Both are failed attempts and both spend the SAME interval;
+            // there is one backoff site so they cannot drift apart.
+            bool backoff_now = false;
             if (was_up) {
                 was_up = false;
+                // Captured before notify_down: the seam runs app code, which may send, and
+                // nothing it does retroactively makes this connection productive.
+                backoff_now = !exchanged;
                 // The departure seam (RFC-0009 §D extended to peer departure), and the
                 // reason it is reported at all (#957). This arm is downstream of all
                 // three sites that clear `connected_` — drop() (peer CLOSE, a poll
@@ -567,9 +592,19 @@ void esp_ws_client_link_t::recv_loop() {
                 // teardown is not a peer departure and reports nothing.
                 notify_down();
             }
-            if (connect_once()) {
-                was_up = true;  // there is now a connection whose death is reportable
-            } else {
+            exchanged = false;
+            // An unproductive connection backs off INSTEAD of re-dialing this turn; the
+            // dial happens on the next one, past the wait. Dialing first and sleeping
+            // after would leave the spin intact for exactly one more cycle, which on the
+            // failing peer is the cycle that matters.
+            if (!backoff_now) {
+                if (connect_once()) {
+                    was_up = true;  // there is now a connection whose death is reportable
+                } else {
+                    backoff_now = true;
+                }
+            }
+            if (backoff_now) {
                 // Interruptible backoff. `sleep_for` was not: the destructor's join
                 // inherited the whole 1.5 s on exactly the unreachable peer a re-dial
                 // exists for. What remains uninterruptible is the dial itself —
@@ -689,6 +724,11 @@ void esp_ws_client_link_t::recv_loop() {
                     st_.rx_bytes += static_cast<std::uint32_t>(off);
                     st_.last_rx_us = esp_timer_get_time();
                 }
+                // This connection has now proved the peer admitted it, so its eventual
+                // death is a DROP to retry at once rather than a refusal to back off from
+                // (#1128). Set before the delivery: the router runs the app in-call here
+                // and the app may tear the link down from this very stack.
+                exchanged = true;
                 rx_.deliver_borrowed(std::span<const std::byte>(rx_buf_.data(), off));
             }
             off = 0;
