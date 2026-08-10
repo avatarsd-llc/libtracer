@@ -10,6 +10,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The derived WS send bound now divides by the strike cap as well as the peer cap
+  (#840).** `derive_send_timeout_ms` computed `CONFIG_ESP_TASK_WDT_TIMEOUT_S / peers`, which
+  makes ONE fan-out round of fully stalled peers fill the entire watchdog window. But a peer
+  is not condemned on its first failed send — the brokenness detector wants
+  `kMaxConsecutiveTxDrops` consecutive failures and each one costs a full bound — so the
+  worst-case stall before the link is rid of a stalled peer set was `strikes` whole windows,
+  not one. Downstream HIL measured 4959 ms of a 5000 ms budget consumed (99%), i.e. whether
+  the board panics decided by noise. The bound is now
+  `watchdog / (peers * kMaxConsecutiveTxDrops)` — 416 ms at the default cap of 4, was
+  1250 ms. **Behaviour change:** a peer that cannot absorb a frame within the tighter bound
+  accrues a strike sooner, so a genuinely stalled session is torn down faster; a healthy one
+  is unaffected, since any completing send resets the streak.
+
 ### Changed — BREAKING
 
 - **The component now requires ESP-IDF `>=5.5.5`** (`idf_component.yml`, was `>=5.3`) — a

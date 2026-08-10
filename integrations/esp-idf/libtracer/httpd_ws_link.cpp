@@ -159,16 +159,30 @@ constexpr int kKeepProbes = 3;          /**< @brief Unanswered probes before dea
 /**
  * @brief Derive the per-socket send bound for @p peer_cap peers, milliseconds.
  *
- * One full fan-out round — one bounded send to EVERY peer, all of them stalled — must
- * fit inside one watchdog window, because that round is exactly the failure #835
- * observed: the sends serialize on the single httpd task and the task is starved for
- * their sum. So the window is divided by the number of peers that can be in it. Both
- * inputs are facts already in hand (@ref kTaskWdtSeconds and the caller's peer cap), so
- * there is no knob and no millisecond literal to justify.
+ * The sends serialize on the single httpd task, so the quantity that must fit inside one
+ * watchdog window is the WHOLE stall a stalled peer set can impose before the link is rid
+ * of it — the failure #835 observed. That is not one fan-out round. A peer is not
+ * condemned on its first failed send: the brokenness detector wants
+ * @ref kMaxConsecutiveTxDrops consecutive failures, and every one of them costs a full
+ * bound. So the worst case is every peer in the cap, each timing out its full streak:
+ *
+ *     peers * kMaxConsecutiveTxDrops * bound  <=  one watchdog window
+ *
+ * Dividing by the peer count alone (what this did before) makes one ROUND fill the window
+ * exactly, and the streak then carries the task `kMaxConsecutiveTxDrops` windows past the
+ * tripwire — measured downstream at 4959 ms of a 5000 ms budget, i.e. 99% consumed with a
+ * panic decided by noise (#840, residual 1). The strike cap is the missing divisor, and
+ * it is the same constant the teardown path already reasons with: this file's own
+ * @ref kMaxConsecutiveTxDrops note says the bound is what makes one broken peer cost
+ * "three send bounds" — that three has to be IN the derivation, not merely acknowledged
+ * by it.
+ *
+ * All three inputs are facts already in hand (@ref kTaskWdtSeconds, the caller's peer cap,
+ * @ref kMaxConsecutiveTxDrops), so there is still no knob and no millisecond literal.
  */
 [[nodiscard]] constexpr std::uint32_t derive_send_timeout_ms(std::size_t peer_cap) noexcept {
     const std::size_t peers = peer_cap != 0 ? peer_cap : kDefaultPeerCap;
-    return static_cast<std::uint32_t>(kTaskWdtSeconds * 1000U / peers);
+    return static_cast<std::uint32_t>(kTaskWdtSeconds * 1000U / (peers * kMaxConsecutiveTxDrops));
 }
 
 /** @brief Clamp @p want to the server's own per-socket send bound, seconds — the value

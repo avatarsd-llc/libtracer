@@ -217,11 +217,19 @@ void test_short_write_closes_immediately() {
 // ---------------------------------------------------------------------------
 void test_send_bound_derivation() {
     std::printf("the per-socket send bound:\n");
+    // 5000 ms / (4 peers * 3 strikes). The strike cap is in the divisor because a peer
+    // costs a FULL bound on each of the three consecutive failures it takes to condemn
+    // it, so the worst case the watchdog window has to contain is peers*strikes bounds,
+    // not one round of peers (#840).
     const httpd_ws_link_t derived(handle(), "/ws", 4, true);
-    check(derived.send_timeout_ms() == 1250,
-          "default = task-watchdog period / peer cap (5000 ms / 4 peers)");
+    check(derived.send_timeout_ms() == 416,
+          "default = watchdog period / (peer cap * strike cap) (5000 ms / (4 * 3))");
     const httpd_ws_link_t capless(handle(), "/ws", 0, true);
-    check(capless.send_timeout_ms() == 1250, "an unbounded cap derives from the socket budget");
+    check(capless.send_timeout_ms() == 416, "an unbounded cap derives from the socket budget");
+    // The property that motivates the shape: one peer set, fully stalled, cannot hold the
+    // httpd task for a whole watchdog window before every one of them is condemned.
+    check(4u * 3u * derived.send_timeout_ms() <= 5000u,
+          "worst-case pre-verdict occupancy fits inside one watchdog window");
     const httpd_ws_link_t injected(handle(), "/ws", 4, true, 200);
     check(injected.send_timeout_ms() == 200, "an injected bound is honoured verbatim");
     const httpd_ws_link_t clamped(handle(), "/ws", 4, true, 60000);
