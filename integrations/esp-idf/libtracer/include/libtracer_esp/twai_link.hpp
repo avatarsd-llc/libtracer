@@ -131,7 +131,17 @@ class twai_link_t : public can_link_t {
     /** @brief Register the inbound-frame sink (invoked on the dispatch thread). */
     void on_receive(rx_fn_t rx) override;
 
-    /** @brief True if the controller enabled and the RX machinery is live. */
+    /**
+     * @brief The CAME-UP predicate: true if the controller enabled and the RX machinery
+     *        came up — a construction fact, never reverting.
+     *
+     * `node_` is published by the constructor and cleared only by the destructor, so this
+     * never answers live state (the #1203 defect on the client link). There is no
+     * `link_up()` counterpart to add here: this type is a `can_link_t` driver seam, not a
+     * `transport_t`, so it is not on the #1059 contract at all — and a BUS has no closure
+     * concept anyway, which is exactly why that contract's base default is `true`. The
+     * owning `transport_can` is the `transport_t` in this stack.
+     */
     [[nodiscard]] bool ok() const noexcept { return node_ != nullptr; }
 
     /**

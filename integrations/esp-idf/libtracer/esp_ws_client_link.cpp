@@ -208,7 +208,7 @@ esp_ws_client_link_t::~esp_ws_client_link_t() {
     // Disarm the link BEFORE waiting on anything. `stop_` is what every blocking wait
     // in the recv loop is predicated on, and it is also what a sender re-reads after it
     // gets `write_m_` — so from here on no NEW work reaches the handles. Clearing
-    // `connected_` makes ok() honest for the rest of teardown; the recv loop's own
+    // `connected_` makes link_up() honest for the rest of teardown; the recv loop's own
     // stop_ re-check keeps it from reading that as "re-dial" (see recv_loop).
     stop_.store(true, std::memory_order_release);
     connected_.store(false, std::memory_order_release);
@@ -341,9 +341,9 @@ bool esp_ws_client_link_t::connect_once() {
             ESP_LOGW(kTag, "SO_SNDTIMEO not applied fd=%d (%d ms)", fd, kWriteTimeoutMs);
         // Notice a peer that vanishes WITHOUT a FIN — a Wi-Fi drop, a power cut, a NAT
         // rebind (#957). Nothing else in this loop notices one: esp_transport_poll_read
-        // keeps reporting "no data this turn" forever, so `connected_` stays true, ok()
-        // keeps answering true for a peer that no longer exists, and on an idle link the
-        // only other bound is TCP's own retransmit timeout — minutes when there is
+        // keeps reporting "no data this turn" forever, so `connected_` stays true,
+        // link_up() keeps answering true for a peer that no longer exists, and on an idle
+        // link the only other bound is TCP's own retransmit timeout — minutes when there is
         // something to retransmit, never when there is not. Keepalive probes are the
         // answer that costs no protocol work: the stack fails the connection, which
         // surfaces on the very next poll or read as an error and takes the ordinary drop
@@ -380,6 +380,12 @@ bool esp_ws_client_link_t::connect_once() {
         connect_ms_ = static_cast<std::uint32_t>(dial_us / 1000);
         ++reconnects_;
     }
+    // The came-up fact latches here and is never cleared (#1059/#1203): `ok()` reports
+    // "a handshake landed at least once", `connected_` (published release, below) reports
+    // whether one is standing NOW. Relaxed — it is a hint, not a synchronisation point —
+    // but stored ahead of the RELEASE publication below, so any observer that acquires
+    // `connected_ == true` necessarily also sees the came-up fact.
+    came_up_.store(true, std::memory_order_relaxed);
     connected_.store(true, std::memory_order_release);
     ESP_LOGI(kTag, "connected ws://%s:%u%s", host_.c_str(), static_cast<unsigned>(port_),
              ws_path_.c_str());
@@ -410,8 +416,9 @@ esp_ws_client_link_t::stats_t esp_ws_client_link_t::stats() const {
         std::min<std::uint64_t>(rx_dropped, std::numeric_limits<std::uint32_t>::max()));
     // Read OUTSIDE the mutex: `connected_` is atomic and `drop()` clears it while
     // holding write_m_, so taking it inside would say nothing extra and reading it
-    // here keeps the hold to the struct copy.
-    out.up = connected_.load(std::memory_order_acquire);
+    // here keeps the hold to the struct copy. This field is LIVENESS — the same answer
+    // `link_up()` gives, not the came-up `ok()` (#1203).
+    out.up = link_up();
     return out;
 }
 

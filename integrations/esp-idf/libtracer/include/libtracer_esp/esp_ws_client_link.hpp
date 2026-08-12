@@ -134,8 +134,8 @@
  *     child's edges and label bindings and both sides re-establish, instead of this node
  *     producing into a session that no longer exists.
  *   - The link also has to NOTICE a peer that vanishes without a FIN (#957). Nothing in
- *     the loop does: `esp_transport_poll_read` reports "no data" forever, so `ok()` would
- *     answer true for a dead peer indefinitely on an idle link. Every dialed socket
+ *     the loop does: `esp_transport_poll_read` reports "no data" forever, so `link_up()`
+ *     would answer true for a dead peer indefinitely on an idle link. Every dialed socket
  *     therefore gets `SO_KEEPALIVE` plus the idle/interval/count tunables ESP-IDF
  *     documents for `esp_http_server`'s own keepalive — the same three the server sibling
  *     applies to accepted sockets — so a vanished peer surfaces as an ordinary poll/read
@@ -195,7 +195,8 @@ class esp_ws_client_link_t : public transport_t {
      *        by default, or only after @ref start_receiving when `defer_recv` is set.
      *        The ctor does NOT block on the connection (the dial runs on the recv
      *        thread, with reconnect), so a slow/unreachable peer never stalls the
-     *        caller — confirm readiness with @ref ok.
+     *        caller — poll @ref ok for "the first dial landed" and @ref link_up for
+     *        "a connection is standing right now" (#1059).
      *
      * @param host     The peer's IPv4 dotted-quad or hostname (the graph plane's WS host).
      * @param port     The peer's TCP port (its :80 esp_http_server, for the /ws mount).
@@ -299,15 +300,39 @@ class esp_ws_client_link_t : public transport_t {
     [[nodiscard]] bus_link_t* bus() override { return nullptr; }
 
     /**
-     * @brief True once the opening handshake has completed (and while connected).
+     * @brief The CAME-UP predicate (#1059): true once an opening handshake has completed,
+     *        and NEVER reverting — not liveness.
+     *
+     * The tree-wide contract `transport_t::link_up` states: `ok()` answers "did this link
+     * ever come up" (the dial + RFC 6455 handshake landed), which for this link is settled
+     * on the recv thread rather than in the constructor — it stays false until the first
+     * dial lands (forever, on a link constructed with `defer_recv` and never armed), and
+     * true from then on for the rest of the object's life. Liveness — "can it carry a frame
+     * right now" — is @ref link_up, and after a peer death the two DIVERGE.
+     *
+     * It used to answer live state, which made this link the inverse of the ruling: two
+     * liveness answers and no came-up answer (#1203). An embedder polling this for liveness
+     * must move to @ref link_up; one gating on "the dial landed" is already correct.
+     */
+    [[nodiscard]] bool ok() const noexcept { return came_up_.load(std::memory_order_relaxed); }
+
+    /**
+     * @brief Liveness (the @ref transport_t::link_up contract): true while a handshaken
+     *        connection is standing, cleared by every path that takes it down.
      *
      * A POLL, not a notification — and bounded in staleness only by what the stack can
      * detect: a peer that vanishes without a FIN is noticed by the keepalive probes the
      * dial arms (#957), so this answers `true` for a dead peer for at most that window.
      * A layer that needs the transition rather than the state takes the departure seam
-     * (`transport_t::set_down_notifier`), which this link now fires on every death path.
+     * (`transport_t::set_down_notifier`), which this link fires on every death path.
+     *
+     * Relaxed, per the base contract: it is a hint, never a synchronisation point. The
+     * handle-publication edge rides the SAME flag read with acquire (see `send()`), which
+     * is a separate concern from this query and is not weakened by it.
      */
-    [[nodiscard]] bool ok() const noexcept { return connected_.load(std::memory_order_acquire); }
+    [[nodiscard]] bool link_up() const noexcept override {
+        return connected_.load(std::memory_order_relaxed);
+    }
 
     /**
      * @brief Inbound MESSAGES dropped by the receive path since construction — the
@@ -346,7 +371,8 @@ class esp_ws_client_link_t : public transport_t {
         link_counters_t c;            /**< @brief Traffic counters (see link_stats.hpp). */
         std::uint32_t reconnects = 0; /**< @brief Completed handshakes since construction. */
         std::uint32_t connect_ms = 0; /**< @brief Last handshake duration, ms (0 = never). */
-        bool up = false;              /**< @brief @ref ok at the instant of the snapshot. */
+        bool up = false; /**< @brief @ref link_up at the instant of the snapshot — LIVENESS,
+                          *          which is what this field always meant (#1203). */
     };
 
     /**
@@ -424,7 +450,16 @@ class esp_ws_client_link_t : public transport_t {
     std::uint32_t reconnects_ = 0;
     /** @brief Last successful dial's handshake duration in ms — st_m_. */
     std::uint32_t connect_ms_ = 0;
+    /** @brief Liveness — what @ref link_up reports, and the handles' publication flag.
+     *         Set by `connect_once()`, cleared by `drop()`, by `send()`'s failed/short-write
+     *         arm and by the destructor. */
     std::atomic<bool> connected_{false};
+    /** @brief The came-up fact — what @ref ok reports (#1059). Set with `connected_` on
+     *         every completed handshake and NEVER cleared, so it latches the first one.
+     *         Atomic (relaxed) rather than a plain `bool` because unlike core's portable
+     *         client this link's first dial runs on the recv thread, so the write is
+     *         cross-thread; it is a hint, not a synchronisation point. */
+    std::atomic<bool> came_up_{false};
     std::atomic<bool> stop_{false};
     /** @brief The ONE-SHOT dial latch (ADR-0081, #1102): the recv thread parks before its
      *         FIRST dial until this is true. Starts true unless the ctor's `defer_recv`;

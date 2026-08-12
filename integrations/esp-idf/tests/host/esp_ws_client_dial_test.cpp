@@ -288,13 +288,16 @@ void test_oversize_frame_is_refused_and_counted() {
     fake_ws::reset();
     {
         tr::net::esp_ws_client_link_t link("127.0.0.1", 8080, "/ws", {}, kBufBytes, kBufBytes, 0);
-        // `ok()`, NOT connect_count(): the fake counts the dial on ENTRY to
+        // `link_up()`, NOT connect_count(): the fake counts the dial on ENTRY to
         // esp_transport_connect, but the link publishes `connected_` only after the
         // socket-option block and the stats latch that follow it. A send in that window
         // takes the `!connected_` arm and bumps tx_drops, which would make the
         // ordinary-path control below fail perhaps one run in a hundred. The other cases
         // here may wait on the dial count because they only read what the dial REQUESTED.
-        check(wait_until([&] { return link.ok(); }, 2s), "the link came up");
+        // The predicate is the LIVENESS one because the gate this waits for IS liveness —
+        // `ok()` is the came-up latch since #1203 and would answer the wrong question the
+        // moment this link ever dropped.
+        check(wait_until([&] { return link.link_up(); }, 2s), "the link came up");
         const std::vector<std::byte> ok_frame(kBufBytes, std::byte{0x11});
         link.send(std::span<const std::byte>(ok_frame));
         check(link.stats().c.tx_frames == 1, "a frame that fits is sent");
