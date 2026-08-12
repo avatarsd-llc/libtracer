@@ -39,8 +39,8 @@ The two entry points differ in what failure means. `path_t::parse` is for a stri
 validity is itself a runtime condition, and returns `status_t::INVALID_PATH`
 (`core/src/path.cpp:96-99,112,117`). The `explicit` constructor is for a compile-site
 literal, where a malformed path is a source bug: it hard-aborts rather than yielding a
-`result_t` the caller would only `*`-deref unchecked (`path.hpp:156`, defined
-`:227-231`). Neither uses
+`result_t` the caller would only `*`-deref unchecked (`path.hpp:159`, defined
+`:230-234`). Neither uses
 exceptions, so both hold under `-fno-exceptions`.
 
 ## String → bytes, once
@@ -74,7 +74,7 @@ flowchart LR
   stitch buffer is two segments' worth, `std::array<std::byte, kMaxSegmentBytes * 2>`
   (`core/src/fwd_router.cpp`), and no longer scales with how wide a mount is (#523).
 - **Ordinary names cost no heap block.** `path_key_t` holds records up to 16 bytes inline
-  (`path_key_t::kInlineBytes`, `core/include/libtracer/path.hpp:248`) — a NAME record is a
+  (`path_key_t::kInlineBytes`, `core/include/libtracer/path.hpp:251`) — a NAME record is a
   4-byte TLV header plus the segment text, so a name of up to 12 characters never
   allocates; longer records spill to a single owned block.
 
