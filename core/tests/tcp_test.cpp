@@ -740,13 +740,16 @@ void test_server_max_peers_cap() {
 
     // TCP has no handshake: the refused dialer's connect() lands in the OS
     // accept queue, then the server closes it at admission. Its recv loop sees
-    // the EOF and tears down — ok() flips false within a poll bound.
+    // the EOF and tears down — link_up() flips false within a poll bound, while
+    // ok() (the came-up predicate, #1059) keeps answering that the connect DID
+    // succeed.
     std::optional<tcp_transport_t> refused;
     refused.emplace("127.0.0.1", port);
     const auto rdead = std::chrono::steady_clock::now() + 2s;
-    while (refused->ok() && std::chrono::steady_clock::now() < rdead)
+    while (refused->link_up() && std::chrono::steady_clock::now() < rdead)
         std::this_thread::sleep_for(20ms);
-    check(!refused->ok(), "second dialer refused cleanly at the cap (connection closed)");
+    check(!refused->link_up(), "second dialer refused cleanly at the cap (connection closed)");
+    check(refused->ok(), "its ok() still reports the connect came up — liveness is link_up()");
     refused.reset();
 
     // Flat-mode inbound: the admitted dialer's frame reaches the plain receiver.

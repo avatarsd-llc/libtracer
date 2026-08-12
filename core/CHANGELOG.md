@@ -57,6 +57,37 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   deployment that (contrary to the documentation) passed a `max_frame` above 16 MiB now tears
   down a connection carrying an over-default frame as MALFORMED, exactly as the default
   configuration always did — the protocol default is a ceiling, not a suggestion.
+### Added
+
+- **`transport_t::link_up()` — one liveness question every link answers (#1059).** The tree
+  carried two conflicting `ok()` conventions: `tcp_transport_t`'s DIAL `ok()` read the live
+  connection fd (liveness), QUIC/WebTransport defined `ok()` as "came up" with a separate
+  `link_up()`, and `transport_ws_client`'s declaration promised both while the backing flag
+  was never cleared — a WS client whose link died kept answering "up" forever. The ruling is
+  the QUIC convention, tree-wide: **`ok()` is the came-up predicate** (did the dial / bind /
+  handshake succeed — asked once, right after construction, the `make_checked` gate; it never
+  reverts), and **`link_up()` on the `transport_t` base is liveness** (a relaxed-atomic hint,
+  default `true` for kinds with no closure concept — UDP, CAN, the multi-peer servers). The
+  pull twin of `set_down_notifier`. Deliberately no is-always-lock-free assertion: one target
+  is an rv32 core without the A extension.
+
+### Changed
+
+- **`transport_ws_client`: `ok()` no longer conflates liveness (#1059).** `ok()` keeps its
+  construction-time answer (unchanged behaviour, corrected declaration), and the new
+  `link_up()` override reads a relaxed atomic the recv loop's teardown path now clears on
+  every death of the connection — peer CLOSE, remote hangup, fatal receive error, RFC 6455
+  breach — before the departure seam fires. Previously the only truthful departure observable
+  was the down-notifier; an owner that installed none could never learn the link died.
+- **`tcp_transport_t`: DIAL `ok()` is now the came-up predicate (#1059).** It used to read
+  the live connection fd and so flipped false on teardown; that liveness answer moved to the
+  `link_up()` override (fd-derived, both roles — LISTEN answers false between peers). A
+  DIAL link that came up and later died now answers `ok() == true`, `link_up() == false`;
+  owners polling for death switch to `link_up()`. LISTEN `ok()` is unchanged.
+- **`quic_transport_t` / `webtransport_transport_t`: `link_up()` now overrides the base
+  virtual (#1059).** Same signature and meaning as before — these two already carried the
+  ruled convention; their `ok()`/`link_up()` declarations now state it as the tree-wide
+  contract.
 
 ## [0.9.1] — 2026-08-10
 

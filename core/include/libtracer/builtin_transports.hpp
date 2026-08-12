@@ -36,7 +36,9 @@ namespace tr::net {
  *
  * The dial/bind/handshake-failure → `TRANSPORT_DOWN` mapping the built-in udp/tcp/ws
  * factories share, in one locus (`ok()` is a concrete, non-virtual method, so the check is
- * templated on `T`, not called through `transport_t`).
+ * templated on `T`, not called through `transport_t`). This is exactly the came-up
+ * predicate `ok()` is defined as (#1059): asked once, right after construction; the
+ * runtime liveness of a link this gate admitted is `transport_t::link_up()`.
  *
  * It was `NOT_FOUND` until #929, which sent a refused connect out as
  * `tr::path::not_found` — a PERMANENT "that address does not exist", when the address the

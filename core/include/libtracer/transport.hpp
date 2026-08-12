@@ -417,6 +417,27 @@ class transport_t {
      */
     [[nodiscard]] virtual bool delivers_ropes() const { return false; }
 
+    /**
+     * @brief Liveness: true while this link can still carry frames (#1059).
+     *
+     * The uniform PULL-side liveness query, the poll twin of @ref set_down_notifier's push
+     * — an owner can ask any link the same question. It is deliberately NOT the concrete
+     * types' `ok()`: `ok()` is the CAME-UP predicate (did construction — the dial, the
+     * handshake, the bind — succeed), answered once, right after construction (the
+     * `make_checked` gate), and it never reverts; THIS is the runtime state, cleared by
+     * the transport's own teardown path when its one connection dies. After a teardown
+     * the two diverge: `ok()` stays true (the link DID come up), `link_up()` answers
+     * false.
+     *
+     * The default is TRUE: a connectionless (UDP) or bus (CAN) kind has no closure
+     * concept — its link is as up as it ever is — and a multi-peer server outlives any
+     * one peer. Connection-oriented transports override it. Implementations read a
+     * relaxed atomic (or state that is already atomic): this is a hint, never a
+     * synchronisation point, and deliberately carries no is-always-lock-free assertion
+     * (one target is an rv32 core without the A extension).
+     */
+    [[nodiscard]] virtual bool link_up() const noexcept { return true; }
+
     /** @brief The link-down notifier fn: (ctx) — the link carries its own identity via ctx. */
     using down_fn_t = void (*)(void* ctx);
 

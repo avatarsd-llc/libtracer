@@ -497,7 +497,11 @@ transport_ws_client::transport_ws_client(const std::string& host, std::uint16_t 
     }
 
     conn_fd_.store(fd, std::memory_order_relaxed);
-    connected_ = true;
+    // The two facts diverge from here (#1059): came_up_ is the ok() answer, written once
+    // and never reverting; connected_ is the link_up() liveness the recv thread's
+    // teardown clears.
+    came_up_ = true;
+    connected_.store(true, std::memory_order_relaxed);
     pipelined_ = std::move(pipelined);
     // Two-phase bring-up (#1025). Spawning the recv thread HERE is the historical shape and
     // stays the default, but it makes the base's "install the sinks before frames flow"
@@ -514,7 +518,7 @@ transport_ws_client::transport_ws_client(const std::string& host, std::uint16_t 
 }
 
 void transport_ws_client::start_receiving() {
-    if (!connected_) return;  // handshake failed: there is nothing to serve
+    if (!came_up_) return;  // handshake failed: there is nothing to serve
     // One-shot: `posix_endpoint_t::start` may be called at most once per endpoint, and this
     // is reachable both from the constructor (one-phase) and from an owner that calls it
     // unconditionally on every link it wires.
@@ -712,6 +716,11 @@ void transport_ws_client::serve(int fd, std::vector<std::byte> pipelined) {
 
 teardown:
     teardown_peer(fd);  // reset-under-write_m_ then close (stream_endpoint_t)
+    // Liveness (#1059): every death of the one connection lands here — peer CLOSE, remote
+    // hangup, receive error, RFC 6455 breach, and the local stop — so this is the ONE
+    // place link_up() flips false. Cleared BEFORE the departure seam fires, so a notifier
+    // that turns around and polls the link reads the state it was just told about.
+    connected_.store(false, std::memory_order_relaxed);
     // Departure seam (RFC-0009 §D extended): the one connection died under us — not a
     // local stop — so report the link down (after teardown, no locks held).
     if (!stop_.load(std::memory_order_relaxed)) notify_down();
