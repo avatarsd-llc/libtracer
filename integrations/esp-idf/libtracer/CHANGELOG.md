@@ -10,6 +10,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`esp_ws_client_link_t` gains a `defer_recv` constructor flag and a real
+  `start_receiving()`** ([#1102](https://github.com/avatarsd-llc/libtracer/issues/1102),
+  ADR-0081's defer-the-dial arm). Constructed with `defer_recv`, the recv thread is
+  spawned but parks BEFORE its first dial until `start_receiving()` releases it — so a
+  peer's push-on-connect can no longer be decoded into the not-yet-installed receiver
+  slot and dropped silently. The latch is one-shot (reconnects are not re-gated: every
+  re-dial happens on a link that was already armed) and `start_receiving()` is idempotent
+  and safe on a link that never connected, matching `transport_vertex_t::make_connection`
+  arming every link unconditionally. Default `false` keeps the historical dial-at-once
+  ctor contract; the documented `provide_link` recipe gains the opt-in step, because
+  there is no `ws` factory on a chip target to pass the flag for you — and an embedder
+  that sets it and never arms the link (never issues the creating write) has a link that
+  never dials, `ok()` false, all reconnect/keepalive machinery off.
+
 ## [0.10.0] — 2026-08-12
 
 This component compiles the core C++ sources, so — unlike 0.9.1 — essentially all of

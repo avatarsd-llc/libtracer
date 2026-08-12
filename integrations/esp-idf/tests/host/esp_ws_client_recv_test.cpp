@@ -1,6 +1,7 @@
 /**
  * @file
- * @brief #900 + #901 — the ESP-IDF WebSocket *client* link's RECEIVE PATH, on the host.
+ * @brief #900 + #901 + #1102 — the ESP-IDF WebSocket *client* link's RECEIVE PATH, on
+ *        the host.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -32,6 +33,13 @@
  *   3. The two adjacent gaps: a stray CONTINUATION with no message open is dropped (the
  *      server sibling's rule), and an EXACT-FIT message delivers instead of being swept
  *      into the overflow branch.
+ *
+ *   4. #1102 — `defer_recv` HOLDS THE FIRST DIAL until `start_receiving()` (ADR-0081's
+ *      defer-the-dial arm). An unarmed link never connects, so a peer's push-on-connect
+ *      cannot beat the sink install; the message is delivered — never lost — once the
+ *      owner arms the link, and the latch is ONE-SHOT: a peer CLOSE re-dials and keeps
+ *      delivering with no re-arm (pinning the triage refutation that a reconnect
+ *      re-opens the window).
  *
  * Each drop case also proves RECOVERY — a well-formed message sent right after parses
  * correctly — and that is what makes the assertions ordering-based rather than
@@ -161,8 +169,10 @@ void test_zero_recv_stack_arms_nothing() {
 /**
  * @brief Build a link, wait for it to dial, and install @p sink — the common prologue.
  *
- * The receiver must be installed before any frame is pushed, which is exactly why the
- * fake's `poll_read` reports "no data" until `push_frames` is called.
+ * This prologue steps AROUND the pre-sink window by construction: the fake's `poll_read`
+ * reports "no data" until `push_frames`, so the receiver is always installed before any
+ * frame exists to deliver. The window itself — a peer that pushes before the sink is
+ * installed — is what `test_defer_recv_holds_the_dial_until_armed` pins (#1102).
  */
 std::unique_ptr<tr::net::esp_ws_client_link_t> dialed_link(sink_t& sink) {
     auto link = std::make_unique<tr::net::esp_ws_client_link_t>(
@@ -259,10 +269,62 @@ void test_fragmented_fitting_message_reassembles() {
     check(link->dropped_rx() == 0, "and nothing was counted as dropped");
 }
 
+/**
+ * @brief #1102 — `defer_recv` holds the FIRST dial until `start_receiving()`, and the
+ *        latch is one-shot across reconnects (ADR-0081's defer-the-dial arm).
+ *
+ * The scripted window is the documented recipe's: the peer's push-on-connect (a frame
+ * queued before the link is armed) against a sink installed after construction. With the
+ * latch, the unarmed link never dials, so the message WAITS at the peer and arrives
+ * intact once the owner arms the link — never lost, never counted. Without the
+ * production hunk the ctor dials at once and the pushed frame is decoded into the empty
+ * slot: the "did not dial" check and the "arrived after arming" check both redden, which
+ * is the non-vacuity this guard was specified with. The reconnect leg pins the triage
+ * refutation of the original title: a peer CLOSE re-dials (no re-arm — the second dial
+ * is the latch NOT re-closing) and the next message is delivered.
+ */
+void test_defer_recv_holds_the_dial_until_armed() {
+    std::printf("#1102 defer_recv holds the dial until start_receiving():\n");
+    fake_ws::reset();
+    sink_t sink;
+    tr::net::esp_ws_client_link_t link("127.0.0.1", 8080, "/ws", /*handshake_headers=*/{}, kRxBytes,
+                                       kRxBytes, /*recv_stack=*/0, /*defer_recv=*/true);
+    // The peer's push-on-connect, queued while the link is UNARMED and the sink absent.
+    const fake_ws::frame_t good = good_message();
+    fake_ws::push_frames({good});
+    check(!wait_until([] { return fake_ws::connect_count() >= 1; }, 250ms),
+          "an unarmed link did NOT dial");
+    check(sink.count() == 0, "and nothing reached the sink before it was installed");
+    link.set_receiver(sink);
+    link.start_receiving();
+    link.start_receiving();  // idempotent — make_connection arms every link unconditionally
+    check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s),
+          "arming released the first dial");
+    check(wait_until([&] { return sink.count() >= 1; }, 5s),
+          "the pre-arm message ARRIVED after arming — held, never lost");
+    check(same_bytes(sink.at(0), good), "byte-for-byte");
+    check(link.dropped_rx() == 0, "and nothing was counted as dropped");
+
+    // Reconnect leg: the latch is ONE-SHOT. A peer CLOSE tears the connection down; the
+    // re-dial happens with no re-arm, and a message on the NEW connection is delivered —
+    // a future latch that wrongly re-closed per connection reddens here.
+    fake_ws::push_frames(
+        {fake_ws::make_frame(WS_TRANSPORT_OPCODES_CLOSE, /*fin=*/true, /*len=*/2, /*seed=*/0x11)});
+    check(wait_until([] { return fake_ws::connect_count() >= 2; }, 5s),
+          "the link re-dialed after the peer CLOSE with no re-arm");
+    const fake_ws::frame_t after =
+        fake_ws::make_frame(WS_TRANSPORT_OPCODES_BINARY, /*fin=*/true, /*len=*/8, /*seed=*/0xB0);
+    fake_ws::push_frames({after});
+    check(wait_until([&] { return sink.count() >= 2; }, 5s),
+          "a message on the new connection was delivered — the latch did not re-close");
+    check(same_bytes(sink.at(1), after), "byte-for-byte");
+    check(link.dropped_rx() == 0, "and still nothing was counted as dropped");
+}
+
 }  // namespace
 
 int main() {
-    std::printf("esp_ws_client_link receive-path host suite (#900, #901):\n");
+    std::printf("esp_ws_client_link receive-path host suite (#900, #901, #1102):\n");
     test_recv_stack_reaches_the_thread();
     test_zero_recv_stack_arms_nothing();
     test_oversized_single_frame_tail_is_not_delivered();
@@ -270,6 +332,7 @@ int main() {
     test_exact_fit_message_delivers();
     test_stray_continuation_is_dropped();
     test_fragmented_fitting_message_reassembles();
+    test_defer_recv_holds_the_dial_until_armed();
     if (g_failures != 0) {
         std::printf("FAILED: %d check(s)\n", g_failures);
         return 1;

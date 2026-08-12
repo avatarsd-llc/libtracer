@@ -258,8 +258,13 @@ flowchart LR
   unconditionally as its last wiring step; `transport_ws_client` and `tcp_transport_t`
   honor it when constructed with `defer_recv`
   ([#1045](https://github.com/avatarsd-llc/libtracer/issues/1045)), which is how
-  `transport_vertex_t` builds a SPEC-created `ws` or `tcp` dialer. `quic`,
-  `webtransport` and the ESP-IDF-native WS client link still take the no-op default;
+  `transport_vertex_t` builds a SPEC-created `ws` or `tcp` dialer. The ESP-IDF-native WS
+  client honors it too, in its own shape: its recv thread does the dialling, so
+  `defer_recv` holds the **first dial** behind the `start_receiving()` latch (ADR-0081's
+  defer-the-dial arm, [#1102](https://github.com/avatarsd-llc/libtracer/issues/1102)) —
+  one-shot, since reconnects happen only on an already-armed link — and the embedder
+  passes the flag itself, there being no `ws` factory on a chip target. `quic` and
+  `webtransport` still take the no-op default;
   whether the window is reachable on each has its own follow-up (#1100–#1103). `udp` has
   no DIAL constructor of this shape — it binds an ephemeral port, never `::connect`s and
   sends nothing in the constructor, so no peer can learn its source port to push to.

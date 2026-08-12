@@ -40,7 +40,9 @@
  *
  * Threading (the review-critical part):
  *   - EVERY DIAL INPUT IS SETTLED BEFORE THE RECV THREAD EXISTS. The ctor spawns a thread
- *     that dials immediately, so this type has NO post-construction dial-configuration
+ *     that dials as soon as it is armed (immediately, unless `defer_recv` holds the first
+ *     dial for @ref start_receiving — see below), so this type has NO
+ *     post-construction dial-configuration
  *     surface: host, port, `ws_path` and the handshake headers are all constructor
  *     arguments and all `const` thereafter — read by the recv thread, written by nobody.
  *     (The rx/tx buffers are the same rule in a weaker spelling: sized once in the ctor and
@@ -65,7 +67,24 @@
  *     makes it structural. A knob that must be applied before the thread starts belongs in
  *     the ctor, which is the same rule that made `recv_stack` reach `esp_pthread_set_cfg`
  *     (#900) rather than be discarded after the spawn.
- *   - A single recv thread (spawned in the ctor) owns the read side: it dials
+ *   - THE PRE-SINK WINDOW IS CLOSED BY NOT DIALLING (ADR-0081, #1102). The receiver sink
+ *     is installed by the owner AFTER construction (`provide_link` → the creating write →
+ *     `fwd_router_t::add_child`), and our own connect is what provokes the peer's
+ *     push-on-connect — so a link that dials from its ctor can deliver a message into an
+ *     empty `receiver_slot_t`, a silent loss with no counter moving. Constructed with
+ *     `defer_recv`, the recv thread parks BEFORE its first dial until
+ *     @ref start_receiving releases it: nothing can arrive before the sink exists because
+ *     nothing is connected, which is ADR-0081's "hold in the transport's native window"
+ *     stated for a link whose window IS its connection. The latch is ONE-SHOT,
+ *     deliberately: every re-dial happens on a link that was already armed, the router
+ *     keeps the receiver installed across a `link_down`, so a latch that re-closed per
+ *     connection would hold bytes against a sink that is already standing. Default off —
+ *     the historical dial-at-once contract — because there is no `ws` factory on a chip
+ *     target to arm it: the embedder that stages the link with `provide_link` is the one
+ *     that must opt in (and then MUST issue the creating write, or arm the link itself —
+ *     see the ctor's `defer_recv` note).
+ *   - A single recv thread (spawned in the ctor) owns the read side: once armed (see
+ *     above; immediately unless `defer_recv`) it dials
  *     (with reconnect/backoff), then loops `esp_transport_poll_read` +
  *     `esp_transport_read` — reading each frame's payload DIRECTLY into a reusable
  *     buffer (server→client frames are unmasked per RFC 6455 §5.1, so the read is
@@ -172,10 +191,11 @@ namespace tr::net {
 class esp_ws_client_link_t : public transport_t {
    public:
     /**
-     * @brief Dial `ws://<host>:<port><ws_path>` and start the recv thread; the ctor
-     *        does NOT block on the connection (it dials on the recv thread, with
-     *        reconnect), so a slow/unreachable peer never stalls the caller — confirm
-     *        readiness with @ref ok.
+     * @brief Start the recv thread, which dials `ws://<host>:<port><ws_path>` — at once
+     *        by default, or only after @ref start_receiving when `defer_recv` is set.
+     *        The ctor does NOT block on the connection (the dial runs on the recv
+     *        thread, with reconnect), so a slow/unreachable peer never stalls the
+     *        caller — confirm readiness with @ref ok.
      *
      * @param host     The peer's IPv4 dotted-quad or hostname (the graph plane's WS host).
      * @param port     The peer's TCP port (its :80 esp_http_server, for the /ws mount).
@@ -203,10 +223,25 @@ class esp_ws_client_link_t : public transport_t {
      *                   in-call delivery through the graph's on_write seam, which is the
      *                   deep path, so a node that knows its delivery depth sizes it here.
      *                   0 = the platform pthread default.
+     * @param defer_recv Hold the FIRST dial until @ref start_receiving (ADR-0081's
+     *                   defer-the-dial arm, #1102). The recv thread is spawned but parks
+     *                   before its first connect, so a peer's push-on-connect cannot land
+     *                   before the owner has installed the receiver sink — the recipe is
+     *                   construct with this set, `provide_link`, issue the creating write
+     *                   (whose `make_connection` installs the sink and then arms every
+     *                   link unconditionally). The COST is deliberate and documented: an
+     *                   unarmed link never dials, so @ref ok stays false and the
+     *                   reconnect/keepalive/departure machinery is all off until armed —
+     *                   an embedder that sets this and never arms the link has a link
+     *                   that never connects. Default false, the historical dial-at-once
+     *                   contract: there is no `ws` factory on a chip target to pass this
+     *                   flag (the `tcp`/core-`ws` factories pass their `defer_recv`
+     *                   themselves), so opting in is the embedder's move.
      */
     explicit esp_ws_client_link_t(std::string host, std::uint16_t port, std::string ws_path = "/ws",
                                   std::string handshake_headers = {}, std::size_t rx_bytes = 2048,
-                                  std::size_t tx_bytes = 2048, std::size_t recv_stack = 0);
+                                  std::size_t tx_bytes = 2048, std::size_t recv_stack = 0,
+                                  bool defer_recv = false);
 
     /**
      * @brief Stop the recv thread, then close + destroy the esp_transport handles.
@@ -240,6 +275,21 @@ class esp_ws_client_link_t : public transport_t {
      * literal, which is a watchdog panic rather than a dropped frame (#952).
      */
     void send(std::span<const std::byte> frame) override;
+
+    /**
+     * @brief Open this link's delivery gate: release the `defer_recv` dial latch, so the
+     *        recv thread makes its first dial (ADR-0081, #1102).
+     *
+     * The second phase of the two-phase bring-up the base contract describes
+     * (`transport_t::start_receiving`): construct with `defer_recv`, install the sinks,
+     * then call this. IDEMPOTENT and SAFE ON A LINK THAT NEVER CONNECTED —
+     * `transport_vertex_t::make_connection` arms every link unconditionally once the
+     * receiver is installed, and on a link constructed without `defer_recv` (or armed
+     * already) this finds the latch set and does nothing. ONE-SHOT: a reconnect never
+     * re-closes the gate, because every re-dial happens on a link that was already armed
+     * and the router keeps the receiver installed across a `link_down`.
+     */
+    void start_receiving() override;
 
     /** @brief Span delivery: the router services each inbound frame in-call, so no
      *         frame outlives its callback. */
@@ -348,11 +398,13 @@ class esp_ws_client_link_t : public transport_t {
      *         covers exactly the callers that could already be parked on that mutex —
      *         and, by the same token, no earlier than the raise itself (#952). */
     std::atomic<std::uint32_t> senders_{0};
-    /** @brief Guards nothing but the reconnect backoff wait — a sleep the destructor has
-     *         to be able to cut short, hence a condition variable rather than
-     *         `sleep_for` (#952). Never taken with `write_m_` held. */
+    /** @brief Guards the recv thread's two parked waits — the reconnect backoff and the
+     *         `defer_recv` dial latch — both of which the destructor has to be able to
+     *         cut short, hence a condition variable rather than `sleep_for` (#952).
+     *         Never taken with `write_m_` held. */
     std::mutex backoff_m_;
-    std::condition_variable backoff_cv_; /**< @brief Signalled by the destructor. */
+    std::condition_variable backoff_cv_; /**< @brief Signalled by the destructor and by
+                                          *          @ref start_receiving. */
     /**
      * @brief Guards the counter block below, and NOTHING else.
      *
@@ -374,6 +426,11 @@ class esp_ws_client_link_t : public transport_t {
     std::uint32_t connect_ms_ = 0;
     std::atomic<bool> connected_{false};
     std::atomic<bool> stop_{false};
+    /** @brief The ONE-SHOT dial latch (ADR-0081, #1102): the recv thread parks before its
+     *         FIRST dial until this is true. Starts true unless the ctor's `defer_recv`;
+     *         set by @ref start_receiving and never cleared — every re-dial happens on a
+     *         link that was already armed, so reconnects are not re-gated. */
+    std::atomic<bool> armed_{true};
     /** @brief Receive-path message drops — see @ref dropped_rx. Written only by the recv
      *         thread, read by anyone, so relaxed is enough (it is a statistic). */
     std::atomic<std::uint64_t> dropped_rx_{0};
