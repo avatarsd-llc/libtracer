@@ -2070,20 +2070,27 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
         // change to what leaves the device for that spelling; `field_shape_matrix` pins
         // both answers.
         const std::string& key = app_key;
+        // GATE-BEFORE-RESOLVE (#435, RFC-0010 §A erratum 2026-08-12). Owner-defined names
+        // are a per-node secret — unlike the protocol's published constants, whose
+        // pre-gate resolution #430 justified — so a caller-attributed write evaluates
+        // the vertex WRITE right BEFORE any name under `settings.app.` is resolved: a
+        // denied caller is told PERMISSION_DENIED whether the name is declared,
+        // undeclared, `ro` or `wo`, and the error channel discloses neither the owner's
+        // name set nor which spellings exist. The read door has the same order (its READ
+        // gate sits above `settings.app.` resolution); #430's write-side hoist left this
+        // branch answering SCHEMA_NOT_FOUND pre-gate, which leaked field existence.
+        if (!caller.empty() && !acl_allows(v, caller, acl_right_t::WRITE))
+            return std::unexpected(status_t::PERMISSION_DENIED);
         const std::optional<app_access_t> access = v->app_field_access(key);
         if (!access)  // undeclared stays ENOTTY — the table opens only its own names
             return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-        if (!caller.empty()) {
-            // A caller-attributed (remote) write, gated in RFC-0010 §A.3 order. Gate 1:
-            // a field not declared remotely writable has NO write surface — the
-            // caller-INDEPENDENT identity (the ENOTTY of writing a read-only ioctl),
-            // checked before the per-caller ACL right. Gate 2: the ordinary vertex
-            // WRITE right, like any control write. The owner (empty caller) skips
-            // both — it is updating its own projection, not a caller.
-            if (*access == app_access_t::RO) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-            if (!acl_allows(v, caller, acl_right_t::WRITE))
-                return std::unexpected(status_t::PERMISSION_DENIED);
-        }
+        // A field not declared remotely writable has NO write surface (RFC-0010 §A.3
+        // gate 1, the ENOTTY of writing a read-only ioctl) — the answer every ADMITTED
+        // caller gets, identically; per the erratum it sits BELOW the ACL gate so it is
+        // never an existence oracle for a denied one. The owner (empty caller) skips
+        // both checks — it is updating its own projection, not a caller.
+        if (!caller.empty() && *access == app_access_t::RO)
+            return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         // Store verbatim (§D — bytes in, bytes out; the descriptor is consumer
         // self-description, never a runtime validation schema). A false return means a
         // concurrent table replacement un-declared the name between gate and store.
@@ -2596,6 +2603,34 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, const field_path_t& field,
     // wrap once. Field reads are gated like data reads (#81): READ for the control
     // surface, READ_ACL — its own right, distinct from acting on the vertex — for ":acl".
     const result_t<view_t> fv = [&]() -> result_t<view_t> {
+        // PROTOCOL-OWNED NAME VALIDITY RESOLVES ABOVE THE READ GATE (#435, RFC-0010 §A
+        // erratum 2026-08-12). The recognised field namespace — {subscribers, acl,
+        // children, settings, schema, identity} — is published spec text
+        // (docs/reference/05 §0x09 STATUS / §Field namespace), identical on every node,
+        // so answering an unknown NAME before the gate discloses nothing; answering it
+        // BELOW the gate split one spelling's answer by who asked (SCHEMA_NOT_FOUND for
+        // an allowed caller, PERMISSION_DENIED for a denied one) — the caller-dependent
+        // disclosure reference/05 §Gating-:identity names as the failure mode — and
+        // diverged from the write door, whose unknown-name arm sits before any gate.
+        // NAME validity ONLY: every recognised name's VALUE keeps its gate below (a
+        // denied caller reading an EXISTENT facet stays PERMISSION_DENIED), the pinned
+        // selector-shape divergences (#869: `:acl[0]`, `:subscribers[*]`, …) are
+        // untouched, and owner-defined `settings.app.*` resolution stays BELOW the gate
+        // — the owner's name set is a secret (see the settings arm past the gate).
+        const std::string_view head = field.steps[0].name;
+        if (head != "subscribers" && head != "acl" && head != "children" && head != "settings" &&
+            head != "schema" && head != "identity")
+            return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+        // Bare `:subscribers` and any `:subscribers.<tail>` spelling name nothing on
+        // either door — the record is addressed whole, per slot — and the write door
+        // already answers both ungated (its TAIL/WHOLE arms), so the read resolves the
+        // same two spellings at the same pre-gate narrowness. Selector shapes (`[N]`,
+        // `[]`, `[*]`) keep their per-door arms below.
+        if (head == "subscribers") {
+            const field_sel_t sub_sel = field_selector(field);
+            if (sub_sel == field_sel_t::WHOLE || sub_sel == field_sel_t::TAIL)
+                return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+        }
         // Served whole — no member or slot addressing, so `:acl[N]` names nothing
         // (an ACE is not separately addressable). Resolving the shape here keeps
         // `:acl[7]` from being served the entire ACE collection under an OK status.

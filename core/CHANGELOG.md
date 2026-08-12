@@ -88,6 +88,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   virtual (#1059).** Same signature and meaning as before — these two already carried the
   ruled convention; their `ok()`/`link_up()` declarations now state it as the tree-wide
   contract.
+- **Read/write disclosure parity on nonexistent fields — namespace-governed, and the answer a
+  DENIED caller sees changes on both doors (#435, RFC-0010 §A erratum 2026-08-12).**
+  `graph_t::read`'s field overload now resolves **protocol-owned name-validity above the READ
+  gate**: an unknown top-level field name (`:status`), bare `:subscribers` or a
+  `:subscribers.<tail>` spelling answers `SCHEMA_NOT_FOUND` caller-independently — matching
+  the write door — where a denied caller was previously told `PERMISSION_DENIED`.
+  Name-validity only: every existent facet keeps its gate, `:identity` stays pre-auth, and the
+  pinned #869 selector-shape divergences are untouched. `graph_t::field_write`'s
+  `settings.app.` arm now evaluates the caller's **WRITE right before resolving the owner
+  name** (gate-before-resolve): a denied caller gets `PERMISSION_DENIED` for declared,
+  undeclared, `ro` and `wo` spellings alike, where #430's hoist previously answered
+  `SCHEMA_NOT_FOUND` pre-gate for undeclared and `ro` names and so disclosed the owner's
+  field-name set. Admitted callers and the owner see no change anywhere. Conformance:
+  `acl/denied-caller-undeclared-app-field`; pinned by `acl_test.cpp`
+  `test_denied_caller_disclosure_parity`.
 
 ## [0.9.1] — 2026-08-10
 
