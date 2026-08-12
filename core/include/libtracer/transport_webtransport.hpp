@@ -84,7 +84,8 @@ class webtransport_transport_t : public transport_t {
      *
      * Confirm with ok(); on failure the object is inert. On success frames may
      * flow immediately, so receivers must be installed before the peer sends
-     * (the set_receiver contract).
+     * (the set_receiver contract) — or the link is constructed with @p defer_rx
+     * and armed with @ref start_receiving once they are.
      *
      * @param peer_host Server hostname or dotted-quad IPv4 (the CONNECT
      *                  `:authority` host part).
@@ -98,11 +99,21 @@ class webtransport_transport_t : public transport_t {
      *                  inbound frame lands in a fresh exactly-sized segment
      *                  from it. Exhaustion is backpressure (dropped_rx()),
      *                  never an OOM. Must outlive the transport.
+     * @param max_frame Per-link RX cap (`:settings max_frame`); 0 = the default.
+     * @param defer_rx  Hold inbound FRAMES until @ref start_receiving (#1101,
+     *                  ADR-0081 §2). The session is established here as always —
+     *                  the H3 handshake keeps consuming — but the frame channel's
+     *                  bytes are left in msquic's per-stream flow-control window,
+     *                  so a server that pushes the instant the session comes up
+     *                  cannot be decoded into a sink the owner has not installed
+     *                  yet. Nothing is buffered library-side. Default false (the
+     *                  historical one-phase shape); `transport_vertex_t` builds a
+     *                  SPEC-created dialer with it set.
      */
     webtransport_transport_t(const std::string& peer_host, std::uint16_t peer_port,
                              const std::string& path = "/", webtransport_dial_tls_t tls = {},
                              mem::mem_backend_t* backend = &mem::heap_backend(),
-                             std::size_t max_frame = 0);
+                             std::size_t max_frame = 0, bool defer_rx = false);
 
     /**
      * @brief LISTEN mode: serve WebTransport (ALPN `h3`) on @p bind_port with
@@ -153,6 +164,19 @@ class webtransport_transport_t : public transport_t {
      *            the wire as one length-prefixed frame.
      */
     void send(std::span<const std::span<const std::byte>> iov) override;
+
+    /**
+     * @brief Open this link's delivery gate — the second phase of a `defer_rx`
+     *        DIAL bring-up (#1101, ADR-0081 §2).
+     *
+     * Re-enables msquic's receive on the WebTransport frame stream, so everything
+     * the peer pushed while the owner was installing its sinks is re-indicated and
+     * delivered rather than dropped. IDEMPOTENT and inert on every other link — a
+     * one-phase dialer, a listener, and a dial that never came up all have nothing
+     * to arm — because `%transport_vertex_t::make_connection` calls it on every
+     * link it wires.
+     */
+    void start_receiving() override;
 
     /** @brief True — this transport honors @ref set_rope_receiver (ADR-0042). */
     [[nodiscard]] bool delivers_ropes() const override { return true; }

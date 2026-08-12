@@ -261,6 +261,25 @@ class msquic_endpoint_t {
     /** @} */
 
     /**
+     * @name Pre-sink delivery gate (ADR-0081 §2 — the msquic arm).
+     *
+     * `transport_vertex_t::make_connection` installs the receiver AFTER the link
+     * object exists, so a peer that pushes inside that span reaches an empty
+     * `receiver_slot_t` and is dropped with no counter moving (#1025/#1101). This
+     * endpoint has no receive thread to withhold — msquic's worker drives every
+     * RECEIVE — so "not delivered yet" is expressed as **not consumed**: the
+     * frame stream's bytes stay in msquic's flow-control window, and stream-level
+     * flow control backpressures the peer. NOTHING is parked library-side (ADR-0042
+     * §2 — the standing no-library-internal-buffers commitment).
+     * @{
+     */
+    /** @brief True while delivery is held: the frame stream's RECEIVE events must
+     *         consume ZERO bytes. Set before the frame channel can exist, cleared
+     *         by @ref open_delivery_gate (the transport's `start_receiving()`). */
+    std::atomic<bool> rx_held{false};
+    /** @} */
+
+    /**
      * @name DIAL handshake rendezvous: the ctor blocks until CONNECTED or
      *       shutdown (derived transports may add further stages on the same
      *       mutex/cv — the webtransport session stage).
@@ -339,6 +358,47 @@ class msquic_endpoint_t {
         if (stopping.load(std::memory_order_relaxed)) return;  // our own teardown
         if (!link_established.exchange(false, std::memory_order_relaxed)) return;  // once, if up
         if (link_down_fn != nullptr) link_down_fn(link_down_ctx);
+    }
+
+    /** @brief True while pre-sink ingress must stay in msquic's window: the
+     *         caller MUST consume zero bytes of the chunk it was about to
+     *         deliver (partial consume — msquic re-indicates it on re-enable). */
+    [[nodiscard]] bool delivery_held() const noexcept {
+        return rx_held.load(std::memory_order_acquire);
+    }
+
+    /**
+     * @brief Hold or release RECEIVE callbacks on ONE stream (msquic's per-stream
+     *        receive enable/disable — the ADR-0081 §2 native window).
+     *
+     * Advisory on the disabling side: msquic always delegates this to the
+     * connection's worker, so a RECEIVE already queued is still indicated
+     * (StreamReceiveSetEnabled.md). The RELIABLE hold is the zero-byte drain at
+     * the delivery site, which @ref delivery_held drives; this call is what tells
+     * msquic to stop offering more (and, on the release side, to re-indicate what
+     * the drain left behind).
+     */
+    void set_stream_receive(HQUIC s, bool enabled) {
+        if (api != nullptr && s != nullptr)
+            (void)api->StreamReceiveSetEnabled(s, enabled ? TRUE : FALSE);
+    }
+
+    /**
+     * @brief Open this link's delivery gate — the `transport_t::start_receiving()`
+     *        meaning ADR-0081 gives every transport, msquic-flavored.
+     *
+     * Idempotent, and inert on a link that never came up (no frame stream to
+     * re-enable) — `transport_vertex_t::make_connection` arms every link it wires
+     * unconditionally. The re-enable happens UNDER @ref conn_m on purpose: the
+     * harvesters null `frame_stream` under the same lock before they close it, so
+     * the handle read here cannot be one they are already closing. Deadlock-free
+     * because StreamReceiveSetEnabled never runs a callback inline — it always
+     * delegates to the connection's worker.
+     */
+    void open_delivery_gate() {
+        if (!rx_held.exchange(false, std::memory_order_acq_rel)) return;  // never held / already
+        const std::lock_guard lock(conn_m);
+        set_stream_receive(frame_stream, true);
     }
 
     /**

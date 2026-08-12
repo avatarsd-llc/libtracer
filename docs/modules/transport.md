@@ -68,7 +68,7 @@ Every socket transport in the tree declares the owning tier: UDP
 (`transport_udp.hpp:111`), TCP client and server (`transport_tcp.hpp:207,372`),
 WebSocket server and client (`transport_ws.hpp:225,416`), CAN
 (`transport_can.hpp:510`), QUIC (`transport_quic.hpp:153`) and WebTransport
-(`transport_webtransport.hpp:158`). The borrowed-span path is the base-class default
+(`transport_webtransport.hpp:182`). The borrowed-span path is the base-class default
 and the tier an out-of-tree transport gets for free.
 
 ## Point-to-point links and bus links
@@ -263,9 +263,16 @@ flowchart LR
   `defer_recv` holds the **first dial** behind the `start_receiving()` latch (ADR-0081's
   defer-the-dial arm, [#1102](https://github.com/avatarsd-llc/libtracer/issues/1102)) —
   one-shot, since reconnects happen only on an already-armed link — and the embedder
-  passes the flag itself, there being no `ws` factory on a chip target. `quic` and
-  `webtransport` still take the no-op default;
-  whether the window is reachable on each has its own follow-up (#1100–#1101). `udp` has
+  passes the flag itself, there being no `ws` factory on a chip target. `webtransport`'s
+  DIAL side honors it as well, with `defer_rx`
+  ([#1101](https://github.com/avatarsd-llc/libtracer/issues/1101)) — it owns no receive
+  thread to withhold, so per
+  [ADR-0081](../adr/0081-pre-sink-ingress-native-window-hold-or-named-drop-never-parked.md)
+  §2 the hold is msquic's **per-stream receive window**: the frame channel's RECEIVE
+  events consume zero bytes and `start_receiving()` re-enables them, while the H3/QPACK
+  state machine keeps consuming its own streams throughout. Nothing is buffered
+  library-side. `quic` still takes the no-op default, with the LISTEN-side gates its own
+  follow-up (#1114). `udp` has
   no DIAL constructor of this shape — it binds an ephemeral port, never `::connect`s and
   sends nothing in the constructor, so no peer can learn its source port to push to.
 - **On a bus the window needs no provocation at all.** `can` has no dial to defer and no

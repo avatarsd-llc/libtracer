@@ -208,6 +208,26 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   a DEVICE-link value** (#917), instead of folding it into the `BACKPRESSURE` that an exhausted
   `value_backend_` raises. No retry makes a device payload CPU-decodable; backpressure said it
   would.
+- **`webtransport_transport_t` DIAL: pre-sink ingress waits in msquic's window (#1101).** The
+  DIAL constructor opens the WebTransport frame channel itself, so a server that pushed the
+  instant the session came up reached the delivery slot before
+  `transport_vertex_t::make_connection` had installed a receiver — dropped silently, with
+  neither `dropped_rx()` nor `malformed_rx()` moving. This transport owns no receive thread to
+  withhold (msquic's worker drives every RECEIVE), so per
+  [ADR-0081](../docs/adr/0081-pre-sink-ingress-native-window-hold-or-named-drop-never-parked.md)
+  §2 the hold is msquic's **per-stream receive window**, never a library buffer: the frame
+  stream's RECEIVE events consume **zero** bytes while the gate is closed, the peer is
+  flow-controlled by QUIC's own rules, and nothing is parked (ADR-0042 §2). The H3/QPACK state
+  machine keeps consuming its own streams throughout — the gate is on delivery only, including
+  the one callback where `0x41 ++ session-id ++ <first record>` arrives together (the preamble
+  is consumed, the record is not).
+
+  Public surface: the DIAL constructor takes a trailing **`bool defer_rx = false`** (the
+  `tcp_transport_t` / `transport_ws_client` `defer_recv` shape — the default keeps the
+  historical one-phase behavior), and `webtransport_transport_t` now overrides
+  **`start_receiving()`**, which re-enables the frame stream's receive. It is idempotent and
+  inert on a one-phase dialer, on a listener, and on a dial that never came up. The
+  `webtransport` factory builds every SPEC-created dialer with `defer_rx = true`.
 
 ## [0.10.0] — 2026-08-12
 

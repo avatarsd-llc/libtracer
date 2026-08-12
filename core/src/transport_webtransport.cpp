@@ -213,7 +213,15 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
         send_raw(s, std::move(preamble));
         // Only after the preamble is queued: a send() racing this open must not
         // slip a length-prefixed record in front of the 0x41 header.
-        if (kind == stream_ctx_t::kind_t::FRAME) frame_stream = s;
+        if (kind == stream_ctx_t::kind_t::FRAME) {
+            frame_stream = s;
+            // The DIAL frame channel is the one door a server can push through before the
+            // owner installs its sink (ADR-0081 §2): tell msquic not to offer its bytes at
+            // all while delivery is held. Advisory — the zero-byte drain in on_stream_rx is
+            // what actually holds them — but it is what keeps the peer's stream-level flow
+            // control closed, which is the point of holding in the native window.
+            if (delivery_held()) set_stream_receive(s, false);
+        }
         ctxs.push_back(ctx.release());
         return s;
     }
@@ -310,8 +318,14 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
      * browser take the node down. Every skipped frame is dropped from `acc`
      * before the "need more bytes" return, so an unbounded GREASE run is
      * bounded memory rather than a slow march into the accumulation cap.
+     *
+     * @param taken In: the current RECEIVE chunk's length (fully consumed by the
+     *              accumulation above). Out: LOWERED to the preamble's share when a
+     *              0x41 adoption lands its first frame bytes while delivery is held
+     *              — the H3 state machine keeps consuming, the payload does not
+     *              (ADR-0081 §2 / #1101).
      */
-    bool classify_bidi(stream_ctx_t& c) {
+    bool classify_bidi(stream_ctx_t& c, std::size_t& taken) {
         std::size_t skipped = 0;  // acc bytes consumed by unknown frames this pass
         while (true) {
             const std::span<const std::uint8_t> in =
@@ -348,7 +362,12 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
                     if (c.harvested) return true;
                     refuse = !session.load(std::memory_order_relaxed) ||
                              sid->value != connect_stream_id || frame_stream != nullptr;
-                    if (!refuse) frame_stream = c.h;
+                    if (!refuse) {
+                        frame_stream = c.h;
+                        // The second pre-sink door (#1101): a peer-opened frame channel.
+                        // Same hold as the locally-opened one — see open_stream.
+                        if (delivery_held()) set_stream_receive(c.h, false);
+                    }
                 }
                 if (refuse) {
                     refuse_stream(c);
@@ -367,8 +386,21 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
                 c.acc.clear();
                 c.acc.shrink_to_fit();
                 const auto tail = rest.subspan(sid->consumed);
-                if (!tail.empty()) return on_rx_chunk(tail.data(), tail.size());
-                return true;
+                if (tail.empty()) return true;
+                if (delivery_held()) {
+                    // The one place where the H3 machine and the payload really do share a
+                    // callback: `0x41 ++ session-id ++ <first record>` can arrive together.
+                    // The preamble is consumed (adoption above depends on it); the record is
+                    // NOT — `taken` drops by the tail's size, so msquic keeps those bytes in
+                    // its flow-control window and re-indicates them when the owner opens the
+                    // gate. It cannot span an earlier chunk: classification runs to
+                    // exhaustion on every chunk, so whatever preceded this one was an
+                    // incomplete header contributing nothing after the preamble. The clamp
+                    // is defensive, and never subtracts more than this chunk carried.
+                    taken = tail.size() <= taken ? taken - tail.size() : 0;
+                    return true;
+                }
+                return on_rx_chunk(tail.data(), tail.size());
             }
 
             if (t->value == wt_h3::kFrameHeaders) {
@@ -487,13 +519,26 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
         }
     }
 
-    /** @brief Route one RECEIVE chunk to the stream's state. False => stop
-     *         consuming this event's remaining chunks (the connection was shut
-     *         down). */
-    bool on_stream_rx(stream_ctx_t& c, const std::uint8_t* p, std::size_t n) {
+    /**
+     * @brief Route one RECEIVE chunk to the stream's state. False => stop
+     *        consuming this event's remaining chunks (the connection was shut
+     *        down).
+     *
+     * @param taken In: @p n (the default, everything consumed). Out: how much of
+     *              the chunk was actually consumed — LESS than @p n only while the
+     *              delivery gate is closed, which is how ingress is held in
+     *              msquic's own flow-control window instead of a library buffer
+     *              (ADR-0081 §2). Only the two frame-channel arms can lower it: the
+     *              H3 control plumbing keeps consuming throughout.
+     */
+    bool on_stream_rx(stream_ctx_t& c, const std::uint8_t* p, std::size_t n, std::size_t& taken) {
         using kind_t = stream_ctx_t::kind_t;
         switch (c.kind) {
             case kind_t::FRAME:
+                if (delivery_held()) {
+                    taken = 0;  // held in msquic's window — re-indicated on start_receiving()
+                    return true;
+                }
                 return on_rx_chunk(p, n);
             case kind_t::SESSION:  // post-CONNECT capsules are ignored
             case kind_t::DRAIN:
@@ -505,7 +550,7 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
                 return true;
             case kind_t::CLASSIFY_BIDI:
                 if (!accumulate(c, p, n)) return false;
-                return classify_bidi(c);
+                return classify_bidi(c, taken);
             case kind_t::CONNECT_CLIENT:
                 if (!accumulate(c, p, n)) return false;
                 parse_connect_response(c);
@@ -554,12 +599,27 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
         impl_t* const self = &self_r;
         stream_ctx_t* const c = &c_r;
         switch (ev->Type) {
-            case QUIC_STREAM_EVENT_RECEIVE:
+            case QUIC_STREAM_EVENT_RECEIVE: {
+                // PARTIAL CONSUME (ADR-0081 §2): what the routing below did not take stays in
+                // msquic's flow-control window — msquic disables further receives on this
+                // stream by itself and re-indicates the remainder when `start_receiving()`
+                // re-enables them. Nothing is copied anywhere library-side to bridge the gap.
+                std::uint64_t consumed = 0;
                 for (std::uint32_t i = 0; i < ev->RECEIVE.BufferCount; ++i) {
                     const QUIC_BUFFER& b = ev->RECEIVE.Buffers[i];
-                    if (!self->on_stream_rx(*c, b.Buffer, b.Length)) break;  // shut down
+                    std::size_t taken = b.Length;
+                    if (!self->on_stream_rx(*c, b.Buffer, b.Length, taken)) {
+                        // The connection is going down; nothing will ever re-read these
+                        // bytes, so report the event fully consumed exactly as before.
+                        consumed = ev->RECEIVE.TotalBufferLength;
+                        break;
+                    }
+                    consumed += taken;
+                    if (taken != b.Length) break;  // held: the rest waits with it
                 }
-                return QUIC_STATUS_SUCCESS;  // every byte consumed
+                ev->RECEIVE.TotalBufferLength = consumed;
+                return QUIC_STATUS_SUCCESS;
+            }
             case QUIC_STREAM_EVENT_SEND_COMPLETE:
                 complete_send(ev->SEND_COMPLETE.ClientContext);
                 return QUIC_STATUS_SUCCESS;
@@ -755,12 +815,19 @@ webtransport_transport_t::webtransport_transport_t(const std::string& peer_host,
                                                    std::uint16_t peer_port, const std::string& path,
                                                    webtransport_dial_tls_t tls,
                                                    mem::mem_backend_t* backend,
-                                                   std::size_t max_frame)
+                                                   std::size_t max_frame, bool defer_rx)
     : impl_(std::make_unique<impl_t>()) {
     impl_t& i = *impl_;
     i.rx = &rx_;  // the delivery-tier slot lives in the transport_t base
     i.backend = backend;
     i.max_frame = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
+    // Two-phase bring-up (#1101, ADR-0081 §2). Latched BEFORE any msquic handle exists, so
+    // there is no instant at which a frame channel — ours below, or one the server opens —
+    // could deliver into the sink the owner has not installed yet. This transport owns no
+    // receive thread to withhold, so the hold is msquic's per-stream receive window: the
+    // bytes stay in a buffer that is not ours and the peer is flow-controlled. The H3
+    // handshake keeps consuming throughout — the gate is on delivery only.
+    i.rx_held.store(defer_rx, std::memory_order_release);
     // Departure seam (RFC-0009 §D extended to peer departure): wire the base's
     // connection-down / one-peer replacement harvest to this transport_t's flat
     // link-down notifier. A WebTransport endpoint carries ONE session (one peer
@@ -833,6 +900,8 @@ webtransport_transport_t::webtransport_transport_t(std::uint16_t bind_port,
 }
 
 webtransport_transport_t::~webtransport_transport_t() = default;  // ~impl_t runs teardown()
+
+void webtransport_transport_t::start_receiving() { impl_->open_delivery_gate(); }
 
 void webtransport_transport_t::send(std::span<const std::byte> frame) { impl_->send_frame(frame); }
 
@@ -944,10 +1013,15 @@ transport_vertex_t::transport_factory_t webtransport_transport_factory(
             // The `:path` came from a hard-coded "/" until #1023, so a SPEC could
             // only ever reach a server that serves its session at the root; an
             // absent (or empty) `path` key still normalises to "/" in the ctor.
+            // DEFERRED delivery (#1101, ADR-0081 §2 — the `tcp`/`ws` factories' shape):
+            // `transport_vertex_t::make_connection` installs the receiver several steps
+            // after this returns, and a server that pushes the instant its session comes
+            // up has that frame in flight through the whole window. Held in msquic's
+            // per-stream receive window until the vertex calls `start_receiving()`.
             t = std::make_unique<webtransport_transport_t>(
                 s.addr, s.port, priv.path,
                 webtransport_dial_tls_t{.ca_file = priv.ca, .insecure_no_verify = priv.insecure},
-                rx_backend, s.max_frame);
+                rx_backend, s.max_frame, /*defer_rx=*/true);
             // A refused session is TRANSIENT, not a bad address (#929).
             if (!t->ok()) return std::unexpected(graph::status_t::TRANSPORT_DOWN);
             return t;
