@@ -14,6 +14,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Changed
+
+- **A kind-less connection `SPEC` matching no staged link now answers `TYPE_MISMATCH`, not
+  `NOT_FOUND` (#1062).** Both `transport_vertex_t::make_connection` return sites for "no `kind`
+  and no `provide_link` staging" moved from `status_t::NOT_FOUND` (wire:
+  `tr::path::not_found`, `0x0020`) to `status_t::TYPE_MISMATCH` (wire:
+  `tr::schema::type_mismatch`, `0x0030`). The config is *incomplete* — `kind` is a required
+  field once no staging supplies the module, the same convention as a DIAL missing `addr` or
+  either role with `port == 0` — whereas RFC-0014 reserves `tr::path::not_found` for an
+  **absent** creator endpoint (the creatability probe), so the old answer let a peer confuse
+  "no such creator endpoint" with "your config was missing `kind`". This pins the RFC-0014 §2
+  error identity for the case under its own clause-kind rule (code + the new
+  `errors/error-kindless-spec-type-mismatch` conformance vector). The genuine name-lookup
+  `NOT_FOUND`s on the settings/link/remove doors are unchanged. Wire-visible.
+
 ## [0.9.1] — 2026-08-10
 
 ### Added

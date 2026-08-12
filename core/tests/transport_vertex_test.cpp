@@ -1161,11 +1161,21 @@ void test_creation_errors() {
               !node.find(path_t::parse("/net/z")->key()).has_value(),
           "no vertices were created for the failed configs");
 
-    // No kind and no staged link => NOT_FOUND (nothing can carry the bytes).
+    // No kind and no staged link => TYPE_MISMATCH on BOTH roles (#1062): the config is
+    // missing a required field (the addr/port precedent), it is not an address to a
+    // missing thing — NOT_FOUND would reach the peer as `tr::path::not_found`, RFC-0014's
+    // reserved "no such creator endpoint" probe answer.
     const auto w4 =
         node.write(path_t("/net:children[]"), conn_spec("client", "w", conn_role_t::DIAL, 8080));
-    check(!w4.has_value() && w4.error() == status_t::NOT_FOUND,
-          "no kind + no provide_link => NOT_FOUND");
+    check(!w4.has_value() && w4.error() == status_t::TYPE_MISMATCH,
+          "no kind + no provide_link (DIAL) => TYPE_MISMATCH, not NOT_FOUND");
+    const auto w5 = node.write(path_t("/net:children[]"),
+                               conn_spec("listener", "v", conn_role_t::LISTEN, 8080));
+    check(!w5.has_value() && w5.error() == status_t::TYPE_MISMATCH,
+          "no kind + no provide_link (LISTEN) => TYPE_MISMATCH, not NOT_FOUND");
+    check(!node.find(path_t::parse("/net/w")->key()).has_value() &&
+              !node.find(path_t::parse("/net/v")->key()).has_value(),
+          "no vertices were created for the kind-less configs");
 }
 
 void test_link_of_accessor() {
