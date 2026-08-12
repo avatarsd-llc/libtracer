@@ -247,6 +247,40 @@ void test_settings_max_frame() {
 }
 
 /**
+ * @brief A :settings max_frame is TIGHTEN-ONLY (#1035): a configured value ABOVE kMaxFrame is
+ *        clamped to it, so a prefix just past the 16 MiB protocol default stays malformed even
+ *        under a 32 MiB config — a config-writable key cannot widen the ingress buffering bound.
+ *        Non-vacuous: without the clamp the 32 MiB cap ACCEPTS the prefix (the heap backend's
+ *        max_segment_size is unbounded) and malformed_rx() never ticks.
+ */
+void test_settings_max_frame_cannot_raise_the_cap() {
+    std::printf("TCP transport — a :settings max_frame above the default is clamped:\n");
+    std::atomic<int> delivered{0};
+    auto rx = [&](std::span<const std::byte>) { delivered.fetch_add(1); };
+    tcp_transport_t listener(std::uint16_t{0}, &tr::mem::heap_backend(),
+                             /*max_frame=*/2 * tcp_transport_t::kMaxFrame);
+    listener.set_receiver(rx);
+
+    raw_client_t client(listener.local_port());
+    std::vector<std::byte> prefix;
+    tr::detail::append_le(prefix, static_cast<std::uint32_t>(tcp_transport_t::kMaxFrame + 1));
+    client.write(prefix);
+
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (listener.malformed_rx() == 0 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(5ms);
+    check(listener.malformed_rx() == 1,
+          "a prefix above kMaxFrame is malformed even under a wider config (tighten-only)");
+    check(delivered.load() == 0, "nothing delivered");
+    // Bounded read: without the clamp the transport ACCEPTS the prefix and waits for a body,
+    // so an unbounded recv would hang the red run instead of failing it.
+    timeval tv{2, 0};
+    ::setsockopt(client.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    std::array<std::byte, 1> b;
+    check(::recv(client.fd, b.data(), 1, 0) == 0, "the connection was closed (EOF at the peer)");
+}
+
+/**
  * @brief A heap-delegating backend that RECORDS every segment it hands out (segment identity) and
  *        can FAIL its first `fail_first` allocations (backpressure).
  */
@@ -1258,6 +1292,7 @@ int main() {
     test_partial_and_coalesced();
     test_oversize_prefix();
     test_settings_max_frame();
+    test_settings_max_frame_cannot_raise_the_cap();
     test_view_delivery_segment_identity();
     test_backpressure_drain();
     test_scatter_gather();

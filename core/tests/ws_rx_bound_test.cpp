@@ -488,6 +488,15 @@ void test_effective_cap_is_the_min_of_the_two_seams() {
     const tr::net::transport_ws_server plain(0);
     check(plain.effective_max_frame() == tr::net::transport_ws_server::kMaxFrame,
           "and the default is the shared kMaxFrame, one home with tcp/quic/webtransport");
+
+    // Tighten-only (#1035): a configured value ABOVE the protocol default cannot widen the
+    // ingress cap — it is clamped to kMaxFrame at assignment (configured_cap). Non-vacuous:
+    // without the clamp the heap backend's unbounded max_segment_size lets 32 MiB through.
+    const tr::net::transport_ws_server wide(
+        0, &tr::mem::heap_backend(),
+        /*max_frame=*/2 * tr::net::transport_ws_server::kMaxFrame);
+    check(wide.effective_max_frame() == tr::net::transport_ws_server::kMaxFrame,
+          "a max_frame ABOVE the default is clamped to kMaxFrame — tighten-only, never raise");
 }
 
 /**

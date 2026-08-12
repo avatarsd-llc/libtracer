@@ -43,6 +43,20 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `bindings/rust/tests/conformance_vectors.rs`,
   `bindings/typescript/packages/client/test/vectors.test.mjs`). Indexed child endpoints
   are spelled as ordinary child vertices (`/camera/frame/7`) — reference docs updated.
+### Fixed
+
+- **`max_frame` is now tighten-only, as the headers always promised (#1035).** Every framed
+  transport (`tcp_transport_t` / `transport_tcp_server`, `transport_ws_client` /
+  `transport_ws_server`, `quic_transport_t`, `webtransport_transport_t`) replaced its receive
+  cap with the configured `max_frame` outright, so a `:settings max_frame` above the 16 MiB
+  protocol default (`length_prefix_framer::kDefaultMaxFrame`) *raised* the ingress buffering
+  bound — contradicting the five headers' tighten-only wording. The nine assignment sites now
+  resolve the setting through the new `length_prefix_framer::configured_cap(max_frame)`
+  (`0` → the default; otherwise `min(max_frame, kDefaultMaxFrame)`), so a config-writable key
+  can only narrow what a node will buffer off the wire, never widen it. Behavioural change: a
+  deployment that (contrary to the documentation) passed a `max_frame` above 16 MiB now tears
+  down a connection carrying an over-default frame as MALFORMED, exactly as the default
+  configuration always did — the protocol default is a ceiling, not a suggestion.
 
 ## [0.9.1] — 2026-08-10
 

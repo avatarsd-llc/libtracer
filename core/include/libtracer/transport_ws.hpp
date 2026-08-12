@@ -154,8 +154,12 @@ class transport_ws_server : public slot_server_t {
      *                  bounded host passes its pool). Exhaustion is
      *                  backpressure — the message is shed and dropped_rx()
      *                  ticks; never an OOM. Must outlive the transport.
-     * @param max_frame Per-connection receive cap (0 → @ref kMaxFrame); the
-     *                  effective cap also honors the backend's real capacity
+     * @param max_frame Per-connection receive cap (0 → @ref kMaxFrame).
+     *                  TIGHTEN-ONLY: a value above kMaxFrame is clamped to it
+     *                  (`length_prefix_framer::configured_cap`, #1035) — a
+     *                  config-writable key must not raise the ingress
+     *                  buffering bound; the effective cap also honors the
+     *                  backend's real capacity
      *                  (`length_prefix_framer::effective_cap` — the
      *                  no-synthetic-limits doctrine). It is checked against the
      *                  DECLARED length in the WS frame header, so an oversize
@@ -333,8 +337,10 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
      *             trusted than an accepted one, so the client takes the same
      *             seam in the same position as `tcp_transport_t`'s DIAL form.
      * @param max_frame Per-connection receive cap (0 → @ref
-     *             transport_ws_server::kMaxFrame), bounded by the backend's real
-     *             capacity — see transport_ws_server's constructor.
+     *             transport_ws_server::kMaxFrame; a value above it is clamped —
+     *             tighten-only, `length_prefix_framer::configured_cap`, #1035),
+     *             bounded by the backend's real capacity — see
+     *             transport_ws_server's constructor.
      * @param recv_stack Recv-thread stack size in bytes, 0 = platform default
      *             (`posix_endpoint_t::start`).
      * @param defer_recv Two-phase bring-up (#1025): with `true` the handshake still runs

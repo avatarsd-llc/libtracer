@@ -90,6 +90,22 @@ class length_prefix_framer {
     };
 
     /**
+     * @brief Resolve a `:settings max_frame` value into the per-connection cap —
+     *        TIGHTEN-ONLY against @ref kDefaultMaxFrame.
+     *
+     * `0` (unset) keeps the default; a nonzero value yields
+     * `min(max_frame, kDefaultMaxFrame)`. The setting arrives through a
+     * config-writable key (a connection SPEC's `:settings`), so it may only
+     * narrow what the node will buffer off the wire — never widen it above the
+     * protocol default (#1035). Every framed transport (tcp / ws / quic /
+     * webtransport) assigns its per-connection cap through this one home.
+     */
+    [[nodiscard]] static constexpr std::size_t configured_cap(std::size_t max_frame) noexcept {
+        if (max_frame == 0) return kDefaultMaxFrame;
+        return max_frame < kDefaultMaxFrame ? max_frame : kDefaultMaxFrame;
+    }
+
+    /**
      * @brief The effective RX frame cap: `min(max_frame, backend.max_segment_size())`.
      *
      * A prefix claiming more than the backend could ever allocate (e.g. a bounded
