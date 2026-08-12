@@ -57,6 +57,8 @@ So on a chip target the plane is:
 
 Neither is a factory entry: the application constructs the link and hands it in with `transport_vertex_t::provide_link`. Consequently a chip build registers **no** `ws` kind in the built-in catalog, and a `:children[]` SPEC carrying `kind=ws` with no staged link answers `SCHEMA_NOT_FOUND`. The `linux` target keeps the portable pair — it has glibc's `sendmsg` and no `esp_http_server`.
 
+For the dial link the recipe has one more step ([#1102](https://github.com/avatarsd-llc/libtracer/issues/1102), ADR-0081): construct `esp_ws_client_link_t` **with `defer_recv = true`**, `provide_link`, then issue the creating `:children[]` write. The flag holds the link's first dial until `start_receiving()` — which the creating write's `make_connection` calls once the receiver sink is installed — so a peer's push-on-connect cannot arrive before a sink exists and be dropped silently. There is no `ws` factory on a chip target to pass the flag for you (the way the core `tcp`/`ws` factories pass theirs), so opting in is the application's move; a link constructed with the flag and never armed **never dials**. The historical dial-at-once default is unchanged for embedders that wire the receiver themselves before any peer can push.
+
 `tools/check_esp_ws_plane.py` is the gate: zero `transport_ws_server` / `transport_ws_client` symbols in the linked chip ELF (`nm`), the portable TUs uncompiled, and both native links still built.
 
 ### lwIP portability audit (what the socket transports use)

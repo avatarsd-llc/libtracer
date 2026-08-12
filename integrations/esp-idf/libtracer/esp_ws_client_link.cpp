@@ -164,13 +164,14 @@ class sender_exit_t {
 esp_ws_client_link_t::esp_ws_client_link_t(std::string host, std::uint16_t port,
                                            std::string ws_path, std::string handshake_headers,
                                            std::size_t rx_bytes, std::size_t tx_bytes,
-                                           std::size_t recv_stack)
+                                           std::size_t recv_stack, bool defer_recv)
     : host_(std::move(host)),
       port_(port),
       ws_path_(std::move(ws_path)),
       handshake_headers_(std::move(handshake_headers)),
       rx_buf_(rx_bytes),
-      tx_buf_(tx_bytes) {
+      tx_buf_(tx_bytes),
+      armed_(!defer_recv) {
     // Every member the recv thread reads is initialized ABOVE this line, which is the
     // whole of #959: the thread spawned below dials at once, so a knob delivered after the
     // spawn is a data race, and for a handshake token it also leaves it undefined whether
@@ -184,6 +185,23 @@ esp_ws_client_link_t::esp_ws_client_link_t(std::string host, std::uint16_t port,
     // this thread runs in-call delivery through the graph's on_write seam, so a node
     // that knows its delivery depth must be able to size it (#900).
     recv_thread_ = esp::spawn_thread(recv_stack, "ws_cli_rx", [this] { recv_loop(); });
+}
+
+void esp_ws_client_link_t::start_receiving() {
+    // Idempotent, and safe on a link that never connected: `transport_vertex_t::
+    // make_connection` arms every link unconditionally once the receiver is installed, so
+    // a second call — or one on a link constructed without `defer_recv`, whose latch
+    // started set — finds the exchange returning true and does nothing. The latch is
+    // never cleared (one-shot): a re-dial only happens on a link that was already armed,
+    // so reconnects need no re-gating (ADR-0081, #1102).
+    if (armed_.exchange(true, std::memory_order_acq_rel)) return;
+    {
+        // Taking the latch mutex before notifying is what makes the wake safe against a
+        // recv thread that has evaluated the predicate but not yet parked — the same
+        // pattern the destructor uses for the backoff wake.
+        const std::lock_guard<std::mutex> lk(backoff_m_);
+    }
+    backoff_cv_.notify_all();
 }
 
 esp_ws_client_link_t::~esp_ws_client_link_t() {
@@ -547,6 +565,21 @@ void esp_ws_client_link_t::recv_loop() {
     // one backoff later instead of at once. That is the harmless direction — the cost is
     // one interval on a link that was silent anyway, against a spin that reboots the node.
     bool exchanged = false;
+    // The `defer_recv` dial latch (ADR-0081's defer-the-dial arm, #1102): park BEFORE the
+    // first dial, so an unarmed link has no connection and the peer has nothing to push
+    // into the pre-sink window — "not delivered yet" spelled as "not connected yet", the
+    // purest form of holding upstream of the library. Waited here ONCE and never
+    // re-checked below, deliberately: every re-dial happens on a link that was already
+    // armed, and the router keeps the receiver installed across a `link_down`, so a
+    // per-connection re-latch would gate delivery against a sink that is standing
+    // (triage Correction 1 on #1102). The wait shares the backoff CV, so the
+    // destructor's stop wake covers a never-armed link too — teardown stays prompt.
+    {
+        std::unique_lock<std::mutex> lk(backoff_m_);
+        backoff_cv_.wait(lk, [this] {
+            return armed_.load(std::memory_order_acquire) || stop_.load(std::memory_order_acquire);
+        });
+    }
     while (!stop_.load(std::memory_order_relaxed)) {
         if (!connected_.load(std::memory_order_acquire)) {
             off = 0;
