@@ -1,0 +1,12 @@
+{
+  "name": "error-kindless-spec-type-mismatch",
+  "category": "errors",
+  "hex": "08400600010002003000",
+  "total_bytes": 10,
+  "decoded": {
+    "type": "0x08 ERROR",
+    "structured": true,
+    "meaning": "ERROR{ VALUE u16=0x0030 (tr::schema::type_mismatch) } — the answer to a creator-endpoint connection SPEC whose config names no `kind` and matches no staged link",
+    "note": "Pins the RFC-0014 §2 error identity for the kind-less-SPEC case (#1062): an incomplete config is a missing REQUIRED FIELD (the addr/port precedent), answered `tr::schema::type_mismatch` — never `tr::path::not_found` (0x0020), which RFC-0014 reserves for an ABSENT creator endpoint (the creatability probe). First child VALUE holds the u16 LE registered code; no detail children."
+  }
+}

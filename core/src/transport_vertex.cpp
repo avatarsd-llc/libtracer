@@ -229,8 +229,13 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::b
             if (++hits > 1) break;
             module.assign(key, 0, slash);
         }
-        // Neither a staged link nor a construction kind — nothing can carry the bytes.
-        if (hits == 0) return std::unexpected(status_t::NOT_FOUND);
+        // Neither a staged link nor a construction kind — nothing can carry the bytes. The
+        // config is INCOMPLETE (`kind` is a required field once no staging supplies the
+        // module), not an address to a missing thing, so this answers TYPE_MISMATCH like the
+        // other missing-required-field gates (a DIAL missing `addr`, either role missing
+        // `port`) — never NOT_FOUND, whose wire form `tr::path::not_found` is RFC-0014's
+        // reserved "no such creator endpoint" probe answer (#1062).
+        if (hits == 0) return std::unexpected(status_t::TYPE_MISMATCH);
         // Ambiguous: refuse instead of picking by map order. The SPEC must carry a `kind`
         // whose declared module says WHICH staging it meant. TYPE_MISMATCH is the config-is-
         // underspecified answer this creation path already uses (a DIAL missing `addr`/`port`
@@ -305,7 +310,8 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::b
         link = owned.get();
     } else {
         // Neither a staged link nor a construction kind — nothing can carry the bytes.
-        return std::unexpected(status_t::NOT_FOUND);
+        // Same missing-required-`kind` refusal as the module-resolution gate above (#1062).
+        return std::unexpected(status_t::TYPE_MISMATCH);
     }
 
     // A BUS link (ADR-0044) serves its currently-audible peers as this vertex's
