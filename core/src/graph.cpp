@@ -17,6 +17,7 @@
 #include <utility>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/config_reader.hpp"
 #include "libtracer/frame.hpp"
 #include "libtracer/key_view.hpp"
 #include "libtracer/mem_borrowed.hpp"
@@ -1587,8 +1588,10 @@ namespace {
  * VALUE u16, RFC-0022 §3.A) — the SAME child, so the per-subscription policy introduced no new
  * wire structure. Back-compat: a SUBSCRIBER carrying neither (or an older parser) keeps the
  * full-route delivery path and the all-zero default policy — conformance vectors unaffected.
- * The SETTINGS walk is pair-consuming, the `net::config_reader_t` rule (#927): a forward-compat
- * pair whose value reads `"delivery_policy"` must not bind the FOLLOWING child as the policy.
+ * The SETTINGS walk IS `wire::config_reader_t` (#927, hoisted to L2/L3 by #985 so this file no
+ * longer carries a hand-written copy of the rule): pair-consuming — a forward-compat pair whose
+ * value reads `"delivery_policy"` must not bind the FOLLOWING child as the policy — and
+ * last-well-formed-occurrence-wins, the plain NAME-field family semantics (#995).
  *
  * The policy's reserved bits (6–15) are stored VERBATIM and never interpreted: §3.A says a
  * sender MUST write 0 and a receiver MUST ignore them — an ignore, not a reject — so a future
@@ -1601,17 +1604,11 @@ void parse_subscriber_tlv(const tlv_t& sub, subscriber_t& s) {
             // full-route delivery path exactly as an older parser would (#681).
             if (auto k = wire::path_key(child)) s.target_key = try_make_target_key(*std::move(k));
         } else if (child.type == type_t::SETTINGS) {
-            const std::vector<tlv_t>& q = child.children;
-            for (std::size_t i = 0; i + 1 < q.size(); i += 2) {  // whole pairs, not every offset
-                if (q[i].type != type_t::NAME) break;  // key slot lost: stop, do not resync
-                const std::string_view key = detail::as_string_view(q[i].payload);
-                const tlv_t& val = q[i + 1];
-                if (val.type != type_t::VALUE) continue;
-                if (key == "delivery_compact" && detail::load_le<std::uint8_t>(val.payload) != 0)
-                    s.ensure_remote().delivery_compact = true;  // cold half only when opted in
-                else if (key == "delivery_policy")
-                    s.policy.bits = detail::load_le<std::uint16_t>(val.payload);
-            }
+            const wire::config_reader_t qos(&child);
+            if (qos.flag("delivery_compact").value_or(false))
+                s.ensure_remote().delivery_compact = true;  // cold half only when opted in
+            if (const std::optional<std::uint16_t> word = qos.u16("delivery_policy"))
+                s.policy.bits = *word;
         }
     }
 }
@@ -2148,25 +2145,17 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
 result_t<void> graph_t::create_child(vertex_t* parent, const view_t& spec_value) {
     // Parse SPEC{ NAME "type" <sel>, NAME "name" <seg>, SETTINGS "config"? } — the
     // creation spec of docs/reference/05 §0x0E. The two NAMEs are positional pairs
-    // (NAME key, NAME/SETTINGS value), pair-consuming like net::config_reader_t (#927).
+    // (NAME key, NAME/SETTINGS value), read through the ONE pair-consuming walk,
+    // wire::config_reader_t (#927 — hoisted to L2/L3 by #985 so this file no longer
+    // carries a hand-written copy of the rule).
     const auto spec = wire::decode(spec_value);
     if (!spec || spec->type != type_t::SPEC) return std::unexpected(status_t::TYPE_MISMATCH);
 
-    std::string_view type_sel;
-    std::span<const std::byte> child_name;
-    const tlv_t* config = nullptr;
-    const std::vector<tlv_t>& ch = spec->children;
-    for (std::size_t i = 0; i + 1 < ch.size(); i += 2) {  // whole pairs, never every offset
-        if (ch[i].type != type_t::NAME) break;  // key slot lost: stop, do not resync (#927)
-        const std::string_view key = detail::as_string_view(ch[i].payload);
-        if (key == "type" && ch[i + 1].type == type_t::NAME) {
-            type_sel = detail::as_string_view(ch[i + 1].payload);
-        } else if (key == "name" && ch[i + 1].type == type_t::NAME) {
-            child_name = ch[i + 1].payload;
-        } else if (key == "config" && ch[i + 1].type == type_t::SETTINGS) {
-            config = &ch[i + 1];
-        }
-    }
+    const wire::config_reader_t spec_pairs(&*spec);
+    const std::string_view type_sel = spec_pairs.name("type").value_or(std::string_view{});
+    const std::span<const std::byte> child_name =
+        spec_pairs.name_bytes("name").value_or(std::span<const std::byte>{});
+    const tlv_t* config = spec_pairs.settings("config");
     // The wire boundary runs THE segment predicate (ADR-0073 §1, #688): a peer-supplied
     // name must be expressible in the addressing grammar, or the vertex it creates is
     // enumerable but unaddressable — and a `/` inside one NAME breaks the injectivity of

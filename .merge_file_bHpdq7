@@ -37,27 +37,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   own LKV, never a descendant's). `vertex_t::listeners_above` carries the same ruling, and the
   two concurrency design docs that claimed `own_subs_ordered()` is "the only read that decides
   whether to deliver at all" are corrected — it is not.
-### Changed
-
-- **`config_reader_t` moved to `tr::wire`; `tr::net::config_reader_t` is now an alias
-  (#985).** The pair-consuming `(NAME key, value)` walk (#927) decodes a `wire::tlv_t`, and
-  its two remaining hand-written copies sat at L4 (`graph_t::create_child`'s creation-SPEC
-  envelope and `parse_subscriber_tlv`'s SUBSCRIBER QoS SETTINGS), where `tr::net` may not be
-  a dependency — so the type now lives in the layer that owns the grammar and both L4
-  readers use it instead of restating its rule. The transport-plane spelling
-  `tr::net::config_reader_t` remains valid as a `using` alias, so no call site moves.
-  Consolidation side effect at the two L4 sites: the canonical plain NAME-field family
-  semantics (#995) now apply uniformly — last **well-formed** occurrence wins (a repeated
-  `delivery_compact`/`delivery_policy` no longer resolves "any nonzero"/per-occurrence) and
-  an empty `VALUE` payload is ignored rather than read as zero.
-
-### Added
-
-- **`config_reader_t::name_bytes(key)`** — the raw payload span of a `NAME` value child
-  (the byte-span twin of `name()`, for values that are wire segments rather than text), and
-  **`config_reader_t::settings(key)`** — the nested `SETTINGS` value child, or `nullptr`.
-  Both run the same pair-consuming, last-well-formed-wins walk as every other accessor;
-  they are the two accessors the L4 readers needed (#985).
 
 ## [0.10.0] — 2026-08-12
 

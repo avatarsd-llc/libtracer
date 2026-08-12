@@ -17,34 +17,34 @@ lock each stage takes, where the buffers come from, and what the delivery legs c
 
 ## 1. Write path
 
-`write_impl` (`core/src/graph.cpp:1198`) is the one body behind every write overload. It takes
+`write_impl` (`core/src/graph.cpp:1199`) is the one body behind every write overload. It takes
 **no map lock**. The stages, in order:
 
 | stage | what it does |
 | --- | --- |
 | ACL gate | `acl_allows(v, caller, WRITE)`; a denial returns `PERMISSION_DENIED` and stores nothing |
-| branch fork | a POINT payload with the branch bit set decomposes through `write_branch` (`graph.cpp:1264`) |
-| store | `store_value` (`graph.cpp:1144`) — LKV or history per role, sequence bump, `await` wake |
-| deliver | `deliver_vertex` for a leaf value, `deliver_current` for a `STREAM` (`graph.cpp:1235-1247`) |
+| branch fork | a POINT payload with the branch bit set decomposes through `write_branch` (`graph.cpp:1271`) |
+| store | `store_value` (`graph.cpp:1145`) — LKV or history per role, sequence bump, `await` wake |
+| deliver | `deliver_vertex` for a leaf value, `deliver_current` for a `STREAM` (`graph.cpp:1236-1248`) |
 
 The handle overload is the whole of `write(vertex_handle_t, rope_t, caller)`
-(`graph.cpp:1508-1510`) — a call straight into `write_impl`. A **path**-addressed write resolves
-first, and `find_ptr` takes `map_mutex_` in shared mode (`graph.cpp:776-777`), so the path overload
-(`graph.cpp:2772`) pays one shared map hold that the handle overload does not.
+(`graph.cpp:1539-1541`) — a call straight into `write_impl`. A **path**-addressed write resolves
+first, and `find_ptr` takes `map_mutex_` in shared mode (`graph.cpp:777-778`), so the path overload
+(`graph.cpp:2791`) pays one shared map hold that the handle overload does not.
 
 Two allocation-shaped details on the store leg. A `HANDLER`-role write clones the rope before
 storing, because the user handler consumes the value and there is no published pointer to
 deliver afterwards; the clone is `try_clone_rope`, nothrow, and on failure the handler still
-runs and only the subscriber delivery drops (`graph.cpp:1207-1233`, `try_clone_rope` at `:988`).
+runs and only the subscriber delivery drops (`graph.cpp:1208-1234`, `try_clone_rope` at `:989`).
 Every other role delivers **the exact pointer `store_value` handed back**, so the hot write path
-reclones nothing (`graph.cpp:1243-1247`).
+reclones nothing (`graph.cpp:1244-1248`).
 
 ---
 
 ## 2. Edge snapshot
 
 Delivery runs outside the vertex lock, because a callback or a re-dispatch may re-enter the
-graph. The edge list therefore has to be copied out first. `fan_out` (`graph.cpp:1068`) does that
+graph. The edge list therefore has to be copied out first. `fan_out` (`graph.cpp:1069`) does that
 in one call to `snapshot_edges` (`core/include/libtracer/vertex.hpp:2065`), which takes **no
 lock at all** (#635): it copies the vertex's PUBLISHED, immutable-after-publish edge array
 (`vertex.hpp:914`) into one of two buffers under a bounded per-participant **edge pin**
@@ -76,8 +76,8 @@ lock-free `own_subs()` count:
 
 | shape | call | overflow buffer |
 | --- | --- | --- |
-| wide, `own_subs() > kInlineFanout` | `v->snapshot_edges(inline_buf, tls_buf, drops)` (`graph.cpp:1118`) | a persistent `thread_local` vector, cleared but keeping capacity |
-| small, or a nested wide fan-out | `v->snapshot_edges(inline_buf, heap_buf, drops)` (`graph.cpp:1136`) | an empty local vector that never allocates unless the snapshot spills |
+| wide, `own_subs() > kInlineFanout` | `v->snapshot_edges(inline_buf, tls_buf, drops)` (`graph.cpp:1119`) | a persistent `thread_local` vector, cleared but keeping capacity |
+| small, or a nested wide fan-out | `v->snapshot_edges(inline_buf, heap_buf, drops)` (`graph.cpp:1137`) | an empty local vector that never allocates unless the snapshot spills |
 
 `inline_buf` is an `edge_snapshot_t`, a raw byte array placement-constructed into, so a small
 fan-out neither allocates nor pays the zeroing a default-constructed `edge_view_t` array would
@@ -87,15 +87,15 @@ thread-local vector's capacity and so allocates nothing either.
 
 `own_subs()` is read without the lock, so the width it reports can be stale.
 That costs nothing but a re-read: **`snapshot_edges` re-checks the width against the published
-array** (`graph.cpp:1101-1102`, `vertex.hpp:2817`), so a subscriber added between the count and
+array** (`graph.cpp:1102-1103`, `vertex.hpp:2824`), so a subscriber added between the count and
 the copy costs at most one fallback allocation on the small path and never a wrong answer. Re-entrancy is
 handled by a `tls_busy` flag: a subscriber callback that re-publishes takes the local-buffer
 path, so the outer fan-out's thread-local buffer is never aliased, and the flag resets on scope
-exit (`graph.cpp:1108-1132`).
+exit (`graph.cpp:1109-1133`).
 
 Both allocations inside the snapshot are nothrow. An unreservable overflow vector degrades the
 snapshot to the first `kInlineFanout` views and drops the rest of that delivery; an edge whose
-owning copies cannot be cloned is skipped, dropping that one delivery (`vertex.hpp:2823-2838`).
+owning copies cannot be cloned is skipped, dropping that one delivery (`vertex.hpp:2830-2845`).
 Neither can abort. A thread that cannot claim a pin cell — more concurrent publishers than
 `kEdgePinSlots` — copies the current array under the stripe mutex instead, which is the
 pre-#635 path for those threads and nobody else; correctness never depends on the constant.
@@ -108,20 +108,20 @@ Declared in `core/include/libtracer/graph.hpp`, all private:
 
 | function | declaration | role |
 | --- | --- | --- |
-| `deliver_vertex` | `graph.hpp:1416` | the per-vertex delivery unit both `write` and `propagate` build on: `fan_out`, then `bubble_up` if anyone listens above |
-| `fan_out` | `graph.hpp:1382` | return at once if nothing subscribes here; else snapshot under the stripe lock, then `dispatch_edge` per view, outside it |
-| `dispatch_edge` | `graph.hpp:1388` | the one dispatch of an edge's three legs, shared by `fan_out` and the admission durability latch so the legs cannot diverge |
-| `dispatch_edge_target` | `graph.hpp:1394` | the local re-dispatch leg — a delivery into another vertex |
-| `dispatch_edge_remote` | `graph.hpp:1395` | the remote leg — a `FWD{WRITE}` through the injected sink |
-| `bubble_up` | `graph.hpp:1412` | vertical fan-out to every registered ancestor's subscribers |
+| `deliver_vertex` | `graph.hpp:1430` | the per-vertex delivery unit both `write` and `propagate` build on: `fan_out`, then `bubble_up` if anyone listens above |
+| `fan_out` | `graph.hpp:1396` | return at once if nothing subscribes here; else snapshot under the stripe lock, then `dispatch_edge` per view, outside it |
+| `dispatch_edge` | `graph.hpp:1402` | the one dispatch of an edge's three legs, shared by `fan_out` and the admission durability latch so the legs cannot diverge |
+| `dispatch_edge_target` | `graph.hpp:1408` | the local re-dispatch leg — a delivery into another vertex |
+| `dispatch_edge_remote` | `graph.hpp:1409` | the remote leg — a `FWD{WRITE}` through the injected sink |
+| `bubble_up` | `graph.hpp:1426` | vertical fan-out to every registered ancestor's subscribers |
 
-`dispatch_edge` is defined inline (`graph.cpp:1058-1065`) precisely so its body stays in the
+`dispatch_edge` is defined inline (`graph.cpp:1059-1066`) precisely so its body stays in the
 fan-out loop; the target and remote legs are split into out-of-line helpers to keep that body's
 inline estimate small, because the in-process callback leg is the hot case. The three legs are
 independent and any subset may fire for one edge: a callback pointer, a target key, and a
 non-empty link name.
 
-`bubble_up` (`graph.cpp:1165`, entered only when `listeners_above() > 0`, `:1381`) walks parent pointers, which
+`bubble_up` (`graph.cpp:1166`, entered only when `listeners_above() > 0`, `:1382`) walks parent pointers, which
 are immutable once linked, and so takes **no lock at all**; a placeholder ancestor holds no edges
 and its `fan_out` is a no-op. An idle write — nobody subscribed above — pays one relaxed load.
 
@@ -148,7 +148,7 @@ and its `fan_out` is a no-op. An idle write — nobody subscribed above — pays
 
 A delivery landing on a target applies exactly the target-local effects of a write — store,
 `await` wake, and the target's own handler reaction, all inside `store_value` — and **never**
-re-dispatches to the target's own `:subscribers[]` and never bubbles (`graph.cpp:1027-1035`).
+re-dispatches to the target's own `:subscribers[]` and never bubbles (`graph.cpp:1028-1036`).
 Propagation past a target is the target's own logic: a controller re-emits on its execution, a
 handler re-emits when it chooses.
 
@@ -215,30 +215,30 @@ more sheds happen further up, before an edge is ever dispatched. What is counted
 
 ```cpp
 struct delivery_drops_t {
-    std::uint64_t no_target = 0;         // graph.hpp:1320
-    std::uint64_t denied = 0;            // graph.hpp:1322
-    std::uint64_t out_of_memory = 0;     // graph.hpp:1325
-    std::uint64_t fan_out_truncated = 0; // graph.hpp:1329
+    std::uint64_t no_target = 0;         // graph.hpp:1334
+    std::uint64_t denied = 0;            // graph.hpp:1336
+    std::uint64_t out_of_memory = 0;     // graph.hpp:1339
+    std::uint64_t fan_out_truncated = 0; // graph.hpp:1343
 };
 ```
 
 | counter | condition | site |
 | --- | --- | --- |
-| `no_target` | the target PATH resolved to no live vertex — retired, or never created | `graph.cpp:1016-1019` |
-| `denied` | the target's `:acl` denied WRITE to the **edge's stored caller**, not the writer's | `graph.cpp:1023-1026` |
-| `out_of_memory` | the nothrow delivery clone could not be allocated | `graph.cpp:1035-1038` |
-| `out_of_memory` | a HANDLER write's notify clone failed — the WHOLE fan-out is shed, one count per subscriber | `graph.cpp:1230` |
-| `out_of_memory` | an edge's owning copies (link NAME / stored caller) could not be allocated, so the snapshot skipped it | `vertex.hpp:2834` |
-| `fan_out_truncated` | the wide-fan-out overflow buffer could not be reserved, so every edge past the inline prefix was abandoned | `vertex.hpp:2829` |
+| `no_target` | the target PATH resolved to no live vertex — retired, or never created | `graph.cpp:1017-1020` |
+| `denied` | the target's `:acl` denied WRITE to the **edge's stored caller**, not the writer's | `graph.cpp:1024-1027` |
+| `out_of_memory` | the nothrow delivery clone could not be allocated | `graph.cpp:1036-1039` |
+| `out_of_memory` | a HANDLER write's notify clone failed — the WHOLE fan-out is shed, one count per subscriber | `graph.cpp:1232` |
+| `out_of_memory` | an edge's owning copies (link NAME / stored caller) could not be allocated, so the snapshot skipped it | `vertex.hpp:2841` |
+| `fan_out_truncated` | the wide-fan-out overflow buffer could not be reserved, so every edge past the inline prefix was abandoned | `vertex.hpp:2836` |
 
 The last three were **uncounted until #896**, and the handler one is why that mattered: it sheds
 every subscriber of the vertex and still returns success, so `delivery_drops()` — the only thing
 that could say so — read zero while a whole fan-out evaporated. The unit of every counter is
 therefore a **delivery**, not an event: a shed fan-out of N counts N, which is why the two
 snapshot sheds are tallied inside `vertex_t::snapshot_edges` (`vertex.hpp:2015`, its
-`snapshot_drops_t`) and folded by `fan_out` (`graph.cpp:1122`, `:1137`) through
-`count_snapshot_drops` (`:748`) rather than counted as one at the caller. Every site **on
-this plane** goes through one door, `count_drop` (`:728`), so a path here that abandons an
+`snapshot_drops_t`) and folded by `fan_out` (`graph.cpp:1123`, `:1138`) through
+`count_snapshot_drops` (`:749`) rather than counted as one at the caller. Every site **on
+this plane** goes through one door, `count_drop` (`:729`), so a path here that abandons an
 admitted delivery without counting it is a visible omission.
 
 The plane boundary is real, not a hedge. A shed that happens *before* the fan-out — a STREAM
@@ -248,7 +248,7 @@ and the write still answers `SUCCESS`. Those sites are pre-existing and tracked 
 read `delivery_drops()` as *what the dispatch plane shed*, not yet as *everything the vertex
 shed*.
 
-`delivery_drops()` (`graph.hpp:1340`, `graph.cpp:721`) is the only record that any of this
+`delivery_drops()` (`graph.hpp:1354`, `graph.cpp:722`) is the only record that any of this
 happened. Without it, a node whose target was retired, or whose fan-in gate denies the edge's
 stored caller, drops every delivery for the rest of its life with nothing anywhere to say so.
 

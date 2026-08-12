@@ -318,7 +318,7 @@ class effective_acl_t {
  * - an UNKNOWN key, a repeated key, a non-`NAME` child in a key slot, and an odd child
  *   count (a key with no value, or a value with no key).
  *
- * The walk is **pair-consuming**, the mechanics of `net::config_reader_t` (#927): it
+ * The walk is **pair-consuming**, the mechanics of `wire::config_reader_t` (#927): it
  * steps one whole `(NAME key, value)` pair at a time, so a value can never be re-read
  * as the next key — which a `subject` sent as a `NAME` (a spelling this function
  * accepts, for `EVERYONE@`) previously could be. The unknown-key ruling is the

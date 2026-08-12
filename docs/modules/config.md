@@ -7,7 +7,7 @@ Every compile-time knob a libtracer build has is a member of **one named type**,
 build selects (which ACL evaluator, which last-known-value slot). An application
 picks its configuration by making `tr::graph::config_t` name its own traits type,
 once, app-wide; every loose spelling in the library is derived from that alias.
-A second reader, `tr::net::config_reader_t`, is the runtime counterpart: typed
+A second reader, `tr::wire::config_reader_t`, is the runtime counterpart: typed
 accessors over a `config` SETTINGS TLV that arrived from a peer.
 ```
 
@@ -53,13 +53,18 @@ Which keys those factories actually read — the universal set and each kind's p
 one, with the wire value each takes — is [connection config](connection-config.md).
 This page is the walk; that page is the vocabulary.
 
-`config_reader_t` is the one home for the *transport* config walk, not for every
-pair walk in the tree — the scope of that claim is deliberate. `graph_t::create_child`
-(the creation SPEC) and the SUBSCRIBER QoS `SETTINGS` parse read the same positional
-grammar at L4, where `tr::net` cannot be a dependency, so they carry the same
-pair-consuming *rule* without sharing the type. `graph::parse_acl` carries it as well
+`config_reader_t` is the one home for the pair walk itself, everywhere it is read
+tolerantly. It lives in `tr::wire`
+([#985](https://github.com/avatarsd-llc/libtracer/issues/985)) — the layer that owns
+the grammar — with `tr::net::config_reader_t` kept as the transport plane's alias, so
+`graph_t::create_child` (the creation SPEC) and the SUBSCRIBER QoS `SETTINGS` parse at
+L4 read through the same type rather than carrying hand-written copies of the rule.
+The one deliberate exception is `graph::parse_acl`
 ([#906](https://github.com/avatarsd-llc/libtracer/issues/906)) — the same mechanics
-under the opposite unknown-key ruling, which is to reject.
+under the opposite unknown-key ruling, which is to reject: an ACL is a security
+document, and the two duplicate-key families
+([#995](https://github.com/avatarsd-llc/libtracer/issues/995)) must not share code
+that could drift one toward the other.
 
 ## Declaring your own build configuration
 
@@ -179,7 +184,7 @@ satisfy.
 
 ### The runtime settings reader
 
-```{doxygenclass} tr::net::config_reader_t
+```{doxygenclass} tr::wire::config_reader_t
 :project: libtracer
 :members:
 ```

@@ -1,7 +1,8 @@
 /**
  * @file
- * @brief #927 — `tr::net::config_reader_t`: the PAIR-CONSUMING SETTINGS walk every
- *        transport config parser shares.
+ * @brief #927 / #985 — `tr::wire::config_reader_t`: the PAIR-CONSUMING SETTINGS walk
+ *        every transport config parser AND both L4 readers (the creation SPEC, the
+ *        SUBSCRIBER QoS SETTINGS) share. `tr::net::config_reader_t` is its alias.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -38,6 +39,7 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 #include "libtracer/byteorder.hpp"
@@ -47,7 +49,15 @@
 
 namespace {
 
-using tr::net::config_reader_t;
+/*
+ * The canonical home is tr::wire (#985); the transport plane's historical spelling
+ * must stay a literal alias of it — one type, not two lookalikes. Compile-time so a
+ * re-fork of the type cannot pass the suite.
+ */
+static_assert(std::is_same_v<tr::net::config_reader_t, tr::wire::config_reader_t>,
+              "tr::net::config_reader_t must alias the tr::wire type (#985)");
+
+using tr::wire::config_reader_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
@@ -406,6 +416,77 @@ void test_cert_key_pair_cannot_be_hijacked() {
     check(is(cfg.name("hint"), "key"), "the unknown pair still reads as an ordinary pair");
 }
 
+/**
+ * @brief The L4 accessors added by #985 — `name_bytes` and `settings` — run the SAME
+ *        pair-consuming walk, not a laxer sibling.
+ *
+ * `graph_t::create_child` reads the creation SPEC's `name` as raw payload bytes and its
+ * `config` as a nested SETTINGS child through these; the whole point of the hoist is
+ * that they inherit every #927 property for free. The vector reuses the hijack shape:
+ * an unknown pair whose string value spells `"config"`, followed by a SETTINGS child an
+ * every-offset scan would have bound as the config.
+ */
+void test_l4_accessors_share_the_walk() {
+    std::printf("the #985 accessors (name_bytes / settings) run the same walk:\n");
+    std::vector<std::byte> real_cfg;  // the legitimate nested config
+    name_child(real_cfg, "port");
+    value_child<std::uint16_t>(real_cfg, 4433);
+    std::vector<std::byte> decoy_cfg;  // the attacker-positioned one
+    name_child(decoy_cfg, "port");
+    value_child<std::uint16_t>(decoy_cfg, 9999);
+
+    std::vector<std::byte> ch;
+    name_child(ch, "type");
+    name_child(ch, "tcp");
+    name_child(ch, "name");
+    name_child(ch, "sensor-a");
+    name_child(ch, "config");
+    raw_child(ch, type_t::SETTINGS, opt_t{.pl = true}, real_cfg);
+    name_child(ch, "hint");
+    name_child(ch, "config");  // a VALUE slot that spells the known key
+    raw_child(ch, type_t::SETTINGS, opt_t{.pl = true}, decoy_cfg);
+    name_child(ch, "pad");
+    const auto blob = settings(ch);
+    const config_reader_t cfg(&blob->tlv);
+
+    const std::optional<std::span<const std::byte>> nb = cfg.name_bytes("name");
+    check(nb.has_value() && tr::detail::as_string_view(*nb) == "sensor-a",
+          "`name_bytes` returns the NAME value's raw payload span");
+    check(is(cfg.name("name"), "sensor-a"),
+          "... and it is the same occurrence `name` reads as text");
+    check(!cfg.name_bytes("config").has_value() && !cfg.name_bytes("absent").has_value(),
+          "`name_bytes` answers by TYPE (SETTINGS value => nullopt) and absent => nullopt");
+
+    const tr::wire::tlv_t* nested = cfg.settings("config");
+    check(nested != nullptr &&
+              config_reader_t(nested).u16("port") == std::optional<std::uint16_t>{4433},
+          "`settings` returns the legitimate nested SETTINGS, readable by a nested reader");
+    check(config_reader_t(nested).u16("port") != std::optional<std::uint16_t>{9999},
+          "... NOT the decoy a hijacked every-offset scan would have bound");
+    check(cfg.settings("type") == nullptr && cfg.settings("absent") == nullptr,
+          "`settings` answers by TYPE (NAME value => nullptr) and absent => nullptr");
+    check(config_reader_t(nullptr).settings("config") == nullptr &&
+              !config_reader_t(nullptr).name_bytes("name").has_value(),
+          "a null config answers nullptr / nullopt on the new accessors too");
+
+    {
+        std::vector<std::byte> ch2;  // last well-formed occurrence wins for SETTINGS too
+        name_child(ch2, "config");
+        raw_child(ch2, type_t::SETTINGS, opt_t{.pl = true}, decoy_cfg);
+        name_child(ch2, "config");
+        raw_child(ch2, type_t::SETTINGS, opt_t{.pl = true}, real_cfg);
+        name_child(ch2, "config");
+        name_child(ch2, "wrong-type-string");
+        const auto blob2 = settings(ch2);
+        const config_reader_t cfg2(&blob2->tlv);
+        const tr::wire::tlv_t* n2 = cfg2.settings("config");
+        check(
+            n2 != nullptr && config_reader_t(n2).u16("port") == std::optional<std::uint16_t>{4433},
+            "repeated `config`: the LAST well-formed SETTINGS wins, a wrong-typed later "
+            "occurrence is ignored");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -418,5 +499,6 @@ int main() {
     test_kind_private_keys_unchanged();
     test_repeat_and_illformed_semantics_unchanged();
     test_desync_stops_the_walk();
+    test_l4_accessors_share_the_walk();
     return tr::testing::summary("config_reader");
 }

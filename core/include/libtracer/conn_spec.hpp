@@ -50,9 +50,9 @@ namespace tr::net {
  * **The config is built by APPENDING, in call order.** Each setter appends one
  * `(NAME key, value)` pair and returns `*this`, so a chain reads as the SETTINGS it emits
  * and a caller keeps byte-exact control of the order. The reader is order-independent
- * (@ref config_reader_t walks positional pairs and takes the last well-formed occurrence of
- * a key), so order is a byte-level property, not a semantic one. A builder on which no
- * setter ran emits **no `config` at all** — the config-less SPEC, which is the
+ * (@ref tr::wire::config_reader_t walks positional pairs and takes the last well-formed occurrence
+ * of a key), so order is a byte-level property, not a semantic one. A builder on which no setter
+ * ran emits **no `config` at all** — the config-less SPEC, which is the
  * @ref transport_vertex_t::provide_link spelling.
  *
  * **`kind` is how a SPEC names its module.** There is no `module` key and this builder does
@@ -69,7 +69,7 @@ namespace tr::net {
  * (quic's `cert`/`key`/`ca`/`insecure`, the tcp/ws servers' `peer_named`/`max_peers`, can's
  * bus identity) never land on that shared record — they are the kind factory's business — so
  * they are spelled through the generic @ref text / @ref u8 / @ref u16 / @ref u32 / @ref flag
- * pairs, whose names mirror @ref config_reader_t's accessors so the encode and decode
+ * pairs, whose names mirror @ref tr::wire::config_reader_t's accessors so the encode and decode
  * vocabularies cannot drift.
  *
  * @note Nothing here validates a key against a kind: an unknown key is legal on the wire

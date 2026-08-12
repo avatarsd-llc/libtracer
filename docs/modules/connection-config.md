@@ -35,11 +35,13 @@ either — the positional pair grammar and its forward-compat rules are
 keys exist, which factory reads each one, what wire value each takes, and what it
 does.
 
-Its subject is deliberately bounded to what `tr::net::config_reader_t` reads. The
-creation SPEC's own envelope (`type`, `name`, `config`), the SUBSCRIBER QoS
-SETTINGS and the ACL `SETTINGS` walk read the same positional grammar without that
-type — they sit at L4, where `tr::net` cannot be a dependency — and they are not
-connection config.
+Its subject is deliberately bounded to what the *transport-side* readers read. The
+creation SPEC's own envelope (`type`, `name`, `config`) and the SUBSCRIBER QoS
+SETTINGS read the same positional grammar — since
+[#985](https://github.com/avatarsd-llc/libtracer/issues/985) through the same
+`tr::wire::config_reader_t` type — but they are not connection config, and the ACL
+`SETTINGS` walk keeps its own reject-unknown-keys code
+([#906](https://github.com/avatarsd-llc/libtracer/issues/906)).
 
 ## The shape of a config
 
@@ -325,7 +327,7 @@ out of the raw config TLV it already receives, and in a block on this page. Not 
 
 Every key table above sits inside a marker block naming the source file that reads
 it, and `tools/check_config_keys.py` derives the same information from that file —
-it finds each `tr::net::config_reader_t` construction and reads the accessor calls
+it finds each `config_reader_t` construction and reads the accessor calls
 on it, so the key *and* its wire value type come from the code, not from a
 maintainer's memory. The gate fails on three things: a key the source reads and the
 page omits, a key the page lists and the source no longer reads, and a source file
@@ -333,10 +335,12 @@ that reads connection config with no block on this page at all. The last one is
 what keeps the sweep honest — a new kind cannot be added with its keys documented
 nowhere, and `udp`'s "no kind-private keys" is a derived fact rather than a claim.
 
-The scope of that gate is the `config_reader_t` family, and the scope is deliberate:
-it does not see the creation-SPEC envelope, the SUBSCRIBER QoS parse or the ACL
-walk, which read the same grammar through their own code at a layer where `tr::net`
-is not available.
+The scope of that gate is connection config, and the scope is deliberate: the
+creation-SPEC envelope and the SUBSCRIBER QoS parse in `core/src/graph.cpp` read
+their grammar through the same shared `config_reader_t` since
+[#985](https://github.com/avatarsd-llc/libtracer/issues/985), so that file is
+explicitly excluded from the sweep — its keys are not connection config — and the
+ACL walk constructs no reader at all.
 
 ```
 tools/check_config_keys.py            # the gate
