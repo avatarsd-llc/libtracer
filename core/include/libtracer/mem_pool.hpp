@@ -64,9 +64,17 @@ class pool_t final : public mem_backend_t {
 
     // Module-set traits (ADR-0047 §2): compile-time backend contracts the seam
     // consumes in place of prose. `needs_cache_ops` is read by `mem::transfer`.
+    //
+    // `is_isr_safe` and `is_nonblocking` are DISTINCT properties (#928). This pool's
+    // free-list ops are syscall-free — but `alloc`/`destroy` do an UNSYNCHRONIZED RMW on
+    // `free_head_`/`free_count_`, so an ISR interleaving with task-context use corrupts the
+    // list. ISR safety is a critical section, i.e. `synchronized_pool_t` with an ISR-safe
+    // policy (`tr::esp::portmux_sync_t`), never the bare pool.
     static constexpr bool needs_cache_ops =
         false; /**< @brief No DMA cache maintenance (plain RAM slab). */
     static constexpr bool is_isr_safe =
+        false; /**< @brief Unsynchronized free-list RMW — NOT safe concurrent with an ISR. */
+    static constexpr bool is_nonblocking =
         true; /**< @brief `alloc`/`destroy` are O(1) free-list ops — no heap, no syscall. */
     static constexpr bool owns_bytes =
         true; /**< @brief Bytes are backend-managed (freed only on `destroy`) — durably storable. */
@@ -101,8 +109,9 @@ class pool_t final : public mem_backend_t {
  *        module-set trait, ADR-0068 compile-time doctrine).
  *
  * A policy owns ONE critical-section mechanism: `lock()` / `unlock()` around the pool's
- * O(1) free-list ops, plus the two facts the seam publishes upward — whether the section
- * is ISR-safe and what the resulting backend is called. The target knows its concurrency
+ * O(1) free-list ops, plus the facts the seam publishes upward — whether the section is
+ * ISR-safe, whether acquiring it can block (heap/syscall/OS wait — distinct from ISR
+ * safety, #928), and what the resulting backend is called. The target knows its concurrency
  * model at BUILD time (a single-core priority-preemptive MCU never becomes a multi-core
  * host), so the choice is a template argument, not a runtime knob: no branch, no vtable,
  * no per-alloc indirection on a ~120 ns operation.
@@ -112,6 +121,7 @@ concept pool_sync_policy = requires(P& p) {
     { p.lock() } noexcept;
     { p.unlock() } noexcept;
     { P::is_isr_safe } -> std::convertible_to<bool>;
+    { P::is_nonblocking } -> std::convertible_to<bool>;
     { P::name } -> std::convertible_to<const char*>;
 };
 
@@ -125,7 +135,9 @@ concept pool_sync_policy = requires(P& p) {
  * critical-section policy instead (`tr::esp::portmux_sync_t` for ESP-IDF).
  */
 struct spin_sync_t {
-    static constexpr bool is_isr_safe = false;           /**< @brief Spin => not ISR-safe. */
+    static constexpr bool is_isr_safe = false; /**< @brief Spin => not ISR-safe. */
+    static constexpr bool is_nonblocking =
+        true; /**< @brief No heap, no syscall, no OS wait — it spins on an O(1) section. */
     static constexpr const char* name = "mem_sync_pool"; /**< @brief Backend name. */
     /** @brief Acquire the flag, spinning (the guarded section is O(1)). */
     void lock() noexcept {
@@ -217,7 +229,10 @@ class synchronized_pool_t final : public mem_backend_t {
     // plain-RAM slab => no cache ops.
     static constexpr bool needs_cache_ops = false; /**< @brief Plain RAM slab. */
     static constexpr bool is_isr_safe =
-        Sync::is_isr_safe;                   /**< @brief Whatever the sync policy guarantees. */
+        Sync::is_isr_safe; /**< @brief Whatever the sync policy guarantees. */
+    static constexpr bool is_nonblocking =
+        Sync::is_nonblocking; /**< @brief The pool's section is O(1); the WAIT is the policy's
+                                 fact, so this forwards it rather than asserting it (#928). */
     static constexpr bool owns_bytes = true; /**< @brief Backend-managed, durably storable. */
 
     /** @brief Total slots (delegated to the inner @ref pool_t). */

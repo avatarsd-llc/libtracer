@@ -57,7 +57,9 @@ bool transfer_host(view::segment_t* seg, std::span<std::byte> host, io_dir_t dir
 
 // Fallback for a backend not in the fast set (a user backend tagged UNKNOWN): the
 // same memcpy, but bracketed by the virtual cache hooks unconditionally (its traits
-// are not statically known here). A non-CUDA DEVICE backend cannot be CPU-copied.
+// are not statically known here). Its DEVICE-space refusal is now redundant with the
+// hoisted guard in `transfer` (#928) and kept as defence in depth: this is the arm a
+// CUDA-tagged segment falls through to when CUDA is not linked.
 bool transfer_generic(view::segment_t* seg, std::span<std::byte> host, io_dir_t dir) noexcept {
     if (host.size() > seg->bytes.size() || seg->space == mem_space_t::DEVICE) return false;
     seg->backend->before_io(seg, dir);
@@ -97,8 +99,10 @@ void destroy_dispatch(view::segment_t* seg) noexcept {
 }
 
 // Single-backend set: only mem_pool is linked, so the transfer dispatch folds too.
+// The DEVICE-space guard is hoisted here exactly as in the multi-member variant (#928),
+// with no CUDA exemption: no device copy is linked in a POOL_ONLY build.
 bool transfer(view::segment_t* seg, std::span<std::byte> host, io_dir_t dir) noexcept {
-    if (seg == nullptr) return false;
+    if (seg == nullptr || seg->space == mem_space_t::DEVICE) return false;
     if (seg->btag == backend_tag::POOL) return transfer_host<pool_t>(seg, host, dir);
     return transfer_generic(seg, host, dir);
 }
@@ -138,6 +142,13 @@ void destroy_dispatch(view::segment_t* seg) noexcept {
 // (CUDA) routed to its device copy, and the generic memcpy for anything else.
 bool transfer(view::segment_t* seg, std::span<std::byte> host, io_dir_t dir) noexcept {
     if (seg == nullptr) return false;
+    // Hoisted DEVICE-space guard (#928): a device pointer is not CPU-dereferenceable, so no
+    // host-memcpy arm may ever see one — only the CUDA backend owns a real device copy.
+    // Before this guard the backend TAG decided the outcome: a BORROWED_DEVICE segment
+    // reached `transfer_host`'s memcpy while a semantically identical UNKNOWN-tagged device
+    // segment got `transfer_generic`'s clean false — and the tag is documented as a fast path
+    // with identical results, never a correctness dependency.
+    if (seg->space == mem_space_t::DEVICE && seg->btag != backend_tag::CUDA) return false;
     switch (seg->btag) {
         case backend_tag::HEAP:
             return transfer_host<heap_backend_t>(seg, host, dir);

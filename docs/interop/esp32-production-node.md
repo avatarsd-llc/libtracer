@@ -88,7 +88,7 @@ and count with no lock and no atomic, so two threads can be handed the same slot
 stored value aliases onto an outbound frame.
 
 The synchronised pool this target needs **is built**:
-`synchronized_pool_t<Sync>` (`core/include/libtracer/mem_pool.hpp:172`) keeps `pool_t`'s
+`synchronized_pool_t<Sync>` (`core/include/libtracer/mem_pool.hpp:184`) keeps `pool_t`'s
 bounded slab and makes the critical section a compile-time policy, chosen as an
 [ADR-0047 — build-time closed module sets](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md)
 §2 module-set trait, because the target knows its concurrency model at build time

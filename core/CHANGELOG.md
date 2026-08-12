@@ -105,6 +105,40 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   RFC-0014 per-module creator endpoint `/net/<module>/conn` (accepted, unimplemented) answers
   `false`: it is an addressable control surface with its own `:schema` catalog, not a
   grouping segment.
+### Changed
+
+- **`mem::pool_t` no longer advertises `is_isr_safe`; the new `is_nonblocking` trait carries
+  what it actually guaranteed (#928).** The bare pool's `alloc`/`destroy` do an
+  unsynchronized RMW on the intrusive free list, so a seam consumer selecting a backend by
+  `is_isr_safe == true` was steered into free-list corruption the moment an ISR interleaved
+  with task-context use. The two properties the one flag conflated now have distinct names:
+  `is_isr_safe` (safe **concurrent with an ISR** — `pool_t`: **false**; ISR safety is
+  `synchronized_pool_t` with an ISR-safe policy such as `tr::esp::portmux_sync_t`) and
+  `is_nonblocking` (no heap, no syscall, no OS wait — `pool_t`: **true**). Every in-tree
+  backend declares both (`heap`/`borrowed`/`cuda`: `is_nonblocking = false`), and
+  `is_nonblocking` joins `is_isr_safe` as a `pool_sync_policy` requirement forwarded by
+  `synchronized_pool_t` — the wait is the policy's fact, not the pool's guess. **Migration:**
+  an out-of-tree sync policy must add `static constexpr bool is_nonblocking`, and a consumer
+  reading `pool_t::is_isr_safe` for "no syscall" wants `is_nonblocking`.
+
+- **`mem::transfer` refuses every DEVICE-space segment except the CUDA backend's (#928).**
+  The DEVICE guard lived only in the generic fallback, so dispatch routed a
+  `BORROWED_DEVICE` segment's device pointer into the host-`memcpy` fast path while a
+  semantically identical UNKNOWN-tagged device segment got a clean `false` — the backend tag
+  changed the outcome it is documented not to. The space check is hoisted into `transfer()`
+  before the switch (CUDA exempt — it owns a real device copy), in both the multi-member and
+  `POOL_ONLY` module sets; the borrowed-DEVICE test stand-in now exercises the refusal a real
+  device link gets.
+
+- **`net::config_reader_t` treats a wrong-width `VALUE` payload as absent (#928).** The typed
+  accessors read through width-tolerant `detail::load_le`, so a 2-byte payload asked for as
+  `u32` silently zero-extended and a 4-byte payload asked for as `u16` silently dropped its
+  high bytes — a config the sender never wrote. `u8`/`u16`/`u32`/`flag` now require
+  `payload.size() == sizeof(T)` exactly (the old empty-payload rejection's general case); an
+  ill-sized occurrence is ignored like a wrong-typed one and never clobbers an earlier
+  well-formed occurrence. `conn_spec_t` already emits full-width values, so the canonical
+  builder is unaffected. Scoped to `config_reader_t` per the #928 ruling — the codebase-wide
+  VALUE-decode convention is decided once alongside #906/#927.
 
 ## [0.10.0] — 2026-08-12
 

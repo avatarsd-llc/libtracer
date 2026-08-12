@@ -55,6 +55,8 @@ namespace tr::esp {
  */
 struct portmux_sync_t {
     static constexpr bool is_isr_safe = true; /**< @brief Interrupts off — ISR-callable. */
+    static constexpr bool is_nonblocking =
+        true; /**< @brief Interrupt-disable — no heap, no syscall, no OS wait (#928). */
     static constexpr const char* name = "mem_critsec_pool"; /**< @brief Backend name. */
 
     /** @brief Enter the critical section (interrupts off for the O(1) free-list op). */

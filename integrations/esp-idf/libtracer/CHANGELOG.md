@@ -25,6 +25,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   there is no `ws` factory on a chip target to pass the flag for you — and an embedder
   that sets it and never arms the link (never issues the creating write) has a link that
   never dials, `ok()` false, all reconnect/keepalive machinery off.
+### Changed
+
+- **`tr::esp::portmux_sync_t` declares the new `is_nonblocking` policy trait (#928).** Core
+  split the overloaded `is_isr_safe` into `is_isr_safe` (safe concurrent with an ISR) and
+  `is_nonblocking` (no heap, no syscall, no OS wait), and made both `pool_sync_policy`
+  requirements. The interrupt-disable section is `true` for both, so `tr::esp::critical_pool_t`
+  keeps publishing `is_isr_safe = true` — it stays the ISR-safe pool the bare `mem::pool_t`
+  never was.
 
 ## [0.10.0] — 2026-08-12
 

@@ -300,9 +300,10 @@ void test_kind_private_keys_unchanged() {
     }
 }
 
-/** @brief Repeat-key, wrong-type and empty-`VALUE` semantics are untouched. */
+/** @brief Repeat-key, wrong-type and empty-`VALUE` semantics are untouched; a
+ *         wrong-WIDTH `VALUE` is treated as absent (#928). */
 void test_repeat_and_illformed_semantics_unchanged() {
-    std::printf("repeat / wrong-type / empty-VALUE semantics are unchanged:\n");
+    std::printf("repeat / wrong-type / wrong-width VALUE semantics:\n");
     {
         std::vector<std::byte> ch;  // last well-formed occurrence wins
         name_child(ch, "addr");
@@ -331,6 +332,39 @@ void test_repeat_and_illformed_semantics_unchanged() {
         const auto blob = settings(ch);
         const config_reader_t cfg(&blob->tlv);
         check(!cfg.u16("port").has_value(), "an empty VALUE payload is ignored");
+    }
+    {
+        // Wrong-width VALUE payloads read as absent (#928): `load_le` is width-tolerant by
+        // design, so without the exact-width gate a 2-byte payload asked for as u32
+        // zero-extends and a 4-byte payload asked for as u16 drops its high bytes — a
+        // config the sender never wrote. Scoped to config_reader_t; the codebase-wide
+        // convention is decided once alongside #906/#927.
+        std::vector<std::byte> ch;
+        name_child(ch, "keepalive");  // documented u32, sent as u16
+        value_child<std::uint16_t>(ch, 30000);
+        name_child(ch, "port");  // documented u16, sent as u32
+        value_child<std::uint32_t>(ch, 8080);
+        const auto blob = settings(ch);
+        const config_reader_t cfg(&blob->tlv);
+        check(!cfg.u32("keepalive").has_value(),
+              "a narrower-than-requested VALUE is absent, not zero-extended");
+        check(!cfg.u16("port").has_value(),
+              "a wider-than-requested VALUE is absent, not high-byte-truncated");
+        check(cfg.u16("keepalive") == std::optional<std::uint16_t>{30000} &&
+                  cfg.u32("port") == std::optional<std::uint32_t>{8080},
+              "the same payloads read at their ACTUAL width still parse (the gate is "
+              "per-accessor width, not a verdict on the pair)");
+    }
+    {
+        std::vector<std::byte> ch;  // a wrong-width repeat does not clobber a good one
+        name_child(ch, "port");
+        value_child<std::uint16_t>(ch, 6000);
+        name_child(ch, "port");
+        value_child<std::uint32_t>(ch, 7000);
+        const auto blob = settings(ch);
+        const config_reader_t cfg(&blob->tlv);
+        check(cfg.u16("port") == std::optional<std::uint16_t>{6000},
+              "a wrong-width later occurrence is ignored, not destructive (#928)");
     }
     {
         std::vector<std::byte> ch;  // a trailing unpaired key has no value

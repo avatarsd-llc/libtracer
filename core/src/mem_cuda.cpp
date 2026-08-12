@@ -63,6 +63,8 @@ class cuda_backend_t final : public mem_backend_t {
         true; /**< @brief The cache hooks reduce to a CUDA stream barrier (after_io). */
     static constexpr bool is_isr_safe =
         false; /**< @brief `cudaMalloc`/`cudaFree` are not ISR-safe. */
+    static constexpr bool is_nonblocking =
+        false; /**< @brief `cudaMalloc`/`cudaFree` may block in the driver (#928). */
     static constexpr bool owns_bytes =
         true; /**< @brief Owns the `cudaMalloc`'d device allocation. */
 };
