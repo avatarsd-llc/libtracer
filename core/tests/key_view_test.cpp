@@ -156,5 +156,24 @@ int main() {
         check(ragged_levels.empty(), "ragged split appends nothing");
     }
 
+    // Zero-length records (#932 — decided once): an empty-payload NAME segment is
+    // ILLEGAL (path syntax rejects `//`), so all four walkers agree it is
+    // malformed framing rather than a valid empty-named level.
+    {
+        const std::vector<std::byte> a_empty_c = make_key({"a", "", "c"});
+        const key_view_t k{a_empty_c};
+        check(as_str(k.last_segment()) == "a",
+              "last_segment stops at the illegal empty record, as it does at a ragged one");
+        check(k.parent().bytes().empty(), "parent's walk stops at the illegal empty record too");
+        std::vector<key_view_t> levels;
+        check(!k.split_levels(levels), "split_levels rejects a key carrying an empty segment");
+        check(levels.empty(), "the rejected split appends nothing");
+
+        const std::vector<std::byte> a = make_key({"a"});
+        const std::vector<std::byte> a_empty = make_key({"a", ""});
+        check(!key_view_t{a_empty}.child_record_under(key_view_t{a}).has_value(),
+              "an empty-payload trailing record is not a child record (all four walkers agree)");
+    }
+
     return tr::testing::summary("key_view");
 }
