@@ -108,10 +108,10 @@ template <class Cursor>
  * this hop consumes, since the peek runs before that is known.
  */
 struct fwd_pre_t {
-    bool valid = false;       /**< @brief False ⇒ nothing was learned; rebuild parses itself. */
-    std::size_t body_end = 0; /**< @brief End of the FWD body. */
-    std::size_t op_pos = 0;   /**< @brief Offset of the op VALUE TLV. */
-    std::size_t op_total = 0; /**< @brief Its total size. */
+    bool valid = false;          /**< @brief False ⇒ nothing was learned; rebuild parses itself. */
+    std::size_t body_end = 0;    /**< @brief End of the FWD body. */
+    std::size_t op_pos = 0;      /**< @brief Offset of the op VALUE TLV. */
+    std::size_t op_total = 0;    /**< @brief Its total size. */
     std::size_t op_body_off = 0; /**< @brief Its body — read to test for REPLY. */
     /** @brief Its body length. Carried rather than re-checked so the rebuild keeps its own
      *         `body_len == 0` rejection: the peek does NOT reject an empty op (such a frame
@@ -152,6 +152,15 @@ struct fwd_pre_t {
      * address is SPELLED and nothing about what a hop does with the rest of the frame.
      */
     bool dst_ref = false;
+    /**
+     * @brief The outer FWD header's decoded `opt` bits — the peek's own read, kept (#1109).
+     *
+     * The rebuild needs them for exactly one thing: preserving the frame's trailer-timestamp
+     * across the hop (`opt.TS`/`opt.TF` name the trailer window at `body_end` that the fresh
+     * head must re-claim and the gather must re-emit — without them the origin's stamp is
+     * silently dropped at the first forwarder). Meaningless when @ref valid is false.
+     */
+    wire::opt_t fwd_opt{};
 };
 
 /**
@@ -231,6 +240,7 @@ template <class Cursor>
         seg0_len = seg_h->body_len;
     }
     pre.valid = true;
+    pre.fwd_opt = fwd_h->opt;
     pre.body_end = body_end;
     pre.op_pos = fwd_h->body_off;
     pre.op_total = op_h->total;
@@ -716,9 +726,17 @@ template <class Cursor>
 template <std::size_t N>
 class stack_writer {
    public:
-    /** @brief Append a structured TLV header (`pl` set, `ll` auto-widened) for @p body_len. */
-    void header(wire::type_t type, std::size_t body_len) {
-        wire::opt_t opt{.pl = true};
+    /**
+     * @brief Append a structured TLV header (`pl` set, `ll` auto-widened) for @p body_len.
+     *
+     * @p trailer contributes its TS/TF bits alone (#1109) — the builder can now EXPRESS a
+     * trailer, in either form, so a forwarded frame's origin stamp survives the head rebuild
+     * (the caller that sets them owns emitting the trailer bytes after the body). CR never
+     * crosses: a rebuilt body invalidates any inbound CRC by construction, so preserving the
+     * bit would mint a frame its own receiver rejects as `crc_fail`.
+     */
+    void header(wire::type_t type, std::size_t body_len, wire::opt_t trailer = {}) {
+        wire::opt_t opt{.pl = true, .ts = trailer.ts, .tf = trailer.ts && trailer.tf};
         if (body_len > 0xFFFFu) opt.ll = true;
         const std::size_t width = opt.ll ? 4u : 2u;
         if (len_ + 2 + width > N) {
@@ -812,6 +830,7 @@ inline constexpr std::size_t kFwdSrcHdrCap = 6;
  *   3. `sel`              7. `extra_seg`        /  named bus peer
  *   4. `head2`            8. `src_body`
  *                         9. `tail`
+ *                         10. trailer TS        (the preserved stamp window, #1109)
  *
  * A rope source may split any region further and so gathers into a growable container instead;
  * this bound is the CONTIGUOUS arm's, and only that arm uses a stack array.
@@ -828,7 +847,7 @@ inline constexpr std::size_t kFwdSrcHdrCap = 6;
  * put a per-frame allocation on every deep-mount forward hop while `bench_forward_heap` still
  * reported `allocs=0`, because that gate drives a stub link which never assembles an iovec.
  *
- * At 9 the headroom to the transport spill is **8 regions**. Keep the mount one span and this
+ * At 10 the headroom to the transport spill is **7 regions**. Keep the mount one span and this
  * constant does not move when the descent is uncapped.
  *
  * **The bound-path mint accumulation (RFC-0024 §7.1) does not move it either**, and this is
@@ -836,14 +855,16 @@ inline constexpr std::size_t kFwdSrcHdrCap = 6;
  * head-plus-element, and the elements already on the wire — but a REPLY grows no `src`, so the
  * mount run and the bus peer's header-and-segment pair (regions 5-7) are empty on exactly the
  * frames that use them. The two sets are mutually exclusive by `is_reply`: a REQUEST emits at
- * most head1, remaining dst, selector, head2, mount, peer header, peer segment, `src` body and
- * tail = **9**; a REPLY at most head1, remaining dst, selector, head2, `src` body, tail, mint
- * head and mint elements = **8**. It was briefly raised to 11 by adding the two sets together,
- * which is a bound no frame can reach — and the constant is measured, not defensive: the
- * change moved code placement enough to cost `bench_forward_rope` a disjoint **+13% at fan 2**
- * in branch mispredicts, on a shape that emits none of the regions it was raised for.
+ * most head1, remaining dst, selector, head2, mount, peer header, peer segment, `src` body,
+ * tail and trailer TS = **10**; a REPLY at most head1, remaining dst, selector, head2, `src`
+ * body, tail, mint head, mint elements and trailer TS = **9**. It was briefly raised to 11 by
+ * adding the request and mint sets together, which is a bound no frame can reach — and the
+ * constant is measured, not defensive: that change moved code placement enough to cost
+ * `bench_forward_rope` a disjoint **+13% at fan 2** in branch mispredicts, on a shape that
+ * emits none of the regions it was raised for. (The +1 here, by contrast, is a region a
+ * stamped frame really emits — the #1109 trailer-TS window, region 10 above.)
  */
-inline constexpr std::size_t kFwdMaxIov = 9;
+inline constexpr std::size_t kFwdMaxIov = 10;
 
 /**
  * @brief The rebuilt forward-hop frame: fresh stack heads + the untouched source
@@ -889,6 +910,18 @@ struct fwd_rebuild_t {
     stack_writer<4 + wire::kPathRefElementBytes> mint;
     std::size_t ref_body_off = 0; /**< @brief The trailing `PATH_REF`'s existing element array. */
     std::size_t ref_body_len = 0; /**< @brief Its length; 0 with a written @ref mint is H = 0. */
+    /**
+     * @brief The inbound frame's trailer-TIMESTAMP window `[ts_off, ts_off + ts_len)`,
+     *        re-emitted VERBATIM as the outgoing frame's last bytes (#1109).
+     *
+     * Zero length ⇒ the frame carried no stamp. Set for a stamped frame in either form
+     * (TF=0's 8 bytes or TF=1's 4 — this hop relays, it does not interpret), with the
+     * matching TS/TF bits preserved on the fresh head1 header. The CRC half of an inbound
+     * trailer is NOT here and never will be: the rebuilt body invalidates it, so it is
+     * dropped rather than forwarded stale (see @ref stack_writer::header).
+     */
+    std::size_t ts_off = 0;
+    std::size_t ts_len = 0; /**< @brief Trailer-TS byte count (0 / 4 / 8). */
 
     /** @brief True ⇔ every head fits its stack buffer (else the caller drops). */
     [[nodiscard]] bool ok() const { return head1.ok() && head2.ok() && mint.ok(); }
@@ -931,6 +964,10 @@ struct fwd_rebuild_t {
             push(mint.span());
             if (ref_body_len > 0) cur.for_each_span(ref_body_off, ref_body_len, push);
         }
+        // The preserved trailer timestamp goes LAST — after the whole body, mint included —
+        // because that is where the grammar's `total = header + length + ts_size` reads it
+        // (#1109). Verbatim source bytes: this hop reads no clock and rewrites no stamp.
+        if (ts_len > 0) cur.for_each_span(ts_off, ts_len, push);
     }
 };
 
@@ -1055,6 +1092,7 @@ template <class Cursor, class MintFn = no_mint_t>
     std::size_t dst_body_off = 0;
     std::size_t dst_end = 0;
     std::size_t pos = 0;
+    wire::opt_t outer_opt{};
 
     if (pre != nullptr && pre->valid) {
         if (pre->op_body_len == 0) return std::nullopt;
@@ -1065,10 +1103,12 @@ template <class Cursor, class MintFn = no_mint_t>
         dst_body_off = pre->dst_body_off;
         dst_end = pre->dst_end;
         pos = pre->after_dst;
+        outer_opt = pre->fwd_opt;
     } else {
         const auto fwd_h = read_fwd_header(cur, 0);
         if (!fwd_h || fwd_h->type != wire::type_t::FWD) return std::nullopt;
         body_end = fwd_h->body_off + fwd_h->body_len;
+        outer_opt = fwd_h->opt;
 
         pos = fwd_h->body_off;
         const auto op_h = read_fwd_header(cur, pos);
@@ -1166,11 +1206,23 @@ template <class Cursor, class MintFn = no_mint_t>
     const std::size_t new_fwd_body =
         op_total + new_dst_total + r.sel_total + new_src_total + r.tail_len + ref_total;
 
+    // The inbound frame's trailer timestamp, preserved VERBATIM across the hop (#1109):
+    // the fresh head keeps the TS/TF bits and the gather re-emits the stamp's source
+    // window as the outgoing frame's last bytes — else an origin's stamp is silently
+    // dropped at the first forwarder, which is exactly the gap #1109 names. Either form
+    // relays (a hop does not interpret the value; the anchorless-TF=1 MUST-reject binds
+    // where the stamp is CONSUMED). An inbound CRC is dropped, not preserved: the body
+    // this hop emits differs from the one the CRC covered (see stack_writer::header).
+    if (outer_opt.ts) {
+        r.ts_off = body_end;
+        r.ts_len = outer_opt.tf ? 4u : 8u;
+    }
+
     // head1: FWD header + op (copied) + new (shrunk) dst header. head2: new (grown)
     // src header + the prepended inbound NAME. Both fixed stack buffers — ZERO heap
     // on the forward hop (ADR-0038 inv. #2). An overflow (a malformed op TLV larger
     // than the buffer) yields an empty span ⇒ the caller drops, never a buffer overrun.
-    r.head1.header(wire::type_t::FWD, new_fwd_body);
+    r.head1.header(wire::type_t::FWD, new_fwd_body, outer_opt);
     cur.for_each_span(op_pos, op_total, [&](std::span<const std::byte> s) { r.head1.raw(s); });
     // A bound `dst` re-heads as a `PATH_REF` with `opt = 0`: the shrink is an element, and the
     // body it now describes is still a fixed-stride record array, so `PL` stays clear

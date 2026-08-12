@@ -1007,6 +1007,89 @@ void test_subscription_observer() {
           "removal signal for the whole link");
 }
 
+/**
+ * @brief #1109: the reply ECHOES a stamped request's TF=0 trailer timestamp — the ICMP-echo
+ *        construction that makes RTT measurable with no request id and no clock sync — and
+ *        stays trailer-less for everyone else (absence indistinguishable from ordinary
+ *        operation; TF=1 at the root is anchorless and never echoed).
+ */
+void test_ts_echo() {
+    std::printf("#1109 wire-time echo: a stamped request's TS comes back on the reply:\n");
+    graph_t g;
+    op_resolver_t resolver(g);
+    const auto path = path_t::parse("/sensor/temp");
+    tr::graph::vertex_handle_t v = g.register_vertex(*path, role_t::STORED_VALUE);
+    (void)g.write(v, make_value(b_value({0x2A})));
+
+    /** @brief The frame with a TF=0 absolute stamp: opt.TS patched in, 8 LE ns appended. */
+    const auto with_ts = [](std::vector<std::byte> f, std::int64_t ns) {
+        opt_t o = opt_t::decode(std::to_integer<std::uint8_t>(f[1]));
+        o.ts = true;
+        o.tf = false;
+        f[1] = static_cast<std::byte>(o.encode());
+        tr::wire::emit_trailer_ts(f, /*relative=*/false, ns);
+        return f;
+    };
+    constexpr std::int64_t kNs = 987'654'321'000LL;
+
+    // A stamped READ: kind=RESULT, and the reply's own trailer carries the request's stamp.
+    {
+        const auto fwd =
+            with_ts(b_fwd(fwd_op_t::READ, b_path({"sensor", "temp"}), b_path({"reply-ep"})), kNs);
+        auto reply = resolve_bytes(resolver, fwd);
+        check(reply.has_value(), "stamped READ resolves");
+        const auto d = decode_reply(*reply);
+        check(d.tlv.type == type_t::FWD &&
+                  value_u8(d.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::RESULT),
+              "stamped READ answers kind=RESULT");
+        check(d.tlv.opt.ts && !d.tlv.opt.tf, "the reply's outer header claims a TF=0 trailer");
+        check(d.tlv.trailer && d.tlv.trailer->ts && !d.tlv.trailer->ts->relative &&
+                  d.tlv.trailer->ts->value == kNs,
+              "the reply echoes the request's stamp VERBATIM");
+        // The ADR-0041 §4 slice is untouched: the echoed stamp rides the OUTER frame only;
+        // the copied route children stay trailer-less.
+        check(!d.tlv.children[1].opt.ts && !d.tlv.children[2].opt.ts,
+              "the copied route TLVs stay trailer-sliced (no per-child stamp)");
+    }
+
+    // A stamped MISS: the addressed kind=ERROR echoes too — RTT is answerable on failure.
+    {
+        const auto fwd =
+            with_ts(b_fwd(fwd_op_t::READ, b_path({"no", "where"}), b_path({"reply-ep"})), kNs);
+        auto reply = resolve_bytes(resolver, fwd);
+        check(reply.has_value(), "stamped READ of an unknown path resolves to a reply");
+        const auto d = decode_reply(*reply);
+        check(value_u8(d.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::ERROR),
+              "... kind=ERROR");
+        check(d.tlv.opt.ts && d.tlv.trailer && d.tlv.trailer->ts && d.tlv.trailer->ts->value == kNs,
+              "... and the error reply echoes the stamp all the same");
+    }
+
+    // An UNSTAMPED request: the reply carries no trailer — a non-stamping peer sees nothing
+    // new (the per-frame opt-in precedent the CRC bits set).
+    {
+        const auto fwd = b_fwd(fwd_op_t::READ, b_path({"sensor", "temp"}), b_path({"reply-ep"}));
+        auto reply = resolve_bytes(resolver, fwd);
+        const auto d = decode_reply(*reply);
+        check(!d.tlv.opt.ts && !d.tlv.trailer.has_value(),
+              "an unstamped request gets an unstamped reply (opt-in, both directions)");
+    }
+
+    // A TF=1 root stamp is ANCHORLESS (the spec's own MUST-reject case) — never echoed.
+    {
+        auto fwd = b_fwd(fwd_op_t::READ, b_path({"sensor", "temp"}), b_path({"reply-ep"}));
+        opt_t o = opt_t::decode(std::to_integer<std::uint8_t>(fwd[1]));
+        o.ts = true;
+        o.tf = true;
+        fwd[1] = static_cast<std::byte>(o.encode());
+        tr::wire::emit_trailer_ts(fwd, /*relative=*/true, -1000);
+        auto reply = resolve_bytes(resolver, fwd);
+        check(reply.has_value(), "a TF=1-stamped request still resolves");
+        const auto d = decode_reply(*reply);
+        check(!d.tlv.opt.ts, "an anchorless TF=1 root stamp is not echoed");
+    }
+}
+
 int main() {
     test_read_zero_copy();
     test_write();
@@ -1023,5 +1106,6 @@ int main() {
     test_transport_down_reaches_the_wire();
     test_write_creates_remote();
     test_subscription_observer();
+    test_ts_echo();
     return tr::testing::summary("op_resolve");
 }

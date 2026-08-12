@@ -52,13 +52,53 @@ inline void emit_header(std::vector<std::byte>& out, type_t type, opt_t opt, std
 }
 
 /**
+ * @brief Store trailer-timestamp bytes into an exactly-sized @p out span — the ONE
+ *        representation of the trailer-TS byte layout, covering BOTH forms (#1109).
+ *
+ * TF=0 (`relative == false`): u64 LE nanoseconds since the Unix epoch, 8 bytes. TF=1
+ * (`relative == true`): signed i32 LE nanosecond offset from the parent's stamp, 4 bytes
+ * (docs/reference/01-data-format.md §timestamp form). Both forms live here so the value
+ * codec (`frame.cpp`), the reply echo and a future stream shape (#879) emit identical bytes.
+ *
+ * Precondition: `out.size() == trailer_ts_bytes(relative)`.
+ */
+inline void store_trailer_ts(std::span<std::byte> out, bool relative, std::int64_t ns) noexcept {
+    if (relative) {
+        detail::store_le(out, static_cast<std::uint32_t>(static_cast<std::int32_t>(ns)), 4u);
+    } else {
+        detail::store_le(out, static_cast<std::uint64_t>(ns), 8u);
+    }
+}
+
+/** @brief Trailer-timestamp width on the wire: 4 bytes relative (TF=1), 8 absolute (TF=0). */
+[[nodiscard]] constexpr std::size_t trailer_ts_bytes(bool relative) noexcept {
+    return relative ? 4u : 8u;
+}
+
+/** @brief Append trailer-timestamp bytes to a growing buffer — the container form of
+ *         `store_trailer_ts` (same bytes by delegation, so the two cannot drift). */
+inline void emit_trailer_ts(std::vector<std::byte>& out, bool relative, std::int64_t ns) {
+    const std::size_t base = out.size();
+    out.resize(base + trailer_ts_bytes(relative));
+    store_trailer_ts(std::span<std::byte>(out).subspan(base), relative, ns);
+}
+
+/**
  * @brief Append one TLV: `<type> <opt> <length> <body>`.
  *
  * Length is u16 LE, widening to u32 LE (the LL bit set) when @p body exceeds 0xFFFF. @p opt
  * carries the structural bits — pass `opt_t{.pl = true}` for a structured (list) payload.
+ *
+ * The TRAILER bits of @p opt are cleared by construction (#1109): this emitter writes header
+ * + body and nothing after, so an `opt.ts`/`opt.cr` passed here used to mint a frame that
+ * CLAIMED a trailer it did not carry — which a receiver reads as truncation (the grammar
+ * counts the trailer into `total`) or, worse, eats the last body bytes as a bogus stamp. A
+ * caller with a trailer to write uses `frame.hpp`'s `encode` (values) or emits the header via
+ * `emit_header` and appends `emit_trailer_ts` / CRC bytes itself (byte builders).
  */
 inline void emit_tlv(std::vector<std::byte>& out, type_t type, opt_t opt,
                      std::span<const std::byte> body) {
+    opt = opt.without_trailer();
     if (body.size() > 0xFFFFu) opt.ll = true;
     emit_header(out, type, opt, body.size());
     out.insert(out.end(), body.begin(), body.end());

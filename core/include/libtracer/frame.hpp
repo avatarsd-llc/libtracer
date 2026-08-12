@@ -78,6 +78,55 @@ struct tlv_t {
 [[nodiscard]] bool equal(const tlv_t& a, const tlv_t& b) noexcept;
 
 /**
+ * @brief The INJECTED wire-time clock seam (#1109): where a stamping producer's trailer-TS
+ *        nanoseconds come from.
+ *
+ * The library itself never reads an ambient clock — not here, not anywhere on a frame path.
+ * A producer that wants wire-time stamps constructs one of these over whatever time source
+ * its platform has and passes it to `stamp_ts`; a producer that does not stamp pays
+ * nothing, the same per-frame opt-in shape the trailer CRC has always had.
+ *
+ * The contract is CONTEXT.md's `origin_timestamp`: the value MUST be per-producer MONOTONIC
+ * (HLC-style — strictly increasing per origin, wall-clock-seeded where available, bumped
+ * logically on coarse clocks or NTP backward jumps). Wall-clock meaning is advisory;
+ * cross-producer comparison is undefined by design. On an MCU without SNTP the epoch anchor
+ * may be arbitrary — that does not affect the echo/RTT use, where only the origin's own
+ * clock is ever read (`RTT = now_ns() - echoed_stamp`).
+ */
+class wire_clock_t {
+   public:
+    /** @brief The producer's current wire-time in nanoseconds (TF=0 trailer units). */
+    [[nodiscard]] virtual std::int64_t now_ns() noexcept = 0;
+
+   protected:
+    /** @brief Seam type: destroyed only as its concrete implementation, never through here. */
+    ~wire_clock_t() = default;
+};
+
+/**
+ * @brief Stamp @p tlv with an ABSOLUTE (TF=0) wire-time trailer of @p now_ns — the writer
+ *        half of the trailer timestamp the decoders have always read (#1109).
+ *
+ * Sets `opt.ts`, clears `opt.tf`, and writes the trailer value, so a stamped TLV can never
+ * reach `encode`'s loud opt-without-value refusal. Absolute-only ON PURPOSE: the relative
+ * form (TF=1) is anchored to the parent's stamp and the spec's anchorless-reject rule
+ * (docs/reference/01-data-format.md §relative) is a conformance gap the reference codec has
+ * not closed — writing TF=1 before that check exists mints frames that decode to silent
+ * near-epoch garbage on a non-validating receiver. The byte layout for both forms already
+ * has one home (`wire::store_trailer_ts`), so the TF=1 writer is a small follow-up gated on
+ * that check, not a redesign.
+ */
+inline void stamp_ts(tlv_t& tlv, std::int64_t now_ns) noexcept {
+    tlv.opt.ts = true;
+    tlv.opt.tf = false;
+    if (!tlv.trailer) tlv.trailer.emplace();
+    tlv.trailer->ts = timestamp_t{.relative = false, .value = now_ns};
+}
+
+/** @brief `stamp_ts` from the injected @p clock — the one call a stamping hot path makes. */
+inline void stamp_ts(tlv_t& tlv, wire_clock_t& clock) noexcept { stamp_ts(tlv, clock.now_ns()); }
+
+/**
  * @brief Decode exactly one TLV that fills @p input.
  * @param input The bytes to decode — must be exactly one TLV; trailing bytes ⇒ `FrameInvalid`.
  * @return The decoded @ref tlv_t (borrowing @p input), or an `err_t` on failure.
@@ -100,10 +149,16 @@ struct tlv_t {
  * applied here too, so this codec cannot mint a frame it would itself reject (#886). A refused
  * TLV anywhere in the tree refuses the whole tree rather than silently dropping a component.
  *
+ * The trailer timestamp is LOUD, not defaulted (#1109): a TLV whose `opt.ts` is set with no
+ * `trailer->ts` value — or whose trailer value's `relative` flag contradicts `opt.tf` — is
+ * refused (empty vector), never emitted with a silently-zero stamp. `stamp_ts` sets the bit
+ * and the value together, so a stamped TLV cannot reach this refusal.
+ *
  * @param tlv The TLV tree to serialize.
  * @return The encoded frame bytes, or an EMPTY vector when @p tlv (or any descendant) is an
- *         ill-formed `PATH_REF`. Empty is unambiguous: a serialized TLV always carries at
- *         least its 4-byte header, so no well-formed @p tlv encodes to nothing.
+ *         ill-formed `PATH_REF` or claims a timestamp it does not carry. Empty is
+ *         unambiguous: a serialized TLV always carries at least its 4-byte header, so no
+ *         well-formed @p tlv encodes to nothing.
  */
 [[nodiscard]] std::vector<std::byte> encode(const tlv_t& tlv);
 

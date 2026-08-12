@@ -121,6 +121,36 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `tools/check_esp_ws_plane.py --ws-plane none` (zero portable **and** native WS
   symbols, with the symbol-table-floor guard). Non-`espressif32` platforms are
   unchanged.
+### Added
+
+- **`wire::wire_clock_t` + `wire::stamp_ts` — the wire-trailer timestamp WRITER (#1109).**
+  The spec's per-TLV trailer TS was reachable only on the read side; no code path could set
+  it, so RTT over the FWD plane was unmeasurable. `stamp_ts(tlv_t&, ...)` sets `opt.TS` and
+  the TF=0 absolute trailer value together, from an **injected** `wire_clock_t` (or a raw
+  `now_ns`) — the library never reads ambient time on a frame path, and the value's contract
+  is CONTEXT.md's per-producer-monotonic `origin_timestamp`. TF=0 only: the TF=1 writer is
+  gated on the spec's anchorless-reject check, which the codec does not yet implement.
+  `wire::store_trailer_ts` / `emit_trailer_ts` / `trailer_ts_bytes` (tlv_emit.hpp) are the
+  one home of the trailer-TS byte layout, covering **both** forms so #879's stream shape
+  reuses them. The FWD forward hop now **preserves** an outer stamp verbatim
+  (`fwd_pre_t::fwd_opt`, `fwd_rebuild_t::ts_off`/`ts_len`, `stack_writer::header`'s trailer
+  bits; `kFwdMaxIov` 9 → 10), and the terminus **echoes** a TF=0 request stamp on every
+  reply, error replies included — the ICMP-echo construction (`RTT = now − echoed_stamp`, no
+  request id, no clock sync). `tlv_arena_t::root_trailer_ts()` exposes the root stamp the
+  echo reads on the span tier.
+
+### Changed
+
+- **`wire::encode` refuses a claimed-but-valueless timestamp (#1109).** `opt.TS` set with no
+  `trailer->ts` value — or a value whose `relative` flag contradicts `opt.TF` — now returns
+  the unambiguous empty vector instead of silently emitting a zero stamp (1970-01-01).
+  `stamp_ts` sets bit and value together and cannot hit the refusal.
+- **`wire::emit_tlv` clears trailer bits by construction (#1109).** It writes header + body
+  and nothing after, so a trailer-bearing `opt` used to mint a frame claiming a trailer it
+  did not carry (read back as truncation). Callers with a trailer to write use `encode` or
+  `emit_header` + `emit_trailer_ts`.
+- **`type_t::TIME` documented as reserved (#1109).** The application-domain payload timestamp
+  type: core assigns the code and deliberately neither emits nor consumes it.
 
 ## [0.9.1] — 2026-08-10
 

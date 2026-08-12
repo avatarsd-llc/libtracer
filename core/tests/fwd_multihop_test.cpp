@@ -237,6 +237,38 @@ int main() {
               "B /sensor LKV updated to the forwarded value (byte-exact)");
     }
 
+    // ===== 2b) #1109 — a TF=0 origin stamp survives the whole round trip =========
+    // client (stamps) -> A (forward hop preserves) -> B (terminus ECHOES) -> A
+    // (reply hop preserves) -> client (reads its own stamp back). This is the
+    // ICMP-echo RTT construction end-to-end over live links: it reddens if the
+    // forward rebuild drops the trailer, if the terminus strips instead of echoing,
+    // or if the reply hop drops it on the way home.
+    std::printf("stamped READ: the origin's TS echoes home across both hops:\n");
+    constexpr std::int64_t kStampNs = 0x0102030405060708LL;
+    {
+        std::vector<std::byte> stamped =
+            b_fwd(fwd_op_t::READ, b_path({"up", "sensor"}), b_path({"reply-ep"}));
+        opt_t o = opt_t::decode(std::to_integer<std::uint8_t>(stamped[1]));
+        o.ts = true;  // TF stays 0 — the absolute form (#1109 ships TF=0 only)
+        stamped[1] = static_cast<std::byte>(o.encode());
+        tr::wire::emit_trailer_ts(stamped, /*relative=*/false, kStampNs);
+        c_to_a.send(stamped);
+    }
+    auto r2b = inbox.wait(kBudget);
+    check(r2b.has_value(), "client received a REPLY for the stamped READ");
+    if (r2b) {
+        const auto dec = tr::wire::decode(*r2b);
+        check(dec.has_value(), "stamped REPLY decodes");
+        if (dec) {
+            check(dec->opt.ts && !dec->opt.tf, "REPLY outer header carries a TF=0 trailer");
+            check(dec->trailer.has_value() && dec->trailer->ts.has_value() &&
+                      !dec->trailer->ts->relative && dec->trailer->ts->value == kStampNs,
+                  "REPLY echoes the origin's stamp VERBATIM after two forwarded hops");
+            check(value_u8(dec->children[3]) == static_cast<std::uint8_t>(reply_kind_t::RESULT),
+                  "stamped READ still answers kind=RESULT with the value");
+        }
+    }
+
     // ===== 3) non-resolvable dst -> ERROR(NOT_FOUND) routed back =================
     std::printf("READ of a non-resolvable dst -> ERROR(NOT_FOUND) routed home:\n");
     c_to_a.send(b_fwd(fwd_op_t::READ, b_path({"up", "nope"}), b_path({"reply-ep"})));

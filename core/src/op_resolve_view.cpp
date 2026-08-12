@@ -76,6 +76,10 @@ class view_node {
     [[nodiscard]] bool structured() const noexcept { return v_->structured(); }
     [[nodiscard]] bool canonical_path() const noexcept { return false; }
 
+    /** @brief The decoded trailer timestamp, if `opt.TS` — the view's own bounded stitched
+     *         read (#1109; the reply echo asks this of the request's root). */
+    [[nodiscard]] std::optional<wire::timestamp_t> trailer_ts() const { return v_->timestamp(); }
+
     /**
      * @brief The trailer-excluded whole-TLV bytes: header + body, dropping any CRC/TS trailer
      *        exactly as the arena's `wire` span does (byte-identical to the span tier for the reply

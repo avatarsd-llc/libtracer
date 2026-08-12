@@ -178,6 +178,14 @@ int main() {
                     v.opt.cw = cw;
                     v.opt.ts = ts;
                     v.opt.tf = tf;
+                    // A claimed timestamp must CARRY a value since #1109 (encode refuses the
+                    // old silent-zero shape), so the TS shapes stamp a real one, in the form
+                    // the TF bit names.
+                    if (ts) {
+                        v.trailer.emplace();
+                        v.trailer->ts =
+                            tr::wire::timestamp_t{.relative = tf, .value = tf ? -42 : 123456789};
+                    }
                     const std::vector<std::byte> bytes = encode(v);
                     auto& mr = fresh_heap_resource();
                     const auto arena = decode_into(bytes, mr);

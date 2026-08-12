@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "libtracer/grammar.hpp"
+#include "libtracer/tlv_emit.hpp"
 #include "test_support.hpp"
 
 namespace {
@@ -235,6 +236,71 @@ int main() {
         widened.opt.ll = true;
         check(dec && equal(*dec, widened),
               "structured tree round-trips (children keep their own u16 headers)");
+    }
+
+    // ---- #1109: the trailer-timestamp WRITER --------------------------------------------
+
+    // stamp_ts + encode/decode round-trip: the writer half of the trailer TS the decoders
+    // have always read. The clock is INJECTED — the library reads no ambient time source.
+    {
+        /** @brief A deterministic injected clock — proves the seam carries the value. */
+        struct fake_clock_t final : tr::wire::wire_clock_t {
+            std::int64_t t = 0; /**< @brief The instant `now_ns` answers. */
+            [[nodiscard]] std::int64_t now_ns() noexcept override { return t; }
+        };
+        fake_clock_t clk;
+        clk.t = 1'234'567'890'123LL;
+
+        tlv_t v;
+        v.type = type_t::VALUE;
+        const std::array<std::byte, 2> pl{std::byte{0x01}, std::byte{0x02}};
+        v.payload = pl;
+        tr::wire::stamp_ts(v, clk);
+        check(v.opt.ts && !v.opt.tf, "stamp_ts sets opt.TS and keeps TF=0 (absolute form only)");
+
+        const std::vector<std::byte> bytes = encode(v);
+        check(bytes.size() == 4u + 2u + 8u, "stamped VALUE = header + payload + 8-byte trailer");
+        const auto dec = decode(bytes);
+        check(dec.has_value() && dec->trailer.has_value() && dec->trailer->ts.has_value(),
+              "stamped frame decodes with a trailer timestamp");
+        check(dec && dec->trailer && dec->trailer->ts && !dec->trailer->ts->relative &&
+                  dec->trailer->ts->value == clk.t,
+              "the decoded stamp is the injected clock's value, absolute form");
+    }
+
+    // The silent-zero is LOUD (#1109): opt.TS claimed with no trailer value refuses the
+    // encode outright — the old behaviour emitted a frame stamped 1970-01-01T00:00:00Z.
+    {
+        tlv_t v;
+        v.type = type_t::VALUE;
+        const std::array<std::byte, 1> pl{std::byte{0x7F}};
+        v.payload = pl;
+        v.opt.ts = true;  // ... and no trailer value anywhere
+        check(encode(v).empty(), "opt.TS with no trailer value refuses the encode (loud)");
+
+        // A value in the WRONG FORM is refused too: the bytes would be read in the other
+        // form's width by every conforming receiver.
+        v.trailer.emplace();
+        v.trailer->ts = tr::wire::timestamp_t{.relative = true, .value = 5};  // TF says absolute
+        check(encode(v).empty(), "a trailer value whose form contradicts opt.TF is refused");
+
+        // Coherent again => encodes.
+        v.trailer->ts = tr::wire::timestamp_t{.relative = false, .value = 5};
+        check(!encode(v).empty(), "the coherent absolute stamp encodes");
+    }
+
+    // The emit_tlv trailer-claiming footgun is closed (#1109): emit_tlv writes header + body
+    // and nothing after, so a trailer-bearing opt used to mint a frame CLAIMING bytes it did
+    // not carry — decoded as truncation. The trailer bits are now structurally impossible
+    // through that door.
+    {
+        std::vector<std::byte> out;
+        const std::array<std::byte, 3> body{std::byte{1}, std::byte{2}, std::byte{3}};
+        tr::wire::emit_tlv(out, type_t::VALUE, tr::wire::opt_t{.ts = true, .cr = true}, body);
+        const auto dec = decode(out);
+        check(dec.has_value(), "emit_tlv with a trailer-claiming opt still emits a VALID frame");
+        check(dec && !dec->opt.ts && !dec->opt.cr && !dec->trailer.has_value(),
+              "emit_tlv cleared the trailer bits it cannot honour (no phantom trailer)");
     }
 
     return tr::testing::summary("frame");

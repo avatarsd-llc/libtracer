@@ -6,7 +6,9 @@
 #include "libtracer/tlv_arena.hpp"
 
 #include <array>
+#include <optional>
 
+#include "libtracer/byteorder.hpp"
 #include "libtracer/grammar.hpp"
 
 namespace tr::wire {
@@ -49,15 +51,34 @@ struct arena_sink {
      * frame is rejected before any node is read.
      */
     bool exhausted_ = false;
+    /** @brief Where the root node's trailer stamp is written, if the frame carries one (#1109). */
+    std::optional<timestamp_t>* root_ts_ = nullptr;
 
-    arena_sink(mem::block_array_t<arena_tlv_t>& nodes, mem::block_source_t& src)
-        : nodes_(nodes), open_(src) {
+    arena_sink(mem::block_array_t<arena_tlv_t>& nodes, mem::block_source_t& src,
+               std::optional<timestamp_t>* root_ts)
+        : nodes_(nodes), open_(src), root_ts_(root_ts) {
         // Typical FWD nesting; deeper frames grow (bounded by `src`). A refusal here is
         // latched like any other — the frame is rejected, not aborted.
         if (!open_.reserve(8)) exhausted_ = true;
     }
 
     void push(const grammar::header_t& h, std::span<const std::byte> bytes) {
+        // The ROOT node's trailer stamp, captured before its bytes go out of reach (#1109):
+        // the node's `wire` span excludes the trailer by design (ADR-0041 §4), so this is
+        // the one moment the arena can still see it. Root-only — see `root_trailer_ts`.
+        if (root_ts_ != nullptr && nodes_.empty() && h.opt.ts) {
+            const std::size_t off = h.header + h.length;
+            timestamp_t t;
+            t.relative = h.opt.tf;
+            if (h.opt.tf) {
+                t.value = static_cast<std::int32_t>(
+                    detail::load_le<std::uint32_t>(bytes.subspan(off, 4)));
+            } else {
+                t.value = static_cast<std::int64_t>(
+                    detail::load_le<std::uint64_t>(bytes.subspan(off, 8)));
+            }
+            *root_ts_ = t;
+        }
         // Written through the slot, not built as a temporary and copied: an `arena_tlv_t`
         // is 48 bytes, and materializing one per node cost ~45 % of this decode (#588).
         arena_tlv_t* n = nodes_.push_slot();
@@ -126,7 +147,7 @@ std::expected<tlv_arena_t, err_t> decode_into(std::span<const std::byte> input,
     // same typical-FWD-nesting figure already used twice in this function, so it introduces no
     // new number to keep in sync.
     if (!arena.nodes_.reserve(8)) return std::unexpected(err_t::TLV_NESTING_TOO_DEEP);
-    arena_sink sink(arena.nodes_, src);
+    arena_sink sink(arena.nodes_, src, &arena.root_ts_);
     std::array<grammar::walk_frame_t<grammar::span_cursor>, 8> slots;
     grammar::walk_stack_t<grammar::span_cursor> stack(slots, &src);
     const auto r = grammar::walk(grammar::span_cursor{input}, sink, stack);

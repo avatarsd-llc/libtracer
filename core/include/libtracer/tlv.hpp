@@ -38,11 +38,17 @@ enum class type_t : std::uint8_t {
     STATUS = 0x09,      /**< @brief Status report. */
     ACL = 0x0A,         /**< @brief Access-control list. */
     SETTINGS = 0x0B,    /**< @brief QoS settings. */
-    TIME = 0x0C,        /**< @brief Time. */
-    ROUTER = 0x0D,      /**< @brief Router-wrapped frame. */
-    SPEC = 0x0E,        /**< @brief In-band vertex-creation spec (structured; ADR-0017). */
-    FWD = 0x0F,         /**< @brief Remote-operation forward frame (RFC-0004 §B / ADR-0035). */
-    FIELD = 0x10,       /**< @brief Control-plane `:field` selector (RFC-0004 §C / ADR-0035). */
+    /** @brief An APPLICATION-DOMAIN timestamp carried inside a structured payload — RESERVED,
+     *         deliberately emitted and consumed by no core code (#1109). The wire-trailer TS
+     *         (`opt.ts`) is transport-time; sample-acquisition / control-deadline time rides
+     *         the payload as a TIME child instead (docs/reference/01-data-format.md
+     *         §application-domain timestamps). What a TIME body means is the embedder's schema,
+     *         so core assigns the code and nothing else. */
+    TIME = 0x0C,
+    ROUTER = 0x0D, /**< @brief Router-wrapped frame. */
+    SPEC = 0x0E,   /**< @brief In-band vertex-creation spec (structured; ADR-0017). */
+    FWD = 0x0F,    /**< @brief Remote-operation forward frame (RFC-0004 §B / ADR-0035). */
+    FIELD = 0x10,  /**< @brief Control-plane `:field` selector (RFC-0004 §C / ADR-0035). */
     /** @brief Route-handle: VALUE label(u16) + PATH route — bind label→route, swapped per hop. */
     ADVERTISE = 0x11,
     /** @brief Route-handle: VALUE label(u16) + payload TLV — a label-compacted delivery. */

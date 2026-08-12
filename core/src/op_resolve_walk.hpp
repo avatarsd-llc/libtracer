@@ -85,6 +85,18 @@ struct arena_node {
     [[nodiscard]] bool canonical_path() const noexcept { return node().canonical_path; }
 
     /**
+     * @brief The decoded trailer timestamp — ROOT node only on this tier (#1109).
+     *
+     * The arena's node spans exclude the trailer (ADR-0041 §4), so the value is captured at
+     * decode for index 0 alone — the one node the walk ever asks (the reply echo reads the
+     * request's OUTER stamp). A non-root ask answers "none", honestly: the arena did not
+     * keep it.
+     */
+    [[nodiscard]] std::optional<wire::timestamp_t> trailer_ts() const noexcept {
+        return i == 0 ? a->root_trailer_ts() : std::nullopt;
+    }
+
+    /**
      * @brief Have this walk's contiguous spans all been produced successfully (#766)? Always
      *        true on the span tier — an arena span is BORROWED from the frame, so producing
      *        it cannot fail and nothing here can refuse.
@@ -479,9 +491,8 @@ template <class N>
  *        read); a multi-link stored value ropes ALL its links into the reply zero-copy — no
  *        flatten.
  */
-[[nodiscard]] rope_t assemble_result_rope(std::span<const std::byte> reply_dst_wire,
-                                          std::span<const std::byte> reply_src_wire,
-                                          const rope_t& payload, mem::mem_backend_t& egress,
+[[nodiscard]] rope_t assemble_result_rope(const reply_route_t& route, const rope_t& payload,
+                                          mem::mem_backend_t& egress,
                                           std::span<const std::byte> trailing = {}) {
     // The links span feeds assemble directly — no heap copy of the link table. The
     // old std::vector staging copy was a per-reply transient that scaled with the
@@ -489,8 +500,8 @@ template <class N>
     // (the throwing std::allocator has no failure path on an MCU) — observed as an
     // OOM abort on a composed-root read's ~288-link reply. `payload` outlives the
     // call, so borrowing its span is safe.
-    return assemble_reply(reply_dst_wire, reply_src_wire, reply_kind_t::RESULT, {}, payload.links(),
-                          payload.total_length(), egress, trailing);
+    return assemble_reply(route, reply_kind_t::RESULT, {}, payload.links(), payload.total_length(),
+                          egress, trailing);
 }
 
 /**
@@ -507,11 +518,9 @@ template <class N>
  * is the inline fast path), so it succeeds on exactly the fragmented heap that could not
  * reserve the large snapshot's link table.
  */
-[[nodiscard]] rope_t or_backpressure(rope_t reply, std::span<const std::byte> reply_dst_wire,
-                                     std::span<const std::byte> reply_src_wire,
+[[nodiscard]] rope_t or_backpressure(rope_t reply, const reply_route_t& route,
                                      mem::mem_backend_t& egress) {
-    if (reply.link_count() == 0)
-        return assemble_error_reply(reply_dst_wire, reply_src_wire, status_t::BACKPRESSURE, egress);
+    if (reply.link_count() == 0) return assemble_error_reply(route, status_t::BACKPRESSURE, egress);
     return reply;
 }
 
@@ -575,9 +584,7 @@ template <class N>
 [[nodiscard]] result_t<rope_t> apply_op(graph_t& graph, const parsed_fwd_t<N>& req,
                                         vertex_handle_t v, std::string_view inbound_link,
                                         const view_t* frame_view, mem::mem_backend_t& flat,
-                                        mem::mem_backend_t& egress,
-                                        std::span<const std::byte> reply_dst_wire,
-                                        std::span<const std::byte> reply_src_wire,
+                                        mem::mem_backend_t& egress, const reply_route_t& route,
                                         const field_path_t& field, bool has_field) {
     // The mint answer (RFC-0024 §7.5): this node's own reference to the target vertex, as a
     // one-element `PATH_REF` the origin stacks under whatever it already holds for the hops
@@ -617,9 +624,7 @@ template <class N>
         case fwd_op_t::READ: {
             if (has_field && is_subscribers_array(field)) {
                 result_t<std::vector<view_t>> subs = graph.read_subscribers(v, inbound_link);
-                if (!subs)
-                    return assemble_error_reply(reply_dst_wire, reply_src_wire, subs.error(),
-                                                egress);
+                if (!subs) return assemble_error_reply(route, subs.error(), egress);
                 std::size_t sub_len = 0;
                 for (const view_t& s : *subs) sub_len += s.length;
                 // PL=1 wrapper (POINT) whose children are the slot SUBSCRIBER views,
@@ -630,10 +635,10 @@ template <class N>
                 emit_cursor_t wout{wrapper.data()};
                 wout.struct_header(type_t::POINT, wll, sub_len);
                 return or_backpressure(
-                    assemble_reply(reply_dst_wire, reply_src_wire, reply_kind_t::RESULT,
+                    assemble_reply(route, reply_kind_t::RESULT,
                                    std::span<const std::byte>(wrapper.data(), wll ? 6u : 4u), *subs,
                                    sub_len, egress, mint),
-                    reply_dst_wire, reply_src_wire, egress);
+                    route, egress);
             }
             // A `:field` read composes a value and is rope-valued; a plain value read hands
             // back a REFERENCE to the published one. Both feed the same reply assembly, which
@@ -644,18 +649,15 @@ template <class N>
                                 : result_t<value_ref_t>{std::unexpected(composed.error())};
             }()
                                                 : graph.read(v, inbound_link);
-            if (!r) return assemble_error_reply(reply_dst_wire, reply_src_wire, r.error(), egress);
+            if (!r) return assemble_error_reply(route, r.error(), egress);
             // The composed-root case: graph.read may SUCCEED (a folded ~hundreds-of-links
             // snapshot) yet the reply's own link-table reserve fail on the fragmented heap.
             // or_backpressure keeps that from becoming a silent drop (the dead-web-ui bug).
-            return or_backpressure(
-                assemble_result_rope(reply_dst_wire, reply_src_wire, **r, egress, mint),
-                reply_dst_wire, reply_src_wire, egress);
+            return or_backpressure(assemble_result_rope(route, **r, egress, mint), route, egress);
         }
         case fwd_op_t::WRITE: {
             if (!req.payload.has_value())
-                return assemble_error_reply(reply_dst_wire, reply_src_wire, status_t::TYPE_MISMATCH,
-                                            egress);
+                return assemble_error_reply(route, status_t::TYPE_MISMATCH, egress);
             const N& payload_node = *req.payload;
 
             // A remote subscribe — a `:subscribers[]` APPEND that arrived over a
@@ -678,25 +680,20 @@ template <class N>
             if (remote_sub) {
                 const view_t sub_value = own_tlv(payload_node, flat);
                 if (sub_value.empty())
-                    return assemble_error_reply(reply_dst_wire, reply_src_wire,
-                                                status_t::BACKPRESSURE, egress);
+                    return assemble_error_reply(route, status_t::BACKPRESSURE, egress);
                 // The ONE route copy of the subscription's life (ADR-0041 §2), into a
                 // refcounted segment — every later delivery clones the refcount.
                 const view_t return_route = own_tlv(req.src, flat);
                 if (return_route.empty())
-                    return assemble_error_reply(reply_dst_wire, reply_src_wire,
-                                                status_t::BACKPRESSURE, egress);
+                    return assemble_error_reply(route, status_t::BACKPRESSURE, egress);
                 // ADR-0049: the wire append enters the graph's single admission door
                 // (subscribe_wire → admit_subscriber) — the SUBSCRIBER TLV is parsed
                 // ONCE there (delivery_compact included), so no parallel parse here.
                 result_t<void> w =
                     graph.subscribe_wire(v, sub_value, return_route, std::string(inbound_link));
-                if (!w)
-                    return assemble_error_reply(reply_dst_wire, reply_src_wire, w.error(), egress);
+                if (!w) return assemble_error_reply(route, w.error(), egress);
                 return or_backpressure(
-                    assemble_reply(reply_dst_wire, reply_src_wire, reply_kind_t::RESULT, {}, {}, 0,
-                                   egress, mint),
-                    reply_dst_wire, reply_src_wire,
+                    assemble_reply(route, reply_kind_t::RESULT, {}, {}, 0, egress, mint), route,
                     egress);  // OK, empty payload
             }
 
@@ -720,15 +717,14 @@ template <class N>
                                             : tr::graph::kPinPayloadRatio;
             const rope_t value = own_or_ref_tlv(payload_node, frame_view, pin_k, flat);
             if (value.total_length() == 0)
-                return assemble_error_reply(reply_dst_wire, reply_src_wire, status_t::BACKPRESSURE,
-                                            egress);
+                return assemble_error_reply(route, status_t::BACKPRESSURE, egress);
 
             result_t<void> w =
                 graph.write(v, has_field ? field : field_path_t{}, value, inbound_link);
-            if (!w) return assemble_error_reply(reply_dst_wire, reply_src_wire, w.error(), egress);
-            return or_backpressure(assemble_reply(reply_dst_wire, reply_src_wire,
-                                                  reply_kind_t::RESULT, {}, {}, 0, egress, mint),
-                                   reply_dst_wire, reply_src_wire, egress);  // OK, empty payload
+            if (!w) return assemble_error_reply(route, w.error(), egress);
+            return or_backpressure(
+                assemble_reply(route, reply_kind_t::RESULT, {}, {}, 0, egress, mint), route,
+                egress);  // OK, empty payload
         }
         case fwd_op_t::AWAIT: {
             // A FIELD selector has no await surface, and silently dropping it was a lie
@@ -748,19 +744,15 @@ template <class N>
             //
             // `graph_t::await` takes no field parameter at all, so the local API never
             // offered this -- only the wire path decoded a selector it could not honour.
-            if (has_field)
-                return assemble_error_reply(reply_dst_wire, reply_src_wire,
-                                            status_t::SCHEMA_NOT_FOUND, egress);
+            if (has_field) return assemble_error_reply(route, status_t::SCHEMA_NOT_FOUND, egress);
             const std::chrono::nanoseconds timeout =
                 req.has_await_timeout ? std::chrono::nanoseconds(req.await_timeout)
                                       : kDefaultAwaitTimeout;
             result_t<value_ref_t> r = graph.await(v, timeout, inbound_link);
             if (!r)
-                return assemble_error_reply(reply_dst_wire, reply_src_wire, r.error(),
+                return assemble_error_reply(route, r.error(),
                                             egress);  // TIMEOUT => tr::flow::timeout
-            return or_backpressure(
-                assemble_result_rope(reply_dst_wire, reply_src_wire, **r, egress, mint),
-                reply_dst_wire, reply_src_wire, egress);
+            return or_backpressure(assemble_result_rope(route, **r, egress, mint), route, egress);
         }
         case fwd_op_t::REPLY:
             break;  // unreachable — handled above
@@ -791,8 +783,18 @@ template <class N>
     // endpoint). Their trailer-excluded whole-TLV `wire` bytes feed every assemble
     // below — read once here so the reply builder never reaches back into a specific
     // node model (ADR-0053 §7 node-reader seam). parse_fwd guarantees both PATH nodes.
-    const std::span<const std::byte> reply_dst_wire = req.src.wire();
-    const std::span<const std::byte> reply_src_wire = req.dst.wire();
+    reply_route_t route{.dst_wire = req.src.wire(), .src_wire = req.dst.wire()};
+    // The wire-time ECHO (#1109): a request whose OUTER FWD carries an absolute (TF=0)
+    // stamp gets it echoed verbatim on the reply's own trailer — every reply below, error
+    // replies included, so an origin measuring RTT gets its answer whatever the outcome.
+    // This REPLACES the old behaviour of clearing every arriving trailer bit: the ADR-0041
+    // §4 trailer-slice still governs the route/payload COPIES (their bytes exclude the
+    // trailer, so their opt must too — `struct_opt` is unchanged), but the reply frame
+    // itself now answers a stamp with a stamp. TF=1 is deliberately not echoed: a root
+    // stamp has no ancestor, so a relative form there is the spec's own anchorless
+    // MUST-reject case, and echoing it would propagate a meaningless value.
+    if (const opt_t root_opt = root.opt(); root_opt.ts && !root_opt.tf)
+        route.echo_ts = root.trailer_ts();
     // #766, guard 1 of 2 — the reply's OWN route bytes. On the rope tier these two spans are
     // materialized (a multi-link PATH pays one flatten from the injected backend), so a
     // refusal here leaves no trustworthy address to answer TO: an assemble_error built on a
@@ -808,8 +810,8 @@ template <class N>
     // state, so a refusal re-labels the verdict BACKPRESSURE (the reply route bytes are known
     // good — guard 1 — so it is addressable either way).
     const auto reply_error = [&](status_t s) {
-        return assemble_error_reply(reply_dst_wire, reply_src_wire,
-                                    req.dst.spans_intact() ? s : status_t::BACKPRESSURE, egress);
+        return assemble_error_reply(route, req.dst.spans_intact() ? s : status_t::BACKPRESSURE,
+                                    egress);
     };
 
     // An opcode outside the four defined values gets an ADDRESSED error, not a drop (#904).
@@ -887,8 +889,8 @@ template <class N>
         // No write-creates on a bound dst, deliberately: `ensure_vertex` mkdir-p's an ADDRESS,
         // and an element is not one. A vref names a vertex that existed when it was minted, so
         // "it is not there any more" is exactly the stale case the deref just refused.
-        return apply_op(graph, req, *bound, inbound_link, frame_view, flat, egress, reply_dst_wire,
-                        reply_src_wire, field, has_field);
+        return apply_op(graph, req, *bound, inbound_link, frame_view, flat, egress, route, field,
+                        has_field);
     }
 
     // dst resolution is the router's PATH-keyed dispatch — span-aliased for a
@@ -919,16 +921,14 @@ template <class N>
         // read/await keep NOT_FOUND — there is no vertex to control or serve.
         if (req.op == fwd_op_t::WRITE && !has_field) {
             const result_t<vertex_handle_t> made = graph.ensure_vertex(dst_key, inbound_link);
-            if (!made)
-                return assemble_error_reply(reply_dst_wire, reply_src_wire, made.error(), egress);
+            if (!made) return assemble_error_reply(route, made.error(), egress);
             found = *made;
         } else {
-            return assemble_error_reply(reply_dst_wire, reply_src_wire, status_t::NOT_FOUND,
-                                        egress);
+            return assemble_error_reply(route, status_t::NOT_FOUND, egress);
         }
     }
-    return apply_op(graph, req, *found, inbound_link, frame_view, flat, egress, reply_dst_wire,
-                    reply_src_wire, field, has_field);
+    return apply_op(graph, req, *found, inbound_link, frame_view, flat, egress, route, field,
+                    has_field);
 }
 
 }  // namespace

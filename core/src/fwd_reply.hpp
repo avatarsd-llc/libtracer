@@ -27,10 +27,12 @@
 
 #include <cstddef>
 #include <cstring>
+#include <optional>
 #include <span>
 #include <utility>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/frame.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/op_resolve.hpp"
 #include "libtracer/rope.hpp"
@@ -78,10 +80,19 @@ static_assert(struct_opt(std::byte{0x00}) == std::byte{0x00});
 struct emit_cursor_t {
     std::byte* p; /**< @brief The write cursor; advanced by every emitter below. */
 
-    /** @brief A structured (PL) header: type, opt, then a u16 (or u32 when @p ll) LE length. */
-    void struct_header(wire::type_t type, bool ll, std::size_t body_len) {
+    /**
+     * @brief A structured (PL) header: type, opt, then a u16 (or u32 when @p ll) LE length.
+     *
+     * @p trailer contributes its TS/TF bits alone (#1109 — the builder can now EXPRESS a
+     * trailer, in either form; the caller that sets them owns appending the trailer bytes
+     * after the body). CR never crosses: this cursor assembles a fresh body, so any inbound
+     * CRC is stale by construction, and no reply computes one today.
+     */
+    void struct_header(wire::type_t type, bool ll, std::size_t body_len, wire::opt_t trailer = {}) {
         *p++ = static_cast<std::byte>(std::to_underlying(type));
-        *p++ = static_cast<std::byte>(wire::opt_t{.pl = true, .ll = ll}.encode());
+        *p++ = static_cast<std::byte>(
+            wire::opt_t{.pl = true, .ts = trailer.ts, .ll = ll, .tf = trailer.ts && trailer.tf}
+                .encode());
         detail::store_le(std::span<std::byte>(p, ll ? 4u : 2u),
                          static_cast<std::uint32_t>(body_len), ll ? 4u : 2u);
         p += ll ? 4u : 2u;
@@ -108,6 +119,30 @@ struct emit_cursor_t {
 };
 
 /**
+ * @brief Where a FWD{REPLY} goes and what wire-time it echoes: the request facts every reply
+ *        assembly needs, read ONCE per resolve (#1109).
+ *
+ * The two route spans are the request's PATH nodes' trailer-excluded whole-TLV `wire` bytes,
+ * pre-swapped: `dst_wire` is the request's `src` (the accumulated return route), `src_wire`
+ * the request's `dst` (this node's responder endpoint). Bundled with @ref echo_ts so the
+ * walk's ~twenty assemble sites cannot drift on which replies echo: ALL of them do, error
+ * replies included — an origin measuring RTT gets its answer whatever the outcome.
+ *
+ * @ref echo_ts is the request's OUTER absolute (TF=0) stamp, echoed VERBATIM onto the
+ * reply's own trailer — the ICMP-echo construction, no clock read anywhere on the reply
+ * path: `RTT = origin_now - echoed_stamp`, entirely on the origin's clock. Empty when the
+ * request did not stamp (the reply then carries no trailer — absence stays indistinguishable
+ * from ordinary operation) and when the request's root stamp is TF=1 (anchorless at the
+ * root; the spec's own MUST-reject case, never propagated).
+ */
+struct reply_route_t {
+    std::span<const std::byte> dst_wire; /**< @brief Reply dst = request src, trailer-excluded. */
+    std::span<const std::byte> src_wire; /**< @brief Reply src = request dst, trailer-excluded. */
+    /** @brief The request's TF=0 outer stamp to echo, if it carried one. */
+    std::optional<wire::timestamp_t> echo_ts{};
+};
+
+/**
  * @brief Assemble the FWD{REPLY} rope: one exactly-sized head segment (FWD header + op=REPLY +
  *        dst=req.src + src=req.dst + kind + @p inline_tail) prepended to @p shared (refcount
  *        clones of the stored payload view(s)).
@@ -115,9 +150,8 @@ struct emit_cursor_t {
  * The head is the only
  * allocation; the route bytes are copied ONCE (trailer-sliced); @p shared is never
  * copied — RFC-0004 §D / ADR-0035 zero-copy reply rule, ADR-0041 §5 direct emit.
- * @p reply_dst_wire (the request's `src`) and @p reply_src_wire (the request's `dst`,
- * the responder endpoint) are the trailer-excluded whole-TLV `wire` spans of those two
- * PATH nodes — passed in rather than read off the arena so the reply builder is
+ * @p route carries the two swapped route spans (see @ref reply_route_t) — passed in
+ * rather than read off the arena so the reply builder is
  * decoupled from the request's node model (ADR-0053 §7: a node-reader-agnostic seam,
  * and where ⑤'s scatter-gather reply emission will hook). Both MUST be non-empty: an
  * empty route span would emit a header whose length counts bytes no address occupies.
@@ -130,19 +164,24 @@ struct emit_cursor_t {
  * heap. A refusal returns an EMPTY rope, which `resolve_node`'s `or_backpressure` turns into an
  * addressed `kind=ERROR STATUS{BACKPRESSURE}` — exhaustion answered by value, never an abort.
  *
- * @param reply_dst_wire The request's `src` route, trailer-excluded whole-TLV bytes.
- * @param reply_src_wire The request's `dst` route, trailer-excluded whole-TLV bytes.
+ * When @p route carries an @ref reply_route_t::echo_ts, the reply's outer header sets
+ * `opt.TS` and the stamp's bytes ride a trailing segment AFTER the body (#1109) — the
+ * trailer is outside the length field, so nothing else about the frame moves. The echo is a
+ * CAPABILITY, not an obligation: if its 8-byte segment cannot be allocated the reply is
+ * emitted un-stamped rather than refused — a requester that gets no stamp back learns "no
+ * echo", which is a conforming answer, while a refused reply would be a silent drop.
+ *
+ * @param route          The reply's routes and optional wire-time echo (@ref reply_route_t).
  * @param kind           The reply discriminant (RESULT / ERROR).
  * @param inline_tail    Bytes emitted into the head after `kind` (the ERROR status tail).
  * @param shared         Payload views roped on after the head — never copied.
  * @param shared_len     Total byte length of @p shared (the header's length field needs it).
- * @param egress         The byte backend the head (and mint) segments draw from.
+ * @param egress         The byte backend the head (and mint / echo) segments draw from.
  * @param trailing       An optional minted `PATH_REF` emitted as the reply's LAST child.
  * @return The reply rope, or an EMPTY rope when @p egress refuses.
  */
-[[nodiscard]] view::rope_t assemble_reply(std::span<const std::byte> reply_dst_wire,
-                                          std::span<const std::byte> reply_src_wire,
-                                          reply_kind_t kind, std::span<const std::byte> inline_tail,
+[[nodiscard]] view::rope_t assemble_reply(const reply_route_t& route, reply_kind_t kind,
+                                          std::span<const std::byte> inline_tail,
                                           std::span<const view::view_t> shared,
                                           std::size_t shared_len, mem::mem_backend_t& egress,
                                           std::span<const std::byte> trailing = {});
@@ -155,14 +194,13 @@ struct emit_cursor_t {
  * `fwd_router.cpp`'s bus-NAME-hop rejection (ADR-0073 §3 / RFC-0020) both land here, so the
  * two cannot drift on the status tail, on the swap order, or on the route bytes' trailer bits.
  *
- * @param reply_dst_wire The request's `src` route, trailer-excluded whole-TLV bytes.
- * @param reply_src_wire The request's `dst` route, trailer-excluded whole-TLV bytes.
+ * @param route          The reply's routes and optional wire-time echo (@ref reply_route_t).
  * @param status         The L4 outcome; mapped to its registered wire code (RFC-0002 §D).
  * @param egress         The byte backend the reply head draws from.
- * @return The reply rope (exactly one link), or an EMPTY rope when @p egress refuses.
+ * @return The reply rope (one link, plus the echo trailer link when @p route stamps), or an
+ *         EMPTY rope when @p egress refuses.
  */
-[[nodiscard]] view::rope_t assemble_error_reply(std::span<const std::byte> reply_dst_wire,
-                                                std::span<const std::byte> reply_src_wire,
-                                                status_t status, mem::mem_backend_t& egress);
+[[nodiscard]] view::rope_t assemble_error_reply(const reply_route_t& route, status_t status,
+                                                mem::mem_backend_t& egress);
 
 }  // namespace tr::graph
