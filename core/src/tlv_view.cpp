@@ -114,13 +114,20 @@ std::optional<timestamp_t> tlv_view_t::timestamp() const {
 
 std::expected<tlv_view_t::materialized_t, err_t> tlv_view_t::materialize(
     mem::mem_backend_t& backend) const {
-    view::view_t flat = wire_.flatten(backend);
-    if (flat.empty() && hdr_.total != 0) {
-        return std::unexpected(err_t::FRAME_INVALID);  // allocation failed
+    // The refusal keeps its cause (#917): an allocator refusal is TRANSIENT
+    // backpressure — retrying this same frame may succeed — and must not be reported
+    // as the PERMANENT malformed-frame verdict it used to collapse into. NOT_HOST is
+    // unreachable by construction here (over() rejects a non-all-host rope before a
+    // tlv_view_t exists) but is mapped honestly all the same.
+    std::expected<view::view_t, view::flatten_err_t> flat = wire_.try_flatten(backend);
+    if (!flat) {
+        return std::unexpected(flat.error() == view::flatten_err_t::NO_MEMORY
+                                   ? err_t::FLOW_BACKPRESSURE
+                                   : err_t::FRAME_INVALID);
     }
-    auto tree = decode(flat.bytes());
+    auto tree = decode(flat->bytes());
     if (!tree) return std::unexpected(tree.error());
-    return materialized_t{std::move(flat), std::move(*tree)};
+    return materialized_t{std::move(*flat), std::move(*tree)};
 }
 
 }  // namespace tr::wire

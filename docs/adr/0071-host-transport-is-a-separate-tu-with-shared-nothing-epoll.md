@@ -72,7 +72,7 @@ Related: `p999` is not a reportable statistic on this project's harness at any s
 
   *The costs are real and the portability benefit is nil.* **+126 199 B** of static text for TCP+UDP (6 231 → 132 430 B, **21.3×**); **6.0×** compile time per TU (476 → 2 856 ms, median of 9); ~334 B per socket before any buffer (88 B `sizeof(tcp::socket)` exact, ~246 B heap) against **232 B measured for the entire shipped connection**; and 40/40 CI jobs are Linux, so the cross-platform abstraction that is asio's principal reason to exist buys nothing.
 
-  *It cannot honour the allocation doctrine.* `DynamicBuffer_v2::grow()` returns `void`. An exhaustion probe threw in 5 of 6 arms **including a bounded slab**, which is `abort()` under `-fno-exceptions`. ADR-0065 exists because `std::pmr` cannot carry a failure signal; routing allocation through asio inherits that defect rather than fixing it. The shipped framer already answers exhaustion by value (`transport_tcp.cpp:222-238`: drain, count, never OOM).
+  *It cannot honour the allocation doctrine.* `DynamicBuffer_v2::grow()` returns `void`. An exhaustion probe threw in 5 of 6 arms **including a bounded slab**, which is `abort()` under `-fno-exceptions`. ADR-0065 exists because `std::pmr` cannot carry a failure signal; routing allocation through asio inherits that defect rather than fixing it. The shipped framer already answers exhaustion by value (`transport_tcp.cpp:236-252`: drain, count, never OOM).
 
   Recorded at this length because the proposal has been raised three times; the intent is that it not be re-litigated without new numbers on the **syscall** term.
 

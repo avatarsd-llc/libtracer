@@ -30,6 +30,19 @@ namespace {
 
 using tr::testing::check;
 
+/** @brief A backend that refuses every allocation — the heap-exhaustion stand-in (#917). */
+class refusing_backend_t final : public tr::mem::mem_backend_t {
+   public:
+    refusing_backend_t() noexcept : mem_backend_t("test_refusing") {}
+
+    [[nodiscard]] tr::view::segment_t* alloc(std::size_t, tr::mem::alloc_hint_t) override {
+        return nullptr;
+    }
+    void destroy(tr::view::segment_t* seg) noexcept override {
+        tr::mem::heap_backend().destroy(seg);
+    }
+};
+
 /** @brief Owns the per-link byte copies and the rope viewing them (borrowed links). */
 struct split_rope_t {
     std::vector<std::vector<std::byte>> parts;
@@ -316,6 +329,15 @@ void test_materialize_and_timestamp() {
     const auto m = v->materialize();
     check(m.has_value() && tr::wire::equal(m->root, *eager),
           "materialize() == decode (the one explicit copy)");
+
+    // #917: an allocator refusal is THIS node's transient failure, not the peer's
+    // malformed frame. It used to come back as FRAME_INVALID (ERROR/PERMANENT — the
+    // "your frame is broken" verdict), which is a durable accusation against a peer
+    // that sent a perfectly valid frame; it is FLOW_BACKPRESSURE (WARN/TRANSIENT) now.
+    refusing_backend_t oom;
+    const auto refused = v->materialize(oom);
+    check(!refused.has_value() && refused.error() == tr::wire::err_t::FLOW_BACKPRESSURE,
+          "materialize() reports a flatten OOM as FLOW_BACKPRESSURE, not FRAME_INVALID");
 }
 
 }  // namespace

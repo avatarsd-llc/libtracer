@@ -15,6 +15,7 @@
 #pragma once
 
 #include <cstddef>
+#include <expected>
 #include <mutex>
 #include <span>
 #include <utility>
@@ -123,7 +124,10 @@ class receiver_slot_t {
      * The rope sink takes it as-is (zero-copy). A span-only sink needs
      * contiguous bytes: a single-link rope hands its bytes borrowed (zero-copy);
      * a multi-link rope pays ONE materialize into @p backend — the span tier's
-     * honesty cost, never the rope tier's.
+     * honesty cost, never the rope tier's. A REFUSED materialize (an OOM, or a
+     * DEVICE link the CPU cannot read) DROPS the frame (#917): before the refusal
+     * had a name, its empty view was handed to the span sink as though those were
+     * the frame's bytes — a truncated frame reported as a complete one.
      *
      * @param tag     The transport's delivery tags (the `Tag...` pack).
      * @param frame   The reassembled frame as the rope it already is.
@@ -135,8 +139,9 @@ class receiver_slot_t {
         if (s.rope_fn != nullptr) {
             s.rope_fn(s.rope_ctx, tag..., std::move(frame));
         } else if (s.span_fn != nullptr) {
-            const view::view_t flat = frame.materialize(backend);
-            s.span_fn(s.span_ctx, tag..., flat.bytes());
+            const std::expected<view::view_t, view::flatten_err_t> flat =
+                frame.try_materialize(backend);
+            if (flat) s.span_fn(s.span_ctx, tag..., flat->bytes());
         }
     }
 

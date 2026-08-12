@@ -21,6 +21,8 @@
 #include <array>
 #include <cassert>
 #include <cstddef>
+#include <cstdint>
+#include <expected>
 #include <span>
 #include <utility>
 #include <vector>
@@ -36,6 +38,24 @@
  */
 
 namespace tr::view {
+
+/**
+ * @brief Why the single contiguous copy could not be taken (#917).
+ *
+ * The two refusals are DIFFERENT verdicts and a caller must not conflate them:
+ * @ref flatten_err_t::NO_MEMORY is transient backpressure (the same rope may
+ * flatten once the allocator recovers), while @ref flatten_err_t::NOT_HOST is a
+ * property of the rope itself (a DEVICE link the CPU must not dereference,
+ * docs/adr/0024) — no retry fixes it and the payload must go via its device
+ * path. Before @ref rope_t::try_flatten both collapsed into an empty @ref view_t,
+ * indistinguishable from each other AND from a legitimately empty rope, so a
+ * router reading that empty as "malformed frame" reported a local OOM as a
+ * PERMANENT protocol error against the peer.
+ */
+enum class flatten_err_t : std::uint8_t {
+    NOT_HOST,  /**< @brief The rope has a DEVICE link — not CPU-flattenable, ever. */
+    NO_MEMORY, /**< @brief The backend refused the segment — transient backpressure. */
+};
 
 /**
  * @brief An ordered chain of @ref view_t links — one logical byte sequence
@@ -176,10 +196,31 @@ class rope_t {
      * single-link rope is returned as its link (a refcount bump, no byte copy); a
      * multi-link rope pays the single flatten copy from @p backend. Distinct from
      * @ref flatten, which always copies — this keeps the trivial case free.
+     * @note Lossy convenience (#917): a refused flatten comes back as an empty view,
+     *       indistinguishable from a legitimately empty rope AND from the other
+     *       refusal cause. A caller that must classify the failure
+     *       (drop-vs-reply, transient-vs-permanent) calls @ref try_materialize.
      */
     [[nodiscard]] view_t materialize(mem::mem_backend_t& backend = mem::heap_backend()) const {
         if (link_count() == 1) return links()[0];
         return flatten(backend);
+    }
+
+    /**
+     * @brief @ref materialize with the failure cause kept distinct (#917).
+     *
+     * Same tiering as @ref materialize — a single-link rope IS its link, zero copy
+     * (handed back as-is even for a DEVICE link, exactly as @ref materialize does:
+     * no CPU dereference happens here); a multi-link rope pays one @ref try_flatten
+     * copy. The difference is the error channel: a success carrying an empty view
+     * means the rope really is zero bytes, while a refusal names its cause, so an
+     * OOM stays TRANSIENT backpressure and a DEVICE payload is never misfiled as a
+     * malformed frame.
+     */
+    [[nodiscard]] std::expected<view_t, flatten_err_t> try_materialize(
+        mem::mem_backend_t& backend = mem::heap_backend()) const {
+        if (link_count() == 1) return links()[0];
+        return try_flatten(backend);
     }
 
     /** @brief Total logical length across all links. */
@@ -272,11 +313,30 @@ class rope_t {
      * The single bridge-boundary copy — taken only when a flat-buffer consumer
      * demands it. The flattened view can then be cast with `decode(view_t)`
      * (`%frame.hpp`, `tr::wire`).
+     * @note Lossy convenience (#917): both refusals collapse into the empty view,
+     *       which a zero-length rope also returns on SUCCESS. A caller that must
+     *       tell them apart calls @ref try_flatten.
      * @retval {} An empty view if the backend cannot allocate, **or if the rope
      *            is not @ref all_host** (a DEVICE link cannot be CPU-memcpy'd —
      *            docs/adr/0024; lower such a payload via its device transport).
      */
-    [[nodiscard]] view_t flatten(mem::mem_backend_t& backend = mem::heap_backend()) const;
+    [[nodiscard]] view_t flatten(mem::mem_backend_t& backend = mem::heap_backend()) const {
+        const std::expected<view_t, flatten_err_t> r = try_flatten(backend);
+        return r ? std::move(*r) : view_t{};
+    }
+
+    /**
+     * @brief @ref flatten with the failure cause kept distinct (#917).
+     *
+     * The honest form of the bridge-boundary copy: an empty view on the value side
+     * means the rope really is zero bytes (a valid, if degenerate, flatten — no
+     * segment is allocated for it), and a refusal names WHICH refusal it is,
+     * @ref flatten_err_t::NOT_HOST (permanent for this rope) vs
+     * @ref flatten_err_t::NO_MEMORY (transient backpressure). Collapsing those into
+     * one empty view is what let a local OOM be reported as a malformed frame (#917).
+     */
+    [[nodiscard]] std::expected<view_t, flatten_err_t> try_flatten(
+        mem::mem_backend_t& backend = mem::heap_backend()) const;
 
    private:
     // The SPILLING arm of try_reserve, kept OUT OF LINE so the no-op arm stays inlinable:
