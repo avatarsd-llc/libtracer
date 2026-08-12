@@ -454,6 +454,22 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      */
     [[nodiscard]] stats_t stats() const noexcept;
 
+    /**
+     * @brief The interface-level shed-frame snapshot (#932) — the subset of @ref stats_t
+     *        a generic `transport_t*` holder can read, in the shape every kind answers.
+     *
+     * Projected from this link's own richer counters: an ingress frame refused at the
+     * abuse cap is the `malformed_rx` class (the peer broke the agreed bound and is
+     * dropped with it), an ingress allocation failure is `dropped_rx` (backpressure),
+     * and both egress classes — an enqueue that found no slot/queue/heap, and a send to
+     * a peer that had already departed — sum into `dropped_tx`.
+     */
+    [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
+        const stats_t s = stats();
+        return {s.rx_dropped_alloc, s.rx_dropped_oversize,
+                static_cast<std::uint64_t>(s.enqueue_drops) + s.tx_to_dead_peer};
+    }
+
     /** @brief TX work slots claimed RIGHT NOW (filling, queued, or sending). */
     [[nodiscard]] std::size_t tx_slots_busy() const noexcept;
 

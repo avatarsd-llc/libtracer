@@ -173,6 +173,13 @@ class quic_transport_t : public transport_t {
      *         Each one shuts the connection down — the stream has lost framing sync. */
     [[nodiscard]] std::uint64_t malformed_rx() const noexcept;
 
+    /** @brief The interface-level snapshot (#932) — what a generic `transport_t*` reads.
+     *         `dropped_tx` stays zero: the msquic egress does not count its shed sends yet
+     *         (a follow-up), and this reports nothing rather than a fabricated number. */
+    [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
+        return {dropped_rx(), malformed_rx(), 0};
+    }
+
    private:
     struct impl_t;  // all msquic types live in the .cpp (no msquic in public headers)
     std::unique_ptr<impl_t> impl_;

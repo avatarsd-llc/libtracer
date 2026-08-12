@@ -16,6 +16,7 @@
 #include <atomic>
 #include <concepts>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <functional>
 #include <span>
@@ -264,6 +265,35 @@ class bus_link_t {
 };
 
 /**
+ * @brief One transport's shed-frame counters, as a generic `transport_t*` holder
+ *        can read them (#932).
+ *
+ * Every transport already counted *some* of this behind its own concrete accessors
+ * (`dropped_rx()`, `malformed_rx()`, `dropped_tx()`), which a consumer that holds
+ * only the interface cannot call — so swapping tcp for ws or CAN silently lost all
+ * drop observability. This is the ONE shape they all answer with; a transport that
+ * does not count a given class leaves it zero. Named `drop_stats`, not `stats`: a
+ * platform link may already publish a RICHER, kind-specific stats block of its own
+ * (`httpd_ws_link_t::stats()`), and this seam is only the shed-frame subset every
+ * kind can answer.
+ *
+ * Monotonic since construction, sampled without synchronization: the three fields
+ * are read one relaxed load at a time, so a snapshot is eventually-consistent, not
+ * an atomic instant across counters.
+ */
+struct transport_drop_stats_t {
+    /** @brief Inbound frames shed rather than delivered — backend exhausted, or the
+     *         frame is undeliverable through the injected resources (backpressure). */
+    std::uint64_t dropped_rx = 0;
+    /** @brief Inbound frames refused as protocol-malformed; for a stream transport this
+     *         is also the teardown reason (a desynced stream cannot be re-framed). */
+    std::uint64_t malformed_rx = 0;
+    /** @brief Outbound frames the caller believed sent that never reached the wire —
+     *         oversize for the peer's cap, no peer/dead socket, or a refused gather. */
+    std::uint64_t dropped_tx = 0;
+};
+
+/**
  * @brief A point-to-point (or bus-facet-exposing) transport link: the byte seam
  *        between the routing plane and one wire (ws/tcp/udp/quic/CAN).
  *
@@ -289,6 +319,16 @@ class transport_t {
 
     /** @brief Emit one frame (a complete TLV's bytes) onto the wire. */
     virtual void send(std::span<const std::byte> frame) = 0;
+
+    /**
+     * @brief This link's shed-frame counters — the interface-level observability seam.
+     *
+     * The DEFAULT is all-zero, which is the honest answer for a link that counts
+     * nothing (an in-process or test stub): "no drops observed here", never a
+     * fabricated number. A concrete transport overrides it with its own counters
+     * (#932); the per-transport accessors stay for callers that hold the concrete type.
+     */
+    [[nodiscard]] virtual transport_drop_stats_t drop_stats() const noexcept { return {}; }
 
     /**
      * @brief Scatter-gather send: emit the gathered spans as ONE frame, no flatten copy.

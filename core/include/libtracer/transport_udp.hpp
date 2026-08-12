@@ -128,6 +128,17 @@ class udp_transport_t : public transport_t, private posix_endpoint_t {
         return malformed_rx_.load(std::memory_order_relaxed);
     }
 
+    /** @brief Datagrams shed on the way OUT (#932): no peer learned or configured yet,
+     *         no socket, or a refused gather store — each one used to be a bare return. */
+    [[nodiscard]] std::uint64_t dropped_tx() const noexcept {
+        return dropped_tx_.load(std::memory_order_relaxed);
+    }
+
+    /** @brief The interface-level snapshot (#932) — what a generic `transport_t*` reads. */
+    [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
+        return {dropped_rx(), malformed_rx(), dropped_tx()};
+    }
+
     /** @brief The largest datagram accepted: `min(max_frame, kMaxDatagram)`, with 0 meaning
      *         @ref kMaxDatagram. The RX *segment* is additionally bounded by the injected
      *         backend's `max_segment_size()`, which never widens this. */
@@ -154,6 +165,7 @@ class udp_transport_t : public transport_t, private posix_endpoint_t {
     std::size_t max_frame_ = kMaxDatagram;  // accepted-datagram cap (:settings; 0 => kMaxDatagram)
     std::atomic<std::uint64_t> dropped_rx_{0};
     std::atomic<std::uint64_t> malformed_rx_{0};
+    std::atomic<std::uint64_t> dropped_tx_{0};
 };
 
 }  // namespace tr::net

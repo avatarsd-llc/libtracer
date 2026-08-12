@@ -85,6 +85,11 @@ struct prefixed_iov_t {
         }
         ok = true;
     }
+
+    /** @brief The assembled record as the read-only gather `write_all_iov` takes (#932). */
+    [[nodiscard]] std::span<const ::iovec> span() const noexcept {
+        return std::span<const ::iovec>(vec, n);
+    }
 };
 
 }  // namespace
@@ -191,15 +196,24 @@ void tcp_transport_t::send(std::span<const std::byte> frame) {
 }
 
 void tcp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
-    // NOT const: write_all_iov consumes the iovec array in place.
-    prefixed_iov_t rec(iov, kMaxFrame);
-    if (!rec.ok) return;
+    const prefixed_iov_t rec(iov, kMaxFrame);
+    // Oversize for the cap, or a refused gather store: shed it, but COUNT it (#932) —
+    // an egress drop used to be a bare return no observer could see.
+    if (!rec.ok) {
+        dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     // Hold write_m_ across the whole write so (a) the recv thread cannot close and
     // reset conn_fd_ underneath us, and (b) two senders can never interleave their
     // length-prefixed records on the stream; read the fd inside the lock to pair
     // with the teardown.
     const std::lock_guard lock(write_m_);
-    write_all_iov(conn_fd_.load(std::memory_order_relaxed), rec.vec, rec.n);
+    const int fd = conn_fd_.load(std::memory_order_relaxed);
+    if (fd < 0) {  // no live peer (still dialing, or torn down) => a counted drop
+        dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    write_all_iov(fd, rec.span());
 }
 
 bool tcp_transport_t::read_exact(int fd, std::byte* dst, std::size_t len) {
@@ -239,25 +253,26 @@ void tcp_transport_t::serve(int fd) {
         if (!read_exact(fd, prefix.data(), prefix.size())) return;
         const std::size_t len = tr::detail::load_le<std::uint32_t>(prefix);
 
-        // The framing rules (effective cap, empty record, oversize ⇒ malformed,
-        // alloc failure ⇒ backpressure drain) live in length_prefix_framer — one
+        // The framing rules (empty record, over the protocol cap ⇒ malformed,
+        // undeliverable ⇒ backpressure drain) live in length_prefix_framer — one
         // home shared with the chunk-fed transports (quic/webtransport). Only the
         // byte source differs: this pull-mode loop reads the body straight off
         // the socket into the accepted segment (ADR-0042 §2/§4 — no library
         // buffer, no copy; feeding recv chunks through feed() would add one).
         using kind_t = length_prefix_framer::prefix_decision_t::kind_t;
-        auto dec = length_prefix_framer::on_prefix(
-            *backend_, length_prefix_framer::effective_cap(*backend_, max_frame_), len);
+        auto dec = length_prefix_framer::on_prefix(*backend_, max_frame_, len);
         if (dec.kind == kind_t::EMPTY) continue;  // an empty record carries no TLV — a no-op
         if (dec.kind == kind_t::MALFORMED) {
-            // Malformed (corrupt/hostile) or undeliverable: count it and tear the
+            // Beyond the protocol cap (corrupt/hostile): count it and tear the
             // connection down — a desynced stream can't re-frame.
             malformed_rx_.fetch_add(1, std::memory_order_relaxed);
             return;
         }
         if (dec.kind == kind_t::DROP) {
-            // Exhaustion is backpressure: drain the frame off the stream (framing
-            // sync survives), drop it, tick the counter — never an OOM.
+            // Undeliverable (exhausted backend, or a frame larger than any segment
+            // it produces) is backpressure: drain the frame off the stream (framing
+            // sync survives), drop it, tick the counter — never an OOM, and never a
+            // disconnect for a peer that stayed inside the protocol cap (#932).
             dropped_rx_.fetch_add(1, std::memory_order_relaxed);
             if (!drain(fd, len)) return;
             continue;
@@ -356,12 +371,15 @@ void transport_tcp_server::send(std::span<const std::byte> frame) {
 }
 
 void transport_tcp_server::send(std::span<const std::span<const std::byte>> iov) {
-    // Build the record ONCE, then hand the pristine gather to the shared fan-out: it
-    // takes the per-peer copy write_all_iov's in-place consumption requires, under the
-    // header lock order (peers_m_ → write_m_).
+    // Build the record ONCE, then hand the gather to the shared fan-out, which writes
+    // it to every peer under the header lock order (peers_m_ → write_m_) — the gather
+    // is read-only, so no per-peer copy is taken (#932).
     const prefixed_iov_t rec(iov, tcp_transport_t::kMaxFrame);
-    if (!rec.ok) return;
-    broadcast_iov(rec.vec, rec.n);
+    if (!rec.ok) {
+        dropped_tx_.fetch_add(1, std::memory_order_relaxed);  // shed, and counted (#932)
+        return;
+    }
+    broadcast_iov(rec.span());
 }
 
 void transport_tcp_server::peer_endpoint_t::send(std::span<const std::byte> frame) {
@@ -371,13 +389,18 @@ void transport_tcp_server::peer_endpoint_t::send(std::span<const std::byte> fram
 
 void transport_tcp_server::peer_endpoint_t::send(std::span<const std::span<const std::byte>> iov) {
     if (owner_ == nullptr || slot_ == nullptr) return;
-    // Single consumer, so the record is written in place (no pristine copy —
-    // unlike the broadcast).  NOT const: write_all_iov consumes it.
-    prefixed_iov_t rec(iov, tcp_transport_t::kMaxFrame);
-    if (!rec.ok) return;
+    // The single-fd twin of the broadcast override: one gathered record, one peer.
+    const prefixed_iov_t rec(iov, tcp_transport_t::kMaxFrame);
+    if (!rec.ok) {
+        owner_->dropped_tx_.fetch_add(1, std::memory_order_relaxed);  // shed, counted (#932)
+        return;
+    }
     const std::lock_guard lock(owner_->write_m_);
-    if (!slot_->open.load(std::memory_order_relaxed)) return;  // departed ⇒ no-op
-    write_all_iov(slot_->fd.load(std::memory_order_relaxed), rec.vec, rec.n);
+    if (!slot_->open.load(std::memory_order_relaxed)) {  // departed ⇒ a counted drop
+        owner_->dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    write_all_iov(slot_->fd.load(std::memory_order_relaxed), rec.span());
 }
 
 void transport_tcp_server::on_readable(session_base_t& base, const std::byte* data,

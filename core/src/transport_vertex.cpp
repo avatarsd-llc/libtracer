@@ -14,6 +14,7 @@
 #include "libtracer/byteorder.hpp"
 #include "libtracer/config_reader.hpp"
 #include "libtracer/fwd_router.hpp"
+#include "libtracer/key_view.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/path.hpp"
 #include "libtracer/tlv_emit.hpp"
@@ -33,19 +34,13 @@ namespace {
 /**
  * @brief The last NAME segment of a canonical PATH-payload key = the connection's NAME.
  *
- * The
- * key is `<...prior NAMEs...><NAME len-prefixed name>`; walk the len-prefixed records.
+ * The key is `<...prior NAMEs...><NAME len-prefixed name>`. The record walk is
+ * `wire::key_view_t::last_segment` — key_view is the single locus for canonical-key
+ * navigation, and this TU hand-rolled a second copy of it (#932). The result is
+ * still materialised as an owning `std::string` because the caller needs one.
  */
 [[nodiscard]] std::string last_segment(std::span<const std::byte> key) {
-    std::span<const std::byte> last;
-    std::size_t i = 0;
-    while (i + 4 <= key.size()) {
-        const std::size_t len = detail::load_le<std::uint16_t>(key.subspan(i + 2, 2));
-        if (i + 4 + len > key.size()) break;
-        last = key.subspan(i + 4, len);
-        i += 4 + len;
-    }
-    return std::string(detail::as_string_view(last));
+    return std::string(detail::as_string_view(wire::key_view_t{key}.last_segment()));
 }
 
 /**

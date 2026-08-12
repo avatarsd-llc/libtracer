@@ -269,16 +269,18 @@ void transport_ws_server::send(std::span<const std::span<const std::byte>> iov) 
     std::array<std::byte, ws::kMaxServerFrameHeader> header{};
     const std::size_t hlen = ws::encode_frame_header(header, ws::opcode_t::BINARY, total);
 
-    std::array<::iovec, kMaxServerIov + 1> pristine_inline;
-    iov_table_t<::iovec> pristine_table(pristine_inline);
-    const auto [pristine, n] = build_server_iov(pristine_table, header, hlen, iov);
-    if (pristine == nullptr) return;  // gather store exhausted => drop the frame
+    std::array<::iovec, kMaxServerIov + 1> gather_inline;
+    iov_table_t<::iovec> gather_table(gather_inline);
+    const auto [vec, n] = build_server_iov(gather_table, header, hlen, iov);
+    if (vec == nullptr) {  // gather store exhausted => drop the frame, and count it (#932)
+        dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
 
-    // The shared fan-out takes the per-peer copy write_all_iov's in-place consumption
-    // requires (otherwise peer 2+ would writev a consumed/zeroed array) under the header
-    // lock order, peers_m_ → write_m_. peer_endpoint_t::send is single-fd and needs no
-    // such copy.
-    broadcast_iov(pristine, n);
+    // The shared fan-out writes this ONE gather to every peer under the header lock
+    // order, peers_m_ → write_m_: write_all_iov does not consume it (#932), so no
+    // per-peer copy is taken.
+    broadcast_iov(std::span<const ::iovec>(vec, n));
 }
 
 void transport_ws_server::peer_endpoint_t::send(std::span<const std::byte> frame) {
@@ -300,12 +302,17 @@ void transport_ws_server::peer_endpoint_t::send(std::span<const std::span<const 
     std::array<::iovec, kMaxServerIov + 1> inline_vec;
     iov_table_t<::iovec> table(inline_vec);
     const auto [vec, n] = build_server_iov(table, header, hlen, iov);
-    if (vec == nullptr) return;  // gather store exhausted => drop the frame
+    if (vec == nullptr) {  // gather store exhausted => drop the frame, and count it (#932)
+        owner_->dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
 
-    // Single consumer, so no pristine copy is needed (unlike the broadcast).
     const std::lock_guard lock(owner_->write_m_);
-    if (!slot_->open.load(std::memory_order_relaxed)) return;  // departed ⇒ no-op
-    write_all_iov(slot_->fd.load(std::memory_order_relaxed), vec, n);
+    if (!slot_->open.load(std::memory_order_relaxed)) {  // departed ⇒ a counted drop
+        owner_->dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    write_all_iov(slot_->fd.load(std::memory_order_relaxed), std::span<const ::iovec>(vec, n));
 }
 
 void transport_ws_server::on_readable(session_base_t& base, const std::byte* data,
@@ -557,9 +564,16 @@ void transport_ws_client::send(std::span<const std::byte> frame) {
     const std::lock_guard lock(write_m_);
     const std::size_t n =
         ws::try_encode_client_frame(tx_buf_, ws::opcode_t::BINARY, frame, next_mask_key());
-    if (n == 0) return;  // frame buffer exhausted => drop the frame
-    write_all(conn_fd_.load(std::memory_order_relaxed),
-              std::span<const std::byte>(tx_buf_.data(), n));
+    if (n == 0) {  // frame buffer exhausted => drop the frame, and COUNT it (#932)
+        dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    const int fd = conn_fd_.load(std::memory_order_relaxed);
+    if (fd < 0) {  // no live connection => a counted egress drop, not a silent one
+        dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    write_all(fd, std::span<const std::byte>(tx_buf_.data(), n));
 }
 
 bool transport_ws_client::handshake(int fd, const std::string& host, std::uint16_t port,

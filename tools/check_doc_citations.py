@@ -133,11 +133,11 @@ ANCHORS = [
     ("core/src/graph.cpp:2235", "graph_t::set_identity"),
     ("core/src/graph.cpp:2261", "graph_t::read_identity"),
     ("core/src/graph.cpp:2680", 'field.steps[0].name == "identity"'),
-    ("core/src/transport_vertex.cpp:64", 'cfg.name("kind")'),
-    ("core/src/transport_vertex.cpp:99", "register_child_type"),
-    ("core/src/transport_vertex.cpp:128", "register_transport_type"),
-    ("core/src/transport_vertex.cpp:133", "transport_vertex_t::register_module"),
-    ("core/src/transport_vertex.cpp:167", "SCHEMA_NOT_FOUND", "transport_vertex_t::module_for"),
+    ("core/src/transport_vertex.cpp:59", 'cfg.name("kind")'),
+    ("core/src/transport_vertex.cpp:94", "register_child_type"),
+    ("core/src/transport_vertex.cpp:123", "register_transport_type"),
+    ("core/src/transport_vertex.cpp:128", "transport_vertex_t::register_module"),
+    ("core/src/transport_vertex.cpp:162", "SCHEMA_NOT_FOUND", "transport_vertex_t::module_for"),
     # fwd-router.md's "Signature source" line — bare :NNN shorthands that had ALL rotted
     # silently (they cited the pre-#739 header). Anchored so they cannot rot again.
     # zero-copy-and-flatten.md's rope-tier citations and ADR-0072's stale-comment pointer —
@@ -161,17 +161,17 @@ ANCHORS = [
     ("core/include/libtracer/child_registry.hpp:586", "by_name"),
     ("core/include/libtracer/child_registry.hpp:627", "std::size_t size()"),
     ("core/include/libtracer/child_registry.hpp:637", "live_size"),
-    ("core/src/transport_vertex.cpp:210", "transport_vertex_t::provide_link"),
-    ("core/src/transport_vertex.cpp:293", "routing key IS the mount path"),
-    ("core/src/transport_vertex.cpp:300", "qualified += name"),
-    ("core/src/transport_vertex.cpp:319", "structural vertex, created lazily"),
-    ("core/src/transport_vertex.cpp:327", "register_vertex_key(mod_key"),
-    ("core/src/transport_vertex.cpp:419", "if (!router_.add_child(qualified, *link))"),
-    ("core/src/transport_vertex.cpp:422", "return std::unexpected(status_t::BACKPRESSURE);",
+    ("core/src/transport_vertex.cpp:205", "transport_vertex_t::provide_link"),
+    ("core/src/transport_vertex.cpp:288", "routing key IS the mount path"),
+    ("core/src/transport_vertex.cpp:295", "qualified += name"),
+    ("core/src/transport_vertex.cpp:314", "structural vertex, created lazily"),
+    ("core/src/transport_vertex.cpp:322", "register_vertex_key(mod_key"),
+    ("core/src/transport_vertex.cpp:414", "if (!router_.add_child(qualified, *link))"),
+    ("core/src/transport_vertex.cpp:417", "return std::unexpected(status_t::BACKPRESSURE);",
      "if (!router_.add_child(qualified, *link))"),
-    ("core/src/transport_vertex.cpp:428", "pending_links_.erase(pl)"),
-    ("core/src/transport_vertex.cpp:442", "if (constructed)"),
-    ("core/src/transport_vertex.cpp:444", "link_state_t::LISTENING : link_state_t::UP"),
+    ("core/src/transport_vertex.cpp:423", "pending_links_.erase(pl)"),
+    ("core/src/transport_vertex.cpp:437", "if (constructed)"),
+    ("core/src/transport_vertex.cpp:439", "link_state_t::LISTENING : link_state_t::UP"),
     ("core/include/libtracer/transport_vertex.hpp:289", "result_t<void> register_module"),
     ("core/include/libtracer/transport_vertex.hpp:97", "enum class link_state_t"),
     ("core/src/graph.cpp:1918", "sel == field_sel_t::TAIL", 'step0.name == "subscribers"'),
@@ -185,9 +185,9 @@ ANCHORS = [
     ("core/src/graph.cpp:2617", "return read_children_folded(vh);"),
     ("core/src/graph.cpp:2614", "sel == field_sel_t::WHOLE || sel == field_sel_t::APPEND"),
     ("core/src/graph.cpp:2760", "field_selector(field) == field_sel_t::SLOT"),
-    ("core/src/transport_vertex.cpp:428", "pending_links_.erase(pl)"),
-    ("core/src/transport_vertex.cpp:442", "if (constructed)"),
-    ("core/src/transport_vertex.cpp:444", "link_state_t::LISTENING : link_state_t::UP"),
+    ("core/src/transport_vertex.cpp:423", "pending_links_.erase(pl)"),
+    ("core/src/transport_vertex.cpp:437", "if (constructed)"),
+    ("core/src/transport_vertex.cpp:439", "link_state_t::LISTENING : link_state_t::UP"),
     ("core/include/libtracer/transport_vertex.hpp:289", "result_t<void> register_module"),
     ("core/include/libtracer/transport_vertex.hpp:97", "enum class link_state_t"),
     ("core/src/graph.cpp:1918", "sel == field_sel_t::TAIL", 'step0.name == "subscribers"'),
@@ -207,7 +207,7 @@ ANCHORS = [
     ("core/include/libtracer/view.hpp:26", "namespace tr::view"),
     ("core/include/libtracer/frame.hpp:23", "namespace tr::wire"),
     ("core/include/libtracer/graph.hpp:49", "namespace tr::graph"),
-    ("core/include/libtracer/transport.hpp:31", "namespace tr::net"),
+    ("core/include/libtracer/transport.hpp:32", "namespace tr::net"),
     ("core/include/libtracer/backend.hpp:40", "enum class io_dir_t"),
     ("core/include/libtracer/backend.hpp:101", "class mem_backend_t"),
     ("core/include/libtracer/backend.hpp:145", "before_io"),
@@ -491,16 +491,16 @@ ANCHORS = [
     ('core/include/libtracer/tlv_arena.hpp:130',
      '* NOTHROW end to end (#588). This function is on the wire RX path and reachable'),
     # core/include/libtracer/transport.hpp
-    ('core/include/libtracer/transport.hpp:35', 'using peer_id_t = std::array<std::byte, 16>;'),
-    ('core/include/libtracer/transport.hpp:65', 'class bus_link_t {'),
-    ('core/include/libtracer/transport.hpp:301',
+    ('core/include/libtracer/transport.hpp:36', 'using peer_id_t = std::array<std::byte, 16>;'),
+    ('core/include/libtracer/transport.hpp:66', 'class bus_link_t {'),
+    ('core/include/libtracer/transport.hpp:341',
      'virtual void send(std::span<const std::span<const std::byte>> iov) {'),
-    ('core/include/libtracer/transport.hpp:418',
+    ('core/include/libtracer/transport.hpp:458',
      '[[nodiscard]] virtual bool delivers_ropes() const { return false; }',
      'rx_.set_rope([](void* c, view::rope_t f) { (*static_cast<F*>(c))(std::move(f)); }, &sink);'),
     # core/include/libtracer/transport_can.hpp
-    ('core/include/libtracer/transport_can.hpp:480', '[[nodiscard]] bus_link_t* bus() override { return this; }'),
-    ('core/include/libtracer/transport_can.hpp:499',
+    ('core/include/libtracer/transport_can.hpp:491', '[[nodiscard]] bus_link_t* bus() override { return this; }'),
+    ('core/include/libtracer/transport_can.hpp:510',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }'),
     # core/include/libtracer/transport_quic.hpp
     ('core/include/libtracer/transport_quic.hpp:153',
@@ -509,7 +509,7 @@ ANCHORS = [
     ('core/include/libtracer/transport_tcp.hpp:207',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'tcp_transport_t& operator=(const tcp_transport_t&) = delete;'),
-    ('core/include/libtracer/transport_tcp.hpp:358',
+    ('core/include/libtracer/transport_tcp.hpp:372',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'transport_tcp_server& operator=(const transport_tcp_server&) = delete;'),
     # core/include/libtracer/transport_udp.hpp
@@ -532,7 +532,7 @@ ANCHORS = [
     ('core/include/libtracer/transport_ws.hpp:225',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'void send(std::span<const std::span<const std::byte>> iov) override;'),
-    ('core/include/libtracer/transport_ws.hpp:399',
+    ('core/include/libtracer/transport_ws.hpp:416',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'transport_ws_client& operator=(const transport_ws_client&) = delete;'),
     # core/include/libtracer/vertex.hpp
@@ -630,12 +630,12 @@ ANCHORS = [
     # core/src/path.cpp
     # core/src/posix_endpoint.cpp
     ('core/src/posix_endpoint.cpp:225',
-     'void stream_endpoint_t::write_all_iov(int fd, ::iovec* vec, std::size_t count) {'),
+     'void stream_endpoint_t::write_all_iov(int fd, std::span<const ::iovec> vec) {'),
     ('core/src/posix_endpoint.cpp:143', 'return ::sendmsg(fd, msg, MSG_NOSIGNAL);'),
     # The multi-peer servers' per-chunk receive scratch — ONE buffer since #871 folded the
     # tcp and ws poll loops into slot_server_t (it used to be one apiece, cited as
     # transport_tcp.cpp:508 and transport_ws.cpp:420).
-    ('core/src/posix_endpoint.cpp:442', 'std::array<std::byte, 4096> chunk;',
+    ('core/src/posix_endpoint.cpp:448', 'std::array<std::byte, 4096> chunk;',
      'void slot_server_t::service_peer(session_base_t& s) {'),
     # core/src/rope.cpp
     ('core/src/rope.cpp:15', 'if (!all_host()) return view_t{};'),
@@ -651,28 +651,28 @@ ANCHORS = [
      '*        MEASURED (`bench_transport_iov`): the fallback fires at exactly **17'),
     ('core/src/transport_tcp.cpp:59',
      "*        `bench_forward_heap`'s `allocs=0` gate cannot see it: that bench drives"),
-    ('core/src/transport_tcp.cpp:205', 'bool tcp_transport_t::read_exact(int fd, std::byte* dst, std::size_t len) {'),
-    ('core/src/transport_tcp.cpp:225', 'std::array<std::byte, 4096> scratch;'),
+    ('core/src/transport_tcp.cpp:219', 'bool tcp_transport_t::read_exact(int fd, std::byte* dst, std::size_t len) {'),
+    ('core/src/transport_tcp.cpp:239', 'std::array<std::byte, 4096> scratch;'),
     # zero-copy-and-flatten.md quotes this comment's tail verbatim, so the anchor carries the
     # QUOTED line — pinning `serve()`'s signature two constructs up passed while the citation
     # pointed at code the doc never quotes.
-    ('core/src/transport_tcp.cpp:247',
+    ('core/src/transport_tcp.cpp:261',
      '// buffer, no copy; feeding recv chunks through feed() would add one).'),
-    ('core/src/transport_tcp.cpp:267', 'if (!read_exact(fd, seg->bytes.data(), len)) return;'),
+    ('core/src/transport_tcp.cpp:282', 'if (!read_exact(fd, seg->bytes.data(), len)) return;'),
     # core/src/transport_udp.cpp
-    ('core/src/transport_udp.cpp:132',
+    ('core/src/transport_udp.cpp:145',
      'const std::size_t rx_cap = std::min(kMaxDatagram, backend_->max_segment_size());'),
     # core/src/transport_vertex.cpp
-    ('core/src/transport_vertex.cpp:53',
+    ('core/src/transport_vertex.cpp:48',
      '*        NAME <utf8>, NAME "kind" NAME <utf8>, NAME "port" VALUE u16, NAME "role" VALUE u8'),
-    ('core/src/transport_vertex.cpp:74', '[[nodiscard]] view_t link_state_value(link_state_t state) {'),
-    ('core/src/transport_vertex.cpp:103',
+    ('core/src/transport_vertex.cpp:69', '[[nodiscard]] view_t link_state_value(link_state_t state) {'),
+    ('core/src/transport_vertex.cpp:98',
      'graph_.register_child_type(',
      'return make_connection(std::move(key), config, conn_role_t::DIAL);'),
-    ('core/src/transport_vertex.cpp:149',
+    ('core/src/transport_vertex.cpp:144',
      'result_t<std::string> transport_vertex_t::module_for(std::string_view kind,'),
-    ('core/src/transport_vertex.cpp:253', 'std::string module;'),
-    ('core/src/transport_vertex.cpp:310',
+    ('core/src/transport_vertex.cpp:248', 'std::string module;'),
+    ('core/src/transport_vertex.cpp:305',
      '// Compose the mount key: `<net_root>/<module>/<name>`, replacing the flat key the'),
     # core/src/transport_ws.cpp
     ('core/src/transport_ws.cpp:86',
@@ -685,8 +685,8 @@ ANCHORS = [
     # which #871 moved out of this TU into slot_server_t::bind_listen; the entry sheds the
     # scope entirely instead, because the array is now spelled `pristine_inline` here and
     # `inline_vec` only in the directed facade — one anchor, one hit, no positional filter.
-    ('core/src/transport_ws.cpp:272', 'std::array<::iovec, kMaxServerIov + 1> pristine_inline;'),
-    ('core/src/transport_ws.cpp:633', 'std::array<std::byte, 4096> chunk;',
+    ('core/src/transport_ws.cpp:272', 'std::array<::iovec, kMaxServerIov + 1> gather_inline;'),
+    ('core/src/transport_ws.cpp:647', 'std::array<std::byte, 4096> chunk;',
      'void transport_ws_client::serve(int fd, std::vector<std::byte> pipelined) {'),
     # core/tests/registry_teardown_test.cpp
     ('core/tests/registry_teardown_test.cpp:275', 'void test_digest_paths_agree() {'),
@@ -715,7 +715,7 @@ ANCHORS = [
     ('core/include/libtracer/path.hpp:159', 'explicit path_t(std::string_view text);'),
     # ONE `bus()` since #871: both stream servers inherit slot_server_t's (they used to
     # restate it, cited as transport_tcp.hpp:343 and transport_ws.hpp:233).
-    ('core/include/libtracer/posix_endpoint.hpp:408',
+    ('core/include/libtracer/posix_endpoint.hpp:409',
      '[[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }'),
     ('core/include/libtracer/edge_pin.hpp:153', 'class pin_t {'),
     ('core/src/fwd_router.cpp:753', 'link.set_rope_receiver('),

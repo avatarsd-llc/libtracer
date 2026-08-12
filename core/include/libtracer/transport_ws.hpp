@@ -238,6 +238,17 @@ class transport_ws_server : public slot_server_t {
         return malformed_rx_.load(std::memory_order_relaxed);
     }
 
+    /** @brief Messages shed on the way OUT (#932): a refused gather store, or no open peer
+     *         slot to write to — each one used to be a bare return no observer could see. */
+    [[nodiscard]] std::uint64_t dropped_tx() const noexcept {
+        return dropped_tx_.load(std::memory_order_relaxed);
+    }
+
+    /** @brief The interface-level snapshot (#932) — what a generic `transport_t*` reads. */
+    [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
+        return {dropped_rx(), malformed_rx(), dropped_tx()};
+    }
+
     /** @brief The cap actually honored: `min(max_frame, backend.max_segment_size())` — what
      *         a declared frame length is compared against, resolved from the two injected
      *         resources rather than restated as a number. */
@@ -266,12 +277,17 @@ class transport_ws_server : public slot_server_t {
          * The single-fd twin of the broadcast override: server frames are UNMASKED
          * (RFC 6455 §5.1), so the frame header rides as the first iovec entry and
          * the payload spans follow via one gathered scatter-gather write — no copy.
-         * Single consumer, so the iovec array needs no pristine copy. No-op once
-         * departed.
+         * No-op once departed.
          *
          * @param iov The spans to emit, in order, as a single frame.
          */
         void send(std::span<const std::span<const std::byte>> iov) override;
+
+        /** @brief The owning server's snapshot (#932): a directed facade counts into the
+         *         link's own counters, so it reports them rather than a fabricated zero. */
+        [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
+            return owner_ == nullptr ? transport_drop_stats_t{} : owner_->drop_stats();
+        }
 
        private:
         friend class transport_ws_server;
@@ -306,6 +322,7 @@ class transport_ws_server : public slot_server_t {
     std::size_t max_frame_ = kMaxFrame;  // per-connection receive cap (:settings; 0 => kMaxFrame)
     std::atomic<std::uint64_t> dropped_rx_{0};
     std::atomic<std::uint64_t> malformed_rx_{0};
+    std::atomic<std::uint64_t> dropped_tx_{0};
 };
 
 /**
@@ -425,6 +442,17 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
         return malformed_rx_.load(std::memory_order_relaxed);
     }
 
+    /** @brief Messages shed on the way OUT (#932) — the client frame could not be encoded
+     *         (gather store refused) or there is no live connection to write to. */
+    [[nodiscard]] std::uint64_t dropped_tx() const noexcept {
+        return dropped_tx_.load(std::memory_order_relaxed);
+    }
+
+    /** @brief The interface-level snapshot (#932) — what a generic `transport_t*` reads. */
+    [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
+        return {dropped_rx(), malformed_rx(), dropped_tx()};
+    }
+
     /** @brief The cap actually honored: `min(max_frame, backend.max_segment_size())`. */
     [[nodiscard]] std::size_t effective_max_frame() const noexcept {
         return length_prefix_framer::effective_cap(*backend_, max_frame_);
@@ -455,6 +483,7 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
     std::size_t max_frame_ = transport_ws_server::kMaxFrame;
     std::atomic<std::uint64_t> dropped_rx_{0};
     std::atomic<std::uint64_t> malformed_rx_{0};
+    std::atomic<std::uint64_t> dropped_tx_{0};
     /**
      * @brief The REUSED masked-frame buffer `send` encodes into, guarded by `write_m_`.
      *

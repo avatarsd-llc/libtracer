@@ -474,6 +474,17 @@ class transport_can : public transport_t, public bus_link_t {
     /** @brief Data slices currently parked awaiting their advertise (introspection). */
     [[nodiscard]] std::size_t pending_slices() const;
 
+    /**
+     * @brief The interface-level snapshot (#932) — what a generic `transport_t*` reads.
+     *
+     * `malformed_rx` stays zero: this bus has no framing-desync class to report — an
+     * ingress slice is either owned and reassembled or shed into @ref dropped_rx — so
+     * it reports nothing rather than folding a different meaning into that field.
+     */
+    [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
+        return {dropped_rx(), 0, dropped_tx()};
+    }
+
     // --- the bus capability (ADR-0044) ------------------------------------------
 
     /** @brief This link IS a bus — expose the @ref bus_link_t facet. */
@@ -508,6 +519,12 @@ class transport_can : public transport_t, public bus_link_t {
         void send(std::span<const std::byte> frame) override;
         // Ingress is the owning transport's (its peer-named slot); the inherited
         // receiver slot of this directed facade is never delivered to.
+
+        /** @brief The owning bus's snapshot (#932): a directed facade counts into the
+         *         link's own counters, so it reports them rather than a fabricated zero. */
+        [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
+            return owner_ == nullptr ? transport_drop_stats_t{} : owner_->drop_stats();
+        }
 
        private:
         friend class transport_can;

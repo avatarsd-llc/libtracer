@@ -14,6 +14,16 @@
  * prefix only where it lands on a NAME-segment boundary — a differing length
  * header would break the byte match one record earlier — so a strict byte-prefix
  * of a valid key is exactly a strict ancestor of it.
+ *
+ * Zero-length records (#932, decided once): an empty-payload NAME segment is
+ * ILLEGAL — path syntax rejects empty segments (docs/reference/03-addressing.md:
+ * `/sensor//temp` is invalid, not a spelling of `/sensor/temp`), and `path.hpp`
+ * refuses one at parse time — so EVERY walker here treats a `len == 0` record as
+ * malformed framing: the record walks stop at it exactly as they stop at a
+ * ragged length, and `split_levels` fails. `child_record_under` already refused
+ * it (its "no room for one payload-bearing record" guard); the other three
+ * accepted it, which let `is_ancestor_of`/`split_levels` call an empty-name
+ * segment a valid level that `child_record_under` denied was a child.
  */
 #pragma once
 
@@ -54,14 +64,15 @@ class key_view_t {
 
     /**
      * @brief The last NAME segment's payload — the vertex's own name; empty at the
-     *        root. Walks records to the end; stops early on a malformed length.
+     *        root. Walks records to the end; stops early on a malformed length (a
+     *        ragged record, or an illegal zero-length one — see the file header).
      */
     [[nodiscard]] std::span<const std::byte> last_segment() const noexcept {
         std::span<const std::byte> last;
         std::size_t i = 0;
         while (i + 4 <= key_.size()) {
             const std::size_t len = detail::load_le<std::uint16_t>(key_.subspan(i + 2, 2));
-            if (i + 4 + len > key_.size()) break;
+            if (len == 0 || i + 4 + len > key_.size()) break;
             last = key_.subspan(i + 4, len);
             i += 4 + len;
         }
@@ -72,14 +83,15 @@ class key_view_t {
      * @brief The parent key: this key with its last NAME encoding dropped (empty
      *        at the root). The ADR-0020 inheritance walk derives ancestor keys by
      *        iterating this — the key is the concatenated NAME encodings, so no
-     *        string form is needed.
+     *        string form is needed. Stops early on malformed framing, as
+     *        @ref last_segment does.
      */
     [[nodiscard]] key_view_t parent() const noexcept {
         std::size_t last_start = 0;
         std::size_t i = 0;
         while (i + 4 <= key_.size()) {
             const std::size_t len = detail::load_le<std::uint16_t>(key_.subspan(i + 2, 2));
-            if (i + 4 + len > key_.size()) break;
+            if (len == 0 || i + 4 + len > key_.size()) break;
             last_start = i;
             i += 4 + len;
         }
@@ -99,7 +111,9 @@ class key_view_t {
      * @brief If this key is a *direct* child of @p parent — exactly one more
      *        well-framed NAME record beyond it — return that trailing record (the
      *        child's own canonical NAME encoding); otherwise @c std::nullopt. A
-     *        deeper descendant (more than one further record) yields @c nullopt.
+     *        deeper descendant (more than one further record) yields @c nullopt,
+     *        as does an illegal zero-length record (see the file header) — the
+     *        `rest.size() <= 4` guard below.
      */
     [[nodiscard]] std::optional<std::span<const std::byte>> child_record_under(
         key_view_t parent) const noexcept {
@@ -117,14 +131,15 @@ class key_view_t {
      * @brief Append each ancestor-prefix level to @p out, shallowest-first (the
      *        last element equals the whole key) — the `mkdir -p` creation order.
      * @return false, appending nothing, if the NAME framing is ragged (records do
-     *         not tile the key exactly) or the key is empty; true otherwise.
+     *         not tile the key exactly), any record carries an illegal zero-length
+     *         payload (see the file header), or the key is empty; true otherwise.
      */
     [[nodiscard]] bool split_levels(std::vector<key_view_t>& out) const {
         const std::size_t start = out.size();
         std::size_t i = 0;
         while (i + 4 <= key_.size()) {
             const std::size_t len = detail::load_le<std::uint16_t>(key_.subspan(i + 2, 2));
-            if (i + 4 + len > key_.size()) break;
+            if (len == 0 || i + 4 + len > key_.size()) break;
             i += 4 + len;
             out.push_back(key_view_t{key_.first(i)});
         }

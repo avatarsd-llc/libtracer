@@ -448,6 +448,35 @@ void test_two_nodes_zero_copy_store() {
     }
 }
 
+/**
+ * @brief #932 — a TX-side drop is COUNTED, and readable through the `transport_t` seam.
+ *
+ * A peer-less listener has nobody to send to, so every `send` sheds the frame. That
+ * used to be a bare return: no counter moved, and a consumer holding only a
+ * `transport_t*` could not observe any drop from any transport. Now `dropped_tx()`
+ * ticks and `drop_stats()` carries it across the interface.
+ */
+void test_tx_drop_counted() {
+    std::printf("tx drops are counted and visible through transport_t (#932):\n");
+    // Listener (learn-peer) mode: an unresolvable peer host leaves the endpoint
+    // unset, so nothing is addressable until a datagram teaches it a source.
+    tr::net::udp_transport_t peerless(47130, "", 0);
+    check(peerless.ok(), "peer-less listener bound");
+    check(peerless.dropped_tx() == 0, "a fresh link has shed nothing");
+
+    const std::vector<std::byte> frame = value_tlv({0x01, 0x02});
+    peerless.send(std::span<const std::byte>(frame));
+    const std::span<const std::byte> one[1] = {frame};
+    peerless.send(std::span<const std::span<const std::byte>>(one));
+    check(peerless.dropped_tx() == 2, "both sends with no peer are counted, not silent");
+
+    // The point of the hoist: a generic transport_t* holder sees the same number.
+    tr::net::transport_t* generic = &peerless;
+    const tr::net::transport_drop_stats_t s = generic->drop_stats();
+    check(s.dropped_tx == 2, "drop_stats() carries dropped_tx across the interface");
+    check(s.dropped_rx == 0 && s.malformed_rx == 0, "and the RX counters are still zero");
+}
+
 }  // namespace
 
 int main() {
@@ -458,5 +487,6 @@ int main() {
     test_view_pool_exhaustion();
     test_settings_max_frame();
     test_two_nodes_zero_copy_store();
+    test_tx_drop_counted();
     return tr::testing::summary("udp");
 }

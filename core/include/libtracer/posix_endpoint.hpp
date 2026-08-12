@@ -292,20 +292,21 @@ class stream_endpoint_t : protected posix_endpoint_t {
      *
      * `sendmsg(2)` (MSG_NOSIGNAL — a vanished peer must not SIGPIPE the process)
      * emits every iovec in one syscall; a stream write may stop anywhere, so the
-     * loop advances past fully-written entries and trims a partially-written one
-     * and resends. @p vec is CONSUMED (its entries' `iov_base`/`iov_len` are
-     * advanced in place) — a caller that fans the same gather to several fds must
-     * pass a fresh copy per fd. EINTR resumes, a socket-dead errno drops the rest
-     * silently, and any other errno is a malformed call that is re-attempted once
-     * and counted — the same ONE write-fault policy as @ref write_all
-     * (#903 / #948; link-down is #66 lifecycle). The caller holds
-     * @ref write_m_ per the write-serialization invariant.
+     * loop resumes from the first unwritten byte. @p vec is READ-ONLY (#932): the
+     * gather is NOT consumed, so the same array may be fanned to many fds with no
+     * per-fd copy — the resume path finishes a partially-written entry with a plain
+     * @ref write_all and re-gathers from the next entry boundary, which needs no
+     * mutable copy of the caller's array and no scratch store on the egress path.
+     * EINTR resumes, a socket-dead errno drops the rest silently, and any other
+     * errno is a malformed call that is re-attempted once and counted — the same
+     * ONE write-fault policy as @ref write_all (#903 / #948; link-down is #66
+     * lifecycle). The caller holds @ref write_m_ per the write-serialization
+     * invariant.
      *
-     * @param fd    The destination fd; a negative fd is a no-op.
-     * @param vec   The iovec array to gather (consumed in place).
-     * @param count The number of entries in @p vec.
+     * @param fd  The destination fd; a negative fd is a no-op.
+     * @param vec The entries to gather, in order, as ONE record.
      */
-    static void write_all_iov(int fd, ::iovec* vec, std::size_t count);
+    static void write_all_iov(int fd, std::span<const ::iovec> vec);
 
     /**
      * @brief Write @p bytes to the live peer as one serialized record.
@@ -540,16 +541,13 @@ class slot_server_t : public transport_t, public bus_link_t, protected stream_en
     /**
      * @brief Fan one already-encoded gathered record to EVERY open peer.
      *
-     * `write_all_iov` CONSUMES its iovec array (it advances base/len on partial writes),
-     * so each peer writes from a fresh COPY of the pristine gather taken here — the
-     * copy store is the shared `%iov_table.hpp` one, and its exhaustion DROPS the frame
-     * rather than truncating it (#848). Takes @ref peers_m_ → `write_m_`, the header
-     * lock order.
+     * `write_all_iov` reads its gather without consuming it (#932), so every peer writes
+     * straight from @p rec — no per-peer copy, and no scratch store that could exhaust
+     * and drop the frame. Takes @ref peers_m_ → `write_m_`, the header lock order.
      *
-     * @param pristine The assembled record (framing entry first, payload spans after).
-     * @param count    The number of entries in @p pristine.
+     * @param rec The assembled record (framing entry first, payload spans after).
      */
-    void broadcast_iov(const ::iovec* pristine, std::size_t count);
+    void broadcast_iov(std::span<const ::iovec> rec);
 
     /**
      * @name Variance points (runtime virtuals — ADR-0047 §4 wiring-frequency).

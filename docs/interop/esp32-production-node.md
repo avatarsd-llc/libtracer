@@ -200,7 +200,7 @@ Rules that follow:
   [failable allocation and backpressure](../design/allocation-and-backpressure.md).
 - **Size the pool from the transport, not from hope.** `udp_transport_t` sizes RX
   segments to `min(64 KiB, backend->max_segment_size())`
-  (`core/src/transport_udp.cpp:132`; `kMaxDatagram = 65536` at
+  (`core/src/transport_udp.cpp:145`; `kMaxDatagram = 65536` at
   `core/include/libtracer/transport_udp.hpp:66`). Give the pool MTU-sized slots and
   datagrams arrive without a 64 KiB scratch buffer on a small thread stack.
 
@@ -231,11 +231,11 @@ So compose per deployment role, and load nothing else:
 
 Listeners are **config-created in-band**: a `SPEC` write to `/net:children[]`
 carrying a `kind` field creates a connection. The universal keys are `addr`, `kind`,
-`port`, `role`, `keepalive` (`core/src/transport_vertex.cpp:53`, read at `:64`); the
-two catalog child types are `client` and `listener` (`:99-107`); the created
+`port`, `role`, `keepalive` (`core/src/transport_vertex.cpp:48`, read at `:59`); the
+two catalog child types are `client` and `listener` (`:94-102`); the created
 connection mounts and routes at `/net/<module>/<name>`, the module **declared by the
-application** via `register_module` (`:133`) — declared-only per ADR-0073 §4, so an
-undeclared kind fails creation with `SCHEMA_NOT_FOUND` (`:157`). The accepted direction is
+application** via `register_module` (`:128`) — declared-only per ADR-0073 §4, so an
+undeclared kind fails creation with `SCHEMA_NOT_FOUND` (`:152`). The accepted direction is
 [RFC-0014 — creator endpoint, connection lifecycle and link liveness](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md),
 which replaces the single global catalog with a per-module creator endpoint
 `/net/<module>/conn`; that endpoint is not implemented, so a node built against this

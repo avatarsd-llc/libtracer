@@ -236,6 +236,34 @@ void test_full_policy() {
           "zero-wait: delivered + dropped accounts for EVERY frame (no silent loss)");
 }
 
+// ---------------------------------------------------------------------------
+// #932 — release() VALIDATES the pointer it is handed instead of trusting it:
+// the TWAI tx-done ISR hands back a driver-supplied pointer, so a foreign
+// pointer or a duplicated completion must be refused, never corrupt the
+// bookkeeping (out-of-bounds store, count_ underflow) from ISR context.
+// ---------------------------------------------------------------------------
+void test_release_validation() {
+    std::printf("release validation (#932 — a foreign or double release is refused):\n");
+    tr::net::can_tx_pool_t<slot_t> pool(2);
+
+    slot_t foreign;
+    check(!pool.release(&foreign), "a pointer outside the pool's slot array is refused");
+    check(pool.in_flight() == 0, "the refused foreign release did not underflow the count");
+
+    slot_t* s = pool.try_acquire();
+    check(s != nullptr, "acquire succeeds on the fresh pool");
+    check(pool.release(s), "a genuinely in-flight slot releases");
+    check(!pool.release(s), "a DOUBLE release of the same slot is refused");
+    check(pool.in_flight() == 0, "the refused double release did not underflow the count");
+
+    slot_t* a = pool.try_acquire();
+    slot_t* b = pool.try_acquire();
+    check(a != nullptr && b != nullptr, "both slots are still acquirable after the bad releases");
+    check(pool.in_flight() == 2, "bookkeeping intact: two slots in flight");
+    check(pool.release(a) && pool.release(b), "both genuine releases still succeed");
+    check(pool.in_flight() == 0, "and the pool is empty again");
+}
+
 }  // namespace
 
 int main() {
@@ -243,5 +271,6 @@ int main() {
     test_exhaustion_and_reuse();
     test_cross_thread_ownership();
     test_full_policy();
+    test_release_validation();
     return tr::testing::summary("can_tx_pool");
 }

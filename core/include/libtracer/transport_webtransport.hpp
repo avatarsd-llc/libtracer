@@ -197,6 +197,13 @@ class webtransport_transport_t : public transport_t {
      *         Each one shuts the connection down (framing sync is lost). */
     [[nodiscard]] std::uint64_t malformed_rx() const noexcept;
 
+    /** @brief The interface-level snapshot (#932) — what a generic `transport_t*` reads.
+     *         `dropped_tx` stays zero: the msquic egress does not count its shed sends yet
+     *         (a follow-up), and this reports nothing rather than a fabricated number. */
+    [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
+        return {dropped_rx(), malformed_rx(), 0};
+    }
+
     /**
      * @brief Stream contexts the live session currently holds — the leak observable (#1163).
      *

@@ -39,8 +39,9 @@ namespace tr::net {
  * and submits to the driver; the slot stays IN FLIGHT — the driver may read it
  * at any point, including from ISR context — until the driver's completion
  * callback hands it back through @ref release. Release is a single
- * store-release on the slot's flag: no locks, no allocation, no system calls,
- * so it is safe to call from a tx-done ISR.
+ * compare-exchange on the slot's flag: no locks, no allocation, no system
+ * calls, so it is safe to call from a tx-done ISR — and it validates the
+ * pointer it is handed, because that pointer comes from the driver (#932).
  *
  * Concurrency contract (matches the `can_link_t` seam, where writes are
  * serialized under the link's write lock):
@@ -99,14 +100,33 @@ class can_tx_pool_t {
     /**
      * @brief Return @p slot to the pool once the driver is done with it.
      *
-     * ISR-safe: one store-release plus a relaxed counter update — no locks, no
-     * allocation. @p slot must be a pointer previously handed out by
-     * @ref try_acquire on this pool and not yet released.
+     * ISR-safe: one compare-exchange plus a relaxed counter update — no locks,
+     * no allocation. @p slot should be a pointer previously handed out by
+     * @ref try_acquire on this pool and not yet released — but the caller is
+     * typically a DRIVER completion callback (the TWAI tx-done ISR) handing back
+     * a driver-supplied pointer, so the pool VALIDATES it rather than trusting
+     * it (#932): a pointer outside this pool's slot array, and a double or
+     * foreign release of a slot that is not in flight, are both refused instead
+     * of corrupting the `in_flight_`/`count_` bookkeeping (out-of-bounds store,
+     * counter underflow) from ISR context.
+     * @return true iff @p slot was an in-flight slot of this pool and was freed.
      */
-    void release(slot_t* slot) noexcept {
+    bool release(slot_t* slot) noexcept {
+        // Bounds first: an index is only formed for a pointer that lies inside
+        // the slot array, so a foreign pointer never reaches in_flight_[].
+        if (slot < slots_.get() || slot >= slots_.get() + capacity_) return false;
         const auto i = static_cast<std::size_t>(slot - slots_.get());
+        // CAS true→false: a double (or never-acquired) release loses here and is
+        // refused, so count_ can never underflow. release on success orders the
+        // completed transmit before the slot's next reuse (pairs with the
+        // acquire in try_acquire).
+        bool expected = true;
+        if (!in_flight_[i].compare_exchange_strong(expected, false, std::memory_order_release,
+                                                   std::memory_order_relaxed)) {
+            return false;
+        }
         count_.fetch_sub(1, std::memory_order_relaxed);
-        in_flight_[i].store(false, std::memory_order_release);
+        return true;
     }
 
     /** @brief The fixed slot count chosen at construction. */
