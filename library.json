@@ -36,7 +36,6 @@
   "build": {
     "includeDir": "core/include",
     "srcDir": "core/src",
-    "srcFilter": "+<*> -<mem_cuda.cpp> -<transport_quic.cpp> -<transport_webtransport.cpp> -<socketcan_link.cpp>",
     "extraScript": "integrations/platformio/pio_esp32_can.py"
   }
 }

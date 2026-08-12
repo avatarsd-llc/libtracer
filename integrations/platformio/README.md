@@ -50,11 +50,44 @@ the package and `pio run`s the `framework = espidf` consumer in
 [`tests/packaging/pio_esp32_can/`](../../tests/packaging/pio_esp32_can/). Moving frames
 on a real bus is a separate, still-open sign-off — the job energises no pin.
 
+## No WebSocket on `espressif32`
+
+**A PlatformIO `espressif32` build ships no WebSocket transport at all** (#984, applying
+the #947 maintainer ruling: *ESP-IDF WebSocket must never use POSIX sockets*).
+
+- The portable `transport_ws_server` / `transport_ws_client` pair is **excluded
+  per-environment** by the build hook: on lwIP its scatter-gather egress is rejected
+  (`lwip_sendmsg` returns `EOPNOTSUPP` for `MSG_NOSIGNAL`), so every data frame was
+  silently dropped while the handshake and PING/PONG still worked (#948) — it was a
+  working-looking transport that never delivered data on silicon. The hook also swaps
+  core's full-node `register_builtin_transports` (udp+tcp+ws) for the udp+tcp-only
+  dispatcher in `builtin_transports_udp_tcp.cpp`, so no dangling reference drags the
+  pair back in. TU selection, no feature macros.
+- The IDF-native replacements (`httpd_ws_link_t` / `esp_ws_client_link_t`) are **not
+  packaged for PlatformIO**: they depend on `esp_http_server` / `esp_websocket_client`,
+  and the latter is an IDF managed component whose availability under PlatformIO's
+  `framework-espidf` is not established. Packaging them is the sanctioned follow-up on
+  #984 once that dependency verifies — and it must update the CI gate alongside.
+
+Need WS on an ESP32 today? Use the [ESP-IDF component](../esp-idf/) packaging, which
+ships the native links. Every other transport this package compiles (udp, tcp, can)
+is unaffected, on every platform; non-`espressif32` platforms keep the portable WS
+pair.
+
+The state is CI-gated on the linked fixture image by the same `pio-esp32-can` workflow:
+`tools/check_esp_ws_plane.py --ws-plane none` asserts zero portable-WS **and** zero
+native-link symbols via `nm` (with a symbol-table floor so a stripped ELF cannot pass
+vacuously), plus the object-tree check.
+
 ## Files
 
 - `library.json` (repo root) — PlatformIO manifest (points at `core/include/` and
   `core/src/`, and lists what `pio pkg publish` ships in `export.include`).
-- `pio_esp32_can.py` — the `build.extraScript` hook described above.
+- `pio_esp32_can.py` — the `build.extraScript` hook described above. It also owns the
+  package's **source filter** (a manifest `build.srcFilter` would take precedence over
+  the script's and cannot express the per-environment `espressif32` WS exclusion).
+- `builtin_transports_udp_tcp.cpp` — the udp+tcp `register_builtin_transports`
+  dispatcher the hook compiles on `espressif32` in place of core's full-node one.
 
 ## Releasing
 

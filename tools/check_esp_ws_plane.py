@@ -25,16 +25,31 @@ because either alone is weak:
   the image on its own — the factory registration keeps the symbols reachable, which
   is why the before-figure on #947's consumer build was 46 linked symbols, not 0.
 
-The converse half — the IDF-native links are still built — is asserted too, so a
-future over-trim that sheds the whole WS plane cannot pass as a fix.
+The converse half depends on WHICH WS plane the packaging under test ships, selected
+with ``--ws-plane``:
+
+* ``native`` (the default — the ESP-IDF component): the IDF-native links must still be
+  built, so a future over-trim that sheds the whole WS plane cannot pass as a fix.
+* ``none`` (the PlatformIO ``espressif32`` packaging, #984): the ruled state is NO
+  WebSocket at all — the portable pair is excluded per-environment by the
+  ``library.json`` extra script, and the IDF-native links are not packaged for
+  PlatformIO. Here the converse flips: the native-link TUs must be ABSENT too (their
+  arrival is #984's sanctioned follow-up and must come with its own gate change), and
+  their symbols join the nm assertion.
+
+Object files are matched under both spellings — ``.cpp.obj`` (ESP-IDF's CMake/Ninja)
+and ``.cpp.o`` (PlatformIO's SCons) — so a PlatformIO ``.pio/build/<env>`` tree is a
+valid ``--build-dir``.
 
 Usage::
 
     tools/check_esp_ws_plane.py --build-dir integrations/esp-idf/examples/full_node/build
     tools/check_esp_ws_plane.py --build-dir build --nm riscv32-esp-elf-nm
+    tools/check_esp_ws_plane.py --build-dir tests/packaging/pio_esp32_can/.pio/build/esp32c6 \
+        --ws-plane none --nm ~/.platformio/packages/toolchain-riscv32-esp/bin/riscv32-esp-elf-nm
 
-Intended for a CHIP-target build with ``CONFIG_LIBTRACER_TRANSPORT_WS=y``. Do not run
-it against the ``linux`` target: there the portable pair is the correct answer.
+Intended for a CHIP-target image. Do not run it against the ``linux`` target: there
+the portable pair is the correct answer.
 """
 from __future__ import annotations
 
@@ -50,11 +65,32 @@ import sys
 # source identifier verbatim, so no demangler is needed (and none may be available).
 PORTABLE_WS_SYMBOLS = ("transport_ws_server", "transport_ws_client")
 
-# Object files whose presence in the build tree means the portable pair was compiled.
-PORTABLE_WS_OBJECTS = ("transport_ws.cpp.obj", "builtin_transport_ws.cpp.obj")
+# The IDF-native WS link types — asserted absent from the image under --ws-plane none.
+NATIVE_WS_SYMBOLS = ("httpd_ws_link", "esp_ws_client_link")
 
-# The IDF-native WS links that replace them on a chip target.
-NATIVE_WS_OBJECTS = ("httpd_ws_link.cpp.obj", "esp_ws_client_link.cpp.obj")
+# TUs whose object file in the build tree means the portable pair was compiled.
+PORTABLE_WS_TUS = ("transport_ws.cpp", "builtin_transport_ws.cpp")
+
+# The IDF-native WS links that replace them in the ESP-IDF component (--ws-plane native).
+NATIVE_WS_TUS = ("httpd_ws_link.cpp", "esp_ws_client_link.cpp")
+
+def find_objects(build_dir: pathlib.Path, tu: str) -> list[pathlib.Path]:
+    """Return every object compiled from @p tu (a ``<stem>.cpp`` name) under @p build_dir.
+
+    All three object spellings are matched, because either build system may produce the
+    tree under test: ESP-IDF's CMake/Ninja keeps the source extension and appends
+    ``.obj`` (``transport_ws.cpp.obj``, sometimes ``.o``), while PlatformIO's SCons
+    REPLACES the extension (``transport_ws.o`` — measured on a real
+    ``.pio/build/<env>`` tree, where a ``.cpp.o`` pattern alone matches nothing and
+    would make the archive-side half of this gate vacuously green). The extensionless
+    form cannot collide with IDF's own C TUs of the same stem (e.g. ``tcp_transport``'s
+    ``transport_ws.c``): those keep their extension as ``transport_ws.c.o``.
+    """
+    stem = tu.removesuffix(".cpp")
+    hits: list[pathlib.Path] = []
+    for pattern in (tu + ".obj", tu + ".o", stem + ".o"):
+        hits.extend(build_dir.rglob(pattern))
+    return sorted(hits)
 
 # Floor on the symbol table an nm read must produce before its "no match" counts as
 # evidence. Not a tuned threshold — any real IDF app ELF lists thousands, and the only
@@ -63,12 +99,17 @@ MIN_PLAUSIBLE_SYMBOLS = 100
 
 
 def find_elf(build_dir: pathlib.Path) -> pathlib.Path | None:
-    """Return the project ELF in @p build_dir (the one next to the flashable .bin)."""
-    candidates = sorted(build_dir.glob("*.elf"))
+    """Return the project ELF in @p build_dir (the one next to the flashable .bin).
+
+    An idf.py build drops exactly one top-level ELF (the bootloader's lives in its own
+    subdirectory, which the non-recursive glob skips), but a PlatformIO ``.pio/build/<env>``
+    tree puts ``bootloader.elf`` NEXT TO ``firmware.elf`` — and sorted order would pick the
+    bootloader, whose populated-but-tiny symbol table can even clear the floor guard. The
+    bootloader is never the image under test, so it is excluded by name.
+    """
+    candidates = [p for p in sorted(build_dir.glob("*.elf")) if p.name != "bootloader.elf"]
     if not candidates:
         return None
-    # A project build drops exactly one top-level ELF; bootloader/partition ELFs live
-    # in their own subdirectories, which the non-recursive glob above already skips.
     return candidates[0]
 
 
@@ -85,6 +126,10 @@ def main() -> int:
     ap.add_argument("--build-dir", required=True, type=pathlib.Path,
                     help="the idf.py build directory of a CHIP-target project")
     ap.add_argument("--nm", default=None, help="nm binary that can read the target ELF")
+    ap.add_argument("--ws-plane", choices=("native", "none"), default="native",
+                    help="which WS plane this packaging ships: 'native' (ESP-IDF "
+                         "component — IDF links must be present) or 'none' (PlatformIO "
+                         "espressif32, #984 — IDF links must be absent too)")
     args = ap.parse_args()
 
     build_dir: pathlib.Path = args.build_dir
@@ -95,23 +140,33 @@ def main() -> int:
     ok = True
 
     # (1) Archive side: the portable TUs must not have been compiled at all.
-    for obj in PORTABLE_WS_OBJECTS:
-        hits = sorted(build_dir.rglob(obj))
+    for tu in PORTABLE_WS_TUS:
+        hits = find_objects(build_dir, tu)
         if hits:
             ok = False
-            print(f"ERROR: {obj} was compiled into the chip build — the portable "
+            print(f"ERROR: {tu} was compiled into the chip build — the portable "
                   f"(POSIX-socket) WS transport is not excluded:", file=sys.stderr)
             for h in hits:
                 print(f"    - {h}", file=sys.stderr)
 
-    # (2) Converse: the IDF-native links must still be there, so shedding the WHOLE WS
-    # plane cannot masquerade as this fix.
-    for obj in NATIVE_WS_OBJECTS:
-        if not any(build_dir.rglob(obj)):
+    # (2) The converse, per --ws-plane. native: the IDF-native links must still be
+    # there, so shedding the WHOLE WS plane cannot masquerade as the fix. none: the
+    # ruled state IS no WS plane at all (#984), so a native link showing up means the
+    # packaging grew a WS surface without the gate being updated alongside it.
+    for tu in NATIVE_WS_TUS:
+        hits = find_objects(build_dir, tu)
+        if args.ws_plane == "native" and not hits:
             ok = False
-            print(f"ERROR: {obj} is absent — the IDF-native WS plane is missing, so "
-                  "this build has no WebSocket at all (over-trim, not a fix).",
+            print(f"ERROR: {tu} object is absent — the IDF-native WS plane is missing, "
+                  "so this build has no WebSocket at all (over-trim, not a fix).",
                   file=sys.stderr)
+        elif args.ws_plane == "none" and hits:
+            ok = False
+            print(f"ERROR: {tu} was compiled — this packaging ships NO WS plane "
+                  "(#984); packaging the IDF-native links is a separate change that "
+                  "must update this gate:", file=sys.stderr)
+            for h in hits:
+                print(f"    - {h}", file=sys.stderr)
 
     # (3) Image side: nm on the final ELF.
     elf = find_elf(build_dir)
@@ -144,25 +199,33 @@ def main() -> int:
                           f"{elf.name} — too few to have searched. A stripped or "
                           "unreadable ELF must not read as 'zero portable-WS symbols'.",
                           file=sys.stderr)
-                pattern = re.compile("|".join(PORTABLE_WS_SYMBOLS))
+                # Under --ws-plane none the native link types are forbidden in the
+                # image too — no WS plane means no WS plane, either implementation.
+                forbidden = PORTABLE_WS_SYMBOLS
+                if args.ws_plane == "none":
+                    forbidden = forbidden + NATIVE_WS_SYMBOLS
+                pattern = re.compile("|".join(forbidden))
                 linked = [ln for ln in symbols if pattern.search(ln)]
                 if linked:
                     ok = False
-                    print(f"ERROR: {len(linked)} portable-WS symbol(s) linked into "
-                          f"{elf.name} — the ESP-IDF image must carry ZERO "
-                          "transport_ws_server / transport_ws_client symbols:",
-                          file=sys.stderr)
+                    print(f"ERROR: {len(linked)} forbidden WS symbol(s) linked into "
+                          f"{elf.name} — this image must carry ZERO symbols matching "
+                          f"{' / '.join(forbidden)}:", file=sys.stderr)
                     for ln in linked[:20]:
                         print(f"    {ln}", file=sys.stderr)
                     if len(linked) > 20:
                         print(f"    ... and {len(linked) - 20} more", file=sys.stderr)
                 elif len(symbols) >= MIN_PLAUSIBLE_SYMBOLS:
-                    print(f"ok: 0 portable-WS symbols among {len(symbols)} in {elf.name} "
-                          f"(checked with {nm})")
+                    print(f"ok: 0 forbidden WS symbols among {len(symbols)} in "
+                          f"{elf.name} (checked with {nm})")
 
     if ok:
-        print("ok: the chip image carries the IDF-native WS plane only "
-              "(httpd_ws_link_t / esp_ws_client_link_t).")
+        if args.ws_plane == "native":
+            print("ok: the chip image carries the IDF-native WS plane only "
+                  "(httpd_ws_link_t / esp_ws_client_link_t).")
+        else:
+            print("ok: the image carries NO WebSocket plane — neither the portable "
+                  "POSIX pair nor the IDF-native links (#984).")
     return 0 if ok else 1
 
 

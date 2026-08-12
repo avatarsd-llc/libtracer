@@ -103,6 +103,24 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   field-name set. Admitted callers and the owner see no change anywhere. Conformance:
   `acl/denied-caller-undeclared-app-field`; pinned by `acl_test.cpp`
   `test_denied_caller_disclosure_parity`.
+- **PlatformIO `espressif32` ships no WebSocket transport (#984, the #947 ruling's
+  PlatformIO half).** The portable POSIX-socket `transport_ws_server` /
+  `transport_ws_client` pair compiled into PlatformIO espressif32 images even after #978
+  removed it from the ESP-IDF component — and on lwIP it never delivered data (#948:
+  `lwip_sendmsg` rejects `MSG_NOSIGNAL` with `EOPNOTSUPP`, so every scatter-gather data
+  frame was silently dropped while the handshake and PING/PONG worked). The
+  `library.json` extra script now owns the package source filter (the manifest
+  `srcFilter` moved there — a manifest filter takes precedence and cannot express a
+  per-environment exclusion) and, on `espressif32` only, excludes the pair plus core's
+  full-node `register_builtin_transports`, compiling a udp+tcp-only dispatcher
+  (`integrations/platformio/builtin_transports_udp_tcp.cpp`) in its place — TU
+  selection, no feature macros. The IDF-native links are **not** packaged for
+  PlatformIO (their `esp_websocket_client` dependency under `framework-espidf` is
+  unverified; sanctioned follow-up on #984) — a consumer needing WS on ESP32 uses the
+  ESP-IDF component. Gated in `pio-esp32-can` CI on the linked fixture image:
+  `tools/check_esp_ws_plane.py --ws-plane none` (zero portable **and** native WS
+  symbols, with the symbol-table-floor guard). Non-`espressif32` platforms are
+  unchanged.
 
 ## [0.9.1] — 2026-08-10
 

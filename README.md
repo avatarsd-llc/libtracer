@@ -39,7 +39,7 @@ libtracer is a **spec first**, then implementations. The C++ core is the golden 
 | **Rust** ([`bindings/rust/`](bindings/rust/)) | native `#![no_std]` **wire codec + typed tier** (builders, PATH, ERROR registry, FWD/FIELD) — no transports/runtime yet | byte‑verified; pre‑release |
 | **TypeScript** ([`bindings/typescript/`](bindings/typescript/)) | native browser/**edge** — codec + client (read/write/await/subscribe) + WebSocket/WebTransport | byte‑verified; client/transports experimental |
 | **ESP‑IDF** ([`integrations/esp-idf/`](integrations/esp-idf/)) | packages the full C++ node as a managed component (CI‑built esp32c6/c3 + linux) | working |
-| **PlatformIO** ([`integrations/platformio/`](integrations/platformio/)) | packages + compiles the portable core (codec/graph/tcp/udp/ws/can) | working; esp32 CAN via a best‑effort build hook (board‑unverified) |
+| **PlatformIO** ([`integrations/platformio/`](integrations/platformio/)) | packages + compiles the portable core (codec/graph/tcp/udp/ws/can; on `espressif32` **no ws** — the POSIX pair is excluded per #947/#984, see the [integration README](integrations/platformio/README.md)) | working; esp32 CAN via a best‑effort build hook (board‑unverified) |
 | **ESPHome · Arduino** ([`integrations/`](integrations/)) | platform packaging | ESPHome is a placeholder stub · Arduino **not planned** |
 | **ROS 2** (`rmw_tracer`, [`bindings/ros2/`](bindings/ros2/)) | drop‑in RMW over the C++ graph | **early stub** |
 
