@@ -20,6 +20,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 > **§C/§E amended by [RFC-0016](0016-composed-branch-read.md) (2026-07-20):** the composed subtree-read this RFC deferred is now specified and accepted — a plain `READ` of a vertex with ≥ 1 registered child serves the **composed branch read**, the folded `POINT` tree of its registered subtree (landed stored TLVs verbatim), the read-side dual of the §B decomposition. §C's one-store invariant and cross-leaf atomicity non-promise stand unchanged and carry into RFC-0016.
 
+> **§E child-removal deferral struck (2026-08-12, [#937](https://github.com/avatarsd-llc/libtracer/issues/937)):** the last deferred point — child-removal delivery semantics — is ruled, not specified: **no removal-push surface exists, normatively.** The vertex-delete surface this deferral waited on landed as retirement ([RFC-0009](0009-vertex-removal-and-subscriber-eviction.md)), whose §B.5 requires that retirement deliver nothing and wake nothing; the ruling agrees with it. See §E for the full statement.
+
 ## Summary
 
 Every subscription becomes a **subtree subscription**: a `SUBSCRIBER` edge on a
@@ -50,8 +52,11 @@ child (the vertex's own value).
    unimplemented. This RFC pins them. A newly **appeared** child surfaces as its
    first write bubbling to the parent subscriber (and write-creates means
    appearance *is* the first write); a child's **value change** surfaces the
-   same way. Child **removal** delivery remains the one open point of #66 —
-   explicitly out of scope here (there is no vertex-delete surface yet).
+   same way. Child **removal** delivery was the one open point of #66 —
+   explicitly out of scope here (there was no vertex-delete surface yet). It is
+   no longer open: ruled 2026-08-12 by
+   [#937](https://github.com/avatarsd-llc/libtracer/issues/937) — **no
+   removal-push surface exists** (see §E).
 2. **Batching without a wire container.** A producer that samples many leaves
    coherently needs a way to push them together. The branch write gives it one
    frame per subtree — decomposed at the terminus into per-leaf truth — while
@@ -224,8 +229,20 @@ sequenceDiagram
 timers — the producer owns cadence and explicitly pushes (a leaf, a branch, or
 several subtrees; batching is N self-contained frames in one `send(iov)`, never
 a wire batch container). No per-subscriber QoS beyond the existing
-byte-agnostic delivery policy. **Deferred:** child-removal delivery semantics
-(#66's remaining open point — tied to a future vertex-delete surface);
+byte-agnostic delivery policy. **Deferred:** ~~child-removal delivery semantics
+(#66's remaining open point — tied to a future vertex-delete surface)~~ (ruled
+2026-08-12 by [#937](https://github.com/avatarsd-llc/libtracer/issues/937) — no
+longer deferred: **no removal-push surface exists, normatively.** The
+vertex-delete surface landed as retirement, and
+[RFC-0009](0009-vertex-removal-and-subscriber-eviction.md) §B.5 requires that
+retirement deliver nothing and wake nothing — no tombstone delta, no
+`STATUS=ERROR(NOT_FOUND)` at the removed child's path, no pushed snapshot diff.
+A subscriber learns that a child is gone only by re-reading: enumerating
+`:children[]`, or diffing a composed branch read
+([RFC-0016](0016-composed-branch-read.md)). Revisited only when a real consumer
+— the [#58](https://github.com/avatarsd-llc/libtracer/issues/58) reconciler, or
+the SPA — demonstrates the need, and because §B.5 forbids the mechanism, any
+future push surface is a new amendment, not a reopening of this deferral);
 wire-level concrete-path tagging of remote deliveries (RFC-0003, draft);
 `delivery_scope = SNAPSHOT` producer-side re-aggregation (the aggregate remains
 available as a read — since 2026-07-20 the **composed branch read** of

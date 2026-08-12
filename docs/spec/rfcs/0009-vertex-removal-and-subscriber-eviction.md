@@ -64,6 +64,20 @@ with the removal question explicitly parked:
 > Child-*removal* observation remains future work and is noted in RFC-0005;
 > **reopen or file fresh if a concrete need lands.**
 
+> **Ruled 2026-08-12 ([#937](https://github.com/avatarsd-llc/libtracer/issues/937))
+> — the future-work line above is closed, not still open.** The reopen clause was
+> exercised and answered with #66's option 3: **no removal-push surface exists,
+> normatively.** This RFC's §B.5 and §C *are* the ruling's substance — retirement
+> delivers nothing and wakes nothing, and a retired path reads
+> `tr::path::not_found` — and the RFC-0005 §E deferral this line points at is
+> struck in the same change, so no document any longer records removal delivery
+> as an open point. #407's concrete need was satisfied by the pull semantics this
+> RFC shipped; no consumer has since demonstrated a need for a push. Revisit only
+> when a real consumer — the
+> [#58](https://github.com/avatarsd-llc/libtracer/issues/58) reconciler, or the
+> SPA — demonstrates the need, and because §B.5 forbids the mechanism, that
+> revisit is a fresh amendment (a new RFC), not a reopening here.
+
 [#407](https://github.com/avatarsd-llc/libtracer/issues/407) is that need. The
 d2d-hardening milestone makes a **web UI the setup edge** that forms links on
 devices and departs ([reference/13](../../reference/13-network-formation.md) §2, §5);
