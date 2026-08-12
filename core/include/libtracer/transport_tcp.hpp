@@ -282,7 +282,11 @@ class transport_tcp_server : public slot_server_t {
      *                   frame is drained in-framer, dropped, and dropped_rx()
      *                   ticks; never an OOM.  Must outlive the transport.
      * @param max_frame  Per-connection receive cap (0 → @ref
-     *                   tcp_transport_t::kMaxFrame); the effective cap also
+     *                   tcp_transport_t::kMaxFrame). TIGHTEN-ONLY: a value
+     *                   above kMaxFrame is clamped to it
+     *                   (`length_prefix_framer::configured_cap`, #1035) — a
+     *                   config-writable key must not raise the ingress
+     *                   buffering bound; the effective cap also
      *                   honors the backend's real capacity
      *                   (length_prefix_framer::effective_cap — the
      *                   no-synthetic-limits doctrine).

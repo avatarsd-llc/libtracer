@@ -205,5 +205,20 @@ int main() {
               "on_prefix: ACCEPT carries a segment holding the frame");
     }
 
+    // 9. configured_cap — the :settings max_frame resolution every framed transport
+    //    assigns through — is TIGHTEN-ONLY against kDefaultMaxFrame (#1035): a
+    //    config-writable key must not raise the ingress cap.
+    {
+        using framer_t = tr::net::length_prefix_framer;
+        constexpr std::size_t kDefault = framer_t::kDefaultMaxFrame;
+        check(framer_t::configured_cap(0) == kDefault, "configured_cap: 0 (unset) => the default");
+        check(framer_t::configured_cap(4096) == 4096,
+              "configured_cap: a value below the default tightens the cap");
+        check(framer_t::configured_cap(kDefault) == kDefault,
+              "configured_cap: the default itself passes through");
+        check(framer_t::configured_cap(kDefault * 2) == kDefault,
+              "configured_cap: a value ABOVE the default is clamped — tighten-only, never raise");
+    }
+
     return tr::testing::summary("length_prefix_framer");
 }

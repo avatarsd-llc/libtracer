@@ -93,7 +93,7 @@ tcp_transport_t::tcp_transport_t(const std::string& peer_host, std::uint16_t pee
                                  mem::mem_backend_t* backend, std::size_t max_frame,
                                  std::size_t recv_stack, bool defer_recv)
     : backend_(backend), recv_stack_(recv_stack) {
-    if (max_frame != 0) max_frame_ = max_frame;
+    max_frame_ = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
     const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return;
 
@@ -150,7 +150,7 @@ void tcp_transport_t::start_receiving() {
 tcp_transport_t::tcp_transport_t(std::uint16_t bind_port, mem::mem_backend_t* backend,
                                  std::size_t max_frame, std::size_t recv_stack)
     : listen_(true), backend_(backend) {
-    if (max_frame != 0) max_frame_ = max_frame;
+    max_frame_ = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
     listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd_ < 0) return;
 
@@ -314,7 +314,7 @@ transport_tcp_server::transport_tcp_server(std::uint16_t bind_port, mem::mem_bac
                                            std::size_t max_frame, std::size_t max_peers,
                                            bool peer_named, std::size_t recv_stack)
     : slot_server_t(max_peers, peer_named), backend_(backend) {
-    if (max_frame != 0) max_frame_ = max_frame;
+    max_frame_ = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
     if (!bind_listen(bind_port)) return;
     start([this] { run(); }, recv_stack);
 }

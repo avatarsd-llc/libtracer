@@ -760,7 +760,7 @@ webtransport_transport_t::webtransport_transport_t(const std::string& peer_host,
     impl_t& i = *impl_;
     i.rx = &rx_;  // the delivery-tier slot lives in the transport_t base
     i.backend = backend;
-    if (max_frame != 0) i.max_frame = max_frame;
+    i.max_frame = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
     // Departure seam (RFC-0009 §D extended to peer departure): wire the base's
     // connection-down / one-peer replacement harvest to this transport_t's flat
     // link-down notifier. A WebTransport endpoint carries ONE session (one peer
@@ -817,7 +817,7 @@ webtransport_transport_t::webtransport_transport_t(std::uint16_t bind_port,
     impl_t& i = *impl_;
     i.rx = &rx_;  // the delivery-tier slot lives in the transport_t base
     i.backend = backend;
-    if (max_frame != 0) i.max_frame = max_frame;
+    i.max_frame = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
     // Departure seam (RFC-0009 §D extended to peer departure): wire the base's
     // connection-down / one-peer replacement harvest to this transport_t's flat
     // link-down notifier. A WebTransport endpoint carries ONE session (one peer

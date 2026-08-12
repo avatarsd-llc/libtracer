@@ -208,7 +208,7 @@ transport_ws_server::transport_ws_server(std::uint16_t bind_port, mem::mem_backe
                                          std::size_t max_frame, std::size_t max_peers,
                                          bool peer_named, std::size_t recv_stack)
     : slot_server_t(max_peers, peer_named), backend_(backend) {
-    if (max_frame != 0) max_frame_ = max_frame;
+    max_frame_ = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
     if (!bind_listen(bind_port)) return;
     start([this] { run(); }, recv_stack);
 }
@@ -467,7 +467,7 @@ transport_ws_client::transport_ws_client(const std::string& host, std::uint16_t 
                                          mem::mem_backend_t* backend, std::size_t max_frame,
                                          std::size_t recv_stack, bool defer_recv)
     : backend_(backend), recv_stack_(recv_stack) {
-    if (max_frame != 0) max_frame_ = max_frame;
+    max_frame_ = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
     // Seed the per-frame masking-key stream with something that varies between
     // connections (steady_clock + this address). Not crypto-strong — RFC 6455
     // masking exists for proxy/cache safety, not to defend against a peer.
