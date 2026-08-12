@@ -546,12 +546,11 @@ pub fn acl_aces(tlv: &Tlv) -> Result<Vec<Ace>, BuildError> {
  * grammar ([`name`]), while `type` is a catalog selector that is never addressed
  * and only has to be non-empty ([`text_name`]).
  *
- * @note [`name`] is *stricter* than the C++ `valid_segment` it mirrors: it rejects
- *       `[` and `]`, which that predicate deliberately admits as the address-index
- *       suffix form (`frame[7]`, reference/03 §Index forms). So this builder refuses
- *       a `child_name` a terminus would accept. Erring strict is safe — no wrong
- *       bytes are emitted — but it is a real cross-tier drift against ADR-0073 §1,
- *       tracked separately.
+ * @note [`name`] and the C++ `valid_segment` it mirrors agree on the full
+ *       seven-character reserved set `/ : . [ ] * ?` (#996 closed the drift where
+ *       C++ admitted `[` / `]`), pinned cross-tier by the
+ *       `path/path-reserved-brackets` conformance vector. So a `child_name` this
+ *       builder refuses is one every conforming terminus refuses too.
  *
  * # Errors
  * A segment error from a NAME key, from a `type` outside the 64-byte budget, or

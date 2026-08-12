@@ -311,7 +311,7 @@ Two independent streams, common timestamp domain, subscriber joins by timestamp.
 ### Architecture
 
 ```
-/camera/frame[0..N]          ← 30 fps, 4 MiB per frame
+/camera/frame/<0..N>         ← 30 fps, 4 MiB per frame
 /lidar/scan[0..M]            ← 10 Hz, 100 KiB per scan
 /sensor/clock                 ← PTP-synced clock vertex (optional)
 ```
@@ -321,7 +321,7 @@ Each producer publishes to its own vertex with its own slicing. **Both producers
 ### Publisher: camera
 
 ```cpp
-extern std::vector<tr::graph::vertex_handle_t> camera_frame;   // camera_frame[i] == /camera/frame[i]
+extern std::vector<tr::graph::vertex_handle_t> camera_frame;   // camera_frame[i] == /camera/frame/<i>
 
 void on_frame(std::byte* frame, std::size_t frame_len, std::uint64_t /*ts_ns*/,
               tr::graph::graph_t& g) {
@@ -353,7 +353,7 @@ void on_scan(std::byte* scan, std::size_t scan_len, std::uint64_t /*ts_ns*/,
 ```cpp
 // Subscribe to both streams: a SUBSCRIBER record naming the local fusion handler,
 // written to each parent's :subscribers[] field (subtree subscription).
-g.write(tr::graph::path_t("/camera/frame:subscribers[]"), cam_subscriber_value);   // every /camera/frame[i]
+g.write(tr::graph::path_t("/camera/frame:subscribers[]"), cam_subscriber_value);   // every /camera/frame/<i>
 g.write(tr::graph::path_t("/lidar/scan:subscribers[]"),   lidar_subscriber_value); // every /lidar/scan[i]
 
 // In the fusion handler. The delivered view borrows the producer's bytes; a
@@ -449,7 +449,7 @@ The same vertex/edge primitives cover **eight orders of magnitude** of payload r
 | GPIO register | 4 bytes | poll | n/a (read-only) | view into MMIO |
 | IMU sample | 28 bytes | 1 kHz | 35 KB/s | user-range record (PL=1) or packed VALUE |
 | 1 KB sensor record | 1 KiB | 1 kHz | 1 MB/s | user-range record (PL=1) of named fields |
-| 4K camera stream | 8 MiB | 30 Hz | 240 MB/s | address-shift `frame[0..N]` |
+| 4K camera stream | 8 MiB | 30 Hz | 240 MB/s | address-shift `frame/<0..N>` |
 | Lidar + camera fusion | varies | 10 Hz | 250 MB/s | two vertex trees, ts-join |
 | 1 GS/s ADC | 4 KiB slices | 244 kHz | 1 GB/s | address-shift `raw[0..N]` |
 | Continuous shared variable | 4 bytes | 1 Hz | 32 B/s | VALUE + a durability-requesting sub |

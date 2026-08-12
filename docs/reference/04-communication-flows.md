@@ -292,7 +292,7 @@ Publisher                  Router                  Subscriber on parent vertex
    |                          |                       /camera/frame  (subtree subscription)
    |                          |                                    |
    | for i in 0..N-1:         |                                    |
-   |   write("/camera/frame[i]", VALUE{ts=T, bytes=slice_i})       |
+   |   write("/camera/frame/<i>", VALUE{ts=T, bytes=slice_i})       |
    |─────────────────────────>|                                    |
    |                          |── resolve concrete path             |
    |                          |── bubble to parent's subscription   |

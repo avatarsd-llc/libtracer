@@ -45,17 +45,20 @@ inline constexpr std::size_t kMaxFieldDepth = 8;
  * not any single missing check, is the recurring defect — cf. #681). A name that fails
  * here answers `INVALID_PATH` wherever it is rejected.
  *
- * Checks: non-empty, at most `kMaxSegmentBytes`, and none of the reserved characters
- * of reference/03 — `/` and `:` are separators, `.` separates field levels, `*` is the
- * wildcard selector, `?` is reserved for the future. `[` / `]` are deliberately NOT
- * rejected: they delimit an address index suffix (`/camera/frame[7]`, reference/03
- * §Index forms / ADR-0008), and address-segment index parsing is not yet implemented —
- * rejecting brackets would break that documented form. This enforces the unambiguous
- * subset now; bracket handling lands with address-index parsing.
+ * Checks: non-empty, at most `kMaxSegmentBytes`, and none of the SEVEN reserved
+ * characters of reference/03 §Reserved characters — `/` and `:` are separators, `.`
+ * separates field levels, `[` / `]` delimit the grammar's index suffix (which sits
+ * OUTSIDE `name`: `segment = name [ index ]`), `*` is the wildcard selector, `?` is
+ * reserved for the future. Rejecting the brackets is the normative MUST (reference/03
+ * §Reserved characters, incorporated by spec v1 §3); the pre-#996 five-character
+ * subset admitted them on the theory that `frame[7]` travels inside the NAME bytes —
+ * ruled the other way: address-index addressing, if it lands, lives outside the NAME
+ * bytes (#996, cf. `.out-of-scope/range-slice-addressing.md`). The character set is
+ * pinned cross-tier by the `path/path-reserved-brackets` conformance vector.
  */
 [[nodiscard]] inline bool valid_segment(std::string_view seg) noexcept {
     return !seg.empty() && seg.size() <= kMaxSegmentBytes &&
-           seg.find_first_of("/:.*?") == std::string_view::npos;
+           seg.find_first_of("/:.[]*?") == std::string_view::npos;
 }
 
 /**

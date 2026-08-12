@@ -51,7 +51,7 @@ Local graph on linux-node-1:
           └── stm32-wheel/          ← UDP link: /net/stm32-wheel/<peer path>
 ```
 
-A consumer on this host reads `/net/esp32-front/camera/frame[7]`: the operation rides an `FWD{READ}` over the `esp32-front` link, resolves on the peer, and the reply retraces the route. **The consumer's code is identical** to a read of the local `/sensor/temp` — same call, same result type; only the path is longer.
+A consumer on this host reads `/net/esp32-front/camera/frame/7`: the operation rides an `FWD{READ}` over the `esp32-front` link, resolves on the peer, and the reply retraces the route. **The consumer's code is identical** to a read of the local `/sensor/temp` — same call, same result type; only the path is longer.
 
 ---
 

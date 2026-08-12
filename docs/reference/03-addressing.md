@@ -57,8 +57,7 @@ A path that violates any limit MUST be rejected with `ERROR{tr::path::invalid}`.
 /sensor/temp:settings.transport_tcp.send_buf_kb  — module-namespaced field (⚠️ grammar only, see below)
 /net/can/can0/wheel-encoder/left       — a remote vertex, routed through a transport-vertex
                                          (the mount is two segments: module, then connection NAME)
-/camera/frame[7]                       — an indexed child endpoint (one vertex per index)
-/camera/frame[]                        — the append / list spelling (see §index forms)
+/camera/frame/7                        — an indexed child endpoint (one child vertex per index)
 /i2c-bus/0x68/accel                    — peripheral on I²C bus 0x68
 /                                      — the root vertex (rarely addressed directly)
 ```
@@ -70,7 +69,7 @@ A path that violates any limit MUST be rejected with `ERROR{tr::path::invalid}`.
 An index appears in two places, and they are **different planes**:
 
 - **On a field step** (`:name[N]`, `:name[]`, `:name[*]`) — resolved against the vertex's field schema, and carried on the wire by the FIELD level's `index_mode` byte ([§the index form on the wire](#the-index-form-on-the-wire)).
-- **On an address segment** (`/camera/frame[7]`) — part of the path grammar above. A PATH TLV's children are all NAME TLVs ([05-protocol-tlvs.md](05-protocol-tlvs.md) §`0x06`), so a segment's brackets travel inside that segment's NAME bytes; v1 assigns no resolution rule *below* the named vertex, so the interoperable reading is one registered vertex per concrete index (§pitfalls).
+- **On an address segment** — the grammar reserves the form (`segment = name [ index ]`, with `index` sitting *outside* `name`), but v1 assigns it no wire carrier: a PATH TLV's children are all NAME TLVs ([05-protocol-tlvs.md](05-protocol-tlvs.md) §`0x06`), a NAME must not contain `[` or `]` (§Reserved characters below), and there is no separate index field. An address-segment index encoding, if one ever lands, travels **outside the NAME bytes** and needs an RFC amendment ([#996](https://github.com/avatarsd-llc/libtracer/issues/996) ruling; cf. the declined range-slice proposal in `.out-of-scope/range-slice-addressing.md`). The interoperable v1 construction for indexed endpoints is one registered **child** vertex per concrete index — `/camera/frame/7` — which also makes a subtree subscription on `/camera/frame` observe every index (§pitfalls).
 
 On a field step:
 
@@ -115,9 +114,7 @@ The five characters `/ : . [ ]` plus `*` and `?` cannot appear inside a NAME seg
 
 (`*` and `?` are not path characters in v1; they are reserved to keep the door open for a possible future per-segment wildcard grammar — see [§per-segment wildcards](#per-segment-wildcards-unratified).)
 
-> ⚠️ **Conformance gap — the reference implementation rejects only five of the seven.** `tr::graph::valid_segment` (`core/include/libtracer/path.hpp:50-58`) tests `seg.find_first_of("/:.*?")`, so a NAME carrying `[` or `]` is accepted at every boundary that predicate guards — the string parser, a wire `SPEC` child name, a module registration. Its own comment says so and says why: "`[` / `]` are deliberately NOT rejected: they delimit an address index suffix (`/camera/frame[7]`, reference/03 §Index forms / ADR-0008), and address-segment index parsing is not yet implemented — rejecting brackets would break that documented form. This enforces the unambiguous subset now; bracket handling lands with address-index parsing." The MUST above is unchanged and is what conformance is measured against; the implementation currently meets a subset of it.
->
-> The gap has a second edge worth naming, because closing it is what closes the gap: §index forms above reads a bracketed segment's brackets as travelling *inside* that segment's NAME bytes, while the grammar at the top of this section puts `index` outside `name` (`segment = name [ index ]`, `name = 1*64 ( UTF8-codepoint - reserved )`) and this rule forbids them in a NAME. Which of the two an address-index encoding picks is a **wire-surface** question — it decides which byte sequences are legal in a `NAME` TLV — so it is an RFC amendment ([GOVERNANCE.md](https://github.com/avatarsd-llc/libtracer/blob/main/.github/GOVERNANCE.md)), not an erratum, and not something the implementation's current subset settles by default.
+All three tiers enforce the full seven-character set through one predicate each — C++ `tr::graph::valid_segment`, Rust `validate_segment`, TS `RESERVED_SEGMENT_CHARS` — and the set is pinned cross-tier by the `path/path-reserved-brackets` conformance vector plus each tier's own host test (see `tests/conformance/HARNESS.md`). Until [#996](https://github.com/avatarsd-llc/libtracer/issues/996) the C++ core admitted `[` and `]` on the theory that an address index travels inside the NAME bytes; the ruling went the other way — the grammar's `index` sits outside `name`, and an address-index encoding, if one ever lands, stays outside the NAME bytes (§index forms above).
 
 ---
 
@@ -171,7 +168,7 @@ g.write(tr::graph::path_t("/x:settings.app.ki"), ki_value);
 
 Every subscription is a **subtree subscription** ([RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md), accepted and implemented): a `SUBSCRIBER` edge on vertex V observes writes to V **and to every descendant of V** — a leaf subscription is just the trivial case. A write at vertex W therefore delivers, once per subscriber, to the subscribers of W and of each of W's ancestors ("vertical bubbling"). The delivered payload is the **written TLV as-is** — the exact frame the producer wrote, at the granularity it chose.
 
-This covers the dominant "everything under a prefix" use case with **no pattern grammar at all**: subscribing to `/sensor` is what a `/sensor/**` wildcard would have meant, and subscribing to `/camera/frame` observes every indexed child `/camera/frame[0]`, `/camera/frame[1]`, … The full semantics — bubbling, branch-write decomposition, write-creates, and the near-free-when-idle cost model (an unobserved write takes no vertex lock and decides in two atomic loads) — are specified in [02-graph-model.md](02-graph-model.md) §subtree subscriptions and [05-protocol-tlvs.md](05-protocol-tlvs.md) §`0x04`.
+This covers the dominant "everything under a prefix" use case with **no pattern grammar at all**: subscribing to `/sensor` is what a `/sensor/**` wildcard would have meant, and subscribing to `/camera/frame` observes every indexed child `/camera/frame/0`, `/camera/frame/1`, … The full semantics — bubbling, branch-write decomposition, write-creates, and the near-free-when-idle cost model (an unobserved write takes no vertex lock and decides in two atomic loads) — are specified in [02-graph-model.md](02-graph-model.md) §subtree subscriptions and [05-protocol-tlvs.md](05-protocol-tlvs.md) §`0x04`.
 
 ### Subscriber identity across a subtree
 
@@ -202,7 +199,7 @@ Publisher chooses slice size S = 64 KiB.
 Number of slices N = ceil(10 MB / S) = 160.
 
 For i in 0..159:
-    write("/camera/frame[i]", VALUE{ts=T, bytes=slice_i})
+    write("/camera/frame/<i>", VALUE{ts=T, bytes=slice_i})
 ```
 
 Each slice is a complete, valid, independently-routable TLV. The publisher emits N writes; the router and transport see N separate dispatches.
@@ -215,7 +212,7 @@ A subscriber registers once on the **parent** vertex — a subtree subscription 
 write("/camera/frame:subscribers[]", SUBSCRIBER{path=/local/handler, settings})
 ```
 
-Each subsequent `write("/camera/frame[i]", ...)` bubbles to the parent's subscription and produces a delivery to `/local/handler`, with the slice index recoverable from the producing path (out-of-band for local delivery; on-wire tagging for remote delivery is the draft [RFC-0003](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0003-bridged-wildcard-delivery-path.md)).
+Each subsequent `write("/camera/frame/<i>", ...)` bubbles to the parent's subscription and produces a delivery to `/local/handler`, with the slice index recoverable from the producing path (out-of-band for local delivery; on-wire tagging for remote delivery is the draft [RFC-0003](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0003-bridged-wildcard-delivery-path.md)).
 
 ### The slice-group key
 
@@ -445,7 +442,7 @@ Since `.rodata` is read-only, the bytes are never modified. The router's dispatc
 Some paths are not known at compile time:
 
 - Connection-routed paths (`/net/<conn>/sensor/temp`) — the connection name is established at runtime.
-- Address-shift slice paths (`/camera/frame[0]`, `/camera/frame[1]`, …) — the index varies per slice.
+- Address-shift slice paths (`/camera/frame/0`, `/camera/frame/1`, …) — the index varies per slice.
 
 For these, register each concrete indexed path once at init and keep its vertex handle. Runtime strings are parsed with a fallible entry point (`path_t::parse`, returning `std::expected`); literal indexed paths use the `path_t("...")` constructor directly:
 
@@ -457,7 +454,7 @@ std::vector<tr::graph::vertex_handle_t> frame_slice;
 frame_slice.reserve(N);
 for (std::size_t i = 0; i < N; ++i) {
     // Runtime-derived index → path_t::parse returns std::expected; deref on success.
-    auto p = tr::graph::path_t::parse("/camera/frame[" + std::to_string(i) + "]");
+    auto p = tr::graph::path_t::parse("/camera/frame/" + std::to_string(i));
     frame_slice.push_back(g.register_vertex(*p, tr::graph::role_t::STREAM));
 }
 
@@ -475,15 +472,15 @@ Registration encodes exactly one PATH TLV in a long-lived segment, validates it 
 
 ### Indexed slot paths
 
-For the common case of `name[i]` where `i` ranges over a known set, register each real indexed path (`/camera/frame[0]`, `/camera/frame[1]`, …) once and write by its handle:
+For the common case of an index `i` ranging over a known set, register each real indexed child path (`/camera/frame/0`, `/camera/frame/1`, …) once and write by its handle:
 
 ```cpp
 tr::graph::graph_t g;
 
 // One vertex per real indexed path.
 std::vector<tr::graph::vertex_handle_t> frame;
-frame.push_back(g.register_vertex(tr::graph::path_t("/camera/frame[0]"), tr::graph::role_t::STREAM));
-frame.push_back(g.register_vertex(tr::graph::path_t("/camera/frame[1]"), tr::graph::role_t::STREAM));
+frame.push_back(g.register_vertex(tr::graph::path_t("/camera/frame/0"), tr::graph::role_t::STREAM));
+frame.push_back(g.register_vertex(tr::graph::path_t("/camera/frame/1"), tr::graph::role_t::STREAM));
 // …
 
 void on_dma_complete(/* … */) {
@@ -493,7 +490,7 @@ void on_dma_complete(/* … */) {
 }
 ```
 
-A single-PATH-plus-index form — encoding `/camera/frame` once and supplying `i` as a separate u16 at the dispatch boundary — is a **permitted-but-not-implemented** optimization (non-normative): the reference core has no separate indexed-handle API. It would be equivalent to the real write to `/camera/frame[i]` above — the resolved vertex and the wire bytes (after index expansion) are identical.
+A single-PATH-plus-index form — encoding `/camera/frame` once and supplying `i` as a separate u16 at the dispatch boundary — is a **permitted-but-not-implemented** optimization (non-normative): the reference core has no separate indexed-handle API. It would be equivalent to the real write to `/camera/frame/<i>` above — the resolved vertex and the wire bytes (after index expansion) are identical.
 
 ### Hot-path dispatch with a static handle
 
@@ -568,7 +565,7 @@ Each entry states the rule, then the shape of the failure an implementation prod
 
 ### A segment index read as a field index
 
-**Rule.** The two index planes are not interchangeable (§index forms). A field index travels as a FIELD level's `index_mode`. A segment index has no separate carrier: a PATH TLV's children are all NAME TLVs ([05-protocol-tlvs.md](05-protocol-tlvs.md) §`0x06`), so `/camera/frame[7]` puts the brackets inside the segment's NAME bytes.
+**Rule.** The two index planes are not interchangeable (§index forms). A field index travels as a FIELD level's `index_mode`. A segment index has **no carrier at all in v1**: a PATH TLV's children are all NAME TLVs ([05-protocol-tlvs.md](05-protocol-tlvs.md) §`0x06`) and a NAME must not contain `[` or `]` (§Reserved characters), so a bracketed segment such as `/camera/frame[7]` is rejected with `ERROR{tr::path::invalid}` at every minting boundary ([#996](https://github.com/avatarsd-llc/libtracer/issues/996)).
 
 **Failure mode.** An implementation that invents a resolution rule *below* `/camera/frame` for the `[7]` will not interoperate: no conformance vector under `path/` carries a bracketed segment, so nothing pins the byte spelling, and giving `[n]` a value-plane meaning is the subject of a draft proposal ([RFC-0017](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0017-element-addressing-value-plane-index.md)) rather than settled v1. The interoperable construction is one registered vertex per concrete index (§indexed slot paths).
 

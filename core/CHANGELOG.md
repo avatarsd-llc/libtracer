@@ -29,6 +29,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `errors/error-kindless-spec-type-mismatch` conformance vector). The genuine name-lookup
   `NOT_FOUND`s on the settings/link/remove doors are unchanged. Wire-visible.
 
+- **`graph::valid_segment` now rejects `[` and `]` — the full reference/03 reserved set
+  `/ : . [ ] * ?` (#996).** BEHAVIOR TIGHTENING on the shared segment predicate
+  (ADR-0073 §1): a NAME carrying a bracket — `path_t::parse("/camera/frame[7]")`, a wire
+  `SPEC` child name, a module registration — now answers `INVALID_PATH`, matching the
+  MUST of reference/03 §Reserved characters (normative via spec v1 §3) that the Rust and
+  TypeScript tiers already enforced; the C++ core was the documented five-character
+  subset. No grammar change: the addressing grammar always reserved the brackets
+  (`index` sits outside `name`), and address-index addressing, if it lands, stays outside
+  the NAME bytes (cf. `.out-of-scope/range-slice-addressing.md`). The agreed set is
+  pinned cross-tier by the new `path/path-reserved-brackets` conformance vector plus a
+  host test in each tier's own suite (`core/tests/path_test.cpp`,
+  `bindings/rust/tests/conformance_vectors.rs`,
+  `bindings/typescript/packages/client/test/vectors.test.mjs`). Indexed child endpoints
+  are spelled as ordinary child vertices (`/camera/frame/7`) — reference docs updated.
+
 ## [0.9.1] — 2026-08-10
 
 ### Added

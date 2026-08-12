@@ -64,9 +64,13 @@ libtracer_test_warnings(key_view_test)
 add_test(NAME key_view COMMAND key_view_test)
 
 # Path parsing / validation — reserved chars, limits, field tail (reference/03).
+# Reads the shared path/path-reserved-brackets vector (#996), so it needs
+# LIBTRACER_VECTORS_DIR.
 add_executable(path_test path_test.cpp)
 target_link_libraries(path_test PRIVATE libtracer)
 libtracer_test_warnings(path_test)
+target_compile_definitions(path_test PRIVATE
+    LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 add_test(NAME path COMMAND path_test)
 
 # PATH_REF (0x14) codec — the bound-path envelope, element layout, count bound and
