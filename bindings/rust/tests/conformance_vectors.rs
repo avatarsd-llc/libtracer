@@ -1669,3 +1669,43 @@ fn fwd_bound_forward_is_one_hop_from_forwarded() {
         hex(&after[after.len() - 8..])
     );
 }
+
+/**
+ * @brief `path/path-reserved-brackets` (#996) — the reserved-character set is
+ * `/ : . [ ] * ?`, pinned cross-tier: the vector's bytes are CODEC-legal (a NAME
+ * payload is free bytes on the wire, so the round-trip must carry `frame[7]`
+ * bit-for-bit), while THIS core's segment predicate must refuse that NAME and
+ * accept the `camera` control. C++ pins the same verdict in
+ * `core/tests/path_test.cpp`; TS in
+ * `bindings/typescript/packages/client/test/vectors.test.mjs`. Relaxing
+ * `validate_segment` back below seven characters turns this red.
+ */
+#[test]
+fn path_reserved_brackets() {
+    let bin = assert_vector_consistent("path/path-reserved-brackets");
+    let tlv = decode(&bin).unwrap();
+    assert_eq!(tlv.type_code, libtracer::type_code::PATH);
+    assert_eq!(tlv.children.len(), 2);
+    let seg = |i: usize| core::str::from_utf8(&tlv.children[i].payload).unwrap();
+    assert_eq!(seg(0), "camera");
+    assert_eq!(seg(1), "frame[7]");
+
+    // The predicate's verdict over the vector's own NAME payloads.
+    assert_eq!(libtracer::validate_segment(seg(0)), Ok(()), "control");
+    assert_eq!(
+        libtracer::validate_segment(seg(1)),
+        Err(BuildError::ReservedChar),
+        "brackets are reserved (reference/03 MUST, normative via spec v1 §3)"
+    );
+
+    // The full seven-character set, exactly — pinned so the set can only change
+    // together with the vector and the sibling suites.
+    for c in "/:.[]*?".chars() {
+        let probe = format!("a{c}b");
+        assert_eq!(
+            libtracer::validate_segment(&probe),
+            Err(BuildError::ReservedChar),
+            "{probe:?} must be refused"
+        );
+    }
+}

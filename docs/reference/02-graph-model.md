@@ -627,7 +627,7 @@ A vertex's writable fields are **whatever the schema says** — for the applicat
 - How many subscribers a vertex may have.
 - How many child vertices a parent vertex may have.
 - The shape of an endpoint's data payload (a `VALUE` TLV's bytes are opaque to the protocol).
-- The relationship between sibling vertices (e.g., `/camera/frame[0]` and `/camera/frame[1]` share a timestamp domain only if the application chooses).
+- The relationship between sibling vertices (e.g., `/camera/frame/0` and `/camera/frame/1` share a timestamp domain only if the application chooses).
 - Whether a vertex is backed by RAM, MMIO, file, or function-on-read.
 
 This is by design. [06-user-data-packing.md](06-user-data-packing.md) shows the full dynamic range — from a single boolean to a streaming 1 GB/s ADC — using the same vertex/edge primitives.

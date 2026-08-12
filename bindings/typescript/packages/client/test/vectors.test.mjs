@@ -687,3 +687,33 @@ test('spec/create-child carries NAME-typed field values, not VALUE-typed ones', 
   assert.equal(text(dec.children[2]), 'name');
   assert.equal(text(dec.children[3]), 'temp');
 });
+
+/**
+ * @brief `path/path-reserved-brackets` (#996) — the reserved-character set is
+ * `/ : . [ ] * ?`, pinned cross-tier: the vector's bytes are CODEC-legal (a NAME
+ * payload is free bytes on the wire, so the codec must carry `frame[7]` bit-for-bit)
+ * while THIS tier's segment validator must refuse that segment and accept the
+ * `camera` control. C++ pins the same verdict in `core/tests/path_test.cpp`; Rust in
+ * `bindings/rust/tests/conformance_vectors.rs`. Relaxing `RESERVED_SEGMENT_CHARS`
+ * below seven characters turns this red.
+ */
+test('path/path-reserved-brackets: codec carries the bytes, the validator refuses the segment', () => {
+  const bytes = vector('path/path-reserved-brackets');
+  const dec = decode(bytes);
+  assert.equal(dec.type, TYPE.PATH);
+  assert.equal(dec.children.length, 2);
+  const text = (t) => Buffer.from(t.payload).toString('utf8');
+  assert.equal(text(dec.children[0]), 'camera');
+  assert.equal(text(dec.children[1]), 'frame[7]');
+  assert.ok(sameBytes(encode(dec), bytes), 'round-trip is byte-exact');
+
+  // The validator's verdict over the vector's own NAME payloads.
+  assert.doesNotThrow(() => encodePath([text(dec.children[0])]), 'control: `camera` builds');
+  assert.throws(() => encodePath(['camera', text(dec.children[1])]), RangeError,
+    '`frame[7]` is refused (reference/03 MUST, normative via spec v1 §3)');
+
+  // The full seven-character set, exactly.
+  for (const c of '/:.[]*?') {
+    assert.throws(() => encodePath([`a${c}b`]), RangeError, `"a${c}b" must be refused`);
+  }
+});
