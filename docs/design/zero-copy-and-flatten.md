@@ -23,12 +23,12 @@ byte source is the wrong shape:
 
 | Structural copy | Site | Why it cannot go |
 |---|---|---|
-| Ingress ownership | `rope_t::flatten` (`core/src/rope.cpp:22`), `read_exact` into the accepted segment (`core/src/transport_tcp.cpp:266`) | A transient recv buffer cannot be borrowed by a rope that outlives the receive call |
-| Mutation ownership | `own_wire` (`core/src/op_resolve_view.cpp:136`) | A mutated multi-link value must own a contiguous, patchable, trailer-cleared segment |
+| Ingress ownership | `rope_t::flatten` (`core/src/rope.cpp:22`), `read_exact` into the accepted segment (`core/src/transport_tcp.cpp:267`) | A transient recv buffer cannot be borrowed by a rope that outlives the receive call |
+| Mutation ownership | `own_wire` (`core/src/op_resolve_view.cpp:140`) | A mutated multi-link value must own a contiguous, patchable, trailer-cleared segment |
 | WS TX gather | `httpd_ws_link_t::queue_send` (`integrations/esp-idf/libtracer/httpd_ws_link.cpp`; destination is a pre-allocated tx work slot — no slot free means a counted drop, not a heap item) | `httpd_ws_send_frame_async` takes one contiguous buffer and `httpd_queue_work` runs later, after the rope links are gone |
 
 A fourth copy is bounded rather than structural: reply-route synthesis (`tlv_sliced`,
-`core/src/fwd_reply.hpp:98`) emits rewritten route wires — tens of bytes, never
+`core/src/fwd_reply.hpp:109`) emits rewritten route wires — tens of bytes, never
 payload-scaled.
 
 The 4096-byte decode arena (`core/src/graph.cpp:1288`) is **structure storage, not a payload copy**:
@@ -54,7 +54,7 @@ where the mechanism lives:
   backend's `destroy` at zero (`:137-141`). Fan-out to N subscribers is N increments.
 - **Decode holds structure only.** `decode_into` emits `arena_tlv_t` nodes whose `wire` / `body`
   are `std::span` into the caller's input — "the arena holds structure only, never bytes"
-  (`core/include/libtracer/tlv_arena.hpp:8-9`, node type at `:30`). Decode allocates node
+  (`core/include/libtracer/tlv_arena.hpp:8-9`, node type at `:31`). Decode allocates node
   bookkeeping, never payload, and is zero-copy over its input provided that input is contiguous.
   That contiguity constraint is what §3 and §4 turn on.
 - **Egress scatter-gathers.** `rope_t::to_iovec` (`core/include/libtracer/rope.hpp:245`) emits one
@@ -80,18 +80,18 @@ identifiers for the rest of this page.
 
 | # | Site | Single-link? | Multi-link? | Kind | Removed by the rope cursor? |
 |---|------|:--:|:--:|---------|---------|
-| ① | Ingress ownership — `flatten` (`core/src/rope.cpp:22`), pull-path `read_exact` into the accepted segment (`core/src/transport_tcp.cpp:266`) | yes (it *is* the recv) | yes | Structural | No — orthogonal; it is the ingress floor |
+| ① | Ingress ownership — `flatten` (`core/src/rope.cpp:22`), pull-path `read_exact` into the accepted segment (`core/src/transport_tcp.cpp:267`) | yes (it *is* the recv) | yes | Structural | No — orthogonal; it is the ingress floor |
 | ② | Branch write — `value.materialize(*value_backend_)` (`core/src/graph.cpp:1275`) | no — refcount bump | yes (one flatten to feed the span cursor) | Fallback | Multi-link leg: yes, via a rope-native branch decode |
 | ③ | Field write — the twin of ② (`core/src/graph.cpp:1521`) | no — refcount bump | yes | Fallback | Same as ② |
 | ④ | 4096-byte decode arena (`core/src/graph.cpp:1288-1289`) | yes — paid on every branch write | yes | Structure scratch, not a payload copy | **No** — see §3; the rope cursor is a byte source, not a structure store |
-| ⑤ | `own_wire` mutation ownership — `sub.flatten(backend())` (`core/src/op_resolve_view.cpp:136`) | no — a single link is still COPIED, through the same backend (`core/src/op_resolve_view.cpp:146`, #793) | yes — flattens the multi-link subrope | Structural for *mutated* values | No — this step *is* the ownership copy; it still owns |
-| ⑥ | Per-node parse contiguity — `ensure_cache` → `wire().materialize(backend())` (`core/src/op_resolve_view.cpp:248-254`) | no — a single-link node adopts | only per **straddling** node | Fallback, span-node-shaped | Yes — rope-native node accessors remove it |
+| ⑤ | `own_wire` mutation ownership — `sub.flatten(backend())` (`core/src/op_resolve_view.cpp:140`) | no — a single link is still COPIED, through the same backend (`core/src/op_resolve_view.cpp:150`, #793) | yes — flattens the multi-link subrope | Structural for *mutated* values | No — this step *is* the ownership copy; it still owns |
+| ⑥ | Per-node parse contiguity — `ensure_cache` → `wire().materialize(backend())` (`core/src/op_resolve_view.cpp:252-258`) | no — a single-link node adopts | only per **straddling** node | Fallback, span-node-shaped | Yes — rope-native node accessors remove it |
 | ⑦ | `deliver_rope` span fallback (`core/include/libtracer/receiver_slot.hpp:138`) | no | yes — only when no rope sink is installed | Fallback — the cost of a span-only sink | Yes — installing the rope sink removes it; see §4.1 |
 | ⑧ | WS RX reassembly — `asm_buf_t` regrow-and-memcpy (`integrations/esp-idf/libtracer/httpd_ws_link.cpp`) | no — unfragmented delivers borrowed (scratch-backed, no per-frame alloc for fitting frames) | yes — O(n²) across fragments | Fallback | Enables ⑦'s removal; the copy itself is a pool-recv question, not a cursor one |
 | ⑨ | WS TX gather — memcpy into a pooled tx work slot in `queue_send` (`integrations/esp-idf/libtracer/httpd_ws_link.cpp`; `new (nothrow)` only for an oversize payload — an exhausted pool drops and counts, #949) | copy per frame per peer; alloc only on the oversize arm | yes | Structural within the `esp_http_server` seam | **No** — TX-side; the cursor is irrelevant |
-| ⑩ | COMPACT remote delivery — `deliver_remote` (`core/src/fwd_router.cpp:1895`, materialize at `:1929`, from the router's injected backend) | no — adopt | yes — auto-promotion leg only | Fallback, narrow | Yes — a scatter-gather compact encoder |
-| ⑪ | Control-child strip — `on_control_rope` (`core/src/fwd_router.cpp:1541`, sub-rope materialize at `:1552` and `:1525`, from the router's injected backend) | no | only a multi-link ADVERTISE / COMPACT sub-rope | Fallback, and fused rather than eliminated — the next consumer re-encodes anyway | Yes, with a near-zero saving |
-| ⑫ | Reply-route synthesis — `tlv_sliced` (`core/src/fwd_reply.hpp:98`, called at `core/src/fwd_reply.cpp:113-114`) | yes | yes | Bounded frame synthesis: the route wires are rewritten | No — these are emitted bytes, not a copy of payload |
+| ⑩ | COMPACT remote delivery — `deliver_remote` (`core/src/fwd_router.cpp:1909`, materialize at `:1943`, from the router's injected backend) | no — adopt | yes — auto-promotion leg only | Fallback, narrow | Yes — a scatter-gather compact encoder |
+| ⑪ | Control-child strip — `on_control_rope` (`core/src/fwd_router.cpp:1555`, sub-rope materialize at `:1566` and `:1539`, from the router's injected backend) | no | only a multi-link ADVERTISE / COMPACT sub-rope | Fallback, and fused rather than eliminated — the next consumer re-encodes anyway | Yes, with a near-zero saving |
+| ⑫ | Reply-route synthesis — `tlv_sliced` (`core/src/fwd_reply.hpp:109`, called at `core/src/fwd_reply.cpp:132-133`) | yes | yes | Bounded frame synthesis: the route wires are rewritten | No — these are emitted bytes, not a copy of payload |
 
 On the single-link path the only copies that fire are ① (the recv floor), ④ (the structure arena),
 ⑨ (the `esp_http_server` WS TX gather) and ⑫ (bounded route synthesis). ①, ⑨ and ⑫ are structural
@@ -171,8 +171,8 @@ deep receive task.
 
 A stack budget for that task counts four such buffers, not one. The decode arena is the only one
 this document covers; the other three are transport receive and chunk scratch, each a 4096-byte
-`std::array` — `core/src/transport_tcp.cpp:224` (the backpressure drain),
-`core/src/transport_ws.cpp:629` (the WS client's receive loop), and
+`std::array` — `core/src/transport_tcp.cpp:225` (the backpressure drain),
+`core/src/transport_ws.cpp:633` (the WS client's receive loop), and
 `core/src/posix_endpoint.cpp:442` — the ONE per-chunk scratch both multi-peer servers now
 share, since #871 folded their duplicated poll loops into `slot_server_t::service_peer` (it
 was two buffers, one apiece, before that). They are not decode arenas and carry no structure,
@@ -226,9 +226,9 @@ exhaustion is representable. The general failable-allocation contract is
 - `check_frame` and `validate_rope` (`core/src/rope_decode.cpp:32`, `:46`) validate structure and
   CRC straight over a rope.
 - The lazy `tlv_view_t` tier walks children one header at a time off a refcounted subrope.
-- `on_control_rope` / `peek_control` (`core/src/fwd_router.cpp:1541`, `:1492`) read a control frame's
+- `on_control_rope` / `peek_control` (`core/src/fwd_router.cpp:1555`, `:1506`) read a control frame's
   label off the rope and materialize only the sub-rope a re-encoding consumer needs contiguous
-  (`:1552`, `:1525`) — out of the router's injected `flat` backend, and a refused flatten drops the
+  (`:1566`, `:1539`) — out of the router's injected `flat` backend, and a refused flatten drops the
   frame rather than delivering an empty value (#730).
 - The FWD request terminus: `resolve_terminus_rope`
   (`core/include/libtracer/fwd_router.hpp:798-806`) adopts a fragmented request as
@@ -241,7 +241,7 @@ exhaustion drops the frame rather than throwing (`core/include/libtracer/fwd_rou
 
 Two limits on that tier are load-bearing. First, **a single-link rope never reaches
 `resolve_terminus_rope`** — `on_frame_rope_impl` short-circuits it deliberately into the
-single-link view path (`core/src/fwd_router.cpp:1181`, the check at `:1187-1192`). Second, the tier earns its place only on large, lightly
+single-link view path (`core/src/fwd_router.cpp:1195`, the check at `:1201-1206`). Second, the tier earns its place only on large, lightly
 fragmented frames: at 64 KB across 2 links it is ~12% ahead of flatten-then-arena, and behind it
 everywhere smaller (`core/include/libtracer/fwd_router.hpp:779-782`, recorded as an erratum to
 [ADR-0053, lazy rope-backed decode view](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0053-lazy-rope-backed-decode-view-partial-path-routing.md)).
@@ -252,7 +252,7 @@ Row ⑦ has changed shape rather than disappearing. The span fallback in
 `receiver_slot_t::deliver_rope` (`core/include/libtracer/receiver_slot.hpp:138`) still exists for a
 slot with no rope sink installed, but the router does not flatten on the reply path: a REPLY that
 reaches its originator is handed to the sink rope-native
-(`core/src/fwd_router.cpp:1230-1234`). The contract at
+(`core/src/fwd_router.cpp:1244-1248`). The contract at
 `core/include/libtracer/fwd_router.hpp:430-434` states it — the router performs no decode and no
 flatten, a rope-delivered reply reaches the sink zero-copy, a sink that wants contiguous bytes
 holds `const view_t m = reply.materialize()`, and only a multi-link reply pays one flatten, on
@@ -264,11 +264,11 @@ demand. The escape hatch is the consumer's, not the router's.
    a rope-aware node type instead of `decode_into` + `materialize`. Removes ②③.
 2. **Streaming branch decode** (§3.2 move 2) — removes ④'s on-stack arena.
 3. **Rope-native node accessors for the walk** — `ensure_cache`
-   (`core/src/op_resolve_view.cpp:248-254`) flattens each *accessed* node whose own subrope
+   (`core/src/op_resolve_view.cpp:252-258`) flattens each *accessed* node whose own subrope
    straddles a link. Converting `wire()` / `body()` from `std::span` to rope-native readers (fields
    via `load_le` / `for_each_span`) plus a scatter-gather reply head removes ⑥.
 
-None of these reaches ⑤. `own_wire` (`core/src/op_resolve_view.cpp:136`) is structural: a *mutated*
+None of these reaches ⑤. `own_wire` (`core/src/op_resolve_view.cpp:140`) is structural: a *mutated*
 multi-link value must own a contiguous, patchable, trailer-cleared segment
 ([ADR-0041, terminus arena decode span contract](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0041-terminus-arena-decode-span-contract.md)
 §2), so it flattens once. The zero-copy `pin_wire` subrope applies only to the opt-in verbatim
@@ -311,14 +311,14 @@ asynchronously, awaited. A borrowed view of that buffer would dangle. Ingress mu
 bytes in an owned segment.
 
 **Why the pull path pays nothing extra.** The TCP `serve` loop reads the body straight into the
-accepted segment: `read_exact(fd, seg->bytes.data(), len)` (`core/src/transport_tcp.cpp:266`,
-`read_exact` defined at `:204`) fills a segment freshly allocated from the injected backend by
+accepted segment: `read_exact(fd, seg->bytes.data(), len)` (`core/src/transport_tcp.cpp:267`,
+`read_exact` defined at `:205`) fills a segment freshly allocated from the injected backend by
 `length_prefix_framer::on_prefix`. The pooled receive target *is* the owned segment — one kernel
 copy and zero user-space copies. The in-source rationale names the trade explicitly: feeding recv
 chunks through `feed()` "would add one" copy, so the pull loop shares framing *rules* with the
-chunk-fed transports rather than their state machine (`core/src/transport_tcp.cpp:241-246`). The
+chunk-fed transports rather than their state machine (`core/src/transport_tcp.cpp:242-247`). The
 only stack scratch left on this path is `drain()`'s 4096-byte backpressure discard buffer
-(`core/src/transport_tcp.cpp:224`), which runs when a frame is dropped, not when one is delivered.
+(`core/src/transport_tcp.cpp:225`), which runs when a frame is dropped, not when one is delivered.
 
 **Where the pull-path shape is not followed**, the residual costs are pool-recv questions, not
 flatten questions:
@@ -393,7 +393,7 @@ the gate.
   of threadlessness — riding the existing HTTP-server task, adding no FreeRTOS task — and is
   removable only by leaving the seam. The rope cursor is irrelevant to it: the sink is a send API,
   not a decoder.
-- **⑫ reply-route synthesis** — `tlv_sliced` (`core/src/fwd_reply.hpp:98`) emits rewritten
+- **⑫ reply-route synthesis** — `tlv_sliced` (`core/src/fwd_reply.hpp:109`) emits rewritten
   route wires. Bounded at tens of bytes, never payload-scaled.
 
 [#477]: https://github.com/avatarsd-llc/libtracer/issues/477

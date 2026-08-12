@@ -108,10 +108,10 @@ them:
 | decoder | inline slots | spill source | the depth bound is |
 | --- | --- | --- | --- |
 | `decode` → owning `tlv_t` | 8 (`core/src/frame.cpp:119`) | the nothrow heap source (`frame.cpp:120`) | the heap — an owning-tree decode allocates there regardless |
-| `decode_into` → `tlv_arena_t` | 8 (`core/src/tlv_arena.cpp:130`) | the caller's `mem::block_source_t` (`tlv_arena.cpp:131`) | whatever resource the caller injected |
+| `decode_into` → `tlv_arena_t` | 8 (`core/src/tlv_arena.cpp:151`) | the caller's `mem::block_source_t` (`tlv_arena.cpp:152`) | whatever resource the caller injected |
 
 The 8 is the typical FWD nesting (three to four levels) with headroom, not a
-ceiling: the arena test decodes a frame nested 100 deep (`core/tests/tlv_arena_test.cpp:289`).
+ceiling: the arena test decodes a frame nested 100 deep (`core/tests/tlv_arena_test.cpp:297`).
 A receiver that wants a hard bound gets one by injecting a small source: a
 stack-buffer `mem::bump_source_t` makes that buffer the whole decode budget
 (`mem_source.hpp`), and exhaustion is then a returned `err_t` rather than an
@@ -227,7 +227,7 @@ Every draw `decode_into` makes is nothrow and guarded, because it runs on the wi
 RX path behind no ACL and a peer chooses both the nesting depth and the node count.
 Exhaustion answers `TLV_NESTING_TOO_DEEP`, never `std::bad_alloc` — which on a
 `-fno-exceptions` node is a link-wrapped `abort()`
-(`core/include/libtracer/tlv_arena.hpp:115-119`).
+(`core/include/libtracer/tlv_arena.hpp:130-134`).
 
 ## Consequences
 

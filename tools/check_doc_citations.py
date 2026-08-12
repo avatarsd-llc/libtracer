@@ -128,7 +128,7 @@ def _is_non_source_part(part: str) -> bool:
 SCOPE_LINES = 80
 
 ANCHORS = [
-    ("core/include/libtracer/tlv.hpp:63", "struct opt_t"),
+    ("core/include/libtracer/tlv.hpp:69", "struct opt_t"),
     ("core/include/libtracer/tlv.hpp:30", "enum class type_t"),
     ("core/src/graph.cpp:2216", "graph_t::set_identity"),
     ("core/src/graph.cpp:2242", "graph_t::read_identity"),
@@ -162,16 +162,16 @@ ANCHORS = [
     ("core/include/libtracer/child_registry.hpp:627", "std::size_t size()"),
     ("core/include/libtracer/child_registry.hpp:637", "live_size"),
     ("core/src/transport_vertex.cpp:170", "transport_vertex_t::provide_link"),
-    ("core/src/transport_vertex.cpp:248", "routing key IS the mount path"),
-    ("core/src/transport_vertex.cpp:255", "qualified += name"),
-    ("core/src/transport_vertex.cpp:274", "grouping vertex, created lazily"),
-    ("core/src/transport_vertex.cpp:282", "register_vertex_key(mod_key"),
-    ("core/src/transport_vertex.cpp:373", "if (!router_.add_child(qualified, *link))"),
-    ("core/src/transport_vertex.cpp:376", "return std::unexpected(status_t::BACKPRESSURE);",
+    ("core/src/transport_vertex.cpp:253", "routing key IS the mount path"),
+    ("core/src/transport_vertex.cpp:260", "qualified += name"),
+    ("core/src/transport_vertex.cpp:279", "grouping vertex, created lazily"),
+    ("core/src/transport_vertex.cpp:287", "register_vertex_key(mod_key"),
+    ("core/src/transport_vertex.cpp:379", "if (!router_.add_child(qualified, *link))"),
+    ("core/src/transport_vertex.cpp:382", "return std::unexpected(status_t::BACKPRESSURE);",
      "if (!router_.add_child(qualified, *link))"),
-    ("core/src/transport_vertex.cpp:382", "pending_links_.erase(pl)"),
-    ("core/src/transport_vertex.cpp:396", "if (constructed)"),
-    ("core/src/transport_vertex.cpp:398", "link_state_t::LISTENING : link_state_t::UP"),
+    ("core/src/transport_vertex.cpp:388", "pending_links_.erase(pl)"),
+    ("core/src/transport_vertex.cpp:402", "if (constructed)"),
+    ("core/src/transport_vertex.cpp:404", "link_state_t::LISTENING : link_state_t::UP"),
     ("core/include/libtracer/transport_vertex.hpp:288", "result_t<void> register_module"),
     ("core/include/libtracer/transport_vertex.hpp:96", "enum class link_state_t"),
     ("core/src/graph.cpp:1891", "sel == field_sel_t::TAIL", 'step0.name == "subscribers"'),
@@ -185,8 +185,8 @@ ANCHORS = [
     ("core/src/graph.cpp:2598", "return read_children_folded(vh);"),
     ("core/src/graph.cpp:2595", "sel == field_sel_t::WHOLE || sel == field_sel_t::APPEND"),
     ("core/src/graph.cpp:2741", "field_selector(field) == field_sel_t::SLOT"),
-    ("core/src/op_resolve_walk.hpp:310", "enum class index_mode_t"),
-    ("core/src/op_resolve_walk.hpp:848", 'field.steps[0].name != "subscribers"'),
+    ("core/src/op_resolve_walk.hpp:322", "enum class index_mode_t"),
+    ("core/src/op_resolve_walk.hpp:850", 'field.steps[0].name != "subscribers"'),
     ("core/include/libtracer/mem_heap.hpp:217", "try_assign"),
     ("core/include/libtracer/view.hpp:26", "namespace tr::view"),
     ("core/include/libtracer/frame.hpp:23", "namespace tr::wire"),
@@ -218,30 +218,30 @@ ANCHORS = [
     ("core/src/graph.cpp:1521", "value.materialize(*value_backend_)", "field_write read it back"),
     ("core/src/graph.cpp:1863", "result_t<void> graph_t::field_write"),
     ("core/src/graph.cpp:2050", "acl_right_t::CREATE", 'step0.name == "children"'),
-    ("core/src/fwd_router.cpp:1895", "fwd_router_t::deliver_remote"),
-    ("core/src/fwd_router.cpp:1929", "value.materialize(*flat_)"),
-    ("core/src/fwd_router.cpp:1930", "flatten OOM"),
-    ("core/src/fwd_router.cpp:1932", "emit_compact", "fwd_router_t::deliver_remote"),
-    ("core/src/fwd_router.cpp:1963", "std::vector<std::span<const std::byte>> iov;", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:1909", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:1943", "value.materialize(*flat_)"),
+    ("core/src/fwd_router.cpp:1944", "flatten OOM"),
+    ("core/src/fwd_router.cpp:1946", "emit_compact", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:1977", "std::vector<std::span<const std::byte>> iov;", "fwd_router_t::deliver_remote"),
     # #730 — the two INGRESS flatten guards. Anchored because the whole point of the
     # seam is that these are testable; a citation to them silently rotting would be the
     # first step back to "the guard nobody can prove still works".
-    ("core/src/fwd_router.cpp:1513", "if (route.empty() && head->child1_total != 0) return;"),
-    ("core/src/fwd_router.cpp:1532", "if (payload.empty() && head->child1_total != 0) return;"),
-    ("core/src/fwd_router.cpp:1525", "const std::span<const std::byte> payload = contig(head->child1_off, head->child1_total);"),
-    ("core/src/fwd_router.cpp:1212", "frame.subrope(0, frame.total_length()).materialize"),
+    ("core/src/fwd_router.cpp:1527", "if (route.empty() && head->child1_total != 0) return;"),
+    ("core/src/fwd_router.cpp:1546", "if (payload.empty() && head->child1_total != 0) return;"),
+    ("core/src/fwd_router.cpp:1539", "const std::span<const std::byte> payload = contig(head->child1_off, head->child1_total);"),
+    ("core/src/fwd_router.cpp:1226", "frame.subrope(0, frame.total_length()).materialize"),
     # #766/#793 — the terminus resolver's three rope-tier draws, and the two allocations the
     # seam docs name as NOT covered by `flat`. These were cited by four doc pages and anchored
     # by none, so #793's own edits to `op_resolve_view.cpp` shifted every one of them without
     # the gate noticing — the exact rot class this file exists for.
-    ("core/src/op_resolve_view.cpp:136", "sub.flatten(flat)"),
+    ("core/src/op_resolve_view.cpp:140", "sub.flatten(flat)"),
     # #801 — the SPAN tier's ownership copy, cited by allocation-and-backpressure.md.
-    ("core/src/op_resolve_walk.hpp:151", "view_t own_wire(mem::mem_backend_t& flat)"),
-    ("core/src/op_resolve_view.cpp:146", "over_bytes(sub.only().bytes(), flat)"),
-    ("core/src/op_resolve_view.cpp:254", "wire().materialize(backend())"),
-    ("core/src/fwd_reply.cpp:104", "view::segment_alloc(egress, head_len)"),
-    ("core/src/op_resolve_walk.hpp:510", "rope_t or_backpressure"),
-    ("core/src/fwd_router.cpp:1431", "decode_into(frame, rx_for(inbound_ctx))"),
+    ("core/src/op_resolve_walk.hpp:163", "view_t own_wire(mem::mem_backend_t& flat)"),
+    ("core/src/op_resolve_view.cpp:150", "over_bytes(sub.only().bytes(), flat)"),
+    ("core/src/op_resolve_view.cpp:258", "wire().materialize(backend())"),
+    ("core/src/fwd_reply.cpp:123", "view::segment_alloc(egress, head_len)"),
+    ("core/src/op_resolve_walk.hpp:521", "rope_t or_backpressure"),
+    ("core/src/fwd_router.cpp:1445", "decode_into(frame, rx_for(inbound_ctx))"),
     # `vertex.hpp:<parent_>` was pinned here TWICE, and the only doc that cites it is
     # `docs/spec/rfcs/0019` — a historical genre this tool's own header excludes from
     # pinning ("dated records of a decision ... pinning them would demand rewriting
@@ -320,7 +320,7 @@ ANCHORS = [
     # core/include/libtracer/frame.hpp
     ('core/include/libtracer/frame.hpp:25',
      '// Decode failures reuse the RFC-0002 registry codes (error.hpp) directly — the'),
-    ('core/include/libtracer/frame.hpp:142',
+    ('core/include/libtracer/frame.hpp:197',
      '[[nodiscard]] inline std::expected<tlv_t, err_t> decode(const view::view_t& v) {'),
     # core/include/libtracer/fwd_frame_view.hpp
     # core/include/libtracer/fwd_router.hpp
@@ -415,7 +415,7 @@ ANCHORS = [
     ('core/include/libtracer/path.hpp:33', 'inline constexpr std::size_t kMaxPathBytes = 1024;'),
     ('core/include/libtracer/path.hpp:35', 'inline constexpr std::size_t kMaxSegments = 255;'),
     ('core/include/libtracer/path.hpp:37', 'inline constexpr std::size_t kMaxFieldDepth = 8;'),
-    ('core/include/libtracer/path.hpp:248', 'static constexpr std::size_t kInlineBytes = 16;'),
+    ('core/include/libtracer/path.hpp:251', 'static constexpr std::size_t kInlineBytes = 16;'),
     # core/include/libtracer/receiver_slot.hpp
     ('core/include/libtracer/receiver_slot.hpp:138', 'const view::view_t flat = frame.materialize(backend);'),
     # core/include/libtracer/rope.hpp
@@ -465,14 +465,14 @@ ANCHORS = [
     # core/include/libtracer/status.hpp
     ('core/include/libtracer/status.hpp:25', 'enum class status_t {'),
     # core/include/libtracer/tlv.hpp
-    ('core/include/libtracer/tlv.hpp:42', 'ROUTER = 0x0D,      /**< @brief Router-wrapped frame. */'),
+    ('core/include/libtracer/tlv.hpp:48', 'ROUTER = 0x0D, /**< @brief Router-wrapped frame. */'),
     # core/include/libtracer/tlv_arena.hpp
     ('core/include/libtracer/tlv_arena.hpp:8',
      "* span points into the caller's input buffer — the arena holds structure"),
-    ('core/include/libtracer/tlv_arena.hpp:30',
+    ('core/include/libtracer/tlv_arena.hpp:31',
      '* @brief One decoded TLV node in a @ref tlv_arena_t (structure only, zero-copy).'),
-    ('core/include/libtracer/tlv_arena.hpp:38', 'struct arena_tlv_t {'),
-    ('core/include/libtracer/tlv_arena.hpp:115',
+    ('core/include/libtracer/tlv_arena.hpp:39', 'struct arena_tlv_t {'),
+    ('core/include/libtracer/tlv_arena.hpp:130',
      '* NOTHROW end to end (#588). This function is on the wire RX path and reachable'),
     # core/include/libtracer/transport.hpp
     ('core/include/libtracer/transport.hpp:35', 'using peer_id_t = std::array<std::byte, 16>;'),
@@ -493,7 +493,7 @@ ANCHORS = [
     ('core/include/libtracer/transport_tcp.hpp:207',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'tcp_transport_t& operator=(const tcp_transport_t&) = delete;'),
-    ('core/include/libtracer/transport_tcp.hpp:339',
+    ('core/include/libtracer/transport_tcp.hpp:358',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'transport_tcp_server& operator=(const transport_tcp_server&) = delete;'),
     # core/include/libtracer/transport_udp.hpp
@@ -513,10 +513,10 @@ ANCHORS = [
     ('core/include/libtracer/transport_webtransport.hpp:158',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }'),
     # core/include/libtracer/transport_ws.hpp
-    ('core/include/libtracer/transport_ws.hpp:221',
+    ('core/include/libtracer/transport_ws.hpp:225',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'void send(std::span<const std::span<const std::byte>> iov) override;'),
-    ('core/include/libtracer/transport_ws.hpp:393',
+    ('core/include/libtracer/transport_ws.hpp:399',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'transport_ws_client& operator=(const transport_ws_client&) = delete;'),
     # core/include/libtracer/vertex.hpp
@@ -554,20 +554,20 @@ ANCHORS = [
     ('core/src/frame.cpp:119', 'std::array<grammar::walk_frame_t<grammar::span_cursor>, 8> slots;'),
     ('core/src/frame.cpp:120', 'grammar::walk_stack_t<grammar::span_cursor> stack(slots, &mem::heap_source());'),
     # core/src/fwd_router.cpp
-    ('core/src/fwd_router.cpp:632',
+    ('core/src/fwd_router.cpp:646',
      'bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_source_t* rx) {'),
-    ('core/src/fwd_router.cpp:1181',
+    ('core/src/fwd_router.cpp:1195',
      'void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_t frame,'),
-    ('core/src/fwd_router.cpp:1187', 'if (frame.link_count() == 1) {'),
-    ('core/src/fwd_router.cpp:1230', '// A REPLY that reaches its originator here is handed to the sink'),
-    ('core/src/fwd_router.cpp:1541',
+    ('core/src/fwd_router.cpp:1201', 'if (frame.link_count() == 1) {'),
+    ('core/src/fwd_router.cpp:1244', '// A REPLY that reaches its originator here is handed to the sink'),
+    ('core/src/fwd_router.cpp:1555',
      'void fwd_router_t::on_control_rope(std::string_view inbound_name, view::rope_t frame) {'),
-    ('core/src/fwd_router.cpp:1492', 'const auto head = peek_control(cur, wire::grammar::crc_check_t::VERIFY);'),
-    ('core/src/fwd_router.cpp:1506', 'const std::span<const std::byte> route = contig(head->child1_off, head->child1_total);'),
-    ('core/src/fwd_router.cpp:1552', 'hold = frame.subrope(off, total).materialize(*flat_);'),
-    ('core/src/fwd_router.cpp:1912',
+    ('core/src/fwd_router.cpp:1506', 'const auto head = peek_control(cur, wire::grammar::crc_check_t::VERIFY);'),
+    ('core/src/fwd_router.cpp:1520', 'const std::span<const std::byte> route = contig(head->child1_off, head->child1_total);'),
+    ('core/src/fwd_router.cpp:1566', 'hold = frame.subrope(off, total).materialize(*flat_);'),
+    ('core/src/fwd_router.cpp:1926',
      "// else. A dropped fresh ADVERTISE self-heals via the peer's HANDLE_NACK (§E.1). NOT yet"),
-    ('core/src/fwd_router.cpp:1947',
+    ('core/src/fwd_router.cpp:1961',
      'constexpr std::array<std::byte, 5> op_tlv{std::byte{0x01}, std::byte{0x00}, std::byte{0x01},'),
     # core/src/graph.cpp
     ('core/src/graph.cpp:246', 'const view_t& frame_view, std::vector<std::byte> key,'),
@@ -605,13 +605,12 @@ ANCHORS = [
     ('core/src/graph.cpp:2118', 'result_t<void> graph_t::create_child(vertex_t* parent, const view_t& spec_value) {'),
     ('core/src/graph.cpp:2772', 'result_t<void> graph_t::write(const path_t& path, rope_t value) {'),
     # core/src/op_resolve_walk.hpp
-    ('core/src/fwd_reply.cpp:32', "*        the u16 the kind=ERROR reply's ERROR{VALUE} identity carries."),
-    ('core/src/fwd_reply.hpp:98', 'void tlv_sliced(std::span<const std::byte> wire) {'),
-    ('core/src/fwd_reply.cpp:113', 'out.tlv_sliced(reply_dst_wire);'),
-    ('core/src/op_resolve_walk.hpp:802',
+    ('core/src/fwd_reply.cpp:33', "*        the u16 the kind=ERROR reply's ERROR{VALUE} identity carries."),
+    ('core/src/fwd_reply.hpp:109', 'void tlv_sliced(std::span<const std::byte> wire) {'),
+    ('core/src/fwd_reply.cpp:132', 'out.tlv_sliced(route.dst_wire);'),
+    ('core/src/op_resolve_walk.hpp:804',
      'if (!req.src.spans_intact()) return std::unexpected(status_t::BACKPRESSURE);'),
-    ('core/src/op_resolve_walk.hpp:913', 'if (!req.dst.spans_intact()) return reply_error(status_t::BACKPRESSURE);'),
-    ('core/src/op_resolve_walk.hpp:722', 'if (value.total_length() == 0)'),
+    ('core/src/op_resolve_walk.hpp:915', 'if (!req.dst.spans_intact()) return reply_error(status_t::BACKPRESSURE);'),
     # core/src/path.cpp
     # core/src/posix_endpoint.cpp
     ('core/src/posix_endpoint.cpp:225',
@@ -629,21 +628,21 @@ ANCHORS = [
     ('core/src/rope_decode.cpp:32', 'std::expected<void, err_t> check_frame(const view::rope_t& r) {'),
     ('core/src/rope_decode.cpp:46', 'std::expected<void, err_t> validate_rope(const view::rope_t& r) {'),
     # core/src/tlv_arena.cpp
-    ('core/src/tlv_arena.cpp:130', 'std::array<grammar::walk_frame_t<grammar::span_cursor>, 8> slots;'),
-    ('core/src/tlv_arena.cpp:131', 'grammar::walk_stack_t<grammar::span_cursor> stack(slots, &src);'),
+    ('core/src/tlv_arena.cpp:151', 'std::array<grammar::walk_frame_t<grammar::span_cursor>, 8> slots;'),
+    ('core/src/tlv_arena.cpp:152', 'grammar::walk_stack_t<grammar::span_cursor> stack(slots, &src);'),
     # core/src/transport_tcp.cpp
     ('core/src/transport_tcp.cpp:56',
      '*        MEASURED (`bench_transport_iov`): the fallback fires at exactly **17'),
     ('core/src/transport_tcp.cpp:59',
      "*        `bench_forward_heap`'s `allocs=0` gate cannot see it: that bench drives"),
-    ('core/src/transport_tcp.cpp:204', 'bool tcp_transport_t::read_exact(int fd, std::byte* dst, std::size_t len) {'),
-    ('core/src/transport_tcp.cpp:224', 'std::array<std::byte, 4096> scratch;'),
+    ('core/src/transport_tcp.cpp:205', 'bool tcp_transport_t::read_exact(int fd, std::byte* dst, std::size_t len) {'),
+    ('core/src/transport_tcp.cpp:225', 'std::array<std::byte, 4096> scratch;'),
     # zero-copy-and-flatten.md quotes this comment's tail verbatim, so the anchor carries the
     # QUOTED line — pinning `serve()`'s signature two constructs up passed while the citation
     # pointed at code the doc never quotes.
-    ('core/src/transport_tcp.cpp:246',
+    ('core/src/transport_tcp.cpp:247',
      '// buffer, no copy; feeding recv chunks through feed() would add one).'),
-    ('core/src/transport_tcp.cpp:266', 'if (!read_exact(fd, seg->bytes.data(), len)) return;'),
+    ('core/src/transport_tcp.cpp:267', 'if (!read_exact(fd, seg->bytes.data(), len)) return;'),
     # core/src/transport_udp.cpp
     ('core/src/transport_udp.cpp:132',
      'const std::size_t rx_cap = std::min(kMaxDatagram, backend_->max_segment_size());'),
@@ -657,7 +656,7 @@ ANCHORS = [
     ('core/src/transport_vertex.cpp:149',
      'result_t<std::string> transport_vertex_t::module_for(std::string_view kind,'),
     ('core/src/transport_vertex.cpp:213', 'std::string module;'),
-    ('core/src/transport_vertex.cpp:265',
+    ('core/src/transport_vertex.cpp:270',
      '// Compose the mount key: `<net_root>/<module>/<name>`, replacing the flat key the'),
     # core/src/transport_ws.cpp
     ('core/src/transport_ws.cpp:86',
@@ -671,12 +670,12 @@ ANCHORS = [
     # scope entirely instead, because the array is now spelled `pristine_inline` here and
     # `inline_vec` only in the directed facade — one anchor, one hit, no positional filter.
     ('core/src/transport_ws.cpp:272', 'std::array<::iovec, kMaxServerIov + 1> pristine_inline;'),
-    ('core/src/transport_ws.cpp:629', 'std::array<std::byte, 4096> chunk;',
+    ('core/src/transport_ws.cpp:633', 'std::array<std::byte, 4096> chunk;',
      'void transport_ws_client::serve(int fd, std::vector<std::byte> pipelined) {'),
     # core/tests/registry_teardown_test.cpp
     ('core/tests/registry_teardown_test.cpp:275', 'void test_digest_paths_agree() {'),
     # core/tests/tlv_arena_test.cpp
-    ('core/tests/tlv_arena_test.cpp:289', 'const std::vector<std::byte> deep_bytes = encode(nested(100));'),
+    ('core/tests/tlv_arena_test.cpp:297', 'const std::vector<std::byte> deep_bytes = encode(nested(100));'),
     # integrations/esp-idf/libtracer/httpd_ws_link.cpp
     ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:71',
      '* (F2b, 2026-07-09): the /unit batch apply overflowed 8 KB and needed ~12 KB. It is named'),
@@ -690,21 +689,21 @@ ANCHORS = [
      '*     task stack (the batch apply overflows the 4 KB httpd default). The PORT-BINDING'),
 
     # --- re-added from the v0.7.1 docs sweep (absent from main's table) ---
-    ('core/include/libtracer/fwd_frame_view.hpp:846', 'inline constexpr std::size_t kFwdMaxIov = 9;'),
+    ('core/include/libtracer/fwd_frame_view.hpp:867', 'inline constexpr std::size_t kFwdMaxIov = 10;'),
     ('core/include/libtracer/graph.hpp:1002', '* @param ctx Caller-owned context; must outlive every possible delivery (edges are'),
     ('core/include/libtracer/graph.hpp:1225', '[[nodiscard]] result_t<value_ref_t> read(const path_t& path) const;'),
     ('core/include/libtracer/graph.hpp:1231', '[[nodiscard]] result_t<value_ref_t> await(const path_t& path, std::chrono::nanoseconds timeout);'),
     ('core/include/libtracer/mem_heap.hpp:157', '[[nodiscard]] inline bool try_grow(std::size_t bytes, F&& grow) noexcept {'),
     ('core/include/libtracer/mem_heap.hpp:183', '[[nodiscard]] bool try_reserve(std::vector<T>& v, std::size_t n) noexcept {'),
     ('core/include/libtracer/mem_heap.hpp:375', '[[nodiscard]] inline std::optional<view_t> over_bytes(std::span<const std::byte> bytes,'),
-    ('core/include/libtracer/path.hpp:156', 'explicit path_t(std::string_view text);'),
+    ('core/include/libtracer/path.hpp:159', 'explicit path_t(std::string_view text);'),
     # ONE `bus()` since #871: both stream servers inherit slot_server_t's (they used to
     # restate it, cited as transport_tcp.hpp:343 and transport_ws.hpp:233).
     ('core/include/libtracer/posix_endpoint.hpp:408',
      '[[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }'),
     ('core/include/libtracer/edge_pin.hpp:153', 'class pin_t {'),
-    ('core/src/fwd_router.cpp:739', 'link.set_rope_receiver('),
-    ('core/src/fwd_router.cpp:693', 'bus->set_peer_rope_receiver('),
+    ('core/src/fwd_router.cpp:753', 'link.set_rope_receiver('),
+    ('core/src/fwd_router.cpp:707', 'bus->set_peer_rope_receiver('),
     ('core/src/graph.cpp:776', 'vertex_t* graph_t::find_ptr(std::span<const std::byte> key) const {'),
     ('core/src/graph.cpp:777', 'const std::shared_lock lock(map_mutex_);'),
     ('core/src/graph.cpp:1849', 's.target_key.reset();'),
@@ -727,11 +726,11 @@ ANCHORS = [
     ('tools/cortexm0_footprint.py:94', 'cxx_flags = ['),
     ('tools/cortexm0_footprint.py:101', '"-DLIBTRACER_NO_ATOMIC",'),
     ('tools/cortexm0_footprint.py:115', '"--specs=nano.specs",'),
-    ('core/tests/CMakeLists.txt:1201', 'add_executable(substrate_test_no_atomic'),
-    ('core/tests/CMakeLists.txt:1214', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
+    ('core/tests/CMakeLists.txt:1205', 'add_executable(substrate_test_no_atomic'),
+    ('core/tests/CMakeLists.txt:1218', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
     # The leading indent is load-bearing: the bare token also appears in the comment
     # three lines above the executable, and an anchor that matches both is not an anchor.
-    ('core/tests/CMakeLists.txt:1215', '    LIBTRACER_NO_ATOMIC'),
+    ('core/tests/CMakeLists.txt:1219', '    LIBTRACER_NO_ATOMIC'),
 
     # --- #1095: the rest of the non-source citations, now that a line-numbered citation
     # of an unverifiable file is an ERROR rather than a false green.
