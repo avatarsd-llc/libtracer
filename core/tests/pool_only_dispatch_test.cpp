@@ -67,7 +67,8 @@ using tr::testing::check_quiet;
  * `pool_t::destroy` beside it.
  */
 struct counting_sync_t {
-    static constexpr bool is_isr_safe = false;                  /**< @brief Spin => not ISR. */
+    static constexpr bool is_isr_safe = false;   /**< @brief Spin => not ISR. */
+    static constexpr bool is_nonblocking = true; /**< @brief Spin => no syscall, no OS wait. */
     static constexpr const char* name = "pool_only_count_sync"; /**< @brief Backend name. */
     static inline std::atomic<std::size_t> acquisitions{0};     /**< @brief Lock count. */
 

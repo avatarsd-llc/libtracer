@@ -194,8 +194,14 @@ void test_bounded_pool() {
  *        bearing distinctions so a backend change that violates them fails to build.
  */
 static_assert(!tr::mem::pool_t::needs_cache_ops, "the pool is plain RAM — no DMA cache ops");
-static_assert(tr::mem::pool_t::is_isr_safe, "the pool's free-list alloc/destroy is ISR-safe");
+static_assert(!tr::mem::pool_t::is_isr_safe,
+              "the bare pool's free-list RMW is unsynchronized — NOT ISR-safe (#928); ISR safety "
+              "is synchronized_pool_t with an ISR-safe policy");
+static_assert(tr::mem::pool_t::is_nonblocking,
+              "the pool's free-list alloc/destroy is O(1) — no heap, no syscall (#928)");
 static_assert(!tr::mem::heap_backend_t::is_isr_safe, "operator new/delete is not ISR-safe");
+static_assert(!tr::mem::heap_backend_t::is_nonblocking,
+              "operator new/delete may lock or syscall — not nonblocking (#928)");
 static_assert(tr::mem::heap_backend_t::owns_bytes, "the heap owns its bytes (durably storable)");
 static_assert(!tr::mem::detail::borrowed_backend_t::owns_bytes,
               "a borrow must NOT be durably stored");
@@ -224,12 +230,17 @@ void test_mem_transfer() {
               std::ranges::equal(hseg->bytes, src),
           "transfer works over the heap backend too");
 
-    // A borrowed-DEVICE segment is host memory tagged DEVICE — the fast path still memcpys it.
+    // A DEVICE-space segment is refused whatever its backend tag (#928): the SPACE tag decides
+    // CPU-copyability, so the borrowed-DEVICE stand-in now gets the same clean false a
+    // semantically identical UNKNOWN-tagged device segment always got through
+    // `transfer_generic` — the backend tag stays a fast path, never an outcome-changing input.
+    // (This deliberately flips the pre-#928 assertion that the fast path memcpy'd it.)
     std::array<std::byte, 8> dev_store{};
     tr::view::segment_ptr_t dseg = tr::view::borrow_device(dev_store);
-    check(tr::mem::transfer(dseg.get(), src, tr::mem::io_dir_t::CPU_TO_DEVICE) &&
-              std::ranges::equal(dev_store, src),
-          "transfer over a borrowed-DEVICE stand-in memcpys (no real device)");
+    check(!tr::mem::transfer(dseg.get(), src, tr::mem::io_dir_t::CPU_TO_DEVICE),
+          "transfer refuses a DEVICE-space segment (the borrowed-DEVICE stand-in included)");
+    check(std::ranges::all_of(dev_store, [](std::byte b) { return b == std::byte{0}; }),
+          "the refused device bytes are untouched");
 
     // Guards: an over-long host buffer and a null segment are rejected, not truncated.
     std::array<std::byte, 9> too_big{};

@@ -44,6 +44,8 @@ class borrowed_backend_t final : public mem_backend_t {
         false; /**< @brief No DMA cache maintenance (host RAM). */
     static constexpr bool is_isr_safe =
         false; /**< @brief `destroy` frees the control block via `operator delete`. */
+    static constexpr bool is_nonblocking =
+        false; /**< @brief `operator delete` may lock or syscall (#928). */
     static constexpr bool owns_bytes =
         false; /**< @brief Borrows caller-owned bytes — must NOT be durably stored. */
 };
@@ -64,11 +66,15 @@ class borrowed_device_backend_t final : public mem_backend_t {
     [[nodiscard]] backend_tag tag() const noexcept override { return backend_tag::BORROWED_DEVICE; }
 
     // Module-set traits (ADR-0047 §2). Bytes are host memory tagged DEVICE (a
-    // CUDA-free stand-in), so `mem::transfer` still moves them with a `memcpy`.
+    // CUDA-free stand-in). `mem::transfer` REFUSES it like any other DEVICE-space
+    // segment (#928): the SPACE tag, not the backend tag, decides CPU-copyability,
+    // so the stand-in exercises exactly the refusal a real device link gets.
     static constexpr bool needs_cache_ops =
         false; /**< @brief Test stand-in over host RAM — no real DMA. */
     static constexpr bool is_isr_safe =
         false; /**< @brief `destroy` frees the control block via `operator delete`. */
+    static constexpr bool is_nonblocking =
+        false; /**< @brief `operator delete` may lock or syscall (#928). */
     static constexpr bool owns_bytes =
         false; /**< @brief Borrows caller-owned bytes — must NOT be durably stored. */
 };

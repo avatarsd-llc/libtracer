@@ -52,8 +52,11 @@ rules from the shared reader apply to every key on this page:
 
 - **Unknown pairs are ignored**, whole — key *and* value — so a newer peer may send
   keys this node has never heard of.
-- **A wrong-typed value is ignored** as though the key were absent; so is an empty
-  `VALUE` payload.
+- **A wrong-typed value is ignored** as though the key were absent; so is a `VALUE`
+  payload whose size is not exactly the width this table gives (an empty payload
+  being that rule's trivial case). A u16 `port` sent as four bytes reads as absent
+  rather than silently dropping its high bytes, and a u32 `keepalive` sent as two
+  reads as absent rather than zero-extending (#928).
 - **A repeated key resolves to its last well-formed occurrence.**
 - **A child that is not a `NAME` where a key belongs stops the walk.** Every key
   after that point reads as absent.

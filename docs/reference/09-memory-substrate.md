@@ -560,7 +560,7 @@ The one in-tree caller of the hooks is **`tr::mem::transfer(seg, host, io_dir_t)
 
 ### Module-set traits
 
-Each concrete backend carries **compile-time contracts** as `static constexpr` members, replacing prose ([ADR-0047 §2](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md)): `needs_cache_ops` (does a transfer need the cache hooks — read by `mem::transfer`), `is_isr_safe` (are `alloc`/`destroy` callable from an ISR — a slot pool yes, a general heap no), and `owns_bytes` (are the bytes backend-owned and thus safe to durably store — false for a borrow). They are `static_assert`-able and, being compile-time, cost nothing on the MCU profile.
+Each concrete backend carries **compile-time contracts** as `static constexpr` members, replacing prose ([ADR-0047 §2](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md)): `needs_cache_ops` (does a transfer need the cache hooks — read by `mem::transfer`), `is_isr_safe` (are `alloc`/`destroy` safe **concurrent with an ISR** — only a *synchronized* pool whose policy is ISR-safe; the bare `pool_t` is **not**, its free-list RMW is unsynchronized), `is_nonblocking` (no heap, no syscall, no OS wait — the bare `pool_t`'s O(1) free-list yes, a general heap no), and `owns_bytes` (are the bytes backend-owned and thus safe to durably store — false for a borrow). They are `static_assert`-able and, being compile-time, cost nothing on the MCU profile.
 
 ---
 

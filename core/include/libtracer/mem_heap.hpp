@@ -281,6 +281,8 @@ class heap_backend_t final : public mem_backend_t {
         false; /**< @brief No DMA cache maintenance (host RAM). */
     static constexpr bool is_isr_safe =
         false; /**< @brief `alloc`/`destroy` call `operator new`/`delete` — not ISR-safe. */
+    static constexpr bool is_nonblocking =
+        false; /**< @brief `operator new`/`delete` may lock or syscall (#928). */
     static constexpr bool owns_bytes =
         true; /**< @brief Owns the `operator new`'d bytes — durably storable. */
 };

@@ -59,7 +59,8 @@ using tr::testing::check_quiet;
  * type, which is exactly the defect #770 reports at the receive seam.
  */
 struct counting_sync_t {
-    static constexpr bool is_isr_safe = false;              /**< @brief Spin => not ISR-safe. */
+    static constexpr bool is_isr_safe = false;   /**< @brief Spin => not ISR-safe. */
+    static constexpr bool is_nonblocking = true; /**< @brief Spin => no syscall, no OS wait. */
     static constexpr const char* name = "test_count_sync";  /**< @brief Backend name. */
     static inline std::atomic<std::size_t> acquisitions{0}; /**< @brief Lock count, all pools. */
 

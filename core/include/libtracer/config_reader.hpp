@@ -49,8 +49,9 @@ namespace tr::wire {
  * string, immediately followed by the value child — a `NAME` for string values, a
  * `VALUE` for integers/flags, or a nested `SETTINGS` for a module namespace.
  * Unknown keys are ignored (forward-compat), a key whose value child has the wrong
- * type (or an empty `VALUE` payload) is ignored too, and when a key appears more
- * than once the LAST well-formed occurrence wins.
+ * type (or a `VALUE` payload that is not EXACTLY the accessor's width — a u32
+ * asked of a 2-byte payload is absent, not zero-extended, #928) is ignored too,
+ * and when a key appears more than once the LAST well-formed occurrence wins.
  *
  * The walk is **pair-consuming**: it advances a whole pair at a time, so an
  * unknown key is skipped together with its value and no value child can ever be
@@ -104,22 +105,22 @@ class config_reader_t {
         return find(key, type_t::SETTINGS);
     }
 
-    /** @brief The u8 value of @p key (a non-empty `VALUE` child), if present. */
+    /** @brief The u8 value of @p key (a 1-byte `VALUE` child), if present. */
     [[nodiscard]] std::optional<std::uint8_t> u8(std::string_view key) const noexcept {
         return value_as<std::uint8_t>(key);
     }
 
-    /** @brief The u16 value of @p key (a non-empty `VALUE` child), if present. */
+    /** @brief The u16 value of @p key (a 2-byte `VALUE` child), if present. */
     [[nodiscard]] std::optional<std::uint16_t> u16(std::string_view key) const noexcept {
         return value_as<std::uint16_t>(key);
     }
 
-    /** @brief The u32 value of @p key (a non-empty `VALUE` child), if present. */
+    /** @brief The u32 value of @p key (a 4-byte `VALUE` child), if present. */
     [[nodiscard]] std::optional<std::uint32_t> u32(std::string_view key) const noexcept {
         return value_as<std::uint32_t>(key);
     }
 
-    /** @brief The boolean value of @p key: a non-empty `VALUE` child read as
+    /** @brief The boolean value of @p key: a 1-byte `VALUE` child read as
      *         u8, nonzero = true. */
     [[nodiscard]] std::optional<bool> flag(std::string_view key) const noexcept {
         const std::optional<std::uint8_t> v = u8(key);
@@ -128,10 +129,10 @@ class config_reader_t {
     }
 
    private:
-    /** @brief Decode @p key's `VALUE` payload little-endian as @p T. */
+    /** @brief Decode @p key's exactly-`sizeof(T)`-byte `VALUE` payload little-endian as @p T. */
     template <class T>
     [[nodiscard]] std::optional<T> value_as(std::string_view key) const noexcept {
-        const tlv_t* val = find(key, type_t::VALUE);
+        const tlv_t* val = find(key, type_t::VALUE, sizeof(T));
         if (val == nullptr) return std::nullopt;
         return detail::load_le<T>(val->payload);
     }
@@ -149,17 +150,28 @@ class config_reader_t {
      * child as that key's value, and last-match-wins then overrode a legitimate
      * earlier occurrence.
      *
-     * Within the matching pairs the pre-existing semantics are unchanged: a
-     * value child of the wrong type (or an empty `VALUE` payload) is ignored
-     * and does not clobber an earlier well-formed occurrence, and the last
-     * well-formed occurrence wins.
+     * Within the matching pairs: a value child of the wrong type is ignored and
+     * does not clobber an earlier well-formed occurrence, and the last
+     * well-formed occurrence wins. A `VALUE` payload whose size is not exactly
+     * @p value_width is ignored the same way (#928): `detail::load_le` is
+     * width-tolerant by design (the wire deliberately emits variable-width
+     * ints), so without this check a 2-byte payload read as u32 silently
+     * zero-extends and a 4-byte payload read as u16 silently drops its high
+     * bytes — a config the sender never wrote. The strictness is SCOPED to
+     * `config_reader_t`; the codebase-wide VALUE-decode convention is decided
+     * once alongside #906 (`parse_acl`, strict) and #927. The old
+     * empty-payload rejection is this check's trivial case.
+     *
+     * @param value_width Required `VALUE` payload size in bytes; ignored for a
+     *                    non-`VALUE` @p value_type.
      *
      * A child that is not a `NAME` where a key belongs desynchronizes the pair
      * stream, and the walk stops there rather than guessing a resync —
      * resynchronizing on every offset is the defect above. A trailing unpaired
      * key is ignored.
      */
-    [[nodiscard]] const tlv_t* find(std::string_view key, type_t value_type) const noexcept {
+    [[nodiscard]] const tlv_t* find(std::string_view key, type_t value_type,
+                                    std::size_t value_width = 0) const noexcept {
         if (config_ == nullptr) return nullptr;
         const std::vector<tlv_t>& ch = config_->children;
         const tlv_t* found = nullptr;
@@ -170,7 +182,7 @@ class config_reader_t {
             if (detail::as_string_view(ch[i].payload) != key) continue;
             const tlv_t& val = ch[i + 1];
             if (val.type != value_type) continue;
-            if (value_type == type_t::VALUE && val.payload.empty()) continue;
+            if (value_type == type_t::VALUE && val.payload.size() != value_width) continue;
             found = &val;
         }
         return found;

@@ -346,7 +346,7 @@ pbuf on a Linux host — and incompatible with `esp_http_server`'s WS framing. F
 **Every pool-recv change shares one precondition, and it is built.** A segment
 self-routes reclaim on whichever subscriber thread drops the last reference, concurrent with a
 writer's `alloc`, so the receive backend must be thread-safe. `synchronized_pool_t<Sync>`
-(`core/include/libtracer/mem_pool.hpp:172`) is that backend, with the critical section as a
+(`core/include/libtracer/mem_pool.hpp:184`) is that backend, with the critical section as a
 compile-time policy
 ([ADR-0060, LKV copy store and injected value backend](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0060-lkv-copy-store-injected-value-backend.md)
 §2, selected per target as a module-set trait

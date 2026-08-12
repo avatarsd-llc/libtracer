@@ -48,7 +48,7 @@ struct view_t {                                          // view.hpp
 };
 
 /** Own a copy of borrowed bytes as a view_t; nullopt == allocation failure. */
-std::optional<view_t> over_bytes(std::span<const std::byte>) noexcept;  // mem_heap.hpp:338
+std::optional<view_t> over_bytes(std::span<const std::byte>) noexcept;  // mem_heap.hpp:340
 std::optional<view_t> over_bytes(std::span<const std::byte>, mem::mem_backend_t&) noexcept; // :375
 
 class rope_t {                                           // rope.hpp — ordered chain of views
@@ -93,8 +93,8 @@ heap, which is the chain's only allocation (`rope_t::append`, `rope.hpp:56-71`).
 Bytes handed up by a transport are borrowed: they live in a connection buffer that is
 reused as soon as the callback returns. Keeping them means owning a copy, and the
 canonical way to take one is `tr::view::over_bytes`
-(`core/include/libtracer/mem_heap.hpp:338`) — one call in place of the
-`heap_alloc` + `memcpy` + `view_t::over` triplet. A second overload (`:375`) takes the
+(`core/include/libtracer/mem_heap.hpp:340`) — one call in place of the
+`heap_alloc` + `memcpy` + `view_t::over` triplet. A second overload (`:377`) takes the
 backend to draw from, which is what a peer-driven ownership copy uses so the copy lands in
 the node's injected seam rather than the global heap.
 

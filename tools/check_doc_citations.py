@@ -397,10 +397,10 @@ ANCHORS = [
     ('core/include/libtracer/mem_borrowed.hpp:39',
      'void destroy(view::segment_t* seg) noexcept override { delete seg; }  // control block only'),
     # core/include/libtracer/mem_heap.hpp
-    ('core/include/libtracer/mem_heap.hpp:338',
+    ('core/include/libtracer/mem_heap.hpp:340',
      '[[nodiscard]] inline std::optional<view_t> over_bytes(std::span<const std::byte> bytes) noexcept {'),
     # core/include/libtracer/mem_pool.hpp
-    ('core/include/libtracer/mem_pool.hpp:172', 'class synchronized_pool_t final : public mem_backend_t {'),
+    ('core/include/libtracer/mem_pool.hpp:184', 'class synchronized_pool_t final : public mem_backend_t {'),
     # core/include/libtracer/mem_source.hpp
     ('core/include/libtracer/mem_source.hpp:138', '[[nodiscard]] block_source_t& heap_source() noexcept;'),
     ('core/include/libtracer/mem_source.hpp:159', '[[nodiscard]] block_source_t& null_source() noexcept;'),
@@ -711,7 +711,7 @@ ANCHORS = [
     ('core/include/libtracer/graph.hpp:1245', '[[nodiscard]] result_t<value_ref_t> await(const path_t& path, std::chrono::nanoseconds timeout);'),
     ('core/include/libtracer/mem_heap.hpp:157', '[[nodiscard]] inline bool try_grow(std::size_t bytes, F&& grow) noexcept {'),
     ('core/include/libtracer/mem_heap.hpp:183', '[[nodiscard]] bool try_reserve(std::vector<T>& v, std::size_t n) noexcept {'),
-    ('core/include/libtracer/mem_heap.hpp:375', '[[nodiscard]] inline std::optional<view_t> over_bytes(std::span<const std::byte> bytes,'),
+    ('core/include/libtracer/mem_heap.hpp:377', '[[nodiscard]] inline std::optional<view_t> over_bytes(std::span<const std::byte> bytes,'),
     ('core/include/libtracer/path.hpp:159', 'explicit path_t(std::string_view text);'),
     # ONE `bus()` since #871: both stream servers inherit slot_server_t's (they used to
     # restate it, cited as transport_tcp.hpp:343 and transport_ws.hpp:233).
