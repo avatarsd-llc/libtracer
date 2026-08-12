@@ -219,8 +219,9 @@ publishes every package in lockstep.
   two routes are one device is precisely the identity-matching ADR-0044 forbids.
   A **bus** link (a `peer_named` ws listener, a CAN segment) is reported via
   `busLinks` and never descended — routing through its connection NAME
-  broadcasts to every peer, and its per-peer directed hop is not addressable
-  when the transport names peers `<ip>:<port>` (reserved characters).
+  broadcasts to every peer, and descending per enumerated peer is withheld on
+  cost grounds: peer counts are unbounded, so it would multiply the walk's
+  request volume at every bus crossed (#1147).
 
 - **`LibtracerClient.writeField(path, selector, valueTLV)` in
   `@avatarsd-llc/libtracer-client` (#408)** — the write counterpart of

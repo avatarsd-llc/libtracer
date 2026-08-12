@@ -79,8 +79,10 @@ const utf8 = new TextDecoder();
 /**
  * @brief Characters reference/03 forbids inside a path segment (mirrors `tlv.ts`).
  *
- * Used to decide whether a bus peer's name could even be addressed as a hop — a ws
- * bus names peers `<ip>:<port>`, which contains two of these.
+ * Used to decide whether a bus peer's name could even be addressed as a hop. Every
+ * shipped bus transport now emits legal-segment peer names (`p<slot>`, `n<id>` —
+ * #426, #1145), but a peer name arrives over the wire and a client validates what
+ * it is sent rather than trusting a naming convention.
  */
 const RESERVED_SEGMENT_CHARS = /[/:.[\]*?]/;
 
@@ -121,14 +123,18 @@ export interface TopologyEdge {
  *   which **broadcasts to every peer**. One request then draws N replies, which
  *   corrupts a client's reply correlation — so descending by name is not merely
  *   imprecise, it is actively wrong.
- * - The directed hop is the **enumerated peer name** (the registry's peer fallback).
- *   That works for a CAN bus, whose peers are named `n5`/`n7` — but a ws bus names its
- *   peers `<ip>:<port>`, and both `:` and `.` are **reserved characters that may not
- *   appear in a path segment** (reference/03). So a ws bus's peers are enumerable but
- *   **not addressable** by the path grammar, from any conforming client.
+ * - Descending **per peer** is expressible — every shipped bus transport names its
+ *   peers with legal path segments (`p<slot>`, `n<id>` — #426, #1145), so a directed
+ *   hop through the enumerated peer name exists — but this walk deliberately does not
+ *   take it, on **cost** grounds: a bus's peer count is unbounded, and a walk that
+ *   descends N peers per bus multiplies its request volume by N at every bus it
+ *   crosses. The buses in question are exactly the constrained links (a CAN segment,
+ *   an embedded ws listener) least able to absorb that traffic.
  *
  * The peers are therefore reported here — the walk knows they exist and can name them
- * — but they are not nodes, because nothing behind them can be read.
+ * — but they are **not descended by policy** (#1147), not by impossibility. A future
+ * opt-in (descend-on-request for a named bus link) could lift this per call; it is
+ * not built.
  */
 export interface TopologyBusPeers {
   /** @brief The {@link TopologyNode.id} owning the bus connection. */
@@ -488,7 +494,7 @@ export async function walkTopology(
 
         // A bus link is a dead end: routing through its NAME broadcasts to every peer,
         // drawing N replies for one request. Record its peers and stop. (See
-        // TopologyBusPeers for why the directed per-peer hop is not expressible either.)
+        // TopologyBusPeers for why the per-peer hop, though expressible, is not taken.)
         const peers = await peersOf(route, id, module, name);
         if (peers.length > 0) {
           const routable = peers.every((p) => !RESERVED_SEGMENT_CHARS.test(p));
