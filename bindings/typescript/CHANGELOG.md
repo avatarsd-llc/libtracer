@@ -7,6 +7,21 @@ versioning/publish strategy.
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-08-12
+
+No API changes. This package is an independent native implementation of the protocol —
+it does not compile the C++ core — so the core's 0.10.0 wire-behaviour changes do not
+reach it. What does land here: the reserved-segment set this tier already enforced is
+now agreed cross-tier — #996 tightened the C++ `valid_segment` to the same
+seven-character set `/ : . [ ] * ?`, pinned by the new `path/path-reserved-brackets`
+conformance vector that `packages/client/test/vectors.test.mjs` now carries
+bit-for-bit — and the topology walk's bus no-descend rule is restated on its true
+grounds (#1147): every shipped bus transport names peers with legal segments, so the
+per-peer hop is *expressible*; the walk withholds it by **policy** (unbounded peer
+counts would multiply request volume at every bus crossed), not impossibility.
+Doc/JSDoc and test only; no runtime behaviour changed. Released at 0.10.0 because one
+tag publishes every package in lockstep.
+
 ## [0.9.1] — 2026-08-10
 
 No changes. This package is an independent native implementation of the protocol —
