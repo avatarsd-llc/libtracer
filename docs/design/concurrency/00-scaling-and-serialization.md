@@ -133,10 +133,18 @@ itself when no waiter is parked
 
 The **whole delivery decision for an unobserved write** is on this list too
 ([#635](https://github.com/avatarsd-llc/libtracer/issues/635)): two counter loads and no lock. One of them,
-`own_subs_ordered()`, is read `seq_cst` rather than relaxed — it is the only read that decides
-whether to deliver at all, so it pairs against a subscribe taking ADR-0049's latch. Every other
-reader of the same counter stays relaxed, because deciding *how much* work to do can safely be
-one publish behind; deciding *whether* cannot.
+`own_subs_ordered()`, is read `seq_cst` rather than relaxed — it decides whether the vertex's
+OWN fan-out happens at all, so it pairs against a subscribe taking ADR-0049's latch. It is
+**not** the only delivery-deciding read: the ancestor leg (`bubble_up`) is gated on the *relaxed*
+`listeners_above()`, and `mark_pending` decides a *deferred* delivery on relaxed reads of both
+counters. The ancestor gate stays relaxed by measurement and ruling
+([#854](https://github.com/avatarsd-llc/libtracer/issues/854), REFUTED): a stale zero there is
+indistinguishable from the write linearizing before the racing subtree subscribe — the
+subscriber's latch snapshots the subscribed *ancestor's* own LKV, never a descendant's, so no
+observation contradicts that ordering — and the `seq_cst` candidate doubled the idle write's
+rv32 fence count to exclude nothing. (`mark_pending`'s near-axis half is
+[#1140](https://github.com/avatarsd-llc/libtracer/issues/1140)'s.) Every other reader of the same
+counters stays relaxed, because deciding *how much* work to do can safely be one publish behind.
 
 ---
 

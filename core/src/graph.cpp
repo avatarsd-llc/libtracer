@@ -1226,10 +1226,14 @@ result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, std::string_view c
             // it sheds — one per subscriber, never one per event. Counted here, at the
             // frame that abandons the delivery, because no inner frame is entered at all.
             // The ancestor legs a bubble would also have served are deliberately not
-            // counted: that axis and its instrumentation are #854's.
+            // counted, and stay that way: #854's close ruling dropped the ancestor-leg
+            // drop instrumentation outright, so this tally is own-subs-wide by decision.
             count_drop(drop_reason_t::OUT_OF_MEMORY, v->own_subs());
         }
-        clear_pending(v);  // eager delivery flushes any pending mark a prior assign left
+        // Eager delivery flushes any pending mark a prior assign left — but only while
+        // what this write published is still current (#1185); on the handler leg that is
+        // the null "consumed" sentinel, matching the handler's permanently null LKV.
+        clear_pending(v, *stored);
         return {};
     }
     const result_t<std::shared_ptr<const rope_t>> stored = store_value(v, std::move(value));
@@ -1243,7 +1247,9 @@ result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, std::string_view c
         // no notify reclone of the rope on the hot write path.
         deliver_vertex(v, **stored);
     }
-    clear_pending(v);  // eager delivery flushes any pending mark a prior assign left
+    // Eager delivery flushes any pending mark a prior assign left — but only while what
+    // this write published is still v's current LKV (#1185).
+    clear_pending(v, *stored);
     return {};
 }
 
@@ -1320,6 +1326,12 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, std::stri
     struct site_t {
         vertex_t* vx;
         const branch_node_t* node;
+        // What this branch's own store published here — null until the apply loop below,
+        // and on a site whose store soft-failed. clear_pending compares it against the
+        // vertex's current LKV so a racing assign's mark keeps its delivery (#1185); a
+        // null on a vertex that holds an LKV simply fails that compare, which is the safe
+        // direction (a duplicate delivery, never a lost one).
+        std::shared_ptr<const rope_t> stored;
     };
     std::vector<site_t> sites;
     if (!detail::try_reserve(sites, plan.size()))  // nothrow (#477): OOM => BACKPRESSURE
@@ -1336,14 +1348,17 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, std::stri
             if (!acl_allows(vx, caller, acl_right_t::WRITE))
                 return std::unexpected(status_t::PERMISSION_DENIED);
         }
-        sites.push_back(site_t{vx, &node});
+        sites.push_back(site_t{vx, &node, nullptr});
     }
 
     // Apply: land every slice. Admission was atomic; application is per-vertex and
     // best-effort (a handler-role landing site may refuse its slice without
     // un-landing the others) — the branch is NOT a transaction (RFC-0005
     // §atomicity non-promise; each leaf is its own consistent refcounted snapshot).
-    for (const site_t& site : sites) (void)store_value(site.vx, site.node->store);
+    for (site_t& site : sites) {
+        if (result_t<std::shared_ptr<const rope_t>> r = store_value(site.vx, site.node->store))
+            site.stored = std::move(*r);
+    }
 
     if (!notify) {
         // The assign half (RFC-0008 §B branch-assign): mark each landed vertex for the
@@ -1367,7 +1382,7 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, std::stri
     // Eager branch delivered these landing sites — clear any pending mark (a prior assign)
     // and advance stream drain cursors so a later sweep does not re-deliver (RFC-0008 §E).
     for (const site_t& site : sites) {
-        clear_pending(site.vx);
+        clear_pending(site.vx, site.stored);
         if (site.vx->role() == role_t::STREAM) site.vx->mark_flushed();
     }
     return {};
@@ -1472,19 +1487,34 @@ void graph_t::mark_pending(vertex_t* v) {
         pending_count_.fetch_add(1, std::memory_order_relaxed);
 }
 
-void graph_t::clear_pending(vertex_t* v) {
+void graph_t::clear_pending(vertex_t* v, const std::shared_ptr<const rope_t>& delivered) {
     // Same idle fast path as mark_pending: an unobserved vertex was never marked.
     if (v->own_subs() == 0 && v->listeners_above() == 0) return;
     // Empty-set fast path (the per-eager-write case when nobody uses assign+propagate):
     // no key render, no sweep lock. Racing a concurrent mark_pending here leaves the mark
-    // for the next covering sweep — an ordering the locked erase already permitted.
+    // for the next covering sweep — the always-safe direction (one duplicate delivery of
+    // the current LKV at worst, never a lost one).
     if (pending_count_.load(std::memory_order_relaxed) == 0) return;
-    // Nothrow key render (#477): on OOM keep the stale mark — at worst the next covering
-    // sweep re-delivers the current LKV once, an ordering the locked-erase race below
-    // already permitted. Never an abort on the writer thread.
+    // Nothrow key render (#477): on OOM keep the stale mark — the same safe direction.
+    // Never an abort on the writer thread.
     std::vector<std::byte> key;  // outside the lock
     if (!try_build_key(v, key)) return;
     const std::lock_guard lock(sweep_mutex_);
+    // Erase only while the value this call's own store published is still v's CURRENT LKV
+    // (#1185, the #854-survivor locked-erase drop). A concurrent assign publishes a NEW
+    // LKV and only then inserts the mark, both after its store — so a differing pointer
+    // here says a value this writer never delivered is live, and its mark is the only
+    // thing that will ever deliver it. Erasing it would lose that delivery outright;
+    // keeping it costs one duplicate delivery of the current LKV at the next covering
+    // sweep, exactly what the two fast paths above already permit. The compare is a
+    // POINTER identity, and it is sound because `delivered` holds a strong reference for
+    // the whole call: the published control block cannot be freed and its address reused
+    // underneath the comparison. Both the racing insert and this erase take sweep_mutex_,
+    // so a mark that survives is precisely one whose value a sweep still owes. (The
+    // handler leg's null "consumed" sentinel matches a handler's permanently null LKV and
+    // erases as before — a handler sweep delivers nothing anyway, deliver_current on a
+    // null LKV.)
+    if (v->read_stored() != delivered) return;
     if (pending_.erase(key) != 0) pending_count_.fetch_sub(1, std::memory_order_relaxed);
 }
 
