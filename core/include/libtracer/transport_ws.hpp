@@ -398,8 +398,20 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
      *         reassembly, never memcpy'd flat. */
     [[nodiscard]] bool delivers_ropes() const override { return true; }
 
-    /** @brief True if the connection handshake succeeded and the link is up. */
-    [[nodiscard]] bool ok() const noexcept { return connected_; }
+    /** @brief The came-up predicate (#1059): the dial and the client opening handshake
+     *         succeeded. Answered at construction and never reverting — a link that came
+     *         up and later died still answers true here; liveness is @ref link_up. */
+    [[nodiscard]] bool ok() const noexcept { return came_up_; }
+
+    /** @brief Liveness (the @ref transport_t::link_up contract): true from the completed
+     *         handshake until the recv loop's teardown — a peer CLOSE, a remote hangup, a
+     *         fatal receive error or an RFC 6455 breach all clear it (relaxed atomic; the
+     *         push twin is @ref set_down_notifier). A `defer_recv` client that is never
+     *         started never observes the wire and so never reports down (see
+     *         @ref start_receiving). */
+    [[nodiscard]] bool link_up() const noexcept override {
+        return connected_.load(std::memory_order_relaxed);
+    }
 
     /** @brief Messages dropped to RX-backend exhaustion (backpressure) — the server-side
      *         counter's twin, same name, same meaning. */
@@ -454,7 +466,15 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
      * (#848).
      */
     mem::block_array_t<std::byte> tx_buf_{mem::heap_source()};
-    bool connected_ = false;
+    /** @brief The came-up fact `ok()` reports: written once, in the constructor, on
+     *         handshake success — before any thread this object owns exists — and never
+     *         again, so a plain bool is race-free here. */
+    bool came_up_ = false;
+    /** @brief The liveness flag `link_up()` reports (#1059): set with `came_up_`, cleared
+     *         by the recv thread's teardown path. Written and read across threads —
+     *         relaxed atomic (a hint, not a synchronisation point; deliberately no
+     *         lock-free assertion — the rv32/no-A target). */
+    std::atomic<bool> connected_{false};
     /**
      * @brief The bytes the server pipelined behind its `101`, parked between the handshake
      *        and @ref start_receiving (moved into the recv thread there, empty after).

@@ -157,16 +157,19 @@ class webtransport_transport_t : public transport_t {
     /** @brief True — this transport honors @ref set_rope_receiver (ADR-0042). */
     [[nodiscard]] bool delivers_ropes() const override { return true; }
 
-    /** @brief DIAL: the WebTransport session is established (200 received) and
-     *         the frame stream started; LISTEN: the listener is up on its port. */
+    /** @brief The came-up predicate (#1059) — DIAL: the WebTransport session is
+     *         established (200 received) and the frame stream started; LISTEN: the
+     *         listener is up on its port. Answered at construction and never
+     *         reverting; liveness is @ref link_up. */
     [[nodiscard]] bool ok() const noexcept;
 
     /** @brief LISTEN mode: the actual bound UDP port (resolves an ephemeral 0). */
     [[nodiscard]] std::uint16_t local_port() const noexcept;
 
-    /** @brief Link state: true from the QUIC CONNECTED event until the
-     *         connection (and with it the session) shuts down. */
-    [[nodiscard]] bool link_up() const noexcept;
+    /** @brief Liveness (the @ref transport_t::link_up contract): true from the
+     *         QUIC CONNECTED event until the connection (and with it the
+     *         session) shuts down. Relaxed atomic. */
+    [[nodiscard]] bool link_up() const noexcept override;
 
     /** @brief True once the WebTransport session is established — the extended
      *         CONNECT was accepted (LISTEN: request validated + 200 sent;

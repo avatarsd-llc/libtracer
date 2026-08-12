@@ -110,6 +110,7 @@ tcp_transport_t::tcp_transport_t(const std::string& peer_host, std::uint16_t pee
     set_rcv_timeout(fd);
     set_nodelay(fd);
     conn_fd_.store(fd, std::memory_order_relaxed);
+    came_up_ = true;  // the ok() fact (#1059): the dial succeeded; liveness is link_up()
     // Two-phase bring-up (#1045). Spawning the recv thread HERE is the historical shape and
     // stays the default, but it makes the base's "install the sinks before frames flow"
     // contract unsatisfiable: this thread can decode and deliver a frame the peer pushed on

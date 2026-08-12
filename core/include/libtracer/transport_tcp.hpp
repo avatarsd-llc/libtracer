@@ -206,9 +206,20 @@ class tcp_transport_t : public transport_t, private stream_endpoint_t {
      *         handed up owning; a span-only sink gets the same bytes borrowed. */
     [[nodiscard]] bool delivers_ropes() const override { return true; }
 
-    /** @brief DIAL: the connect succeeded; LISTEN: the listen socket is bound. */
-    [[nodiscard]] bool ok() const noexcept {
-        return listen_ ? listen_fd_ >= 0 : conn_fd_.load(std::memory_order_relaxed) >= 0;
+    /** @brief The came-up predicate (#1059) — DIAL: the connect succeeded; LISTEN: the
+     *         listen socket is bound. Answered at construction and never reverting (this
+     *         accessor used to read the live fd on a DIAL link, i.e. it doubled as
+     *         liveness; that is @ref link_up now). */
+    [[nodiscard]] bool ok() const noexcept { return listen_ ? listen_fd_ >= 0 : came_up_; }
+
+    /** @brief Liveness (the @ref transport_t::link_up contract): true while the ONE
+     *         connection is live — DIAL: from the connect until the recv loop's teardown;
+     *         LISTEN: while an accepted peer is connected (false between peers). Derived
+     *         from the connection fd, which the teardown path already resets under the
+     *         write lock — state that is already atomic (relaxed; a hint, not a
+     *         synchronisation point). */
+    [[nodiscard]] bool link_up() const noexcept override {
+        return conn_fd_.load(std::memory_order_relaxed) >= 0;
     }
 
     /** @brief LISTEN mode: the actual bound TCP port (resolves an ephemeral 0). */
@@ -235,6 +246,10 @@ class tcp_transport_t : public transport_t, private stream_endpoint_t {
     bool listen_ = false;
     int listen_fd_ = -1;  // LISTEN mode only
     std::uint16_t bound_port_ = 0;
+    /** @brief The came-up fact `ok()` reports on a DIAL link (#1059): written once, in
+     *         the constructor, before any thread this object owns exists — a plain bool
+     *         is race-free here. */
+    bool came_up_ = false;
 
     // RX segment source for frame reassembly (ADR-0042 §2) + drop counters.
     mem::mem_backend_t* backend_;
