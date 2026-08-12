@@ -1,6 +1,6 @@
 # The connection table is lock-free to read and mutex-serialized to write: an append-only chunked list, plus one control-plane lock
 
-Status: **accepted; implemented** — decisions 1–4 all landed: the append-only chunked `children_` (`core/include/libtracer/child_registry.hpp:705`), permanently stable slot addresses (now depended on by ADR-0062's forward cache), the two control-plane `std::mutex`es (`transport_vertex.hpp:437`, `fwd_router.hpp:872`, with the lock order documented at `transport_vertex.hpp:411`) and a race-free `child_t` shape bit (`child_registry.hpp:122` — originally
+Status: **accepted; implemented** — decisions 1–4 all landed: the append-only chunked `children_` (`core/include/libtracer/child_registry.hpp:705`), permanently stable slot addresses (now depended on by ADR-0062's forward cache), the two control-plane `std::mutex`es (`transport_vertex.hpp:395`, `fwd_router.hpp:872`, with the lock order documented at `transport_vertex.hpp:392`) and a race-free `child_t` shape bit (`child_registry.hpp:122` — originally
 `std::atomic<bool> multi_peer`, folded into the link word by Erratum 6). **Corrects the load-bearing premise of [ADR-0061](0061-per-transport-mount-routing-strip-k-l5-demux.md)** — that the connection table is "immutable after setup" — which [RFC-0014](../spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md) invalidated by making connection create/remove a *runtime* operation. Originally reused [ADR-0060](0060-lkv-copy-store-injected-value-backend.md) §2's arch-selected sync trait; **Erratum 1 retires that** in favour of a plain `std::mutex`, which is the primitive the rest of the codebase already serializes with. Upholds [ADR-0038](0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md) §3 (the FWD demux is lock-free) and its invariant #2 (zero-heap forward). Resolves [#521](https://github.com/avatarsd-llc/libtracer/issues/521) and unblocks [#512](https://github.com/avatarsd-llc/libtracer/issues/512). Grounded by a `/grill-with-docs` session against the code and fresh measurement.
 
 ## Context
@@ -15,7 +15,7 @@ That was harmless while `fwd_router_t::add_child`'s own comment was true — "Re
 
 So a forward read can race a connection-create across threads and walk a freed buffer. This is the same use-after-free class #494 closed in the registry, re-entering from the write side.
 
-Exploring the write side found the problem is wider than the registry. `transport_vertex_t` has **no synchronization at all** — no mutex, no atomics — yet `make_connection` mutates three containers (`pending_links_`, `conns_`, `modules_`; `transport_vertex.hpp:445-458`), and the graph invokes the factory **outside** `map_mutex_` (`graph.cpp:1879`). Two concurrent CREATEs give concurrent `insert_or_assign` into a `std::map` — tree rebalancing under a racing insert, a worse failure than the vector realloc.
+Exploring the write side found the problem is wider than the registry. `transport_vertex_t` has **no synchronization at all** — no mutex, no atomics — yet `make_connection` mutates three containers (`pending_links_`, `conns_`, `modules_`; `transport_vertex.hpp:403-416`), and the graph invokes the factory **outside** `map_mutex_` (`graph.cpp:1879`). Two concurrent CREATEs give concurrent `insert_or_assign` into a `std::map` — tree rebalancing under a racing insert, a worse failure than the vector realloc.
 
 ## Decision
 
@@ -84,7 +84,7 @@ slot pointer**, both fill it and both publish — one child silently lost.
 
 **Erratum 3 — the reachability example was wrong; the race is real by another route.** "Two peers
 each creating a connection" does **not** race: `transport_ws_server` and `transport_tcp_server`
-multiplex every peer on ONE poll thread (`transport_ws.hpp:61,224`, `transport_tcp.hpp:197,354`) — no
+multiplex every peer on ONE poll thread (`transport_ws.hpp:61,224`, `transport_tcp.hpp:197,352`) — no
 per-peer thread, because FreeRTOS stacks are the scarce resource. Two peers of one server are
 serialized by construction. The race needs **two distinct links in distinct modules** (a CREATE over
 `ws-server` while another arrives over `udp`, `tcp-server`, or `can`), or any application thread
