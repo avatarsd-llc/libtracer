@@ -2589,7 +2589,14 @@ class vertex_t {
         own_subs_.fetch_add(static_cast<std::uint32_t>(delta), std::memory_order_seq_cst);
     }
     /** @brief The active subscriber slots on strict ancestors — the one relaxed load the
-     *         write hot path pays before deciding whether to walk ancestors at all. */
+     *         write hot path pays before deciding whether to walk ancestors at all.
+     *  @note  Relaxed BY RULING even where it gates a SKIP, so there is no `_ordered` twin
+     *         (#854, measured and REFUTED): a stale zero here is indistinguishable from the
+     *         write linearizing before the racing subtree subscribe, because ADR-0049's latch
+     *         snapshots the subscribed ANCESTOR's own LKV (@ref add_edge) and never a
+     *         descendant's — so unlike @ref own_subs_ordered's near-axis pair there is no
+     *         forbidden observation to exclude, and the `seq_cst` candidate doubled the idle
+     *         write's rv32 fence count to exclude nothing. */
     [[nodiscard]] std::uint32_t listeners_above() const noexcept {
         return listeners_above_.load(std::memory_order_relaxed);
     }

@@ -744,6 +744,30 @@ void test_assign_propagate() {
     (void)g.subscribe(path_t("/w"), on_w);
     (void)g.write(w, make_value({0x77}));
     check(*cw == 1, "write() delivers immediately (assign + targeted propagate)");
+
+    // #1185 (the #854-survivor locked-erase drop): an assign that lands BETWEEN the write's
+    // store and its clear_pending publishes a value only the pending mark will ever deliver,
+    // so that mark must survive the erase. The subscriber callback runs on the writer thread
+    // inside the write's own fan_out — exactly that window — so the interleaving is
+    // deterministic here instead of racy.
+    auto s = g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
+    auto x = g.register_vertex(path_t("/s/x"), role_t::STORED_VALUE);
+    auto seen = std::make_shared<std::vector<int>>();
+    auto armed = std::make_shared<bool>(true);
+    auto on_x = [&g, x, seen, armed](const tr::view::rope_t& in) {
+        seen->push_back(std::to_integer<int>(in.only().bytes()[0]));
+        if (!*armed) return;
+        *armed = false;  // once — the sweep below re-enters this same callback
+        (void)g.assign(x, make_value({0x92}));  // races the in-flight write's clear_pending
+    };
+    (void)g.subscribe(path_t("/s/x"), on_x);
+    (void)g.write(x, make_value({0x91}));
+    check(seen->size() == 1 && seen->front() == 0x91, "the eager write delivers its own value");
+    g.propagate(s);  // a covering sweep: /s/x rides it only if its mark survived
+    check(seen->size() == 2 && seen->back() == 0x92,
+          "a write's clear_pending keeps the mark of an assign it did not deliver (#1185)");
+    g.propagate(s);
+    check(seen->size() == 2, "the surviving mark is drained once, not re-delivered");
 }
 
 /** @brief `/a/b` spelled back from a canonical key, so the enumeration order is asserted on

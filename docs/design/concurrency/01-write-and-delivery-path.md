@@ -59,9 +59,17 @@ own thread, outside the lock, once no participant announces it (`vertex.hpp:1012
 It reaches that call only when something subscribes here. `fan_out` opens on
 `own_subs_ordered() == 0 ⇒ return` (#635), so an unobserved write — and every placeholder
 ancestor a `bubble_up` walks past — never touches the stripe at all. That gate is why the
-count is read `seq_cst` in this one place and relaxed everywhere else: it is the only read
-that decides whether to deliver, so it has to be ordered against a subscribe taking ADR-0049's
-latch, or a write racing the subscribe reaches neither leg.
+count is read `seq_cst` in this one place and relaxed everywhere else: it decides whether the
+vertex's own fan-out happens, so it has to be ordered against a subscribe taking ADR-0049's
+latch, or a write racing the subscribe reaches neither leg. It is not the only read that decides
+a delivery — `deliver_vertex`'s ancestor gate reads the *relaxed* `listeners_above()`, and
+`mark_pending` gates a deferred delivery on relaxed reads of both counters. The ancestor gate
+needs no ordered twin
+([#854](https://github.com/avatarsd-llc/libtracer/issues/854), measured and REFUTED): the latch a
+subtree subscribe takes snapshots the subscribed *ancestor's* own LKV, never a descendant's, so a
+stale zero at that gate is indistinguishable from the write linearizing before the subscribe.
+(`mark_pending`'s near-axis reads are
+[#1140](https://github.com/avatarsd-llc/libtracer/issues/1140)'s.)
 
 The two-buffer split is the point. `fan_out` chooses which pair of buffers to hand in from the
 lock-free `own_subs()` count:
@@ -123,8 +131,9 @@ and its `fan_out` is a no-op. An idle write — nobody subscribed above — pays
 > an unobserved write took a lock it shares with vertices it has nothing to do with, and every
 > ancestor a `bubble_up` visits took another — which is why `fan_out` opens on
 > `own_subs_ordered() == 0 ⇒ return` and why the idle write costs one load and no lock. That
-> load is `seq_cst` rather than relaxed because it is the one read that decides whether to
-> deliver at all; `vertex_t::own_subs_ordered` carries the pairing that requires it. The
+> load is `seq_cst` rather than relaxed because its skip has to be ordered against a subscribe
+> taking ADR-0049's latch; `vertex_t::own_subs_ordered` carries the pairing that requires it
+> (the ancestor gate `listeners_above()` stays relaxed by ruling — #854). The
 > rationale and the measurements behind the gate are
 > [ADR-0064](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0064-lkv-publish-is-waiterless-and-the-slot-becomes-lock-free.md)'s.
 >

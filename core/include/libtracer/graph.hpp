@@ -454,6 +454,20 @@ class graph_t {
      *          exactly as ordered as `deliver_vertex`'s own two gates and no more. The
      *          `seq_cst` half's argument is documented there; it is not restated here.
      *
+     * @warning **The ancestor half can be one subscribe behind, with no bound but the
+     *          platform's.** `listeners_above` is a relaxed load, so a `false` here may miss a
+     *          subtree subscribe that has already COMPLETED on another thread — latch taken,
+     *          counter bumped — and nothing synchronizes when this reader catches up. That
+     *          staleness is deliberate and ruled on measurement (#854, REFUTED — the `seq_cst`
+     *          candidate doubled the idle write's fence count on rv32 and bought nothing): per
+     *          the #555 standard, the outcome a stale-`false` skip produces — the racing
+     *          publish reaching no subtree subscriber — is indistinguishable from the write
+     *          linearizing BEFORE the subscribe, and the subscriber's ADR-0049 latch cannot
+     *          contradict that ordering, because the latch snapshots the SUBSCRIBED ancestor's
+     *          own LKV (@ref vertex_t::add_edge), which never holds a descendant's value.
+     *          There is no forbidden observation for an ordered load to exclude, so the
+     *          ordered load does not exist.
+     *
      * @note Swapping the `seq_cst` own half for the relaxed @ref vertex_t::own_subs leaves
      *       the whole suite green, so its presence here rests on that argument, not coverage.
      */
@@ -1430,7 +1444,12 @@ class graph_t {
     void mark_pending(vertex_t* v);
     // Drop v from the pending set (an eager `write` delivered it, so a later covering
     // sweep must not re-deliver). Gated on the same listeners fast path as mark_pending.
-    void clear_pending(vertex_t* v);
+    // `delivered` is the LKV pointer this caller's own store published (the handler leg's
+    // null "consumed" sentinel included): the erase happens under the sweep lock only while
+    // that is still v's CURRENT LKV, so a mark left by an assign that raced this write —
+    // whose newer value this writer never delivered — survives instead of being dropped
+    // (#1185, the #854-survivor locked-erase drop).
+    void clear_pending(vertex_t* v, const std::shared_ptr<const rope_t>& delivered);
     // Subscribe/unsubscribe bookkeeping (RFC-0005): bump v's own active-slot count
     // and every descendant's listeners_above_, under the map lock (shared — the
     // counters are atomics; the lock only excludes concurrent vertex creation so
