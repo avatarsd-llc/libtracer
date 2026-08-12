@@ -33,6 +33,7 @@
 #include <memory>
 #include <utility>
 
+#include "libtracer/builtin_transports.hpp"
 #include "libtracer/transport_can.hpp"
 #include "libtracer/transport_vertex.hpp"
 #include "libtracer_esp/twai_link.hpp"
@@ -81,5 +82,17 @@ void build_can_stack() {
  */
 extern "C" void app_main(void) {
     if (g_run_hardware) build_can_stack();
+    // #984's gate half: name register_builtin_transports, the dispatcher the hook
+    // swaps on espressif32 (core's full-node udp+tcp+ws form is filtered out; the
+    // udp+tcp-only integrations/platformio/builtin_transports_udp_tcp.cpp replaces
+    // it). Taking the address forces the linker to resolve the definition and every
+    // register_*_transport it calls — before the swap that dragged the portable
+    // transport_ws pair into this image (the before-figure check_esp_ws_plane.py's
+    // --ws-plane none run is measured against); after it, an undefined reference
+    // here means the hook failed to compile the replacement TU. Without this line
+    // nothing in the fixture reached the built-in catalog and --gc-sections alone
+    // could have made the symbol gate pass vacuously.
+    std::printf("builtin dispatcher=%p\n",
+                reinterpret_cast<void*>(&tr::net::register_builtin_transports));
     std::printf("libtracer PlatformIO espressif32 TWAI packaging fixture: linked\n");
 }

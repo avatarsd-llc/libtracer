@@ -26,6 +26,10 @@
 #     library.json's export.include                          -> "No such file" in the
 #                                                               packed consumer.
 #
+# The same linked image also carries the #984 WS-plane gate (see that step's
+# comment): PlatformIO espressif32 ships NO WebSocket plane, asserted with
+# tools/check_esp_ws_plane.py --ws-plane none.
+#
 # SEPARATE workflow, like esp-idf.yml and can-vcan-e2e.yml: the required core
 # gates must never depend on a multi-GB embedded toolchain download.
 #
@@ -36,8 +40,8 @@ name: pio-esp32-can
 # The two path lists are duplicated rather than shared through a YAML anchor: `on:`
 # is parsed before any anchor a job could define, and this file needs no other
 # sharing, so the duplication costs one edit and avoids depending on how the parser
-# treats anchors here. `core/include/**` + `core/src/**` are in both: the packaged
-# srcFilter compiles the whole core, so a shared-header change can break this build
+# treats anchors here. `core/include/**` + `core/src/**` are in both: the hook's
+# source filter compiles the whole core, so a shared-header change can break this build
 # without touching a single platformio/ file (the trap quic.yml's allowlist fell into).
 on:
   push:
@@ -52,6 +56,7 @@ on:
       - "core/include/**"
       - "core/src/**"
       - "tests/packaging/pio_esp32_can/**"
+      - "tools/check_esp_ws_plane.py"
       - ".github/workflows/pio-esp32-can.yml"
   pull_request:
     paths:
@@ -64,6 +69,7 @@ on:
       - "core/include/**"
       - "core/src/**"
       - "tests/packaging/pio_esp32_can/**"
+      - "tools/check_esp_ws_plane.py"
       - ".github/workflows/pio-esp32-can.yml"
   workflow_dispatch:
 
@@ -95,6 +101,29 @@ jobs:
       - name: Build the espressif32 TWAI consumer (compile + link)
         working-directory: tests/packaging/pio_esp32_can
         run: pio run
+
+      # WS-plane gate on the LINKED PlatformIO image (#984 — the #947 ruling's
+      # PlatformIO half, same shape as esp-idf.yml's): the espressif32 packaging
+      # ships NO WebSocket plane. The extra script excludes the portable POSIX
+      # transport_ws pair per-environment and swaps in a udp+tcp-only
+      # register_builtin_transports dispatcher; the IDF-native links are not
+      # packaged for PlatformIO at all. `--ws-plane none` asserts both halves —
+      # zero portable-WS AND zero native-link symbols in firmware.elf (nm, with
+      # the symbol-table-floor guard so a stripped/unreadable ELF cannot pass
+      # vacuously), plus the object-tree check under PlatformIO's `.o` spelling.
+      # Not vacuous on the image side either: the fixture takes the address of
+      # register_builtin_transports, so before the exclusion this exact image
+      # linked the portable pair (--gc-sections could not shed it).
+      - name: Assert the image ships no WS plane (#984, mirrors the #947 gate)
+        working-directory: tests/packaging/pio_esp32_can
+        run: |
+          NM=$(find ~/.platformio/packages -type f -name 'riscv32-esp-elf-nm' | head -n1)
+          if [ -z "$NM" ]; then
+            echo "ERROR: riscv32-esp-elf-nm not found under ~/.platformio/packages" >&2
+            exit 1
+          fi
+          python3 "${GITHUB_WORKSPACE}/tools/check_esp_ws_plane.py" \
+            --build-dir .pio/build/esp32c6 --ws-plane none --nm "$NM"
 
       - name: Show build artifacts
         if: always()

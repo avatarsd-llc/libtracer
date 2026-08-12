@@ -7,11 +7,14 @@
  *
  * This hand-written
  * dispatcher is what a full node compiles: the default core CMake build, the PlatformIO
- * portable set (library.json globs core/src), and the ESP-IDF component. A core build
- * that DROPS a transport compiles a CMake-GENERATED variant from builtin_transports.cpp.in
- * instead (which calls only the enabled register_*_transport), so this file and the
- * generated one are never linked together. See core/CMakeLists.txt and
- * libtracer/builtin_transports.hpp.
+ * portable set (the extra-script source filter over core/src) on every platform except
+ * espressif32, and the ESP-IDF component's `linux` target. A core build that DROPS a
+ * transport compiles a CMake-GENERATED variant from builtin_transports.cpp.in instead
+ * (which calls only the enabled register_*_transport), so this file and the generated one
+ * are never linked together; a PlatformIO espressif32 build swaps in the udp+tcp-only
+ * integrations/platformio/builtin_transports_udp_tcp.cpp the same way, because its ws leg
+ * is the portable POSIX pair that must not reach silicon (#947/#984). See
+ * core/CMakeLists.txt and libtracer/builtin_transports.hpp.
  */
 #include "libtracer/builtin_transports.hpp"
 
