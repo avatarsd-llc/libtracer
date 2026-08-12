@@ -139,6 +139,51 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   well-formed occurrence. `conn_spec_t` already emits full-width values, so the canonical
   builder is unaffected. Scoped to `config_reader_t` per the #928 ruling — the codebase-wide
   VALUE-decode convention is decided once alongside #906/#927.
+### Added
+
+- **`transport_t::drop_stats()` — the interface-level shed-frame seam (#932).** Every transport
+  counted *some* drops behind its own concrete accessors, so a consumer holding a
+  `transport_t*` could observe none of them and swapping tcp for ws or CAN silently lost all
+  drop observability. `transport_drop_stats_t {dropped_rx, malformed_rx, dropped_tx}` is the one
+  shape they all answer with; the base returns all-zero (the honest answer for a link that
+  counts nothing) and tcp / udp / ws / CAN / quic / webtransport and the ESP `httpd_ws_link_t`
+  override it. Spelled `drop_stats`, not `stats`, because a platform link may already publish a
+  richer kind-specific `stats()` block. The per-transport accessors are unchanged.
+
+- **`dropped_tx()` on tcp / udp / ws (#932).** Every `send()` shed frames on oversize, a refused
+  gather store, no peer or a dead socket with a bare `return` — the exact mirror of RX counters
+  that did exist. Each of those legs now ticks a counter. (CAN already had `dropped_tx()`.)
+
+### Changed
+
+- **`stream_endpoint_t::write_all_iov` takes `std::span<const ::iovec>` and no longer CONSUMES
+  the gather (#932).** It used to advance `iov_base`/`iov_len` in place, a prose-only rule
+  behind a bare mutable `::iovec*` that every fan-out site paid for with a per-peer copy; a
+  partially-written entry is now finished with the plain writer and the gather re-entered at the
+  next entry boundary. `slot_server_t::broadcast_iov` correspondingly takes a span and drops its
+  per-peer scratch table — one fewer allocation, and one fewer exhaustion drop leg, on the
+  multi-peer egress path.
+
+- **`length_prefix_framer`: over LOCAL capacity is a DROP, not MALFORMED (#932).** A length past
+  `backend.max_segment_size()` but inside the protocol cap used to be reported as malformed,
+  which the callers act on by disconnecting the peer — a legitimate peer got torn down over
+  *our* segment size. It is now drained, counted in `result_t::dropped`, and the stream resyncs;
+  only a length above the protocol cap (`max_frame`) is malformed. `on_prefix`'s second
+  parameter is consequently the PROTOCOL cap, not the effective cap.
+
+- **`can_tx_pool_t::release` validates its slot pointer and returns `bool` (#932).** The pointer
+  comes from a driver completion callback (the TWAI tx-done ISR), so a pointer outside the slot
+  array or a double/foreign release used to corrupt `in_flight_[]`/`count_` from ISR context.
+  Bounds check + CAS true→false; a refused release returns false and the TWAI ISR no longer
+  gives a TX permit for it.
+
+### Fixed
+
+- **`key_view_t` walkers agreed on zero-length records (#932).** `child_record_under` rejected a
+  4-byte (len == 0) trailing record while `parent()` / `split_levels()` / `last_segment()`
+  accepted it. Empty path segments are illegal (`/sensor//temp` is invalid), so all four now
+  treat a `len == 0` record as malformed framing. `transport_vertex.cpp`'s hand-rolled
+  `last_segment` walk was replaced by `key_view_t::last_segment`, key_view's single locus.
 
 ## [0.10.0] — 2026-08-12
 

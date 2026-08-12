@@ -47,14 +47,14 @@ implementation differ.
 
 | | Surface | Catalog |
 | ---- | ---- | ---- |
-| **What the implementation accepts** | a CREATE-gated `SPEC{ NAME "type", NAME "name", SETTINGS "config" }` write to `/net:children[]` (`graph_t::create_child`, `core/src/graph.cpp:2145`) | one global set of registered child types — `client` and `listener` (`core/src/transport_vertex.cpp:99-107`); the concrete transport is selected by a `kind` key inside the `config` SETTINGS (`core/src/transport_vertex.cpp:53,64`), extended per transport module through `register_transport_type` (`core/src/transport_vertex.cpp:128`) |
+| **What the implementation accepts** | a CREATE-gated `SPEC{ NAME "type", NAME "name", SETTINGS "config" }` write to `/net:children[]` (`graph_t::create_child`, `core/src/graph.cpp:2145`) | one global set of registered child types — `client` and `listener` (`core/src/transport_vertex.cpp:94-102`); the concrete transport is selected by a `kind` key inside the `config` SETTINGS (`core/src/transport_vertex.cpp:48,59`), extended per transport module through `register_transport_type` (`core/src/transport_vertex.cpp:123`) |
 | **What RFC-0014 specifies** | a per-module creator endpoint `/net/<module>/conn` — `SPEC{ name, config }` creates, `NAME{ name }` retires, with the transport and the role both positional in `<module>` | each module's own `conn:schema` |
 
 The created connection vertex is mounted and routed at **`/net/<module>/<name>`**,
 `<module>` **declared by the application** through `register_module` — modules are
 declared-only (ADR-0073 §4): the library derives and auto-registers no module names, and an
 undeclared `kind` fails creation with `SCHEMA_NOT_FOUND`
-(`core/src/transport_vertex.cpp:133,149-167,253-279`). `/net` itself is the recommended root
+(`core/src/transport_vertex.cpp:128,144-162,248-274`). `/net` itself is the recommended root
 convention (a constructor default, overridable per node). The per-module creator endpoint is
 the accepted direction and is **not implemented**: an integration written against
 this implementation writes the global `:children[]` catalog

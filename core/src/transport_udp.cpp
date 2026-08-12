@@ -79,7 +79,10 @@ udp_transport_t::~udp_transport_t() {
 
 void udp_transport_t::send(std::span<const std::byte> frame) {
     const std::uint64_t p = peer();
-    if (fd_ < 0 || p == 0) return;  // no peer (learned or configured) => nobody to send to
+    if (fd_ < 0 || p == 0) {  // no peer (learned or configured) => nobody to send to
+        dropped_tx_.fetch_add(1, std::memory_order_relaxed);  // shed, and counted (#932)
+        return;
+    }
     sockaddr_in peer{};
     peer.sin_family = AF_INET;
     peer.sin_addr.s_addr = static_cast<std::uint32_t>(p >> 16);
@@ -88,7 +91,11 @@ void udp_transport_t::send(std::span<const std::byte> frame) {
 }
 
 void udp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
-    if (fd_ < 0 || iov.empty()) return;
+    if (fd_ < 0) {
+        dropped_tx_.fetch_add(1, std::memory_order_relaxed);  // no socket => a counted drop
+        return;
+    }
+    if (iov.empty()) return;  // nothing to send is not a drop
     // Gather the rope's segments into one datagram with a single syscall — no
     // userspace flatten copy (the "rope we put into tx", lowered to sendmsg). The iovec
     // count is small and bounded (a FWD forward/reply is ≤ ~6 spans), so the common case
@@ -107,11 +114,17 @@ void udp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
     iov_table_t<::iovec> table(inline_vec);
     const std::size_t n = iov.size();
     ::iovec* vec = table.acquire(n);
-    if (vec == nullptr) return;  // gather store exhausted => drop the datagram
+    if (vec == nullptr) {  // gather store exhausted => drop the datagram, counted (#932)
+        dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     for (std::size_t i = 0; i < n; ++i)
         vec[i] = ::iovec{const_cast<std::byte*>(iov[i].data()), iov[i].size()};
     const std::uint64_t p = peer();
-    if (p == 0) return;  // no peer (learned or configured) => nobody to send to
+    if (p == 0) {  // no peer (learned or configured) => nobody to send to
+        dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     sockaddr_in peer{};
     peer.sin_family = AF_INET;
     peer.sin_addr.s_addr = static_cast<std::uint32_t>(p >> 16);
