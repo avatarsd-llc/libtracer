@@ -1313,6 +1313,142 @@ void test_peer_stream_cycling_is_bounded() {
     check(listener.session_up(), "and the session survived the cycling (stream-scoped, not fatal)");
 }
 
+/**
+ * @brief #1101 — a `defer_rx` DIAL link delivers NOTHING until start_receiving(), so a frame
+ *        the server pushes the instant the session comes up cannot land in an empty sink.
+ *
+ * The window is `transport_vertex_t::make_connection`: it installs the receiver several steps
+ * after the link object exists, and this transport owns no receive thread to withhold —
+ * msquic's worker drives every RECEIVE, and the DIAL constructor opens the frame channel
+ * itself, so a server writing back on it reaches `rx->deliver` before the constructor even
+ * returns. An empty `receiver_slot_t` drops that frame silently: no `dropped_rx()`, no
+ * `malformed_rx()`, a healthy-looking session.
+ *
+ * The hold is msquic's own per-stream receive window (ADR-0081 §2) — nothing is parked
+ * library-side, which is the standing no-library-internal-buffers commitment (ADR-0042 §2).
+ *
+ * The guard does not race the window, and it is not vacuous:
+ *
+ *  - the dialer's sink is installed IMMEDIATELY after construction, so the silence below can
+ *    only be the un-armed link, never a missing sink;
+ *  - the server pushes only AFTER a frame has travelled dialer→server, which is proof the
+ *    server has ADOPTED the frame channel (that frame arrives through the very ctx that sets
+ *    `frame_stream`) — so its push cannot be a send dropped for want of a stream;
+ *  - SILENCE for a generous window, with both counters still 0;
+ *  - the FRAME once `start_receiving()` runs — the positive control that keeps the silence
+ *    from being vacuous: the bytes were really there, held in msquic's window, and really
+ *    decodable.
+ *
+ * Reverting the gate (constructing with `defer_rx = false`, or removing the zero-byte drain
+ * in `on_stream_rx`) reddens this in one run: the pushed frame is delivered inside the
+ * silence window instead of after the arming.
+ */
+void test_push_on_session_waits_for_start_receiving() {
+    std::printf("WebTransport — a push-on-session frame waits for the sink (#1101):\n");
+    // The sinks outlive the transports that deliver to them (this file's destruction idiom).
+    frame_sink_t at_server, at_dialer;
+    auto server_rx = [&](std::span<const std::byte> f) { at_server.push(f); };
+    auto dialer_rx = [&](std::span<const std::byte> f) { at_dialer.push(f); };
+
+    webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key);
+    check(listener.ok(), "listener started (ALPN h3, ephemeral port, dev cert)");
+    listener.set_receiver(server_rx);
+    {
+        webtransport_transport_t dialer("127.0.0.1", listener.local_port(), "/", dev_tls(),
+                                        &tr::mem::heap_backend(), /*max_frame=*/0,
+                                        /*defer_rx=*/true);
+        check(dialer.ok(), "the deferred dialer still completed CONNECT + 200 in its constructor");
+        check(dialer.session_up(),
+              "the H3 handshake ran to completion while delivery was held (the gate is on "
+              "delivery, never on the state machine)");
+        // Installed BEFORE the window: what holds the push back below is the closed gate.
+        dialer.set_receiver(dialer_rx);
+
+        // Adoption proof: the server's send() drops until it has adopted the 0x41 stream, so
+        // one frame the other way first — it arrives through that very ctx.
+        const auto ping = test_frame(4, 0x01);
+        dialer.send(ping);
+        check(at_server.wait_for_count(1, 3000ms),
+              "a dialer->server frame arrived: the server has adopted the frame channel");
+
+        const auto pushed = test_frame(11, 0x70);
+        listener.send(pushed);
+
+        // Orders of magnitude more than msquic needs to indicate a frame already on the wire.
+        std::this_thread::sleep_for(500ms);
+        check(at_dialer.count() == 0,
+              "the deferred link delivered NOTHING for the whole window: the bytes wait in "
+              "msquic's flow-control window");
+        check(dialer.dropped_rx() == 0 && dialer.malformed_rx() == 0,
+              "and they were not shed under another name either (both counters still 0)");
+
+        dialer.start_receiving();
+        check(at_dialer.wait_for_count(1, 4000ms),
+              "after start_receiving() the pushed frame was DELIVERED, not dropped");
+        check(at_dialer.count() == 1 && at_dialer.at(0) == pushed,
+              "carrying the pushed frame's own bytes");
+        check(dialer.dropped_rx() == 0 && dialer.malformed_rx() == 0,
+              "delivered with both counters still 0");
+
+        // Idempotent: a second arming on an armed link leaves it delivering.
+        dialer.start_receiving();
+        const auto after = test_frame(7, 0x90);
+        listener.send(after);
+        check(at_dialer.wait_for_count(2, 3000ms),
+              "a second start_receiving() is inert — the link keeps delivering");
+        check(at_dialer.count() == 2 && at_dialer.at(1) == after, "and the second frame is intact");
+    }
+}
+
+/**
+ * @brief #1101 — `start_receiving()` is inert on every link that has no gate to open.
+ *
+ * `transport_vertex_t::make_connection` calls it unconditionally on every link it wires, so
+ * the three shapes that are NOT a deferred DIAL must all be safe: a ONE-PHASE dialer (never
+ * held), a LISTENER (its peer's frame channel is not gated), and a dial that NEVER CAME UP
+ * (no frame stream to re-enable — the ADR-0081 idempotence requirement).
+ */
+void test_start_receiving_is_inert_where_it_must_be() {
+    std::printf("WebTransport — start_receiving() is inert where it must be (#1101):\n");
+    frame_sink_t at_server, at_dialer;
+    auto server_rx = [&](std::span<const std::byte> f) { at_server.push(f); };
+    auto dialer_rx = [&](std::span<const std::byte> f) { at_dialer.push(f); };
+
+    webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key);
+    listener.set_receiver(server_rx);
+    listener.start_receiving();  // a LISTEN link: nothing to arm
+    listener.start_receiving();
+    {
+        // A ONE-PHASE dialer (the historical shape): armed or not, it delivers.
+        webtransport_transport_t dialer("127.0.0.1", listener.local_port(), "/", dev_tls());
+        check(dialer.ok(), "one-phase dialer up");
+        dialer.set_receiver(dialer_rx);
+        dialer.start_receiving();
+        dialer.start_receiving();
+
+        const auto f1 = test_frame(5, 0x21);
+        dialer.send(f1);
+        check(at_server.wait_for_count(1, 3000ms), "the un-gated dialer still delivers upstream");
+        const auto f2 = test_frame(6, 0x22);
+        listener.send(f2);
+        check(at_dialer.wait_for_count(1, 3000ms),
+              "and the armed listener still delivers downstream");
+        check(at_dialer.count() == 1 && at_dialer.at(0) == f2, "with the frame intact");
+    }
+    // A dial that NEVER CAME UP: the wrong-CA vector (#918) refuses the session, so this link
+    // has no frame stream at all. Arming it must be a safe no-op, not a null-handle call.
+    // Its own listener — a webtransport endpoint carries ONE session at a time, the reason
+    // test_spec_dial_trust_keys stands up one listener per leg.
+    webtransport_transport_t listener2(std::uint16_t{0}, g_cert, g_key);
+    webtransport_transport_t dead("127.0.0.1", listener2.local_port(), "/",
+                                  webtransport_dial_tls_t{.ca_file = g_other_cert},
+                                  &tr::mem::heap_backend(), /*max_frame=*/0, /*defer_rx=*/true);
+    check(!dead.ok(), "the wrong-CA dial did not come up (no session, no frame stream)");
+    dead.start_receiving();
+    dead.start_receiving();
+    check(!dead.session_up(), "arming a link that never came up changed nothing");
+}
+
 }  // namespace
 
 int main() {
@@ -1354,5 +1490,7 @@ int main() {
     test_frame_stream_adoption_gate();
     test_unknown_h3_frames_skipped();
     test_peer_stream_cycling_is_bounded();
+    test_push_on_session_waits_for_start_receiving();
+    test_start_receiving_is_inert_where_it_must_be();
     return tr::testing::summary("webtransport");
 }
