@@ -25,7 +25,38 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   there is no `ws` factory on a chip target to pass the flag for you — and an embedder
   that sets it and never arms the link (never issues the creating write) has a link that
   never dials, `ok()` false, all reconnect/keepalive machinery off.
+- **`httpd_ws_link_t::stats_t` gains `tx_pool_waits`**
+  ([#1187](https://github.com/avatarsd-llc/libtracer/issues/1187)) — sends that found the TX
+  pool full and waited for the httpd task to free a slot, whether or not the wait then
+  succeeded. Read it against `tx_pool_misses`: waits without misses is the pool doing its
+  job as an in-flight bound (a wide fan-out paced by the drain, costing latency), while
+  misses mean the httpd task did not free a slot within one send occupancy. The rest of
+  `stats_t` is unchanged, and `drop_stats()` is unaffected — a wait is not a loss.
+
 ### Changed
+
+- **A fan-out wider than the TX pool now costs latency, not its tail**
+  ([#1187](https://github.com/avatarsd-llc/libtracer/issues/1187)). `httpd_ws_link_t`'s TX
+  slot pool is an OUTSTANDING-SEND bound, but a producer task that walked its peer set
+  without ever leaving the CPU could only fill it once: on a unicore target (ESP32-C6) the
+  whole publish sweep was posted before the httpd task ran at all, so exactly the first
+  `tx_slot_capacity()` destinations landed **every pass, in publish order**, and the rest
+  of the peer set sat at a flat zero — 12 subscriber edges, 5 alive, reproduced
+  bit-identically on two boards. A send issued from any task OTHER than the httpd task now
+  sleeps in short turns until a slot frees, bounded by one slot occupancy (the per-socket
+  send bound spent once per write leg — derived, not configured), and a whole sweep by one
+  such bound; a send that is still unserved when the bound expires is dropped and counted
+  exactly as before. Nothing is buffered to achieve this: the frame waits in the caller's
+  own memory, in the caller's own call (ADR-0081 §1). A send issued ON the httpd task —
+  a reply serviced in-call, or a push provoked by an inbound frame — cannot wait for a
+  drain it is itself supposed to perform, so it still meets the pool's depth as a hard
+  same-pass limit; one pool slot is now **reserved** for those in-call sends so a delivery
+  burst can no longer starve a request's reply (the reported secondary effect, where a
+  subscribe ack was lost and the requester timed out against a live edge). `kTxPoolSlots`
+  is unchanged at 4 and remains a compile-time constant; making the RAM-bearing link
+  constants settable is [#1160](https://github.com/avatarsd-llc/libtracer/issues/1160)'s
+  ruled scope (ctor parameters), and this fix is deliberately independent of the depth
+  chosen there.
 
 - **`tr::esp::portmux_sync_t` declares the new `is_nonblocking` policy trait (#928).** Core
   split the overloaded `is_isr_safe` into `is_isr_safe` (safe concurrent with an ISR) and

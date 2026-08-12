@@ -252,12 +252,67 @@ constexpr int kKeepProbes = 3;          /**< @brief Unanswered probes before dea
  */
 constexpr std::size_t kRxScratchBytes = 2048;
 
-/** @brief TX work slots pre-allocated per link, claimed lock-free by sending tasks
- *         (see @ref httpd_ws_link_t::tx_slot_t). Sized past the steady-state
- *         in-flight depth (a reply + a couple of subscription pushes); a burst past
- *         it is DROPPED and counted (@ref httpd_ws_link_t::enqueue_drops), never
- *         blocks and never allocates. The pool IS the link's outstanding-send bound. */
+/**
+ * @brief TX work slots pre-allocated per link, claimed lock-free by sending tasks
+ *        (see @ref httpd_ws_link_t::tx_slot_t).
+ *
+ * The pool IS the link's OUTSTANDING-SEND bound — how many frames may be in flight toward
+ * the httpd task at one instant — and deliberately NOT a fan-out width. It is sized past
+ * the steady-state in-flight depth (a reply plus a couple of subscription pushes) and
+ * never allocates; what a burst past it does is @ref httpd_ws_link_t::claim_tx_slot_waiting's
+ * subject, not this constant's.
+ *
+ * That distinction is the #1187 correction. Until then a fan-out wider than this dropped
+ * every destination past the fourth, and on a UNICORE target it did so deterministically:
+ * the producer task posts its whole sweep before the httpd task can run once, so no slot
+ * can free mid-pass and the SAME prefix of the peer set won every pass — a publish-order
+ * loss with a silent tail, reproduced bit-identically on two boards (#1187). Sizing the
+ * pool to the widest fan-out an embedder might have is not the answer to that: the number
+ * is an in-flight depth, and a wide sweep at any depth would find the same cliff one peer
+ * later. Waiting for the drain is (see @ref kTxWaitSliceMs).
+ */
 constexpr std::size_t kTxPoolSlots = 4;
+
+/**
+ * @brief One turn a WAITING send spends off the CPU before re-trying the pool,
+ *        milliseconds.
+ *
+ * A send that finds the pool full and is NOT running on the httpd task sleeps in turns of
+ * this until a slot frees or the bound below expires (@ref
+ * httpd_ws_link_t::claim_tx_slot_waiting). Sleeping — not spinning, and not
+ * `taskYIELD` — is what makes it work on the unicore target the defect was found on: the
+ * httpd task is the only task that can free a slot, and a producer at a higher priority
+ * yields nothing to it by spinning. One tick is the smallest amount of "let the drain
+ * run" the scheduler can express; the granularity is the tick period, so this is a floor
+ * on the turn, never a promise about it. The BOUND is what is derived
+ * (@ref tx_wait_bound_us) — the turn is only how finely that bound is sampled.
+ *
+ * The waiting frame is the CALLER'S, still in the caller's memory: nothing is copied, no
+ * queue of ours grows, and a frame that does not make it is dropped and counted exactly
+ * as before. So this stays inside ADR-0081 §1 (never park ingress or egress in a
+ * library-owned buffer) — it is the producer's own call that waits, which is the same
+ * "hold it in the layer that already owns the memory" answer §2 gives.
+ */
+constexpr std::uint32_t kTxWaitSliceMs = 1;
+
+/**
+ * @brief The longest a send may wait for a TX slot, microseconds — derived, never chosen.
+ *
+ * One slot is held for exactly as long as the httpd task needs to put its frame on a
+ * socket, and that duration already has a bound in hand: the per-socket send bound this
+ * link applies at admission, spent once per write leg (@ref kIdfWsWriteLegs). Past it the
+ * oldest queued send has either completed or timed out — either way its slot is back, or
+ * its peer is accruing the strike that condemns it. Waiting longer than one such
+ * occupancy therefore cannot learn anything new; waiting less would give up while the
+ * drain is still healthy.
+ *
+ * It is a per-SEND bound, and the futility latch (@ref
+ * httpd_ws_link_t::tx_wait_futile_until_us_) is what keeps a whole fan-out pass from
+ * paying it once per destination against a task that is not draining at all.
+ */
+[[nodiscard]] constexpr std::int64_t tx_wait_bound_us(std::uint32_t send_timeout_ms) noexcept {
+    return static_cast<std::int64_t>(send_timeout_ms) * kIdfWsWriteLegs * 1000;
+}
 
 /**
  * @brief Inline payload capacity of one TX work slot, bytes.
@@ -997,18 +1052,60 @@ void httpd_ws_link_t::alloc_buffers() {
         for (std::size_t i = 0; i < kTxPoolSlots; ++i) tx_pool_[i].work.slot = &tx_pool_[i];
 }
 
-httpd_ws_link_t::tx_slot_t* httpd_ws_link_t::claim_tx_slot() {
+httpd_ws_link_t::tx_slot_t* httpd_ws_link_t::claim_tx_slot(bool in_call) {
     // Teardown gate: once the dtor is draining, new sends must stop claiming slots or the
     // drain never converges (unregistering the URI stops RX only — subscription pushers
     // keep sending until the router detaches the transport). They are dropped and counted,
     // which is the same answer an exhausted pool gets, so nothing runs past the dtor.
     if (tx_pool_ == nullptr || stopping_.load(std::memory_order_relaxed)) return nullptr;
-    for (std::size_t i = 0; i < kTxPoolSlots; ++i) {
+    // The LAST slot is the httpd task's reserve, and the asymmetry is the point: a send
+    // issued ON that task (a request's reply, serviced in-call) cannot wait for the pool to
+    // drain, because the task that would do the draining is the one asking. An off-task
+    // producer CAN wait, so a slot it does not take costs it latency, never a frame. Without
+    // the reserve a fan-out burst and a subscribe ack raced through the same four slots and
+    // the ack lost — the requester then timed out against an edge that was already
+    // delivering (#1187, the secondary effect). One slot is enough for the shape that
+    // produced it: one reply per serviced request.
+    const std::size_t n = (in_call || kTxPoolSlots < 2) ? kTxPoolSlots : kTxPoolSlots - 1;
+    for (std::size_t i = 0; i < n; ++i) {
         bool expected = false;
         if (tx_pool_[i].busy.compare_exchange_strong(expected, true, std::memory_order_acquire))
             return &tx_pool_[i];
     }
-    return nullptr;  // every slot in flight this instant — the caller drops and counts
+    return nullptr;  // every slot in flight this instant — the caller waits, or drops
+}
+
+httpd_ws_link_t::tx_slot_t* httpd_ws_link_t::claim_tx_slot_waiting() {
+    // "Am I the drain?" is the whole fork. esp_http_server runs every queued send on ONE
+    // task, so a send issued on it can only be served after the current handler frame
+    // returns: waiting there would wait on this stack frame, which is the #814 shape and a
+    // guaranteed deadlock for the full send bound. In-call sends take the pool as they find
+    // it (reserve included) and drop when it is full, exactly as before.
+    const bool in_call = server_task_.load(std::memory_order_relaxed) == current_task();
+    if (tx_slot_t* const slot = claim_tx_slot(in_call); slot != nullptr) return slot;
+    const std::int64_t bound_us = tx_wait_bound_us(send_timeout_ms_);
+    if (in_call || bound_us <= 0) return nullptr;
+    const std::int64_t started_us = esp_timer_get_time();
+    // The futility latch. The bound below is per SEND, and a fan-out asks per DESTINATION —
+    // so against an httpd task that is not draining at all, a 12-edge sweep would pay it
+    // twelve times over and park its producer for twelve send bounds. Once ONE wait has
+    // expired, the answer for the rest of that sweep is already known, so the pool is taken
+    // as-is (drop and count) until the latch lapses. A pass therefore costs at most one
+    // bound of latency before it goes back to being honest, counted loss.
+    if (started_us < tx_wait_futile_until_us_.load(std::memory_order_relaxed)) return nullptr;
+    tx_pool_waits_.fetch_add(1, std::memory_order_relaxed);
+    const std::int64_t deadline_us = started_us + bound_us;
+    do {
+        // Off the CPU, never a spin: on a unicore target the httpd task is the only task
+        // that can free a slot, and it does not run while this one is runnable.
+        std::this_thread::sleep_for(std::chrono::milliseconds(kTxWaitSliceMs));
+        // A destructor that started while this send was asleep is drained on a bound of its
+        // own, so give up the moment it does rather than extending it by ours.
+        if (stopping_.load(std::memory_order_relaxed)) return nullptr;
+        if (tx_slot_t* const slot = claim_tx_slot(false); slot != nullptr) return slot;
+    } while (esp_timer_get_time() < deadline_us);
+    tx_wait_futile_until_us_.store(esp_timer_get_time() + bound_us, std::memory_order_relaxed);
+    return nullptr;  // the drain is not keeping up — the caller drops and counts it
 }
 
 void httpd_ws_link_t::release_tx_work(tx_work_t* work) {
@@ -1750,7 +1847,7 @@ void httpd_ws_link_t::queue_send(const session_ref_t& to,
     for (const auto& part : iov) total += part.size();
     tx_work_t* work = nullptr;
     std::byte* dst = nullptr;
-    if (tx_slot_t* const slot = claim_tx_slot(); slot != nullptr) {
+    if (tx_slot_t* const slot = claim_tx_slot_waiting(); slot != nullptr) {
         work = &slot->work;
         work->handle = h;
         work->gate = g;
@@ -1768,10 +1865,14 @@ void httpd_ws_link_t::queue_send(const session_ref_t& to,
         }
         if (work != nullptr) work->payload = dst;
     } else {
-        // The pool had nothing free. Still an enqueue_drops below — the total is unchanged
-        // — but recorded separately, because it is evidence about THIS link's outstanding
-        // depth against tx_slot_capacity, while the other two causes name the shared
-        // control queue and the heap (#953).
+        // The pool had nothing free, AND (off the httpd task) it still had nothing free
+        // after a full drain bound — see claim_tx_slot_waiting. Still an enqueue_drops below
+        // — the total is unchanged — but recorded separately, because it is evidence about
+        // THIS link's outstanding depth against tx_slot_capacity, while the other two causes
+        // name the shared control queue and the heap (#953). Since #1187 it is also evidence
+        // about the DRAIN and not merely about the depth: a miss now means the httpd task
+        // did not free a slot within one send occupancy, which `tx_pool_waits` separates
+        // from the far commoner "waited briefly and was served".
         tx_pool_misses_.fetch_add(1, std::memory_order_relaxed);
     }
     bool queued = false;
@@ -1808,6 +1909,7 @@ httpd_ws_link_t::stats_t httpd_ws_link_t::stats() const noexcept {
     stats_t s;
     s.enqueue_drops = enqueue_drops_.load(std::memory_order_relaxed);
     s.tx_pool_misses = tx_pool_misses_.load(std::memory_order_relaxed);
+    s.tx_pool_waits = tx_pool_waits_.load(std::memory_order_relaxed);
     s.tx_to_dead_peer = tx_to_dead_peer_.load(std::memory_order_relaxed);
     s.peers_refused = peers_refused_.load(std::memory_order_relaxed);
     s.sessions_condemned = sessions_condemned_.load(std::memory_order_relaxed);

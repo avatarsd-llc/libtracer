@@ -337,6 +337,29 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     set_tests_properties(httpd_ws_fanout_alloc
         PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
+    # #1187 — the fan-out WAIT: the TX pool is an in-flight bound, not a fan-out ceiling, so
+    # a sweep wider than it costs latency rather than losing the same publish-order tail
+    # every pass. What this target adds over the two suites above is the SCHEDULING model —
+    # its drainer runs only while the producer is blocked, which is the unicore ordering that
+    # made the loss deterministic on silicon and which a free-running host thread hides.
+    add_executable(httpd_ws_fanout_wait_test
+        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_fanout_wait_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
+    target_include_directories(httpd_ws_fanout_wait_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(httpd_ws_fanout_wait_test PRIVATE libtracer)
+    target_link_options(httpd_ws_fanout_wait_test PRIVATE
+        "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    libtracer_test_warnings(httpd_ws_fanout_wait_test)
+    add_test(NAME httpd_ws_fanout_wait COMMAND httpd_ws_fanout_wait_test)
+    # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
+    # every case here constructs an adopting link — same exemption as the suites above.
+    set_tests_properties(httpd_ws_fanout_wait
+        PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+
     # #960 — the peer-departure eviction notifier's LOCK DISCIPLINE, on the same fake. The
     # event none of the suites above stages is a departure notification held OPEN: the
     # notifier parks the server task while another task tries to acquire the handler gate.
