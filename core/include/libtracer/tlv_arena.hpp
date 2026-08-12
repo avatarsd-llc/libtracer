@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <optional>
 #include <span>
 
 #include "libtracer/frame.hpp"
@@ -94,10 +95,24 @@ class tlv_arena_t {
         return nodes_[i].end;
     }
 
+    /**
+     * @brief The ROOT node's decoded trailer timestamp, if the frame carried one (#1109).
+     *
+     * Captured at decode because the node spans deliberately EXCLUDE the trailer (the
+     * ADR-0041 §4 trailer-less-at-rest rule), so nothing reachable from a node can read the
+     * stamp back — and the reply echo needs exactly this value. Root-only on purpose: the
+     * echo reads the request's OUTER stamp, and per-node capture would grow every
+     * `arena_tlv_t` on the MCU terminus for a value only index 0 is ever asked for. A
+     * TF=1 root decodes here too (`relative == true`), and the CONSUMER decides what an
+     * anchorless relative stamp is worth — the echo declines it.
+     */
+    [[nodiscard]] std::optional<timestamp_t> root_trailer_ts() const noexcept { return root_ts_; }
+
    private:
     friend std::expected<tlv_arena_t, err_t> decode_into(std::span<const std::byte>,
                                                          mem::block_source_t&);
     mem::block_array_t<arena_tlv_t> nodes_;
+    std::optional<timestamp_t> root_ts_{}; /**< @brief Root trailer TS, set by `decode_into`. */
 };
 
 /**

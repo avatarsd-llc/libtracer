@@ -157,25 +157,36 @@ std::vector<std::byte> encode(const tlv_t& tlv) {
         body.assign(tlv.payload.begin(), tlv.payload.end());
     }
 
+    // The trailer timestamp is LOUD (#1109): `opt.ts` with no trailer value used to emit a
+    // silently-ZERO stamp — a frame that decodes, sorts and plots as 1970-01-01, which is
+    // strictly worse than no frame. A missing value, and equally a trailer value whose
+    // `relative` flag contradicts `opt.tf` (the bytes would be read in the wrong width),
+    // now refuse the encode through the same unambiguous empty-vector channel the PATH_REF
+    // rule uses. `stamp_ts` (frame.hpp) sets bit and value together and cannot land here.
+    if (tlv.opt.ts &&
+        (!tlv.trailer || !tlv.trailer->ts || tlv.trailer->ts->relative != tlv.opt.tf)) {
+        return {};
+    }
+
     std::vector<std::byte> out;
     // The header byte layout has one home (ADR-0048 §3) and now so does the LENGTH-WIDTH
-    // POLICY (#924): emit_tlv widens to the u32 LL form when the body exceeds 0xFFFF, so a
-    // tlv_t built programmatically with a default opt (ll = false) over an oversize body can
-    // no longer serialize a length silently truncated to `size & 0xFFFF`. A body at or under
-    // 0xFFFF — and a tlv_t that already carries opt.ll — emits byte-identical bytes; the widen
-    // costs one predicted-not-taken compare per TLV and allocates nothing.
-    wire::emit_tlv(out, tlv.type, tlv.opt, body);
+    // POLICY (#924): widen to the u32 LL form when the body exceeds 0xFFFF, so a tlv_t built
+    // programmatically with a default opt (ll = false) over an oversize body can no longer
+    // serialize a length silently truncated to `size & 0xFFFF`. A body at or under 0xFFFF —
+    // and a tlv_t that already carries opt.ll — emits byte-identical bytes; the widen costs
+    // one predicted-not-taken compare per TLV and allocates nothing. Emitted via emit_header
+    // rather than emit_tlv since #1109: emit_tlv now CLEARS trailer bits by construction
+    // (it writes nothing after the body), while this encoder appends the trailer itself.
+    opt_t opt = tlv.opt;
+    if (body.size() > 0xFFFFu) opt.ll = true;
+    wire::emit_header(out, tlv.type, opt, body.size());
+    out.insert(out.end(), body.begin(), body.end());
 
     std::vector<std::byte> ts_bytes;
     if (tlv.opt.ts) {
-        const timestamp_t t = (tlv.trailer && tlv.trailer->ts)
-                                  ? *tlv.trailer->ts
-                                  : timestamp_t{.relative = tlv.opt.tf, .value = 0};
-        if (tlv.opt.tf) {
-            write_le(ts_bytes, static_cast<std::uint32_t>(static_cast<std::int32_t>(t.value)), 4);
-        } else {
-            write_le(ts_bytes, static_cast<std::uint64_t>(t.value), 8);
-        }
+        // Value presence + form coherence were checked above; the byte layout has ONE home
+        // (wire::emit_trailer_ts, both forms — #1109's builder plumbing).
+        wire::emit_trailer_ts(ts_bytes, tlv.opt.tf, tlv.trailer->ts->value);
         out.insert(out.end(), ts_bytes.begin(), ts_bytes.end());
     }
     if (tlv.opt.cr) {

@@ -183,6 +183,17 @@ The TLV's wire-time is the **parent's wire-time + offset**. Use for children ins
 
 > ⚠️ **Conformance gap — the reference codec does not perform this check.** `tr::frame` records the relative flag and the delta and returns success, so an anchorless `TF=1` frame decodes cleanly instead of being rejected; nothing walks the ancestor chain and no TS path raises `PATH_INVALID`. The requirement above is unchanged — this is a gap in the implementation, and §pitfalls below describes exactly what it produces (timestamps that parse, sort and plot, near the Unix epoch).
 
+### Writer-side status (#1109)
+
+The reference implementation now writes the wire-trailer TS as well as reading it — a plain enhancement, since the trailer above was already fully specified. What ships, and what deliberately does not:
+
+- **Stamping is per-frame opt-in from an INJECTED clock.** `tr::wire::stamp_ts` (`frame.hpp`) sets `opt.TS` and the trailer value together; the clock is the `wire_clock_t` seam the producer supplies — the library never reads ambient time on any frame path. The contract on the value is `CONTEXT.md`'s `origin_timestamp`: per-producer monotonic, wall-clock-advisory. A producer that does not stamp pays nothing — the same shape as the CRC opt-in above.
+- **TF=0 only, on purpose.** The relative form's anchorless-reject rule is the conformance gap flagged above; writing TF=1 before that check exists would mint exactly the near-epoch garbage §pitfalls describes. The byte layout for **both** forms has one home (`wire::store_trailer_ts` / `emit_trailer_ts`), and the frame builders (`stack_writer::header`, the reply emit cursor) accept both forms' TS/TF bits — so the TF=1 writer is a gated follow-up on the anchor check, not a redesign, and the stream shape proposed on #879 reuses this plumbing as-is.
+- **A forwarder preserves the stamp verbatim.** The FWD hop rebuild keeps the outer `TS`/`TF` bits and re-emits the trailer bytes, so an origin's stamp survives to the terminus. An inbound **CRC does not cross a hop**: the rebuilt body invalidates it by construction, so `CR` is dropped rather than forwarded stale.
+- **The terminus ECHOES a TF=0 request stamp on its reply** — error replies included. This is the ICMP-echo RTT construction: `RTT = origin_now − echoed_stamp`, computed entirely on the origin's clock, no request id, no clock sync, no per-request state. The echo is a capability, not an obligation — a reply without a stamp means "this peer does not echo" and is fully conforming; stored values remain trailer-less at rest (the ADR-0041 trailer-slice is unchanged — only the reply's own outer frame answers a stamp with a stamp).
+- **The silent-zero is loud.** `encode` refuses (`empty vector`) a TLV claiming `opt.TS` with no trailer value, or a value whose form contradicts `opt.TF` — it no longer emits a stamp of 1970-01-01. Likewise `wire::emit_tlv`, which writes nothing after the body, clears trailer bits by construction instead of minting a frame that claims a trailer it does not carry.
+- **`TIME` (0x0C) is reserved, not forgotten.** Confirmed as the application-domain payload type §below points at; core assigns the code and deliberately neither emits nor consumes it — a TIME body's meaning is the embedder's schema.
+
 ### Use case: 1 GS/s ADC with per-sample timing
 
 Without relative TS, a tight ADC stream would carry an 8-byte timestamp on every slice — bandwidth waste. With relative TS:

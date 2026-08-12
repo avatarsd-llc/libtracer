@@ -37,6 +37,7 @@
 #include <vector>
 
 #include "fwd_frame_builder.hpp"
+#include "libtracer/frame.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "test_support.hpp"
@@ -380,6 +381,26 @@ int main() {
             b_fwd(fwd_op_t::READ, b_path({"nope", "missing"}), b_path({"reply-ep"})), {});
         check(!notfound.empty() && illegal_reply != notfound,
               "INVALID_PATH is distinguishable from the NOT_FOUND reply");
+    }
+
+    // #1109 — a TF=0-stamped request: BOTH tiers echo the stamp on the reply, and they do
+    // it byte-identically across every split (the arena captures the root TS at decode; the
+    // view reads it lazily — two different mechanisms, one wire answer).
+    {
+        auto stamped = b_fwd(fwd_op_t::READ, b_path({"sensor", "temp"}), b_path({"reply-ep"}));
+        opt_t o = opt_t::decode(std::to_integer<std::uint8_t>(stamped[1]));
+        o.ts = true;
+        stamped[1] = static_cast<std::byte>(o.encode());
+        constexpr std::int64_t kNs = 555'444'333'222LL;
+        tr::wire::emit_trailer_ts(stamped, /*relative=*/false, kNs);
+        differential("stamped READ (#1109 TS echo, both tiers)", seed_temp_value, stamped);
+        // The oracle itself must actually CARRY the echo — without this the differential
+        // would pass vacuously on two identically-unstamped replies.
+        const auto oracle = resolve_arena_flat(seed_temp_value, stamped, {});
+        const auto dec = tr::wire::decode(oracle);
+        check(dec.has_value() && dec->opt.ts && !dec->opt.tf && dec->trailer && dec->trailer->ts &&
+                  dec->trailer->ts->value == kNs,
+              "the echoed stamp is on the reply and equals the request's");
     }
 
     // A WRITE must not mkdir-p an illegally-spelled path either: the write-creates branch

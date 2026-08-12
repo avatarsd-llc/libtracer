@@ -26,6 +26,7 @@
 
 #include "fwd_frame_builder.hpp"
 #include "libtracer/byteorder.hpp"
+#include "libtracer/frame.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/rope_decode.hpp"
@@ -114,6 +115,19 @@ std::optional<bytes_t> forward_bytes(const Cursor& cur, std::string_view inbound
     r->gather(cur,
               [&](std::span<const std::byte> s) { out.insert(out.end(), s.begin(), s.end()); });
     return out;
+}
+
+/**
+ * @brief The same frame stamped with a TF=0 absolute trailer: `opt.TS` patched into the
+ *        header byte, the 8 LE nanosecond bytes appended (#1109).
+ */
+bytes_t with_ts(bytes_t frame, std::uint64_t ns) {
+    opt_t o = opt_t::decode(std::to_integer<std::uint8_t>(frame[1]));
+    o.ts = true;
+    o.tf = false;
+    frame[1] = static_cast<std::byte>(o.encode());
+    tr::wire::emit_trailer_ts(frame, /*relative=*/false, static_cast<std::int64_t>(ns));
+    return frame;
 }
 
 }  // namespace
@@ -277,6 +291,66 @@ int main() {
             all_equal = forward_bytes(rope_cursor{r}, "bus7") == span_out;
         }
         check(all_equal, "rebuild: every rope split gathers byte-identical egress");
+    }
+
+    // 4f. #1109: an origin's TF=0 trailer stamp SURVIVES the forward hop — the TS/TF bits
+    //     stay on the rebuilt head and the 8 stamp bytes are re-emitted verbatim as the
+    //     outgoing frame's last bytes. (Before this fix the fresh head hardcoded
+    //     `opt{.pl = true}` and gather stopped at body_end: the stamp was silently dropped
+    //     at the first forwarder.)
+    {
+        constexpr std::uint64_t kNs = 0x1122334455667788ull;
+        const bytes_t frame = with_ts(
+            b_fwd(fwd_op_t::WRITE, b_path({"child", "x"}), b_path({"c"}), {}, payload), kNs);
+        const auto out = forward_bytes(span_cursor{frame}, "in");
+        const bytes_t want =
+            with_ts(b_fwd(fwd_op_t::WRITE, b_path({"x"}), b_path({"in", "c"}), {}, payload), kNs);
+        check(out == want, "rebuild: a TF=0 origin stamp survives the hop byte-exact");
+
+        // The pre-carried path (the router's shape: peek fills the offsets, the caller sets
+        // strip_at, the rebuild reuses them) must preserve the stamp identically — the peek
+        // now carries the outer opt bits forward for exactly this.
+        tr::net::fwd_pre_t pre;
+        check(tr::net::peek_fwd_dst(span_cursor{frame}, pre), "stamped frame: dst peek accepts");
+        pre.strip_at = pre.seg0_off + pre.seg0_len;  // consume the one leading segment
+        const auto pre_r = tr::net::rebuild_fwd_forward(
+            span_cursor{frame}, std::span<const std::byte>{}, "in", 1, &pre);
+        check(pre_r.has_value() && pre_r->ok(), "stamped frame: the pre-carried rebuild succeeds");
+        if (pre_r) {
+            bytes_t pre_out;
+            pre_r->gather(span_cursor{frame}, [&](std::span<const std::byte> s) {
+                pre_out.insert(pre_out.end(), s.begin(), s.end());
+            });
+            check(pre_out == want, "rebuild(pre): the peek-carried opt preserves the stamp too");
+        }
+
+        // Every rope split gathers the same stamped egress (source-agnostic, as ever).
+        bool all_equal = true;
+        for (std::size_t cut = 1; cut + 1 < frame.size() && all_equal; ++cut) {
+            const std::size_t cuts[] = {cut};
+            const tr::view::rope_t r = rope_split(frame, cuts);
+            all_equal = forward_bytes(rope_cursor{r}, "in") == out;
+        }
+        check(all_equal, "rebuild: every rope split gathers the same stamped egress");
+    }
+
+    // 4g. #1109: an inbound CRC does NOT cross the hop (the rebuilt body invalidates it),
+    //     while the stamp riding beside it still does.
+    {
+        constexpr std::int64_t kNs = 777'000'111LL;
+        const bytes_t plain =
+            b_fwd(fwd_op_t::WRITE, b_path({"child", "x"}), b_path({"c"}), {}, payload);
+        auto dec = tr::wire::decode(plain);
+        check(dec.has_value(), "CRC+TS source frame decodes");
+        tr::wire::stamp_ts(*dec, kNs);
+        dec->opt.cr = true;  // CRC-32C over body ++ ts, computed by encode
+        const bytes_t frame = tr::wire::encode(*dec);
+        check(!frame.empty(), "CRC+TS source frame re-encodes");
+        const auto out = forward_bytes(span_cursor{frame}, "in");
+        const bytes_t want =
+            with_ts(b_fwd(fwd_op_t::WRITE, b_path({"x"}), b_path({"in", "c"}), {}, payload),
+                    static_cast<std::uint64_t>(kNs));
+        check(out == want, "rebuild: TS preserved, stale CRC dropped (CR never crosses)");
     }
 
     // 5. Malformed rejects — each structural precondition fails to nullopt.

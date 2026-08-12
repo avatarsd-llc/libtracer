@@ -587,17 +587,31 @@ void reject_bus_name_hop(const child_registry_t& registry, std::string_view inbo
     // A route `wire::encode` refuses is no address at all, and a head sized around an empty
     // span would announce a body length no bytes occupy. Drop by value, as for a missing src.
     if (rdst.empty() || rsrc.empty()) return;
+    graph::reply_route_t route{.dst_wire = rdst, .src_wire = rsrc};
+    // The wire-time echo (#1109) rides rejections too: an origin probing RTT against a route
+    // this node refuses still gets its stamp back with the addressed error, so the same
+    // frame answers both questions. TF=1 is not echoed — anchorless at the root, the spec's
+    // own MUST-reject case (the terminus resolver applies the identical filter).
+    if (dec->opt.ts && !dec->opt.tf && dec->trailer && dec->trailer->ts)
+        route.echo_ts = dec->trailer->ts;
     const view::rope_t reply =
-        graph::assemble_error_reply(rdst, rsrc, graph::status_t::INVALID_PATH, egress);
-    // Exactly one link by construction: an error reply carries no shared payload and no mint
-    // trailer, so `assemble_error_reply` yields the head segment alone and it egresses
-    // contiguously — the single `send(span)` this path has always made. A zero-link rope is
-    // the egress refusal; drop rather than emit a headerless frame.
-    if (reply.link_count() != 1) return;
+        graph::assemble_error_reply(route, graph::status_t::INVALID_PATH, egress);
+    // One link — plus the echo trailer link on a stamped request — by construction: an error
+    // reply carries no shared payload and no mint trailer. A zero-link rope is the egress
+    // refusal; drop rather than emit a headerless frame. The echoed shape is two links, so
+    // this COLD path materializes rather than growing a scatter-gather send it never needed.
+    if (reply.link_count() == 0) return;
     // `by_name` includes the bus-peer fallback, so a frame that arrived FROM a peer (whose
     // inbound_name is the peer's own name) answers back over that peer's directed endpoint —
     // the same lookup resolve_terminus uses for its replies.
-    if (transport_t* const up = registry.by_name(inbound_name)) up->send(reply.links()[0].bytes());
+    if (transport_t* const up = registry.by_name(inbound_name)) {
+        if (reply.link_count() == 1) {
+            up->send(reply.links()[0].bytes());
+        } else {
+            const view::view_t flat = reply.materialize();
+            if (!flat.empty()) up->send(flat.bytes());
+        }
+    }
 }
 
 /**

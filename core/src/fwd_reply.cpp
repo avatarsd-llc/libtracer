@@ -11,6 +11,7 @@
 
 #include "libtracer/byteorder.hpp"
 #include "libtracer/error.hpp"
+#include "libtracer/tlv_emit.hpp"
 
 /**
  * @file
@@ -79,24 +80,42 @@ constexpr std::size_t kU8ValueLen = 5;  // 4-byte VALUE header + 1 payload byte
 
 }  // namespace
 
-rope_t assemble_reply(std::span<const std::byte> reply_dst_wire,
-                      std::span<const std::byte> reply_src_wire, reply_kind_t kind,
+rope_t assemble_reply(const reply_route_t& route, reply_kind_t kind,
                       std::span<const std::byte> inline_tail, std::span<const view_t> shared,
                       std::size_t shared_len, mem::mem_backend_t& egress,
                       std::span<const std::byte> trailing) {
-    const std::size_t children_len = kU8ValueLen + reply_dst_wire.size() + reply_src_wire.size() +
+    const std::size_t children_len = kU8ValueLen + route.dst_wire.size() + route.src_wire.size() +
                                      kU8ValueLen + inline_tail.size();
+    // The echo trailer is NOT in body_len: the length field has always excluded the trailer
+    // (docs/reference/01-data-format.md §header), which is exactly why the stamp can ride a
+    // trailing segment without moving anything else about the frame (#1109).
     const std::size_t body_len = children_len + shared_len + trailing.size();
     const bool ll = body_len > 0xFFFFu;
     const std::size_t head_len = (ll ? 6u : 4u) + children_len;
 
     rope_t rope;
-    // Reserve the reply chain (head + one link per shared payload view) up front so the
-    // appends below never spill through a throwing std::vector growth — an abort() under
-    // -fno-exceptions on a fragmented heap. On failure return an EMPTY rope; resolve_node's
-    // or_backpressure wrapper turns an empty success reply into an addressed BACKPRESSURE
-    // error (the client falls back on the same link rather than presuming it dead).
-    if (!rope.try_reserve(1 + shared.size() + (trailing.empty() ? 0u : 1u))) return rope_t{};
+    // Reserve the reply chain (head + one link per shared payload view, plus the mint and
+    // echo tails when present) up front so the appends below never spill through a throwing
+    // std::vector growth — an abort() under -fno-exceptions on a fragmented heap. On failure
+    // return an EMPTY rope; resolve_node's or_backpressure wrapper turns an empty success
+    // reply into an addressed BACKPRESSURE error (the client falls back on the same link
+    // rather than presuming it dead).
+    if (!rope.try_reserve(1 + shared.size() + (trailing.empty() ? 0u : 1u) +
+                          (route.echo_ts ? 1u : 0u)))
+        return rope_t{};
+    // The echo trailer segment, allocated BEFORE the head is written because the head's opt
+    // byte must tell the truth: a `TS` bit whose bytes could not be allocated would be the
+    // trailer-claiming footgun this change closes in `emit_tlv` (#1109). A refusal drops the
+    // ECHO, not the reply — the echo is a capability (no stamp back = "this peer does not
+    // echo"), while a refused reply is the silent drop the origin cannot act on.
+    segment_ptr_t ts_seg;
+    if (route.echo_ts) {
+        ts_seg = view::segment_alloc(egress, wire::trailer_ts_bytes(route.echo_ts->relative));
+        if (ts_seg)
+            wire::store_trailer_ts(ts_seg->bytes, route.echo_ts->relative, route.echo_ts->value);
+    }
+    const bool echo = static_cast<bool>(ts_seg);
+    const wire::opt_t trailer_opt{.ts = echo, .tf = echo && route.echo_ts->relative};
     // The reply head draws from the injected egress backend (#795), not the global heap: this
     // is the last peer-drivable terminus allocation, sized by the swapped route bytes, and a
     // bounded node bounds it by pointing `egress` at its slab. `segment_alloc` is the nothrow
@@ -108,20 +127,20 @@ rope_t assemble_reply(std::span<const std::byte> reply_dst_wire,
     // (or_backpressure → addressed BACKPRESSURE), never a malformed frame.
     if (!seg) return rope_t{};
     emit_cursor_t out{seg->bytes.data()};
-    out.struct_header(type_t::FWD, ll, body_len);
+    out.struct_header(type_t::FWD, ll, body_len, trailer_opt);
     out.u8_value(std::to_underlying(fwd_op_t::REPLY));
-    out.tlv_sliced(reply_dst_wire);
-    out.tlv_sliced(reply_src_wire);
+    out.tlv_sliced(route.dst_wire);
+    out.tlv_sliced(route.src_wire);
     out.u8_value(std::to_underlying(kind));
     out.raw(inline_tail);
     rope.append(view_t::over(std::move(seg)));
     for (const view_t& v : shared) rope.append(v);  // refcount clone — no byte copy
-    // The minted `PATH_REF` goes LAST — after the payload, as the reply's final child
-    // (RFC-0024 §7.1). Last rather than beside `kind` so a positional reader of an ordinary
-    // reply is untouched: it reads op / dst / src / kind / payload and stops, and only an
-    // origin that ASKED for a mint reads past. Its own segment, because the head is sized
-    // exactly and the payload's links sit between — one small allocation on the mint path
-    // and none on any other.
+    // The minted `PATH_REF` goes LAST in the body — after the payload, as the reply's final
+    // child (RFC-0024 §7.1). Last rather than beside `kind` so a positional reader of an
+    // ordinary reply is untouched: it reads op / dst / src / kind / payload and stops, and
+    // only an origin that ASKED for a mint reads past. Its own segment, because the head is
+    // sized exactly and the payload's links sit between — one small allocation on the mint
+    // path and none on any other.
     if (!trailing.empty()) {
         // The minted PATH_REF draws from the SAME egress backend (#795): a fixed 12 B, but on
         // the reply path all the same, so a bounded node bounds it too. A refusal is not an
@@ -130,21 +149,23 @@ rope_t assemble_reply(std::span<const std::byte> reply_dst_wire,
         if (mint_seg) {
             std::memcpy(mint_seg->bytes.data(), trailing.data(), trailing.size());
             rope.append(view_t::over(std::move(mint_seg)));
+            if (ts_seg) rope.append(view_t::over(std::move(ts_seg)));  // trailer after the body
             return rope;
         }
         // A mint that cannot be allocated is not an error: the operation already succeeded and
         // its reply is complete without it, so answer the plain reply and let the origin stay
         // canonical — the same degrade a saturated generation takes. Rebuilt rather than
         // returned short, because a header whose body_len counts bytes that are not there is
-        // unparseable, not merely unhelpful.
-        return assemble_reply(reply_dst_wire, reply_src_wire, kind, inline_tail, shared, shared_len,
-                              egress);
+        // unparseable, not merely unhelpful. The route (echo included) rides the rebuild.
+        return assemble_reply(route, kind, inline_tail, shared, shared_len, egress);
     }
+    // The echo trailer is the frame's LAST bytes — after the whole body, mint included —
+    // because that is where the grammar's `total = header + length + ts_size` reads it.
+    if (ts_seg) rope.append(view_t::over(std::move(ts_seg)));
     return rope;
 }
 
-rope_t assemble_error_reply(std::span<const std::byte> reply_dst_wire,
-                            std::span<const std::byte> reply_src_wire, status_t status,
+rope_t assemble_error_reply(const reply_route_t& route, status_t status,
                             mem::mem_backend_t& egress) {
     const std::uint16_t code = std::to_underlying(error_code(status));
     const std::array<std::byte, 14> tail{
@@ -163,7 +184,7 @@ rope_t assemble_error_reply(std::span<const std::byte> reply_dst_wire,
         static_cast<std::byte>(code & 0xFFu),
         static_cast<std::byte>(code >> 8),
     };
-    return assemble_reply(reply_dst_wire, reply_src_wire, reply_kind_t::ERROR, tail, {}, 0, egress);
+    return assemble_reply(route, reply_kind_t::ERROR, tail, {}, 0, egress);
 }
 
 }  // namespace tr::graph
