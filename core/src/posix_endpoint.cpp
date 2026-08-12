@@ -222,13 +222,16 @@ void stream_endpoint_t::write_all(int fd, std::span<const std::byte> bytes) {
     }
 }
 
-void stream_endpoint_t::write_all_iov(int fd, ::iovec* vec, std::size_t count) {
+void stream_endpoint_t::write_all_iov(int fd, std::span<const ::iovec> vec) {
     if (fd < 0) return;
     bool retry_spent = false;
-    while (count > 0) {
+    std::size_t i = 0;  // the first entry not yet fully written
+    while (i < vec.size()) {
         msghdr msg{};
-        msg.msg_iov = vec;
-        msg.msg_iovlen = count;
+        // sendmsg does not modify the iovec array; the cast is the C API's
+        // missing const, not a licence to consume the caller's gather (#932).
+        msg.msg_iov = const_cast<::iovec*>(vec.data() + i);
+        msg.msg_iovlen = vec.size() - i;
         const ssize_t n = send_gather(fd, &msg);
         if (n <= 0) {
             const write_fault_t fault = classify_write_fault(n);
@@ -239,16 +242,22 @@ void stream_endpoint_t::write_all_iov(int fd, ::iovec* vec, std::size_t count) {
         }
         retry_spent = false;
         std::size_t done = static_cast<std::size_t>(n);
-        // Advance past every fully-written entry, then trim the one the write
-        // stopped inside — the stream may stop at any byte boundary.
-        while (count > 0 && done >= vec->iov_len) {
-            done -= vec->iov_len;
-            ++vec;
-            --count;
+        // Advance past every fully-written entry — the stream may stop at any
+        // byte boundary.
+        while (i < vec.size() && done >= vec[i].iov_len) {
+            done -= vec[i].iov_len;
+            ++i;
         }
-        if (count > 0 && done > 0) {
-            vec->iov_base = static_cast<std::byte*>(vec->iov_base) + done;
-            vec->iov_len -= done;
+        if (i < vec.size() && done > 0) {
+            // The write stopped INSIDE entry i. Finish that entry with the plain
+            // writer instead of trimming the caller's array in place, then
+            // re-gather from the next entry boundary: the gather stays read-only,
+            // so a fan-out needs no per-peer copy. This is the rare slow path — a
+            // complete gathered write never lands here.
+            write_all(fd, std::span<const std::byte>(
+                              static_cast<const std::byte*>(vec[i].iov_base) + done,
+                              vec[i].iov_len - done));
+            ++i;
         }
     }
 }
@@ -361,17 +370,14 @@ bool slot_server_t::close_peer(std::string_view peer) {
     return false;
 }
 
-void slot_server_t::broadcast_iov(const ::iovec* pristine, std::size_t count) {
-    std::array<::iovec, kMaxInlineIov + 1> scratch_inline;
-    iov_table_t<::iovec> scratch_table(scratch_inline);
-    ::iovec* scratch = scratch_table.acquire(count);
-    if (scratch == nullptr) return;  // same store, same answer: drop, never truncate
+void slot_server_t::broadcast_iov(std::span<const ::iovec> rec) {
+    // No per-peer copy and no scratch store: write_all_iov reads the gather
+    // without consuming it (#932), so every peer writes from the same record.
     const std::lock_guard plock(peers_m_);
     const std::lock_guard wlock(write_m_);
     for (const std::unique_ptr<session_base_t>& s : slots_) {
         if (!s->open.load(std::memory_order_relaxed)) continue;
-        std::copy_n(pristine, count, scratch);
-        write_all_iov(s->fd.load(std::memory_order_relaxed), scratch, count);
+        write_all_iov(s->fd.load(std::memory_order_relaxed), rec);
     }
 }
 

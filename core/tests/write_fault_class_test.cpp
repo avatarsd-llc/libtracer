@@ -138,7 +138,7 @@ arm_result_t run_arm(bool use_iov, bool kill_peer = false) {
     if (use_iov) {
         std::array<::iovec, kSpans> vec{};
         for (std::size_t i = 0; i < kSpans; ++i) vec[i] = {copy.data() + i * kSpanLen, kSpanLen};
-        write_probe_t::write_all_iov(sv[0], vec.data(), kSpans);
+        write_probe_t::write_all_iov(sv[0], std::span<const ::iovec>(vec));
     } else {
         write_probe_t::write_all(sv[0], std::span<const std::byte>(copy));
     }

@@ -649,9 +649,15 @@ void test_tcp_send_iov_overflow_drops() {
     check(at_listener.bytes().size() == kWideSpans, "and it is the whole gather");
 }
 
-/** @brief The multi-peer broadcast's per-peer scratch table takes the same treatment. */
+/**
+ * @brief The multi-peer broadcast's record table takes the same treatment.
+ *
+ * The per-peer scratch copy this case was written for is GONE (#932): `write_all_iov`
+ * no longer consumes its gather, so the fan-out writes the one record table to every
+ * peer. The remaining store — the record table itself — must still soft-fail.
+ */
 void test_tcp_server_broadcast_scratch_drops() {
-    std::printf("tcp server broadcast — scratch gather drops, node lives:\n");
+    std::printf("tcp server broadcast — record gather drops, node lives:\n");
     sink_t at_peer;
     auto peer_rx = [&](std::span<const std::byte> f) { at_peer.push(f); };
     tr::net::transport_tcp_server server(0);
@@ -666,7 +672,7 @@ void test_tcp_server_broadcast_scratch_drops() {
     const auto send_wide = [&] { server.send(std::span<const std::span<const std::byte>>(iov)); };
 
     const std::size_t n_allocs = count_allocs(send_wide);
-    check(n_allocs >= 2, "both the record table AND the per-peer scratch reached the store");
+    check(n_allocs == 1, "ONE store allocation: the record table (no per-peer scratch, #932)");
     check(at_peer.wait_for(1, 2s), "the unrefused baseline broadcast arrived");
 
     const std::size_t escaped = escape_sweep(n_allocs, send_wide);

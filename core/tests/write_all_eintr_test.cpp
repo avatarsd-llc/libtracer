@@ -157,7 +157,7 @@ run_result_t run_interrupted_write(bool use_iov) {
             vec[0] = {copy.data(), third};
             vec[1] = {copy.data() + third, third};
             vec[2] = {copy.data() + 2 * third, payload.size() - 2 * third};
-            write_probe_t::write_all_iov(sv[0], vec, 3);
+            write_probe_t::write_all_iov(sv[0], std::span<const ::iovec>(vec, 3));
         } else {
             write_probe_t::write_all(sv[0], std::span<const std::byte>(payload));
         }
