@@ -299,10 +299,10 @@ write is gated on `WRITE` — **not** `DELETE` — per
 **Mount and routing are the same path.** A created connection lives at `/net/<module>/<name>` and
 routes by exactly that path: the routing key *is* the mount path, so the registry's precomputed
 NAME run is exactly the prefix a hop prepends to `src` and the forward path assembles nothing per
-hop (`core/src/transport_vertex.cpp:253-260,270-277`;
+hop (`core/src/transport_vertex.cpp:293-300,310-317`;
 [ADR-0061 — per-transport mount routing, strip-K L5 demux](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md)).
-The `/net/<module>` grouping vertex is created lazily on first use, with `graph_.find` itself as the
-dedupe rather than a second source of truth (`core/src/transport_vertex.cpp:279-287`). Because a
+The `/net/<module>` structural vertex is created lazily on first use, with `graph_.find` itself as the
+dedupe rather than a second source of truth (`core/src/transport_vertex.cpp:319-327`). Because a
 connection is addressed under `/net/<module>/`, a first-level local vertex cannot shadow one.
 
 **Module naming is declared-only, by the application**
@@ -311,7 +311,7 @@ connection is addressed under `/net/<module>/`, a first-level local vertex canno
 transport registers no module name, and an undeclared `(kind, role)` pair fails creation with
 `SCHEMA_NOT_FOUND` (`core/src/transport_vertex.cpp:167`). The application declares each module
 under a name it chooses through `register_module` (`core/src/transport_vertex.cpp:133`,
-`core/include/libtracer/transport_vertex.hpp:288`), a minting boundary gated by the shared
+`core/include/libtracer/transport_vertex.hpp:289`), a minting boundary gated by the shared
 segment-validity predicate — a reserved-character name answers `INVALID_PATH`. The built-in
 transports export *suggested*-name constants (`kWsClientSuggestedModule`, …) an application may
 adopt; `/net` itself is likewise only the recommended root convention (a constructor default).
@@ -322,20 +322,20 @@ the last can be refused: `add_child` answers `false` when the registry cannot gr
 only place that can say so (`core/include/libtracer/fwd_router.hpp:257`,
 `core/include/libtracer/child_registry.hpp:267`). A refusal unwinds the first two in reverse —
 retire the vertex, then erase the entry, which destroys the config-constructed socket — publishes
-no liveness, and answers `BACKPRESSURE` (`core/src/transport_vertex.cpp:379-382`). Discarding that
+no liveness, and answers `BACKPRESSURE` (`core/src/transport_vertex.cpp:419-422`). Discarding that
 `bool` left a connection reporting `UP` that no `dst` resolved, no inbound frame reached, and
 `remove_child` did not know about — a ghost a peer could mint by creating connections until the
 registry slab exhausted. A `provide_link` staging is consumed only once the wiring has succeeded
-(`core/src/transport_vertex.cpp:388`), so a retry after the pressure clears still finds its link.
+(`core/src/transport_vertex.cpp:428`), so a retry after the pressure clears still finds its link.
 
 **Liveness is the connection vertex's value.** `link_state_t` is six states —
 `DORMANT`, `DIALING`, `RECONNECTING`, `UP`, `LISTENING`, `BIND_FAILED`
-(`core/include/libtracer/transport_vertex.hpp:96-103`). `DIAL` links use the first four; `LISTEN`
+(`core/include/libtracer/transport_vertex.hpp:97-104`). `DIAL` links use the first four; `LISTEN`
 links report listen-socket reachability with the last two, never a per-accepted-peer state. The
 value is a 1-byte `VALUE` on the vertex, so it is `await`-able and subscribable: `subscribe
 /net/<module>/<name>` streams every transition. The liveness *engine* that would drive these
 automatically is not implemented — the value is set by the caller, and a config-constructed socket
-reports `UP` or `LISTENING` at creation (`core/src/transport_vertex.cpp:402-404`).
+reports `UP` or `LISTENING` at creation (`core/src/transport_vertex.cpp:442-444`).
 
 **The accepted direction, and what is not realised.** RFC-0014 replaces the single global
 `/net:children[]` catalog with a **per-module creator endpoint** at `/net/<module>/conn`, whose own
@@ -348,7 +348,7 @@ originate the **wires** ([#491]).
 
 ### Connection settings are transport-private
 
-`conn_settings_t` (`core/include/libtracer/transport_vertex.hpp:120`) and `conn_role_t` (`:77`) are
+`conn_settings_t` (`core/include/libtracer/transport_vertex.hpp:121`) and `conn_role_t` (`:78`) are
 a **device-private `:settings` facet** of a connection vertex
 ([ADR-0021 — the colon-field plane is the vertex ioctl](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0021-colon-field-plane-is-the-vertex-ioctl.md)
 draws the standard / device-private line). They live on the `tr::net` leaf record and are **never**

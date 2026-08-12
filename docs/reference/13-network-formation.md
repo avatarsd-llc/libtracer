@@ -275,7 +275,7 @@ write-only, non-propagating creator endpoint.
 `dormant` takes `0` so a resting link is the falsy default. **The byte encoding becomes
 normative on the merge of RFC-0014's conformance vectors** — the RFC defers it, so these
 values are the reference encoding until then (`link_state_t`,
-`core/include/libtracer/transport_vertex.hpp:96-103`). A `LISTEN` vertex's liveness
+`core/include/libtracer/transport_vertex.hpp:97-104`). A `LISTEN` vertex's liveness
 reports **listen-socket reachability**, not per-accepted-peer connectivity; accepted-peer
 count and identity are exposed through `:children[]` / `:settings`. Once up, a link is
 bidirectional regardless of who dialed — `role` says only *who initiates*. The liveness

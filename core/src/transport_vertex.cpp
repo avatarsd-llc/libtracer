@@ -167,6 +167,46 @@ result_t<std::string> transport_vertex_t::module_for_locked(std::string_view kin
     return std::unexpected(status_t::SCHEMA_NOT_FOUND);
 }
 
+bool transport_vertex_t::is_structural(wire::key_view_t key) const {
+    if (key.empty()) return false;  // the graph root is nobody's structural vertex
+    // The net root is emitted as ONE NAME segment everywhere in this file (`make_connection`
+    // composes the mount key the same way), so the whole predicate is two segment compares
+    // over the key bytes — no key is materialised and nothing is allocated.
+    const std::string_view root = std::string_view(net_root_).substr(1);
+    const wire::key_view_t parent = key.parent();
+    const std::string_view leaf = detail::as_string_view(key.last_segment());
+    // `<net_root>` itself: the `:children[]` creation target the ctor registers.
+    if (parent.empty()) return leaf == root;
+    // `<net_root>/<module>`: exactly two segments, the first the root. Anything deeper is a
+    // connection (`<net_root>/<module>/<name>`) or below one — the peer's mounted graph.
+    if (!parent.parent().empty()) return false;
+    if (detail::as_string_view(parent.last_segment()) != root) return false;
+    const std::lock_guard ctl(ctl_m_);  // ADR-0063 §3 control-plane serialization
+    for (const module_decl_t& d : modules_) {
+        if (d.module == leaf) return true;
+    }
+    // A module reached through the KIND-LESS spelling is never declared — `make_connection`
+    // takes its name from the staging key instead (`provide_link`, the test/manual seam), and
+    // mints the same `<net_root>/<module>` vertex for it. So the staged set and the live
+    // connections are the other two places a module name of this plane can be read back from.
+    // No fourth container is added for this (commit `221ed983` deleted exactly that state):
+    // these are the ones the class already keeps for creation and teardown.
+    std::string under(leaf);
+    under.push_back('/');
+    for (const auto& [staged_key, staged] : pending_links_) {
+        (void)staged;
+        if (staged_key.starts_with(under)) return true;  // key is `<module>/<name>`
+    }
+    std::string qualified_under(root);
+    qualified_under.push_back('/');
+    qualified_under += under;
+    for (const auto& [qualified, conn] : conns_) {
+        (void)conn;
+        if (qualified.starts_with(qualified_under)) return true;  // `<root>/<module>/<name>`
+    }
+    return false;
+}
+
 void transport_vertex_t::provide_link(std::string module, std::string name, transport_t& link) {
     const std::lock_guard ctl(ctl_m_);  // ADR-0063 §3 control-plane serialization
     std::string key = std::move(module);
@@ -276,7 +316,7 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::b
     }
     child_key = std::move(mount_key);
 
-    // The `/net/<module>` grouping vertex, created lazily on first use. graph_.find IS the
+    // The `/net/<module>` structural vertex, created lazily on first use. graph_.find IS the
     // dedupe — a separate seen-set would be a second source of truth (and another container
     // instantiation) for something the graph already knows.
     {

@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "libtracer/graph.hpp"
+#include "libtracer/key_view.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/transport.hpp"
 
@@ -304,6 +305,47 @@ class transport_vertex_t {
      */
     [[nodiscard]] graph::result_t<std::string> module_for(std::string_view kind,
                                                           conn_role_t role) const;
+
+    /**
+     * @brief Is @p key one of THIS net plane's **structural vertices** — the net root, or a
+     *        `<net_root>/<module>` segment — rather than a connection or an application
+     *        vertex (#1096)?
+     *
+     * `transport_vertex_t` mints two vertices nobody asked for: the net root (the
+     * `:children[]` creation target) and, lazily, each `<net_root>/<module>` segment a
+     * connection mounts under. Both are registered `role_t::STORED_VALUE` and carry no
+     * descriptor table, so an embedder walking @ref graph::graph_t::for_each_vertex sees
+     * them as ordinary value vertices someone forgot to describe — byte-identical `:schema`
+     * shape to a real leaf, differing only in the NAME. This predicate is how an embedder
+     * tells them apart without re-typing the library's own naming rule.
+     *
+     * The answer is deliberately scoped HERE and nowhere wider. `graph_t` cannot answer it:
+     * an application's own structural vertex (a `/zone` holding nothing but children) is
+     * indistinguishable from a connection vertex on every graph-visible surface — same
+     * visit, same schema shape, same composed-branch read (RFC-0016) — so a graph-level
+     * predicate would be inventing an answer. What the LIBRARY minted, the library can
+     * report; what the APPLICATION minted stays the application's business (ADR-0010:
+     * libtracer is a transport for application data, not a definer of application
+     * semantics). See `docs/reference/11` §structural vertices.
+     *
+     * @note **Name match, not provenance — a documented false positive.** Creation
+     *       deduplicates against `graph_.find`, deliberately keeping no per-module minted
+     *       set (commit `221ed983` deleted exactly that state). So a vertex an application
+     *       registered at `<net_root>` or `<net_root>/<module>` *before* this object got
+     *       there answers `true` here: the predicate says "this key names a structural
+     *       position of this net plane", not "this object registered this vertex".
+     * @note The RFC-0014 per-module creator endpoint `/net/<module>/conn` (accepted,
+     *       unimplemented) is **not** structural and answers `false`: it is an addressable
+     *       control surface with its own `:schema` catalog, not a grouping segment — and it
+     *       sits one level below the deepest structural position anyway.
+     * @param key The canonical PATH-payload key `for_each_vertex` hands its callback (no
+     *            handle unwrapping needed — the signature matches).
+     * @return true iff @p key is `<net_root>`, or `<net_root>/<module>` for a module of this
+     *         plane — one declared through @ref register_module, one staged through
+     *         @ref provide_link (the kind-less spelling never declares its module), or one
+     *         carrying a live connection.
+     */
+    [[nodiscard]] bool is_structural(wire::key_view_t key) const;
 
     /**
      * @brief Supply a pre-built transport a subsequent SPEC of connection @p name binds.

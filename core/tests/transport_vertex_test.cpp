@@ -45,8 +45,10 @@
 
 #include "fwd_frame_builder.hpp"
 #include "libtracer/backend.hpp"
+#include "libtracer/byteorder.hpp"
 #include "libtracer/config_reader.hpp"
 #include "libtracer/error.hpp"
+#include "libtracer/key_view.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -866,7 +868,7 @@ void test_factory_built_ws_dial_delivers_push_on_connect() {
         // and graph it delivers into.
         transport_vertex_t net(node, router);
         declare_builtin_modules(net);  // ADR-0073 §4: the application mints the module names
-        // Pre-create the `/net/<module>` grouping vertex `make_connection` would otherwise
+        // Pre-create the `/net/<module>` structural vertex `make_connection` would otherwise
         // create lazily. That lazy call is a `register_vertex_key` BEFORE the factory runs, so
         // leaving it would park the creation path on the gate with no socket built yet — the
         // held window has to start AFTER the client exists to be the window #1025 is about.
@@ -1049,7 +1051,7 @@ void test_factory_built_tcp_dial_delivers_push_on_connect() {
                                   conn_role_t::DIAL)
                   .has_value(),
               "the tcp DIAL module is declared");
-        // Pre-create the `/net/<module>` grouping vertex `make_connection` would otherwise
+        // Pre-create the `/net/<module>` structural vertex `make_connection` would otherwise
         // create lazily. That lazy call is a `register_vertex_key` BEFORE the factory runs, so
         // leaving it would park the creation path on the gate with no socket built yet — the
         // held window has to start AFTER the dialer exists to be the window #1045 is about.
@@ -1609,6 +1611,100 @@ void test_app_chosen_root_and_module() {
 }
 
 /**
+ * @brief #1096 — an embedder walking `for_each_vertex` can partition this net plane's
+ *        STRUCTURAL vertices from everything else.
+ *
+ * The exact partition the issue asks for, taken from ONE walk of the live graph: `/net` and
+ * `/net/<module>` are structural; the connection leaf `/net/<module>/<name>` is not; and an
+ * application's own structural vertex `/zone` — registered `STORED_VALUE`, holding nothing but
+ * a child, visited identically — is not either. The `/zone` arm is the load-bearing one: it
+ * is what stops the predicate degenerating into "two segments under the root", which is the
+ * path-shape workaround this issue exists to retire.
+ */
+void test_structural_vertex_partition() {
+    std::printf("#1096: for_each_vertex partitions structural vertices from value vertices:\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    (void)net.register_module("ws-client", "ws", conn_role_t::DIAL);
+
+    tr::net::loopback_channel_t channel;
+    net.provide_link("ws-client", "up", channel.a());
+    const auto w =
+        node.write(path_t("/net:children[]"), conn_spec("client", "up", conn_role_t::DIAL, 8080));
+    check(w.has_value(), "the connection /net/ws-client/up is created");
+
+    // The application's OWN structural vertex — same role, same shape, same walk. Nothing in
+    // the graph distinguishes it from /net/ws-client, which is exactly why graph_t must not
+    // be the one answering (the doctrine ruling; docs/reference/11 §structural vertices).
+    (void)node.register_vertex(path_t("/zone"), role_t::STORED_VALUE);
+    (void)node.register_vertex(path_t("/zone/temp"), role_t::STORED_VALUE);
+
+    std::set<std::string> structural;
+    std::set<std::string> ordinary;
+    node.for_each_vertex([&](tr::wire::key_view_t key, tr::graph::vertex_handle_t) {
+        // Spell the key back as a `/`-path for the assertions below.
+        std::string spelled;
+        std::span<const std::byte> rest = key.bytes();
+        while (rest.size() >= 4) {
+            const auto len =
+                static_cast<std::size_t>(tr::detail::load_le<std::uint16_t>(rest.subspan(2, 2)));
+            if (rest.size() < 4 + len) break;
+            spelled.push_back('/');
+            spelled += tr::detail::as_string_view(rest.subspan(4, len));
+            rest = rest.subspan(4 + len);
+        }
+        (net.is_structural(key) ? structural : ordinary).insert(spelled);
+    });
+
+    check(structural.contains("/net"), "the net root /net is structural");
+    check(structural.contains("/net/ws-client"), "the module segment /net/ws-client is structural");
+    check(!structural.contains("/net/ws-client/up") && ordinary.contains("/net/ws-client/up"),
+          "the connection leaf /net/ws-client/up is NOT structural");
+    check(!structural.contains("/zone") && ordinary.contains("/zone"),
+          "an app's OWN structural vertex /zone is not one of the net plane's (not a path shape)");
+    check(!structural.contains("/zone/temp") && ordinary.contains("/zone/temp"),
+          "an app leaf /zone/temp is NOT structural");
+    check(structural.size() == 2, "exactly two structural vertices — the root and the module");
+    channel.shutdown();
+}
+
+/**
+ * @brief #1096 — the edges of the predicate: an app-chosen root, an undeclared module name,
+ *        the graph root, and the future `/net/<module>/conn` creator endpoint.
+ */
+void test_structural_vertex_edges() {
+    std::printf("#1096: structural-vertex edges (custom root, undeclared module, conn):\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router, "/io");
+    tr::net::loopback_channel_t channel;
+    net.provide_link("w", "b", channel.a());  // kind-less spelling: the module is never declared
+    const auto w =
+        node.write(path_t("/io:children[]"), conn_spec("client", "b", conn_role_t::DIAL, 9000));
+    check(w.has_value(), "the connection /io/w/b is created under the app-chosen root");
+
+    // The `path_t` must OUTLIVE the call — `key()` is a span into it, not an owned copy.
+    const auto structural_at = [&](std::string_view p) {
+        const auto path = path_t::parse(p);
+        return net.is_structural(tr::wire::key_view_t(path->key()));
+    };
+    check(structural_at("/io"), "the app-chosen net root /io is structural");
+    check(structural_at("/io/w"),
+          "a module minted through the kind-less provide_link spelling is structural too");
+    check(!structural_at("/io/w/b"), "the connection leaf /io/w/b is not");
+    check(!structural_at("/io/nope"), "a module name of no connection and no declaration is not");
+    check(!structural_at("/net"),
+          "another plane's default root is not structural for a net plane rooted at /io");
+    check(!net.is_structural(tr::wire::key_view_t{}),
+          "the graph root is nobody's structural vertex");
+    // RFC-0014's per-module creator endpoint (accepted, unimplemented) is an addressable
+    // control surface with its own :schema catalog — not a grouping segment.
+    check(!structural_at("/io/w/conn"), "the future /net/<module>/conn endpoint is not structural");
+    channel.shutdown();
+}
+
+/**
  * @brief #688 open trace — a peer-created child DOES reach `fwd_router_t::add_child`, and
  *        THE segment predicate runs strictly before it.
  *
@@ -1817,6 +1913,8 @@ int main() {
     test_register_module_rejects_reserved_chars();
     test_wire_name_reaches_add_child();
     test_app_chosen_root_and_module();
+    test_structural_vertex_partition();
+    test_structural_vertex_edges();
 
     return tr::testing::summary("transport_vertex");
 }
