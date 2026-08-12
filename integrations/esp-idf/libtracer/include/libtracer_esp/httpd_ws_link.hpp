@@ -89,11 +89,16 @@
  *   - TX: a send claims a pool slot lock-free (CAS) and gathers straight into its
  *     inline payload. A frame past the inline capacity keeps the pooled shell and
  *     takes a nothrow heap payload (`new (std::nothrow)`, drop-on-OOM backpressure —
- *     never an abort). An exhausted pool has NO fallback: the pool is this link's
+ *     never an abort). An exhausted pool has NO buffer behind it: the pool is this link's
  *     outstanding-send bound, and a send that finds it full is dropped and counted
  *     (@ref enqueue_drops) rather than posted from a heap-allocated work item, which
  *     bounded the in-flight depth by the heap instead of by the queue behind it
- *     (#949).
+ *     (#949). What it does have, since #1187, is a bounded WAIT: a send from any task
+ *     other than the httpd task sleeps in short turns until the drain frees a slot,
+ *     within one send occupancy, so a fan-out wider than the pool degrades to latency
+ *     instead of losing the same publish-order tail every pass. Nothing is copied or
+ *     parked to achieve that — the frame waits in the caller's memory, in the caller's
+ *     call (ADR-0081 §1) — and an expired wait is the same counted drop it always was.
  *   - FAN-OUT: a broadcast (`send()` — the path a subscription push takes) snapshots
  *     its destinations into a FIXED on-stack chunk and resumes the scan for the next
  *     one, so the peer set is walked with no container of its own. Until #961 that
@@ -418,10 +423,30 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
          * Separated because it means something different from the other two (#953): a
          * pool miss is DEPTH pressure — this link already has @ref tx_slot_capacity sends
          * outstanding — while a refused enqueue names the shared control queue and an OOM
-         * names the heap. Read against @ref tx_slot_capacity: a rising count with a small
-         * pool is a link that wants a deeper one, not a sick server.
+         * names the heap.
+         *
+         * Since #1187 an off-httpd-task send WAITS for a slot before it misses, so this
+         * counts only the sends that were still unserved after a full send occupancy — a
+         * DRAIN that is not keeping up, not merely a wide fan-out. Read it against
+         * @ref tx_pool_waits: waits without misses is the pool doing its job as a bound
+         * (wide passes costing latency), while misses mean the httpd task is stalled on
+         * some peer for longer than one send bound. A send issued ON the httpd task never
+         * waits — it is the drain — so an in-call fan-out still misses at the pool's depth.
          */
         std::uint32_t tx_pool_misses = 0;
+        /**
+         * @brief Sends that found the pool full and WAITED for the httpd task to free a
+         *        slot (#1187), whether or not the wait then succeeded.
+         *
+         * The early-warning half of the pair above, and the one that is NOT a loss: every
+         * frame counted here was either delivered late or is also counted in
+         * @ref tx_pool_misses. A steadily rising count means fan-out passes are wider than
+         * the link's in-flight depth and are being paced by the drain — normal, and the
+         * whole point of the bound — while a count that starts climbing where it used to
+         * be flat says a producer's publish sweep is now costing it latency it did not pay
+         * before.
+         */
+        std::uint32_t tx_pool_waits = 0;
         /**
          * @brief Frames dropped at the head of the send path because the destination had
          *        already departed, been condemned, or had its slot reclaimed by a new
@@ -473,8 +498,21 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     /** @brief TX work slots claimed RIGHT NOW (filling, queued, or sending). */
     [[nodiscard]] std::size_t tx_slots_busy() const noexcept;
 
-    /** @brief Total TX work slots in the per-link pool — this link's outstanding-send
-     *         bound; a send past it is dropped and counted (@ref enqueue_drops). */
+    /**
+     * @brief Total TX work slots in the per-link pool — this link's OUTSTANDING-SEND bound.
+     *
+     * Not a fan-out ceiling, and the difference is what #1187 corrected. A send from any
+     * task other than the httpd task now WAITS (bounded, off the CPU) for the drain to free
+     * a slot, so a broadcast to more peers than this costs latency rather than losing its
+     * tail; only a send issued ON the httpd task — a reply serviced in-call, or a push
+     * provoked by an inbound frame — still hits this depth as a hard same-pass limit, since
+     * the task it would wait for is the one asking. One slot of the pool is reserved for
+     * exactly those in-call sends, so a fan-out cannot starve a request's reply.
+     *
+     * A frame that is still unserved when the wait expires is dropped and counted
+     * (@ref enqueue_drops, and @ref stats_t::tx_pool_misses for the cause); waits themselves
+     * are counted in @ref stats_t::tx_pool_waits.
+     */
     [[nodiscard]] static std::size_t tx_slot_capacity() noexcept;
 
     /**
@@ -605,9 +643,36 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *         survivable (per-frame nothrow buffer); a link with no TX pool drops every
      *         send on the counted path — see @ref enqueue_drops. */
     void alloc_buffers();
-    /** @brief Claim a free TX work slot lock-free (a CAS scan); nullptr when the pool is
-     *         exhausted or absent — the caller drops the frame and counts it. */
-    [[nodiscard]] tx_slot_t* claim_tx_slot();
+    /**
+     * @brief Claim a free TX work slot lock-free (a CAS scan); nullptr when the pool is
+     *        exhausted, absent, or the link is stopping.
+     *
+     * @param in_call True when the caller runs ON the httpd task (a reply serviced in-call),
+     *                which is the ONE claimer allowed the pool's reserved last slot — it
+     *                cannot wait for a drain it is itself supposed to perform. See the
+     *                definition for why the reserve exists.
+     */
+    [[nodiscard]] tx_slot_t* claim_tx_slot(bool in_call);
+
+    /**
+     * @brief Claim a TX work slot, WAITING for the httpd task to free one when the pool is
+     *        full and this task is not the httpd task; nullptr once the wait bound expires.
+     *
+     * The #1187 fix. The pool is an in-flight bound, and a producer that walks a peer set
+     * without ever leaving the CPU can only ever fill it once: on a unicore target the whole
+     * fan-out is posted before the httpd task runs at all, so exactly the first
+     * @ref tx_slot_capacity destinations landed every pass and the rest received nothing —
+     * deterministic, publish-order-prefix loss with a silent tail. Sleeping in short turns
+     * until a slot frees converts that into ADDED LATENCY for a wide pass, which is what a
+     * bound is supposed to feel like.
+     *
+     * It buffers NOTHING: the frame waits in the caller's own memory, in the caller's own
+     * call, and a wait that expires still drops and counts exactly as before (ADR-0081 §1 —
+     * never park a frame in a library-owned queue). The wait is bounded by one slot
+     * occupancy, and a whole fan-out pass by one such bound (the futility latch, @ref
+     * tx_wait_futile_until_us_).
+     */
+    [[nodiscard]] tx_slot_t* claim_tx_slot_waiting();
     /** @brief Return a drained/failed work item: drop any oversize heap payload and
      *         recycle its pool slot. */
     static void release_tx_work(tx_work_t* work);
@@ -884,6 +949,19 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     /** @brief Log a reassembly that would pass the cap, out of line. */
     void note_reassembly_over_cap(std::size_t had, std::size_t adding);
     std::atomic<std::uint32_t> tx_pool_misses_{0};
+    std::atomic<std::uint32_t> tx_pool_waits_{0};
+    /**
+     * @brief `esp_timer_get_time()` value until which a full pool is taken as-is rather
+     *        than waited on — the futility latch (#1187).
+     *
+     * Set when a wait expires without a slot freeing, i.e. when the httpd task has not
+     * drained one send occupancy's worth. The wait bound is per SEND and a fan-out asks per
+     * DESTINATION, so without this a wide sweep against a wedged task would park its
+     * producer for one bound per edge; with it, the first expiry answers for the rest of the
+     * pass and the frames go back to being dropped and counted immediately. Relaxed: it
+     * orders nothing and a stale read costs at most one extra wait.
+     */
+    std::atomic<std::int64_t> tx_wait_futile_until_us_{0};
     std::atomic<std::uint32_t> tx_to_dead_peer_{0};
     std::atomic<std::uint32_t> peers_refused_{0};
     std::atomic<std::uint32_t> sessions_condemned_{0};
