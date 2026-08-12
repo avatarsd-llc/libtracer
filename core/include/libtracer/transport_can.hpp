@@ -418,6 +418,30 @@ class transport_can : public transport_t, public bus_link_t {
     }
 
     /**
+     * @brief Reassembled groups dropped because they completed inside the
+     *        sink-install window — the transport existed (link receiving, RX
+     *        callback registered) but no receiver sink was installed yet
+     *        (#1103, ADR-0081 §4).
+     *
+     * `transport_vertex_t::make_connection` constructs the link, then registers
+     * the connection vertex, and only then wires the receiver via
+     * `fwd_router_t::add_child`. A bus needs no provocation to fill that span:
+     * any bystander traffic already on the wire lands in it. CAN is ADR-0081's
+     * drop arm because neither escape exists — the bus has no per-peer flow
+     * control to hold bytes in, and withholding the RX callback would starve the
+     * liveness bookkeeping it drives (`last_heard`, the pending/reassembly
+     * sweeps); parking the group inside the library is banned outright. So a
+     * group that completes while both receiver slots are empty is dropped at the
+     * delivery seam and counted HERE — a distinctly named cause, never folded
+     * into @ref dropped_rx or @ref dropped_groups and never silent. Counts
+     * GROUPS. A deployment that sees it moving is watching the sink-install
+     * window, not guessing.
+     */
+    [[nodiscard]] std::uint64_t dropped_presink() const noexcept {
+        return dropped_presink_.load(std::memory_order_relaxed);
+    }
+
+    /**
      * @brief Outbound frames the caller believed sent that never reached the bus
      *        (the twai `tx_dropped()` convention, spelled to match `dropped_rx`).
      *
@@ -577,9 +601,10 @@ class transport_can : public transport_t, public bus_link_t {
     // per-slice path has one indirect call either way.
     mem::mem_backend_t* rx_backend_ = nullptr;
 
-    // Drop counters (#912). Written on the RX/TX threads, read by anyone.
+    // Drop counters (#912, #1103). Written on the RX/TX threads, read by anyone.
     std::atomic<std::uint64_t> dropped_rx_{0};
     std::atomic<std::uint64_t> dropped_tx_{0};
+    std::atomic<std::uint64_t> dropped_presink_{0};
 
     // the last-heard peer table (ADR-0044) — node id -> entry, insert-only
     mutable std::mutex peers_m_;

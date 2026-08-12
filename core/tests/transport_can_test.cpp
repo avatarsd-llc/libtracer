@@ -1023,8 +1023,58 @@ void test_clean_run_counters_are_zero() {
     check(sink.wait_for_count(1, 2s), "frame delivered");
     check(tx_b.dropped_rx() == 0 && tx_b.dropped_groups() == 0,
           "receiver reports zero RX drops on a clean run");
+    check(tx_b.dropped_presink() == 0, "receiver reports zero pre-sink drops on a clean run");
     check(tx_a.dropped_tx() == 0, "sender reports zero TX drops on a clean run");
     check(tx_b.pending_slices() == 0, "no slices left parked after delivery");
+}
+
+/**
+ * @brief #1103 / ADR-0081 §4 — a group completing inside the sink-install window is
+ *        dropped with the NAMED counter, never silently and never folded.
+ *
+ * The window is the span `transport_vertex_t::make_connection` opens between the
+ * transport's constructor (link receiving, RX callback registered, hello sent) and
+ * `fwd_router_t::add_child` installing the receiver. Reproduced directly: B's link is
+ * fully live — the group reassembles and completes on its RX thread — but delivery
+ * finds both receiver slots empty. Non-vacuity: revert the `deliver` hunk and the
+ * first check reddens, because the empty `receiver_slot_t` returns without moving any
+ * counter at all.
+ */
+void test_presink_window_drop_is_named() {
+    std::printf("transport_can pre-sink window drop is a NAMED counter (#1103):\n");
+
+    fake_can_bus_t bus;
+    sink_t sink;
+    auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
+    auto link_a = std::make_unique<fake_link_t>(bus);
+    auto link_b = std::make_unique<fake_link_t>(bus);
+    tr::net::transport_can tx_a(std::move(link_a),
+                                {0, 1, tr::view::can_frame_mode_t::CLASSIC, "sensor/temp"});
+    tr::net::transport_can tx_b(std::move(link_b),
+                                {0, 2, tr::view::can_frame_mode_t::CLASSIC, "q"});
+
+    // NO receiver on B — this IS the window.
+    const std::vector<std::byte> payload = make_payload(20);
+    tx_a.send(payload);
+
+    check(wait_until([&] { return tx_b.dropped_presink() == 1; }, 2s),
+          "the group completing inside the window ticks dropped_presink");
+    check(tx_b.dropped_rx() == 0, "the drop is NOT folded into dropped_rx");
+    check(tx_b.dropped_groups() == 0, "the drop is NOT folded into dropped_groups");
+    check(sink.count() == 0, "nothing was delivered (no sink existed)");
+    // Ingestion was never gated, only delivery: the liveness bookkeeping the RX
+    // callback drives kept running through the window, so A is already audible.
+    bool heard_a = false;
+    tx_b.enumerate_peers([&](std::string_view p) { heard_a = heard_a || p == "n1"; });
+    check(heard_a, "last_heard kept running through the window (A is enumerable)");
+
+    // Positive control on the SAME transports: wire the sink and the next group is
+    // delivered — the counter names the window, it does not disable the path.
+    tx_b.set_receiver(rx);
+    tx_a.send(payload);
+    check(sink.wait_for_count(1, 2s), "the post-wiring group is delivered");
+    check(equal_bytes(sink.last(), payload), "delivered bytes are byte-exact");
+    check(tx_b.dropped_presink() == 1, "the counter did not move on a delivered group");
 }
 
 }  // namespace
@@ -1093,6 +1143,7 @@ int main() {
     test_control_stream_resync();
     test_lifecycle();
     test_clean_run_counters_are_zero();
+    test_presink_window_drop_is_named();
     test_pending_flood_is_capped_and_counted();
     test_pending_slices_age_out();
     test_zero_peer_ttl_does_not_disable_the_age_out();
