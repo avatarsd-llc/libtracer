@@ -237,6 +237,18 @@ class tcp_transport_t : public transport_t, private stream_endpoint_t {
         return malformed_rx_.load(std::memory_order_relaxed);
     }
 
+    /** @brief Frames shed on the way OUT (#932): a record over @ref kMaxFrame, a refused
+     *         gather store, or no live peer to write to (dialing / torn down). */
+    [[nodiscard]] std::uint64_t dropped_tx() const noexcept {
+        return dropped_tx_.load(std::memory_order_relaxed);
+    }
+
+    /** @brief The interface-level snapshot (#932) — the concrete accessors above, as the
+     *         one shape a generic `transport_t*` holder reads. */
+    [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
+        return {dropped_rx(), malformed_rx(), dropped_tx()};
+    }
+
    private:
     void run_listen();   // accept loop (LISTEN mode)
     void serve(int fd);  // per-connection frame reassembly loop
@@ -256,6 +268,7 @@ class tcp_transport_t : public transport_t, private stream_endpoint_t {
     std::size_t max_frame_ = kMaxFrame;  // per-connection receive cap (:settings; 0 => kMaxFrame)
     std::atomic<std::uint64_t> dropped_rx_{0};
     std::atomic<std::uint64_t> malformed_rx_{0};
+    std::atomic<std::uint64_t> dropped_tx_{0};
     std::size_t recv_stack_ = 0; /**< @brief The stack hint, held for @ref start_receiving. */
     /** @brief One-shot latch making @ref start_receiving idempotent — `start()` may be
      *         called at most once per endpoint. DIAL only; a LISTEN link spends its one
@@ -301,10 +314,11 @@ class transport_tcp_server : public slot_server_t {
      *                   above kMaxFrame is clamped to it
      *                   (`length_prefix_framer::configured_cap`, #1035) — a
      *                   config-writable key must not raise the ingress
-     *                   buffering bound; the effective cap also
-     *                   honors the backend's real capacity
-     *                   (length_prefix_framer::effective_cap — the
-     *                   no-synthetic-limits doctrine).
+     *                   buffering bound. A frame inside this cap that the
+     *                   backend cannot hold (`length_prefix_framer::effective_cap`
+     *                   — the no-synthetic-limits doctrine) is shed as
+     *                   backpressure, NOT treated as malformed (#932); only a
+     *                   length above this cap closes the connection.
      * @param max_peers  Concurrent-peer admission cap; 0 = unbounded (host
      *                   default).  A deployment-injected bound (RFC-0006) — a
      *                   connection beyond it is accepted and immediately
@@ -369,6 +383,17 @@ class transport_tcp_server : public slot_server_t {
         return malformed_rx_.load(std::memory_order_relaxed);
     }
 
+    /** @brief Frames shed on the way OUT (#932), summed over the whole link: a record
+     *         over the frame cap, a refused gather store, or no open peer to fan to. */
+    [[nodiscard]] std::uint64_t dropped_tx() const noexcept {
+        return dropped_tx_.load(std::memory_order_relaxed);
+    }
+
+    /** @brief The interface-level snapshot (#932) — what a generic `transport_t*` reads. */
+    [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
+        return {dropped_rx(), malformed_rx(), dropped_tx()};
+    }
+
    private:
     struct session_t;  // one peer slot's connection state (defined in the .cpp)
 
@@ -383,9 +408,14 @@ class transport_tcp_server : public slot_server_t {
         void send(std::span<const std::byte> frame) override;
 
         /** @brief Directed scatter-gather twin: prefix + spans as ONE gathered
-         *         record to this facade's peer only (no pristine copy — single
-         *         consumer).  No-op once departed. */
+         *         record to this facade's peer only.  No-op once departed. */
         void send(std::span<const std::span<const std::byte>> iov) override;
+
+        /** @brief The owning server's snapshot (#932): a directed facade counts into the
+         *         link's own counters, so it reports them rather than a fabricated zero. */
+        [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
+            return owner_ == nullptr ? transport_drop_stats_t{} : owner_->drop_stats();
+        }
 
        private:
         friend class transport_tcp_server;
@@ -418,6 +448,7 @@ class transport_tcp_server : public slot_server_t {
     std::size_t max_frame_ = tcp_transport_t::kMaxFrame;
     std::atomic<std::uint64_t> dropped_rx_{0};
     std::atomic<std::uint64_t> malformed_rx_{0};
+    std::atomic<std::uint64_t> dropped_tx_{0};
 };
 
 }  // namespace tr::net

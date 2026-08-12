@@ -8,10 +8,16 @@
  * transport_webtransport each open-coded (the review's finding #4 "verbatim"
  * duplication): each complete frame is reassembled into ONE exactly-sized
  * refcounted segment drawn from the caller's backend (ADR-0042 §2/§4 — no library
- * buffer, one copy off the wire); an allocation failure is BACKPRESSURE (the
- * frame is drained so framing sync survives, and counted), and an oversize length
- * prefix is malformed (a desynced stream cannot be re-framed, so the caller tears
- * the connection down).
+ * buffer, one copy off the wire).
+ *
+ * Two failures, two answers (#932): a frame this node cannot STORE right now —
+ * `alloc` failed, or the injected backend's slots are permanently smaller than the
+ * frame — is BACKPRESSURE (the body is drained so framing sync survives, and
+ * counted); only a length beyond the agreed PROTOCOL cap (`max_frame`, itself
+ * tighten-only against @ref kDefaultMaxFrame) is malformed, because that is the
+ * one case where the stream has lost framing sync and cannot be re-framed, so the
+ * caller tears the connection down. A well-behaved peer whose frame merely
+ * exceeds OUR local segment size is shed, never disconnected.
  *
  * The state machine is transport-agnostic — no msquic types, no atomics, no
  * connection handle — so it is unit-tested directly (length_prefix_framer_test)
@@ -69,8 +75,10 @@ class length_prefix_framer {
      *
      * The single home for the per-prefix decisions every u32-length-prefixed
      * stream applies identically: `len == 0` is a no-op record, `len` beyond the
-     * @ref effective_cap is malformed (a desynced stream cannot be re-framed),
-     * and an allocation failure is backpressure (drain the body, count a drop).
+     * protocol cap is malformed (a desynced stream cannot be re-framed), and a
+     * frame the backend cannot hold — `alloc` failed, including because the frame
+     * is larger than any segment this backend can ever produce — is backpressure
+     * (drain the body, count a drop).
      * @ref feed applies them to a chunk-fed stream; a pull-mode blocking reader
      * (`tcp_transport_t`) applies the same rules but reads the body straight off
      * the socket into the accepted segment — adopting @ref feed there would add
@@ -81,9 +89,10 @@ class length_prefix_framer {
         /** @brief The decision kind. */
         enum class kind_t : std::uint8_t {
             EMPTY,     /**< @brief `len == 0` — the record carries no TLV; skip it. */
-            MALFORMED, /**< @brief `len` exceeds the effective cap — tear the stream down. */
-            DROP,      /**< @brief Backend `alloc` failed — drain the body bytes, count a drop. */
-            ACCEPT,    /**< @brief @ref seg owns exactly `len` bytes, ready to fill. */
+            MALFORMED, /**< @brief `len` exceeds the PROTOCOL cap — tear the stream down. */
+            DROP,   /**< @brief The backend could not hold the frame (`alloc` failed, or the frame
+                          exceeds this backend's segment size) — drain the body, count a drop. */
+            ACCEPT, /**< @brief @ref seg owns exactly `len` bytes, ready to fill. */
         };
         kind_t kind = kind_t::EMPTY; /**< @brief The decision. */
         tr::view::segment_ptr_t seg; /**< @brief The accepted frame's segment (ACCEPT only). */
@@ -106,12 +115,15 @@ class length_prefix_framer {
     }
 
     /**
-     * @brief The effective RX frame cap: `min(max_frame, backend.max_segment_size())`.
+     * @brief The effective RX frame cap: `min(max_frame, backend.max_segment_size())` —
+     *        the largest frame this connection can actually DELIVER.
      *
-     * A prefix claiming more than the backend could ever allocate (e.g. a bounded
-     * pool's slot) is undeliverable, so it is rejected up front and never drained —
-     * the bound is the injected resource's real capacity, not a magic number (the
-     * no-synthetic-limits doctrine).
+     * The bound is the injected resources' real capacity, not a magic number (the
+     * no-synthetic-limits doctrine). It is a *deliverability* bound, not the
+     * protocol's framing bound: a length above it but within `max_frame` is shed as
+     * backpressure, not treated as malformed (#932) — see @ref on_prefix. Transports
+     * that refuse an oversize frame from a DECLARED length before buffering a body
+     * byte (the WS frame header) compare against this.
      */
     [[nodiscard]] static std::size_t effective_cap(const mem::mem_backend_t& backend,
                                                    std::size_t max_frame) noexcept {
@@ -122,15 +134,22 @@ class length_prefix_framer {
     /**
      * @brief Apply the shared framing rules to one decoded u32 length prefix.
      *
-     * @param backend Where an accepted frame's segment is allocated (ADR-0042 §2/§4).
-     * @param cap     The effective cap from @ref effective_cap.
-     * @param len     The decoded length prefix.
+     * @param backend   Where an accepted frame's segment is allocated (ADR-0042 §2/§4).
+     * @param max_frame The PROTOCOL cap (from @ref configured_cap) — the only bound whose
+     *                  violation means the stream is desynced. A length within it that the
+     *                  backend cannot satisfy (exhausted, or simply larger than any segment
+     *                  this backend produces) comes back as `DROP`, so a legitimate peer is
+     *                  backpressured rather than disconnected over OUR local capacity (#932).
+     * @param len       The decoded length prefix.
      * @return The @ref prefix_decision_t; `ACCEPT` carries the freshly allocated segment.
      */
-    [[nodiscard]] static prefix_decision_t on_prefix(mem::mem_backend_t& backend, std::size_t cap,
-                                                     std::size_t len) {
+    [[nodiscard]] static prefix_decision_t on_prefix(mem::mem_backend_t& backend,
+                                                     std::size_t max_frame, std::size_t len) {
         if (len == 0) return {prefix_decision_t::kind_t::EMPTY, {}};
-        if (len > cap) return {prefix_decision_t::kind_t::MALFORMED, {}};
+        if (len > max_frame) return {prefix_decision_t::kind_t::MALFORMED, {}};
+        // Undeliverable-but-in-spec is backpressure, not a framing error: ask the
+        // backend, and let a refusal (exhaustion OR a too-small slot) be the DROP.
+        if (len > backend.max_segment_size()) return {prefix_decision_t::kind_t::DROP, {}};
         auto seg = tr::view::segment_ptr_t::adopt(backend.alloc(len));
         if (!seg) return {prefix_decision_t::kind_t::DROP, {}};
         return {prefix_decision_t::kind_t::ACCEPT, std::move(seg)};
@@ -143,10 +162,10 @@ class length_prefix_framer {
      * transport must act on with its own counters / connection handle.
      */
     struct result_t {
-        std::size_t dropped =
-            0; /**< @brief Frames skipped to backpressure (backend `alloc` failed). */
-        bool malformed =
-            false; /**< @brief An oversize length prefix was seen — stop, shut the peer down. */
+        std::size_t dropped = 0; /**< @brief Frames skipped to backpressure (the backend could
+                                       not hold them), drained so framing sync survives. */
+        bool malformed = false;  /**< @brief A prefix beyond the PROTOCOL cap was seen — stop,
+                                       shut the peer down. */
     };
 
     /**
@@ -155,12 +174,12 @@ class length_prefix_framer {
      * @tparam OnFrame  Callable `void(tr::view::segment_ptr_t seg, std::size_t len)`
      *                  — `seg` owns exactly @p len bytes of one reassembled frame.
      * @param backend   Where each frame's segment is allocated (ADR-0042 §2/§4).
-     * @param max_frame The caller's frame ceiling. The **effective** cap is
-     *                  `min(max_frame, backend.max_segment_size())` — a prefix
-     *                  claiming more than the backend could ever allocate (e.g. a
-     *                  bounded pool's slot) is rejected up front, so no undeliverable
-     *                  frame is drained (the no-synthetic-limits doctrine: the bound
-     *                  is the injected resource's real capacity, not a magic number).
+     * @param max_frame The caller's PROTOCOL frame ceiling (`configured_cap`): a prefix
+     *                  beyond it is malformed and stops the feed. A frame within it that
+     *                  the backend cannot hold — exhausted, or larger than any segment it
+     *                  produces (`effective_cap`) — is drained and counted in
+     *                  `result_t::dropped` instead, so local capacity backpressures a
+     *                  legitimate peer rather than disconnecting it (#932).
      * @param p,n       The chunk (may split a prefix or a body arbitrarily).
      * @param on_frame  Invoked once per completed frame, in arrival order.
      * @return Per-chunk `result_t`: frames dropped to backpressure, and whether
@@ -169,7 +188,6 @@ class length_prefix_framer {
     template <class OnFrame>
     result_t feed(mem::mem_backend_t& backend, std::size_t max_frame, const std::byte* p,
                   std::size_t n, OnFrame&& on_frame) {
-        const std::size_t cap = effective_cap(backend, max_frame);
         result_t res;
         while (n > 0) {
             if (drain_left_ > 0) {
@@ -192,16 +210,16 @@ class length_prefix_framer {
                 n -= take;
                 if (prefix_have_ < kPrefixBytes) return res;  // await the rest of the prefix
                 const std::size_t len = tr::detail::load_le<std::uint32_t>(prefix_);
-                prefix_decision_t dec = on_prefix(backend, cap, len);
+                prefix_decision_t dec = on_prefix(backend, max_frame, len);
                 switch (dec.kind) {
                     case prefix_decision_t::kind_t::EMPTY:
                         // An empty record carries no TLV — a no-op.
                         prefix_have_ = 0;
                         continue;
                     case prefix_decision_t::kind_t::MALFORMED:
-                        // Malformed (corrupt/hostile) or undeliverable (exceeds the
-                        // backend's capacity): a desynced stream cannot be re-framed —
-                        // stop and let the caller shut the peer down.
+                        // Beyond the protocol cap (corrupt/hostile): a desynced stream
+                        // cannot be re-framed — stop and let the caller shut the peer
+                        // down. A merely undeliverable frame lands in DROP instead.
                         res.malformed = true;
                         return res;
                     case prefix_decision_t::kind_t::DROP:

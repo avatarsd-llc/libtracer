@@ -3,7 +3,8 @@
  * @brief length_prefix_framer unit test — drives the u32-length-prefix reassembly state machine
  *        directly (no QUIC connection), the whole point of extracting it from transport_quic /
  *        transport_webtransport (finding #4): prefix/body split across chunks, multiple frames per
- *        chunk, empty records, oversize => malformed, backpressure drain + resync, and reset.
+ *        chunk, empty records, over the protocol cap => malformed, over local capacity =>
+ *        backpressure drain + resync (#932), and reset.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -53,7 +54,10 @@ class toggle_backend_t final : public tr::mem::mem_backend_t {
     std::size_t max_seg = ~std::size_t{0}; /**< largest allocatable segment (default: unbounded) */
     tr::view::segment_t* alloc(std::size_t size,
                                tr::mem::alloc_hint_t = tr::mem::alloc_hint_t::NONE) override {
-        return fail ? nullptr : tr::mem::heap_backend().alloc(size);
+        // A bounded backend refuses what it could never hold, exactly as a real
+        // pool does — the framer's DROP leg depends on that honesty.
+        if (fail || size > max_seg) return nullptr;
+        return tr::mem::heap_backend().alloc(size);
     }
     void destroy(tr::view::segment_t*) noexcept override {}  // never fires (heap-owned segments)
     [[nodiscard]] std::size_t max_segment_size() const noexcept override { return max_seg; }
@@ -156,17 +160,36 @@ int main() {
               "framing resyncs: the next record delivers cleanly after a drop");
     }
 
-    // 6b. A prefix beyond the backend's capacity is malformed (rejected without a
-    //     drain), even when it is within the caller's max_frame ceiling.
+    // 6b. (#932) A prefix beyond the backend's capacity but INSIDE the protocol cap
+    //     is backpressure, not malformed: the peer obeyed the agreed limit, our local
+    //     segment size is our problem — drain, count, resync, keep the connection.
     {
         tr::net::length_prefix_framer f;
         collector_t c;
         toggle_backend_t be;
-        be.max_seg = 8;                        // this backend can never allocate more than 8 bytes
-        const bytes_t rec = record(ramp(20));  // claims 20 > 8, though 20 < kMax
-        const auto res = f.feed(be, kMax, rec.data(), rec.size(), c);
-        check(res.malformed, "a frame beyond backend.max_segment_size() is malformed");
+        be.max_seg = 8;                        // this backend never allocates more than 8 bytes
+        const bytes_t big = record(ramp(20));  // claims 20 > 8, though 20 < kMax
+        const auto res = f.feed(be, kMax, big.data(), big.size(), c);
+        check(!res.malformed, "a frame beyond backend.max_segment_size() is NOT malformed (#932)");
+        check(res.dropped == 1, "it is counted as a backpressure drop instead");
         check(c.frames.empty(), "no frame delivered when the backend could never hold it");
+
+        const bytes_t fits = ramp(6, 0x70);
+        const bytes_t r2 = record(fits);
+        const auto res2 = f.feed(be, kMax, r2.data(), r2.size(), c);
+        check(res2.dropped == 0 && c.frames.size() == 1 && c.frames[0] == fits,
+              "the over-capacity frame was DRAINED: framing resyncs and the next record delivers");
+    }
+
+    // 6c. (#932) Only a length beyond the PROTOCOL cap still tears the stream down.
+    {
+        tr::net::length_prefix_framer f;
+        collector_t c;
+        toggle_backend_t be;
+        be.max_seg = 8;
+        const bytes_t rec = record(ramp(20));
+        const auto res = f.feed(be, /*max_frame=*/10, rec.data(), rec.size(), c);
+        check(res.malformed, "a length above max_frame is still malformed");
     }
 
     // 7. reset() discards partial state (a half-read prefix does not corrupt the next).
@@ -192,15 +215,16 @@ int main() {
         check(framer_t::effective_cap(be, 1000) == 64, "effective_cap: backend capacity wins");
         check(framer_t::effective_cap(be, 16) == 16, "effective_cap: caller ceiling wins");
 
-        const std::size_t cap = framer_t::effective_cap(be, 1000);
-        check(framer_t::on_prefix(be, cap, 0).kind == kind_t::EMPTY, "on_prefix: len 0 => EMPTY");
-        check(framer_t::on_prefix(be, cap, 65).kind == kind_t::MALFORMED,
-              "on_prefix: len > cap => MALFORMED");
+        check(framer_t::on_prefix(be, 1000, 0).kind == kind_t::EMPTY, "on_prefix: len 0 => EMPTY");
+        check(framer_t::on_prefix(be, 1000, 1001).kind == kind_t::MALFORMED,
+              "on_prefix: len > the protocol cap => MALFORMED");
+        check(framer_t::on_prefix(be, 1000, 65).kind == kind_t::DROP,
+              "on_prefix: len inside the protocol cap but past the backend's slot => DROP (#932)");
         be.fail = true;
-        check(framer_t::on_prefix(be, cap, 10).kind == kind_t::DROP,
+        check(framer_t::on_prefix(be, 1000, 10).kind == kind_t::DROP,
               "on_prefix: alloc failure => DROP");
         be.fail = false;
-        auto dec = framer_t::on_prefix(be, cap, 10);
+        auto dec = framer_t::on_prefix(be, 1000, 10);
         check(dec.kind == kind_t::ACCEPT && dec.seg && dec.seg->bytes.size() >= 10,
               "on_prefix: ACCEPT carries a segment holding the frame");
     }
