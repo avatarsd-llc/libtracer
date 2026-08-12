@@ -148,3 +148,4 @@ tests/packaging/pio_esp32_can/.pio/
 tests/packaging/pio_esp32_can/CMakeLists.txt
 tests/packaging/pio_esp32_can/src/CMakeLists.txt
 tests/packaging/pio_esp32_can/sdkconfig.*
+.merge_file_*
