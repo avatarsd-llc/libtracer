@@ -14,6 +14,38 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-08-12
+
+### Added
+
+- **`transport_t::link_up()` — one liveness question every link answers (#1059).** The tree
+  carried two conflicting `ok()` conventions: `tcp_transport_t`'s DIAL `ok()` read the live
+  connection fd (liveness), QUIC/WebTransport defined `ok()` as "came up" with a separate
+  `link_up()`, and `transport_ws_client`'s declaration promised both while the backing flag
+  was never cleared — a WS client whose link died kept answering "up" forever. The ruling is
+  the QUIC convention, tree-wide: **`ok()` is the came-up predicate** (did the dial / bind /
+  handshake succeed — asked once, right after construction, the `make_checked` gate; it never
+  reverts), and **`link_up()` on the `transport_t` base is liveness** (a relaxed-atomic hint,
+  default `true` for kinds with no closure concept — UDP, CAN, the multi-peer servers). The
+  pull twin of `set_down_notifier`. Deliberately no is-always-lock-free assertion: one target
+  is an rv32 core without the A extension.
+
+- **`wire::wire_clock_t` + `wire::stamp_ts` — the wire-trailer timestamp WRITER (#1109).**
+  The spec's per-TLV trailer TS was reachable only on the read side; no code path could set
+  it, so RTT over the FWD plane was unmeasurable. `stamp_ts(tlv_t&, ...)` sets `opt.TS` and
+  the TF=0 absolute trailer value together, from an **injected** `wire_clock_t` (or a raw
+  `now_ns`) — the library never reads ambient time on a frame path, and the value's contract
+  is CONTEXT.md's per-producer-monotonic `origin_timestamp`. TF=0 only: the TF=1 writer is
+  gated on the spec's anchorless-reject check, which the codec does not yet implement.
+  `wire::store_trailer_ts` / `emit_trailer_ts` / `trailer_ts_bytes` (tlv_emit.hpp) are the
+  one home of the trailer-TS byte layout, covering **both** forms so #879's stream shape
+  reuses them. The FWD forward hop now **preserves** an outer stamp verbatim
+  (`fwd_pre_t::fwd_opt`, `fwd_rebuild_t::ts_off`/`ts_len`, `stack_writer::header`'s trailer
+  bits; `kFwdMaxIov` 9 → 10), and the terminus **echoes** a TF=0 request stamp on every
+  reply, error replies included — the ICMP-echo construction (`RTT = now − echoed_stamp`, no
+  request id, no clock sync). `tlv_arena_t::root_trailer_ts()` exposes the root stamp the
+  echo reads on the span tier.
+
 ### Changed
 
 - **A kind-less connection `SPEC` matching no staged link now answers `TYPE_MISMATCH`, not
@@ -43,35 +75,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `bindings/rust/tests/conformance_vectors.rs`,
   `bindings/typescript/packages/client/test/vectors.test.mjs`). Indexed child endpoints
   are spelled as ordinary child vertices (`/camera/frame/7`) — reference docs updated.
-### Fixed
-
-- **`max_frame` is now tighten-only, as the headers always promised (#1035).** Every framed
-  transport (`tcp_transport_t` / `transport_tcp_server`, `transport_ws_client` /
-  `transport_ws_server`, `quic_transport_t`, `webtransport_transport_t`) replaced its receive
-  cap with the configured `max_frame` outright, so a `:settings max_frame` above the 16 MiB
-  protocol default (`length_prefix_framer::kDefaultMaxFrame`) *raised* the ingress buffering
-  bound — contradicting the five headers' tighten-only wording. The nine assignment sites now
-  resolve the setting through the new `length_prefix_framer::configured_cap(max_frame)`
-  (`0` → the default; otherwise `min(max_frame, kDefaultMaxFrame)`), so a config-writable key
-  can only narrow what a node will buffer off the wire, never widen it. Behavioural change: a
-  deployment that (contrary to the documentation) passed a `max_frame` above 16 MiB now tears
-  down a connection carrying an over-default frame as MALFORMED, exactly as the default
-  configuration always did — the protocol default is a ceiling, not a suggestion.
-### Added
-
-- **`transport_t::link_up()` — one liveness question every link answers (#1059).** The tree
-  carried two conflicting `ok()` conventions: `tcp_transport_t`'s DIAL `ok()` read the live
-  connection fd (liveness), QUIC/WebTransport defined `ok()` as "came up" with a separate
-  `link_up()`, and `transport_ws_client`'s declaration promised both while the backing flag
-  was never cleared — a WS client whose link died kept answering "up" forever. The ruling is
-  the QUIC convention, tree-wide: **`ok()` is the came-up predicate** (did the dial / bind /
-  handshake succeed — asked once, right after construction, the `make_checked` gate; it never
-  reverts), and **`link_up()` on the `transport_t` base is liveness** (a relaxed-atomic hint,
-  default `true` for kinds with no closure concept — UDP, CAN, the multi-peer servers). The
-  pull twin of `set_down_notifier`. Deliberately no is-always-lock-free assertion: one target
-  is an rv32 core without the A extension.
-
-### Changed
 
 - **`transport_ws_client`: `ok()` no longer conflates liveness (#1059).** `ok()` keeps its
   construction-time answer (unchanged behaviour, corrected declaration), and the new
@@ -121,25 +124,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `tools/check_esp_ws_plane.py --ws-plane none` (zero portable **and** native WS
   symbols, with the symbol-table-floor guard). Non-`espressif32` platforms are
   unchanged.
-### Added
-
-- **`wire::wire_clock_t` + `wire::stamp_ts` — the wire-trailer timestamp WRITER (#1109).**
-  The spec's per-TLV trailer TS was reachable only on the read side; no code path could set
-  it, so RTT over the FWD plane was unmeasurable. `stamp_ts(tlv_t&, ...)` sets `opt.TS` and
-  the TF=0 absolute trailer value together, from an **injected** `wire_clock_t` (or a raw
-  `now_ns`) — the library never reads ambient time on a frame path, and the value's contract
-  is CONTEXT.md's per-producer-monotonic `origin_timestamp`. TF=0 only: the TF=1 writer is
-  gated on the spec's anchorless-reject check, which the codec does not yet implement.
-  `wire::store_trailer_ts` / `emit_trailer_ts` / `trailer_ts_bytes` (tlv_emit.hpp) are the
-  one home of the trailer-TS byte layout, covering **both** forms so #879's stream shape
-  reuses them. The FWD forward hop now **preserves** an outer stamp verbatim
-  (`fwd_pre_t::fwd_opt`, `fwd_rebuild_t::ts_off`/`ts_len`, `stack_writer::header`'s trailer
-  bits; `kFwdMaxIov` 9 → 10), and the terminus **echoes** a TF=0 request stamp on every
-  reply, error replies included — the ICMP-echo construction (`RTT = now − echoed_stamp`, no
-  request id, no clock sync). `tlv_arena_t::root_trailer_ts()` exposes the root stamp the
-  echo reads on the span tier.
-
-### Changed
 
 - **`wire::encode` refuses a claimed-but-valueless timestamp (#1109).** `opt.TS` set with no
   `trailer->ts` value — or a value whose `relative` flag contradicts `opt.TF` — now returns
@@ -151,6 +135,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `emit_header` + `emit_trailer_ts`.
 - **`type_t::TIME` documented as reserved (#1109).** The application-domain payload timestamp
   type: core assigns the code and deliberately neither emits nor consumes it.
+
+### Fixed
+
+- **`max_frame` is now tighten-only, as the headers always promised (#1035).** Every framed
+  transport (`tcp_transport_t` / `transport_tcp_server`, `transport_ws_client` /
+  `transport_ws_server`, `quic_transport_t`, `webtransport_transport_t`) replaced its receive
+  cap with the configured `max_frame` outright, so a `:settings max_frame` above the 16 MiB
+  protocol default (`length_prefix_framer::kDefaultMaxFrame`) *raised* the ingress buffering
+  bound — contradicting the five headers' tighten-only wording. The nine assignment sites now
+  resolve the setting through the new `length_prefix_framer::configured_cap(max_frame)`
+  (`0` → the default; otherwise `min(max_frame, kDefaultMaxFrame)`), so a config-writable key
+  can only narrow what a node will buffer off the wire, never widen it. Behavioural change: a
+  deployment that (contrary to the documentation) passed a `max_frame` above 16 MiB now tears
+  down a connection carrying an over-default frame as MALFORMED, exactly as the default
+  configuration always did — the protocol default is a ceiling, not a suggestion.
 
 ## [0.9.1] — 2026-08-10
 

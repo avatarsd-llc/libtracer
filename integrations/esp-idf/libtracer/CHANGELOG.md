@@ -10,6 +10,46 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-08-12
+
+This component compiles the core C++ sources, so — unlike 0.9.1 — essentially all of
+core 0.10.0 reaches it.
+
+### Added
+
+- **Picks up `transport_t::link_up()` (#1059).** The liveness question now lives on the
+  transport base this component's links inherit: `tcp_transport_t`'s DIAL role answers it
+  from the live fd, and the chip-native links (`httpd_ws_link_t`, `esp_ws_client_link_t`,
+  `twai_link_t`) answer the base default until they carry their own liveness. Deliberately a
+  relaxed atomic with no is-always-lock-free assertion — a 32-bit embedded core is exactly
+  the target that ruling protected.
+
+- **Picks up the wire-trailer timestamp writer (#1109).** `wire::stamp_ts` + the FWD plane's
+  stamp preservation and terminus echo compile in, so an ESP node in a FWD path now
+  preserves an outer TF=0 stamp verbatim and echoes a request stamp on every reply — RTT to
+  and through a chip node becomes measurable with no clock sync. The forward hop's iovec
+  budget grows one slot (`kFwdMaxIov` 9 → 10); no library-internal buffering is added.
+
+### Changed
+
+- **Picks up the core's wire-visible tightenings.** A kind-less connection `SPEC` matching
+  no staged link now answers `TYPE_MISMATCH`, not `NOT_FOUND` (#1062); `graph::valid_segment`
+  rejects the full reserved set `/ : . [ ] * ?` — brackets included — so a bracketed NAME now
+  answers `INVALID_PATH` (#996); and read/write disclosure parity on nonexistent fields
+  (#435) governs this node's `:settings.app` doors the same as every other terminus.
+
+- **Picks up the tighten-only `max_frame` clamp (#1035).** The component's framed transport
+  (`tcp_transport_t`, both roles) now resolves `:settings max_frame` through
+  `length_prefix_framer::configured_cap`, so a config write can only narrow what this node
+  buffers off the wire — on a heap-constrained chip target the 16 MiB protocol default being
+  a ceiling rather than a suggestion is precisely the wanted direction.
+
+- **Not this component: the PlatformIO WS exclusion (#984).** The `library.json` srcFilter
+  change ships the *PlatformIO* espressif32 package with no WebSocket transport; this
+  ESP-IDF component is the other packaging channel and is unchanged — it already builds the
+  IDF-native WS links and never core's POSIX-socket pair (#947/#978). Noted here because a
+  consumer choosing between the two channels should know WS-on-ESP32 now lives only here.
+
 ## [0.9.1] — 2026-08-10
 
 ### Changed

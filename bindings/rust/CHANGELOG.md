@@ -8,6 +8,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-08-12
+
+No API changes. This package is an independent native implementation of the protocol —
+it does not compile the C++ core — so the core's 0.10.0 wire-behaviour changes do not
+reach it. What does land here: #996 closed the cross-tier reserved-set drift the
+`structured::name` doc note tracked — the C++ `valid_segment` now rejects `[` and `]`
+too, so this crate's predicate is no longer *stricter* than the core, it *agrees* with
+it on the full seven-character set `/ : . [ ] * ?`, pinned by the new
+`path/path-reserved-brackets` conformance vector that `tests/conformance_vectors.rs`
+now carries bit-for-bit. Doc note and test only; no Rust behaviour changed (this tier
+already enforced the full set). Released at 0.10.0 because one tag publishes every
+package in lockstep.
+
 ## [0.9.1] — 2026-08-10
 
 No changes. This package is an independent native implementation of the protocol —
