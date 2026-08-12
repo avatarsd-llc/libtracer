@@ -52,6 +52,7 @@
 #include <vector>
 
 #include "fwd_frame_builder.hpp"
+#include "libtracer/config_reader.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "test_support.hpp"
@@ -486,18 +487,17 @@ std::vector<std::byte> vector_bytes(std::string_view case_dir) {
  * @brief The packed `delivery_policy` word a SUBSCRIBER's `SETTINGS` child carries
  *        (RFC-0022 §3.A), read straight out of @p sub's bytes — `nullopt` when the record
  *        names no policy at all (the `policy-absent` case).
+ *
+ * Reads through `wire::config_reader_t` — the same strict pair-consuming walk the graph's
+ * `parse_subscriber_tlv` runs (#985) — rather than a lenient every-offset scan of its own:
+ * a lenient readback oracle can mask a strict parser's regression.
  */
 std::optional<std::uint16_t> policy_word_of(std::span<const std::byte> sub) {
     const auto dec = tr::wire::decode(sub);
     if (!dec || dec->type != type_t::SUBSCRIBER) return std::nullopt;
     for (const tlv_t& child : dec->children) {
         if (child.type != type_t::SETTINGS) continue;
-        const std::vector<tlv_t>& q = child.children;
-        for (std::size_t i = 0; i + 1 < q.size(); ++i) {
-            if (q[i].type != type_t::NAME || q[i + 1].type != type_t::VALUE) continue;
-            if (tr::detail::as_string_view(q[i].payload) == "delivery_policy")
-                return tr::detail::load_le<std::uint16_t>(q[i + 1].payload);
-        }
+        if (const auto word = tr::wire::config_reader_t(&child).u16("delivery_policy")) return word;
     }
     return std::nullopt;
 }
@@ -825,6 +825,77 @@ void test_qos_settings_pair_scan_cannot_be_hijacked() {
           "control: a SUBSCRIBER that really names delivery_policy still latches on join");
 }
 
+/** @brief Append `NAME "delivery_policy", VALUE <@p width bytes of @p word>` to @p q. */
+void emit_policy_pair(std::vector<std::byte>& q, std::uint16_t word, std::size_t width = 2) {
+    tr::wire::emit_name(q, "delivery_policy");
+    std::vector<std::byte> w(width);
+    tr::detail::store_le(w, word, width);
+    tr::wire::emit_tlv(q, type_t::VALUE, opt_t{}, w);
+}
+
+/** @brief `SUBSCRIBER{ PATH(/client), SETTINGS{ @p pairs } }` — the QoS body verbatim. */
+std::vector<std::byte> b_subscriber_with_qos(const std::vector<std::byte>& pairs) {
+    std::vector<std::byte> body = b_path({"client"});
+    tr::wire::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true}, pairs);
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, type_t::SUBSCRIBER, opt_t{.pl = true}, body);
+    return out;
+}
+
+/** @brief Subscribe @p sub to a producer holding `0x5A` and report the join deliveries.
+ *  @return the delivery count, or -1 if the SUBSCRIBER was refused at the door. */
+int join_latches_for(graph_t& g, const std::vector<std::byte>& sub) {
+    const vertex_handle_t src = g.register_vertex(path_t("/rk/src"), role_t::STORED_VALUE);
+    (void)g.write(src, byte_value(0x5A));  // the LKV a durability request would latch
+    register_client(g);
+    tr::graph::field_path_t field;
+    field.steps.push_back(
+        tr::graph::field_step_t{.name = "subscribers", .indexed = true, .append = true});
+    const std::optional<vertex_handle_t> v = g.find(path_t("/rk/src").key());
+    if (!v || !g.write(*v, field, make_value(sub)).has_value()) return -1;
+    return g_client_writes;
+}
+
+/**
+ * @brief A REPEATED `delivery_policy` resolves by the shared walk's rule (#985, #995).
+ *
+ * `parse_subscriber_tlv` no longer restates the pair rule — it runs
+ * `wire::config_reader_t`, so the plain NAME-field family semantics apply here exactly as
+ * they do to a connection config: the LAST **well-formed** occurrence wins, and an
+ * ill-formed one (an empty `VALUE` payload) is ignored rather than read as zero, so it
+ * cannot clobber a well-formed earlier occurrence. Both were properties of the shared type
+ * only; the hand-written copy this replaced read every occurrence in turn and let an empty
+ * payload zero the word. The oracle is the durability latch — a policy carrying
+ * `kDurabilityRequest` buys exactly one join delivery of the producer's held `0x5A`.
+ */
+void test_qos_settings_repeat_semantics_are_the_shared_walk() {
+    std::printf("a repeated `delivery_policy` resolves by the shared walk's rule (#985):\n");
+    {
+        std::vector<std::byte> q;
+        emit_policy_pair(q, delivery_policy_t::kDurabilityRequest);
+        emit_policy_pair(q, 0);
+        graph_t g;
+        check(join_latches_for(g, b_subscriber_with_qos(q)) == 0,
+              "durability then plain: the LAST well-formed occurrence wins — no latch");
+    }
+    {
+        std::vector<std::byte> q;
+        emit_policy_pair(q, 0);
+        emit_policy_pair(q, delivery_policy_t::kDurabilityRequest);
+        graph_t g;
+        check(join_latches_for(g, b_subscriber_with_qos(q)) == 1,
+              "plain then durability: the same rule, the other sign — one join delivery");
+    }
+    {
+        std::vector<std::byte> q;
+        emit_policy_pair(q, delivery_policy_t::kDurabilityRequest);
+        emit_policy_pair(q, 0, 0);  // an EMPTY VALUE payload: ill-formed, not "zero"
+        graph_t g;
+        check(join_latches_for(g, b_subscriber_with_qos(q)) == 1,
+              "an empty VALUE payload is IGNORED — it does not clobber the earlier word");
+    }
+}
+
 /**
  * @brief The `settings/removed-knob` and `stream/history-depth-host-only` vectors are the
  *        bytes the RESOLVER builds — not a shape a document declared.
@@ -895,6 +966,7 @@ int main() {
     test_conformance_vectors();
     test_replace_door_latches();
     test_qos_settings_pair_scan_cannot_be_hijacked();
+    test_qos_settings_repeat_semantics_are_the_shared_walk();
     test_removed_knob_reply_bytes();
     return tr::testing::summary("qos_policy");
 }

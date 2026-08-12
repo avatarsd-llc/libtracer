@@ -88,7 +88,7 @@ whose `(NAME key, value)` pairing does not hold. A payload *narrower* than the
 field is fine: little-endian zero-extension names the same integer, which is why
 the `acl/acl-aces` conformance vector's two-byte `access_mask` keeps parsing.
 
-The walk is pair-consuming, the same mechanics `net::config_reader_t` uses — and
+The walk is pair-consuming, the same mechanics `wire::config_reader_t` uses — and
 the exact opposite ruling on unknown keys, deliberately. Config is where a newer
 peer legitimately sends more than the receiver understands; an ACL is not.
 

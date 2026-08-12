@@ -11,8 +11,9 @@ exactly the artifact this repo has watched rot before, so the page does not carr
 one: it carries marker-delimited blocks, and this tool derives the truth from the
 source and fails when the two disagree.
 
-Derivation. A connection config is read through `tr::net::config_reader_t`, whose
-typed accessors take the key as a string literal:
+Derivation. A connection config is read through `config_reader_t` (the pair walk
+now lives in `tr::wire`, #985; `tr::net::config_reader_t` is its transport-plane
+alias), whose typed accessors take the key as a string literal:
 
     const config_reader_t cfg(raw_config);
     if (const auto v = cfg.name("ca")) ...      -> key "ca",  value spelling `NAME`
@@ -31,10 +32,12 @@ Three ways the page can fail, all of them the ways it would go stale:
     failure the page exists to prevent).
 
 Scope, stated because an unreached completeness claim is itself a defect: this
-gate covers the `config_reader_t` family only. `graph_t::create_child` and the
-SUBSCRIBER QoS / ACL walks read the same positional grammar without that type
-(they sit at L4, where `tr::net` cannot be a dependency), and they are NOT
-connection config — they are out of this page's subject and out of this check.
+gate covers CONNECTION config only. Since #985 hoisted the walk to `tr::wire`,
+`graph_t::create_child` and the SUBSCRIBER QoS walk (`core/src/graph.cpp`) read
+their grammar through the SAME `config_reader_t` type — but a creation-SPEC
+envelope and a per-subscription QoS block are not connection config, so that file
+is excluded below rather than documented on this page. The ACL walk still carries
+its own reject-unknown-keys code (#906) and never constructs a reader.
 
   tools/check_config_keys.py            # the gate: page vs source (exit 1 on drift)
   tools/check_config_keys.py --list     # print the derived inventory and exit 0
@@ -53,7 +56,12 @@ SOURCE_DIRS = (ROOT / "core" / "src", ROOT / "core" / "include")
 SOURCE_SUFFIXES = (".cpp", ".hpp")
 
 # The reader's own header declares the accessors; it reads no keys of its own.
-EXCLUDED = {ROOT / "core" / "include" / "libtracer" / "config_reader.hpp"}
+# `graph.cpp` constructs readers too (#985), but over the creation-SPEC envelope and
+# the SUBSCRIBER QoS SETTINGS — not connection config, hence not this page's subject.
+EXCLUDED = {
+    ROOT / "core" / "include" / "libtracer" / "config_reader.hpp",
+    ROOT / "core" / "src" / "graph.cpp",
+}
 
 # `const config_reader_t cfg(raw_config);` -> the variable every accessor hangs off.
 READER_CTOR = re.compile(r"\bconfig_reader_t\s+([A-Za-z_]\w*)\s*\(")

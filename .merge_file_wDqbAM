@@ -14,51 +14,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
-### Fixed
-
-- **An eager `write` no longer erases a racing `assign`'s pending mark (#1185).** `clear_pending`
-  erased the mark unconditionally under the sweep lock, so an `assign` that landed between a
-  `write`'s store and that erase lost its deferred delivery outright: the newer value was
-  published, its mark dropped, and no covering `propagate` ever delivered it. The erase is now
-  conditional on the value this writer published still being the vertex's current LKV — a
-  pointer compare against a strong reference the caller holds — so a mark whose value a sweep
-  still owes survives. The failure direction is now always a duplicate delivery of the current
-  LKV, never a lost one, which is what every fast path on the same function already permitted.
-  No API change; `graph_t::write` / `assign` / `propagate` keep their signatures.
-
-### Documentation
-
-- **`graph_t::has_subscribers` now states the staleness its ancestor half actually has
-  (#1185/#854).** The predicate's `listeners_above` half is a relaxed load, so a `false` can
-  miss a subtree subscribe that already completed on another thread. The header said nothing;
-  it now names the window and carries the #555-standard justification for leaving it relaxed —
-  #854's measured REFUTATION (the `seq_cst` candidate doubled the idle write's rv32 fence count
-  and excluded no observation, because ADR-0049's latch snapshots the subscribed *ancestor's*
-  own LKV, never a descendant's). `vertex_t::listeners_above` carries the same ruling, and the
-  two concurrency design docs that claimed `own_subs_ordered()` is "the only read that decides
-  whether to deliver at all" are corrected — it is not.
-### Changed
-
-- **`config_reader_t` moved to `tr::wire`; `tr::net::config_reader_t` is now an alias
-  (#985).** The pair-consuming `(NAME key, value)` walk (#927) decodes a `wire::tlv_t`, and
-  its two remaining hand-written copies sat at L4 (`graph_t::create_child`'s creation-SPEC
-  envelope and `parse_subscriber_tlv`'s SUBSCRIBER QoS SETTINGS), where `tr::net` may not be
-  a dependency — so the type now lives in the layer that owns the grammar and both L4
-  readers use it instead of restating its rule. The transport-plane spelling
-  `tr::net::config_reader_t` remains valid as a `using` alias, so no call site moves.
-  Consolidation side effect at the two L4 sites: the canonical plain NAME-field family
-  semantics (#995) now apply uniformly — last **well-formed** occurrence wins (a repeated
-  `delivery_compact`/`delivery_policy` no longer resolves "any nonzero"/per-occurrence) and
-  an empty `VALUE` payload is ignored rather than read as zero.
-
-### Added
-
-- **`config_reader_t::name_bytes(key)`** — the raw payload span of a `NAME` value child
-  (the byte-span twin of `name()`, for values that are wire segments rather than text), and
-  **`config_reader_t::settings(key)`** — the nested `SETTINGS` value child, or `nullptr`.
-  Both run the same pair-consuming, last-well-formed-wins walk as every other accessor;
-  they are the two accessors the L4 readers needed (#985).
-
 ## [0.10.0] — 2026-08-12
 
 ### Added
