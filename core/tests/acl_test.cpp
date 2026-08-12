@@ -724,6 +724,103 @@ void test_flat_knob_surface_is_withdrawn() {
 }
 
 /**
+ * @brief Namespace-governed disclosure, identical on read AND write (#435, RFC-0010 §A
+ *        erratum 2026-08-12): a PROTOCOL-OWNED name that exists on no node answers
+ *        SCHEMA_NOT_FOUND caller-independently on both doors, while an OWNER-DEFINED
+ *        `settings.app.` spelling answers a denied caller PERMISSION_DENIED whether it
+ *        exists or not — on both doors.
+ *
+ * The principle: disclosure of a name's existence is governed by whether the name set is a
+ * published protocol constant (the `{subscribers, acl, children, settings, schema,
+ * identity}` namespace — resolve-before-gate, name-validity only) or an owner secret
+ * (`settings.app.*` — gate-before-resolve). The gate always protects the VALUE: a denied
+ * caller against an EXISTENT surface stays PERMISSION_DENIED in every case.
+ *
+ * The rows marked NEW are the erratum's two code moves and redden if either is reverted:
+ * the READ door used to answer a denied caller PERMISSION_DENIED for `:status` / bare
+ * `:subscribers` (gate above unknown-name resolution), and the WRITE door used to answer
+ * SCHEMA_NOT_FOUND for an undeclared or `ro` app field BEFORE its WRITE gate (#430's
+ * hoist, over-extended to owner names).
+ */
+void test_denied_caller_disclosure_parity() {
+    std::printf("namespace-governed disclosure — read/write parity (#435):\n");
+    graph_t g;
+    g.set_subject_resolver(caller_is_subject);
+    vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
+    check(
+        g.write(path_t("/x:acl"),
+                make_value(make_acl({{.subject = "peer-a",
+                                      .mask = bit(acl_right_t::READ) | bit(acl_right_t::WRITE)}})))
+            .has_value(),
+        "trusted local caller installs the :acl (peer-a READ|WRITE, peer-none nothing)");
+    std::vector<tr::graph::app_field_t> table;
+    table.push_back(tr::graph::app_field_t{.name = "kp", .access = tr::graph::app_access_t::RW});
+    table.push_back(tr::graph::app_field_t{.name = "label", .access = tr::graph::app_access_t::RO});
+    g.set_app_fields(v, std::move(table));
+    const std::array<std::byte, 2> raw{std::byte{0x2a}, std::byte{0x00}};
+    const auto val = make_value(value_tlv(raw));
+
+    // (a) Protocol-owned NONEXISTENT names — SCHEMA_NOT_FOUND for denied, granted and
+    // local callers, on BOTH doors. The valid-name set is published spec text
+    // (docs/reference/05: the namespace a dispatcher recognises), so the answer leaks
+    // nothing; the denied caller's READ rows are NEW (the gate used to answer first).
+    for (const char* spelling : {"/x:status", "/x:subscribers"}) {
+        const auto p = path_t::parse(spelling);
+        for (const std::string_view caller : {"peer-none", "peer-a", ""}) {
+            check(fails_with(g.read(v, p->field(), caller), status_t::SCHEMA_NOT_FOUND),
+                  std::string("read ") + spelling + " is SCHEMA_NOT_FOUND for every caller");
+            check(fails_with(g.write(v, p->field(), tr::view::rope_t{val}, caller),
+                             status_t::SCHEMA_NOT_FOUND),
+                  std::string("write ") + spelling + " is SCHEMA_NOT_FOUND for every caller");
+        }
+    }
+
+    // (b) Owner-defined UNDECLARED name, denied caller — PERMISSION_DENIED on BOTH doors
+    // (the WRITE row is NEW: the undeclared SCHEMA_NOT_FOUND moved below the WRITE gate),
+    // while a caller the ACL admits — and the owner — still gets the honest ENOTTY.
+    const auto nope = path_t::parse("/x:settings.app.nope");
+    check(denied(g.write(v, nope->field(), tr::view::rope_t{val}, "peer-none")),
+          "denied caller's WRITE of an undeclared app field is PERMISSION_DENIED (NEW)");
+    check(denied(g.read(v, nope->field(), "peer-none")),
+          "denied caller's READ of an undeclared app field is PERMISSION_DENIED");
+    check(fails_with(g.write(v, nope->field(), tr::view::rope_t{val}, "peer-a"),
+                     status_t::SCHEMA_NOT_FOUND),
+          "granted caller's WRITE of the same name is SCHEMA_NOT_FOUND (ENOTTY survives)");
+    check(fails_with(g.read(v, nope->field(), "peer-a"), status_t::SCHEMA_NOT_FOUND),
+          "granted caller's READ of the same name is SCHEMA_NOT_FOUND");
+    check(fails_with(g.write(v, nope->field(), tr::view::rope_t{val}, {}),
+                     status_t::SCHEMA_NOT_FOUND),
+          "owner write of the same name is SCHEMA_NOT_FOUND");
+    // Declared-`ro` existence is not disclosed either: the no-write-surface answer is for
+    // ADMITTED callers; a denied one cannot tell `ro` from undeclared (NEW).
+    const auto label = path_t::parse("/x:settings.app.label");
+    check(denied(g.write(v, label->field(), tr::view::rope_t{val}, "peer-none")),
+          "denied caller's WRITE of a declared-ro field is PERMISSION_DENIED (NEW)");
+    check(fails_with(g.write(v, label->field(), tr::view::rope_t{val}, "peer-a"),
+                     status_t::SCHEMA_NOT_FOUND),
+          "granted caller's WRITE of the ro field stays SCHEMA_NOT_FOUND (no write surface)");
+
+    // (c) The must-not-regress controls — a denied caller against an EXISTING surface
+    // stays PERMISSION_DENIED everywhere: the hoist is name-validity only, never the value.
+    const auto kp = path_t::parse("/x:settings.app.kp");
+    check(denied(g.read(v, path_t::parse("/x:schema")->field(), "peer-none")),
+          "control: denied caller's :schema READ stays PERMISSION_DENIED");
+    check(denied(g.read(v, path_t::parse("/x:settings")->field(), "peer-none")),
+          "control: denied caller's bare :settings READ stays PERMISSION_DENIED");
+    check(denied(g.read(v, kp->field(), "peer-none")),
+          "control: denied caller's READ of a declared app field stays PERMISSION_DENIED");
+    check(denied(g.write(v, kp->field(), tr::view::rope_t{val}, "peer-none")),
+          "control: denied caller's WRITE of a declared app field stays PERMISSION_DENIED");
+    check(g.write(v, kp->field(), tr::view::rope_t{val}, "peer-a").has_value(),
+          "control: the granted caller still lands the declared rw field (door alive)");
+    // `:identity` remains the sole facet that resolves FULLY above the gate (RFC-0011).
+    const std::vector<std::byte> key(32, std::byte{0x11});
+    check(g.set_identity(1, key).has_value(), "a keypair is installed");
+    check(g.read(v, path_t::parse("/x:identity")->field(), "peer-none").has_value(),
+          "control: :identity still serves a denied caller (pre-auth by design)");
+}
+
+/**
  * @brief The `:acl` and `:schema` field surfaces are addressed WHOLE — a trailing step or
  *        an `[N]`/`[]` selector names nothing, on read and on write.
  *
@@ -1306,6 +1403,7 @@ int main() {
     test_open_by_default();
     test_gated_ops();
     test_flat_knob_surface_is_withdrawn();
+    test_denied_caller_disclosure_parity();
     test_acl_and_schema_are_addressed_whole();
     test_expiry();
     test_inheritance();

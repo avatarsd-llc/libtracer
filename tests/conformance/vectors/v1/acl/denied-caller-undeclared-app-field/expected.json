@@ -1,0 +1,12 @@
+{
+  "name": "denied-caller-undeclared-app-field",
+  "category": "acl",
+  "hex": "08400600010002005000",
+  "total_bytes": 10,
+  "decoded": {
+    "type": "0x08 ERROR",
+    "structured": true,
+    "meaning": "ERROR{ VALUE u16=0x0050 (tr::access::denied) } — the reply a caller the vertex ACL denies receives for a read OR a write of ANY `settings.app.` spelling, declared or undeclared (RFC-0010 §A erratum 2026-08-12, #435)",
+    "note": "gate-before-resolve for the owner namespace: the ACL right is evaluated before any name under settings.app. is resolved, so this reply is uniform over declared, undeclared, ro and wo spellings and discloses neither the owner's field names nor which spellings exist. NOT the answer for a protocol-owned nonexistent name (`:status`, a withdrawn knob) — those resolve name-validity above the gate and answer ERROR{0x0031 tr::schema::not_found} caller-independently, byte-identical to settings/removed-knob."
+  }
+}

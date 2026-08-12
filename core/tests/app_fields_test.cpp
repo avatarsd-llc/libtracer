@@ -296,11 +296,14 @@ void test_gating() {
     const path_t p_secret("/dev/y:settings.app.secret");
     const std::vector<std::byte> val = value_tlv("v");
 
-    // ro: the remote write has NO surface — checked BEFORE the ACL right (the vertex is
-    // ACL-open here, so a PERMISSION_DENIED would betray a wrong gate order).
+    // ro: the remote write has NO surface. The vertex is ACL-open here, so the caller is
+    // ADMITTED and gets the honest ENOTTY; per the RFC-0010 §A erratum (2026-08-12, #435)
+    // the answer is settled BELOW the WRITE gate, so a caller the ACL denies would get
+    // PERMISSION_DENIED instead (owner-name existence never leaks — acl_test's
+    // test_denied_caller_disclosure_parity pins that half).
     check(fails_with(g.write(v, p_label.field(), make_value(val), "linkA"),
                      status_t::SCHEMA_NOT_FOUND),
-          "remote write to ro field: SCHEMA_NOT_FOUND (caller-independent, gate 1)");
+          "remote write to ro field: SCHEMA_NOT_FOUND for an admitted caller");
     check(g.write(v, p_label.field(), make_value(val), {}).has_value(),
           "owner write to ro field succeeds (ro constrains remote callers only)");
 
@@ -311,7 +314,7 @@ void test_gating() {
           ":acl granting linkA READ|WRITE lands");
     check(
         fails_with(g.write(v, p_kp.field(), make_value(val), "linkB"), status_t::PERMISSION_DENIED),
-        "remote rw write without the WRITE right: PERMISSION_DENIED (gate 2)");
+        "remote rw write without the WRITE right: PERMISSION_DENIED (the ACL gate)");
     check(g.write(v, p_kp.field(), make_value(val), "linkA").has_value(),
           "remote rw write with the WRITE right succeeds");
     check(reads_back(g.read(v, p_kp.field(), "linkA"), val),

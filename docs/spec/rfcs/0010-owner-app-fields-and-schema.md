@@ -185,6 +185,13 @@ acceptable at cutover time, before any name freezes).
   ADR-0021's `ENOTTY` posture and keeps `lazy validation` cheap: validation
   of an app-field write is one table lookup, not a schema parse.
 
+  > **Erratum (2026-08-12), [#435](https://github.com/avatarsd-llc/libtracer/issues/435) —
+  > see §Erratum at the end of this document.** This clause's `SCHEMA_NOT_FOUND` answers,
+  > for names under `settings.app.`, govern the **owner and callers the vertex ACL
+  > admits**. A caller the ACL denies the operation's right receives
+  > `ERROR{tr::access::denied}` **before** any name under `settings.app.` is resolved, so
+  > a protected vertex never discloses owner-field existence through the error channel.
+
 #### A.3 Write semantics and gating
 
 - **Local (owner) writes** to a declared field always succeed regardless of
@@ -203,6 +210,14 @@ acceptable at cutover time, before any name freezes).
      writes at all simply declare everything `ro` — remote writability is
      owner-declared, exactly as the mission of ADR-0021 rule 3 intends ("the
      device owns the catalog of what each field accepts").
+
+  > **Erratum (2026-08-12), [#435](https://github.com/avatarsd-llc/libtracer/issues/435) —
+  > see §Erratum at the end of this document.** The numbered order above is **corrected**:
+  > for a caller-attributed write the ordinary **WRITE right (item 2) is evaluated
+  > first**, and the declared-writability check (item 1) applies to callers that pass it.
+  > Both checks remain; only their order changes. As written, the pre-gate
+  > `SCHEMA_NOT_FOUND` disclosed which owner names exist (undeclared vs declared-`ro` vs
+  > gated) to callers the ACL denies.
 - The written value is stored **verbatim** (bytes in, bytes out — §D). The
   runtime performs **no dtype/range validation against the descriptor**: the
   descriptor is self-description for consumers, opaque to the runtime (§B);
@@ -605,3 +620,78 @@ open at least 14 days for implementer feedback before this document is merged
 (unless the standing solo-maintainer waiver is applied, as on
 RFC-0002/0005/0008). Sustained objections and their resolution to be recorded
 here.
+
+## Erratum (2026-08-12) — §A's `SCHEMA_NOT_FOUND` answers govern callers the ACL admits; a denied caller learns nothing about owner names ([#435](https://github.com/avatarsd-llc/libtracer/issues/435))
+
+**What the text said.** §A.2's "undeclared names remain `SCHEMA_NOT_FOUND`" (restated
+caller-unqualified in [reference/05](../../reference/05-protocol-tlvs.md) §`0x0B`:
+*"undeclared names return `ERROR{tr::schema::not_found}` on read and write"*), and §A.3's
+numbered gate order — declared-writability (`SCHEMA_NOT_FOUND`) **before** the caller's
+WRITE right (`tr::access::denied`).
+
+**What was wrong.** Read literally, the error channel disclosed the **owner's field-name
+set** to callers the vertex ACL denies. The reference write door answered a denied caller
+`SCHEMA_NOT_FOUND` for an undeclared or declared-`ro` `settings.app.` name *before* any
+ACL evaluation, so probing spellings distinguished undeclared / `ro` / writable — while
+the read door's READ gate sat above resolution and answered the same caller
+`PERMISSION_DENIED` for the same spelling: one name, two answers, split by path and by
+caller. The write-side pre-gate resolution arrived with the
+[#430](https://github.com/avatarsd-llc/libtracer/issues/430) hoist, whose justification —
+*"knob names are a fixed, published constant of the protocol, not a per-node secret"* —
+is exactly the property owner-defined names do **not** have. And
+[reference/05](../../reference/05-protocol-tlvs.md) §Gating `:identity` already names the
+caller-dependent error split as the failure mode to avoid: *"a denied caller gets
+`PERMISSION_DENIED` where an allowed caller gets `SCHEMA_NOT_FOUND` — which leaks the
+caller's authorization state through an error code."*
+
+**The correction — namespace-governed disclosure, applied identically on read and
+write.** Whether a name's *existence* may be answered before the ACL gate is governed by
+whether the name set is a published protocol constant or an owner secret; the gate always
+protects the **value**:
+
+| namespace | name set | order (name-validity), read **and** write | denied caller, nonexistent name | denied caller, existent facet |
+| --- | --- | --- | --- | --- |
+| protocol-owned (the `{subscribers, acl, children, settings, schema, identity}` field namespace; the withdrawn flat knobs) | published by spec, identical on every node | resolve-before-gate | `ERROR{tr::schema::not_found}` — discloses only published spec text | `ERROR{tr::access::denied}` — the value stays gated |
+| owner-defined (`settings.app.*`) | owner-declared, per-node | **gate-before-resolve** | `ERROR{tr::access::denied}` | `ERROR{tr::access::denied}` |
+
+Concretely:
+
+- §A.2's and §A.3's `SCHEMA_NOT_FOUND` answers for `settings.app.` names (undeclared;
+  declared-`ro` write; §A.4's `wo` read) are answers to the **owner and to callers the
+  ACL admits the operation's right** — among those they remain exactly as specified, and
+  caller-independent. A caller the ACL denies receives `ERROR{tr::access::denied}` before
+  any `settings.app.` name is resolved: for a denied caller the answer is uniform over
+  declared, undeclared, `ro` and `wo`, so the error channel discloses neither the owner's
+  names nor which spellings exist.
+- §A.3's numbered order is corrected accordingly (see the inline erratum note there): the
+  WRITE-right gate is evaluated first for caller-attributed writes; both checks remain.
+- The **protocol-owned** namespace resolves name-validity **above** the gate on both
+  doors — the write door always did; the read door is aligned by this erratum (a denied
+  caller's read of `:status`, of bare `:subscribers`, or of a withdrawn
+  `:settings.<knob>` answers `ERROR{tr::schema::not_found}`, as its write already did).
+  This is **name-validity only, never the value**: a denied caller against any existent
+  facet (`:schema`, `:settings`, `:acl`, a declared app field, …) still receives
+  `ERROR{tr::access::denied}`, the pinned selector-shape divergences
+  ([#869](https://github.com/avatarsd-llc/libtracer/issues/869)) are untouched, and
+  `:identity` remains the sole facet that resolves *fully* above the gate
+  ([RFC-0011](0011-node-identity-facet.md) §C).
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)).
+The immutable spec pins none of these codes: which of the two errors a **denied** caller
+sees lives in this RFC and reference/05, not in `spec/v1.md`. No grammar, frame shape,
+type code or error identity changes — both codes are long in the RFC-0002 registry — and
+the correction aligns the text (and the two reference-core doors) with the disclosure
+rule the spec already commits to at `:identity` and with #430's own scoping. Maintainer
+ruling in [#435](https://github.com/avatarsd-llc/libtracer/issues/435) (grilled
+2026-08-06; instrument confirmed 2026-08-12).
+
+**Record.** The governing principle is to be recorded as an ADR whose number settles
+after the [#894](https://github.com/avatarsd-llc/libtracer/issues/894)/[#897](https://github.com/avatarsd-llc/libtracer/issues/897)
+reclamation ADR is written; until then this erratum and its conformance vector are the
+record. Conformance: `tests/conformance/vectors/v1/acl/denied-caller-undeclared-app-field`
+(the denied-caller reply, byte-exact), bound behaviourally by
+`core/tests/acl_test.cpp` — `test_denied_caller_disclosure_parity` (both doors, both
+namespaces, plus the existent-surface controls). Text corrected alongside:
+[reference/05](../../reference/05-protocol-tlvs.md) §`0x0B` (the caller qualifier) and
+[reference/02](../../reference/02-graph-model.md) §Owner-declared application fields
+(the gate order).
