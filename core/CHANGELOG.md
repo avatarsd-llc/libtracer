@@ -184,6 +184,30 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   accepted it. Empty path segments are illegal (`/sensor//temp` is invalid), so all four now
   treat a `len == 0` record as malformed framing. `transport_vertex.cpp`'s hand-rolled
   `last_segment` walk was replaced by `key_view_t::last_segment`, key_view's single locus.
+- **`rope_t::try_flatten` / `try_materialize` — the flatten refusal now has a cause (#917).**
+  `flatten()` answered an empty `view_t` for three different things: a rope with a DEVICE link
+  (not CPU-flattenable, ever), an allocator refusal (transient), and a rope that legitimately
+  holds zero bytes. Every caller's `empty()` test therefore asked three questions at once, and
+  the one that mattered — `tlv_view_t::materialize` — resolved it as `err_t::FRAME_INVALID`,
+  i.e. it reported this node's local OOM as a PERMANENT "your frame is malformed" verdict
+  against a peer that had sent a perfectly valid frame. The new pair returns
+  `std::expected<view_t, view::flatten_err_t>` with `NOT_HOST` vs `NO_MEMORY` kept apart, and a
+  zero-length rope now flattens to a SUCCESS carrying an empty view without touching the backend
+  at all. `flatten()` / `materialize()` remain, unchanged, as the lossy convenience wrappers.
+
+### Changed
+
+- **`tlv_view_t::materialize` reports a flatten OOM as `err_t::FLOW_BACKPRESSURE`** (WARN /
+  TRANSIENT) instead of `err_t::FRAME_INVALID` (ERROR / PERMANENT) (#917). A caller that
+  branched on `FRAME_INVALID` to drop-and-blame the peer must now also handle
+  `FLOW_BACKPRESSURE`, which is retryable and is about this node, not the peer.
+- **`receiver_slot`'s `deliver_rope` span fallback DROPS a frame whose materialize is refused**
+  (#917). It previously handed the refusal's empty view to the span sink as though those were
+  the frame's bytes — a truncated frame delivered as a complete one.
+- **`graph_t::write` (both the branch-decomposition and field arms) answers `TYPE_MISMATCH` for
+  a DEVICE-link value** (#917), instead of folding it into the `BACKPRESSURE` that an exhausted
+  `value_backend_` raises. No retry makes a device payload CPU-decodable; backpressure said it
+  would.
 
 ## [0.10.0] — 2026-08-12
 

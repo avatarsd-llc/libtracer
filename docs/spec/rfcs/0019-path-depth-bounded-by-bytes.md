@@ -495,7 +495,7 @@ mechanism" and `hop_count` is absent from `core/`. `kMaxSegments` inherited the 
 
 The literal RFC-0006 shape cannot be written for an **encode-time** MUST: an encoder has no
 observation of a receiver's memory, and `max_frame` is a *local, receive-side* cap
-(`core/include/libtracer/transport_vertex.hpp:127`, "Only tightens, never raises") that is never
+(`core/include/libtracer/transport_vertex.hpp:128`, "Only tightens, never raises") that is never
 advertised on the wire. There is no negotiated byte budget to point an encoder at. Making it work
 would require:
 

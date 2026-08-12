@@ -1276,11 +1276,17 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, std::stri
     // interim until the ④b rope-cursor decode). Every node span points into `head`,
     // so each landed slice is head.subview(...) — a refcount bump, never a byte copy.
     // The flatten draws from the ADR-0060 value_backend_ — the whole decomposition's
-    // durable bytes then live in one pooled segment. An exhausted pool yields an empty
-    // head (rope.cpp flatten's nullptr path); surface that as BACKPRESSURE (§3) rather
-    // than letting decode_into read it back as a malformed (TYPE_MISMATCH) value.
-    const view_t head = value.materialize(*value_backend_);
-    if (head.empty() && value.total_length() != 0) return std::unexpected(status_t::BACKPRESSURE);
+    // durable bytes then live in one pooled segment. The refusal keeps its cause (#917):
+    // an exhausted pool surfaces as BACKPRESSURE (§3 — transient, a retry may succeed)
+    // rather than letting decode_into read an empty head back as a malformed value, while
+    // a DEVICE-link value, which no retry makes CPU-decodable, is TYPE_MISMATCH.
+    const std::expected<view_t, tr::view::flatten_err_t> head =
+        value.try_materialize(*value_backend_);
+    if (!head) {
+        return std::unexpected(head.error() == tr::view::flatten_err_t::NO_MEMORY
+                                   ? status_t::BACKPRESSURE
+                                   : status_t::TYPE_MISMATCH);
+    }
     // The #477 residual is CLOSED (#588). This used to be a
     // `std::pmr::monotonic_buffer_resource` over the same stack buffer, whose overflow
     // leg drew from the THROWING default upstream — so a branch tree bigger than the
@@ -1295,7 +1301,7 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, std::stri
     std::array<std::byte, 4096> stack;
     mem::bump_source_t src(stack, *ctl_);
     const std::expected<wire::tlv_arena_t, wire::err_t> arena =
-        wire::decode_into(head.bytes(), src);
+        wire::decode_into(head->bytes(), src);
     if (!arena) return std::unexpected(status_t::TYPE_MISMATCH);
     const wire::tlv_arena_t& a = *arena;
 
@@ -1316,7 +1322,7 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, std::stri
     std::vector<std::byte> parse_key;
     if (!detail::try_assign(parse_key, root_key)) return std::unexpected(status_t::BACKPRESSURE);
     std::vector<branch_node_t> plan;  // post-order; plan.back() is the root
-    const result_t<bool> parsed = parse_branch_node(a, 0, head, std::move(parse_key), plan);
+    const result_t<bool> parsed = parse_branch_node(a, 0, *head, std::move(parse_key), plan);
     if (!parsed) return std::unexpected(parsed.error());
     if (!*parsed) return {};  // a value-free branch is a no-op write
 
@@ -1374,7 +1380,7 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, std::stri
     for (const branch_node_t& node : plan) {
         const bool is_root = &node == &plan.back();
         if (!node.subtree_has_value) continue;
-        const view_t& slice = is_root ? head : node.notify;
+        const view_t& slice = is_root ? *head : node.notify;
         if (slice.empty()) continue;
         vertex_t* vx = is_root ? v : find_ptr(node.key);
         if (vx != nullptr) fan_out(vx, slice);
@@ -1546,12 +1552,19 @@ result_t<void> graph_t::write(vertex_handle_t vh, const field_path_t& field, rop
     if (field.empty()) return write_impl(v, std::move(value), caller);
     // A field write targets a contiguous control TLV (settings / acl / subscribers);
     // materialize it (single-link: zero copy) before the field surface parses it. A
-    // multi-link value's flatten draws from the ADR-0060 value_backend_; an exhausted
-    // pool yields an empty head — surface the injected-resource BACKPRESSURE (§3)
-    // rather than letting field_write read it back as a malformed value.
-    const view_t head = value.materialize(*value_backend_);
-    if (head.empty() && value.total_length() != 0) return std::unexpected(status_t::BACKPRESSURE);
-    return field_write(v, field, head, caller);
+    // multi-link value's flatten draws from the ADR-0060 value_backend_. The refusal keeps
+    // its cause (#917): an exhausted pool surfaces the injected-resource BACKPRESSURE
+    // (§3 — transient) rather than letting field_write read an empty head back as a
+    // malformed value, while a DEVICE-link value — permanently un-parsable on the CPU —
+    // is TYPE_MISMATCH.
+    const std::expected<view_t, tr::view::flatten_err_t> head =
+        value.try_materialize(*value_backend_);
+    if (!head) {
+        return std::unexpected(head.error() == tr::view::flatten_err_t::NO_MEMORY
+                                   ? status_t::BACKPRESSURE
+                                   : status_t::TYPE_MISMATCH);
+    }
+    return field_write(v, field, *head, caller);
 }
 
 result_t<value_ref_t> graph_t::await(vertex_handle_t vh, std::chrono::nanoseconds timeout,

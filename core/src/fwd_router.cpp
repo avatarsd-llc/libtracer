@@ -608,8 +608,10 @@ void reject_bus_name_hop(const child_registry_t& registry, std::string_view inbo
         if (reply.link_count() == 1) {
             up->send(reply.links()[0].bytes());
         } else {
-            const view::view_t flat = reply.materialize();
-            if (!flat.empty()) up->send(flat.bytes());
+            // Honest failure channel (#917): a REFUSED materialize (an OOM on this cold
+            // error path) drops the rejection reply — it is not an empty frame to send.
+            const std::expected<view::view_t, view::flatten_err_t> flat = reply.try_materialize();
+            if (flat) up->send(flat->bytes());
         }
     }
 }
@@ -1223,15 +1225,19 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
                     // path, so the one flatten is the ADR-0052 legitimate kind (exactly the
                     // control-plane precedent). Through the injected byte backend (#730), so
                     // a bounded node's memory bound covers this flatten too.
-                    const view_t flat = frame.subrope(0, frame.total_length()).materialize(*flat_);
-                    // Flatten OOM ⇒ drop the frame. A REDUNDANT EARLY-OUT, like the ADVERTISE
-                    // arm's: `reject_bus_name_hop` opens with a `wire::decode`, an empty span
-                    // does not decode, and it returns without replying — so deleting this line
-                    // changes no observable behaviour. Kept so the reason is the OOM and not
-                    // the codec's leniency. The SEAM on the line above is the testable part,
-                    // and `fwd_flatten_backend_test` pins it.
-                    if (flat.empty()) return;
-                    reject_bus_name_hop(registry_, inbound_name, flat.bytes(), *egress_);
+                    const std::expected<view_t, view::flatten_err_t> flat =
+                        frame.subrope(0, frame.total_length()).try_materialize(*flat_);
+                    // Flatten REFUSED ⇒ drop the frame. This arm is all-host-guarded above,
+                    // so the refusal is the OOM — named by the error channel now rather than
+                    // inferred from an empty view a zero-byte success could fake (#917). Still
+                    // a REDUNDANT EARLY-OUT, like the ADVERTISE arm's: `reject_bus_name_hop`
+                    // opens with a `wire::decode`, an empty span does not decode, and it
+                    // returns without replying — so deleting this line changes no observable
+                    // behaviour. Kept so the reason is the OOM and not the codec's leniency.
+                    // The SEAM on the line above is the testable part, and
+                    // `fwd_flatten_backend_test` pins it.
+                    if (!flat) return;
+                    reject_bus_name_hop(registry_, inbound_name, flat->bytes(), *egress_);
                 },
                 /* terminus */
                 [&] {
@@ -1563,7 +1569,13 @@ void fwd_router_t::on_control_rope(std::string_view inbound_name, view::rope_t f
     view_t hold;
     dispatch_control(inbound_name, cur,
                      [&](std::size_t off, std::size_t total) -> std::span<const std::byte> {
-                         hold = frame.subrope(off, total).materialize(*flat_);
+                         // A REFUSED materialize (an OOM — the frame is all-host-guarded
+                         // above) yields an empty span, which every arm's own guard already
+                         // reads as "drop". Named rather than inferred from `empty()` (#917).
+                         std::expected<view_t, view::flatten_err_t> m =
+                             frame.subrope(off, total).try_materialize(*flat_);
+                         if (!m) return {};
+                         hold = std::move(*m);
                          return hold.bytes();
                      });
 }
@@ -1940,10 +1952,14 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const vie
             // paths draw from the injected seam. `flat_` is therefore reached from BOTH
             // this writer thread and the receive threads, which is why an injected backend
             // must be thread-safe (ADR-0060 §2).
-            const view_t flat = value.materialize(*flat_);
-            if (flat.empty() && value.total_length() != 0) return;  // flatten OOM — drop
+            // A REFUSED materialize drops the delivery (#917): an OOM, or a DEVICE-link
+            // value this COMPACT cannot carry either way. The old `empty && total != 0`
+            // inference is gone — the error channel names the failure, and a legitimately
+            // empty value now emits the empty COMPACT it always should have.
+            const std::expected<view_t, view::flatten_err_t> flat = value.try_materialize(*flat_);
+            if (!flat) return;
             if (fresh) emit_advertise(*link, label, route);
-            emit_compact(*link, label, flat.bytes());
+            emit_compact(*link, label, flat->bytes());
             return;
         }
         // label == 0: this link has issued all 65535 labels. Compaction is an optimization

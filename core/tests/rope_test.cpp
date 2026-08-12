@@ -10,6 +10,8 @@
  * (make_shared<rope_t>) costs exactly one allocation, what the old view_t slot cost;
  * the 3rd link spills the chain to the heap. Also covers only()/materialize(), the
  * accessors a contiguous-bytes consumer calls (single-link: zero copy; multi: flatten),
+ * the try_flatten/try_materialize outcome separation (#917 — a legitimately empty rope, an
+ * allocator refusal and a DEVICE link are three different answers, not one empty view),
  * and the nothrow soft-fail growth API (try_reserve / try_to_iovec and the
  * tr::detail try_reserve / try_push_back primitives) that keeps the composed-reply path
  * from abort()ing under -fno-exceptions on a fragmented heap.
@@ -196,6 +198,86 @@ void test_accessors() {
 }
 
 /**
+ * @brief A backend that refuses every allocation — the heap-exhaustion stand-in (#917).
+ */
+class refusing_backend_t final : public tr::mem::mem_backend_t {
+   public:
+    refusing_backend_t() noexcept : mem_backend_t("test_refusing") {}
+
+    [[nodiscard]] tr::view::segment_t* alloc(std::size_t, tr::mem::alloc_hint_t) override {
+        ++calls_;
+        return nullptr;
+    }
+    void destroy(tr::view::segment_t* seg) noexcept override {
+        tr::mem::heap_backend().destroy(seg);
+    }
+
+    /** @brief How many allocations were asked for — proves the seam was (or was not) consulted. */
+    [[nodiscard]] int calls() const noexcept { return calls_; }
+
+   private:
+    int calls_ = 0;
+};
+
+/**
+ * @brief try_flatten / try_materialize keep the THREE outcomes apart (#917).
+ *
+ * `flatten()` used to answer an empty view for a DEVICE-link rope, for an allocator
+ * refusal, AND for a legitimately empty rope — so every caller's `empty()` test was
+ * three questions at once, and a router reading it as "malformed frame" turned a local
+ * OOM into a PERMANENT accusation against the peer. These pin that each outcome is now
+ * distinguishable, and that the lossy `flatten()` wrapper still behaves as before.
+ */
+void test_flatten_verdicts() {
+    std::printf("rope_t try_flatten()/try_materialize() outcome separation (#917):\n");
+    std::array<std::byte, 4> buf{std::byte{0xD0}, std::byte{0xD1}, std::byte{0xD2},
+                                 std::byte{0xD3}};
+
+    // (1) A legitimately empty rope SUCCEEDS with an empty view — and never touches the
+    //     backend, so an exhausted allocator cannot recolour the degenerate case as OOM.
+    refusing_backend_t idle;
+    const rope_t none;
+    const auto empty_ok = none.try_flatten(idle);
+    check(empty_ok.has_value() && empty_ok->empty() && idle.calls() == 0,
+          "try_flatten of an empty rope is a SUCCESS carrying an empty view (no allocation)");
+    check(none.try_materialize(idle).has_value(), "try_materialize of an empty rope succeeds");
+
+    // (2) The allocator's refusal is NO_MEMORY — transient, retryable.
+    refusing_backend_t oom;
+    rope_t multi(byte_view(buf[0]));
+    multi.append(byte_view(buf[1]));
+    multi.append(byte_view(buf[2]));  // 3 links -> genuinely multi-link, so a flatten happens
+    const auto refused = multi.try_flatten(oom);
+    check(!refused.has_value() && refused.error() == tr::view::flatten_err_t::NO_MEMORY &&
+              oom.calls() == 1,
+          "try_flatten reports the backend's refusal as NO_MEMORY (transient backpressure)");
+    const auto refused_mat = multi.try_materialize(oom);
+    check(!refused_mat.has_value() && refused_mat.error() == tr::view::flatten_err_t::NO_MEMORY,
+          "try_materialize of a multi-link rope forwards the NO_MEMORY refusal");
+
+    // (3) A DEVICE link is NOT_HOST — permanent for this rope, no retry helps, and the
+    //     backend is never consulted (the CPU must not read those bytes at all).
+    refusing_backend_t untouched;
+    rope_t dev(view_t::over(tr::view::borrow_device(std::span<std::byte>(&buf[3], 1))));
+    dev.append(byte_view(buf[0]));
+    const auto not_host = dev.try_flatten(untouched);
+    check(!not_host.has_value() && not_host.error() == tr::view::flatten_err_t::NOT_HOST &&
+              untouched.calls() == 0,
+          "try_flatten reports a DEVICE link as NOT_HOST without asking the backend");
+
+    // A SINGLE-link device rope materializes to its link, zero copy — no CPU dereference
+    // happens, exactly as materialize() has always behaved.
+    const rope_t dev_one(view_t::over(tr::view::borrow_device(std::span<std::byte>(&buf[3], 1))));
+    const auto dev_mat = dev_one.try_materialize(untouched);
+    check(dev_mat.has_value() && dev_mat->is_device(),
+          "try_materialize of a single-link DEVICE rope hands back the link (zero copy)");
+
+    // The lossy wrappers are unchanged: both refusals still collapse into the empty view.
+    check(multi.flatten(oom).empty() && dev.flatten(untouched).empty(),
+          "flatten() keeps its lossy empty-view contract for both refusals");
+}
+
+/**
  * @brief The nothrow soft-fail growth API: an impossible count returns false (never
  *        abort()s), a normal reservation makes the following appends non-reallocating,
  *        and try_to_iovec / the tr::detail primitives behave correctly.
@@ -299,6 +381,7 @@ int main() {
     test_sbo_gate();
     test_self_concat();
     test_accessors();
+    test_flatten_verdicts();
     test_nothrow_growth();
     return tr::testing::summary("rope");
 }

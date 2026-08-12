@@ -28,9 +28,9 @@ lock each stage takes, where the buffers come from, and what the delivery legs c
 | deliver | `deliver_vertex` for a leaf value, `deliver_current` for a `STREAM` (`graph.cpp:1236-1248`) |
 
 The handle overload is the whole of `write(vertex_handle_t, rope_t, caller)`
-(`graph.cpp:1539-1541`) — a call straight into `write_impl`. A **path**-addressed write resolves
+(`graph.cpp:1545-1547`) — a call straight into `write_impl`. A **path**-addressed write resolves
 first, and `find_ptr` takes `map_mutex_` in shared mode (`graph.cpp:777-778`), so the path overload
-(`graph.cpp:2791`) pays one shared map hold that the handle overload does not.
+(`graph.cpp:2804`) pays one shared map hold that the handle overload does not.
 
 Two allocation-shaped details on the store leg. A `HANDLER`-role write clones the rope before
 storing, because the user handler consumes the value and there is no published pointer to
@@ -121,7 +121,7 @@ inline estimate small, because the in-process callback leg is the hot case. The 
 independent and any subset may fire for one edge: a callback pointer, a target key, and a
 non-empty link name.
 
-`bubble_up` (`graph.cpp:1166`, entered only when `listeners_above() > 0`, `:1382`) walks parent pointers, which
+`bubble_up` (`graph.cpp:1166`, entered only when `listeners_above() > 0`, `:1403`) walks parent pointers, which
 are immutable once linked, and so takes **no lock at all**; a placeholder ancestor holds no edges
 and its `fan_out` is a no-op. An idle write — nobody subscribed above — pays one relaxed load.
 
@@ -170,19 +170,19 @@ target](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0007-
 
 ## 5. Remote delivery legs
 
-`fwd_router_t::deliver_remote` (`core/src/fwd_router.cpp:1909`) is the sink the remote leg calls.
+`fwd_router_t::deliver_remote` (`core/src/fwd_router.cpp:1921`) is the sink the remote leg calls.
 It has two legs, and only one of them copies payload bytes.
 
 **The default full-route leg copies nothing.** It emits
 `FWD{ op=WRITE, dst=<stored return route>, src=<empty PATH>, payload=<VALUE> }` as a
 scatter-gather send: a fresh stack header, the stored route, an empty `src`, and one span per
-rope link (`fwd_router.cpp:1964-1971`). The header is a `stack_writer<16>` — the FWD header of at
+rope link (`fwd_router.cpp:1980-1987`). The header is a `stack_writer<16>` — the FWD header of at
 most 6 bytes plus the 5-byte op TLV — and both constant TLVs are `constexpr` arrays with no
-runtime construction (`fwd_router.cpp:1961-1965`). The route bytes were copied once at subscribe
+runtime construction (`fwd_router.cpp:1977-1981`). The route bytes were copied once at subscribe
 time, so a delivery re-uses them by reference; a multi-link value crosses as its own segments,
 with no flatten. The iov vector is sized once up front through `tr::detail::try_reserve`, and a
 refused reserve drops that delivery rather than emitting a truncated frame
-(`fwd_router.cpp:1977-1978`). That helper runs the *throwing* `std::vector::reserve` through
+(`fwd_router.cpp:1993-1994`). That helper runs the *throwing* `std::vector::reserve` through
 `try_grow` and answers its failure by value (`core/include/libtracer/mem_heap.hpp:157-171`), so on
 a hosted build the OOM becomes a drop with no probe-then-commit window left to lose
 ([#923](https://github.com/avatarsd-llc/libtracer/issues/923), which folded in
@@ -190,11 +190,13 @@ a hosted build the OOM becomes a drop with no probe-then-commit window left to l
 nothing to catch and the helper still probes first, so the window survives on that profile —
 tabulated in [`../allocation-and-backpressure.md`](../allocation-and-backpressure.md).
 
-**The COMPACT leg is the one that flattens.** `const view_t flat = value.materialize(*flat_);`
-(`fwd_router.cpp:1943`) precedes the compact encode, because a COMPACT wraps a contiguous
+**The COMPACT leg is the one that flattens.** `value.try_materialize(*flat_)`
+(`fwd_router.cpp:1959`) precedes the compact encode, because a COMPACT wraps a contiguous
 payload. Single-link — the common case — that materialize is a zero-copy adopt; a multi-link
 value pays one flatten per delivery, out of the router's INJECTED byte backend rather than the
-global heap. A failed flatten drops the delivery (`fwd_router.cpp:1944`).
+global heap. A REFUSED flatten drops the delivery (`fwd_router.cpp:1960`) — since #917 that is a
+test on the named refusal, so a legitimately empty value is delivered rather than swept up with
+the OOM by an `empty()` guess.
 Auto-promotion advertises the label once per flow and then streams
 compact frames; a dropped fresh ADVERTISE self-heals through the peer's `HANDLE_NACK`
 ([RFC-0004 — Remote operation

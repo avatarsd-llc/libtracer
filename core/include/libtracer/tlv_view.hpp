@@ -189,8 +189,11 @@ class tlv_view_t {
      * every CRC trailer — byte-identical to `decode(flatten(wire()))`.
      *
      * @param backend Where the flat segment is allocated.
-     * @return The flat copy + eager tree, or the grammar's `err_t`
-     *         (`FRAME_INVALID` when @p backend cannot allocate the segment).
+     * @return The flat copy + eager tree, or the grammar's `err_t`.
+     * @retval err_t::FLOW_BACKPRESSURE @p backend could not allocate the segment.
+     *         A LOCAL, transient failure of this node — retrying the same frame may
+     *         succeed. Until #917 it was reported as `FRAME_INVALID`, i.e. as a
+     *         PERMANENT accusation that the peer sent a malformed frame.
      */
     [[nodiscard]] std::expected<materialized_t, err_t> materialize(
         mem::mem_backend_t& backend = mem::heap_backend()) const;
