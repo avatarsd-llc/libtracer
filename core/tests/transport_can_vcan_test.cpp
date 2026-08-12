@@ -344,5 +344,29 @@ int main() {
               witnessed->data[0] == 0x5Cu,
           "and it is the legal frame's own payload, not the over-length frame's first 8 bytes");
 
+    // ------------------------------------------------------------------------
+    // #1103 / ADR-0081 §4 — the ADVISORY counter assertion over the real bus: a
+    // node that exists but has no receiver wired yet (the sink-install window
+    // `transport_vertex_t::make_connection` opens between constructing the link
+    // and `fwd_router_t::add_child`) drops a completed group with the NAMED
+    // counter, never silently. This job never gates a merge (it self-skips
+    // without kernel CAN); the counter's merge-blocking guard is the unit case in
+    // transport_can_test.
+    // ------------------------------------------------------------------------
+    auto link_d = std::make_unique<tr::net::socketcan_link_t>("vcan0");
+    check(link_d->ok(), "fourth CAN_RAW socket bound to vcan0");
+    tr::net::transport_can tx_d(std::move(link_d),
+                                {0, 4, tr::view::can_frame_mode_t::CLASSIC, "d/s"});
+    // No set_receiver on D: this IS the window. A's broadcast group completes on
+    // D's receive thread and delivery finds both receiver slots empty.
+    tx_a.send(payload(26, 0x2A));
+    const auto presink_deadline = std::chrono::steady_clock::now() + 3s;
+    while (tx_d.dropped_presink() == 0 && std::chrono::steady_clock::now() < presink_deadline) {
+        std::this_thread::sleep_for(10ms);
+    }
+    check(tx_d.dropped_presink() == 1,
+          "the pre-sink window drop ticked the NAMED counter over the real bus");
+    check(tx_d.dropped_rx() == 0, "and it was not folded into dropped_rx");
+
     return tr::testing::summary("transport_can_vcan");
 }

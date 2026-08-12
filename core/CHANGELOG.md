@@ -58,6 +58,22 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   **`config_reader_t::settings(key)`** — the nested `SETTINGS` value child, or `nullptr`.
   Both run the same pair-consuming, last-well-formed-wins walk as every other accessor;
   they are the two accessors the L4 readers needed (#985).
+### Added
+
+- **`transport_can::dropped_presink()` — the named counter for the sink-install window
+  (#1103, [ADR-0081](../docs/adr/0081-pre-sink-ingress-native-window-hold-or-named-drop-never-parked.md)
+  §4).** A reassembled group that completes while the transport exists (link receiving, RX
+  callback registered) but no receiver sink is installed yet — the span
+  `transport_vertex_t::make_connection` opens between constructing the link and
+  `fwd_router_t::add_child`, widened arbitrarily by graph map-lock contention — used to vanish
+  into the empty `receiver_slot_t` with no counter moving. Reproduced through the production
+  creation path over a real `vcan0`: with the window held 200 ms, 95 of 235 groups a bystander
+  peer put on the bus were lost, and nothing named the loss. A bus cannot take either escape
+  ADR-0081 offers — it has no per-peer flow control to hold bytes in, and withholding its RX
+  callback would starve the liveness bookkeeping it drives (`last_heard`, the
+  pending/reassembly sweeps) — so per §4 the group is dropped at the delivery seam and this
+  distinctly named counter ticks: never parked in the library, never folded into `dropped_rx()`
+  or `dropped_groups()`, never silent. Counts groups.
 
 ## [0.10.0] — 2026-08-12
 

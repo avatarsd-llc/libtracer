@@ -67,7 +67,7 @@ the rope form for an owning link, the span form otherwise (`fwd_router.cpp:753,6
 Every socket transport in the tree declares the owning tier: UDP
 (`transport_udp.hpp:111`), TCP client and server (`transport_tcp.hpp:207,358`),
 WebSocket server and client (`transport_ws.hpp:225,399`), CAN
-(`transport_can.hpp:475`), QUIC (`transport_quic.hpp:153`) and WebTransport
+(`transport_can.hpp:499`), QUIC (`transport_quic.hpp:153`) and WebTransport
 (`transport_webtransport.hpp:158`). The borrowed-span path is the base-class default
 and the tier an out-of-tree transport gets for free.
 
@@ -85,7 +85,7 @@ tags each inbound frame with the sending peer's name. No vertex is created for a
 peer and no peer state is stored.
 
 `transport_t::bus()` returns the facet or `nullptr`. CAN always returns it
-(`transport_can.hpp:456`); the TCP and WebSocket **servers** return it when
+(`transport_can.hpp:480`); the TCP and WebSocket **servers** return it when
 configured peer-named — one implementation, on the slot-server base both of them
 inherit (`posix_endpoint.hpp:408`); every other kind keeps the `nullptr` default.
 
@@ -265,9 +265,16 @@ flowchart LR
   one-shot, since reconnects happen only on an already-armed link — and the embedder
   passes the flag itself, there being no `ws` factory on a chip target. `quic` and
   `webtransport` still take the no-op default;
-  whether the window is reachable on each has its own follow-up (#1100–#1103). `udp` has
+  whether the window is reachable on each has its own follow-up (#1100–#1101). `udp` has
   no DIAL constructor of this shape — it binds an ephemeral port, never `::connect`s and
   sends nothing in the constructor, so no peer can learn its source port to push to.
+- **On a bus the window needs no provocation at all.** `can` has no dial to defer and no
+  peer flow-control window to hold bytes in, and its RX callback cannot be withheld
+  without starving the liveness bookkeeping it drives (`last_heard`, the
+  pending/reassembly sweeps). Any bystander traffic already on the wire lands in the
+  window, so the answer is [ADR-0081](../adr/0081-pre-sink-ingress-native-window-hold-or-named-drop-never-parked.md)
+  §4's other arm — drop, and tick `transport_can::dropped_presink()`
+  ([#1103](https://github.com/avatarsd-llc/libtracer/issues/1103)).
 - **The callable sugar binds by address.** `set_receiver(F& sink)` and
   `set_rope_receiver(F& sink)` take an lvalue; a temporary lambda does not compile,
   and a callable destroyed early dangles exactly like a stale `ctx`.

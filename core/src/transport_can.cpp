@@ -681,7 +681,19 @@ void transport_can::deliver(std::uint16_t src_node, tr::view::rope_t frame) {
         peer_rx_.deliver_rope(name.view(), std::move(frame));
         return;
     }
-    rx_.deliver_rope(std::move(frame));
+    if (rx_.has_any()) {
+        rx_.deliver_rope(std::move(frame));
+        return;
+    }
+    // Neither slot holds a sink: the #1103 sink-install window — the transport
+    // exists (link receiving, RX callback registered) but `make_connection` has
+    // not reached `add_child` yet, and on a bus any bystander traffic lands in
+    // that span unprovoked. ADR-0081 §4's drop arm: dropped HERE with its own
+    // named counter, never parked in the library, and ingestion is never gated
+    // (on_rx keeps running, so `last_heard` and both sweeps stay live). The
+    // has_any→deliver_rope gap can only mis-tick during teardown's sink clear,
+    // where the frame is going nowhere either way.
+    dropped_presink_.fetch_add(1, std::memory_order_relaxed);
 }
 
 // --- the `can` catalog factory (ADR-0027 / ADR-0043 §5 / ADR-0044) -----------
