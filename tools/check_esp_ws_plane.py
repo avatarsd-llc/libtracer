@@ -74,15 +74,22 @@ PORTABLE_WS_TUS = ("transport_ws.cpp", "builtin_transport_ws.cpp")
 # The IDF-native WS links that replace them in the ESP-IDF component (--ws-plane native).
 NATIVE_WS_TUS = ("httpd_ws_link.cpp", "esp_ws_client_link.cpp")
 
-# Both object spellings: ESP-IDF's CMake/Ninja emits <tu>.obj, PlatformIO's SCons <tu>.o.
-OBJECT_SUFFIXES = (".obj", ".o")
-
-
 def find_objects(build_dir: pathlib.Path, tu: str) -> list[pathlib.Path]:
-    """Return every object compiled from @p tu under @p build_dir, either suffix."""
+    """Return every object compiled from @p tu (a ``<stem>.cpp`` name) under @p build_dir.
+
+    All three object spellings are matched, because either build system may produce the
+    tree under test: ESP-IDF's CMake/Ninja keeps the source extension and appends
+    ``.obj`` (``transport_ws.cpp.obj``, sometimes ``.o``), while PlatformIO's SCons
+    REPLACES the extension (``transport_ws.o`` — measured on a real
+    ``.pio/build/<env>`` tree, where a ``.cpp.o`` pattern alone matches nothing and
+    would make the archive-side half of this gate vacuously green). The extensionless
+    form cannot collide with IDF's own C TUs of the same stem (e.g. ``tcp_transport``'s
+    ``transport_ws.c``): those keep their extension as ``transport_ws.c.o``.
+    """
+    stem = tu.removesuffix(".cpp")
     hits: list[pathlib.Path] = []
-    for suffix in OBJECT_SUFFIXES:
-        hits.extend(build_dir.rglob(tu + suffix))
+    for pattern in (tu + ".obj", tu + ".o", stem + ".o"):
+        hits.extend(build_dir.rglob(pattern))
     return sorted(hits)
 
 # Floor on the symbol table an nm read must produce before its "no match" counts as
@@ -92,12 +99,17 @@ MIN_PLAUSIBLE_SYMBOLS = 100
 
 
 def find_elf(build_dir: pathlib.Path) -> pathlib.Path | None:
-    """Return the project ELF in @p build_dir (the one next to the flashable .bin)."""
-    candidates = sorted(build_dir.glob("*.elf"))
+    """Return the project ELF in @p build_dir (the one next to the flashable .bin).
+
+    An idf.py build drops exactly one top-level ELF (the bootloader's lives in its own
+    subdirectory, which the non-recursive glob skips), but a PlatformIO ``.pio/build/<env>``
+    tree puts ``bootloader.elf`` NEXT TO ``firmware.elf`` — and sorted order would pick the
+    bootloader, whose populated-but-tiny symbol table can even clear the floor guard. The
+    bootloader is never the image under test, so it is excluded by name.
+    """
+    candidates = [p for p in sorted(build_dir.glob("*.elf")) if p.name != "bootloader.elf"]
     if not candidates:
         return None
-    # A project build drops exactly one top-level ELF; bootloader/partition ELFs live
-    # in their own subdirectories, which the non-recursive glob above already skips.
     return candidates[0]
 
 
