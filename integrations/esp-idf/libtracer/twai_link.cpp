@@ -256,7 +256,7 @@ void twai_link_t::write_raw(const can_frame_data_t& frame) {
     // no driver-side wait; a rejection here is a driver/state error, not
     // queue-full — hand the slot straight back and count the drop.
     if (twai_node_transmit(node_, &slot->frame, /*timeout_ms=*/0) != ESP_OK) {
-        tx_pool_.release(slot);
+        (void)tx_pool_.release(slot);
         (void)xSemaphoreGive(tx_free_sem_);
         tx_dropped_.fetch_add(1, std::memory_order_relaxed);
     }
@@ -309,9 +309,14 @@ bool twai_link_t::on_tx_done_isr(twai_node_handle_t node, const twai_tx_done_eve
     // done_tx_frame IS &slot->frame of the pool slot write_raw submitted;
     // success or not, the driver is finished with it — return it and wake one
     // backpressured writer. No allocation, no locks: the pool release is a
-    // single store-release, ISR-safe by construction.
+    // single compare-exchange, ISR-safe by construction.
+    //
+    // The pointer is the DRIVER's, so the release is validated (#932): a
+    // completion for a frame this pool never handed out (or a duplicated
+    // completion) is refused, and we must NOT give the semaphore for it — that
+    // would hand out a write permit for a slot that is still in flight.
     auto* slot = reinterpret_cast<tx_slot_t*>(const_cast<twai_frame_t*>(edata->done_tx_frame));
-    self->tx_pool_.release(slot);
+    if (!self->tx_pool_.release(slot)) return false;
 
     BaseType_t hp_task_woken = pdFALSE;
     (void)xSemaphoreGiveFromISR(self->tx_free_sem_, &hp_task_woken);
