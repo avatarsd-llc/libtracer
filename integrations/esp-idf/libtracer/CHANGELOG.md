@@ -57,6 +57,38 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   constants settable is [#1160](https://github.com/avatarsd-llc/libtracer/issues/1160)'s
   ruled scope (ctor parameters), and this fix is deliberately independent of the depth
   chosen there.
+- **BREAKING (semantic): `esp_ws_client_link_t::ok()` is now the CAME-UP predicate, and
+  liveness moved to the new `link_up()` override**
+  ([#1203](https://github.com/avatarsd-llc/libtracer/issues/1203), completing
+  [#1059](https://github.com/avatarsd-llc/libtracer/issues/1059) on the chip-native links).
+  Same declaration, different answer, so nothing breaks at COMPILE time — **read this
+  before upgrading if you poll a chip WS client link.**
+  - `ok()` used to return `connected_`, i.e. live state that reverts on every disconnect.
+    Under the tree-wide ruling that is `link_up()`'s job, so this link had two liveness
+    answers (its own and the base default `true`) and no came-up answer — the inverse of
+    the contract every core transport already follows.
+  - `ok()` now latches: false until the first dial + RFC 6455 handshake lands (forever, on
+    a link constructed with `defer_recv` and never armed), true from then on for the rest
+    of the object's life. `link_up()` answers liveness — true while a handshaken connection
+    is standing, cleared by the recv loop's drop path, by `send()`'s failed/short-write arm
+    and by the destructor, and true again after a re-dial.
+  - **Migration:** an embedder polling `link->ok()` to decide whether the peer is reachable
+    (to re-dial, to gate a publish, to drive a status LED) must move to `link->link_up()`.
+    One gating on "did this link ever come up" is already correct and needs no change.
+    `stats().up` is unchanged in meaning — it always reported liveness, and now says so.
+  - Deliberately shipped in ONE release with the accessor's arrival rather than latched
+    first and implemented later: a window in which both spellings answer liveness is a
+    window in which a downstream site silently keeps working and then breaks.
+- **`httpd_ws_link_t` overrides `link_up()` (#1203).** Its `ok()` was already the came-up
+  predicate (the `httpd_handle_t` is published by the constructor and cleared only by the
+  destructor), so nothing about it changes; what changes is that a link whose server never
+  started no longer inherits the base default `true`. A multi-peer server still outlives
+  any one peer — a session's departure does not move this, it is reported through the
+  per-session eviction seam.
+- **`twai_link_t::ok()` — documentation only (#1203).** It was already a came-up predicate,
+  and there is no `link_up()` to add: the type is a `can_link_t` driver seam rather than a
+  `transport_t`, so it is not on the `#1059` contract, and a bus has no closure concept
+  anyway. The owning `transport_can` is the `transport_t` in that stack.
 
 - **`tr::esp::portmux_sync_t` declares the new `is_nonblocking` policy trait (#928).** Core
   split the overloaded `is_isr_safe` into `is_isr_safe` (safe concurrent with an ISR) and

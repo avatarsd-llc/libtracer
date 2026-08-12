@@ -18,9 +18,9 @@
  * The two halves of #957, on this link:
  *
  *   1. NOTICING. `esp_transport_poll_read` reports "no data this turn" forever for a peer
- *      that vanished without a FIN, so `connected_` stayed true and `ok()` answered true
- *      for a dead peer indefinitely on an idle link. The dial now arms `SO_KEEPALIVE`
- *      plus the idle/interval/count tunables, which is what turns a vanished peer into an
+ *      that vanished without a FIN, so `connected_` stayed true and the liveness accessor
+ *      answered true for a dead peer indefinitely on an idle link. The dial now arms
+ *      `SO_KEEPALIVE` plus the idle/interval/count tunables, which turns a vanished peer into an
  *      ordinary poll/read error. What is pinned here is that the four options are applied
  *      on the dialed socket, with the enable present — the tunables alone are inert.
  *
@@ -36,6 +36,12 @@
  * a second CLOSE after the reconnect reports again (so it is per connection, not
  * once-ever), a destructor reports nothing (a local teardown is not a peer departure),
  * and a dial that never lands reports nothing (there was no connection to bury).
+ *
+ * A later case (#1203) pins the ACCESSOR side of the same event: the two questions "did
+ * this link ever come up" (`ok()`, latched) and "is it up now" (`link_up()`, the #1059
+ * base contract) must answer differently across a peer death. Before that fix this link
+ * answered live state from `ok()` and inherited the base `link_up()`, so it had two
+ * liveness answers and no came-up answer.
  *
  * What this suite deliberately does NOT claim: that lwIP's probes actually fail a
  * connection to a peer that pulled its power. That is a property of a real stack on real
@@ -146,7 +152,7 @@ fake_ws::frame_t close_frame() {
  * @brief Build a link, wait for its first dial, and wait for it to be UP.
  *
  * The second wait is not redundant, and its absence was #1118. `connect_count()` is
- * incremented by the fake INSIDE `esp_transport_connect`, whereas `ok()` reads
+ * incremented by the fake INSIDE `esp_transport_connect`, whereas `link_up()` reads
  * `connected_`, which the recv thread stores only after `connect_once()` has returned —
  * the socket options and the handle publication happen in between. So "the dial was
  * counted" and "the link is up" are different predicates with a real window between them,
@@ -161,7 +167,7 @@ std::unique_ptr<tr::net::esp_ws_client_link_t> dialed_link() {
     auto link = std::make_unique<tr::net::esp_ws_client_link_t>(
         "127.0.0.1", 8080, "/ws", /*handshake_headers=*/std::string{}, kBufBytes, kBufBytes, 0);
     check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "the link dialed");
-    check(wait_until([&] { return link->ok(); }, 2s), "and came up");
+    check(wait_until([&] { return link->link_up(); }, 2s), "and came up");
     return link;
 }
 
@@ -243,7 +249,7 @@ void test_destructor_reports_nothing() {
     {
         auto link = dialed_link();
         link->set_down_notifier(&down_counter_t::fire, &down);
-        check(link->ok(), "the link is up before the teardown");
+        check(link->link_up(), "the link is up before the teardown");
     }
     // Destroyed while CONNECTED: the destructor clears `connected_`, which is the same
     // state a dead peer leaves behind — the recv loop must tell them apart by `stop_`.
@@ -265,6 +271,7 @@ void test_failed_dials_report_nothing() {
         check(wait_until([] { return fake_ws::connect_count() >= 2; }, 6s),
               "the link retried its dial at least twice");
         check(!link->ok(), "and never came up");
+        check(!link->link_up(), "so neither answer is true — not even the liveness one (#1203)");
         check(down.count() == 0, "no departure was reported for a link that was never up");
     }
     fake_ws::fail_connects(false);
@@ -336,6 +343,46 @@ void test_productive_connection_redials_at_once() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 7 — THE CONTRACT: ok() is the came-up latch, link_up() is the liveness (#1203).
+// ---------------------------------------------------------------------------
+/**
+ * @brief A peer death must move `link_up()` and leave `ok()` alone.
+ *
+ * The shipped defect: this link answered live state from `ok()` and inherited the base
+ * `link_up()` (`true`, the connectionless/multi-peer default), so it had TWO liveness
+ * answers — one of them permanently wrong — and NO came-up answer. That is the exact
+ * inverse of the tree-wide ruling #1059 made for the core transports, and the mirror of
+ * the core client's own regression case (`core/tests/ws_transport_test.cpp`,
+ * `test_client_link_up_clears_on_peer_close`).
+ *
+ * Driven through a REAL teardown — the peer sends an RFC 6455 CLOSE and the recv loop's
+ * one drop path runs — rather than by poking state, and the down window is the #1128
+ * backoff (this connection delivered nothing), so the observation is not a race against
+ * an immediate re-dial. Non-vacuous in both directions: pre-fix the `link_up()` line
+ * fails (the base default never goes false) and the `ok()` line fails too (it tracked
+ * `connected_`).
+ */
+void test_ok_latches_while_link_up_flips() {
+    std::printf("#1203 a peer death moves link_up(), not ok():\n");
+    fake_ws::reset();
+    {
+        auto link = dialed_link();
+        check(link->ok(), "ok() reports the handshake landed");
+        check(link->link_up(), "and link_up() reports the connection standing");
+        check(link->stats().up, "the stats snapshot agrees the link is up");
+        fake_ws::push_frames({close_frame()});
+        check(wait_until([&] { return !link->link_up(); }, 5s),
+              "after the peer CLOSE, link_up() reports the link DOWN");
+        check(link->ok(), "while ok() keeps the came-up fact — it never reverts");
+        check(!link->stats().up, "and the stats snapshot is liveness, so it went down too");
+        // The latch survives the recovery too: coming back up cannot make a latched fact
+        // any truer, and the two must not re-converge into one answer.
+        check(wait_until([&] { return link->link_up(); }, 5s), "the link re-dialed and came back");
+        check(link->ok(), "and ok() is still true across the whole cycle");
+    }
+}
+
 }  // namespace
 
 /**
@@ -368,6 +415,7 @@ int main() {
     test_failed_dials_report_nothing();
     test_refused_connection_backs_off();
     test_productive_connection_redials_at_once();
+    test_ok_latches_while_link_up_flips();
     if (g_failures != 0) {
         std::printf("FAILED: %d check(s)\n", g_failures);
         return 1;

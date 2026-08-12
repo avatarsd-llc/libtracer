@@ -158,7 +158,7 @@ void test_teardown_does_not_destroy_handles_under_a_sender() {
     fake_ws::hold_writes(true);
 
     auto link = dialing_link();
-    check(wait_until([&] { return link->ok(); }, 2s), "and came up connected");
+    check(wait_until([&] { return link->link_up(); }, 2s), "and came up connected");
     const std::vector<std::byte> frame = payload();
 
     // The senders hold the LINK, never the owning unique_ptr: `link.reset()` writes that
@@ -234,7 +234,8 @@ void test_teardown_does_not_wait_out_the_reconnect_backoff() {
     fake_ws::fail_connects(true);
 
     auto link = dialing_link();
-    check(!link->ok(), "the dial failed, so the link is down and backing off");
+    check(!link->link_up(), "the dial failed, so the link is down and backing off");
+    check(!link->ok(), "and it never came up (#1203: ok() is the came-up latch)");
 
     const auto start = std::chrono::steady_clock::now();
     link.reset();
@@ -296,7 +297,7 @@ void test_send_during_a_redial_reads_no_handle() {
     fake_ws::fail_connects(true);  // the recv thread cycles connect_once() + backoff
 
     auto link = dialing_link();
-    check(!link->ok(), "the link is down and re-dialing");
+    check(!link->link_up(), "the link is down and re-dialing");
     const int dials_before = fake_ws::connect_count();
 
     // Two foreign tasks pushing at a link that is rebuilding its handles underneath them.
@@ -349,7 +350,7 @@ void test_the_blocking_bounds_are_derived_from_the_watchdog() {
     fake_ws::reset();
 
     auto link = dialing_link();
-    check(wait_until([&] { return link->ok(); }, 2s), "and came up connected");
+    check(wait_until([&] { return link->link_up(); }, 2s), "and came up connected");
 
     const std::vector<std::byte> frame = payload();
     link->send(frame);

@@ -358,8 +358,31 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *         the peer's slot, pointer-valid for this link's lifetime). */
     [[nodiscard]] transport_t* peer_link(std::string_view peer) override;
 
-    /** @brief True if the httpd instance started and the WS handler registered. */
+    /**
+     * @brief The CAME-UP predicate (#1059): true if the httpd instance started and the WS
+     *        handler registered — a construction fact, asked once, never reverting.
+     *
+     * Already the ruled meaning: `handle_` is published by the constructor and cleared only
+     * by the destructor, so this never answers live state (the defect #1203 fixed on the
+     * client link). Which peers are currently attached is a different question entirely —
+     * @ref enumerate_peers / @ref peer_stats_t — because this is a MULTI-PEER server.
+     */
     [[nodiscard]] bool ok() const noexcept { return handle_ != nullptr; }
+
+    /**
+     * @brief Liveness (the @ref transport_t::link_up contract): true while this server is
+     *        standing, i.e. exactly while it came up.
+     *
+     * A multi-peer server OUTLIVES any one peer — that is why the base default is `true`
+     * and why no session's departure moves this — so the only thing that can make it false
+     * is a server that never started at all. Answering the base default there would report
+     * a link that cannot carry a frame as live, which is why this is overridden rather than
+     * inherited (#1203). Per-peer liveness is not this accessor's question: a departed peer
+     * is reported through the bus facet's per-session eviction seam.
+     */
+    [[nodiscard]] bool link_up() const noexcept override {
+        return handle_.load(std::memory_order_relaxed) != nullptr;
+    }
 
     /** @brief The bound WS port (the value passed to the port-binding ctor; 0 when this link
      *         adopts an external server). */
@@ -569,6 +592,16 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * @brief The directed per-peer sending endpoint @ref peer_link hands out:
      *        `send()` writes a BINARY frame to that peer's socket only (via the
      *        owning link's httpd send queue). No-op once the peer has departed.
+     *
+     * It keeps the base `link_up()` (`true`) DELIBERATELY, and that is the one place in
+     * this component where the #1059 liveness question is answered by the default rather
+     * than by state: a session's `open`/`dead` flags live under `peers_m_` as plain bools,
+     * so an honest answer here would mean either taking that mutex inside a `noexcept`
+     * poll (which the httpd task can already be holding) or mirroring the flags into an
+     * atomic that could drift from them. Nothing polls this endpoint — it is a private
+     * type handed to the routing plane purely to SEND, and a departed peer is reported to
+     * that plane by the eviction seam, not by a poll — so the mirror would buy an unused
+     * answer with a new divergence. Revisit if a puller ever appears (#1203).
      */
     class peer_endpoint_t final : public transport_t {
        public:
