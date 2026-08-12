@@ -261,6 +261,15 @@ The contract:
 - **Capacity.** The protocol imposes no vertex-count cap; the set is bounded only by available memory. A constrained host MAY pre-size or cap it — that is host policy, not a wire constraint. A host that exposes a small fixed numeric handle space to its own application code is likewise describing a host limit, not a protocol one.
 - **Allocation must be failable, not fatal.** Every allocation a **peer** can provoke — decode arenas, scatter-gather tables, route-label tables, delivery clones — MUST report exhaustion as a value (`BACKPRESSURE`, per [05-protocol-tlvs.md](05-protocol-tlvs.md) §`0x09` STATUS and the error registry) rather than aborting or unwinding. An implementation targeting a `-fno-exceptions` platform therefore needs a **failable allocation seam distinct from its ordinary one**: an allocator that signals failure by returning nothing, not by throwing ([ADR-0065 — Failable allocation gets its own seam: block source](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md)). Which seams exist in this implementation, and what a bounded node must inject into each, is [../design/allocation-and-backpressure.md](../design/allocation-and-backpressure.md); the memory model behind them is [09-memory-substrate.md](09-memory-substrate.md). ⚠️ *The reference implementation does not yet meet this MUST for two of the four categories named above*: the route-label tables allocate from a `std::pmr::memory_resource`, which reports exhaustion by throwing ([#603](https://github.com/avatarsd-llc/libtracer/issues/603)), and the CAN egress window vector grows with a throwing `push_back` on every send — both behind no ACL, which is the pitfall row below made concrete. The requirement stands; these are conformance gaps.
 
+### Enumerating what is registered
+
+A host that has to *walk* its own graph — an embedder rendering a tree, a diagnostic dump, a startup audit — uses the enumeration surface `graph_t::for_each_vertex(fn)`, which visits every **registered** vertex in ascending canonical-key byte order and hands `fn` the vertex's key plus its handle. Two properties matter and neither is obvious:
+
+- **Unregistered intermediates are not visited.** A key created only as addressing scaffolding on the way to a deeper registration is not a vertex an owner declared, and `find` does not answer for it either.
+- **Some registered vertices are still not application data.** The net plane's own position-holders (`/net`, `/net/<module>`) enumerate exactly like value vertices; ask `tr::net::transport_vertex_t::is_structural(key)` — the object that minted them — rather than inferring from the path shape. See [11-vertex-roles-and-aggregation.md](11-vertex-roles-and-aggregation.md) §structural vertices.
+
+It is a **control-plane** surface: it snapshots and sorts the whole vertex set, so it belongs in setup, diagnostics and tooling, never on a delivery or write path.
+
 ### Failure surfaces locally
 
 When a remote link fails — transport disconnect, peer crash, network partition:

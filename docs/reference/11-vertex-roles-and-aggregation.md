@@ -352,6 +352,26 @@ This works because:
 
 ---
 
+## Structural vertices (the net plane's own bookkeeping)
+
+Some vertices exist only to hold a position in the tree. The net plane mints two kinds: the **net root** (`/net` by default — the `:children[]` creation target), and each **module segment** (`/net/<module>`) a connection mounts under, created lazily on first use. Neither holds an application datum; both exist so that `/net/<module>/<name>` has somewhere to hang. This document calls them **structural vertices** ([CONTEXT.md](https://github.com/avatarsd-llc/libtracer/blob/main/CONTEXT.md) §structural vertex) — *not* "grouping vertices", because §address grouping above already uses "grouping" for the unrelated fan-in / fan-out patterns.
+
+They are invisible as such. A structural vertex is registered with the stored-value role and carries no field descriptor table, so a peer reading its `:schema` gets the same shape a real leaf gives — the NAME differs and nothing else. **An embedder enumerating the graph therefore cannot tell a structural vertex from a value vertex whose owner forgot to describe it.** The enumeration surface is `graph_t::for_each_vertex(fn)`, which visits every *registered* vertex in ascending canonical-key byte order and hands `fn` the vertex's key and handle. Unregistered intermediates — bare addressing scaffolding created on the way to a deeper registration — are not visited at all, so a *never-registered* placeholder is already distinguishable; a structural vertex is registered, and is not.
+
+### The graph does not answer "is this structural"
+
+The library answers this question **only for the vertices it minted itself**, on the object that minted them — `tr::net::transport_vertex_t::is_structural(key)`, whose signature is exactly the `for_each_vertex` callback's key so no handle is unwrapped. There is deliberately **no `graph_t`-level predicate**, and the reason is worth stating so it is not re-proposed:
+
+- An application's own structural vertex — a `/zone` that holds nothing but children — is indistinguishable from a connection vertex on every graph-visible surface: same visit, same `:schema` bytes, same behaviour under the [RFC-0016](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0016-composed-branch-read.md) composed branch read. A `graph_t::is_structural()` would have to answer `false` for `/zone` and `true` for `/net/tcp-client` on no graph-visible basis. That is not a predicate; it is a guess.
+- "Has registered children" does not rescue it. A `/gpio` that holds its own value *and* has a `/gpio/IDR` child reads the same way a module segment does.
+- What the **library** minted, the library may report — reporting a fact it authored is not defining application semantics ([ADR-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0010-closed-protocol-error-boundary.md): *libtracer is a transport for application data, not a definer of application semantics*); withholding it would just force every embedder to re-type the library's own naming rule. What the **application** minted, only the application can say. That asymmetry is why the answer lives at `transport_vertex_t` scope and nowhere wider.
+
+There is also no `role_t::GROUP`. A role names a read / write / subscribe *behaviour* (the seven above); a "group" role names none, would behave as a stored value everywhere in the runtime, and would put a new value into a public byte-wide enum that downstream `switch`es already cover. The role stays invisible to peers either way — see §outside the scope of this document.
+
+`is_structural` answers by **name match, not provenance**: connection creation deduplicates against the graph itself and keeps no record of what it minted, so a vertex an application registered at `/net` or `/net/<module>` first still answers `true`. The predicate states a structural *position* of that net plane. The [RFC-0014](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md) per-module creator endpoint `/net/<module>/conn` answers `false` when it lands: it is an addressable control surface with its own `:schema` catalog, not a position-holder.
+
+---
+
 ## The contract between role and schema
 
 The role is **invisible** to remote peers; the schema is **visible**. A well-designed vertex documents in its schema the things a peer must know:
@@ -399,6 +419,7 @@ The net plane carries the same shape for connections:
 - **A subtree subscription captures the whole subtree.** Subscribing at `/peer` to collect `/peer/{id}/log` also delivers every other write under `/peer`; the consumer filters. v1 has no per-segment wildcard, so there is no way to ask for the sibling pattern instead.
 - **Redundant routes are not deduplicated.** A consumer subscribed over two routes to the same remote vertex receives two deliveries per write. An implementation that suppresses the second as a duplicate destroys the failover signal that is the second route's entire purpose.
 - **A routed address is not `/net/<name>`.** The connection segment is two segments — module then name. An implementation that builds `/net/<name>/<remote path>` addresses a module vertex that does not exist and the route fails to resolve.
+- **A structural vertex is not discoverable from the graph.** `/net` and `/net/<module>` enumerate exactly like value vertices; ask the object that minted them (`transport_vertex_t::is_structural`) instead of inferring from path shape. "Two segments under the root" is wrong — it claims every application `/zone/<child>` too.
 - **Fan-out configuration appends.** `write("/x:subscribers[]", …)` appends an edge; `write("/x:subscribers[N]", …)` addresses slot `N`. Building a fan-out front by repeatedly writing `[0]` yields one subscriber, not three.
 
 ---
@@ -422,6 +443,7 @@ The net plane carries the same shape for connections:
 | Address-shift slicing for large payloads | [03-addressing.md](03-addressing.md) §address-shift slicing | Composes with role 2 and the Mode-A canvas |
 | Schema as the visible contract | [02-graph-model.md](02-graph-model.md) §schema and field discipline | The only role-adjacent discovery surface |
 | Redundant links as distinct explicit routes | [07-host-embedding.md](07-host-embedding.md) §global topology | §redundant links are distinct explicit routes |
+| Structural vertices of the net plane (`/net`, `/net/<module>`) | [ADR-0027](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0027-transport-and-connections-are-vertices.md), [ADR-0061](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md) | §structural vertices |
 | MMIO snapshot semantics | [10-module-catalog.md](10-module-catalog.md) §hard integrations (`mem_mmio` reads: TOCTOU on a live register) | Role 7 (live MMIO) |
 
 The toctree in [README.md](README.md) is the order of record for this suite.

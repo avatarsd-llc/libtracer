@@ -74,6 +74,37 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   pending/reassembly sweeps) — so per §4 the group is dropped at the delivery seam and this
   distinctly named counter ticks: never parked in the library, never folded into `dropped_rx()`
   or `dropped_groups()`, never silent. Counts groups.
+### Added
+
+- **`tr::net::transport_vertex_t::is_structural(wire::key_view_t)` — the net plane names its
+  own structural vertices (#1096).** `transport_vertex_t` mints two vertices nobody asked
+  for: the net root (the `:children[]` creation target) and, lazily, each
+  `<net_root>/<module>` segment a connection mounts under. Both are registered
+  `role_t::STORED_VALUE` and carry no descriptor table, so an embedder walking
+  `graph_t::for_each_vertex` saw them as ordinary value vertices someone forgot to describe —
+  byte-identical `:schema` shape to a real leaf, differing only in the NAME. The predicate
+  takes exactly the key `for_each_vertex` hands its callback, so no handle is unwrapped and
+  no new `graph_t` accessor is added.
+  **The answer is scoped to `transport_vertex_t` on purpose, and `graph_t` will never
+  answer it**: an application's own structural vertex (a `/zone` holding nothing but children)
+  is indistinguishable from a connection vertex on every graph-visible surface — same visit,
+  same schema shape, same RFC-0016 composed branch read — so a graph-level predicate would be
+  inventing an answer where there is no graph-visible basis for one. What the *library*
+  minted, the library reports; what the *application* minted stays the application's business
+  (ADR-0010). No `role_t::GROUP` enumerator was added — a role that names no read/write
+  behaviour is not a role, and a new value in a public byte-wide enum breaks downstream
+  `switch`es. Nothing under `docs/spec/` moved and no wire byte changed: the role has never
+  been on the wire (reference/11 §outside the scope). Documented in
+  [reference/11](../docs/reference/11-vertex-roles-and-aggregation.md) §structural vertices,
+  with "structural vertex" minted as a [CONTEXT.md](../CONTEXT.md) term.
+  **Name match, not provenance — a documented false positive.** Creation deduplicates against
+  `graph_.find` and deliberately keeps no per-module minted set (commit `221ed983` deleted
+  exactly that state), so a vertex an application registered at `<net_root>` or
+  `<net_root>/<module>` *before* this object got there answers `true`. The predicate states a
+  structural *position* of this net plane, not the identity of whoever registered it. The
+  RFC-0014 per-module creator endpoint `/net/<module>/conn` (accepted, unimplemented) answers
+  `false`: it is an addressable control surface with its own `:schema` catalog, not a
+  grouping segment.
 
 ## [0.10.0] — 2026-08-12
 
