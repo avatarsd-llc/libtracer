@@ -24,6 +24,7 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -74,10 +75,14 @@ using tr::testing::check;
 
 /** @brief What one read of the forking vertex came back as. */
 enum class shape_t : std::uint8_t {
-    NONE,   /**< @brief The read returned no value at all. */
-    LEAF,   /**< @brief The vertex's own one-byte scalar. */
-    FORKED, /**< @brief A composed reply that CARRIES the child. */
-    OTHER,  /**< @brief Composed but childless, or a scalar that is not the expected byte. */
+    NONE,      /**< @brief The read returned no value at all. */
+    LEAF,      /**< @brief The vertex's own one-byte scalar. */
+    FORKED,    /**< @brief A composed reply that CARRIES the child. */
+    ROOT_ONLY, /**< @brief The LEGAL retirement transient: a composed POINT wrapping the
+                        root's scalar alone, zero child records — byte-identical to the
+                        fully READ-ACL-pruned reply (RFC-0016 §B erratum 2026-08-13,
+                        #1030). */
+    OTHER,     /**< @brief Anything else — a malformed reply the race must never produce. */
 };
 
 /**
@@ -89,7 +94,10 @@ enum class shape_t : std::uint8_t {
  * retirement transient — the fork bit still set when the walk takes the map lock, the child
  * already gone — composes the ROOT ALONE, which is bigger than a scalar and carries no
  * child. Distinguishing the two is what lets the concurrent case assert that a reader saw
- * the vertex *forked* rather than merely saw the bit set.
+ * the vertex *forked* rather than merely saw the bit set — and what lets it ACCEPT the
+ * root-only compose by name instead of lumping it with malformed replies: the shape is
+ * specified legal (RFC-0016 §B erratum 2026-08-13, #1030), so it is matched byte-exactly
+ * against the five bytes the erratum pins (POINT header wrapping the root's scalar).
  *
  * @p scratch is caller-owned so the reader loop keeps its capacity across millions of
  * reads instead of allocating inside the race.
@@ -108,7 +116,12 @@ enum class shape_t : std::uint8_t {
     const auto hit =
         std::search(scratch.begin(), scratch.end(), child_name.begin(), child_name.end(),
                     [](std::byte b, char c) { return b == static_cast<std::byte>(c); });
-    return hit != scratch.end() ? shape_t::FORKED : shape_t::OTHER;
+    if (hit != scratch.end()) return shape_t::FORKED;
+    // No child record: legal only as the exact root-only compose — POINT (0x07, opt.PL,
+    // 16-bit length 1) wrapping the root's stored scalar, the erratum's canonical bytes.
+    const std::array<std::byte, 5> root_only{std::byte{0x07}, std::byte{0x40}, std::byte{0x01},
+                                             std::byte{0x00}, std::byte{leaf_byte}};
+    return std::ranges::equal(scratch, root_only) ? shape_t::ROOT_ONLY : shape_t::OTHER;
 }
 
 /** @brief Whether a read of @p p came back as something bigger than a bare scalar. */
@@ -210,7 +223,10 @@ void test_idempotent_retire() {
  * The fork read is lock-free while `fill` and `mark_unregistered` mutate the bit under the
  * graph's unique lock. Which side of a concurrent registration a reader lands on was never
  * ordered by anything a caller can observe, so the assertion over the free-running reads is
- * that every one is WELL-FORMED — never that it saw a particular side.
+ * that every one is a shape the contract admits — leaf, forked, or the root-only
+ * retirement transient the RFC-0016 §B erratum (2026-08-13, #1030) specifies as legal —
+ * never that it saw a particular side. The transient is COUNTED, not asserted present:
+ * whether the race window is hit is a scheduler artifact no portable test may demand.
  *
  * The overlap is asserted, not hoped for, and it is asserted by OBSERVATION rather than by
  * rate. Two earlier versions got that wrong. The first ran 300 rounds against four readers
@@ -265,6 +281,11 @@ void test_concurrent_fork() {
         std::atomic<std::size_t> acked{0}; /**< @brief Highest phase this reader has answered. */
         std::size_t reads = 0;             /**< @brief Reads completed, free-running included. */
         std::size_t bad = 0;               /**< @brief Reads that returned no value. */
+        std::size_t root_only = 0;         /**< @brief Free-running reads that saw the LEGAL
+                                                     root-only retirement transient. */
+        std::size_t malformed = 0;         /**< @brief Reads of a shape the contract does not
+                                                     admit — neither settled shape nor the
+                                                     root-only transient. */
         std::size_t forked = 0;            /**< @brief Phase-contained reads that saw the child. */
         std::size_t leaf = 0;              /**< @brief Phase-contained reads that saw the scalar. */
         std::size_t wrong = 0;             /**< @brief Phase-contained reads of the wrong shape. */
@@ -287,7 +308,14 @@ void test_concurrent_fork() {
                 const std::size_t seq = phase.load(std::memory_order_acquire);
                 const shape_t s = classify_read(g, kRoot, kRootByte, kChildName, scratch);
                 ++t.reads;
+                // EVERY read is classified, free-running included (#1030): the two settled
+                // shapes and the root-only retirement transient are the contract's whole
+                // vocabulary (RFC-0016 §B + erratum 2026-08-13); anything else is a torn
+                // reply. The earlier arm counted only "a value came back", which is
+                // exactly how the transient went unseen.
                 if (s == shape_t::NONE) ++t.bad;
+                if (s == shape_t::ROOT_ONLY) ++t.root_only;
+                if (s == shape_t::OTHER) ++t.malformed;
                 if (seq != answered) {
                     // This read STARTED after `seq` was published and finished before the
                     // acknowledgement below, which the writer is still waiting on — so the
@@ -336,10 +364,12 @@ void test_concurrent_fork() {
     stop.store(true, std::memory_order_relaxed);
     for (auto& t : pool) t.join();
 
-    std::size_t reads = 0, bad = 0, forked = 0, leaf = 0, wrong = 0;
+    std::size_t reads = 0, bad = 0, root_only = 0, malformed = 0, forked = 0, leaf = 0, wrong = 0;
     for (const reader_tally_t& t : tally) {
         reads += t.reads;
         bad += t.bad;
+        root_only += t.root_only;
+        malformed += t.malformed;
         forked += t.forked;
         leaf += t.leaf;
         wrong += t.wrong;
@@ -350,10 +380,13 @@ void test_concurrent_fork() {
     const std::size_t want_each = kRounds * kReaders;
 
     std::printf(
-        "    %zu rounds x %zu readers -> %zu reads, %zu malformed; %zu forked + %zu leaf "
-        "phase observations, %zu wrong\n",
-        kRounds, kReaders, reads, bad, forked, leaf, wrong);
-    check(bad == 0, "every concurrent read of the forking vertex was well-formed");
+        "    %zu rounds x %zu readers -> %zu reads, %zu no-value, %zu malformed, %zu "
+        "root-only transients; %zu forked + %zu leaf phase observations, %zu wrong\n",
+        kRounds, kReaders, reads, bad, malformed, root_only, forked, leaf, wrong);
+    check(bad == 0, "every concurrent read of the forking vertex returned a value");
+    check(malformed == 0,
+          "every free-running read was one of the three specified shapes — leaf, forked, or "
+          "the root-only retirement transient (RFC-0016 §B erratum, #1030) — never torn");
     check(wrong == 0, "every read the handshake pinned inside a phase saw that phase's shape");
     check(forked == want_each,
           "each reader observed the vertex FORKED — child in the reply — once per round");
