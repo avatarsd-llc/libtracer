@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0024 |
 | **Title** | Bound paths: node-scoped vertex-ref source routing |
-| **Status** | **accepted** (2026-08-03, maintainer-ratified, comment window waived). The whole document is ratified, and **§4-§7 are now incorporated in full** as of the forwarding car (2026-08-03): `docs/spec/v1.md` §3 and `docs/reference/05-protocol-tlvs.md` §`0x14` cite the wire form (§4), the routing semantics (§5-§7) and the **hop rules** normatively, `docs/reference/03-addressing.md` carries the two-forms rule, and `docs/reference/13-network-formation.md` the bound diameter ([#809](https://github.com/avatarsd-llc/libtracer/issues/809)). The forwarder's element-consuming hop (§4.1, §5.1 step 4) and the origin-side bind (§7.2/§7.4) ship with that car; §7.1's accumulation gains **erratum 1** below, which is what makes multi-hop minting safe. **TWO** clauses remain ratified and NOT incorporated. (1) The §5.3 **NACK** carrying the failing hop index, whose spelling §9.2 still leaves open. A drop is already the conformant behaviour without it; the NACK only makes the origin's recovery faster. (2) §7.1's **"Symmetry, ruled in"** reverse-direction option, which **erratum 2** below records as having no wire spelling at all: every candidate contradicts an already-incorporated normative sentence, so realizing it is a further **amendment**, not an implementation. Nothing in the shipped surface depends on it. The **§8 bench gate is discharged** with the forwarding car: no shipped shape regresses with disjoint ranges under §8.2's protocol (16 interleaved pairs, `taskset -c 2`, both arms collated, first round discarded), the mandatory four-link `reply-spread` arm is level, and §8.4's per-hop question is answered in §3.4 — the first build of the car answered it NEGATIVE and the three costs behind that are recorded there. |
+| **Status** | **accepted** (2026-08-03, maintainer-ratified, comment window waived). The whole document is ratified, and **§4-§7 are now incorporated in full** as of the forwarding car (2026-08-03): `docs/spec/v1.md` §3 and `docs/reference/05-protocol-tlvs.md` §`0x14` cite the wire form (§4), the routing semantics (§5-§7) and the **hop rules** normatively, `docs/reference/03-addressing.md` carries the two-forms rule, and `docs/reference/13-network-formation.md` the bound diameter ([#809](https://github.com/avatarsd-llc/libtracer/issues/809)). The forwarder's element-consuming hop (§4.1, §5.1 step 4) and the origin-side bind (§7.2/§7.4) ship with that car; §7.1's accumulation gains **erratum 1** below, which is what makes multi-hop minting safe. **ONE** clause remains ratified and NOT incorporated: the §5.3 **NACK** carrying the failing hop index, whose spelling §9.2 still leaves open. A drop is already the conformant behaviour without it; the NACK only makes the origin's recovery faster. §7.1's **"Symmetry, ruled in"** reverse-direction option — which **erratum 2** below records as having had no wire spelling, every candidate contradicting an already-incorporated normative sentence — is now **incorporated via amendment 1** (2026-08-14, [#1223](https://github.com/avatarsd-llc/libtracer/issues/1223)): spelling (b), forwarder-contributed, the origin's frame bit-identical. The **§8 bench gate is discharged** with the forwarding car: no shipped shape regresses with disjoint ranges under §8.2's protocol (16 interleaved pairs, `taskset -c 2`, both arms collated, first round discarded), the mandatory four-link `reply-spread` arm is level, and §8.4's per-hop question is answered in §3.4 — the first build of the car answered it NEGATIVE and the three costs behind that are recorded there. |
 | **Author(s)** | AvatarSD (maintainer) — written up from the 2026-08-02 grill, in which the design below was **ruled**, not proposed |
 | **Created** | 2026-08-02 |
 | **Comment window** | waived by default while solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"); invoke explicitly if outside input is wanted. Verified: `docs/implementations.md:13` still reads `_(none yet)_`, so the waiver's revert trigger has not fired. |
@@ -606,7 +606,8 @@ Four spellings exist. Each contradicts something already incorporated:
 an amendment picks a spelling — (b) is the only live candidate — a conformant host binds the forward
 direction only, and a return route stays canonical. Nothing regresses: the delivery direction is
 exactly as expensive as it is today, which is what §7.4 was already paying before this clause was
-written.
+written. *(Resolved: **amendment 1** below picks (b), 2026-08-14. This erratum stays as the record
+of why an amendment was the instrument, and its settled sub-questions are the amendment's premises.)*
 
 **What the clause DOES determine, recorded so an amendment need not re-derive it.** Three of the
 four questions a reverse mint raises are already answered by text outside §7.1, and only the
@@ -634,6 +635,61 @@ spelling is open:
   element minted on a different host against its own vertex map, where it is perfectly valid. That
   is the §5.3 mis-route class. The rule is all-or-nothing over the reverse list alone; it never
   makes `src` partial, because under every surviving spelling `src` stays canonical and complete.
+
+**Amendment 1 (#1223, 2026-08-14) — the reverse-direction mint gets its spelling: (b),
+forwarder-contributed.** Maintainer ruling on
+[#1223](https://github.com/avatarsd-llc/libtracer/issues/1223); instrument per this RFC's own
+**Instrument** field (a new child position on a `FWD` request is a new frame shape,
+`GOVERNANCE.md` §"Errata, amendments, and the comment window"); comment window waived by default
+while solo-maintained, invoked here as waived. Erratum 2's four settled sub-questions are premises
+of this amendment and are not re-derived. The normative content, in full:
+
+- **The spelling is (b): canonical `src`, plus a reverse-direction `PATH_REF` as the trailing
+  child of the *forwarded* request.** The reverse child appears only on a request whose `op` bit 7
+  (the mint request) is set, and only after the first forwarding hop. It carries §4.2's exact
+  grammar — `opt.PL` and `opt.LL` both 0, `length` a multiple of 8, element count ≤ 255 — and it
+  is **last**, so a positional reader of an ordinary request is untouched, mirroring the forward
+  mint answer's position on the reply. `src` stays canonical and complete; the fallback (§9.3) is
+  preserved, which is what ruled (b) in over (a), (c) and (d).
+- **The origin's frame is bit-identical to today: zero added origin bytes.** The origin never
+  emits the reverse child, exactly as no peer ever sees the origin's own element of the forward
+  list. The `fwd/fwd-mint-request` conformance vector's **bytes stand unchanged**; its prose claim
+  narrows from "zero added request bytes" to "zero added **origin** bytes".
+- **Each forwarding hop that participates PREPENDS its own element** for the identity the request
+  *arrived on* — its connection vertex for a point-to-point link, or the accepted session's
+  identity vertex for a bus session (the [ADR-0044](../../adr/0044-stateless-transport-peer-enumeration-separate-paths-client-side-identity.md)
+  amendment's peer vertex; budget: the accepting listener's `max_peers`, per erratum 2's third
+  settled sub-question) — in lockstep with the canonical growth of `src`, per erratum 2's first
+  settled sub-question (prepend, so the list runs responder-first and element 0 is always the
+  reading host's own reference, §4.1). A hop with no reverse child yet MAY create it (one element).
+- **The responder completes and consumes locally, mirroring the origin.** The reverse list arrives
+  one element short of the route: the hop *into* the responder is the one no peer can mint for it.
+  The responder completes the list with its own reference to the connection vertex the request
+  arrived on and **consumes that element locally** on every delivery (§7.4), never putting it on
+  the wire — the exact mirror of the origin completing and locally consuming the forward list's
+  first element (§7.5).
+- **A hop that cannot contribute MUST strip the whole reverse list** from the request it forwards —
+  erratum 2's fourth settled sub-question, made normative here. Erratum 1's argument transfers
+  direction-reversed and equally forced: a list that skips a hop is a **wrong** route, the §5.3
+  mis-route class. All-or-nothing over the reverse list alone; `src` is never made partial.
+- **A mint is gated by the full existing check, in this direction too.** A hop MUST NOT contribute
+  a reverse element when the requesting frame could not have reached it canonically — automatic,
+  since the element rides that very frame — and MUST NOT mint on a saturated generation (§4.4
+  rule 3; it strips instead). §6.2's re-check at the dereferenced vertex applies unchanged to
+  every delivery over the reverse list.
+- **What this buys.** §7.1's original promise is repaid: one round trip binds both directions, and
+  the §7.4 delivery direction becomes real rather than "exactly as expensive as it is today" — the
+  per-delivery saving is §3.2's `canonical_dst − (4 + 8H)`. It is also what
+  [#1223](https://github.com/avatarsd-llc/libtracer/issues/1223)'s producer-side validation stands
+  on: a producer that validates the reverse element before delivering makes a dead session's
+  recycled name fail the generation check instead of inheriting the stream.
+- **Compatibility, stated rather than hidden.** A core that predates this RFC rejects the
+  mint-flagged opcode outright (§7.5), so it never relays a reverse list. A core from the window
+  between the forwarding car (2026-08-03) and this amendment masks the `op` byte and **relays the
+  trailing child verbatim without contributing** — the skip-a-hop shape. That window is empty in
+  fact: `docs/implementations.md:13` still reads `_(none yet)_`, and the reference core ships the
+  strip rule with this amendment. A deployment that pins commits inside that window (as
+  `docs/spec/v1.md`'s draft banner instructs) must not enable the reverse mint across those hosts.
 
 ### 7.2 (a) implicit, heuristic-free
 
@@ -675,8 +731,10 @@ the other; RFC-0021 defines *what is resolved*, this one defines *what the answe
 
 ### 7.5 The mint exchange — every byte
 
-**Request: zero added bytes.** The bind request is a flag in the **existing `op` byte**, not a new
-child and not a TLV option bit.
+**Request: zero added origin bytes** *(scoped by amendment 1: the sentence read "zero added bytes"
+until 2026-08-14, and that is still exactly true of the origin's frame; the reverse list rides the
+**forwarded** legs, which the origin never emits — see §7.1 amendment 1)*. The bind request is a
+flag in the **existing `op` byte**, not a new child and not a TLV option bit.
 
 - It cannot be a TLV `opt` bit: all six defined bits are assigned (`opt_t`,
   `core/include/libtracer/tlv.hpp:59-65`) and bits 7 and 0 are reserved-MUST-be-zero, with a set
@@ -695,15 +753,18 @@ child and not a TLV option bit.
   an error. §9.3 makes the masking rule normative for every forwarder; until it is deployed, a
   bind request to an unknown peer costs one failed op.
 
-**Reply: `4 + 8H` per direction.**
+**The lists: `4 + 8H` per direction, each riding the leg that reaches its reader** *(re-ledgered
+by amendment 1 — the reverse row sat under "Reply" until 2026-08-14, where erratum 2 records it
+could never have arrived)*.
 
-| direction | added bytes | when |
-| --- | ---: | --- |
-| forward list (origin learns the route out) | 4 + 8H | whenever a mint completes |
-| reverse list (responder learns the route back, §7.1) | 4 + 8H | only when the symmetry option is exercised |
+| direction | rides | added bytes | when |
+| --- | --- | ---: | --- |
+| forward list (origin learns the route out) | the **reply**, last child | 4 + 8H | whenever a mint completes |
+| reverse list (responder learns the route back, §7.1 amendment 1) | the **forwarded request**, last child — growing hop by hop; the origin's own leg carries none | 4 + 8H at the last leg | only when the mint request is set and every hop contributes (else stripped) |
 
 **Break-even, computed.** Per-op saving once bound is `canonical_dst − (4 + 8H)` (§3.2), paid
-once against a mint cost of `4 + 8H` per direction:
+once against a mint cost of `4 + 8H` per direction — the totals below are unchanged by
+amendment 1, which moves the reverse arm's bytes to the forwarded request without repricing them:
 
 | route | H | saving/op | mint (fwd only) | break-even | mint (both dirs) | break-even |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -815,12 +876,14 @@ Only §9.2's NACK spelling is still open.
 The NACK spelling (§5.3): extend `HANDLE_NACK` with a hop-index child, or take a sibling code from
 `0x15`–`0x1F`. Both are additive; the vocabulary argument (§2.1) favours the sibling.
 
-**Not deferred here: the reverse-direction spelling.** §7.1's symmetry option is *not* an
-implementation-review question, and erratum 2 is why — every spelling of it contradicts an
-already-incorporated normative sentence ("zero added request bytes", or `src` accumulating
-canonically), so it needs an **amendment**, not a choice made in review. Erratum 2 records the
-candidates, the one that survives, and the three sub-questions an amendment would not have to
-re-derive.
+**Not deferred here: the reverse-direction spelling — and no longer open.** §7.1's symmetry option
+was *not* an implementation-review question, and erratum 2 is why — every spelling of it
+contradicted an already-incorporated normative sentence ("zero added request bytes", or `src`
+accumulating canonically), so it needed an **amendment**, not a choice made in review. **Amendment 1
+(§7.1) made that amendment on 2026-08-14**: spelling (b), forwarder-contributed, the origin's frame
+bit-identical. What remains for implementation review is only the ordinary kind: the request-side
+mirror of the reply's mint rebuild, and the producer-side validation
+([#1223](https://github.com/avatarsd-llc/libtracer/issues/1223) steps 3–4).
 
 ### 9.3 Conformance obligations on a peer
 

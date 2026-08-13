@@ -6,7 +6,7 @@
   "decoded": {
     "type": "0x0F FWD",
     "structured": true,
-    "meaning": "FWD{ op=0x80 = READ | mint-request, dst=/sensor/temp, src=/reply-ep } — byte-for-byte fwd/fwd-read with ONE bit changed: the op byte's bit 7. A bound-path mint request costs zero added request bytes.",
+    "meaning": "FWD{ op=0x80 = READ | mint-request, dst=/sensor/temp, src=/reply-ep } — byte-for-byte fwd/fwd-read with ONE bit changed: the op byte's bit 7. A bound-path mint request costs zero added origin bytes (RFC-0024 §7.1 amendment 1: forwarding hops may grow the forwarded legs; the origin's frame never changes).",
     "note": "RFC-0024 §7.5. The opcode is `op & 0x3F`; bits 7-6 are flags. A forwarder MUST mask before switching on the byte, or this frame reads as an unknown opcode at every hop."
   }
 }
