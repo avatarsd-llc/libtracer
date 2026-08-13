@@ -690,12 +690,27 @@ bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_sou
         // segment, which is what keeps two buses' same-named peers distinct on the way back.
         // Departure seam (RFC-0009 §D extended): a bus peer that hangs up carries its
         // own name, and label state is keyed by that name, so link_down still takes the peer.
-        // No `conn_slot` is recorded for a BUS child, and that is the RFC-0024 §5 refusal
-        // rather than an omission: a bus mount's own NAME is not a routable next-hop
-        // (ADR-0073 §3 / RFC-0020 — its `send()` BROADCASTS), and a bus PEER has no vertex at
-        // all, so there is nothing an element could name here. A bound route over a bus fails
-        // validation at this hop and the origin falls back to canonical, which is exactly what
-        // the canonical spelling already does with the bus link's own name.
+        // No `conn_slot` is recorded for a BUS child, and that is a refusal rather than an
+        // omission. TWO INDEPENDENT facts, each with its own citation (#1223 — this used to
+        // cite "the RFC-0024 §5 refusal", which says nothing about buses, mounts or peers,
+        // and derived the second fact from the first, which does not follow):
+        //   1. The MOUNT is not a bindable next-hop. A bus link's own NAME is not a routable
+        //      next-hop (ADR-0073 §3 — its `send()` BROADCASTS), and RFC-0020 §3 makes it a
+        //      MUST that a residual below a bus mount is never resolved against the local
+        //      graph. So no element may name the mount as the hop's egress. This is also what
+        //      `bound_egress` enforces per frame, via the `eg.multi_peer` guard below —
+        //      that guard protects the MOUNT, not a peer.
+        //   2. A bus PEER has no vertex to name — for an ANNOUNCE-CENSUS peer. That is
+        //      ADR-0044 §Decision 1, as scoped by its 2026-08-13 amendment (#1223): announced
+        //      peers create no vertices, so there is nothing an element could reference. It is
+        //      NOT entailed by fact 1 — a bus peer has a perfectly well-defined DIRECTED,
+        //      pointer-stable endpoint (`bus_link_t::peer_link`, transport.hpp — "sends to
+        //      THAT peer only", valid for the link's lifetime). An ACCEPTED ws/tcp session is
+        //      outside that scope and may hold a vertex; when it does, this seam is what has
+        //      to grow a slot for it.
+        // A bound route over a bus therefore fails validation at this hop and the origin falls
+        // back to canonical, which is exactly what the canonical spelling already does with the
+        // bus link's own name.
         child_rx_ctx_t& bctx = acquire_ctx(name, rx);
         publish_ctx(bctx);
         bus->set_peer_down_notifier(
