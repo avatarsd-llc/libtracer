@@ -22,7 +22,7 @@ The configuration space therefore has exactly three kinds of axis, and no fourth
 | axis kind | what it selects | mechanism |
 | --- | --- | --- |
 | **module set** | which translation units compile at all | CMake `option()` / Kconfig — a dropped module leaves neither code nor a symbol |
-| **buffer sizes** | how big the fixed tables are | `inline constexpr` in one generated header |
+| **buffer sizes** | how big the fixed tables are | `inline constexpr` in one hand-written header |
 | **policy types** | which implementation of a named seam is bound | `using` alias in the same header |
 
 All three are **plain C++ or build-system state — never a preprocessor feature macro**
@@ -31,8 +31,8 @@ A knob is a constant or an alias, so a wrong value is a compile error in the bui
 rather than a silent behavioural fork between translation units.
 
 The sizes and policies are members of **one named type**, `default_config_t`
-(`core/include/libtracer/config.hpp.in:73`), bound once by `using config_t = default_config_t;`
-(`:261`). An application declares its own by inheriting and overriding what differs (`:61-67`):
+(`core/include/libtracer/config.hpp:81`), bound once by `using config_t = default_config_t;`
+(`:313`). An application declares its own by inheriting and overriding what differs (`:65-75`):
 
 ```cpp
 struct my_node_config_t : tr::graph::default_config_t {
@@ -43,7 +43,7 @@ using config_t = my_node_config_t;
 
 Inheriting means a knob added later does not break the preset — it inherits the new default
 rather than failing to compile. The rest of the library names the derived spellings re-exported
-below the traits type (`:263-281`), each of which is exactly its traits member, so introducing
+below the traits type (`:316-333`), each of which is exactly its traits member, so introducing
 `config_t` moved no call site.
 
 It is **bound once, not threaded as a template parameter**, and
@@ -55,18 +55,34 @@ and an app-declared traits type cannot reach the library's out-of-line translati
 
 ## The delivery mechanism
 
-One header, `<libtracer/config.hpp>`, carries every size and policy. Two renderings of a
-single template (`core/include/libtracer/config.hpp.in`) exist:
+One header, `<libtracer/config.hpp>`, carries every size and policy. It is **ordinary
+hand-written C++** and the only place a default is spelled — a consumer with no build-system
+participation at all (a raw `-Icore/include` compile, a vendored source drop, the Cortex-M0
+footprint gate) gets stock settings and builds.
 
-- **generated** — CMake (or the ESP-IDF component) renders it into the build tree with the
-  target's values and puts that directory *first* on the public include path, so it shadows
-  the checked-in copy for every TU of that build. One file per build is what makes a size
-  agreement impossible to break: a bare `-D` set on some TUs and not others would be an ODR
-  violation the linker is not obliged to notice.
-- **checked in** — the default rendering, held byte-identical to the template by a
-  configure-time drift gate. A consumer with no build-system participation at all (a raw
-  `-Icore/include` compile, a vendored source drop, the Cortex-M0 footprint gate) gets stock
-  settings and builds.
+A target that wants non-default values supplies an **override fragment**,
+`libtracer/config_override.hpp`, earlier on the include path. `config.hpp` picks it up
+automatically and uses the `config_t` it binds. One file per build is what makes a size
+agreement impossible to break: a bare `-D` set on some TUs and not others would be an ODR
+violation the linker is not obliged to notice.
+
+The fragment **inherits** `default_config_t` and states only what differs:
+
+```cpp
+// libtracer/config_override.hpp
+namespace tr::graph {
+struct esp_config_t : default_config_t {
+    static constexpr std::size_t kCacheLineBytes = 0;
+};
+using config_t = esp_config_t;
+}  // namespace tr::graph
+```
+
+That inheritance is why there is no drift gate any more: a knob added to `config.hpp` reaches
+every override with its new default, because no override restates the knobs it does not change.
+Earlier revisions generated the whole header from a CMake template and byte-compared a default
+render against the checked-in copy — a gate that existed only because the defaults were spelled
+twice ([ADR-0068 §Erratum 1](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0068-build-configuration-is-plain-cpp-config-header.md)).
 
 The consequence worth stating plainly: **the values are chosen by whoever builds libtracer's
 sources.** For every real integration path that is the application's own build — the ESP-IDF
@@ -139,17 +155,29 @@ type-erasure bloat and template-instantiation bloat alike.
 
 ## The sized and bound axes
 
-| knob | kind | default | CMake | ESP-IDF |
-| --- | --- | --- | --- | --- |
-| `kVertexLockStripes` (`config.hpp.in:86`) | count | 16 | `-DLIBTRACER_VERTEX_LOCK_STRIPES` | menuconfig `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` |
-| `kCacheLineBytes` (`:109`) | padding width | 64 | `-DLIBTRACER_CACHE_LINE_BYTES` | derived from `CONFIG_FREERTOS_UNICORE`, not exposed (`integrations/esp-idf/libtracer/CMakeLists.txt:290-293`) |
-| `kHazardReaderSlots` (`:136`) | count | 64 | `-DLIBTRACER_HAZARD_READER_SLOTS` | hardcoded to 64 (`integrations/esp-idf/libtracer/CMakeLists.txt:275`) |
-| `kEdgePinSlots` (`:159`) | count | 32 | `-DLIBTRACER_EDGE_PIN_SLOTS` | hardcoded to 8 (`integrations/esp-idf/libtracer/CMakeLists.txt:285`) |
-| `kMaxVertexBytes64` / `kMaxVertexBytes32` (`:185` / `:203`) | RAM ratchet | 96 / 72 | the preset — deliberately not a CMake variable | the preset |
-| `kPinPayloadRatio` (`:227`) | ratio | 0 — the `kPinNever` sentinel | no variable — a preset member | not exposed |
-| `acl_policy_t` (`:236`) | policy type | `allow_only_policy_t` | `-DLIBTRACER_ACL_FULL=ON` | hardcoded to `allow_only_policy_t` (`integrations/esp-idf/libtracer/CMakeLists.txt:273`) — the full policy is not selectable |
-| `lkv_slot_t` (`:252`) | policy type | `sp_atomic_slot_t` | `-DLIBTRACER_LKV_SLOT=<type>` | hardcoded to `sp_atomic_slot_t` (`integrations/esp-idf/libtracer/CMakeLists.txt:274`) — the hazard slot is not selectable |
-| `kSpinWaitSafe` (`:307`) | target fact | `true` | `-DLIBTRACER_SPIN_WAIT_SAFE=false` on an RTOS host | derived from `IDF_TARGET` — `false` on every chip, `true` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:306-310`) |
+Every knob is overridden the same way — as a member of the fragment's traits type. The column
+below names the member; a knob the fragment does not state keeps the default beside it.
+
+The **ESP-IDF column describes that component as it stands today**, which is the one build still
+rendering the `config.hpp.in` template rather than writing a fragment: it sets plain CMake
+variables and `configure_file`s the template. The knob *values* are what the column says either
+way; only the delivery differs, and #1244 converts it.
+
+| knob | kind | default | ESP-IDF |
+| --- | --- | --- | --- |
+| `kVertexLockStripes` (`config.hpp:95`) | count | 16 | menuconfig `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` (`integrations/esp-idf/libtracer/CMakeLists.txt:269`) |
+| `kCacheLineBytes` (`:119`) | padding width | 64 | derived from `CONFIG_FREERTOS_UNICORE`, not exposed (`integrations/esp-idf/libtracer/CMakeLists.txt:290`) |
+| `kHazardReaderSlots` (`:146`) | count | 64 | inherited — the refcount slot never builds the domain |
+| `kEdgePinSlots` (`:159`) | count | 32 | set to 8 (`integrations/esp-idf/libtracer/CMakeLists.txt:285`) |
+| `kMaxVertexBytes64` / `kMaxVertexBytes32` (`:195` / `:213`) | RAM ratchet | 96 / 72 | the preset — deliberately not overridable |
+| `kPinPayloadRatio` (`:237`) | ratio | 0 — the `kPinNever` sentinel | the preset |
+| `acl_policy_t` (`:246`) | policy type | `allow_only_policy_t` | inherited — the full policy is not selectable |
+| `lkv_slot_t` (`:262`) | policy type | `sp_atomic_slot_t` | inherited — the hazard slot is not selectable |
+| `kSpinWaitSafe` (`:357`) | target fact | `true` | derived from `IDF_TARGET` — `false` on every chip, `true` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:306`) |
+
+Two CMake variables survive for one transition release, `-DLIBTRACER_ACL_FULL` and
+`-DLIBTRACER_LKV_SLOT`; `core/CMakeLists.txt` writes a fragment on their behalf. The five other
+cache variables this table used to list were deleted with the template (#1142).
 
 Each is documented at its declaration with what it costs and when to move it; that header is
 the reference, not this table. What matters here is the shape: **nine knobs, all named, all
@@ -225,7 +253,7 @@ an integrator should be asked.
 
 `lkv_slot_t` is the one knob whose value is a **name the integrator supplies**, so it is the one
 knob with a contract attached. The declaration instructs that the named type must satisfy the
-policy contract in `lkv_slot.hpp` (`config.hpp.in:252`, and the instruction itself at `:249-250`) —
+policy contract in `lkv_slot.hpp` (`config.hpp:262`, and the instruction itself at `:259-260`) —
 a header that is absent from `core/Doxyfile`'s `INPUT` list, so the generated API site does not
 serve the page that instruction points at. The contract, stated here, is three operations over
 `value_ptr_t = std::shared_ptr<const view::rope_t>`:
@@ -276,7 +304,7 @@ Four differences that surprise people, each a property of the target rather than
   builds: one, in practice, and never the 32-bit arm, because no CI leg cross-compiles that
   test while the ESP-IDF legs compile `vertex_t` itself on every change. That distinction has
   teeth here — both arms are **ratchets pinned to the measured size, so neither has headroom by
-  construction** (`config.hpp.in:203`): 96 B on 64-bit, 72 B on rv32, and the next added member
+  construction** (`config.hpp:213`): 96 B on 64-bit, 72 B on rv32, and the next added member
   is a build failure on both. They were ceilings held above the measurement until 2026-08-10,
   which is why 16 B reclaimed on the 64-bit arm and 8 B on the 32-bit one went unnoticed — a
   ceiling answers "did you regress past a fixed point", never "did this get leaner". The stripe carries a companion
@@ -307,9 +335,17 @@ Some constants look exactly like sizing knobs and are not:
 
 ## Adding an axis
 
-A knob is added to `config.hpp.in` — the template is the source of truth — and its default
-rendering is regenerated rather than hand-edited; the drift gate fails the configure step if
-the two disagree. Every render site must then set it. There are two (`core/CMakeLists.txt`
-and the ESP-IDF component), and **the drift gate covers only the first**: a template variable
-the component does not set renders as an empty substitution, which is a compile error in the
-integrator's tree rather than a configure error in this one. Set it in both.
+A knob is added as a `default_config_t` member in `config.hpp`, with its default as an ordinary
+C++ literal. That is the whole procedure: there is one copy, so nothing has to be regenerated
+and nothing can drift.
+
+Nothing else has to be touched. Every override fragment inherits `default_config_t`, so an
+existing override — the ESP-IDF component's, an application's — picks up the new knob at its
+new default without an edit. Deliberately, a knob does **not** get a CMake cache variable: it is
+set in the fragment, as C++. (`-DLIBTRACER_ACL_FULL` and `-DLIBTRACER_LKV_SLOT` survive for one
+transition release, with `core/CMakeLists.txt` writing a fragment on their behalf.)
+
+Put the knob in `default_config_t` even when it states an L0 fact — `kSpinWaitSafe` is a
+`tr::mem` concept whose spelling is derived from `config_t`. A knob outside the one named type
+cannot be reached by a fragment at all, which is exactly how that one ended up stranded in the
+build system.

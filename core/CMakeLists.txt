@@ -200,90 +200,52 @@ endif()
 option(LIBTRACER_ACL_FULL "Evaluate ACLs with the full security_acl host policy (DENY, ordered)"
        OFF)
 
-# Process-wide vertex lock-stripe count (#361 §2) — a per-target knob, delivered as
-# plain C++ through the generated config header below (ADR-0068), never as a -D.
-set(LIBTRACER_VERTEX_LOCK_STRIPES 16 CACHE STRING
-    "Vertex lock-stripe count (N mutexes + condvars process-wide; 4-8 for a small MCU node)")
-
-# False-sharing padding width, or 0 where the target has no second core to false-share with
-# (measured: 16 stripes cost 1,024 B of rv32 .bss at 64 and 128 B at 0). An optimization
-# knob only — 0 on a multi-core host costs control-plane throughput, never correctness.
-set(LIBTRACER_CACHE_LINE_BYTES 64 CACHE STRING
-    "Cache-line width for false-sharing padding, or 0 on a single-core target")
-
 # ---- libtracer/config.hpp — per-target build configuration as plain C++ (ADR-0068) ----
-# Every compile-time knob is an `inline constexpr` / `using` binding in ONE generated
-# header that shadows the checked-in default (raw -Iinclude consumers build with stock
-# settings). One file per build ⇒ every TU agrees ⇒ no per-TU -D ODR hazard.
-if(LIBTRACER_ACL_FULL)
-    set(LIBTRACER_ACL_POLICY full_acl_policy_t)
-else()
-    set(LIBTRACER_ACL_POLICY allow_only_policy_t)
-endif()
-# The LKV slot policy (ADR-0069 §1). Default: today's atomic<shared_ptr>, so a stock build
-# is unchanged. A many-core host rebinds it to a non-serializing reclamation scheme; the
-# named type must satisfy the contract in lkv_slot.hpp and be visible to vertex.hpp.
+# The defaults are C++ literals in include/libtracer/config.hpp and the build system does not
+# spell them at all. A target with non-default knobs supplies a `libtracer/config_override.hpp`
+# fragment earlier on the include path; config.hpp picks it up and uses the `config_t` it binds.
+# One file per build ⇒ every TU agrees ⇒ no per-TU -D ODR hazard, which is the property the
+# older generated-header arrangement existed to provide. Deleting the template deleted with it
+# the checked-in second copy of the defaults and the configure-time drift gate that guarded the
+# two against each other — a class of rot that cannot occur when there is one copy (§Erratum 1).
+#
+# TRANSITION, one release (#1142): the two option names CI legs and embedder scripts already
+# pass on the command line keep working, by writing that fragment on their behalf. A NEW knob
+# does not get a CMake variable — it is set in the fragment, as ordinary C++.
 set(LIBTRACER_LKV_SLOT sp_atomic_slot_t CACHE STRING
-    "LKV slot policy type (tr::graph::<type> from lkv_slot.hpp)")
-# Hazard-domain size (ADR-0069 §3) — threads that may concurrently touch a vertex's LKV.
-# Costs (N+1)*128 bytes of .bss, and zero unless LIBTRACER_LKV_SLOT=hazard_slot_t.
-set(LIBTRACER_HAZARD_READER_SLOTS 64 CACHE STRING
-    "Hazard-pointer domain size (threads that may concurrently touch an LKV slot)")
-# Edge-pin domain size (#635) — threads that may PUBLISH concurrently. Always emitted (the
-# publish path is not a policy binding); costs N*max(LIBTRACER_CACHE_LINE_BYTES, sizeof(void*))
-# bytes of .bss. Undersizing costs throughput on the overflow threads, never correctness.
-set(LIBTRACER_EDGE_PIN_SLOTS 32 CACHE STRING
-    "Edge-pin domain size (threads that may publish to one graph concurrently)")
-# May a task spin-wait for a lock another task holds (#1158)? A TARGET fact, not a preference:
-# true on a multi-core host, false on any priority-preemptive scheduler, where a spinner that
-# outranks the holder converts an O(1) section into a watchdog reset. The value is the C++
-# token, as with LIBTRACER_LKV_SLOT — an RTOS-hosted core build passes `false` and the guard in
-# mem_pool.hpp then rejects synchronized_pool_t<spin_sync_t> at compile time. The ESP-IDF
-# component derives it from IDF_TARGET and does not ask (integrations/esp-idf/libtracer/
-# CMakeLists.txt); a bare host build has no scheduler to invert against, hence true by default.
-set(LIBTRACER_SPIN_WAIT_SAFE true CACHE STRING
-    "May a task spin-wait for a lock another task holds? (`true`/`false`; false on an RTOS)")
-configure_file(
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/libtracer/config.hpp.in
-    ${CMAKE_CURRENT_BINARY_DIR}/generated/include/libtracer/config.hpp
-    @ONLY)
-target_include_directories(libtracer BEFORE PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/generated/include>)
+    "DEPRECATED (one release): LKV slot policy type. Prefer a libtracer/config_override.hpp")
+set(_lt_cfg_binding "")
+if(LIBTRACER_ACL_FULL)
+    string(APPEND _lt_cfg_binding "    using acl_policy_t = full_acl_policy_t;\n")
+endif()
+if(NOT LIBTRACER_LKV_SLOT STREQUAL "sp_atomic_slot_t")
+    string(APPEND _lt_cfg_binding "    using lkv_slot_t = ${LIBTRACER_LKV_SLOT};\n")
+endif()
+if(NOT _lt_cfg_binding STREQUAL "")
+    message(STATUS "libtracer: writing a config_override.hpp for the deprecated -D knobs "
+                   "(LIBTRACER_ACL_FULL / LIBTRACER_LKV_SLOT) — prefer supplying the fragment")
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/generated/include/libtracer/config_override.hpp
+"/**
+ * @file
+ * @brief GENERATED — the deprecated -D knobs as an override fragment (ADR-0068 §Erratum 1).
+ *
+ * Written by core/CMakeLists.txt for the one-release transition off `-DLIBTRACER_ACL_FULL` /
+ * `-DLIBTRACER_LKV_SLOT`. Supply your own `libtracer/config_override.hpp` instead.
+ */
+#pragma once
 
-# Drift gate: the checked-in default config.hpp must be byte-identical to the template
-# rendered with default values — the template is the single source of truth, and a
-# hand-edited default cannot silently rot (the derive-don't-hand-maintain rule).
-set(_lt_saved_stripes "${LIBTRACER_VERTEX_LOCK_STRIPES}")
-set(_lt_saved_policy "${LIBTRACER_ACL_POLICY}")
-set(_lt_saved_slot "${LIBTRACER_LKV_SLOT}")
-set(_lt_saved_hp "${LIBTRACER_HAZARD_READER_SLOTS}")
-set(_lt_saved_ep "${LIBTRACER_EDGE_PIN_SLOTS}")
-set(_lt_saved_line "${LIBTRACER_CACHE_LINE_BYTES}")
-set(_lt_saved_spin "${LIBTRACER_SPIN_WAIT_SAFE}")
-set(LIBTRACER_VERTEX_LOCK_STRIPES 16)
-set(LIBTRACER_ACL_POLICY allow_only_policy_t)
-set(LIBTRACER_LKV_SLOT sp_atomic_slot_t)
-set(LIBTRACER_HAZARD_READER_SLOTS 64)
-set(LIBTRACER_EDGE_PIN_SLOTS 32)
-set(LIBTRACER_CACHE_LINE_BYTES 64)
-set(LIBTRACER_SPIN_WAIT_SAFE true)
-configure_file(
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/libtracer/config.hpp.in
-    ${CMAKE_CURRENT_BINARY_DIR}/generated/drift-check/config.hpp
-    @ONLY)
-set(LIBTRACER_VERTEX_LOCK_STRIPES "${_lt_saved_stripes}")
-set(LIBTRACER_ACL_POLICY "${_lt_saved_policy}")
-set(LIBTRACER_LKV_SLOT "${_lt_saved_slot}")
-set(LIBTRACER_HAZARD_READER_SLOTS "${_lt_saved_hp}")
-set(LIBTRACER_EDGE_PIN_SLOTS "${_lt_saved_ep}")
-set(LIBTRACER_CACHE_LINE_BYTES "${_lt_saved_line}")
-set(LIBTRACER_SPIN_WAIT_SAFE "${_lt_saved_spin}")
-file(READ ${CMAKE_CURRENT_SOURCE_DIR}/include/libtracer/config.hpp _lt_cfg_default)
-file(READ ${CMAKE_CURRENT_BINARY_DIR}/generated/drift-check/config.hpp _lt_cfg_rendered)
-if(NOT _lt_cfg_default STREQUAL _lt_cfg_rendered)
-    message(FATAL_ERROR "include/libtracer/config.hpp has drifted from config.hpp.in's "
-                        "default rendering — regenerate the checked-in default from the "
-                        "template (ADR-0068).")
+namespace tr::graph {
+
+/** @brief This build's configuration: the defaults, with the -D knobs applied. */
+struct cmake_config_t : default_config_t {
+${_lt_cfg_binding}};
+
+using config_t = cmake_config_t;
+
+}  // namespace tr::graph
+")
+    target_include_directories(libtracer BEFORE PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/generated/include>)
 endif()
 
 option(LIBTRACER_WITH_CUDA "Build the mem_cuda GPU backend (needs CUDA toolkit)" OFF)
@@ -364,14 +326,20 @@ if(LIBTRACER_INSTALL)
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
+    # `config.hpp.in` is excluded: core does not render it any more, and it survives only as
+    # the ESP-IDF component's rendering source until #1244 retires that too. Shipping a
+    # template into an installed include tree would be noise at best.
     install(DIRECTORY include/libtracer
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
         PATTERN "config.hpp.in" EXCLUDE)
-    # Ship the GENERATED config.hpp (this build's knob values), overriding the
-    # checked-in default the directory copy above brought along — an installed
-    # non-default package must be self-consistent (ADR-0068).
-    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/generated/include/libtracer/config.hpp
-        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/libtracer)
+    # An installed non-default package must be self-consistent (ADR-0068): config.hpp itself
+    # is the checked-in default the directory copy above already brought along, so what has to
+    # ship alongside it is this build's override fragment — when one exists. config.hpp finds
+    # it by the same include-path question in the installed tree as in the build tree.
+    if(EXISTS ${CMAKE_CURRENT_BINARY_DIR}/generated/include/libtracer/config_override.hpp)
+        install(FILES ${CMAKE_CURRENT_BINARY_DIR}/generated/include/libtracer/config_override.hpp
+            DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/libtracer)
+    endif()
 
     set(LIBTRACER_CMAKE_CONFIG_DIR ${CMAKE_INSTALL_LIBDIR}/cmake/libtracer)
 
