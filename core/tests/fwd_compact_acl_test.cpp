@@ -59,6 +59,7 @@
 
 #include "fwd_frame_builder.hpp"
 #include "libtracer/byteorder.hpp"
+#include "libtracer/mem_heap.hpp"
 #include "libtracer/route_handle.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
@@ -282,6 +283,142 @@ void test_no_resolver_still_delivers() {
     check(stored_u32(g, sink) == kAttack, "and so does the warm one");
 }
 
+// --- #1068: the drop is COUNTED, and counted as the cause it actually is -------------
+
+/** @brief RAII: install an OOM-injection hook for one scope, always uninstalled on exit. */
+struct hook_guard_t {
+    explicit hook_guard_t(bool (*hook)(std::size_t) noexcept) {
+        tr::detail::probe_fail_hook = hook;
+    }
+    ~hook_guard_t() { tr::detail::probe_fail_hook = nullptr; }
+    hook_guard_t(const hook_guard_t&) = delete;
+    hook_guard_t& operator=(const hook_guard_t&) = delete;
+};
+
+/** @brief Reject every probe — total heap exhaustion. */
+bool fail_all(std::size_t) noexcept { return false; }
+
+/**
+ * @brief An ACL-denied COMPACT advances `delivery_drops().denied` — on BOTH arms (#1068).
+ *
+ * The drop itself is #974's correct behavior and is asserted above; what this pins is that it
+ * is VISIBLE. Pre-fix every check below reads zero: the router discards the write's status (it
+ * has no caller to hand it to) and `write_impl` returned `PERMISSION_DENIED` without counting,
+ * so a revoked peer streaming into a protected vertex was indistinguishable, from this node's
+ * own instrumentation, from a healthy quiet link.
+ *
+ * The API write at the end is the recorded ruling: `denied` counts a refusal on EVERY plane,
+ * including one whose caller was also told. The alternative — "refusals nobody heard about" —
+ * makes the number depend on which door a refusal came through, so it could not be summed.
+ */
+void test_denied_compact_is_counted() {
+    std::printf("an ACL-denied COMPACT is COUNTED, on both arms (#1068):\n");
+    graph_t g;
+    const vertex_handle_t sink = g.register_vertex(*path_t::parse("/sink"), role_t::STORED_VALUE);
+    check(g.write(sink, make_value(b_value_u32(kSeed))).has_value(), "the target is seeded");
+    check(install_acl(g, "/sink:acl", acl_allowing("peer-z", acl_right_t::WRITE)),
+          "an ACL granting WRITE to `peer-z` ALONE is installed");
+    g.set_subject_resolver(caller_is_subject);
+
+    fwd_router_t router(g);
+    rec_link_t hostile;  // NOT `peer-z`
+    rec_link_t friendly;
+    (void)router.add_child("peer-h", hostile);
+    (void)router.add_child("peer-z", friendly);
+
+    // The baseline is taken AFTER setup: the seeding write and the ACL install are writes of
+    // their own, and this test asserts DELTAS so it never depends on their count being zero.
+    const auto base = g.delivery_drops();
+
+    // COLD arm — the first COMPACT on this label is the denied one, so nothing was memoized
+    // and the write goes through `deliver_local`.
+    router.on_frame("peer-h", tr::net::encode_advertise(kLabel, b_path({"sink"})));
+    router.on_frame("peer-h", tr::net::encode_compact(kLabel, b_value_u32(kAttack)));
+    check(stored_u32(g, sink) == kSeed, "the cold denied COMPACT did not write");
+    check(g.delivery_drops().denied == base.denied + 1,
+          "and it counted EXACTLY one denied delivery (pre-#1068 this stayed at zero)");
+
+    // WARM arm — one granted delivery is what memoizes the resolution; then revoke.
+    router.on_frame("peer-z", tr::net::encode_advertise(kLabel, b_path({"sink"})));
+    router.on_frame("peer-z", tr::net::encode_compact(kLabel, b_value_u32(kAllowed)));
+    check(stored_u32(g, sink) == kAllowed, "the granted COMPACT lands — and WARMS the binding");
+    check(g.delivery_drops().denied == base.denied + 1,
+          "instrument: a delivery that LANDS counts nothing");
+
+    check(install_acl(g, "/sink:acl", acl_allowing("peer-q", acl_right_t::WRITE)),
+          "the grant is revoked (the ACL is rewritten to name `peer-q`)");
+    router.on_frame("peer-z", tr::net::encode_compact(kLabel, b_value_u32(kAttack)));
+    check(stored_u32(g, sink) == kAllowed, "the warm denied COMPACT did not write");
+    check(g.delivery_drops().denied == base.denied + 2,
+          "and the WARM arm counted its denial too — both arms, not just one");
+
+    // The plain API write: refused, the caller is TOLD, and it counts all the same.
+    check(!g.write(sink, make_value(b_value_u32(kAttack)), "peer-h").has_value(),
+          "a plain API write from a denied caller is refused");
+    check(g.delivery_drops().denied == base.denied + 3,
+          "and counts on the same number — `denied` means denied on every plane");
+
+    const auto d = g.delivery_drops();
+    check(d.no_target == base.no_target && d.out_of_memory == base.out_of_memory &&
+              d.fan_out_truncated == base.fan_out_truncated,
+          "and no denial leaked into another cause");
+}
+
+/**
+ * @brief The other two ways the SAME arm bails are counted as themselves, never as denials.
+ *
+ * `deliver_local` returns one `bool` for three distinct failures, which is exactly why the
+ * cause has to be counted where it is known rather than inferred from the return. Both cases
+ * here counted NOTHING before #1068, so a mapping that folded them into `denied` would look
+ * just as "fixed" on the test above — this is what tells the two apart.
+ */
+void test_route_miss_and_oom_are_not_denials() {
+    std::printf("a route miss and an allocation failure count as themselves (#1068):\n");
+
+    // A label bound to a route naming no vertex at all: admitted, then nowhere to land.
+    {
+        graph_t g;
+        fwd_router_t router(g);
+        rec_link_t link;
+        (void)router.add_child("peer-z", link);
+        const auto base = g.delivery_drops();
+        router.on_frame("peer-z", tr::net::encode_advertise(kLabel, b_path({"ghost"})));
+        router.on_frame("peer-z", tr::net::encode_compact(kLabel, b_value_u32(kAttack)));
+        const auto d = g.delivery_drops();
+        check(d.no_target == base.no_target + 1, "the unresolvable route counted a MISSING TARGET");
+        check(d.denied == base.denied, "and NOT a denial — no ACL was consulted at all");
+    }
+
+    // A heap exhausted under a warm binding. The delivery is shed somewhere on the write —
+    // `store_value`'s probe is the reachable failure here, since the router's own
+    // `over_bytes` draws from the global heap, which the injection seam does not gate. What
+    // this pins is the property the counter contract needs either way: an allocation failure
+    // is NEVER attributed to policy. A mapping that folded every non-success into `denied`
+    // would pass the denial test above and fail exactly here.
+    {
+        graph_t g;
+        const vertex_handle_t sink =
+            g.register_vertex(*path_t::parse("/sink"), role_t::STORED_VALUE);
+        check(g.write(sink, make_value(b_value_u32(kSeed))).has_value(), "the target is seeded");
+        fwd_router_t router(g);
+        rec_link_t link;
+        (void)router.add_child("peer-z", link);
+        router.on_frame("peer-z", tr::net::encode_advertise(kLabel, b_path({"sink"})));
+        router.on_frame("peer-z", tr::net::encode_compact(kLabel, b_value_u32(kAllowed)));
+        check(stored_u32(g, sink) == kAllowed, "a first COMPACT lands and warms the binding");
+
+        const auto base = g.delivery_drops();
+        {
+            const hook_guard_t guard(fail_all);
+            router.on_frame("peer-z", tr::net::encode_compact(kLabel, b_value_u32(kAttack)));
+        }
+        const auto d = g.delivery_drops();
+        check(stored_u32(g, sink) == kAllowed, "the exhausted COMPACT did not write");
+        check(d.denied == base.denied,
+              "and counted NO denial — nothing was refused by policy, only by memory");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -292,6 +429,10 @@ int main() {
     test_compact_denied_on_the_warm_arm();
     std::printf("\n");
     test_no_resolver_still_delivers();
+    std::printf("\n");
+    test_denied_compact_is_counted();
+    std::printf("\n");
+    test_route_miss_and_oom_are_not_denials();
 
     return tr::testing::summary("fwd_compact_acl");
 }

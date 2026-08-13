@@ -79,6 +79,29 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   orphan path and is unaffected; on the process-lifetime heap a host build uses, a missed orphan
   was only ever a deferral. `lkv_slot_test` pins the weakened guarantee non-vacuously.
 
+  delivery-drop counters (#1068).** A deliverer outside the graph — the net plane, resolving a
+  COMPACT label to a vertex and writing it — performs deliveries no counting site inside
+  `graph_t` can see, so the drops on that path were invisible in every direction. The new
+  method adds to the existing `delivery_drops()` totals; `external_drop_t` names only
+  `NO_TARGET` and `OUT_OF_MEMORY`, deliberately not `DENIED` (see below). A method rather than
+  a friendship because the counters are a published surface while the internal drop sites are
+  not. Additive: no existing member changed signature.
+
+### Changed
+
+- **`delivery_drops().denied` now counts an ACL refusal on EVERY plane (#1068).** It counted
+  only a subscription edge's fan-in denial; it is now counted at `write_impl`'s WRITE gate, so
+  a plain API `write`, a `FWD{WRITE}` terminus and both `COMPACT` terminus arms all count
+  there too. This is a **meaning change to a public counter**, not just more coverage: an API
+  caller that receives `PERMISSION_DENIED` now also advances it, so `denied` reads as
+  *refusals* rather than *refusals nobody was told about* — a number whose value depended on
+  which door a refusal came through could not be summed. A deployment alarming on `denied`
+  should expect it to move for locally-refused writes it previously did not count.
+  Deliberately NOT folded in: `assign`, a control-plane field write, and a denied READ.
+  The motivating gap was an ACL-denied COMPACT delivery, which was silent in every direction —
+  no counter, no sink, and (unchanged, by design) no wire signal, since `HANDLE_NACK` means
+  "unknown label" and answering a denial with one would prompt an endless re-advertise.
+
 ### Documentation
 
 - **`bus_link_t::peer_link`'s endpoint is documented as RESOLVE-PER-USE

@@ -371,8 +371,8 @@ record of it:
 
 ```cpp
 struct delivery_drops_t {
-    std::uint64_t no_target;          // the target PATH resolved to no live vertex
-    std::uint64_t denied;             // the target's :acl denied WRITE to the edge's stored caller
+    std::uint64_t no_target;          // no live vertex: an edge's target PATH, or a net-plane route
+    std::uint64_t denied;             // a WRITE was refused by the target's :acl — on any plane
     std::uint64_t out_of_memory;      // a nothrow delivery clone / edge-view copy could not allocate
     std::uint64_t fan_out_truncated;  // a wide fan-out's snapshot could not be widened past the
                                       // inline prefix — the capacity degrade, kept apart from OOM
@@ -382,6 +382,19 @@ struct delivery_drops_t {
 The unit is a **delivery, not an event**: a write whose notify clone fails sheds every
 subscriber of the vertex, and a truncated snapshot sheds every edge past the inline prefix, so
 each counts once per shed delivery (`1` never stands in for `N`).
+
+`denied` counts a refusal on **every plane the value-write path is entered from** — an API
+`write`, a `FWD{WRITE}` terminus, a `COMPACT` terminus, and a subscription edge's fan-in gate
+— because it is counted at the graph's own WRITE gate rather than once per deliverer (#1068).
+It is therefore *refusals*, not *refusals nobody was told about*: an API caller both receives
+`PERMISSION_DENIED` and counts here. A number that depended on which door a refusal came
+through could not be summed. `assign`, a control-plane field write and a denied READ are each
+a different right or a different path, and are deliberately not folded in.
+
+A deliverer **outside** the graph — the net plane resolving a label to a vertex and writing it
+— counts its own abandoned deliveries through `count_external_drop`, the one public door to
+these counters. It names only `NO_TARGET` and `OUT_OF_MEMORY`: a denial is counted at the gate
+that produces it, so offering it there would count one refusal twice.
 
 Counted, never enforced: nothing in the library reads them, so a deployment chooses
 whether to alarm. They are relaxed monotonic and incremented only **on** a drop, so the
