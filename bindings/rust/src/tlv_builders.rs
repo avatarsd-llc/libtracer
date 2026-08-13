@@ -223,12 +223,12 @@ pub fn value_u8(v: u8) -> Tlv {
     value(&[v])
 }
 
-/** @brief A little-endian u16 VALUE TLV node (e.g. an ACL `access_mask`, an ERROR code). */
+/** @brief A little-endian u16 VALUE TLV node (e.g. an ERROR code, a delivery-policy word). */
 pub fn value_u16(v: u16) -> Tlv {
     value(&v.to_le_bytes())
 }
 
-/** @brief A little-endian u32 VALUE TLV node (e.g. a FIELD `[N]` index). */
+/** @brief A little-endian u32 VALUE TLV node (e.g. a FIELD `[N]` index, an ACE `access_mask`). */
 pub fn value_u32(v: u32) -> Tlv {
     value(&v.to_le_bytes())
 }

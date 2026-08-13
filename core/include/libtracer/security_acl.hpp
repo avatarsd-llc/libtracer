@@ -122,9 +122,9 @@ namespace detail_acl {
  *   drop its high bytes while still counting as present.
  *
  * A payload NARROWER than the field is accepted: little-endian zero-extension is exact,
- * so it names the same integer, and it is the canonical spelling on the wire — reference
- * 05 §`0x0A` declares `access_mask` as u16 and the `acl/acl-aces` conformance vector (and
- * the Rust core's builder) emit it in two bytes, where `encode_acl` emits four.
+ * so it names the same integer — the canonical `access_mask` width is u32 (RFC-0026,
+ * matching what `encode_acl` and the `acl/acl-aces` vector spell), but a narrower
+ * pre-RFC-0026 spelling names the same rights and stays readable.
  */
 [[nodiscard]] inline bool ace_field_ok(std::span<const std::byte> payload,
                                        std::size_t width) noexcept {

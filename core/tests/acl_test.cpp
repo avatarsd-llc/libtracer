@@ -153,9 +153,10 @@ std::vector<std::byte> acl_with_non_ace_child() {
  * @brief One ALLOW ACE with `access_mask` spelled in TWO bytes and no `flags` child at all.
  *
  * Both are legal: `parse_acl` accepts a payload narrower than the parsed width (little-endian
- * zero-extension is exact — the `acl/acl-aces` conformance vector spells the mask this way) and
- * `flags` is optional. Neither is what `encode_acl` emits, which makes this the witness that an
- * `:acl` read RE-ENCODES the parsed ACEs rather than echoing the written bytes (#907).
+ * zero-extension is exact — the canonical width is u32 per RFC-0026, but the pre-amendment
+ * two-byte spelling stays readable) and `flags` is optional. Neither is what `encode_acl` emits,
+ * which makes this the witness that an `:acl` read RE-ENCODES the parsed ACEs rather than
+ * echoing the written bytes (#907).
  */
 std::vector<std::byte> acl_narrow_mask(std::string_view subject, std::uint32_t mask) {
     std::vector<std::vector<std::byte>> keep;

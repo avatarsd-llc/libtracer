@@ -14,6 +14,18 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Changed
+
+- **The ACE `access_mask` canonical wire width is u32 (RFC-0026, #993).** The published
+  corpus disagreed with itself: reference 05 §`0x0A`, the `acl/acl-aces` conformance vector
+  and the Rust builder spelled the mask u16 while `tr::graph::encode_acl` — the encoder
+  behind every `:acl` read — emitted u32. The amendment names u32 canonical: the layout
+  text and the vector now spell four bytes (vector re-cut, 179 → 183 bytes) and a new host
+  test byte-compares `encode_acl` against the vector so the typed builder can never drift
+  from it again. **No C++ API or behaviour change**: `encode_acl` already emitted u32, and
+  `parse_acl`'s acceptance rule (narrower payloads zero-extend, #906) is untouched, so ACLs
+  stored with the old two-byte spelling remain readable.
+
 ### Documentation
 
 - RFC-0016 §B erratum ([#1030](https://github.com/avatarsd-llc/libtracer/issues/1030)):

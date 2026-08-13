@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 
 use crate::path::tlv_to_path;
 use crate::tlv_builders::{
-    name, subscriber, text_name, value, value_u16, value_u64, value_u8, BuildError,
+    name, subscriber, text_name, value, value_u16, value_u32, value_u64, value_u8, BuildError,
 };
 use crate::{type_code, Opt, Tlv};
 
@@ -439,8 +439,9 @@ pub struct Ace {
     pub flags: u8,
     /** @brief `subject` token bytes (e.g. `"peer-a"`, or the one special subject `"EVERYONE@"`). */
     pub subject: Vec<u8>,
-    /** @brief `access_mask` u16 bitfield (READ=0x01, WRITE=0x02, SUBSCRIBE=0x04, …). */
-    pub access_mask: u16,
+    /** @brief `access_mask` u32 bitfield (READ=0x01, WRITE=0x02, SUBSCRIBE=0x04, …) —
+     * canonical wire width per RFC-0026. */
+    pub access_mask: u32,
     /** @brief Optional `expires_ns` u64 (absent ⇒ never expires). */
     pub expires_ns: Option<u64>,
 }
@@ -455,7 +456,7 @@ impl Ace {
         push_named(&mut children, "type", value_u8(self.ace_type));
         push_named(&mut children, "flags", value_u8(self.flags));
         push_named(&mut children, "subject", value(&self.subject));
-        push_named(&mut children, "access_mask", value_u16(self.access_mask));
+        push_named(&mut children, "access_mask", value_u32(self.access_mask));
         if let Some(exp) = self.expires_ns {
             push_named(&mut children, "expires_ns", value_u64(exp));
         }
@@ -511,9 +512,11 @@ pub fn acl_aces(tlv: &Tlv) -> Result<Vec<Ace>, BuildError> {
             .ok_or(BuildError::TypeMismatch)?
             .payload
             .clone();
+        // The full canonical u32 (RFC-0026) — narrowing here would silently drop the
+        // high rights bits a wider mask grants.
         let access_mask = get("access_mask")
             .ok_or(BuildError::TypeMismatch)?
-            .payload_uint() as u16;
+            .payload_uint() as u32;
         let expires_ns = get("expires_ns").map(|v| v.payload_uint());
         out.push(Ace {
             ace_type,
