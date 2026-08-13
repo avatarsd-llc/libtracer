@@ -170,6 +170,7 @@ std::vector<std::byte> b_field_subscribers_index(std::uint32_t n) {
 }
 
 using tr::testing::b_fwd;
+using tr::testing::b_fwd_mint;
 
 /** @brief Bind one wire subscriber at @p v arriving over @p link, tagged @p marker. */
 bool wire_sub(graph_t& g, vertex_handle_t v, std::string_view link, std::string_view marker) {
@@ -276,6 +277,13 @@ class fake_bus_t : public transport_t, public bus_link_t {
     }
     /** @brief Simulate the bus observing @p peer_name's session dead. */
     void peer_die(std::string_view peer_name) { notify_peer_down(peer_name); }
+    /** @brief Simulate an ACCEPTING listener admitting @p peer_name — endpoint first (a peer
+     *         that arrives is resolvable), then the arrival notifier, the `slot_server_t`
+     *         order (#1254: the notifier is what registers the session's identity anchor). */
+    void peer_arrive(std::string_view peer_name) {
+        (void)peer(peer_name);
+        notify_peer_up(peer_name);
+    }
     /** @brief Simulate the session FULLY torn down: the endpoint gone (so `peer_link`
      *         answers null, the RFC-0020 reject precondition), then the notifier. */
     void peer_kill(std::string_view peer_name) {
@@ -894,6 +902,107 @@ void test_refused_route_reclaims_the_edge() {
           "the same route with tr::path::invalid evicts — the discriminator is the code");
 }
 
+/**
+ * @brief #1223 steps 3+4 (RFC-0024 §7.1 amendment 1): the reverse-direction mint closes the
+ *        DISCLOSURE — a recycled session name no longer inherits the dead session's stream.
+ *
+ * Two nodes, real frames on one call stack. A holds the accepting bus (sessions get #1254
+ * identity anchors via the arrival notifier); B is the producer. A mint-flagged subscribe
+ * from session p0 makes the forwarding hop (A) contribute p0's anchor element, and B
+ * completes + stores the reverse list with the edge. Every claim follows the #1223
+ * refutation rule: the POSITIVE control (the legitimate session receives its own publish,
+ * over the bound leg) is shown before any does-not-receive claim.
+ */
+void test_reverse_mint_closes_the_disclosure() {
+    std::printf("reverse mint closes the disclosure (#1223 steps 3+4):\n");
+    graph_t ga, gb;
+    fwd_router_t ra(ga), rb(gb);
+    pipe_link_t a_to_b, b_to_a;
+    a_to_b.set_peer(b_to_a);
+    b_to_a.set_peer(a_to_b);
+    fake_bus_t bus;
+    (void)ra.add_child("srv", bus);
+    (void)ra.add_child("b", a_to_b);
+    // B's connection vertex for its link to A MUST exist BEFORE add_child: the bound-path
+    // join resolves `conn_slot` at registration, and it is what the responder's reverse
+    // completion and the delivery-time element-0 consumption both dereference. Production
+    // wiring gets this from the `/net:children[]` SPEC door; the harness registers it bare.
+    (void)gb.register_vertex(path_t("/a"), role_t::STORED_VALUE);
+    (void)rb.add_child("a", b_to_a);
+    vertex_handle_t sensor = gb.register_vertex(path_t("/sensor"), role_t::STORED_VALUE);
+
+    // S1 arrives as p0 — the accepting listener fires the arrival notifier, so p0 holds a
+    // #1254 identity anchor on A — and subscribes with the MINT flag set. A (the forwarding
+    // hop) creates the reverse list with p0's anchor element; B completes it with its own
+    // connection-vertex element and stores both with the edge.
+    bus.peer_arrive("p0");
+    check(ga.find_session_anchor(fwd_router_t::session_anchor_id("srv", "p0")).has_value(),
+          "p0's identity anchor exists on A");
+    bus.inject_peer("p0", b_fwd_mint(fwd_op_t::WRITE, b_path({"b", "sensor"}), b_path({}),
+                                     b_field_subscribers_append(), b_subscriber("s1")));
+    const auto subs0 = gb.read_subscribers(sensor);
+    check(subs0.has_value() && subs0->size() == 1, "B holds S1's remote edge");
+
+    // POSITIVE CONTROL: S1 receives its own publish over the bound delivery leg, and the
+    // frame it receives is the CANONICAL delivery shape — the origin never sees the bound
+    // form (dst re-headed as a PATH, RFC-0024 §7.1 amendment 1's last-hop rule).
+    std::size_t p0_seen = bus.peer("p0").count();
+    const std::size_t wire_before = b_to_a.log().size();
+    check(gb.write(sensor, make_value(b_value_u8(0x11))).has_value(), "publish 1");
+    check(bus.peer("p0").count() == p0_seen + 1, "positive control: S1 receives publish 1");
+    // The wire between B and A carries the BOUND form (dst = a one-element PATH_REF): the
+    // proof the positive control rode the reverse list, not the canonical fallback.
+    {
+        const auto& lg = b_to_a.log();
+        check(lg.size() == wire_before + 1, "exactly one B->A delivery frame");
+        const auto dec = tr::wire::decode(lg.back());
+        check(dec.has_value() && dec->children.size() >= 2 &&
+                  dec->children[1].type == tr::wire::type_t::PATH_REF &&
+                  dec->children[1].payload.size() == 8,
+              "the B->A delivery dst is a one-element PATH_REF (the bound leg engaged)");
+    }
+    {
+        const std::vector<std::vector<std::byte>> got = bus.peer("p0").drain();
+        check(!got.empty() && !got.back().empty() &&
+                  static_cast<tr::wire::type_t>(got.back()[0]) == tr::wire::type_t::FWD,
+              "the delivered frame is a FWD");
+        const auto dec = tr::wire::decode(got.back());
+        check(dec.has_value() && dec->children.size() >= 2 &&
+                  dec->children[1].type == tr::wire::type_t::PATH,
+              "the client-visible dst is a canonical PATH — the bound form never reaches an "
+              "origin");
+    }
+
+    // S1 dies; the SAME name is recycled by a brand-new session that subscribed to NOTHING.
+    // The kill retires the anchor (generation bump), the re-arrival revives it one higher.
+    bus.peer_kill("p0");
+    bus.peer_arrive("p0");
+    const auto subs1 = gb.read_subscribers(sensor);
+    check(subs1.has_value() && subs1->size() == 1, "B still holds the dead session's edge");
+
+    // Publish 2 — THE DISCLOSURE PROBE. Pre-amendment, S2 (new socket, same name, no
+    // subscription) received this byte-for-byte. Now the delivery's last element carries
+    // the RETIRED generation, A's deref refuses (§5.1), S2 receives NOTHING — and §5.3's
+    // NACK echo lets B's step-5 reclaim retire the stale edge on this very publish.
+    p0_seen = bus.peer("p0").count();
+    check(gb.write(sensor, make_value(b_value_u8(0x22))).has_value(),
+          "publish 2 (the dead session's delivery must refuse)");
+    check(bus.peer("p0").count() == p0_seen,
+          "THE FIX: the recycled session does NOT inherit the dead session's delivery");
+    const auto subs2 = gb.read_subscribers(sensor);
+    check(subs2.has_value() && subs2->empty(),
+          "the stale edge is reclaimed by the bound refusal (steps 4+5 compose)");
+
+    // And the recycled session is a fully working session: its own mint-flagged subscribe
+    // binds at the REVIVED generation and deliveries flow to it.
+    bus.inject_peer("p0", b_fwd_mint(fwd_op_t::WRITE, b_path({"b", "sensor"}), b_path({}),
+                                     b_field_subscribers_append(), b_subscriber("s2")));
+    p0_seen = bus.peer("p0").count();
+    check(gb.write(sensor, make_value(b_value_u8(0x33))).has_value(), "publish 3");
+    check(bus.peer("p0").count() == p0_seen + 1,
+          "the successor's OWN subscription delivers at the revived generation");
+}
+
 int main() {
     std::printf("== edge_eviction_test ==\n");
     test_evict_scoped_to_link();
@@ -905,6 +1014,7 @@ int main() {
     test_empty_link_name_evicts_nothing();
     test_departure_notifier_seam();
     test_refused_route_reclaims_the_edge();
+    test_reverse_mint_closes_the_disclosure();
     test_concurrent_evict_vs_writes();
     return tr::testing::summary("edge_eviction");
 }

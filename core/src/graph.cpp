@@ -535,6 +535,27 @@ std::optional<vertex_handle_t> graph_t::find_session_anchor(std::string_view id)
     return vertex_handle_t{node};
 }
 
+std::optional<graph_t::session_anchor_route_t> graph_t::session_anchor_route(
+    vertex_handle_t vh) const noexcept {
+    const vertex_t* const v = vh.get();
+    if (v == nullptr) return std::nullopt;
+    // The anchor id is one NAME record whose payload is `:<mount>/<peer>` (see
+    // `session_anchor_id`). Both `:` and `/` are characters `path::valid_segment` forbids,
+    // so the leading-`:` test alone separates every anchor from every addressable vertex —
+    // no parent walk, no lock (the key record is immutable for the vertex's life).
+    const std::span<const std::byte> rec = v->name().bytes();
+    if (rec.size() <= 4) return std::nullopt;  // header + at least ":m/p"
+    const std::string_view id{reinterpret_cast<const char*>(rec.data()) + 4, rec.size() - 4};
+    if (id.size() < 4 || id.front() != ':') return std::nullopt;
+    const std::size_t slash = id.rfind('/');
+    // rfind, not find: a mount NAME may itself be qualified (`net/ws`), while a session's
+    // routable name is one segment and can never contain `/` (`path::valid_segment` gates
+    // every peer name a transport stamps).
+    if (slash == std::string_view::npos || slash <= 1 || slash + 1 >= id.size())
+        return std::nullopt;
+    return session_anchor_route_t{.mount = id.substr(1, slash - 1), .peer = id.substr(slash + 1)};
+}
+
 std::size_t graph_t::session_anchor_slots() const noexcept {
     const std::shared_lock lock(map_mutex_);
     std::size_t n = 0;
@@ -728,6 +749,12 @@ std::size_t graph_t::evict_route_edges(std::string_view link_name,
     // unwind the RFC-0005 bookkeeping by exactly the count each vertex reports. Only the
     // per-vertex predicate differs — link AND stored-route equality instead of link alone.
     if (link_name.empty() || route_wire.empty()) return 0;
+    // Classify the echo's form ONCE, here, where wire types are spoken: a `PATH_REF` echo
+    // is a refused reverse-list delivery (RFC-0024 §7.1 amendment 1) and matches the stored
+    // reverse list's emitted suffix; anything else runs the canonical byte-equal match.
+    const bool bound_echo =
+        static_cast<wire::type_t>(std::to_integer<std::uint8_t>(route_wire[0])) ==
+        wire::type_t::PATH_REF;
     std::vector<vertex_t*> candidates;
     {
         const std::shared_lock lock(map_mutex_);
@@ -736,7 +763,7 @@ std::size_t graph_t::evict_route_edges(std::string_view link_name,
     std::size_t total = 0;
     for (vertex_t* v : candidates) {
         const std::shared_lock lock(map_mutex_);
-        const std::size_t k = v->evict_route_edges(link_name, route_wire);
+        const std::size_t k = v->evict_route_edges(link_name, route_wire, bound_echo);
         if (k == 0) continue;
         v->bump_own_subs(-static_cast<std::int32_t>(k));
         bump_subtree_listeners(v, -static_cast<std::int32_t>(k));
@@ -1107,7 +1134,7 @@ namespace {
 }
 }  // namespace
 
-void graph_t::dispatch_edge_target(const edge_view_t& e, const rope_t& value) {
+[[gnu::noinline]] void graph_t::dispatch_edge_target(const edge_view_t& e, const rope_t& value) {
     // The bound spelling first (#830): a slot deref is a bounds check, a slot load and a
     // generation compare — flat at every address depth — where `find_ptr` walks the key
     // segment by segment. `deref_vertex_slot` refuses a stale generation, a saturated one, an
@@ -1160,23 +1187,29 @@ void graph_t::dispatch_edge_target(const edge_view_t& e, const rope_t& value) {
     count_store_drops(target, store_drops);
 }
 
-void graph_t::dispatch_edge_remote(const edge_view_t& e, const rope_t& value) {
+[[gnu::noinline]] void graph_t::dispatch_edge_remote(const edge_view_t& e, const rope_t& value) {
     // Remote delivery (#136): a write fans out to a remote subscriber as a
     // FWD{WRITE} (or auto-promoted COMPACT) via the injected sink — outside the
     // vertex lock, like every other dispatch leg, since the sink does transport I/O.
-    remote_sink_(
-        remote_delivery_t{
-            .link = e.link, .return_route = e.return_route, .delivery_compact = e.delivery_compact},
-        value);
+    remote_sink_(remote_delivery_t{.link = e.link,
+                                   .return_route = e.return_route,
+                                   .reverse_route = e.reverse_route,
+                                   .caller = e.caller,
+                                   .delivery_compact = e.delivery_compact},
+                 value);
 }
 
 /**
- * @brief `inline` (linkage no-op for a single-TU member; an inliner hint): the wide fan-out loop's
- *        per-edge cost is this function's body, so it must stay inlined in that loop — the
+ * @brief `always_inline` — and the two legs above `noinline` — because the wide fan-out loop's
+ *        per-edge cost is this function's body, so it must stay inlined in that loop: the
  *        target/remote legs live in the two helpers above precisely to keep this body's inline
- *        estimate small (the callback leg is the in-process hot case).
+ *        estimate small (the callback leg is the in-process hot case). The split is ENFORCED
+ *        by attribute, not left to the inliner's estimate, because one added aggregate field
+ *        in the remote leg was enough to flip that estimate — this body fell out of the loop
+ *        and the in-process delivery gate paid 12% (#1223 steps 3+4; same hazard as #1250).
  */
-inline void graph_t::dispatch_edge(const edge_view_t& e, const rope_t& value) {
+[[gnu::always_inline]] inline void graph_t::dispatch_edge(const edge_view_t& e,
+                                                          const rope_t& value) {
     // The ONE dispatch of a subscription edge's three legs — shared by the per-write
     // fan_out and the admission durability latch (ADR-0049), so the legs cannot diverge.
     // Always called OUTSIDE the vertex lock (each leg may re-enter the graph or do I/O).
@@ -2068,7 +2101,7 @@ void graph_t::set_remote_delivery_sink(
 }
 
 result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view_t source_view, view_t return_route,
-                                       std::string link) {
+                                       std::string link, view_t reverse_route) {
     vertex_t* v = vh.get();
     // The route is this door's precondition, not an optional extra (#1055). Every edge this
     // door admits carries a link, and `dispatch_edge` gates its remote leg on that link while
@@ -2099,6 +2132,10 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view_t source_view, v
     subscriber_remote_t& r = s.ensure_remote();  // a wire subscriber always carries the cold half
     r.caller = link;  // the fan-in gate context this edge's deliveries run under (#81)
     r.return_route = std::move(return_route);
+    // The completed reverse bound route (RFC-0024 §7.1 amendment 1) — empty for every
+    // canonical-only subscribe, and stored WITHOUT validation beyond what the resolver
+    // already did: element 0 is this node's own mint, re-validated on every delivery.
+    r.reverse_route = std::move(reverse_route);
     r.link = std::move(link);
     const std::string gate_ctx = r.caller;  // survives the move above (the SUBSCRIBE gate
                                             // runs under the inbound link, #81/ADR-0026)

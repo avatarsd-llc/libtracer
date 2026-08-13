@@ -25,7 +25,8 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view
     // default is the global heap, so an un-injected span-tier resolve is byte-unchanged.
     return resolve_node(graph_, arena_node{&fwd, 0}, inbound_link, frame_view,
                         flat_ != nullptr ? *flat_ : mem::heap_backend(),
-                        egress_ != nullptr ? *egress_ : mem::heap_backend());
+                        egress_ != nullptr ? *egress_ : mem::heap_backend(), reverse_ref_fn_,
+                        reverse_ref_ctx_);
 }
 
 }  // namespace tr::graph

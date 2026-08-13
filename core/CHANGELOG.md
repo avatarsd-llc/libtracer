@@ -16,6 +16,30 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **The reverse-direction mint is implemented — a recycled `p<slot>` session no longer
+  inherits the dead session's deliveries**
+  ([#1223](https://github.com/avatarsd-llc/libtracer/issues/1223) steps 3+4 of 5, the
+  confirmed-by-execution disclosure's close; RFC-0024 §7.1 **amendment 1**, spelling (b),
+  forwarder-contributed). A forwarding hop relaying a mint-flagged request now contributes
+  its arrival identity's element — the connection vertex for a point-to-point link, the
+  accepted session's #1254 identity anchor for a bus session — to the request's trailing
+  reverse `PATH_REF` child (`rebuild_request_reverse_mint`, the out-of-line mirror of the
+  reply-side mint; create / extend / strip-whole per erratum 1 direction-reversed). The
+  responder completes the list with its own element (`op_resolver_t::on_reverse_ref`, a new
+  injected transport-plane seam) and stores it with the edge
+  (`subscriber_remote_t::reverse_route`; `graph_t::subscribe_wire` gained a defaulted
+  `reverse_route` parameter — source-compatible). Every delivery then consumes element 0
+  locally (validated bounds + generation + ACL) and rides the bound form; the LAST hop
+  dereferences the session anchor (`graph_t::session_anchor_route`, new) and egresses to
+  the session with the `dst` re-headed canonical, so **an origin client's frames are
+  bit-identical in both directions** — the `fwd/fwd-mint-request` conformance vector's
+  bytes stand. A dead session's element fails the generation compare at the consuming hop,
+  which drops AND answers §5.3's NACK — the same addressed echo step 5 correlates, so the
+  stale edge retires on its first post-mortem delivery (`vertex_t::evict_route_edges`
+  gained a `bound_echo` arm matching the echoed `PATH_REF` element-wise). An unflagged
+  subscribe, an incomplete list, or an unbindable hop all degrade to the canonical-only
+  subscription, byte-identical to before.
+
 - **A delivery refused `tr::path::invalid` now reclaims the exact subscriber edge that
   stored the refused route** ([#1223](https://github.com/avatarsd-llc/libtracer/issues/1223)
   step 5 of 5 — the leak's independent close, zero new wire bytes). The RFC-0020

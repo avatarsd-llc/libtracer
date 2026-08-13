@@ -552,14 +552,19 @@ void reject_bus_name_hop(const child_registry_t& registry, std::string_view inbo
     const tlv_t* op = nullptr;
     const tlv_t* dst = nullptr;
     const tlv_t* src = nullptr;
-    // `type_t::PATH` only, and that is not an oversight: a BOUND frame's dst is a `PATH_REF`,
-    // so its one PATH child is the `src` — it lands in `dst`, `src` stays null, and the
-    // `src == nullptr` line below drops the frame by value. That is the conformant answer
-    // (RFC-0024 §5.3: a bound frame this node cannot route is dropped, never repaired), and
-    // it is also unreachable today, since only the canonical mount descent rejects a hop.
+    // The `dst` slot takes either routable form (RFC-0024 §4): a canonical `PATH`, or the
+    // BOUND `PATH_REF` a reverse-list delivery is addressed by (§7.1 amendment 1) — the
+    // refusal of a bound delivery echoes the refused `PATH_REF` exactly as the canonical
+    // reject echoes the refused route, and the producer's step-5 reclaim correlates either
+    // (`evict_route_edges` classifies the echo's type byte). The `src` slot stays `PATH`
+    // only: a request's return route is always canonical (`05-protocol-tlvs.md` hop rules).
+    // The scan stops at `src`, so a mint-flagged request's TRAILING reverse `PATH_REF`
+    // (which sits after `src`) can never be mistaken for the address being refused.
     for (const tlv_t& c : dec->children) {
-        if (c.type == type_t::PATH) {
-            (dst == nullptr ? dst : src) = &c;
+        if (dst == nullptr && (c.type == type_t::PATH || c.type == type_t::PATH_REF)) {
+            dst = &c;
+        } else if (dst != nullptr && c.type == type_t::PATH) {
+            src = &c;
         } else if (c.type == type_t::VALUE && op == nullptr) {
             op = &c;
         }
@@ -660,10 +665,13 @@ template <class Cursor>
     if (!rdst || rdst->type != wire::type_t::PATH) return std::nullopt;
     pos += rdst->total;
     if (pos >= end) return std::nullopt;
-    // Child 3 — PATH src: the refused route, echoed whole. Non-empty by the same rule as
+    // Child 3 — the refused route, echoed whole: a PATH, or (RFC-0024 §7.1 amendment 1)
+    // the `PATH_REF` a reverse-list delivery was refused as. Non-empty by the same rule as
     // the eviction it feeds (an empty route names nothing and matches nothing).
     const auto rsrc = read_fwd_header(cur, pos);
-    if (!rsrc || rsrc->type != wire::type_t::PATH || rsrc->body_len == 0) return std::nullopt;
+    if (!rsrc || (rsrc->type != wire::type_t::PATH && rsrc->type != wire::type_t::PATH_REF) ||
+        rsrc->body_len == 0)
+        return std::nullopt;
     const refused_src_t out{.off = pos, .len = rsrc->total};
     pos += rsrc->total;
     if (pos >= end) return std::nullopt;
@@ -1126,6 +1134,31 @@ std::optional<wire::path_ref_element_t> fwd_router_t::hop_mint(
     return wire::path_ref_element_t{.index = slot->index, .generation = slot->generation};
 }
 
+std::optional<wire::path_ref_element_t> fwd_router_t::reverse_hop_ref(
+    std::string_view inbound_name, const child_rx_ctx_t* inbound_ctx, bool from_peer) const {
+    /*
+     * This hop's REVERSE-direction element (RFC-0024 §7.1 amendment 1): a reference for the
+     * identity the request ARRIVED on. Point-to-point, that is the same connection vertex
+     * the reply-direction mint answers with — one identity, two directions, one supplier.
+     */
+    if (!from_peer) return hop_mint(inbound_name, inbound_ctx);
+    /*
+     * Bus-session arrival: the accepted session's identity vertex — the #1254 anchor the
+     * ADR-0044 amendment licensed. `inbound_name` is the session's routable name and the
+     * ctx names the mount (`on_frame_bus` wiring), which is exactly `session_anchor_id`'s
+     * key. An announce-census peer (CAN) was never anchored, answers nullopt here, and the
+     * rebuild then STRIPS — CAN stays out of scope by construction, not by a special case.
+     */
+    if (inbound_ctx == nullptr || inbound_ctx->retired.load(std::memory_order_acquire))
+        return std::nullopt;
+    const std::optional<graph::vertex_handle_t> anchor =
+        graph_.find_session_anchor(session_anchor_id(inbound_ctx->name, inbound_name));
+    if (!anchor) return std::nullopt;
+    const std::optional<graph::vertex_slot_t> slot = graph_.vertex_slot(*anchor);
+    if (!slot) return std::nullopt;  // saturated => permanently unbindable (§4.4 rule 3)
+    return wire::path_ref_element_t{.index = slot->index, .generation = slot->generation};
+}
+
 transport_t* fwd_router_t::bound_egress(wire::path_ref_element_t e, std::string_view caller,
                                         graph::acl_right_t right) const {
     // §5.1 in order: bounds, generation (both inside `deref_vertex_slot`, which also refuses a
@@ -1186,13 +1219,72 @@ std::optional<fwd_router_t::bound_dispatch_t> fwd_router_t::bound_dispatch(
     return out;
 }
 
-template <class Cursor>
+template <class Cursor, class Reject>
+bool fwd_router_t::route_bound_session_delivery(std::string_view inbound_name,
+                                                const child_rx_ctx_t* inbound_ctx, bool from_peer,
+                                                const Cursor& cur, const fwd_pre_t& pre,
+                                                Reject&& reject) {
+    // Only a WRITE can be a delivery (delivery-is-a-write, RFC-0004 §D); every other op with
+    // a one-element residual keeps its bound-terminus meaning untouched. Read off the offset
+    // the peek carried, masked (§9.3), exactly as route_bound_forward reads it.
+    if (pre.op_body_len == 0) return false;  // malformed => the terminus tier's refusal stands
+    if (static_cast<fwd_op_t>(cur.byte_at(pre.op_body_off) & graph::kFwdOpcodeMask) !=
+        fwd_op_t::WRITE)
+        return false;
+    const wire::path_ref_element_t e = read_path_ref_element(cur, pre.dst_body_off);
+    // §5.1 bounds + generation. THIS is the disclosure fix (#1223): a dead session's element
+    // carries the generation its anchor was retired at, the recycled slot's revived anchor
+    // reads one higher, and the delivery for the DEAD session refuses here instead of
+    // reaching the unrelated successor. §5.3 requires the failure be a drop plus a NACK —
+    // and the NACK is load-bearing, not politeness: it is the addressed refusal the
+    // producer's step-5 reclaim (#1258) correlates to retire the stale edge on first use.
+    const std::optional<graph::vertex_handle_t> v = graph_.deref_vertex_slot(e.index, e.generation);
+    if (!v) {
+        reject();
+        return true;
+    }
+    const std::optional<graph::graph_t::session_anchor_route_t> ar =
+        graph_.session_anchor_route(*v);
+    if (!ar) return false;  // an ordinary vertex: the bound TERMINUS path, unchanged
+    // §6.2's re-check at the dereferenced vertex, per delivery, under the inbound link's
+    // subject — a generation match authorizes nothing. A denial is a plain drop (the
+    // anti-enumeration rule: denied answers denied-shaped silence on this data-plane leg).
+    if (!graph_.allows(*v, inbound_name, graph::acl_right_t::WRITE)) return true;
+    // The egress is the SESSION itself: the anchor's key names mount and peer, and the
+    // directed per-peer endpoint is resolved against that mount alone (`resolve_peer` —
+    // never the cross-bus scan, so two servers' same-named peers stay distinct). A session
+    // that departed between the deref and this lookup is a refusal like any other.
+    const child_registry_t::child_t* const entry = registry_.entry_by_name(ar->mount);
+    transport_t* const session =
+        entry != nullptr ? child_registry_t::resolve_peer(*entry, ar->peer) : nullptr;
+    if (session == nullptr) {
+        reject();
+        return true;
+    }
+    // Forward through the ONE rebuild locus: consume the element (the peek already set
+    // `strip_at` one element in), and re-head the emptied `dst` as a canonical PATH — the
+    // peer behind an accepted session is an ORIGIN, which never speaks the bound form, so
+    // the frame it receives is byte-identical to the canonical delivery it always got.
+    fwd_pre_t session_pre = pre;
+    session_pre.dst_to_path = true;
+    route_fwd_forward(inbound_name, inbound_ctx, from_peer, 0, cur, *session, &session_pre);
+    return true;
+}
+
+template <class Cursor, class Reject>
 bool fwd_router_t::route_bound_forward(std::string_view inbound_name,
                                        const child_rx_ctx_t* inbound_ctx, bool from_peer,
                                        const Cursor& cur, const fwd_pre_t& pre,
-                                       std::size_t element_count) {
-    // 0 or 1 element: this node is the terminus, not a forwarder.
-    if (element_count <= 1) return false;
+                                       std::size_t element_count, Reject&& reject) {
+    // 0 elements: this node is the terminus.
+    if (element_count == 0) return false;
+    // EXACTLY one element: usually the bound terminus — but a WRITE whose one element
+    // dereferences to a SESSION ANCHOR is the reverse-list delivery's last hop (RFC-0024
+    // §7.1 amendment 1, #1223 step 4), and the ANSWER to a failed validation is §5.3's
+    // NACK, which is what lets the producer's step-5 reclaim retire the stale edge.
+    if (element_count == 1)
+        return route_bound_session_delivery(inbound_name, inbound_ctx, from_peer, cur, pre,
+                                            std::forward<Reject>(reject));
     // The op's own right, at the dereferenced vertex (§6.2). AWAIT reads, so it asks for READ;
     // a REPLY carries no right of its own — it is the answer to an op already authorized at
     // every gate on the way in — and a bound REPLY is not a shape this node ever emits, so it
@@ -1320,7 +1412,7 @@ bool fwd_router_t::route_fwd_ingress(std::string_view inbound_name, const Cursor
         // no header to find out, which is what keeps a bound terminus from costing more than
         // the canonical terminus it is supposed to beat.
         if (kind == fwd_dst_kind_t::PATH_REF &&
-            route_bound_forward(inbound_name, inbound_ctx, from_peer, cur, pre, ref_count))
+            route_bound_forward(inbound_name, inbound_ctx, from_peer, cur, pre, ref_count, reject))
             return true;
     }
     // The `dst` names no mount here and no bound hop took it ⇒ this node is its terminus.
@@ -1523,15 +1615,21 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
     const auto mint_fn = [&]() -> std::optional<wire::path_ref_element_t> {
         return hop_mint(inbound_name, inbound_ctx);
     };
+    // The REVERSE-direction twin (§7.1 amendment 1), equally lazy: called at most once, and
+    // only after the rebuild has read the op byte it was going to read anyway and found the
+    // mint flag set on a request. An unflagged frame never evaluates it.
+    const auto reverse_fn = [&]() -> std::optional<wire::path_ref_element_t> {
+        return reverse_hop_ref(inbound_name, inbound_ctx, from_peer);
+    };
     const auto rebuilt =
         !mount.empty()
             ? rebuild_fwd_forward(cur_src, mount, from_peer ? inbound_name : std::string_view{},
-                                  strip_k, pre, mint_fn)
+                                  strip_k, pre, mint_fn, reverse_fn)
         : inbound != nullptr && !inbound->mount_tlv.empty()
             ? rebuild_fwd_forward(cur_src, std::span<const std::byte>(inbound->mount_tlv),
-                                  std::string_view{}, strip_k, pre, mint_fn)
+                                  std::string_view{}, strip_k, pre, mint_fn, reverse_fn)
             : rebuild_fwd_forward(cur_src, std::span<const std::byte>{}, inbound_name, strip_k, pre,
-                                  mint_fn);
+                                  mint_fn, reverse_fn);
     if (!rebuilt) return;        // not a forwardable FWD ⇒ drop (callers pre-peeked)
     if (!rebuilt->ok()) return;  // malformed oversized op ⇒ drop, no overrun
 
@@ -2151,6 +2249,45 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const vie
         // label == 0: this link has issued all 65535 labels. Compaction is an optimization
         // over a delivery form that carries its own route, so the flow degrades to that
         // form instead of dropping — fall through.
+    }
+    // The reverse-list delivery (RFC-0024 §7.1 amendment 1, #1223 step 4): consume the
+    // stored list's element 0 — this node's OWN reference to the connection vertex the
+    // subscribe arrived on — by validating it against this node's vertex map (§5.1 bounds +
+    // generation, then §6.2's ACL at the dereferenced vertex under the edge's stored
+    // subject) and egressing through the vertex it names. Elements 1.. go on the wire as
+    // the delivery's bound `dst`. ANY refusal — the link re-dialled (generation moved), the
+    // child gone, the ACL revoked — falls through to the canonical route below, which is
+    // stored alongside precisely so this binding is an optimisation plus a liveness check
+    // and never the only way home.
+    const std::span<const std::byte> rev = sub.reverse_route.bytes();
+    if (rev.size() >= 4u + 2u * wire::kPathRefElementBytes) {
+        const wire::grammar::span_cursor rcur{rev};
+        const wire::path_ref_element_t e0 = read_path_ref_element(rcur, 4);
+        if (transport_t* const out = bound_egress(e0, sub.caller, graph::acl_right_t::WRITE)) {
+            const std::span<const std::byte> dst_body =
+                rev.subspan(4u + wire::kPathRefElementBytes);
+            constexpr std::array<std::byte, 5> op_tlv{
+                std::byte{0x01}, std::byte{0x00}, std::byte{0x01}, std::byte{0x00},
+                std::byte{std::to_underlying(fwd_op_t::WRITE)}};
+            constexpr std::array<std::byte, 4> empty_src{std::byte{0x06}, std::byte{0x40},
+                                                         std::byte{0x00}, std::byte{0x00}};
+            const std::size_t body_len =
+                op_tlv.size() + 4u + dst_body.size() + empty_src.size() + value.total_length();
+            stack_writer<20> head;  // FWD header (<=6) + 5-byte op + 4-byte PATH_REF header
+            head.header(type_t::FWD, body_len);
+            head.raw(op_tlv);
+            head.header_bare(type_t::PATH_REF, dst_body.size());
+            if (head.ok()) {
+                std::vector<std::span<const std::byte>> iov;
+                if (!tr::detail::try_reserve(iov, 3 + value.link_count())) return;  // OOM
+                iov.push_back(head.span());
+                iov.push_back(dst_body);
+                iov.push_back(std::span<const std::byte>(empty_src));
+                for (const view_t& l : value.links()) iov.push_back(l.bytes());
+                out->send(std::span<const std::span<const std::byte>>(iov));
+                return;
+            }
+        }
     }
     // Default: full-route `FWD{ op=WRITE, dst=<return route>, src=<empty PATH>,
     // payload=<VALUE> }` (delivery-is-a-write, RFC-0004 §D / #136), scatter-gathered over

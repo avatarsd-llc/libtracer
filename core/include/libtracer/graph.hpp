@@ -104,6 +104,13 @@ static_assert(sizeof(vertex_handle_t) == sizeof(vertex_t*));
 struct remote_delivery_t {
     std::string_view link; /**< @brief This node's NAME for the consumer link. */
     view_t return_route;   /**< @brief Consumer return route (PATH TLV view, refcount clone). */
+    /** @brief Completed reverse bound route (`PATH_REF` view, refcount clone; empty ⇒
+     *         canonical-only). Element 0 is this node's own reference, consumed locally by
+     *         the sink per delivery — RFC-0024 §7.1 amendment 1. */
+    view_t reverse_route;
+    /** @brief The edge's stored ACL fan-in context (#81) — the subject the sink's local
+     *         element-0 consumption re-checks §6.2 under. */
+    std::string_view caller;
     bool delivery_compact = false; /**< @brief Opt-in to label-compacted delivery. */
 };
 
@@ -772,11 +779,36 @@ class graph_t {
      * and this reclaim acts only on it.
      *
      * @param link_name  This node's NAME for the link the refusal arrived on.
-     * @param route_wire The refused route — whole PATH TLV bytes echoed by the rejecting hop.
+     * @param route_wire The refused route — whole TLV bytes echoed by the rejecting hop: a
+     *                   canonical PATH, or (RFC-0024 §7.1 amendment 1) the bound `PATH_REF`
+     *                   a reverse-list delivery was refused as. This door classifies the
+     *                   type byte; the per-vertex half stays wire-type-agnostic.
      * @return The number of edges evicted, summed over the graph.
      */
     std::size_t evict_route_edges(std::string_view link_name,
                                   std::span<const std::byte> route_wire);
+
+    /**
+     * @brief The (mount, peer) a SESSION ANCHOR names, or nullopt for every ordinary vertex —
+     *        the reverse-list delivery's egress question (RFC-0024 §7.1 amendment 1, #1223).
+     *
+     * A bound delivery's LAST element dereferences to the accepted session's identity vertex
+     * (the #1254 anchor); the hop that consumes it must egress to the SESSION, and this is
+     * where it learns which one. Classification is by the anchor's own key shape — the id is
+     * `:<mount>/<peer>`, and both `:` and `/` are characters `path::valid_segment` forbids,
+     * so no addressable vertex's key can ever satisfy it (the same argument that makes the
+     * anchor unspellable makes this test unforgeable). The views are BORROWED from the
+     * vertex's immutable key record and stay valid for the graph's life (vertices are never
+     * freed).
+     */
+    struct session_anchor_route_t {
+        std::string_view mount; /**< @brief The bus child's registered NAME. */
+        std::string_view peer;  /**< @brief The accepted session's routable name. */
+    };
+    /** @brief Classify @p vh per the block above: the anchor's (mount, peer), or nullopt
+     *         for every ordinary vertex. Lock-free — the key record is immutable. */
+    [[nodiscard]] std::optional<session_anchor_route_t> session_anchor_route(
+        vertex_handle_t vh) const noexcept;
 
     /**
      * @brief Visit every REGISTERED vertex once, in ascending canonical-key BYTE order —
@@ -1313,9 +1345,17 @@ class graph_t {
      * `dst` on every publish. Both in-tree callers already satisfy this (the resolver rejects
      * a failed route copy as `BACKPRESSURE`, `fwd_router_t::subscribe_toward` refuses an empty
      * residual as `INVALID_PATH`), so the door narrowed to what the wire already produced.
+     *
+     * @p reverse_route, when non-empty, is the COMPLETED reverse-direction bound route
+     * (RFC-0024 §7.1 amendment 1): a `PATH_REF` TLV whose element 0 is THIS node's own
+     * reference to the connection vertex the subscribe arrived on, followed by the elements
+     * the forwarding hops contributed. Stored beside @p return_route as the delivery
+     * optimisation + liveness check; empty (the default, and every pre-amendment caller)
+     * keeps the subscription canonical-only, byte-identical to before.
      */
     [[nodiscard]] result_t<void> subscribe_wire(vertex_handle_t v, view_t source_view,
-                                                view_t return_route, std::string link);
+                                                view_t return_route, std::string link,
+                                                view_t reverse_route = {});
 
     /**
      * @brief Read by path — resolve the path key once (guarded map lookup), then the hot path.

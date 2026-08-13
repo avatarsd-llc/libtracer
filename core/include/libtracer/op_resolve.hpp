@@ -31,6 +31,7 @@
 
 #include "libtracer/graph.hpp"
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/path_ref.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/status.hpp"
 #include "libtracer/tlv_arena.hpp"
@@ -229,10 +230,33 @@ class op_resolver_t {
                                                  std::string_view inbound_link = {},
                                                  const view::view_t* frame_view = nullptr);
 
+    /**
+     * @brief The responder's own reverse-direction element supplier (RFC-0024 §7.1
+     *        amendment 1): asked, at most once per mint-flagged remote subscribe, for THIS
+     *        node's reference to the connection vertex @p inbound_link arrived on.
+     *
+     * The mapping from a link NAME to its connection vertex is the transport plane's
+     * (`fwd_router_t`'s receiver contexts), which this graph-layer resolver deliberately
+     * cannot name — so it is injected as a bare `{fn, ctx}` pair, the ADR-0047 seam shape.
+     * `nullopt` (or no installed supplier — every pre-amendment embedder) means the
+     * responder cannot complete the reverse list: the subscription stores none and stays
+     * canonical-only, the documented degrade.
+     */
+    using reverse_ref_fn_t =
+        std::optional<wire::path_ref_element_t> (*)(void* ctx, std::string_view inbound_link);
+
+    /** @brief Install the reverse-element supplier (null @p fn uninstalls). */
+    void on_reverse_ref(reverse_ref_fn_t fn, void* ctx) noexcept {
+        reverse_ref_fn_ = fn;
+        reverse_ref_ctx_ = ctx;
+    }
+
    private:
     graph_t& graph_;
     mem::mem_backend_t* flat_ = &mem::heap_backend();    // rope-tier terminus flattens (#766)
     mem::mem_backend_t* egress_ = &mem::heap_backend();  // reply head + mint egress bytes (#795)
+    reverse_ref_fn_t reverse_ref_fn_ = nullptr;  // responder's reverse-mint seam (amendment 1)
+    void* reverse_ref_ctx_ = nullptr;            /**< @brief Its caller-owned context. */
 };
 
 }  // namespace tr::graph
