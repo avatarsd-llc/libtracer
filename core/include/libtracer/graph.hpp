@@ -1226,6 +1226,16 @@ class graph_t {
      * `PERMISSION_DENIED` on denial) → slot append → durability latch (if the parsed
      * `delivery_policy_t` sets `durability_request` and @p v holds a value, the LKV is
      * latched to this subscriber — one synchronous sink call, RFC-0004 §D / RFC-0022 §3.A).
+     *
+     * @p return_route MUST be non-empty — an empty one is `INVALID_PATH` (#1055). This door
+     * is the only one that binds a link for delivery, so it is where the two fields are held
+     * to ONE meaning: an edge that carries a link carries the route to deliver over it. The
+     * fan-out body (`dispatch_edge`) therefore tests the link alone and hands the sink the
+     * route unchecked, which is what keeps that deliberately-inlinable per-edge test at one
+     * comparison; admitting a routeless edge instead bought a `FWD{WRITE}` with a zero-byte
+     * `dst` on every publish. Both in-tree callers already satisfy this (the resolver rejects
+     * a failed route copy as `BACKPRESSURE`, `fwd_router_t::subscribe_toward` refuses an empty
+     * residual as `INVALID_PATH`), so the door narrowed to what the wire already produced.
      */
     [[nodiscard]] result_t<void> subscribe_wire(vertex_handle_t v, view_t source_view,
                                                 view_t return_route, std::string link);

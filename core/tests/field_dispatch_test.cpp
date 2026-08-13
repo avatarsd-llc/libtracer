@@ -443,7 +443,10 @@ void test_subscriber_door_parity() {
            "append arm: a non-SUBSCRIBER payload is TYPE_MISMATCH");
     expect(write_status(g, v, fp("subscribers", sel_t::SLOT), junk, {}), status_t::TYPE_MISMATCH,
            "[N] arm: a non-SUBSCRIBER payload is TYPE_MISMATCH");
-    const auto wire_junk = g.subscribe_wire(v, junk, make_value({}), "link-a");
+    // The route is non-empty at both `subscribe_wire` call sites below so that the PAYLOAD is
+    // the only defect under test — an empty one is its own refusal since #1055.
+    const auto wire_junk =
+        g.subscribe_wire(v, junk, make_value({0x06, 0x40, 0x00, 0x00}), "link-a");
     expect(wire_junk ? kOk : outcome_t{wire_junk.error()}, status_t::TYPE_MISMATCH,
            "subscribe_wire: a non-SUBSCRIBER payload is TYPE_MISMATCH");
 
@@ -454,7 +457,8 @@ void test_subscriber_door_parity() {
            status_t::TYPE_MISMATCH, "append arm: a SUBSCRIBER with no target is TYPE_MISMATCH");
     expect(write_status(g, v, fp("subscribers", sel_t::SLOT), subscriber_tlv_no_target(), {}),
            status_t::TYPE_MISMATCH, "[N] arm: a SUBSCRIBER with no target is TYPE_MISMATCH");
-    const auto wire_ok = g.subscribe_wire(v, subscriber_tlv_no_target(), make_value({}), "link-a");
+    const auto wire_ok = g.subscribe_wire(v, subscriber_tlv_no_target(),
+                                          make_value({0x06, 0x40, 0x00, 0x00}), "link-a");
     expect(wire_ok ? kOk : outcome_t{wire_ok.error()}, kOk,
            "subscribe_wire: the SAME record is ACCEPTED (it clears target_key itself)");
 
@@ -510,6 +514,56 @@ void test_append_plus_wildcard_is_refused() {
            "read :children[]+[*] does not enumerate either");
 }
 
+/**
+ * @brief `subscribe_wire` refuses an EMPTY return route, so no edge can carry a link with
+ *        nothing to deliver over (#1055).
+ *
+ * The remote leg of `graph_t::dispatch_edge` is gated on `!e.link.empty()`, while the field
+ * it hands the sink is the return route — so an edge holding a link and an empty route emitted
+ * one routeless `FWD{WRITE}` per publish, its `dst` a zero-byte PATH. Neither in-tree wire door
+ * can build that state (the resolver rejects a failed route copy as BACKPRESSURE; the router's
+ * `subscribe_toward` refuses an empty residual as INVALID_PATH), but this door is public API and
+ * validated neither argument, so an embedder driving it directly reached it.
+ *
+ * The ruling on #1055 put the gate at the door rather than in the fan-out body: `dispatch_edge`
+ * is the wide fan-out loop's per-edge cost and is kept inlinable on purpose, and the door now
+ * narrows to exactly what every in-tree caller already produces. So `link` keeps its ONE
+ * meaning on a subscription edge — the link to deliver over — and the invariant that makes
+ * testing it sufficient is established here.
+ */
+void test_subscribe_wire_requires_return_route() {
+    std::printf("subscribe_wire refuses an empty return route (#1055):\n");
+    graph_t g;
+    const vertex_handle_t v = g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
+
+    std::size_t deliveries = 0;
+    g.set_remote_delivery_sink(
+        [&](const tr::graph::remote_delivery_t&, const tr::view::rope_t&) { ++deliveries; });
+
+    // The defective state, admitted through the public door: a link to deliver over, and no
+    // route to deliver to.
+    const auto routeless =
+        g.subscribe_wire(v, subscriber_tlv_no_target(), make_value({}), "link-a");
+    expect(routeless ? kOk : outcome_t{routeless.error()}, status_t::INVALID_PATH,
+           "a non-empty link with an EMPTY return route is INVALID_PATH at the door");
+    expect(read_status(g, v, fp("subscribers", sel_t::SLOT), {}), status_t::NOT_FOUND,
+           "... and no edge was admitted");
+
+    // The second half of the witness: before the fix the door accepted, and this write turned
+    // into one remote delivery carrying a zero-byte route.
+    check(g.write(v, make_value({0x01, 0x00, 0x01, 0x00, 0x7F})).has_value(),
+          "the producer still takes a write");
+    check(deliveries == 0, "no remote delivery fired for the refused subscribe");
+
+    // The same record WITH a route is still admitted and still delivers — the door narrowed,
+    // it did not close.
+    const auto routed = g.subscribe_wire(v, subscriber_tlv_no_target(),
+                                         make_value({0x06, 0x40, 0x00, 0x00}), "link-a");
+    check(routed.has_value(), "the SAME record with a non-empty route is admitted");
+    check(g.write(v, make_value({0x01, 0x00, 0x01, 0x00, 0x7F})).has_value(), "write again");
+    check(deliveries == 1, "... and that edge delivers exactly once");
+}
+
 }  // namespace
 
 int main() {
@@ -518,5 +572,6 @@ int main() {
     test_field_wildcard_divergence();
     test_subscriber_door_parity();
     test_append_plus_wildcard_is_refused();
+    test_subscribe_wire_requires_return_route();
     return tr::testing::summary("field_dispatch");
 }

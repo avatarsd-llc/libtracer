@@ -1871,6 +1871,16 @@ void graph_t::set_remote_delivery_sink(
 result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view_t source_view, view_t return_route,
                                        std::string link) {
     vertex_t* v = vh.get();
+    // The route is this door's precondition, not an optional extra (#1055). Every edge this
+    // door admits carries a link, and `dispatch_edge` gates its remote leg on that link while
+    // handing the sink the RETURN ROUTE — so admitting a routeless edge here bought one
+    // `FWD{WRITE}` per publish whose `dst` was a zero-byte PATH. Refusing it at the door is
+    // what lets the fan-out body keep testing the link alone: that test is the wide-fan-out
+    // loop's per-edge cost and is kept inlinable on purpose, so the invariant is established
+    // once, here, rather than re-checked on every delivery. INVALID_PATH because that is what
+    // an empty PATH TLV is, and what `fwd_router_t::subscribe_toward` already answers for the
+    // empty residual it refuses to build a route from.
+    if (return_route.empty()) return std::unexpected(status_t::INVALID_PATH);
     // Parse the owned SUBSCRIBER copy ONCE (ADR-0049) — delivery_compact comes from this
     // parse (the resolver's parallel subscriber_compact() is retired); the tlv_t borrows
     // source_view's bytes, which the slot then retains zero-copy.
@@ -1947,7 +1957,9 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
             // edge was admitted over (#943). Do NOT "fix" that by assigning `link` here:
             // `graph_t::dispatch_edge` gates its remote leg on `!e.link.empty()`, so a
             // non-empty link would add a phantom `FWD{WRITE}` per publish carrying an EMPTY
-            // return route.
+            // return route. That is the invariant `subscribe_wire` now enforces at its own
+            // door (#1055, INVALID_PATH on an empty route) — this arm holds up the other half
+            // of it, by binding no link when it binds no route.
             //
             // Reachability, as of this commit: the ONE in-tree wire door
             // (`op_resolve_walk.hpp`'s WRITE case) routes a remote `:subscribers[]` append
