@@ -61,6 +61,26 @@ jobs:
           cmake --build core/build -j "$(nproc)"
           ctest --test-dir core/build --output-on-failure
 
+  # WEAKLY-ORDERED host gate (#1140). Every other leg here runs x86-64, whose TSO model
+  # hides an entire class of defect: a seq_cst store lowers to a locked `xchg`, so a LATER
+  # RELAXED load of zero still cannot observe the pre-store world. Every acquire/release and
+  # Dekker pairing in the graph's lock-free gates — `own_subs_ordered`'s fan-out skip (#635),
+  # `mark_pending`'s deferred skip (#1140) — is therefore untestable where CI runs, and both
+  # were argued from the code rather than covered. aarch64 does NOT order a relaxed load
+  # after a seq_cst store, which is the same property the shipped rv32 targets have and the
+  # reason those arguments matter at all. This leg is the real evidence: same sources, same
+  # ctest, a memory model that can actually exhibit the anomaly. Ablate it by relaxing any of
+  # those ordered loads — the graph race guards can then fail HERE and nowhere else.
+  build-test-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure + build (C++23, aarch64) + ctest
+        run: |
+          cmake -S core -B core/build-arm64 -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build core/build-arm64 -j "$(nproc)"
+          ctest --test-dir core/build-arm64 --output-on-failure
+
   # GCC-15 host gate: build the core + ctest with GCC 15 (the same major the
   # ESP-IDF v6.0 RISC-V toolchain ships), so the core is gated on the compiler
   # the MCU actually uses — catches toolchain-version-specific issues (e.g. the

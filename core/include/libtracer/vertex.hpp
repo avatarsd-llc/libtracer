@@ -2614,13 +2614,21 @@ class vertex_t {
     }
     /**
      * @brief The same count under `seq_cst` — the SUBSCRIBE half of a Dekker pair, and the
-     *        only read that may be used to SKIP a fan-out (#635).
+     *        only read that may be used to SKIP a DELIVERY (#635, #1140).
      *
      * A relaxed read is fine for every consumer that only decides how much work to do
      * (@ref own_subs above). It is NOT fine for one that decides whether to deliver at all:
      * a publisher that skips `snapshot_edges` on a zero count must be ordered against a
      * subscribe that is concurrently taking ADR-0049's durability latch, or the new
      * subscriber gets the latch's OLD value and never sees the publish that raced it.
+     *
+     * "Skip a delivery" covers both halves of the write path, EAGER and DEFERRED. #635 fixed
+     * the eager one (`graph_t::fan_out`'s snapshot skip); #1140 fixed the deferred one
+     * (`graph_t::mark_pending`, where a skipped mark leaves the vertex in no sweep set, so
+     * the next covering `propagate` delivers it nowhere). The distinction between skipping a
+     * fan-out and skipping a mark is bookkeeping — the lost delivery is the same, so the same
+     * read is required. Only the OWN half; the ancestor count keeps its relaxed load, see
+     * @ref listeners_above.
      *
      * The pairing is the one @ref store already documents for `waiters`. PUBLISHER: store
      * the LKV, THEN load this count. SUBSCRIBER: bump this count, THEN load the LKV into

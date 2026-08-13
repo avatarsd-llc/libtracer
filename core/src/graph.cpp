@@ -1543,7 +1543,29 @@ void graph_t::mark_pending(vertex_t* v) {
     // or above v (else a sweep would deliver nowhere — the idle-write fast path keeps the
     // unobserved write off the shared lock, RFC-0005 listeners gate).
     if (v->delivery_mode() != delivery_mode_t::IF_NEWER) return;
-    if (v->own_subs() == 0 && v->listeners_above() == 0) return;
+    // The OWN half is the SEQ_CST read (#1140), for the same reason fan_out's is (#635) and
+    // to the #555 standard — this is a SKIP gate, and the work it skips is never re-offered:
+    // a vertex that misses its mark enters no sweep set, so an ancestor propagate delivers it
+    // nowhere and only a LATER write can re-mark it. Omitted, not deferred.
+    //
+    // The pairing, and the outcome it excludes. PUBLISHER (assign): store the LKV, seq_cst
+    // (`vertex_t::store` -> `lkv_slot_t::store`), THEN load this count, seq_cst. SUBSCRIBER
+    // (`admit_subscriber`): bump the count, seq_cst (`bump_own_subs`, and #635 moved it AHEAD
+    // of the slot verb), THEN load the LKV into ADR-0049's durability latch, seq_cst
+    // (`vertex_t::add_edge` -> `lkv_.load()`). Both sides seq_cst puts all four accesses in
+    // one total order S: a publisher that reads zero here precedes the subscriber's bump in
+    // S, hence precedes the subscriber's latch load, so the latch carries the value this
+    // skipped mark would have swept. The forbidden observation — the skip says
+    // write-before-subscribe while the latch hands the subscriber the PRE-write value, saying
+    // subscribe-before-write, and the value reaches nobody — is not in S. A RELAXED load does
+    // not join S and excludes nothing: architecturally reachable on aarch64/rv32 (a shipped
+    // target), latent on x86-64 only because the seq_cst LKV store lowers to a locked `xchg`.
+    // The other interleaving (count already bumped, slot not yet appended) costs one pending
+    // mark and one sweep that finds a value the latch also delivered — a duplicate, never a
+    // loss. The ANCESTOR half stays relaxed BY RULING (#854, refuted): the latch snapshots
+    // the subscribed ANCESTOR's own LKV, never a descendant's, so a stale zero there has no
+    // forbidden observation to exclude. See `vertex_t::own_subs_ordered`.
+    if (v->own_subs_ordered() == 0 && v->listeners_above() == 0) return;
     // The key render and the set-node insert both allocate on the writer thread —
     // NOTHROW them (#477): on OOM the pending mark is dropped (that deferred delivery
     // is shed, exactly like an eager delivery leg under the same pressure), never an
