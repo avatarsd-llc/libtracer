@@ -267,7 +267,7 @@ flowchart LR
   DIAL side honors it as well, with `defer_rx`
   ([#1101](https://github.com/avatarsd-llc/libtracer/issues/1101)) — it owns no receive
   thread to withhold, so per
-  [ADR-0081](../adr/0081-pre-sink-ingress-native-window-hold-or-named-drop-never-parked.md)
+  [ADR-0081](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0081-pre-sink-ingress-native-window-hold-or-named-drop-never-parked.md)
   §2 the hold is msquic's **per-stream receive window**: the frame channel's RECEIVE
   events consume zero bytes and `start_receiving()` re-enables them, while the H3/QPACK
   state machine keeps consuming its own streams throughout. Nothing is buffered
@@ -279,7 +279,7 @@ flowchart LR
   peer flow-control window to hold bytes in, and its RX callback cannot be withheld
   without starving the liveness bookkeeping it drives (`last_heard`, the
   pending/reassembly sweeps). Any bystander traffic already on the wire lands in the
-  window, so the answer is [ADR-0081](../adr/0081-pre-sink-ingress-native-window-hold-or-named-drop-never-parked.md)
+  window, so the answer is [ADR-0081](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0081-pre-sink-ingress-native-window-hold-or-named-drop-never-parked.md)
   §4's other arm — drop, and tick `transport_can::dropped_presink()`
   ([#1103](https://github.com/avatarsd-llc/libtracer/issues/1103)).
 - **The callable sugar binds by address.** `set_receiver(F& sink)` and

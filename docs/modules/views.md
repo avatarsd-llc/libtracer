@@ -178,6 +178,10 @@ reports a failed allocation as a successful write of nothing.
 :members:
 ```
 
+```{doxygenenum} tr::view::flatten_err_t
+:project: libtracer
+```
+
 ```{doxygenclass} tr::view::rope_t
 :project: libtracer
 :members:
