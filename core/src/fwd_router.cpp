@@ -121,6 +121,11 @@ struct seg_reader_t {
         cur.for_each_span(off, len, [&](std::span<const std::byte> s) {
             for (const std::byte b : s) scratch[w++] = b;
         });
+        // A feed clamped at the window edge (#986) stitches FEWER bytes than asked for,
+        // and naming `len` of them anyway would hand the router a segment whose tail is
+        // whatever the slot held before. Short ⇒ unroutable, the same answer `in_place`
+        // gives for the straddle it could not name.
+        if (w - base != len) return {};
         return std::string_view(reinterpret_cast<const char*>(scratch.data() + base), len);
     }
 
@@ -1406,7 +1411,10 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
                 ok = false;
             }
         });
-        if (!ok) return;
+        // ... and the same drop for a region that overshot the source window (#986): a
+        // clamped feed emits FEWER bytes than the rebuilt head declares, which is the
+        // truncated-frame-on-the-wire outcome this arm already refuses one line up.
+        if (!ok || cur_src.poisoned()) return;
         child.send(std::span<const std::span<const std::byte>>(iov.data(), n));
     } else {
         // Rope source: a region may cross several links, so the sub-span count is only known
@@ -1425,7 +1433,8 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
         rebuilt->gather(cur_src, [&](std::span<const std::byte> s) {
             if (ok && !iov.push_back(s)) ok = false;
         });
-        if (!ok) return;
+        // Same #986 window-overshoot drop as the span arm: both arms state one policy.
+        if (!ok || cur_src.poisoned()) return;
         child.send(std::span<const std::span<const std::byte>>(iov.data(), iov.size()));
     }
 }

@@ -18,6 +18,7 @@
  */
 #pragma once
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -60,6 +61,25 @@ struct span_cursor {
 
     /** @brief Number of bytes available from the TLV's start. */
     [[nodiscard]] std::size_t size() const noexcept { return buf.size(); }
+
+    /**
+     * @brief Never latched — a contiguous cursor cannot serve a byte from outside its
+     *        window, so it has nothing to report (#986).
+     *
+     * The rope source's latch exists because its window is a SOFT bound: the link chain
+     * physically continues past it, so an overshooting feed reads real bytes belonging
+     * to another part of the rope and nothing faults. A `span_cursor`'s window is its
+     * whole object — @ref for_each_span clamps to it, and past that there are no bytes
+     * to serve, wrong or otherwise.
+     *
+     * `static constexpr`, not a member: this makes `if (cur.poisoned())` in the shared
+     * grammar fold away entirely on the span source, and — the reason it is written this
+     * way — keeps the cursor exactly one `std::span` wide. Carrying a `bool` here cost
+     * **compact-forward −26% deliv/s and compact-terminus −14%** (measured, 4/4 and 3/4
+     * interleaved pairs, disjoint ranges): at 24 bytes the cursor stops being two
+     * registers, and `walk`/`region` pass one per descent.
+     */
+    [[nodiscard]] static constexpr bool poisoned() noexcept { return false; }
     /**
      * @brief A sub-cursor over the `[off, off + len)` window of this cursor.
      *
@@ -85,6 +105,8 @@ struct span_cursor {
      * one span, so this is a straight call; the rope cursor yields one span per
      * straddled link, letting the identical feed cross a link boundary with no
      * concatenation buffer.
+     * @note Precondition: `off + n <= size()`, enforced in every build (#986) —
+     *       the feed is truncated to the window and @ref poisoned latches.
      */
     template <class Fn>
     void for_each_span(std::size_t off, std::size_t n, Fn&& fn) const {
@@ -301,6 +323,14 @@ template <class Cursor>
                 return std::unexpected(err_t::FRAME_CRC_FAIL);
             }
         }
+        // The decode boundary for #986's containment latch. `total_size_fits` above
+        // proves both feeds lie inside the window, so reaching this is a bound this
+        // grammar failed to take — not hostile input — and the honest answer is the
+        // one a short frame gets. Tested here rather than at the feeds so the CRC
+        // arms stay branch-free; a truncated feed cannot pass its CRC anyway, which
+        // is why this is the guarantee's backstop and not its only rung.
+        if (cur.poisoned()) [[unlikely]]
+            return std::unexpected(err_t::FRAME_TRUNCATED);
     }
 
     return header_t{

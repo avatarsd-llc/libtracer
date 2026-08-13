@@ -100,6 +100,27 @@ class rope_cursor {
     /** @brief Number of bytes available from this cursor's origin. */
     [[nodiscard]] std::size_t size() const noexcept { return size_; }
 
+    /**
+     * @brief Has any read through THIS cursor been truncated at the window edge? (#986)
+     *
+     * The release-mode half of @ref for_each_span's containment contract. A bulk feed
+     * that overshoots the window is clamped rather than served, and latches this — so
+     * the decode boundary can answer `FRAME_TRUNCATED` (`parse_header` does) instead of
+     * consuming a short feed as if it were whole. Sticky: it is never cleared, because a
+     * frame that produced one wrong-length read is not made sound by a later good one.
+     *
+     * @note Checked on the cursor that was FED. @ref region hands out a copy, so a
+     *       sub-cursor's latch does not travel back to its parent; the boundaries that
+     *       map this to an error (`parse_header`, the forward-plane gather) each test
+     *       the cursor they passed, which is why a temporary sub-cursor — the shape
+     *       `walk` and `peek_fwd_*` descend with — is still covered.
+     * @note Point reads (@ref byte_at, @ref load_le) keep the debug-only contract:
+     *       their callers bounds-check per read against @ref size, and a wrong point
+     *       read is one byte where a wrong feed is an unbounded run. Closing them for
+     *       release is a separate signature question (they return values, not void).
+     */
+    [[nodiscard]] bool poisoned() const noexcept { return poisoned_; }
+
     /** @brief This cursor's origin as a `(link index, intra-link offset)` anchor. */
     [[nodiscard]] std::pair<std::size_t, std::size_t> anchor() const noexcept {
         return {li_, intra_};
@@ -195,28 +216,29 @@ class rope_cursor {
      * The CRC-feed seam: a range wholly inside one link yields a single span; a
      * straddling range yields one span per link it crosses, so the grammar's
      * incremental CRC crosses a link boundary with no concatenation buffer.
-     * @note Precondition: `off + n <= size()` (debug-asserted) — the same window
-     *       containment @ref region and @ref byte_at carry, and that the sibling
-     *       `span_cursor::for_each_span` gets for free from `std::span::subspan`.
-     *       The walk's own guards are chain-end and `seek`'s past-chain assert,
-     *       neither of which sees a feed that overshoots a NARROWED window while
-     *       staying inside the chain — without this the caller would be handed
-     *       real-but-wrong bytes and told it succeeded.
-     * @warning Unlike @ref byte_at there is NO release backstop: `byte_at`'s
-     *          out-of-window read degrades to an out-of-range subscript (`seek`
-     *          returns the one-past-the-end index) that a sanitizer reports, but
-     *          an overshooting feed reads bytes the chain genuinely holds, so a
-     *          release (NDEBUG) build walks past the window silently and no
-     *          sanitizer can see it. In release this contract is the CALLER's to
-     *          keep; the assert closes the defect class for debug and CI only.
+     * @note Precondition: `off + n <= size()`. Violating it is DEFINED, in every
+     *       build (#986): the feed is truncated to the window, so no byte from
+     *       outside it is ever handed to @p fn, and @ref poisoned latches — see
+     *       that accessor for why the window is enforced here rather than left
+     *       to the caller. The debug assert below still fires first, so a
+     *       violation stays loud in a debug build and CI.
      */
     template <class Fn>
     void for_each_span(std::size_t off, std::size_t n, Fn&& fn) const {
-        // Precondition, enforced in debug builds (zero release cost): the whole feed must
-        // lie inside this cursor's window. Unlike byte_at, a violation is NOT sanitizer-
-        // visible in a release build — the overshot bytes really are in the chain, just
-        // outside the window — so this assert is the only guard there is.
-        assert(off + n <= size());
+        // The RELEASE guarantee (#986), not merely a debug precondition. `seek`'s
+        // past-chain assert and the walk's `li < links_.size()` guard both miss a feed
+        // that overshoots a NARROWED window while staying inside the chain: those bytes
+        // really are in the chain, so nothing faults and no sanitizer can see it, and the
+        // caller would be handed real bytes from the wrong place and told it succeeded.
+        // Clamping is what makes the overshoot unable to produce a wrong byte at all;
+        // the latch is what lets the decode boundary answer FRAME_TRUNCATED for it.
+        // Taken by subtracting FROM size_ so no sum can wrap (`off + n` can).
+        const std::size_t avail = size_ - (off < size_ ? off : size_);
+        if (n > avail) [[unlikely]] {
+            poisoned_ = true;
+            n = avail;
+        }
+        assert(!poisoned_ && "rope_cursor: feed overshoots the cursor's window");
         // An empty feed names no byte, so it must not `seek` one: the grammar's CRC
         // feed calls this with n == 0 for an absent payload or trailer, at an offset
         // that is legitimately the end of the window.
@@ -261,6 +283,11 @@ class rope_cursor {
     std::size_t li_ = 0;     // link holding the cursor's first byte
     std::size_t intra_ = 0;  // offset of that byte within link li_
     std::size_t size_ = 0;   // bytes available from the anchor
+    // Sticky window-truncation latch (#986). `mutable` because the reads that set it are
+    // const and take the cursor by const&, which is exactly what lets a boundary holding
+    // only a `const Cursor&` — parse_header — see its own feed's violation. Keeps the
+    // cursor trivially copyable, as the walk stack's relocation memcpy needs.
+    mutable bool poisoned_ = false;
 };
 
 }  // namespace tr::wire::grammar
