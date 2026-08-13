@@ -753,6 +753,32 @@ class graph_t {
     std::size_t evict_link_edges(std::string_view link_name);
 
     /**
+     * @brief Evict the remote subscriber edge(s) whose delivery link AND stored return
+     *        route both match — the refused-route reclaim (#1223 step 5).
+     *
+     * The narrow sibling of @ref evict_link_edges, fired by the transport plane when a
+     * delivery it emitted draws back an addressed `tr::path::invalid` refusal (the RFC-0020
+     * bus-residual reject — the one wire observation a producer gets that a stored route's
+     * terminal session departed). Where link teardown reclaims a whole link's edges, this
+     * reclaims exactly the edge(s) that delivered along @p route_wire over @p link_name:
+     * both keys are required, and the route compare is BYTE-equal on the stored PATH TLV
+     * (see `vertex_t::evict_route_edges`). Same two-phase locking, same RFC-0005 unwind,
+     * same no-error-channel contract as link teardown; an empty key matches nothing.
+     *
+     * RFC-0009 §D.4 is NOT contradicted: that clause keeps an edge whose *target vertex*
+     * retired, on the stated premise that "a write to a retired path is not an error the
+     * producer observes". A refused ROUTE is precisely the case where the producer now DOES
+     * observe an error — RFC-0020 (which postdates §D.4) made the observation normative,
+     * and this reclaim acts only on it.
+     *
+     * @param link_name  This node's NAME for the link the refusal arrived on.
+     * @param route_wire The refused route — whole PATH TLV bytes echoed by the rejecting hop.
+     * @return The number of edges evicted, summed over the graph.
+     */
+    std::size_t evict_route_edges(std::string_view link_name,
+                                  std::span<const std::byte> route_wire);
+
+    /**
      * @brief Visit every REGISTERED vertex once, in ascending canonical-key BYTE order —
      *        the graph's enumeration surface (a census, a directory listing, a paginated
      *        `/system/…` projection).

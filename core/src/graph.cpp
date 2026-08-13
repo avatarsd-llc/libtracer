@@ -721,6 +721,30 @@ std::size_t graph_t::evict_link_edges(std::string_view link_name) {
     return total;
 }
 
+std::size_t graph_t::evict_route_edges(std::string_view link_name,
+                                       std::span<const std::byte> route_wire) {
+    // Byte-for-byte the evict_link_edges discipline (see its comment): snapshot under one
+    // shared hold, evict per vertex under a fresh shared hold + the vertex's stripe lock,
+    // unwind the RFC-0005 bookkeeping by exactly the count each vertex reports. Only the
+    // per-vertex predicate differs — link AND stored-route equality instead of link alone.
+    if (link_name.empty() || route_wire.empty()) return 0;
+    std::vector<vertex_t*> candidates;
+    {
+        const std::shared_lock lock(map_mutex_);
+        collect_subscribed(root_.get(), candidates);
+    }
+    std::size_t total = 0;
+    for (vertex_t* v : candidates) {
+        const std::shared_lock lock(map_mutex_);
+        const std::size_t k = v->evict_route_edges(link_name, route_wire);
+        if (k == 0) continue;
+        v->bump_own_subs(-static_cast<std::int32_t>(k));
+        bump_subtree_listeners(v, -static_cast<std::int32_t>(k));
+        total += k;
+    }
+    return total;
+}
+
 result_t<vertex_handle_t> graph_t::ensure_vertex(std::span<const std::byte> key,
                                                  std::string_view caller) {
     result_t<vertex_t*> p = ensure_vertex_ptr(key, caller);

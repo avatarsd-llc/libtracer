@@ -621,6 +621,25 @@ class fwd_router_t {
     static constexpr std::uint32_t kNoConnSlot = 0xFFFFFFFFu;
 
     /**
+     * @brief Reclaim the subscriber edge a refused delivery route names (#1223 step 5).
+     *
+     * Called on every inbound `FWD{REPLY}` that terminates here, BEFORE the reply sink and
+     * whether or not one is installed. A reply that is not an addressed `tr::path::invalid`
+     * refusal (RFC-0020's bus-residual reject — op REPLY, kind ERROR, `STATUS{ERROR{0x0021}}`)
+     * returns after at most five header reads, allocation-free, so the warm read-reply path
+     * pays a peek and nothing else. On a refusal, the reply's `src` — the refused route the
+     * rejecting hop echoed back verbatim ("so it can correlate", `reject_bus_name_hop`) — is
+     * handed with @p inbound_name to `graph_t::evict_route_edges`, which reclaims exactly the
+     * edge(s) that stored that route over that link. This is the producer-side half of the
+     * RFC-0020 exchange: the reject already ships; this makes the producer act on it instead
+     * of dropping it into a sink that never matched it.
+     *
+     * @param inbound_name This node's NAME for the link the reply arrived on.
+     * @param frame        The reply frame's contiguous bytes.
+     */
+    void reclaim_refused_route(std::string_view inbound_name, std::span<const std::byte> frame);
+
+    /**
      * @brief A link's stable per-child receiver state — its identity AND its mount run.
      *
      * `mount_tlv` is the child's mount path pre-encoded as a run of NAME TLVs, the same

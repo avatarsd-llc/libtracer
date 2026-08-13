@@ -614,6 +614,79 @@ void reject_bus_name_hop(const child_registry_t& registry, std::string_view inbo
     }
 }
 
+/** @brief The reply-`src` window @ref peek_refused_route hands back — offsets, not a span,
+ *         because the source may be a rope the caller re-slices from its own cursor. */
+struct refused_src_t {
+    std::size_t off = 0; /**< @brief Absolute offset of the echoed route's PATH TLV. */
+    std::size_t len = 0; /**< @brief Its total size (header + body). */
+};
+
+/**
+ * @brief Is this terminating `FWD{REPLY}` an addressed RFC-0020 refusal — and if so, where
+ *        is the refused route it echoes? (#1223 step 5, the producer-side half.)
+ *
+ * `reject_bus_name_hop` above answers a delivery whose residual names a departed session
+ * with `FWD{ REPLY, dst=req.src, src=req.dst, kind=ERROR, STATUS{ERROR{tr::path::invalid}} }`
+ * — the request's routes swapped, "the refused spelling ... echoed so it can correlate".
+ * This peek is that correlation, on the receiving side: it recognizes the exact shape by
+ * OFFSET (five header reads through the one grammar, no decode, no allocation — the warm
+ * read-reply path bails at the first non-matching child) and hands back the `src` window,
+ * which is the refused route byte-for-byte as this node stored and emitted it.
+ *
+ * Strict on the shape, deliberately: a reply with a FIELD child, a non-ERROR kind, or any
+ * status but `tr::path::invalid` (0x0021) is NOT a route refusal and must not evict — a
+ * TIMEOUT or BACKPRESSURE names a live route having a bad day.
+ *
+ * @tparam Cursor A grammar byte-source cursor (span or rope).
+ * @param  cur    The cursor positioned at the frame's first byte.
+ * @retval std::nullopt Not an addressed `tr::path::invalid` refusal.
+ */
+template <class Cursor>
+[[nodiscard]] std::optional<refused_src_t> peek_refused_route(const Cursor& cur) {
+    const auto outer = read_fwd_header(cur, 0);
+    if (!outer || outer->type != wire::type_t::FWD || !outer->opt.pl) return std::nullopt;
+    const std::size_t end = outer->body_off + outer->body_len;
+    // Child 1 — VALUE op, one byte, masked REPLY (RFC-0024 §9.3: mask, never the raw byte).
+    std::size_t pos = outer->body_off;
+    const auto op = read_fwd_header(cur, pos);
+    if (!op || op->type != wire::type_t::VALUE || op->body_len != 1) return std::nullopt;
+    if (static_cast<graph::fwd_op_t>(cur.byte_at(op->body_off) & graph::kFwdOpcodeMask) !=
+        graph::fwd_op_t::REPLY)
+        return std::nullopt;
+    pos += op->total;
+    if (pos >= end) return std::nullopt;
+    // Child 2 — PATH dst: the reply's consumed way home; not read further.
+    const auto rdst = read_fwd_header(cur, pos);
+    if (!rdst || rdst->type != wire::type_t::PATH) return std::nullopt;
+    pos += rdst->total;
+    if (pos >= end) return std::nullopt;
+    // Child 3 — PATH src: the refused route, echoed whole. Non-empty by the same rule as
+    // the eviction it feeds (an empty route names nothing and matches nothing).
+    const auto rsrc = read_fwd_header(cur, pos);
+    if (!rsrc || rsrc->type != wire::type_t::PATH || rsrc->body_len == 0) return std::nullopt;
+    const refused_src_t out{.off = pos, .len = rsrc->total};
+    pos += rsrc->total;
+    if (pos >= end) return std::nullopt;
+    // Child 4 — VALUE kind == ERROR.
+    const auto kind = read_fwd_header(cur, pos);
+    if (!kind || kind->type != wire::type_t::VALUE || kind->body_len != 1) return std::nullopt;
+    if (cur.byte_at(kind->body_off) !=
+        static_cast<std::uint8_t>(std::to_underlying(graph::reply_kind_t::ERROR)))
+        return std::nullopt;
+    pos += kind->total;
+    if (pos >= end) return std::nullopt;
+    // Child 5 — STATUS{ ERROR{ VALUE u16 LE } }, and the code is tr::path::invalid.
+    const auto st = read_fwd_header(cur, pos);
+    if (!st || st->type != wire::type_t::STATUS || !st->opt.pl) return std::nullopt;
+    const auto err = read_fwd_header(cur, st->body_off);
+    if (!err || err->type != wire::type_t::ERROR || !err->opt.pl) return std::nullopt;
+    const auto code = read_fwd_header(cur, err->body_off);
+    if (!code || code->type != wire::type_t::VALUE || code->body_len != 2) return std::nullopt;
+    if (cur.load_le(code->body_off, 2) != std::to_underlying(wire::err_t::PATH_INVALID))
+        return std::nullopt;
+    return out;
+}
+
 /**
  * @brief Can any address that exists have @p name as its mount prefix?
  *
@@ -642,6 +715,16 @@ void reject_bus_name_hop(const child_registry_t& registry, std::string_view inbo
 }
 
 }  // namespace
+
+void fwd_router_t::reclaim_refused_route(std::string_view inbound_name,
+                                         std::span<const std::byte> frame) {
+    const wire::grammar::span_cursor cur{frame};
+    const std::optional<refused_src_t> ref = peek_refused_route(cur);
+    if (!ref) return;
+    // COLD past the peek by construction: only an addressed refusal reaches the walk. The
+    // count is not surfaced, matching the link_down seam — eviction seams report nothing.
+    (void)graph_.evict_route_edges(inbound_name, frame.subspan(ref->off, ref->len));
+}
 
 bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_source_t* rx) {
     // ADR-0063 §3: serialize control-plane writers. The registry's scan-then-append and the
@@ -1306,6 +1389,15 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
                 },
                 /* reply */
                 [&] {
+                    // The step-5 reclaim (#1223) peeks the rope IN PLACE; only an actual
+                    // RFC-0020 refusal pays the one cold flatten (the reject arm's ADR-0052
+                    // precedent, same injected backend), because the route compare needs the
+                    // echoed src contiguous.
+                    if (peek_refused_route(cur)) {
+                        const std::expected<view_t, view::flatten_err_t> flat =
+                            frame.subrope(0, frame.total_length()).try_materialize(*flat_);
+                        if (flat) reclaim_refused_route(inbound_name, flat->bytes());
+                    }
                     // A REPLY that reaches its originator here is handed to the sink
                     // rope-native (ADR-0055): NO flatten — the sink materializes on demand.
                     // Absent sink ⇒ dropped (as the flatten path would, into a no-op decode).
@@ -1346,6 +1438,11 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
             /* terminus */ [&] { resolve_terminus(inbound_name, frame, frame_view, inbound_ctx); },
             /* reply */
             [&] {
+                // The step-5 reclaim (#1223) runs BEFORE the sink and without one: an
+                // addressed RFC-0020 refusal evicts the edge that stored the refused route,
+                // whether or not anything else is listening for replies. Not a refusal ⇒
+                // the peek bails allocation-free.
+                reclaim_refused_route(inbound_name, frame);
                 // Hand the FWD{REPLY} to the sink rope-native (ADR-0055): NO decode. A
                 // view-delivered frame ropes zero-copy off its owning view; a borrowed span is
                 // copied once into an owned segment (the copy the old decode-then-consumer-

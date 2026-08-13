@@ -60,7 +60,7 @@ window, so **"the forward hop is heap-free by construction" is false as stated**
   nothing about it (`core/src/transport_tcp.cpp:51-55`).
 - **The multi-link rope arm.** A rope source's sub-span count is the sender's choice and is
   known only at run time, so that arm gathers into a `mem::block_array_t` drawn from the
-  injected receive source (`core/src/fwd_router.cpp:1492`). Nothrow (ADR-0065 — exhaustion
+  injected receive source (`core/src/fwd_router.cpp:1589`). Nothrow (ADR-0065 — exhaustion
   drops the frame rather than aborting), but **not** allocation-free.
 
 Read `bench_forward_heap` and `bench_transport_iov` together; neither is sufficient alone.
