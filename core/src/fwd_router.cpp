@@ -1749,10 +1749,21 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
         // caches the address, never the authorization" — so the cached handle is reused and
         // the gate is re-evaluated per frame: a later `:acl` binds the very next COMPACT.
         if (rb.warm && rb.target && graph_.retire_generation(*rb.target) == rb.target_gen) {
+            // Both bails below are allocation failures, counted so a node shedding COMPACT
+            // frames under memory pressure says so (#1068). A DENIAL is NOT counted here:
+            // `graph_.write` counts it at the gate that produces it, so this arm must not
+            // add a second count for the same refusal. Nothing is counted on success — the
+            // steady-state warm path is exactly the instructions it was before.
             const auto payload_view = view::over_bytes(payload_bytes);
-            if (!payload_view) return;  // alloc failure ⇒ drop (one audited locus)
+            if (!payload_view) {  // alloc failure ⇒ drop (one audited locus)
+                graph_.count_external_drop(graph::graph_t::external_drop_t::OUT_OF_MEMORY, 1);
+                return;
+            }
             view::rope_t value;
-            if (!value.try_reserve(1)) return;
+            if (!value.try_reserve(1)) {
+                graph_.count_external_drop(graph::graph_t::external_drop_t::OUT_OF_MEMORY, 1);
+                return;
+            }
             value.append(*payload_view);
             if (graph_.write(*rb.target, std::move(value), inbound_name).has_value()) {
                 if (const auto sink = delivery_.get(); sink.fn != nullptr) {
@@ -1766,7 +1777,14 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
         // COLD or STALE: take the owning form, resolve the route, then memoize it.
         const std::optional<handle_binding_t> binding =
             handles_.lookup_ingress(inbound_name, label);
-        if (!binding) return;
+        // The label resolved a moment ago (rb.found) and its binding is gone now: a
+        // concurrent unbind between the two reads. The delivery was admitted and has no
+        // target left, which is what NO_TARGET means (#1068) — it is not the stale-label
+        // arm above, which self-heals by NACK; there is nothing here to re-advertise to.
+        if (!binding) {
+            graph_.count_external_drop(graph::graph_t::external_drop_t::NO_TARGET, 1);
+            return;
+        }
         // Same caller context as the warm arm above (#974): the cold and warm halves of one
         // flow must not disagree about who is writing.
         if (deliver_local(binding->local_route, payload_bytes, inbound_name)) {
@@ -1845,12 +1863,26 @@ bool fwd_router_t::deliver_local(std::span<const std::byte> route_path,
     // Through the SAME helper the memoized handle is resolved by — so the cold path and the
     // cached path cannot disagree about which vertex a label names. Two decode+find copies
     // would be two sources of truth, which is the shape #516 turned out to be.
+    // The bool contract is deliberately unchanged (#1068): the CAUSE does not travel back to
+    // the caller, it travels into the counters at the site that knows it. Widening the return
+    // would hand every caller a reason it has nothing to do with — on_compact's only question
+    // is "did it land", and the operator's question is answered by delivery_drops().
     const std::optional<graph::vertex_handle_t> v = resolve_route_vertex(route_path);
-    if (!v) return false;
+    if (!v) {
+        // Not an address, or an address naming no live vertex — indistinguishable here and
+        // the same outcome either way: an admitted delivery with nowhere to land.
+        graph_.count_external_drop(graph::graph_t::external_drop_t::NO_TARGET, 1);
+        return false;
+    }
     // `payload` is a wire-encoded TLV (never empty); `nullopt` is exactly an alloc
     // failure → drop the delivery (one audited alloc/copy/over locus).
     const auto payload_view = view::over_bytes(payload);
-    if (!payload_view) return false;
+    if (!payload_view) {
+        graph_.count_external_drop(graph::graph_t::external_drop_t::OUT_OF_MEMORY, 1);
+        return false;
+    }
+    // A denial inside `write` is counted at the graph's WRITE gate, never here — the false
+    // this returns for a refusal is the caller's answer, not a second drop.
     // @p caller is the ACL subject context (#974) — the inbound link's NAME on the COMPACT
     // path, matching what the full-route FWD{WRITE} presents. It is a required parameter
     // precisely so a future delivery path cannot land here unattributed by omission.

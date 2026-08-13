@@ -329,10 +329,14 @@ itself, described via `:schema` like any other data
 ```
 
 The backpressure counters come from `graph_t::delivery_drops()`
-(`core/include/libtracer/graph.hpp:1364`), which snapshots four per-cause totals —
-`no_target`, `denied`, `out_of_memory`, `fan_out_truncated` (`graph.hpp:1342-1354`). Each
+(`core/include/libtracer/graph.hpp:1382`), which snapshots four per-cause totals —
+`no_target`, `denied`, `out_of_memory`, `fan_out_truncated` (`graph.hpp:1350-1372`). Each
 counts shed **deliveries**, not events, so a fan-out shed whole under memory pressure moves
-them by its width. They are counted and
+them by its width. `denied` counts an `:acl` refusal on every plane — a local API write, a
+`FWD{WRITE}` terminus, a `COMPACT` terminus and a subscription edge alike (#1068) — so on a
+node whose vertices carry ACLs it is the signal that a peer is writing where it may not, and
+a peer whose grant was revoked shows up here rather than as a link that simply went quiet.
+They are counted and
 never enforced: nothing in the library reads them, so the deployment decides what to
 alarm on. The loads are individually relaxed rather than one atomic snapshot,
 so their useful reading is "is this growing", not an instant total.

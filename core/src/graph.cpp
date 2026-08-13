@@ -746,6 +746,21 @@ void graph_t::count_drop(drop_reason_t why, std::uint64_t n) noexcept {
     }
 }
 
+void graph_t::count_external_drop(external_drop_t why, std::uint64_t n) noexcept {
+    // Translate the narrow public cause into the internal one and go through the SAME door
+    // every in-graph site uses (#1068). The mapping is total and the switch exhaustive, so a
+    // cause added to the public enum must choose an internal counter here rather than
+    // silently counting nothing — the failure mode this whole centralization exists against.
+    switch (why) {
+        case external_drop_t::NO_TARGET:
+            count_drop(drop_reason_t::NO_TARGET, n);
+            return;
+        case external_drop_t::OUT_OF_MEMORY:
+            count_drop(drop_reason_t::OUT_OF_MEMORY, n);
+            return;
+    }
+}
+
 void graph_t::count_snapshot_drops(const vertex_t::snapshot_drops_t& drops) noexcept {
     if (drops.out_of_memory != 0) count_drop(drop_reason_t::OUT_OF_MEMORY, drops.out_of_memory);
     if (drops.truncated != 0) count_drop(drop_reason_t::FAN_OUT_TRUNCATED, drops.truncated);
@@ -1197,8 +1212,18 @@ namespace {
 }  // namespace
 
 result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, std::string_view caller) {
-    if (!acl_allows(v, caller, acl_right_t::WRITE))
+    // The ONE WRITE gate of the value-write path, so counting the refusal here counts it for
+    // every plane that enters through it: an API write, a FWD{WRITE} terminus, and both the
+    // warm and cold COMPACT terminus arms (#1068). The router discards this status — it has
+    // no caller to hand it to — so if the denial were not counted at the gate that produces
+    // it, a revoked peer streaming into a protected vertex would look exactly like a quiet
+    // link. Counting an API caller's own denial as well is deliberate (see delivery_drops_t
+    // ::denied): `denied` means refusals, not refusals-nobody-heard-about, and a counter
+    // whose value depended on WHICH door a refusal came through could not be summed.
+    if (!acl_allows(v, caller, acl_right_t::WRITE)) {
+        count_drop(drop_reason_t::DENIED, 1);
         return std::unexpected(status_t::PERMISSION_DENIED);
+    }
     // `write` is the RFC-0008 §D composition — assign the vertex, then deliver exactly
     // what it stored (a leaf VALUE, or each landed descendant of a branch POINT). This is
     // the FWD{WRITE}-terminus behavior: a TARGETED delivery of the written vertex(es), not
