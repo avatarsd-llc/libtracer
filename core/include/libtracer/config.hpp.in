@@ -7,18 +7,25 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * Two renderings of one template exist:
+ * @warning **TRANSITIONAL — this template has ONE remaining consumer and is being retired
+ *          (#1244).** As of ADR-0068 §Erratum 1 (#1142) the defaults live in the checked-in
+ *          `config.hpp`, which is now ordinary hand-written C++; core's build does not render
+ *          this file at all. It survives solely because the ESP-IDF component still
+ *          `configure_file`s it (`integrations/esp-idf/libtracer/CMakeLists.txt`), and it
+ *          renders the OLD header shape — self-consistent for that build, since the only
+ *          cross-header consumer is `tr::mem::kSpinWaitSafe`, which both shapes define.
  *
- *   - `config.hpp.in` — the single source of truth. CMake `configure_file`s it into the
- *     build tree with the target's knob values and prepends that directory to the PUBLIC
- *     include path, so the generated file SHADOWS this one for every TU of the build
- *     (one file per build ⇒ no per-TU `-D` mismatch, no ODR hazard).
- *   - the checked-in `%config.hpp` — the default rendering, kept byte-identical by a
- *     configure-time drift gate (`FATAL_ERROR` on mismatch), so a raw `-Icore/include`
- *     consumer (the Cortex-M0 footprint gate, vendored source drops) builds with stock
- *     settings and no build-system participation.
+ *          **The configure-time drift gate that used to hold this file and `config.hpp`
+ *          byte-identical is gone**, because the two shapes deliberately differ now. So a
+ *          knob added to `config.hpp` does NOT reach this template, and therefore does not
+ *          reach an ESP build, until someone adds it here too. That is the whole cost of the
+ *          split, it is bounded to the window before #1244 converts ESP-IDF to an override
+ *          fragment, and #1244 then DELETES this file.
  *
- * Adding a knob: add it HERE (both renderings via the gate), never as a macro in a
+ *          Adding a knob in that window: add it to `config.hpp` as a `default_config_t`
+ *          member, and mirror it here as an `inline constexpr` so ESP keeps up.
+ *
+ * Adding a knob (the retired arrangement, for context): add it HERE, never as a macro in a
  * public header. The CMake cache variable / Kconfig option is the user-facing name; this
  * header is its C++ delivery vehicle.
  */

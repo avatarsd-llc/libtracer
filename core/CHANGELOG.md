@@ -35,6 +35,32 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **Build configuration is overridden by a `libtracer/config_override.hpp` fragment, not by
+  CMake cache variables (#1142, ADR-0068 §Erratum 1).** `libtracer/config.hpp` is now ordinary
+  hand-written C++ and the only place a default core's own build reads is spelled: core's
+  `configure_file`, the configure-time drift gate that byte-compared the template's default
+  render against the checked-in copy, and five cache variables
+  (`LIBTRACER_VERTEX_LOCK_STRIPES`, `LIBTRACER_CACHE_LINE_BYTES`, `LIBTRACER_HAZARD_READER_SLOTS`,
+  `LIBTRACER_EDGE_PIN_SLOTS`, `LIBTRACER_SPIN_WAIT_SAFE`) are
+  **removed** — 78 lines of `core/CMakeLists.txt` existed to move six C++ constants into a C++
+  header, and the gate existed only because the defaults were spelled twice. A target with
+  non-default knobs now supplies a fragment earlier on the include path; `config.hpp` picks it
+  up and uses the `config_t` it binds. The fragment INHERITS `default_config_t` and states only
+  what differs, so a knob added later reaches every override at its new default — the property
+  that makes the drift gate unnecessary rather than merely absent.
+  **Transition, one release:** `-DLIBTRACER_ACL_FULL` and `-DLIBTRACER_LKV_SLOT` — the only two
+  the CI matrix passes — keep working, with `core/CMakeLists.txt` writing the fragment on their
+  behalf and saying so at configure time. A NEW knob does not get a CMake variable.
+  **Scope:** this is the core half only. `config.hpp.in` stays in the tree with exactly one
+  remaining consumer — the ESP-IDF component, which still renders it — and is retired, along
+  with that component's conversion to a fragment, by **#1244**. In that window the two files
+  are no longer held identical by any gate, so a knob added to `config.hpp` must be mirrored
+  into `config.hpp.in` by hand to reach an ESP build; the template's own header says so.
+- **`kSpinWaitSafe` is a `default_config_t` member (#1142).** `tr::mem::kSpinWaitSafe` is now
+  derived from `config_t` rather than being a loose `inline constexpr` literal. A knob outside
+  the one named type cannot be reached by an override fragment at all, which is why this one
+  had been stranded in the build system; this restores ADR-0070's rule. No value changed.
+
 - **The ACE `access_mask` canonical wire width is u32 (RFC-0026, #993).** The published
   corpus disagreed with itself: reference 05 §`0x0A`, the `acl/acl-aces` conformance vector
   and the Rust builder spelled the mask u16 while `tr::graph::encode_acl` — the encoder

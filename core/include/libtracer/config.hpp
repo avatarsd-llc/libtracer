@@ -7,20 +7,22 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * Two renderings of one template exist:
+ * This file is ORDINARY, hand-written C++ and is the only place the defaults are spelled.
+ * A raw `-Icore/include` consumer (the Cortex-M0 footprint gate, vendored source drops)
+ * therefore builds with stock settings and no build-system participation at all.
  *
- *   - `config.hpp.in` — the single source of truth. CMake `configure_file`s it into the
- *     build tree with the target's knob values and prepends that directory to the PUBLIC
- *     include path, so the generated file SHADOWS this one for every TU of the build
- *     (one file per build ⇒ no per-TU `-D` mismatch, no ODR hazard).
- *   - the checked-in `%config.hpp` — the default rendering, kept byte-identical by a
- *     configure-time drift gate (`FATAL_ERROR` on mismatch), so a raw `-Icore/include`
- *     consumer (the Cortex-M0 footprint gate, vendored source drops) builds with stock
- *     settings and no build-system participation.
+ * **Overriding.** A target that wants non-default knobs puts a header named
+ * `libtracer/config_override.hpp` earlier on the include path; this file picks it up
+ * automatically (see @ref tr::graph::default_config_t) and the fragment binds
+ * @ref tr::graph::config_t to its own traits type. The fragment is a handful of lines
+ * that INHERITS the defaults, so it states only what differs and a knob added here later
+ * reaches it untouched. One file per build ⇒ every TU agrees ⇒ no per-TU `-D` mismatch and
+ * no ODR hazard — the property the older generated-header arrangement existed to provide,
+ * kept without a template, a checked-in second copy, or the configure-time drift gate that
+ * guarded the two against each other (ADR-0068 §Erratum 1).
  *
- * Adding a knob: add it HERE (both renderings via the gate), never as a macro in a
- * public header. The CMake cache variable / Kconfig option is the user-facing name; this
- * header is its C++ delivery vehicle.
+ * Adding a knob: add it HERE as a @ref tr::graph::default_config_t member, never as a
+ * macro in a public header and never as a loose constant that a fragment cannot reach.
  */
 #pragma once
 
@@ -56,26 +58,33 @@ class hazard_slot_t;         // lkv_slot.hpp — lock-free atomic<node*>; hazard
  * app-declared traits type cannot reach the library's out-of-line translation units anyway, so
  * it would layer on this header rather than replace it.
  *
- * **Declaring your own.** Copy this struct, change what differs, and bind it — one alias,
- * app-wide, in the header your build puts ahead of this one on the include path:
+ * **Declaring your own.** Write a `libtracer/config_override.hpp` and put its directory ahead
+ * of `core/include` on the include path. This header includes it — after this struct, so the
+ * defaults are already visible to inherit from — and uses whatever @ref config_t it binds:
  *
  * ```cpp
- * struct my_node_config_t : tr::graph::default_config_t {
+ * // libtracer/config_override.hpp
+ * #pragma once
+ * namespace tr::graph {
+ * struct my_node_config_t : default_config_t {
  *     static constexpr std::size_t kCacheLineBytes = 0;  // single-core: no false sharing
- *     using lkv_slot_t = tr::graph::sp_atomic_slot_t;
+ *     using lkv_slot_t = sp_atomic_slot_t;
  * };
  * using config_t = my_node_config_t;
+ * }  // namespace tr::graph
  * ```
  *
  * Inheriting from @ref default_config_t means a knob added later does not break your preset —
- * it inherits the new default instead of failing to compile.
+ * it inherits the new default instead of failing to compile. Stating only the differences is
+ * also what keeps the override honest: there is no second copy of the defaults to rot.
  */
 struct default_config_t {
     /**
      * @brief The number of lock stripes shared by every vertex in the process (#361 §2).
      *
-     * CMake: `-DLIBTRACER_VERTEX_LOCK_STRIPES=8`; ESP-IDF: menuconfig
-     * `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES`. A small single-core node reclaims RAM at 4-8.
+     * Override fragment: `static constexpr std::size_t kVertexLockStripes = 8;`; ESP-IDF:
+     * menuconfig `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES`, which writes exactly that line. A
+     * small single-core node reclaims RAM at 4-8.
      *
      * What N costs, precisely: `N * sizeof(vertex_stripe_t)` bytes of `.bss` reserved at LINK
      * time (plus the same for the condvar table) — the table is not lazy, whatever the platform
@@ -98,9 +107,10 @@ struct default_config_t {
      *
      * This is an OPTIMIZATION knob, never a correctness one: 0 on a multi-core target costs
      * throughput under concurrent control-plane verbs and changes no observable behaviour.
-     * CMake: `-DLIBTRACER_CACHE_LINE_BYTES=0`. The ESP-IDF component derives it from
-     * `CONFIG_FREERTOS_UNICORE` — a unicore build has no second core by construction, so the
-     * right value is not a question the integrator should be asked.
+     * Override fragment: `static constexpr std::size_t kCacheLineBytes = 0;`. The ESP-IDF
+     * component derives it from `CONFIG_FREERTOS_UNICORE` — a unicore build has no second
+     * core by construction, so the right value is not a question the integrator should be
+     * asked.
      *
      * Values below a padded type's natural alignment are raised to it, not applied
      * ([dcl.align]/5 makes a reduction ill-formed, and GCC ignores it *silently*); each padded
@@ -113,8 +123,8 @@ struct default_config_t {
      *
      * Read this as "threads that concurrently touch a vertex's LKV" — readers announce, writers
      * park displaced nodes, and both claim one index for the life of the thread. A per-target
-     * knob rather than a thread ceiling picked out of the air (RFC-0006); CMake:
-     * `-DLIBTRACER_HAZARD_READER_SLOTS=24`.
+     * knob rather than a thread ceiling picked out of the air (RFC-0006); override fragment:
+     * `static constexpr std::size_t kHazardReaderSlots = 24;`.
      *
      * Sizing: one index per such thread, and **nothing at all** unless @ref lkv_slot_t is bound
      * to `hazard_slot_t` — the default binding never references the registry, so it is never
@@ -143,7 +153,7 @@ struct default_config_t {
      * Read this as "threads that may publish (`graph_t::write`) concurrently". Each claims one
      * index for the life of the thread; the pin itself is held only across the copy-out, never
      * across a dispatch. A per-target knob rather than a thread ceiling picked out of the air
-     * (RFC-0006); CMake: `-DLIBTRACER_EDGE_PIN_SLOTS=24`.
+     * (RFC-0006); override fragment: `static constexpr std::size_t kEdgePinSlots = 24;`.
      *
      * **Correctness never depends on this number** — only scaling does. A thread that finds
      * every index taken falls back to copying the CURRENT array under the vertex stripe mutex,
@@ -245,20 +255,63 @@ struct default_config_t {
      *
      * A many-core host is the case for rebinding this: today's slot INVERTS under concurrent
      * readers, and a reclamation scheme that does not serialize recovers roughly 4x of that at
-     * twenty-four readers (ADR-0069 §6 — the real path, not the model bench's 20.8x). CMake:
-     * `-DLIBTRACER_LKV_SLOT=<type>`. The named type must satisfy the policy contract in
+     * twenty-four readers (ADR-0069 §6 — the real path, not the model bench's 20.8x). Override
+     * fragment: `using lkv_slot_t = hazard_slot_t;`. The named type must satisfy the contract in
      * `%lkv_slot.hpp` — in particular `load()` returns an OWNING handle.
      */
     using lkv_slot_t = sp_atomic_slot_t;
+
+    /**
+     * @brief Whether a task on this target may SPIN-WAIT for a lock another task holds (#1158).
+     *
+     * An L0 (`tr::mem`) fact, but a member HERE because ADR-0070's rule is that the
+     * configuration is ONE named type: a knob that lives outside it cannot be set by an
+     * override fragment, which is exactly the defect that kept this one in the build system.
+     * @ref tr::mem::kSpinWaitSafe is its spelling for the memory layer, derived like every
+     * other loose name below.
+     *
+     * True on a multi-core host: the holder runs on a different core, so a spinner makes
+     * progress possible and the O(1) section costs less than a mutex round-trip. FALSE on a
+     * priority-preemptive scheduler, where a spinner that outranks the holder never yields the
+     * CPU the holder needs to release the lock — the wait becomes unbounded priority inversion
+     * and the board hangs in the watchdog rather than merely running slowly. That is true of a
+     * single-core chip and equally of an SMP chip whose spinner and holder share a core.
+     */
+    static constexpr bool kSpinWaitSafe = true;
 };
+
+}  // namespace tr::graph
+
+// ---------------------------------------------------------------------------------------------
+// The override seam. A target with non-default knobs puts `libtracer/config_override.hpp` ahead
+// of this directory on the include path; it is included HERE, after default_config_t, so the
+// fragment can inherit the defaults and must state only what differs. Absent — the ordinary
+// case, and every raw `-I` consumer — the defaults bind unchanged.
+//
+// __has_include is a DISCOVERY question ("did the integrator supply a file?"), not the
+// configuration-by-macro that ADR-0068 retired: no knob is spelled as a preprocessor symbol,
+// nothing is per-TU (the fragment is on the include path for the whole build, so every TU
+// resolves the same file), and the value that reaches the code is ordinary typed C++.
+#if defined(__has_include)
+#if __has_include(<libtracer/config_override.hpp>)
+#include <libtracer/config_override.hpp>
+/** @brief Set by THIS header when a fragment was found — the fragment binds `config_t` itself
+ *         and is never asked to define a marker of its own. */
+#define LIBTRACER_HAS_CONFIG_OVERRIDE 1
+#endif
+#endif
+
+namespace tr::graph {
 
 /**
  * @brief THE configuration this build uses — the one binding, and the one thing to override.
  *
- * An application selects its configuration by making this alias name its own traits type,
- * app-wide, exactly once. Everything below is derived from it, so nothing else has to change.
+ * An override fragment binds this alias to its own traits type; with no fragment present it
+ * names @ref default_config_t. Everything below is derived from it, so nothing else changes.
  */
+#if !defined(LIBTRACER_HAS_CONFIG_OVERRIDE)
 using config_t = default_config_t;
+#endif
 
 // ---------------------------------------------------------------------------------------------
 // Derived spellings. These are what the rest of the library and its consumers actually name;
@@ -292,18 +345,15 @@ namespace tr::mem {
 /**
  * @brief Whether a task on this target may SPIN-WAIT for a lock another task holds.
  *
- * True on a multi-core host: the holder is running on a different core, so a spinner makes
- * progress possible and the O(1) section costs less than a mutex round-trip. FALSE on a
- * priority-preemptive scheduler, where a spinner that outranks the holder never yields the
- * CPU the holder needs to release the lock — the wait becomes unbounded priority inversion
- * and the board hangs in the watchdog rather than merely running slowly. That is true of a
- * single-core chip and equally of an SMP chip whose spinner and holder share a core.
+ * The memory layer's spelling of @ref tr::graph::default_config_t::kSpinWaitSafe, which carries
+ * the full rationale. Derived from @ref tr::graph::config_t exactly as the `tr::graph` loose
+ * names are, so an override fragment sets it in the one place every knob is set.
  *
- * A target fact, so the BUILD sets it and nothing asks the integrator (the same reasoning
+ * A target fact, so the BUILD states it and nothing asks the integrator (the same reasoning
  * that derives @ref tr::graph::kCacheLineBytes rather than exposing it). Its one consumer
  * is the guard in `synchronized_pool_t`, which refuses to instantiate the spinlock policy
  * where spin-waiting is unsafe.
  */
-inline constexpr bool kSpinWaitSafe = true;
+inline constexpr bool kSpinWaitSafe = tr::graph::config_t::kSpinWaitSafe;
 
 }  // namespace tr::mem

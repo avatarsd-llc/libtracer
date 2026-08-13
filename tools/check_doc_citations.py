@@ -21,7 +21,7 @@ repo-relative path (`core/src/graph.cpp:956`), the design pages' established
 BASENAME shorthand (`graph.hpp:1291`), and a bare continuation (`:371`) that
 inherits the file most recently named. The shorthand is resolved against a map of
 every source basename in the tree; a basename carried by two files is an ERROR,
-not a guess — the doc must spell the full path. Generated headers (`config.hpp.in`)
+not a guess — the doc must spell the full path. Generated headers (`config.hpp`)
 count as sources, so the configuration pages' knob citations are pinnable too.
 
 Coverage is the pin list, not the doc set: a citation with no entry below is NOT checked,
@@ -86,7 +86,7 @@ import sys
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
 # Extensions a citation may name. `.hpp.in` is the CMake-configured header template
-# (`config.hpp.in`) — the only place the compile-time knobs are *declared*, and what
+# (`config.hpp`) — the only place the compile-time knobs are *declared*, and what
 # the configuration pages therefore cite; the generated `config.hpp` is a build
 # artifact and is not in the tree.
 SOURCE_SUFFIXES = (".hpp.in", ".hpp", ".cpp", ".cc", ".hh", ".h")
@@ -290,7 +290,7 @@ ANCHORS = [
     # history on every refactor"). It could only survive a refactor by rewriting that
     # RFC, which is what the exclusion exists to forbid, so both copies are dropped
     # rather than kept as a pin nothing living can hold up (#896).
-    # --- #803: the shorthand + `config.hpp.in` enrolment ---
+    # --- #803: the shorthand + `config.hpp` enrolment ---
     #
     # Everything below became pinnable when the resolver learned the design pages'
     # basename shorthand and the `.hpp.in` template. These are the ~250 `file:line`
@@ -329,27 +329,27 @@ ANCHORS = [
     ('core/include/libtracer/can_reassembly.hpp:191',
      '[[nodiscard]] std::optional<tr::view::rope_t> assemble(const reassembly_key_t& key) const {'),
     # core/include/libtracer/config.hpp
-    ('core/include/libtracer/config.hpp:77', '* CMake: `-DLIBTRACER_VERTEX_LOCK_STRIPES=8`; ESP-IDF: menuconfig'),
-    ('core/include/libtracer/config.hpp:86', 'static constexpr std::size_t kVertexLockStripes = 16;'),
-    # core/include/libtracer/config.hpp.in
-    ('core/include/libtracer/config.hpp.in:63', '* struct my_node_config_t : tr::graph::default_config_t {'),
-    ('core/include/libtracer/config.hpp.in:73', 'struct default_config_t {'),
-    ('core/include/libtracer/config.hpp.in:136', 'static constexpr std::size_t kHazardReaderSlots = @LIBTRACER_HAZARD_READER_SLOTS@;'),
-    ('core/include/libtracer/config.hpp.in:185', 'static constexpr std::size_t kMaxVertexBytes64 = 96;'),
-    ('core/include/libtracer/config.hpp.in:227', 'static constexpr std::uint32_t kPinPayloadRatio = 0;'),
-    ('core/include/libtracer/config.hpp.in:236', 'using acl_policy_t = @LIBTRACER_ACL_POLICY@;'),
-    ('core/include/libtracer/config.hpp.in:203', 'static constexpr std::size_t kMaxVertexBytes32 = 72;'),
-    ('core/include/libtracer/config.hpp.in:252', 'using lkv_slot_t = @LIBTRACER_LKV_SLOT@;'),
-    ('core/include/libtracer/config.hpp.in:261', 'using config_t = default_config_t;'),
-    ('core/include/libtracer/config.hpp.in:86',
-     'static constexpr std::size_t kVertexLockStripes = @LIBTRACER_VERTEX_LOCK_STRIPES@;'),
-    ('core/include/libtracer/config.hpp.in:109',
-     'static constexpr std::size_t kCacheLineBytes = @LIBTRACER_CACHE_LINE_BYTES@;'),
-    ('core/include/libtracer/config.hpp.in:249',
-     '* `-DLIBTRACER_LKV_SLOT=<type>`. The named type must satisfy the policy contract in'),
-    ('core/include/libtracer/config.hpp.in:307',
-     'inline constexpr bool kSpinWaitSafe = @LIBTRACER_SPIN_WAIT_SAFE@;'),
-    ('core/include/libtracer/config.hpp.in:263',
+    ('core/include/libtracer/config.hpp:85', '* Override fragment: `static constexpr std::size_t kVertexLockStripes = 8;`; ESP-IDF:'),
+    ('core/include/libtracer/config.hpp:95', 'static constexpr std::size_t kVertexLockStripes = 16;'),
+    # core/include/libtracer/config.hpp
+    ('core/include/libtracer/config.hpp:69', '* struct my_node_config_t : default_config_t {'),
+    ('core/include/libtracer/config.hpp:81', 'struct default_config_t {'),
+    ('core/include/libtracer/config.hpp:146', 'static constexpr std::size_t kHazardReaderSlots = 64;'),
+    ('core/include/libtracer/config.hpp:195', 'static constexpr std::size_t kMaxVertexBytes64 = 96;'),
+    ('core/include/libtracer/config.hpp:237', 'static constexpr std::uint32_t kPinPayloadRatio = 0;'),
+    ('core/include/libtracer/config.hpp:246', 'using acl_policy_t = allow_only_policy_t;'),
+    ('core/include/libtracer/config.hpp:213', 'static constexpr std::size_t kMaxVertexBytes32 = 72;'),
+    ('core/include/libtracer/config.hpp:262', 'using lkv_slot_t = sp_atomic_slot_t;'),
+    ('core/include/libtracer/config.hpp:313', 'using config_t = default_config_t;'),
+    ('core/include/libtracer/config.hpp:95',
+     'static constexpr std::size_t kVertexLockStripes = 16;'),
+    ('core/include/libtracer/config.hpp:119',
+     'static constexpr std::size_t kCacheLineBytes = 64;'),
+    ('core/include/libtracer/config.hpp:259',
+     '* fragment: `using lkv_slot_t = hazard_slot_t;`. The named type must satisfy the contract in'),
+    ('core/include/libtracer/config.hpp:357',
+     'inline constexpr bool kSpinWaitSafe = tr::graph::config_t::kSpinWaitSafe;'),
+    ('core/include/libtracer/config.hpp:316',
      '// ---------------------------------------------------------------------------------------------'),
     # core/include/libtracer/crc.hpp
     ('core/include/libtracer/crc.hpp:38', 'constexpr std::array<std::uint32_t, 256> crc32c_table() noexcept {'),
@@ -755,11 +755,11 @@ ANCHORS = [
     ('bindings/typescript/packages/client/test/mesh-testbed.test.mjs:24',
      "ADDRESSING: a connection's routing key IS its vertex path"),
     ('core/CMakeLists.txt:63', 'option(LIBTRACER_NET_PLANE'),
-    ('core/CMakeLists.txt:289', 'option(LIBTRACER_WITH_CUDA "Build the mem_cuda GPU backend'),
-    ('core/CMakeLists.txt:312', 'option(LIBTRACER_WITH_QUIC "Configure the libtracer_quic transport module'),
-    ('core/CMakeLists.txt:398', 'write_basic_package_version_file('),
-    ('core/CMakeLists.txt:409', 'if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND EXISTS'),
-    ('core/CMakeLists.txt:416', 'option(LIBTRACER_BUILD_EXAMPLES "Build the core examples"'),
+    ('core/CMakeLists.txt:251', 'option(LIBTRACER_WITH_CUDA "Build the mem_cuda GPU backend'),
+    ('core/CMakeLists.txt:274', 'option(LIBTRACER_WITH_QUIC "Configure the libtracer_quic transport module'),
+    ('core/CMakeLists.txt:366', 'write_basic_package_version_file('),
+    ('core/CMakeLists.txt:377', 'if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND EXISTS'),
+    ('core/CMakeLists.txt:384', 'option(LIBTRACER_BUILD_EXAMPLES "Build the core examples"'),
     # `docs/examples/index.md` cited the two `if(LIBTRACER_NET_PLANE)` lines (58, 73). That
     # text appears THREE times in this file and the scope filter cannot separate 58 from 73
     # — a scope must sit ABOVE its candidate, and everything above 58 is also above 73. The
@@ -771,11 +771,11 @@ ANCHORS = [
     ('core/examples/CMakeLists.txt:92', 'add_test(NAME example_wire_codec COMMAND wire_codec)'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:44', 'set(LIBTRACER_SRCS'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:172', 'if(CONFIG_LIBTRACER_TRANSPORT_CAN)'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:273', 'set(LIBTRACER_ACL_POLICY allow_only_policy_t)'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:274', 'set(LIBTRACER_LKV_SLOT sp_atomic_slot_t)'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:306', 'if(IDF_TARGET STREQUAL "linux")'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:275', 'set(LIBTRACER_HAZARD_READER_SLOTS 64)'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:285', 'set(LIBTRACER_EDGE_PIN_SLOTS 8)'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:269',
+     'set(LIBTRACER_VERTEX_LOCK_STRIPES ${CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES})'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:273', 'set(LIBTRACER_ACL_POLICY allow_only_policy_t)'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:290', 'if(CONFIG_FREERTOS_UNICORE)'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:61',
      '"${LIBTRACER_ROOT}/core/src/route_handle.cpp"'),
@@ -804,7 +804,7 @@ def source_map(root: pathlib.Path = None) -> dict:
 
 # One token: an optional directory prefix, a source basename, `:`, and a line spec —
 # or a citation of a NON-source file, or a bare `` `:99` `` continuation. The extension
-# alternation is ordered longest-first so `config.hpp.in` does not truncate to
+# alternation is ordered longest-first so `config.hpp` does not truncate to
 # `config.hpp`.
 #
 # The DOCUMENT branch exists purely to BREAK inheritance: a page that cites
@@ -815,7 +815,7 @@ def source_map(root: pathlib.Path = None) -> dict:
 #
 # Only a DOCUMENT breaks the run. A build file cited mid-sentence
 # (`CMakeLists.txt:188`) does not — the configuration page's knob table names
-# `config.hpp.in` once and then walks down it in bare `:109` / `:136` refs, with each
+# `config.hpp` once and then walks down it in bare `:109` / `:136` refs, with each
 # row's CMake column citing a `CMakeLists.txt` line in between. The running citation
 # there is the header; the build file is an aside.
 #
@@ -999,7 +999,7 @@ def citation_spans(context: str, filemap: dict = None) -> tuple:
 
     Handles every spelling the docs actually use: a full path `core/src/graph.cpp:12`,
     the design pages' basename shorthand `graph.hpp:1291`, a generated header
-    `config.hpp.in:237`, a range `file.cpp:12-20`, a comma list `file.hpp:145,153`, and
+    `config.hpp:237`, a range `file.cpp:12-20`, a comma list `file.hpp:145,153`, and
     the UNBACKTICKED form that appears inside annotated code-excerpt blocks. A bare
     `` `:99` `` inherits the most recently named file, which is how the glossary and the
     design pages write sibling citations.

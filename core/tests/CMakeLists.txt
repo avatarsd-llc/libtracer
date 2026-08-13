@@ -1424,16 +1424,28 @@ add_test(NAME test_support COMMAND test_support_test)
 
 # #1158 — the spin-pool guard. Not an executable: what is under test is that a build is
 # REJECTED, so the check (cmake/spin_pool_guard.cmake) drives the compiler over one probe TU
-# against two renderings of libtracer/config.hpp and asserts BOTH arms — the allowed one
-# compiles, the forbidden one fails AND names critical_pool_t. Rendered here rather than
-# hand-written so the forbidden config cannot drift from the template.
-set(_lt_probe_saved_spin "${LIBTRACER_SPIN_WAIT_SAFE}")
-set(LIBTRACER_SPIN_WAIT_SAFE false)
-configure_file(
-    ${CMAKE_CURRENT_SOURCE_DIR}/../include/libtracer/config.hpp.in
-    ${CMAKE_CURRENT_BINARY_DIR}/spin-forbidden/libtracer/config.hpp
-    @ONLY)
-set(LIBTRACER_SPIN_WAIT_SAFE "${_lt_probe_saved_spin}")
+# under two configurations and asserts BOTH arms — the allowed one compiles, the forbidden one
+# fails AND names critical_pool_t. The forbidden arm is an ORDINARY override fragment (ADR-0068
+# §Erratum 1): three lines that inherit the defaults and flip the one knob, so it cannot drift
+# from them the way a second full copy of config.hpp could.
+file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/spin-forbidden/libtracer/config_override.hpp
+"/**
+ * @file
+ * @brief GENERATED test fixture — the spin-forbidden configuration for the #1158 guard.
+ */
+#pragma once
+
+namespace tr::graph {
+
+/** @brief The defaults with spin-waiting refused, as an RTOS target declares it. */
+struct spin_forbidden_config_t : default_config_t {
+    static constexpr bool kSpinWaitSafe = false;
+};
+
+using config_t = spin_forbidden_config_t;
+
+}  // namespace tr::graph
+")
 add_test(NAME spin_pool_guard COMMAND ${CMAKE_COMMAND}
          -DLT_CXX=${CMAKE_CXX_COMPILER}
          -DLT_CORE_INCLUDE=${CMAKE_CURRENT_SOURCE_DIR}/../include

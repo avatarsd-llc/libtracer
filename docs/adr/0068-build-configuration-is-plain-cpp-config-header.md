@@ -45,8 +45,8 @@ using acl_policy_t = allow_only_policy_t;
 ```
 
 - The **checked-in** `core/include/libtracer/config.hpp` carries the defaults, so raw `-Icore/include` consumers (the Cortex-M0 footprint gate, vendored source drops) build with stock settings and no build-system participation.
-- A CMake build **always** generates the same header from `config.hpp.in` into the build tree and prepends that directory to the PUBLIC include path, so the generated file **shadows** the in-tree default. Non-default knobs exist only there.
-- **Drift gate:** at configure time, the default-valued render of `config.hpp.in` is byte-compared against the checked-in default; a mismatch is a `FATAL_ERROR`. The template is the single source of truth; the checked-in copy cannot silently rot (the derive-don't-hand-maintain rule).
+- A CMake build **always** generates the same header from `config.hpp.in` into the build tree and prepends that directory to the PUBLIC include path, so the generated file **shadows** the in-tree default. Non-default knobs exist only there. — *superseded, see [§Erratum 1](#erratum-1--the-defaults-are-c-literals-the-template-and-its-drift-gate-are-gone-1142).*
+- **Drift gate:** at configure time, the default-valued render of `config.hpp.in` is byte-compared against the checked-in default; a mismatch is a `FATAL_ERROR`. The template is the single source of truth; the checked-in copy cannot silently rot (the derive-don't-hand-maintain rule). — *superseded, see [§Erratum 1](#erratum-1--the-defaults-are-c-literals-the-template-and-its-drift-gate-are-gone-1142).*
 - The install step ships the *generated* header, so an installed non-default package is self-consistent.
 - ESP-IDF: the component generates the same header from its Kconfig values (`CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES`), listed before `core/include` in the component's PUBLIC `INCLUDE_DIRS` — every dependent TU sees one file, which **dissolves** the ODR hazard the PUBLIC compile definition existed to manage.
 
@@ -91,3 +91,30 @@ Where §1 of ADR-0047 grants a seam compile-time dispatch and the policy is **st
 - `substrate_test_no_atomic`'s hand-listed source recompile becomes unnecessary **once** the refcount macro is rebound through this mechanism (follow-on, rides the slot ADR) — the alias changes the type via one shared header instead of a per-TU `-D`, so one library build per config, no ABI fork inside a build.
 - The LKV slot work (#604) lands as `basic_graph_t<slot_t>` + explicit instantiation under this ADR's §2 binding; its own ADR still owes the reclamation-scheme argument (hazard vs epoch), not the mechanism.
 - Compile-time cost of the second host instantiation (~3 s, one TU) is accepted and was measured, not assumed.
+
+## Erratum 1 — the defaults are C++ literals; the template and its drift gate are gone (#1142)
+
+**What changed:** the delivery mechanism in §1, third and fourth bullets. **What did not:** the decision. Configuration is still one header of plain C++, still never a preprocessor definition, and still one file per build so every TU agrees.
+
+### The defect
+
+§1 put the *defaults* in the build system: `config.hpp.in` held `@LIBTRACER_VERTEX_LOCK_STRIPES@` and `core/CMakeLists.txt` held `16`. That forced a second copy — the checked-in `config.hpp` non-participating consumers need — and the drift gate exists **only** to guard the two copies against each other. Worse, the gate needed the default values a *third* time (a hand-maintained duplicate of the cache defaults twenty lines above it, plus a twelve-line save/restore dance to render with them). Nothing enforced that the two CMake lists agreed: change one and the gate compares against the wrong baseline, reporting drift on a clean tree or agreeing for the wrong reason. Seventy-eight lines of CMake existed to move six C++ constants into a C++ header.
+
+The rejected option *"a checked-in default with no drift gate"* was rejected on real evidence of rot. That reasoning holds for a **duplicate**; it does not apply once there is only one copy, because there is then nothing to drift from.
+
+### The shape
+
+- `core/include/libtracer/config.hpp` is **ordinary hand-written C++** and the only place a default is spelled. For core's own build: no `configure_file`, no drift gate, no cache variables.
+- **Landed in two steps, deliberately.** This erratum's core half is #1142; the ESP-IDF half is #1244. Until #1244 lands, `config.hpp.in` remains in the tree with exactly one consumer — the ESP-IDF component, which still renders it — and the byte-drift gate that used to hold template and header identical is gone, because the two shapes now differ by design. The consequence is stated at the template's head and bounded to that window: a knob added to `config.hpp` must be mirrored into `config.hpp.in` by hand, or an ESP build will not see it. #1244 converts ESP-IDF to a fragment and deletes the template.
+- A target with non-default knobs supplies **`libtracer/config_override.hpp`** earlier on the include path. `config.hpp` includes it if present (`__has_include`) *after* `default_config_t`, and uses whatever `config_t` it binds.
+- The fragment **inherits** `default_config_t` and states only what differs. This is what makes the drift gate unnecessary rather than merely absent: a knob added to `config.hpp` later reaches every override with its new default, because no override restates the ones it does not change. That property is compile-checked by the `#1158` spin-forbidden fragment, which flips one knob and inherits the rest — and, once #1244 lands, by the ESP-shaped fragment that sets four.
+- `__has_include` is a **discovery** question — "did the integrator supply a file?" — not the configuration-by-macro this ADR retired. No knob is spelled as a preprocessor symbol; nothing is per-TU (the fragment sits on the include path for the whole build); the value reaching the code is ordinary typed C++.
+
+### Consequences
+
+- `kSpinWaitSafe` became a `default_config_t` member (its `tr::mem` spelling now derives from `config_t`). A knob that lives *outside* the one named type cannot be set by a fragment — which is precisely why it had been stranded in the build system. This restores ADR-0070's rule that the configuration is one named type.
+- The ESP-IDF component will write a four-line fragment from its Kconfig values instead of rendering the whole header, so it stops carrying a full copy of core's defaults. The Kconfig option names are unchanged. **That is #1244's half — not yet done;** the component still renders `config.hpp.in` today.
+- The `#1158` spin-pool guard's forbidden arm is a three-line fragment rather than a second rendering of the template.
+- **Transition (one release):** `-DLIBTRACER_ACL_FULL` and `-DLIBTRACER_LKV_SLOT` — the only two the CI matrix passes — keep working; `core/CMakeLists.txt` writes the fragment on their behalf and says so at configure time. The other five cache variables are deleted outright. A **new** knob does not get a CMake variable.
+- The install step ships the checked-in `config.hpp` plus this build's fragment when one exists, so an installed non-default package stays self-consistent.
+- The ADR's own §1 promise that "CMake option names are unchanged" is narrowed accordingly: it holds for the two above and for the Kconfig knobs; the five deleted cache variables were consumed by nothing outside this repo.
