@@ -294,7 +294,8 @@ result_t<rope_t> op_resolver_t::resolve(const wire::tlv_view_t& fwd, std::string
     // the walk's nodes carry: it is passed straight to `resolve_node` because only the reply
     // builders draw from it, never a node's `wire()`/`body()`. Default heap when un-injected.
     return resolve_node(graph_, root, inbound_link, frame_view, root.backend(),
-                        egress_ != nullptr ? *egress_ : mem::heap_backend());
+                        egress_ != nullptr ? *egress_ : mem::heap_backend(), reverse_ref_fn_,
+                        reverse_ref_ctx_);
 }
 
 }  // namespace tr::graph

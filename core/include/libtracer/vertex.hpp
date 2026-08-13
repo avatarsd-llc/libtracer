@@ -37,6 +37,7 @@
 #include "libtracer/edge_pin.hpp"
 #include "libtracer/lkv_slot.hpp"
 #include "libtracer/path.hpp"
+#include "libtracer/path_ref.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/status.hpp"
 #include "libtracer/view.hpp"
@@ -636,6 +637,22 @@ struct subscriber_remote_t {
      */
     std::string caller;
     /**
+     * @brief The COMPLETED reverse-direction bound route (RFC-0024 §7.1 amendment 1) — a
+     *        `PATH_REF` TLV whose element 0 is THIS node's own reference to the connection
+     *        vertex the subscribe arrived on; empty ⇒ the subscription is canonical-only.
+     *
+     * Stored at admission by `graph_t::subscribe_wire` when the mint-flagged subscribe
+     * carried a reverse list the responder could complete. On every delivery the producer
+     * consumes element 0 locally — validates it against its OWN vertex map (§6.2's re-check)
+     * and egresses through the vertex it dereferences to — and puts elements `1..` on the
+     * wire as the delivery's bound `dst`. A failed local validation (the link re-dialled;
+     * the generation moved) falls back to the canonical @ref return_route, which is always
+     * stored alongside — the reverse binding is an optimisation plus a liveness check, never
+     * the only route. Same ownership shape as @ref return_route — one refcounted copy at
+     * subscribe, refcount clones per delivery snapshot.
+     */
+    view_t reverse_route{};
+    /**
      * @brief Route-handle opt-in (`SUBSCRIBER.qos_settings.delivery_compact`, RFC-0004
      *        §E.1 / ADR-0035 slice 4).
      *
@@ -795,8 +812,10 @@ struct edge_view_t {
     void* callback_ctx = nullptr;       /**< @brief The sink's caller-owned context. */
     target_key_t target_key; /**< @brief Local re-dispatch target (refcount share, not a copy). */
     target_binding_t binding{}; /**< @brief The minted slot for that target, or unbound (#830). */
-    std::string link;      /**< @brief Remote-delivery link NAME (owning copy; empty ⇒ local). */
-    view_t return_route{}; /**< @brief Consumer return route (refcount clone). */
+    std::string link;       /**< @brief Remote-delivery link NAME (owning copy; empty ⇒ local). */
+    view_t return_route{};  /**< @brief Consumer return route (refcount clone). */
+    view_t reverse_route{}; /**< @brief Completed reverse bound route (refcount clone; empty ⇒
+                                 canonical-only delivery — RFC-0024 §7.1 amendment 1). */
     bool delivery_compact = false; /**< @brief RFC-0004 §E.1 label-compaction opt-in. */
     std::string caller; /**< @brief The edge's stored ACL fan-in context (#81, owning copy). */
 };
@@ -879,6 +898,8 @@ class edge_snapshot_t {
 struct pub_remote_t {
     std::string link;              /**< @brief Remote-delivery link NAME. */
     view_t return_route{};         /**< @brief Consumer return route (refcount clone). */
+    view_t reverse_route{};        /**< @brief Completed reverse bound route (refcount clone;
+                                        empty ⇒ canonical-only — RFC-0024 §7.1 amendment 1). */
     std::string caller;            /**< @brief The edge's stored ACL fan-in context (#81). */
     bool delivery_compact = false; /**< @brief RFC-0004 §E.1 label-compaction opt-in. */
 };
@@ -2067,11 +2088,18 @@ class vertex_t {
      *
      * @param link  This node's NAME for the link the refusal arrived on (== the edge's
      *              delivery link).
-     * @param route The refused route — the whole PATH TLV bytes echoed by the rejecting hop.
+     * @param route The refused route — the whole TLV bytes echoed by the rejecting hop: a
+     *              canonical PATH, or (RFC-0024 §7.1 amendment 1) the bound `PATH_REF` a
+     *              reverse-list delivery was refused as.
+     * @param bound_echo True ⇔ @p route is the `PATH_REF` form — the caller classified the
+     *              echo's type byte (this header stays wire-type-agnostic), and the match
+     *              runs against the stored reverse list's emitted suffix instead of the
+     *              canonical return route.
      * @return The number of edges evicted (the caller unwinds exactly this many from the
      *         RFC-0005 listener bookkeeping).
      */
-    std::size_t evict_route_edges(std::string_view link, std::span<const std::byte> route) {
+    std::size_t evict_route_edges(std::string_view link, std::span<const std::byte> route,
+                                  bool bound_echo = false) {
         if (link.empty() || route.empty()) return 0;
         edge_block_t* b = nullptr;
         std::size_t n = 0;
@@ -2087,10 +2115,32 @@ class vertex_t {
                 // edge has a route to be refused, and that door populates `link` and the
                 // route together (see subscriber_remote_t::return_route's invariant).
                 if (s.remote->link != link) continue;
-                const std::span<const std::byte> stored = s.remote->return_route.bytes();
-                if (stored.size() != route.size() ||
-                    !std::equal(stored.begin(), stored.end(), route.begin()))
-                    continue;
+                bool hit = false;
+                if (!bound_echo) {
+                    const std::span<const std::byte> stored = s.remote->return_route.bytes();
+                    hit = stored.size() == route.size() &&
+                          std::equal(stored.begin(), stored.end(), route.begin());
+                } else if (!s.remote->reverse_route.empty()) {
+                    // The BOUND twin (RFC-0024 §7.1 amendment 1): a delivery that rode the
+                    // reverse list is refused as a `PATH_REF` echo — the emitted `dst`,
+                    // which is the stored list MINUS the element this node consumed
+                    // locally. Matched ELEMENT-WISE against the stored suffix rather than
+                    // whole-TLV byte-equal, because the refusing hop re-encodes the echo
+                    // and only the 8-byte element array is canonical by grammar
+                    // (`opt.PL`/`LL` MUST be 0 — RFC-0024 §4.2); comparing re-encoded
+                    // header bytes would couple eviction to an encoder detail. Both bodies
+                    // sit behind fixed 4-byte headers for the same grammar reason.
+                    const std::span<const std::byte> rev = s.remote->reverse_route.bytes();
+                    const std::span<const std::byte> echo_body =
+                        route.size() > 4 ? route.subspan(4) : std::span<const std::byte>{};
+                    const std::span<const std::byte> rev_tail =
+                        rev.size() > 4 + wire::kPathRefElementBytes
+                            ? rev.subspan(4 + wire::kPathRefElementBytes)
+                            : std::span<const std::byte>{};
+                    hit = !rev_tail.empty() && echo_body.size() == rev_tail.size() &&
+                          std::equal(rev_tail.begin(), rev_tail.end(), echo_body.begin());
+                }
+                if (!hit) continue;
                 subscriber_t reclaimed;       // an inert shell: no view, no route, no cold half
                 reclaimed.active = false;     // the slot is free for add_edge reuse
                 s = std::move(reclaimed);     // frees the old slot's retained state in place
@@ -2800,6 +2850,7 @@ class vertex_t {
         if (s.remote != nullptr) {
             e.link = s.remote->link;
             e.return_route = s.remote->return_route;
+            e.reverse_route = s.remote->reverse_route;
             e.delivery_compact = s.remote->delivery_compact;
             e.caller = s.remote->caller;
         }
@@ -2882,7 +2933,8 @@ class vertex_t {
                     destroy_edge_pub(np);  // OOM on an owning copy — publish nothing
                     return false;
                 }
-                e.remote->return_route = s.remote->return_route;  // refcount clone — nothrow
+                e.remote->return_route = s.remote->return_route;    // refcount clone — nothrow
+                e.remote->reverse_route = s.remote->reverse_route;  // refcount clone — nothrow
                 e.remote->delivery_compact = s.remote->delivery_compact;
             }
         }
@@ -2958,7 +3010,8 @@ class vertex_t {
         if (!tr::detail::try_assign(out.link, in.remote->link) ||
             !tr::detail::try_assign(out.caller, in.remote->caller))
             return false;
-        out.return_route = in.remote->return_route;  // refcount clone — nothrow
+        out.return_route = in.remote->return_route;    // refcount clone — nothrow
+        out.reverse_route = in.remote->reverse_route;  // refcount clone — nothrow
         out.delivery_compact = in.remote->delivery_compact;
         return true;
     }

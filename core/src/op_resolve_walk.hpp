@@ -247,10 +247,20 @@ struct parsed_fwd_t {
     bool mint_request = false;
     /** @brief `dst` is a `PATH_REF` (`0x14`), not a canonical `PATH` (RFC-0024 §4). */
     bool dst_bound = false;
-    N dst{};                         /**< forward route (a PATH or PATH_REF node) */
-    std::optional<N> selector{};     /**< optional :field (a FIELD node) */
-    N src{};                         /**< accumulated return route (a PATH node) */
-    std::optional<N> payload{};      /**< WRITE only (the value node) */
+    N dst{};                     /**< forward route (a PATH or PATH_REF node) */
+    std::optional<N> selector{}; /**< optional :field (a FIELD node) */
+    N src{};                     /**< accumulated return route (a PATH node) */
+    std::optional<N> payload{};  /**< WRITE only (the value node) */
+    /**
+     * @brief The reverse-direction `PATH_REF` list the forwarding hops accumulated
+     *        (RFC-0024 §7.1 amendment 1) — the request's trailing child, present only on a
+     *        mint-flagged request that crossed at least one contributing hop.
+     *
+     * One element SHORT of the route by construction: the hop into this responder is the
+     * one no peer can mint for it, so the responder completes the list with its own
+     * reference before storing it (the remote-subscribe arm below).
+     */
+    std::optional<N> reverse{};
     std::uint64_t await_timeout = 0; /**< AWAIT only */
     bool has_await_timeout = false;
 };
@@ -306,15 +316,28 @@ template <class N>
     if (!next || next->type() != type_t::PATH) return std::unexpected(status_t::INVALID_PATH);
     p.src = *next;
 
-    const std::optional<N> tail = ch.next();
+    std::optional<N> tail = ch.next();
     if (p.op == fwd_op_t::WRITE) {
-        if (tail) p.payload = *tail;
+        // A mint-flagged request's LAST child may be the reverse-direction `PATH_REF`
+        // (RFC-0024 §7.1 amendment 1) — positionally AFTER the closed RFC-0004 §B list, so
+        // a `PATH_REF` here is the reverse list and never the payload when the flag is set.
+        // (The one shape sacrificed: a mint-flagged WRITE whose stored VALUE is itself a
+        // raw `PATH_REF` TLV and which carries no reverse list — no in-tree producer emits
+        // it, and an origin that needs it simply clears bit 7 on that write.)
+        if (tail && !(p.mint_request && tail->type() == type_t::PATH_REF)) {
+            p.payload = *tail;
+            tail = ch.next();
+        }
     } else if (p.op == fwd_op_t::AWAIT) {
         if (tail && tail->type() == type_t::VALUE) {
             p.await_timeout = detail::load_le<std::uint64_t>(tail->body());
             p.has_await_timeout = true;
+            tail = ch.next();
         }
     }
+    // The reverse list rides ONLY a mint-flagged request (§7.1 amendment 1); on an unflagged
+    // frame a trailing PATH_REF is not licensed and stays unparsed, exactly as before.
+    if (p.mint_request && tail && tail->type() == type_t::PATH_REF) p.reverse = *tail;
     return p;
 }
 
@@ -585,7 +608,9 @@ template <class N>
                                         vertex_handle_t v, std::string_view inbound_link,
                                         const view_t* frame_view, mem::mem_backend_t& flat,
                                         mem::mem_backend_t& egress, const reply_route_t& route,
-                                        const field_path_t& field, bool has_field) {
+                                        const field_path_t& field, bool has_field,
+                                        op_resolver_t::reverse_ref_fn_t reverse_ref_fn = nullptr,
+                                        void* reverse_ref_ctx = nullptr) {
     // The mint answer (RFC-0024 §7.5): this node's own reference to the target vertex, as a
     // one-element `PATH_REF` the origin stacks under whatever it already holds for the hops
     // in front of it. 4 + 8 bytes, on the reply only, and only when asked — the request side
@@ -686,11 +711,52 @@ template <class N>
                 const view_t return_route = own_tlv(req.src, flat);
                 if (return_route.empty())
                     return assemble_error_reply(route, status_t::BACKPRESSURE, egress);
+                // The responder's COMPLETION of the reverse-direction list (RFC-0024 §7.1
+                // amendment 1): the list arrives one element short — the hop into this node
+                // is the one no peer can mint for it — so element 0 becomes this node's own
+                // reference to the connection vertex the subscribe arrived on, supplied by
+                // the injected transport-plane seam. Every failure degrades to the
+                // canonical-only subscription (an EMPTY reverse view), never to an error:
+                // the reverse binding is an optimisation plus a liveness check, and a
+                // subscribe that cannot bind it still subscribes exactly as before.
+                view_t reverse_route{};
+                if (req.reverse && reverse_ref_fn != nullptr) {
+                    const std::span<const std::byte> rbody = req.reverse->body();
+                    const std::size_t n = wire::path_ref_element_count(rbody.size());
+                    if (n >= 1 && rbody.size() % wire::kPathRefElementBytes == 0 &&
+                        n + 1 <= wire::kMaxPathRefElements && req.reverse->spans_intact()) {
+                        const std::optional<wire::path_ref_element_t> own =
+                            reverse_ref_fn(reverse_ref_ctx, inbound_link);
+                        if (own) {
+                            // One owned segment for the subscription's life (the ADR-0041
+                            // §2 shape `return_route` uses one field over): a fresh 4-byte
+                            // header, this node's element, then the hops' elements verbatim.
+                            view::segment_ptr_t seg = view::segment_alloc(
+                                flat, 4u + wire::kPathRefElementBytes + rbody.size());
+                            if (seg) {
+                                const std::span<std::byte> out = seg->bytes;
+                                if (wire::emit_path_ref_into(
+                                        out, std::span<const wire::path_ref_element_t>(&*own, 1))) {
+                                    // emit_path_ref_into wrote a 1-element header; widen the
+                                    // length to cover the appended hop elements too.
+                                    const std::size_t body_len =
+                                        wire::kPathRefElementBytes + rbody.size();
+                                    out[2] = static_cast<std::byte>(body_len & 0xFFu);
+                                    out[3] = static_cast<std::byte>((body_len >> 8) & 0xFFu);
+                                    std::memcpy(out.data() + 4 + wire::kPathRefElementBytes,
+                                                rbody.data(), rbody.size());
+                                    reverse_route = view_t::over(std::move(seg));
+                                }
+                            }
+                        }
+                    }
+                }
                 // ADR-0049: the wire append enters the graph's single admission door
                 // (subscribe_wire → admit_subscriber) — the SUBSCRIBER TLV is parsed
                 // ONCE there (delivery_compact included), so no parallel parse here.
                 result_t<void> w =
-                    graph.subscribe_wire(v, sub_value, return_route, std::string(inbound_link));
+                    graph.subscribe_wire(v, sub_value, return_route, std::string(inbound_link),
+                                         std::move(reverse_route));
                 if (!w) return assemble_error_reply(route, w.error(), egress);
                 return or_backpressure(
                     assemble_reply(route, reply_kind_t::RESULT, {}, {}, 0, egress, mint), route,
@@ -770,9 +836,10 @@ template <class N>
  * names a specific decode representation.
  */
 template <class N>
-[[nodiscard]] result_t<rope_t> resolve_node(graph_t& graph, const N& root,
-                                            std::string_view inbound_link, const view_t* frame_view,
-                                            mem::mem_backend_t& flat, mem::mem_backend_t& egress) {
+[[nodiscard]] result_t<rope_t> resolve_node(
+    graph_t& graph, const N& root, std::string_view inbound_link, const view_t* frame_view,
+    mem::mem_backend_t& flat, mem::mem_backend_t& egress,
+    op_resolver_t::reverse_ref_fn_t reverse_ref_fn = nullptr, void* reverse_ref_ctx = nullptr) {
     result_t<parsed_fwd_t<N>> parsed = parse_fwd(root);
     if (!parsed) return std::unexpected(parsed.error());
     const parsed_fwd_t<N>& req = *parsed;
@@ -890,7 +957,7 @@ template <class N>
         // and an element is not one. A vref names a vertex that existed when it was minted, so
         // "it is not there any more" is exactly the stale case the deref just refused.
         return apply_op(graph, req, *bound, inbound_link, frame_view, flat, egress, route, field,
-                        has_field);
+                        has_field, reverse_ref_fn, reverse_ref_ctx);
     }
 
     // dst resolution is the router's PATH-keyed dispatch — span-aliased for a
@@ -928,7 +995,7 @@ template <class N>
         }
     }
     return apply_op(graph, req, *found, inbound_link, frame_view, flat, egress, route, field,
-                    has_field);
+                    has_field, reverse_ref_fn, reverse_ref_ctx);
 }
 
 }  // namespace

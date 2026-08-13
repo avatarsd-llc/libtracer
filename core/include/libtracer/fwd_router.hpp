@@ -192,6 +192,16 @@ class fwd_router_t {
             [this](const graph::remote_delivery_t& sub, const view::rope_t& value) {
                 deliver_remote(sub, value);
             });
+        // The responder's reverse-mint seam (RFC-0024 §7.1 amendment 1): the resolver's
+        // remote-subscribe arm asks for THIS node's reference to the connection vertex a
+        // mint-flagged subscribe arrived on — the transport plane's mapping, so it is
+        // injected here as the captureless {fn, ctx} pair the ADR-0047 doctrine prescribes.
+        resolver_.on_reverse_ref(
+            [](void* ctx,
+               std::string_view inbound_link) -> std::optional<wire::path_ref_element_t> {
+                return static_cast<fwd_router_t*>(ctx)->connection_ref(inbound_link);
+            },
+            this);
     }
 
     fwd_router_t(const fwd_router_t&) = delete;
@@ -927,12 +937,43 @@ class fwd_router_t {
      *                      second time is what made a bound terminus measurably slower than
      *                      the canonical one it is supposed to beat.
      * @param element_count The `PATH_REF` element count that peek reported.
+     * @param reject        The caller's addressed-refusal arm (the RFC-0020-shaped echo) —
+     *                      §5.3's NACK for a one-element delivery whose validation failed,
+     *                      which is what the producer's step-5 reclaim correlates.
      */
-    template <class Cursor>
+    template <class Cursor, class Reject>
     [[nodiscard]] bool route_bound_forward(std::string_view inbound_name,
                                            const child_rx_ctx_t* inbound_ctx, bool from_peer,
                                            const Cursor& cur, const fwd_pre_t& pre,
-                                           std::size_t element_count);
+                                           std::size_t element_count, Reject&& reject);
+    /**
+     * @brief The reverse-list delivery's LAST hop (RFC-0024 §7.1 amendment 1, #1223 step 4):
+     *        a one-element bound WRITE whose element dereferences to a SESSION ANCHOR is
+     *        egressed to that session as the canonical delivery frame.
+     *
+     * The disclosure fix lives in this function's deref: a dead session's element carries
+     * the retired generation, the recycled slot's revived anchor reads one higher, and the
+     * frame refuses (§5.1) with §5.3's NACK — the addressed echo the producer's step-5
+     * reclaim retires the stale edge on. A one-element WRITE whose element names an
+     * ORDINARY vertex answers false and keeps its bound-terminus meaning byte-for-byte.
+     */
+    template <class Cursor, class Reject>
+    [[nodiscard]] bool route_bound_session_delivery(std::string_view inbound_name,
+                                                    const child_rx_ctx_t* inbound_ctx,
+                                                    bool from_peer, const Cursor& cur,
+                                                    const fwd_pre_t& pre, Reject&& reject);
+    /**
+     * @brief This hop's REVERSE-direction mint element (RFC-0024 §7.1 amendment 1): a
+     *        reference for the identity a mint-flagged request ARRIVED on.
+     *
+     * Point-to-point, the arrival link's connection vertex (`hop_mint` — one identity,
+     * two directions, one supplier). Bus-session arrival, the accepted session's identity
+     * anchor (#1254). Nullopt — no anchor (an announce-census peer), a saturated
+     * generation, a tombstoned ctx — makes the rebuild STRIP the reverse list, the
+     * erratum-1 rule direction-reversed.
+     */
+    [[nodiscard]] std::optional<wire::path_ref_element_t> reverse_hop_ref(
+        std::string_view inbound_name, const child_rx_ctx_t* inbound_ctx, bool from_peer) const;
     /**
      * @brief The receiver ctx of @p name whatever its state — live OR tombstoned (#884).
      *

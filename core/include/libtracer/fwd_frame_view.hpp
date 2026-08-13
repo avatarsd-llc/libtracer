@@ -154,6 +154,18 @@ struct fwd_pre_t {
      */
     bool dst_ref = false;
     /**
+     * @brief Re-head the shrunk BOUND `dst` as a canonical empty `PATH` instead of a
+     *        `PATH_REF` — the reverse-list delivery's LAST hop (RFC-0024 §7.1 amendment 1).
+     *
+     * Set only by the router's session-delivery arm, where the consumed element was the
+     * final one and the egress is the accepted session itself: the peer behind it is an
+     * ORIGIN, which never speaks the bound form, so the frame it receives must be the
+     * canonical delivery shape byte-for-byte (`dst` = an empty `PATH`, exactly what the
+     * canonical mount descent leaves after stripping mount + peer). Meaningless unless
+     * @ref dst_ref is also set.
+     */
+    bool dst_to_path = false;
+    /**
      * @brief The outer FWD header's decoded `opt` bits — the peek's own read, kept (#1109).
      *
      * The rebuild needs them for exactly one thing: preserving the frame's trailer-timestamp
@@ -1023,6 +1035,66 @@ template <class Cursor, class MintFn>
 }
 
 /**
+ * @brief The REVERSE-direction mint on a forwarded mint-flagged REQUEST (RFC-0024 §7.1
+ *        amendment 1) — the request-side mirror of @ref rebuild_reply_mint, equally
+ *        OUT OF LINE and for the same measured reason (its `noinline` note applies verbatim:
+ *        the tail walk must not be flattened into the hop every unflagged frame runs).
+ *
+ * Three outcomes, all normative:
+ *
+ * - **Extend.** The request's last child is already a reverse `PATH_REF` and @p mint_fn
+ *   yields this hop's element for the identity the frame ARRIVED on — its connection vertex
+ *   for a point-to-point link, or the accepted session's identity vertex for a bus session.
+ *   The element is PREPENDED (the list runs responder-first), exactly the @ref
+ *   fwd_rebuild_t::mint machinery the reply side uses.
+ * - **Create.** No reverse child yet — this is the FIRST forwarding hop (the origin never
+ *   emits the child) — and @p mint_fn yields an element: a fresh one-element `PATH_REF` is
+ *   appended as the new last child. "A hop with no reverse child yet MAY create it"; the
+ *   reference core participates.
+ * - **Strip.** A reverse child exists but this hop cannot contribute (no identity vertex, a
+ *   saturated generation, a full list): the WHOLE child is removed. Erratum 1's rule
+ *   direction-reversed and equally forced — a list that skips a hop is a wrong route, the
+ *   §5.3 mis-route class, so it is all-or-nothing over the reverse list alone.
+ *
+ * The unflagged request never reaches here (the caller gates on op bit 7), so the ordinary
+ * forward hop pays one not-taken branch, exactly as it does for the reply mint.
+ *
+ * Writes @p r's tail and mint fields; @return the bytes this hop's element adds to the body
+ * (an extension adds the element; a creation is billed through the same @ref
+ * fwd_rebuild_t::ref_body_len = 0 accounting), or 0 for strip/no-op.
+ */
+template <class Cursor, class MintFn>
+[[gnu::noinline]] std::size_t rebuild_request_reverse_mint(const Cursor& cur, std::size_t pos,
+                                                           std::size_t body_end, MintFn& mint_fn,
+                                                           fwd_rebuild_t& r) {
+    const std::optional<reply_mint_t> found = peek_reply_mint(cur, pos, body_end);
+    // The ONE call — after the frame is known mint-flagged, at most once per hop.
+    const std::optional<wire::path_ref_element_t> mint =
+        (!found || found->can_contribute) ? mint_fn() : std::nullopt;
+    if (!found) {
+        // CREATE: no reverse child yet. Nothing to strip; a hop that cannot mint forwards
+        // the flagged request untouched (the strip rule binds only when a list exists).
+        if (!mint) return 0;
+        r.mint.header_bare(wire::type_t::PATH_REF, wire::kPathRefElementBytes);
+        std::array<std::byte, wire::kPathRefElementBytes> e{};
+        wire::path_ref_store_element(e, *mint);
+        r.mint.raw(e);
+        return wire::kPathRefElementBytes;
+    }
+    // A list exists: the tail stops short of it either way — extended one element longer, or
+    // STRIPPED whole (RFC-0024 §7.1 amendment 1; erratum 1's rule direction-reversed).
+    r.tail_len = found->pos > pos ? found->pos - pos : 0;
+    if (!mint) return 0;
+    r.ref_body_off = found->pos + 4;  // LL = 0 is a MUST, so the header is 4 bytes
+    r.ref_body_len = found->body_len;
+    r.mint.header_bare(wire::type_t::PATH_REF, r.ref_body_len + wire::kPathRefElementBytes);
+    std::array<std::byte, wire::kPathRefElementBytes> e{};
+    wire::path_ref_store_element(e, *mint);
+    r.mint.raw(e);
+    return wire::kPathRefElementBytes;
+}
+
+/**
  * @brief The forward hop's head rebuild, read entirely by OFFSET — no decoded
  *        tree (ADR-0038 inv. #1).
  *
@@ -1075,10 +1147,11 @@ template <class Cursor, class MintFn>
  *       @ref read_fwd_header itself: that inlines it into the cold control-frame and terminus
  *       paths too and measured **+16 to +24%** — strictly worse than doing nothing.
  */
-template <class Cursor, class MintFn = no_mint_t>
+template <class Cursor, class MintFn = no_mint_t, class ReverseMintFn = no_mint_t>
 [[gnu::flatten]] [[nodiscard]] std::optional<fwd_rebuild_t> rebuild_fwd_forward(
     const Cursor& cur, std::span<const std::byte> mount_tlv, std::string_view extra_seg,
-    std::size_t strip_k, const fwd_pre_t* pre = nullptr, MintFn mint_fn = MintFn{}) {
+    std::size_t strip_k, const fwd_pre_t* pre = nullptr, MintFn mint_fn = MintFn{},
+    ReverseMintFn reverse_mint_fn = ReverseMintFn{}) {
     // The frame's leading headers were already parsed by the `dst` peek that routed this hop.
     // When the caller hands them over, re-reading them is pure duplicated work — profiling put
     // ~88% of a 1-link forward hop in header parsing, most of it exactly this. There is still
@@ -1125,10 +1198,13 @@ template <class Cursor, class MintFn = no_mint_t>
         dst_end = dst_h->body_off + dst_h->body_len;
         pos += dst_h->total;
     }
-    // Masked (RFC-0024 §9.3) — the flag bits say nothing about which op this is.
+    // Masked (RFC-0024 §9.3) — the flag bits say nothing about which op this is. The raw
+    // byte is read ONCE and split: opcode for the reply test, bit 7 for the reverse mint's
+    // gate (§7.1 amendment 1 — the reverse child rides only a mint-flagged request).
+    const std::uint8_t op_byte = cur.byte_at(op_body_off);
     const bool is_reply =
-        static_cast<graph::fwd_op_t>(cur.byte_at(op_body_off) & graph::kFwdOpcodeMask) ==
-        graph::fwd_op_t::REPLY;
+        static_cast<graph::fwd_op_t>(op_byte & graph::kFwdOpcodeMask) == graph::fwd_op_t::REPLY;
+    const bool mint_flagged = (op_byte & graph::kFwdOpFlagMintRequest) != 0;
 
     fwd_rebuild_t r;
     if (pos < body_end) {
@@ -1160,13 +1236,17 @@ template <class Cursor, class MintFn = no_mint_t>
     r.src_body_off = src_h->body_off;
     r.src_body_len = src_h->body_len;
 
-    // This hop's mint contribution (RFC-0024 §7.1 step 2), on a forwarded REPLY only: the
-    // reply's trailing `PATH_REF` is re-headed one element longer and this hop's element goes
-    // in front. A request is never touched — the mint request costs zero request bytes, which
-    // is the whole point of putting the flag in the op byte (§7.5).
-    // The mint half is a CALL, never inlined here (see `rebuild_reply_mint`).
+    // This hop's mint contribution (RFC-0024 §7.1 + amendment 1), in either direction. A
+    // forwarded REPLY carrying a mint answer gets this hop's FORWARD element prepended; a
+    // mint-flagged forwarded REQUEST gets this hop's REVERSE element — its arrival identity's
+    // vertex ref — prepended to (or creating, or stripping) the trailing reverse `PATH_REF`
+    // child. An UNFLAGGED request is never touched — the mint request still costs zero added
+    // origin bytes, which is the whole point of putting the flag in the op byte (§7.5).
+    // Both mint halves are CALLS, never inlined here (see `rebuild_reply_mint`).
     const std::size_t mint_growth =
-        is_reply ? rebuild_reply_mint(cur, pos, body_end, mint_fn, r) : 0u;
+        is_reply       ? rebuild_reply_mint(cur, pos, body_end, mint_fn, r)
+        : mint_flagged ? rebuild_request_reverse_mint(cur, pos, body_end, reverse_mint_fn, r)
+                       : 0u;
 
     // The K leading dst segments (NAMEs) this hop consumes. The peek already walked exactly
     // these, so a caller that recorded where they end hands the answer over; `strip_at` below
@@ -1228,9 +1308,13 @@ template <class Cursor, class MintFn = no_mint_t>
     // A bound `dst` re-heads as a `PATH_REF` with `opt = 0`: the shrink is an element, and the
     // body it now describes is still a fixed-stride record array, so `PL` stays clear
     // (RFC-0024 §4.2 — a set `PL` here would mis-frame the whole body at the next hop).
-    if (pre != nullptr && pre->valid && pre->dst_ref) {
+    if (pre != nullptr && pre->valid && pre->dst_ref && !pre->dst_to_path) {
         r.head1.header_bare(wire::type_t::PATH_REF, new_dst_body);
     } else {
+        // Canonical PATH — the ordinary shrunk dst, AND the reverse-list delivery's last
+        // hop (`dst_to_path`): the consumed element was the final one and the peer behind
+        // the egress is an origin, so it receives the canonical delivery shape (§7.1
+        // amendment 1 — the origin never speaks the bound form).
         r.head1.header(wire::type_t::PATH, new_dst_body);
     }
 
