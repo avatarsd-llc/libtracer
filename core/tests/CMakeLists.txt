@@ -637,6 +637,9 @@ endif()
 add_executable(security_acl_test security_acl_test.cpp)
 target_link_libraries(security_acl_test PRIVATE libtracer)
 libtracer_test_warnings(security_acl_test)
+# RFC-0026 (#993) — the typed-builder-vs-vector byte-compare needs the vector bytes.
+target_compile_definitions(security_acl_test PRIVATE
+    LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 add_test(NAME security_acl COMMAND security_acl_test)
 
 # ADR-0050 — the effective-ACL merge semantics (effective_acl_t, pure, synthetic ACE

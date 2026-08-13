@@ -13,6 +13,9 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -40,6 +43,19 @@ using tr::testing::check;
 std::vector<std::byte> as_bytes(std::string_view s) {
     std::vector<std::byte> out(s.size());
     std::memcpy(out.data(), s.data(), s.size());
+    return out;
+}
+
+/** @brief The raw bytes of a conformance vector's `input.bin`. */
+std::vector<std::byte> vector_bytes(std::string_view case_dir) {
+    const std::filesystem::path p =
+        std::filesystem::path{LIBTRACER_VECTORS_DIR} / case_dir / "input.bin";
+    std::ifstream f(p, std::ios::binary);
+    const std::vector<char> raw((std::istreambuf_iterator<char>(f)),
+                                std::istreambuf_iterator<char>());
+    std::vector<std::byte> out(raw.size());
+    for (std::size_t i = 0; i < raw.size(); ++i)
+        out[i] = static_cast<std::byte>(static_cast<unsigned char>(raw[i]));
     return out;
 }
 
@@ -486,11 +502,11 @@ int main() {
         using tr::wire::type_t;
         const std::vector<std::byte> mask4 = le(bit(acl_right_t::READ), 4);
 
-        // 9a. The `acl/acl-aces` conformance vector (and the Rust core's builder, and
-        //     reference/05 §0x0A's own layout) spell `access_mask` as u16 where
-        //     encode_acl spells it u32. A narrower payload zero-extends exactly, so both
-        //     name the same rights and both parse — rejecting the narrow one would make
-        //     this core reject its own published vector.
+        // 9a. The canonical `access_mask` width is u32 (RFC-0026 / #993) — what encode_acl,
+        //     the Rust builder and the re-cut `acl/acl-aces` vector all spell. A narrower
+        //     u16 payload (the vector's pre-RFC-0026 spelling) zero-extends exactly, so it
+        //     names the same rights and MUST keep parsing: stored ACLs written before the
+        //     amendment are still readable.
         {
             std::vector<std::byte> e;
             add_pair(e, "type", type_t::VALUE, le(0, 1));
@@ -499,7 +515,7 @@ int main() {
             add_pair(e, "access_mask", type_t::VALUE, le(0x0003, 2));
             const std::vector<ace_t> got = parsed_aces<allow_only_policy_t>(one_ace(e));
             check(got.size() == 1 && got[0].access_mask == 0x0003 && got[0].flags == kAceInherit,
-                  "a u16 `access_mask` (the conformance-vector spelling) still parses");
+                  "a u16 `access_mask` (the pre-RFC-0026 narrow spelling) still parses");
         }
 
         // 9b. A NAME-typed `subject` is the EVERYONE@ spelling and stays legal —
@@ -529,6 +545,19 @@ int main() {
                       got[0].expires_ns == 42,
                   "a NAME-typed EVERYONE@ subject with an expiry parses");
         }
+    }
+
+    // 10. RFC-0026 (#993) — the typed builder's bytes ARE the published vector's bytes.
+    //     The conformance harness gates the codec only (encode(decode(v)) == v), so a
+    //     typed-builder width divergence is invisible to it; this byte-compare is the
+    //     gate that keeps encode_acl and `acl/acl-aces` from drifting apart again.
+    {
+        const std::vector<ace_t> aces = {
+            ace("peer-a", 0x0003, ace_type_t::ALLOW, kAceInherit),
+            ace("EVERYONE@", 0x0001, ace_type_t::ALLOW, 0, 0x0102030405060708ull),
+        };
+        check(encode_acl(aces) == vector_bytes("acl/acl-aces"),
+              "encode_acl reproduces the acl/acl-aces vector byte-for-byte (u32 mask)");
     }
 
     return tr::testing::summary("security_acl");

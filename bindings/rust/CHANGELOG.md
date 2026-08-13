@@ -8,6 +8,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: `structured::Ace::access_mask` widens `u16` → `u32` (RFC-0026, #993).** u32 is
+  the ACE mask's canonical wire width — what the C++ core's `encode_acl` always emitted and
+  what the re-cut `acl/acl-aces` vector now spells. `Ace::to_tlv` emits four bytes
+  (`value_u32`), and `structured::acl_aces` no longer narrows the parsed mask to 16 bits —
+  a rights bit above the old ceiling now survives build → decode → read (new
+  `ace_mask_u32_round_trip` test). Callers constructing `Ace` literals with an explicit
+  `u16` mask need the type widened; the numeric values are unchanged.
+
 ## [0.11.0] — 2026-08-13
 
 No changes. This crate is an independent native implementation of the protocol — it does

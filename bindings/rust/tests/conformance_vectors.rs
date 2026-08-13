@@ -996,6 +996,23 @@ fn ace_builder_matches_manual() {
     assert_eq!(encode(&structured::acl(&aces)), bin);
 }
 
+/** @brief RFC-0026 (#993): the mask is u32 end to end — a rights bit above the old
+ * 16-bit ceiling survives build → decode → read untruncated (the reader used to
+ * narrow to u16, silently dropping the high half of a wider grant). */
+#[test]
+fn ace_mask_u32_round_trip() {
+    let aces = [Ace {
+        ace_type: 0,
+        flags: 0,
+        subject: b"peer-a".to_vec(),
+        access_mask: 0x0001_0001,
+        expires_ns: None,
+    }];
+    let t = decode(&encode(&structured::acl(&aces))).unwrap();
+    let got = structured::acl_aces(&t).unwrap();
+    assert_eq!(got[0].access_mask, 0x0001_0001);
+}
+
 /* ------------------------------------------------------------- Unit 6 — SPEC --- */
 
 /**

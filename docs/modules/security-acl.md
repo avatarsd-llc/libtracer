@@ -86,7 +86,8 @@ a numeric field whose payload is empty or **wider** than the field, a known key
 whose value TLV is the wrong type, an unknown key, a repeated key, and a body
 whose `(NAME key, value)` pairing does not hold. A payload *narrower* than the
 field is fine: little-endian zero-extension names the same integer, which is why
-the `acl/acl-aces` conformance vector's two-byte `access_mask` keeps parsing.
+a two-byte `access_mask` — the `acl/acl-aces` vector's spelling before RFC-0026
+canonicalized the field at u32 — keeps parsing.
 
 The walk is pair-consuming, the same mechanics `wire::config_reader_t` uses — and
 the exact opposite ruling on unknown keys, deliberately. Config is where a newer
