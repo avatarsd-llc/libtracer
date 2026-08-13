@@ -410,6 +410,25 @@ int main() {
             rejects<allow_only_policy_t>(one_ace(e), "a duplicate `access_mask` is rejected");
         }
 
+        // 8k-vector. The SAME refusal, pinned on the shared #995 walk-parity vector —
+        // the bytes the Rust binding's ACE reader is gated against
+        // (bindings/rust/tests/conformance_vectors.rs). The codec harness round-trips
+        // the vector in every core; the security-family rejection is asserted here,
+        // where it can fail.
+        {
+            const std::filesystem::path p = std::filesystem::path{LIBTRACER_VECTORS_DIR} /
+                                            "acl/ace-duplicate-key" / "input.bin";
+            std::ifstream f(p, std::ios::binary);
+            const std::vector<char> raw((std::istreambuf_iterator<char>(f)),
+                                        std::istreambuf_iterator<char>());
+            std::vector<std::byte> vec(raw.size());
+            for (std::size_t i = 0; i < raw.size(); ++i)
+                vec[i] = static_cast<std::byte>(static_cast<unsigned char>(raw[i]));
+            check(!vec.empty(), "acl/ace-duplicate-key input.bin loads");
+            rejects<allow_only_policy_t>(
+                vec, "acl/ace-duplicate-key: the shared vector is rejected, same as 8k");
+        }
+
         // 8l. An empty `subject` token — rejected before, and still rejected at the pair
         //     rather than by the end-of-ACE required-field check.
         {

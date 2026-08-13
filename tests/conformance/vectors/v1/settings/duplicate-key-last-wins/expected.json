@@ -1,0 +1,12 @@
+{
+  "name": "duplicate-key-last-wins",
+  "category": "settings",
+  "hex": "0B401B00020004006B696E640100010001020004006B696E64020002007773",
+  "total_bytes": 31,
+  "decoded": {
+    "type": "0x0B SETTINGS",
+    "structured": true,
+    "meaning": "SETTINGS{ NAME \"kind\" VALUE 0x01, NAME \"kind\" NAME \"ws\" } — the key repeated, wrong-typed first: a string read of \"kind\" answers \"ws\" (#995 plain NAME-field family: pair-consuming + last-well-formed-occurrence-wins)",
+    "note": "a wrong-typed occurrence never clobbers a well-formed one, in either order; the codec harness gates only the round-trip — the reader claim is bound by each core's host suite (HARNESS.md)"
+  }
+}

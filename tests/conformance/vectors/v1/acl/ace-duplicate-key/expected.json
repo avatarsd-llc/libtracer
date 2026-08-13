@@ -1,0 +1,12 @@
+{
+  "name": "ace-duplicate-key",
+  "category": "acl",
+  "hex": "0A4050000A404C0002000400747970650100010000020007007375626A65637401000600706565722D6102000B006163636573735F6D61736B01000200010002000B006163636573735F6D61736B01000200FFFF",
+  "total_bytes": 84,
+  "decoded": {
+    "type": "0x0A ACL",
+    "structured": true,
+    "meaning": "ACL{ ACL{ NAME \"type\" VALUE 0x00, NAME \"subject\" VALUE \"peer-a\", NAME \"access_mask\" VALUE u16=0x0001, NAME \"access_mask\" VALUE u16=0xFFFF } } — a REPEATED access_mask, narrow then wide: every ACE reader REJECTS this record (TYPE_MISMATCH), because last-wins would widen the grant",
+    "note": "#995 security-reader family (mechanics #927, disposition #906): the codec round-trips these bytes — the refusal is the reader's, bound by each core's host suite (HARNESS.md)"
+  }
+}

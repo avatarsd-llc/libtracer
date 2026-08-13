@@ -56,6 +56,10 @@ add_executable(config_reader_test config_reader_test.cpp)
 target_link_libraries(config_reader_test PRIVATE libtracer)
 libtracer_test_warnings(config_reader_test)
 add_test(NAME config_reader COMMAND config_reader_test)
+# Pins the shared #995 walk-parity vector on the reader, so it needs
+# LIBTRACER_VECTORS_DIR.
+target_compile_definitions(config_reader_test PRIVATE
+    LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 
 # Canonical-key NAME navigation (key_view.hpp) — the locus the graph walks funnel through.
 add_executable(key_view_test key_view_test.cpp)
@@ -641,6 +645,10 @@ libtracer_test_warnings(security_acl_test)
 target_compile_definitions(security_acl_test PRIVATE
     LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 add_test(NAME security_acl COMMAND security_acl_test)
+# Pins the shared acl/ace-duplicate-key #995 vector on parse_acl, so it needs
+# LIBTRACER_VECTORS_DIR.
+target_compile_definitions(security_acl_test PRIVATE
+    LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 
 # ADR-0050 — the effective-ACL merge semantics (effective_acl_t, pure, synthetic ACE
 # lists) + the graph's cached merge: subtree-precise invalidation (ADR-0057 child

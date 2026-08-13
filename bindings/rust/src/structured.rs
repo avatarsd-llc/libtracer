@@ -39,9 +39,24 @@ pub struct NamedField {
 }
 
 /**
- * @brief Read the NAME-tagged fields of any structured TLV: each `NAME` child is paired
- * with the immediately-following child as its value. A trailing `NAME` with no
- * following value is skipped. Covers `router-wrapped`, SETTINGS, SPEC.
+ * @brief Read the NAME-tagged fields of any structured TLV as positional `(NAME key,
+ * value)` PAIRS — the C++ `wire::config_reader_t` mechanics (#927), mirrored here so
+ * both cores parse one grammar (#995).
+ *
+ * The walk is **pair-consuming**: it steps two children at a time, so a value child is
+ * never re-read as the next position's key. A child that is not a `NAME` where a key
+ * belongs desynchronizes the pair stream and the walk STOPS there rather than guessing
+ * a resync — the every-offset scan this replaced made the grammar ambiguous (a pair
+ * whose value textually equalled a known key bound the following child as that key's
+ * value). A trailing unpaired `NAME` is ignored. Duplicate keys are preserved in wire
+ * order: which occurrence wins — or whether a repeat is rejected outright — is each
+ * consumer's disposition, not the walk's (#995: plain NAME-field readers are last-wins;
+ * security readers reject).
+ *
+ * Covers SETTINGS, SPEC, and the `router-wrapped` envelope. The ROUTER (`0x0D`) code
+ * is a reserved codepoint with no implemented mechanism in any core; when one lands,
+ * its reader joins the REJECT family (the #995 ruling), but until then this walk only
+ * enumerates its pairs.
  *
  * # Errors
  * [`BuildError::InvalidUtf8`] on a non-UTF-8 NAME key.
@@ -50,22 +65,28 @@ pub fn named_fields(tlv: &Tlv) -> Result<Vec<NamedField>, BuildError> {
     let mut out = Vec::new();
     let ch = &tlv.children;
     let mut i = 0;
-    while i < ch.len() {
-        if ch[i].type_code == type_code::NAME && i + 1 < ch.len() {
-            out.push(NamedField {
-                key: ch[i].payload_str()?.to_string(),
-                value: ch[i + 1].clone(),
-            });
-            i += 2;
-            continue;
+    while i + 1 < ch.len() {
+        if ch[i].type_code != type_code::NAME {
+            break;
         }
-        i += 1;
+        out.push(NamedField {
+            key: ch[i].payload_str()?.to_string(),
+            value: ch[i + 1].clone(),
+        });
+        i += 2;
     }
     Ok(out)
 }
 
 /**
- * @brief The value TLV of the first NAME-tagged field with the given key, or `None`.
+ * @brief The value TLV of the LAST NAME-tagged field with the given key, or `None` —
+ * the plain NAME-field family disposition (#995): pair-consuming + last-occurrence-wins,
+ * matching the C++ termini of this grammar (`config_reader_t`, `create_child`,
+ * `parse_subscriber_tlv`).
+ *
+ * Type-agnostic: "last" here means the last PAIR carrying the key. A typed reader
+ * ([`settings_str`], [`spec_type_name`]) additionally requires its value TYPE, so a
+ * wrong-typed later occurrence never clobbers a well-formed earlier one there.
  *
  * # Errors
  * [`BuildError::InvalidUtf8`] on a non-UTF-8 NAME key while scanning.
@@ -73,6 +94,7 @@ pub fn named_fields(tlv: &Tlv) -> Result<Vec<NamedField>, BuildError> {
 pub fn named_field(tlv: &Tlv, key: &str) -> Result<Option<Tlv>, BuildError> {
     Ok(named_fields(tlv)?
         .into_iter()
+        .rev()
         .find(|f| f.key == key)
         .map(|f| f.value))
 }
@@ -145,7 +167,8 @@ pub fn settings(pairs: &[(&str, &[u8])]) -> Result<Tlv, BuildError> {
 }
 
 /**
- * @brief The opaque value bytes of a SETTINGS key, or `None`.
+ * @brief The opaque value bytes of a SETTINGS key, or `None`. On a repeated key the
+ * LAST occurrence wins ([`named_field`]'s #995 family disposition).
  *
  * @note Type-agnostic by design — it hands back whatever payload the value child holds.
  *       Use [`settings_str`] for a key a reader looks up as a string, so the value TYPE
@@ -167,12 +190,10 @@ pub fn settings_get(tlv: &Tlv, key: &str) -> Result<Option<Vec<u8>>, BuildError>
  * value is an opaque `VALUE` reads as `None` here, matching the terminus's **type**
  * check (`config_reader_t`).
  *
- * @note The **walk** is not yet in parity, and this is the narrower reader. The
- *       terminus consumes strict `(NAME key, value)` pairs, stops at the first slot
- *       where a key is not a `NAME`, and lets a later well-formed pair win; this
- *       resynchronises at every offset and takes the first match. So `SETTINGS{ NAME
- *       "kind" VALUE …, NAME "kind" NAME "ws" }` reads `"ws"` at the terminus and
- *       `None` here. Tracked separately — see the walk-parity follow-up.
+ * Within the matching pairs the LAST **well-formed** (`NAME`-typed) occurrence wins,
+ * and a wrong-typed occurrence never clobbers a well-formed one — `SETTINGS{ NAME
+ * "kind" VALUE …, NAME "kind" NAME "ws" }` reads `"ws"`, exactly as at the terminus
+ * (#995; the shared `settings/duplicate-key-last-wins` vector pins both cores).
  *
  * # Errors
  * [`BuildError::TypeMismatch`] if the TLV is not a SETTINGS; [`BuildError::InvalidUtf8`]
@@ -182,10 +203,12 @@ pub fn settings_str(tlv: &Tlv, key: &str) -> Result<Option<String>, BuildError> 
     if tlv.type_code != type_code::SETTINGS {
         return Err(BuildError::TypeMismatch);
     }
-    match named_field(tlv, key)? {
-        Some(v) if v.type_code == type_code::NAME => Ok(Some(v.payload_str()?.to_string())),
-        _ => Ok(None),
+    for f in named_fields(tlv)?.into_iter().rev() {
+        if f.key == key && f.value.type_code == type_code::NAME {
+            return Ok(Some(f.value.payload_str()?.to_string()));
+        }
     }
+    Ok(None)
 }
 
 /* -------------------------------------------------------------- SUBSCRIBER --- */
@@ -300,29 +323,36 @@ impl DeliveryPolicy {
  * policy: the word must be read by name, never by position. Returning the default for
  * such a record is what the `subscriber/policy-absent` vector pins.
  *
+ * The walk is the plain NAME-field family's (#995), exactly the C++
+ * `parse_subscriber_tlv` → `config_reader_t` rule: the LAST **well-formed** occurrence
+ * (a 2-byte `VALUE`) wins, and an ill-formed one — wrong TLV type or wrong width — is
+ * SKIPPED rather than rejected, so it neither errors out the read nor clobbers a
+ * well-formed earlier word. The shared `subscriber/policy-last-wins` vector pins both
+ * cores.
+ *
  * # Errors
- * [`BuildError::TypeMismatch`] if the TLV is not a SUBSCRIBER, or if a `delivery_policy`
- * key is present but its value is not a 2-byte VALUE.
+ * [`BuildError::TypeMismatch`] if the TLV is not a SUBSCRIBER.
  */
 pub fn subscriber_policy(tlv: &Tlv) -> Result<DeliveryPolicy, BuildError> {
     if tlv.type_code != type_code::SUBSCRIBER {
         return Err(BuildError::TypeMismatch);
     }
+    let mut policy = DeliveryPolicy::default();
     for child in tlv.children_of_type(type_code::SETTINGS) {
         for f in named_fields(child)? {
             if f.key != DELIVERY_POLICY_KEY {
                 continue;
             }
             if f.value.type_code != type_code::VALUE || f.value.payload.len() != 2 {
-                return Err(BuildError::TypeMismatch);
+                continue;
             }
-            return Ok(DeliveryPolicy::from_bits(u16::from_le_bytes([
+            policy = DeliveryPolicy::from_bits(u16::from_le_bytes([
                 f.value.payload[0],
                 f.value.payload[1],
-            ])));
+            ]));
         }
     }
-    Ok(DeliveryPolicy::default())
+    Ok(policy)
 }
 
 /**
@@ -494,9 +524,26 @@ pub fn acl(aces: &[Ace]) -> Tlv {
 /**
  * @brief Parse an ACL TLV into its ACEs (each inner ACL a NAME-tagged ACE record).
  *
+ * STRICT — the security-reader family of the #995 ruling, matching the C++
+ * `graph::parse_acl` (#906): an ACL is a security document, so a shape the builder
+ * never emits is REJECTED rather than read leniently, because leniency here does not
+ * lose a field — it inverts or widens a grant. Per ACE, `TypeMismatch` on: an odd
+ * child count (an unpaired key or value), a non-`NAME` child in a key slot (a
+ * desynchronized pair stream), an UNKNOWN key (a silently dropped attribute would
+ * widen access), a REPEATED key (last-wins would let `access_mask` narrow-then-wide
+ * widen the grant — the shared `acl/ace-duplicate-key` vector pins the refusal in
+ * both cores), a numeric field whose value is not a `VALUE`, an empty `subject`, and
+ * a missing required `type` / `subject` / `access_mask`.
+ *
+ * What is deliberately NOT mirrored here: the terminus's policy-tier checks (DENY
+ * acceptance, the flag-bit subset, per-field width caps) — those gate what a graph
+ * STORES, not what the codec reads; this crate has no policy to evaluate. The
+ * `access_mask` width is the canonical u32 of RFC-0026 (#993), read without
+ * narrowing.
+ *
  * # Errors
- * [`BuildError::TypeMismatch`] if the TLV is not an ACL or an ACE lacks the
- * required `type` / `subject` / `access_mask` fields.
+ * [`BuildError::TypeMismatch`] per the reject rules above;
+ * [`BuildError::InvalidUtf8`] on a non-UTF-8 key.
  */
 pub fn acl_aces(tlv: &Tlv) -> Result<Vec<Ace>, BuildError> {
     if tlv.type_code != type_code::ACL {
@@ -504,23 +551,68 @@ pub fn acl_aces(tlv: &Tlv) -> Result<Vec<Ace>, BuildError> {
     }
     let mut out = Vec::new();
     for inner in tlv.children_of_type(type_code::ACL) {
-        let fields = named_fields(inner)?;
-        let get = |k: &str| fields.iter().find(|f| f.key == k).map(|f| &f.value);
-        let ace_type = get("type").ok_or(BuildError::TypeMismatch)?.payload_uint() as u8;
-        let flags = get("flags").map(|v| v.payload_uint() as u8).unwrap_or(0);
-        let subject = get("subject")
-            .ok_or(BuildError::TypeMismatch)?
-            .payload
-            .clone();
-        // The full canonical u32 (RFC-0026) — narrowing here would silently drop the
-        // high rights bits a wider mask grants.
-        let access_mask = get("access_mask")
-            .ok_or(BuildError::TypeMismatch)?
-            .payload_uint() as u32;
-        let expires_ns = get("expires_ns").map(|v| v.payload_uint());
+        let ch = &inner.children;
+        if ch.len() % 2 != 0 {
+            return Err(BuildError::TypeMismatch);
+        }
+        let mut ace_type: Option<u8> = None;
+        let mut flags: Option<u8> = None;
+        let mut subject: Option<Vec<u8>> = None;
+        let mut access_mask: Option<u32> = None;
+        let mut expires_ns: Option<u64> = None;
+        let mut i = 0;
+        while i + 1 < ch.len() {
+            if ch[i].type_code != type_code::NAME {
+                return Err(BuildError::TypeMismatch);
+            }
+            let val = &ch[i + 1];
+            // Every arm rejects a repeat (dup .is_some()) — the security disposition.
+            match ch[i].payload_str()? {
+                "type" => {
+                    if ace_type.is_some() || val.type_code != type_code::VALUE {
+                        return Err(BuildError::TypeMismatch);
+                    }
+                    ace_type = Some(val.payload_uint() as u8);
+                }
+                "flags" => {
+                    if flags.is_some() || val.type_code != type_code::VALUE {
+                        return Err(BuildError::TypeMismatch);
+                    }
+                    flags = Some(val.payload_uint() as u8);
+                }
+                "subject" => {
+                    // Opaque bytes (VALUE recommended; NAME for the "EVERYONE@"
+                    // spelling) — any non-empty payload, like the terminus.
+                    if subject.is_some() || val.payload.is_empty() {
+                        return Err(BuildError::TypeMismatch);
+                    }
+                    subject = Some(val.payload.clone());
+                }
+                "access_mask" => {
+                    if access_mask.is_some() || val.type_code != type_code::VALUE {
+                        return Err(BuildError::TypeMismatch);
+                    }
+                    // The full canonical u32 (RFC-0026) — narrowing here would silently
+                    // drop the high rights bits a wider mask grants.
+                    access_mask = Some(val.payload_uint() as u32);
+                }
+                "expires_ns" => {
+                    if expires_ns.is_some() || val.type_code != type_code::VALUE {
+                        return Err(BuildError::TypeMismatch);
+                    }
+                    expires_ns = Some(val.payload_uint());
+                }
+                _ => return Err(BuildError::TypeMismatch),
+            }
+            i += 2;
+        }
+        let (Some(ace_type), Some(subject), Some(access_mask)) = (ace_type, subject, access_mask)
+        else {
+            return Err(BuildError::TypeMismatch);
+        };
         out.push(Ace {
             ace_type,
-            flags,
+            flags: flags.unwrap_or(0),
             subject,
             access_mask,
             expires_ns,
@@ -587,12 +679,12 @@ pub fn spec(type_sel: &str, child_name: &str, config: Option<Tlv>) -> Result<Tlv
  * absent. Reading the type as well as the bytes is what stops this reader from
  * accepting the `VALUE`-typed spelling the terminus refuses.
  *
- * @note The **walk** is not in parity, and here this reader is the *looser* one.
- *       `create_child` consumes strict pairs and stops at the first non-`NAME` key
- *       slot; this resynchronises at every offset. So a SPEC whose children begin
- *       with a stray `VALUE` answers `INVALID_PATH` at the terminus while this
- *       reader still finds the fields that follow. Tracked separately — see the
- *       walk-parity follow-up.
+ * The walk is [`named_fields`]' pair-consuming one (#995), the same rule
+ * `create_child` runs: a SPEC whose children begin with a stray non-`NAME` (the
+ * shared `spec/desync-stray-value` vector) reads BOTH fields absent here, exactly as
+ * the terminus — which refuses the create with `INVALID_PATH` — never sees them. On
+ * a repeated key the last `NAME`-typed occurrence wins, and a wrong-typed occurrence
+ * never clobbers a well-formed one.
  *
  * # Errors
  * [`BuildError::TypeMismatch`] if the TLV is not a SPEC, or a non-UTF-8 field.
@@ -602,10 +694,12 @@ pub fn spec_type_name(tlv: &Tlv) -> Result<(Option<String>, Option<String>), Bui
         return Err(BuildError::TypeMismatch);
     }
     let named_str = |key: &str| -> Result<Option<String>, BuildError> {
-        match named_field(tlv, key)? {
-            Some(v) if v.type_code == type_code::NAME => Ok(Some(v.payload_str()?.to_string())),
-            _ => Ok(None),
+        for f in named_fields(tlv)?.into_iter().rev() {
+            if f.key == key && f.value.type_code == type_code::NAME {
+                return Ok(Some(f.value.payload_str()?.to_string()));
+            }
         }
+        Ok(None)
     };
     Ok((named_str("type")?, named_str("name")?))
 }

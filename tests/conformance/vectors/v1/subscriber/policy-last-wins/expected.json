@@ -1,0 +1,12 @@
+{
+  "name": "policy-last-wins",
+  "category": "subscriber",
+  "hex": "04405F0006400A0002000600636C69656E740B404D0002000F0064656C69766572795F706F6C69637901000200010002000F0064656C69766572795F706F6C69637901000200210002000F0064656C69766572795F706F6C696379020004006E6F7065",
+  "total_bytes": 99,
+  "decoded": {
+    "type": "0x04 SUBSCRIBER",
+    "structured": true,
+    "meaning": "SUBSCRIBER{ PATH{ NAME \"client\" }, SETTINGS{ NAME \"delivery_policy\" VALUE u16=0x0001, NAME \"delivery_policy\" VALUE u16=0x0021, NAME \"delivery_policy\" NAME \"nope\" } } — the policy word reads 0x0021: last WELL-FORMED occurrence wins, and the trailing wrong-typed occurrence is skipped, not an error",
+    "note": "#995 plain NAME-field family on the QoS SETTINGS (the C++ parse_subscriber_tlv → config_reader_t rule); reader claim bound by each core's host suite (HARNESS.md)"
+  }
+}

@@ -390,6 +390,23 @@ void test_conformance_vectors() {
         check(kind == "ws" && addr == "127.0.0.1",
               "... and reads the STRING keys kind/addr, which only a NAME value can carry");
     }
+
+    // --- spec/desync-stray-value (#995) — bytes we REFUSE, shared with the bindings ---
+    {
+        // A stray non-NAME in the FIRST key slot: the pair-consuming walk stops there,
+        // both fields read absent, and the create is refused. A reader that resyncs at
+        // every offset finds ("stored_value", "temp") in these very bytes — the Rust
+        // binding did, until #995 — which is why the witness is a SHARED vector: the
+        // codec harness round-trips it green in every core, and each core's host suite
+        // (this one, and bindings/rust/tests/conformance_vectors.rs) pins the refusal.
+        const std::vector<std::byte> vec = vector_bytes("spec/desync-stray-value");
+        graph_t g;
+        (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
+        const auto w = g.write(path_t("/dev:children[]"), owned(vec));
+        check(!w.has_value() && w.error() == status_t::INVALID_PATH,
+              "spec/desync-stray-value => INVALID_PATH (the walk stops at the stray VALUE)");
+        check(!g.find(path_t::parse("/dev/temp")->key()).has_value(), "nothing was created");
+    }
 }
 
 /**
