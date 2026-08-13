@@ -108,10 +108,11 @@ template <class Cursor>
  * this hop consumes, since the peek runs before that is known.
  */
 struct fwd_pre_t {
-    bool valid = false;          /**< @brief False ⇒ nothing was learned; rebuild parses itself. */
-    std::size_t body_end = 0;    /**< @brief End of the FWD body. */
-    std::size_t op_pos = 0;      /**< @brief Offset of the op VALUE TLV. */
-    std::size_t op_total = 0;    /**< @brief Its total size. */
+    bool valid = false;       /**< @brief False ⇒ nothing was learned; rebuild parses itself. */
+    std::size_t body_end = 0; /**< @brief End of the FWD body. */
+    std::size_t op_pos = 0;   /**< @brief Offset of the op VALUE TLV. */
+    std::size_t op_total = 0; /**< @brief Its total size. */
+
     std::size_t op_body_off = 0; /**< @brief Its body — read to test for REPLY. */
     /** @brief Its body length. Carried rather than re-checked so the rebuild keeps its own
      *         `body_len == 0` rejection: the peek does NOT reject an empty op (such a frame
