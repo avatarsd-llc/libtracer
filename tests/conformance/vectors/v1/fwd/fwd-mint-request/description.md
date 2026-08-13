@@ -5,7 +5,10 @@ that also asks every host on its route to answer with its own vertex ref (RFC-00
 
 This frame is [`fwd/fwd-read`](../fwd-read/description.md) with **one bit changed**, and
 the two vectors are deliberately kept that way: the whole claim of the request side is that
-a mint request costs **zero added bytes**.
+a mint request costs **zero added origin bytes** — this is the origin's frame, and it is
+bit-identical to the unflagged read. (RFC-0024 §7.1 amendment 1 lets *forwarding hops*
+grow the forwarded legs with a trailing reverse `PATH_REF` child; that never appears on the
+origin's frame, so these bytes are unchanged by the amendment.)
 
 ```
 0F 40 2B 00                       FWD, opt=0x40 (PL=1), length=43
