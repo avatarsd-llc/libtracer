@@ -51,11 +51,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   **Transition, one release:** `-DLIBTRACER_ACL_FULL` and `-DLIBTRACER_LKV_SLOT` — the only two
   the CI matrix passes — keep working, with `core/CMakeLists.txt` writing the fragment on their
   behalf and saying so at configure time. A NEW knob does not get a CMake variable.
-  **Scope:** this is the core half only. `config.hpp.in` stays in the tree with exactly one
-  remaining consumer — the ESP-IDF component, which still renders it — and is retired, along
-  with that component's conversion to a fragment, by **#1244**. In that window the two files
-  are no longer held identical by any gate, so a knob added to `config.hpp` must be mirrored
-  into `config.hpp.in` by hand to reach an ESP build; the template's own header says so.
+- **`config.hpp.in` is deleted; the ESP-IDF component writes a fragment (#1244, ADR-0068
+  §Erratum 1).** The template survived #1142 only as the ESP-IDF component's rendering source.
+  That component now writes a `libtracer/config_override.hpp` stating the four knobs an ESP
+  target changes — `kVertexLockStripes` (menuconfig), `kCacheLineBytes` (derived from
+  `CONFIG_FREERTOS_UNICORE`), `kEdgePinSlots` and `kSpinWaitSafe` (derived from `IDF_TARGET`)
+  — and inherits the rest, so it no longer carries a second copy of core's defaults and a knob
+  added to `config.hpp` reaches an ESP build with no hand-mirroring. **No configured value
+  changed** and the Kconfig option names are unchanged. `core/CMakeLists.txt`'s install step
+  drops the `PATTERN "config.hpp.in" EXCLUDE` that existed only for the deleted file.
 - **`kSpinWaitSafe` is a `default_config_t` member (#1142).** `tr::mem::kSpinWaitSafe` is now
   derived from `config_t` rather than being a loose `inline constexpr` literal. A knob outside
   the one named type cannot be reached by an override fragment at all, which is why this one

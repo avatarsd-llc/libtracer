@@ -257,22 +257,29 @@ if(NOT IDF_TARGET STREQUAL "linux")
     list(APPEND LIBTRACER_PRIV_INCLUDE_DIRS "compat/include")
 endif()
 
-# libtracer/config.hpp — per-target compile-time knobs delivered as plain C++
-# (ADR-0068). Generated here from the Kconfig values and listed BEFORE core/include,
-# so the generated file shadows the checked-in default for the component's own
-# sources AND every dependent (`REQUIRES libtracer`) — one file per build means every
-# TU agrees, which is what the old PUBLIC compile definition existed to guarantee.
+# libtracer/config_override.hpp — this component's per-target compile-time knobs, delivered
+# as plain C++ (ADR-0068 §Erratum 1). The DEFAULTS are not spelled here at all: they are C++
+# literals in the checked-in core/include/libtracer/config.hpp, which discovers this fragment
+# with __has_include and uses the `tr::graph::config_t` it binds. The fragment INHERITS
+# `tr::graph::default_config_t` and states only the four knobs an ESP target changes, so a knob
+# added to config.hpp later reaches this build at its new default — which is why no drift gate
+# has to hold the two files in step.
+# The generated directory is listed BEFORE core/include in INCLUDE_DIRS below, so the fragment
+# is found from the component's own sources AND from every dependent (`REQUIRES libtracer`) —
+# one file per build means every TU agrees, which is what the old PUBLIC compile definition
+# existed to guarantee.
+# What this component deliberately does NOT state, because core's default is already the right
+# answer here: the ACL profile (`allow_only_policy_t`, the MCU profile — no full-ACL Kconfig
+# yet), the LKV slot (`sp_atomic_slot_t` — a write-dominated single core keeps the refcount
+# slot) and the hazard reader slots (unused, since the refcount slot never builds the domain).
 # CONFIG_* is defined only in the SECOND (build) CMake pass; in the early
-# requirement-expansion pass the fallback renders the stock default (16), which the
+# requirement-expansion pass the fallback writes the stock default (16), which the
 # second pass then overwrites with the real value before anything compiles.
 if(CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES)
     set(LIBTRACER_VERTEX_LOCK_STRIPES ${CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES})
 else()
     set(LIBTRACER_VERTEX_LOCK_STRIPES 16)
 endif()
-set(LIBTRACER_ACL_POLICY allow_only_policy_t)  # the MCU profile — no full-ACL Kconfig yet
-set(LIBTRACER_LKV_SLOT sp_atomic_slot_t)  # write-dominated single core: keep the refcount slot
-set(LIBTRACER_HAZARD_READER_SLOTS 64)  # unused here: the refcount slot never builds the domain
 # Edge-pin announcements (#635) — one index per task that may PUBLISH concurrently. Unlike the
 # hazard domain this one is ALWAYS emitted, so it is real static RAM: N * max(padding,
 # sizeof(cell_t)) bytes. A cell is the announced pointer PLUS its claimed flag, so it is 8 B on
@@ -308,10 +315,46 @@ if(IDF_TARGET STREQUAL "linux")
 else()
     set(LIBTRACER_SPIN_WAIT_SAFE false)
 endif()
-configure_file(
-    "${LIBTRACER_ROOT}/core/include/libtracer/config.hpp.in"
-    "${CMAKE_CURRENT_BINARY_DIR}/generated/include/libtracer/config.hpp"
-    @ONLY)
+set(LIBTRACER_CONFIG_OVERRIDE_PATH
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/include/libtracer/config_override.hpp")
+set(LIBTRACER_CONFIG_OVERRIDE_TEXT
+"/**
+ * @file
+ * @brief GENERATED — this ESP-IDF build's configuration as an override fragment (ADR-0068).
+ *
+ * Written by integrations/esp-idf/libtracer/CMakeLists.txt from the component's Kconfig
+ * values and the chip facts above it. Do not edit; do not add a knob here that is not also
+ * a tr::graph::default_config_t member in core/include/libtracer/config.hpp.
+ */
+#pragma once
+
+#include <cstddef>
+
+namespace tr::graph {
+
+/** @brief Core's defaults with this component's Kconfig and chip-derived knobs applied. */
+struct esp_config_t : default_config_t {
+    static constexpr std::size_t kVertexLockStripes = ${LIBTRACER_VERTEX_LOCK_STRIPES};
+    static constexpr std::size_t kCacheLineBytes = ${LIBTRACER_CACHE_LINE_BYTES};
+    static constexpr std::size_t kEdgePinSlots = ${LIBTRACER_EDGE_PIN_SLOTS};
+    static constexpr bool kSpinWaitSafe = ${LIBTRACER_SPIN_WAIT_SAFE};
+};
+
+using config_t = esp_config_t;
+
+}  // namespace tr::graph
+")
+# Write only when the bytes actually change. `configure_file` gave that for free and this
+# component reconfigures often (menuconfig, and the two-pass component expansion runs this
+# block twice per configure); an unconditional file(WRITE) would touch the header every time
+# and rebuild every TU that includes it, which is all of them.
+set(LIBTRACER_CONFIG_OVERRIDE_PREV "")
+if(EXISTS "${LIBTRACER_CONFIG_OVERRIDE_PATH}")
+    file(READ "${LIBTRACER_CONFIG_OVERRIDE_PATH}" LIBTRACER_CONFIG_OVERRIDE_PREV)
+endif()
+if(NOT LIBTRACER_CONFIG_OVERRIDE_PREV STREQUAL LIBTRACER_CONFIG_OVERRIDE_TEXT)
+    file(WRITE "${LIBTRACER_CONFIG_OVERRIDE_PATH}" "${LIBTRACER_CONFIG_OVERRIDE_TEXT}")
+endif()
 
 idf_component_register(
     SRCS ${LIBTRACER_SRCS}
