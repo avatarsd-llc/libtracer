@@ -723,10 +723,10 @@ ANCHORS = [
     # that sentence and read as if it had verified the whole of it. These pin the lines
     # the prose actually names, in the two pages that name them: the segment module page
     # and the configuration-space design page.
-    ('tools/cortexm0_footprint.py:65', 'REQUIRED_MODULES = ('),
-    ('tools/cortexm0_footprint.py:94', 'cxx_flags = ['),
-    ('tools/cortexm0_footprint.py:101', '"-DLIBTRACER_NO_ATOMIC",'),
-    ('tools/cortexm0_footprint.py:115', '"--specs=nano.specs",'),
+    ('tools/cortexm0_footprint.py:84', 'REQUIRED_MODULES = ('),
+    ('tools/cortexm0_footprint.py:151', 'cxx_flags = ['),
+    ('tools/cortexm0_footprint.py:158', '"-DLIBTRACER_NO_ATOMIC",'),
+    ('tools/cortexm0_footprint.py:172', '"--specs=nano.specs",'),
     ('core/tests/CMakeLists.txt:1228', 'add_executable(substrate_test_no_atomic'),
     ('core/tests/CMakeLists.txt:1241', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
     ('core/tests/CMakeLists.txt:1242', '    LIBTRACER_NO_ATOMIC'),

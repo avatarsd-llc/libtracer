@@ -10,13 +10,21 @@
 # gate stays green (it catches vtable/erasure bloat AND template-instantiation
 # bloat). Complements the ESP-IDF whole-image sentinel in esp-idf.yml.
 #
-# `--mode warn` governs the BUDGET VERDICT only. Today the measured node is
-# 20,977 B — 4.49 KiB over the 16 KiB bound (re-measured 2026-08-07 at 3935d4e;
-# 20,937 B on 2026-07-27 and 21,025 B at v0.8.0, so +40 B over the blind window).
-# The old note blamed std::pmr soft-float reaching the image via the arena
-# decoder's `memory_resource&` seam; #588 removed that seam, so that attribution
-# no longer holds and the remaining overage has not been re-attributed. Flip
-# `--mode fail` only after the overage is understood.
+# `--mode warn` governs the BUDGET VERDICT only. The node has been over the
+# 16 KiB bound continuously and the standing overage is not re-attributed
+# (#1138 item 4 — the old std::pmr soft-float attribution died when #588
+# removed the arena decoder's `memory_resource&` seam), so a hard budget gate
+# would red main. Flip `--mode fail` only after the overage is understood.
+#
+# The RECORD of what the node measures is the `footprint-cortexm0` artifact
+# series each run uploads (toolchain-labeled JSON) — NOT this comment. Numbers
+# hand-maintained here went stale and mixed local with CI toolchains, which
+# manufactured a phantom +1 KiB regression once (#1138). Drift IS gated now:
+# each run fetches the previous successful main measurement and compares flash
+# on matched toolchains; growth warns (`--drift-mode warn`) while the
+# run-over-run noise band is measured, and the ruling is to flip
+# `--drift-mode fail` at ~2x observed noise once a release's worth of labeled
+# points exists.
 #
 # A failure to MEASURE is not a budget verdict and warn mode no longer answers
 # for it (#982): a missing toolchain, compile error, link error, or unparsable
@@ -45,6 +53,11 @@ on:
 jobs:
   sentinel:
     runs-on: ubuntu-24.04
+    # actions: read lets the drift baseline step download the previous main
+    # run's artifact with the default token.
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v4
 
@@ -57,11 +70,32 @@ jobs:
           sudo apt-get install -y -qq gcc-arm-none-eabi
           arm-none-eabi-g++ --version | head -1
 
+      - name: Fetch the previous main measurement (drift baseline)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The baseline is the footprint-cortexm0 artifact of the most recent
+          # successful main run (on a main push that is the previous commit's
+          # run — this run is still in_progress and never matches). Absence —
+          # first run, expired retention — is not an instrument failure: the
+          # gate step skips the drift comparison with a ::notice::.
+          run_id=$(gh run list --workflow footprint-cortexm0.yml --branch main \
+            --status success --limit 1 --json databaseId --jq '.[0].databaseId') || run_id=""
+          if [ -n "$run_id" ]; then
+            gh run download "$run_id" --name footprint-cortexm0 --dir baseline \
+              || echo "baseline artifact missing/expired on run $run_id — drift gate will skip"
+          else
+            echo "no successful main run of this workflow yet — drift gate will skip"
+          fi
+
       - name: Cortex-M0 required-modules footprint gate
         run: |
           python3 tools/cortexm0_footprint.py \
             --mode warn \
             --max-flash-bytes 16384 \
+            --baseline-json baseline/footprint-cortexm0.json \
+            --drift-mode warn \
+            --max-growth-bytes 0 \
             --out-json footprint-cortexm0.json
 
       - name: Upload footprint artifact

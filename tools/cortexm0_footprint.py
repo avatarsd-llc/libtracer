@@ -22,17 +22,36 @@ module-set work (Waves 1-3) lands, the delta on this number is the evidence.
 tools/esp_size_gate.py is reported only — it carries no ceiling; this Cortex-M0
 budget is the one footprint gate):
   * warn — over budget prints `::warning::` and exits 0. The default *today*:
-    the measured full send+receive P0 node is 20,977 B, i.e. **4.49 KiB over**
-    the 16 KiB bound (re-measured 2026-08-07 at `3935d4e`; 21,025 B at
-    `v0.8.0`), so a hard gate would red main. Per the PR #193 precedent, no
-    over-budget number reds main until the required modules are genuinely under
-    the ceiling. The overage is NOT attributed: the old note blamed `std::pmr`
-    soft-float reaching the image through the ADR-0041 arena decoder's
-    `memory_resource&` seam, but #588 removed that seam and the remainder has
-    not been re-attributed since.
+    the measured node has been over the 16 KiB bound continuously, so a hard
+    gate would red main. Per the PR #193 precedent, no over-budget number reds
+    main until the required modules are genuinely under the ceiling. The
+    standing overage is NOT attributed (#1138 item 4): the old note blamed
+    `std::pmr` soft-float reaching the image through the ADR-0041 arena
+    decoder's `memory_resource&` seam, but #588 removed that seam and the
+    remainder has not been re-attributed since.
   * fail — over budget prints `::error::` and exits 1. Flip the workflow to this
     once the overage is understood and closed — then the doctrine's hard gate
     (ADR-0047 §5) is in force and this referee catches any regression.
+
+**The record of what the node measures is the `footprint-cortexm0` artifact
+series, not any comment.** Hand-maintained figures in headers go stale and mix
+local with CI toolchains — a cross-toolchain spread of ~1 KiB on this fixture
+once manufactured a phantom +1,043 B regression (#1138). Every published
+number therefore carries the producing toolchain's version string, in the JSON
+artifact and in the job summary.
+
+**The drift gate (#1138).** An unreachable budget renders the same verdict
+forever, so it cannot distinguish "code grew" from "still over". `--baseline-json`
+points at the previous successful main run's artifact; flash growth beyond
+`--max-growth-bytes` on a MATCHED toolchain trips `--drift-mode`:
+  * warn — the default while the run-over-run noise band is being measured.
+  * fail — the ruling is to flip this at ~2× observed noise once a release's
+    worth of toolchain-labeled points exists (after the overage re-attribution,
+    which also gates the budget-mode flip).
+A missing/unreadable baseline or a toolchain mismatch SKIPS the comparison with
+a `::notice::` — history absence is not an instrument failure (the current
+build still measured), and a cross-toolchain delta is exactly the invalid
+comparison this gate exists to refuse.
 
 **A failure to MEASURE is not a budget verdict and `--mode` does not speak for
 it.** A missing toolchain, a compile error, a link error, or an unparsable
@@ -81,6 +100,44 @@ def _repo_root() -> pathlib.Path:
 
 def _run(cmd: list[str], cwd: pathlib.Path) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+
+
+def _toolchain_id(cxx: str, root: pathlib.Path) -> str:
+    """The compiler's own identity line (`<cxx> --version`, first line).
+
+    This labels every published number so a cross-toolchain comparison is
+    visibly invalid instead of silently plausible (#1138: local gcc 14.3.1 vs
+    CI gcc 13.2 differ by ~1 KiB on this fixture). Probe failure returns
+    "unknown" rather than erroring — an unrunnable compiler reds the job at the
+    compile step, where the diagnostic is better.
+    """
+    try:
+        res = _run([cxx, "--version"], cwd=root)
+    except OSError:
+        return "unknown"
+    if res.returncode != 0 or not res.stdout.strip():
+        return "unknown"
+    return res.stdout.splitlines()[0].strip()
+
+
+def _load_baseline(path: str) -> tuple[dict | None, str | None]:
+    """Load the previous main run's artifact for the drift comparison.
+
+    Returns (payload, skip_reason); exactly one is non-None. Absence or
+    unreadability is a SKIP, not an instrument failure — the current build
+    still measured, and the series legitimately starts somewhere (first run,
+    expired artifact retention).
+    """
+    p = pathlib.Path(path)
+    if not p.is_file():
+        return None, f"baseline {path!r} not present (first run or expired retention)"
+    try:
+        payload = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return None, f"baseline {path!r} unreadable: {exc}"
+    if not isinstance(payload.get("flash_bytes"), int):
+        return None, f"baseline {path!r} carries no integer flash_bytes"
+    return payload, None
 
 
 def _compile_and_link(
@@ -168,6 +225,14 @@ def main() -> int:
     ap.add_argument("--max-flash-bytes", type=int, default=DEFAULT_BUDGET,
                     help=f"hard flash budget (default: {DEFAULT_BUDGET} = 16 KiB)")
     ap.add_argument("--mode", choices=("warn", "fail"), default="warn")
+    ap.add_argument("--baseline-json", default=None,
+                    help="previous main run's --out-json artifact; enables the drift gate")
+    ap.add_argument("--drift-mode", choices=("warn", "fail"), default="warn",
+                    help="verdict for flash growth beyond --max-growth-bytes vs the baseline "
+                         "(default: warn while the noise band is being measured)")
+    ap.add_argument("--max-growth-bytes", type=int, default=0,
+                    help="run-over-run flash growth tolerated before --drift-mode trips "
+                         "(default: 0 — same toolchain, same fixture; growth is real)")
     ap.add_argument("--out-json", default=None, help="write the numbers as a JSON artifact")
     args = ap.parse_args()
 
@@ -192,6 +257,8 @@ def main() -> int:
     if not (shutil.which(args.cxx) or pathlib.Path(cxx).is_file()):
         return _broken(f"Cortex-M0 sentinel: cross-compiler {args.cxx!r} not found on PATH")
 
+    toolchain = _toolchain_id(cxx, root)
+
     try:
         with tempfile.TemporaryDirectory(prefix="cortexm0_sentinel_") as tmp:
             workdir = pathlib.Path(tmp)
@@ -207,12 +274,37 @@ def main() -> int:
     verdict = "PASS" if flash_ok else ("WARN" if args.mode == "warn" else "FAIL")
     modules = ", ".join(f"`{m}`" for m in REQUIRED_MODULES)
 
+    # --- drift gate (#1138): read the series the job has always uploaded -----
+    # A skip (no baseline, mismatched toolchain) is a ::notice::, never an
+    # error — see _load_baseline. A matched-toolchain growth beyond the
+    # tolerance trips --drift-mode.
+    drift_skip: str | None = None
+    drift_delta: int | None = None
+    drift_over = False
+    baseline: dict | None = None
+    if args.baseline_json:
+        baseline, drift_skip = _load_baseline(args.baseline_json)
+        if baseline is not None:
+            base_tc = baseline.get("toolchain", "unknown")
+            if base_tc != toolchain or toolchain == "unknown":
+                drift_skip = (
+                    f"toolchain changed ({base_tc!r} -> {toolchain!r}) — a cross-toolchain "
+                    f"flash delta is not a drift signal (~1 KiB spread on this fixture, #1138)"
+                )
+                baseline = None
+            else:
+                drift_delta = flash - baseline["flash_bytes"]
+                drift_over = drift_delta > args.max_growth_bytes
+    else:
+        drift_skip = "no --baseline-json given"
+
     lines = [
         f"## libtracer Cortex-M0 footprint — required modules ({args.mcpu})",
         "",
         f"Profile: `arm-none-eabi-g++ -std=c++23 -Os -fno-exceptions -fno-rtti "
         f"-DLIBTRACER_NO_ATOMIC` + `--gc-sections`, stripped.",
         f"Required modules: {modules} + the `sentinel_node` fixture.",
+        f"Toolchain: `{toolchain}` — compare flash numbers ONLY within one toolchain.",
         "",
         "| Section | Bytes |",
         "| --- | --- |",
@@ -228,6 +320,18 @@ def main() -> int:
            else f"(**over by {_fmt(-headroom)}**)."),
         "",
     ]
+    if drift_delta is not None:
+        base_commit = (baseline.get("commit") or "unknown")[:12]
+        drift_verdict = ("OK" if not drift_over
+                         else ("WARN" if args.drift_mode == "warn" else "FAIL"))
+        lines += [
+            f"**Drift vs previous main ({base_commit}): {drift_verdict}** — "
+            f"{drift_delta:+,} B flash ({_fmt(baseline['flash_bytes'])} -> {_fmt(flash)}), "
+            f"tolerance {args.max_growth_bytes:,} B, same toolchain.",
+            "",
+        ]
+    else:
+        lines += [f"Drift gate: skipped — {drift_skip}.", ""]
     report = "\n".join(lines)
     print(report)
     step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
@@ -239,6 +343,8 @@ def main() -> int:
         payload = {
             "mcpu": args.mcpu,
             "required_modules": list(REQUIRED_MODULES),
+            "toolchain": toolchain,
+            "commit": os.environ.get("GITHUB_SHA"),
             "text_bytes": text,
             "data_bytes": data,
             "bss_bytes": bss,
@@ -251,8 +357,24 @@ def main() -> int:
         }
         pathlib.Path(args.out_json).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
+    rc = 0
+
+    if drift_skip is not None:
+        print(f"::notice::Cortex-M0 drift gate skipped: {drift_skip}")
+    elif drift_over:
+        grew = (
+            f"Cortex-M0 required-modules flash grew {drift_delta:+,} B vs the previous main "
+            f"measurement ({_fmt(baseline['flash_bytes'])} -> {_fmt(flash)}, tolerance "
+            f"{args.max_growth_bytes:,} B, toolchain `{toolchain}`) (#1138)"
+        )
+        if args.drift_mode == "fail":
+            print(f"::error::{grew}")
+            rc = 1
+        else:
+            print(f"::warning::{grew} (drift warn mode: not failing the job — attribute the growth)")
+
     if flash_ok:
-        return 0
+        return rc
     over = (
         f"Cortex-M0 required-modules flash footprint {_fmt(flash)} exceeds the "
         f"{_fmt(args.max_flash_bytes)} budget by {_fmt(-headroom)} (ADR-0047 §5)"
@@ -261,7 +383,7 @@ def main() -> int:
         print(f"::error::{over}")
         return 1
     print(f"::warning::{over} (warn mode: not failing the job — tighten or investigate)")
-    return 0
+    return rc
 
 
 if __name__ == "__main__":
