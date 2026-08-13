@@ -14,42 +14,7 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
-### Fixed
-
-- **An eager `write` no longer erases a racing `assign`'s pending mark (#1185).** `clear_pending`
-  erased the mark unconditionally under the sweep lock, so an `assign` that landed between a
-  `write`'s store and that erase lost its deferred delivery outright: the newer value was
-  published, its mark dropped, and no covering `propagate` ever delivered it. The erase is now
-  conditional on the value this writer published still being the vertex's current LKV — a
-  pointer compare against a strong reference the caller holds — so a mark whose value a sweep
-  still owes survives. The failure direction is now always a duplicate delivery of the current
-  LKV, never a lost one, which is what every fast path on the same function already permitted.
-  No API change; `graph_t::write` / `assign` / `propagate` keep their signatures.
-
-### Documentation
-
-- **`graph_t::has_subscribers` now states the staleness its ancestor half actually has
-  (#1185/#854).** The predicate's `listeners_above` half is a relaxed load, so a `false` can
-  miss a subtree subscribe that already completed on another thread. The header said nothing;
-  it now names the window and carries the #555-standard justification for leaving it relaxed —
-  #854's measured REFUTATION (the `seq_cst` candidate doubled the idle write's rv32 fence count
-  and excluded no observation, because ADR-0049's latch snapshots the subscribed *ancestor's*
-  own LKV, never a descendant's). `vertex_t::listeners_above` carries the same ruling, and the
-  two concurrency design docs that claimed `own_subs_ordered()` is "the only read that decides
-  whether to deliver at all" are corrected — it is not.
-### Changed
-
-- **`config_reader_t` moved to `tr::wire`; `tr::net::config_reader_t` is now an alias
-  (#985).** The pair-consuming `(NAME key, value)` walk (#927) decodes a `wire::tlv_t`, and
-  its two remaining hand-written copies sat at L4 (`graph_t::create_child`'s creation-SPEC
-  envelope and `parse_subscriber_tlv`'s SUBSCRIBER QoS SETTINGS), where `tr::net` may not be
-  a dependency — so the type now lives in the layer that owns the grammar and both L4
-  readers use it instead of restating its rule. The transport-plane spelling
-  `tr::net::config_reader_t` remains valid as a `using` alias, so no call site moves.
-  Consolidation side effect at the two L4 sites: the canonical plain NAME-field family
-  semantics (#995) now apply uniformly — last **well-formed** occurrence wins (a repeated
-  `delivery_compact`/`delivery_policy` no longer resolves "any nonzero"/per-occurrence) and
-  an empty `VALUE` payload is ignored rather than read as zero.
+## [0.11.0] — 2026-08-13
 
 ### Added
 
@@ -73,7 +38,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   **`config_reader_t::settings(key)`** — the nested `SETTINGS` value child, or `nullptr`.
   Both run the same pair-consuming, last-well-formed-wins walk as every other accessor;
   they are the two accessors the L4 readers needed (#985).
-### Added
 
 - **`transport_can::dropped_presink()` — the named counter for the sink-install window
   (#1103, [ADR-0081](../docs/adr/0081-pre-sink-ingress-native-window-hold-or-named-drop-never-parked.md)
@@ -89,7 +53,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   pending/reassembly sweeps) — so per §4 the group is dropped at the delivery seam and this
   distinctly named counter ticks: never parked in the library, never folded into `dropped_rx()`
   or `dropped_groups()`, never silent. Counts groups.
-### Added
 
 - **`tr::net::transport_vertex_t::is_structural(wire::key_view_t)` — the net plane names its
   own structural vertices (#1096).** `transport_vertex_t` mints two vertices nobody asked
@@ -120,7 +83,33 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   RFC-0014 per-module creator endpoint `/net/<module>/conn` (accepted, unimplemented) answers
   `false`: it is an addressable control surface with its own `:schema` catalog, not a
   grouping segment.
+
+- **`transport_t::drop_stats()` — the interface-level shed-frame seam (#932).** Every transport
+  counted *some* drops behind its own concrete accessors, so a consumer holding a
+  `transport_t*` could observe none of them and swapping tcp for ws or CAN silently lost all
+  drop observability. `transport_drop_stats_t {dropped_rx, malformed_rx, dropped_tx}` is the one
+  shape they all answer with; the base returns all-zero (the honest answer for a link that
+  counts nothing) and tcp / udp / ws / CAN / quic / webtransport and the ESP `httpd_ws_link_t`
+  override it. Spelled `drop_stats`, not `stats`, because a platform link may already publish a
+  richer kind-specific `stats()` block. The per-transport accessors are unchanged.
+
+- **`dropped_tx()` on tcp / udp / ws (#932).** Every `send()` shed frames on oversize, a refused
+  gather store, no peer or a dead socket with a bare `return` — the exact mirror of RX counters
+  that did exist. Each of those legs now ticks a counter. (CAN already had `dropped_tx()`.)
+
 ### Changed
+
+- **`config_reader_t` moved to `tr::wire`; `tr::net::config_reader_t` is now an alias
+  (#985).** The pair-consuming `(NAME key, value)` walk (#927) decodes a `wire::tlv_t`, and
+  its two remaining hand-written copies sat at L4 (`graph_t::create_child`'s creation-SPEC
+  envelope and `parse_subscriber_tlv`'s SUBSCRIBER QoS SETTINGS), where `tr::net` may not be
+  a dependency — so the type now lives in the layer that owns the grammar and both L4
+  readers use it instead of restating its rule. The transport-plane spelling
+  `tr::net::config_reader_t` remains valid as a `using` alias, so no call site moves.
+  Consolidation side effect at the two L4 sites: the canonical plain NAME-field family
+  semantics (#995) now apply uniformly — last **well-formed** occurrence wins (a repeated
+  `delivery_compact`/`delivery_policy` no longer resolves "any nonzero"/per-occurrence) and
+  an empty `VALUE` payload is ignored rather than read as zero.
 
 - **`mem::pool_t` no longer advertises `is_isr_safe`; the new `is_nonblocking` trait carries
   what it actually guaranteed (#928).** The bare pool's `alloc`/`destroy` do an
@@ -154,22 +143,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   well-formed occurrence. `conn_spec_t` already emits full-width values, so the canonical
   builder is unaffected. Scoped to `config_reader_t` per the #928 ruling — the codebase-wide
   VALUE-decode convention is decided once alongside #906/#927.
-### Added
-
-- **`transport_t::drop_stats()` — the interface-level shed-frame seam (#932).** Every transport
-  counted *some* drops behind its own concrete accessors, so a consumer holding a
-  `transport_t*` could observe none of them and swapping tcp for ws or CAN silently lost all
-  drop observability. `transport_drop_stats_t {dropped_rx, malformed_rx, dropped_tx}` is the one
-  shape they all answer with; the base returns all-zero (the honest answer for a link that
-  counts nothing) and tcp / udp / ws / CAN / quic / webtransport and the ESP `httpd_ws_link_t`
-  override it. Spelled `drop_stats`, not `stats`, because a platform link may already publish a
-  richer kind-specific `stats()` block. The per-transport accessors are unchanged.
-
-- **`dropped_tx()` on tcp / udp / ws (#932).** Every `send()` shed frames on oversize, a refused
-  gather store, no peer or a dead socket with a bare `return` — the exact mirror of RX counters
-  that did exist. Each of those legs now ticks a counter. (CAN already had `dropped_tx()`.)
-
-### Changed
 
 - **`stream_endpoint_t::write_all_iov` takes `std::span<const ::iovec>` and no longer CONSUMES
   the gather (#932).** It used to advance `iov_base`/`iov_len` in place, a prose-only rule
@@ -191,26 +164,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   array or a double/foreign release used to corrupt `in_flight_[]`/`count_` from ISR context.
   Bounds check + CAS true→false; a refused release returns false and the TWAI ISR no longer
   gives a TX permit for it.
-
-### Fixed
-
-- **`key_view_t` walkers agreed on zero-length records (#932).** `child_record_under` rejected a
-  4-byte (len == 0) trailing record while `parent()` / `split_levels()` / `last_segment()`
-  accepted it. Empty path segments are illegal (`/sensor//temp` is invalid), so all four now
-  treat a `len == 0` record as malformed framing. `transport_vertex.cpp`'s hand-rolled
-  `last_segment` walk was replaced by `key_view_t::last_segment`, key_view's single locus.
-- **`rope_t::try_flatten` / `try_materialize` — the flatten refusal now has a cause (#917).**
-  `flatten()` answered an empty `view_t` for three different things: a rope with a DEVICE link
-  (not CPU-flattenable, ever), an allocator refusal (transient), and a rope that legitimately
-  holds zero bytes. Every caller's `empty()` test therefore asked three questions at once, and
-  the one that mattered — `tlv_view_t::materialize` — resolved it as `err_t::FRAME_INVALID`,
-  i.e. it reported this node's local OOM as a PERMANENT "your frame is malformed" verdict
-  against a peer that had sent a perfectly valid frame. The new pair returns
-  `std::expected<view_t, view::flatten_err_t>` with `NOT_HOST` vs `NO_MEMORY` kept apart, and a
-  zero-length rope now flattens to a SUCCESS carrying an empty view without touching the backend
-  at all. `flatten()` / `materialize()` remain, unchanged, as the lossy convenience wrappers.
-
-### Changed
 
 - **`tlv_view_t::materialize` reports a flatten OOM as `err_t::FLOW_BACKPRESSURE`** (WARN /
   TRANSIENT) instead of `err_t::FRAME_INVALID` (ERROR / PERMANENT) (#917). A caller that
@@ -243,6 +196,46 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   **`start_receiving()`**, which re-enables the frame stream's receive. It is idempotent and
   inert on a one-phase dialer, on a listener, and on a dial that never came up. The
   `webtransport` factory builds every SPEC-created dialer with `defer_rx = true`.
+
+### Fixed
+
+- **An eager `write` no longer erases a racing `assign`'s pending mark (#1185).** `clear_pending`
+  erased the mark unconditionally under the sweep lock, so an `assign` that landed between a
+  `write`'s store and that erase lost its deferred delivery outright: the newer value was
+  published, its mark dropped, and no covering `propagate` ever delivered it. The erase is now
+  conditional on the value this writer published still being the vertex's current LKV — a
+  pointer compare against a strong reference the caller holds — so a mark whose value a sweep
+  still owes survives. The failure direction is now always a duplicate delivery of the current
+  LKV, never a lost one, which is what every fast path on the same function already permitted.
+  No API change; `graph_t::write` / `assign` / `propagate` keep their signatures.
+
+- **`key_view_t` walkers agreed on zero-length records (#932).** `child_record_under` rejected a
+  4-byte (len == 0) trailing record while `parent()` / `split_levels()` / `last_segment()`
+  accepted it. Empty path segments are illegal (`/sensor//temp` is invalid), so all four now
+  treat a `len == 0` record as malformed framing. `transport_vertex.cpp`'s hand-rolled
+  `last_segment` walk was replaced by `key_view_t::last_segment`, key_view's single locus.
+- **`rope_t::try_flatten` / `try_materialize` — the flatten refusal now has a cause (#917).**
+  `flatten()` answered an empty `view_t` for three different things: a rope with a DEVICE link
+  (not CPU-flattenable, ever), an allocator refusal (transient), and a rope that legitimately
+  holds zero bytes. Every caller's `empty()` test therefore asked three questions at once, and
+  the one that mattered — `tlv_view_t::materialize` — resolved it as `err_t::FRAME_INVALID`,
+  i.e. it reported this node's local OOM as a PERMANENT "your frame is malformed" verdict
+  against a peer that had sent a perfectly valid frame. The new pair returns
+  `std::expected<view_t, view::flatten_err_t>` with `NOT_HOST` vs `NO_MEMORY` kept apart, and a
+  zero-length rope now flattens to a SUCCESS carrying an empty view without touching the backend
+  at all. `flatten()` / `materialize()` remain, unchanged, as the lossy convenience wrappers.
+
+### Documentation
+
+- **`graph_t::has_subscribers` now states the staleness its ancestor half actually has
+  (#1185/#854).** The predicate's `listeners_above` half is a relaxed load, so a `false` can
+  miss a subtree subscribe that already completed on another thread. The header said nothing;
+  it now names the window and carries the #555-standard justification for leaving it relaxed —
+  #854's measured REFUTATION (the `seq_cst` candidate doubled the idle write's rv32 fence count
+  and excluded no observation, because ADR-0049's latch snapshots the subscribed *ancestor's*
+  own LKV, never a descendant's). `vertex_t::listeners_above` carries the same ruling, and the
+  two concurrency design docs that claimed `own_subs_ordered()` is "the only read that decides
+  whether to deliver at all" are corrected — it is not.
 
 ## [0.10.0] — 2026-08-12
 

@@ -10,6 +10,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-08-13
+
 ### Added
 
 - **`esp_ws_client_link_t` gains a `defer_recv` constructor flag and a real

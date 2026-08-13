@@ -7,6 +7,13 @@ versioning/publish strategy.
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-08-13
+
+No changes. These packages are an independent native implementation of the protocol —
+they do not compile the C++ core — and nothing in this release touched them; the core's
+0.11.0 changes are C++ implementation surface, not wire surface. Released at 0.11.0
+because one tag publishes every package in lockstep.
+
 ## [0.10.0] — 2026-08-12
 
 No API changes. This package is an independent native implementation of the protocol —
