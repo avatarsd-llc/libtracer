@@ -8,6 +8,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-08-13
+
+No changes. This crate is an independent native implementation of the protocol — it does
+not compile the C++ core — and nothing in this release touched it: the core's 0.11.0
+changes (the `key_view_t` record accessors, the flatten error split, the transport drop
+counters and the ESP link-liveness contract) are all C++ implementation surface, not
+wire surface. Released at 0.11.0 because one tag publishes every package in lockstep.
+
 ## [0.10.0] — 2026-08-12
 
 No API changes. This package is an independent native implementation of the protocol —
