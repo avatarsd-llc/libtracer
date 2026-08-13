@@ -355,6 +355,66 @@ void the_overflow_lock_does_not_dirty_the_orphan_line() {
 }
 
 /**
+ * @brief What the orphan path actually guarantees: released at slot death **or at the next
+ *        domain scan** (#1037).
+ *
+ * `retire_and_flush` used to claim the stronger "released when its slot dies", which its own
+ * `orphans` probe cannot deliver — the probe is a relaxed check-then-act, and no ordering inside
+ * that function closes the window (the adopting `scan` races the same push). The claim was
+ * weakened; this pins what replaced it, from the outside, on the shape that produces an orphan
+ * in the first place: a writer thread that exits while the slot it published into is still alive.
+ *
+ * **Non-vacuity is the point.** A test that only asserted "everything was freed at the end" would
+ * pass against a build with no orphan path at all. So the orphan is asserted **present** — both
+ * as a non-null domain list and as a rope still counted live — *before* the scan that drains it,
+ * and the drain is then attributed to that scan rather than to teardown.
+ *
+ * Single-threaded at every point it reads the registry: the writer is joined first, and joining
+ * orders `~participant_t`'s push before these loads.
+ */
+void orphans_drain_at_the_next_scan() {
+    namespace hp = tr::graph::detail_hp;
+    std::printf("hazard_slot_t — an exited writer's parked value is released by the next scan:\n");
+    auto& reg = hp::registry();
+
+    // Adopt anything an earlier probe left parked, so what this test observes is its own doing.
+    hp::retire_and_flush(nullptr);
+    const std::size_t base = g_live.load(relaxed_);
+
+    // The slot outlives the writer on purpose — that is what leaves the node on the writer's
+    // list at exit instead of flushing it through `~hazard_slot_t` on the writer's own thread.
+    hazard_slot_t slot;
+    std::thread writer([&slot] {
+        check(slot.store(make_tagged(101)), "the writer published onto the shared slot");
+        check(slot.store(make_tagged(102)), "and displaced it, parking the first on its own list");
+    });
+    writer.join();
+
+    const bool orphaned = reg.orphans.load(std::memory_order_relaxed) != nullptr;
+    const std::size_t after_exit = g_live.load(relaxed_);
+    std::printf("    after the writer exited: orphans=%s, live ropes=%zu (was %zu)\n",
+                orphaned ? "present" : "none", after_exit, base);
+    check(orphaned, "the exited writer really did orphan its retired list (non-vacuous)");
+    check(after_exit == base + 2,
+          "and both ropes are still allocated — the parked one and the slot's own");
+
+    // The next scan on any thread. This is the whole of the weakened guarantee.
+    hp::retire_and_flush(nullptr);
+
+    const std::size_t after_scan = g_live.load(relaxed_);
+    std::printf("    after the next scan:      orphans=%s, live ropes=%zu\n",
+                reg.orphans.load(std::memory_order_relaxed) != nullptr ? "present" : "none",
+                after_scan);
+    check(reg.orphans.load(std::memory_order_relaxed) == nullptr,
+          "the scan adopted the orphan list");
+    check(after_scan == base + 1, "and released the parked rope, leaving only the slot's value");
+
+    slot.clear();
+    hp::retire_and_flush(nullptr);
+    check(g_live.load(relaxed_) == base, "clearing the slot released the rest");
+}
+
+/**
  * @brief The exit sweep must not free the lists of a participant that is still live (#898).
  *
  * The sweep is a static-destruction object, so the honest instrument is an **injected
@@ -559,6 +619,8 @@ int main() {
     overflow_thread_stops_sweeping_the_claim_table();
     check(g_live.load() == 0, "the over-capacity probe freed every rope too");
     the_overflow_lock_does_not_dirty_the_orphan_line();
+    orphans_drain_at_the_next_scan();
+    check(g_live.load() == 0, "the orphan-drain probe freed every rope too");
 
     sweep_spares_a_live_participant();
     sweep_races_a_live_writer(200);

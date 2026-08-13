@@ -43,6 +43,23 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   is what makes a subscriber remote, while the code tests `link` — now states the invariant
   the door establishes instead.
 
+- **The hazard domain's orphan guarantee is weakened to what it can deliver, and the
+  injected-resource lifetime contract tightened to compensate**
+  ([#1037](https://github.com/avatarsd-llc/libtracer/issues/1037)). `detail_hp::retire_and_flush`
+  documented that a value written by a thread that has since exited "is still released when its
+  slot dies"; its `orphans` term is a relaxed check-then-act, so a `~participant_t` pushing that
+  thread's list concurrently with the load is missed and those nodes wait for the next domain
+  scan. No ordering inside that function recovers the strong reading — the adopting `scan` races
+  the *same* push, so re-probing after the ticket moves the window rather than closing it — so
+  the promise now reads **"released when the slot dies OR at the next domain scan"**.
+  Correspondingly, [ADR-0039](../docs/adr/0039-pmr-memory-model-host-aligned-allocation.md)
+  §Erratum 8 requires an injected `std::pmr::memory_resource` to outlive every value allocated
+  from it, **every thread that wrote through it, and a domain quiescence point after the last
+  such thread exits**. **No behaviour change and no API change**; embedders injecting a scoped
+  arena under `hazard_slot_t` gain one stated obligation. The default `sp_atomic_slot_t` has no
+  orphan path and is unaffected; on the process-lifetime heap a host build uses, a missed orphan
+  was only ever a deferral. `lkv_slot_test` pins the weakened guarantee non-vacuously.
+
 ### Documentation
 
 - RFC-0016 §B erratum ([#1030](https://github.com/avatarsd-llc/libtracer/issues/1030)):

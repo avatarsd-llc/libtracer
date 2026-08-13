@@ -201,3 +201,45 @@ knobs, not one.
 
 Re-establishing the pair means running both arms in one pass and quoting the instrument's own
 output. Until then, quote neither number.
+
+## Erratum 8 (2026-08-13) — the injected resource must outlive every writer **and** a domain quiescence point ([#1037](https://github.com/avatarsd-llc/libtracer/issues/1037))
+
+*(Ruled with [#1037](https://github.com/avatarsd-llc/libtracer/issues/1037); settled together with the
+[#894](https://github.com/avatarsd-llc/libtracer/issues/894)/[#897](https://github.com/avatarsd-llc/libtracer/issues/897)
+seam, which is the same lifetime story.)*
+
+The lifetime rule this ADR hands the embedder — *the injected `std::pmr::memory_resource` must
+outlive every value allocated from it* — was carried in the reference core by a promise the code
+does not keep. `detail_hp::retire_and_flush` claimed that a value written by a thread that has
+since exited "is still released when its slot dies, not at process exit"; its `orphans` term is a
+relaxed check-then-act, so a `~participant_t` pushing that thread's list concurrently with the load
+is missed and the nodes wait for the next scan on any thread, or for the final sweep.
+
+**No ordering inside that function recovers the strong reading**, which is why this is a contract
+erratum and not a bug fix:
+
+- Re-probing after the ticket is acquired does not close the window. The adopting `scan` takes the
+  orphan list by `exchange`-ing its head, so a push landing after that exchange is missed by the
+  adopting scan as well — the miss moves rather than disappears, and the unconditional ticket lands
+  on the nothing-to-do path the early return was measured in to protect.
+- An orphan epoch published before the push reproduces the same shape one level down: a counter
+  bumped before the push can still be read before it is bumped.
+
+**The contract is therefore tightened, and the code's claim weakened to match.** An injected
+resource must outlive:
+
+1. every value allocated from it (unchanged), **and**
+2. every thread that wrote through it (already stated in `retire_and_flush`'s note, now normative
+   here), **and**
+3. **a domain quiescence point after the last such thread exits** — a point at which some thread
+   has run a domain scan, so that orphans left by an exited writer have been adopted and released.
+   Destroying a graph and its slots is not by itself that point.
+
+`retire_and_flush` now promises only "released when the slot dies **or** at the next domain scan",
+which is what a lock-free probe can deliver, and `lkv_slot_test` pins that weakened guarantee
+non-vacuously (orphans are asserted present before the scan that drains them).
+
+**Scope of the hazard, unchanged from the report.** The fault needs the injected-resource
+composition; on the process-lifetime heap a host build actually uses, a missed orphan is a deferral
+and nothing more. `sp_atomic_slot_t` — still the default — has no orphan path at all, so a target
+that cannot satisfy (3) has a policy that does not ask it to.
