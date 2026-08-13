@@ -573,6 +573,31 @@ inline void retire(lists_t& l, node_t* n) {
  * wrote through it, not merely the graph. For the process-lifetime heap a host build
  * actually uses, that is vacuous; for a scoped arena it is a real constraint, and one more
  * reason `sp_atomic_slot_t` stays the default.
+ *
+ * ## What the orphan probe promises, and why it is not "at slot death" (#1037)
+ *
+ * The `orphans` term of the early return is a **check-then-act**, and deliberately stays one.
+ * Nothing re-reads it on the taken branch, so a `~participant_t` pushing an exited thread's
+ * list concurrently with the load is missed by *this* call; those nodes wait for the next
+ * `%scan` on any thread, or for `%final_sweep_t`. The guarantee is therefore **released when
+ * the slot dies OR at the next domain scan**, never the stronger "at slot death" this comment
+ * used to claim.
+ *
+ * That weakening is a ruling, not an oversight — no ordering available here buys more:
+ *
+ * - **Re-probing after the ticket** narrows the window instead of closing it. `%scan` adopts by
+ *   `exchange`-ing the orphan head, so a push that lands after that exchange is missed by the
+ *   adopting scan too; the miss merely moves from "returned early" to "adopted a moment too
+ *   soon", and the unconditional `%ticket_t` is paid on exactly the nothing-to-do path this
+ *   early return exists to protect.
+ * - **An orphan epoch** published before the push has the same shape one level down: a counter
+ *   bumped before the push can still be read before it is bumped.
+ *
+ * The property the strong reading was wanted for — an injected resource never freed through
+ * after its death — is obtained from the lifetime contract instead of from this probe:
+ * ADR-0039 §Erratum 8 requires the resource to outlive every thread that wrote through it
+ * **and** a domain quiescence point. Where that holds, "or at the next scan" is sufficient;
+ * where it does not, no probe ordering here would have saved it.
  */
 inline void retire_and_flush(node_t* n) {
     registry_t& r = registry();
@@ -582,8 +607,10 @@ inline void retire_and_flush(node_t* n) {
     // A slot that held nothing, on a thread that parked nothing, with nothing left behind by a
     // thread that exited, has nothing to release — and a tree of never-written vertices should
     // not pay a domain scan each to learn that. Orphans are normally absent, so the extra
-    // relaxed load costs nothing and buys the case that matters: a value written by a thread
-    // that has since exited is still released when its slot dies, not at process exit.
+    // relaxed load costs nothing and buys the common case: a value written by a thread that has
+    // since exited is usually released here, at slot death, rather than at process exit. A push
+    // racing this load is missed and waits for the next scan — see the note above; that is the
+    // guarantee, and the injected-resource property rests on ADR-0039's lifetime rule instead.
     if (n == nullptr && mine_empty && orphans_empty) return;
     ticket_t t;
     lists_t& l = r.lists[t.index()];
