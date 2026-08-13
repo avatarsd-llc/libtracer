@@ -87,7 +87,72 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   a friendship because the counters are a published surface while the internal drop sites are
   not. Additive: no existing member changed signature.
 
-### Changed
+- **The ACE `access_mask` canonical wire width is u32 (RFC-0026, #993).** The published
+  corpus disagreed with itself: reference 05 §`0x0A`, the `acl/acl-aces` conformance vector
+  and the Rust builder spelled the mask u16 while `tr::graph::encode_acl` — the encoder
+  behind every `:acl` read — emitted u32. The amendment names u32 canonical: the layout
+  text and the vector now spell four bytes (vector re-cut, 179 → 183 bytes) and a new host
+  test byte-compares `encode_acl` against the vector so the typed builder can never drift
+  from it again. **No C++ API or behaviour change**: `encode_acl` already emitted u32, and
+  `parse_acl`'s acceptance rule (narrower payloads zero-extend, #906) is untouched, so ACLs
+  stored with the old two-byte spelling remain readable.
+
+- **BREAKING (admission): `graph_t::subscribe_wire` refuses an EMPTY `return_route` with
+  `INVALID_PATH` (#1055).** The door previously validated neither of its two remote-binding
+  arguments, so an edge could be admitted carrying a link with no route to deliver over it.
+  `graph_t::dispatch_edge` gates its remote leg on `!link.empty()` but hands the sink the
+  *return route* untested, so such an edge emitted one `FWD{WRITE}` per publish whose `dst`
+  was a zero-byte PATH — on the COMPACT arm it became the label key, on the full-route arm it
+  was spliced into the iov and counted into the body length. Both in-tree callers already
+  satisfied the new rule (the resolver rejects a failed route copy as `BACKPRESSURE`, and
+  `fwd_router_t::subscribe_toward` refuses an empty residual as `INVALID_PATH`), so no wire
+  door changes behaviour; only an embedder driving the public door directly with an empty
+  route is affected, and that call was already producing malformed deliveries. The gate is at
+  the door rather than in the fan-out body deliberately: `dispatch_edge` is the wide
+  fan-out loop's per-edge cost and is kept inlinable, so this adds nothing to the publish
+  path. `subscriber_remote_t::return_route`'s declaration — which claimed being *populated*
+  is what makes a subscriber remote, while the code tests `link` — now states the invariant
+  the door establishes instead.
+
+- **The hazard domain's orphan guarantee is weakened to what it can deliver, and the
+  injected-resource lifetime contract tightened to compensate**
+  ([#1037](https://github.com/avatarsd-llc/libtracer/issues/1037)). `detail_hp::retire_and_flush`
+  documented that a value written by a thread that has since exited "is still released when its
+  slot dies"; its `orphans` term is a relaxed check-then-act, so a `~participant_t` pushing that
+  thread's list concurrently with the load is missed and those nodes wait for the next domain
+  scan. No ordering inside that function recovers the strong reading — the adopting `scan` races
+  the *same* push, so re-probing after the ticket moves the window rather than closing it — so
+  the promise now reads **"released when the slot dies OR at the next domain scan"**.
+  Correspondingly, [ADR-0039](../docs/adr/0039-pmr-memory-model-host-aligned-allocation.md)
+  §Erratum 8 requires an injected `std::pmr::memory_resource` to outlive every value allocated
+  from it, **every thread that wrote through it, and a domain quiescence point after the last
+  such thread exits**. **No behaviour change and no API change**; embedders injecting a scoped
+  arena under `hazard_slot_t` gain one stated obligation. The default `sp_atomic_slot_t` has no
+  orphan path and is unaffected; on the process-lifetime heap a host build uses, a missed orphan
+  was only ever a deferral. `lkv_slot_test` pins the weakened guarantee non-vacuously.
+
+- **`delivery_drops().out_of_memory` now counts the two sheds that happen BEFORE the fan-out
+  (#1003).** A STREAM write whose history append was shed under allocation pressure abandoned
+  its entire fan-out with every counter reading a zero delta: for a STREAM the ring drain *is*
+  the fan-out, so the skipped entry is a delivery every subscriber loses, and the eager
+  delivery then drained zero entries and returned before one edge was snapshotted — the loss
+  never reached the dispatch plane's counting door. The `mark_pending` OOM legs (key render,
+  set-node probe) shed a deferred `IF_NEWER` delivery just as silently, while their own comment
+  claimed equivalence to "an eager delivery leg under the same pressure" that had in fact been
+  counted since #896. Both now count at that same **one-per-subscriber** width. The write still
+  answers `SUCCESS` in both cases — the value publish landed, and a stream's history is
+  bounded-lossy by contract (RFC-0008 §E) — so no result code changes; what changes is that
+  `delivery_drops()` may now move where it previously read zero. A branch **notify** fans its
+  slice out eagerly and flushes the drain cursor, so its shed costs history rather than a
+  delivery and is deliberately *not* counted. Threading the tally through the fan-out grows
+  `dispatch_edge_target` by **70 B** (481 -> 551), so the symbol ratchet is re-pinned — priced
+  first, per #1199: an interleaved same-runner A/B measured x1.00 on the wide fan-out
+  (`inproc/64/1024/1`, p50 and deliveries/s alike) and x1.00-x1.02 on every other delivery
+  loop, with identical `mem:` live bytes and block counts on all five shapes.
+- **`vertex_t::store` takes an optional `store_drops_t*` out-parameter** reporting what the
+  store shed, in the shape `snapshot_drops_t` established: the storage layer owns no counters,
+  so it reports a tally by reference and `graph_t` folds it through its single counting door.
+  Purely additive and defaulted — existing calls compile and behave unchanged.
 
 - **`delivery_drops().denied` now counts an ACL refusal on EVERY plane (#1068).** It counted
   only a subscription edge's fan-in denial; it is now counted at `write_impl`'s WRITE gate, so
@@ -101,6 +166,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   The motivating gap was an ACL-denied COMPACT delivery, which was silent in every direction —
   no counter, no sink, and (unchanged, by design) no wire signal, since `HANDLE_NACK` means
   "unknown label" and answering a denial with one would prompt an endless re-advertise.
+
+### Removed
+
+- **`vertex_t::try_edge_view_of`** — private, zero callers since the published-edge copy loop
+  (#635) took over the writer-thread fan-out snapshot it documented itself as serving. Its
+  replacement is `try_copy_published`.
 
 ### Documentation
 

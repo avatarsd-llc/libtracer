@@ -1435,7 +1435,14 @@ class graph_t {
     // NOTE the asymmetry this creates: the Handler leg never moves from `value`, so the
     // CALLER's rope now survives the call on that path holding its refcounts, where the
     // by-value temporary used to die at the call. Destruction count is unchanged.
-    [[nodiscard]] result_t<std::shared_ptr<const rope_t>> store_value(vertex_t* v, rope_t&& value);
+    // `drops` reports what the store SHED (vertex_t::store_drops_t), zeroed on entry. REQUIRED,
+    // not defaulted, and that is the whole point (#1003): this is the ONE funnel every graph
+    // write reaches vertex_t::store through, so a required out-param is what makes "a write
+    // path that abandons a delivery without counting it" impossible to write by omission —
+    // the same reason snapshot_edges takes its tally by reference. Whether a shed cost a
+    // DELIVERY is the caller's call; count_store_drops is where each site records its answer.
+    [[nodiscard]] result_t<std::shared_ptr<const rope_t>> store_value(
+        vertex_t* v, rope_t&& value, vertex_t::store_drops_t& drops);
     // Branch-write decomposition (RFC-0005): a POINT payload written to `v` lands
     // each value-carrying node at the corresponding descendant vertex as a
     // refcount SUBVIEW of the written frame (creating missing vertices, CREATE-
@@ -1476,6 +1483,13 @@ class graph_t {
     // snapshot_edges) into the per-cause counters. Called on the fan-out path, so it
     // early-outs on the clean case in one test.
     void count_snapshot_drops(const vertex_t::snapshot_drops_t& drops) noexcept;
+    // Fold one store's shed tally (vertex_t::store_drops_t, reported by store_value) into the
+    // per-cause counters, at the width a shed STREAM ring append actually sheds: ONE PER
+    // SUBSCRIBER of `v`, never one per event, matching the eager handler-clone leg. Call ONLY
+    // from a site where the ring drain is the delivery — a branch NOTIFY fans its slice out
+    // eagerly and flushes the cursor, so its shed costs history, not a delivery, and counting
+    // it there would be an overcount. Early-outs on the clean case in one test.
+    void count_store_drops(vertex_t* v, const vertex_t::store_drops_t& drops) noexcept;
     // Vertical bubbling (RFC-0005): fan `value` out to every registered ancestor's
     // subscribers. Called only when v->listeners_above_ says someone is listening.
     void bubble_up(vertex_t* v, const rope_t& value);

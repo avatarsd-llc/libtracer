@@ -766,6 +766,20 @@ void graph_t::count_snapshot_drops(const vertex_t::snapshot_drops_t& drops) noex
     if (drops.truncated != 0) count_drop(drop_reason_t::FAN_OUT_TRUNCATED, drops.truncated);
 }
 
+void graph_t::count_store_drops(vertex_t* v, const vertex_t::store_drops_t& drops) noexcept {
+    if (!drops.ring_append) return;  // the clean write pays exactly this test
+    // A shed STREAM ring append under memory pressure. For a STREAM the drain IS the fan-out,
+    // so the entry that never entered the ring is a delivery every subscriber loses — counted
+    // at the width it sheds, one per subscriber, never one per event. Same width, same cause
+    // and same reasoning as the handler notify-clone leg that sheds a whole fan-out.
+    //
+    // own-subs-wide by DECISION, not by oversight: the ancestor legs a bubble would also have
+    // served stay uncounted because #854's close ruling dropped ancestor-leg drop
+    // instrumentation outright. A vertex with no subscribers of its own counts nothing, which
+    // is why this is guarded rather than a bare add of zero.
+    if (const std::uint64_t n = v->own_subs(); n != 0) count_drop(drop_reason_t::OUT_OF_MEMORY, n);
+}
+
 void graph_t::bump_subtree_listeners(vertex_t* v, std::int32_t delta) {
     // Iterative (vertex_t::for_each_descendant): this was self-recursion at ~208 B a frame, and
     // graph depth is a peer-chosen segment count -- see #690 and that function's docs.
@@ -1052,7 +1066,13 @@ void graph_t::dispatch_edge_target(const edge_view_t& e, const rope_t& value) {
         count_drop(drop_reason_t::OUT_OF_MEMORY, 1);
         return;
     }
-    (void)store_value(target, std::move(clone));
+    // Delivery TERMINATES here, so the target's own edges are never dispatched by this write —
+    // but a STREAM target's ring still feeds the next propagate over it, exactly as an assign's
+    // does. A shed append therefore loses that deferred delivery, and is counted at the
+    // TARGET's own-subs width (the shed is the target's, not the source's).
+    vertex_t::store_drops_t store_drops;
+    (void)store_value(target, std::move(clone), store_drops);
+    count_store_drops(target, store_drops);
 }
 
 void graph_t::dispatch_edge_remote(const edge_view_t& e, const rope_t& value) {
@@ -1157,7 +1177,9 @@ void graph_t::fan_out(vertex_t* v, const rope_t& value) {
         for (const edge_view_t& e : heap_buf) dispatch_edge(e, value);
 }
 
-result_t<std::shared_ptr<const rope_t>> graph_t::store_value(vertex_t* v, rope_t&& value) {
+result_t<std::shared_ptr<const rope_t>> graph_t::store_value(vertex_t* v, rope_t&& value,
+                                                             vertex_t::store_drops_t& drops) {
+    drops = vertex_t::store_drops_t{};
     if (v->role() == role_t::HANDLER) {
         const value_handlers_t& h = v->handlers();  // load once — a retire may swap it out
         if (!h.on_write) return std::unexpected(status_t::NOT_FOUND);
@@ -1168,7 +1190,7 @@ result_t<std::shared_ptr<const rope_t>> graph_t::store_value(vertex_t* v, rope_t
     }
     // The storage verb owns the invariant order: LKV publish (lock-free) BEFORE the
     // lock; ring append + keep-last trim + seq bump + await wake under it.
-    std::shared_ptr<const rope_t> sp = v->store(std::move(value), mr_);
+    std::shared_ptr<const rope_t> sp = v->store(std::move(value), mr_, &drops);
     // vertex_t::store soft-fails its LKV allocation nothrow (#477): null here (a
     // non-handler role always publishes a pointer) is exactly OOM — report it as the
     // injected-resource status (BACKPRESSURE, ADR-0060 §3), never abort. Distinct from
@@ -1240,7 +1262,11 @@ result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, std::string_view c
         // returns — so since #1116 (`rope_t&&`) the caller's rope survives that path.
         rope_t notify;
         const bool can_notify = try_clone_rope(notify, value);
-        const result_t<std::shared_ptr<const rope_t>> stored = store_value(v, std::move(value));
+        // A HANDLER stores no LKV and owns no ring, so this tally is structurally clean —
+        // required by the signature, and that is the point: the seam cannot be skipped.
+        vertex_t::store_drops_t store_drops;
+        const result_t<std::shared_ptr<const rope_t>> stored =
+            store_value(v, std::move(value), store_drops);
         if (!stored) return std::unexpected(stored.error());
         if (can_notify) {
             deliver_vertex(v, notify);
@@ -1262,11 +1288,19 @@ result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, std::string_view c
         clear_pending(v, *stored);
         return {};
     }
-    const result_t<std::shared_ptr<const rope_t>> stored = store_value(v, std::move(value));
+    vertex_t::store_drops_t store_drops;
+    const result_t<std::shared_ptr<const rope_t>> stored =
+        store_value(v, std::move(value), store_drops);
     if (!stored) return std::unexpected(stored.error());
     if (v->role() == role_t::STREAM) {
         // Deliver the just-appended ring entry and advance the drain cursor, so a later
         // propagate on this stream does not re-deliver it (RFC-0008 §E).
+        //
+        // If the append was SHED, this drain finds nothing and returns before a single edge
+        // is snapshotted — the whole fan-out abandoned without ever reaching the dispatch
+        // plane's counting sites (#1003). The write still succeeds; the tally is what makes
+        // the loss something an operator can see.
+        count_store_drops(v, store_drops);
         deliver_current(v);
     } else {
         // Deliver exactly what was stored (RFC-0008 §D): the published LKV pointer —
@@ -1287,8 +1321,14 @@ result_t<void> graph_t::assign(vertex_handle_t vh, rope_t value, std::string_vie
     // ring / bump the write sequence (waking await), then mark v for the next covering
     // sweep. A branch POINT assigns each descendant the same way. Sends nothing.
     if (is_branch_point(value, v->role())) return write_branch(v, value, caller, /*notify=*/false);
-    const result_t<std::shared_ptr<const rope_t>> stored = store_value(v, std::move(value));
+    vertex_t::store_drops_t store_drops;
+    const result_t<std::shared_ptr<const rope_t>> stored =
+        store_value(v, std::move(value), store_drops);
     if (!stored) return std::unexpected(stored.error());
+    // A shed ring append here loses the delivery the NEXT covering sweep would have drained
+    // — deferred, not eager, but lost all the same, and the sweep has no way to know an
+    // entry was ever meant to be there.
+    count_store_drops(v, store_drops);
     mark_pending(v);
     return {};
 }
@@ -1388,8 +1428,15 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, std::stri
     // un-landing the others) — the branch is NOT a transaction (RFC-0005
     // §atomicity non-promise; each leaf is its own consistent refcounted snapshot).
     for (site_t& site : sites) {
-        if (result_t<std::shared_ptr<const rope_t>> r = store_value(site.vx, site.node->store))
+        vertex_t::store_drops_t store_drops;
+        if (result_t<std::shared_ptr<const rope_t>> r =
+                store_value(site.vx, site.node->store, store_drops))
             site.stored = std::move(*r);
+        // Counted ONLY on the assign half. The notify half below delivers each covered site's
+        // slice through fan_out and then mark_flushed()es the cursor, so on that path the ring
+        // was never the delivery vehicle: a shed append costs a HISTORY entry, not a delivery,
+        // and counting it would be the overcount that makes delivery_drops() lie the other way.
+        if (!notify) count_store_drops(site.vx, store_drops);
     }
 
     if (!notify) {
@@ -1501,9 +1548,20 @@ void graph_t::mark_pending(vertex_t* v) {
     // NOTHROW them (#477): on OOM the pending mark is dropped (that deferred delivery
     // is shed, exactly like an eager delivery leg under the same pressure), never an
     // abort. The node probe bounds both mainstream ABIs' RB-tree node + key header.
+    //
+    // "Exactly like an eager delivery leg" is now true of the COUNTING too (#1003). It was
+    // not: the eager legs have counted since the counting door landed while these two shed in
+    // silence, and a comment asserting a symmetry the code did not have is what hid this. An
+    // unmarked vertex is delivered by no sweep at all, so with no later write to re-mark it
+    // the assigned value is never delivered — a lost delivery, not a deferred one. Counted at
+    // the same one-per-subscriber width; the rare overcount when a later write DOES re-mark is
+    // accepted, because undercounting a real loss is the worse failure.
     static constexpr std::size_t kSetNodeProbe = 8 * sizeof(void*) + sizeof(std::vector<std::byte>);
     std::vector<std::byte> key;  // outside the lock (a lock-free parent walk)
-    if (!try_build_key(v, key)) return;
+    if (!try_build_key(v, key)) {
+        count_drop(drop_reason_t::OUT_OF_MEMORY, v->own_subs());
+        return;
+    }
     const std::lock_guard lock(sweep_mutex_);
     // Re-read the mode UNDER this lock (#895) — the check at the top is only a fast path.
     // set_delivery_mode holds the SAME lock across the mode store and both set edits, so a
@@ -1514,9 +1572,18 @@ void graph_t::mark_pending(vertex_t* v) {
     // sets mutually exclusive by construction. It joins the probe's condition rather than
     // taking a `return` of its own so `key`'s cleanup stays single-exit — worth 4 of the 18
     // instructions per assign the two-exit spelling cost (`perf stat -e instructions:u`).
-    if (v->delivery_mode() == delivery_mode_t::IF_NEWER && detail::probe_bytes(kSetNodeProbe) &&
-        pending_.insert(std::move(key)).second)
+    // Split into two named conditions so the shed can be ATTRIBUTED without a second probe:
+    // only a declined probe is a dropped delivery. A mode that flipped to EXPLICIT /
+    // UNCONDITIONAL under the lock sheds nothing (neither wants a mark), and an insert that
+    // finds the key already present sheds nothing either — the mark is there and the next
+    // covering sweep will deliver. Still single-exit, so `key`'s cleanup keeps the shape the
+    // paragraph above paid for; the two locals are registers on the marking path.
+    const bool if_newer = v->delivery_mode() == delivery_mode_t::IF_NEWER;
+    const bool room = if_newer && detail::probe_bytes(kSetNodeProbe);
+    if (room && pending_.insert(std::move(key)).second)
         pending_count_.fetch_add(1, std::memory_order_relaxed);
+    else if (if_newer && !room)
+        count_drop(drop_reason_t::OUT_OF_MEMORY, v->own_subs());
 }
 
 void graph_t::clear_pending(vertex_t* v, const std::shared_ptr<const rope_t>& delivered) {

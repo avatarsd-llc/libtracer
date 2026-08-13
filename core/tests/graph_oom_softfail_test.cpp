@@ -14,7 +14,10 @@
  *   - DELIVERY legs drop (never abort, never corrupt): a wide fan-out degrades to the
  *     inline prefix, a spilled-rope target clone drops one leg, a stream ring append
  *     is shed (bounded-lossy history);
- *   - a stream drain under OOM DEFERS (cursor kept) and catches up once memory returns.
+ *   - a stream drain under OOM DEFERS (cursor kept) and catches up once memory returns;
+ *   - the two sheds that happen BEFORE the fan-out — a STREAM ring append and a
+ *     `mark_pending` leg — are COUNTED at one per subscriber while the write still answers
+ *     SUCCESS (#1003), which is what makes an abandoned fan-out visible at all.
  */
 
 #include <array>
@@ -384,8 +387,9 @@ void test_stream_ring_shed() {
  * subscriber observes the same stream element twice — on machinery whose whole point is
  * an in-order queue rather than a coalesce (RFC-0008 §E).
  *
- * The write still answering SUCCESS with no drop counted is the OTHER half of this shed
- * and is deliberately not asserted here (#1003 owns making it visible).
+ * The write still answering SUCCESS is the OTHER half of this shed, and that half is now
+ * VISIBLE rather than silent — `test_stream_shed_is_counted` below owns the counter
+ * assertions (#1003). This one stays about WHAT was delivered, not what was counted.
  */
 void test_stream_shed_append_no_redelivery() {
     std::printf("stream drain — a shed ring append re-delivers NOTHING (#925):\n");
@@ -412,6 +416,106 @@ void test_stream_shed_append_no_redelivery() {
     check(seen.size() == 2 && seen.back() == 0x12, "the next real append delivers once");
     g.propagate(v);
     check(seen.size() == 2, "a covering sweep after the shed re-delivers nothing");
+}
+
+/**
+ * @brief A shed STREAM ring append is COUNTED, one per subscriber, and the write still
+ *        answers SUCCESS (#1003).
+ *
+ * The shed happens BEFORE the fan-out is ever reached: the store verb skips the append, the
+ * STREAM arm of the eager delivery drains zero entries and returns before a single edge is
+ * snapshotted, so the loss never passes any dispatch-plane counting site. Every counter read
+ * a zero delta while an entire fan-out was abandoned — the node concluding nothing was shed
+ * while N deliveries were.
+ *
+ * Both halves of the ruling are asserted: SUCCESS is the specified answer (the LKV publish
+ * landed and the ring is bounded-lossy by contract, RFC-0008 §E), so the counter is the ONLY
+ * thing that can carry the loss; and the width is per SUBSCRIBER, matching the eager
+ * handler-clone leg that sheds a whole fan-out.
+ */
+void test_stream_shed_is_counted() {
+    std::printf("stream ring — a shed append is COUNTED per subscriber, write still SUCCEEDs:\n");
+    graph_t g;
+    auto v = g.register_vertex(path_t("/s/counted"), role_t::STREAM);
+    g.set_history_depth(v, 4);
+    constexpr int kSubs = 3;
+    int seen = 0;
+    for (int i = 0; i < kSubs; ++i) (void)g.subscribe(path_t("/s/counted"), count_cb, &seen);
+
+    const auto before = g.delivery_drops();
+    {
+        const hook_guard_t frag(fail_big);  // the ring-append probe exceeds 512 B
+        check(g.write(v, make_value({0x10})).has_value(),
+              "the write SUCCEEDs — the LKV published and the ring is lossy by contract");
+    }
+    check(seen == 0, "not one of the three subscribers was delivered");
+
+    const auto after = g.delivery_drops();
+    check(after.out_of_memory - before.out_of_memory == static_cast<std::uint64_t>(kSubs),
+          "the shed fan-out is counted ONCE PER SUBSCRIBER, not once per event");
+    check(after.no_target == before.no_target && after.denied == before.denied &&
+              after.fan_out_truncated == before.fan_out_truncated,
+          "and is not confused with another cause");
+
+    // The healthy write behind it must deliver AND count nothing further — an increment that
+    // drifted onto the delivering path would be invisible in behaviour and make the counters lie.
+    check(g.write(v, make_value({0x11})).has_value(), "the next healthy write succeeds");
+    check(seen == kSubs, "and delivers to all three subscribers");
+    check(g.delivery_drops().out_of_memory == after.out_of_memory,
+          "the delivering path counts no drop at all");
+}
+
+/**
+ * @brief A shed deferred mark is counted too: `assign` under a failed pending-mark probe,
+ *        then a FULLY HEALTHY covering propagate that delivers nothing (#1003).
+ *
+ * Stronger than a deferral. An unmarked vertex rides no ancestor sweep, so with no later
+ * write to re-mark it the assigned value is never delivered at all — a lost delivery whose
+ * own code comment claimed equivalence to "an eager delivery leg under the same pressure"
+ * while the eager legs counted and this one did not.
+ *
+ * The control (same sequence, no injection) is asserted alongside it, because "delivered
+ * nothing" only means something if the identical unindexed sequence delivers.
+ */
+void test_shed_pending_mark_is_counted() {
+    std::printf("deferred mark — a shed pending mark is counted, and the sweep delivers none:\n");
+    graph_t g;
+    auto parent = g.register_vertex(path_t("/p"), role_t::STORED_VALUE);
+    auto child = g.register_vertex(path_t("/p/c"), role_t::STORED_VALUE);
+    int seen = 0;
+    (void)g.subscribe(path_t("/p/c"), count_cb, &seen);  // one own-sub on the assigned vertex
+
+    // Control: the same assign+propagate with no injection delivers exactly once.
+    check(g.assign(child, make_value({0x01})).has_value(), "the control assign succeeds");
+    g.propagate(parent);
+    check(seen == 1, "control — the covering sweep delivers the assigned value once");
+
+    const auto before = g.delivery_drops();
+    {
+        // Pinpoint the mark: reject EXACTLY the pending-set node probe, spelled as graph.cpp
+        // spells it, so the store above it still allocates and the assign still succeeds. A
+        // blanket fail_big would not shed this at all — the node probe is well under its
+        // 512 B threshold — and a fail_all would soft-fail the store instead, which is a
+        // different defect on a different plane.
+        g_reject_size = 8 * sizeof(void*) + sizeof(std::vector<std::byte>);
+        const hook_guard_t frag(fail_exact);
+        check(g.assign(child, make_value({0x02})).has_value(),
+              "the assign SUCCEEDs — the value was stored, only the MARK was shed");
+    }
+    // A fully healthy sweep now: nothing is injected, so anything undelivered is lost, not
+    // deferred.
+    g.propagate(parent);
+    check(seen == 1, "the shed mark means the covering sweep delivers NOTHING — a lost delivery");
+
+    // Exactly one: the vertex has one own-sub, and the ruled width is one per subscriber.
+    // Pinpointing the probe is what makes this exact — only the set-node leg was declined,
+    // so a second increment here would mean some other leg started counting too.
+    const auto after = g.delivery_drops();
+    check(after.out_of_memory - before.out_of_memory == 1,
+          "the shed deferred delivery is counted once per subscriber, not silent");
+    check(after.no_target == before.no_target && after.denied == before.denied &&
+              after.fan_out_truncated == before.fan_out_truncated,
+          "and is not confused with another cause");
 }
 
 /** @brief A stream drain under OOM DEFERS (cursor kept) and catches up afterwards. */
@@ -516,6 +620,8 @@ int main() {
     test_remote_edge_copy_drop();
     test_stream_ring_shed();
     test_stream_shed_append_no_redelivery();
+    test_stream_shed_is_counted();
+    test_shed_pending_mark_is_counted();
     test_stream_drain_defer();
     test_composed_read_reply_backpressure();
     return tr::testing::summary("graph_oom_softfail");
