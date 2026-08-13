@@ -469,6 +469,30 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     set_tests_properties(httpd_ws_admission
         PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
+    # #1184 — the post-handshake AUTH frame, which is the seam after the one above: the
+    # predicate decides the handshake, this decides the session. Two fakes carry it — the
+    # http server's, plus the esp_timer whose periodic sweep bounds how long a session may
+    # stay unauthenticated. The timer fake never fires on its own, so the deadline is a
+    # decision the test makes rather than a wall-clock race it has to win.
+    add_executable(httpd_ws_auth_test
+        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_auth_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
+    target_include_directories(httpd_ws_auth_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(httpd_ws_auth_test PRIVATE libtracer)
+    # The close path writes a CLOSE frame and then shuts the socket down, so this suite needs
+    # both interpositions the fake's socket layer provides.
+    target_link_options(httpd_ws_auth_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    libtracer_test_warnings(httpd_ws_auth_test)
+    add_test(NAME httpd_ws_auth COMMAND httpd_ws_auth_test)
+    # Every case constructs an adopting link, whose teardown leaks the handler gate BY
+    # DESIGN (the #815 precedent) — same exemption as the suites above.
+    set_tests_properties(httpd_ws_auth
+        PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+
     # #953 — the LINK-level failure tally: the drop classes with no session to charge,
     # plus the two session-lifecycle facts nothing else records.
     add_executable(httpd_ws_counters_test

@@ -21,6 +21,43 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `tx_slots_busy()` against `tx_slot_capacity() + tx_reply_reserve()`: that sum is the
   link's total slot count, and the depth a send issued on the httpd task can reach.
 
+- **`httpd_ws_link_t` gains a post-handshake authentication frame**
+  ([#1184](https://github.com/avatarsd-llc/libtracer/issues/1184)), so a BROWSER can
+  authenticate a graph session. The `WebSocket` API cannot set request headers, so the
+  existing `set_admission_cb` predicate — which reads the opening GET — is unreachable from
+  a browser, leaving embedders a cookie-minting HTTP endpoint or the credential in the URL
+  query string (a leak into logs, history and referrers). The new `set_auth_cb` installs an
+  in-band check that runs on the session's first data frame(s) instead. Header-based
+  admission is unchanged and both may be installed at once.
+  - The payload is **opaque** to the link and handed to the hook verbatim: the frame is a
+    permanent CARRIER, not a token format. The hook answers `ACCEPT` / `CONTINUE` / `REJECT`
+    (`auth_verdict_t`) with an optional reply payload, so a multi-round-trip handshake — the
+    ed25519/Noise direction — rides the same frame later with no format change.
+  - Until it is accepted a session is admitted at the transport level and **served nothing**:
+    its frames go to the hook and never the graph, and it is absent from `enumerate_peers`,
+    `enumerate_peer_stats` and `peer_link`, and skipped by every broadcast.
+  - `auth_result_t::subject` binds a session identity, published through the new
+    `peer_stats_t::subject`. What it means to a handler stays
+    [#375](https://github.com/avatarsd-llc/libtracer/issues/375)'s question.
+  - Both constructors take a new trailing `auth_deadline_ms` (0 = `kDefaultAuthDeadlineMs`).
+    A session that has not authenticated within it is closed — an unauthenticated peer now
+    reaches a slot, which it never could before, so the window it may hold one is bounded.
+    Enforced by a periodic `esp_timer` sweep AND synchronously at the claim edge, so an
+    expired session can never be the reason a live peer is refused.
+  - Two application-range close codes, `kCloseAuthFailed` (4401) and `kCloseAuthTimeout`
+    (4408), written to the peer BEFORE the socket is shut down. New `stats_t::auth_rejected`
+    and `stats_t::auth_expired` count the two causes separately.
+  - Described in [docs/reference/16-websocket-session-auth.md](../../../docs/reference/16-websocket-session-auth.md).
+
+### Changed
+
+- **A CONDEMNED session no longer counts toward `max_peers`.** The admission cap counted
+  slot-table occupancy while every other question this link answers — `enumerate_peers`,
+  `peer_link`, the fan-out — answers from reachability (#963), so a session the link had
+  already refused to carry another frame for could turn a live peer away until httpd got
+  round to reaping it (a select round when the server is healthy, unbounded when it is not,
+  which is exactly when `condemn` is used). The cap now skips condemned slots.
+
 ### Fixed
 
 - **`httpd_ws_link.cpp` now compiles with `CONFIG_LWIP_IPV6` off.** The #994 peer-endpoint

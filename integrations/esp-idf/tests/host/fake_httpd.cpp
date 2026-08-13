@@ -120,6 +120,28 @@ void server_t::note_sent() {
     ++frames_sent_;
 }
 
+std::vector<server_t::sent_frame_t> server_t::sent_frames() const {
+    const std::lock_guard lock(m_);
+    return sent_frames_;
+}
+
+void server_t::clear_sent_frames() {
+    const std::lock_guard lock(m_);
+    sent_frames_.clear();
+}
+
+void server_t::note_sent_frame(int fd, httpd_ws_type_t type, const void* payload, std::size_t len) {
+    sent_frame_t rec;
+    rec.fd = fd;
+    rec.type = type;
+    if (payload != nullptr && len != 0) {
+        const auto* const bytes = static_cast<const std::byte*>(payload);
+        rec.payload.assign(bytes, bytes + len);
+    }
+    const std::lock_guard lock(m_);
+    sent_frames_.push_back(std::move(rec));
+}
+
 void server_t::set_queue_refusing(bool refusing) {
     const std::lock_guard lock(m_);
     queue_refusing_ = refusing;
@@ -615,6 +637,10 @@ esp_err_t httpd_ws_send_frame_async(httpd_handle_t handle, int fd, httpd_ws_fram
         if (ret < 0) return ESP_FAIL;
     }
     fake_httpd::instance().note_sent();
+    // Record what the PEER would have seen. Only here, past both writes, so a frame that was
+    // announced and then abandoned is counted by neither — the same success edge note_sent
+    // marks (#1184 needs the close CODE, which the counter cannot carry).
+    fake_httpd::instance().note_sent_frame(fd, frame->type, frame->payload, frame->len);
     return ESP_OK;
 }
 
