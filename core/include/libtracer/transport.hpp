@@ -135,10 +135,10 @@ class bus_link_t {
      * keeps point-to-point hop naming, inbound frames carry the registered child NAME,
      * and `send()` fans out to every open peer.
      *
-     * Each of the five peer-named wiring calls declared below — @ref set_peer_receiver and
-     * @ref set_peer_rope_receiver (both spellings each) and @ref set_peer_down_notifier —
-     * passes this gate, so a link that reports false ends up with an empty
-     * `peer_rx_` and no peer-departure notifier. (A DERIVED class can still reach the
+     * Each of the six peer-named wiring calls declared below — @ref set_peer_receiver and
+     * @ref set_peer_rope_receiver (both spellings each) and @ref set_peer_down_notifier and
+     * @ref set_peer_up_notifier — passes this gate, so a link that reports false ends up with
+     * an empty `peer_rx_` and neither peer-lifecycle notifier. (A DERIVED class can still reach the
      * protected `peer_rx_` directly; the gate governs this interface's own doors.)
      * It is a query, not a knob: `bus_link_t` is a PUBLIC base, so a flat link's
      * `set_peer_receiver` is reachable by an explicit upcast past the null `bus()`, and
@@ -199,12 +199,12 @@ class bus_link_t {
      * The mirror of @ref set_peer_down_notifier, fired from the thread that observed the
      * session become usable — for `slot_server_t` that is `accept()` for a raw stream peer
      * and the `101 Switching Protocols` publish for a WS peer, i.e. exactly the transition
-     * whose inverse fires @ref notify_peer_down.
+     * whose inverse fires the departure notifier.
      *
      * **Only an accepting listener fires it, and that is the whole point.** An
      * announce-census bus (CAN, ADR-0030) learns of a peer from ANOTHER node's traffic, has
      * no closure event by design (RFC-0009 §D.5), and keeps §Decision 1 in full force; it
-     * therefore never calls @ref notify_peer_up and never grows a session vertex. So "does
+     * therefore never fires this seam and never grows a session vertex. So "does
      * this kind fire peer-up" IS the announced-peer / accepted-session line, expressed as a
      * capability rather than as a kind check at the consumer.
      *
@@ -312,7 +312,7 @@ class bus_link_t {
     /**
      * @brief Fire the peer-ARRIVAL notifier for @p peer (no-op when none installed).
      *
-     * Same contract as @ref notify_peer_down and the same discipline: called from the
+     * Same contract as the departure notifier below and the same discipline: called from the
      * thread that observed the arrival, after the slot's own bookkeeping is complete and
      * with none of the adapter's internal locks held, because the notifier re-enters the
      * routing plane and takes graph locks. Firing it while a slot lock is held would nest

@@ -617,7 +617,7 @@ class slot_server_t : public transport_t, public bus_link_t, protected stream_en
      * A FLAT (not @ref peer_named) server announces nothing: it has one routing identity for
      * every peer it carries, so there is no per-session identity to announce.
      *
-     * Fired with NO transport lock held, per `bus_link_t::notify_peer_up`'s contract — the
+     * Fired with NO transport lock held, per the bus facet's arrival-notifier contract — the
      * notifier re-enters the routing plane and takes graph locks.
      */
     void publish_peer_up(const session_base_t& s);
