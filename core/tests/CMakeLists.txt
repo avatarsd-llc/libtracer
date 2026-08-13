@@ -1452,3 +1452,11 @@ add_test(NAME spin_pool_guard COMMAND ${CMAKE_COMMAND}
          -DLT_FORBIDDEN_INCLUDE=${CMAKE_CURRENT_BINARY_DIR}/spin-forbidden
          -DLT_PROBE=${CMAKE_CURRENT_SOURCE_DIR}/spin_pool_guard_probe.cpp
          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/spin_pool_guard.cmake)
+
+# #1223 step 2 — an accepted slot_server_t session's identity anchor: a real
+# transport_tcp_server, real dialled sockets, and the two hazards the shape had to clear
+# (unaddressable below the mount; :children[] untouched). Real threads ⇒ built under TSan.
+add_executable(session_anchor_test session_anchor_test.cpp)
+target_link_libraries(session_anchor_test PRIVATE libtracer)
+libtracer_test_warnings(session_anchor_test)
+add_test(NAME session_anchor COMMAND session_anchor_test)

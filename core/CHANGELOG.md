@@ -16,6 +16,30 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **An accepted `slot_server_t` session now holds a session identity anchor — a vertex-map
+  slot with a saturating generation, revived in place on slot reuse**
+  ([#1223](https://github.com/avatarsd-llc/libtracer/issues/1223) step 2 of 5, realizing
+  [ADR-0044](../docs/adr/0044-stateless-transport-peer-enumeration-separate-paths-client-side-identity.md)'s
+  2026-08-13 amendment). New public surface: `graph_t::register_session_anchor` /
+  `find_session_anchor` / `session_anchor_slots`, `bus_link_t::set_peer_up_notifier` (the
+  arrival twin of `set_peer_down_notifier`), `fwd_router_t::session_anchor_id`, and the
+  protected `slot_server_t::publish_peer_up`. **Nothing observable changes**: no wire bytes,
+  no `enumerate_peers` output, no `:children[]` bytes, no new address.
+  An anchor is an **identity anchor, not an addressable node** — it hangs off a private
+  structural root the addressable root cannot reach, so `find`, path descent and every
+  `:children[]` listing are untouched (a bus mount's members stay exactly what
+  `enumerate_peers` synthesizes, and RFC-0020 §3's "MUST NOT resolve the residual against
+  its local graph" keeps its premise). What it has is the one thing it is for: a slot in the
+  pinned, insert-only vertex map, so a later step can mint an RFC-0024 element naming the
+  session and a route naming a DEAD session fails the §5.1 generation check.
+  Bounded across churn by construction: a recycled `p<slot>` revives the SAME `vertex_t` in
+  the SAME slot with only the generation bumped. Measured on `bench_forward_heap`:
+  `session_anchor` 144 B live / 6 allocs (vs. a bare `vertex` at 128 B / 3), and
+  `session_anchor_churn` **0 live bytes** — a retire+revive allocates nothing net.
+  Only an ACCEPTING listener fires the arrival seam (`slot_server_t`, and the ESP
+  `httpd_ws_link_t` at parity), so an announce-census bus — CAN — grows no vertices and
+  keeps ADR-0044 §Decision 1 in full force.
+
 - **`rope_cursor::for_each_span` now keeps its window containment in RELEASE builds, and
   `rope_cursor`/`span_cursor` gain `poisoned()`**
   ([#986](https://github.com/avatarsd-llc/libtracer/issues/986)). A bulk feed that

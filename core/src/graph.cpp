@@ -350,6 +350,10 @@ graph_t::graph_t(std::pmr::memory_resource* mr, mem::mem_backend_t* value_backen
     : mr_(mr),
       value_backend_(value_backend),
       root_(std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{}, handlers_t{})),
+      // The anchors' private structural root (#1223). It takes NO vertex slot: it is never
+      // an anchor itself and no element can name it, and giving it one would put a second
+      // unaddressable hole in an index whose only documented hole is slot 0.
+      anchor_root_(std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{}, handlers_t{})),
       ctl_(ctl) {
     // Slot 0 is the structural root (RFC-0024 §6.4): the index is seeded here so it stays
     // allocation-ordered from the first vertex_t this graph owns. The root is not a
@@ -479,6 +483,63 @@ std::uint32_t graph_t::retire_generation(vertex_handle_t vh) const noexcept {
 std::size_t graph_t::vertex_slot_count() const noexcept {
     const std::shared_lock lock(map_mutex_);
     return vertex_slots_.size();
+}
+
+/**
+ * @brief One anchor's NAME record — the whole of an anchor's key (#1223).
+ *
+ * `build_key` stops at the node whose parent is null, and an anchor's parent (`anchor_root_`)
+ * is that node, so this single record IS the key retirement's sweep cleanup sees. The caller
+ * composes @p id to contain characters `path::valid_segment` rejects, which is what makes the
+ * rendered bytes unreachable from any address; framing it as an ordinary NAME record is what
+ * keeps `key_view_t`'s decomposition well-defined over it.
+ */
+static std::vector<std::byte> anchor_record(std::string_view id) {
+    std::vector<std::byte> rec;
+    wire::emit_name(rec, id);
+    return rec;
+}
+
+result_t<vertex_handle_t> graph_t::register_session_anchor(std::string_view id) {
+    const std::vector<std::byte> rec = anchor_record(id);
+    const std::unique_lock lock(map_mutex_);
+    vertex_t* node = anchor_root_->child_by_record(rec);
+    if (node == nullptr) {
+        // FIRST sight of this id: one allocation, one slot, forever. Every later arrival on
+        // the same id lands on the branch below and re-fills THIS object, which is the whole
+        // bounded-across-churn property — a listener with `max_peers` slots can only ever ask
+        // for `max_peers` distinct ids, so anchors are bounded by the accept policy and not
+        // by how often clients reconnect (ADR-0044 §Amendment's measurement).
+        auto fresh =
+            std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{rec}, handlers_t{});
+        node = anchor_root_->add_child(std::move(fresh));
+        vertex_slots_.push_back(node);
+    }
+    // Live already ⇒ the caller is telling us about a session that never left. Refuse rather
+    // than re-fill: a second fill() would NOT bump the generation (only retirement does), so
+    // silently succeeding here would hand out a handle whose staleness signal never moved.
+    if (node->registered()) return std::unexpected(status_t::PATH_IN_USE);
+    // Revive in place — the same call `register_vertex_key` makes on a retired placeholder,
+    // against the same object at the same slot. The generation was bumped by the RETIRE that
+    // made this reachable, so the revived anchor already reads as a different tenancy to any
+    // element minted against its predecessor.
+    node->fill(role_t::STORED_VALUE, handlers_t{});
+    return vertex_handle_t{node};
+}
+
+std::optional<vertex_handle_t> graph_t::find_session_anchor(std::string_view id) const {
+    const std::vector<std::byte> rec = anchor_record(id);
+    const std::shared_lock lock(map_mutex_);
+    vertex_t* const node = anchor_root_->child_by_record(rec);
+    if (node == nullptr || !node->registered()) return std::nullopt;
+    return vertex_handle_t{node};
+}
+
+std::size_t graph_t::session_anchor_slots() const noexcept {
+    const std::shared_lock lock(map_mutex_);
+    std::size_t n = 0;
+    anchor_root_->for_each_child([&n](const vertex_t&) { ++n; });
+    return n;
 }
 
 std::optional<vertex_slot_t> graph_t::vertex_slot(vertex_handle_t vh) const noexcept {

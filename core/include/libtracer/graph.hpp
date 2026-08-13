@@ -492,6 +492,57 @@ class graph_t {
     [[nodiscard]] std::size_t vertex_slot_count() const noexcept;
 
     /**
+     * @brief Register — or REVIVE — a session **identity anchor**: a vertex that exists to
+     *        be REFERENCED and never to be ADDRESSED (#1223 step 2).
+     *
+     * ADR-0044's 2026-08-13 amendment scopes §Decision 1 to announce-census peers and lets
+     * an **accepted** ws/tcp session hold a vertex, so that the session's death is a RETIRE
+     * and a route naming it fails the RFC-0024 §5.1 generation check. This is the seam that
+     * gives it one. @p id is the session's node-scoped identity string — the router composes
+     * it from the mount's qualified name and the peer's slot name, so the SAME slot always
+     * asks for the SAME anchor.
+     *
+     * **An anchor is not part of the addressable tree, deliberately.** It hangs off a private
+     * structural root that `root_` cannot reach, so:
+     *   - `find`, `read`, every path descent and every `:children[]` listing are byte-for-byte
+     *     unchanged — an anchor is invisible to all of them. That is what keeps
+     *     `bus_link_t::enumerate_peers` the ONE source of truth for a bus vertex's synthesized
+     *     members (ADR-0044 §Decision 1, unamended in this respect), instead of a second one.
+     *   - nothing below a bus mount becomes locally resolvable, so RFC-0020 §3's MUST ("a node
+     *     MUST NOT resolve the residual against its local graph") keeps the premise it was
+     *     argued on. An anchor cannot be the shadow vertex that MUST is about, because no
+     *     spelling of any `dst` reaches it.
+     * What an anchor DOES have is the only thing it is for: a slot in the pinned, insert-only
+     * vertex map, hence a `(index, generation)` an RFC-0024 element can name.
+     *
+     * **Revive is in place.** The anchor for a given @p id is allocated ONCE and re-`fill`ed
+     * afterwards, exactly as a retired addressable vertex is revived by a second registration
+     * at its path — so a recycled `p<slot>` returns the SAME `vertex_t` in the SAME slot with
+     * only the saturating retire generation bumped (RFC-0024 §4.4 rule 3). Anchor count is
+     * therefore bounded by the listener's `max_peers`, not by session churn, which is the
+     * measurement the ADR amendment rests on.
+     *
+     * Retire an anchor through the ordinary @ref retire — it is an ordinary vertex in every
+     * respect the mint, the deref and retirement care about.
+     *
+     * @retval status_t::PATH_IN_USE @p id already names a LIVE anchor (a duplicate arrival
+     *         notification, or an id collision). The caller keeps the existing anchor.
+     */
+    [[nodiscard]] result_t<vertex_handle_t> register_session_anchor(std::string_view id);
+
+    /** @brief The live anchor for @p id, or `std::nullopt` when none is registered (it was
+     *         never created, or it has been retired). Never descends the addressable tree. */
+    [[nodiscard]] std::optional<vertex_handle_t> find_session_anchor(std::string_view id) const;
+
+    /**
+     * @brief How many anchor `vertex_t`s this graph has ever ALLOCATED — live or retired.
+     *
+     * The bounded-across-churn number, exposed so a test can assert it rather than infer it:
+     * it counts allocations, not registrations, so a revive must leave it unchanged.
+     */
+    [[nodiscard]] std::size_t session_anchor_slots() const noexcept;
+
+    /**
      * @brief This node's own reference to @p vh — the MINT side of a bound-path element
      *        (RFC-0024 §6.4, §7).
      *
@@ -1649,6 +1700,13 @@ class graph_t {
     // rather than per REGISTRATION is what keeps it a bijection: a retired vertex is revived
     // by a second fill() of the same object, which must not mint a second slot.
     //
+    // Session identity anchors (@ref register_session_anchor, #1223) append here on the same
+    // terms and for the same reason — an anchor is allocated once and revived in place, so a
+    // slot handed out for one names that allocation forever. The one structural exception is
+    // `anchor_root_` itself, which takes NO slot: it is a private parent, never registered,
+    // never filled and never mintable, so the property this container actually owes RFC-0024
+    // — "every vertex a mint may be asked for has exactly one immovable slot" — is untouched.
+    //
     // CHUNKED, not a `std::vector`, and the difference is the whole charged cost. A vector
     // grows geometrically, so between two doublings it holds up to TWICE the pointers it
     // needs: measured on the 512-vertex heap probe (bench_forward_heap `zeroheap vertex`) a
@@ -1685,6 +1743,27 @@ class graph_t {
      *         (§3), never a silent heap fallback. */
     mem::mem_backend_t* value_backend_ = &mem::heap_backend();
     std::unique_ptr<vertex_t> root_;
+    // The session identity anchors' private structural root (#1223, ADR-0044 §Amendment
+    // 2026-08-13). NOT reachable from root_ — that is the whole design: an anchor gets a
+    // vertex-map slot and a saturating generation without becoming an ADDRESS. `find` and
+    // every `:children[]` listing walk from root_, so they never see one; a bus mount's
+    // members stay exactly what `enumerate_peers` synthesizes, and RFC-0020 §3's "MUST NOT
+    // resolve the residual against its local graph" keeps its premise, because there is no
+    // local graph node below the mount for a residual to land on.
+    //
+    // Anchors ARE ordinary vertices otherwise, which is what makes them useful: same
+    // pointer-stable insert-only allocation, same vertex_slots_ append, same fill()/retire
+    // revive-in-place, same saturating retire_gen_. Giving them a parent (rather than
+    // leaving them free-floating) is what lets `retire` — which refuses a parentless vertex
+    // — work on them unchanged.
+    //
+    // Anchor keys cannot collide with an addressable vertex's key: build_key stops at the
+    // node whose parent is null, so an anchor's key is its own single NAME record, and the
+    // router composes that record's content to contain `:` and `/` — two of the SEVEN
+    // characters `path::valid_segment` rejects, so no registered address anywhere in this
+    // graph can render the same bytes. That is what keeps retirement's sweep-set cleanup
+    // (which is keyed by rendered key bytes) from ever touching a real vertex's entry.
+    std::unique_ptr<vertex_t> anchor_root_;
     // The device creation catalog (#82, ADR-0017): SPEC `type` -> factory. Populated at
     // setup (register_child_type), read-only once frames flow, so no lock (same contract
     // as remote_sink_). `std::less<>` enables heterogeneous string_view lookup.

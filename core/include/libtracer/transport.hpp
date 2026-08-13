@@ -188,6 +188,43 @@ class bus_link_t {
         peer_down_fn_.store(fn, std::memory_order_release);
     }
 
+    /** @brief The peer-ARRIVAL notifier fn: (ctx, the arriving peer's NAME). */
+    using peer_up_fn_t = void (*)(void* ctx, std::string_view peer);
+
+    /**
+     * @brief Register the peer-ARRIVAL notifier — the seam that says "this node's own accept
+     *        policy just admitted a session", and the boundary ADR-0044 §Decision 1 was
+     *        scoped to by its 2026-08-13 amendment (#1223).
+     *
+     * The mirror of @ref set_peer_down_notifier, fired from the thread that observed the
+     * session become usable — for `slot_server_t` that is `accept()` for a raw stream peer
+     * and the `101 Switching Protocols` publish for a WS peer, i.e. exactly the transition
+     * whose inverse fires @ref notify_peer_down.
+     *
+     * **Only an accepting listener fires it, and that is the whole point.** An
+     * announce-census bus (CAN, ADR-0030) learns of a peer from ANOTHER node's traffic, has
+     * no closure event by design (RFC-0009 §D.5), and keeps §Decision 1 in full force; it
+     * therefore never calls @ref notify_peer_up and never grows a session vertex. So "does
+     * this kind fire peer-up" IS the announced-peer / accepted-session line, expressed as a
+     * capability rather than as a kind check at the consumer.
+     *
+     * `fwd_router_t::add_child` installs a notifier that registers (or REVIVES) the
+     * session's identity anchor in the graph's vertex map, so the session gains an index and
+     * a saturating generation. Must be set before frames flow, like the receivers.
+     * @note REFUSED on a link that is not @ref peer_named, for the reason
+     *       @ref set_peer_down_notifier is: a flat link has one routing identity for every
+     *       peer it carries, so there is no per-session identity to anchor.
+     * @param fn  The notifier; @p ctx is passed back as its first argument.
+     * @param ctx Caller-owned context; must outlive every possible notification.
+     */
+    void set_peer_up_notifier(peer_up_fn_t fn, void* ctx) noexcept {
+        if (!peer_named()) return;
+        // Same ctx-before-fn publication as set_peer_down_notifier, and for the same
+        // reason: an accept can land on the poll thread while this wiring is still running.
+        peer_up_ctx_.store(ctx, std::memory_order_relaxed);
+        peer_up_fn_.store(fn, std::memory_order_release);
+    }
+
     /**
      * @brief Register the peer-named inbound sink (used INSTEAD of `set_receiver`).
      *
@@ -272,6 +309,21 @@ class bus_link_t {
         if (fn != nullptr) fn(peer_down_ctx_.load(std::memory_order_relaxed), peer);
     }
 
+    /**
+     * @brief Fire the peer-ARRIVAL notifier for @p peer (no-op when none installed).
+     *
+     * Same contract as @ref notify_peer_down and the same discipline: called from the
+     * thread that observed the arrival, after the slot's own bookkeeping is complete and
+     * with none of the adapter's internal locks held, because the notifier re-enters the
+     * routing plane and takes graph locks. Firing it while a slot lock is held would nest
+     * the transport's mutex inside `graph_t::map_mutex_`, the reverse of the order
+     * `fwd_router_t` documents.
+     */
+    void notify_peer_up(std::string_view peer) const {
+        const peer_up_fn_t fn = peer_up_fn_.load(std::memory_order_acquire);
+        if (fn != nullptr) fn(peer_up_ctx_.load(std::memory_order_relaxed), peer);
+    }
+
     /** @brief The peer-named delivery-tier slot (the ONE tier-select mechanism);
      *         the bus adapter's receive path dispatches through it. */
     receiver_slot_t<std::string_view> peer_rx_;
@@ -281,6 +333,10 @@ class bus_link_t {
      *         it (notify_peer_down) while add_child is still installing it. */
     std::atomic<peer_down_fn_t> peer_down_fn_{nullptr};
     std::atomic<void*> peer_down_ctx_{nullptr}; /**< @brief Its caller-owned context. */
+    /** @brief Installed peer-arrival sink. Atomic for the same reason its departure
+     *         twin is: the poll thread can accept while add_child is still wiring. */
+    std::atomic<peer_up_fn_t> peer_up_fn_{nullptr};
+    std::atomic<void*> peer_up_ctx_{nullptr}; /**< @brief Its caller-owned context. */
 };
 
 /**
