@@ -1,0 +1,12 @@
+{
+  "name": "desync-stray-value",
+  "category": "spec",
+  "hex": "0E402D0001000100EE020004007479706502000C0073746F7265645F76616C7565020004006E616D650200040074656D70",
+  "total_bytes": 49,
+  "decoded": {
+    "type": "0x0E SPEC",
+    "structured": true,
+    "meaning": "SPEC{ VALUE 0xEE, NAME \"type\" NAME \"stored_value\", NAME \"name\" NAME \"temp\" } — a stray non-NAME in the FIRST key slot desynchronizes the pair stream: the walk stops there, both fields read absent, and the create is refused with INVALID_PATH",
+    "note": "an every-offset resync would read (\"stored_value\", \"temp\") out of bytes the terminus refuses — the #995 walk-parity witness; reader claim bound by each core's host suite (HARNESS.md)"
+  }
+}

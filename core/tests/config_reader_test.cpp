@@ -35,6 +35,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <span>
@@ -66,6 +69,19 @@ using tr::testing::check;
 /** @brief True when @p got holds exactly @p want. */
 bool is(const std::optional<std::string_view>& got, std::string_view want) {
     return got.has_value() && *got == want;
+}
+
+/** @brief The raw bytes of a conformance vector's `input.bin`. */
+std::vector<std::byte> vector_bytes(std::string_view case_dir) {
+    const std::filesystem::path p =
+        std::filesystem::path{LIBTRACER_VECTORS_DIR} / case_dir / "input.bin";
+    std::ifstream f(p, std::ios::binary);
+    const std::vector<char> raw((std::istreambuf_iterator<char>(f)),
+                                std::istreambuf_iterator<char>());
+    std::vector<std::byte> out(raw.size());
+    for (std::size_t i = 0; i < raw.size(); ++i)
+        out[i] = static_cast<std::byte>(static_cast<unsigned char>(raw[i]));
+    return out;
 }
 
 /** @brief Append a `NAME` child — a key, or a string value; the wire shape is one. */
@@ -521,6 +537,27 @@ void test_l4_accessors_share_the_walk() {
     }
 }
 
+/**
+ * @brief The #995 shared walk-parity vector: the rules above, pinned on the SAME bytes
+ *        every core's reader consumes.
+ *
+ * The inline fixtures in this file pin the C++ rule; the vector exists so the Rust
+ * binding's reader (`bindings/rust/tests/conformance_vectors.rs`) is gated against the
+ * identical bytes rather than a hand-copied restatement of them. The codec harness
+ * round-trips the vector in every core; the READER claim — last-well-formed-wins over
+ * a wrong-typed first occurrence — is made here, where it can fail.
+ */
+void test_shared_vector_pins_the_walk() {
+    std::printf("the settings/duplicate-key-last-wins vector reads the same here (#995):\n");
+    const std::vector<std::byte> vec = vector_bytes("settings/duplicate-key-last-wins");
+    const auto dec = tr::wire::decode(vec);
+    check(dec.has_value() && dec->type == type_t::SETTINGS, "the vector decodes as SETTINGS");
+    const config_reader_t cfg(&*dec);
+    check(is(cfg.name("kind"), "ws"),
+          "`kind` reads \"ws\": the wrong-typed first occurrence is skipped, the last "
+          "well-formed one wins");
+}
+
 }  // namespace
 
 int main() {
@@ -534,5 +571,6 @@ int main() {
     test_repeat_and_illformed_semantics_unchanged();
     test_desync_stops_the_walk();
     test_l4_accessors_share_the_walk();
+    test_shared_vector_pins_the_walk();
     return tr::testing::summary("config_reader");
 }

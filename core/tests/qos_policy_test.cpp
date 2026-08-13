@@ -894,6 +894,16 @@ void test_qos_settings_repeat_semantics_are_the_shared_walk() {
         check(join_latches_for(g, b_subscriber_with_qos(q)) == 1,
               "an empty VALUE payload is IGNORED — it does not clobber the earlier word");
     }
+    {
+        // The #995 shared walk-parity vector: the SAME rule, pinned on the SAME bytes the
+        // Rust binding's reader consumes (bindings/rust/tests/conformance_vectors.rs). Three
+        // occurrences — 0x0001, 0x0021, then a wrong-typed NAME — must read as 0x0021: last
+        // well-formed wins, and the wrong-typed trailer is skipped, not an error.
+        check(policy_word_of(vector_bytes("subscriber/policy-last-wins")) ==
+                  std::optional<std::uint16_t>{0x0021},
+              "subscriber/policy-last-wins reads 0x0021 — the shared vector agrees with the "
+              "inline fixtures above");
+    }
 }
 
 /**

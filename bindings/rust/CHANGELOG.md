@@ -17,6 +17,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a rights bit above the old ceiling now survives build → decode → read (new
   `ace_mask_u32_round_trip` test). Callers constructing `Ace` literals with an explicit
   `u16` mask need the type widened; the numeric values are unchanged.
+- **The NAME-tagged field walk is now pair-consuming and in parity with the C++
+  termini** (#995). `structured::named_fields` steps whole `(NAME key, value)` pairs
+  and STOPS at a non-`NAME` key slot instead of resynchronising at every offset;
+  `named_field` / `settings_get` / `settings_str` / `spec_type_name` now resolve a
+  repeated key to the **last well-formed** occurrence (a wrong-typed occurrence is
+  skipped, never destructive) instead of the first match; `subscriber_policy` applies
+  the same rule and now **skips** a wrongly-typed `delivery_policy` value instead of
+  returning `TypeMismatch`. Behaviour changes on malformed/duplicate-key input only:
+  a SPEC opening with a stray non-`NAME` now reads both fields absent (the terminus
+  refuses those bytes with `INVALID_PATH`), and `SETTINGS{ NAME "kind" VALUE …, NAME
+  "kind" NAME "ws" }` now reads `"ws"`. Pinned by the new shared vectors
+  `settings/duplicate-key-last-wins`, `spec/desync-stray-value` and
+  `subscriber/policy-last-wins`.
+- **`structured::acl_aces` is strict — the security-reader family** (#995,
+  matching the C++ `parse_acl`, #906): per ACE it now rejects with `TypeMismatch` a
+  repeated key (last-wins would widen a narrow-then-wide `access_mask` grant), an
+  unknown key, a non-`NAME` child in a key slot, an odd child count, a numeric field
+  whose value is not a `VALUE`, and an empty `subject`. Pinned by the new shared
+  vector `acl/ace-duplicate-key`. The `access_mask` is read at its canonical u32
+  width (RFC-0026, #993, above).
 
 ## [0.11.0] — 2026-08-13
 

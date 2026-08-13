@@ -1478,6 +1478,182 @@ fn delivery_policy_bit_layout() {
     assert!(!all_reserved.durability_request());
 }
 
+/* ------------------------------------------- #995 — NAME-field walk parity --- */
+
+/**
+ * @brief `settings/duplicate-key-last-wins` — the plain NAME-field family disposition:
+ * pair-consuming + last-WELL-FORMED-occurrence-wins, wrong-typed never destructive.
+ *
+ * The pre-#995 walk resynchronised at every offset and took the FIRST match, so these
+ * bytes read `None` here and `"ws"` at the C++ terminus (`config_reader_t`).
+ */
+#[test]
+fn settings_duplicate_key_last_wins() {
+    let bin = assert_vector_consistent("settings/duplicate-key-last-wins");
+    let t = decode(&bin).unwrap();
+    // The string reader: the wrong-typed first occurrence is skipped, the last
+    // well-formed one wins.
+    assert_eq!(
+        structured::settings_str(&t, "kind").unwrap(),
+        Some("ws".to_string())
+    );
+    // The type-agnostic reader: last occurrence, whatever its type.
+    assert_eq!(
+        structured::settings_get(&t, "kind").unwrap(),
+        Some(b"ws".to_vec())
+    );
+    // The walk itself preserves BOTH pairs in wire order — which occurrence wins is
+    // the consumer's disposition, not the walk's.
+    let fields = structured::named_fields(&t).unwrap();
+    assert_eq!(fields.len(), 2);
+    assert!(fields.iter().all(|f| f.key == "kind"));
+    // And the other order: a wrong-typed LATER occurrence never clobbers a good one.
+    let flipped = structured::settings_typed(&[
+        ("kind", SettingValue::Name("ws")),
+        ("kind", SettingValue::Value(&[0x01])),
+    ])
+    .unwrap();
+    assert_eq!(
+        structured::settings_str(&flipped, "kind").unwrap(),
+        Some("ws".to_string())
+    );
+}
+
+/**
+ * @brief `spec/desync-stray-value` — the #995 SPEC witness: a stray non-`NAME` in the
+ * first key slot desynchronizes the pair stream, and the walk STOPS instead of
+ * resyncing.
+ *
+ * This is the acceptance regression test: before #995 the reader answered
+ * `(Some("stored_value"), Some("temp"))` out of bytes the terminus refuses with
+ * `INVALID_PATH` (nothing created).
+ */
+#[test]
+fn spec_desync_stray_value_reads_nothing() {
+    let bin = assert_vector_consistent("spec/desync-stray-value");
+    let t = decode(&bin).unwrap();
+    assert_eq!(
+        structured::spec_type_name(&t).unwrap(),
+        (None, None),
+        "the pair walk must stop at the stray VALUE, exactly as the terminus does"
+    );
+    assert!(
+        structured::named_fields(&t).unwrap().is_empty(),
+        "no pair survives a desync at child 0"
+    );
+}
+
+/** @brief A trailing unpaired `NAME` is ignored; the pairs before it still parse. */
+#[test]
+fn named_fields_trailing_unpaired_key_is_ignored() {
+    let t = Tlv {
+        type_code: libtracer::type_code::SETTINGS,
+        opt: Opt::structured(),
+        payload: Vec::new(),
+        children: vec![
+            libtracer::name("addr").unwrap(),
+            libtracer::text_name("10.0.0.2").unwrap(),
+            libtracer::name("kind").unwrap(),
+        ],
+        trailer: None,
+    };
+    let fields = structured::named_fields(&t).unwrap();
+    assert_eq!(fields.len(), 1);
+    assert_eq!(fields[0].key, "addr");
+    assert_eq!(structured::settings_str(&t, "kind").unwrap(), None);
+}
+
+/**
+ * @brief `subscriber/policy-last-wins` — both pre-#995 SUBSCRIBER divergences, each
+ * with its sign: last well-formed occurrence wins (the reader returned the FIRST
+ * match), and a wrongly-typed value is SKIPPED (the reader rejected the whole read).
+ */
+#[test]
+fn subscriber_policy_last_wins() {
+    let bin = assert_vector_consistent("subscriber/policy-last-wins");
+    let t = decode(&bin).unwrap();
+    let got = structured::subscriber_policy(&t).unwrap();
+    assert_eq!(
+        got,
+        DeliveryPolicy::from_bits(0x0021),
+        "the last WELL-FORMED word wins; the trailing NAME-typed occurrence is \
+         skipped, not an error, and does not clobber it"
+    );
+}
+
+/**
+ * @brief `acl/ace-duplicate-key` — the #995 SECURITY family: a repeated ACE key is
+ * REJECTED in every tier, because last-wins would read the narrow-then-wide
+ * `access_mask` as the 0xFFFF grant.
+ *
+ * The codec round-trips these bytes untouched (that is `assert_vector_consistent`);
+ * the refusal asserted here is the READER's — exactly the boundary HARNESS.md names.
+ */
+#[test]
+fn ace_duplicate_key_is_rejected() {
+    let bin = assert_vector_consistent("acl/ace-duplicate-key");
+    let t = decode(&bin).unwrap();
+    assert_eq!(
+        structured::acl_aces(&t),
+        Err(BuildError::TypeMismatch),
+        "a duplicate access_mask, narrow then wide: last-wins would WIDEN the grant"
+    );
+}
+
+/** @brief The rest of the ACE reject family: unknown key, desync, odd child count. */
+#[test]
+fn ace_reject_family_structural_refusals() {
+    let ace = |children: Vec<Tlv>| Tlv {
+        type_code: libtracer::type_code::ACL,
+        opt: Opt::structured(),
+        payload: Vec::new(),
+        children: vec![Tlv {
+            type_code: libtracer::type_code::ACL,
+            opt: Opt::structured(),
+            payload: Vec::new(),
+            children,
+            trailer: None,
+        }],
+        trailer: None,
+    };
+    let base = || {
+        vec![
+            libtracer::name("type").unwrap(),
+            value(&[0x00]),
+            libtracer::name("subject").unwrap(),
+            value(b"peer-a"),
+            libtracer::name("access_mask").unwrap(),
+            value(&0x0001u16.to_le_bytes()),
+        ]
+    };
+    // The well-formed base parses.
+    assert!(structured::acl_aces(&ace(base())).is_ok());
+    // An UNKNOWN key: rejected, never skipped — a dropped attribute widens access.
+    let mut unknown = base();
+    unknown.push(libtracer::name("grace_ns").unwrap());
+    unknown.push(value(&[0x01]));
+    assert_eq!(
+        structured::acl_aces(&ace(unknown)),
+        Err(BuildError::TypeMismatch)
+    );
+    // A non-NAME in a key slot: the pair stream is desynchronized — rejected, not
+    // resumed (the config reader STOPS here; a security reader refuses outright).
+    let mut desync = base();
+    desync.insert(0, value(&[0xEE]));
+    desync.insert(1, value(&[0xEE]));
+    assert_eq!(
+        structured::acl_aces(&ace(desync)),
+        Err(BuildError::TypeMismatch)
+    );
+    // An odd child count: a trailing key whose value the sender believes it wrote.
+    let mut odd = base();
+    odd.push(libtracer::name("expires_ns").unwrap());
+    assert_eq!(
+        structured::acl_aces(&ace(odd)),
+        Err(BuildError::TypeMismatch)
+    );
+}
+
 /* ------------------------------- RFC-0024 §5-§7 — the bound-path routing car --- */
 
 /**
