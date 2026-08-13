@@ -14,6 +14,25 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Added
+
+- **`rope_cursor::for_each_span` now keeps its window containment in RELEASE builds, and
+  `rope_cursor`/`span_cursor` gain `poisoned()`**
+  ([#986](https://github.com/avatarsd-llc/libtracer/issues/986)). A bulk feed that
+  overshoots the cursor's window is **truncated to it** instead of served, and the rope
+  cursor latches; `parse_header` maps that latch to `FRAME_TRUNCATED` and the forward
+  plane drops the frame rather than emitting a short one. Previously the precondition was
+  a debug `assert`, so a release build fed the caller real bytes from outside the window
+  and reported success — the one violation no sanitizer can see, because the overshot
+  bytes really are in the link chain. `span_cursor::poisoned()` is a `static constexpr
+  false` and its hot path is unchanged: giving the contiguous cursor the same treatment
+  measured `compact-forward` x0.66 deliveries/s and `compact-terminus` x0.82 (4/4 and 3/4
+  interleaved pairs, disjoint ranges), and a latency regression on the delivery path is an
+  automatic reject. The shipped shape measures x1.00 on that A/B, +0 B on every pinned
+  symbol and +0 B on the Cortex-M0 P0 footprint. Point reads (`byte_at`, `load_le`) and
+  `region` keep the debug-only contract — see the frame-codec module docs for the recorded
+  decision and the full table.
+
 ### Changed
 
 - **The ACE `access_mask` canonical wire width is u32 (RFC-0026, #993).** The published

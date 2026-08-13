@@ -59,10 +59,10 @@ the borrowed span dies when the callback returns, so a receiver that must outliv
 the callback needs this tier.
 
 There is deliberately no adapter that wraps a borrowed span into a rope; such a rope's
-refcounts would lie about lifetime. `fwd_router_t::add_child` (`core/src/fwd_router.cpp:641`)
+refcounts would lie about lifetime. `fwd_router_t::add_child` (`core/src/fwd_router.cpp:646`)
 therefore branches on the link's declared capability and installs exactly one sink —
-the rope form for an owning link, the span form otherwise (`fwd_router.cpp:748,685`, and
-`fwd_router.cpp:702,709` for the peer-named bus equivalent).
+the rope form for an owning link, the span form otherwise (`fwd_router.cpp:753,690`, and
+`fwd_router.cpp:707,714` for the peer-named bus equivalent).
 
 Every socket transport in the tree declares the owning tier: UDP
 (`transport_udp.hpp:111`), TCP client and server (`transport_tcp.hpp:207,372`),

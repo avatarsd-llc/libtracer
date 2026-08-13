@@ -132,6 +132,16 @@ if(UNIX)
     add_test(NAME rope_cursor_assert COMMAND rope_cursor_assert_test)
 endif()
 
+# The RELEASE half of the same contract (#986): the clamp-and-latch that survives
+# NDEBUG, which the assert test above cannot speak for. The TU defines NDEBUG itself
+# (before any include) so it holds under every CMAKE_BUILD_TYPE, and this target adds
+# it again so the intent is visible in the build graph rather than only in the source.
+add_executable(rope_cursor_release_guard_test rope_cursor_release_guard_test.cpp)
+target_link_libraries(rope_cursor_release_guard_test PRIVATE libtracer)
+target_compile_definitions(rope_cursor_release_guard_test PRIVATE NDEBUG)
+libtracer_test_warnings(rope_cursor_release_guard_test)
+add_test(NAME rope_cursor_release_guard COMMAND rope_cursor_release_guard_test)
+
 add_executable(rope_decode_test rope_decode_test.cpp)
 target_link_libraries(rope_decode_test PRIVATE libtracer)
 libtracer_test_warnings(rope_decode_test)

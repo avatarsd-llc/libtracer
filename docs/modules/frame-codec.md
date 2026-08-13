@@ -98,9 +98,9 @@ call stack, so the walk keeps one open-node record per open level in a
 `walk_stack_t`. That stack starts in a caller-supplied inline span and, once those
 slots are used, relocates into geometrically grown blocks drawn from a spill
 source. **The inline span is a tuning knob, not a limit — overflowing it changes
-cost, not behaviour** (`grammar.hpp:330-336`). Exhausting the spill source rejects
+cost, not behaviour** (`grammar.hpp:360-366`). Exhausting the spill source rejects
 the frame with `TLV_NESTING_TOO_DEEP`, which means exactly "exceeds this receiver's
-decode resources" (`grammar.hpp:428-432`).
+decode resources" (`grammar.hpp:458-462`).
 
 The two decoders differ only in what they spill to, and therefore in what bounds
 them:
@@ -412,6 +412,41 @@ The header/trailer rules — the type-`0x00` reject, the reserved-bit reject, th
 byte source. Both materializing decoders funnel through it. The cursor is the
 byte-*source* seam: `span_cursor` is the contiguous case and `rope_cursor` walks
 links, stitching a straddled header into a bounded scratch.
+
+#### Cursor window containment — what holds in a RELEASE build (#986)
+
+The cursors' bounds contracts are **not** uniformly debug-only, and the split is
+deliberate rather than incidental. It rests on one asymmetry: a `span_cursor`'s
+window *is* its whole object, so overshooting it forms an out-of-range `subspan`
+— undefined behaviour that the fuzz and sanitizer CI reports. A `rope_cursor`'s
+window is a **soft** bound inside a longer link chain, so an overshooting read
+walks bytes the chain genuinely holds. Nothing faults, no sanitizer can see it,
+and the caller is handed real bytes from the wrong place and told it succeeded.
+
+| reader | violation in a release build |
+| --- | --- |
+| `rope_cursor::for_each_span` | **truncated to the window** and the cursor latches (`poisoned()`); `parse_header` answers `FRAME_TRUNCATED`, the forward-plane gather drops the frame |
+| `span_cursor::for_each_span` | UB — caught by fuzz/ASan CI, the backstop the rope case lacks |
+| `rope_cursor::byte_at` / `load_le` | debug-asserted only; callers bounds-check per read, and a wrong point read is one byte where a wrong feed is an unbounded run |
+| `region` (both) | debug-asserted only |
+
+The guarantee is spent on the bulk reader alone **because it was priced**. Giving
+the contiguous cursor the same clamp-and-latch measured `compact-forward` at
+x0.66 deliveries/s and `compact-terminus` at x0.82 — reproduced in 4/4 and 3/4
+interleaved pairs with disjoint ranges — since a `min()`-derived `subspan` length
+costs the CRC feed loop what a directly-derived one gives it, and carrying a latch
+byte takes the cursor past two registers. A latency regression on the delivery
+path is an automatic reject here, so `span_cursor::poisoned()` is a
+`static constexpr false` that folds the shared grammar's check away entirely.
+
+What the shipped shape costs, measured: **zero** on the pinned symbols
+(`bench/symbol_ratchet.json`, including `route_fwd_forward<rope_cursor>`), **zero**
+on the Cortex-M0 P0 flash footprint — a span-only MCU never instantiates the rope
+cursor at all — and x1.00 on the interleaved delivery-path A/B. Targets that link a
+rope-delivering transport pay +50 B in `parse_header<rope_cursor>` (+3.0%) on rv32.
+
+`rope_cursor_assert_test` gates the debug half; `rope_cursor_release_guard_test`
+gates this one, compiled with `NDEBUG` forced **on** so it cannot pass vacuously.
 
 ```{doxygenstruct} tr::wire::grammar::header_t
 :project: libtracer
