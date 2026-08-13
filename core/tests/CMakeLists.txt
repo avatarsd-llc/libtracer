@@ -1348,6 +1348,25 @@ if(LIBTRACER_WITH_QUIC)
     add_executable(wt_interop_server wt_interop_server.cpp)
     target_link_libraries(wt_interop_server PRIVATE libtracer_quic)
     libtracer_test_warnings(wt_interop_server)
+
+    # #1182 — the OUT-OF-PROCESS WebTransport peer. `probe_fail_hook` is process-wide,
+    # so gating the transport's two peer-driven allocations means putting the peer in
+    # another process; this binary is raw_wt_client.hpp behind a line protocol, and it
+    # is spawned by webtransport_alloc_gate_test, NOT an add_test() of its own.
+    add_executable(wt_peer_driver wt_peer_driver.cpp)
+    target_link_libraries(wt_peer_driver PRIVATE libtracer_quic)
+    libtracer_test_warnings(wt_peer_driver)
+
+    add_executable(webtransport_alloc_gate_test webtransport_alloc_gate_test.cpp)
+    target_link_libraries(webtransport_alloc_gate_test PRIVATE libtracer_quic)
+    libtracer_test_warnings(webtransport_alloc_gate_test)
+    add_dependencies(webtransport_alloc_gate_test wt_peer_driver)
+    target_compile_definitions(webtransport_alloc_gate_test PRIVATE
+        LIBTRACER_DEV_CERT_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/../../tools/gen-dev-cert.sh"
+        LIBTRACER_WT_PEER_DRIVER="$<TARGET_FILE:wt_peer_driver>")
+    add_test(NAME webtransport_alloc_gate COMMAND webtransport_alloc_gate_test)
+    set_tests_properties(webtransport_alloc_gate PROPERTIES ENVIRONMENT
+        "TSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tsan-msquic.supp")
 endif()
 
 # mem_cuda GPU test — only with LIBTRACER_WITH_CUDA; run on a real GPU locally
