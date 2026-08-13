@@ -352,9 +352,16 @@ constexpr std::size_t kFanoutChunk = kDefaultPeerCap;
  * `INET6_ADDRSTRLEN` already counts the longest textual address and its terminator; the
  * `:` and up to five port digits are what this adds. Sizing it from the platform's own
  * constant is what keeps it a fact rather than a magic number: a stack that widened its
- * address text would widen this with it.
+ * address text would widen this with it. With `CONFIG_LWIP_IPV6` off, lwIP does not
+ * define the v6 constant (or `sockaddr_in6` at all), and every accepted socket is
+ * AF_INET — so the v4 constant is the exact bound, not a truncation.
  */
-constexpr std::size_t kEndpointChars = INET6_ADDRSTRLEN + 6;
+#if CONFIG_LWIP_IPV6
+constexpr std::size_t kAddrChars = INET6_ADDRSTRLEN;
+#else
+constexpr std::size_t kAddrChars = INET_ADDRSTRLEN;
+#endif
+constexpr std::size_t kEndpointChars = kAddrChars + 6;
 
 /**
  * @brief The peer's routable name for slot @p idx — `p<slot>` (ADR-0073 §2).
@@ -398,6 +405,9 @@ constexpr std::size_t kEndpointChars = INET6_ADDRSTRLEN + 6;
  * saw in the strike log, and it made the strike unattributable to a peer at exactly the
  * moment the attribution mattered. A v4-mapped v6 address (`::ffff:a.b.c.d`) is unwrapped
  * so a dual-stack node keeps reporting its IPv4 peers the way the census always has.
+ * With `CONFIG_LWIP_IPV6` off the whole v6 arm is compiled out — lwIP defines neither
+ * `sockaddr_in6` nor `INET6_ADDRSTRLEN` then, and the listener binds `PF_INET`, so
+ * AF_INET is the only family `getpeername` can report.
  *
  * This string is NOT the peer's graph name and has not been since #994: it carries `.` and
  * `:`, both rejected by `graph::valid_segment`, so a session named with it could be listed
@@ -423,7 +433,8 @@ constexpr std::size_t kEndpointChars = INET6_ADDRSTRLEN + 6;
     sockaddr_storage addr = {};
     socklen_t len = sizeof(addr);
     if (::getpeername(fd, reinterpret_cast<sockaddr*>(&addr), &len) == 0) {
-        char ip[INET6_ADDRSTRLEN] = {};
+        char ip[kAddrChars] = {};
+#if CONFIG_LWIP_IPV6
         if (addr.ss_family == AF_INET6) {
             const auto& a6 = reinterpret_cast<const sockaddr_in6&>(addr);
             if (IN6_IS_ADDR_V4MAPPED(&a6.sin6_addr)) {
@@ -437,6 +448,7 @@ constexpr std::size_t kEndpointChars = INET6_ADDRSTRLEN + 6;
             (void)std::snprintf(out, sizeof(out), "%s:%u", ip, (unsigned)ntohs(a6.sin6_port));
             return;
         }
+#endif
         if (addr.ss_family == AF_INET) {
             const auto& a4 = reinterpret_cast<const sockaddr_in&>(addr);
             ::inet_ntop(AF_INET, &a4.sin_addr, ip, sizeof(ip));
