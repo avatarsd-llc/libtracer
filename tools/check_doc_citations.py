@@ -311,7 +311,7 @@ ANCHORS = [
     # the same silence #725/#726 found in the module pages, in a file the gate could read
     # all along but had no pin for.
     ('bench/bench_libtracer.cpp:16', '(The `loopback` /'),
-    ('bench/bench_libtracer.cpp:1235',
+    ('bench/bench_libtracer.cpp:1246',
      '// (The `loopback` and n-routers `routers-hN` modes benchmarked the ROUTER-flood'),
     # bench/bench_lkv_slot.cpp
     ('bench/bench_lkv_slot.cpp:193', 'class model_sp_atomic_t {'),
@@ -456,7 +456,7 @@ ANCHORS = [
      '* @brief Nothrow @ref to_iovec — fill @p out with one span per link (no copy),'),
     ('core/include/libtracer/rope.hpp:303',
      '[[nodiscard]] bool try_to_iovec(std::vector<std::span<const std::byte>>& out) const noexcept {'),
-    ('core/include/libtracer/rope.hpp:373', 'static constexpr std::size_t kInline = 2;'),
+    ('core/include/libtracer/rope.hpp:397', 'static constexpr std::size_t kInline = 2;'),
     # core/include/libtracer/rope_decode.hpp
     ('core/include/libtracer/rope_decode.hpp:17',
      '* SINK NOTE: this validates STRUCTURE + CRC over a rope; it does not yet'),
@@ -632,8 +632,8 @@ ANCHORS = [
     ('core/src/posix_endpoint.cpp:464', 'std::array<std::byte, 4096> chunk;',
      'void slot_server_t::service_peer(session_base_t& s) {'),
     # core/src/rope.cpp
-    ('core/src/rope.cpp:16', 'if (!all_host()) return std::unexpected(flatten_err_t::NOT_HOST);'),
-    ('core/src/rope.cpp:28', 'if (!b.empty()) std::memcpy(seg->bytes.data() + pos, b.data(), b.size());'),
+    ('core/src/rope.cpp:21', 'if (!all_host()) {'),
+    ('core/src/rope.cpp:41', 'if (!b.empty()) std::memcpy(seg->bytes.data() + pos, b.data(), b.size());'),
     # core/src/rope_decode.cpp
     ('core/src/rope_decode.cpp:32', 'std::expected<void, err_t> check_frame(const view::rope_t& r) {'),
     ('core/src/rope_decode.cpp:46', 'std::expected<void, err_t> validate_rope(const view::rope_t& r) {'),

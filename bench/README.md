@@ -338,6 +338,8 @@ craft libtracer":
 | `inproc-pool` / `inproc-pool-borrow` | the same 1:1 write, but through an **injected `std::pmr::unsynchronized_pool_resource`** as `mr_` instead of the global heap — the pooled-vs-heap LKV persist, swept over payload at fan=1. Measured on this host the pool is ~19 ns **slower** (~104 vs ~85 ns/op): it is a determinism / bounded-ceiling lever, not a latency one, and the inversion flips only on an MCU allocator. Gated by the `lkv` same-run throughput ratio (`perf_gate.py lkv_ratio_gate`), not by a latency percentile. |
 | `inproc-mt{1,2,4,8}` | **n-cores (parallel-dispatch) axis**: T threads, each driving its *own* `graph_t` + endpoint over the zero-copy in-process path, measured for aggregate throughput + per-op latency under load. Each thread reuses one borrowed view over a stable per-thread buffer, so the timed loop allocates nothing — what scales is dispatch itself. Thread counts are clamped to `hardware_concurrency()`, so a small runner emits fewer rows. `ep` carries the thread count. |
 | `acl-inherit-d4` / `acl-inherit-d4-mt4` | ACL-gated reads with inheritance (ADR-0050 cached effective-ACE merge) at depth 4 — the uncontended gate cost, and the shared-ancestor contended case at 4 threads. |
+| `lkv-alloc-heap` / `lkv-alloc-pool` | **the segment allocation alone** — `backend.alloc` + `backend.destroy`, no payload moved. The ADR-0060 pooled-vs-heap ratio the `lkv` gate asserts, and a *null control* for the pair below: it shares their loop and their binary but never flattens, so an arm that moves while these stay at 1.00x is the flatten and not the host. |
+| `lkv-store-heap` / `lkv-store-pool` | **the rope-to-contiguous copy** — `rope_t::materialize` over a 2-link rope (backend alloc + payload `memcpy`), pooled backend vs the default heap. Gated points since [#1250](https://github.com/avatarsd-llc/libtracer/issues/1250). **The name is misleading and is kept anyway:** the "store" is the *copy-store allocation*, NOT the LKV slot — there is no `graph_t`, no vertex and no last-known-value publish in this loop. A rename would end the `gh-pages` history series keyed on these names (the `fold-n*` → `fold-b*` precedent below), so the meaning is documented instead. Read it as "`materialize` got slower", never as "the LKV store got slower" — #1250 was triaged the wrong way round for exactly that reason. |
 | `mixed` | 128 topics, varied fan-out + payloads. |
 | `net` | two processes over real UDP (`run_net.sh`). |
 | `eptype-lean` | ep-type axis: minimal sink (see below). |
@@ -349,7 +351,7 @@ craft libtracer":
 > `bridge_t` envelope, deleted with the bridge itself in
 > [ADR-0040](../docs/adr/0040-net-plane-is-explicit-source-routed-only.md) — the net plane is
 > explicit-source-routed `FWD` only. Neither mode is emitted today
-> (`bench_libtracer.cpp:16`, `:1235`); `bridge_t`, `router_wrap`, `router_unwrap`, `kMaxHops`,
+> (`bench_libtracer.cpp:16`, `:1246`); `bridge_t`, `router_wrap`, `router_unwrap`, `kMaxHops`,
 > `export_vertex` and `run_routers` survive in `core/` and `bench/` only inside comments
 > and `core/CHANGELOG.md`'s record of their removal — not one declaration, definition or
 > call of any of them is left (`grep -rn` over both trees, 2026-08-08), and the

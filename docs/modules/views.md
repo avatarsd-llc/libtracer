@@ -85,7 +85,7 @@ flowchart LR
 ```
 
 A rope holds its first two links in small-buffer storage (`kInline = 2`,
-`core/include/libtracer/rope.hpp:373`); the third link spills the whole chain to the
+`core/include/libtracer/rope.hpp:397`); the third link spills the whole chain to the
 heap, which is the chain's only allocation (`rope_t::append`, `rope.hpp:76-91`).
 
 ## Owning a copy of borrowed bytes

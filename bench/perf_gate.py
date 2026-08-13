@@ -85,6 +85,17 @@ BASELINE = HERE / "perf_baseline.json"
 #   inproc-path @ 8192 ep   — the resolver canary (registry lookup per write)
 #   mixed                   — the composed realistic topology
 #   fold-b4                 — the L0 inline-fold codec tier (batch-amortized)
+#   lkv-store-{heap,pool}   — the L1 rope->contiguous copy (`rope_t::materialize`)
+#
+# The two `lkv-store-*` legs are here because of what happened without them (#1250):
+# reshaping `rope_t::flatten`'s wrapper cost 25-48% on EVERY `materialize` path — branch
+# and field writes, `op_resolve` reads, FWD COMPACT emission, the RX span sink — and not
+# one of the then-ten points is downstream of that call, so every gate stayed green
+# through a release. They cost NOTHING extra to run: `bench_libtracer`'s default sweep
+# already emits these rows (`run_lkv_store_gate`), so this is two more keys read out of
+# output the gate was already collecting, not two more measurements — the added
+# wall-clock is zero. Both are taken at 64 B: the sweep's 1024 B twins move with them
+# (measured, #1250) and a second size would buy correlated evidence, not new coverage.
 #
 # EDITORS: this list is the answer to "how many points does the per-PR gate watch?",
 # and `docs/methodology.md` (§What actually stops a regression) states that count and
@@ -104,6 +115,8 @@ POINTS = [
     ("main", "inproc-path", 64, 1, 8192),
     ("main", "mixed", 0, 6, 128),
     ("main", "fold-b4", 512, 1, 1),
+    ("main", "lkv-store-heap", 64, 1, 1),
+    ("main", "lkv-store-pool", 64, 1, 1),
     ("compact", "compact-forward", 64, 1, 1),
     ("compact", "compact-terminus", 64, 1, 1),
     ("demux", "fwd-demux-fixed", 79, 1, 1),

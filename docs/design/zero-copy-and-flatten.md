@@ -23,7 +23,7 @@ byte source is the wrong shape:
 
 | Structural copy | Site | Why it cannot go |
 |---|---|---|
-| Ingress ownership | `rope_t::flatten` (`core/src/rope.cpp:28`), `read_exact` into the accepted segment (`core/src/transport_tcp.cpp:282`) | A transient recv buffer cannot be borrowed by a rope that outlives the receive call |
+| Ingress ownership | `rope_t::flatten` (`core/src/rope.cpp:41`), `read_exact` into the accepted segment (`core/src/transport_tcp.cpp:282`) | A transient recv buffer cannot be borrowed by a rope that outlives the receive call |
 | Mutation ownership | `own_wire` (`core/src/op_resolve_view.cpp:140`) | A mutated multi-link value must own a contiguous, patchable, trailer-cleared segment |
 | WS TX gather | `httpd_ws_link_t::queue_send` (`integrations/esp-idf/libtracer/httpd_ws_link.cpp`; destination is a pre-allocated tx work slot — no slot free means a counted drop, not a heap item) | `httpd_ws_send_frame_async` takes one contiguous buffer and `httpd_queue_work` runs later, after the rope links are gone |
 
@@ -66,8 +66,8 @@ where the mechanism lives:
   (`core/src/transport_ws.cpp:272`) — zero heap, zero payload copy. The only host TX copy is the
   kernel skb copy every BSD socket pays.
 - **Flatten refuses a heterogeneous rope.** A DEVICE link is not CPU-addressable, so a host memcpy
-  would fault; `flatten` checks `all_host()` up front and refuses
-  (`core/src/rope.cpp:16`). Since #917 the refusal carries its cause: `try_flatten` returns
+  would fault; the one body `flatten` and `try_flatten` share checks `all_host()` up front and
+  refuses (`core/src/rope.cpp:21`). Since #917 the refusal carries its cause: `try_flatten` returns
   `flatten_err_t::NOT_HOST` here and `NO_MEMORY` for an allocator refusal, and a zero-length rope
   is a *success* carrying an empty view. `flatten` itself is the lossy wrapper that collapses all
   three back into that empty view.
@@ -83,7 +83,7 @@ identifiers for the rest of this page.
 
 | # | Site | Single-link? | Multi-link? | Kind | Removed by the rope cursor? |
 |---|------|:--:|:--:|---------|---------|
-| ① | Ingress ownership — `flatten` (`core/src/rope.cpp:28`), pull-path `read_exact` into the accepted segment (`core/src/transport_tcp.cpp:282`) | yes (it *is* the recv) | yes | Structural | No — orthogonal; it is the ingress floor |
+| ① | Ingress ownership — `flatten` (`core/src/rope.cpp:41`), pull-path `read_exact` into the accepted segment (`core/src/transport_tcp.cpp:282`) | yes (it *is* the recv) | yes | Structural | No — orthogonal; it is the ingress floor |
 | ② | Branch write — `value.try_materialize(*value_backend_)` (`core/src/graph.cpp:1348-1353`) | no — refcount bump | yes (one flatten to feed the span cursor) | Fallback | Multi-link leg: yes, via a rope-native branch decode |
 | ③ | Field write — the twin of ② (`core/src/graph.cpp:1675`) | no — refcount bump | yes | Fallback | Same as ② |
 | ④ | 4096-byte decode arena (`core/src/graph.cpp:1366-1367`) | yes — paid on every branch write | yes | Structure scratch, not a payload copy | **No** — see §3; the rope cursor is a byte source, not a structure store |
@@ -343,7 +343,7 @@ flatten questions:
 
 **The DEVICE-link constraint never conflicts with pool-recv.** Receive targets are always host
 memory, so a host pool slot is a legal recv-and-adopt target; only a CPU-side *flatten* of a DEVICE
-link would fault, and `flatten` refuses that up front (`core/src/rope.cpp:16`) — as
+link would fault, and `flatten` refuses that up front (`core/src/rope.cpp:21`) — as
 `flatten_err_t::NOT_HOST`, a verdict no retry clears, kept distinct from the allocator's.
 
 **Removing even the ownership copy** requires `LWIP_NETCONN` plus a pbuf-wrapping `mem_backend`

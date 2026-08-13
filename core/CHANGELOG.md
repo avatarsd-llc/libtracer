@@ -35,6 +35,26 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **`rope_t::flatten` is out-of-line again, and `rope_t::materialize` is inlinable again —
+  25–48% back on every `materialize` path**
+  ([#1250](https://github.com/avatarsd-llc/libtracer/issues/1250)). No signature, no
+  semantics and no error channel changes: `flatten`, `try_flatten`, `try_materialize` and
+  `flatten_err_t` are exactly what [#917](https://github.com/avatarsd-llc/libtracer/issues/917)
+  shipped, and an OOM still reads as `NO_MEMORY` backpressure rather than a malformed frame.
+  What changed is the *shape*. [#1210](https://github.com/avatarsd-llc/libtracer/issues/1210)
+  had defined `flatten` in the header as a wrapper that unwrapped `try_flatten`'s
+  `expected`, which cost twice over: the temp was `const`, so `std::move(*r)` yielded a
+  `const view_t&&` and bound the **copy** constructor (two extra atomic refcount RMWs per
+  flatten), and the body's 32 B `expected` slot plus its stack canary pushed the two-line
+  `materialize` past GCC's inline threshold — so even the **single-link zero-copy arm**,
+  which never flattens, started paying an out-of-line call. Both wrappers now delegate to
+  one out-of-line core (`flatten_core`) that returns the view straight into the caller's
+  return slot. Measured on this host, 15 interleaved A/B/C triples with rotating start
+  order and `taskset`: `lkv-store-pool/64` 0.521x before → **0.994x**, `lkv-store-heap/64`
+  0.758x → **0.989x**, both 1024 B twins 0.585x/0.726x → **0.996x**, against `lkv-alloc-*`
+  null-control arms reading 0.987–1.003x in the same triples. `lkv-store-heap/64/1/1` and
+  `lkv-store-pool/64/1/1` are now `perf_gate.py` POINTS (twelve, from ten) — they are the
+  only gated legs downstream of `materialize`, which is why the loss shipped green.
 - **Build configuration is overridden by a `libtracer/config_override.hpp` fragment, not by
   CMake cache variables (#1142, ADR-0068 §Erratum 1).** `libtracer/config.hpp` is now ordinary
   hand-written C++ and the only place a default core's own build reads is spelled: core's
