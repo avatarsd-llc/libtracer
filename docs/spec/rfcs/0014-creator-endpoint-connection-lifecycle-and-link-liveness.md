@@ -161,6 +161,13 @@ ADR-0059 §Consequences pre-declared). Its only readable facet is `:schema` (the
   field** — it is positional, fixed by which module the connection was created under (`ws-client` =
   DIAL, `ws-server` = LISTEN, `can` = a multi-peer bus). B's IP changing is a `:settings` edit; every
   route under the connection is untouched.
+
+  > **Erratum (2026-08-13), [#1070](https://github.com/avatarsd-llc/libtracer/issues/1070) —
+  > see §Erratum at the end of this document.** "Live in `:settings` and are re-configurable"
+  > and "B's IP changing is a `:settings` edit" are **corrected**: these keys are
+  > transport-private creation-time config, not a vertex `:settings` facet, and no
+  > post-creation reconfiguration door exists. The `role`-is-positional clause and the
+  > name-not-address principle stand unchanged.
 - **Explicit lifecycle only.** Created solely by a `SPEC` write (or an owner-local registration),
   removed solely by a `NAME` write (or owner-local `retire`). Connection vertices are a stated
   **exception** to RFC-0005 §D write-creates and RFC-0009 §E.1 revive-by-data-write: a plain data
@@ -217,6 +224,14 @@ link **ignores refcount** — its listen socket stays bound and accepting until 
   `backoff` and `connect_timeout` are `:settings` config, never hardcoded (RFC-0006/0007 / ADR-0051).
   A consumer distinguishes "transiently retrying" from "unreachable" by applying its **own** display
   threshold to the propagated `reconnecting` state — the wire stays honestly `reconnecting`.
+
+  > **Erratum (2026-08-13), [#1070](https://github.com/avatarsd-llc/libtracer/issues/1070) —
+  > see §Erratum at the end of this document.** Read "config, never hardcoded" as scoped to
+  > **this engine's own defaults** for a creator-endpoint `DIAL` connection, and read
+  > "`:settings`" as the transport's config door (the erratum on §3). It does **not** oblige a
+  > *provided* link to accept a wire-set dial deadline: where a platform bound exists — an ESP
+  > task-watchdog window — `connect_timeout` is a **derived safety bound**, and config may only
+  > tighten within it, never raise how long a task may block.
 - **Liveness enum** (the vertex value; supersedes the binary `set_link_state`):
 
   | state | role | meaning |
@@ -346,7 +361,10 @@ fails-fast `link-down` and is reaped.
   RFC-0009 §E.1 for the transport subtree.
 - **Rulings (maintainer, window waived).** (i) `SPEC` on an existing name **rejects** with
   `PATH_IN_USE` (idempotent-safe for a retrying orchestrator); reconfiguration is `:settings`, and a
-  declarative reconciler diffs live-vs-desired and SPECs only absent names. (ii) A `DIAL` link
+  declarative reconciler diffs live-vs-desired and SPECs only absent names. *(Erratum 2026-08-13,
+  [#1070](https://github.com/avatarsd-llc/libtracer/issues/1070): "reconfiguration is `:settings`"
+  is corrected — see §Erratum. The `PATH_IN_USE` rejection and the reconciler guidance stand; a
+  reconciler that must change a key retires and re-creates.)* (ii) A `DIAL` link
   **retries forever** while refcount > 0 — **no** give-up bound and **no** terminal state (a give-up
   count would be a synthetic limit); presentation thresholds are the consumer's. (iii) The
   remote-owned-subscription-origination surface named in §Scope boundary is a **separate follow-up**
@@ -365,3 +383,61 @@ fails-fast `link-down` and is reaped.
   adversarial verification pass (ADR/spec consistency, code-pinnability, internal coherence, consumer
   fit); the design decisions are the maintainer's. Accepted the same day (solo-maintained spec, window
   waived — the RFC-0009 precedent).
+
+## Erratum (2026-08-13) — connection config is a transport-private creation-time record, not a vertex `:settings` facet; `connect_timeout` may be a derived safety bound ([#1070](https://github.com/avatarsd-llc/libtracer/issues/1070))
+
+**What the text said.** §3's first bullet: the address (`addr`/`port`), `keepalive`, `backoff`
+and `connect_timeout` *"live in `:settings` and are re-configurable"*, and *"B's IP changing is
+a `:settings` edit; every route under the connection is untouched"* — restated in
+§Compatibility ruling (i) as *"reconfiguration is `:settings`"*, and copied into
+[reference/13](../../reference/13-network-formation.md) §Creator endpoint. Separately, §4:
+*"`backoff` and `connect_timeout` are `:settings` config, never hardcoded"*.
+
+**What was wrong.** Three distinct claims, none of which holds:
+
+1. **Residence.** These keys never reach a vertex `:settings` namespace. They travel in the
+   `SPEC`'s `config` SETTINGS and are parsed into `tr::net::conn_settings_t`, whose own
+   declaration states it is *"not part of any vertex's protocol `:settings` surface"* — a
+   device-private facet ([ADR-0021](../../adr/0021-colon-field-plane-is-the-vertex-ioctl.md)
+   §Decision 3) reached through the transport's own config door. The route the text names was
+   not merely unimplemented: the vertex `:settings` core namespace was emptied outright by
+   [RFC-0022](0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.B, so there
+   is no shared per-vertex policy record for these to live in.
+2. **Reconfigurability.** There is no post-creation write door for them. The only accessor,
+   `transport_vertex_t::settings_of`, returns a `const conn_settings_t*`. Changing a peer's
+   address therefore means `NAME`-retire plus `SPEC`-re-create — and because
+   `remove_connection` un-routes and retires the identity vertex, the routes under the
+   connection are **not** untouched, which is the one property the sentence promised.
+3. **Consumption.** `keepalive` has no consumer anywhere in the tree; `backoff` and
+   `connect_timeout` are parsed and dormant pending this RFC's own §4 engine (#492). The
+   [connection-config module page](../../modules/connection-config.md) already documented all
+   three honestly; only the RFC and the reference page over-promised.
+
+**The correction.**
+
+- Connection config is **creation-time, transport-private** config. §3's residence and
+  re-configurability clauses are withdrawn; the *name-not-address* principle and the
+  positional-`role` clause they were attached to are untouched and still operative.
+- §4's "never hardcoded" is **scoped**: it governs the S5 liveness engine's own defaults for
+  creator-endpoint `DIAL` connections. It does not reach a *provided* link (`provide_link`, an
+  embedder-constructed socket), where a platform constraint may impose a ceiling.
+  `connect_timeout` on such a link is a **derived safety bound** — a peer's config may tighten
+  within it but must never raise how long a local task may block. The shipped ESP WS client
+  derives its dial deadline from the task-watchdog window for exactly this reason, and is
+  conforming.
+- A **re-configuration door, if one is ever wanted, is new design** — it belongs to the S5
+  liveness engine work under [#492](https://github.com/avatarsd-llc/libtracer/issues/492), not
+  to this erratum. Until then the honest statement is: set at creation, changed by
+  retire-and-re-create.
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). No
+wire surface moves: no grammar, frame shape, type code or error identity changes, and the
+`config` SETTINGS keys and their parse are exactly as shipped. The corrected clauses are
+*declaring* clauses describing where config lives and whether a door exists — and applying the
+correction changes what no conforming implementation does, because no implementation ever
+offered the withdrawn door. It aligns the text with RFC-0022 §3.B and with the shipped
+`conn_settings_t` contract. Maintainer ruling in
+[#1070](https://github.com/avatarsd-llc/libtracer/issues/1070) (grilled 2026-08-12).
+
+**Text corrected alongside:** [reference/13](../../reference/13-network-formation.md) §Creator
+endpoint — the copied sentence, plus an explicit statement of which keys are consumed today.

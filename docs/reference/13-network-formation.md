@@ -124,12 +124,27 @@ overridable per node), never a library rule — with names like `ws-client`, `ws
   reason to split them.
 - **The path carries a name, never an address.** The created connection is addressed
   `/net/<module>/<name>`; `addr`, `port`, `keepalive`, `backoff` and `connect_timeout`
-  live in `:settings` and are re-configurable. A peer's IP changing is a `:settings`
-  edit; every route under the connection is untouched. Routing that makes
-  `/net/<module>/<name>` addressable is [ADR-0061 — Per-module mount routing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md).
-- **`SPEC` naming an existing name is `PATH_IN_USE`** — reconfiguration goes through
-  `:settings`, never a re-`SPEC`. A retrying orchestrator can treat that rejection as
-  "already exists", so the create is idempotent-safe.
+  are **creation-time config** — they travel in the `SPEC`'s `config` SETTINGS and are
+  parsed into the transport-private `tr::net::conn_settings_t`. They do **not** live in
+  the vertex `:settings` namespace: that core namespace was emptied outright by
+  [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md)
+  §3.B, and `conn_settings_t` is explicitly *not part of any vertex's protocol
+  `:settings` surface* — a device-private facet ([ADR-0021](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0021-colon-field-plane-is-the-vertex-ioctl.md) §Decision 3)
+  reached through the transport's own config door. Nor is there a post-creation
+  reconfiguration door: the only accessor, `transport_vertex_t::settings_of`, hands out
+  a **const** view. So a peer's IP changing is *not* a `:settings` edit — today it means
+  retiring the connection (`NAME`) and re-creating it (`SPEC`), which does tear down the
+  routes under it, because `remove_connection` un-routes and retires the identity vertex.
+  Routing that makes `/net/<module>/<name>` addressable is [ADR-0061 — Per-module mount routing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md).
+- **Of those five keys, only `addr` and `port` are consumed today.** `keepalive` has no
+  consumer anywhere in the tree — it is parsed and nothing reads it — and `backoff` /
+  `connect_timeout` are parsed-but-dormant pending the §4 liveness engine
+  ([#492](https://github.com/avatarsd-llc/libtracer/issues/492)). The per-key record,
+  including which kinds honour `max_frame`, is the
+  [connection-config module page](../modules/connection-config.md).
+- **`SPEC` naming an existing name is `PATH_IN_USE`** — a re-`SPEC` is never a
+  reconfiguration. A retrying orchestrator can treat that rejection as "already exists",
+  so the create is idempotent-safe.
 - **Creation is atomic.** One write yields a fully configured connection vertex; there
   is no live-but-unconfigured window.
 - **Gating reuses the existing access-mask bits** (see [05 — Protocol TLVs](05-protocol-tlvs.md)):
