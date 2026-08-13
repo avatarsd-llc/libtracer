@@ -626,6 +626,102 @@ void test_subscribe_never_misses_a_racing_write() {
     if (missed != 0) std::printf("    (%d of %d rounds lost the racing write)\n", missed, kRounds);
 }
 
+/**
+ * @brief #1140: the DEFERRED half of the same gate — a skipped `mark_pending` must not open
+ *        a hole in ADR-0049's latch either.
+ *
+ * `graph_t::mark_pending` is the assign path's counterpart to #635's `fan_out` gate, and it
+ * is a SKIP, not a deferral: a vertex that misses its mark enters no sweep set, so the next
+ * covering `propagate` delivers it nowhere and only a LATER write can re-mark it. The two
+ * legs a value can reach a brand-new subscriber by are therefore the latch taken inside the
+ * edge verb (the assign got there first) and the ancestor sweep (the subscribe did). The
+ * racing assign must arrive by ONE of them, always — never neither.
+ *
+ * **What this pins, and what it does not.** Two independent things make the gate sound, and
+ * this guard covers exactly one of them:
+ *
+ * - **Program order — COVERED.** The count must rise BEFORE the slot the latch is taken
+ *   from. Move the `note_subscriber_added` bump in `graph_t::admit_subscriber` back to
+ *   trailing `add_edge` and this fails: an assign landing in the gap stores its value, reads
+ *   a zero count, skips the mark, and the latch one line earlier already holds the OLD one —
+ *   so the sweep below finds nothing and the new value is delivered nowhere.
+ * - **Memory order — NOT COVERED HERE, by construction.** That the publisher's count read is
+ *   `own_subs_ordered()` (seq_cst) rather than `own_subs()` (relaxed) cannot be observed on
+ *   x86-64: the seq_cst LKV store lowers to a locked `xchg`, a full hardware barrier, so a
+ *   later RELAXED read of zero still forces the subscriber's latch to see the new value.
+ *   Swap the ordered read for the relaxed one and this test stays green on this host. The
+ *   coverage for that half is the `ubuntu-24.04-arm` CI leg (core-ci `build-test-arm64`),
+ *   where the store does not order the later load and the excluded interleaving is
+ *   architecturally reachable — the same reason it is reachable on the shipped rv32 targets.
+ *   Say which half a guard covers; #635's own guard did not, and that is how the deferred
+ *   leg kept a relaxed read for as long as it did.
+ *
+ * Shaped like `test_subscribe_never_misses_a_racing_write` and for the same reason: the
+ * window is tens of nanoseconds, so both threads stay HOT and hand off through one atomic.
+ * Differences are `assign` instead of `write` (the STATE half — it marks, it never fans out),
+ * one shared parent whose `propagate` is the sweep that would deliver the mark, and the check
+ * running AFTER that sweep.
+ */
+void test_assign_never_misses_a_racing_subscribe() {
+    std::printf("#1140: an assign racing subscribe arrives by the latch or the sweep:\n");
+    constexpr int kRounds = 20000;
+    constexpr int kOffsets = 64;  // interleaving positions the assign's arrival is swept over
+
+    graph_t g;
+    // One shared parent per round set: `propagate(parent)` is the covering sweep that drains
+    // the pending marks its strict descendants took.
+    const path_t parent_path("/mrace");
+    const tr::graph::vertex_handle_t parent = g.register_vertex(parent_path, role_t::STORED_VALUE);
+    std::vector<tr::graph::vertex_handle_t> verts;
+    std::vector<path_t> paths;
+    verts.reserve(kRounds);
+    paths.reserve(kRounds);
+    for (int i = 0; i < kRounds; ++i) {
+        // A FRESH vertex per round: the gate only fires from a zero count, so a reused one
+        // would test nothing after the first subscribe. IF_NEWER is the default mode, which
+        // is the one mark_pending marks for.
+        const std::string name = "/mrace/v" + std::to_string(i);
+        paths.emplace_back(name);
+        verts.push_back(g.register_vertex(paths.back(), role_t::STORED_VALUE));
+        (void)g.write(verts.back(), make_value({0x01}));  // the OLD value the latch may hold
+    }
+
+    std::atomic<unsigned> seen{0};
+    std::atomic<int> gate{-1};  // the round the assigner may start
+    std::atomic<int> done{-1};  // the round the assigner has finished
+    auto on_value = [&seen](const tr::view::rope_t& v) {
+        seen.fetch_or(1U << std::to_integer<unsigned>(v.only().bytes()[0]),
+                      std::memory_order_relaxed);
+    };
+
+    std::thread w([&] {
+        for (int i = 0; i < kRounds; ++i) {
+            while (gate.load(std::memory_order_acquire) != i) { /* hot handoff */
+            }
+            std::atomic<int> step{0};  // a REAL RMW — a signal fence is compiler-only, and
+            for (int k = 0; k < i % kOffsets; ++k)  // an empty loop optimizes to nothing
+                step.fetch_add(1, std::memory_order_relaxed);
+            (void)g.assign(verts[i], make_value({0x02}));
+            done.store(i, std::memory_order_release);
+        }
+    });
+
+    int missed = 0;
+    for (int i = 0; i < kRounds; ++i) {
+        seen.store(0, std::memory_order_relaxed);
+        gate.store(i, std::memory_order_release);
+        (void)g.subscribe(paths[i], on_value, kDurableSub);
+        while (done.load(std::memory_order_acquire) != i) { /* both legs have run */
+        }
+        g.propagate(parent);  // the covering sweep: it drains the mark, or there is none
+        if ((seen.load(std::memory_order_relaxed) & (1U << 2)) == 0) ++missed;
+    }
+    w.join();
+
+    check(missed == 0, "no assign racing a subscribe is lost by mark_pending's skip gate");
+    if (missed != 0) std::printf("    (%d of %d rounds lost the racing assign)\n", missed, kRounds);
+}
+
 void test_delivery_terminates_at_target() {
     std::printf("delivery terminates at the target (ADR-0051): no chained relay, no cycle:\n");
     graph_t g;
@@ -908,6 +1004,7 @@ int main() {
     test_subscribers_addressed_whole();
     test_admission_door_uniformity();
     test_subscribe_never_misses_a_racing_write();
+    test_assign_never_misses_a_racing_subscribe();
     test_schema_read();
     test_delivery_terminates_at_target();
     test_for_each_vertex();

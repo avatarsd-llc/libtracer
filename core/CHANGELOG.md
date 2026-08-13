@@ -193,6 +193,27 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   no counter, no sink, and (unchanged, by design) no wire signal, since `HANDLE_NACK` means
   "unknown label" and answering a denial with one would prompt an endless re-advertise.
 
+### Fixed
+
+- **`assign` no longer loses a delivery to a subscribe that races it on a weakly-ordered
+  target ([#1140](https://github.com/avatarsd-llc/libtracer/issues/1140)).** `mark_pending`
+  — the deferred half of the write path, and a **skip** gate: a vertex that misses its mark
+  enters no sweep set, so the next covering `propagate` delivers it nowhere and only a later
+  write can re-mark it — read the vertex's own subscriber count through the **relaxed**
+  `vertex_t::own_subs()`. It now reads `vertex_t::own_subs_ordered()`, the `seq_cst` half of
+  the Dekker pair `admit_subscriber`'s subscriber-count bump already holds up, which is the
+  same read #635 gave the eager half (`fan_out`). Without it the two linearizations
+  contradict each other on **the same vertex**: the publisher's skip says
+  write-before-subscribe while ADR-0049's durability latch hands the new subscriber the
+  **pre-write** value, and the assigned value reaches nobody at all. Reachable on
+  **aarch64 and rv32** (a shipped target — esp32c3/c6); latent on x86-64, where the `seq_cst`
+  LKV store lowers to a locked `xchg` and orders the later relaxed load in hardware. The
+  ancestor half (`listeners_above`) stays relaxed by the #854 ruling. Public surface: only
+  `vertex_t::own_subs_ordered`'s contract, which now names both skip sites. A new
+  `graph_test` guard covers the **program-order** half (the count rising before the slot);
+  the memory-order half is covered by a new weakly-ordered `ubuntu-24.04-arm` CI leg, since
+  no x86-64 test can observe it.
+
 ### Removed
 
 - **`vertex_t::try_edge_view_of`** — private, zero callers since the published-edge copy loop

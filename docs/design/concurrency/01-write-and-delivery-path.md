@@ -28,9 +28,9 @@ lock each stage takes, where the buffers come from, and what the delivery legs c
 | deliver | `deliver_vertex` for a leaf value, `deliver_current` for a `STREAM` (`graph.cpp:1287-1307`) |
 
 The handle overload is the whole of `write(vertex_handle_t, rope_t, caller)`
-(`graph.cpp:1637-1639`) — a call straight into `write_impl`. A **path**-addressed write resolves
+(`graph.cpp:1659-1661`) — a call straight into `write_impl`. A **path**-addressed write resolves
 first, and `find_ptr` takes `map_mutex_` in shared mode (`graph.cpp:806-807`), so the path overload
-(`graph.cpp:2908`) pays one shared map hold that the handle overload does not.
+(`graph.cpp:2930`) pays one shared map hold that the handle overload does not.
 
 Two allocation-shaped details on the store leg. A `HANDLER`-role write clones the rope before
 storing, because the user handler consumes the value and there is no published pointer to
@@ -53,23 +53,33 @@ lock at all** (#635): it copies the vertex's PUBLISHED, immutable-after-publish 
 every vertex that merely hashed to the same stripe — ×16.6 at twenty-four threads
 ([ADR-0075](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0075-a-vertexs-edges-are-published-and-read-under-an-edge-pin.md)). It
 still serializes writer-vs-writer on the control plane, where a mutation builds the new array
-and swaps it in (`vertex.hpp:2788`); the displaced array is scanned and freed on the mutator's
+and swaps it in (`vertex.hpp:2796`); the displaced array is scanned and freed on the mutator's
 own thread, outside the lock, once no participant announces it (`vertex.hpp:1020`).
 
 It reaches that call only when something subscribes here. `fan_out` opens on
 `own_subs_ordered() == 0 ⇒ return` (#635), so an unobserved write — and every placeholder
 ancestor a `bubble_up` walks past — never touches the stripe at all. That gate is why the
-count is read `seq_cst` in this one place and relaxed everywhere else: it decides whether the
-vertex's own fan-out happens, so it has to be ordered against a subscribe taking ADR-0049's
-latch, or a write racing the subscribe reaches neither leg. It is not the only read that decides
-a delivery — `deliver_vertex`'s ancestor gate reads the *relaxed* `listeners_above()`, and
-`mark_pending` gates a deferred delivery on relaxed reads of both counters. The ancestor gate
-needs no ordered twin
+count is read `seq_cst` where a *delivery* is skipped and relaxed everywhere else: it decides
+whether the vertex's own fan-out happens, so it has to be ordered against a subscribe taking
+ADR-0049's latch, or a write racing the subscribe reaches neither leg. `mark_pending` is the
+**deferred** half of the same decision and reads the same ordered count
+([#1140](https://github.com/avatarsd-llc/libtracer/issues/1140)): its skip omits the sweep
+mark, so the vertex enters no sweep set and only a later write can re-mark it — omitted work,
+not deferred work, and the same lost delivery a skipped fan-out would be. Both are the near
+axis, the vertex's OWN count, where the publisher writes the very LKV the racing subscriber's
+latch reads.
+
+The **ancestor** gate is the other axis and stays relaxed: `deliver_vertex` and
+`mark_pending` both read `listeners_above()` relaxed, and it needs no ordered twin
 ([#854](https://github.com/avatarsd-llc/libtracer/issues/854), measured and REFUTED): the latch a
 subtree subscribe takes snapshots the subscribed *ancestor's* own LKV, never a descendant's, so a
 stale zero at that gate is indistinguishable from the write linearizing before the subscribe.
-(`mark_pending`'s near-axis reads are
-[#1140](https://github.com/avatarsd-llc/libtracer/issues/1140)'s.)
+
+Neither near-axis pairing can be exercised by any x86-64 test: a `seq_cst` store there lowers
+to a locked `xchg`, so even a *relaxed* later load of zero is ordered in hardware and the
+anomaly cannot appear. The coverage is the weakly-ordered `ubuntu-24.04-arm` CI leg
+(core-ci `build-test-arm64`), which is the same memory model the shipped rv32 targets have;
+the host guards in `graph_test` pin the *program-order* half only, and say so.
 
 The two-buffer split is the point. `fan_out` chooses which pair of buffers to hand in from the
 lock-free `own_subs()` count:
@@ -87,7 +97,7 @@ thread-local vector's capacity and so allocates nothing either.
 
 `own_subs()` is read without the lock, so the width it reports can be stale.
 That costs nothing but a re-read: **`snapshot_edges` re-checks the width against the published
-array** (`graph.cpp:1137-1138`, `vertex.hpp:2851`), so a subscriber added between the count and
+array** (`graph.cpp:1137-1138`, `vertex.hpp:2859`), so a subscriber added between the count and
 the copy costs at most one fallback allocation on the small path and never a wrong answer. Re-entrancy is
 handled by a `tls_busy` flag: a subscriber callback that re-publishes takes the local-buffer
 path, so the outer fan-out's thread-local buffer is never aliased, and the flag resets on scope
@@ -95,7 +105,7 @@ exit (`graph.cpp:1144-1168`).
 
 Both allocations inside the snapshot are nothrow. An unreservable overflow vector degrades the
 snapshot to the first `kInlineFanout` views and drops the rest of that delivery; an edge whose
-owning copies cannot be cloned is skipped, dropping that one delivery (`vertex.hpp:2857-2872`).
+owning copies cannot be cloned is skipped, dropping that one delivery (`vertex.hpp:2865-2880`).
 Neither can abort. A thread that cannot claim a pin cell — more concurrent publishers than
 `kEdgePinSlots` — copies the current array under the stripe mutex instead, which is the
 pre-#635 path for those threads and nobody else; correctness never depends on the constant.
@@ -234,8 +244,8 @@ struct delivery_drops_t {
 | `out_of_memory` | a `COMPACT` terminus could not take the payload view or reserve its rope | `fwd_router.cpp:1759`, `:1764`, `:1881` |
 | `out_of_memory` | the nothrow delivery clone could not be allocated | `graph.cpp:1065-1068` |
 | `out_of_memory` | a HANDLER write's notify clone failed — the WHOLE fan-out is shed, one count per subscriber | `graph.cpp:1283` |
-| `out_of_memory` | an edge's owning copies (link NAME / stored caller) could not be allocated, so the snapshot skipped it | `vertex.hpp:2868` |
-| `fan_out_truncated` | the wide-fan-out overflow buffer could not be reserved, so every edge past the inline prefix was abandoned | `vertex.hpp:2863` |
+| `out_of_memory` | an edge's owning copies (link NAME / stored caller) could not be allocated, so the snapshot skipped it | `vertex.hpp:2876` |
+| `fan_out_truncated` | the wide-fan-out overflow buffer could not be reserved, so every edge past the inline prefix was abandoned | `vertex.hpp:2871` |
 
 The last three were **uncounted until #896**, and the handler one is why that mattered: it sheds
 every subscriber of the vertex and still returns success, so `delivery_drops()` — the only thing
