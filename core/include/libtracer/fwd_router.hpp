@@ -563,6 +563,23 @@ class fwd_router_t {
      */
     void link_down(std::string_view link_name);
 
+    /**
+     * @brief The node-scoped identity string of the session @p peer holds on bus mount
+     *        @p mount — the key `graph_t::register_session_anchor` allocates against (#1223).
+     *
+     * Deliberately NOT a spellable address. It is `:<mount>/<peer>`, and both `:` and `/` are
+     * among the seven characters `path::valid_segment` rejects, so the anchor's rendered key
+     * is bytes no registered path in this graph can produce — the property that keeps an
+     * anchor out of every listing, every descent and every sweep-set collision. Qualified by
+     * the mount because two listeners each name their first session `p0`, and those are two
+     * sessions.
+     *
+     * Exposed because it is what a test (and a later step's mint) needs in order to name the
+     * anchor the router created; it is a pure function of its arguments and holds no state.
+     */
+    [[nodiscard]] static std::string session_anchor_id(std::string_view mount,
+                                                       std::string_view peer);
+
     /** @brief The route-handle label store (test introspection — assert statelessness). */
     [[nodiscard]] const route_handle_t& handles() const noexcept { return handles_; }
 
@@ -906,6 +923,30 @@ class fwd_router_t {
      * use `ctx_by_name`, which walks the published chain and skips the dead.
      */
     child_rx_ctx_t* ctl_ctx_by_name(std::string_view name);
+    /**
+     * @brief A bus mount admitted a session named @p peer — give it an identity anchor
+     *        (#1223 step 2, ADR-0044 §Amendment 2026-08-13).
+     *
+     * Registers (or REVIVES, at the same slot) the anchor vertex for `:<mount>/<peer>`. A
+     * `PATH_IN_USE` answer means the anchor is already live — a duplicated arrival for a
+     * session that never left — and is dropped: the existing anchor stays, generation
+     * untouched, which is the only outcome that keeps the stamp honest.
+     *
+     * Fired ONLY by an accepting listener (`slot_server_t` and the ESP httpd link), never by
+     * an announce-census bus, so CAN peers keep ADR-0044 §Decision 1 in full force and grow
+     * no vertices at all. Runs on the transport's poll thread with no transport lock held.
+     */
+    void bus_peer_up(const child_rx_ctx_t& ctx, std::string_view peer);
+    /**
+     * @brief A bus mount's session @p peer departed — retire its anchor, THEN evict.
+     *
+     * Retirement first, on purpose: it is the step that bumps the saturating generation, and
+     * it is the one thing that must have happened before the slot can be handed to a
+     * successor. Eviction (@ref link_down) is unchanged and still keyed by the peer NAME.
+     * An anchor that was never created (an announce-census peer, or a session that departed
+     * before its arrival was wired) simply resolves to nothing and the eviction runs alone.
+     */
+    void bus_peer_down(const child_rx_ctx_t& ctx, std::string_view peer);
     /**
      * @brief The receiver ctx @p name is to be registered through — reuse-or-append (#884).
      *

@@ -364,6 +364,10 @@ void transport_ws_server::on_readable(session_base_t& base, const std::byte* dat
         // store below this point and the same probe reads an empty socket — that is the
         // regression this hook exists to redden (`ws_transport_test`, the handshake race).
         if (detail::ws_peer_published_hook != nullptr) detail::ws_peer_published_hook();
+        // The WS slot's OPEN transition is here, not at accept — so this is where its arrival
+        // seam fires (#1223). Before `drain_frames`, so a session that departs inside the very
+        // first drain still sees its arrival announced ahead of its departure.
+        publish_peer_up(s);
         // Bytes pipelined past the header are the start of the frame stream —
         // the old one-peer server dropped them; carry them over.
         const auto* rest = reinterpret_cast<const std::byte*>(s.hs_buf.data()) + hdr_end + 4;

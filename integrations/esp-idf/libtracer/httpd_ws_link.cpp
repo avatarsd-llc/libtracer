@@ -1767,6 +1767,14 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
         // ...and so is the stack sample (#955). This is now the ONLY claim edge — the
         // opening-GET one this used to share with was removed, so nothing samples twice.
         check_httpd_stack();
+        // ...and so is the arrival seam (#1223). Here, not inside the peers_m_ hold above:
+        // the notifier re-enters the routing plane and takes graph locks, which is the same
+        // precondition notify_departed carries. Announced even while `auth_pending`: an
+        // anchor is invisible to enumeration, resolution and fan-out (it is not an address),
+        // so it grants a pending session nothing the auth narrowing withholds — and a
+        // session closed at the auth deadline is torn down through the ordinary departure
+        // seam, which retires it.
+        notify_arrived(peer);
     }
 
     // Reassembly — asm_buf is httpd-task-only, so no lock. The SPA sends one whole TLV
@@ -2196,6 +2204,14 @@ void httpd_ws_link_t::notify_departed(std::string_view peer) {
     } else if (!any_open_session()) {
         notify_down();
     }
+}
+
+void httpd_ws_link_t::notify_arrived(std::string_view peer) {
+    // Peer-named only, the same fork notify_departed takes and for the same reason: a flat
+    // link has ONE routing identity for every tab it carries, so there is no per-session
+    // identity to anchor. There is no flat-mode counterpart to notify_down() here — link-up
+    // is the transport's own state, not a per-session event.
+    if (peer_named_) notify_peer_up(peer);
 }
 
 bool httpd_ws_link_t::any_open_session() const {

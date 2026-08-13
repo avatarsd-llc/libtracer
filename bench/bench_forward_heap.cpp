@@ -464,6 +464,54 @@ int main() {
             std::printf("FAIL: vertex-diet fixture did not register/write — not a heap result\n");
             return 2;
         }
+
+        // --- per-SESSION-ANCHOR steady-heap probe (#1223, REPORT-ONLY) ------------
+        // ADR-0044's 2026-08-13 amendment rests on a number — ~0.5 KB at 4 peers — and that
+        // number is only honest if a session identity anchor costs what a bare vertex costs.
+        // It is the SAME allocation shape (one vertex_t + its NAME record + one slot-deque
+        // pointer, no handlers, no ext block, no value), so the line printed here should read
+        // like the `vertex` line above; a materially larger one would undercut the amendment
+        // and belongs in the PR that caused it.
+        //
+        // CHURN is measured alongside, because the whole claim is that reconnects are free:
+        // the second pass retires and revives every anchor in place and must allocate NOTHING.
+        tr::graph::graph_t anchor_graph;
+        bool anchor_ok = true;
+        probe::reset();
+        probe::arm();
+        for (std::size_t i = 0; i < kDietN; ++i) {
+            char ab[32];
+            std::snprintf(ab, sizeof ab, ":net/ws/srv/p%04zu", i);
+            anchor_ok = anchor_ok && anchor_graph.register_session_anchor(ab).has_value();
+        }
+        const probe::counts_t anc = probe::snapshot();
+        for (std::size_t i = 0; i < kDietN; ++i) {
+            char ab[32];
+            std::snprintf(ab, sizeof ab, ":net/ws/srv/p%04zu", i);
+            if (const auto h = anchor_graph.find_session_anchor(ab)) {
+                anchor_ok = anchor_ok && anchor_graph.retire(*h).has_value();
+                anchor_ok = anchor_ok && anchor_graph.register_session_anchor(ab).has_value();
+            } else {
+                anchor_ok = false;
+            }
+        }
+        const probe::counts_t chn = probe::snapshot();
+        probe::disarm();
+        std::printf(
+            "RESULT zeroheap session_anchor allocs=%zu frees=%zu bytes=%zu n=%zu gross_bytes=%zu "
+            "ok=%d (report-only — live usable-size bytes per accepted-session anchor, #1223)\n",
+            anc.allocs / kDietN, anc.frees / kDietN, per(anc.live_bytes), kDietN,
+            anc.bytes / kDietN, anchor_ok ? 1 : 0);
+        std::printf(
+            "RESULT zeroheap session_anchor_churn allocs=%zu frees=%zu bytes=%zu n=%zu "
+            "gross_bytes=%zu ok=%d (report-only — a retire+revive of the SAME slot, #1223)\n",
+            (chn.allocs - anc.allocs) / kDietN, (chn.frees - anc.frees) / kDietN,
+            per(chn.live_bytes - anc.live_bytes), kDietN, (chn.bytes - anc.bytes) / kDietN,
+            anchor_ok ? 1 : 0);
+        if (!anchor_ok) {
+            std::printf("FAIL: session-anchor fixture did not register/revive — not a result\n");
+            return 2;
+        }
     }
 
     // --- per-vertex APP-FIELD-TABLE steady-heap probe (#388, REPORT-ONLY) ------

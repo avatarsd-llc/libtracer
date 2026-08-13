@@ -923,6 +923,18 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      */
     void notify_departed(std::string_view peer);
     /**
+     * @brief Announce a newly claimed slot as a live, named session (#1223 step 2).
+     *
+     * The arrival twin of @ref notify_departed, and the ESP-side parity for
+     * `slot_server_t::publish_peer_up`: this link has the same positional-slot plane
+     * (@ref slot_name, first-free reuse), so it has the same slot-recycling identity problem
+     * and needs the same anchor. Fired at the CLAIM edge — the lazy first-frame claim, which
+     * is this link's "the session is now usable" transition — and, like its twin, with
+     * neither `peers_m_` nor the gate's mutex held, because the notifier re-enters the graph.
+     * FLAT mode announces nothing: it has one routing identity for every tab it carries.
+     */
+    void notify_arrived(std::string_view peer);
+    /**
      * @brief True while ANY slot is still open — the flat mode's "is the link still up"
      *        question (#889).
      *

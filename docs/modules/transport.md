@@ -50,7 +50,7 @@ A transport that can hand up *owning* frames implements the rope-receiver seam
 view delivery](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md),
 generalized to ropes by [ADR-0053 — lazy rope-backed decode, view partial-path
 routing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0053-lazy-rope-backed-decode-view-partial-path-routing.md)):
-it overrides `delivers_ropes()` (`core/include/libtracer/transport.hpp:477`) and
+it overrides `delivers_ropes()` (`core/include/libtracer/transport.hpp:533`) and
 delivers each inbound frame as a `rope_t` of refcounted links over segments drawn
 from a host-injected `mem_backend_t`. A contiguous frame is the single-link case; a
 scattered one — a CAN reassembly group, a fragmented WebSocket message — crosses the
@@ -61,8 +61,8 @@ the callback needs this tier.
 There is deliberately no adapter that wraps a borrowed span into a rope; such a rope's
 refcounts would lie about lifetime. `fwd_router_t::add_child` (`core/src/fwd_router.cpp:646`)
 therefore branches on the link's declared capability and installs exactly one sink —
-the rope form for an owning link, the span form otherwise (`fwd_router.cpp:768,690`, and
-`fwd_router.cpp:722,729` for the peer-named bus equivalent).
+the rope form for an owning link, the span form otherwise (`fwd_router.cpp:780,690`, and
+`fwd_router.cpp:734,741` for the peer-named bus equivalent).
 
 Every socket transport in the tree declares the owning tier: UDP
 (`transport_udp.hpp:111`), TCP client and server (`transport_tcp.hpp:207,372`),
@@ -110,7 +110,7 @@ Departure follows the same split. A **peer-named** server evicts exactly the dep
 (`notify_peer_down(name)`); a **flat** server has one routing identity for every peer it
 carries — the registered child NAME — so its only seam is the whole link
 (`transport_t::notify_down`), and it therefore waits until the **last** open session departs
-(`posix_endpoint.cpp:527`). Firing it on a mid-life close would evict the surviving peers'
+(`posix_endpoint.cpp:546`). Firing it on a mid-life close would evict the surviving peers'
 edges along with the departed one's.
 
 ## QUIC and WebTransport
@@ -287,7 +287,7 @@ flowchart LR
   and a callable destroyed early dangles exactly like a stale `ctx`.
 - **Overriding `send(iov)` is not optional for a scatter-gather wire.** The base
   implementation gathers into a temporary buffer and, when that allocation fails,
-  **drops the frame** rather than aborting (`transport.hpp:360`). A transport with a
+  **drops the frame** rather than aborting (`transport.hpp:416`). A transport with a
   native `sendmsg`/`writev` that does not override it silently pays a copy per
   forward hop and inherits a drop path it did not intend.
 - **The link-down notifier is a routing seam, not a log hook.** It re-enters the

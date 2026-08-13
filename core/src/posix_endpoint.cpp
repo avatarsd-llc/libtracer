@@ -456,6 +456,25 @@ void slot_server_t::accept_peer() {
         on_slot_publishing();
         slot->open.store(opens_now, std::memory_order_relaxed);
     }
+    // Arrival seam (#1223), fired LAST and with no transport lock held — the mirror image of
+    // teardown_slot's departure seam, in every respect including the `open` condition: only a
+    // session that reached `open` can flow frames, so only one gets an identity. A WS slot is
+    // NOT open here (it opens at its 101), and announces itself from that site instead.
+    if (opens_now) publish_peer_up(*slot);
+}
+
+void slot_server_t::publish_peer_up(const session_base_t& s) {
+    if (!peer_named_) return;
+    std::string name;
+    {
+        // The name is peers_m_-guarded state (enumerate_peers / peer_link read it off this
+        // thread), so COPY it out under the lock and notify outside: the notifier re-enters
+        // the routing plane, and holding a transport lock across that inverts the documented
+        // order (`transport_vertex_t::ctl_m_` → router → `graph_t::map_mutex_`).
+        const std::lock_guard lock(peers_m_);
+        name = s.name;
+    }
+    if (!name.empty()) notify_peer_up(name);
 }
 
 void slot_server_t::service_peer(session_base_t& s) {

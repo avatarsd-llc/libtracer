@@ -607,6 +607,22 @@ class slot_server_t : public transport_t, public bus_link_t, protected stream_en
     /** @} */
 
     /**
+     * @brief Announce @p s as a live, named session — the arrival half of the seam whose
+     *        departure half is `teardown_slot`'s `notify_peer_down` (#1223 step 2).
+     *
+     * Called from the POLL THREAD at the moment the slot becomes usable to senders, which is
+     * kind-specific and therefore not a single site: a raw stream peer is live the instant it
+     * is accepted, a WS peer only once its `101` is on the wire — the same two transitions
+     * `open` itself is stored at, so arrival and departure bracket exactly the same interval.
+     * A FLAT (not @ref peer_named) server announces nothing: it has one routing identity for
+     * every peer it carries, so there is no per-session identity to announce.
+     *
+     * Fired with NO transport lock held, per the bus facet's arrival-notifier contract — the
+     * notifier re-enters the routing plane and takes graph locks.
+     */
+    void publish_peer_up(const session_base_t& s);
+
+    /**
      * @brief Guards the slot vector and every slot's NAME — the cross-thread reads
      *        (@ref enumerate_peers / @ref peer_link) against the poll thread's
      *        accept/teardown. See the class-level threading rule; lock order where

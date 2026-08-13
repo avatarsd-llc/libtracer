@@ -713,9 +713,21 @@ bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_sou
         // bus link's own name.
         child_rx_ctx_t& bctx = acquire_ctx(name, rx);
         publish_ctx(bctx);
+        // The session-identity pair (#1223 step 2). Arrival is a NEW seam and only an
+        // ACCEPTING listener fires it — `set_peer_up_notifier` is what turns ADR-0044's
+        // amended scope into a capability rather than a kind check here: an announce-census
+        // bus never calls it, so a CAN peer still grows no vertex. Departure keeps doing
+        // exactly what it did (`link_down`), with the anchor's retire in front of it.
+        bus->set_peer_up_notifier(
+            [](void* c, std::string_view peer) {
+                auto* const cc = static_cast<child_rx_ctx_t*>(c);
+                cc->self->bus_peer_up(*cc, peer);
+            },
+            &bctx);
         bus->set_peer_down_notifier(
             [](void* c, std::string_view peer) {
-                static_cast<child_rx_ctx_t*>(c)->self->link_down(peer);
+                auto* const cc = static_cast<child_rx_ctx_t*>(c);
+                cc->self->bus_peer_down(*cc, peer);
             },
             &bctx);
         if (bus->delivers_ropes()) {
@@ -843,6 +855,40 @@ void fwd_router_t::clear_link(std::string_view link_name) { handles_.clear_link(
 void fwd_router_t::link_down(std::string_view link_name) {
     graph_.evict_link_edges(link_name);
     clear_link(link_name);
+}
+
+std::string fwd_router_t::session_anchor_id(std::string_view mount, std::string_view peer) {
+    std::string id;
+    id.reserve(mount.size() + peer.size() + 2);
+    id += ':';
+    id += mount;
+    id += '/';
+    id += peer;
+    return id;
+}
+
+void fwd_router_t::bus_peer_up(const child_rx_ctx_t& ctx, std::string_view peer) {
+    // A tombstoned ctx names no live child (#884), so a late arrival from a transport whose
+    // mount was already removed anchors nothing — the same skip every name-keyed consumer
+    // makes. Read `retired` the way the frame paths do.
+    if (ctx.retired.load(std::memory_order_acquire)) return;
+    // PATH_IN_USE (the session is already anchored) is the only error this can answer, and
+    // the right response to it is to keep the anchor that exists. Discarded by value.
+    (void)graph_.register_session_anchor(session_anchor_id(ctx.name, peer));
+}
+
+void fwd_router_t::bus_peer_down(const child_rx_ctx_t& ctx, std::string_view peer) {
+    // Retire BEFORE the eviction. Retirement is what bumps the saturating generation
+    // (RFC-0024 §4.4 rule 3), and the slot this session sat in can be handed to the next
+    // dialer the moment the poll thread returns from here — so the stamp has to have moved
+    // by then, or the successor revives at a generation an element minted against the DEAD
+    // session still matches. `find_session_anchor` answers nullopt for an announce-census
+    // peer (which was never anchored) and for a double departure, both of which then take
+    // the unchanged eviction-only path.
+    if (const std::optional<graph::vertex_handle_t> anchor =
+            graph_.find_session_anchor(session_anchor_id(ctx.name, peer)))
+        (void)graph_.retire(*anchor);
+    link_down(peer);
 }
 
 std::uint16_t fwd_router_t::advertise(std::string_view link_name,

@@ -265,7 +265,7 @@ serve the page that instruction points at. The contract, stated here, is three o
 | read | `value_ptr_t load() const` | Returns an **owning** handle. |
 
 Owning is not negotiable. The composed branch read `graph_t::read_subtree_folded`
-(`core/include/libtracer/graph.hpp:980`) stashes one LKV per node into a vector that outlives
+(`core/include/libtracer/graph.hpp:1031`) stashes one LKV per node into a vector that outlives
 the map lock and spans three passes, so **N values are held simultaneously**. A reclamation
 scheme that can protect only one value per reader at a time — hazard pointers, as classically
 stated — therefore cannot hand back a pinned pointer; it must promote the pin to a counted
