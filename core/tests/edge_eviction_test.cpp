@@ -276,9 +276,43 @@ class fake_bus_t : public transport_t, public bus_link_t {
     }
     /** @brief Simulate the bus observing @p peer_name's session dead. */
     void peer_die(std::string_view peer_name) { notify_peer_down(peer_name); }
+    /** @brief Simulate the session FULLY torn down: the endpoint gone (so `peer_link`
+     *         answers null, the RFC-0020 reject precondition), then the notifier. */
+    void peer_kill(std::string_view peer_name) {
+        peers_.erase(std::string(peer_name));
+        notify_peer_down(peer_name);
+    }
 
    private:
     std::map<std::string, std::unique_ptr<peer_ep_t>> peers_; /**< @brief name → endpoint. */
+};
+
+/**
+ * @brief One half of an in-memory point-to-point link PAIR: `send()` delivers synchronously
+ *        into the twin's router-installed receiver, so two `fwd_router_t` nodes exchange
+ *        real frames on one call stack — the #1223 two-node harness shape.
+ */
+class pipe_link_t : public transport_t {
+   public:
+    /** @brief Wire this half to its twin (call on both halves, crosswise). */
+    void set_peer(pipe_link_t& p) { peer_ = &p; }
+    /** @brief Count and forward one outbound frame into the twin node's ingress. */
+    void send(std::span<const std::byte> frame) override {
+        ++sent_;
+        log_.emplace_back(frame.begin(), frame.end());
+        if (peer_ != nullptr) peer_->inject(frame);
+    }
+    /** @brief The recorded outbound frames (test oracle). */
+    [[nodiscard]] const std::vector<std::vector<std::byte>>& log() const { return log_; }
+    /** @brief Poke one inbound frame into the router-installed receiver. */
+    void inject(std::span<const std::byte> frame) { rx_.deliver_borrowed(frame); }
+    /** @brief The number of frames this half has sent. */
+    [[nodiscard]] std::size_t count() const { return sent_; }
+
+   private:
+    pipe_link_t* peer_ = nullptr; /**< @brief The twin half, registered on the other node. */
+    std::size_t sent_ = 0;        /**< @brief Outbound frame count (single-thread harness). */
+    std::vector<std::vector<std::byte>> log_; /**< @brief Recorded outbound frames. */
 };
 
 // ---------------------------------------------------------------------------
@@ -757,6 +791,109 @@ void test_local_unsubscribe() {
     check(again == 1 && local == 0, "the new subscriber delivers; the old one stays silent");
 }
 
+/**
+ * @brief The `FWD{REPLY, kind=ERROR, STATUS{ERROR{code}}}` refusal frame `reject_bus_name_hop`
+ *        emits, hand-built so the test can vary the CODE — the reclaim's discriminator.
+ */
+std::vector<std::byte> refusal_frame(const std::vector<std::byte>& refused_route,
+                                     std::uint16_t code) {
+    std::vector<std::byte> code_v;
+    const std::byte c[2] = {static_cast<std::byte>(code & 0xFFU),
+                            static_cast<std::byte>(code >> 8)};
+    tr::wire::emit_tlv(code_v, type_t::VALUE, opt_t{}, std::span<const std::byte>(c, 2));
+    std::vector<std::byte> err;
+    tr::wire::emit_tlv(err, type_t::ERROR, opt_t{.pl = true}, code_v);
+    std::vector<std::byte> status;
+    tr::wire::emit_tlv(status, type_t::STATUS, opt_t{.pl = true}, err);
+    std::vector<std::byte> payload = b_value_u8(1);  // kind VALUE u8 = ERROR
+    append(payload, status);
+    return b_fwd(fwd_op_t::REPLY, b_path({}), refused_route, {}, payload);
+}
+
+/**
+ * @brief #1223 step 5 — a delivery refused `tr::path::invalid` (RFC-0020) reclaims the ONE
+ *        edge that stored the refused route, with zero new wire bytes and no link bounce.
+ *
+ * Two nodes on one call stack. A hosts client sessions on a bus mount; B is the producer one
+ * hop away (A names B "b", B names A "a"). Session `p0` subscribes THROUGH A to B's
+ * `/sensor`, so B holds a remote edge keyed by the arrival link `"a"` whose stored return
+ * route ends at `p0` — the #1223 leak shape: `p0`'s death is visible only to A, and B's
+ * `link_down("a")` never fires because the A<->B link stays healthy.
+ *
+ * The reclaim closes the loop on frames that ALREADY ship: A's RFC-0020 bus-residual reject
+ * echoes the refused route back as the reply `src` ("so it can correlate"), and B now
+ * correlates. Assertions:
+ *   - positive control FIRST (the #1223 refutation rule): live sessions receive;
+ *   - one bounced publish after `p0` dies reclaims exactly `p0`'s edge — the next publish
+ *     emits nothing for it, while a second live session's edge on the SAME mount and link
+ *     survives and keeps delivering;
+ *   - the discriminator is the STATUS code, proven order-dependently: a refusal echoing the
+ *     LIVE session's route with a non-`path::invalid` code evicts nothing, then the same
+ *     route with `tr::path::invalid` evicts — so the hold was the code, not the route.
+ */
+void test_refused_route_reclaims_the_edge() {
+    std::printf("refused-route reclaim (#1223 step 5, the RFC-0020 producer side):\n");
+    graph_t ga, gb;
+    fwd_router_t ra(ga), rb(gb);
+    pipe_link_t a_to_b, b_to_a;
+    a_to_b.set_peer(b_to_a);
+    b_to_a.set_peer(a_to_b);
+    fake_bus_t bus;
+    (void)ra.add_child("bus", bus);
+    (void)ra.add_child("b", a_to_b);
+    (void)rb.add_child("a", b_to_a);
+    vertex_handle_t sensor = gb.register_vertex(path_t("/sensor"), role_t::STORED_VALUE);
+
+    // Sessions p0 (doomed) and q1 (stays live) subscribe to /b/sensor through A.
+    bus.inject_peer("p0", b_fwd(fwd_op_t::WRITE, b_path({"b", "sensor"}), b_path({}),
+                                b_field_subscribers_append(), b_subscriber("doomed")));
+    bus.inject_peer("q1", b_fwd(fwd_op_t::WRITE, b_path({"b", "sensor"}), b_path({}),
+                                b_field_subscribers_append(), b_subscriber("alive")));
+    const auto subs0 = gb.read_subscribers(sensor);
+    check(subs0.has_value() && subs0->size() == 2, "B holds two remote edges");
+
+    // Positive control FIRST (the #1223 refutation rule: no eviction claim without it).
+    // Counts are read as DELTAS: the subscribes above already put one ack on each session.
+    std::size_t p0_seen = bus.peer("p0").count();
+    std::size_t q1_seen = bus.peer("q1").count();
+    check(gb.write(sensor, make_value(b_value_u8(0x11))).has_value(), "publish 1");
+    check(bus.peer("p0").count() == p0_seen + 1 && bus.peer("q1").count() == q1_seen + 1,
+          "positive control: both live sessions receive publish 1");
+
+    // p0 dies. A knows; B does not — the edge survives, and would forever (#1223).
+    bus.peer_kill("p0");
+    const auto subs1 = gb.read_subscribers(sensor);
+    check(subs1.has_value() && subs1->size() == 2, "B still holds p0's edge (the leak shape)");
+
+    // Publish 2: p0's delivery bounces off A (its residual names no current peer — the
+    // RFC-0020 reject), and the addressed refusal reclaims exactly p0's edge on B.
+    q1_seen = bus.peer("q1").count();
+    check(gb.write(sensor, make_value(b_value_u8(0x22))).has_value(),
+          "publish 2 (one delivery bounces)");
+    const auto subs2 = gb.read_subscribers(sensor);
+    check(subs2.has_value() && subs2->size() == 1, "the refused route's edge is reclaimed");
+    check(bus.peer("q1").count() == q1_seen + 1, "the live session still received publish 2");
+
+    // Publish 3: B emits exactly ONE delivery toward A — the reclaimed edge is gone from
+    // the fan-out, and the A<->B link never went down.
+    const std::size_t before = b_to_a.count();
+    q1_seen = bus.peer("q1").count();
+    check(gb.write(sensor, make_value(b_value_u8(0x33))).has_value(), "publish 3");
+    check(b_to_a.count() == before + 1, "one delivery only: the dead edge left the fan-out");
+    check(bus.peer("q1").count() == q1_seen + 1, "the live session received publish 3");
+
+    // The discriminator is the STATUS code. A forged/other refusal echoing the LIVE route
+    // with a non-path::invalid code must not evict (a TIMEOUT names a live route having a
+    // bad day) — and the SAME route with path::invalid then does, which proves the first
+    // frame was held back by its code, not by a route mismatch.
+    const std::vector<std::byte> live_route = b_path({"bus", "q1"});
+    b_to_a.inject(refusal_frame(live_route, 0x0041));  // some code that is not 0x0021
+    check(gb.read_subscribers(sensor)->size() == 1, "a non-invalid status evicts nothing");
+    b_to_a.inject(refusal_frame(live_route, 0x0021));  // tr::path::invalid
+    check(gb.read_subscribers(sensor)->empty(),
+          "the same route with tr::path::invalid evicts — the discriminator is the code");
+}
+
 int main() {
     std::printf("== edge_eviction_test ==\n");
     test_evict_scoped_to_link();
@@ -767,6 +904,7 @@ int main() {
     test_evict_reaches_field_write_admitted_edges();
     test_empty_link_name_evicts_nothing();
     test_departure_notifier_seam();
+    test_refused_route_reclaims_the_edge();
     test_concurrent_evict_vs_writes();
     return tr::testing::summary("edge_eviction");
 }

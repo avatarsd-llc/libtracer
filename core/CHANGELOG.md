@@ -16,6 +16,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **A delivery refused `tr::path::invalid` now reclaims the exact subscriber edge that
+  stored the refused route** ([#1223](https://github.com/avatarsd-llc/libtracer/issues/1223)
+  step 5 of 5 — the leak's independent close, zero new wire bytes). The RFC-0020
+  bus-residual reject already echoes the refused route back as the reply `src` "so it can
+  correlate"; the producer's router now correlates: every terminating `FWD{REPLY}` is peeked
+  by offset (allocation-free; non-refusals bail after at most five header reads), and an
+  addressed `STATUS{ERROR{tr::path::invalid}}` evicts the edge(s) whose delivery link AND
+  stored return route both match, byte-equal. New public surface:
+  `graph_t::evict_route_edges(link, route_wire)` and `vertex_t::evict_route_edges` — the
+  narrow siblings of the link-teardown eviction, same two-phase locking, same RFC-0005
+  unwind. RFC-0009 §D.4 is not contradicted: its premise ("not an error the producer
+  observes") is precisely what RFC-0020 changed for this case, and the reclaim acts only on
+  that observation. A stale route whose terminal name has been RECYCLED still delivers (the
+  disclosure) — that is steps 3–4's validation work, not this seam's.
+
 - **An accepted `slot_server_t` session now holds a session identity anchor — a vertex-map
   slot with a saturating generation, revived in place on slot reuse**
   ([#1223](https://github.com/avatarsd-llc/libtracer/issues/1223) step 2 of 5, realizing

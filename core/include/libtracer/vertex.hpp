@@ -2050,6 +2050,60 @@ class vertex_t {
     }
 
     /**
+     * @brief Reclaim the remote edges whose delivery @p link AND stored return @p route both
+     *        match — the per-vertex half of `graph_t::evict_route_edges` (#1223 step 5).
+     *
+     * The narrow sibling of @ref evict_link_edges — where that one reclaims EVERY edge a
+     * departed link admitted, this one reclaims exactly the edge(s) whose next hop refused
+     * the stored route with an addressed `tr::path::invalid` (RFC-0020) — the one wire
+     * observation a producer gets about a route whose terminal session departed. Matching
+     * `link` alone would evict every edge sharing the mount; matching the route alone would
+     * let any link speak for another's edges — both keys are required, and the route compare
+     * is BYTE-equal on the stored PATH TLV (the same bytes `deliver_remote` emits as the
+     * delivery `dst`, which are the bytes the refusing hop echoes back — see
+     * `reject_bus_name_hop`'s swap). Only `subscribe_wire`-door edges qualify: a field-write
+     * edge stores no route, and `route` never compares equal to its empty view. An EMPTY
+     * @p link or @p route matches nothing, as in @ref evict_link_edges (#1056).
+     *
+     * @param link  This node's NAME for the link the refusal arrived on (== the edge's
+     *              delivery link).
+     * @param route The refused route — the whole PATH TLV bytes echoed by the rejecting hop.
+     * @return The number of edges evicted (the caller unwinds exactly this many from the
+     *         RFC-0005 listener bookkeeping).
+     */
+    std::size_t evict_route_edges(std::string_view link, std::span<const std::byte> route) {
+        if (link.empty() || route.empty()) return 0;
+        edge_block_t* b = nullptr;
+        std::size_t n = 0;
+        {
+            const std::lock_guard lock(vertex_stripe_of(this).m);
+            b = edges_locked();
+            if (b == nullptr) return 0;
+            std::vector<subscriber_t>& subs = b->slots;
+            for (std::size_t i = 0; i < subs.size(); ++i) {
+                subscriber_t& s = subs[i];
+                if (!s.active || s.remote == nullptr) continue;
+                // The delivery link, not the admission fallback: only a `subscribe_wire`
+                // edge has a route to be refused, and that door populates `link` and the
+                // route together (see subscriber_remote_t::return_route's invariant).
+                if (s.remote->link != link) continue;
+                const std::span<const std::byte> stored = s.remote->return_route.bytes();
+                if (stored.size() != route.size() ||
+                    !std::equal(stored.begin(), stored.end(), route.begin()))
+                    continue;
+                subscriber_t reclaimed;       // an inert shell: no view, no route, no cold half
+                reclaimed.active = false;     // the slot is free for add_edge reuse
+                s = std::move(reclaimed);     // frees the old slot's retained state in place
+                deactivate_published(*b, i);  // the refused route stops receiving
+                ++n;
+            }
+            if (n != 0) (void)try_publish_edges(*b);
+        }
+        if (n != 0) scan_retired_edges(*b);
+        return n;
+    }
+
+    /**
      * @brief What a snapshot DECLINED to hand back: the deliveries a vertex shed before
      *        the graph could dispatch them (#896).
      *
