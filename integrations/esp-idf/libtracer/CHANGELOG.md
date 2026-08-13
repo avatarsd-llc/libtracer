@@ -21,6 +21,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `tx_slots_busy()` against `tx_slot_capacity() + tx_reply_reserve()`: that sum is the
   link's total slot count, and the depth a send issued on the httpd task can reach.
 
+- **A handshake can now authenticate its own session:
+  `httpd_ws_link_t::set_admission_verdict_cb`**
+  ([#1245](https://github.com/avatarsd-llc/libtracer/issues/1245)). The three-valued form of
+  the admission predicate — `REFUSE` / `ADMIT` / `ADMIT_AUTHENTICATED` — where the third
+  verdict says the opening GET already carried a credential this node accepts, so no
+  authentication frame is asked for and no deadline is armed for that session. Without it
+  #1184's two seams do not compose in the one deployment that motivated the frame: a node
+  serving BOTH browsers (which cannot present a header, hence the frame) and native dialers
+  (`esp_ws_client_link_t`, which presents a header and has no way to send a frame). Installing
+  an auth hook put EVERY session into the unauthenticated state, so every dialer of such a
+  node was closed with `kCloseAuthTimeout` however good its header credential was — and the
+  hook could not work around it, `auth_fn_t` being handed a payload and no session identity to
+  attach a handshake observation to. **Additive**: `set_admission_cb` is untouched, a link
+  with no auth hook is unaffected by any verdict, and the new predicate is a SEPARATE method
+  rather than an overload precisely so `set_admission_cb(nullptr, nullptr)` does not become
+  ambiguous. The verdict is carried from the pre-handshake to the lazy first-frame claim (the
+  slot does not exist at the first, and only this link spans the two) through a fixed-size
+  per-socket record set, `kMaxPreauthenticated`; an overflow, or a handshake whose peer never
+  sends a frame, degrades to `ADMIT` — the session is asked for a credential, which is the
+  fail-CLOSED direction.
+
 - **`httpd_ws_link_t` gains a post-handshake authentication frame**
   ([#1184](https://github.com/avatarsd-llc/libtracer/issues/1184)), so a BROWSER can
   authenticate a graph session. The `WebSocket` API cannot set request headers, so the

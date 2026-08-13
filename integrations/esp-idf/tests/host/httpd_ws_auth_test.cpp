@@ -389,6 +389,91 @@ void test_pending_departure_notifies_nobody() {
     check(downs == 0, "its departure fired no eviction — the plane held no edge to evict");
 }
 
+/** @brief The two-valued predicate, for the overload-exclusivity check. */
+bool admit_all(void*, httpd_req_t*) { return true; }
+
+/** @brief The verdict @ref preauth_admission answers, and the ctx it was handed. */
+httpd_ws_link_t::admission_verdict_t g_admission_verdict =
+    httpd_ws_link_t::admission_verdict_t::ADMIT;
+int g_admission_calls = 0;
+
+/** @brief A three-valued admission predicate answering whatever the case scripted. */
+httpd_ws_link_t::admission_verdict_t preauth_admission(void*, httpd_req_t*) {
+    ++g_admission_calls;
+    return g_admission_verdict;
+}
+
+/**
+ * @brief #1245 — a handshake that authenticated its peer must not then be asked for a
+ *        credential frame, because the peers that can present a header (a native dialer)
+ *        are exactly the ones that cannot send a frame.
+ */
+void test_handshake_authentication_skips_the_frame() {
+    std::printf("#1245 ADMIT_AUTHENTICATED serves a session with no credential frame:\n");
+    reset_server();
+    // A SHORT deadline, so "no deadline is armed for this session" is proven by a sweep the
+    // session outlives rather than by reading a flag.
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true, 0, 200);
+    link->set_admission_verdict_cb(&preauth_admission, nullptr);
+    link->set_auth_cb(&recording_auth, nullptr);
+    reset_hook({httpd_ws_link_t::auth_verdict_t::REJECT});
+    g_admission_calls = 0;
+    constexpr int kHeader = 690;  // authenticated at the handshake
+    constexpr int kFramed = 691;  // admitted, must present a credential
+
+    g_admission_verdict = httpd_ws_link_t::admission_verdict_t::ADMIT_AUTHENTICATED;
+    check(fake_httpd::instance().open_session(kHeader), "the handshake was answered");
+    check(g_admission_calls == 1, "the three-valued predicate was consulted once");
+    check(fake_httpd::instance().deliver_frame(kHeader, kBody) == ESP_OK,
+          "its first frame dispatched");
+    check(g_seen.empty(), "and went to the GRAPH, not to the credential hook");
+    check(peer_count(*link) == 1, "the session was served from its first frame");
+
+    // The other verdict on the SAME link, so this is a per-session property and not a
+    // link-wide off switch for the hook.
+    g_admission_verdict = httpd_ws_link_t::admission_verdict_t::ADMIT;
+    check(fake_httpd::instance().open_session(kFramed), "a plain ADMIT handshake was answered");
+    check(fake_httpd::instance().deliver_frame(kFramed, kCredential) == ESP_OK,
+          "its first frame dispatched");
+    check(g_seen.size() == 1, "and went to the credential hook");
+    check(link->stats().auth_rejected == 1, "which refused it");
+    check(peer_count(*link) == 1, "leaving only the handshake-authenticated session served");
+
+    // The deadline must not reach the pre-authenticated session.
+    advance_ms(250);
+    check(fake_esp_timer_fire() == 1, "the sweep timer fires past the deadline");
+    run_server();
+    check(link->stats().auth_expired == 0, "and expires nothing — no deadline was armed for it");
+    check(peer_count(*link) == 1, "the handshake-authenticated session is still a peer");
+    fake_httpd::instance().close_session(kHeader);
+    run_server();
+}
+
+/** @brief A REFUSE verdict is the `false` of the two-valued predicate, and the two forms of
+ *         the predicate are alternatives rather than a pair. */
+void test_verdict_refuse_and_overload_exclusivity() {
+    std::printf("#1245 REFUSE refuses, and the two predicate forms are exclusive:\n");
+    reset_server();
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    link->set_admission_verdict_cb(&preauth_admission, nullptr);
+    g_admission_calls = 0;
+    g_admission_verdict = httpd_ws_link_t::admission_verdict_t::REFUSE;
+    constexpr int kRefused = 692;
+    check(!fake_httpd::instance().open_session(kRefused), "REFUSE abandoned the handshake");
+    check(!fake_httpd::instance().has_session(kRefused), "no session was admitted");
+    check(link->stats().peers_refused == 1, "and the refusal was counted");
+
+    // Installing the two-valued form must CLEAR the three-valued one, or the link would
+    // hold two predicates with no rule about which wins.
+    link->set_admission_cb(&admit_all, nullptr);
+    g_admission_calls = 0;
+    constexpr int kAdmitted = 693;
+    check(fake_httpd::instance().open_session(kAdmitted), "the bool predicate now decides");
+    check(g_admission_calls == 0, "and the verdict predicate was not consulted at all");
+    fake_httpd::instance().close_session(kAdmitted);
+    run_server();
+}
+
 /** @brief The destructor retires the sweep timer. */
 void test_teardown_retires_the_timer() {
     std::printf("#1184 teardown retires the sweep:\n");
@@ -417,6 +502,8 @@ int main() {
     test_expired_squatter_cannot_consume_the_cap();
     test_pending_departure_notifies_nobody();
     test_teardown_retires_the_timer();
+    test_handshake_authentication_skips_the_frame();
+    test_verdict_refuse_and_overload_exclusivity();
     if (g_failures != 0) {
         std::printf("FAILED: %d check(s)\n", g_failures);
         return 1;

@@ -115,6 +115,7 @@
  */
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -617,6 +618,41 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     using admission_fn_t = bool (*)(void* ctx, httpd_req_t* req);
 
     /**
+     * @brief What an @ref admission_verdict_fn_t answer does with the handshake it was asked
+     *        about — three outcomes, because a handshake can carry a credential of its own.
+     *
+     * The two-valued predicate cannot express the case that makes @ref set_admission_cb and
+     * @ref set_auth_cb composable: a peer whose HANDSHAKE already authenticated it. Without
+     * that, installing an auth hook puts every session into the unauthenticated state,
+     * including one the predicate just validated — and a peer that presents a header (a
+     * native dialer, @ref esp_ws_client_link_t) has no way to send an authentication frame,
+     * so it is closed at the deadline however good its credential was (#1245).
+     */
+    enum class admission_verdict_t : std::uint8_t {
+        /** @brief Refuse the handshake: no 101, no session. Identical to answering `false`. */
+        REFUSE,
+        /** @brief Admit it. With an auth hook installed the session starts UNAUTHENTICATED
+         *         and must present a credential frame; without one it is served at once.
+         *         Identical to answering `true`. */
+        ADMIT,
+        /** @brief Admit it AND treat the handshake as its authentication: no credential
+         *         frame is asked for, no deadline is armed, and the session is served from
+         *         its first data frame even though an auth hook is installed. Identical to
+         *         @ref ADMIT on a link with no auth hook. */
+        ADMIT_AUTHENTICATED,
+    };
+
+    /**
+     * @brief Admission predicate that can also PRE-AUTHENTICATE the session — the three-valued
+     *        form of @ref admission_fn_t, and the one a link serving both browsers (which must
+     *        use the in-band frame) and native dialers (which cannot) needs.
+     *
+     * @p req is a REQUEST-scoped `httpd_req_t*` under the same rules @ref admission_fn_t
+     * documents: valid for the duration of the call and no longer.
+     */
+    using admission_verdict_fn_t = admission_verdict_t (*)(void* ctx, httpd_req_t* req);
+
+    /**
      * @brief Install (or clear, with `nullptr`) an admission predicate consulted on every
      *        opening handshake, in the server's WebSocket PRE-handshake callback — before
      *        the 101 is written, before the session is upgraded, and therefore before any
@@ -643,6 +679,36 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      */
     void set_admission_cb(admission_fn_t fn, void* ctx) noexcept {
         admission_fn_ = fn;
+        admission_verdict_fn_ = nullptr;
+        admission_ctx_ = ctx;
+    }
+
+    /**
+     * @brief Install (or clear, with `nullptr`) the three-valued admission predicate. Same
+     *        call site, same timing and same rules as @ref set_admission_cb — the only
+     *        difference is that this one may answer @ref
+     *        admission_verdict_t::ADMIT_AUTHENTICATED.
+     *
+     * A SEPARATE name rather than an overload: `set_admission_cb(nullptr, nullptr)` is an
+     * existing call, and a second overload would make it ambiguous — a source break on a
+     * published surface, to save one identifier.
+     *
+     * The two forms are ALTERNATIVES, not a pair: installing either clears the other, so a
+     * link always has exactly one admission predicate and there is no order in which two
+     * could disagree.
+     *
+     * HOW THE VERDICT REACHES THE SESSION. It cannot be written onto a slot here — the slot
+     * does not exist yet, because `esp_http_server` answers the handshake internally and this
+     * link claims a session LAZILY on its first data frame. The verdict is therefore recorded
+     * against the socket descriptor and consumed at that claim, both on the httpd task. The
+     * record set is FIXED-SIZE (@ref kMaxPreauthenticated): a handshake that overflows it, or
+     * one whose peer never sends a data frame, degrades to @ref admission_verdict_t::ADMIT —
+     * the session is asked for a credential frame. That is the whole failure mode, and it
+     * fails CLOSED.
+     */
+    void set_admission_verdict_cb(admission_verdict_fn_t fn, void* ctx) noexcept {
+        admission_verdict_fn_ = fn;
+        admission_fn_ = nullptr;
         admission_ctx_ = ctx;
     }
 
@@ -774,6 +840,12 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *         truncated. Sized to hold a hex-spelled 32-byte public key (64 chars) with
      *         room for a scheme prefix. */
     static constexpr std::size_t kMaxSubjectChars = 127;
+    /** @brief How many handshakes may be awaiting their first data frame with an @ref
+     *         admission_verdict_t::ADMIT_AUTHENTICATED verdict recorded against them. Above
+     *         any `max_open_sockets` an ESP node runs, because an entry lives only for the
+     *         gap between the 101 and the peer's first frame. See @ref set_admission_cb for
+     *         what an overflow costs. */
+    static constexpr std::size_t kMaxPreauthenticated = 24;
 
    private:
     struct gate_t;         // the handler-admission gate + teardown barrier (in the .cpp)
@@ -1159,7 +1231,24 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *         peer (the default). Read on the httpd task, from @ref ws_pre_handshake —
      *         see @ref set_admission_cb. */
     admission_fn_t admission_fn_ = nullptr;
+    /** @brief The three-valued form of the same predicate; at most one of the two is ever
+     *         non-null (@ref set_admission_cb clears the other). */
+    admission_verdict_fn_t admission_verdict_fn_ = nullptr;
     void* admission_ctx_ = nullptr;
+    /**
+     * @brief Sockets whose handshake answered @ref admission_verdict_t::ADMIT_AUTHENTICATED
+     *        and which have not yet claimed a session. Entries `[0, preauth_n_)` are live.
+     *
+     * Written in @ref ws_pre_handshake and consumed at the lazy claim in @ref on_data_frame,
+     * both on the httpd task, under @ref peers_m_. FIXED-SIZE on purpose: this is a handoff
+     * between two points of the SAME connection's setup, not a table — an entry lives for the
+     * gap between the 101 and that peer's first frame. Sized well above any `max_open_sockets`
+     * an ESP node runs, and a full set drops its oldest entry, which costs that session
+     * nothing but a credential frame it may not be able to answer — the fail-CLOSED direction.
+     */
+    std::array<int, kMaxPreauthenticated> preauth_fds_{};
+    /** @brief How many entries of @ref preauth_fds_ are live. */
+    std::size_t preauth_n_ = 0;
     /** @brief Post-handshake auth hook + its opaque ctx; null serves every session at once
      *         (the default) — see @ref set_auth_cb. Read on the httpd task, unlocked. */
     auth_fn_t auth_fn_ = nullptr;
@@ -1208,6 +1297,24 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * and the mutex it would otherwise sit under is the one the send path needs.
      */
     void on_auth_message(session_t* slot, std::span<const std::byte> body);
+    /**
+     * @brief Record that @p fd's handshake answered @ref
+     *        admission_verdict_t::ADMIT_AUTHENTICATED (httpd task; takes @ref peers_m_).
+     *
+     * Any stale entry for the same descriptor is overwritten rather than duplicated: a
+     * descriptor is reused the moment the kernel frees it, and a leftover from a handshake
+     * whose peer never spoke must not pre-authenticate whoever lands on it next.
+     */
+    void note_preauthenticated(int fd);
+    /**
+     * @brief Consume @p fd's pre-authentication record, if it has one (httpd task; @ref
+     *        peers_m_ must ALREADY be held — this runs inside the claim's critical section).
+     *
+     * @return true when the handshake authenticated this session, false otherwise. Consuming
+     *         rather than reading is what keeps the record set a handoff: an entry cannot
+     *         outlive the claim it was written for.
+     */
+    [[nodiscard]] bool take_preauthenticated(int fd) noexcept;
     /**
      * @brief Send @p payload to @p slot's socket RIGHT NOW rather than through the work
      *        queue (httpd task only; @ref peers_m_ must NOT be held).

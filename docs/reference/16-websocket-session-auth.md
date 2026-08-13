@@ -38,6 +38,32 @@ The credential travels as an ordinary WebSocket data frame, which a browser *can
 handshake-header path is unchanged and still available to peers that can use it; the two are
 complementary, not alternatives, and a node may require both.
 
+### One node, two kinds of peer
+
+A node that is reachable by a browser is usually also reachable by a **native peer** — another
+node, a CLI, a gateway — and a native peer authenticates at the handshake, because it can. So
+the interesting configuration is not "frame instead of header"; it is **both at once, on the
+same endpoint**, with each peer using the one it is capable of.
+
+That only works if the handshake check can say *"this one is already authenticated"*. Otherwise
+installing the frame check makes it mandatory for everybody, and a peer whose whole credential
+was in the header — and which has no way to send a frame — is closed at the deadline with a
+perfectly good credential. So the handshake check answers **three** ways rather than two:
+
+| Handshake verdict | Then |
+| --- | --- |
+| refuse | no upgrade; the peer never reaches a session |
+| admit | upgraded, and **not** authenticated: a credential frame is required, and the deadline runs |
+| admit, authenticated | upgraded and served from the first frame; no credential frame, no deadline |
+
+The third verdict is what makes the two admission points composable rather than exclusive. It
+is a property of one **session**, not a switch on the link: the same node answers "admit,
+authenticated" to a peer presenting a header and "admit" to a browser presenting nothing, in
+the same second.
+
+A node that serves only browsers never needs it, and a node with no frame check is unaffected
+by it.
+
 ### What "served nothing" means
 
 Between the 101 and acceptance, the session is not a peer. Concretely, an unauthenticated
@@ -150,8 +176,9 @@ count; the link-level tallies above are the right altitude.
 The ESP-IDF WebSocket server link (`httpd_ws_link_t`,
 [`integrations/esp-idf/libtracer/`](https://github.com/avatarsd-llc/libtracer/blob/main/integrations/esp-idf/libtracer/httpd_ws_link.cpp))
 implements this: `set_auth_cb` installs the check, the constructor takes the deadline, and
-the close codes are `kCloseAuthFailed` / `kCloseAuthTimeout`. Its host suite
-(`httpd_ws_auth_test`) pins each property above against the real translation unit.
+the close codes are `kCloseAuthFailed` / `kCloseAuthTimeout`. The three-valued handshake
+verdict is `set_admission_verdict_cb` with `admission_verdict_t::ADMIT_AUTHENTICATED`. Its
+host suite (`httpd_ws_auth_test`) pins each property above against the real translation unit.
 
 See also [12-deployment-profiles.md](12-deployment-profiles.md) for where a browser-facing
 node sits, and [13-network-formation.md](13-network-formation.md) for how peers find each
