@@ -158,22 +158,22 @@ type-erasure bloat and template-instantiation bloat alike.
 Every knob is overridden the same way — as a member of the fragment's traits type. The column
 below names the member; a knob the fragment does not state keeps the default beside it.
 
-The **ESP-IDF column describes that component as it stands today**, which is the one build still
-rendering the `config.hpp.in` template rather than writing a fragment: it sets plain CMake
-variables and `configure_file`s the template. The knob *values* are what the column says either
-way; only the delivery differs, and #1244 converts it.
+The **ESP-IDF column is that component's fragment**: it derives four knobs from its Kconfig
+values and chip facts and writes them into a generated `libtracer/config_override.hpp`, listed
+ahead of `core/include` on the component's include path. Everything the column calls *inherited*
+is a knob the fragment does not state at all (#1244).
 
 | knob | kind | default | ESP-IDF |
 | --- | --- | --- | --- |
-| `kVertexLockStripes` (`config.hpp:95`) | count | 16 | menuconfig `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` (`integrations/esp-idf/libtracer/CMakeLists.txt:269`) |
-| `kCacheLineBytes` (`:119`) | padding width | 64 | derived from `CONFIG_FREERTOS_UNICORE`, not exposed (`integrations/esp-idf/libtracer/CMakeLists.txt:290`) |
+| `kVertexLockStripes` (`config.hpp:95`) | count | 16 | menuconfig `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` (`integrations/esp-idf/libtracer/CMakeLists.txt:279`) |
+| `kCacheLineBytes` (`:119`) | padding width | 64 | derived from `CONFIG_FREERTOS_UNICORE`, not exposed (`integrations/esp-idf/libtracer/CMakeLists.txt:297`) |
 | `kHazardReaderSlots` (`:146`) | count | 64 | inherited — the refcount slot never builds the domain |
-| `kEdgePinSlots` (`:159`) | count | 32 | set to 8 (`integrations/esp-idf/libtracer/CMakeLists.txt:285`) |
+| `kEdgePinSlots` (`:159`) | count | 32 | set to 8 (`integrations/esp-idf/libtracer/CMakeLists.txt:292`) |
 | `kMaxVertexBytes64` / `kMaxVertexBytes32` (`:195` / `:213`) | RAM ratchet | 96 / 72 | the preset — deliberately not overridable |
 | `kPinPayloadRatio` (`:237`) | ratio | 0 — the `kPinNever` sentinel | the preset |
 | `acl_policy_t` (`:246`) | policy type | `allow_only_policy_t` | inherited — the full policy is not selectable |
 | `lkv_slot_t` (`:262`) | policy type | `sp_atomic_slot_t` | inherited — the hazard slot is not selectable |
-| `kSpinWaitSafe` (`:357`) | target fact | `true` | derived from `IDF_TARGET` — `false` on every chip, `true` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:306`) |
+| `kSpinWaitSafe` (`:357`) | target fact | `true` | derived from `IDF_TARGET` — `false` on every chip, `true` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:313`) |
 
 Two CMake variables survive for one transition release, `-DLIBTRACER_ACL_FULL` and
 `-DLIBTRACER_LKV_SLOT`; `core/CMakeLists.txt` writes a fragment on their behalf. The five other

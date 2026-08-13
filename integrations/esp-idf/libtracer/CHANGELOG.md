@@ -72,6 +72,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **The component writes a `libtracer/config_override.hpp` FRAGMENT instead of rendering
+  `config.hpp.in`** ([#1244](https://github.com/avatarsd-llc/libtracer/issues/1244),
+  ADR-0068 §Erratum 1). It was the last consumer of core's template, which core itself
+  stopped rendering in #1142; the template is now deleted. The generated fragment inherits
+  `tr::graph::default_config_t` and states only the four knobs an ESP target changes —
+  `kVertexLockStripes` (menuconfig `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES`), `kCacheLineBytes`
+  (derived from `CONFIG_FREERTOS_UNICORE`), `kEdgePinSlots` (8) and `kSpinWaitSafe` (derived
+  from `IDF_TARGET`: `false` on every chip, `true` on `linux`). The ACL profile, the LKV slot
+  and the hazard reader slots are no longer restated here at all, because core's defaults are
+  already what this component wants — so a knob added to `config.hpp` now reaches an ESP build
+  at its new default, where before it had to be mirrored into the template by hand.
+  **No configured value changed and no Kconfig option was renamed**; the generated directory
+  still precedes `core/include` in `INCLUDE_DIRS`, which is what lets `config.hpp` find the
+  fragment with `__has_include`.
+
 - **A CONDEMNED session no longer counts toward `max_peers`.** The admission cap counted
   slot-table occupancy while every other question this link answers — `enumerate_peers`,
   `peer_link`, the fan-out — answers from reachability (#963), so a session the link had

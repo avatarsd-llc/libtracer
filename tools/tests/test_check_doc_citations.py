@@ -40,6 +40,11 @@ import check_doc_citations as cdc  # noqa: E402
 
 # A stand-in tree: two unambiguous basenames, one template, and one basename carried by
 # two files — the shape the real repo has (`app_main.cpp` lives in four integrations).
+#
+# `config.hpp.in` is a FIXTURE name, not a tree path: #1244 deleted the real template when
+# the ESP-IDF component moved to an override fragment. What these cases pin is the `.hpp.in`
+# SUFFIX support in `SOURCE_SUFFIXES` — in particular that the longest-first alternation does
+# not truncate a `.hpp.in` citation onto a `.hpp` file — which outlives any one template.
 FILEMAP = {
     "graph.cpp": ["core/src/graph.cpp"],
     "graph.hpp": ["core/include/libtracer/graph.hpp"],

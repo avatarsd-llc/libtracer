@@ -326,12 +326,8 @@ if(LIBTRACER_INSTALL)
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
-    # `config.hpp.in` is excluded: core does not render it any more, and it survives only as
-    # the ESP-IDF component's rendering source until #1244 retires that too. Shipping a
-    # template into an installed include tree would be noise at best.
     install(DIRECTORY include/libtracer
-        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-        PATTERN "config.hpp.in" EXCLUDE)
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
     # An installed non-default package must be self-consistent (ADR-0068): config.hpp itself
     # is the checked-in default the directory copy above already brought along, so what has to
     # ship alongside it is this build's override fragment — when one exists. config.hpp finds

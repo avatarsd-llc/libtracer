@@ -68,7 +68,7 @@ This is strictly stronger than what the template parameter offered. Templating w
 - **Zero call-site churn.** The derived names are the ones in use.
 - **The 32-bit ceiling is enforced for the first time.** It has no headroom, so the next inlined 32-bit member is a build failure by design — which is what the gate is for.
 - **A ceiling is now raised in the configuration**, where it appears in a diff, rather than by editing a test until it passes.
-- **The `configure_file` + drift-gate machinery stays.** ADR-0068's two-renderer footgun is unchanged by this decision; the hoped-for deletion of the generator was contingent on the app-declared traits type, which does not work.
+- **The `configure_file` + drift-gate machinery stays.** ADR-0068's two-renderer footgun is unchanged by this decision; the hoped-for deletion of the generator was contingent on the app-declared traits type, which does not work. *(Overtaken by events: [ADR-0068 §Erratum 1](0068-build-configuration-is-plain-cpp-config-header.md) deleted both — core's in #1142, the ESP-IDF component's in #1244 — by making the checked-in header the only copy and overriding it with a small `config_override.hpp` fragment. This ADR's own contribution, the one named traits type, is what made that fragment possible: a knob outside `config_t` cannot be reached by one.)*
 - **Two configurations in one binary remain unavailable.** Nothing in this codebase has asked for it, and §Context prices it as a RAM regression if it ever does.
 
 ## Considered options
