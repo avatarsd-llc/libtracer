@@ -181,6 +181,27 @@ class server_t {
     [[nodiscard]] std::size_t frames_sent() const;
 
     /**
+     * @brief One frame the link put on the wire — what the PEER would see, as opposed to
+     *        what @ref frames_sent counts.
+     *
+     * The counter answers "did a send happen"; the auth exchange needs "what did it say",
+     * because a close CODE is the whole observable distinguishing a refused credential from
+     * an expired deadline (#1184). Recorded only for frames that fully succeeded, which is
+     * the same event @ref note_sent marks.
+     */
+    struct sent_frame_t {
+        int fd = -1;                                 /**< @brief Destination socket. */
+        httpd_ws_type_t type = HTTPD_WS_TYPE_BINARY; /**< @brief BINARY, CLOSE, … */
+        std::vector<std::byte> payload;              /**< @brief A copy of the frame body. */
+    };
+    /** @brief Every frame recorded since @ref clear_sent_frames, in send order. */
+    [[nodiscard]] std::vector<sent_frame_t> sent_frames() const;
+    /** @brief Forget the recorded frames (not the @ref frames_sent counter). */
+    void clear_sent_frames();
+    /** @brief Record one successfully-sent frame — called by the fake's send-frame API. */
+    void note_sent_frame(int fd, httpd_ws_type_t type, const void* payload, std::size_t len);
+
+    /**
      * @brief Script what @p fd's socket writes do, one entry per write; the LAST entry
      *        repeats once the script is exhausted (an empty script means always FULL).
      *
@@ -280,6 +301,7 @@ class server_t {
     std::function<void()> frame_hook_;
     std::size_t free_ctx_calls_ = 0;
     std::size_t frames_sent_ = 0;
+    std::vector<sent_frame_t> sent_frames_; /**< @brief See @ref sent_frames. */
     std::map<int, std::size_t> writes_;
     bool queue_refusing_ = false;
     std::size_t queue_cap_ = 0;   /**< @brief 0 = unbounded; see set_queue_capacity. */

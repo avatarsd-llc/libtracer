@@ -689,8 +689,8 @@ ANCHORS = [
      '* (F2b, 2026-07-09): the /unit batch apply overflowed 8 KB and needed ~12 KB. It is named'),
     ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:170',
      'static constexpr std::size_t kRequiredHttpdStack = 12288;'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:547', 'if (chunk.empty()) return true;'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:553',
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:574', 'if (chunk.empty()) return true;'),
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:580',
      'if (len_ != 0) std::memcpy(grown.get(), bytes_.get(), len_);'),
     # integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp
     ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:52',
@@ -727,9 +727,9 @@ ANCHORS = [
     ('tools/cortexm0_footprint.py:151', 'cxx_flags = ['),
     ('tools/cortexm0_footprint.py:158', '"-DLIBTRACER_NO_ATOMIC",'),
     ('tools/cortexm0_footprint.py:172', '"--specs=nano.specs",'),
-    ('core/tests/CMakeLists.txt:1272', 'add_executable(substrate_test_no_atomic'),
-    ('core/tests/CMakeLists.txt:1285', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
-    ('core/tests/CMakeLists.txt:1286', '    LIBTRACER_NO_ATOMIC'),
+    ('core/tests/CMakeLists.txt:1296', 'add_executable(substrate_test_no_atomic'),
+    ('core/tests/CMakeLists.txt:1309', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
+    ('core/tests/CMakeLists.txt:1310', '    LIBTRACER_NO_ATOMIC'),
     # The leading indent is load-bearing: the bare token also appears in the comment
     # three lines above the executable, and an anchor that matches both is not an anchor.
 

@@ -188,9 +188,15 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *                   value only on a host whose watchdog regime differs from the
      *                   derivation's inputs; it is clamped to the server's own
      *                   `send_wait_timeout`.
+     * @param auth_deadline_ms How long an admitted session may stay UNAUTHENTICATED before
+     *                   this link closes it, milliseconds; 0 (the default) uses
+     *                   @ref kDefaultAuthDeadlineMs. Inert unless @ref set_auth_cb installed
+     *                   a hook — with no hook every session is served immediately and there
+     *                   is no unauthenticated state to bound.
      */
     explicit httpd_ws_link_t(std::uint16_t bind_port, std::size_t max_peers = 0,
-                             bool peer_named = false, std::uint32_t send_timeout_ms = 0);
+                             bool peer_named = false, std::uint32_t send_timeout_ms = 0,
+                             std::uint32_t auth_deadline_ms = 0);
 
     /**
      * @brief Adopt an already-running `esp_http_server` and register the WebSocket URI
@@ -247,9 +253,14 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *                   fans out; inbound arrives as the registered child NAME).
      * @param send_timeout_ms Per-socket send bound for UPGRADED sockets, milliseconds;
      *                   0 (the default) derives it — see @ref send_timeout_ms.
+     * @param auth_deadline_ms How long an admitted session may stay UNAUTHENTICATED before
+     *                   this link closes it, milliseconds; 0 (the default) uses
+     *                   @ref kDefaultAuthDeadlineMs. Inert unless @ref set_auth_cb installed
+     *                   a hook.
      */
     httpd_ws_link_t(httpd_handle_t external, const char* uri, std::size_t max_peers = 0,
-                    bool peer_named = false, std::uint32_t send_timeout_ms = 0);
+                    bool peer_named = false, std::uint32_t send_timeout_ms = 0,
+                    std::uint32_t auth_deadline_ms = 0);
 
     /**
      * @brief Stop the owned httpd instance (or unregister the adopted WS URI) and release
@@ -336,6 +347,16 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
          * rejects, and feeding it back as an address is the defect #994 removed.
          */
         std::string_view endpoint_str;
+        /**
+         * @brief The identity the auth hook bound to this session, valid during the visit
+         *        only; EMPTY when no hook is installed or it bound none.
+         *
+         * Never empty-because-unauthenticated: an unauthenticated session is not visited at
+         * all (see @ref set_auth_cb), so everything enumerated here has already been
+         * ACCEPTed. What the subject MEANS to a handler is #375's question, not this
+         * accessor's — here it is the operator-facing answer to "who is on p3?".
+         */
+        std::string_view subject;
     };
     /** @brief Visitor for @ref enumerate_peer_stats. */
     using peer_stats_visitor_t = std::function<void(const peer_stats_t&)>;
@@ -499,6 +520,27 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
         /** @brief Inbound frames dropped because the oversize payload buffer could not be
          *         allocated. The session is closed with them. */
         std::uint32_t rx_dropped_alloc = 0;
+        /**
+         * @brief Sessions closed because the auth hook answered REJECT — a credential this
+         *        node was OFFERED and refused.
+         *
+         * Kept apart from @ref peers_refused, which counts handshakes turned away one stage
+         * earlier (the admission predicate, or `max_peers`), and from @ref auth_expired,
+         * which counts peers that offered nothing at all. The three are different events
+         * about different actors and summing them hides which one is happening: a climbing
+         * count here is credentials being TRIED, i.e. the shape of a brute-force attempt or
+         * of a fleet holding a stale token.
+         */
+        std::uint32_t auth_rejected = 0;
+        /**
+         * @brief Sessions closed because they did not authenticate within `auth_deadline_ms`.
+         *
+         * The squatter count. A steady trickle is normal — a browser tab closed mid-login,
+         * a peer that lost its network between the 101 and its first frame — while a rate
+         * that tracks connection attempts means something is opening sockets and never
+         * speaking, which is the exposure the deadline exists for.
+         */
+        std::uint32_t auth_expired = 0;
     };
 
     /**
@@ -603,6 +645,135 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
         admission_fn_ = fn;
         admission_ctx_ = ctx;
     }
+
+    /**
+     * @brief What an @ref auth_fn_t answer does with the session it was asked about.
+     *
+     * Three outcomes and not two, because the frame is specified as a CARRIER rather than as
+     * a bearer-token check: a credential that needs one round trip answers ACCEPT on the
+     * first frame, and a handshake that needs several (the ed25519/Noise direction this was
+     * designed for) answers CONTINUE until it is done. The link's own behaviour is identical
+     * either way — it is the hook that knows how many frames its scheme costs.
+     */
+    enum class auth_verdict_t : std::uint8_t {
+        ACCEPT,   /**< @brief Credential good: serve this session from the next frame on. */
+        CONTINUE, /**< @brief Not done yet: keep the session unauthenticated, same deadline. */
+        REJECT    /**< @brief Credential bad: close with @ref kCloseAuthFailed. */
+    };
+
+    /**
+     * @brief One @ref auth_fn_t answer: the verdict, an optional frame to send back, and —
+     *        on ACCEPT — the identity to bind to the session.
+     *
+     * Both spans/views are BORROWED for the duration of the call: the link copies whatever
+     * it keeps before returning, so a hook may answer out of a stack buffer or its own ctx.
+     */
+    struct auth_result_t {
+        /** @brief What to do with the session. Value-initialises to REJECT so a hook that
+         *         forgets to set it fails CLOSED. */
+        auth_verdict_t verdict = auth_verdict_t::REJECT;
+        /**
+         * @brief Bytes to send back to the peer as one BINARY frame, or empty for none.
+         *
+         * The half of the carrier a bearer token never needs and a handshake cannot work
+         * without — a Noise responder's message rides here. Sent BEFORE the session is
+         * served (ACCEPT) or closed (REJECT), so a rejected peer can still be told why in
+         * its own scheme's language on top of the close code.
+         */
+        std::span<const std::byte> reply;
+        /**
+         * @brief The session subject to bind on ACCEPT — ignored on the other two verdicts.
+         *
+         * TEXT, and printable: an identity that is natively bytes (an ed25519 public key)
+         * is spelled by the hook in hex or base64, which is what keeps it reportable through
+         * @ref peer_stats_t::subject beside `endpoint_str`. Truncated at
+         * @ref kMaxSubjectChars.
+         *
+         * This link BINDS it and publishes it; what it MEANS to a handler — per-caller ACL,
+         * `on_write` identity — is not decided here and is tracked as #375. Carrying it is
+         * this frame's job precisely because the frame is where a session's identity is
+         * first known.
+         */
+        std::string_view subject;
+    };
+
+    /**
+     * @brief The post-handshake authentication hook: given one whole inbound message from a
+     *        not-yet-authenticated session, decide what to do with that session. @p ctx is
+     *        the opaque pointer registered alongside it in @ref set_auth_cb.
+     *
+     * @p payload is the message's bytes, reassembled, and is OPAQUE to this link: it is not
+     * decoded, not validated, and never mistaken for a TLV. That opacity is the design (the
+     * frame is the permanent carrier, the credential kind is the hook's business), not an
+     * omission.
+     */
+    using auth_fn_t = auth_result_t (*)(void* ctx, std::span<const std::byte> payload);
+
+    /**
+     * @brief Install (or clear, with `nullptr`) the post-handshake authentication hook.
+     *        Unset (the default) serves every admitted session immediately — the historical
+     *        behaviour, and still the right one for a link gated at the handshake.
+     *
+     * WHY THIS EXISTS ALONGSIDE @ref set_admission_cb. The browser `WebSocket` API cannot
+     * set request headers, so a browser peer has no way to present the token an admission
+     * predicate reads — leaving embedders a cookie (and the HTTP login endpoint that mints
+     * it) or the credential in the URL query string, which leaks it into server logs,
+     * browser history and referrers. This hook moves the credential IN-BAND, after the 101,
+     * where a browser can send it. Header-based admission is unaffected and both may be
+     * installed at once: the predicate still decides the handshake, and this hook then
+     * decides the session.
+     *
+     * WHAT AN UNAUTHENTICATED SESSION GETS: nothing. Between its first frame and its ACCEPT
+     * the session exists but is not served — its messages reach this hook and never the
+     * graph, it is absent from @ref enumerate_peers, @ref enumerate_peer_stats and
+     * @ref peer_link, and a broadcast @ref send skips it. It cannot read a vertex, write
+     * one, subscribe, or be discovered by a peer that can.
+     *
+     * WHAT BOUNDS IT: the constructor's `auth_deadline_ms`. A session that has not been
+     * ACCEPTed within it is closed with @ref kCloseAuthTimeout. Without that bound an
+     * unauthenticated peer would hold one unit of `max_peers` for as long as it cared to,
+     * which on an embedded slot pool is a cheap denial of service — and a NEW exposure, since
+     * before this hook existed no unadmitted peer ever reached a slot at all.
+     *
+     * NOT SYNCHRONIZED — set it once at wiring time, before the link serves; the hook is
+     * read on the httpd task with no lock. It runs ON that task, in-call, with no lock of
+     * this link held, and must be brief: the task it occupies owns accept, recv and every
+     * other session's I/O.
+     *
+     * IT MUST NOT DESTROY THIS LINK. That is a narrower contract than the graph delivery
+     * path carries — an inbound TLV may drive an app teardown in-call (#814) and this link
+     * survives it by touching nothing afterwards — and the difference is that the verdict has
+     * work to do ON RETURN: the reply to write, the subject to bind, the close code to send.
+     * A credential check has no business tearing down the node it is authenticating, so the
+     * contract is stated rather than engineered around.
+     *
+     * Installing a hook also ARMS the deadline sweep (one periodic `esp_timer` per link,
+     * created here and never re-created). A sweep that cannot be armed is reported at ERROR
+     * and the hook still takes effect: authentication without a bound is strictly better
+     * than no authentication, and the alternative — refusing to authenticate because a timer
+     * was unavailable — fails open, which is the one outcome this seam must never have.
+     */
+    void set_auth_cb(auth_fn_t fn, void* ctx) noexcept;
+
+    /**
+     * @brief WebSocket close code for a session the auth hook REJECTED — RFC 6455
+     *        application range (4000–4999), mnemonic for HTTP 401.
+     *
+     * Distinct from @ref kCloseAuthTimeout on purpose: "your credential was refused" and
+     * "you were too slow" call for different client behaviour (re-prompt versus retry), and
+     * a client that has to guess which one it hit will guess wrong. Picked once, here.
+     */
+    static constexpr std::uint16_t kCloseAuthFailed = 4401;
+    /** @brief WebSocket close code for a session that ran out its `auth_deadline_ms` —
+     *         mnemonic for HTTP 408. See @ref kCloseAuthFailed for why the two differ. */
+    static constexpr std::uint16_t kCloseAuthTimeout = 4408;
+    /** @brief Default `auth_deadline_ms`: long enough for a multi-round-trip handshake over
+     *         a slow link, short enough that a squatting session is not a resource. */
+    static constexpr std::uint32_t kDefaultAuthDeadlineMs = 10000;
+    /** @brief Longest @ref auth_result_t::subject a session stores; a longer one is
+     *         truncated. Sized to hold a hex-spelled 32-byte public key (64 chars) with
+     *         room for a scheme prefix. */
+    static constexpr std::size_t kMaxSubjectChars = 127;
 
    private:
     struct gate_t;         // the handler-admission gate + teardown barrier (in the .cpp)
@@ -989,6 +1160,73 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *         see @ref set_admission_cb. */
     admission_fn_t admission_fn_ = nullptr;
     void* admission_ctx_ = nullptr;
+    /** @brief Post-handshake auth hook + its opaque ctx; null serves every session at once
+     *         (the default) — see @ref set_auth_cb. Read on the httpd task, unlocked. */
+    auth_fn_t auth_fn_ = nullptr;
+    void* auth_ctx_ = nullptr;
+    /** @brief The unauthenticated-session bound in MICROseconds, resolved from the ctor's
+     *         milliseconds once (0 there => @ref kDefaultAuthDeadlineMs). */
+    std::int64_t auth_deadline_us_ = 0;
+    std::atomic<std::uint32_t> auth_rejected_{0};
+    std::atomic<std::uint32_t> auth_expired_{0};
+    /**
+     * @brief The periodic `esp_timer` that fires the deadline sweep, as an opaque pointer so
+     *        this header names no `esp_timer` type; null when auth is not configured.
+     *
+     * Created by the first @ref set_auth_cb that installs a hook and deleted at the head of
+     * the destructor, BEFORE @ref close_gate — so the join in close_gate is what proves no
+     * sweep is still inside this link. Its callback touches the GATE and nothing else of
+     * ours, for the same reason every other latched callback does.
+     */
+    void* auth_timer_ = nullptr;
+    /**
+     * @brief `esp_timer` callback (timer task): ask the httpd task to run a sweep.
+     *
+     * @p arg is the GATE, never the link — the timer may fire while a destructor is running
+     * and the gate is the object designed to survive that. It does no work of its own beyond
+     * one @ref httpd_queue_work; a refused enqueue is simply this tick skipped, and the next
+     * one covers the same sessions (a deadline is a floor on how long a squatter lives, not
+     * a promise about the instant it dies).
+     */
+    static void auth_timer_fired(void* arg);
+    /** @brief `httpd_queue_work` fn: run @ref sweep_auth_deadlines on the httpd task,
+     *         resolving the link through the gate @p arg. */
+    static void auth_sweep_work(void* arg);
+    /**
+     * @brief Close every session whose authentication deadline has passed (httpd task only).
+     *
+     * Snapshots the expired sessions under @ref peers_m_ and closes them with the lock
+     * RELEASED, because @ref close_session takes it again — the same shape every other
+     * close path here uses.
+     */
+    void sweep_auth_deadlines();
+    /**
+     * @brief Hand one whole message from an unauthenticated session to the auth hook and act
+     *        on the verdict (httpd task only; @ref peers_m_ must NOT be held).
+     *
+     * The hook runs with no lock of this link held: it is foreign code of unbounded duration
+     * and the mutex it would otherwise sit under is the one the send path needs.
+     */
+    void on_auth_message(session_t* slot, std::span<const std::byte> body);
+    /**
+     * @brief Send @p payload to @p slot's socket RIGHT NOW rather than through the work
+     *        queue (httpd task only; @ref peers_m_ must NOT be held).
+     *
+     * The auth exchange is the one send path that is already ON the httpd task and already
+     * holds its session, so it needs neither the pool nor `httpd_queue_work` — the queue
+     * exists to marshal sends from OTHER tasks onto this one. Bracketed like @ref tx_work's
+     * send so a short write is judged by the same rule (@ref send_guarded).
+     */
+    esp_err_t send_now(session_t* slot, int fd, int ws_type, std::span<const std::byte> payload);
+    /**
+     * @brief Send a WebSocket CLOSE with @p code and tear the session down (httpd task only;
+     *        @ref peers_m_ must NOT be held).
+     *
+     * Order matters and is the whole reason this is not just @ref condemn: `condemn` is
+     * `shutdown`, after which every write on the socket fails at once, so a close code
+     * written afterwards never reaches the peer. The frame goes first, the shutdown second.
+     */
+    void close_session(session_t* slot, std::uint16_t code);
     /** @brief The per-socket send bound applied at admission — see @ref send_timeout_ms. */
     std::uint32_t send_timeout_ms_ = 0;
     /** @brief Frames that never reached a socket, for this link's life — see @ref
