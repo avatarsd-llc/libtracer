@@ -607,10 +607,18 @@ struct subscriber_remote_t {
      * @brief The consumer's accumulated return route (a complete PATH TLV's bytes — the FWD
      *        `src` the subscribe arrived with).
      *
-     * Populated ⇒ a REMOTE subscriber: a write hands (@ref link, this route,
-     * @ref delivery_compact, value) to the graph's injected remote-delivery sink,
-     * which emits the `FWD{WRITE}` (or auto-promoted COMPACT) back over the link (RFC-0004
-     * §D/§E.1, ADR-0035 slice 4 / #136). Held as a view over a REFCOUNTED segment (ADR-0041
+     * A write hands (@ref link, this route, @ref delivery_compact, value) to the graph's
+     * injected remote-delivery sink, which emits the `FWD{WRITE}` (or auto-promoted COMPACT)
+     * back over the link (RFC-0004 §D/§E.1, ADR-0035 slice 4 / #136).
+     *
+     * @ref link is the discriminator, not this field: `graph_t::dispatch_edge` takes its
+     * remote leg on a non-empty link and reads this route without testing it. The two agree
+     * because the admitting door enforces it — `graph_t::subscribe_wire` refuses an empty
+     * route as `INVALID_PATH` (#1055), and the `:subscribers[]` field-write arm, which binds
+     * no route, deliberately leaves @ref link empty (see the note at that door: assigning a
+     * link there would manufacture exactly the routeless delivery this invariant excludes).
+     * So on a published edge the two are populated together or not at all, and testing either
+     * one answers "is this subscriber remote?". Held as a view over a REFCOUNTED segment (ADR-0041
      * §2): copied once at subscribe, then every delivery snapshot is a refcount clone —
      * O(1) copies over the subscription's life, and an in-flight delivery keeps the route
      * alive across a concurrent unsubscribe. An opaque view, so L4 never depends on tr::net.

@@ -47,7 +47,7 @@ implementation differ.
 
 | | Surface | Catalog |
 | ---- | ---- | ---- |
-| **What the implementation accepts** | a CREATE-gated `SPEC{ NAME "type", NAME "name", SETTINGS "config" }` write to `/net:children[]` (`graph_t::create_child`, `core/src/graph.cpp:2158`) | one global set of registered child types — `client` and `listener` (`core/src/transport_vertex.cpp:99-107`); the concrete transport is selected by a `kind` key inside the `config` SETTINGS (`core/src/transport_vertex.cpp:48,64`), extended per transport module through `register_transport_type` (`core/src/transport_vertex.cpp:128`) |
+| **What the implementation accepts** | a CREATE-gated `SPEC{ NAME "type", NAME "name", SETTINGS "config" }` write to `/net:children[]` (`graph_t::create_child`, `core/src/graph.cpp:2170`) | one global set of registered child types — `client` and `listener` (`core/src/transport_vertex.cpp:99-107`); the concrete transport is selected by a `kind` key inside the `config` SETTINGS (`core/src/transport_vertex.cpp:48,64`), extended per transport module through `register_transport_type` (`core/src/transport_vertex.cpp:128`) |
 | **What RFC-0014 specifies** | a per-module creator endpoint `/net/<module>/conn` — `SPEC{ name, config }` creates, `NAME{ name }` retires, with the transport and the role both positional in `<module>` | each module's own `conn:schema` |
 
 The created connection vertex is mounted and routed at **`/net/<module>/<name>`**,

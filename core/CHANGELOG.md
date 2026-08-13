@@ -26,6 +26,23 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `parse_acl`'s acceptance rule (narrower payloads zero-extend, #906) is untouched, so ACLs
   stored with the old two-byte spelling remain readable.
 
+- **BREAKING (admission): `graph_t::subscribe_wire` refuses an EMPTY `return_route` with
+  `INVALID_PATH` (#1055).** The door previously validated neither of its two remote-binding
+  arguments, so an edge could be admitted carrying a link with no route to deliver over it.
+  `graph_t::dispatch_edge` gates its remote leg on `!link.empty()` but hands the sink the
+  *return route* untested, so such an edge emitted one `FWD{WRITE}` per publish whose `dst`
+  was a zero-byte PATH — on the COMPACT arm it became the label key, on the full-route arm it
+  was spliced into the iov and counted into the body length. Both in-tree callers already
+  satisfied the new rule (the resolver rejects a failed route copy as `BACKPRESSURE`, and
+  `fwd_router_t::subscribe_toward` refuses an empty residual as `INVALID_PATH`), so no wire
+  door changes behaviour; only an embedder driving the public door directly with an empty
+  route is affected, and that call was already producing malformed deliveries. The gate is at
+  the door rather than in the fan-out body deliberately: `dispatch_edge` is the wide
+  fan-out loop's per-edge cost and is kept inlinable, so this adds nothing to the publish
+  path. `subscriber_remote_t::return_route`'s declaration — which claimed being *populated*
+  is what makes a subscriber remote, while the code tests `link` — now states the invariant
+  the door establishes instead.
+
 ### Documentation
 
 - RFC-0016 §B erratum ([#1030](https://github.com/avatarsd-llc/libtracer/issues/1030)):
