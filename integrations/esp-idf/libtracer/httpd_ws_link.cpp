@@ -1547,6 +1547,7 @@ esp_err_t httpd_ws_link_t::ws_pre_handshake(httpd_req_t* req) {
     auto* const gate = static_cast<gate_t*>(req->user_ctx);
     if (gate == nullptr) return ESP_FAIL;
     admission_fn_t fn = nullptr;
+    admission_verdict_fn_t verdict_fn = nullptr;
     void* ctx = nullptr;
     {
         const std::lock_guard lock(gate->m);
@@ -1558,6 +1559,7 @@ esp_err_t httpd_ws_link_t::ws_pre_handshake(httpd_req_t* req) {
         // would otherwise wait for.
         self->server_task_.store(current_task(), std::memory_order_relaxed);
         fn = self->admission_fn_;
+        verdict_fn = self->admission_verdict_fn_;
         ctx = self->admission_ctx_;
         // Register on the barrier for the duration of the predicate. `serving_fd` stays
         // -1 deliberately: it names the session an in-flight handler frame is servicing
@@ -1567,10 +1569,27 @@ esp_err_t httpd_ws_link_t::ws_pre_handshake(httpd_req_t* req) {
     }
     // The predicate runs with `m` RELEASED — it is host code, bounded by nothing this
     // link owns, and the gate mutex is the one every latched callback resolves through
-    // (the lock-order rule recorded on gate_t). A null hook admits
-    // every peer, which is the historical open-graph behavior.
-    const bool admit = fn == nullptr || fn(ctx, req);
+    // (the lock-order rule recorded on gate_t).
+    //
+    // At most one of the two forms is installed (each setter clears the other), so this is a
+    // choice between three shapes and never a merge of two answers: the three-valued
+    // predicate, the two-valued one, or no predicate at all — which admits every peer, the
+    // historical open-graph behavior.
+    const admission_verdict_t verdict =
+        verdict_fn != nullptr ? verdict_fn(ctx, req)
+        : fn != nullptr ? (fn(ctx, req) ? admission_verdict_t::ADMIT : admission_verdict_t::REFUSE)
+                        : admission_verdict_t::ADMIT;
+    const bool admit = verdict != admission_verdict_t::REFUSE;
     if (!admit) ESP_LOGW(kTag, "peer refused by admission hook (fd=%d)", httpd_req_to_sockfd(req));
+    // Record the pre-authentication BEFORE the 101 goes out, so the peer's first data frame
+    // — which may arrive on another httpd select round the instant the upgrade completes —
+    // can never race the note it has to read. `peers_m_` nests UNDER `m`, which is the
+    // permitted order (see gate_t), and the link is re-resolved through the gate the way
+    // every other latched callback does.
+    if (verdict == admission_verdict_t::ADMIT_AUTHENTICATED) {
+        const std::lock_guard lock(gate->m);
+        if (gate->link != nullptr) gate->link->note_preauthenticated(httpd_req_to_sockfd(req));
+    }
     {
         const std::lock_guard lock(gate->m);
         // Count the refusal here (#953) rather than beside its log line: this is a STATIC
@@ -1722,7 +1741,14 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
             // deadline is stamped from the same clock reading the session is dated by. The
             // subject is cleared with it: slots are recycled in place, so a stale identity
             // left here would be published for whoever landed on the slot next.
-            slot->auth_pending = auth_fn_ != nullptr;
+            // ...unless the HANDSHAKE authenticated it (#1245). A peer that presented a
+            // credential the admission predicate accepted has already answered the question
+            // this hook asks, and asking it again in-band is a question a native dialer
+            // cannot answer at all — it has no way to send an authentication frame, so a
+            // link serving both browsers and dialers would close every dialer at the
+            // deadline. The record is CONSUMED here, which is what keeps it a handoff.
+            const bool preauthenticated = take_preauthenticated(fd);
+            slot->auth_pending = auth_fn_ != nullptr && !preauthenticated;
             slot->auth_deadline_us =
                 slot->auth_pending ? slot->st.connected_at_us + auth_deadline_us_ : 0;
             slot->subject[0] = '\0';
@@ -1964,6 +1990,41 @@ void httpd_ws_link_t::close_session(session_t* slot, std::uint16_t code) {
         slot->dead = true;
     }
     condemn(fd);
+}
+
+void httpd_ws_link_t::note_preauthenticated(int fd) {
+    if (fd < 0) return;
+    const std::lock_guard lock(peers_m_);
+    // Overwrite a stale record for the same descriptor rather than adding a second. A
+    // descriptor is reused as soon as the kernel frees it, so a leftover from a handshake
+    // whose peer never sent a frame would otherwise pre-authenticate the NEXT connection to
+    // land on that number — the one way this mechanism could fail open.
+    for (std::size_t i = 0; i < preauth_n_; ++i)
+        if (preauth_fds_[i] == fd) return;  // already recorded; nothing to add
+    if (preauth_n_ == preauth_fds_.size()) {
+        // Full: drop the entry at the front to make room. `take_preauthenticated` fills a
+        // hole from the back, so the set is not ordered by age and this is not "the oldest"
+        // — it is one arbitrary handshake, which will be asked for a credential frame it may
+        // not be able to answer. That is the fail-CLOSED direction, and reaching it at all
+        // means more handshakes are in flight than the server has sockets.
+        for (std::size_t i = 1; i < preauth_n_; ++i) preauth_fds_[i - 1] = preauth_fds_[i];
+        --preauth_n_;
+        ESP_LOGW(kTag,
+                 "pre-authentication record set full - a handshake will be asked for a "
+                 "credential frame");
+    }
+    preauth_fds_[preauth_n_++] = fd;
+}
+
+bool httpd_ws_link_t::take_preauthenticated(int fd) noexcept {
+    if (fd < 0) return false;
+    for (std::size_t i = 0; i < preauth_n_; ++i) {
+        if (preauth_fds_[i] != fd) continue;
+        preauth_fds_[i] = preauth_fds_[preauth_n_ - 1];  // order carries no meaning
+        --preauth_n_;
+        return true;
+    }
+    return false;
 }
 
 void httpd_ws_link_t::on_auth_message(session_t* slot, std::span<const std::byte> body) {

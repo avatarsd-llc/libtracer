@@ -687,7 +687,7 @@ ANCHORS = [
     # integrations/esp-idf/libtracer/httpd_ws_link.cpp
     ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:71',
      '* (F2b, 2026-07-09): the /unit batch apply overflowed 8 KB and needed ~12 KB. It is named'),
-    ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:170',
+    ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:171',
      'static constexpr std::size_t kRequiredHttpdStack = 12288;'),
     ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:574', 'if (chunk.empty()) return true;'),
     ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:580',
