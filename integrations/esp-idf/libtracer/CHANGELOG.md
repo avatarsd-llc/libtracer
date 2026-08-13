@@ -10,6 +10,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`httpd_ws_link.cpp` now compiles with `CONFIG_LWIP_IPV6` off.** The #994 peer-endpoint
+  rework sized its buffers from `INET6_ADDRSTRLEN` and decoded an `AF_INET6` `getpeername`
+  unconditionally, but lwIP defines neither `sockaddr_in6` nor the v6 constant when IPv6 is
+  disabled — an embedder with `CONFIG_LWIP_IPV6=n` (v4-only nodes are common on constrained
+  builds) could not compile the component at all. The v6 arm is now compiled out under that
+  config: `esp_http_server` binds `PF_INET` there, so `AF_INET` is the only family a peer
+  can present and the v4 buffer bound is exact, not truncated. No behavior change with
+  IPv6 on.
+
 ## [0.11.0] — 2026-08-13
 
 ### Added
