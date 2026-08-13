@@ -196,6 +196,23 @@ void transport_can::enumerate_peers(const peer_visitor_t& visit) const {
     }
 }
 
+/**
+ * @brief Resolve `n<node-id>` to that peer's directed endpoint — IDENTITY-scoped, so
+ *        the slot-recycling hazard of @ref bus_link_t::peer_link cannot arise here
+ *        (#1153).
+ *
+ * The name is the peer's own bus node id, not a position: `parse_peer_name` is the exact
+ * inverse of `format_peer_name`, the table is keyed by that same node id, and
+ * `touch_peer` stamps `endpoint.node_` once on first insert. Name, key and endpoint are
+ * therefore one identity that no other peer can ever inherit, and the table is
+ * INSERT-ONLY — expiry hides an entry from resolution but never frees or reassigns it.
+ * A cached pointer keeps addressing the node it was resolved for, even across an
+ * expiry and a later return of that node.
+ *
+ * What resolution still answers is LIVENESS, not identity: a peer silent past
+ * `peer_ttl` stops resolving, and a pointer cached before that keeps sending into a bus
+ * nobody is listening on. That is a delivery question, never a misdelivery.
+ */
 transport_t* transport_can::peer_link(std::string_view peer) {
     const std::optional<std::uint16_t> node = parse_peer_name(peer);
     if (!node) return nullptr;

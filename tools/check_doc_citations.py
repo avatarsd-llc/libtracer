@@ -490,9 +490,9 @@ ANCHORS = [
     ('core/include/libtracer/tlv_arena.hpp:130',
      '* NOTHROW end to end (#588). This function is on the wire RX path and reachable'),
     # core/include/libtracer/transport.hpp
-    ('core/include/libtracer/transport.hpp:341',
+    ('core/include/libtracer/transport.hpp:360',
      'virtual void send(std::span<const std::span<const std::byte>> iov) {'),
-    ('core/include/libtracer/transport.hpp:458',
+    ('core/include/libtracer/transport.hpp:477',
      '[[nodiscard]] virtual bool delivers_ropes() const { return false; }',
      'rx_.set_rope([](void* c, view::rope_t f) { (*static_cast<F*>(c))(std::move(f)); }, &sink);'),
     # core/include/libtracer/transport_can.hpp
@@ -629,7 +629,7 @@ ANCHORS = [
     # The multi-peer servers' per-chunk receive scratch — ONE buffer since #871 folded the
     # tcp and ws poll loops into slot_server_t (it used to be one apiece, cited as
     # transport_tcp.cpp:508 and transport_ws.cpp:420).
-    ('core/src/posix_endpoint.cpp:448', 'std::array<std::byte, 4096> chunk;',
+    ('core/src/posix_endpoint.cpp:464', 'std::array<std::byte, 4096> chunk;',
      'void slot_server_t::service_peer(session_base_t& s) {'),
     # core/src/rope.cpp
     ('core/src/rope.cpp:16', 'if (!all_host()) return std::unexpected(flatten_err_t::NOT_HOST);'),

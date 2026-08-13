@@ -85,6 +85,25 @@ class bus_link_t {
      *
      * The returned transport sends to THAT peer only (the bus binding's directed
      * framing); it is owned by this link and stays valid for the link's lifetime.
+     *
+     * RESOLVE PER USE — never cache the pointer across a possible departure (#1153).
+     * Pointer VALIDITY and peer IDENTITY are two different guarantees, and only the
+     * first holds for every kind. Where a kind names peers POSITIONALLY, the endpoint
+     * is scoped to the SLOT, not to the session that occupied it: after the named peer
+     * departs, a pointer resolved for it addresses whatever session inherits the slot,
+     * and the endpoint's own liveness check is satisfied by that stranger. The pointer
+     * never dangles; it silently changes who it means. A caller that re-resolves before
+     * each send is unexposed, which is why no production caller is affected today —
+     * `child_registry_t` resolves and sends in one expression, and a remote subscriber
+     * edge stores the peer NAME rather than this pointer.
+     *
+     * Which kinds are exposed follows from the naming regime alone:
+     *  - IDENTITY-derived names are immune — @ref transport_can names a peer `n<node-id>`
+     *    for its own bus node id, so the name, the table key and the endpoint are one
+     *    identity that no other peer can inherit.
+     *  - POSITIONAL names are exposed — @ref slot_server_t names a peer `p<slot>` for the
+     *    slot index it landed in, and slots are recycled in place.
+     *
      * @retval nullptr @p peer names no currently-known bus peer.
      */
     [[nodiscard]] virtual transport_t* peer_link(std::string_view peer) = 0;
