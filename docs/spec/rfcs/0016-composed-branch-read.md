@@ -104,6 +104,14 @@ All of the following are shipped behavior, pinned by `graph_t::read` /
   composed branch read; a leaf serves its stored value **byte-identically to before**;
   a HANDLER-role target keeps `on_read` precedence (§C below); field reads
   (`read(v, field, caller)` — `:children[]`, `:schema`, `:acl`, …) are unchanged.
+
+  > **Erratum (2026-08-13), [#1030](https://github.com/avatarsd-llc/libtracer/issues/1030)
+  > — see §Erratum at the end of this document.** The fork's predicate is answered
+  > lock-free; a read racing the retirement of the target's **last** registered child may
+  > take the composed path and then find no registered child under the walk's own lock,
+  > composing the **root alone** — a `POINT` with zero child records. That reply is
+  > **legal**: it is byte-identical to the fully-pruned reply the READ-ACL prune below
+  > already produces deterministically, so it is not a new shape.
 - **Landed LKVs only.** Each node contributes one atomic load of its stored value.
   Descendant HANDLER `on_read` seams are **never invoked** during the walk — a
   descendant handler with no stored value simply contributes no value slot.
@@ -115,6 +123,12 @@ All of the following are shipped behavior, pinned by `graph_t::read` /
   vertex the caller may not READ **prunes its whole subtree** — silently, siblings
   unaffected; an explicitly-allowed vertex under a denied ancestor is still pruned
   (structural — set-equivalent to the gated enumerate-and-read walk it replaces).
+
+  > **Erratum (2026-08-13), [#1030](https://github.com/avatarsd-llc/libtracer/issues/1030)
+  > — see §Erratum at the end of this document.** The prune may remove **every** child: a
+  > caller allowed READ on the branch and denied on each of its children receives a
+  > composed `POINT` carrying the root's stored TLV (if any) and **zero child records**.
+  > A decoder of the composed reply MUST accept the zero-child-record shape.
 - **A value-free branch serves a names-only topology tree** — the nested `POINT`/`NAME`
   skeleton with no value slots — instead of the previous `NOT_FOUND`.
 - **Consistency (carried from RFC-0005 §C, unchanged).** One store per vertex; each
@@ -259,3 +273,61 @@ Corrected at the two inheriting code sites that carried the same sentence:
 
 **No normative requirement changes**, and the wire surface is untouched — hence an erratum per
 [GOVERNANCE.md](../../../.github/GOVERNANCE.md), not an amendment.
+
+---
+
+## Erratum (2026-08-13) — a composed reply may carry zero child records; the racing-retire root-only compose is that same legal shape ([#1030](https://github.com/avatarsd-llc/libtracer/issues/1030))
+
+§B's grammar walk-through and §A's examples show composed replies with one or more
+`child_node` records, and nothing in the text said whether zero is possible. Two shipped
+behaviors produce exactly that reply — the identical bytes, one deterministically and one
+under a race:
+
+**The READ-ACL prune already produces it, deterministically.** §B's per-node prune is
+per-child: a caller allowed READ on the branch and denied READ on **every** child
+receives `POINT{ [stored TLV of target]? }` — a composed reply with zero child records.
+For a one-byte root value `0xDD` that is the five bytes `07 40 01 00 DD`. This is the
+prune working exactly as §B specifies; it has been shipped behavior since the prune
+landed, with no concurrency anywhere.
+
+**The lock-free fork can produce it transiently.** Since
+[#652](https://github.com/avatarsd-llc/libtracer/issues/652) the branch/leaf fork is
+answered from the vertex's registered-child bit without the map lock; the composed walk
+then takes the map lock separately and skips unregistered children. A read racing the
+retirement of the target's last registered child can decide "branch" from the bit and
+then find no registered child under the lock — composing the root alone. Measured at
+roughly 3 % of reads under a four-reader register/write/retire hammer
+([#1030](https://github.com/avatarsd-llc/libtracer/issues/1030)); byte-identical to the
+ACL-prune reply above.
+
+**The ruling (2026-08-12 grilling session, recorded on #1030): the shape is legal —
+specify it, change no code.** A decoder that rejects the zero-child-record compose is
+already broken against the deterministic ACL-prune case, which has nothing to do with
+retirement; the race adds frequency, not a new shape. The alternative — re-checking the
+fork under the walk's map lock and falling through to the leaf path — would put a branch
+back on the read path #652 optimised while still leaving the ACL prune producing the
+same shape, reducing nothing a decoder must handle.
+
+Corrections, all in this document (§B, inline erratum notes at the two governing
+bullets):
+
+- The fork bullet gains the racing-retire transient: a read racing the retirement of the
+  last registered child may compose the root alone, and that reply is legal.
+- The prune bullet states the boundary case: the prune may remove every child, and a
+  decoder MUST accept the zero-child-record shape.
+
+Corrected alongside at the code sites that carry the same contract:
+`core/include/libtracer/vertex.hpp` (`has_registered_child`'s "either side" weakening
+gains the matching sentence) and the tests —
+`core/tests/read_fork_test.cpp` now **classifies** every free-running read of the racing
+harness (the root-only compose is counted and accepted; any other unexpected shape
+fails), and `core/tests/subtree_read_test.cpp` pins the deterministic ACL-prune case: a
+caller allowed on the branch and denied on every child receives a composed reply with
+zero child records.
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)).
+The wire surface is unchanged — the zero-child-record reply is producible by shipped,
+already-specified behavior (the §B prune), and this correction only writes down that the
+composed grammar's `child_node*` repetition genuinely includes zero. No frame shape, type
+code, or error identity changes. Maintainer ruling recorded on
+[#1030](https://github.com/avatarsd-llc/libtracer/issues/1030) (grilled 2026-08-12).

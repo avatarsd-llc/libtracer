@@ -1442,7 +1442,12 @@ class vertex_t {
      * either side of it — exactly as it could when the fork took a shared lock, since the
      * API orders a `read` against a concurrent `register_vertex` no more strongly than this.
      * The composed branch read re-acquires the map lock for its own walk, so the ordering
-     * that walk depends on is not this counter's to provide.
+     * that walk depends on is not this counter's to provide. One observable follows from
+     * that gap: a read racing the retirement of the LAST registered child may see the bit
+     * set here and then find no registered child under the walk's lock, composing the
+     * root alone — a POINT with zero child records. That reply is LEGAL, byte-identical
+     * to the fully READ-ACL-pruned reply RFC-0016 §B produces deterministically (erratum
+     * 2026-08-13, #1030) — a transient in frequency, not a new shape.
      */
     [[nodiscard]] bool has_registered_child() const noexcept {
         return test_flag(flag_t::REGISTERED_CHILD, std::memory_order_acquire);

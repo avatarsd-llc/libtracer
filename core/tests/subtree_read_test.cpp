@@ -13,7 +13,9 @@
  * a STATUS composes as-is). The battery (modeled on folded_children_test):
  * a seeded DIFFERENTIAL over randomized tree shapes (composed-read map == tracked writes ==
  * per-leaf reads, order-independent), the branch-write ROUND-TRIP, ACL subtree PRUNING
- * (incl. allow-under-denied-ancestor, set-equivalent to the gated enumerate+read loop),
+ * (incl. allow-under-denied-ancestor, set-equivalent to the gated enumerate+read loop,
+ * and the every-child-denied boundary that composes the root alone — RFC-0016 §B
+ * erratum, #1030),
  * leaf/handler REGRESSION (byte-identical to the pre-composed-read behavior), the names-only
  * topology tree, and the ZERO-COPY link-structure accounting (owned headers + borrowed
  * names + refcount-cloned LKV links — never one flattened buffer).
@@ -397,6 +399,51 @@ void test_acl_prune() {
           "snapshot topology is set-equivalent to the gated enumerate+read loop");
 }
 
+/**
+ * @brief The prune's boundary case, pinned deterministically: a caller allowed READ on
+ *        the branch and denied READ on EVERY child receives a composed reply with ZERO
+ *        child records (RFC-0016 §B erratum 2026-08-13, #1030).
+ *
+ * This is the cheap non-racy guard for the shape the retirement transient also produces
+ * (`read_fork_test` counts that one under a race): the two are byte-identical, so a
+ * decoder that chokes on the childless compose is broken against THIS deterministic,
+ * concurrency-free case — which is why the shape is specified legal rather than raced
+ * away.
+ */
+void test_acl_prune_zero_children() {
+    std::printf("ACL PRUNE boundary — every child denied composes the root ALONE:\n");
+    graph_t g;
+    (void)g.register_vertex(path_t("/q"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/q/a"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/q/b"), role_t::STORED_VALUE);
+    (void)g.write(path_t("/q"), make_value(value_tlv({0xDD})));
+    (void)g.write(path_t("/q/a"), make_value(value_tlv({0x01})));
+    (void)g.write(path_t("/q/b"), make_value(value_tlv({0x02})));
+
+    g.set_subject_resolver([](std::string_view) -> std::expected<subject_token_t, tr::wire::err_t> {
+        return subject_token_t{std::byte{'u'}};
+    });
+    std::vector<std::byte> everyone;
+    for (const char c : std::string_view("EVERYONE@")) everyone.push_back(std::byte(c));
+    // A WRITE-only ACE closes READ on BOTH children; the branch itself stays open (no ACL
+    // installed => the default admits the attributed caller's READ).
+    const std::vector<tr::graph::ace_t> deny_aces{
+        {.subject = everyone, .access_mask = static_cast<std::uint32_t>(acl_right_t::WRITE)}};
+    const std::vector<std::byte> deny_read = tr::graph::encode_acl(deny_aces);
+    check(g.write(path_t("/q/a:acl"), make_value(deny_read)).has_value(),
+          "install the READ-denying ACL on /q/a");
+    check(g.write(path_t("/q/b:acl"), make_value(deny_read)).has_value(),
+          "install the READ-denying ACL on /q/b");
+
+    const auto snap = read_snapshot_map(g, path_t("/q"), "peer");
+    check(snap.has_value(), "the branch read still SUCCEEDS for the gated caller");
+    if (!snap) return;
+    check(snap->topology == std::set<std::string>{""},
+          "the composed reply carries ZERO child records — the prune removed every child");
+    check(snap->values == std::map<std::string, std::vector<std::byte>>{{"", value_tlv({0xDD})}},
+          "and the root's own stored TLV is served verbatim, nothing else");
+}
+
 // --- 4. REGRESSION: leaf and handler-target reads ----------------------------
 
 void test_leaf_and_handler_regression() {
@@ -523,6 +570,7 @@ int main() {
     test_differential_random_trees();
     test_branch_write_round_trip();
     test_acl_prune();
+    test_acl_prune_zero_children();
     test_leaf_and_handler_regression();
     test_non_value_tlv_verbatim();
     test_names_only_topology();

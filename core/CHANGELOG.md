@@ -14,6 +14,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Documentation
+
+- RFC-0016 §B erratum ([#1030](https://github.com/avatarsd-llc/libtracer/issues/1030)):
+  a composed branch-read reply may legitimately carry **zero child records** — produced
+  deterministically when the READ-ACL prune removes every child, and transiently when a
+  read races the retirement of the last registered child (the lock-free fork of #652).
+  No code change; the shape was already legal and is now written down.
+  `has_registered_child`'s contract note, the `read_fork_test` race harness (free-running
+  reads are now shape-classified) and a deterministic `subtree_read_test` boundary case
+  pin it.
+
 ## [0.11.0] — 2026-08-13
 
 ### Added
