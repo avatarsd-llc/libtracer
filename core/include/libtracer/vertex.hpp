@@ -874,7 +874,7 @@ class edge_snapshot_t {
  * loop's bandwidth. Inlining these four members made the entry 136 B against `subscriber_t`'s
  * 72 and cost **+23 % on the fan-out-1024 publish** — the wide-fan-out arm, measured, not
  * predicted. Out of line, an entry is 48 B, and a local edge's copy is the pointer-and-refcount
- * work `vertex_t::try_edge_view_of` always did.
+ * work `vertex_t::try_copy_published` does.
  */
 struct pub_remote_t {
     std::string link;              /**< @brief Remote-delivery link NAME. */
@@ -1567,6 +1567,32 @@ class vertex_t {
     // -- storage & readiness ----------------------------------------------------------
 
     /**
+     * @brief What a @ref store SHED under allocation pressure — reported BY REFERENCE,
+     *        never counted here (#1003).
+     *
+     * The same division of labour @ref snapshot_drops_t states for the fan-out plane, for the
+     * same reason: `vertex_t` is the storage layer and owns no counters, so it reports the
+     * tally and `graph_t` folds it through the single exhaustive counting door. A shed the
+     * storage layer knows about and the graph never hears of is exactly the defect — a whole
+     * STREAM fan-out was abandoned under memory pressure while `graph_t::delivery_drops()`,
+     * the one observable, read zero.
+     *
+     * The width is the CALLER's call, not this struct's: whether a shed append cost a
+     * delivery depends on whether the ring drain *was* the delivery (it is for the write and
+     * sweep paths; it is not for a branch notify, which fans the slice out eagerly and then
+     * flushes the cursor). See `graph_t::count_store_drops`.
+     */
+    struct store_drops_t {
+        /** @brief The STREAM history append was shed: the ring-append probe declined, so the
+         *         entry never entered the ring. The LKV publish ABOVE it still landed — the
+         *         write succeeds (RFC-0008 §E, bounded-lossy history), and what is lost is
+         *         the delivery a later drain would have made. */
+        bool ring_append = false;
+        /** @brief Did this store shed anything? The ONE test a clean write pays. */
+        [[nodiscard]] bool any() const noexcept { return ring_append; }
+    };
+
+    /**
      * @brief Store @p value as this vertex's state: publish the last-known-value
      *        (lock-free), append the STREAM ring (keep-last trim), bump the write
      *        sequence, and wake awaiters.
@@ -1583,6 +1609,12 @@ class vertex_t {
      *              Lifetime: the resource must outlive every `shared_ptr` obtained
      *              from this vertex — the same "handles do not outlive the graph's
      *              memory" contract the injection seam already imposes.
+     * @param drops Out: what this store SHED (@ref store_drops_t) — set, never cleared, so
+     *              the caller owns the zeroing. A pointer rather than the reference
+     *              @ref snapshot_edges takes because the storage-layer unit tests call this
+     *              verb directly and hold no counters; the seam that must never forget is
+     *              `graph_t::store_value`, the ONE funnel every graph write reaches this
+     *              through, and the tally is required THERE.
      * @return The published LKV pointer — exactly what a concurrent @ref read_stored
      *         observes — so the write path can deliver the stored value (RFC-0008 §D
      *         "deliver exactly what was stored") without recloning the rope.
@@ -1590,7 +1622,8 @@ class vertex_t {
      *         published or appended (#477 nothrow soft-fail — the graph maps this to
      *         `BACKPRESSURE`; the store verb never aborts the node).
      */
-    std::shared_ptr<const rope_t> store(rope_t value, std::pmr::memory_resource* mr = nullptr) {
+    std::shared_ptr<const rope_t> store(rope_t value, std::pmr::memory_resource* mr = nullptr,
+                                        store_drops_t* drops = nullptr) {
         std::shared_ptr<const rope_t> sp = try_make_lkv(std::move(value), mr);
         if (!sp) return nullptr;  // OOM: nothing published — the caller soft-fails (#477)
         // Publish the new last-known-value (lock-free by CONTRACT; see lkv_). A slot that
@@ -1641,6 +1674,12 @@ class vertex_t {
                 // append: the ring is bounded-lossy by contract (drain: "entries
                 // trimmed before the drain are lost"), so a pressure-dropped history
                 // entry is valid behavior — the LKV above already published.
+                //
+                // Valid, but not FREE, and not silent (#1003): for a STREAM the drain IS the
+                // fan-out, so a skipped append is a delivery every subscriber loses. The
+                // write still answers SUCCESS (the ruled disposition — the value publish
+                // landed and the ring is lossy by contract), which is exactly why the loss
+                // has to leave the tally behind instead.
                 static constexpr std::size_t kRingAppendProbe = 1024;
                 if (tr::detail::probe_bytes(kRingAppendProbe)) {
                     if (!e->history)  // first append allocates the ring (#388 lazy deque)
@@ -1649,6 +1688,8 @@ class vertex_t {
                     ++e->appended_since_flush;  // the drain counts APPENDS, not seq (#925)
                     const std::size_t keep = e->history_keep_last != 0 ? e->history_keep_last : 1;
                     while (e->history->size() > keep) e->history->pop_front();
+                } else if (drops != nullptr) {
+                    drops->ring_append = true;
                 }
             }
             write_seq_.fetch_add(1, std::memory_order_seq_cst);
@@ -2703,33 +2744,6 @@ class vertex_t {
         return e;
     }
 
-    /**
-     * @brief The NOTHROW twin of `edge_view_of` for the writer-thread fan-out snapshot
-     *        (#477): fill @p out with the slot's dispatch view, soft-failing instead of
-     *        throwing when an owning copy (target key / link / caller) cannot allocate.
-     *
-     * A local callback edge copies nothing that allocates (empty key, no cold half, the
-     * route is a refcount clone), so the hot small-fan-out path never reaches a probe.
-     * `edge_view_of` stays for the admission-time latch (control plane). Call with the
-     * stripe lock held.
-     * @retval false An owning copy failed (OOM) — drop this edge's delivery; @p out is
-     *         partially filled and must be discarded.
-     */
-    [[nodiscard]] bool try_edge_view_of(const subscriber_t& s, edge_view_t& out) const noexcept {
-        out.callback = s.callback;
-        out.callback_ctx = s.callback_ctx;
-        out.target_key = s.target_key;  // refcount clone — nothrow, and no longer a malloc
-        out.binding = s.binding;        // two words, trivially copyable
-        if (s.remote != nullptr) {
-            if (!tr::detail::try_assign(out.link, s.remote->link) ||
-                !tr::detail::try_assign(out.caller, s.remote->caller))
-                return false;
-            out.return_route = s.remote->return_route;  // refcount clone — nothrow
-            out.delivery_compact = s.remote->delivery_compact;
-        }
-        return true;
-    }
-
     // -- the published edge array (#635) ------------------------------------------------
     //
     // Everything below runs with the stripe lock held EXCEPT copy_published, which is the
@@ -2866,8 +2880,9 @@ class vertex_t {
     /**
      * @brief The NOTHROW copy of one published entry into a dispatch view (#477).
      *
-     * Deliberately the same SHAPE as `try_edge_view_of`, which it replaced on this path: a
-     * single named return filled in place, and the cold half touched only when it exists. The
+     * A single named return filled in place, with the cold half touched only when it exists —
+     * the shape inherited from the pre-#635 `try_edge_view_of`, which this replaced on the
+     * fan-out path and which #1003 deleted once nothing called it any more. The
      * plain in-process edge — the fan-1-vs-Zenoh case and the bulk of a wide fan-out — copies
      * two pointers and takes one refcount clone, reaching no allocator and therefore no probe.
      * @retval false An owning copy failed (OOM) — drop this edge's delivery.

@@ -61,9 +61,9 @@ per-vertex `:settings` container — `:settings.reliability`, `:settings.durabil
 [RFC-0022](../../docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md)
 (with its Amendment 1) deleted `settings_t` outright and removed the whole
 `:settings.<knob>` **write** surface: a write to any of the seven names now answers
-`SCHEMA_NOT_FOUND`, caller-independently (`core/src/graph.cpp:2027-2033`). The `:settings`
+`SCHEMA_NOT_FOUND`, caller-independently (`core/src/graph.cpp:2094-2100`). The `:settings`
 **read** container survives with its shape and none
-of its knobs — `SETTINGS{ [NAME "app" SETTINGS{…}] }`, `core/src/graph.cpp:2324` — so
+of its knobs — `SETTINGS{ [NAME "app" SETTINGS{…}] }`, `core/src/graph.cpp:2391` — so
 there is nothing left for QoS to round-trip through, and no wire surface a namespaced
 extension could ride. See [ADR-0023](../../docs/adr/0023-ros2-binding-via-rmw-tracer.md)'s
 two errata. Nothing shipped against the old mapping: this package has one real TU
@@ -73,7 +73,7 @@ What `qos.c` maps onto instead — **three carriers, not one**:
 
 | `rmw_qos_profile_t` field | libtracer carrier | where |
 | --- | --- | --- |
-| `reliability`, `durability` (libtracer packs a third bit-field, `priority`, that ROS has no profile member for) | the **subscription's** packed 16-bit `delivery_policy`, set at `rmw_create_subscription` time and carried in the `SUBSCRIBER`'s existing `SETTINGS` child as `NAME "delivery_policy" VALUE u16` | `core/include/libtracer/vertex.hpp:227`, decoded at `core/src/graph.cpp:1525`, RFC-0022 §3.A |
+| `reliability`, `durability` (libtracer packs a third bit-field, `priority`, that ROS has no profile member for) | the **subscription's** packed 16-bit `delivery_policy`, set at `rmw_create_subscription` time and carried in the `SUBSCRIBER`'s existing `SETTINGS` child as `NAME "delivery_policy" VALUE u16` | `core/include/libtracer/vertex.hpp:227`, decoded at `core/src/graph.cpp:1592`, RFC-0022 §3.A |
 | `history` + `depth` | **owner-side** ring depth — the topic's owner calls `graph_t::set_history_depth`; a remote subscriber cannot set it | `core/include/libtracer/graph.hpp:816` |
 | `deadline`, `liveliness`, `lifespan` | **no mapping at all** | — |
 
