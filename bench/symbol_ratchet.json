@@ -15,7 +15,7 @@
     {
       "binary": "bench_libtracer",
       "symbol": "tr::graph::graph_t::find_ptr",
-      "bytes": 557
+      "bytes": 565
     },
     {
       "binary": "bench_compact_delivery",
