@@ -214,7 +214,7 @@ thresholds, one hard invariant:
 
 Details that make these trustworthy:
 
-- The per-PR gate watches **ten canonical points** — a representative slice of the
+- The per-PR gate watches **twelve canonical points** — a representative slice of the
   fan-out / payload / topic sweeps plus a fold-width point, one per *gated* family
   (`inproc` and `inproc-borrow` share one), so a pullback on any of those legs is caught and
   not just the 1:1 write. They are **not** the whole dispatch surface, and this page should
@@ -230,10 +230,22 @@ Details that make these trustworthy:
   1024-subscriber fan-out loop; `inproc-path/64/1/8192` — the resolver canary, one
   registry lookup per write across 8192 registered vertices; `mixed/0/6/128` — the
   composed topology, 128 topics whose fan-out varies 1–16 (mean 6) over payloads of
-  1 B–8 KiB, which is why its payload column reads 0; and `fold-b4/512/1/1` — the L0
-  fold walk, 512 bytes held constant across four rope links and timed over a batch.
+  1 B–8 KiB, which is why its payload column reads 0; `fold-b4/512/1/1` — the L0
+  fold walk, 512 bytes held constant across four rope links and timed over a batch; and
+  `lkv-store-heap/64/1/1` + `lkv-store-pool/64/1/1` — the L1 **rope-to-contiguous copy**
+  (`rope_t::materialize`: one segment allocated from the backend plus the payload
+  `memcpy`), against the default heap and against a pooled backend.
 
-  Four of the ten come from OTHER bench binaries, and they are here because of what
+  Those last two are here because of what happened without them
+  ([#1250](https://github.com/avatarsd-llc/libtracer/issues/1250)): reshaping
+  `rope_t::flatten`'s wrapper cost **25–48%** on every path through `materialize` —
+  branch and field writes, `op_resolve` reads, FWD COMPACT emission, the RX span sink —
+  and no gated point at the time was downstream of that call, so the loss shipped with
+  every gate green. They are read out of `RESULT` rows the default sweep already emits,
+  so they add no wall-clock. Note the name: `lkv-store-*` measures the **copy-store
+  allocation**, not the last-known-value slot.
+
+  Four of the twelve come from OTHER bench binaries, and they are here because of what
   happened without them (#1173): `compact-forward` moved **+41%** across the v0.8.0 →
   v0.9.0 window while every gated point stayed flat, so the gate had nothing to object to.
   They are `compact-forward/64/1/1` and `compact-terminus/64/1/1` — the compact-delivery

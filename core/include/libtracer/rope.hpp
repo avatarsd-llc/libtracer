@@ -319,11 +319,17 @@ class rope_t {
      * @retval {} An empty view if the backend cannot allocate, **or if the rope
      *            is not @ref all_host** (a DEVICE link cannot be CPU-memcpy'd —
      *            docs/adr/0024; lower such a payload via its device transport).
+     * @note Kept OUT OF LINE, and computed directly rather than by unwrapping
+     *       @ref try_flatten's `expected` — both halves of that shape cost real time
+     *       (#1250). Wrapping cost a copy: the wrapper held a `const expected`, so
+     *       `std::move(*r)` yielded a `const view_t&&` that bound the COPY
+     *       constructor — two extra atomic refcount RMWs per flatten. Defining it
+     *       here cost the CALLER: the body's 32 B `expected` temp plus its stack
+     *       canary pushed @ref materialize past this toolchain's inline threshold, so
+     *       even the single-link zero-copy arm — which never flattens at all — paid an
+     *       out-of-line call. Together, 25–48% on every `materialize` path.
      */
-    [[nodiscard]] view_t flatten(mem::mem_backend_t& backend = mem::heap_backend()) const {
-        const std::expected<view_t, flatten_err_t> r = try_flatten(backend);
-        return r ? std::move(*r) : view_t{};
-    }
+    [[nodiscard]] view_t flatten(mem::mem_backend_t& backend = mem::heap_backend()) const;
 
     /**
      * @brief @ref flatten with the failure cause kept distinct (#917).
@@ -339,6 +345,24 @@ class rope_t {
         mem::mem_backend_t& backend = mem::heap_backend()) const;
 
    private:
+    /**
+     * @brief The ONE flatten body — @ref flatten and @ref try_flatten are both thin
+     *        out-of-line wrappers over it, so neither duplicates the logic and
+     *        neither pays for the other's error channel (#1250).
+     *
+     * The value comes back BY VALUE and the error channel rides beside it, so the
+     * lossy wrapper drops the channel for free while the flattened view is still
+     * constructed straight into the wrapper's own return slot — no copy, no move, no
+     * `expected` to unwrap.
+     * @param err Assigned the refusal cause, and ONLY on a refusal.
+     * @param ok Set to whether this was a flatten at all. The empty view is a
+     *           legitimate SUCCESS for a zero-byte rope (#917), so the returned view
+     *           cannot carry the verdict itself.
+     * @return The flattened view when @p ok; the empty view otherwise.
+     */
+    [[nodiscard]] view_t flatten_core(mem::mem_backend_t& backend, flatten_err_t& err,
+                                      bool& ok) const;
+
     // The SPILLING arm of try_reserve, kept OUT OF LINE so the no-op arm stays inlinable:
     // this half calls the allocator and migrates the small buffer. Carrying it in the same
     // body is what kept the whole check out of line at the path-target delivery clone on

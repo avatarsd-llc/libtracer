@@ -891,6 +891,17 @@ struct lkv_result_t {
 /**
  * @brief ADR-0060: the write-path copy-store allocation in isolation.
  *
+ * **Read the mode names carefully — `lkv-store-*` is NOT the LKV slot.** The "store" is
+ * the write path's *copy-store*: the segment the value is copied INTO, i.e. exactly
+ * `rope_t::materialize` (backend alloc + payload `memcpy`) and nothing downstream of it.
+ * No `graph_t`, no vertex, no last-known-value publish is anywhere in this loop. A
+ * regression here therefore reads as "the rope-to-contiguous copy got slower", and #1250
+ * is the case that proves the distinction is load-bearing: a 48% step on these rows was
+ * triaged as an LKV-store regression when the defect was the shape of `rope_t::flatten`.
+ * The names are deliberately NOT being corrected — they are the primary key of the
+ * `gh-pages` history series, and renaming them would end those series (see the `fold-n*`
+ * -> `fold-b*` note in bench/README.md for what that costs).
+ *
  * Two variants of the exact allocation `graph_t` routes through its `value_backend_`
  * at the branch/field write sites (`graph.cpp` 825/1017):
  *   - @p copy `false` — the pure `backend.alloc` + `backend.destroy` op the ADR
@@ -1247,9 +1258,12 @@ int main(int argc, char** argv) {
     // New sweeps append here, after every pre-existing row, for the same reason.
     for (std::size_t F : kFanouts) run_inproc_deliver(kRefSize, F);
     // ADR-0060: the write-path copy-store alloc gate — pooled value_backend vs the
-    // default heap on the branch/field-write flatten. Two NEW charted series
-    // (lkv-store-heap / lkv-store-pool) + a same-run ratio gate (bench/perf_gate.py).
-    // Appended LAST per the row-ordering note above (never ahead of a gated row).
+    // default heap on the branch/field-write flatten. Charted series (lkv-store-heap /
+    // lkv-store-pool) + a same-run ratio gate (bench/perf_gate.py). The two 64 B
+    // `lkv-store-*` rows are ALSO perf_gate.py POINTS since #1250 — they are the only
+    // gated legs downstream of `rope_t::materialize`, and a 25-48% loss on it shipped
+    // past all ten of the points that predate them. Position is unchanged by that: the
+    // rows stay exactly where they were emitted, so no pre-existing gated row moved.
     run_lkv_store_gate();
     // The full 1:1 write THROUGH an injected pool `mr_` (unsynchronized_pool_resource) vs the
     // default global-heap `inproc` / `inproc-borrow`. Isolates what the pool actually does to
