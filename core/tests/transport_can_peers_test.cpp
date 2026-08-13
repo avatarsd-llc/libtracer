@@ -412,6 +412,81 @@ void test_peer_expiry() {
 }
 
 // ---------------------------------------------------------------------------
+// #1153 — a resolved endpoint is IDENTITY-scoped on this bus.
+//
+// The pointer keeps meaning the node it was resolved for: across that node's
+// expiry, across a DIFFERENT peer arriving while it is gone, and across its own
+// return. This is exactly the property a slot-named server (slot_server_t's
+// `p<slot>`) does not have — there, a departed peer's name is inherited by
+// whoever claims the freed slot, so a cached endpoint silently changes who it
+// addresses. Pinning it here keeps the per-kind split documented on
+// bus_link_t::peer_link honest: a future move to positional CAN naming would
+// have to redden this test to land.
+// ---------------------------------------------------------------------------
+
+void test_resolved_endpoint_is_identity_scoped() {
+    std::printf("#1153 identity-scoped endpoint (a cached pointer never inherits a stranger):\n");
+
+    fake_can_bus_t bus;
+    tr::net::transport_can observer(
+        std::make_unique<fake_link_t>(bus),
+        {0, 1, tr::view::can_frame_mode_t::CLASSIC, "obs", std::chrono::milliseconds(150)});
+
+    const auto names = [&] {
+        std::set<std::string> out;
+        observer.enumerate_peers([&](std::string_view p) { out.emplace(p); });
+        return out;
+    };
+
+    // --- n9 announces; resolve it ONCE and keep the pointer. ------------------
+    std::atomic<int> n9_deliveries{0};
+    auto n9_rx = [&](std::span<const std::byte>) { ++n9_deliveries; };
+    std::optional<tr::net::transport_can> peer9;
+    peer9.emplace(
+        std::make_unique<fake_link_t>(bus),
+        tr::net::transport_can_config_t{0, 9, tr::view::can_frame_mode_t::CLASSIC, "n9-first"});
+    peer9->set_receiver(n9_rx);
+    check(wait_until([&] { return names().count("n9") == 1; }, kBudget),
+          "n9 announced, enumerates");
+
+    tr::net::transport_t* const cached = observer.peer_link("n9");
+    check(cached != nullptr, "n9 resolves to a directed endpoint");
+
+    // --- n9 falls silent: it stops RESOLVING, but the entry is never freed. ---
+    peer9.reset();
+    check(wait_until([&] { return names().count("n9") == 0; }, kBudget),
+          "after peer_ttl of silence n9 leaves the enumeration");
+    check(observer.peer_link("n9") == nullptr, "and a FRESH resolution of n9 now fails");
+
+    // --- a different peer arrives while n9 is gone. It cannot inherit the name.
+    std::atomic<int> n7_deliveries{0};
+    auto n7_rx = [&](std::span<const std::byte>) { ++n7_deliveries; };
+    tr::net::transport_can peer7(
+        std::make_unique<fake_link_t>(bus),
+        {0, 7, tr::view::can_frame_mode_t::CLASSIC, "n7-newcomer", std::chrono::milliseconds(150)});
+    peer7.set_receiver(n7_rx);
+    check(wait_until([&] { return names().count("n7") == 1; }, kBudget),
+          "the newcomer n7 enumerates");
+    check(observer.peer_link("n9") == nullptr,
+          "n9 STILL does not resolve — an arriving peer inherits no departed peer's name");
+
+    // --- n9 returns on the same node id: the CACHED pointer still means n9. ---
+    peer9.emplace(
+        std::make_unique<fake_link_t>(bus),
+        tr::net::transport_can_config_t{0, 9, tr::view::can_frame_mode_t::CLASSIC, "n9-returned"});
+    peer9->set_receiver(n9_rx);
+    check(wait_until([&] { return names().count("n9") == 1; }, kBudget), "n9 returns to the bus");
+
+    const std::vector<std::byte> directed(18, std::byte{0x5A});
+    cached->send(directed);
+    check(wait_until([&] { return n9_deliveries.load() >= 1; }, kBudget),
+          "the pointer cached BEFORE the expiry delivered to the returned n9");
+    // Sized to what this sink can actually have seen: n7 has been up throughout the
+    // directed send and would have counted it had the endpoint addressed the newcomer.
+    check(n7_deliveries.load() == 0, "and the newcomer n7 received nothing addressed to n9");
+}
+
+// ---------------------------------------------------------------------------
 // Per-distinct-node growth: many announcers all enumerate; re-announce is idempotent.
 // ---------------------------------------------------------------------------
 
@@ -469,6 +544,7 @@ void test_peer_table_growth() {
 int main() {
     test_enumeration_and_forwarding();
     test_peer_expiry();
+    test_resolved_endpoint_is_identity_scoped();
     test_peer_table_growth();
     return tr::testing::summary("transport_can_peers");
 }

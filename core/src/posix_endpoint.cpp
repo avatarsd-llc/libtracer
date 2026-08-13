@@ -347,6 +347,22 @@ void slot_server_t::enumerate_peers(const peer_visitor_t& visit) const {
         if (s->open.load(std::memory_order_relaxed) && !s->name.empty()) visit(s->name);
 }
 
+/**
+ * @brief Resolve `p<slot>` to that slot's directed endpoint — SLOT-scoped, not
+ *        session-scoped (#1153).
+ *
+ * The returned facade is one object per slot for the link's life, and the name is a
+ * pure function of the slot index (see accept_peer), so BOTH halves of a resolution
+ * survive the session that produced it: a caller holding this pointer across the named
+ * peer's departure sends into whichever session next claims the slot, and
+ * `peer_endpoint_t::send`'s `open` check cannot catch it — that check is true for
+ * whoever occupies the slot at send time, which is precisely the stranger. Hence the
+ * resolve-per-use contract on @ref bus_link_t::peer_link.
+ *
+ * No production caller is exposed (all re-resolve per send), so this is an API hazard
+ * rather than a live defect; the fix that removes it structurally is explicit
+ * per-session naming, which must land across both server planes at once (#1013).
+ */
 transport_t* slot_server_t::peer_link(std::string_view peer) {
     const std::lock_guard lock(peers_m_);
     for (const std::unique_ptr<session_base_t>& s : slots_)

@@ -62,6 +62,20 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Documentation
 
+- **`bus_link_t::peer_link`'s endpoint is documented as RESOLVE-PER-USE
+  ([#1153](https://github.com/avatarsd-llc/libtracer/issues/1153)).** The contract
+  promised pointer validity for the link's lifetime, which readers took for peer
+  identity; those are different guarantees and only the first holds for every kind.
+  Where a kind names peers POSITIONALLY (`slot_server_t`'s `p<slot>`, and slots recycle
+  in place), an endpoint cached across the named peer's departure addresses whoever
+  inherits the slot, and the endpoint's own `open` check is satisfied by that stranger.
+  Identity-derived names are immune — `transport_can`'s `n<node-id>` binds name, table
+  key and endpoint to one identity no other peer can inherit, now pinned by a test that
+  caches a pointer across an expiry, a different peer's arrival and the node's return.
+  **No behaviour change**: no production caller caches the pointer, so this states a
+  contract rather than fixing a defect. The structural fix — explicit per-session naming
+  across both server planes — remains open on #1013.
+
 - RFC-0016 §B erratum ([#1030](https://github.com/avatarsd-llc/libtracer/issues/1030)):
   a composed branch-read reply may legitimately carry **zero child records** — produced
   deterministically when the READ-ACL prune removes every child, and transiently when a

@@ -180,7 +180,7 @@ A stack budget for that task counts four such buffers, not one. The decode arena
 this document covers; the other three are transport receive and chunk scratch, each a 4096-byte
 `std::array` — `core/src/transport_tcp.cpp:239` (the backpressure drain),
 `core/src/transport_ws.cpp:647` (the WS client's receive loop), and
-`core/src/posix_endpoint.cpp:448` — the ONE per-chunk scratch both multi-peer servers now
+`core/src/posix_endpoint.cpp:464` — the ONE per-chunk scratch both multi-peer servers now
 share, since #871 folded their duplicated poll loops into `slot_server_t::service_peer` (it
 was two buffers, one apiece, before that). They are not decode arenas and carry no structure,
 but they occupy the same frames and none of the four has a measured per-task high-water.
