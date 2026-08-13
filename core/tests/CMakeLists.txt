@@ -364,6 +364,29 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     set_tests_properties(httpd_ws_fanout_wait
         PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
+    # #1218 — the fan-out WIDTH: the in-call reserve is a slot of its own, never a slice out
+    # of the pool, so a sweep that FITS tx_slot_capacity() still fits it on every pass and
+    # never waits. The complement of the suite above (which asks what a sweep WIDER than the
+    # pool does): carving the reserve out made the two the same question and starved the
+    # steady-state tail.
+    add_executable(httpd_ws_fanout_width_test
+        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_fanout_width_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
+    target_include_directories(httpd_ws_fanout_width_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(httpd_ws_fanout_width_test PRIVATE libtracer)
+    target_link_options(httpd_ws_fanout_width_test PRIVATE
+        "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    libtracer_test_warnings(httpd_ws_fanout_width_test)
+    add_test(NAME httpd_ws_fanout_width COMMAND httpd_ws_fanout_width_test)
+    # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
+    # every case here constructs an adopting link — same exemption as the suites above.
+    set_tests_properties(httpd_ws_fanout_width
+        PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+
     # #960 — the peer-departure eviction notifier's LOCK DISCIPLINE, on the same fake. The
     # event none of the suites above stages is a departure notification held OPEN: the
     # notifier parks the server task while another task tries to acquire the handler gate.

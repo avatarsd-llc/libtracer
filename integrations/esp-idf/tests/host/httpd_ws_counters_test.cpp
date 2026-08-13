@@ -210,12 +210,14 @@ void test_pool_exhaustion_is_counted() {
     check(to != nullptr, "the directed endpoint resolved");
 
     // Do NOT drain: on this fake a queued work item only runs when the test pumps it, so
-    // every send holds its slot. Past tx_slot_capacity the pool has nothing left, which is
-    // the DEPTH-pressure condition — distinct from a refusing control queue, and the whole
-    // reason it got a field of its own.
-    const std::size_t cap = httpd_ws_link_t::tx_slot_capacity();
-    check(cap > 0, "the pool has a capacity to exhaust");
-    for (std::size_t i = 0; i < cap + 2; ++i) to->send(std::span<const std::byte>(kBody));
+    // every send holds its slot. Past the claimable depth the link has nothing left, which
+    // is the DEPTH-pressure condition — distinct from a refusing control queue, and the
+    // whole reason it got a field of its own. These sends are issued ON the httpd task, so
+    // the depth is the pool PLUS the in-call reserve (#1218).
+    const std::size_t depth =
+        httpd_ws_link_t::tx_slot_capacity() + httpd_ws_link_t::tx_reply_reserve();
+    check(depth > 0, "the pool has a capacity to exhaust");
+    for (std::size_t i = 0; i < depth + 2; ++i) to->send(std::span<const std::byte>(kBody));
 
     const auto after = link->stats();
     check(after.tx_pool_misses >= 2, "the sends past the pool's depth are counted as misses");

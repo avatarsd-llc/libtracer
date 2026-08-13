@@ -33,9 +33,10 @@
  *   2. the same sweep issued ON the httpd task still stops at the pool's depth, because the
  *      task it would wait for is the one asking. The honest bound, stated as a test rather
  *      than only in a doc comment;
- *   3. an in-call send ALWAYS finds the reserved slot, even with every other slot claimed by
+ *   3. an in-call send ALWAYS finds the reserved slot, even with the whole pool claimed by
  *      producers — the secondary symptom in #1187, where a subscribe ack lost its race with
- *      a delivery burst and the requester timed out against a live edge;
+ *      a delivery burst and the requester timed out against a live edge. The reserve is a
+ *      slot PAST the pool since #1218, so this costs a producer nothing;
  *   4. a wait that cannot be served EXPIRES, drops and counts. The fix must not turn a
  *      counted loss into an unbounded park (ADR-0081 §1).
  */
@@ -225,8 +226,12 @@ void test_a_wide_sweep_from_a_producer_task_reaches_every_peer() {
  *
  * A push provoked by an inbound frame is serviced IN-CALL on the httpd task, and that task
  * is the one that would have to drain the pool — so it cannot wait, and a sweep issued from
- * there still cannot put more than `tx_slot_capacity()` frames in flight at once. Making
- * that a test is what stops a later reader from assuming the wait covers every path.
+ * there still cannot put more than the slots it can claim in flight at once. Making that a
+ * test is what stops a later reader from assuming the wait covers every path.
+ *
+ * What it can claim is the pool PLUS the in-call reserve (#1218): the reserve is a slot of
+ * its own past `tx_slot_capacity()`, and the in-call sender is the one claimer entitled to
+ * it. The depth is what is pinned here, not which slot served which frame.
  */
 void test_an_in_call_sweep_still_stops_at_the_pool_depth() {
     std::printf("the same sweep issued ON the httpd task:\n");
@@ -244,9 +249,10 @@ void test_an_in_call_sweep_still_stops_at_the_pool_depth() {
     broadcast(*link);  // the main thread IS the latched httpd task (see claim)
     drain();
 
-    check_eq(fake_httpd::instance().frames_sent() - sent_before, capacity,
-             "a pool's worth reached the wire — the in-call depth is unchanged");
-    check_eq(link->enqueue_drops() - drops_before, kWidePeers - capacity,
+    const std::size_t in_call_depth = capacity + httpd_ws_link_t::tx_reply_reserve();
+    check_eq(fake_httpd::instance().frames_sent() - sent_before, in_call_depth,
+             "the pool plus the in-call reserve reached the wire — the depth still bounds it");
+    check_eq(link->enqueue_drops() - drops_before, kWidePeers - in_call_depth,
              "and the rest were dropped and counted, never parked");
 
     reset(link);
@@ -258,11 +264,16 @@ void test_an_in_call_sweep_still_stops_at_the_pool_depth() {
 /**
  * @brief #1187's secondary effect: a subscribe ack lost to a delivery burst.
  *
- * Producers may claim every slot but the last; the reserve is the httpd task's, because it
- * is the one claimer that cannot wait. Here a producer thread claims all it is allowed to
- * (nothing drains, so the slots stay held) and the in-call send must STILL be queued. The
- * second in-call send must then miss — the reserve is one slot, not an escape hatch, and
- * without that half the case would also pass on a link with no bound at all.
+ * The reserve is the httpd task's, because it is the one claimer that cannot wait. Here a
+ * producer thread claims everything it is allowed to (nothing drains, so the slots stay
+ * held) and the in-call send must STILL be queued. The second in-call send must then miss —
+ * the reserve is one slot, not an escape hatch, and without that half the case would also
+ * pass on a link with no bound at all.
+ *
+ * Since #1218 "everything it is allowed to" is the pool's WHOLE depth: the reserve sits past
+ * `tx_slot_capacity()` rather than inside it, so this guarantee no longer costs a producer
+ * the slot it was promised. That is what makes the case stronger than it was — the burst it
+ * survives is now a full-depth one.
  */
 void test_an_in_call_send_always_finds_the_reserved_slot() {
     std::printf("an in-call reply against a pool claimed by producers:\n");
@@ -274,23 +285,23 @@ void test_an_in_call_send_always_finds_the_reserved_slot() {
     drain();
 
     const std::size_t capacity = httpd_ws_link_t::tx_slot_capacity();
-    // Exactly what a producer is allowed: one short of the pool. Nothing drains, so each
-    // claim is still held when the next one runs, and none of them has to wait.
+    // Exactly what a producer is allowed: the pool, in full. Nothing drains, so each claim
+    // is still held when the next one runs, and none of them has to wait.
     std::thread producer([peer, capacity] {
-        for (std::size_t i = 0; i + 1 < capacity; ++i)
-            peer->send(std::span<const std::byte>(kBody));
+        for (std::size_t i = 0; i < capacity; ++i) peer->send(std::span<const std::byte>(kBody));
     });
     producer.join();
-    check_eq(link->tx_slots_busy(), capacity - 1, "the producers hold every slot but the reserve");
+    check_eq(link->tx_slots_busy(), capacity, "the producers hold every slot the pool offers");
 
     const std::uint32_t drops_before = link->enqueue_drops();
     peer->send(std::span<const std::byte>(kBody));  // in-call: the main thread is the httpd task
-    check_eq(link->tx_slots_busy(), capacity, "the in-call send took the reserved slot");
+    check_eq(link->tx_slots_busy(), capacity + httpd_ws_link_t::tx_reply_reserve(),
+             "the in-call send took the reserved slot");
     check_eq(link->enqueue_drops() - drops_before, 0, "and was not dropped");
 
     peer->send(std::span<const std::byte>(kBody));
     check_eq(link->enqueue_drops() - drops_before, 1,
-             "a second in-call send found the pool genuinely full and was counted");
+             "a second in-call send found pool and reserve genuinely full, and was counted");
 
     reset(link);
 }
@@ -316,9 +327,13 @@ void test_an_unservable_wait_expires_and_counts() {
     if (peer == nullptr) return;
     drain();
 
-    const std::size_t capacity = httpd_ws_link_t::tx_slot_capacity();
-    for (std::size_t i = 0; i < capacity; ++i) peer->send(std::span<const std::byte>(kBody));
-    check_eq(link->tx_slots_busy(), capacity, "the pool is fully claimed and nothing is draining");
+    // Every slot the link has: the pool AND the in-call reserve (#1218). These sends are
+    // in-call, so they may take both — and they must, or the producer below would simply
+    // find the reserve free and never wait at all.
+    const std::size_t depth =
+        httpd_ws_link_t::tx_slot_capacity() + httpd_ws_link_t::tx_reply_reserve();
+    for (std::size_t i = 0; i < depth; ++i) peer->send(std::span<const std::byte>(kBody));
+    check_eq(link->tx_slots_busy(), depth, "the pool is fully claimed and nothing is draining");
 
     const std::uint32_t drops_before = link->enqueue_drops();
     const std::uint32_t waits_before = link->stats().tx_pool_waits;

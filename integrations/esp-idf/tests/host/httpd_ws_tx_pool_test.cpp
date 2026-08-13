@@ -165,8 +165,12 @@ void test_refused_enqueues_never_cost_a_slot() {
  * Before #949 a send that found no free slot allocated a work item and a payload buffer on
  * the global heap and posted them anyway: the outstanding-send count was bounded by the
  * heap rather than by the control queue behind it, and nothing counted the event. Here the
- * pool is filled with frames that are genuinely queued (nothing drains in between), and
- * four more sends are offered on top.
+ * pool is filled with frames that are genuinely queued (nothing drains in between), and as
+ * many more sends are offered on top.
+ *
+ * "Filled" is the whole claimable depth, which for a send issued on the httpd task — every
+ * send here is — is the pool PLUS the in-call reserve (#1218: the reserve is a slot past
+ * `tx_slot_capacity()`, and the in-call sender is the one claimer entitled to it).
  *
  * Two measurements, and both are needed. The counter says the drop happened; the control
  * queue's depth says nothing of the over-offer was posted — a link that still heap fell back
@@ -175,7 +179,7 @@ void test_refused_enqueues_never_cost_a_slot() {
  * fan-out suite.
  */
 void test_a_burst_past_the_pool_drops_and_counts() {
-    std::printf("four sends offered to a pool that is already full:\n");
+    std::printf("a pool's worth of sends offered to a pool that is already full:\n");
     auto link = make_link();
     claim(kFd);
     tr::net::transport_t* const peer = only_peer(*link);
@@ -184,22 +188,23 @@ void test_a_burst_past_the_pool_drops_and_counts() {
     drain();
     fake_httpd::instance().set_send_script(kFd, {send_result_t::FULL});
 
-    const std::size_t capacity = httpd_ws_link_t::tx_slot_capacity();
+    const std::size_t depth =
+        httpd_ws_link_t::tx_slot_capacity() + httpd_ws_link_t::tx_reply_reserve();
     // Warm up on the ordinary path and drain, so anything first-use (the fake's deque node,
     // a lazy init in the log) is spent OUTSIDE the window below.
     peer->send(std::span<const std::byte>(kBody));
     drain();
     check_eq(link->tx_slots_busy(), 0, "the warm-up drained: the pool is idle again");
 
-    for (std::size_t i = 0; i < capacity; ++i) peer->send(std::span<const std::byte>(kBody));
-    check_eq(link->tx_slots_busy(), capacity, "the pool is fully claimed, all of it live");
+    for (std::size_t i = 0; i < depth; ++i) peer->send(std::span<const std::byte>(kBody));
+    check_eq(link->tx_slots_busy(), depth, "the pool is fully claimed, all of it live");
 
     const std::uint32_t drops_before = link->enqueue_drops();
-    for (std::size_t i = 0; i < capacity; ++i) peer->send(std::span<const std::byte>(kBody));
+    for (std::size_t i = 0; i < depth; ++i) peer->send(std::span<const std::byte>(kBody));
 
-    check_eq(link->enqueue_drops() - drops_before, capacity,
+    check_eq(link->enqueue_drops() - drops_before, depth,
              "every send past the pool was counted as a drop");
-    check_eq(fake_httpd::instance().queue_depth(), capacity,
+    check_eq(fake_httpd::instance().queue_depth(), depth,
              "the control queue holds the pooled frames only — the drops were never offered");
 
     reset(link);
@@ -225,19 +230,20 @@ void test_the_pooled_frames_of_an_over_offer_all_go_out() {
     drain();
     fake_httpd::instance().set_send_script(kFd, {send_result_t::FULL});
 
-    const std::size_t capacity = httpd_ws_link_t::tx_slot_capacity();
+    const std::size_t depth =
+        httpd_ws_link_t::tx_slot_capacity() + httpd_ws_link_t::tx_reply_reserve();
     const std::size_t sent_before = fake_httpd::instance().frames_sent();
-    for (std::size_t i = 0; i < 2 * capacity; ++i) peer->send(std::span<const std::byte>(kBody));
+    for (std::size_t i = 0; i < 2 * depth; ++i) peer->send(std::span<const std::byte>(kBody));
     drain();
 
-    check_eq(fake_httpd::instance().frames_sent() - sent_before, capacity,
+    check_eq(fake_httpd::instance().frames_sent() - sent_before, depth,
              "the pooled half of the burst was delivered in full");
     check_eq(link->tx_slots_busy(), 0, "and the pool came back to idle");
 
     const std::size_t sent_mid = fake_httpd::instance().frames_sent();
-    for (std::size_t i = 0; i < capacity; ++i) peer->send(std::span<const std::byte>(kBody));
+    for (std::size_t i = 0; i < depth; ++i) peer->send(std::span<const std::byte>(kBody));
     drain();
-    check_eq(fake_httpd::instance().frames_sent() - sent_mid, capacity,
+    check_eq(fake_httpd::instance().frames_sent() - sent_mid, depth,
              "and the link still serves a full pool's worth afterwards");
 
     reset(link);

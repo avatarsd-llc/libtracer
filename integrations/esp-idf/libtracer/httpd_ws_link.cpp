@@ -270,8 +270,42 @@ constexpr std::size_t kRxScratchBytes = 2048;
  * pool to the widest fan-out an embedder might have is not the answer to that: the number
  * is an in-flight depth, and a wide sweep at any depth would find the same cliff one peer
  * later. Waiting for the drain is (see @ref kTxWaitSliceMs).
+ *
+ * This is the depth AVAILABLE TO ANY SENDER, and #1218 is why that has to be said: the
+ * in-call reserve is a slot of its own (@ref kTxReplySlots) on top of this number, never a
+ * slice taken out of it. Carved out of the pool instead, it silently made every off-task
+ * fan-out one destination narrower than the bound documented here — so a sweep that had
+ * always FIT started waiting for a drain, every pass, and paid the whole regression
+ * (#1218) for a reply that was not even pending.
  */
 constexpr std::size_t kTxPoolSlots = 4;
+
+/**
+ * @brief TX work slots held back for sends issued ON the httpd task — ADDITIONAL to
+ *        @ref kTxPoolSlots, never carved out of it (#1218).
+ *
+ * A send issued on the httpd task (a request's reply, serviced in-call) is the one sender
+ * that cannot wait for a slot: the task that would free one is the task that is asking, so
+ * waiting there waits on its own stack frame (#814). Without a reserve, a delivery burst and
+ * a subscribe ack raced through the same slots and the ack lost — the requester then timed
+ * out against an edge that was already delivering (#1187's secondary effect). One slot is
+ * enough for the shape that produced it: one reply per serviced request.
+ *
+ * That the reserve is EXTRA is the whole of #1218. #1187 implemented it by shortening the
+ * scan an off-task claimer was allowed — which cost every producer a slot permanently,
+ * whether or not any request was in flight, and turned a fan-out of exactly
+ * @ref kTxPoolSlots (which had always fit, at the offered rate) into one that had to wait
+ * for the drain on every single pass. The reserve is not free — it costs one slot of RAM
+ * per link (a shell plus @ref kTxInlineBytes) — and that price is the honest one: a
+ * guarantee for a claimer that cannot wait has to be a slot nobody else can take, not a
+ * narrower bound for everybody else.
+ */
+constexpr std::size_t kTxReplySlots = 1;
+
+/** @brief TX work slots ALLOCATED per link: the sender-visible pool plus the in-call
+ *         reserve (@ref kTxPoolSlots, @ref kTxReplySlots). The reserve is the tail of the
+ *         array, so a slot index below @ref kTxPoolSlots is claimable by anyone. */
+constexpr std::size_t kTxSlotsTotal = kTxPoolSlots + kTxReplySlots;
 
 /**
  * @brief One turn a WAITING send spends off the CPU before re-trying the pool,
@@ -842,7 +876,8 @@ struct httpd_ws_link_t::tx_work_t {
  * @brief One pre-allocated TX work slot: claimed lock-free (a CAS on @ref busy) by
  *        any sending task in @ref claim_tx_slot, released by the httpd task once
  *        its send drains (@ref release_tx_work) — so a steady-state send allocates
- *        nothing. The pool (kTxPoolSlots of these) is allocated once per link.
+ *        nothing. The pool (kTxSlotsTotal of these — kTxPoolSlots claimable by any
+ *        sender plus the in-call reserve) is allocated once per link.
  *
  * A single flag is the WHOLE lifetime, and that is a statement about the ESP-IDF floor
  * rather than about this file. A claimed slot is released only by the work item that was
@@ -1059,13 +1094,13 @@ void httpd_ws_link_t::alloc_buffers() {
     // send on the counted enqueue-drop path (@ref note_enqueue_drop) instead of quietly
     // moving a hot publish path onto the global heap.
     rx_scratch_.reset(new (std::nothrow) std::byte[kRxScratchBytes]);
-    tx_pool_.reset(new (std::nothrow) tx_slot_t[kTxPoolSlots]);
+    tx_pool_.reset(new (std::nothrow) tx_slot_t[kTxSlotsTotal]);
     // Bind each slot to its embedded work item ONCE, here, and never again. The
     // back-pointer is a property of the slot, not of the claim: the work item is how the
     // httpd task finds the slot to release, and a claimer re-storing the same value into it
     // while that release is in flight would be a plain data race for no gain.
     if (tx_pool_ != nullptr)
-        for (std::size_t i = 0; i < kTxPoolSlots; ++i) tx_pool_[i].work.slot = &tx_pool_[i];
+        for (std::size_t i = 0; i < kTxSlotsTotal; ++i) tx_pool_[i].work.slot = &tx_pool_[i];
 }
 
 httpd_ws_link_t::tx_slot_t* httpd_ws_link_t::claim_tx_slot(bool in_call) {
@@ -1074,20 +1109,22 @@ httpd_ws_link_t::tx_slot_t* httpd_ws_link_t::claim_tx_slot(bool in_call) {
     // keep sending until the router detaches the transport). They are dropped and counted,
     // which is the same answer an exhausted pool gets, so nothing runs past the dtor.
     if (tx_pool_ == nullptr || stopping_.load(std::memory_order_relaxed)) return nullptr;
-    // The LAST slot is the httpd task's reserve, and the asymmetry is the point: a send
-    // issued ON that task (a request's reply, serviced in-call) cannot wait for the pool to
-    // drain, because the task that would do the draining is the one asking. An off-task
-    // producer CAN wait, so a slot it does not take costs it latency, never a frame. Without
-    // the reserve a fan-out burst and a subscribe ack raced through the same four slots and
-    // the ack lost — the requester then timed out against an edge that was already
-    // delivering (#1187, the secondary effect). One slot is enough for the shape that
-    // produced it: one reply per serviced request.
-    const std::size_t n = (in_call || kTxPoolSlots < 2) ? kTxPoolSlots : kTxPoolSlots - 1;
-    for (std::size_t i = 0; i < n; ++i) {
+    const auto take = [this](std::size_t i) {
         bool expected = false;
-        if (tx_pool_[i].busy.compare_exchange_strong(expected, true, std::memory_order_acquire))
-            return &tx_pool_[i];
-    }
+        return tx_pool_[i].busy.compare_exchange_strong(expected, true, std::memory_order_acquire);
+    };
+    // The reserve sits PAST the pool (kTxReplySlots, #1218), and an in-call send takes it
+    // FIRST. The asymmetry is the point: a send issued on the httpd task — a request's reply,
+    // serviced in-call — cannot wait for a drain the asking task is itself supposed to
+    // perform, while an off-task producer can, so a slot it does not take costs it latency
+    // and never a frame. Reaching for the reserve before the pool is what keeps that
+    // guarantee from being paid for out of the fan-out width: a reply in flight leaves all
+    // kTxPoolSlots claimable, so a producer sweep that fits the pool still fits it.
+    if (in_call)
+        for (std::size_t i = kTxPoolSlots; i < kTxSlotsTotal; ++i)
+            if (take(i)) return &tx_pool_[i];
+    for (std::size_t i = 0; i < kTxPoolSlots; ++i)
+        if (take(i)) return &tx_pool_[i];
     return nullptr;  // every slot in flight this instant — the caller waits, or drops
 }
 
@@ -1095,8 +1132,8 @@ httpd_ws_link_t::tx_slot_t* httpd_ws_link_t::claim_tx_slot_waiting() {
     // "Am I the drain?" is the whole fork. esp_http_server runs every queued send on ONE
     // task, so a send issued on it can only be served after the current handler frame
     // returns: waiting there would wait on this stack frame, which is the #814 shape and a
-    // guaranteed deadlock for the full send bound. In-call sends take the pool as they find
-    // it (reserve included) and drop when it is full, exactly as before.
+    // guaranteed deadlock for the full send bound. In-call sends take their reserve, or the
+    // pool as they find it, and drop when both are full — they never wait.
     const bool in_call = server_task_.load(std::memory_order_relaxed) == current_task();
     if (tx_slot_t* const slot = claim_tx_slot(in_call); slot != nullptr) return slot;
     const std::int64_t bound_us = tx_wait_bound_us(send_timeout_ms_);
@@ -1168,7 +1205,7 @@ httpd_ws_link_t::~httpd_ws_link_t() {
         bool busy = true;
         for (int turn = 0; turn < kDrainTurns && busy; ++turn) {
             busy = false;
-            for (std::size_t i = 0; i < kTxPoolSlots; ++i)
+            for (std::size_t i = 0; i < kTxSlotsTotal; ++i)
                 if (tx_pool_[i].busy.load(std::memory_order_acquire)) busy = true;
             if (busy) std::this_thread::sleep_for(std::chrono::milliseconds(kDrainSliceMs));
         }
@@ -1180,7 +1217,7 @@ httpd_ws_link_t::~httpd_ws_link_t() {
             // at all (the work runs on the task that is sleeping here). The in-flight
             // tx_work still reads the slot's payload and release-stores its busy flag,
             // so freeing the pool now is a use-after-free — leak it instead: a
-            // bounded, teardown-only loss (kTxPoolSlots inline slots) that the
+            // bounded, teardown-only loss (kTxSlotsTotal inline slots) that the
             // drained path never pays. tx_work touches only the work item and the
             // caller's still-running server handle, never this link, so the leaked
             // pool is the one allocation that must outlive us.
@@ -1937,12 +1974,14 @@ httpd_ws_link_t::stats_t httpd_ws_link_t::stats() const noexcept {
 std::size_t httpd_ws_link_t::tx_slots_busy() const noexcept {
     if (tx_pool_ == nullptr) return 0;
     std::size_t busy = 0;
-    for (std::size_t i = 0; i < kTxPoolSlots; ++i)
+    for (std::size_t i = 0; i < kTxSlotsTotal; ++i)
         if (tx_pool_[i].busy.load(std::memory_order_relaxed)) ++busy;
     return busy;
 }
 
 std::size_t httpd_ws_link_t::tx_slot_capacity() noexcept { return kTxPoolSlots; }
+
+std::size_t httpd_ws_link_t::tx_reply_reserve() noexcept { return kTxReplySlots; }
 
 void httpd_ws_link_t::note_enqueue_drop(int fd, std::size_t bytes) {
     const std::uint32_t total = enqueue_drops_.fetch_add(1, std::memory_order_relaxed) + 1;
