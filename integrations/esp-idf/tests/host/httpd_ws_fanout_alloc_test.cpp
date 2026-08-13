@@ -283,7 +283,7 @@ void test_a_broadcast_allocates_nothing() {
  *
  * It is measured in TWO stages, and #949 is why. With the heap work-item fallback deleted,
  * the TX pool is the link's outstanding-send bound, and a fan-out wider than the pool
- * cannot put every frame on a socket in one pass: the peers past `tx_slot_capacity()` are
+ * cannot put every frame on a socket in one pass: the peers past the claimable depth are
  * dropped and counted. Delivery alone can therefore no longer witness the whole scan.
  *
  *   - Stage A offers the fan-out to a REFUSING control socket. No slot is held past the
@@ -291,8 +291,11 @@ void test_a_broadcast_allocates_nothing() {
  *     is counted: exactly six, which a skipped peer would make five and a re-visited one
  *     seven. That is the chunk-boundary guard.
  *   - Stage B lets the frames through and looks at each peer's socket: no peer may be
- *     written twice, and exactly a pool's worth must be written once. A repeat at the seam
- *     shows up here as a peer with two frames even when the totals still add up.
+ *     written twice, and exactly the claimable depth must be written once. A repeat at the
+ *     seam shows up here as a peer with two frames even when the totals still add up. That
+ *     depth, for the in-call sender this suite is, is `tx_slot_capacity()` plus the in-call
+ *     reserve (#1218 — the reserve is a slot past the pool, and an in-call send may take
+ *     it).
  *
  * What stage B alone cannot separate is a scan that skips the last peer from the pool
  * bound dropping it, which is precisely why stage A — where the bound is not in play —
@@ -338,10 +341,11 @@ void test_the_fanout_reaches_every_open_peer_exactly_once() {
     broadcast(*link);
     drain();
 
-    const std::size_t capacity = httpd_ws_link_t::tx_slot_capacity();
-    check_eq(fake_httpd::instance().frames_sent() - sent_before, capacity,
+    const std::size_t depth =
+        httpd_ws_link_t::tx_slot_capacity() + httpd_ws_link_t::tx_reply_reserve();
+    check_eq(fake_httpd::instance().frames_sent() - sent_before, depth,
              "a pool's worth of the fan-out reached the wire");
-    check_eq(link->enqueue_drops() - drops_before, open_fds.size() - capacity,
+    check_eq(link->enqueue_drops() - drops_before, open_fds.size() - depth,
              "and the peers past the pool were DROPPED and counted, not heap-queued (#949)");
     // Two writes per frame, not one: `httpd_ws_send_frame_async` puts a frame on the socket
     // as a header write and a payload write (see fake_httpd's transcription of it).
@@ -354,7 +358,7 @@ void test_the_fanout_reaches_every_open_peer_exactly_once() {
         check(w == 0 || w == 2, what);
         if (w == 2) ++served;
     }
-    check_eq(served, capacity, "exactly a pool's worth of DISTINCT peers were served");
+    check_eq(served, depth, "exactly a pool's worth of DISTINCT peers were served");
 
     reset(link);
 }
@@ -368,7 +372,7 @@ void test_the_fanout_reaches_every_open_peer_exactly_once() {
  *
  * Until #949 a send that found no free TX slot allocated a work item AND a payload buffer
  * on the global heap and posted them anyway. A broadcast is where that bit hardest: the
- * over-offer is one heap pair per peer past `tx_slot_capacity()`, arriving in a burst, with
+ * over-offer is one heap pair per peer past the claimable depth, arriving in a burst, with
  * the outstanding-send count bounded by the heap rather than by the control queue behind
  * it. The answer is now a counted drop, and the two numbers below are what separate them —
  * a link that still fell back would allocate here and count nothing.
@@ -384,8 +388,11 @@ void test_a_fanout_past_the_pool_allocates_nothing() {
     auto link = make_link();
     check(link->ok(), "the adopting link registered its URI");
 
-    const std::size_t capacity = httpd_ws_link_t::tx_slot_capacity();
-    const std::size_t wide = 2 * capacity;
+    // The claimable depth for a send on the httpd task — the pool plus the in-call reserve
+    // (#1218). Everything past it is the over-offer this case is about.
+    const std::size_t depth =
+        httpd_ws_link_t::tx_slot_capacity() + httpd_ws_link_t::tx_reply_reserve();
+    const std::size_t wide = 2 * depth;
     std::vector<int> fds;
     for (std::size_t i = 0; i < wide; ++i) {
         fds.push_back(900 + static_cast<int>(i));
@@ -404,16 +411,16 @@ void test_a_fanout_past_the_pool_allocates_nothing() {
     broadcast(*link);
     const std::size_t allocs_after = g_allocs.load(std::memory_order_relaxed);
 
-    // `capacity` frames were really queued, and the fake pushes each onto a std::deque, so
+    // `depth` frames were really queued, and the fake pushes each onto a std::deque, so
     // the window is not expected to be zero — it is expected to hold NO allocation for the
     // peers past the pool. The deque grows in blocks, so the bound is the pooled frames'
     // own cost: one allocation each, at most.
-    check(allocs_after - allocs_before <= capacity,
+    check(allocs_after - allocs_before <= depth,
           "the wide fan-out allocated at most one block per QUEUED frame — nothing for the "
           "peers past the pool");
-    check_eq(link->enqueue_drops() - drops_before, wide - capacity,
+    check_eq(link->enqueue_drops() - drops_before, wide - depth,
              "and those peers were counted as drops (so the zero above is not vacuous)");
-    check_eq(link->tx_slots_busy(), capacity, "the pool is exactly full, not overdrawn");
+    check_eq(link->tx_slots_busy(), depth, "the pool is exactly full, not overdrawn");
 
     drain();
     reset(link);

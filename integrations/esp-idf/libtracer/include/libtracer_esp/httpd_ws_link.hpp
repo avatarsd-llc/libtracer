@@ -99,6 +99,11 @@
  *     instead of losing the same publish-order tail every pass. Nothing is copied or
  *     parked to achieve that — the frame waits in the caller's memory, in the caller's
  *     call (ADR-0081 §1) — and an expired wait is the same counted drop it always was.
+ *     One further slot, past the pool, is reserved for sends issued ON the httpd task
+ *     (@ref tx_reply_reserve): the one claimer that cannot wait for a drain it is itself
+ *     supposed to perform, so a delivery burst cannot starve a request's reply. Past the
+ *     pool, and not out of it — carved out, it narrowed every producer's fan-out by a
+ *     destination and cost a sweep that had always fit its tail (#1218).
  *   - FAN-OUT: a broadcast (`send()` — the path a subscription push takes) snapshots
  *     its destinations into a FIXED on-stack chunk and resumes the scan for the next
  *     one, so the peer set is walked with no container of its own. Until #961 that
@@ -518,25 +523,44 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
                 static_cast<std::uint64_t>(s.enqueue_drops) + s.tx_to_dead_peer};
     }
 
-    /** @brief TX work slots claimed RIGHT NOW (filling, queued, or sending). */
+    /** @brief TX work slots claimed RIGHT NOW (filling, queued, or sending) — across the
+     *         pool AND the in-call reserve, so the ceiling here is
+     *         @ref tx_slot_capacity + @ref tx_reply_reserve. */
     [[nodiscard]] std::size_t tx_slots_busy() const noexcept;
 
     /**
-     * @brief Total TX work slots in the per-link pool — this link's OUTSTANDING-SEND bound.
+     * @brief TX work slots ANY sender may claim — this link's OUTSTANDING-SEND bound.
      *
      * Not a fan-out ceiling, and the difference is what #1187 corrected. A send from any
-     * task other than the httpd task now WAITS (bounded, off the CPU) for the drain to free
-     * a slot, so a broadcast to more peers than this costs latency rather than losing its
+     * task other than the httpd task WAITS (bounded, off the CPU) for the drain to free a
+     * slot, so a broadcast to more peers than this costs latency rather than losing its
      * tail; only a send issued ON the httpd task — a reply serviced in-call, or a push
-     * provoked by an inbound frame — still hits this depth as a hard same-pass limit, since
-     * the task it would wait for is the one asking. One slot of the pool is reserved for
-     * exactly those in-call sends, so a fan-out cannot starve a request's reply.
+     * provoked by an inbound frame — hits this depth as a hard same-pass limit, since the
+     * task it would wait for is the one asking.
+     *
+     * It is the depth available to EVERY sender, including a producer's fan-out: the
+     * in-call reserve is @ref tx_reply_reserve slots on top of it, not a slice out of it.
+     * That is #1218 — reserved out of this number instead, it made every off-task fan-out
+     * one destination narrower than the bound stated here, so a sweep that had always fit
+     * began waiting for the drain on every pass whether or not a reply was pending.
      *
      * A frame that is still unserved when the wait expires is dropped and counted
      * (@ref enqueue_drops, and @ref stats_t::tx_pool_misses for the cause); waits themselves
      * are counted in @ref stats_t::tx_pool_waits.
      */
     [[nodiscard]] static std::size_t tx_slot_capacity() noexcept;
+
+    /**
+     * @brief TX work slots held back for sends issued ON the httpd task, ADDITIONAL to
+     *        @ref tx_slot_capacity (#1218).
+     *
+     * The in-call sender is the one claimer that cannot wait for a slot — the task that
+     * frees them is the task asking — so the guarantee that a request's reply always finds
+     * one has to be a slot no other sender can take. It costs the RAM of one more slot per
+     * link, and buys back the fan-out width that carving the reserve out of the pool had
+     * taken from every producer.
+     */
+    [[nodiscard]] static std::size_t tx_reply_reserve() noexcept;
 
     /**
      * @brief Admission predicate: given the parsed opening GET, return true to admit the
@@ -681,8 +705,10 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *        exhausted, absent, or the link is stopping.
      *
      * @param in_call True when the caller runs ON the httpd task (a reply serviced in-call),
-     *                which is the ONE claimer allowed the pool's reserved last slot — it
-     *                cannot wait for a drain it is itself supposed to perform. See the
+     *                which is the ONE claimer allowed the reserve BEYOND the pool
+     *                (@ref tx_reply_reserve) — it cannot wait for a drain it is itself
+     *                supposed to perform, and it reaches for that reserve first so the
+     *                pool's full depth stays available to producers (#1218). See the
      *                definition for why the reserve exists.
      */
     [[nodiscard]] tx_slot_t* claim_tx_slot(bool in_call);

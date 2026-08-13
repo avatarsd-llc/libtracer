@@ -10,6 +10,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`httpd_ws_link_t::tx_reply_reserve()`**
+  ([#1218](https://github.com/avatarsd-llc/libtracer/issues/1218)) — TX work slots held
+  back for sends issued ON the httpd task, **additional to `tx_slot_capacity()`**. The
+  in-call sender is the one claimer that cannot wait for a slot (the task that frees them
+  is the task asking), so the guarantee that a request's reply always finds one is now a
+  slot no other sender can take, rather than a shortened pool for everybody else. Read
+  `tx_slots_busy()` against `tx_slot_capacity() + tx_reply_reserve()`: that sum is the
+  link's total slot count, and the depth a send issued on the httpd task can reach.
+
 ### Fixed
 
 - **`httpd_ws_link.cpp` now compiles with `CONFIG_LWIP_IPV6` off.** The #994 peer-endpoint
@@ -20,6 +31,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   config: `esp_http_server` binds `PF_INET` there, so `AF_INET` is the only family a peer
   can present and the v4 buffer bound is exact, not truncated. No behavior change with
   IPv6 on.
+
+- **The in-call reserve no longer narrows the fan-out width**
+  ([#1218](https://github.com/avatarsd-llc/libtracer/issues/1218)). 0.11.0 introduced the
+  reserve by shortening the scan an off-httpd-task claimer was allowed, which took a slot
+  from **every** producer, permanently, whether or not a reply was pending — so the
+  outstanding-send bound a fan-out actually got was `tx_slot_capacity() - 1`. A publish
+  sweep of exactly `tx_slot_capacity()` destinations, which had always fit and delivered at
+  the offered rate, therefore had to wait for the drain on **every pass**; on a unicore
+  target that drain cannot happen while the producer is running, so the wait expired, the
+  last destination of the sweep was dropped, and the futility latch then suppressed further
+  waits for a full send occupancy — a permanently starved tail plus a producer stalled a
+  send bound per latch cycle. The reserve is now `tx_reply_reserve()` slots **past** the
+  pool, and an in-call send takes it FIRST, so a reply in flight leaves the pool's whole
+  depth claimable. What #1187 bought is unchanged: a sweep wider than the pool still costs
+  latency rather than its tail, and a delivery burst still cannot starve a request's reply —
+  it now survives a burst holding the pool's **full** depth. The cost is one more TX slot
+  of RAM per link (a work-item shell plus its inline payload capacity); a guarantee for a
+  claimer that cannot wait has to be a slot nobody else can take.
 
 ## [0.11.0] — 2026-08-13
 
