@@ -687,17 +687,17 @@ ANCHORS = [
     # integrations/esp-idf/libtracer/httpd_ws_link.cpp
     ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:71',
      '* (F2b, 2026-07-09): the /unit batch apply overflowed 8 KB and needed ~12 KB. It is named'),
-    ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:160',
+    ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:165',
      'static constexpr std::size_t kRequiredHttpdStack = 12288;'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:442', 'if (chunk.empty()) return true;'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:448',
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:497', 'if (chunk.empty()) return true;'),
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:503',
      'if (len_ != 0) std::memcpy(grown.get(), bytes_.get(), len_);'),
     # integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp
     ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:52',
      '*     task stack (the batch apply overflows the 4 KB httpd default). The PORT-BINDING'),
 
     # --- re-added from the v0.7.1 docs sweep (absent from main's table) ---
-    ('core/include/libtracer/fwd_frame_view.hpp:867', 'inline constexpr std::size_t kFwdMaxIov = 10;'),
+    ('core/include/libtracer/fwd_frame_view.hpp:868', 'inline constexpr std::size_t kFwdMaxIov = 10;'),
     # ONE `bus()` since #871: both stream servers inherit slot_server_t's (they used to
     # restate it, cited as transport_tcp.hpp:343 and transport_ws.hpp:233).
     ('core/include/libtracer/posix_endpoint.hpp:409',
@@ -727,9 +727,9 @@ ANCHORS = [
     ('tools/cortexm0_footprint.py:94', 'cxx_flags = ['),
     ('tools/cortexm0_footprint.py:101', '"-DLIBTRACER_NO_ATOMIC",'),
     ('tools/cortexm0_footprint.py:115', '"--specs=nano.specs",'),
-    ('core/tests/CMakeLists.txt:1205', 'add_executable(substrate_test_no_atomic'),
-    ('core/tests/CMakeLists.txt:1218', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
-    ('core/tests/CMakeLists.txt:1219', '    LIBTRACER_NO_ATOMIC'),
+    ('core/tests/CMakeLists.txt:1228', 'add_executable(substrate_test_no_atomic'),
+    ('core/tests/CMakeLists.txt:1241', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
+    ('core/tests/CMakeLists.txt:1242', '    LIBTRACER_NO_ATOMIC'),
     # The leading indent is load-bearing: the bare token also appears in the comment
     # three lines above the executable, and an anchor that matches both is not an anchor.
 
