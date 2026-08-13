@@ -108,6 +108,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`quic_transport_t::dropped_tx()` and `webtransport_transport_t::dropped_tx()` — the msquic
+  egress counts its shed frames (#932).** Both transports reported `drop_stats().dropped_tx`
+  as a hardcoded `0`, which a generic `transport_t*` holder cannot tell apart from "nothing
+  was dropped" — the last gap in the drop-counter seam #1213 hoisted. All three shed paths in
+  the shared `msquic_endpoint_t` now count: a record over `kMaxFrame` (both `send` overloads,
+  refused before any stream is consulted), a send with no live peer stream (dialing or torn
+  down), and a `StreamSend` msquic refused. H3 handshake material sent through `send_raw` is
+  deliberately **not** counted — a refused handshake write is a setup failure the handshake
+  surfaces itself, not a frame the router believed it sent. No behaviour change: the same
+  frames are shed as before, they are merely observable now.
+
 - **`wire::key_view_t` gains record accessors — `record_end`, `record_from`, `record_t` and
   `record_cursor_t` (#888).** The NAME-record framing walk (4-byte header, u16 length, advance
   by `4 + len`) was hand-rolled at **eight** places, because the class offered no way to ask

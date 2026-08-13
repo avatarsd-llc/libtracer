@@ -462,6 +462,48 @@ void test_scatter_gather() {
           "gathered segments arrive concatenated as one frame");
 }
 
+/**
+ * @brief The egress shed counter (#932): both TX drop classes move `dropped_tx`, and
+ *        the generic `transport_t*` view sees them.
+ *
+ * The finding this closes is that msquic egress dropped frames with no counter at all,
+ * so `drop_stats().dropped_tx` was a hardcoded zero — indistinguishable from "nothing
+ * was dropped". Both classes are driven WITHOUT a peer where possible, so neither
+ * assertion depends on connection timing.
+ */
+void test_tx_drop_counters() {
+    std::printf("QUIC transport — outbound sheds are counted (#932):\n");
+
+    // Class 1: no peer stream. A listener nobody dialled has no frame stream, so
+    // every send is shed — the "dialing / torn down" case a router cannot see.
+    quic_transport_t idle(std::uint16_t{0}, g_cert, g_key);
+    check(idle.dropped_tx() == 0, "a fresh link has shed nothing");
+    const std::array<std::byte, 3> small{std::byte{1}, std::byte{2}, std::byte{3}};
+    idle.send(std::span<const std::byte>(small));
+    check(idle.dropped_tx() == 1, "a send with no peer stream counted one TX drop");
+
+    // The scatter-gather overload funnels through the same locked hand-off, so it
+    // must count identically — the two overloads cannot disagree.
+    const std::array<std::span<const std::byte>, 1> iov{std::span<const std::byte>(small)};
+    idle.send(std::span<const std::span<const std::byte>>(iov));
+    check(idle.dropped_tx() == 2, "the gather overload counted its shed too");
+
+    // Class 2: oversize. Refused before any stream is consulted, so this counts on
+    // a peerless link as well — and stays distinct from `malformed_rx`, which is the
+    // INBOUND spelling of the same cap.
+    std::vector<std::byte> huge(quic_transport_t::kMaxFrame + 1, std::byte{0xAB});
+    idle.send(std::span<const std::byte>(huge));
+    check(idle.dropped_tx() == 3, "an oversize frame counted a TX drop");
+    check(idle.malformed_rx() == 0, "an outbound oversize is not an inbound malformed");
+
+    // The point of #932: a holder of only the interface reads the same numbers.
+    const tr::net::transport_t& generic = idle;
+    const auto stats = generic.drop_stats();
+    check(stats.dropped_tx == 3, "drop_stats() reports the TX drops, not a hardcoded zero");
+    check(stats.dropped_rx == idle.dropped_rx() && stats.malformed_rx == idle.malformed_rx(),
+          "the snapshot's other two fields still agree with the concrete accessors");
+}
+
 // Build FWD{ op=WRITE, dst=<segs...>, src=<empty PATH>, payload=<VALUE> } — a remote
 // write routed by explicit source route (RFC-0004 §D, ADR-0040).
 std::vector<std::byte> fwd_write(std::initializer_list<std::string_view> dst,
@@ -740,6 +782,7 @@ int main() {
     test_view_delivery_segment_identity();
     test_backpressure_drain();
     test_scatter_gather();
+    test_tx_drop_counters();
     test_two_nodes_over_quic();
     test_config_constructed_quic();
     test_spec_dial_trust_keys();

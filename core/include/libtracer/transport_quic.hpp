@@ -173,11 +173,15 @@ class quic_transport_t : public transport_t {
      *         Each one shuts the connection down — the stream has lost framing sync. */
     [[nodiscard]] std::uint64_t malformed_rx() const noexcept;
 
-    /** @brief The interface-level snapshot (#932) — what a generic `transport_t*` reads.
-     *         `dropped_tx` stays zero: the msquic egress does not count its shed sends yet
-     *         (a follow-up), and this reports nothing rather than a fabricated number. */
+    /** @brief Frames shed on the way OUT (#932): a record over @ref kMaxFrame, no live
+     *         peer stream to write to (dialing / torn down), or a `StreamSend` msquic
+     *         refused. H3 handshake material is not counted — it is not a frame. */
+    [[nodiscard]] std::uint64_t dropped_tx() const noexcept;
+
+    /** @brief The interface-level snapshot (#932) — the concrete accessors above, as the
+     *         one shape a generic `transport_t*` holder reads. */
     [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
-        return {dropped_rx(), malformed_rx(), 0};
+        return {dropped_rx(), malformed_rx(), dropped_tx()};
     }
 
    private:

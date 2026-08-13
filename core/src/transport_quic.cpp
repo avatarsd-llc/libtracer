@@ -224,6 +224,10 @@ std::uint64_t quic_transport_t::malformed_rx() const noexcept {
     return impl_->malformed_rx.load(std::memory_order_relaxed);
 }
 
+std::uint64_t quic_transport_t::dropped_tx() const noexcept {
+    return impl_->dropped_tx.load(std::memory_order_relaxed);
+}
+
 namespace {
 
 /**

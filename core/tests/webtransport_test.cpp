@@ -299,6 +299,36 @@ void test_send_overload_parity() {
           "both overloads framed the record identically");
     check(listener.malformed_rx() == 0 && listener.dropped_rx() == 0,
           "neither record desynced the length-prefix reassembler");
+    // The counting half of #932 that a peerless link cannot show: a send that
+    // REACHED the wire must not count. Both overloads delivered above, so an
+    // over-counting egress is caught here rather than inflating the metric.
+    check(dialer.dropped_tx() == 0, "a delivered send counts no TX drop, on either overload");
+}
+
+/**
+ * @brief WebTransport's egress shed counter (#932) — the same shed classes as the
+ *        QUIC transport, since both derive the counting from `msquic_endpoint_t`.
+ *
+ * Driven WITHOUT a peer so neither assertion depends on handshake timing; the
+ * paired positive (a delivered send counts nothing) is asserted in
+ * @ref test_send_overload_parity.
+ */
+void test_tx_drop_counters() {
+    std::printf("WebTransport — outbound sheds are counted (#932):\n");
+    webtransport_transport_t idle(std::uint16_t{0}, g_cert, g_key);
+    check(idle.dropped_tx() == 0, "a fresh link has shed nothing");
+
+    const auto small = test_frame(4, 0x41);
+    idle.send(small);
+    check(idle.dropped_tx() == 1, "a send with no peer session counted one TX drop");
+
+    std::vector<std::byte> huge(webtransport_transport_t::kMaxFrame + 1, std::byte{0xCD});
+    idle.send(std::span<const std::byte>(huge));
+    check(idle.dropped_tx() == 2, "an oversize frame counted a TX drop");
+
+    const tr::net::transport_t& generic = idle;
+    check(generic.drop_stats().dropped_tx == 2,
+          "drop_stats() reports the TX drops, not a hardcoded zero");
 }
 
 // A heap-delegating backend that RECORDS every segment it hands out (segment
@@ -1176,6 +1206,7 @@ int main() {
     test_session_and_raw_duplex();
     test_big_frame_chunking();
     test_send_overload_parity();
+    test_tx_drop_counters();
     test_view_delivery_and_backpressure();
     test_fwd_read_round_trip();
     test_config_constructed_webtransport();

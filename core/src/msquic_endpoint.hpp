@@ -211,6 +211,15 @@ class msquic_endpoint_t {
     std::size_t max_frame = kMaxFrame;          /**< @brief Per-connection RX cap (:settings). */
     std::atomic<std::uint64_t> dropped_rx{0};   /**< @brief Backpressure-dropped frames. */
     std::atomic<std::uint64_t> malformed_rx{0}; /**< @brief Malformed length prefixes seen. */
+    /**
+     * @brief Outbound frames shed before the wire (#932): over @ref kMaxFrame, no peer
+     *        stream to write to, or a `StreamSend` msquic refused.
+     *
+     * Counts the PROTOCOL-frame path only (@ref send_frame). H3 handshake material goes
+     * out through @ref send_raw, which is not a frame the router believed it sent, so a
+     * refusal there is a connection-setup failure rather than a dropped frame.
+     */
+    std::atomic<std::uint64_t> dropped_tx{0};
     /** @} */
 
     /**
@@ -453,11 +462,17 @@ class msquic_endpoint_t {
      * here. Every send on this endpoint — raw handshake bytes and both
      * length-prefixed record overloads — funnels through this, so a correction
      * to the dance is made once.
+     *
+     * @return Whether msquic took the buffer. A false is a send that never reached
+     *         the wire; only the frame path counts it (@ref submit_frame), because a
+     *         refused handshake write is a setup failure, not a shed frame.
      */
-    void submit(HQUIC stream, std::unique_ptr<send_ctx_t> ctx) {
+    [[nodiscard]] bool submit(HQUIC stream, std::unique_ptr<send_ctx_t> ctx) {
         tsan_release(ctx.get());  // pairs with SEND_COMPLETE's acquire
-        if (QUIC_SUCCEEDED(api->StreamSend(stream, &ctx->buf, 1, QUIC_SEND_FLAG_NONE, ctx.get())))
-            (void)ctx.release();
+        if (!QUIC_SUCCEEDED(api->StreamSend(stream, &ctx->buf, 1, QUIC_SEND_FLAG_NONE, ctx.get())))
+            return false;
+        (void)ctx.release();
+        return true;
     }
 
     /**
@@ -466,17 +481,25 @@ class msquic_endpoint_t {
      *
      * No-op until a peer's frame stream is up (and after teardown) — drop, like
      * tcp. Thread-safe: the stream slot is read under @ref conn_m.
+     *
+     * Both shed paths — no stream, and a `StreamSend` msquic refused — count
+     * @ref dropped_tx, so the caller's frame is never lost silently (#932).
      */
     void submit_frame(std::unique_ptr<send_ctx_t> ctx) {
         const std::lock_guard lock(conn_m);
-        if (frame_stream == nullptr) return;  // no peer stream (yet / anymore) — drop
-        submit(frame_stream, std::move(ctx));
+        if (frame_stream == nullptr) {  // no peer stream (yet / anymore) — drop
+            dropped_tx.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        if (!submit(frame_stream, std::move(ctx)))
+            dropped_tx.fetch_add(1, std::memory_order_relaxed);
     }
 
     /** @brief Send raw @p bytes (H3 handshake material — no prefix) on
-     *         @p stream; msquic owns the buffer until SEND_COMPLETE. */
+     *         @p stream; msquic owns the buffer until SEND_COMPLETE. A refusal is
+     *         a setup failure the handshake surfaces on its own, not a shed frame. */
     void send_raw(HQUIC stream, std::vector<std::uint8_t> bytes) {
-        submit(stream, std::make_unique<send_ctx_t>(std::move(bytes)));
+        (void)submit(stream, std::make_unique<send_ctx_t>(std::move(bytes)));
     }
 
     /**
@@ -488,7 +511,10 @@ class msquic_endpoint_t {
      * transfer).
      */
     void send_frame(std::span<const std::byte> frame) {
-        if (frame.size() > kMaxFrame) return;  // the peer would reject it as malformed
+        if (frame.size() > kMaxFrame) {  // the peer would reject it as malformed
+            dropped_tx.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
         auto ctx = std::make_unique<send_ctx_t>(frame.size());
         if (!frame.empty())
             std::memcpy(ctx->bytes.data() + kPrefixBytes, frame.data(), frame.size());
@@ -507,7 +533,10 @@ class msquic_endpoint_t {
     void send_frame(std::span<const std::span<const std::byte>> iov) {
         std::size_t total = 0;
         for (const auto& s : iov) total += s.size();
-        if (total > kMaxFrame) return;  // the peer would reject it as malformed
+        if (total > kMaxFrame) {  // the peer would reject it as malformed
+            dropped_tx.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
         auto ctx = std::make_unique<send_ctx_t>(total);
         std::size_t off = kPrefixBytes;
         for (const auto& s : iov) {
