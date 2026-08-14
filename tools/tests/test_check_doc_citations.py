@@ -819,5 +819,206 @@ class EnrolledPathsArePinnedTest(unittest.TestCase):
             self.assertTrue(covered, f"{path} is pinned but the gate never runs on it")
 
 
+class UnanchoredCitationTest(unittest.TestCase):
+    """A cited span no anchor pins (#1243) — the hole a NEW citation fell through.
+
+    The verify pass walks the pin list, so it can only ever check citations that were
+    already pinned. The citation a PR *introduces* has no pin, was therefore never read,
+    and pointed wherever the author typed — at a comment, at a blank line, at a transposed
+    line number. Five did exactly that under a green `OK 382` on 2026-08-13.
+
+    The rule is the mirror of the dead-pin check the gate already runs ("pinned here but no
+    doc cites it any more"): a citation is pinned, or it is refused.
+    """
+
+    def unanchored(self, text, pinned):
+        return cdc.unanchored_citations(text, set(pinned), FILEMAP)
+
+    def test_a_cited_line_with_no_anchor_is_reported(self):
+        out = self.unanchored("see `graph.cpp:1276`", set())
+        self.assertEqual(len(out), 1)
+        self.assertIn(f"{GRAPH}:1276", out[0])
+
+    def test_the_report_asks_for_the_anchor(self):
+        # The remedy has to be in the message: the author's next move is "add an anchor",
+        # not "go read the gate's source to find out what it wants".
+        out = self.unanchored("see `graph.cpp:1276`", set())
+        self.assertIn("add an anchor", out[0])
+
+    def test_a_pinned_line_is_not_reported(self):
+        self.assertEqual(self.unanchored("see `graph.cpp:1276`", {f"{GRAPH}:1276"}), [])
+
+    def test_an_anchor_anywhere_INSIDE_a_cited_range_covers_it(self):
+        # The table's convention is to pin the most distinctive line within a cited range,
+        # which is often neither endpoint (a doc that points at a `/**` means the block).
+        self.assertEqual(self.unanchored("`graph.cpp:1270-1280`", {f"{GRAPH}:1275"}), [])
+
+    def test_a_range_pinned_nowhere_is_reported_by_its_full_span(self):
+        out = self.unanchored("`graph.cpp:1270-1280`", {f"{GRAPH}:1300"})
+        self.assertIn(f"{GRAPH}:1270-1280", out[0])
+
+    def test_a_bare_continuation_is_checked_under_the_file_it_inherited(self):
+        # The spelling that hides a citation from a grep also used to hide it from any
+        # coverage argument made by hand.
+        out = self.unanchored("(`core/src/graph.cpp:12`, `:99`)", {f"{GRAPH}:12"})
+        self.assertEqual(len(out), 1)
+        self.assertIn(f"{GRAPH}:99", out[0])
+
+    def test_an_unresolvable_name_is_not_reported(self):
+        # It pins no location, so there is nothing to anchor. @ref unverifiable_citations
+        # is what decides whether that silence is legitimate.
+        self.assertEqual(self.unanchored("`nowhere.cpp:12`", set()), [])
+
+    def test_a_cited_markdown_page_is_not_reported(self):
+        self.assertEqual(self.unanchored("`docs/reference/07-host-embedding.md:79`", set()), [])
+
+
+class UnanchoredCitationGateTest(unittest.TestCase):
+    """That `main` RUNS the coverage check — the same shape as the #1095 gate test.
+
+    `unanchored_citations` can be perfect and the gate still accept an unpinned citation if
+    nothing calls it, which is exactly the failure #1243 reports. Asserts on OUTPUT, not on
+    the exit code: over a stand-in doc set every real anchor reads as uncited, so the exit
+    code is 1 either way and proves nothing.
+    """
+
+    @contextlib.contextmanager
+    def _gate_over(self, relative_dir, body, anchors=None):
+        """Run `main` over one throwaway doc (optionally with a stand-in ANCHORS table)."""
+        directory = os.path.join(REPO, relative_dir)
+        os.makedirs(directory, exist_ok=True)
+        doc = os.path.join(directory, "zz-1243-probe.md")
+        with open(doc, "w") as fh:
+            fh.write(body)
+        real_all_docs, real_anchors, buf = cdc.all_docs, cdc.ANCHORS, io.StringIO()
+        try:
+            cdc.all_docs = lambda: [pathlib.Path(doc)]
+            if anchors is not None:
+                cdc.ANCHORS = anchors
+            with contextlib.redirect_stdout(buf):
+                cdc.main([])
+            yield buf.getvalue()
+        finally:
+            cdc.all_docs, cdc.ANCHORS = real_all_docs, real_anchors
+            os.remove(doc)
+
+    # The exact hygiene-run shape: a citation introduced by a PR, landing on a COMMENT line
+    # inside `graph.cpp`, with no anchor. Before #1243 this printed `OK` and shipped.
+    NEW_CITATION = "the fold is at `core/src/graph.cpp:1273`\n"
+    RIGHT_ANCHOR = [("core/src/graph.cpp:1273",
+                     "// Fold BEFORE dispatching: these deliveries were abandoned inside the")]
+
+    def test_the_gate_reports_a_citation_no_anchor_pins(self):
+        with self._gate_over("docs/design", self.NEW_CITATION) as out:
+            self.assertIn("pinned by no ANCHORS entry", out)
+            self.assertIn("core/src/graph.cpp:1273", out)
+
+    def test_the_report_names_the_citing_doc(self):
+        with self._gate_over("docs/design", self.NEW_CITATION) as out:
+            self.assertIn("docs/design/zz-1243-probe.md", out)
+
+    def test_the_same_citation_WITH_its_anchor_passes(self):
+        # The contributor rule the fix creates: adding a citation means adding its anchor
+        # in the same PR. With the anchor present the coverage complaint is gone.
+        with self._gate_over("docs/design", self.NEW_CITATION, self.RIGHT_ANCHOR) as out:
+            self.assertNotIn("pinned by no ANCHORS entry", out)
+
+    def test_an_anchor_pointing_at_the_WRONG_line_still_fails(self):
+        # Coverage is not a rubber stamp: the anchor is verified against the cited line's
+        # text, so "add any anchor" is not a way past the gate.
+        wrong = [("core/src/graph.cpp:1273", "this text is not on that line")]
+        with self._gate_over("docs/design", self.NEW_CITATION, wrong) as out:
+            self.assertIn("DRIFT", out)
+
+    def test_the_gate_leaves_a_dated_record_alone(self):
+        # An ADR cites the tree AS IT STOOD, and is never anchored; demanding coverage
+        # there would demand rewriting the record on every refactor.
+        with self._gate_over("docs/adr", self.NEW_CITATION) as out:
+            self.assertNotIn("pinned by no ANCHORS entry", out)
+
+
+class EveryLiveCitationIsPinnedTest(unittest.TestCase):
+    """The coverage rule over the REAL doc set — the acceptance criterion, mechanized.
+
+    Sibling of `EnrolledPathsArePinnedTest`, widened from the nine enrolled paths to every
+    citation the living docs make. It fails if a citation lands without its anchor, which is
+    the whole of #1243.
+    """
+
+    def test_no_live_doc_cites_a_span_no_anchor_pins(self):
+        pinned = {entry[0] for entry in cdc.ANCHORS}
+        filemap = cdc.source_map()
+        offenders = []
+        for doc in cdc.all_docs():
+            try:
+                text = doc.read_text()
+            except (OSError, UnicodeDecodeError):
+                continue
+            rel = os.path.relpath(str(doc), REPO).replace(os.sep, "/")
+            if cdc.is_historical(rel):
+                continue
+            offenders += [f"{rel}: {e}" for e in cdc.unanchored_citations(text, pinned, filemap)]
+        self.assertEqual(offenders, [])
+
+
+class RepinHoldVerdictTest(unittest.TestCase):
+    """A HOLD is part of the verdict (#1243).
+
+    `--repin` printed its holds and exited 0, so the rebase procedure that gated on the exit
+    status read "held" as "done" and carried stale citations through a rebase — the same
+    false green the verify pass had, one command over. It also must not cry wolf: a citation
+    held in a file that did not move needs no attention, and a run that reddens on every
+    clean tree is a run whose exit code stops being read.
+    """
+
+    @contextlib.contextmanager
+    def _repin_over(self, maps, notes, body=""):
+        """Run the `--repin` driver over one throwaway doc and a stand-in line map."""
+        directory = os.path.join(REPO, "docs", "design")
+        os.makedirs(directory, exist_ok=True)
+        doc = os.path.join(directory, "zz-1243-repin-probe.md")
+        with open(doc, "w") as fh:
+            fh.write(body)
+        real_all_docs, real_maps = cdc.all_docs, cdc.anchor_line_maps
+        buf = io.StringIO()
+        try:
+            cdc.all_docs = lambda: [pathlib.Path(doc)]
+            cdc.anchor_line_maps = lambda *a, **k: (maps, list(notes))
+            with contextlib.redirect_stdout(buf):
+                code = cdc.repin(None, False)
+            yield code, buf.getvalue()
+        finally:
+            cdc.all_docs, cdc.anchor_line_maps = real_all_docs, real_maps
+            os.remove(doc)
+
+    def test_a_clean_run_exits_zero(self):
+        with self._repin_over({GRAPH: {10: 10}}, []) as (code, out):
+            self.assertEqual(code, 0)
+            self.assertNotIn("HELD", out)
+
+    def test_a_run_with_a_HOLD_exits_non_zero(self):
+        # An anchor the map could not follow: the tool cannot re-pin what it cannot locate,
+        # and the operator has to be told in a way a shell can see.
+        with self._repin_over({}, ["src/a.cpp:2: anchor GONE — re-pin by hand"]) as (code, out):
+            self.assertEqual(code, 1)
+            self.assertIn("HELD", out)
+
+    def test_the_summary_line_says_the_run_is_incomplete(self):
+        with self._repin_over({}, ["src/a.cpp:2: anchor GONE — re-pin by hand"]) as (_, out):
+            self.assertIn("INCOMPLETE", out)
+
+    def test_an_unmappable_citation_in_a_MOVED_file_holds_the_run(self):
+        # A span too wide for the re-pin's plausibility clamp, in a file whose anchors moved:
+        # there IS a shift to apply and the tool refuses to guess it, so a human must.
+        with self._repin_over({GRAPH: {10: 12}}, [], "`core/src/graph.cpp:33-77`\n") as (code, out):
+            self.assertEqual(code, 1)
+            self.assertIn(f"{GRAPH}:33", out)
+
+    def test_the_same_citation_in_an_UNMOVED_file_is_silent(self):
+        with self._repin_over({GRAPH: {10: 10}}, [], "`core/src/graph.cpp:33-77`\n") as (code, out):
+            self.assertEqual(code, 0)
+            self.assertNotIn("HOLD", out)
+
+
 if __name__ == "__main__":
     unittest.main()

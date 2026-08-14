@@ -241,7 +241,7 @@ struct delivery_drops_t {
 | `denied` | a subscription edge's delivery was refused by the target's `:acl`, gated on the **edge's stored caller**, not the writer's | `graph.cpp:1236-1239` |
 | `denied` | a WRITE was refused at the graph's own gate — the API write, the `FWD{WRITE}` terminus and both `COMPACT` terminus arms enter through it | `graph.cpp:1425-1463` |
 | `no_target` | a net-plane route resolved to no vertex (`fwd_router.cpp:2130`), or its binding vanished under a concurrent unbind (`:2041`) | `fwd_router.cpp:2041`, `:2130` |
-| `out_of_memory` | a `COMPACT` terminus could not take the payload view or reserve its rope | `fwd_router.cpp:2015`, `:2020`, `:2137` |
+| `out_of_memory` | a `COMPACT` terminus could not take the payload view or reserve its rope | `fwd_router.cpp:2013-2015`, `:2020`, `:2137` |
 | `out_of_memory` | the nothrow delivery clone could not be allocated | `graph.cpp:1248-1251` |
 | `out_of_memory` | a HANDLER write's notify clone failed — the WHOLE fan-out is shed, one count per subscriber | `graph.cpp:1472` |
 | `out_of_memory` | an edge's owning copies (link NAME / stored caller) could not be allocated, so the snapshot skipped it | `vertex.hpp:2982` |
@@ -252,7 +252,7 @@ every subscriber of the vertex and still returns success, so `delivery_drops()` 
 that could say so — read zero while a whole fan-out evaporated. The unit of every counter is
 therefore a **delivery**, not an event: a shed fan-out of N counts N, which is why the two
 snapshot sheds are tallied inside `vertex_t::snapshot_edges` (`vertex.hpp:2173`, its
-`snapshot_drops_t`) and folded by `fan_out` (`graph.cpp:1347`, `:1362`) through
+`snapshot_drops_t`) and folded by `fan_out` (`graph.cpp:1346-1347`, `:1361-1362`) through
 `count_snapshot_drops` (`:947`) rather than counted as one at the caller. Every site **on
 this plane** goes through one door, `count_drop` (`:912`), so a path here that abandons an
 admitted delivery without counting it is a visible omission.

@@ -598,8 +598,8 @@ core 0.10.0 reaches it.
   longer derive to "block forever" (#956).** Two further corrections to
   `derive_send_timeout_ms`, on top of the strike cap (#840):
   - `SO_SNDTIMEO` is a **per-`send` property**, and `httpd_ws_send_frame_async` writes a
-    frame as a header call plus a payload call (`esp_http_server/src/httpd_ws.c:447`,
-    `:455`), so one frame to one stalled peer parked the httpd task for **twice** what the
+    frame as a header call plus a payload call (`esp_http_server/src/httpd_ws.c:447,455`),
+    so one frame to one stalled peer parked the httpd task for **twice** what the
     derivation claimed. `kIdfWsWriteLegs` is now the third divisor.
   - The division had **no floor**: a large-but-legal `max_peers` truncated it to `0`, and
     `SO_SNDTIMEO = 0` means *block forever* — exactly the failure the derivation exists to
