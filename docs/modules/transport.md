@@ -110,7 +110,7 @@ Departure follows the same split. A **peer-named** server evicts exactly the dep
 (`notify_peer_down(name)`); a **flat** server has one routing identity for every peer it
 carries — the registered child NAME — so its only seam is the whole link
 (`transport_t::notify_down`), and it therefore waits until the **last** open session departs
-(`posix_endpoint.cpp:679`). Firing it on a mid-life close would evict the surviving peers'
+(`posix_endpoint.cpp:683`). Firing it on a mid-life close would evict the surviving peers'
 edges along with the departed one's.
 
 ## QUIC and WebTransport
