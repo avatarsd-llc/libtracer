@@ -32,7 +32,7 @@ rather than a silent behavioural fork between translation units.
 
 The sizes and policies are members of **one named type**, `default_config_t`
 (`core/include/libtracer/config.hpp:81`), bound once by `using config_t = default_config_t;`
-(`:313`). An application declares its own by inheriting and overriding what differs (`:65-75`):
+(`:344`). An application declares its own by inheriting and overriding what differs (`:65-75`):
 
 ```cpp
 struct my_node_config_t : tr::graph::default_config_t {
@@ -43,7 +43,7 @@ using config_t = my_node_config_t;
 
 Inheriting means a knob added later does not break the preset — it inherits the new default
 rather than failing to compile. The rest of the library names the derived spellings re-exported
-below the traits type (`:316-333`), each of which is exactly its traits member, so introducing
+below the traits type (`:347-366`), each of which is exactly its traits member, so introducing
 `config_t` moved no call site.
 
 It is **bound once, not threaded as a template parameter**, and
@@ -173,21 +173,28 @@ is a knob the fragment does not state at all (#1244).
 | `kPinPayloadRatio` (`:237`) | ratio | 0 — the `kPinNever` sentinel | the preset |
 | `acl_policy_t` (`:246`) | policy type | `allow_only_policy_t` | inherited — the full policy is not selectable |
 | `lkv_slot_t` (`:262`) | policy type | `sp_atomic_slot_t` | inherited — the hazard slot is not selectable |
-| `kSpinWaitSafe` (`:357`) | target fact | `true` | derived from `IDF_TARGET` — `false` on every chip, `true` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:313`) |
+| `kSpinWaitSafe` (`:390`) | target fact | `true` | derived from `IDF_TARGET` — `false` on every chip, `true` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:313`) |
+| `kWeaklyOrdered` (`:311`) | target fact | `true` | inherited — every ESP chip is weakly ordered, which is the default |
 
 Two CMake variables survive for one transition release, `-DLIBTRACER_ACL_FULL` and
 `-DLIBTRACER_LKV_SLOT`; `core/CMakeLists.txt` writes a fragment on their behalf. The five other
 cache variables this table used to list were deleted with the template (#1142).
 
 Each is documented at its declaration with what it costs and when to move it; that header is
-the reference, not this table. What matters here is the shape: **nine knobs, all named, all
+the reference, not this table. What matters here is the shape: **ten knobs, all named, all
 finite.** Three are counts (`kVertexLockStripes`, `kHazardReaderSlots`, `kEdgePinSlots`), one is a
-padding width, one is a per-target RAM ceiling, one is a ratio, two are type bindings, and one is a
-target fact rather than a preference — `kSpinWaitSafe` says whether a task on this target may spin
+padding width, one is a per-target RAM ceiling, one is a ratio, two are type bindings, and two are
+target facts rather than preferences. `kSpinWaitSafe` says whether a task on this target may spin
 for a lock another task holds, and the guard in `mem_pool.hpp` reads it to refuse
-`synchronized_pool_t<spin_sync_t>` where the answer is no (#1158).
+`synchronized_pool_t<spin_sync_t>` where the answer is no (#1158). `kWeaklyOrdered` says whether
+the target's memory model may reorder a later relaxed load ahead of an earlier `seq_cst` store,
+and the guard in `vertex.hpp` reads it to refuse a `kDeliverySkipOrder` weaker than `seq_cst`
+(#1143) — the compile-time half of the ordering question whose evidence half is the
+`ubuntu-24.04-arm` CI leg (#1140). Both default to the value that is safe to inherit in silence,
+which for the ordering fact is the STRICT one: asserting on a TSO host costs nothing, while a
+target that wrongly claims TSO disarms the check on the one class it exists for.
 
-Two of the nine carry no build-system variable at all. `kMaxVertexBytes64` / `kMaxVertexBytes32`
+Two of the ten carry no build-system variable at all. `kMaxVertexBytes64` / `kMaxVertexBytes32`
 and `kPinPayloadRatio` are preset members: an application moves them by declaring its own traits
 type, not by passing `-D`. `kPinPayloadRatio` is the pin/copy amplification ratio `K` — a
 trailer-less written value is stored as a subview of the inbound frame, rather than copied out,
@@ -299,7 +306,7 @@ Four differences that surprise people, each a property of the target rather than
   `atomic::wait` back-end `.bss` beyond the registry itself.
 - **`sizeof(vertex_t)` is gated in the header, not in a test.** The ceilings are `config_t`
   members and the assertions sit in `vertex.hpp` beside the type they constrain
-  (`core/include/libtracer/vertex.hpp:3294,3299`), so every build on every target checks its
+  (`core/include/libtracer/vertex.hpp:3341,3346`), so every build on every target checks its
   own binding, for free. A test-resident gate covers only the configurations CI actually
   builds: one, in practice, and never the 32-bit arm, because no CI leg cross-compiles that
   test while the ESP-IDF legs compile `vertex_t` itself on every change. That distinction has
@@ -308,7 +315,7 @@ Four differences that surprise people, each a property of the target rather than
   is a build failure on both. They were ceilings held above the measurement until 2026-08-10,
   which is why 16 B reclaimed on the 64-bit arm and 8 B on the 32-bit one went unnoticed — a
   ceiling answers "did you regress past a fixed point", never "did this get leaner". The stripe carries a companion
-  assertion of a different kind: `alignof(vertex_stripe_t) == kStripeAlign` (`vertex.hpp:1106`),
+  assertion of a different kind: `alignof(vertex_stripe_t) == kStripeAlign` (`vertex.hpp:1149`),
   which catches an `alignas` that asked for less than the payload's natural alignment and was
   therefore ignored — silently, by GCC, per `[dcl.align]/5`.
 - **A single-core target's constraint is RAM; a many-core host's is the read path.** The two

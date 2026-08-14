@@ -35,6 +35,18 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `version|node|endpoint`. RAM: **0 added bytes per binding** (the flag lands in `binding_t`'s
   existing tail padding) and 8 per remote node heard. Common-path cost: one already-loaded
   `bool` test per data slice — no lookup added.
+- **`graph::default_config_t::kWeaklyOrdered` — the target's memory model, as a configuration
+  member, so an ordering precondition can be a `static_assert`**
+  ([#1143](https://github.com/avatarsd-llc/libtracer/issues/1143)). Public config surface, with
+  the derived spelling `graph::kWeaklyOrdered` beside the other loose names. **Defaults to
+  `true`** — assume the target reorders unless its fragment says otherwise — and it never
+  selects a weaker access, so no shipped build changes an instruction. The knob's first
+  consumer is the new `graph::kDeliverySkipOrder` (`vertex.hpp`), the single spelling of the
+  delivery-skip Dekker pair's order (`vertex_t::own_subs_ordered` and `bump_own_subs`, #635 /
+  #1140): on a weakly-ordered target the build now REFUSES a `kDeliverySkipOrder` weaker than
+  `seq_cst`, where before that pairing's argument lived only in prose and its ablation left the
+  whole suite green on a TSO host. The evidence half of the same question — an
+  `ubuntu-24.04-arm` CI leg that can actually exhibit the anomaly — landed earlier under #1140.
 
 ## [0.12.0] — 2026-08-14
 
