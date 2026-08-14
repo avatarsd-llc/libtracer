@@ -945,6 +945,15 @@ target_link_libraries(fwd_sink_race_test PRIVATE libtracer Threads::Threads)
 libtracer_test_warnings(fwd_sink_race_test)
 add_test(NAME fwd_sink_race COMMAND fwd_sink_race_test)
 
+# #1049 — the L4 analogue: graph_t's five configuration seams under a setter storm. The
+# three callback seams carry the same wrong-context detector as #914's; the child-type
+# catalog and the identity record (served ABOVE the READ gate, to an unauthenticated peer)
+# assert their legal-outcome sets instead, and are TSan/ASan vehicles.
+add_executable(graph_config_race_test graph_config_race_test.cpp)
+target_link_libraries(graph_config_race_test PRIVATE libtracer Threads::Threads)
+libtracer_test_warnings(graph_config_race_test)
+add_test(NAME graph_config_race COMMAND graph_config_race_test)
+
 # #419 — the two-mount route: one dst crossing TWO net/<module>/<name> mounts, driven
 # through three in-process routers chained by loopback link pairs. The behavioural binding
 # for the fwd/fwd-routed-two-mount conformance vector (HARNESS.md: a vector gates the codec

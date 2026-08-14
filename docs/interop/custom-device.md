@@ -130,7 +130,7 @@ none — and remains a conforming node that any forwarder routes and any peer re
 
 Creation is not a new verb. It is an **append of a `SPEC` TLV to a parent's
 `:children[]` field**, gated by that parent's `CREATE` right
-(`core/src/graph.cpp:2419-2423`;
+(`core/src/graph.cpp:2441-2445`;
 [ADR-0020 — NFSv4-style ACEs with inheritance](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0020-acl-nfsv4-style-aces-with-inheritance.md)).
 The SPEC's `type` member names one of the device's registered child types and its
 optional `config` SETTINGS carries the instantiation parameters; an unregistered
@@ -156,7 +156,7 @@ arrive beside it, not instead of it.
 
 Removal has no wire spelling on either surface: a `[N]` clear of `:children[]` is
 not implemented, and `graph_t::retire` is an owner-side call with no wire operation
-behind it (`core/include/libtracer/graph.hpp:393-397`). Retirement empties the
+behind it (`core/include/libtracer/graph.hpp:421-425`). Retirement empties the
 vertex in place rather than freeing it — the handle stays dereferenceable and a
 holder that caches a resolution re-checks `retire_generation` before use — and it
 re-virginizes the address, clearing the previous owner's `:acl`, value seam, stored

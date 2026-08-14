@@ -33,6 +33,7 @@
 #include <string_view>
 #include <vector>
 
+#include "graph_sinks.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tracer.hpp"
 #include "test_support.hpp"
@@ -61,7 +62,7 @@ std::vector<std::byte> as_bytes(std::string_view s) {
 
 /** @brief The test resolver (ADR-0018): the caller context IS the subject token. */
 std::expected<tr::graph::subject_token_t, tr::wire::err_t> caller_is_subject(
-    std::string_view caller) {
+    void*, std::string_view caller) {
     return as_bytes(caller);
 }
 
@@ -400,7 +401,7 @@ void test_field_wildcard_divergence() {
     // BELOW its own, so one spelling has two answers split by who is asking.
     graph_t gated;
     const vertex_handle_t gv = gated.register_vertex(path_t("/g"), role_t::STORED_VALUE);
-    gated.set_subject_resolver(caller_is_subject);
+    gated.configure_subject_resolver(caller_is_subject, nullptr);
     // A non-empty ACL that grants "peer-a" nothing at all (an empty effective ACL would be
     // unrestricted, so the ACE has to exist and name someone else).
     std::vector<tr::graph::ace_t> closed;
@@ -537,8 +538,8 @@ void test_subscribe_wire_requires_return_route() {
     const vertex_handle_t v = g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
 
     std::size_t deliveries = 0;
-    g.set_remote_delivery_sink(
-        [&](const tr::graph::remote_delivery_t&, const tr::view::rope_t&) { ++deliveries; });
+    const tr::testing::remote_sink_guard_t sink_guard(
+        g, [&](const tr::graph::remote_delivery_t&, const tr::view::rope_t&) { ++deliveries; });
 
     // The defective state, admitted through the public door: a link to deliver over, and no
     // route to deliver to.

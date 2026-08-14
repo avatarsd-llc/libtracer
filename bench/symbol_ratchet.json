@@ -15,12 +15,12 @@
     {
       "binary": "bench_libtracer",
       "symbol": "tr::graph::graph_t::fan_out(",
-      "bytes": 1503
+      "bytes": 1474
     },
     {
       "binary": "bench_libtracer",
       "symbol": "tr::graph::graph_t::dispatch_edge_remote",
-      "bytes": 339
+      "bytes": 350
     },
     {
       "binary": "bench_libtracer",

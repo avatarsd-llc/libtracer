@@ -189,7 +189,7 @@ std::vector<std::byte> vector_bytes(std::string_view case_dir) {
  * The empty (local) context never reaches a resolver — `graph_t::acl_allows` settles it
  * as trusted before invoking one (#905) — so the error arm here means DENY, nothing else.
  */
-std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(std::string_view caller) {
+std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(void*, std::string_view caller) {
     const auto* p = reinterpret_cast<const std::byte*>(caller.data());
     return subject_token_t(p, p + caller.size());
 }
@@ -229,7 +229,8 @@ int main() {
     transport_vertex_t net_cli(g_cli, r_cli);
 
     graph_t g_a;
-    g_a.set_subject_resolver(caller_is_subject);  // A gates its own relays by inbound link
+    g_a.configure_subject_resolver(caller_is_subject,
+                                   nullptr);  // A gates its own relays by inbound link
     fwd_router_t r_a(g_a);
     transport_vertex_t net_a(g_a, r_a);
 

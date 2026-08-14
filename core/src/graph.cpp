@@ -374,6 +374,10 @@ graph_t::graph_t(std::pmr::memory_resource* mr, mem::mem_backend_t* value_backen
 }
 
 void graph_t::register_child_type(std::string type, child_factory_t factory) {
+    // Exclusive: an insert rebalances the tree `create_child` walks (#1049). Setup-only by
+    // doctrine; locked so that a caller who ignores that gets a serialized registration
+    // rather than a torn walk of a red-black tree driven by a peer's bytes.
+    const std::unique_lock lock(child_types_mutex_);
     child_types_.insert_or_assign(std::move(type), std::move(factory));
 }
 
@@ -1070,12 +1074,17 @@ void graph_t::set_pin_payload_ratio(vertex_handle_t v, std::uint32_t k) {
     v.get()->set_pin_payload_ratio(k);
 }
 
-void graph_t::set_subject_resolver(subject_resolver_t resolver) {
-    subject_resolver_ = std::move(resolver);
+void graph_t::configure_subject_resolver(subject_resolver_fn_t fn, void* ctx) noexcept {
+    subject_resolver_.set(fn, ctx);
 }
 
 bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right) const {
-    if (!subject_resolver_) return true;  // enforcement disabled — the one hot-path check
+    // ONE coherent read of the {fn, ctx} pair for the whole gate (#1049) — never a
+    // re-read at the call below, which is what let a concurrent install free the
+    // std::function predecessor's captures under a gate that was already inside it.
+    // Unset, this is the same single relaxed load the old `if (!subject_resolver_)` was.
+    const auto resolver = subject_resolver_.get();
+    if (resolver.fn == nullptr) return true;  // enforcement disabled — the one hot-path check
     // The trusted channel is the EMPTY caller context — a local API call — settled HERE,
     // before the resolver runs (#905). It used to be a resolver return value (`nullopt`),
     // whose natural reading ("I cannot name this caller") meant "grant everything", WRITE_ACL
@@ -1087,7 +1096,7 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
     // write path must carry a caller for the same reason — which is why
     // `fwd_router_t::deliver_local` takes its own as a REQUIRED, undefaulted parameter.
     if (caller.empty()) return true;
-    const std::expected<subject_token_t, wire::err_t> subject = subject_resolver_(caller);
+    const std::expected<subject_token_t, wire::err_t> subject = resolver.fn(resolver.ctx, caller);
     if (!subject) return false;  // the resolver DENIED this caller — PERMISSION_DENIED
     // The wildcard spelling is RESERVED in the subject-token space (#908): the wire has one
     // spelling for a subject, so a principal that could BE `EVERYONE@` is indistinguishable
@@ -1262,12 +1271,21 @@ namespace {
     // Remote delivery (#136): a write fans out to a remote subscriber as a
     // FWD{WRITE} (or auto-promoted COMPACT) via the injected sink — outside the
     // vertex lock, like every other dispatch leg, since the sink does transport I/O.
-    remote_sink_(remote_delivery_t{.link = e.link,
-                                   .return_route = e.return_route,
-                                   .reverse_route = e.reverse_route,
-                                   .caller = e.caller,
-                                   .delivery_compact = e.delivery_compact},
-                 value);
+    //
+    // The coherent slot read lives HERE, in the noinline leg, not in the always_inline
+    // dispatch body that calls it (#1049): `dispatch_edge`'s per-edge test stays the one
+    // relaxed load it always was, and this leg — already off the wide-fan-out critical
+    // path — pays the sequence read. An empty snapshot means the sink was cleared or is
+    // mid-publish; that edge is skipped for this write, which is the sink_slot_t contract.
+    const auto sink = remote_sink_.get();
+    if (sink.fn == nullptr) return;
+    sink.fn(sink.ctx,
+            remote_delivery_t{.link = e.link,
+                              .return_route = e.return_route,
+                              .reverse_route = e.reverse_route,
+                              .caller = e.caller,
+                              .delivery_compact = e.delivery_compact},
+            value);
 }
 
 /**
@@ -1287,7 +1305,7 @@ namespace {
     if (e.callback != nullptr)
         e.callback(e.callback_ctx, value);  // the rope by const ref (sink may clone links)
     if (e.target_key) dispatch_edge_target(e, value);
-    if (!e.link.empty() && remote_sink_) dispatch_edge_remote(e, value);
+    if (!e.link.empty() && remote_sink_.installed()) dispatch_edge_remote(e, value);
 }
 
 void graph_t::fan_out(vertex_t* v, const rope_t& value) {
@@ -2067,8 +2085,8 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
     return subscription_t{v, idx};
 }
 
-void graph_t::set_subscription_observer(sub_observer_t observer) {
-    subscription_observer_ = std::move(observer);
+void graph_t::configure_subscription_observer(sub_observer_fn_t fn, void* ctx) noexcept {
+    subscription_observer_.set(fn, ctx);
 }
 
 void graph_t::notify_subscription(sub_event_t::kind_t kind, const vertex_t* v,
@@ -2078,6 +2096,11 @@ void graph_t::notify_subscription(sub_event_t::kind_t kind, const vertex_t* v,
     // construction the inbound link NAME the FWD resolver drives the op under, and the local
     // doors (both subscribe() sugars, a field-write from host code) pass the empty context.
     if (!observing_subscriptions(caller)) return;
+    // The COHERENT read (#1049) — `observing_subscriptions` above is only the cheap hint
+    // that guards the decode work below. Taken before that work so the event is built at
+    // all only for a pair this call will actually dispatch to.
+    const auto observer = subscription_observer_.get();
+    if (observer.fn == nullptr) return;
     // Decode the target from the record ITSELF, not from the parsed slot: subscribe_wire
     // deliberately drops target_key for a remote binding, but the PATH the peer sent is still
     // what an observer wants to see (sub_event_t::target carries the caveat). A slot with no
@@ -2094,11 +2117,11 @@ void graph_t::notify_subscription(sub_event_t::kind_t kind, const vertex_t* v,
         }
     }
     const std::vector<std::byte> producer = build_key(v);
-    subscription_observer_(sub_event_t{.kind = kind,
-                                       .producer = wire::key_view_t{producer},
-                                       .target = wire::key_view_t{target},
-                                       .link = caller,
-                                       .slot = slot});
+    observer.fn(observer.ctx, sub_event_t{.kind = kind,
+                                          .producer = wire::key_view_t{producer},
+                                          .target = wire::key_view_t{target},
+                                          .link = caller,
+                                          .slot = slot});
 }
 
 result_t<void> graph_t::subscribe(const path_t& src, const path_t& target,
@@ -2178,9 +2201,8 @@ void graph_t::set_app_fields_static(vertex_handle_t v, borrowed_fields_t table) 
     v.get()->set_app_fields_static(table);
 }
 
-void graph_t::set_remote_delivery_sink(
-    std::function<void(const remote_delivery_t&, const rope_t&)> sink) {
-    remote_sink_ = std::move(sink);
+void graph_t::configure_remote_delivery_sink(remote_delivery_fn_t fn, void* ctx) noexcept {
+    remote_sink_.set(fn, ctx);
 }
 
 result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view_t source_view, view_t return_route,
@@ -2508,17 +2530,27 @@ result_t<void> graph_t::create_child(vertex_t* parent, const view_t& spec_value)
     if (type_sel.empty() || !valid_segment(detail::as_string_view(child_name)))
         return std::unexpected(status_t::INVALID_PATH);
 
-    // Look up the catalog type (ADR-0017): unknown => SCHEMA_NOT_FOUND (ENOTTY). The
-    // map is read-only once frames flow (populated at setup), so no lock here.
-    const auto it = child_types_.find(type_sel);
-    if (it == child_types_.end()) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+    // Look up the catalog type (ADR-0017): unknown => SCHEMA_NOT_FOUND (ENOTTY). Setup-only
+    // by doctrine, but this walk runs from a PEER's bytes, so it is taken under the shared
+    // lock (#1049) and the factory is COPIED out of the map before the lock drops. The copy
+    // is what makes the lock re-entrancy-safe: factories call back into `graph_t` (they
+    // register vertices), and one that registered a child type while we still held a shared
+    // lock would self-deadlock on the exclusive side. One std::function copy on a path that
+    // is about to allocate a vertex is not a cost worth avoiding.
+    child_factory_t factory;
+    {
+        const std::shared_lock lock(child_types_mutex_);
+        const auto it = child_types_.find(type_sel);
+        if (it == child_types_.end()) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+        factory = it->second;
+    }
 
     // Compose the child key = parent's canonical PATH-payload + one NAME(child_name).
     // The graph owns this addressing; the factory only sees the finished key.
     std::vector<std::byte> child_key = build_key(parent);
     wire::emit_name(child_key, child_name);
 
-    result_t<vertex_handle_t> made = it->second(*this, std::move(child_key), config);
+    result_t<vertex_handle_t> made = factory(*this, std::move(child_key), config);
     if (!made) return std::unexpected(made.error());  // PATH_IN_USE on a duplicate name
     return {};
 }
@@ -2576,6 +2608,21 @@ result_t<view_t> graph_t::read_schema(vertex_t* v) const {
     return *out;
 }
 
+/**
+ * @brief The largest `:identity` record the RFC-0011 §B kind registry can produce.
+ *
+ * Every kind fixes its key length, so the record's length is a function of the registry
+ * rather than of anything a caller supplies — this is a consequence of §B, NOT a synthetic
+ * cap on user data. ed25519, the only kind today, serializes to exactly 60 bytes
+ * (`SETTINGS{ NAME "kind" VALUE u8, NAME "key" VALUE 32B }`); the headroom absorbs a
+ * registry addition without a reader change.
+ *
+ * It exists so @ref graph_t::read_identity can copy the record out under its lock WITHOUT
+ * allocating under that lock. @ref graph_t::set_identity is the single writer and checks
+ * against it, which is what makes the reader's buffer provably sufficient.
+ */
+constexpr std::size_t kMaxIdentityRecordBytes = 96;
+
 result_t<void> graph_t::set_identity(std::uint8_t kind, std::span<const std::byte> key) {
     // The RFC-0011 §B identity-kind registry. `0x00` is reserved-invalid; every other
     // kind fixes its key length, so a length that contradicts the kind is a malformed
@@ -2596,21 +2643,54 @@ result_t<void> graph_t::set_identity(std::uint8_t kind, std::span<const std::byt
 
     std::vector<std::byte> record;
     wire::emit_tlv(record, type_t::SETTINGS, opt_t{.pl = true}, members);
+    // The single-writer half of @ref kMaxIdentityRecordBytes. Unreachable at today's
+    // registry (ed25519 is 60 bytes and every other kind was refused above); it is here so
+    // that a future §B addition whose record outgrows the reader's stack buffer fails
+    // LOUDLY at the one install site rather than overflowing that buffer.
+    if (record.size() > kMaxIdentityRecordBytes) return std::unexpected(status_t::TYPE_MISMATCH);
+
+    // Publish under the lock (#1049). The record is BUILT above, outside it, so the only
+    // thing serialized is the swap that frees the previous buffer — the buffer a concurrent
+    // `read_identity` may be memcpying from, on behalf of a peer that has authenticated
+    // nothing (RFC-0011 §C: the facet resolves above the READ gate on purpose).
+    const std::unique_lock lock(identity_mutex_);
     identity_record_ = std::move(record);
     return {};
 }
 
-void graph_t::clear_identity() { identity_record_.clear(); }
+void graph_t::clear_identity() {
+    const std::unique_lock lock(identity_mutex_);
+    identity_record_.clear();
+}
 
 result_t<view_t> graph_t::read_identity() const {
     // No keypair => the facet is ABSENT, not empty (RFC-0011 §C.3): the ENOTTY of an
     // unsupported field, byte-for-byte the pre-RFC behaviour. An empty record was
     // rejected precisely because it would fabricate an "identity exists but is vacant"
     // state no consumer can act on.
-    if (identity_record_.empty()) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+    //
+    // Shared-locked across the emptiness test AND the copy (#1049): those two straddled a
+    // possible install/clear, either of which frees the buffer the copy reads. Concurrent
+    // reads still run in parallel; the only exclusion is against a rotation.
+    //
+    // The lock deliberately does NOT span the ALLOCATION. The bytes land in a stack buffer
+    // the §B registry bounds (@ref kMaxIdentityRecordBytes, enforced at the single install
+    // site) and `over_bytes` runs after the unlock, because holding a lock across an
+    // allocator call is what would stop `identity_mutex_` being a LEAF: the moment that
+    // allocator becomes an injected `block_source_t` carrying its own `Sync` policy
+    // (#873 / ADR-0079), a lock-ordering obligation appears that does not exist today.
+    // Copying first costs one memcpy of at most 96 bytes on a cold path and removes it.
+    std::array<std::byte, kMaxIdentityRecordBytes> scratch;
+    std::size_t len = 0;
+    {
+        const std::shared_lock lock(identity_mutex_);
+        if (identity_record_.empty()) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+        len = identity_record_.size();
+        std::memcpy(scratch.data(), identity_record_.data(), len);
+    }
     // Pre-serialized at install, so every vertex of this node serves BYTE-IDENTICAL
     // bytes (§C.1) — the invariant that makes the record a valid cross-path key.
-    const auto out = view::over_bytes(identity_record_);
+    const auto out = view::over_bytes(std::span<const std::byte>(scratch.data(), len));
     if (!out) return std::unexpected(status_t::BACKPRESSURE);
     return *out;
 }

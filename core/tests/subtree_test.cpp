@@ -33,6 +33,7 @@
 #include <utility>
 #include <vector>
 
+#include "graph_sinks.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -175,12 +176,13 @@ void test_remote_ancestor_subscriber() {
     std::string seen_link;
     std::vector<std::byte> seen_value;
     std::vector<std::byte> seen_route;
-    g.set_remote_delivery_sink([&](const tr::graph::remote_delivery_t& d, const rope_t& v) {
-        ++deliveries;
-        seen_link.assign(d.link);
-        seen_value.assign(v.only().bytes().begin(), v.only().bytes().end());
-        seen_route.assign(d.return_route.bytes().begin(), d.return_route.bytes().end());
-    });
+    const tr::testing::remote_sink_guard_t sink_guard(
+        g, [&](const tr::graph::remote_delivery_t& d, const rope_t& v) {
+            ++deliveries;
+            seen_link.assign(d.link);
+            seen_value.assign(v.only().bytes().begin(), v.only().bytes().end());
+            seen_route.assign(d.return_route.bytes().begin(), d.return_route.bytes().end());
+        });
     check(g.subscribe_wire(a, make_value({0x04, 0x40, 0x00, 0x00}), make_value(route), "lnk0")
               .has_value(),
           "bind a REMOTE subscriber at the ancestor /a");
@@ -312,9 +314,11 @@ void test_write_creates_acl_gate() {
     (void)g.register_vertex(path_t("/p"), role_t::STORED_VALUE);
     // Enforcement is on for the ATTRIBUTED caller "peer"; the empty (local) context stays
     // trusted without consulting the resolver (#905), which is what the setup writes use.
-    g.set_subject_resolver([](std::string_view) -> std::expected<subject_token_t, tr::wire::err_t> {
-        return subject_token_t{std::byte{'u'}};
-    });
+    g.configure_subject_resolver(
+        [](void*, std::string_view) -> std::expected<subject_token_t, tr::wire::err_t> {
+            return subject_token_t{std::byte{'u'}};
+        },
+        nullptr);
 
     // /p grants WRITE (with INHERIT) but NOT CREATE — creating below /p is denied.
     // Built via the typed ADR-0050 surface (encode_acl) — no hand-rolled ACE bytes.
@@ -348,9 +352,11 @@ void test_branch_write_acl_admission() {
     vertex_handle_t s = g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
     vertex_handle_t st = g.register_vertex(path_t("/s/t"), role_t::STORED_VALUE);
     vertex_handle_t su = g.register_vertex(path_t("/s/u"), role_t::STORED_VALUE);
-    g.set_subject_resolver([](std::string_view) -> std::expected<subject_token_t, tr::wire::err_t> {
-        return subject_token_t{std::byte{'u'}};
-    });
+    g.configure_subject_resolver(
+        [](void*, std::string_view) -> std::expected<subject_token_t, tr::wire::err_t> {
+            return subject_token_t{std::byte{'u'}};
+        },
+        nullptr);
     // Close /s/u to writes (an ACL granting only READ — any present ACE closes it),
     // built via the typed ADR-0050 surface (encode_acl).
     std::vector<std::byte> everyone;

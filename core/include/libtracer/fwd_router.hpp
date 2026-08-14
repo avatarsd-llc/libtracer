@@ -188,10 +188,16 @@ class fwd_router_t {
           flat_(flat),
           egress_(egress),
           handles_(mr, max_label_bindings_per_link) {
-        graph_.set_remote_delivery_sink(
-            [this](const graph::remote_delivery_t& sub, const view::rope_t& value) {
-                deliver_remote(sub, value);
-            });
+        // The captureless {fn, ctx} pair the ADR-0047 doctrine prescribes (#1049) — the same
+        // shape as `on_reverse_ref` below. The graph publishes it through a `sink_slot_t`,
+        // so `this` must outlive every write that can still reach the producer fan-out;
+        // constructing a router against a graph that is ALREADY serving frames is
+        // unsupported, which is what `configure_` in the verb's name says.
+        graph_.configure_remote_delivery_sink(
+            [](void* ctx, const graph::remote_delivery_t& sub, const view::rope_t& value) {
+                static_cast<fwd_router_t*>(ctx)->deliver_remote(sub, value);
+            },
+            this);
         // The responder's reverse-mint seam (RFC-0024 §7.1 amendment 1): the resolver's
         // remote-subscribe arm asks for THIS node's reference to the connection vertex a
         // mint-flagged subscribe arrived on — the transport plane's mapping, so it is

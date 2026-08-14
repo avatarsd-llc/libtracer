@@ -106,7 +106,7 @@ std::vector<std::byte> as_bytes(std::string_view s) {
 }
 
 /** @brief The test resolver (ADR-0018): the caller context IS the subject token. */
-std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(std::string_view caller) {
+std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(void*, std::string_view caller) {
     return as_bytes(caller);
 }
 
@@ -395,7 +395,7 @@ void test_ancestor_rewrite_vs_descendant_eval(std::size_t rewritten_level, std::
         " (#880, ADR-0078, #1043):\n",
         static_cast<int>(shape.size()), shape.data());
     graph_t g;
-    g.set_subject_resolver(caller_is_subject);
+    g.configure_subject_resolver(caller_is_subject, nullptr);
     (void)g.register_vertex(path_t("/anc"), role_t::STORED_VALUE);
     for (std::size_t d = 1; d <= kChainDepth; ++d)
         (void)g.register_vertex(path_t(chain_path(d)), role_t::STORED_VALUE);

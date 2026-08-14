@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "fwd_frame_builder.hpp"
+#include "graph_sinks.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -294,8 +295,8 @@ void test_remote_edge_copy_drop() {
     graph_t g;
     auto v = g.register_vertex(path_t("/s/remote"), role_t::STORED_VALUE);
     int deliveries = 0;
-    g.set_remote_delivery_sink(
-        [&deliveries](const tr::graph::remote_delivery_t&, const rope_t&) { ++deliveries; });
+    const tr::testing::remote_sink_guard_t sink_guard(
+        g, [&deliveries](const tr::graph::remote_delivery_t&, const rope_t&) { ++deliveries; });
     for (int i = 0; i < kSubs; ++i) {
         // Distinct links, one length: every copy probes the same byte count, so ONE
         // injected rejection covers the whole set.

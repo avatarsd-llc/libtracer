@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "fwd_frame_builder.hpp"
+#include "graph_sinks.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -811,7 +812,7 @@ void test_out_of_range_index_mode() {
 }
 
 // ---------------------------------------------------------------------------
-// The external subscription observer (graph_t::set_subscription_observer).
+// The external subscription observer (graph_t::configure_subscription_observer).
 // ---------------------------------------------------------------------------
 
 /** @brief `/a/b` spelled back from a canonical key, so an event is asserted on readable text. */
@@ -882,10 +883,11 @@ void test_subscription_observer() {
     graph_t g;
     op_resolver_t resolver(g);
     std::vector<seen_event_t> seen;
-    g.set_subscription_observer([&seen](const tr::graph::sub_event_t& e) {
-        seen.push_back(
-            seen_event_t{e.kind, spell(e.producer), spell(e.target), std::string(e.link), e.slot});
-    });
+    const tr::testing::sub_observer_guard_t observer_guard(
+        g, [&seen](const tr::graph::sub_event_t& e) {
+            seen.push_back(seen_event_t{e.kind, spell(e.producer), spell(e.target),
+                                        std::string(e.link), e.slot});
+        });
 
     tr::graph::vertex_handle_t v =
         g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
