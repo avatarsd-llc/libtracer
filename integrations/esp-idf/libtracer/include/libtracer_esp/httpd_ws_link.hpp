@@ -386,6 +386,43 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     [[nodiscard]] transport_t* peer_link(std::string_view peer) override;
 
     /**
+     * @brief Close one peer's session by NAME — the "revoke this controller" action
+     *        (#1146), callable from any task.
+     *
+     * The base contract holds honestly here, and only because of the component's ESP-IDF
+     * floor: `true` means the teardown really was initiated. The close cannot run in-call
+     * — `esp_http_server` owns the descriptor's lifetime on its own task, and an off-task
+     * `shutdown` of a stale fd lands on whoever inherited the number (#954), the exact
+     * hazard @ref condemn's precondition exists for — so this marshals a work item onto
+     * the httpd task, exactly as every send does. Above the floor (>=5.5.5,
+     * idf_component.yml) `httpd_queue_work`'s verdict is trustworthy: the mbox slot is
+     * reserved before the control-socket `sendto`, so ESP_OK means the item WILL run and
+     * ESP_FAIL is a refusal the caller sees — the pre-floor silent bin, which would have
+     * made `true` a lie precisely when the queue is fullest (i.e. when a stalling peer
+     * most deserves revoking), does not exist any more (#949).
+     *
+     * The work item carries the session's `(slot, generation)` identity minted at THIS
+     * call, never a descriptor: if the named session departs — or its slot is reclaimed
+     * and even re-earns the same positional name — before the item drains, the identity
+     * test fails and the item does nothing, so a `true` can close only the session that
+     * was named when it was returned (#954's rule applied to the close path). On the
+     * httpd task the close is @ref close_session: a CLOSE frame with @ref kCloseRevoked
+     * first, so the peer can tell revocation from a network fault, then the `shutdown`
+     * that gets the session reaped and its departure notified through the ordinary
+     * free_ctx seam.
+     *
+     * @retval true  @p peer named an open, served session and the close work item was
+     *               accepted by the control queue — the teardown will run.
+     * @retval false @p peer names no served session (unknown, departed, condemned, or
+     *               still unauthenticated — an unauthenticated session is not a peer,
+     *               same visibility rule as @ref enumerate_peers), this link is FLAT
+     *               (per-peer naming does not exist), the control queue refused the
+     *               enqueue, or the work item could not be allocated. Nothing happened;
+     *               the caller may retry.
+     */
+    [[nodiscard]] bool close_peer(std::string_view peer) override;
+
+    /**
      * @brief The CAME-UP predicate (#1059): true if the httpd instance started and the WS
      *        handler registered — a construction fact, asked once, never reverting.
      *
@@ -511,8 +548,10 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
         /** @brief Opening handshakes turned away — by the admission predicate or by
          *         `max_peers`. These never reach a slot, so no session can carry them. */
         std::uint32_t peers_refused = 0;
-        /** @brief Sessions this link KILLED (three-strike streak or a rejected short
-         *         write) — the count that separates a peer that left from one torn down. */
+        /** @brief Sessions this link KILLED — a three-strike streak, a rejected short
+         *         write, an auth verdict (@ref auth_rejected / @ref auth_expired name the
+         *         cause), or an administrative @ref close_peer — the count that separates
+         *         a peer that left from one torn down. */
         std::uint32_t sessions_condemned = 0;
         /** @brief Inbound frames refused at the abuse cap, before any reassembly. The peer
          *         is dropped with them. No session is charged: the cap is applied before
@@ -833,6 +872,17 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     /** @brief WebSocket close code for a session that ran out its `auth_deadline_ms` —
      *         mnemonic for HTTP 408. See @ref kCloseAuthFailed for why the two differ. */
     static constexpr std::uint16_t kCloseAuthTimeout = 4408;
+    /**
+     * @brief WebSocket close code for a session torn down by @ref close_peer — mnemonic
+     *        for HTTP 403.
+     *
+     * Distinct from the two auth codes for the same reason they are distinct from each
+     * other: "your access was revoked" calls for different client behaviour (stop
+     * reconnecting) than "your credential was refused" (re-prompt) or "you were too
+     * slow" (retry), and a revoked controller that reads its close as a network fault
+     * will reconnect forever.
+     */
+    static constexpr std::uint16_t kCloseRevoked = 4403;
     /** @brief Default `auth_deadline_ms`: long enough for a multi-round-trip handshake over
      *         a slow link, short enough that a squatting session is not a resource. */
     static constexpr std::uint32_t kDefaultAuthDeadlineMs = 10000;
@@ -854,6 +904,7 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     struct tx_work_t;      // one queued outbound frame (defined in the .cpp)
     struct tx_slot_t;      // one pre-allocated TX work slot (defined in the .cpp)
     struct detach_req_t;   // the teardown session-detach work item (defined in the .cpp)
+    struct close_req_t;    // the close_peer work item (defined in the .cpp)
 
     /**
      * @brief The directed per-peer sending endpoint @ref peer_link hands out:
@@ -899,6 +950,7 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     static void on_session_closed(void* slot_ctx);  // free_ctx_fn: a peer departed
     static void tx_work(void* work_arg);            // httpd_queue_work fn: one queued send
     static void detach_work(void* req_arg);         // httpd_queue_work fn: teardown detach
+    static void close_work(void* req_arg);          // httpd_queue_work fn: one close_peer
 
     // --- instance handlers (run on the httpd task) ---
     esp_err_t on_data_frame(httpd_req_t* req);  // recv one WS frame, (reassemble,) deliver
@@ -1346,6 +1398,19 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * written afterwards never reaches the peer. The frame goes first, the shutdown second.
      */
     void close_session(session_t* slot, std::uint16_t code);
+    /**
+     * @brief Re-validate a close-work item's `(slot, gen)` identity and, if the named
+     *        session is still the one holding the slot, run @ref close_session on it
+     *        with @ref kCloseRevoked (httpd task only; @ref peers_m_ must NOT be held).
+     *
+     * The identity test is @ref live_fd's, made here rather than trusted from enqueue
+     * time: the item drained arbitrarily later, and everything that can invalidate the
+     * reference — the peer departing, the slot's reclaim, a new claim — runs on this
+     * same task, so a reference that passes cannot go stale between the test and the
+     * close. A reference that fails means the named session is already gone, which is
+     * the outcome the caller asked for; nothing touches its successor (#954).
+     */
+    void close_ref(const session_ref_t& to);
     /** @brief The per-socket send bound applied at admission — see @ref send_timeout_ms. */
     std::uint32_t send_timeout_ms_ = 0;
     /** @brief Frames that never reached a socket, for this link's life — see @ref

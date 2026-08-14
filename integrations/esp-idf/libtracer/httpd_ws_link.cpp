@@ -985,6 +985,23 @@ struct httpd_ws_link_t::detach_req_t {
     std::atomic<bool> released{false}; /**< @brief Ownership handshake (see the brief). */
 };
 
+/**
+ * @brief The @ref httpd_ws_link_t::close_peer work item: the session identity to close,
+ *        and the gate to reach the link through — NOTHING that belongs to the link.
+ *
+ * Heap-allocated per call and freed by @ref httpd_ws_link_t::close_work, which is
+ * affordable because close_peer is an administrative action, never a data-path one — the
+ * no-allocation discipline protects the per-frame paths, and a revocation is not one.
+ * Nothrow, like every allocation here: a failed `new` is a `false` to the caller, not an
+ * abort. The gate rather than the link for the same reason @ref
+ * httpd_ws_link_t::tx_work_t carries one: the item can drain on the adopted server's task
+ * after the link is gone, and the gate is the one object designed to outlive it.
+ */
+struct httpd_ws_link_t::close_req_t {
+    gate_t* gate = nullptr; /**< @brief The owning link's gate (see the brief). */
+    session_ref_t to;       /**< @brief The session to close, identified as (slot, gen). */
+};
+
 httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, std::size_t max_peers, bool peer_named,
                                  std::uint32_t send_timeout_ms, std::uint32_t auth_deadline_ms)
     : port_(bind_port),
@@ -3012,6 +3029,115 @@ transport_t* httpd_ws_link_t::peer_link(std::string_view peer) {
     for (const auto& s : slots_)
         if (s->open && !s->dead && !s->auth_pending && s->name == peer) return &s->endpoint;
     return nullptr;
+}
+
+bool httpd_ws_link_t::close_peer(std::string_view peer) {
+    // A FLAT link has no per-peer identity to close BY: every tab it carries answers to the
+    // one registered child NAME, so the only honest answer is "this kind cannot close one
+    // peer" — the base's own `false`. Same fork notify_departed takes (#889).
+    if (!peer_named_) return false;
+    // ONE load of each member into a local, for the reason queue_send records (#963): the
+    // plain re-reads these replace raced the destructor's writes outright.
+    const httpd_handle_t h = handle_.load(std::memory_order_relaxed);
+    gate_t* const g = gate_.load(std::memory_order_relaxed);
+    if (h == nullptr || g == nullptr) return false;
+    session_ref_t to;
+    {
+        const std::lock_guard lock(peers_m_);
+        // The SAME visibility filter peer_link and enumerate_peers apply, and it has to be
+        // the same one: a name this link refuses to resolve and refuses to enumerate is a
+        // name it must also refuse to close, or `close_peer` becomes a probe that answers
+        // `true` for sessions the caller was told do not exist (an unauthenticated one, or
+        // one already condemned and awaiting its reap).
+        for (const auto& s : slots_) {
+            if (!s->open || s->dead || s->auth_pending || s->name != peer) continue;
+            // Mint the identity HERE, under the lock that resolved it (#954). The close runs
+            // on the httpd task an arbitrary time later, by which point this slot may have
+            // been reclaimed and re-earned the very same positional name — `p3` is a pure
+            // function of the slot index, so the NAME cannot survive as the token. The
+            // generation can.
+            to = session_ref_t{s.get(), s->gen};
+            break;
+        }
+    }
+    if (to.slot == nullptr) return false;  // no served session answers to that name
+    // Heap, nothrow, one per call: this is an administrative action, not a data-path one,
+    // so it does not draw on the TX pool whose whole purpose is to bound the FRAME path's
+    // in-flight depth. A revocation competing with the fan-out for slots would be exactly
+    // backwards — it is most needed when that pool is under pressure.
+    auto* const req = new (std::nothrow) close_req_t{g, to};
+    if (req == nullptr) return false;
+    // The honest half of the contract, and the whole reason #1146 was blocked on a transport
+    // fact rather than on effort. Above the component's ESP-IDF floor (>=5.5.5) this verdict
+    // means what it says: `httpd_queue_work` reserves the control mbox slot through a
+    // counting semaphore BEFORE its `sendto`, so ESP_OK implies the item will run and a full
+    // queue is a visible ESP_FAIL. Below that floor the enqueue was a bare non-blocking
+    // `sendto` whose datagram lwIP could bin while still reporting success (#944/#949) — on
+    // which a `true` here would have been a security-relevant lie, told precisely when the
+    // queue is fullest, which is when a stalling peer most needs revoking.
+    if (httpd_queue_work(h, &httpd_ws_link_t::close_work, req) != ESP_OK) {
+        delete req;
+        return false;  // refused: nothing was initiated, and the caller may retry
+    }
+    return true;
+}
+
+void httpd_ws_link_t::close_work(void* req_arg) {
+    // Runs ON the httpd task (httpd_queue_work's whole contract) — the task that owns
+    // accept, close and therefore the descriptor's lifetime, which is what makes the
+    // `shutdown` inside close_session safe here and unsafe from the caller's task (#954's
+    // recycled-fd hazard, and the precondition condemn() documents).
+    const std::unique_ptr<close_req_t> req(static_cast<close_req_t*>(req_arg));
+    if (req->gate == nullptr) return;
+    httpd_ws_link_t* owner = nullptr;
+    {
+        // Resolve the link through the gate, exactly as tx_work and on_session_closed do:
+        // a destructor can only shut the gate under this same lock, so either this item
+        // finds a link that is provably alive or it finds null and is inert. Registering on
+        // the barrier is what lets the close itself run with `m` RELEASED — close_session
+        // takes `peers_m_` and calls into the server, and holding the gate across that
+        // would block a concurrent destructor for the whole send bound (the rule gate_t's
+        // lock-order note states).
+        const std::lock_guard lock(req->gate->m);
+        owner = req->gate->link;
+        if (owner == nullptr) return;  // the link is gone; the session is not ours to close
+        ++req->gate->depth;
+    }
+    owner->close_ref(req->to);
+    {
+        // `owner` may be DESTROYED by now — the departure this close provokes reaches the
+        // routing plane through free_ctx and an app teardown can follow it in-call (#814),
+        // the same tail on_session_closed carries. Only `gate` may be touched from here.
+        const std::lock_guard lock(req->gate->m);
+        --req->gate->depth;
+    }
+    req->gate->cv.notify_all();
+}
+
+void httpd_ws_link_t::close_ref(const session_ref_t& to) {
+    {
+        const std::lock_guard lock(peers_m_);
+        if (to.slot == nullptr) return;
+        // live_fd's identity test, made again HERE and not trusted from enqueue time. The
+        // reference was minted on another task and this item drained arbitrarily later, so
+        // the named session may have departed on its own in between — and its slot may have
+        // been reclaimed and re-claimed by a stranger who inherited both the slot address
+        // and the positional name. A failed test means the caller's peer is already gone,
+        // which is the outcome it asked for; the successor is not touched (#954).
+        if (to.slot->gen != to.gen) return;
+        if (!to.slot->open || to.slot->dead) return;
+    }
+    // No further identity test is owed below: everything that could invalidate the
+    // reference — a departure's reclaim_slot, a fresh claim — runs on THIS task, so it
+    // cannot interleave between the check above and the close.
+    //
+    // close_session, not condemn: the peer is told WHY in the one language a WebSocket
+    // client can read without a protocol of its own. A revoked controller that sees a bare
+    // socket teardown reads it as a network fault and reconnects forever, which is the
+    // behaviour the distinct close codes exist to prevent. The CLOSE frame goes out first
+    // and the `shutdown` second — the order close_session exists to keep, since after the
+    // shutdown no write can reach the peer at all.
+    close_session(to.slot, kCloseRevoked);
 }
 
 }  // namespace tr::net

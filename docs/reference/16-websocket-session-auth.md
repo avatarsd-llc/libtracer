@@ -147,6 +147,12 @@ application range (4000–4999):
 | --- | --- | --- |
 | `4401` | the credential was refused | not retry with the same credential; obtain a new one (mnemonic: HTTP 401) |
 | `4408` | the deadline expired before a credential arrived | retry; the credential itself was never judged (mnemonic: HTTP 408) |
+| `4403` | the session was REVOKED by the node (`close_peer`) | stop reconnecting; the credential was fine, the access was withdrawn (mnemonic: HTTP 403) |
+
+The third is not an authentication verdict at all — it is the administrative teardown
+`bus_link_t::close_peer` performs, and it is listed here because it shares the wire surface
+and a client that cannot tell it from the other two behaves wrongly in the most expensive
+direction: a revoked controller reading its close as a network fault reconnects forever.
 
 The code is written to the peer **before** the socket is torn down. A close that shut the
 socket first would deliver no code at all, and a client left to infer the reason from a bare
