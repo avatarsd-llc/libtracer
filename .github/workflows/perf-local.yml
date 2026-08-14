@@ -66,6 +66,27 @@ jobs:
           cmake --build bench/build --target bench_libtracer bench_forward_heap \
             bench_forward_demux bench_compact_delivery -j "$(nproc)"
 
+      # QUIESCENCE (#1236). The build above just ran `-j$(nproc)` and the 1-minute load
+      # average is still carrying it, so this WAITS for the machine rather than checking
+      # it — a bare check placed here would refuse every run. A host that never settles
+      # skips its sample and leaves the job green: refusing to measure is a correct
+      # outcome, and a red job trains the reader to ignore red.
+      - name: Wait for the host to go quiet (skip the sample if it does not)
+        id: guard
+        run: python3 bench/host_guard.py wait --timeout 900
+
+      # The A/A null pair, leg one. Same binary either side of the measured run, so the
+      # text layout is held constant and the only thing left that can move the number is
+      # the machine — which is what makes this a HOST instrument. `bench_forward_demux`
+      # is the probe because its rows were measured layout-STABLE on this host (~0%
+      # across placements of identical source, where fold-b4 swings ~15%), so movement
+      # in it is unambiguous.
+      - name: A/A null — before the measured run
+        if: steps.guard.outputs.bank == 'true'
+        env:
+          LIBTRACER_BENCH_SECONDS: "1"
+        run: taskset -c "$BENCH_CPU" ./bench/build/bench_forward_demux >bench/aa_pre.txt || true
+
       # Deterministic (allocation counts, not time) — a free consistency check per
       # point, and its transcript feeds the memory series (mirrors perf.yml).
       - name: Zero-heap forward gate (ADR-0038 §16KB-RAM)
@@ -108,7 +129,22 @@ jobs:
           [ -s bench/bench_zenoh_raw.txt ] || \
             echo "::warning::no Zenoh transcript — the control series will not be recorded this commit"
 
+      # The A/A null pair, leg two. Disagreement with leg one means the machine moved
+      # under the measurement; the sample is still banked (a datum taken in known
+      # conditions beats no datum) but carries the verdict into the store.
+      - name: A/A null — after the measured run
+        if: steps.guard.outputs.bank == 'true'
+        env:
+          LIBTRACER_BENCH_SECONDS: "1"
+        run: taskset -c "$BENCH_CPU" ./bench/build/bench_forward_demux >bench/aa_post.txt || true
+
+      - name: A/A bracket verdict
+        id: bracket
+        if: steps.guard.outputs.bank == 'true'
+        run: python3 bench/host_guard.py bracket --pre bench/aa_pre.txt --post bench/aa_post.txt
+
       - name: Emit history metrics + stamp the host onto every point
+        if: steps.guard.outputs.bank == 'true'
         run: |
           args=""
           for f in bench/bench_libtracer_raw.txt bench/bench_forward_demux_raw.txt \
@@ -122,17 +158,16 @@ jobs:
             --out-bigger bench/benchmark_throughput.json
           # benchmark-action renders each point's `extra` in the chart tooltip — this
           # is where "which host produced this number" lives, per bench, per point.
-          python3 - "$HOST_DESC" <<'EOF'
-          import json, sys
-          desc = sys.argv[1]
-          for p in ("bench/benchmark_output.json", "bench/benchmark_throughput.json"):
-              items = json.load(open(p))
-              for it in items:
-                  it["extra"] = desc
-              json.dump(items, open(p, "w"), indent=1)
-          EOF
+          # It now also carries the COMPILER (a toolchain bump and a code change used
+          # to move the trend identically, with nothing recorded to tell them apart)
+          # and the A/A verdict, so a suspect point declares itself in the store.
+          python3 bench/host_guard.py stamp \
+            --json bench/benchmark_output.json \
+            --json bench/benchmark_throughput.json \
+            --desc "$HOST_DESC" --compiler --note "$AA_NOTE"
         env:
           HOST_DESC: ${{ steps.host.outputs.desc }}
+          AA_NOTE: ${{ steps.bracket.outputs.note }}
 
       - name: Upload this point's transcripts + host capture
         if: always()
@@ -147,9 +182,15 @@ jobs:
             bench/bench_forward_demux_raw.txt
             bench/bench_compact_delivery_raw.txt
             bench/bench_zenoh_raw.txt
+            bench/aa_pre.txt
+            bench/aa_post.txt
           retention-days: 90
 
+      # BANKING is conditional (#1236): a busy host contributes no point at all. The
+      # transcripts above are uploaded either way, so a skipped sample is still
+      # evidence — it is only the persisted series that stays clean.
       - name: Track latency + memory history (fixed host)
+        if: steps.guard.outputs.bank == 'true'
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: libtracer bench-local latency (ns, smaller is better, fixed pinned host)
@@ -168,6 +209,7 @@ jobs:
           alert-comment-cc-users: '@avatarsd'
 
       - name: Track throughput history (fixed host)
+        if: steps.guard.outputs.bank == 'true'
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: libtracer bench-local throughput (deliveries/s, bigger is better, fixed pinned host)

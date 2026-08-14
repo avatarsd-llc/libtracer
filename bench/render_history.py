@@ -31,8 +31,14 @@ import json
 import pathlib
 import re
 import subprocess
+import sys
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
+
+# The contamination predicate lives with the guard that writes it (#1236), so the
+# renderer and the workflow can never disagree about what "contaminated" means.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import host_guard  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # family specs
@@ -563,10 +569,37 @@ def _suite_key(suite_name: str) -> str:
     return suite_name
 
 
-def _series_by_name(entries: list[dict]) -> dict[str, list[list[float]]]:
-    """@brief name -> [[entry_idx, value], ...] (sparse; a series may start late)."""
+def _contaminated_idx(entries: list[dict]) -> dict[int, str]:
+    """@brief entry index -> contamination reason, for the samples the charts must not trust.
+
+    The pinned host is a shared workstation, so a sample can measure a parallel build
+    instead of the commit (#1236). `host_guard` owns the predicate — a flag the sample
+    stamped on itself through its A/A bracket, or the reviewed list of samples that
+    predate the guard — and this is the one place the renderer asks.
+    """
+    known = host_guard.load_known_contaminated()
+    out: dict[int, str] = {}
+    for i, e in enumerate(entries):
+        reason = host_guard.entry_contaminated(e, known)
+        if reason:
+            out[i] = reason
+    return out
+
+
+def _series_by_name(entries: list[dict],
+                    skip: dict[int, str] | None = None) -> dict[str, list[list[float]]]:
+    """@brief name -> [[entry_idx, value], ...] (sparse; a series may start late).
+
+    Points from contaminated samples are OMITTED rather than drawn, which the sparse
+    shape already expresses as a gap. Drawing them was the defect: a quarter of the
+    board stepping at one commit reads as a regression at that commit, and it was the
+    machine. The datum survives in the store; only the line stops asserting it.
+    """
+    skip = skip or {}
     out: dict[str, list[list[float]]] = {}
     for i, e in enumerate(entries):
+        if i in skip:
+            continue
         for b in e.get("benches", []):
             try:
                 out.setdefault(b["name"], []).append([i, float(b["value"])])
@@ -660,6 +693,10 @@ def build(data: dict, colors: dict[str, int] | None = None) -> dict:
         if not entries:
             continue
         k = _suite_key(suite_name)
+        # Resolved once per suite: the same map decides which points the series omit
+        # and which samples the page names as skipped, so the gap in the line and the
+        # explanation for it can never disagree.
+        contaminated = _contaminated_idx(entries)
         suites[k] = {
             "shas": [e.get("commit", {}).get("id", "")[:7] for e in entries],
             "msgs": [_first_line(e.get("commit", {}).get("message", "")) for e in entries],
@@ -670,9 +707,12 @@ def build(data: dict, colors: dict[str, int] | None = None) -> dict:
             "instruments": instrument_annotations(
                 sorted({b.get("name", "") for e in entries for b in e.get("benches", [])}),
                 entries),
+            # Sample index -> why it is not drawn. Carried into the payload so the gap
+            # is explained where it appears instead of reading as missing data.
+            "contaminated": {str(i): r for i, r in contaminated.items()},
             **_host_meta(entries),
         }
-        suite_series[k] = _series_by_name(entries)
+        suite_series[k] = _series_by_name(entries, contaminated)
 
     if colors is None:
         colors = {}
