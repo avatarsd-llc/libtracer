@@ -194,8 +194,8 @@ Rules that follow:
   rule is **not yet met everywhere**: the peer-driven label-table binds of #603
   (`core/src/route_handle.cpp:82`) and `try_reserve`'s throwing second step under
   concurrency (#850) still abort on exhaustion. (The CAN egress window table was the third
-  until #1110 deleted it — `view_can_frames_t::split` now derives its windows and allocates
-  nothing.) Price those two before shipping a `-fno-exceptions` image, and audit any
+  until #1110 deleted it — `view_can.hpp`'s `can_frame_at` now derives each window and
+  allocates nothing.) Price those two before shipping a `-fno-exceptions` image, and audit any
   path that calls throwing `new`; the full accounting is in
   [failable allocation and backpressure](../design/allocation-and-backpressure.md).
 - **Size the pool from the transport, not from hope.** `udp_transport_t` sizes RX

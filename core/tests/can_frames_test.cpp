@@ -57,6 +57,21 @@ std::vector<std::byte> rope_bytes(const tr::view::rope_t& r) {
     return out;
 }
 
+/**
+ * @brief Chain a payload's CAN data-field windows back into one rope, in order.
+ *
+ * The local inverse of the split — which is all the round-trip checks below ever wanted
+ * from the `view_can_frames_t::to_rope()` that #932 removed. It was never on a production
+ * path (the real far side is `tr::net::can_reassembly_t`, exercised in section 3), so it
+ * lives here as the two-line test convenience it always was rather than as a shipped API.
+ */
+tr::view::rope_t can_rope(const tr::view::view_t& payload, tr::view::can_frame_mode_t mode) {
+    tr::view::rope_t r;
+    const std::size_t n = tr::view::can_frame_count(payload, mode);
+    for (std::size_t i = 0; i < n; ++i) r.append(tr::view::can_frame_at(payload, mode, i));
+    return r;
+}
+
 std::vector<std::byte> ramp(std::size_t n) {
     std::vector<std::byte> v;
     v.reserve(n);
@@ -97,36 +112,47 @@ int main() {
               "slice_can_id overflowing the endpoint field returns nullopt");
     }
 
-    // --- 2. view_can_frames: header-elided split + zero-copy reassembly. ---
+    // --- 2. view_can framing: header-elided split + zero-copy reassembly. ---
     {
+        using tr::view::can_frame_at;
+        using tr::view::can_frame_count;
         using tr::view::can_frame_mode_t;
-        using tr::view::view_can_frames_t;
+
+        // Zero frames for an empty payload — the boundary the count's ceiling division owns.
+        check(can_frame_count(tr::view::view_t{}, can_frame_mode_t::CLASSIC) == 0,
+              "empty payload => 0 CAN frames");
 
         // Single classic frame: 6 bytes fit in one 8-byte data field.
         {
             const std::vector<std::byte> payload = ramp(6);
-            const auto framed =
-                view_can_frames_t::split(view_over(payload), can_frame_mode_t::CLASSIC);
-            check(framed.frame_count() == 1, "6-byte payload => 1 classic CAN frame");
-            check(rope_bytes(framed.to_rope()) == payload, "  single classic frame round-trips");
+            const auto pv = view_over(payload);
+            check(can_frame_count(pv, can_frame_mode_t::CLASSIC) == 1,
+                  "6-byte payload => 1 classic CAN frame");
+            check(rope_bytes(can_rope(pv, can_frame_mode_t::CLASSIC)) == payload,
+                  "  single classic frame round-trips");
         }
         // Multi classic frames: 20 bytes => 8 + 8 + 4.
         {
             const std::vector<std::byte> payload = ramp(20);
-            const auto framed =
-                view_can_frames_t::split(view_over(payload), can_frame_mode_t::CLASSIC);
-            check(framed.frame_count() == 3, "20-byte payload => 3 classic CAN frames (8+8+4)");
-            check(framed.frame(0).length == 8 && framed.frame(2).length == 4,
+            const auto pv = view_over(payload);
+            check(can_frame_count(pv, can_frame_mode_t::CLASSIC) == 3,
+                  "20-byte payload => 3 classic CAN frames (8+8+4)");
+            check(can_frame_at(pv, can_frame_mode_t::CLASSIC, 0).length == 8 &&
+                      can_frame_at(pv, can_frame_mode_t::CLASSIC, 2).length == 4,
                   "  classic frames are 8,8,4 bytes");
-            check(rope_bytes(framed.to_rope()) == payload, "  multi classic frame round-trips");
+            check(rope_bytes(can_rope(pv, can_frame_mode_t::CLASSIC)) == payload,
+                  "  multi classic frame round-trips");
         }
         // CAN-FD: 100 bytes => 64 + 36.
         {
             const std::vector<std::byte> payload = ramp(100);
-            const auto framed = view_can_frames_t::split(view_over(payload), can_frame_mode_t::FD);
-            check(framed.frame_count() == 2, "100-byte payload => 2 CAN-FD frames (64+36)");
-            check(framed.frame(0).length == 64, "  first FD frame is 64 bytes");
-            check(rope_bytes(framed.to_rope()) == payload, "  multi CAN-FD frame round-trips");
+            const auto pv = view_over(payload);
+            check(can_frame_count(pv, can_frame_mode_t::FD) == 2,
+                  "100-byte payload => 2 CAN-FD frames (64+36)");
+            check(can_frame_at(pv, can_frame_mode_t::FD, 0).length == 64,
+                  "  first FD frame is 64 bytes");
+            check(rope_bytes(can_rope(pv, can_frame_mode_t::FD)) == payload,
+                  "  multi CAN-FD frame round-trips");
         }
         // CAN-FD DLC lattice helper.
         check(tr::view::can_fd_dlc_round_up(36) == 48, "can_fd_dlc_round_up(36) == 48");
@@ -136,24 +162,27 @@ int main() {
     // --- 3. can_reassembly: out-of-order, missing-interior, totality. ---
     {
         using tr::view::can_frame_mode_t;
-        using tr::view::view_can_frames_t;
         tr::net::reassembly_key_t key;
         key.origin = {1, 2, 3};  // rest zero
         key.ts = 0xCAFE;
 
         const std::vector<std::byte> payload = ramp(20);  // 3 classic slices.
-        const auto framed = view_can_frames_t::split(view_over(payload), can_frame_mode_t::CLASSIC);
+        const auto pv = view_over(payload);
+        // The windows are derived per call now (#932); this binds the two fixed arguments.
+        const auto slice = [&](std::size_t i) {
+            return tr::view::can_frame_at(pv, can_frame_mode_t::CLASSIC, i);
+        };
 
         // Feed slices OUT OF ORDER: 2, 0, 1.
         tr::net::can_reassembly_t reasm;
         reasm.set_expected_count(key, 3);
-        reasm.add_slice(key, 2, framed.frame(2));
-        reasm.add_slice(key, 0, framed.frame(0));
+        reasm.add_slice(key, 2, slice(2));
+        reasm.add_slice(key, 0, slice(0));
         check(!reasm.is_complete(key), "group incomplete with slice 1 missing");
         check(reasm.has_interior_gap(key), "interior gap detected (have 0,2 not 1)");
         check(!reasm.assemble(key).has_value(), "assemble() returns nullopt while incomplete");
 
-        reasm.add_slice(key, 1, framed.frame(1));
+        reasm.add_slice(key, 1, slice(1));
         check(!reasm.has_interior_gap(key), "no interior gap once slice 1 arrives");
         check(reasm.is_complete(key), "group complete: all 3 slices present + expected set");
 
@@ -164,9 +193,9 @@ int main() {
 
         // Totality opt-in: without expected_count, completeness is undecidable.
         tr::net::can_reassembly_t no_total;
-        no_total.add_slice(key, 0, framed.frame(0));
-        no_total.add_slice(key, 1, framed.frame(1));
-        no_total.add_slice(key, 2, framed.frame(2));
+        no_total.add_slice(key, 0, slice(0));
+        no_total.add_slice(key, 1, slice(1));
+        no_total.add_slice(key, 2, slice(2));
         check(!no_total.is_complete(key),
               "no expected_count => not complete (trailing-drop blind)");
         no_total.erase(key);
@@ -176,9 +205,12 @@ int main() {
     // --- 3b. can_reassembly bounding: evict-oldest + dropped_groups counter. ---
     {
         using tr::view::can_frame_mode_t;
-        using tr::view::view_can_frames_t;
         const std::vector<std::byte> payload = ramp(20);
-        const auto framed = view_can_frames_t::split(view_over(payload), can_frame_mode_t::CLASSIC);
+        const auto pv = view_over(payload);
+        // The windows are derived per call now (#932); this binds the two fixed arguments.
+        const auto slice = [&](std::size_t i) {
+            return tr::view::can_frame_at(pv, can_frame_mode_t::CLASSIC, i);
+        };
         const auto key_ts = [](std::uint64_t ts) {
             tr::net::reassembly_key_t k;
             k.ts = ts;
@@ -188,10 +220,10 @@ int main() {
         // Bound live groups at 2; a third distinct group evicts the oldest (ts=1),
         // never OOM (the no-synthetic-limits doctrine: bounded drop + a counter).
         tr::net::can_reassembly_t bounded(std::pmr::new_delete_resource(), /*max_groups=*/2);
-        bounded.add_slice(key_ts(1), 0, framed.frame(0));
-        bounded.add_slice(key_ts(2), 0, framed.frame(0));
+        bounded.add_slice(key_ts(1), 0, slice(0));
+        bounded.add_slice(key_ts(2), 0, slice(0));
         check(bounded.dropped_groups() == 0, "no eviction while within the group bound");
-        bounded.add_slice(key_ts(3), 0, framed.frame(0));  // exceeds 2 => evict oldest (ts=1)
+        bounded.add_slice(key_ts(3), 0, slice(0));  // exceeds 2 => evict oldest (ts=1)
         check(bounded.dropped_groups() == 1, "a 3rd group evicts one (dropped_groups == 1)");
         check(!bounded.contains(key_ts(1)), "the oldest group (ts=1) was evicted");
         check(bounded.contains(key_ts(2)) && bounded.contains(key_ts(3)),
@@ -205,9 +237,12 @@ int main() {
     // holds NO clock — the caller stamps it, so this is fully deterministic.
     {
         using tr::view::can_frame_mode_t;
-        using tr::view::view_can_frames_t;
         const std::vector<std::byte> payload = ramp(20);
-        const auto framed = view_can_frames_t::split(view_over(payload), can_frame_mode_t::CLASSIC);
+        const auto pv = view_over(payload);
+        // The windows are derived per call now (#932); this binds the two fixed arguments.
+        const auto slice = [&](std::size_t i) {
+            return tr::view::can_frame_at(pv, can_frame_mode_t::CLASSIC, i);
+        };
         const auto key_ts = [](std::uint64_t ts) {
             tr::net::reassembly_key_t k;
             k.ts = ts;
@@ -216,8 +251,8 @@ int main() {
 
         tr::net::can_reassembly_t aging;
         aging.set_now(1000);
-        aging.set_expected_count(key_ts(1), 3);          // an advertise promising 3 slices
-        aging.add_slice(key_ts(1), 0, framed.frame(0));  // ... only 1 of which lands
+        aging.set_expected_count(key_ts(1), 3);   // an advertise promising 3 slices
+        aging.add_slice(key_ts(1), 0, slice(0));  // ... only 1 of which lands
         check(!aging.is_complete(key_ts(1)), "the group is incomplete (a slice was lost)");
 
         aging.set_now(1100);
@@ -228,7 +263,7 @@ int main() {
         // A live group keeps its place: a touch restamps it, so only groups that
         // stopped making progress age out.
         aging.set_now(1400);
-        aging.add_slice(key_ts(1), 1, framed.frame(1));
+        aging.add_slice(key_ts(1), 1, slice(1));
         aging.set_now(1800);
         check(aging.sweep_stale(500) == 0,
               "a group still receiving slices is restamped, not swept");

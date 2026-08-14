@@ -375,6 +375,23 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Removed
 
+- **BREAKING: `view::view_can_frames_t` — replaced by the free functions
+  `view::can_frame_count(payload, mode)` and `view::can_frame_at(payload, mode, i)`**
+  ([#932](https://github.com/avatarsd-llc/libtracer/issues/932), `view_can.hpp`). The class,
+  its static `split` factory and its `mode()` / `frame_count()` / `frame(i)` / `to_rope()`
+  accessors are gone. #1110 had already deleted the `std::vector<view_t>` window table these
+  wrapped, leaving a value that held the payload, the mode, and a memo of one ceiling
+  division — state every caller already had. The sole production consumer
+  (`transport_can::send_impl`) used only the count and the i-th window, so it now calls the
+  two free functions directly; `mode()` and `to_rope()` had no production caller at all.
+  **Migration:** `split(p, m).frame_count()` → `can_frame_count(p, m)`;
+  `split(p, m).frame(i)` → `can_frame_at(p, m, i)`; `mode()` → the mode you passed in. There
+  is deliberately no `can_join`/`to_rope` replacement — the production far side is
+  `net::can_reassembly_t`, and the only callers of `to_rope()` were round-trip tests, which
+  now chain the windows into a `rope_t` locally. Behaviour, wire bytes and cost are
+  unchanged: the framing stays zero-copy, O(1) per window, allocation-free and infallible,
+  and `view_can.hpp` no longer includes `rope.hpp`.
+
 - **`vertex_t::try_edge_view_of`** — private, zero callers since the published-edge copy loop
   (#635) took over the writer-thread fan-out snapshot it documented itself as serving. Its
   replacement is `try_copy_published`.
