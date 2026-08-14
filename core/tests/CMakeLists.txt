@@ -306,6 +306,29 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     set_tests_properties(httpd_ws_session_identity
         PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
+    # #1071 — the DEPARTURE's cost, on the same fake but with a real graph_t + fwd_router_t
+    # behind the link: the subject is what a peer hanging up charges the httpd task, which is
+    # paid inside graph_t::evict_link_edges. Needs core/tests on the include path for the
+    # frame/value builders the wire-subscribe door takes.
+    add_executable(httpd_ws_departure_cost_test
+        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_departure_cost_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
+    target_include_directories(httpd_ws_departure_cost_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(httpd_ws_departure_cost_test PRIVATE libtracer)
+    target_link_options(httpd_ws_departure_cost_test PRIVATE
+        "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    libtracer_test_warnings(httpd_ws_departure_cost_test)
+    add_test(NAME httpd_ws_departure_cost COMMAND httpd_ws_departure_cost_test)
+    # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and this
+    # suite constructs an adopting link — same exemption as the suites around it.
+    set_tests_properties(httpd_ws_departure_cost
+        PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+
     # #1146 — close_peer: the administrative teardown of ONE inbound session, on the same
     # fake. The subject here is the CONTROL QUEUE rather than the socket: the close must be
     # marshalled onto the httpd task (the task that owns the descriptor's lifetime), so the
