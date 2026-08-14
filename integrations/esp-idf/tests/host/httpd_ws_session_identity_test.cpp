@@ -37,9 +37,21 @@
  * slots are recycled in place and the new peer lands in the departed one's slot. A ctx
  * comparison would have passed and misdelivered anyway; the generation is what makes the
  * pair unique.
+ *
+ * Cases 6-9 stage the OTHER half of that window (#1013). The five above all queue the
+ * frame BEFORE the reuse, so the identity it carries was minted while its peer was still
+ * there; what they cannot see is a caller that RESOLVED before the reuse and sent after
+ * it, because the send then minted its identity from the slot's current generation — a
+ * generation describing the stranger, which made every check downstream self-satisfying.
+ * The properties they add:
+ *   6. a send on a handle resolved before the reuse reaches nobody, and is counted;
+ *   7. the handle is per RESOLUTION — shared within one session, never across two;
+ *   8. re-resolving after the reuse still reaches the successor (not vacuous);
+ *   9. sustained churn neither exhausts the handle pool nor stops resolution.
  */
 
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <memory>
 #include <span>
@@ -296,15 +308,164 @@ void test_a_live_peer_still_receives_its_queued_frame() {
     reset(link);
 }
 
+// ---------------------------------------------------------------------------
+// 6 — the [resolve -> mint] window (#1013).
+// ---------------------------------------------------------------------------
+/**
+ * @brief A send on a handle resolved BEFORE the reuse must not reach the successor.
+ *
+ * Case 1's window is `[mint -> drain]`: the frame was already queued when A departed, so
+ * the identity it carries was minted while A was still there. This one is the half that
+ * came before it. The caller resolves A, is preempted — `fwd_router` resolves the peer at
+ * one end of a forward hop and sends at the other, with label and gather work in between —
+ * and only then does A hang up and B arrive on the same descriptor and the same recycled
+ * slot. The send that follows used to mint its identity from the slot's CURRENT
+ * generation, which describes B, so every downstream check passed and A's directed reply
+ * was written into B's socket.
+ *
+ * B's socket is scripted healthy on purpose, exactly as in case 1: a frame that reaches it
+ * is delivered and indistinguishable to B from one addressed to it.
+ */
+void test_a_handle_resolved_before_the_reuse_does_not_reach_the_successor() {
+    std::printf("a send on a handle resolved BEFORE the fd was reused (#1013):\n");
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    claim(kFd);
+
+    // Resolve A — and send NOTHING yet. This is the whole difference from case 1.
+    tr::net::transport_t* const to_a = only_peer(*link);
+    check(to_a != nullptr, "peer A resolved to a directed handle");
+    if (to_a == nullptr) return;
+
+    fake_httpd::instance().close_session(kFd);
+    drain();  // the departure is processed, as it is on the httpd task
+    claim(kFd);
+    fake_httpd::instance().set_send_script(kFd, {send_result_t::FULL});
+
+    const std::size_t writes_before = fake_httpd::instance().writes(kFd);
+    const std::size_t sent_before = fake_httpd::instance().frames_sent();
+    const std::uint32_t dead_before = link->stats().tx_to_dead_peer;
+    to_a->send(std::span<const std::byte>(kBody));
+    check(fake_httpd::instance().queue_depth() == 0,
+          "the send was refused at the resolving end: nothing was even queued");
+    drain();
+    check(fake_httpd::instance().writes(kFd) == writes_before,
+          "B's socket took NO write from a reply resolved for A");
+    check(fake_httpd::instance().frames_sent() == sent_before, "A's reply was delivered to nobody");
+    check(link->stats().tx_to_dead_peer > dead_before, "the refusal was COUNTED, not silent");
+    check(fake_httpd::instance().has_session(kFd), "B's session is untouched");
+
+    reset(link);
+}
+
+/**
+ * @brief The handle is per RESOLUTION, and a new session never inherits the old one's.
+ *
+ * Two properties in one case, because they are two halves of the same rule. Within ONE
+ * session, two resolutions answer with the SAME object — they saw the same generation, so
+ * sharing is safe and the pool stays bounded by the peer population rather than by
+ * traffic. ACROSS a session boundary they must NOT: a handle stamped for A is retired when
+ * A departs and quarantined behind the link's other retirements, so B's resolution comes
+ * back as a different object. That inequality is what the shared per-slot endpoint could
+ * never provide — it was one object per slot for the link's life, and equality here is
+ * precisely how a stale holder used to reach a stranger.
+ */
+void test_the_handle_is_per_resolution_not_per_slot() {
+    std::printf("the identity of the handle peer_link hands out:\n");
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    claim(kFd);
+
+    tr::net::transport_t* const first = only_peer(*link);
+    tr::net::transport_t* const again = only_peer(*link);
+    check(first != nullptr && first == again,
+          "two resolutions of the SAME live session share one handle");
+
+    fake_httpd::instance().close_session(kFd);
+    drain();
+    claim(kFd);
+    tr::net::transport_t* const after = only_peer(*link);
+    check(after != nullptr, "the successor resolves");
+    check(after != first, "the successor got a DIFFERENT handle: A's was retired, not re-pointed");
+
+    reset(link);
+}
+
+/**
+ * @brief The guard is not vacuous on the resolve path either: re-resolving reaches B.
+ *
+ * Without this, the case above is satisfied by a link whose `peer_link` simply stopped
+ * working after a reuse. The resolve-per-use contract is what the routing plane actually
+ * does, and it must still deliver.
+ */
+void test_re_resolving_after_the_reuse_reaches_the_successor() {
+    std::printf("re-resolving after the reuse, as the routing plane does:\n");
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    claim(kFd);
+    (void)only_peer(*link);  // A's resolution, abandoned unspent
+
+    fake_httpd::instance().close_session(kFd);
+    drain();
+    claim(kFd);
+    fake_httpd::instance().set_send_script(kFd, {send_result_t::FULL});
+
+    tr::net::transport_t* const to_b = only_peer(*link);
+    check(to_b != nullptr, "B resolved to a directed handle");
+    if (to_b == nullptr) return;
+    const std::size_t sent_before = fake_httpd::instance().frames_sent();
+    to_b->send(std::span<const std::byte>(kBody));
+    drain();
+    check(fake_httpd::instance().frames_sent() == sent_before + 1,
+          "B's own reply was delivered to B");
+
+    reset(link);
+}
+
+/**
+ * @brief Repeated resolve/depart cycles neither leak the pool nor stop resolving.
+ *
+ * The pool is grown on demand and recycled through a quarantined free list, so the failure
+ * this pins is the one a bounded pool invites: enough churn to exhaust it, after which
+ * `peer_link` would fail closed forever and the link would resolve nothing. Many more
+ * cycles than the quarantine is deep, on a link whose peer population never exceeds one.
+ */
+void test_churn_does_not_exhaust_the_handle_pool() {
+    std::printf("resolution handles across sustained session churn:\n");
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    bool all_resolved = true;
+    bool all_delivered = true;
+    for (int i = 0; i < 64; ++i) {
+        claim(kFd);
+        fake_httpd::instance().set_send_script(kFd, {send_result_t::FULL});
+        tr::net::transport_t* const to = only_peer(*link);
+        if (to == nullptr) {
+            all_resolved = false;
+            break;
+        }
+        const std::size_t sent_before = fake_httpd::instance().frames_sent();
+        to->send(std::span<const std::byte>(kBody));
+        drain();
+        if (fake_httpd::instance().frames_sent() != sent_before + 1) all_delivered = false;
+        fake_httpd::instance().close_session(kFd);
+        drain();
+    }
+    check(all_resolved, "every one of 64 successive sessions resolved");
+    check(all_delivered, "every one of them received its own directed frame");
+
+    reset(link);
+}
+
 }  // namespace
 
 int main() {
-    std::printf("httpd_ws_link session-identity host suite (#954):\n");
+    std::printf("httpd_ws_link session-identity host suite (#954, #1013):\n");
     test_directed_frame_does_not_follow_the_descriptor();
     test_broadcast_frame_does_not_follow_the_descriptor();
     test_inherited_failures_do_not_condemn_the_successor();
     test_the_session_ctx_pointer_aliases_across_the_reuse();
     test_a_live_peer_still_receives_its_queued_frame();
+    test_a_handle_resolved_before_the_reuse_does_not_reach_the_successor();
+    test_the_handle_is_per_resolution_not_per_slot();
+    test_re_resolving_after_the_reuse_reaches_the_successor();
+    test_churn_does_not_exhaust_the_handle_pool();
     std::printf(g_failures == 0 ? "\nALL PASS\n" : "\n%d FAILURE(S)\n", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

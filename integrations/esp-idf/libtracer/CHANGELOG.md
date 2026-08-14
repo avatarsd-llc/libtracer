@@ -10,6 +10,46 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`httpd_ws_link_t::peer_link()` now returns a PER-RESOLUTION handle, closing the
+  `[resolve -> mint]` misdelivery window**
+  ([#1013](https://github.com/avatarsd-llc/libtracer/issues/1013)). The half of #954 the
+  0.10.0 entry below explicitly left open. Until now `peer_link` handed back a facade owned
+  by the peer SLOT — one object for the link's life — so it had no identity of its own and
+  the directed `send()` re-read the slot's generation when it finally ran. A caller
+  resolves a peer at one end of a forward hop and sends at the other, with label and gather
+  work in between; on a single-core MCU the httpd task can be scheduled in that gap, close
+  the session and accept another onto the same descriptor AND the same recycled slot — a
+  browser reload — and a generation minted after that swap describes the STRANGER. Every
+  downstream check then passed by construction, and one authenticated session's directed
+  FWD reply was written into another's socket. Machine-verified, and now pinned by the
+  host suite (`httpd_ws_session_identity_test`, cases 6-9).
+
+  The generation is **captured at the resolve**, under `peers_m_`, and carried by the
+  returned handle; a send only ever COMPARES it and never re-reads the slot's. A session
+  that departed in between fails that comparison, so the frame is dropped and counted
+  (`stats_t::tx_to_dead_peer`) exactly as a send to an already-departed peer is. Stamping
+  the shared per-slot object at resolve time was rejected rather than shipped: two callers
+  resolving one slot at different generations overwrite each other's stamp, which narrows
+  the window while reading like a closure.
+
+  **What callers see.** The return type is unchanged (`transport_t*`), and the
+  `bus_link_t::peer_link` contract is unchanged — resolve per use, do not cache the pointer
+  across a possible departure. Two resolutions of the same LIVE session still answer with
+  the same object (they saw the same generation, so sharing is safe); resolutions either
+  side of a departure no longer do. `peer_link` can now also answer `nullptr` for a peer
+  that IS live, in the one case where the handle pool cannot be grown — an honest "no such
+  peer" the caller drops and counts, never a handle that might name the wrong session.
+
+  **Cost.** The handles come from a per-link pool grown on demand to the peer population
+  and recycled through a quarantined free list, so a forward hop's resolve allocates
+  nothing in steady state — the same shape the TX slot pool and the peer slots already use,
+  and no per-hop global-heap traffic. One handle is 20 B on a 32-bit chip (~32 B with the
+  pool's owning pointer and the allocator's block overhead), the pool holds at most
+  `open sessions + 4`, and each session slot gives back the 12 B its embedded endpoint used
+  to occupy: about +20 B per concurrent peer plus ~128 B fixed for the quarantine.
+
 ## [0.12.0] — 2026-08-14
 
 ### Added
@@ -549,7 +589,7 @@ core 0.10.0 reaches it.
 
 - **Public headers now propagate their ESP-IDF dependencies (#963.4).** `esp_http_server`,
   `tcp_transport` and `esp_driver_twai` moved from `PRIV_REQUIRES` to **`REQUIRES`**. Those
-  three are named by headers under `include/libtracer_esp/` (`httpd_ws_link.hpp:150`,
+  three are named by headers under `include/libtracer_esp/` (`httpd_ws_link.hpp:152`,
   `esp_ws_client_link.hpp:176`, `twai_link.hpp:36-37`), and `PRIV_REQUIRES` does not
   propagate include dirs — so a dependent that included one of ours without independently
   requiring the base component died with `esp_http_server.h: No such file or directory` and
