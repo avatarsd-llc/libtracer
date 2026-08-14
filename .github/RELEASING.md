@@ -170,9 +170,9 @@ git tag over `VERSION`).
 - **This repo's standing rule:** a release is cut only when the maintainer
   explicitly says so. Reconciling the version markers (`tools/sync-version.py`) is
   **not** a release — only the signed `vX.Y.Z` tag is.
-- **Released so far:** `v0.3.0` (2026-07-08), `v0.4.0` (2026-07-09), `v0.5.0`
-  (2026-07-21), `v0.6.0` (2026-07-23). `VERSION` currently reads the shipped
-  `0.6.0`, so the next cut bumps it. Do not take this list as authoritative —
+- **Released so far:** `v0.3.0` (2026-07-08) through `v0.12.0` (2026-08-14).
+  `VERSION` reads the most recently shipped release, so the next cut bumps it.
+  Do not take this list as authoritative —
   `git tag -l 'v*'` and `gh release list` are; it is here so a reader knows the
   process has run before and is not being exercised for the first time.
 - Spec/governance context: [GOVERNANCE.md](GOVERNANCE.md) (RFC process, BDFL

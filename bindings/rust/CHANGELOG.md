@@ -8,6 +8,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-08-14
+
 ### Added
 
 - **`type_code::PATH_REF_REVERSE` (`0x15`) and `is_path_ref_type()`** ([#1260](https://github.com/avatarsd-llc/libtracer/issues/1260); RFC-0024 §7.1 **amendment 2**). **Wire change.** The reverse-direction bound-path list a mint-flagged request accumulates has its own type code, identified by that code rather than by its position. Its body grammar is `PATH_REF`'s exactly, so `decode`/`encode` apply the structural rule to both codes. `ParsedFwd` gained `reverse`, and a raw `PATH_REF` payload on a mint-flagged `WRITE` is no longer mistaken for the list. New conformance vectors `fwd/fwd-reverse-mint` and `path-ref/reverse-len-not-multiple-of-8`.

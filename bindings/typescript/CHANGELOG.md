@@ -7,6 +7,8 @@ versioning/publish strategy.
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-08-14
+
 ### Added
 
 - **`TYPE.PATH_REF_REVERSE` (`0x15`) and `isPathRefType()`** ([#1260](https://github.com/avatarsd-llc/libtracer/issues/1260); RFC-0024 §7.1 **amendment 2**). **Wire change.** The reverse-direction bound-path list a mint-flagged request accumulates has its own type code, and is identified by that code rather than by its position. Its body grammar is `PATH_REF`'s exactly, so the codec's structural gate now applies to both codes — a core that checked `0x14` alone would have accepted an unframeable `0x15` body. `decodeFwd` gained `reverse` (the parsed child, or `null`) and no longer mistakes a raw `PATH_REF` payload on a mint-flagged `WRITE` for the reverse list. New conformance vectors `fwd/fwd-reverse-mint` and `path-ref/reverse-len-not-multiple-of-8`.
