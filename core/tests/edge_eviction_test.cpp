@@ -374,6 +374,205 @@ void test_evict_scoped_to_link() {
     check(other == 1, "the redialed session's edge delivers");
 }
 
+/**
+ * @brief #1071: a departure costs the departing peer's OWN subscribed vertices, not the
+ *        graph's whole subscribed set.
+ *
+ * The regression this pins is a LATENCY one, and latency is not directly assertable, so the
+ * instrument is `graph_t::link_edge_candidates` — the count of vertices the eviction will
+ * visit, which is exactly what the old whole-tree walk made proportional to the graph. The
+ * test stages a deliberate imbalance: one vertex subscribed by the peer under test, many
+ * subscribed by OTHER peers. Before the index the departing peer's cost was all of them.
+ *
+ * Asserting a RATIO rather than an absolute keeps this honest as the harness grows: the
+ * property is that the bystanders contribute nothing, so the cost must not move when their
+ * number does. It is measured twice, with a different bystander count each time.
+ */
+void test_departure_cost_is_scoped_to_the_peer() {
+    std::printf("#1071 — a departure's cost tracks the departing peer, not the graph:\n");
+    graph_t g;
+    g.set_remote_delivery_sink([](const tr::graph::remote_delivery_t&, const rope_t&) {});
+
+    vertex_handle_t mine = g.register_vertex(path_t("/mine"), role_t::STORED_VALUE);
+    check(wire_sub(g, mine, "cli", "m0"), "the peer under test subscribes on ONE vertex");
+    check(g.link_edge_candidates("cli") == 1, "its departure visits exactly that one vertex");
+
+    // Twenty bystander vertices, each subscribed by a DIFFERENT peer. Under the old walk
+    // every one of these became a candidate for 'cli' as well, because the predicate was
+    // "this vertex has any subscriber", with the link tested only per edge afterwards.
+    for (int i = 0; i < 20; ++i) {
+        const std::string p = "/bystander" + std::to_string(i);
+        vertex_handle_t b = g.register_vertex(path_t(p.c_str()), role_t::STORED_VALUE);
+        check(wire_sub(g, b, "peer" + std::to_string(i), "b"), "a bystander peer subscribes");
+    }
+    check(g.link_edge_candidates("cli") == 1,
+          "20 bystander subscriptions later, the cost is STILL one vertex");
+
+    for (int i = 20; i < 60; ++i) {
+        const std::string p = "/bystander" + std::to_string(i);
+        vertex_handle_t b = g.register_vertex(path_t(p.c_str()), role_t::STORED_VALUE);
+        check(wire_sub(g, b, "peer" + std::to_string(i), "b"), "another bystander peer");
+    }
+    check(g.link_edge_candidates("cli") == 1,
+          "60 bystanders: the departing peer's cost has not moved at all");
+
+    // And the cost that DOES track the peer tracks it exactly: its own second vertex counts.
+    vertex_handle_t mine2 = g.register_vertex(path_t("/mine2"), role_t::STORED_VALUE);
+    check(wire_sub(g, mine2, "cli", "m1"), "the peer subscribes on a second vertex of its own");
+    check(g.link_edge_candidates("cli") == 2, "its own subscription DOES add to its cost");
+    check(wire_sub(g, mine2, "cli", "m2"), "a SECOND edge on a vertex it already subscribed");
+    check(g.link_edge_candidates("cli") == 2,
+          "a repeat subscription on the same vertex does not grow the cost (dedup)");
+
+    // The eviction itself is still exact — cheapness must not have cost correctness.
+    check(g.evict_link_edges("cli") == 3, "evict('cli') still reclaims all three of its edges");
+    check(g.link_edge_candidates("cli") == 0, "and its index entry is gone with them");
+    check(g.link_edge_candidates("peer0") == 1, "a bystander's own cost is untouched");
+}
+
+/**
+ * @brief #1071: the index survives a full departure — a redialing peer that reuses the SAME
+ *        link NAME is evictable again.
+ *
+ * The hazard is specific to indexing and invisible to the old walk, which rediscovered every
+ * vertex from the tree each time and so could not go stale. A whole-link eviction REMOVES the
+ * index entry (otherwise a departed link's list would be immortal); if the re-subscribe after
+ * it failed to recreate the entry, the second departure would find no candidates and silently
+ * leak the redialed session's edges — the same disclosure class #1223 spent five steps on.
+ */
+void test_index_recreated_after_a_full_eviction() {
+    std::printf("#1071 — a same-NAME redial is indexed, and evictable, again:\n");
+    graph_t g;
+    std::size_t cli = 0;
+    g.set_remote_delivery_sink([&](const tr::graph::remote_delivery_t& d, const rope_t&) {
+        if (d.link == "cli") ++cli;
+    });
+    vertex_handle_t v = g.register_vertex(path_t("/v"), role_t::STORED_VALUE);
+
+    check(wire_sub(g, v, "cli", "first"), "the first session subscribes");
+    check(g.evict_link_edges("cli") == 1, "it departs and its edge is reclaimed");
+    check(g.link_edge_candidates("cli") == 0, "the index entry went with it");
+
+    check(wire_sub(g, v, "cli", "second"), "a redial reuses the SAME link name and subscribes");
+    check(g.link_edge_candidates("cli") == 1, "the entry is RECREATED — not lost with the first");
+    cli = 0;
+    check(g.write(v, make_value({0x01})).has_value(), "write reaches the redialed session");
+    check(cli == 1, "the redialed edge delivers");
+
+    check(g.evict_link_edges("cli") == 1, "the SECOND departure reclaims the redial's edge too");
+    cli = 0;
+    check(g.write(v, make_value({0x02})).has_value(), "write after the second departure");
+    check(cli == 0, "and nothing is delivered to the dead session — no leaked edge");
+}
+
+/**
+ * @brief #1071: the index is a SUPERSET, and a stale entry is a no-op rather than a fault.
+ *
+ * Individual removals — an explicit unsubscribe, a route-scoped reclaim — deliberately do
+ * NOT un-index their vertex, because the cost of being wrong in that direction is a wasted
+ * comparison while the other direction leaks an edge. This pins the tolerated asymmetry so a
+ * later "optimization" that prunes on unsubscribe has to argue with a test rather than with a
+ * comment.
+ */
+void test_stale_index_entries_are_harmless() {
+    std::printf("#1071 — a stale index entry costs a no-op, never a wrong answer:\n");
+    graph_t g;
+    std::size_t cli = 0;
+    g.set_remote_delivery_sink([&](const tr::graph::remote_delivery_t& d, const rope_t&) {
+        if (d.link == "cli") ++cli;
+    });
+    vertex_handle_t v = g.register_vertex(path_t("/v"), role_t::STORED_VALUE);
+    vertex_handle_t w = g.register_vertex(path_t("/w"), role_t::STORED_VALUE);
+
+    check(wire_sub(g, v, "cli", "a"), "the peer subscribes at /v");
+    check(wire_sub(g, w, "cli", "b"), "and at /w");
+    check(g.link_edge_candidates("cli") == 2, "two candidate vertices");
+
+    // The route-scoped reclaim takes BOTH edges: wire_sub stores the link name as the return
+    // route, so one route matches both. That leaves the link with no edges at all — and, by
+    // design, with both of its index entries still standing.
+    const std::vector<std::byte> route = b_path({std::string("cli")});
+    check(g.evict_route_edges("cli", route) == 2,
+          "the narrow route-scoped reclaim takes both edges");
+    check(g.link_edge_candidates("cli") == 2,
+          "both index entries are now STALE — the narrow path does not un-index");
+
+    cli = 0;
+    check(g.write(v, make_value({0x01})).has_value(), "write /v after the narrow reclaim");
+    check(g.write(w, make_value({0x02})).has_value(), "write /w after the narrow reclaim");
+    check(cli == 0, "the edges really are gone — the staleness is in the index, not the graph");
+
+    // The whole-link eviction now runs against two vertices that hold nothing. The contract
+    // is that this is a NO-OP reporting zero, not a miscount and not a fault.
+    check(g.evict_link_edges("cli") == 0, "the whole-link eviction over stale entries reports 0");
+    check(g.link_edge_candidates("cli") == 0, "and clears them, so the staleness is not immortal");
+}
+
+/**
+ * @brief #1071 + #943: a FIELD-WRITE-admitted edge is indexed under the link that admitted
+ *        it, on a vertex that link never subscribed on by any other door.
+ *
+ * The index key must be `vertex_t::evict_link_edges`'s own spelling — `remote->link`, falling
+ * back to `remote->caller` — and this is the case that separates the two. A `:subscribers[N]`
+ * replace arriving over a link lands in `graph_t::field_write`, which stores the inbound link
+ * ONLY as the gate context and leaves `link` empty precisely so dispatch does not grow a
+ * phantom remote leg (#943). Keying the index on `link` alone therefore un-indexes exactly
+ * these edges, and a departure walks straight past them.
+ *
+ * #943's own test cannot see that: it seeds slot 0 with a `subscribe_wire` append over the
+ * SAME link, which indexes the vertex anyway, so the fallback is masked. Here the seed comes
+ * over a DIFFERENT link, so the only thing that can put this vertex on 'cli's candidate list
+ * is the caller fallback. Ablating the fallback to `s.remote->link` turns the two assertions
+ * below red — that is the check that this test is not decorative.
+ */
+void test_field_write_admitted_edge_is_indexed_under_its_caller() {
+    std::printf("#1071/#943 — a field-write-admitted edge is indexed by its CALLER:\n");
+    graph_t g;
+    fwd_router_t router(g);
+    fake_link_t seed_link;
+    fake_link_t cli;
+    (void)router.add_child("seed", seed_link);
+    (void)router.add_child("cli", cli);
+
+    (void)g.register_vertex(path_t("/p"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/t"), role_t::STORED_VALUE);
+
+    const auto value_of = [&](const char* p) -> std::vector<std::byte> {
+        const auto r = g.read(path_t(p));
+        return r ? rope_bytes(**r) : std::vector<std::byte>{};
+    };
+
+    // Seed slot 0 over a DIFFERENT link, so /p is indexed for 'seed' and NOT for 'cli'.
+    // A `[N]` replace requires the slot to exist, and this is the door that creates one.
+    seed_link.inject(b_fwd(fwd_op_t::WRITE, b_path({"p"}), b_path({"seed"}),
+                           b_field_subscribers_append(), b_subscriber("seed")));
+    seed_link.drain();
+    check(g.link_edge_candidates("seed") == 1, "/p is a candidate for the SEEDING link");
+    check(g.link_edge_candidates("cli") == 0, "and is NOT yet a candidate for 'cli'");
+
+    // The door under test: a `:subscribers[0]` REPLACE arriving over 'cli'. It goes through
+    // field_write, which leaves `remote->link` empty and stores 'cli' as the caller only.
+    cli.inject(b_fwd(fwd_op_t::WRITE, b_path({"p"}), b_path({"cli"}), b_field_subscribers_index(0),
+                     b_subscriber("t")));
+    cli.drain();
+
+    check(g.write(path_t("/p"), rope_t{make_value(b_value_u8(0x51))}).has_value(),
+          "write /p while the 'cli' session is up");
+    check(value_of("/t") == b_value_u8(0x51), "the field-write-admitted edge IS delivering");
+
+    // THE ASSERTION. Without the caller fallback this reads 0 and the edge is invisible to
+    // 'cli's teardown — a subscriber edge that outlives the session that created it.
+    check(g.link_edge_candidates("cli") == 1,
+          "the caller fallback put /p on 'cli's candidate list");
+
+    cli.die();  // the transport reports the connection dead → fwd_router_t::link_down
+
+    check(g.write(path_t("/p"), rope_t{make_value(b_value_u8(0x52))}).has_value(),
+          "write /p after the 'cli' session departed");
+    check(value_of("/t") == b_value_u8(0x51),
+          "the departed session's edge delivered NOTHING — it was found and reclaimed");
+}
+
 /** @brief §D.2: surviving indices stable; freed slots reused before growth; reuse delivers. */
 void test_slot_reuse_and_index_stability() {
     std::printf("slot reuse and index stability:\n");
@@ -1006,6 +1205,10 @@ void test_reverse_mint_closes_the_disclosure() {
 int main() {
     std::printf("== edge_eviction_test ==\n");
     test_evict_scoped_to_link();
+    test_departure_cost_is_scoped_to_the_peer();
+    test_index_recreated_after_a_full_eviction();
+    test_stale_index_entries_are_harmless();
+    test_field_write_admitted_edge_is_indexed_under_its_caller();
     test_local_unsubscribe();
     test_clear_edge_releases_the_slot_pin();
     test_slot_reuse_and_index_stability();

@@ -697,42 +697,114 @@ std::size_t graph_t::parked_seam_count() const {
 }
 
 /**
- * @brief Pre-order collect of every vertex holding at least one active subscriber slot —
- *        the snapshot half of @ref graph_t::evict_link_edges. Call with `map_mutex_` held
- *        (shared suffices: the walk only excludes concurrent vertex creation, `own_subs`
- *        is a relaxed atomic, and vertex addresses are pinned for the graph's lifetime —
- *        ADR-0057 — so the collected pointers stay valid past the lock).
+ * @brief Drop duplicate vertices from one link's candidate list, in place.
+ *
+ * Duplicates are a SPACE problem only, never a correctness one: visiting a vertex twice costs
+ * a second `vertex_t::evict_link_edges` that finds the link's edges already gone and reports
+ * 0. That is what lets the insert below be a bare append and pay for order here, amortized,
+ * instead of on every subscribe.
  */
-static void collect_subscribed(vertex_t* v, std::vector<vertex_t*>& out) {
-    // Iterative (#690): the recursive form cost ~80 B a frame at a depth no peer-facing check
-    // bounds. `out` still grows on the heap -- that is the caller's snapshot, not the walk.
-    const auto take = [&out](vertex_t& c) {
-        if (c.own_subs() > 0) out.push_back(&c);
-    };
-    take(*v);
-    v->for_each_descendant(take);
+static void compact_candidates(std::pmr::vector<vertex_t*>& vs) {
+    std::sort(vs.begin(), vs.end());
+    vs.erase(std::unique(vs.begin(), vs.end()), vs.end());
+}
+
+void graph_t::index_link_vertex(std::string_view link, vertex_t* v) {
+    if (link.empty()) return;  // the LOCAL spelling — no link teardown can ever name it
+    const std::lock_guard lock(link_index_mutex_);
+    auto it = link_index_.find(link);
+    if (it == link_index_.end())
+        it = link_index_
+                 .emplace(std::pmr::string(link, mr_),
+                          link_entry_t{.vs = std::pmr::vector<vertex_t*>(mr_)})
+                 .first;
+    link_entry_t& e = it->second;
+    // A bare APPEND, deliberately — this is the subscribe path, and #1071's acceptance
+    // criteria reject paying for the departure fix here. The obvious alternative, keeping the
+    // list sorted so membership is a binary search, makes the Nth subscription memmove N/2
+    // pointers: measured at 200 subscriptions over one link it cost +19% on the subscribe
+    // path against a ±1.6% A/A null, which is a reject. Appending is O(1).
+    e.vs.push_back(v);
+    // Compaction is amortized against the last compacted size, so the list stays inside 2x
+    // the peer's distinct vertex count (plus a small floor, so a handful of subscriptions
+    // never sorts at all) while each individual subscribe stays O(1) amortized. Without a
+    // bound a peer that re-subscribes to the same vertex in a loop would grow this forever,
+    // which on a node sized in kilobytes is the wrong failure.
+    if (e.vs.size() >= 2 * e.compacted + kLinkIndexCompactFloor) {
+        compact_candidates(e.vs);
+        e.compacted = e.vs.size();
+    }
+}
+
+std::size_t graph_t::link_edge_candidates(std::string_view link_name) const {
+    if (link_name.empty()) return 0;
+    const std::lock_guard lock(link_index_mutex_);
+    const auto it = link_index_.find(link_name);
+    if (it == link_index_.end()) return 0;
+    // Compact before reporting, so the number is the DISTINCT vertex count a caller can
+    // reason about rather than an artefact of where the amortized compaction last landed.
+    link_entry_t& e = it->second;
+    if (e.vs.size() != e.compacted) {
+        compact_candidates(e.vs);
+        e.compacted = e.vs.size();
+    }
+    return e.vs.size();
+}
+
+/**
+ * @brief The candidate vertices for @p link_name — the index entry, or empty.
+ *
+ * @param take When true the entry is REMOVED, transferring its vector to the caller: what a
+ *             whole-link eviction wants, since every one of that link's edges is about to be
+ *             gone and the entry would otherwise be a permanent stale list. The route-scoped
+ *             sibling passes false — it reclaims only SOME of the link's edges, so the entry
+ *             must survive for the link's eventual teardown.
+ */
+std::pmr::vector<vertex_t*> graph_t::link_candidates(std::string_view link_name, bool take) {
+    const std::lock_guard lock(link_index_mutex_);
+    const auto it = link_index_.find(link_name);
+    if (it == link_index_.end()) return std::pmr::vector<vertex_t*>(mr_);
+    // Compact first: a duplicate would cost a second eviction pass over the same vertex.
+    link_entry_t& e = it->second;
+    if (e.vs.size() != e.compacted) {
+        compact_candidates(e.vs);
+        e.compacted = e.vs.size();
+    }
+    if (!take) return e.vs;  // a copy: the entry outlives this eviction
+    std::pmr::vector<vertex_t*> out = std::move(e.vs);
+    link_index_.erase(it);
+    return out;
 }
 
 std::size_t graph_t::evict_link_edges(std::string_view link_name) {
-    // Two-phase, per the graph.hpp lock-order docs: snapshot the candidate vertices under
-    // ONE shared map hold (no stripe lock inside), then evict per vertex — each under its
-    // own stripe lock inside a FRESH shared map hold. The per-vertex hold makes the
-    // {clear edges, unwind counters} pair atomic against a concurrent retire() (unique
-    // map lock), which reads own_subs() before zeroing it — interleaving there would
-    // double-subtract descendants' listeners_above_. Between vertices everything may
-    // interleave: a vertex retired meanwhile has an empty edge list (k == 0, no-op), and
+    // Two-phase, per the graph.hpp lock-order docs — but the first phase is now an INDEX
+    // LOOKUP rather than a walk of the whole vertex tree (#1071). What it replaced collected
+    // every vertex in the graph holding any subscriber edge, into a global-heap vector sized
+    // to that set, on a path whose caller is a peer hanging up: one browser tab's departure
+    // was priced by every other peer's subscriptions, on the ESP-IDF link's shared HTTP
+    // server task. The candidates here are exactly the vertices THIS link ever subscribed
+    // on, and the list is the index's own entry moved out, so the path allocates nothing.
+    //
+    // The second phase is unchanged and still carries the whole locking argument: evict per
+    // vertex, each under its own stripe lock inside a FRESH shared map hold. The per-vertex
+    // hold makes the {clear edges, unwind counters} pair atomic against a concurrent
+    // retire() (unique map lock), which reads own_subs() before zeroing it — interleaving
+    // there would double-subtract descendants' listeners_above_. Between vertices everything
+    // may interleave: a vertex retired meanwhile has an empty edge list (k == 0, no-op), and
     // a subscribe admitted meanwhile for a DEAD link is the pre-existing races' window,
-    // resolved by the transport calling this hook after the link stopped delivering.
-    std::vector<vertex_t*> candidates;
-    {
-        const std::shared_lock lock(map_mutex_);
-        collect_subscribed(root_.get(), candidates);
-    }
+    // resolved by the transport calling this hook after the link stopped delivering — the
+    // index does not change that window, because it is populated at the same own_subs bump
+    // the old walk's predicate read (see link_index_).
+    //
+    // The empty key still matches nothing (#1056), one step earlier than before: it is now
+    // refused at the index instead of per vertex.
+    if (link_name.empty()) return 0;
+    const std::pmr::vector<vertex_t*> candidates = link_candidates(link_name, /*take=*/true);
     std::size_t total = 0;
     for (vertex_t* v : candidates) {
         const std::shared_lock lock(map_mutex_);
         const std::size_t k = v->evict_link_edges(link_name);
-        if (k == 0) continue;
+        if (k == 0) continue;  // a stale index entry: the vertex's edges went individually
         // The k-fold mirror of note_subscriber_removed, under the same shared hold as
         // the clear (RFC-0005 bookkeeping: descendants' writes stop bubbling here).
         v->bump_own_subs(-static_cast<std::int32_t>(k));
@@ -749,17 +821,16 @@ std::size_t graph_t::evict_route_edges(std::string_view link_name,
     // unwind the RFC-0005 bookkeeping by exactly the count each vertex reports. Only the
     // per-vertex predicate differs — link AND stored-route equality instead of link alone.
     if (link_name.empty() || route_wire.empty()) return 0;
+    // Same index, same saving as its whole-link sibling — but the entry is COPIED, not
+    // taken: this reclaims only the edges matching one route, so the link keeps whatever
+    // else it holds and must stay indexed for its eventual teardown.
     // Classify the echo's form ONCE, here, where wire types are spoken: a `PATH_REF` echo
     // is a refused reverse-list delivery (RFC-0024 §7.1 amendment 1) and matches the stored
     // reverse list's emitted suffix; anything else runs the canonical byte-equal match.
     const bool bound_echo =
         static_cast<wire::type_t>(std::to_integer<std::uint8_t>(route_wire[0])) ==
         wire::type_t::PATH_REF;
-    std::vector<vertex_t*> candidates;
-    {
-        const std::shared_lock lock(map_mutex_);
-        collect_subscribed(root_.get(), candidates);
-    }
+    const std::pmr::vector<vertex_t*> candidates = link_candidates(link_name, /*take=*/false);
     std::size_t total = 0;
     for (vertex_t* v : candidates) {
         const std::shared_lock lock(map_mutex_);
@@ -1941,6 +2012,18 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
     // value — the new subscriber would miss that write outright. Bumping first inverts the
     // window into the harmless direction (a count with no slot yet ⇒ one snapshot that finds
     // nothing). vertex_t::own_subs_ordered carries the ordering argument.
+    // Index this vertex under the link the edge is admitted OVER, before `s` is moved into
+    // the slot below and while its cold half is still readable (#1071). The spelling is
+    // `vertex_t::evict_link_edges`'s, not a paraphrase of it: `link` first, `caller` when
+    // that is empty, because a field_write admission stores the inbound link only as the
+    // gate context (#943) and keying on the delivery link alone un-indexes it forever.
+    //
+    // Deliberately BEFORE the append and not conditional on it succeeding. The index is a
+    // superset (see link_index_): an admission that then fails BACKPRESSURE or OUT_OF_RANGE
+    // leaves a stale entry, which costs one no-op eviction, whereas indexing only on success
+    // would open a window where the edge is live and unindexed — a departure could then miss
+    // it, which is a leaked subscriber edge rather than a wasted comparison.
+    if (s.remote) index_link_vertex(s.remote->link.empty() ? s.remote->caller : s.remote->link, v);
     note_subscriber_added(v);  // RFC-0005: descendants' writes now bubble here
     if (slot) {
         // RFC-0009 §D.1 replace: the SAME door, so the SUBSCRIBE gate above and the latch

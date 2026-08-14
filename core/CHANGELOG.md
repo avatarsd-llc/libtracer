@@ -16,6 +16,32 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`graph_t::link_edge_candidates(std::string_view)` — the cost of a link's departure, made
+  observable** ([#1071](https://github.com/avatarsd-llc/libtracer/issues/1071)). Reports how
+  many vertices a `evict_link_edges` for that link would visit. A diagnostic, and the
+  instrument the scoping property is asserted on; it reads the per-link index, which is a
+  deliberate SUPERSET of the vertices actually holding edges (an individual unsubscribe does
+  not un-index), so it is an upper bound on work and must not be read as an edge count.
+
+### Changed
+
+- **A link's departure now costs that link's own subscribed vertices instead of the graph's
+  whole subscribed set** ([#1071](https://github.com/avatarsd-llc/libtracer/issues/1071)).
+  `graph_t::evict_link_edges` and `evict_route_edges` previously opened with a pre-order walk
+  of every vertex in the graph, collecting each one holding any subscriber edge into a
+  **global-heap** `std::vector` sized to that set, and only then tested the link per edge. One
+  peer hanging up was therefore priced by every *other* peer's subscriptions — paid
+  synchronously, inside the session's free-context callback, which on the ESP-IDF
+  HTTP-server-hosted link is the single task that owns accept, receive and close for every
+  other socket on that server. Both entry points now take their candidates from a per-link
+  index maintained at the one subscriber-admission door, so the walk and its allocation are
+  gone: the departure path allocates nothing at all. Behaviour is unchanged — same counts,
+  same RFC-0005 unwind, same two-phase locking per vertex, same empty-key no-op (#1056), and
+  the same subscribe-racing-teardown window, because the index is populated at exactly the
+  `own_subs` bump the replaced walk's predicate read. The index is keyed by the edge's
+  admitted-over spelling (`link`, falling back to `caller`), which is what keeps
+  field-write-admitted edges (#943) reachable by a teardown.
+
 - **The reverse-direction mint is implemented — a recycled `p<slot>` session no longer
   inherits the dead session's deliveries**
   ([#1223](https://github.com/avatarsd-llc/libtracer/issues/1223) steps 3+4 of 5, the

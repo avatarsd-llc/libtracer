@@ -30,6 +30,7 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -758,6 +759,26 @@ class graph_t {
      * @return The number of edges evicted, summed over the graph.
      */
     std::size_t evict_link_edges(std::string_view link_name);
+
+    /**
+     * @brief How many vertices a @ref evict_link_edges for @p link_name would EXAMINE — the
+     *        departure's cost, observable (#1071).
+     *
+     * A diagnostic, and the instrument the #1071 acceptance test asserts on: before the
+     * per-link index this number was "every vertex in the graph holding any subscriber
+     * edge", so one peer's hangup was priced by every OTHER peer's subscriptions. It is now
+     * the count of vertices that peer itself ever subscribed on.
+     *
+     * Reports the INDEX's size, not a live edge count, and the two differ by design: the
+     * index is a superset that keeps a vertex after an individual unsubscribe (see
+     * `link_index_`), so this can exceed the number of edges an eviction would actually
+     * reclaim. It is an upper bound on work, which is exactly what the scaling property is
+     * about — never read it as "how many edges this link has".
+     * @param link_name This node's NAME for the link; empty ⇒ 0 (a local edge is not
+     *                  reachable by link teardown).
+     * @return The number of candidate vertices, i.e. the departure's bounded cost.
+     */
+    [[nodiscard]] std::size_t link_edge_candidates(std::string_view link_name) const;
 
     /**
      * @brief Evict the remote subscriber edge(s) whose delivery link AND stored return
@@ -1642,6 +1663,19 @@ class graph_t {
     // a newborn's creation-time sum and this walk never double-count).
     void note_subscriber_added(vertex_t* v);
     void note_subscriber_removed(vertex_t* v);
+    // Record that `v` may hold an edge admitted over `link` (#1071 — see link_index_).
+    // Called from the ONE admission door, at the note_subscriber_added bump, with no other
+    // lock held. An empty `link` is a no-op: that is the LOCAL spelling, and a local edge is
+    // not reachable by any link teardown (the #1056 empty-key rule, mirrored here so the
+    // index cannot grow an entry no eviction can ever name). Idempotent — a vertex already
+    // listed for `link` is not listed twice, which is what keeps a peer that re-subscribes
+    // to the same vertex from growing its own departure cost without bound.
+    void index_link_vertex(std::string_view link, vertex_t* v);
+    // The candidate vertices an eviction for `link_name` must visit — see the definition.
+    // `take` removes the index entry (whole-link teardown) instead of copying it
+    // (route-scoped reclaim, which leaves the link holding other edges).
+    [[nodiscard]] std::pmr::vector<vertex_t*> link_candidates(std::string_view link_name,
+                                                              bool take);
     // The single SUBSCRIBER admission step (ADR-0049): SUBSCRIBE gate under `caller` →
     // slot append → transient-local durability latch (delivered outside the lock, per
     // the edge's kind) → RFC-0005 bookkeeping. Every door — the two subscribe() sugars,
@@ -1799,6 +1833,76 @@ class graph_t {
      *         the LKV control block + rope of every `assign`. Host-owned; outlives the
      *         graph. Defaults to the standard heap. */
     std::pmr::memory_resource* mr_ = std::pmr::get_default_resource();
+
+    /**
+     * @brief Transparent hashing/equality for @ref link_index_, so a lookup spends no
+     *        allocation turning a caller's `std::string_view` into a key (#1071).
+     *
+     * Hashed rather than ordered because this lookup sits on the SUBSCRIBE path: a tree's
+     * cost grows with the number of live links, so an ordered index made every subscribe a
+     * little dearer on a node with more peers — measurably, and in the one direction #1071's
+     * acceptance criteria refuse. A hash makes it independent of that count.
+     */
+    struct link_key_hash_t {
+        using is_transparent = void; /**< @brief Enables the heterogeneous `find`. */
+        std::size_t operator()(std::string_view s) const noexcept {
+            return std::hash<std::string_view>{}(s);
+        }
+    };
+    /** @brief The equality half of @ref link_key_hash_t's heterogeneous lookup. */
+    struct link_key_eq_t {
+        using is_transparent = void; /**< @brief Enables the heterogeneous `find`. */
+        bool operator()(std::string_view a, std::string_view b) const noexcept { return a == b; }
+    };
+
+    /**
+     * @brief Which vertices hold a subscriber edge for a given LINK NAME — the index that
+     *        makes a peer's departure cost its OWN edges instead of the graph's (#1071).
+     *
+     * Keyed by the edge's ADMITTED-OVER spelling, which is what `vertex_t::evict_link_edges`
+     * matches on: `remote->link`, falling back to `remote->caller` when the former is empty
+     * (a `field_write` admission stores the inbound link only as the gate context — #943).
+     * Computing the key any other way here would silently un-index exactly the edges that
+     * fix was about.
+     *
+     * A SUPERSET, deliberately, and that asymmetry is the whole safety argument. An entry is
+     * added when an edge is admitted and removed only when the whole link is evicted, so an
+     * individual unsubscribe, a replace that displaces the last edge of a link, and a failed
+     * admission all leave a STALE vertex behind. A stale entry costs one
+     * `vertex_t::evict_link_edges` that matches nothing and reports 0 — the same no-op the
+     * old whole-tree walk performed on every unsubscribed vertex it visited. A MISSING entry
+     * would instead leak a live edge past a departure, so every path that can create one
+     * indexes, and no path except whole-link eviction removes.
+     *
+     * Insertion happens at the @ref note_subscriber_added bump, NOT after the slot lands:
+     * that bump is precisely the predicate (`own_subs() > 0`) the replaced whole-tree walk
+     * keyed on, so the index becomes visible to a concurrent eviction no later than the walk
+     * would have seen the vertex. The subscribe-racing-its-own-link's-teardown window is
+     * therefore exactly the pre-existing one @ref evict_link_edges documents, neither
+     * widened nor narrowed.
+     *
+     * Drawn from the injected @ref mr_ (ADR-0039): the departure path allocated a
+     * global-heap `std::vector` sized to the graph's whole subscribed set on every peer
+     * hangup, which is the allocation #1071 called out. It now allocates nothing at all —
+     * the candidate list IS this entry, moved out.
+     */
+    /** @brief One link's candidate list, plus the size it was last compacted at. */
+    struct link_entry_t {
+        std::pmr::vector<vertex_t*> vs; /**< @brief Candidates; may hold duplicates. */
+        std::size_t compacted = 0;      /**< @brief `vs.size()` after the last compaction. */
+    };
+    /** @brief Compaction floor — below this a link's list never sorts, so the common peer
+     *         with a handful of subscriptions pays nothing but the append. */
+    static constexpr std::size_t kLinkIndexCompactFloor = 8;
+
+    // `mutable` because the entries are a CACHE of where a link's edges may be: the
+    // diagnostic reader compacts one in place to report a distinct count, which changes no
+    // observable graph state. Guarded by the mutable mutex below, as `map_mutex_` is.
+    mutable std::pmr::unordered_map<std::pmr::string, link_entry_t, link_key_hash_t, link_key_eq_t>
+        link_index_{mr_};
+    /** @brief Guards @ref link_index_ ONLY. A leaf: never held across a map, stripe, or
+     *         sweep acquisition, so it orders against nothing else in this class. */
+    mutable std::mutex link_index_mutex_;
     /** @brief The ADR-0060 injected byte-buffer seam the write-path copy-store draws
      *         its owned value @ref view::segment_t from (the flatten of a branch/field
      *         write, `graph.cpp` sites 825/1017). Host-owned; outlives the graph.
