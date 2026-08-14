@@ -583,10 +583,10 @@ ANCHORS = [
     ('core/include/libtracer/transport_quic.hpp:153',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }'),
     # core/include/libtracer/transport_tcp.hpp
-    ('core/include/libtracer/transport_tcp.hpp:207',
+    ('core/include/libtracer/transport_tcp.hpp:218',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'tcp_transport_t& operator=(const tcp_transport_t&) = delete;'),
-    ('core/include/libtracer/transport_tcp.hpp:372',
+    ('core/include/libtracer/transport_tcp.hpp:403',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'transport_tcp_server& operator=(const transport_tcp_server&) = delete;'),
     # core/include/libtracer/transport_udp.hpp
@@ -606,10 +606,10 @@ ANCHORS = [
     ('core/include/libtracer/transport_webtransport.hpp:182',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }'),
     # core/include/libtracer/transport_ws.hpp
-    ('core/include/libtracer/transport_ws.hpp:225',
+    ('core/include/libtracer/transport_ws.hpp:233',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'void send(std::span<const std::span<const std::byte>> iov) override;'),
-    ('core/include/libtracer/transport_ws.hpp:416',
+    ('core/include/libtracer/transport_ws.hpp:429',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'transport_ws_client& operator=(const transport_ws_client&) = delete;'),
     # core/include/libtracer/vertex.hpp
@@ -706,13 +706,13 @@ ANCHORS = [
      'if (!req.src.spans_intact()) return std::unexpected(status_t::BACKPRESSURE);'),
     # core/src/path.cpp
     # core/src/posix_endpoint.cpp
-    ('core/src/posix_endpoint.cpp:225',
-     'void stream_endpoint_t::write_all_iov(int fd, std::span<const ::iovec> vec) {'),
-    ('core/src/posix_endpoint.cpp:143', 'return ::sendmsg(fd, msg, MSG_NOSIGNAL);'),
+    ('core/src/posix_endpoint.cpp:293',
+     'write_result_t stream_endpoint_t::write_all_iov(int fd, std::span<const ::iovec> vec,'),
+    ('core/src/posix_endpoint.cpp:180', 'return ::sendmsg(fd, msg, MSG_NOSIGNAL);'),
     # The multi-peer servers' per-chunk receive scratch — ONE buffer since #871 folded the
     # tcp and ws poll loops into slot_server_t (it used to be one apiece, cited as
     # transport_tcp.cpp:508 and transport_ws.cpp:420).
-    ('core/src/posix_endpoint.cpp:483', 'std::array<std::byte, 4096> chunk;',
+    ('core/src/posix_endpoint.cpp:613', 'std::array<std::byte, 4096> chunk;',
      'void slot_server_t::service_peer(session_base_t& s) {'),
     # core/src/rope.cpp
     ('core/src/rope.cpp:21', 'if (!all_host()) {'),
@@ -728,13 +728,13 @@ ANCHORS = [
      '*        MEASURED (`bench_transport_iov`): the fallback fires at exactly **17'),
     ('core/src/transport_tcp.cpp:59',
      "*        `bench_forward_heap`'s `allocs=0` gate cannot see it: that bench drives"),
-    ('core/src/transport_tcp.cpp:219', 'bool tcp_transport_t::read_exact(int fd, std::byte* dst, std::size_t len) {'),
-    ('core/src/transport_tcp.cpp:239', 'std::array<std::byte, 4096> scratch;'),
-    ('core/src/transport_tcp.cpp:282', 'if (!read_exact(fd, seg->bytes.data(), len)) return;'),
+    ('core/src/transport_tcp.cpp:235', 'bool tcp_transport_t::read_exact(int fd, std::byte* dst, std::size_t len) {'),
+    ('core/src/transport_tcp.cpp:255', 'std::array<std::byte, 4096> scratch;'),
+    ('core/src/transport_tcp.cpp:298', 'if (!read_exact(fd, seg->bytes.data(), len)) return;'),
     # zero-copy-and-flatten.md quotes this comment's tail verbatim, so the anchor carries the
     # QUOTED line — pinning `serve()`'s signature two constructs up passed while the citation
     # pointed at code the doc never quotes.
-    ('core/src/transport_tcp.cpp:261',
+    ('core/src/transport_tcp.cpp:277',
      '// buffer, no copy; feeding recv chunks through feed() would add one).'),
     # core/src/transport_udp.cpp
     ('core/src/transport_udp.cpp:145',
@@ -755,13 +755,13 @@ ANCHORS = [
     ('core/src/transport_ws.cpp:100',
      'const std::optional<tr::view::view_t> link = tr::view::over_bytes(payload, backend);'),
     ('core/src/transport_ws.cpp:150', 'constexpr std::size_t kMaxServerIov = kMaxInlineIov;'),
-    ('core/src/transport_ws.cpp:264', '// no flatten, no re-copy (server frames are UNMASKED, RFC 6455 §5.1). Lock'),
-    ('core/src/transport_ws.cpp:272', 'std::array<::iovec, kMaxServerIov + 1> gather_inline;'),
+    ('core/src/transport_ws.cpp:267', '// no flatten, no re-copy (server frames are UNMASKED, RFC 6455 §5.1). Lock'),
+    ('core/src/transport_ws.cpp:275', 'std::array<::iovec, kMaxServerIov + 1> gather_inline;'),
     # The broadcast's gather store. Its old scope named the constructor's `::socket` call,
     # which #871 moved out of this TU into slot_server_t::bind_listen; the entry sheds the
     # scope entirely instead, because the array is now spelled `pristine_inline` here and
     # `inline_vec` only in the directed facade — one anchor, one hit, no positional filter.
-    ('core/src/transport_ws.cpp:651', 'std::array<std::byte, 4096> chunk;',
+    ('core/src/transport_ws.cpp:682', 'std::array<std::byte, 4096> chunk;',
      'void transport_ws_client::serve(int fd, std::vector<std::byte> pipelined) {'),
     # core/tests/registry_teardown_test.cpp
     ('core/tests/registry_teardown_test.cpp:275', 'void test_digest_paths_agree() {'),
@@ -783,7 +783,7 @@ ANCHORS = [
     ('core/include/libtracer/fwd_frame_view.hpp:905', 'inline constexpr std::size_t kFwdMaxIov = 10;'),
     # ONE `bus()` since #871: both stream servers inherit slot_server_t's (they used to
     # restate it, cited as transport_tcp.hpp:343 and transport_ws.hpp:233).
-    ('core/include/libtracer/posix_endpoint.hpp:409',
+    ('core/include/libtracer/posix_endpoint.hpp:598',
      '[[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }'),
     ('core/include/libtracer/edge_pin.hpp:153', 'class pin_t {'),
     ('core/src/fwd_router.cpp:873', 'link.set_rope_receiver('),
@@ -813,9 +813,9 @@ ANCHORS = [
     ('tools/cortexm0_footprint.py:151', 'cxx_flags = ['),
     ('tools/cortexm0_footprint.py:158', '"-DLIBTRACER_NO_ATOMIC",'),
     ('tools/cortexm0_footprint.py:172', '"--specs=nano.specs",'),
-    ('core/tests/CMakeLists.txt:1342', 'add_executable(substrate_test_no_atomic'),
-    ('core/tests/CMakeLists.txt:1355', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
-    ('core/tests/CMakeLists.txt:1356', '    LIBTRACER_NO_ATOMIC'),
+    ('core/tests/CMakeLists.txt:1354', 'add_executable(substrate_test_no_atomic'),
+    ('core/tests/CMakeLists.txt:1367', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
+    ('core/tests/CMakeLists.txt:1368', '    LIBTRACER_NO_ATOMIC'),
     # The leading indent is load-bearing: the bare token also appears in the comment
     # three lines above the executable, and an anchor that matches both is not an anchor.
 
@@ -915,7 +915,7 @@ ANCHORS = [
     ('core/include/libtracer/path.hpp:50',
      "* separates field levels, `[` / `]` delimit the grammar's index suffix (which sits"),
     ('core/include/libtracer/path.hpp:230', 'inline path_t::path_t(std::string_view text) {'),
-    ('core/include/libtracer/posix_endpoint.hpp:421',
+    ('core/include/libtracer/posix_endpoint.hpp:610',
      "/** @brief Visit the currently-OPEN peers' names, `p<slot>` (#426). */"),
     ('core/include/libtracer/tlv.hpp:61', 'PATH_REF = 0x14,'),
     ('core/include/libtracer/transport.hpp:157',
@@ -1009,7 +1009,7 @@ ANCHORS = [
     ('core/src/path.cpp:117',
      'return std::unexpected(status_t::INVALID_PATH);',
      'if (p.field_.steps.size() > kMaxFieldDepth)'),
-    ('core/src/posix_endpoint.cpp:546',
+    ('core/src/posix_endpoint.cpp:679',
      'return false;',
      'if (s->open.load(std::memory_order_relaxed)) return true;'),
     ('core/src/route_handle.cpp:34', 'auto sp = std::allocate_shared<link_tables_t>('),

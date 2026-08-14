@@ -34,6 +34,12 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
     //    facet — each inbound peer gets its own return-route identity (board↔board).
     //  - `max_peers` (VALUE u32; default 0 = unbounded, host-bounded per RFC-0006) is
     //    the concurrent-peer admission cap.
+    // A third tcp-private key, honored on BOTH halves and mirroring ws's verbatim (#838):
+    //  - `liveness_window` (VALUE u32, ms; default 0 = kDefaultLivenessWindowMs) — how long
+    //    a peer may fail to take bytes before it is broken. It is the send bound's
+    //    provenance: a host has no task watchdog to derive one from the way the MCU link
+    //    does (#835), so the number comes from the deployer, exactly as `connect_timeout`
+    //    and CAN's `peer_ttl` (ADR-0044) do.
     // tcp has both a dial and a listen shape, so it is TWO modules (RFC-0014 §1) — but the
     // library registers NEITHER (ADR-0073 §4): the application declares each module under a
     // name IT chooses via register_module (kTcpClientSuggestedModule /
@@ -43,6 +49,7 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
             const config_reader_t cfg(raw_config);
             const bool peer_named = cfg.flag("peer_named").value_or(false);
             const auto max_peers = static_cast<std::size_t>(cfg.u32("max_peers").value_or(0));
+            const std::uint32_t liveness_window = cfg.u32("liveness_window").value_or(0);
             return dial_or_listen(
                 s,
                 [&] {
@@ -56,11 +63,12 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
                     // is fully wired.
                     return make_checked<tcp_transport_t>(s.addr, s.port, rx_backend, s.max_frame,
                                                          /*recv_stack=*/std::size_t{0},
-                                                         /*defer_recv=*/true);
+                                                         /*defer_recv=*/true, liveness_window);
                 },
                 [&] {
-                    return make_checked<transport_tcp_server>(s.port, rx_backend, s.max_frame,
-                                                              max_peers, peer_named);
+                    return make_checked<transport_tcp_server>(
+                        s.port, rx_backend, s.max_frame, max_peers, peer_named,
+                        /*recv_stack=*/std::size_t{0}, liveness_window);
                 });
         });
 }

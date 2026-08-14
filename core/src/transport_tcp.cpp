@@ -96,8 +96,10 @@ struct prefixed_iov_t {
 
 tcp_transport_t::tcp_transport_t(const std::string& peer_host, std::uint16_t peer_port,
                                  mem::mem_backend_t* backend, std::size_t max_frame,
-                                 std::size_t recv_stack, bool defer_recv)
+                                 std::size_t recv_stack, bool defer_recv,
+                                 std::uint32_t liveness_window_ms)
     : backend_(backend), recv_stack_(recv_stack) {
+    liveness_window_ms_ = liveness_window_ms;                      // the #838 send bound's source
     max_frame_ = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
     const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return;
@@ -113,6 +115,9 @@ tcp_transport_t::tcp_transport_t(const std::string& peer_host, std::uint16_t pee
     // A receive timeout lets every blocking read poll stop_ for a clean
     // shutdown (the posix_endpoint_t SO_RCVTIMEO idiom, applied per connection).
     set_rcv_timeout(fd);
+    // Its egress twin (#838): without it a send into a peer that has stopped reading blocks
+    // forever WITH write_m_ held, freezing every other sender on this link too.
+    set_snd_timeout(fd);
     set_nodelay(fd);
     conn_fd_.store(fd, std::memory_order_relaxed);
     came_up_ = true;  // the ok() fact (#1059): the dial succeeded; liveness is link_up()
@@ -154,8 +159,10 @@ void tcp_transport_t::start_receiving() {
 }
 
 tcp_transport_t::tcp_transport_t(std::uint16_t bind_port, mem::mem_backend_t* backend,
-                                 std::size_t max_frame, std::size_t recv_stack)
+                                 std::size_t max_frame, std::size_t recv_stack,
+                                 std::uint32_t liveness_window_ms)
     : listen_(true), backend_(backend) {
+    liveness_window_ms_ = liveness_window_ms;                      // the #838 send bound's source
     max_frame_ = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
     listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd_ < 0) return;
@@ -207,13 +214,22 @@ void tcp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
     // reset conn_fd_ underneath us, and (b) two senders can never interleave their
     // length-prefixed records on the stream; read the fd inside the lock to pair
     // with the teardown.
+    //
+    // The hold is BOUNDED (#838). It used to span a fully blocking write, so a peer whose
+    // TCP receive window filled and stayed full froze this thread — and every other sender
+    // waiting on write_m_ — indefinitely. The record now carries the derived send bound (one
+    // peer here, so the whole liveness window), and a peer that keeps missing it is closed
+    // rather than blocked on forever.
     const std::lock_guard lock(write_m_);
     const int fd = conn_fd_.load(std::memory_order_relaxed);
     if (fd < 0) {  // no live peer (still dialing, or torn down) => a counted drop
         dropped_tx_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    write_all_iov(fd, rec.span());
+    const write_result_t r =
+        write_all_iov(fd, rec.span(), derive_send_bound_ms(liveness_window_ms_, 1));
+    if (note_write_result(r, fd, tx_stall_streak_))
+        dropped_tx_.fetch_add(1, std::memory_order_relaxed);  // shed by the bound, counted
 }
 
 bool tcp_transport_t::read_exact(int fd, std::byte* dst, std::size_t len) {
@@ -295,6 +311,7 @@ void tcp_transport_t::run_listen() {
         listen_fd_,
         [this](int fd) {
             set_rcv_timeout(fd);
+            set_snd_timeout(fd);  // the #838 egress bound, same as the DIAL socket's
             set_nodelay(fd);
             return true;
         },
@@ -328,8 +345,9 @@ struct transport_tcp_server::session_t : slot_server_t::session_base_t {
 
 transport_tcp_server::transport_tcp_server(std::uint16_t bind_port, mem::mem_backend_t* backend,
                                            std::size_t max_frame, std::size_t max_peers,
-                                           bool peer_named, std::size_t recv_stack)
-    : slot_server_t(max_peers, peer_named), backend_(backend) {
+                                           bool peer_named, std::size_t recv_stack,
+                                           std::uint32_t liveness_window_ms)
+    : slot_server_t(max_peers, peer_named, liveness_window_ms), backend_(backend) {
     max_frame_ = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
     if (!bind_listen(bind_port)) return;
     start([this] { run(); }, recv_stack);
@@ -379,7 +397,9 @@ void transport_tcp_server::send(std::span<const std::span<const std::byte>> iov)
         dropped_tx_.fetch_add(1, std::memory_order_relaxed);  // shed, and counted (#932)
         return;
     }
-    broadcast_iov(rec.span());
+    // Each peer the bound shed is one frame that never reached it — counted here, where the
+    // link's own tx counter lives (#838).
+    dropped_tx_.fetch_add(broadcast_iov(rec.span()), std::memory_order_relaxed);
 }
 
 void transport_tcp_server::peer_endpoint_t::send(std::span<const std::byte> frame) {
@@ -400,7 +420,13 @@ void transport_tcp_server::peer_endpoint_t::send(std::span<const std::span<const
         owner_->dropped_tx_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    write_all_iov(slot_->fd.load(std::memory_order_relaxed), rec.span());
+    // One peer in this round, so the bound is the whole liveness window (#838) — and the
+    // strike, if it stalls, lands on THIS session, the one that earned it.
+    const int fd = slot_->fd.load(std::memory_order_relaxed);
+    const write_result_t r =
+        write_all_iov(fd, rec.span(), derive_send_bound_ms(owner_->liveness_window_ms(), 1));
+    if (owner_->note_write_result(r, fd, slot_->tx_stall_streak))
+        owner_->dropped_tx_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void transport_tcp_server::on_readable(session_base_t& base, const std::byte* data,

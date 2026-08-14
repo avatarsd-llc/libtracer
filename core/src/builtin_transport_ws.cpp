@@ -45,6 +45,13 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
     //    left ADR-0044's peer-listing story creatable only by direct construction (#408).
     //  - `max_peers` (VALUE u32; default 0 = unbounded, host-bounded per RFC-0006) is the
     //    concurrent-peer admission cap.
+    // A third ws-private key, honored on BOTH halves (#838):
+    //  - `liveness_window` (VALUE u32, ms; default 0 = kDefaultLivenessWindowMs) — how long
+    //    a peer may fail to take bytes before it is broken. It is the send bound's
+    //    provenance: a host has no task watchdog to derive one from the way the MCU link
+    //    does (#835), so the number comes from the deployer, exactly as `connect_timeout`
+    //    and CAN's `peer_ttl` (ADR-0044) do. Kind-private, not conn_settings_t: it is a
+    //    property of a STREAM peer, not of every kind.
     // ws has both a dial and a listen shape, so it is TWO modules (RFC-0014 §1) — but the
     // library registers NEITHER (ADR-0073 §4): the application declares each module under a
     // name IT chooses via register_module (kWsClientSuggestedModule / kWsServerSuggestedModule
@@ -54,6 +61,7 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
         const config_reader_t cfg(raw_config);
         const bool peer_named = cfg.flag("peer_named").value_or(false);
         const auto max_peers = static_cast<std::size_t>(cfg.u32("max_peers").value_or(0));
+        const std::uint32_t liveness_window = cfg.u32("liveness_window").value_or(0);
         return dial_or_listen(
             s,
             [&] {
@@ -66,11 +74,12 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
                 // calls `start_receiving()` once the link is fully wired.
                 return make_checked<transport_ws_client>(s.addr, s.port, rx_backend, s.max_frame,
                                                          /*recv_stack=*/std::size_t{0},
-                                                         /*defer_recv=*/true);
+                                                         /*defer_recv=*/true, liveness_window);
             },
             [&] {
                 return make_checked<transport_ws_server>(s.port, rx_backend, s.max_frame, max_peers,
-                                                         peer_named);
+                                                         peer_named, /*recv_stack=*/std::size_t{0},
+                                                         liveness_window);
             });
     });
 }

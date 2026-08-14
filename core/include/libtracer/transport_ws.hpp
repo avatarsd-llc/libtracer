@@ -177,11 +177,19 @@ class transport_ws_server : public slot_server_t {
      *                   (`posix_endpoint_t::start`). One thread multiplexes
      *                   the listener and every peer, so this is the whole
      *                   server's recv-stack knob.
+     * @param liveness_window_ms The app-provided PEER LIVENESS WINDOW in ms, `0` =
+     *                   `kDefaultLivenessWindowMs` (#838). One fan-out round is bounded
+     *                   by it (each peer gets window ÷ peers-in-the-round), so a browser
+     *                   tab that stops reading — a throttled background tab is the shipped
+     *                   case — can no longer freeze the sending thread or the other tabs'
+     *                   frames behind it; a session that stalls `kMaxConsecutiveStalls`
+     *                   records in a row, or once mid-record, is closed.
      */
     explicit transport_ws_server(std::uint16_t bind_port,
                                  mem::mem_backend_t* backend = &mem::heap_backend(),
                                  std::size_t max_frame = 0, std::size_t max_peers = 0,
-                                 bool peer_named = false, std::size_t recv_stack = 0);
+                                 bool peer_named = false, std::size_t recv_stack = 0,
+                                 std::uint32_t liveness_window_ms = 0);
 
     /** @brief Stop the recv thread and close all sockets. */
     ~transport_ws_server() override;
@@ -370,11 +378,16 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
      *             constructor returns, and the default (`false`, the historical shape)
      *             decodes it on the recv thread into whatever sink is installed by then —
      *             possibly none, in which case it is dropped with no counter moving.
+     * @param liveness_window_ms The app-provided PEER LIVENESS WINDOW in ms, `0` =
+     *             `kDefaultLivenessWindowMs` (#838): it bounds every send (and the
+     *             write-mutex hold it takes), so a server that stops reading cannot freeze
+     *             the sending thread; `kMaxConsecutiveStalls` stalled records in a row,
+     *             or one that half-reached the wire, close the connection.
      */
     transport_ws_client(const std::string& host, std::uint16_t port,
                         mem::mem_backend_t* backend = &mem::heap_backend(),
                         std::size_t max_frame = 0, std::size_t recv_stack = 0,
-                        bool defer_recv = false);
+                        bool defer_recv = false, std::uint32_t liveness_window_ms = 0);
 
     /** @brief Stop the recv thread and close the socket. */
     ~transport_ws_client() override;
@@ -447,6 +460,17 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
     [[nodiscard]] std::uint64_t dropped_tx() const noexcept {
         return dropped_tx_.load(std::memory_order_relaxed);
     }
+
+    /** @brief The subset of @ref dropped_tx a STALLED server caused (#838): records
+     *         abandoned because their send bound expired. `kMaxConsecutiveStalls` in a
+     *         row — or one that half-reached the wire — closes the connection. */
+    [[nodiscard]] std::uint64_t stalled_tx() const noexcept {
+        return stalled_tx_.load(std::memory_order_relaxed);
+    }
+
+    /** @brief The peer liveness window this link bounds its sends by, ms, as constructed
+     *         (`0` ⇒ `kDefaultLivenessWindowMs`) (#838). */
+    [[nodiscard]] std::uint32_t liveness_window_ms() const noexcept { return liveness_window_ms_; }
 
     /** @brief The interface-level snapshot (#932) — what a generic `transport_t*` reads. */
     [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
