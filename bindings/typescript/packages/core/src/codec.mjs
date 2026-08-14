@@ -59,7 +59,7 @@ export const TYPE = Object.freeze({
  * `0x15` sits adjacent to `0x14` so this stays one masked compare on the per-TLV parse path.
  *
  * @param {number} typeB  the TLV's type byte
- * @returns {boolean} true when the shape rules of {@link pathRefBodyValid} apply
+ * @returns {boolean} true when the bound-path body shape rules apply (RFC-0024 §4.2/§4.3)
  */
 export function isPathRefType(typeB) {
   return (typeB & 0xfe) === TYPE.PATH_REF;
