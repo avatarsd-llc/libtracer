@@ -214,6 +214,15 @@ pub struct ParsedFwd {
     pub mint_request: bool,
     /** @brief `dst` is a `PATH_REF` (`0x14`), not a canonical `PATH` (RFC-0024 §4). */
     pub dst_bound: bool,
+    /**
+     * @brief The trailing reverse-direction list a mint-flagged FORWARDED request carries —
+     * a `PATH_REF_REVERSE` (`0x15`), RFC-0024 §7.1 amendments 1 and 2.
+     *
+     * Identified by its TYPE, never by its position: a `WRITE`'s payload is whatever stands
+     * in the payload slot as long as it is not this code, INCLUDING a raw `PATH_REF`. The
+     * origin never emits the child, so this is `None` on every frame a client builds.
+     */
+    pub reverse: Option<Tlv>,
 }
 
 fn u8_of(t: &Tlv) -> u8 {
@@ -276,16 +285,33 @@ pub fn parse_fwd_tlv(fwd: &Tlv) -> Result<ParsedFwd, BuildError> {
             payload = Some(ch[i].clone());
         }
     } else if op == fwd_op::WRITE {
-        if i < ch.len() {
+        // The reverse list is told from the payload by its TYPE (RFC-0024 §7.1 amendment 2),
+        // so a raw `PATH_REF` payload is a payload and only `0x15` is the list.
+        if ch
+            .get(i)
+            .is_some_and(|c| c.type_code != type_code::PATH_REF_REVERSE)
+        {
             payload = Some(ch[i].clone());
+            i += 1;
         }
     } else if op == fwd_op::AWAIT {
         if let Some(c) = ch.get(i) {
             if c.type_code == type_code::VALUE && c.payload.len() >= 8 {
                 await_timeout_ns = Some(c.payload_uint());
+                i += 1;
             }
         }
     }
+
+    // Licensed only on a mint-flagged request (§7.1 amendment 1): on an unflagged frame a
+    // trailing `0x15` binds no route and stays unparsed.
+    let reverse = if mint_request {
+        ch.get(i)
+            .filter(|c| c.type_code == type_code::PATH_REF_REVERSE)
+            .cloned()
+    } else {
+        None
+    };
 
     Ok(ParsedFwd {
         op,
@@ -297,6 +323,7 @@ pub fn parse_fwd_tlv(fwd: &Tlv) -> Result<ParsedFwd, BuildError> {
         await_timeout_ns,
         mint_request,
         dst_bound,
+        reverse,
     })
 }
 

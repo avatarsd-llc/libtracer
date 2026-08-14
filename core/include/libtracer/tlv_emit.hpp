@@ -156,16 +156,27 @@ inline void emit_value_le(std::vector<std::byte>& out, T value, std::size_t widt
  * `-fno-exceptions` a growing container would abort the node on a fragmented heap instead of
  * degrading to the plain reply the design promises (#748's precedent, same function).
  *
+ * @param out      Destination buffer, at least `path_ref_wire_bytes(elements.size())` bytes.
+ * @param elements The route, in route order.
+ * @param type     Which bound-path code to head it with — `type_t::PATH_REF` (the default,
+ *                 an address) or `type_t::PATH_REF_REVERSE` (the reverse list a
+ *                 mint-flagged request accumulates, RFC-0024 §7.1 amendment 2). The body
+ *                 grammar is identical; only the role differs, which is the whole reason the
+ *                 role is spelled in the type byte rather than in a position.
+ *
  * @return False — writing nothing — when @p elements exceeds @ref kMaxPathRefElements (the
  *         §4.3 bound; such a caller has no bound spelling and falls back to the canonical
- *         `PATH`), or when @p out is smaller than `path_ref_wire_bytes`.
+ *         `PATH`), when @p out is smaller than `path_ref_wire_bytes`, or when @p type is
+ *         neither bound-path code.
  */
 [[nodiscard]] inline bool emit_path_ref_into(std::span<std::byte> out,
-                                             std::span<const path_ref_element_t> elements) {
+                                             std::span<const path_ref_element_t> elements,
+                                             type_t type = type_t::PATH_REF) {
     if (elements.size() > kMaxPathRefElements) return false;
+    if (!is_path_ref_type(type)) return false;
     const std::size_t body_len = elements.size() * kPathRefElementBytes;
     if (out.size() < path_ref_wire_bytes(elements.size())) return false;
-    out[0] = static_cast<std::byte>(std::to_underlying(type_t::PATH_REF));
+    out[0] = static_cast<std::byte>(std::to_underlying(type));
     out[1] = static_cast<std::byte>(opt_t{}.encode());
     out[2] = static_cast<std::byte>(body_len & 0xFFu);
     out[3] = static_cast<std::byte>((body_len >> 8) & 0xFFu);
@@ -182,15 +193,17 @@ inline void emit_value_le(std::vector<std::byte>& out, T value, std::size_t widt
  * Same bytes as `emit_path_ref_into`, which it delegates to, so the two spellings cannot
  * drift. For the reply path use the span form: it does not allocate.
  *
- * @return False — emitting nothing — when @p elements exceeds @ref kMaxPathRefElements, the
- *         §4.3 bound.
+ * @return False — emitting nothing — when @p elements exceeds @ref kMaxPathRefElements (the
+ *         §4.3 bound) or @p type is neither bound-path code.
  */
 [[nodiscard]] inline bool emit_path_ref(std::vector<std::byte>& out,
-                                        std::span<const path_ref_element_t> elements) {
+                                        std::span<const path_ref_element_t> elements,
+                                        type_t type = type_t::PATH_REF) {
     if (elements.size() > kMaxPathRefElements) return false;
+    if (!is_path_ref_type(type)) return false;
     const std::size_t base = out.size();
     out.resize(base + path_ref_wire_bytes(elements.size()));
-    return emit_path_ref_into(std::span<std::byte>(out).subspan(base), elements);
+    return emit_path_ref_into(std::span<std::byte>(out).subspan(base), elements, type);
 }
 
 /** @brief Append a NAME TLV over a text segment (no temporary buffer). */

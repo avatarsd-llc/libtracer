@@ -97,6 +97,25 @@ pub mod type_code {
     pub const FIELD: u8 = 0x10;
     /** @brief Bound path: a bare array of 8-byte node-scoped vertex refs (RFC-0024 §4). */
     pub const PATH_REF: u8 = 0x14;
+    /**
+     * @brief The REVERSE-direction bound path a mint-flagged request accumulates
+     * (RFC-0024 §7.1 amendment 2) — `PATH_REF`'s body grammar exactly, a different role.
+     *
+     * A distinct code rather than "the only trailing child": every other element of this
+     * grammar self-describes by type, and a positional rule mis-reads a mint-flagged WRITE
+     * whose payload is itself a raw `PATH_REF`.
+     */
+    pub const PATH_REF_REVERSE: u8 = 0x15;
+}
+
+/**
+ * @brief True for either bound-path code — the two types whose body is a fixed-stride 8-byte
+ * element array rather than a self-describing payload (RFC-0024 §4.2).
+ *
+ * `0x15` sits adjacent to `0x14` so this stays one masked compare on the per-TLV parse path.
+ */
+pub const fn is_path_ref_type(type_b: u8) -> bool {
+    type_b & 0xFE == type_code::PATH_REF
 }
 
 /**
@@ -366,7 +385,7 @@ fn parse_one(buf: &[u8]) -> Result<(Tlv, usize, &[u8]), Error> {
     // The one per-type structural rule (RFC-0024 §4.2/§4.3), through the single predicate
     // `encode` now shares — see `path_ref_body_valid` for the four clauses and why they are
     // shape rather than meaning.
-    if type_b == type_code::PATH_REF && !path_ref_body_valid(opt.pl, opt.ll, length) {
+    if is_path_ref_type(type_b) && !path_ref_body_valid(opt.pl, opt.ll, length) {
         return Err(Error::FrameInvalid);
     }
     let ts_size = if opt.ts {
@@ -555,7 +574,7 @@ pub fn decode(input: &[u8]) -> Result<Tlv, Error> {
 pub fn encode(tlv: &Tlv) -> Vec<u8> {
     // A PATH_REF body is never structured, so `payload` IS the body length here: an `opt.pl`
     // PATH_REF fails the PL clause before the children branch below ever runs.
-    if tlv.type_code == type_code::PATH_REF
+    if is_path_ref_type(tlv.type_code)
         && !path_ref_body_valid(tlv.opt.pl, tlv.opt.ll, tlv.payload.len() as u64)
     {
         return Vec::new();

@@ -1,0 +1,12 @@
+{
+  "name": "fwd-reverse-mint",
+  "category": "fwd",
+  "hex": "0F402D000100010080064008000200040074656D7006400C00020003006E65740200010061150008000700000003000000",
+  "total_bytes": 49,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "meaning": "The FORWARDED leg of a mint-flagged READ: FWD{ op=0x80 = READ | mint-request, dst=/temp (the residual after this hop consumed /sensor), src=/net/a (grown canonically by the arrival mount), PATH_REF_REVERSE(1 element) }. The trailing 0x15 child is the reverse-direction list the forwarding hop contributed — its own reference to the identity the request arrived on (RFC-0024 §7.1 amendments 1 and 2). The origin's own frame carries no such child: fwd/fwd-mint-request is what the origin emitted, unchanged.",
+    "note": "The reverse list is identified by its TYPE — 0x15 PATH_REF_REVERSE — and never by its position (RFC-0024 §7.1 amendment 2). Its body grammar is 0x14's exactly: opt.PL and opt.LL both 0, length a multiple of 8, at most 255 elements. A reader that identified it as 'the only trailing child' would mis-read a mint-flagged WRITE whose payload is a raw PATH_REF, which is the shape the amendment gives back."
+  }
+}

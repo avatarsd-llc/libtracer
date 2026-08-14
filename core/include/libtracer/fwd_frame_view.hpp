@@ -369,11 +369,12 @@ template <class Cursor>
 }
 
 /**
- * @brief The trailing `PATH_REF` a forwarded REPLY carries — the mint answer so far.
+ * @brief The trailing bound-path child a forwarded frame carries — the mint list so far, in
+ *        whichever direction the caller asked for.
  *
- * @see peek_reply_mint
+ * @see peek_trailing_mint
  */
-struct reply_mint_t {
+struct trailing_mint_t {
     std::size_t pos = 0;      /**< @brief Offset of the `PATH_REF` child's own header. */
     std::size_t body_len = 0; /**< @brief Length of the element array already on the wire. */
     /**
@@ -399,29 +400,41 @@ struct no_mint_t {
 };
 
 /**
- * @brief Where a forwarded REPLY's trailing `PATH_REF` sits, if it carries one (RFC-0024 §7.1).
+ * @brief Where a forwarded frame's trailing mint list sits, if it carries one (RFC-0024 §7.1).
  *
- * A mint answer rides the reply as its LAST child, so a hop that wants to contribute its own
+ * A mint list rides its frame as the LAST child, so a hop that wants to contribute its own
  * element looks exactly there and nowhere else. The presence of that child IS the signal that
  * the origin asked for a mint — a hop holds no per-flow state and has nothing else to read it
  * from, which is what keeps the accumulation stateless.
+ *
+ * **The two directions are told apart by TYPE, never by position** (RFC-0024 §7.1
+ * amendment 2): the forward mint ANSWER on a reply is a `PATH_REF` (`0x14`), the REVERSE list
+ * on a mint-flagged request a `PATH_REF_REVERSE` (`0x15`). @p Want is that discriminant, and
+ * it is free: the loop below already compares each tail child's type byte, so a caller asking
+ * for the other constant compiles to the same instruction. A positional rule ("the only
+ * trailing child") would have cost the same here and foreclosed a raw `PATH_REF` payload on a
+ * mint-flagged WRITE, which is why the type carries the role.
  *
  * FINDING the answer and being able to ADD to it are two different answers, and the caller
  * needs both: a hop that finds a list it cannot extend MUST STRIP it (§7.1 erratum 1), never
  * relay it. A relayed list that skips a hop is not a shorter route, it is a WRONG one — see
  * the strip branch in @ref rebuild_fwd_forward for the mis-route it produces. Reporting a
  * full-cap list as "not found" would take exactly that forbidden branch, so the cap rides back
- * as @ref reply_mint_t::can_contribute rather than as a `nullopt`.
+ * as @ref trailing_mint_t::can_contribute rather than as a `nullopt`.
  *
- * @param cur   Cursor over the reply frame.
- * @param from  First byte after `src` — where the reply's trailing children begin.
+ * @param cur   Cursor over the frame.
+ * @param from  First byte after `src` — where the frame's trailing children begin.
  * @param end   End of the FWD body.
- * @retval std::nullopt No trailing `PATH_REF` at all, or a malformed tail. The reply carries
- *         no mint exchange and is forwarded untouched.
+ * @tparam Want The mint list's type: `PATH_REF` on a reply, `PATH_REF_REVERSE` on a
+ *              mint-flagged request (RFC-0024 §7.1 amendment 2). A TEMPLATE parameter, not a
+ *              runtime one, so the compare below is against an IMMEDIATE at both call sites
+ *              and the two directions cannot share a generic copy that reloads it.
+ * @retval std::nullopt No trailing child of type @p want at all, or a malformed tail. The
+ *         frame carries no mint exchange in this direction and is forwarded untouched.
  */
-template <class Cursor>
-[[nodiscard]] std::optional<reply_mint_t> peek_reply_mint(const Cursor& cur, std::size_t from,
-                                                          std::size_t end) {
+template <wire::type_t Want = wire::type_t::PATH_REF, class Cursor>
+[[nodiscard]] std::optional<trailing_mint_t> peek_trailing_mint(const Cursor& cur, std::size_t from,
+                                                                std::size_t end) {
     std::size_t pos = from;
     std::size_t ref_pos = 0;
     std::size_t ref_body_len = 0;
@@ -429,7 +442,10 @@ template <class Cursor>
     while (pos < end) {
         const auto h = read_fwd_header(cur, pos);
         if (!h || h->total == 0 || pos + h->total > end) return std::nullopt;
-        found = h->type == wire::type_t::PATH_REF;
+        // ONE compare, exactly as before amendment 2 gave the reverse list its own code —
+        // `want` is a constant at every call site, so no cursor read and no body peek is
+        // added to any hop by the discriminant being a type rather than a position.
+        found = h->type == Want;
         ref_pos = pos;
         ref_body_len = h->body_len;
         if (found && !wire::path_ref_body_valid(h->opt.pl, h->opt.ll, h->body_len))
@@ -437,7 +453,7 @@ template <class Cursor>
         pos += h->total;
     }
     if (!found) return std::nullopt;
-    return reply_mint_t{
+    return trailing_mint_t{
         .pos = ref_pos,
         .body_len = ref_body_len,
         .can_contribute = wire::path_ref_element_count(ref_body_len) < wire::kMaxPathRefElements,
@@ -990,7 +1006,7 @@ struct fwd_rebuild_t {
  *
  * `noinline` against @ref rebuild_fwd_forward's `flatten`, and it is a measurement, not a
  * preference. `flatten` pulls everything a function calls into it, so inlined this dragged
- * @ref peek_reply_mint's header loop into the rebuild's body — on the branch a REQUEST hop
+ * @ref peek_trailing_mint's header loop into the rebuild's body — on the branch a REQUEST hop
  * never takes. The extra front end that bought cost `bench_forward_rope` **+13% at fan 2** in
  * branch mispredicts (3x armA's count under `perf stat`, on ~equal instructions): a shipped
  * shape paying for a form its frames cannot be. Out of line, the request hop sees one
@@ -1004,7 +1020,8 @@ template <class Cursor, class MintFn>
 [[gnu::noinline]] std::size_t rebuild_reply_mint(const Cursor& cur, std::size_t pos,
                                                  std::size_t body_end, MintFn& mint_fn,
                                                  fwd_rebuild_t& r) {
-    const std::optional<reply_mint_t> found = peek_reply_mint(cur, pos, body_end);
+    const std::optional<trailing_mint_t> found =
+        peek_trailing_mint<wire::type_t::PATH_REF>(cur, pos, body_end);
     if (!found) return 0;
     // The tail stops short of the mint answer either way: this hop re-heads it one element
     // longer, or removes it. It is never relayed untouched.
@@ -1042,15 +1059,16 @@ template <class Cursor, class MintFn>
  *
  * Three outcomes, all normative:
  *
- * - **Extend.** The request's last child is already a reverse `PATH_REF` and @p mint_fn
+ * - **Extend.** The request's last child is already a `PATH_REF_REVERSE` (`0x15`, the
+ *   reverse list's OWN type since RFC-0024 §7.1 amendment 2 — never a position) and @p mint_fn
  *   yields this hop's element for the identity the frame ARRIVED on — its connection vertex
  *   for a point-to-point link, or the accepted session's identity vertex for a bus session.
  *   The element is PREPENDED (the list runs responder-first), exactly the @ref
  *   fwd_rebuild_t::mint machinery the reply side uses.
  * - **Create.** No reverse child yet — this is the FIRST forwarding hop (the origin never
- *   emits the child) — and @p mint_fn yields an element: a fresh one-element `PATH_REF` is
- *   appended as the new last child. "A hop with no reverse child yet MAY create it"; the
- *   reference core participates.
+ *   emits the child) — and @p mint_fn yields an element: a fresh one-element
+ *   `PATH_REF_REVERSE` is appended as the new last child. "A hop with no reverse child yet
+ *   MAY create it"; the reference core participates.
  * - **Strip.** A reverse child exists but this hop cannot contribute (no identity vertex, a
  *   saturated generation, a full list): the WHOLE child is removed. Erratum 1's rule
  *   direction-reversed and equally forced — a list that skips a hop is a wrong route, the
@@ -1067,7 +1085,8 @@ template <class Cursor, class MintFn>
 [[gnu::noinline]] std::size_t rebuild_request_reverse_mint(const Cursor& cur, std::size_t pos,
                                                            std::size_t body_end, MintFn& mint_fn,
                                                            fwd_rebuild_t& r) {
-    const std::optional<reply_mint_t> found = peek_reply_mint(cur, pos, body_end);
+    const std::optional<trailing_mint_t> found =
+        peek_trailing_mint<wire::type_t::PATH_REF_REVERSE>(cur, pos, body_end);
     // The ONE call — after the frame is known mint-flagged, at most once per hop.
     const std::optional<wire::path_ref_element_t> mint =
         (!found || found->can_contribute) ? mint_fn() : std::nullopt;
@@ -1075,7 +1094,7 @@ template <class Cursor, class MintFn>
         // CREATE: no reverse child yet. Nothing to strip; a hop that cannot mint forwards
         // the flagged request untouched (the strip rule binds only when a list exists).
         if (!mint) return 0;
-        r.mint.header_bare(wire::type_t::PATH_REF, wire::kPathRefElementBytes);
+        r.mint.header_bare(wire::type_t::PATH_REF_REVERSE, wire::kPathRefElementBytes);
         std::array<std::byte, wire::kPathRefElementBytes> e{};
         wire::path_ref_store_element(e, *mint);
         r.mint.raw(e);
@@ -1087,7 +1106,7 @@ template <class Cursor, class MintFn>
     if (!mint) return 0;
     r.ref_body_off = found->pos + 4;  // LL = 0 is a MUST, so the header is 4 bytes
     r.ref_body_len = found->body_len;
-    r.mint.header_bare(wire::type_t::PATH_REF, r.ref_body_len + wire::kPathRefElementBytes);
+    r.mint.header_bare(wire::type_t::PATH_REF_REVERSE, r.ref_body_len + wire::kPathRefElementBytes);
     std::array<std::byte, wire::kPathRefElementBytes> e{};
     wire::path_ref_store_element(e, *mint);
     r.mint.raw(e);

@@ -16,6 +16,24 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`wire::type_t::PATH_REF_REVERSE` (`0x15`) — the reverse-direction bound-path list's own
+  type code** ([#1260](https://github.com/avatarsd-llc/libtracer/issues/1260); RFC-0024 §7.1
+  **amendment 2**). **Wire change.** The reverse list a mint-flagged request accumulates is
+  now identified by this code rather than by amendment 1's positional rule ("the only trailing
+  child"), which is **withdrawn**. Its body grammar is `PATH_REF`'s exactly — `opt.PL`/`opt.LL`
+  0, `length` a multiple of 8, ≤ 255 elements — so the codec's shape gate now asks
+  `wire::is_path_ref_type()` (new; one masked compare, `0x15` being adjacent to `0x14`) instead
+  of testing one code. `wire::emit_path_ref` / `emit_path_ref_into` gained a defaulted `type_t`
+  parameter (source-compatible; both refuse a type that is neither bound-path code). The
+  reference core neither emits nor accepts the old spelling: amendment 1 shipped inside this
+  same unreleased window, so no released frame carries it. New conformance vectors
+  `fwd/fwd-reverse-mint` and `path-ref/reverse-len-not-multiple-of-8` (76 → 78); the origin's
+  own frame is unchanged and `fwd/fwd-mint-request`'s bytes stand. Cost on the hop: **zero
+  instructions** — `peek_trailing_mint` already compared each tail child's type byte, so the
+  discriminant is the same compare against a different constant, with no cursor read and no
+  body peek added. The un-foreclosed shape comes back with it: a mint-flagged `WRITE` whose
+  payload is itself a raw `PATH_REF` now keeps its payload.
+
 - **`graph_t::link_edge_candidates(std::string_view)` — the cost of a link's departure, made
   observable** ([#1071](https://github.com/avatarsd-llc/libtracer/issues/1071)). Reports how
   many vertices a `evict_link_edges` for that link would visit. A diagnostic, and the
@@ -24,6 +42,13 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   not un-index), so it is an upper bound on work and must not be read as an edge count.
 
 ### Changed
+
+- **`net::peek_reply_mint` / `net::reply_mint_t` are renamed `net::peek_trailing_mint` /
+  `net::trailing_mint_t`** ([#1260](https://github.com/avatarsd-llc/libtracer/issues/1260)).
+  The function has served both directions since the reverse mint landed, and now takes the
+  list's `wire::type_t` as its discriminant (defaulted to `PATH_REF`, so a reply-side caller is
+  unchanged but for the name). "Reply" in the old name was already wrong, and would have been
+  actively misleading next to a request-only type code.
 
 - **A link's departure now costs that link's own subscribed vertices instead of the graph's
   whole subscribed set** ([#1071](https://github.com/avatarsd-llc/libtracer/issues/1071)).

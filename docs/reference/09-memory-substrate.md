@@ -318,7 +318,7 @@ The decode arena is not the only thing a peer sizes. A FWD hop reading a **multi
 
 Dropping is the whole answer, not half of one: emitting the entries that did fit would put a **truncated FWD on the wire**, which is strictly worse than silence, and FWD is not delivery-guaranteed — the sender retries. Note the shape difference from the decode: the decode has a *status* to return, so it answers by value; a forward hop has no reply channel, so its only honest answer is to stay quiet.
 
-The **single-link** (contiguous) hop allocates nothing: each region yields exactly one sub-span, so the entry count is bounded by the frame layout and a stack array of that layout-derived size holds it (`core/include/libtracer/fwd_frame_view.hpp:880` — `kFwdMaxIov`).
+The **single-link** (contiguous) hop allocates nothing: each region yields exactly one sub-span, so the entry count is bounded by the frame layout and a stack array of that layout-derived size holds it (`core/include/libtracer/fwd_frame_view.hpp:896` — `kFwdMaxIov`).
 
 ### Divergent rejects: an open conformance question
 
