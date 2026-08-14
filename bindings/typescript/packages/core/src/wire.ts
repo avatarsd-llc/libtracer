@@ -12,6 +12,7 @@
  */
 export {
   TYPE,
+  isPathRefType,
   PATH_REF_ELEMENT_BYTES,
   MAX_PATH_REF_ELEMENTS,
   ERROR,

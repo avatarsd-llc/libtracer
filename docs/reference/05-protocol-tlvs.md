@@ -13,17 +13,17 @@
 | `0x20` – `0x7F` | Reserved for future core extensions |
 | `0x80` – `0xFF` | User-defined application payload types |
 
-Assigned in the first block: `0x01`–`0x04`, `0x06`–`0x0C`, `0x0E` (12 types). `0x05` is a **reserved code with no assigned meaning** in v1 (see §`0x05`); `0x0D` ROUTER is a **reserved, decodable codepoint with no implemented mechanism** (see §`0x0D`). `0x0E` is **SPEC** (vertex-creation spec, [ADR-0017](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0017-in-band-vertex-creation-controller-orchestration.md)). The `0x0F`–`0x1F` fast-track range holds the remote-operation, route-handle and bound-path frames (`0x0F`–`0x14` assigned, §reserved range `0x0F` – `0x1F`); `0x20` – `0x7F` is the long-term registry.
+Assigned in the first block: `0x01`–`0x04`, `0x06`–`0x0C`, `0x0E` (12 types). `0x05` is a **reserved code with no assigned meaning** in v1 (see §`0x05`); `0x0D` ROUTER is a **reserved, decodable codepoint with no implemented mechanism** (see §`0x0D`). `0x0E` is **SPEC** (vertex-creation spec, [ADR-0017](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0017-in-band-vertex-creation-controller-orchestration.md)). The `0x0F`–`0x1F` fast-track range holds the remote-operation, route-handle and bound-path frames (`0x0F`–`0x15` assigned, §reserved range `0x0F` – `0x1F`); `0x20` – `0x7F` is the long-term registry.
 
 The names below are the canonical type-code names; an implementation's own enumeration matches them.
 
 ### Structured TLVs
 
-Several core type codes are **structured** — they carry `opt.PL=1` and their payload is a concatenation of child TLVs. In the first block the structured types are: `0x04` SUBSCRIBER, `0x06` PATH, `0x07` POINT, `0x09` STATUS (when non-empty), `0x0A` ACL, `0x0B` SETTINGS, `0x0E` SPEC. In the fast-track range `0x0F` FWD, `0x10` FIELD and the `0x11`–`0x13` route-handle frames are structured as well (§the fast-track range); `0x14` PATH_REF is the one code in that range that is not. Each entry below specifies its own children layout.
+Several core type codes are **structured** — they carry `opt.PL=1` and their payload is a concatenation of child TLVs. In the first block the structured types are: `0x04` SUBSCRIBER, `0x06` PATH, `0x07` POINT, `0x09` STATUS (when non-empty), `0x0A` ACL, `0x0B` SETTINGS, `0x0E` SPEC. In the fast-track range `0x0F` FWD, `0x10` FIELD and the `0x11`–`0x13` route-handle frames are structured as well (§the fast-track range); `0x14` PATH_REF and `0x15` PATH_REF_REVERSE are the two codes in that range that are not. Each entry below specifies its own children layout.
 
 There is no generic container type: every structured container declares its purpose via its type code. User-range type codes (`0x80–0xFF`) MAY also be structured (set `opt.PL=1`) for application-defined records.
 
-`0x14` PATH_REF is deliberately **not** structured despite being an address form: its payload is a fixed-stride record array, so `opt.PL` MUST be 0 (§`0x14`).
+`0x14` PATH_REF and `0x15` PATH_REF_REVERSE are deliberately **not** structured despite carrying addresses: their payload is a fixed-stride record array, so `opt.PL` MUST be 0 (§`0x14`, §`0x15`).
 
 ---
 
@@ -271,7 +271,7 @@ Type code `0x05` is a **reserved code with no assigned meaning** in v1. Structur
 - Receivers MUST treat `type=0x05` as a reserved-but-unassigned code per [01-data-format.md](01-data-format.md) §handling unknown type codes (skip safely, do not crash).
 - The code is not available for reuse; collision-prevention keeps it unassigned.
 
-The structural concept lives in the options bits: any TLV with `opt.PL=1` is a structured container holding concatenated child TLVs. The protocol's structured types are SUBSCRIBER (0x04), PATH (0x06), POINT (0x07), STATUS (0x09), ACL (0x0A), SETTINGS (0x0B), SPEC (0x0E) in the first block, plus FWD (0x0F), FIELD (0x10) and the route-handle frames ADVERTISE (0x11) / COMPACT (0x12) / HANDLE_NACK (0x13) in the fast-track range; PATH_REF (0x14) is the one code in that range that is not. User-defined structured records use user-range type codes (`0x80–0xFF`) with `PL=1`.
+The structural concept lives in the options bits: any TLV with `opt.PL=1` is a structured container holding concatenated child TLVs. The protocol's structured types are SUBSCRIBER (0x04), PATH (0x06), POINT (0x07), STATUS (0x09), ACL (0x0A), SETTINGS (0x0B), SPEC (0x0E) in the first block, plus FWD (0x0F), FIELD (0x10) and the route-handle frames ADVERTISE (0x11) / COMPACT (0x12) / HANDLE_NACK (0x13) in the fast-track range; PATH_REF (0x14) and PATH_REF_REVERSE (0x15) are the two codes in that range that are not. User-defined structured records use user-range type codes (`0x80–0xFF`) with `PL=1`.
 
 ### Why no generic container
 
@@ -934,11 +934,12 @@ Allocated on a fast-track basis during v1. Assigned so far:
 - `0x0F` **FWD** and `0x10` **FIELD** — the remote-operation frames ([RFC-0004](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0004-remote-operation-addressing.md) §B/§C, ADR-0035).
   - A `FWD`'s `dst` (and `src`) **MAY** be a `PATH_REF` (§`0x14`) instead of a `PATH`; the two forms are interchangeable as addresses, and a peer that does not accept the bound one falls back per §`0x14` §routing semantics.
   - The `op` byte's **opcode is `op & 0x3F`**; bits 7–6 are flags, of which **bit 7 is the bound-path mint request** (§`0x14` §routing semantics). A forwarder MUST mask rather than switch on the raw byte ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §7.5/§9.3).
-  - A mint-flagged **request** MAY additionally carry a trailing **reverse-direction `PATH_REF`** child after RFC-0004 §B's closed child list — same §`0x14` grammar (`opt.PL`/`opt.LL` 0, `length` a multiple of 8, ≤ 255 elements), contributed by **forwarding hops only**, never by the origin ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §7.1 amendment 1). Last, so a positional reader of an ordinary request is untouched, mirroring the reply's mint answer.
+  - A mint-flagged **request** MAY additionally carry a trailing **`PATH_REF_REVERSE`** (§`0x15`) child after RFC-0004 §B's closed child list — the reverse-direction list, contributed by **forwarding hops only**, never by the origin ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §7.1 amendments 1 and 2). It is identified by its **type code**, never by its position; it is nonetheless last, so a positional reader of an ordinary request is untouched, mirroring the reply's mint answer.
 - `0x11`–`0x13` — the **route-handle transport-plane control frames** (below).
 - `0x14` **PATH_REF** — the **bound path**, the second normative address form ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §4, below).
+- `0x15` **PATH_REF_REVERSE** — the **reverse-direction bound-path list** a mint-flagged request accumulates ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §7.1 amendment 2, below). `0x14`'s body grammar exactly; a different role.
 
-Unassigned: `0x15`–`0x1F`. Candidate uses: `CAPABILITY` (opaque token, lighter than full ACL), `HEARTBEAT` (an explicit liveness ping; the intended alternative is writes to the `:liveness.last_seen_ns` field, [04-communication-flows.md](04-communication-flows.md) — ⚠️ which is itself unimplemented, so *neither* spelling exists today, [#586](https://github.com/avatarsd-llc/libtracer/issues/586)). Receivers MUST handle unknown codes in this range per the forward-compatibility rules of [01-data-format.md](01-data-format.md) §forward / backward compatibility.
+Unassigned: `0x16`–`0x1F`. Candidate uses: `CAPABILITY` (opaque token, lighter than full ACL), `HEARTBEAT` (an explicit liveness ping; the intended alternative is writes to the `:liveness.last_seen_ns` field, [04-communication-flows.md](04-communication-flows.md) — ⚠️ which is itself unimplemented, so *neither* spelling exists today, [#586](https://github.com/avatarsd-llc/libtracer/issues/586)). Receivers MUST handle unknown codes in this range per the forward-compatibility rules of [01-data-format.md](01-data-format.md) §forward / backward compatibility.
 
 A single-hop `FWD` request → reply round-trip (the consumer reaches a terminus node directly). The reply's `dst` is the request's `src`; a failure comes back as `kind=ERROR` carrying `STATUS{ ERROR }`:
 
@@ -1096,13 +1097,42 @@ A host that implements only the terminus case remains **conformant**: it answers
 - The `FWD` `op` byte carries **flags in bits 7–6**; the opcode is `op & 0x3F`. A forwarder **MUST** mask before switching on it, so an unrecognised flag degrades to the plain opcode instead of an unknown-opcode reject.
 - **Bit 7 is the mint request.** An origin sets it on an ordinary operation; each host that participates answers with its own vertex ref, and the terminus answers with its reference to the **target vertex itself**.
 - The answer rides the **reply**, as its **last** child: a `PATH_REF` of `4 + 8H` bytes. Last, so a positional reader of an ordinary reply is untouched and only an origin that asked reads past it.
-- **Both directions bind in one round trip** ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §7.1 amendment 1; its erratum 2 records why the reverse arm needed an amendment — until 2026-08-14 this bullet read "one direction is bound, and only one"). The **forward** list rides the reply, below. The **reverse** list rides the *forwarded request* as a trailing `PATH_REF` child: each forwarding host **prepends** its own element for the identity the request arrived on — its connection vertex for a point-to-point link, or the accepted session's identity vertex for a bus session, budgeted by the accepting listener's `max_peers`. The origin never emits the child, so the origin's leg carries none. The responder receives the list one element short, completes it with its own reference to the connection vertex the request arrived on, and **consumes that element locally** on every delivery — the exact mirror of the origin's handling of the forward list below. A hop that cannot contribute its reverse element **MUST strip the whole reverse list** (the strip rule below, direction-reversed: a list that skips a hop is a wrong route, not a shorter one).
+- **Both directions bind in one round trip** ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §7.1 amendment 1; its erratum 2 records why the reverse arm needed an amendment — until 2026-08-14 this bullet read "one direction is bound, and only one"). The **forward** list rides the reply, below. The **reverse** list rides the *forwarded request* as a trailing **`PATH_REF_REVERSE`** (§`0x15`) child — identified by that type code and never by its position ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §7.1 amendment 2): each forwarding host **prepends** its own element for the identity the request arrived on — its connection vertex for a point-to-point link, or the accepted session's identity vertex for a bus session, budgeted by the accepting listener's `max_peers`. The origin never emits the child, so the origin's leg carries none. The responder receives the list one element short, completes it with its own reference to the connection vertex the request arrived on, and **consumes that element locally** on every delivery — the exact mirror of the origin's handling of the forward list below. A hop that cannot contribute its reverse element **MUST strip the whole reverse list** (the strip rule below, direction-reversed: a list that skips a hop is a wrong route, not a shorter one).
 - **The list accumulates on the reply's way back.** The terminus writes the first element. Each hop that forwards a reply whose last child is already a `PATH_REF` **prepends** its own element for the link that reply arrived on — which is the link the request left through — so the list stays in route order, origin-first. That presence is the only signal a hop reads: a forwarder holds no per-flow state and has nothing else to read it from. The mint answer therefore comes back **one element short of the route**: the hop out of the origin is the one hop no peer ever sees, so the origin completes the list with its own reference to its first-hop connection vertex, and **consumes that element locally** on every subsequent operation rather than putting it on the wire.
 - **A hop that cannot contribute MUST strip the mint answer** rather than relay it — no connection vertex, a saturated generation, a full list. This is a safety rule, not tidiness: a list that skips a hop is not a shorter route but a **wrong** one. The origin consumes its own element, the frame reaches the hop that contributed nothing with exactly one element left, and that hop — believing itself the terminus — dereferences an element minted on a *different* host against its own vertex map, where the same index and generation name an ordinary live vertex. That is a mis-route. A hop that cannot mint therefore refuses the whole exchange: the origin sees an ordinary reply, stays canonical, and loses only the optimisation.
 - A mint is gated by the **full existing check**: a host **MUST NOT** mint a vref for a vertex the requesting caller could not have reached canonically in the same operation. Since a mint rides that operation, this is automatic — a denial happens before any vref is produced. So probing the bound form yields exactly what probing the canonical form yields, *exists + denied*, and never *exists + here is a handle to it*. A bound path cannot be used to discover a namespace its holder cannot already walk.
 - The request is a **hint, never an obligation**. A host that will not or cannot mint — a saturated generation, or simply no implementation — answers the ordinary reply, and the origin stays canonical.
 
 **Optionality.** `PATH_REF` is optional to *emit* and optional to *accept*. A peer that does not accept it answers such a frame per the forward-compatibility rules of [01-data-format.md](01-data-format.md) §handling unknown type codes, and the origin falls back to the canonical form.
+
+### Reverse bound path — `0x15` PATH_REF_REVERSE
+
+The **reverse-direction** list a mint-flagged request accumulates on its way to the responder ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §7.1 amendments 1 and 2). Same body, different role.
+
+#### Payload layout
+
+Byte-for-byte §`0x14`'s, and every structural rule stated there binds here **identically**:
+
+```
+PATH_REF_REVERSE (0x15, PL=0, LL=0) {
+  ; body: H bare 8-byte elements, in route order (responder-first), no per-element framing
+  ;   u32 index       little-endian
+  ;   u32 generation  little-endian
+}
+```
+
+- **`opt.PL` MUST be 0** and **`opt.LL` MUST be 0**; **`length` MUST be a multiple of 8**; the element count **MUST be ≤ 255** (`length` ≤ 2040). A header that fails any of these is `tr::frame::invalid`, exactly as for `0x14`. A core that applies the shape check to `0x14` alone is **not conformant**: conformance vector [`path-ref/reverse-len-not-multiple-of-8`](https://github.com/avatarsd-llc/libtracer/tree/main/tests/conformance/vectors/v1/path-ref/reverse-len-not-multiple-of-8).
+- An element means the same thing and is equally **node-scoped**: it is a reference on the host that minted it, and an address rather than a capability.
+
+#### Where it appears, and why it is its own code
+
+It appears in exactly one place: as the **last child of a forwarded `FWD` request whose `op` bit 7 is set**. It never appears on a reply (the forward mint answer there is a `0x14` `PATH_REF`), never on an unflagged request, and never on the origin's own frame — the origin emits no reverse child, which is what keeps a mint request at **zero added origin bytes**. Conformance vector: [`fwd/fwd-reverse-mint`](https://github.com/avatarsd-llc/libtracer/tree/main/tests/conformance/vectors/v1/fwd/fwd-reverse-mint).
+
+The alternative was to identify it as "the only trailing child of a mint-flagged request", which decodes the same frames. It is not used, for three reasons: a positional rule mis-reads a mint-flagged `WRITE` whose stored value is itself a raw `PATH_REF`; it breaks the moment any later extension adds a second trailing child; and every other element of this grammar self-describes by type. The type byte is free to read — a hop already compares each tail child's type — so the role is spelled where the grammar spells every other role.
+
+Hop behaviour — prepend or strip, the responder's completion and local consumption — is §`0x14` §routing semantics §Minting, which describes the list wherever it says "the reverse list".
+
+**Optionality.** As for `0x14`: optional to emit, optional to accept. A peer that does not accept it treats the child per the forward-compatibility rules of [01-data-format.md](01-data-format.md) §handling unknown type codes; the reverse binding is an optimisation plus a liveness check, and a responder that never receives one keeps a canonical return route.
 
 ---
 

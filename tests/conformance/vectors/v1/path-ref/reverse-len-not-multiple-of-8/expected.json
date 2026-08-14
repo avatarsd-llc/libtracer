@@ -1,0 +1,9 @@
+{
+  "name": "reverse-len-not-multiple-of-8",
+  "category": "path-ref",
+  "hex": "15000C000700000003000000AABBCCDD",
+  "total_bytes": 16,
+  "reject": "FRAME_INVALID",
+  "decoded": null,
+  "meaning": "0x15 PATH_REF_REVERSE carries 0x14's body grammar exactly (RFC-0024 §7.1 amendment 2), so length=12 — one and a half elements — has no reading and is tr::frame::invalid for the identical reason path-ref/ref-len-not-multiple-of-8 is. A successful decode of this frame is a conformance FAILURE."
+}

@@ -302,6 +302,15 @@ export interface ParsedFwd {
   readonly mintRequest: boolean;
   /** @brief `dst` is a `PATH_REF` (`0x14`), not a canonical `PATH` (RFC-0024 §4). */
   readonly dstBound: boolean;
+  /**
+   * @brief The trailing reverse-direction list a mint-flagged FORWARDED request carries — a
+   * `PATH_REF_REVERSE` (`0x15`), RFC-0024 §7.1 amendments 1 and 2 (else `null`).
+   *
+   * Identified by its TYPE, never by its position: a WRITE's payload is whatever stands in
+   * the payload slot as long as it is not this code, INCLUDING a raw `PATH_REF`. The origin
+   * never emits the child, so this is `null` on every frame a client builds.
+   */
+  readonly reverse: Tlv | null;
 }
 
 /**
@@ -356,14 +365,20 @@ export function parseFwdTlv(fwd: Tlv): ParsedFwd {
     if (ch[i]?.type === TYPE.VALUE) kind = u8(ch[i++]);
     if (i < ch.length) payload = ch[i++];
   } else if (op === FWD_OP.WRITE) {
-    if (i < ch.length) payload = ch[i++];
+    // The reverse list is told from the payload by its TYPE (RFC-0024 §7.1 amendment 2), so a
+    // raw PATH_REF payload is a payload and only 0x15 is the list.
+    if (i < ch.length && ch[i].type !== TYPE.PATH_REF_REVERSE) payload = ch[i++];
   } else if (op === FWD_OP.AWAIT) {
     if (ch[i]?.type === TYPE.VALUE && ch[i].payload.length >= 8) {
       awaitTimeoutNs = new DataView(ch[i].payload.buffer, ch[i].payload.byteOffset, 8).getBigUint64(0, true);
       i++;
     }
   }
-  return { op, dst, field, src, kind, payload, awaitTimeoutNs, mintRequest, dstBound };
+  // Licensed only on a mint-flagged request (§7.1 amendment 1): on an unflagged frame a
+  // trailing 0x15 binds no route and stays unparsed.
+  const reverse =
+    mintRequest && ch[i]?.type === TYPE.PATH_REF_REVERSE ? ch[i] : null;
+  return { op, dst, field, src, kind, payload, awaitTimeoutNs, mintRequest, dstBound, reverse };
 }
 
 /**

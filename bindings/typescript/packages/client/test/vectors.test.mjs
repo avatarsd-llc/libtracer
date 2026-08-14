@@ -19,6 +19,7 @@ import {
   encode,
   ERROR,
   TYPE,
+  isPathRefType,
   PATH_REF_ELEMENT_BYTES,
   MAX_PATH_REF_ELEMENTS,
 } from '@avatarsd-llc/libtracer';
@@ -533,6 +534,39 @@ test('fwd-mint-request is fwd-read with ONE bit changed — a mint ask costs no 
   assert.equal(pf.mintRequest, false);
   // The mint REQUEST is canonically addressed: the canonical path IS the mint key.
   assert.equal(mf.dstBound, false);
+});
+
+test('fwd-reverse-mint carries the reverse list as a TYPED trailing child (0x15)', () => {
+  const bin = vector('fwd/fwd-reverse-mint');
+  const tlv = decode(bin);
+  assert.equal(tlv.type, TYPE.FWD);
+  const last = tlv.children[tlv.children.length - 1];
+  // The type byte IS the amendment (RFC-0024 §7.1 amendment 2): a positional reading decodes
+  // this frame identically, which is exactly why the code has to be asserted rather than the
+  // shape inferred.
+  assert.equal(last.type, TYPE.PATH_REF_REVERSE, 'the reverse list heads with 0x15');
+  assert.equal(last.payload.length, 8, 'one element');
+  assert.ok(isPathRefType(last.type), 'and the shape rules of a bound-path body apply to it');
+
+  // The origin's own frame carries none — "zero added ORIGIN bytes", after the amendment.
+  const origin = decode(vector('fwd/fwd-mint-request'));
+  assert.ok(
+    origin.children.every((c) => c.type !== TYPE.PATH_REF_REVERSE),
+    'the origin emits no reverse child',
+  );
+
+  const parsed = decodeFwd(bin);
+  assert.equal(parsed.op, FWD_OP.READ);
+  assert.equal(parsed.mintRequest, true);
+  assert.ok(parsed.reverse !== null, 'the reverse list is parsed out');
+  assert.equal(parsed.payload, null, 'a READ has no payload — the child is not mistaken for one');
+});
+
+test('the reverse code carries 0x14\'s body grammar — an unframeable length is invalid', () => {
+  // Paired with path-ref/ref-len-not-multiple-of-8: a core applying the shape rule to 0x14
+  // alone accepts these bytes, and the two codes then disagree about what a body is.
+  const bin = rejectVector('path-ref/reverse-len-not-multiple-of-8');
+  assert.throws(() => decode(bin), (e) => e.code === ERROR.FRAME_INVALID);
 });
 
 test('fwd-mint-reply carries the minted binding as its LAST child', () => {

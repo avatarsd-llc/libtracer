@@ -561,7 +561,7 @@ tested against hand-built frames with no live transport.
 :project: libtracer
 ```
 
-```{doxygenstruct} tr::net::reply_mint_t
+```{doxygenstruct} tr::net::trailing_mint_t
 :project: libtracer
 :members:
 ```
@@ -571,7 +571,7 @@ tested against hand-built frames with no live transport.
 :members:
 ```
 
-```{doxygenfunction} tr::net::peek_reply_mint
+```{doxygenfunction} tr::net::peek_trailing_mint
 :project: libtracer
 ```
 

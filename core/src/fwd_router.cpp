@@ -558,8 +558,10 @@ void reject_bus_name_hop(const child_registry_t& registry, std::string_view inbo
     // reject echoes the refused route, and the producer's step-5 reclaim correlates either
     // (`evict_route_edges` classifies the echo's type byte). The `src` slot stays `PATH`
     // only: a request's return route is always canonical (`05-protocol-tlvs.md` hop rules).
-    // The scan stops at `src`, so a mint-flagged request's TRAILING reverse `PATH_REF`
-    // (which sits after `src`) can never be mistaken for the address being refused.
+    // The scan stops at `src`, so a mint-flagged request's TRAILING reverse list (which sits
+    // after `src`) can never be mistaken for the address being refused — and since §7.1
+    // amendment 2 that list is `PATH_REF_REVERSE` (`0x15`), which this scan does not accept
+    // as a `dst` at all, so the guarantee no longer rests on the scan's stopping point alone.
     for (const tlv_t& c : dec->children) {
         if (dst == nullptr && (c.type == type_t::PATH || c.type == type_t::PATH_REF)) {
             dst = &c;

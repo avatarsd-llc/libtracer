@@ -563,6 +563,65 @@ fn path_ref_len_not_multiple_of_8() {
     assert_eq!(hex(&bin), "14000c000700000003000000aabbccdd");
 }
 
+/**
+ * @brief The reverse list's own code carries the SAME body grammar (RFC-0024 §7.1
+ * amendment 2), so an unframeable length is `tr::frame::invalid` under `0x15` too.
+ *
+ * The pairing with `path_ref_len_not_multiple_of_8` is the point: a core that applied the
+ * shape rule to `0x14` alone would accept these bytes, and the two codes would then disagree
+ * about what a bound-path body is.
+ */
+#[test]
+fn path_ref_reverse_len_not_multiple_of_8() {
+    let bin = assert_vector_rejected("path-ref/reverse-len-not-multiple-of-8");
+    assert_eq!(hex(&bin), "15000c000700000003000000aabbccdd");
+}
+
+/**
+ * @brief `fwd/fwd-reverse-mint` — the forwarded leg's reverse list is a TYPED trailing child.
+ *
+ * Pinned against `fwd/fwd-mint-request` in the direction that matters: the origin's frame is
+ * the one WITHOUT the child, so the reverse list's bytes are proven to ride the forwarded leg
+ * only. The child's own type byte is asserted, because a positional reading decodes this
+ * frame identically and is exactly what amendment 2 ruled out.
+ */
+#[test]
+fn fwd_reverse_mint_is_a_typed_trailing_child() {
+    let bin = assert_vector_consistent("fwd/fwd-reverse-mint");
+    let fwd = decode(&bin).expect("fwd-reverse-mint decodes");
+    let last = fwd.children.last().expect("the FWD has children");
+    assert_eq!(
+        last.type_code,
+        libtracer::type_code::PATH_REF_REVERSE,
+        "the reverse list heads with 0x15, not 0x14"
+    );
+    assert_eq!(last.payload.len(), 8, "one element");
+    assert!(
+        libtracer::is_path_ref_type(last.type_code),
+        "and it is a bound-path body for the shape rule's purposes"
+    );
+    // The origin's own frame carries no such child — that is what "zero added ORIGIN bytes"
+    // means after the amendment.
+    let origin = decode(&assert_vector_consistent("fwd/fwd-mint-request")).unwrap();
+    assert!(
+        origin
+            .children
+            .iter()
+            .all(|c| c.type_code != libtracer::type_code::PATH_REF_REVERSE),
+        "the origin emits no reverse child"
+    );
+    let parsed = libtracer::fwd::parse_fwd_tlv(&fwd).expect("parse_fwd accepts the forwarded leg");
+    assert!(parsed.mint_request, "the op byte is mint-flagged");
+    assert!(
+        parsed.reverse.is_some(),
+        "and the reverse list is parsed out"
+    );
+    assert!(
+        parsed.payload.is_none(),
+        "a READ has no payload — the reverse child is not mistaken for one"
+    );
+}
+
 /** @brief One element over the §4.3 bound: 256 elements / 2048 bytes ⇒ `tr::frame::invalid`. */
 #[test]
 fn path_ref_256_elements() {

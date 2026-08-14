@@ -536,6 +536,68 @@ void test_unmasked_op_byte_still_routes() {
     check(rpeek.has_value() && *rpeek == fwd_op_t::REPLY, "and a flagged REPLY peeks as REPLY");
 }
 
+/**
+ * @brief RFC-0024 §7.1 amendment 2: the reverse list is told from the payload by its own TYPE
+ *        (`PATH_REF_REVERSE`, `0x15`), never by its position.
+ *
+ * Two claims, and the first is the one amendment 1's positional rule got wrong. Under that
+ * rule a mint-flagged WRITE whose stored value happened to be a raw `PATH_REF` TLV was read
+ * as a reverse list and the write lost its payload — a shape with no in-tree producer, which
+ * is exactly why the foreclosure was cheap to take and is now cheap to give back. The second
+ * claim is the one the rule got right and the type keeps: a genuine trailing reverse list is
+ * NOT swallowed as the WRITE's payload.
+ */
+void test_reverse_list_is_typed_not_positional() {
+    std::printf("the reverse list is identified by TYPE, not by position (§7.1 amendment 2):\n");
+    graph_t g;
+    op_resolver_t resolver(g);
+    const vertex_handle_t v = g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
+
+    const auto ends_with = [](const std::vector<std::byte>& frame,
+                              const std::vector<std::byte>& tail) {
+        return frame.size() >= tail.size() &&
+               std::equal(tail.begin(), tail.end(), frame.end() - static_cast<long>(tail.size()));
+    };
+    const auto read_back = [&]() {
+        const auto r = resolve_bytes(
+            resolver, b_fwd_raw_op(kRead, b_path({"sensor", "temp"}), b_path({"back"})));
+        return r.has_value() ? reply_bytes(*r) : std::vector<std::byte>{};
+    };
+
+    // (1) A mint-flagged WRITE whose PAYLOAD is a raw `PATH_REF` TLV — un-foreclosed.
+    const std::vector<std::byte> ref_payload = b_path_ref_one(7u, 3u);
+    const auto wrote_ref =
+        resolve_bytes(resolver, b_fwd_raw_op(kWrite | kMint, b_path({"sensor", "temp"}),
+                                             b_path({"back"}), {}, ref_payload));
+    check(wrote_ref.has_value() && reply_facts(*wrote_ref).kind == reply_kind_t::RESULT,
+          "a mint-flagged WRITE whose payload is a raw PATH_REF still writes");
+    check(ends_with(read_back(), ref_payload),
+          "and the raw PATH_REF is what got STORED — the payload is no longer eaten by a "
+          "positional reverse-list rule");
+
+    // (2) A mint-flagged WRITE carrying BOTH a payload and a genuine reverse list.
+    const path_ref_element_t rev_el{.index = 11u, .generation = 2u};
+    std::vector<std::byte> reverse_child;
+    check(tr::wire::emit_path_ref(reverse_child, std::span<const path_ref_element_t>(&rev_el, 1),
+                                  type_t::PATH_REF_REVERSE),
+          "a PATH_REF_REVERSE emits through the same guarded emitter as a PATH_REF");
+    check(
+        !reverse_child.empty() && static_cast<type_t>(reverse_child[0]) == type_t::PATH_REF_REVERSE,
+        "and it heads with 0x15, not 0x14");
+    const std::vector<std::byte> value_payload = b_value({0x2A});
+    std::vector<std::byte> tail = value_payload;
+    tail.insert(tail.end(), reverse_child.begin(), reverse_child.end());
+    const auto wrote_both = resolve_bytes(
+        resolver,
+        b_fwd_raw_op(kWrite | kMint, b_path({"sensor", "temp"}), b_path({"back"}), {}, tail));
+    check(wrote_both.has_value() && reply_facts(*wrote_both).kind == reply_kind_t::RESULT,
+          "a mint-flagged WRITE carrying payload AND reverse list writes");
+    const std::vector<std::byte> stored = read_back();
+    check(ends_with(stored, value_payload),
+          "the VALUE is what got stored — the reverse child is not the payload");
+    check(!ends_with(stored, reverse_child), "and the reverse list was not stored as one");
+}
+
 void test_path_binding_slot() {
     std::printf("path_t keeps its value shape and gains the opaque bound slot (§7.4):\n");
     path_t p("/sensor/temp");
@@ -653,6 +715,7 @@ int main() {
     test_mint_denied_by_acl();
     test_revocation_is_immediate();
     test_unmasked_op_byte_still_routes();
+    test_reverse_list_is_typed_not_positional();
     test_path_binding_slot();
     test_conformance_vectors();
     return tr::testing::summary("bound_path");

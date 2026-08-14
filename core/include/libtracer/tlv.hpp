@@ -23,9 +23,11 @@ namespace tr::wire {
  * established, `delivery_compact`-flagged flow into a per-link label. They are NOT part of
  * the FWD frame and NOT cross-core conformance TLVs — a peer that ignores them simply keeps
  * the full-route delivery path — but are self-describing (opt.PL=1) so the codec parses them
- * generically. 0x14 PATH_REF is the bound-path address form (RFC-0024 §4): the one type whose
- * body is NOT self-describing — a fixed-stride 8-byte record array (opt.PL=0), whose shape the
- * grammar therefore checks by type (path_ref.hpp).
+ * generically. 0x14 PATH_REF is the bound-path address form (RFC-0024 §4) and 0x15
+ * PATH_REF_REVERSE the reverse-direction list a mint-flagged request accumulates (§7.1
+ * amendment 2): the two types whose body is NOT self-describing — a fixed-stride 8-byte
+ * record array (opt.PL=0), whose shape the grammar therefore checks by type (path_ref.hpp,
+ * gated by `is_path_ref_type`).
  */
 enum class type_t : std::uint8_t {
     VALUE = 0x01,       /**< @brief Opaque scalar value. */
@@ -57,7 +59,34 @@ enum class type_t : std::uint8_t {
     HANDLE_NACK = 0x13,
     /** @brief Bound path: a bare array of 8-byte node-scoped vertex refs (RFC-0024 §4). */
     PATH_REF = 0x14,
+    /**
+     * @brief The REVERSE-direction bound path a mint-flagged request accumulates
+     *        (RFC-0024 §7.1 amendment 2) — same body grammar as `PATH_REF`, different role.
+     *
+     * A distinct code rather than a positional rule: every other element of this grammar
+     * self-describes by type, and "the only trailing child" would break the moment a future
+     * RFC adds a second trailing child to a mint-flagged request. It also un-forecloses a raw
+     * `PATH_REF`-typed *payload* on such a request. The code costs nothing: a reader already
+     * compares the child's type byte, so a different constant is the same instruction
+     * (`peek_trailing_mint`).
+     */
+    PATH_REF_REVERSE = 0x15,
 };
+
+/**
+ * @brief True for either bound-path type — the two codes whose body is a fixed-stride
+ *        8-byte element array rather than a self-describing payload (RFC-0024 §4.2).
+ *
+ * The structural rules of `path_ref_body_valid` apply to both, so every site that gates on
+ * "is this an element array" asks HERE rather than spelling a two-code disjunction. `0x15`
+ * was taken adjacent to `0x14` for exactly this: the test stays ONE masked compare on the
+ * grammar's per-TLV path, where a disjunction would have been two.
+ */
+[[nodiscard]] constexpr bool is_path_ref_type(type_t t) noexcept {
+    static_assert(static_cast<std::uint8_t>(type_t::PATH_REF) == 0x14);
+    static_assert(static_cast<std::uint8_t>(type_t::PATH_REF_REVERSE) == 0x15);
+    return (static_cast<std::uint8_t>(t) & 0xFEu) == static_cast<std::uint8_t>(type_t::PATH_REF);
+}
 
 /**
  * @brief The 1-byte `opt` options bitfield of a TLV header.
