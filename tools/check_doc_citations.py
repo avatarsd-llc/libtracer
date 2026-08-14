@@ -31,10 +31,11 @@ green `OK N verified` out of CI, because the verify pass only ever walked @ref A
 of them did exactly that on one 2026-08-13 hygiene run. @ref unanchored_citations closes the
 loop in the failing direction: every cited `file:line` span in a LIVING doc must be pinned by
 an anchor somewhere inside it, exactly as the reverse rule already fails a pin no doc cites.
-Adding a citation therefore means adding its anchor in the same PR — one rule, both ways, and
-the pin count is now a coverage count rather than a sample. Build and tooling
-files are not sources and used to be unreadable here at all, which is how two rotted
-`LIBTRACER_NO_ATOMIC` citations sat beside a verified one in the same sentence (#1052).
+Adding a citation therefore means adding its anchor in the same PR — one rule, both ways,
+and the pin count is a COVERAGE count rather than a sample.
+
+Build and tooling files are not sources and used to be unreadable here at all, which is how
+two rotted `LIBTRACER_NO_ATOMIC` citations sat beside a verified one in one sentence (#1052).
 @ref CITABLE_NON_SOURCE_PATHS enrols the ones whose citations ARE pinned — an explicit
 allowlist, because covering non-source files wholesale is a maintainer's call.
 
@@ -53,7 +54,7 @@ history on every refactor.
 
 `--repin` is the other half (#836): when a source edit HAS moved cited lines, it rewrites
 every citation spelling from a line map instead of leaving a `sed` sweep to find them.
-Three rules are load-bearing there, each paid for:
+The rules below are load-bearing there, each paid for:
 
 * **One pass.** A re-pin builds the whole map first and rewrites the ORIGINAL text once.
   A sequential pass feeds its own output — rewrite `1114 -> 1118` and the next rule in
@@ -73,7 +74,6 @@ Three rules are load-bearing there, each paid for:
   the same reason those genres are not enrolled above: an ADR or an RFC cites the tree as
   it stood, and moving its citations forward rewrites the record. Their moves are counted
   and reported, never applied.
-
 * **A HOLD is a verdict, not a remark.** `--repin` used to exit 0 whether it re-pinned
   everything or held half of it for a human, so a rebase procedure that ran it and looked at
   the exit status read "held" as "done" and shipped stale citations (#1243). A run that ends
