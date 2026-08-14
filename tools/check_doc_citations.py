@@ -134,11 +134,56 @@ def _is_non_source_part(part: str) -> bool:
 
 # (cited location, substring the target line must contain[, scope])
 #
+# WHAT A GREEN RUN MEANS, and what it does not (#1271). Every check below is MECHANICAL:
+# it proves a citation points at the text someone once decided it should point at, and that
+# every cited span is pinned by somebody. It proves NOTHING about whether the cited line
+# supports the sentence citing it. Adding an anchor is the one moment of judgement in the
+# whole loop, and after it the pin is carried forward by every re-pin forever — so an anchor
+# added merely to silence a FAIL, without reading the sentence, launders a wrong citation
+# into a permanently green one. `custom-device.md` cited the subscriber-append BACKPRESSURE
+# arm for a claim about the CREATE ACL gate and stayed green across two mechanical re-pins.
+# When you add an entry here, the question to answer is "does this line support that
+# sentence?", not "does the gate pass?"
+#
 # `scope` disambiguates an anchor whose text repeats — the three `:field` depth gates
 # are the same statement in three branches. It must appear in the SCOPE_LINES above a
 # candidate for that candidate to count, which is what turns "candidates [4 lines]"
-# into a single actionable answer.
+# into a single actionable answer. A `!`-prefixed scope inverts the test: the text must
+# NOT appear above the candidate. That is the only way to select the EARLIER of two
+# identical lines closer together than SCOPE_LINES, because a discriminator sitting
+# BETWEEN them is above the later one and above the earlier one's window too — see
+# `transport_vertex.cpp:94` / `:98`, which are byte-identical four lines apart.
+#
+# AMBIGUITY IS A FAILURE, not a footnote (#1271). Multi-hit candidates used to be computed
+# only when an anchor had DRIFTED, so an anchor that still resolved in place was accepted
+# however many other lines in its scope matched it too. That is how a re-pin aimed a
+# paragraph about `deliver_remote`'s default full-route leg at its bound leg: the text
+# occurs twice in that function, the scope named the function, and the pin moved faithfully
+# to the wrong one. @ref anchor_hits is now run on the in-place path as well, and an anchor
+# matching more than once inside its scope is reported so the author tightens it.
 SCOPE_LINES = 80
+
+
+def anchor_hits(lines: list, anchor: str, scope: str = None) -> list:
+    """Every 1-based line in `lines` whose text matches `anchor` inside `scope`.
+
+    `scope` is the disambiguator documented above: a plain string must appear in the
+    SCOPE_LINES lines ABOVE a candidate for it to count, and a `!`-prefixed one must not.
+    With no scope every textual match counts, which is what makes a repeated anchor with no
+    scope ambiguous — the condition the verify pass refuses.
+
+    One helper for all three callers (the drift report, the re-pin line maps, and the
+    in-place ambiguity check) so "which lines does this anchor mean?" has exactly one
+    answer. It used to be spelled inline twice, and the third caller is the one #1271 found
+    missing.
+    """
+    hits = [i + 1 for i, ln in enumerate(lines) if anchor in ln]
+    if not scope:
+        return hits
+    negated = scope.startswith("!")
+    needle = scope[1:] if negated else scope
+    return [h for h in hits
+            if any(needle in x for x in lines[max(0, h - SCOPE_LINES):h]) != negated]
 
 ANCHORS = [
     ("core/include/libtracer/tlv.hpp:98", "struct opt_t"),
@@ -148,8 +193,14 @@ ANCHORS = [
     ("core/src/graph.cpp:2605", "graph_t::read_identity"),
     ("core/src/graph.cpp:3024", 'field.steps[0].name == "identity"'),
     ("core/src/transport_vertex.cpp:59", 'cfg.name("kind")'),
-    ("core/src/transport_vertex.cpp:94", "register_child_type"),
-    ("core/src/transport_vertex.cpp:123", "register_transport_type"),
+    # `graph_.register_child_type(` is BYTE-IDENTICAL at :94 and :98, four lines apart, and
+    # both are cited. No text ABOVE :94 tells them apart (:98's window contains :94's), so the
+    # discriminator is a NEGATIVE scope: the `DIAL` lambda body sits BETWEEN them, above :98
+    # only. Its mirror at :98 selects the later one positively, off the same line.
+    ("core/src/transport_vertex.cpp:94", "graph_.register_child_type(",
+     "!config, conn_role_t::DIAL);"),
+    ("core/src/transport_vertex.cpp:123",
+     "void transport_vertex_t::register_transport_type(std::string kind, transport_factory_t factory) {"),
     ("core/src/transport_vertex.cpp:128", "transport_vertex_t::register_module"),
     ("core/src/transport_vertex.cpp:162", "SCHEMA_NOT_FOUND", "transport_vertex_t::module_for"),
     ("core/src/transport_vertex.cpp:205", "transport_vertex_t::provide_link"),
@@ -182,10 +233,12 @@ ANCHORS = [
     # anchor and reds the gate, with no correct re-pin available on either side. An anchor
     # exists to keep a LIVE doc citation from rotting; this text has no live citer left.
     ("core/include/libtracer/child_registry.hpp:267", "bool add(std::string name"),
-    ("core/include/libtracer/child_registry.hpp:517", "resolve_peer"),
-    ("core/include/libtracer/child_registry.hpp:532", "bool erase"),
+    ("core/include/libtracer/child_registry.hpp:517",
+     "[[nodiscard]] static transport_t* resolve_peer(const child_t& child, std::string_view peer) {"),
+    ("core/include/libtracer/child_registry.hpp:532", "bool erase(std::string_view name) {"),
     ("core/include/libtracer/child_registry.hpp:565", "entry_by_name"),
-    ("core/include/libtracer/child_registry.hpp:586", "by_name"),
+    ("core/include/libtracer/child_registry.hpp:586",
+     "[[nodiscard]] transport_t* by_name(std::string_view name) const {"),
     ("core/include/libtracer/child_registry.hpp:627", "std::size_t size()"),
     ("core/include/libtracer/child_registry.hpp:637", "live_size"),
     ("core/src/transport_vertex.cpp:417", "return std::unexpected(status_t::BACKPRESSURE);",
@@ -208,13 +261,14 @@ ANCHORS = [
     ("core/src/op_resolve_walk.hpp:163", "view_t own_wire(mem::mem_backend_t& flat)"),
     ("core/src/op_resolve_walk.hpp:548", "rope_t or_backpressure"),
     ('core/src/op_resolve_walk.hpp:993', 'if (!req.dst.spans_intact()) return reply_error(status_t::BACKPRESSURE);'),
-    ("core/include/libtracer/mem_heap.hpp:217", "try_assign"),
+    ("core/include/libtracer/mem_heap.hpp:217",
+     "[[nodiscard]] inline bool try_assign(std::vector<std::byte>& dst,"),
     ('core/include/libtracer/mem_heap.hpp:157', '[[nodiscard]] inline bool try_grow(std::size_t bytes, F&& grow) noexcept {'),
     ('core/include/libtracer/mem_heap.hpp:183', '[[nodiscard]] bool try_reserve(std::vector<T>& v, std::size_t n) noexcept {'),
     ('core/include/libtracer/mem_heap.hpp:377', '[[nodiscard]] inline std::optional<view_t> over_bytes(std::span<const std::byte> bytes,'),
-    ("core/include/libtracer/view.hpp:26", "namespace tr::view"),
-    ("core/include/libtracer/frame.hpp:23", "namespace tr::wire"),
-    ("core/include/libtracer/graph.hpp:50", "namespace tr::graph"),
+    ("core/include/libtracer/view.hpp:26", "namespace tr::view {"),
+    ("core/include/libtracer/frame.hpp:23", "namespace tr::wire {"),
+    ("core/include/libtracer/graph.hpp:50", "namespace tr::graph {"),
     ('core/include/libtracer/graph.hpp:1110', '[[nodiscard]] result_t<rope_t> read_subtree_folded(vertex_handle_t v,'),
     ('core/include/libtracer/graph.hpp:1166', 'template <typename F>'),
     ('core/include/libtracer/graph.hpp:1488', 'struct delivery_drops_t {'),
@@ -235,12 +289,13 @@ ANCHORS = [
     ('core/include/libtracer/graph.hpp:1146', '* @param ctx Caller-owned context; must outlive every possible delivery (edges are'),
     ('core/include/libtracer/graph.hpp:1387', '[[nodiscard]] result_t<value_ref_t> read(const path_t& path) const;'),
     ('core/include/libtracer/graph.hpp:1393', '[[nodiscard]] result_t<value_ref_t> await(const path_t& path, std::chrono::nanoseconds timeout);'),
-    ("core/include/libtracer/transport.hpp:32", "namespace tr::net"),
+    ("core/include/libtracer/transport.hpp:32", "namespace tr::net {"),
     ('core/include/libtracer/transport.hpp:36', 'using peer_id_t = std::array<std::byte, 16>;'),
     ('core/include/libtracer/transport.hpp:66', 'class bus_link_t {'),
     ("core/include/libtracer/backend.hpp:40", "enum class io_dir_t"),
     ("core/include/libtracer/backend.hpp:101", "class mem_backend_t"),
-    ("core/include/libtracer/backend.hpp:145", "before_io"),
+    ("core/include/libtracer/backend.hpp:145",
+     "virtual void before_io(view::segment_t* /*seg*/, io_dir_t /*dir*/) noexcept {}"),
     ('core/include/libtracer/backend.hpp:58', "* @brief The address space a backend's bytes live in."),
     ("core/include/libtracer/grammar.hpp:363", "receiver-resource depth bound"),
     # CONTEXT.md quotes the AMENDED meaning of `nesting_too_deep` twice. Its citation was
@@ -290,7 +345,8 @@ ANCHORS = [
     ("core/src/fwd_router.cpp:1793", "if (route.empty() && head->child1_total != 0) return;"),
     ("core/src/fwd_router.cpp:1812", "if (payload.empty() && head->child1_total != 0) return;"),
     ("core/src/fwd_router.cpp:1805", "const std::span<const std::byte> payload = contig(head->child1_off, head->child1_total);"),
-    ("core/src/fwd_router.cpp:1465", "frame.subrope(0, frame.total_length()).try_materialize"),
+    ("core/src/fwd_router.cpp:1465", "frame.subrope(0, frame.total_length()).try_materialize",
+     "if (hit.rejected) {"),
     # #766/#793 — the terminus resolver's three rope-tier draws, and the two allocations the
     # seam docs name as NOT covered by `flat`. These were cited by four doc pages and anchored
     # by none, so #793's own edits to `op_resolve_view.cpp` shifted every one of them without
@@ -358,7 +414,8 @@ ANCHORS = [
     ('core/include/libtracer/config.hpp:237', 'static constexpr std::uint32_t kPinPayloadRatio = 0;'),
     ('core/include/libtracer/config.hpp:246', 'using acl_policy_t = allow_only_policy_t;'),
     ('core/include/libtracer/config.hpp:213', 'static constexpr std::size_t kMaxVertexBytes32 = 72;'),
-    ('core/include/libtracer/config.hpp:262', 'using lkv_slot_t = sp_atomic_slot_t;'),
+    ('core/include/libtracer/config.hpp:262', 'using lkv_slot_t = sp_atomic_slot_t;',
+     'A many-core host is the case for rebinding this'),
     ('core/include/libtracer/config.hpp:313', 'using config_t = default_config_t;'),
     ('core/include/libtracer/config.hpp:95',
      'static constexpr std::size_t kVertexLockStripes = 16;'),
@@ -368,8 +425,11 @@ ANCHORS = [
      '* fragment: `using lkv_slot_t = hazard_slot_t;`. The named type must satisfy the contract in'),
     ('core/include/libtracer/config.hpp:357',
      'inline constexpr bool kSpinWaitSafe = tr::graph::config_t::kSpinWaitSafe;'),
-    ('core/include/libtracer/config.hpp:316',
-     '// ---------------------------------------------------------------------------------------------'),
+    # Was pinned to the :316 banner rule, one of three IDENTICAL comment rules in this header —
+    # an anchor no scope could ever separate. Re-pinned inside the SAME cited span
+    # (`config.hpp:316-333`) to the first derived spelling, which is unique.
+    ('core/include/libtracer/config.hpp:322',
+     'inline constexpr std::size_t kVertexLockStripes = config_t::kVertexLockStripes;'),
     # core/include/libtracer/crc.hpp
     ('core/include/libtracer/crc.hpp:38', 'constexpr std::array<std::uint32_t, 256> crc32c_table() noexcept {'),
     ('core/include/libtracer/crc.hpp:51', 'constexpr std::array<std::uint16_t, 256> crc16_table() noexcept {'),
@@ -608,7 +668,8 @@ ANCHORS = [
     ('core/src/graph.cpp:947',
      'void graph_t::count_snapshot_drops(const vertex_t::snapshot_drops_t& drops) noexcept {'),
     ('core/src/graph.cpp:1201', '[[nodiscard]] bool try_clone_rope(rope_t& dst, const rope_t& src) noexcept {'),
-    ('core/src/graph.cpp:1229', 'if (target == nullptr) {'),
+    ('core/src/graph.cpp:1229', 'if (target == nullptr) {',
+     'target = find_ptr(*e.target_key);'),
     ('core/src/graph.cpp:1236', 'if (!acl_allows(target, e.caller, acl_right_t::WRITE)) {'),
     ('core/src/graph.cpp:1240', '// Delivery TERMINATES at the target (ADR-0051 / RFC-0007): apply exactly the'),
     ('core/src/graph.cpp:1248', 'if (!try_clone_rope(clone, value)) {'),
@@ -625,7 +686,8 @@ ANCHORS = [
      'result_t<std::shared_ptr<const rope_t>> graph_t::store_value(vertex_t* v, rope_t&& value,'),
     ('core/src/graph.cpp:1392', 'void graph_t::bubble_up(vertex_t* v, const rope_t& value) {'),
     ('core/src/graph.cpp:1444', '// A handler stores no LKV (the user handler consumes the value), so the'),
-    ('core/src/graph.cpp:1472', 'count_drop(drop_reason_t::OUT_OF_MEMORY, v->own_subs());'),
+    ('core/src/graph.cpp:1472', 'count_drop(drop_reason_t::OUT_OF_MEMORY, v->own_subs());',
+     'frame that abandons the delivery'),
     ('core/src/graph.cpp:1485', '// Deliver the just-appended ring entry and advance the drain cursor, so a later'),
     ('core/src/graph.cpp:1496', '// no notify reclone of the rope on the hot write path.'),
     ('core/src/graph.cpp:1525',
@@ -726,7 +788,10 @@ ANCHORS = [
     ('core/src/fwd_router.cpp:873', 'link.set_rope_receiver('),
     ('core/src/fwd_router.cpp:827', 'bus->set_peer_rope_receiver('),
     ('core/src/graph.cpp:989', 'vertex_t* graph_t::find_ptr(std::span<const std::byte> key) const {'),
-    ('core/src/graph.cpp:990', 'const std::shared_lock lock(map_mutex_);'),
+    # Was pinned to :990's `shared_lock` — seventeen identical lines in this file. Re-pinned
+    # inside the SAME cited span (`graph.cpp:989-990`) to the signature that takes the lock.
+    ('core/src/graph.cpp:989',
+     'vertex_t* graph_t::find_ptr(std::span<const std::byte> key) const {'),
     ('core/src/graph.cpp:2214', 's.target_key.reset();'),
     ('core/src/path.cpp:96', 'if (!valid_segment(seg)) return std::unexpected(status_t::INVALID_PATH);'),
     ('core/src/path.cpp:112', 'if (step.empty()) return std::unexpected(status_t::INVALID_PATH);'),
@@ -791,7 +856,8 @@ ANCHORS = [
     ('core/examples/CMakeLists.txt:92', 'add_test(NAME example_wire_codec COMMAND wire_codec)'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:44', 'set(LIBTRACER_SRCS'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:172', 'if(CONFIG_LIBTRACER_TRANSPORT_CAN)'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:313', 'if(IDF_TARGET STREQUAL "linux")'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:313', 'if(IDF_TARGET STREQUAL "linux")',
+     'unlike CONFIG_* is defined in BOTH CMake passes'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:292', 'set(LIBTRACER_EDGE_PIN_SLOTS 8)'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:279',
      'set(LIBTRACER_VERTEX_LOCK_STRIPES ${CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES})'),
@@ -920,8 +986,11 @@ ANCHORS = [
     ('core/src/graph.cpp:1706', 'if (!detail::try_assign(copy, k)) return false;'),
     ('core/src/graph.cpp:1803',
      '// Empty-set fast path (the per-eager-write case when nobody uses assign+propagate):'),
-    ('core/src/graph.cpp:2054',
-     '// status (ADR-0060 §3), the same one the store leg answers on exhaustion.'),
+    # ('core/src/graph.cpp:2054', '// status (ADR-0060 §3), …') — anchor DROPPED (#1271). It
+    # existed only to pin `custom-device.md`'s creation-gate citation, which named the
+    # subscriber-append BACKPRESSURE arm for a claim about the `:children[]` CREATE gate. The
+    # citation now points at the gate itself (`graph.cpp:2419-2423`, already pinned above), so
+    # this text has no live citer left.
     ('core/src/graph.cpp:2321', 'if (!tlv) return std::unexpected(status_t::TYPE_MISMATCH);'),
     ('core/src/graph.cpp:2492',
      '// (NAME key, NAME/SETTINGS value), read through the ONE pair-consuming walk,'),
@@ -1354,9 +1423,7 @@ def anchor_line_maps(anchors: list = None, root: pathlib.Path = None) -> tuple:
         if lineno <= len(lines) and anchor in lines[lineno - 1]:
             maps.setdefault(path, {})[lineno] = lineno
             continue
-        hits = [i + 1 for i, ln in enumerate(lines) if anchor in ln]
-        if scope:
-            hits = [h for h in hits if any(scope in x for x in lines[max(0, h - SCOPE_LINES) : h])]
+        hits = anchor_hits(lines, anchor, scope)
         if len(hits) == 1:
             maps.setdefault(path, {})[lineno] = hits[0]
         else:
@@ -1737,11 +1804,21 @@ def main(argv: list = None) -> int:
             failures.append(f"{loc}: past EOF ({len(lines)} lines)")
             continue
         if anchor in lines[lineno - 1]:
+            # Resolves in place — but does it resolve UNIQUELY? An anchor matching two lines
+            # in its scope pins neither: the next re-pin picks whichever the line map lands
+            # on, and the author's judgement about WHICH of them the prose meant was never
+            # recorded. Reported here rather than left to the drift path, which is the only
+            # place the candidate set used to be computed at all (#1271).
+            candidates = anchor_hits(lines, anchor, scope)
+            if len(candidates) > 1:
+                failures.append(
+                    f"{loc}: AMBIGUOUS — {anchor!r} matches {len(candidates)} lines in scope "
+                    f"{candidates}. Tighten the anchor text, or add a scope that appears in "
+                    f"the {SCOPE_LINES} lines above the intended line (a `!`-prefixed scope "
+                    f"selects the line it does NOT appear above).")
             continue
         # Drifted — find where the anchor went, so the fix is mechanical.
-        hits = [i + 1 for i, ln in enumerate(lines) if anchor in ln]
-        if scope:
-            hits = [h for h in hits if any(scope in x for x in lines[max(0, h - SCOPE_LINES) : h])]
+        hits = anchor_hits(lines, anchor, scope)
         where = f" -> now at {hits[0]}" if len(hits) == 1 else f" -> candidates {hits}" if hits else " -> anchor GONE"
         # Name the pages that cite it. Without this a comma continuation or a bare `:N`
         # left the reader grepping for a spelling that does not literally appear.

@@ -1020,5 +1020,121 @@ class RepinHoldVerdictTest(unittest.TestCase):
             self.assertNotIn("HOLD", out)
 
 
+class AnchorHitsTest(unittest.TestCase):
+    """The scope filter, including the `!` inversion #1271 added.
+
+    `anchor_hits` is the one answer to "which lines does this anchor mean?", shared by the
+    drift report, the re-pin line maps and the in-place ambiguity check. A positive scope
+    selects candidates it appears ABOVE; a negated one selects the candidates it does not.
+    The negated form is not a convenience: it is the ONLY way to select the earlier of two
+    identical lines closer together than SCOPE_LINES, because a discriminator sitting
+    between them is above the later one and above the earlier one's window too.
+    """
+
+    # The `transport_vertex.cpp:94` / `:98` shape, in miniature: one repeated call, one
+    # discriminating line between the two occurrences.
+    LINES = ["register(", "  DIAL", "register(", "  LISTEN"]
+
+    def test_no_scope_means_every_match(self):
+        self.assertEqual(cdc.anchor_hits(self.LINES, "register("), [1, 3])
+
+    def test_a_positive_scope_selects_the_candidate_it_sits_above(self):
+        self.assertEqual(cdc.anchor_hits(self.LINES, "register(", "DIAL"), [3])
+
+    def test_a_negated_scope_selects_the_candidate_it_does_NOT_sit_above(self):
+        self.assertEqual(cdc.anchor_hits(self.LINES, "register(", "!DIAL"), [1])
+
+    def test_a_scope_matching_nothing_selects_nothing(self):
+        self.assertEqual(cdc.anchor_hits(self.LINES, "register(", "absent"), [])
+
+    def test_the_scope_window_ends_AT_the_candidate_line_inclusive(self):
+        # Pre-existing semantics, pinned here because the `!` form inverts them and a
+        # silent off-by-one would flip which of two adjacent candidates a negation selects:
+        # the window is the SCOPE_LINES lines up to and INCLUDING the candidate, so a scope
+        # that is the candidate's own text matches it.
+        self.assertEqual(cdc.anchor_hits(self.LINES, "DIAL", "DIAL"), [2])
+        self.assertEqual(cdc.anchor_hits(self.LINES, "DIAL", "!DIAL"), [])
+
+    def test_the_real_table_has_no_ambiguous_anchor(self):
+        # The acceptance criterion, over the shipped table: every anchor resolves to exactly
+        # one line inside its scope. Fails the moment an entry is added whose text repeats.
+        offenders = []
+        for entry in cdc.ANCHORS:
+            loc, anchor = entry[0], entry[1]
+            scope = entry[2] if len(entry) > 2 else None
+            path, lineno = loc.rsplit(":", 1)
+            src = pathlib.Path(REPO) / path
+            if not src.exists():
+                continue
+            lines = src.read_text().split("\n")
+            hits = cdc.anchor_hits(lines, anchor, scope)
+            if len(hits) > 1:
+                offenders.append(f"{loc}: {anchor!r} matches {hits}")
+        self.assertEqual(offenders, [])
+
+
+class AmbiguousAnchorGateTest(unittest.TestCase):
+    """That `main` REFUSES an in-place anchor whose text repeats in its scope (#1271).
+
+    The blind spot this closes: multi-hit candidates were only ever computed on the DRIFT
+    path, so an anchor that still resolved at its pinned line was accepted no matter how
+    many other lines in its scope matched it too. That is how a mechanical re-pin aimed a
+    paragraph about `deliver_remote`'s default full-route leg at its bound leg — faithful
+    pin, wrong meaning, green gate.
+
+    Asserts on OUTPUT, not on the exit code: over a stand-in doc set every real anchor reads
+    as uncited, so the exit code is 1 either way and proves nothing.
+    """
+
+    # `if (!acl_allows(v, caller, acl_right_t::READ))` is the same statement in four ACL
+    # gates of `graph.cpp` — a real repeated line, so this cannot pass on a fixture quirk.
+    CITATION = "the read gate is at `core/src/graph.cpp:1154`\n"
+    ANCHOR_TEXT = "if (!acl_allows(v, caller, acl_right_t::READ))"
+
+    @contextlib.contextmanager
+    def _gate_over(self, anchors):
+        directory = os.path.join(REPO, "docs", "design")
+        os.makedirs(directory, exist_ok=True)
+        doc = os.path.join(directory, "zz-1271-probe.md")
+        with open(doc, "w") as fh:
+            fh.write(self.CITATION)
+        real_all_docs, real_anchors, buf = cdc.all_docs, cdc.ANCHORS, io.StringIO()
+        try:
+            cdc.all_docs = lambda: [pathlib.Path(doc)]
+            cdc.ANCHORS = anchors
+            with contextlib.redirect_stdout(buf):
+                cdc.main([])
+            yield buf.getvalue()
+        finally:
+            cdc.all_docs, cdc.ANCHORS = real_all_docs, real_anchors
+            os.remove(doc)
+
+    def test_an_unscoped_repeated_anchor_is_reported(self):
+        with self._gate_over([(f"{GRAPH}:1154", self.ANCHOR_TEXT)]) as out:
+            self.assertIn("AMBIGUOUS", out)
+            self.assertIn(f"{GRAPH}:1154", out)
+
+    def test_the_report_says_how_to_fix_it(self):
+        # The message has to name the remedy, because the anchor RESOLVES: nothing about the
+        # cited line looks wrong, and "tighten the scope" is not guessable from a bare FAIL.
+        with self._gate_over([(f"{GRAPH}:1154", self.ANCHOR_TEXT)]) as out:
+            self.assertIn("Tighten the anchor text", out)
+
+    def test_a_scope_that_disambiguates_passes(self):
+        # `graph_t::read` owns the 1154 gate; the scope names it, and no other candidate
+        # carries that signature above it.
+        scoped = [(f"{GRAPH}:1154", self.ANCHOR_TEXT, "result_t<value_ref_t> graph_t::read(")]
+        with self._gate_over(scoped) as out:
+            self.assertNotIn("AMBIGUOUS", out)
+
+    def test_an_anchor_whose_text_appears_once_is_never_flagged(self):
+        # The no-false-positive half: an ordinary unique anchor needs no scope and must not
+        # be asked for one, or the check costs more than the class it catches.
+        unique = [(f"{GRAPH}:2489",
+                   "result_t<void> graph_t::create_child(vertex_t* parent, const view_t& spec_value) {")]
+        with self._gate_over(unique) as out:
+            self.assertNotIn("AMBIGUOUS", out)
+
+
 if __name__ == "__main__":
     unittest.main()
