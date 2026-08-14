@@ -575,8 +575,8 @@ ANCHORS = [
      '[[nodiscard]] virtual bool delivers_ropes() const { return false; }',
      'rx_.set_rope([](void* c, view::rope_t f) { (*static_cast<F*>(c))(std::move(f)); }, &sink);'),
     # core/include/libtracer/transport_can.hpp
-    ('core/include/libtracer/transport_can.hpp:491', '[[nodiscard]] bus_link_t* bus() override { return this; }'),
-    ('core/include/libtracer/transport_can.hpp:510',
+    ('core/include/libtracer/transport_can.hpp:522', '[[nodiscard]] bus_link_t* bus() override { return this; }'),
+    ('core/include/libtracer/transport_can.hpp:541',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }'),
     # core/include/libtracer/transport_quic.hpp
     ('core/include/libtracer/transport_quic.hpp:153',
