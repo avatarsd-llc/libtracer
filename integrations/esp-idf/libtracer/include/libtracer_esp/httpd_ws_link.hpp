@@ -112,6 +112,26 @@
  * Peer slots remain heap, grown on demand and RECYCLED in place (never shrunk), so
  * the endpoint `peer_link` hands out stays pointer-valid for the link's life. Their
  * allocation is per SESSION (a new peer past the high-water mark), never per frame.
+ *
+ * WHAT IS CONFIGURABLE, and what is not (#1160). The three numbers that ARE this link's
+ * per-link RAM — the RX scratch, the TX pool depth and a slot's inline capacity, together
+ * ~8.4 KiB at their defaults — are constructor arguments (@ref kDefaultRxScratchBytes,
+ * @ref kDefaultTxPoolSlots, @ref kDefaultTxInlineBytes), matching how
+ * `esp_ws_client_link_t` has always taken `rx_bytes`/`tx_bytes`. Per-LINK and not Kconfig
+ * because a Kconfig value is per-image and two links in one image legitimately serve
+ * different peers. Their effective values are readable — @ref rx_scratch_bytes,
+ * @ref tx_slot_capacity, @ref tx_inline_bytes, @ref buffer_bytes — so a node can REPORT
+ * the ceiling that produced a drop instead of quoting a constant out of these sources.
+ *
+ * Everything else stays fixed ON PURPOSE, and each one says why where it is defined in
+ * `httpd_ws_link.cpp`. In short: the send bound and the TX wait bound are DERIVED (from
+ * `CONFIG_ESP_TASK_WDT_TIMEOUT_S`, the peer cap and the strike cap) and a knob over a
+ * derivation is a way to configure a node into a watchdog panic; the consecutive-TX-drop
+ * strike cap is a brokenness DETECTOR, not a tunable — it is what keeps one silently
+ * stalled peer from parking the httpd task, and it is a divisor of the send bound; the
+ * frame ceiling bounds an ABUSE case and costs no RAM; the socket slack and the assumed
+ * peer cap are already reachable through `max_peers`; and the teardown drain is a
+ * teardown-only bound whose both outcomes are safe and logged.
  */
 #pragma once
 
@@ -171,6 +191,53 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     static constexpr std::size_t kRequiredHttpdStack = 12288;
 
     /**
+     * @brief Default reusable RX scratch capacity, bytes — the ctor's `rx_scratch_bytes`
+     *        when left 0.
+     *
+     * The httpd task is the only RX thread and delivery is synchronous (borrowed, serviced
+     * in-call), so ONE scratch per link suffices and needs no lock. Graph control TLVs —
+     * writes, subscribes, value pushes — sit well under this; a larger frame (up to the
+     * abuse cap) falls back to the exact-size nothrow heap path, trading one allocation
+     * for not pinning 32 KB of RAM permanently.
+     *
+     * It is a DEFAULT and not a constant since #1160: this and the two below are the
+     * link's whole per-link static cost (`rx_scratch_bytes + (tx_pool_slots + 1) *
+     * tx_inline_bytes`, ~8.4 KiB at these figures), and a node that knows its own frame
+     * sizes must be able to trade them without editing this component. Per-LINK and not
+     * Kconfig for the reason `esp_ws_client_link_t` already takes `rx_bytes`/`tx_bytes`
+     * that way: two links in one image can serve different peers.
+     */
+    static constexpr std::size_t kDefaultRxScratchBytes = 2048;
+
+    /**
+     * @brief Default TX work slots any sender may claim — the ctor's `tx_pool_slots` when
+     *        left 0, and this link's OUTSTANDING-SEND bound.
+     *
+     * Deliberately NOT a fan-out width (#1187): it is how many frames may be in flight
+     * toward the httpd task at one instant, sized past the steady-state in-flight depth (a
+     * reply plus a couple of subscription pushes). A sweep wider than this waits for the
+     * drain rather than losing its tail, so raising it buys in-flight depth — and RAM at
+     * @ref kDefaultTxInlineBytes a slot — never fan-out reach.
+     *
+     * @see tx_slot_capacity for the effective per-link value, and @ref tx_reply_reserve
+     *      for the in-call slot that sits on TOP of it.
+     */
+    static constexpr std::size_t kDefaultTxPoolSlots = 4;
+
+    /**
+     * @brief Default inline payload capacity of one TX work slot, bytes — the ctor's
+     *        `tx_inline_bytes` when left 0.
+     *
+     * Sized past the common outbound frames (value pushes, directed replies, census) so a
+     * steady-state send gathers straight into the slot with NO allocation; a larger frame
+     * (e.g. a composed-root snapshot reply) keeps the pooled shell but takes a nothrow heap
+     * payload. Roughly one Ethernet MTU. It multiplies: the pool allocates
+     * `tx_pool_slots + tx_reply_reserve()` of these, so it is the dominant half of the
+     * link's per-link RAM.
+     */
+    static constexpr std::size_t kDefaultTxInlineBytes = 1600;
+
+    /**
      * @brief Start an `esp_http_server` instance on @p bind_port with a WebSocket
      *        URI handler at "/"; confirm with @ref ok.
      *
@@ -194,10 +261,20 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *                   @ref kDefaultAuthDeadlineMs. Inert unless @ref set_auth_cb installed
      *                   a hook — with no hook every session is served immediately and there
      *                   is no unauthenticated state to bound.
+     * @param rx_scratch_bytes Reusable RX scratch capacity, bytes; 0 (the default) uses
+     *                   @ref kDefaultRxScratchBytes. A frame past it still arrives — it
+     *                   takes a per-frame nothrow heap buffer instead of the scratch.
+     * @param tx_pool_slots TX work slots any sender may claim; 0 (the default) uses
+     *                   @ref kDefaultTxPoolSlots. The in-call reserve
+     *                   (@ref tx_reply_reserve) is allocated ON TOP of it.
+     * @param tx_inline_bytes Inline payload capacity of one TX slot, bytes; 0 (the
+     *                   default) uses @ref kDefaultTxInlineBytes. A frame past it keeps
+     *                   its pooled shell and takes a nothrow heap payload.
      */
     explicit httpd_ws_link_t(std::uint16_t bind_port, std::size_t max_peers = 0,
                              bool peer_named = false, std::uint32_t send_timeout_ms = 0,
-                             std::uint32_t auth_deadline_ms = 0);
+                             std::uint32_t auth_deadline_ms = 0, std::size_t rx_scratch_bytes = 0,
+                             std::size_t tx_pool_slots = 0, std::size_t tx_inline_bytes = 0);
 
     /**
      * @brief Adopt an already-running `esp_http_server` and register the WebSocket URI
@@ -258,10 +335,20 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *                   this link closes it, milliseconds; 0 (the default) uses
      *                   @ref kDefaultAuthDeadlineMs. Inert unless @ref set_auth_cb installed
      *                   a hook.
+     * @param rx_scratch_bytes Reusable RX scratch capacity, bytes; 0 (the default) uses
+     *                   @ref kDefaultRxScratchBytes.
+     * @param tx_pool_slots TX work slots any sender may claim; 0 (the default) uses
+     *                   @ref kDefaultTxPoolSlots. On an ADOPTED server this is the knob
+     *                   worth revisiting: the in-flight depth that fits depends on how
+     *                   promptly the shared task drains, and that task is also serving
+     *                   the host's own routes.
+     * @param tx_inline_bytes Inline payload capacity of one TX slot, bytes; 0 (the
+     *                   default) uses @ref kDefaultTxInlineBytes.
      */
     httpd_ws_link_t(httpd_handle_t external, const char* uri, std::size_t max_peers = 0,
                     bool peer_named = false, std::uint32_t send_timeout_ms = 0,
-                    std::uint32_t auth_deadline_ms = 0);
+                    std::uint32_t auth_deadline_ms = 0, std::size_t rx_scratch_bytes = 0,
+                    std::size_t tx_pool_slots = 0, std::size_t tx_inline_bytes = 0);
 
     /**
      * @brief Stop the owned httpd instance (or unregister the adopted WS URI) and release
@@ -629,8 +716,28 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * A frame that is still unserved when the wait expires is dropped and counted
      * (@ref enqueue_drops, and @ref stats_t::tx_pool_misses for the cause); waits themselves
      * are counted in @ref stats_t::tx_pool_waits.
+     *
+     * PER-LINK since #1160 (the ctor's `tx_pool_slots`), hence no longer `static`: a
+     * caller that needs the figure without a link in hand names @ref kDefaultTxPoolSlots,
+     * which is what this reports for a link that took the default.
      */
-    [[nodiscard]] static std::size_t tx_slot_capacity() noexcept;
+    [[nodiscard]] std::size_t tx_slot_capacity() const noexcept;
+
+    /** @brief Effective reusable RX scratch capacity, bytes — the ctor's
+     *         `rx_scratch_bytes` as this link actually allocated it (0 if the allocation
+     *         failed, in which case every frame takes the per-frame nothrow path). */
+    [[nodiscard]] std::size_t rx_scratch_bytes() const noexcept;
+
+    /** @brief Effective inline payload capacity of one TX work slot, bytes — the ctor's
+     *         `tx_inline_bytes`. A frame past it keeps its pooled shell and takes a
+     *         nothrow heap payload, so this is the size above which a send allocates. */
+    [[nodiscard]] std::size_t tx_inline_bytes() const noexcept;
+
+    /** @brief This link's whole per-link buffer cost, bytes:
+     *         `rx_scratch_bytes() + (tx_slot_capacity() + tx_reply_reserve()) *
+     *         tx_inline_bytes()`, plus the slot shells. What a RAM audit asks for, and
+     *         what #1160 exists to make reportable rather than derivable-from-sources. */
+    [[nodiscard]] std::size_t buffer_bytes() const noexcept;
 
     /**
      * @brief TX work slots held back for sends issued ON the httpd task, ADDITIONAL to
@@ -1003,9 +1110,12 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     void queue_send(const session_ref_t& to,
                     std::span<const std::byte> frame);  // one-span sugar over the gather
 
-    /** @brief Allocate the once-per-link RX scratch + TX slot pool (nothrow). RX failure is
+    /** @brief Allocate the once-per-link RX scratch + TX slot pool and its inline payload
+     *         block (nothrow), at the sizes the constructor resolved. RX failure is
      *         survivable (per-frame nothrow buffer); a link with no TX pool drops every
-     *         send on the counted path — see @ref enqueue_drops. */
+     *         send on the counted path — see @ref enqueue_drops. The pool's two
+     *         allocations succeed or fail TOGETHER: a slot with no payload behind it is
+     *         not a claimable slot. */
     void alloc_buffers();
     /**
      * @brief Claim a free TX work slot lock-free (a CAS scan); nullptr when the pool is
@@ -1479,9 +1589,32 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *         sampling. Plain `bool`: written and read only on the httpd task, like
      *         @ref rx_scratch_ and the reassembly buffer. */
     bool stack_named_ = false;
+    /** @brief Effective RX scratch capacity — the ctor's `rx_scratch_bytes` resolved
+     *         against @ref kDefaultRxScratchBytes, and zeroed if the allocation failed so
+     *         the size and the pointer can never disagree. */
+    std::size_t rx_scratch_bytes_ = 0;
     /** @brief Once-allocated TX work-slot pool: claimed lock-free by sending tasks,
      *         released by the httpd task as each send drains. */
     std::unique_ptr<tx_slot_t[]> tx_pool_;
+    /**
+     * @brief The slots' inline payload storage, one flat block of
+     *        `tx_slots_total_ * tx_inline_bytes_`.
+     *
+     * Separate from @ref tx_pool_ because the inline capacity is a CONSTRUCTOR argument
+     * since #1160 and a C++ array member cannot carry a runtime extent. One block rather
+     * than one per slot: the pool is allocated once per link and never grows, so a single
+     * allocation is both fewer heap headers and the shape that lets the teardown's
+     * leak-instead-of-free arm abandon the slots and their payloads together.
+     */
+    std::unique_ptr<std::byte[]> tx_inline_;
+    /** @brief Effective inline capacity of one slot — the ctor's `tx_inline_bytes`. */
+    std::size_t tx_inline_bytes_ = 0;
+    /** @brief Effective sender-claimable pool depth — the ctor's `tx_pool_slots`, what
+     *         @ref tx_slot_capacity reports. */
+    std::size_t tx_pool_slots_ = 0;
+    /** @brief Slots ALLOCATED: @ref tx_pool_slots_ plus the in-call reserve. Cached
+     *         because every pool sweep walks it. */
+    std::size_t tx_slots_total_ = 0;
     /**
      * @brief The handler-admission gate registered as the URI's `user_ctx` — every
      *        dispatch resolves this link through it (see @ref close_gate).

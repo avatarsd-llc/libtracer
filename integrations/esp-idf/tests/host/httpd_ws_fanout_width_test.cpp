@@ -153,7 +153,7 @@ void test_a_sweep_at_the_pool_width_never_waits_and_never_starves() {
     auto link = make_link();
     check(link->ok(), "the adopting link registered its URI");
 
-    const std::size_t width = httpd_ws_link_t::tx_slot_capacity();
+    const std::size_t width = httpd_ws_link_t::kDefaultTxPoolSlots;
     std::vector<int> fds;
     for (std::size_t i = 0; i < width; ++i) {
         fds.push_back(2100 + static_cast<int>(i));
@@ -210,7 +210,7 @@ void test_an_in_call_reply_does_not_narrow_the_pool() {
     if (peer == nullptr) return;
     drain();
 
-    const std::size_t capacity = httpd_ws_link_t::tx_slot_capacity();
+    const std::size_t capacity = httpd_ws_link_t::kDefaultTxPoolSlots;
     const std::size_t reserve = httpd_ws_link_t::tx_reply_reserve();
     check(reserve >= 1, "the link keeps an in-call reserve at all");
 

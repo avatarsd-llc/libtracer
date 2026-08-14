@@ -95,16 +95,64 @@ constexpr int kWriteBudgetMs = kWatchdogMs / 4;
  *  thrashes) — it just stops being unbounded in practice. */
 constexpr int kWriteTimeoutMs = kWriteBudgetMs / kIdfWriteLegs;
 
-/** @brief Read timeout after a positive poll (ms) — data is already buffered, so short. */
+/**
+ * @brief Read timeout after a positive poll (ms) — data is already buffered, so short.
+ *
+ * POLICY, not a derivation, so it is a Kconfig knob
+ * (`CONFIG_LIBTRACER_WS_CLIENT_READ_TIMEOUT_MS`, #1160): it says how long the recv thread
+ * is willing to wait for bytes the poll already promised, which is a property of the
+ * network the node sits on and not of anything this component can compute. Per-IMAGE and
+ * not per-link on purpose — it is the recv loop's cadence, shared by every client link in
+ * the image, and there is no per-link RAM behind it to trade. The fallback is the
+ * historical literal, so a build without the symbol (the host suite) compiles the value
+ * this link always had.
+ */
+#ifdef CONFIG_LIBTRACER_WS_CLIENT_READ_TIMEOUT_MS
+constexpr int kReadTimeoutMs = CONFIG_LIBTRACER_WS_CLIENT_READ_TIMEOUT_MS;
+#else
 constexpr int kReadTimeoutMs = 100;
-/** @brief Poll wait per recv-loop turn (ms) — bounds how fast a stop is observed. */
+#endif
+
+/**
+ * @brief Poll wait per recv-loop turn (ms) — bounds how fast a stop is observed.
+ *
+ * Kconfig for the same reason as @ref kReadTimeoutMs
+ * (`CONFIG_LIBTRACER_WS_CLIENT_POLL_MS`, #1160), and it is the knob that trades teardown
+ * latency against idle wakeups: the destructor's join cannot complete faster than one
+ * turn of this, and a node that wakes its recv thread five times a second is paying for
+ * that responsiveness in a power budget only the embedder can see.
+ */
+#ifdef CONFIG_LIBTRACER_WS_CLIENT_POLL_MS
+constexpr int kPollMs = CONFIG_LIBTRACER_WS_CLIENT_POLL_MS;
+#else
 constexpr int kPollMs = 200;
-/** @brief Backoff before re-dialing after a failed/lost connection (ms) — an upper
- *  bound only: the wait is on a condition variable the destructor signals. */
+#endif
+
+/**
+ * @brief Backoff before re-dialing after a failed/lost connection (ms) — an upper
+ *        bound only: the wait is on a condition variable the destructor signals.
+ *
+ * Kconfig (`CONFIG_LIBTRACER_WS_CLIENT_RECONNECT_BACKOFF_MS`, #1160), and the most
+ * deployment-shaped of the three: it is how hard a node re-dials a peer that is down, so
+ * a fleet on a congested link wants it longer and a bench node chasing a reboot wants it
+ * shorter. Nothing in this file can decide that.
+ */
+#ifdef CONFIG_LIBTRACER_WS_CLIENT_RECONNECT_BACKOFF_MS
+constexpr int kReconnectBackoffMs = CONFIG_LIBTRACER_WS_CLIENT_RECONNECT_BACKOFF_MS;
+#else
 constexpr int kReconnectBackoffMs = 1500;
-/** @brief Poll slice for the destructor's sender drain (ms). A sleep, not a spin: a
- *  higher-priority destroying task that only yielded would starve on a unicore chip
- *  exactly the senders it is waiting for. */
+#endif
+
+/**
+ * @brief Poll slice for the destructor's sender drain (ms). A sleep, not a spin: a
+ *        higher-priority destroying task that only yielded would starve on a unicore chip
+ *        exactly the senders it is waiting for.
+ *
+ * DELIBERATELY FIXED (#1160). One tick is the smallest amount of "let the senders run"
+ * the scheduler can express, so this is a floor imposed by the RTOS rather than a number
+ * chosen here — raising it only makes teardown coarser and lowering it cannot work. There
+ * is no trade for an embedder to make, so there is no knob.
+ */
 constexpr int kDrainSliceMs = 1;
 
 /**
@@ -420,6 +468,13 @@ esp_ws_client_link_t::stats_t esp_ws_client_link_t::stats() const {
     // `link_up()` gives, not the came-up `ok()` (#1203).
     out.up = link_up();
     return out;
+}
+
+esp_ws_client_link_t::timing_t esp_ws_client_link_t::timing() noexcept {
+    // Pure reporting of what this translation unit compiled: the two derived bounds and
+    // the three Kconfig ones, in the units the header names. It takes no lock and touches
+    // no member because none of the five is per-link (#1160).
+    return {kDialTimeoutMs, kWriteTimeoutMs, kReadTimeoutMs, kPollMs, kReconnectBackoffMs};
 }
 
 void esp_ws_client_link_t::drop() {

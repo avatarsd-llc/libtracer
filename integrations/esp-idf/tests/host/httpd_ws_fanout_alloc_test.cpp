@@ -229,7 +229,7 @@ void test_a_broadcast_allocates_nothing() {
     auto link = make_link();
     check(link->ok(), "the adopting link registered its URI");
 
-    const std::size_t peers = httpd_ws_link_t::tx_slot_capacity();
+    const std::size_t peers = httpd_ws_link_t::kDefaultTxPoolSlots;
     std::vector<int> fds;
     for (std::size_t i = 0; i < peers; ++i) {
         fds.push_back(600 + static_cast<int>(i));
@@ -342,7 +342,7 @@ void test_the_fanout_reaches_every_open_peer_exactly_once() {
     drain();
 
     const std::size_t depth =
-        httpd_ws_link_t::tx_slot_capacity() + httpd_ws_link_t::tx_reply_reserve();
+        httpd_ws_link_t::kDefaultTxPoolSlots + httpd_ws_link_t::tx_reply_reserve();
     check_eq(fake_httpd::instance().frames_sent() - sent_before, depth,
              "a pool's worth of the fan-out reached the wire");
     check_eq(link->enqueue_drops() - drops_before, open_fds.size() - depth,
@@ -391,7 +391,7 @@ void test_a_fanout_past_the_pool_allocates_nothing() {
     // The claimable depth for a send on the httpd task — the pool plus the in-call reserve
     // (#1218). Everything past it is the over-offer this case is about.
     const std::size_t depth =
-        httpd_ws_link_t::tx_slot_capacity() + httpd_ws_link_t::tx_reply_reserve();
+        httpd_ws_link_t::kDefaultTxPoolSlots + httpd_ws_link_t::tx_reply_reserve();
     const std::size_t wide = 2 * depth;
     std::vector<int> fds;
     for (std::size_t i = 0; i < wide; ++i) {

@@ -243,7 +243,7 @@ void test_an_in_call_sweep_still_stops_at_the_pool_depth() {
     }
     drain();
 
-    const std::size_t capacity = httpd_ws_link_t::tx_slot_capacity();
+    const std::size_t capacity = httpd_ws_link_t::kDefaultTxPoolSlots;
     const std::size_t sent_before = fake_httpd::instance().frames_sent();
     const std::uint32_t drops_before = link->enqueue_drops();
     broadcast(*link);  // the main thread IS the latched httpd task (see claim)
@@ -284,7 +284,7 @@ void test_an_in_call_send_always_finds_the_reserved_slot() {
     if (peer == nullptr) return;
     drain();
 
-    const std::size_t capacity = httpd_ws_link_t::tx_slot_capacity();
+    const std::size_t capacity = httpd_ws_link_t::kDefaultTxPoolSlots;
     // Exactly what a producer is allowed: the pool, in full. Nothing drains, so each claim
     // is still held when the next one runs, and none of them has to wait.
     std::thread producer([peer, capacity] {
@@ -331,7 +331,7 @@ void test_an_unservable_wait_expires_and_counts() {
     // in-call, so they may take both — and they must, or the producer below would simply
     // find the reserve free and never wait at all.
     const std::size_t depth =
-        httpd_ws_link_t::tx_slot_capacity() + httpd_ws_link_t::tx_reply_reserve();
+        httpd_ws_link_t::kDefaultTxPoolSlots + httpd_ws_link_t::tx_reply_reserve();
     for (std::size_t i = 0; i < depth; ++i) peer->send(std::span<const std::byte>(kBody));
     check_eq(link->tx_slots_busy(), depth, "the pool is fully claimed and nothing is draining");
 

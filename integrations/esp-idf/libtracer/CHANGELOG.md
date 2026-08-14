@@ -94,6 +94,43 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     and `stats_t::auth_expired` count the two causes separately.
   - Described in [docs/reference/16-websocket-session-auth.md](../../../docs/reference/16-websocket-session-auth.md).
 
+- **The two chip-native WebSocket links are configurable, and their effective values are
+  readable** ([#1160](https://github.com/avatarsd-llc/libtracer/issues/1160)). Every number
+  governing them used to be a `constexpr` in an anonymous namespace with no knob, no
+  argument and no accessor — including the three that ARE the per-link static RAM
+  (~8.4 KiB/link), on a target where the same CMakeLists derives 896 B of stripe padding
+  rather than asking. Split knob by knob:
+  - **RAM-bearing → constructor arguments** (per-LINK, because a Kconfig value is
+    per-image and two links in one image serve different peers — the shape
+    `esp_ws_client_link_t` has always had for `rx_bytes`/`tx_bytes`). Both
+    `httpd_ws_link_t` constructors take three new trailing arguments,
+    `rx_scratch_bytes` / `tx_pool_slots` / `tx_inline_bytes`, each `0` = "take the
+    default" (the same idiom `send_timeout_ms` and `auth_deadline_ms` already use). The
+    defaults are published as **`kDefaultRxScratchBytes`** (2048),
+    **`kDefaultTxPoolSlots`** (4) and **`kDefaultTxInlineBytes`** (1600), so nothing
+    about a stock link changes.
+  - **Readable**: new **`httpd_ws_link_t::rx_scratch_bytes()`**,
+    **`tx_inline_bytes()`** and **`buffer_bytes()`** (the whole per-link buffer cost, what
+    a RAM audit asks for), plus **`esp_ws_client_link_t::rx_bytes()`** / **`tx_bytes()`**
+    and **`esp_ws_client_link_t::timing()`** — the five blocking bounds the client rides.
+    A node reporting an inbound-drop streak can now name the ceiling that produced it.
+  - **Client timing → Kconfig** (per-image: recv-loop cadence and re-dial policy, no
+    per-link RAM behind them): `LIBTRACER_WS_CLIENT_READ_TIMEOUT_MS` (100),
+    `LIBTRACER_WS_CLIENT_POLL_MS` (200), `LIBTRACER_WS_CLIENT_RECONNECT_BACKOFF_MS`
+    (1500). Defaults are the historical literals.
+  - **Deliberately still fixed**, each now saying why next to itself: the consecutive-TX-drop
+    strike cap (a brokenness DETECTOR, and a divisor of the derived send bound — a knob over
+    it would let an embedder disable the protection that keeps one stalled peer from parking
+    the httpd task), the inbound frame ceiling (bounds an abuse case, costs no RAM), the
+    socket slack and the assumed peer cap (already reachable through `max_peers`), the
+    teardown drain bounds, and the client's dial/write timeouts (DERIVED from
+    `CONFIG_ESP_TASK_WDT_TIMEOUT_S`, which is itself a Kconfig one level up — a second knob
+    could configure a node into a watchdog panic).
+
+  **BREAKING (source):** `httpd_ws_link_t::tx_slot_capacity()` is no longer `static` — it
+  reports the per-link depth. Call it on the link, or name `kDefaultTxPoolSlots` where no
+  link is in hand. `tx_reply_reserve()` stays `static`.
+
 ### Changed
 
 - **The component writes a `libtracer/config_override.hpp` FRAGMENT instead of rendering
@@ -510,7 +547,7 @@ core 0.10.0 reaches it.
 
 - **Public headers now propagate their ESP-IDF dependencies (#963.4).** `esp_http_server`,
   `tcp_transport` and `esp_driver_twai` moved from `PRIV_REQUIRES` to **`REQUIRES`**. Those
-  three are named by headers under `include/libtracer_esp/` (`httpd_ws_link.hpp:119`,
+  three are named by headers under `include/libtracer_esp/` (`httpd_ws_link.hpp:139`,
   `esp_ws_client_link.hpp:157`, `twai_link.hpp:36-37`), and `PRIV_REQUIRES` does not
   propagate include dirs — so a dependent that included one of ours without independently
   requiring the base component died with `esp_http_server.h: No such file or directory` and

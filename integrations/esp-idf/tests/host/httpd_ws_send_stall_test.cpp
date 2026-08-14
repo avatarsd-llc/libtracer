@@ -282,7 +282,7 @@ void test_jammed_queue_still_closes_the_doomed_fd() {
     claim(700);
     claim(701);
     // The deepest backlog this link can build: one queued send per TX pool slot.
-    const std::size_t kCtrlDepth = httpd_ws_link_t::tx_slot_capacity();
+    const std::size_t kCtrlDepth = httpd_ws_link_t::kDefaultTxPoolSlots;
     fake_httpd::instance().set_queue_capacity(kCtrlDepth);
     fake_httpd::instance().set_send_script(700, {send_result_t::SHORT});
     fake_httpd::instance().set_send_script(701, {send_result_t::FULL});
