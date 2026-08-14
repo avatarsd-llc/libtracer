@@ -49,7 +49,7 @@ it, so the number cannot drift inside the tree:
   | Manifest | Ecosystem |
   | --- | --- |
   | [`library.json`](../library.json) | PlatformIO |
-  | [`integrations/arduino/library.properties`](../integrations/arduino/library.properties) | Arduino |
+  | [`integrations/arduino/library.properties`](../integrations/arduino/library.properties) | Arduino (**not distributed** — stamped for tree consistency only, see below) |
   | [`integrations/esp-idf/libtracer/idf_component.yml`](../integrations/esp-idf/libtracer/idf_component.yml) | ESP Component Registry |
   | `bindings/typescript/packages/*/package.json` (×4) | npm (`@avatarsd-llc/*`) |
   | [`bindings/typescript/package-lock.json`](../bindings/typescript/package-lock.json) | npm (mirrors the four above) |
@@ -73,14 +73,22 @@ To reconcile the tree to a version: run `python3 tools/sync-version.py X.Y.Z`
 lockfile (`cd bindings/rust && cargo update -p libtracer`), and commit them
 together.
 
-**One consumer bypasses the pipeline:** the Arduino Library Registry indexes
-[`library.properties`](../integrations/arduino/library.properties) directly
-from the **tagged tree** — no CI job stamps it on the way. So reconciling the
-committed manifests before (or promptly after) tagging is still **recommended**;
-tag-time stamping makes it non-blocking for the four CI-published registries,
-not unnecessary. The same applies to anyone consuming the raw tagged tree by
-git pin (CMake `FetchContent` is covered — `core/CMakeLists.txt` prefers the
-git tag over `VERSION`).
+**Arduino is not a release channel.** The Arduino Library Manager path is **not
+planned** (maintainer decision, `9751fd32`) — see
+[`integrations/arduino/README.md`](../integrations/arduino/README.md). libtracer
+has never been submitted to [`arduino/library-registry`](https://github.com/arduino/library-registry)
+and no release step does so. As laid out, it could not be: the registry requires
+`library.properties` **in the repository root**, and ours lives under
+`integrations/arduino/`. `tools/sync-version.py` still stamps it so the number
+cannot drift inside the tree (and `version-consistency.yml` enforces that), but
+nothing consumes it. Point Arduino users at the **PlatformIO** package or the
+**ESP-IDF** managed component.
+
+**Consumers of the raw tagged tree** (a git pin rather than a registry) see the
+committed manifests, not the tag-time stamped ones — so reconciling them before
+tagging is still **recommended**; tag-time stamping makes it non-blocking for the
+CI-published registries, not unnecessary. CMake `FetchContent` is already covered
+— `core/CMakeLists.txt` prefers the git tag over `VERSION`.
 
 ## Pre-release gates
 
@@ -127,8 +135,9 @@ git tag over `VERSION`).
    renames the section to `## [X.Y.Z] — YYYY-MM-DD`, and opens a fresh empty
    `[Unreleased]`. `--check` is the read-only form; omit `--write` to preview on
    stdout. Read the diff before committing — the tool moves text, it does not
-   judge it. Recommended in the same PR (required only for the Arduino registry,
-   see "Source of truth" above): `python3 tools/sync-version.py X.Y.Z` (which now
+   judge it. Recommended in the same PR (it keeps the committed manifests honest
+   for anyone consuming the tagged tree by git pin — see "Source of truth"
+   above): `python3 tools/sync-version.py X.Y.Z` (which now
    carries `bindings/typescript/package-lock.json` with it) and refresh the Rust
    lockfile (`cargo update -p libtracer`). Merge it (signed, per DCO).
 2. **Tag + push — this triggers the whole release.** On the merge commit:
@@ -158,12 +167,16 @@ git tag over `VERSION`).
 
    ([`publish-npm.yml`](workflows/publish-npm.yml) remains as a manual
    `workflow_dispatch` **dry-run tester** for the npm packages only.)
-3. **Arduino (manual, one-time).** The Arduino Library Registry is a submission
-   PR to [`arduino/library-registry`](https://github.com/arduino/library-registry),
-   not a tag push — do it once; thereafter it tracks new tags automatically.
-4. **Verify.** Check the GitHub Release and that npm / crates.io / PlatformIO /
-   ESP show `X.Y.Z`. `find_package(libtracer X.Y REQUIRED)` is already proven by
-   the `install-consume` CI job.
+3. **Verify — per registry, not just the run's conclusion.** Because a missing
+   secret **skips** a publish job rather than failing it, a green `release` run
+   does not prove all five artifacts shipped. Check the GitHub Release, and check
+   that npm (×4) / crates.io / PlatformIO / ESP actually serve `X.Y.Z`. Two
+   gotchas: the npm package names (`@avatarsd-llc/libtracer{,-ws,-webtransport,-client}`)
+   are **not** the `bindings/typescript/packages/` directory names, and the ESP
+   Component Registry index can lag the upload by several minutes — poll it before
+   concluding the job skipped. `find_package(libtracer X.Y REQUIRED)` is already
+   proven by the `install-consume` CI job. There is no Arduino step (see "Source
+   of truth" above).
 
 ## Notes
 
