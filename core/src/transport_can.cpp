@@ -415,7 +415,7 @@ void transport_can::on_rx(const can_frame_data_t& frame) {
     expire_pending();
     if (fields->endpoint == kCanControlEndpoint) {
         // Accumulate the per-node advertise byte stream and pop every complete frame.
-        std::vector<std::byte>& buf = control_[fields->node];
+        std::vector<std::byte>& buf = nodes_[fields->node].control;
         const std::span<const std::byte> in = frame.bytes();
         buf.insert(buf.end(), in.begin(), in.end());
         while (!buf.empty()) {
@@ -463,10 +463,24 @@ void transport_can::learn_advertise(const can::advertise_t& adv) {
     // A directed group addressed to another node (ADR-0044) is learned so its
     // data slices are recognized and CONSUMED, but never reassembled/delivered.
     const bool deliver = adv.target == can::kCanBroadcastNode || adv.target == cfg_.node;
+    // THE LAP TEST (#1011). `alloc_base` hands out strictly ascending bases and wraps
+    // to kCanFirstDataEndpoint when a reservation runs off the end of the window, so a
+    // base that does NOT exceed the last one this node placed is proof its allocator
+    // came round. Keyed on the ADVERTISED id's node rather than the carrying frame's,
+    // so it matches exactly what process_data resolves against.
+    //
+    // `<=` rather than `<` on purpose: within one lap the next base is the previous
+    // one plus a slice count of at least 1, so equality is unreachable from a
+    // conforming producer and can only mean a full revolution (or a duplicate frame).
+    // The spurious direction is safe — a false lap only retires OLDER bindings, and
+    // the fresh one below is inserted after the sweep, so it always starts current.
+    node_rx_t& node = nodes_[base->node];
+    if (base->endpoint <= node.last_base) mark_prior_lap(base->node);
+    node.last_base = base->endpoint;
     // The endpoint space wraps by design, so this base has been used before (#909).
     // Retire whatever still claims these slots BEFORE the fresh binding lands.
     invalidate_overlapping(*base, adv.slice_count);
-    learned_[adv.can_id] = binding_t{adv, deliver};
+    learned_[adv.can_id] = binding_t{adv, deliver, false};
     if (deliver) reasm_.set_expected_count(key_of(base->node, base->endpoint), adv.slice_count);
 
     // A data frame may have arrived ahead of its manifest (cross-ID arbitration);
@@ -558,6 +572,42 @@ void transport_can::invalidate_overlapping(const can::can_id_fields_t& base,
     }
 }
 
+/**
+ * @brief Mark every binding of @p node as belonging to a PRIOR lap of its endpoint
+ *        allocator — the half of the aliasing that overlap arithmetic cannot see (#1011).
+ *
+ * @ref invalidate_overlapping closes the case where a re-issued run *overlaps* a stale
+ * binding. It deliberately skips DISJOINT runs, and correctly so: a run nobody has
+ * re-issued is not aliased. But "not aliased" is not "still live". Once the allocator
+ * has lapped, a binding it skipped over is a promise about slices that were emitted a
+ * whole revolution ago and, being incomplete, never will be. Data frames for the groups
+ * now occupying nearby slots carry no manifest of their own once their advertise is lost
+ * on the bus — a data frame is `version|node|endpoint` and nothing else — so they resolve
+ * first-match to that survivor and complete its stale group with foreign bytes.
+ *
+ * The lap is the smallest state that makes "no advertise in this lap" decidable, and it
+ * is derived rather than invented: the producer's `alloc_base` is monotone within a lap
+ * and resets to @ref kCanFirstDataEndpoint at the wrap, so a base that fails to advance
+ * IS the wrap, observed. No generation on the wire (ADR-0077 option 1, still declined —
+ * the 29 bits are spent), no epoch framework, no clock. One `std::uint16_t` per node
+ * remembers where the allocator was; one flag per binding remembers which side of the
+ * revolution it fell on, in padding the struct already carried.
+ *
+ * A marked binding is NOT erased. Erasing it would send its slices to the pending park
+ * instead, where a later advertise for that run could re-drive them into a fresh group —
+ * the parked-slice residue, a distinct mechanism this change is explicitly not
+ * conflating with. Keeping the binding makes every stale slice resolve, be refused, and
+ * be COUNTED, one tick each.
+ *
+ * @note Requires `rx_m_` held.
+ */
+void transport_can::mark_prior_lap(std::uint16_t node) {
+    for (auto& [base_id, b] : learned_) {
+        const auto fields = can::decode_can_id(base_id);
+        if (fields && fields->node == node) b.prior_lap = true;
+    }
+}
+
 void transport_can::process_data(const can_frame_data_t& frame) {
     const auto fields = can::decode_can_id(frame.id);
     if (!fields) return;
@@ -584,6 +634,29 @@ void transport_can::process_data(const can_frame_data_t& frame) {
     if (!binding->deliver) return;
 
     const tr::net::reassembly_key_t key = key_of(fields->node, base_ep);
+    // REFUSE RATHER THAN WELD (#1011). The binding this slice resolved to was learned
+    // before the producer's endpoint allocator came round, so no advertise of the
+    // current lap stands behind it: whatever manifest governed these slots is a
+    // revolution old, and the slice in hand belongs to some group whose own advertise
+    // was lost. Completing the stale group would deliver two payloads welded into one
+    // frame, trimmed to the length the STALE manifest promised — byte-corrupt at
+    // exactly the size the receiver expects, which is why it has to be refused here
+    // rather than detected downstream.
+    //
+    // The disposition is the one already chosen for the fabricated-empty-slice and
+    // DLC-0 cases: drop the WHOLE group (its surviving slices can never be completed
+    // into anything true) and count. `discard` is a no-op returning false when the
+    // binding never accumulated one, so `dropped_groups` moves once per group while
+    // this counter moves once per refused slice. The binding is left in place
+    // deliberately — see mark_prior_lap.
+    //
+    // Common-path cost: one test of a bool that shares a cache line with the
+    // `deliver` flag read on the line above. No lookup, no clock, no allocation.
+    if (binding->prior_lap) {
+        reasm_.discard(key);
+        dropped_stale_binding_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     const std::uint32_t index = static_cast<std::uint32_t>(fields->endpoint - base_ep);
     // `over_bytes` has exactly two outcomes and nullopt means ONE thing: the backend
     // refused (empty input still returns an engaged empty view). The `value_or(view_t{})`

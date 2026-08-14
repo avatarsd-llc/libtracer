@@ -381,6 +381,10 @@ have a residue that nothing else frees:
 | pending data slices (awaiting an advertise) | `max_pending` — evict oldest | `rx_ttl`, swept on every inbound frame | `dropped_rx()` |
 | reassembly groups | `max_groups` — evict oldest | `rx_ttl`, swept on every inbound advertise | `dropped_groups()` |
 
+A fourth counter, `dropped_stale_binding()`, is not a bound either: it counts data slices
+refused because the binding they resolved to belongs to a **prior lap** of the producer's
+endpoint allocator — see *A binding from a prior lap is refused, never welded* below.
+
 A group is also reclaimed, on the same counter, when a fresh advertise re-issues the
 endpoint run its binding held — see *A re-issued endpoint run retires whatever still
 claims it* below. That one is not a bound at all but a correctness rule; it shares the
@@ -449,11 +453,10 @@ counter, and no bound that is not the wire's.
 
 Two residues this does **not** reach, both rooted in the same fact: a data frame carries
 only the CAN ID, so a slice from a previous lap is byte-indistinguishable from one
-belonging to the group now claiming those slots. Both are bounded by the `rx_ttl` age-out
-and neither is a gap of the keying — they are gaps of the header-elided design itself.
+belonging to the group now claiming those slots.
 
 1. **A slice parked before its advertise.** It is re-driven into whichever group later
-   claims its slot.
+   claims its slot. Still open; bounded by the `rx_ttl` age-out.
 2. **A stale binding no re-issue overlapped, fed by frames whose own advertises were
    lost.** The retire-on-re-issue rule fires only when a new run *overlaps* the old one.
    A binding whose run is skipped over survives; if the advertises for the groups that
@@ -461,7 +464,43 @@ and neither is a gap of the keying — they are gaps of the header-elided design
    first-match to that surviving binding, fill its indices, and complete its stale group.
    Two different payloads are then welded into one frame and delivered upstream as valid.
    No slice is ever parked, so this is a distinct mechanism from (1) rather than a
-   restatement of it.
+   restatement of it. **Closed by the lap test below** — refused and counted, not welded.
+
+### A binding from a prior lap is refused, never welded
+
+Overlap arithmetic answers "is this run aliased?", and correctly answers *no* for a run
+nobody re-issued. It cannot answer the different question the weld turns on: **is there
+still an advertise standing behind this binding?** Once the producer's allocator has come
+round, a skipped-over binding is a promise about slices emitted a whole revolution ago
+that, being incomplete, never will arrive — and the manifest-less data now landing in
+those slots resolves straight to it.
+
+The receiver decides that from state it already holds, with no wire change. `alloc_base`
+issues **strictly ascending** bases and wraps to the first data slot, so an advertise whose
+base does *not exceed* the last base that node placed **is** the wrap, observed. Every
+binding of that node is then flagged as belonging to a **prior lap**, and a data slice
+resolving to a prior-lap binding takes the same disposition as a refused-backend slice or a
+DLC-0 one: the whole group is discarded (`dropped_groups()`) and the slice is counted by
+name on `dropped_stale_binding()` — a distinct cause, never folded into `dropped_rx()`.
+
+The stale binding is deliberately **kept**, not erased. Erasing it would send its slices to
+the pending park, where a later advertise for that run could re-drive them into a fresh
+group — residue (1) above, a distinct mechanism this does not conflate with. Keeping it
+makes every stale slice resolve, be refused, and be counted, one tick each.
+
+What it costs: one `std::uint16_t` per remote node (folded into the per-node control-stream
+entry, so no second map) and one flag per binding, in padding the binding already carried —
+**zero added bytes per binding**. On the common path, one already-loaded `bool` test per
+data slice; no lookup, no clock, no allocation. What it costs a *sender*: a group whose
+advertise is lost on slots a prior-lap binding still holds is now refused rather than
+delivered corrupt — a delivery traded for a counted drop.
+
+[ADR-0077](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0077-can-advertise-carries-a-producer-generation-keying-reassembly.md)
+records why the alternative — binding group identity into the *data* frames — stayed
+declined: the 29 bits are fully spent by `version|node|endpoint`, so it costs endpoint bits,
+an advertise format-version bump, and a mixed-version decode matrix. The lap is inferred
+receiver-locally from the allocator's own observable behaviour, so a mixed-version bus needs
+no compatibility rule at all.
 
 ```{admonition} Eviction is not a substitute for correct keying
 :class: warning

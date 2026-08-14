@@ -1077,6 +1077,129 @@ void test_presink_window_drop_is_named() {
     check(tx_b.dropped_presink() == 1, "the counter did not move on a delivered group");
 }
 
+/**
+ * @brief #1011 — a binding no re-issue OVERLAPPED is refused once the producer's endpoint
+ *        allocator has lapped, instead of welding two payloads into one frame.
+ *
+ * The sibling of `test_endpoint_wraparound_does_not_alias_stale_state`, and deliberately its
+ * geometric complement: there the post-wrap run lands INSIDE the trap's range, so
+ * `invalidate_overlapping` fires. Here the post-wrap run is DISJOINT from it, which is exactly
+ * the case that rule skips — correctly, since nothing is aliased — leaving the trap's binding
+ * live a whole revolution after the slices it promised were lost.
+ *
+ * Staged on the real send path throughout, with the bus LOSING frames rather than the test
+ * hand-building them:
+ *
+ *  1. lead   — 5 slices at `[1, 6)`, moving the allocator off the first slot.
+ *  2. trap   — 3 slices at `[6, 9)` (`0xA1`) with every slice but index 0 lost. The binding is
+ *              learned; the group keeps one true slice and can never complete.
+ *  3. filler — one group consuming the rest of the endpoint window exactly.
+ *  4. wrap   — 5 slices; the reservation no longer fits, so `alloc_base` wraps back and the
+ *              group lands at `[1, 6)` — DISJOINT from `[6, 9)`, so the trap SURVIVES.
+ *  5. weld   — 3 slices at `[6, 9)` (`0xB2`) whose ADVERTISE is lost on the bus, along with its
+ *              own index-0 slice. Indices 1 and 2 land with no manifest of their own.
+ *
+ * Unfixed, step 5 completes the trap's stale group: `trap[0] ++ weld[1] ++ weld[2]`, trimmed to
+ * the TRAP's advertised total and delivered as valid — 8 bytes of `0xA1` with 16 bytes of `0xB2`
+ * welded on, at exactly the length the receiver expected. The payloads are constant and
+ * different rather than index-derived, so a misattributed slice cannot be byte-identical to the
+ * correct one and the corruption stays visible to a byte compare.
+ *
+ * Fixed, the wrap advertise at base 1 fails to exceed the last base node 1 placed, so the lap is
+ * observed and every node-1 binding — the trap included — is marked prior-lap. Step 5's slices
+ * resolve to it, are refused, and are counted BY NAME. `rx_ttl` is parked far out of reach so
+ * nothing asserted here can be the `#912` age-out.
+ *
+ * Non-vacuity is asserted in the same run: the group sent afterwards, with its advertise intact,
+ * delivers byte-exact and moves no counter.
+ */
+void test_stale_lap_binding_is_refused_not_welded() {
+    std::printf("transport_can refuses a prior-lap binding instead of welding (#1011):\n");
+
+    fake_can_bus_t bus;
+    sink_t sink;
+    auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
+    auto link_a = std::make_unique<fake_link_t>(bus);
+    auto link_b = std::make_unique<fake_link_t>(bus);
+
+    tr::net::transport_can_config_t cfg_b = rx_test_config();
+    cfg_b.rx_ttl = 60s;  // far out of reach: the age-out must not be what refuses anything
+    tr::net::transport_can tx_a(std::move(link_a),
+                                {0, 1, tr::view::can_frame_mode_t::CLASSIC, "sensor/temp"});
+    tr::net::transport_can tx_b(std::move(link_b), cfg_b);
+    tx_b.set_receiver(rx);
+
+    constexpr std::size_t kWin = tr::view::kCanClassicMaxData;
+    // Derived from the CAN-ID field widths, never chosen: widen kEndpointBits and the
+    // geometry follows the wire instead of stopping at a boundary that moved.
+    constexpr std::uint16_t kFirst = tr::net::kCanFirstDataEndpoint;
+    constexpr std::size_t kLeadSlices = 5;
+    constexpr std::uint16_t kTrapBase = static_cast<std::uint16_t>(kFirst + kLeadSlices);
+    constexpr std::size_t kTrapSlices = 3;
+    constexpr std::size_t kFillerSlices = can::kEndpointMax - (kTrapBase + kTrapSlices) + 1;
+    // The post-wrap group stops exactly where the trap's run begins: DISJOINT, which is
+    // precisely what the overlap rule skips. That is the whole point of this case.
+    constexpr std::size_t kWrapSlices = kTrapBase - kFirst;
+    static_assert(kFirst + kWrapSlices == kTrapBase, "the wrap run must NOT overlap the trap");
+
+    const std::uint32_t trap_id = can::encode_can_id({0, 1, kTrapBase});
+
+    // 1. Lead group — ordinary traffic.
+    tx_a.send(make_payload(kLeadSlices * kWin));
+
+    // 2. The trap: everything but its FIRST slice is lost, so index 0 survives as the
+    //    true byte the weld would later be built on top of.
+    const std::vector<std::byte> trap_payload(kTrapSlices * kWin, std::byte{0xA1});
+    bus.set_drop([&](const tr::net::can_frame_data_t& f) {
+        const auto fields = can::decode_can_id(f.id);
+        return fields && fields->node == 1 && fields->endpoint > kTrapBase &&
+               fields->endpoint < kTrapBase + kTrapSlices;
+    });
+    tx_a.send(trap_payload);  // write_raw is synchronous, so the loss is complete on return
+    bus.set_drop(nullptr);
+    check(wait_until([&] { return tx_b.learned_binding(trap_id).has_value(); }, 2s),
+          "the trap's binding was learned and its group left incomplete");
+
+    // 3. Consume the rest of the endpoint window, so the next reservation cannot fit.
+    tx_a.send(make_payload(kFillerSlices * kWin));
+
+    // 4. THE WRAP, landing disjoint from the trap.
+    tx_a.send(make_payload(kWrapSlices * kWin));
+    check(sink.wait_for_count(3, 10s), "the lead, filler and wrapping groups all delivered");
+    check(tx_b.learned_binding(trap_id).has_value(),
+          "the trap SURVIVED the disjoint re-issue — the overlap rule does not reach it");
+
+    // 5. The weld attempt: a whole group's manifest lost on the control slot, plus its own
+    //    index-0 slice, so only the indices the trap is missing arrive.
+    const std::vector<std::byte> weld_payload(kTrapSlices * kWin, std::byte{0xB2});
+    bus.set_drop([&](const tr::net::can_frame_data_t& f) {
+        const auto fields = can::decode_can_id(f.id);
+        if (!fields || fields->node != 1) return false;
+        return fields->endpoint == tr::net::kCanControlEndpoint || fields->endpoint == kTrapBase;
+    });
+    tx_a.send(weld_payload);
+    bus.set_drop(nullptr);
+
+    // The headline. Unfixed, a fourth delivery appears: 24 bytes of 0xA1 ++ 0xB2, the exact
+    // length the trap's manifest promised, indistinguishable downstream from good data.
+    check(wait_until([&] { return tx_b.dropped_stale_binding() == 2; }, 2s),
+          "both manifest-less slices were refused against the prior-lap binding and counted");
+    check(sink.count() == 3, "NOTHING was delivered from the weld — no fourth group");
+    check(tx_b.dropped_groups() >= 1,
+          "the stale group's buffered slice was reclaimed, counted on dropped_groups()");
+    check(tx_b.dropped_rx() == 0, "the refusal is NOT folded into dropped_rx");
+
+    // Non-vacuity: the guard refuses a prior lap, not the ordinary path. The next group
+    // carries its own advertise, so it is delivered byte-exact and moves no counter.
+    const std::uint64_t refused_before = tx_b.dropped_stale_binding();
+    const std::vector<std::byte> good = make_payload(3 * kWin);
+    tx_a.send(good);
+    check(sink.wait_for_count(4, 10s), "a group with its own advertise still delivers");
+    check(equal_bytes(sink.last(), good), "and it is delivered byte-exact as itself");
+    check(tx_b.dropped_stale_binding() == refused_before,
+          "the counter did not move on the healthy path");
+}
+
 }  // namespace
 
 /**
@@ -1154,5 +1277,6 @@ int main() {
     test_rx_slice_refusal_drops_the_group_and_counts();
     test_rx_zero_length_slice_drops_the_group_and_counts();
     test_endpoint_wraparound_does_not_alias_stale_state();
+    test_stale_lap_binding_is_refused_not_welded();
     return tr::testing::summary("transport_can");
 }
