@@ -14,6 +14,28 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Added
+
+- **`net::transport_can::dropped_stale_binding()` — the CAN weld, made observable and then
+  refused** ([#1011](https://github.com/avatarsd-llc/libtracer/issues/1011)). A learned binding
+  whose endpoint run no later advertise *overlapped* survived indefinitely, because the
+  retire-on-re-issue rule ([#909](https://github.com/avatarsd-llc/libtracer/issues/909)) fires
+  on overlap and skips disjoint runs. Data slices whose own advertise was lost on the bus then
+  resolved first-match to that survivor, completed its stale group, and two unrelated payloads
+  were delivered upstream as one frame — trimmed to the length the *stale* manifest promised,
+  so byte-corrupt at exactly the size the receiver expected. The receiver now decides "no
+  advertise in this lap" from state it already holds: `alloc_base` issues strictly ascending
+  bases and wraps to `kCanFirstDataEndpoint`, so an advertise whose base does not exceed the
+  last one seen from that node proves the producer's allocator came round, and every binding of
+  that node is marked as belonging to a **prior lap**. A slice resolving to a prior-lap binding
+  is refused instead of welded: the group is discarded (ticking `dropped_groups()`, as every
+  other pre-delivery reclamation does) and the slice ticks the new counter. Counts **slices**,
+  like `dropped_rx()`; never folded into it. **No wire change** — ADR-0077's option 1 (binding
+  group identity into the data frames) stays declined, since the 29 bits are fully consumed by
+  `version|node|endpoint`. RAM: **0 added bytes per binding** (the flag lands in `binding_t`'s
+  existing tail padding) and 8 per remote node heard. Common-path cost: one already-loaded
+  `bool` test per data slice — no lookup added.
+
 ## [0.12.0] — 2026-08-14
 
 ### Added

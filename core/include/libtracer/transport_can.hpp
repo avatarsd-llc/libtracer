@@ -442,6 +442,37 @@ class transport_can : public transport_t, public bus_link_t {
     }
 
     /**
+     * @brief Inbound data slices refused because the binding they resolved to
+     *        predates the producer's current endpoint-allocator lap — the WELD,
+     *        counted (#1011).
+     *
+     * The retire-on-re-issue rule (#909) fires only on OVERLAP, so a binding whose
+     * endpoint run a later advertise merely skipped over survives. Data slices whose
+     * own advertise was lost on the bus then resolve first-match to that survivor,
+     * fill the indices its lost slices left empty, and complete its stale group: two
+     * unrelated payloads welded into one frame, trimmed to the length the STALE
+     * manifest promised, and delivered upstream as valid. Silent, and the size the
+     * receiver expected.
+     *
+     * The lap is what makes it decidable without spending endpoint bits (ADR-0077's
+     * option 1, still declined): `alloc_base` issues strictly ascending bases and
+     * wraps to @ref kCanFirstDataEndpoint, so an advertise whose base does not exceed
+     * the last one seen from that node is proof the producer's allocator came round.
+     * Every binding of that node then belongs to a PRIOR lap, and a slice resolving to
+     * one is refused rather than welded: the group is discarded (ticking @ref
+     * dropped_groups, as every other pre-delivery reclamation does) and the slice is
+     * counted HERE.
+     *
+     * Counts SLICES, like @ref dropped_rx — one per refused slice, not one per group.
+     * A distinctly named cause, never folded into @ref dropped_rx (which is
+     * backpressure and age-out) and never silent: a deployment that sees this moving
+     * is watching lost advertises on a lapping bus, not guessing.
+     */
+    [[nodiscard]] std::uint64_t dropped_stale_binding() const noexcept {
+        return dropped_stale_binding_.load(std::memory_order_relaxed);
+    }
+
+    /**
      * @brief Outbound frames the caller believed sent that never reached the bus
      *        (the twai `tx_dropped()` convention, spelled to match `dropped_rx`).
      *
@@ -555,9 +586,13 @@ class transport_can : public transport_t, public bus_link_t {
     // and a group lives exactly as long as the binding that feeds it".
     void invalidate_overlapping(const can::can_id_fields_t& base,
                                 std::uint16_t slice_count);  // requires rx_m_ held
-    void process_data(const can_frame_data_t& frame);        // requires rx_m_ held
-    void park_pending(const can_frame_data_t& frame);        // requires rx_m_ held
-    void expire_pending();                                   // requires rx_m_ held
+    // Mark every binding of `node` as belonging to a prior lap — the producer's
+    // endpoint allocator has come round (#1011). Runs only on a detected lap, and
+    // walks the same map invalidate_overlapping already walks per advertise.
+    void mark_prior_lap(std::uint16_t node);           // requires rx_m_ held
+    void process_data(const can_frame_data_t& frame);  // requires rx_m_ held
+    void park_pending(const can_frame_data_t& frame);  // requires rx_m_ held
+    void expire_pending();                             // requires rx_m_ held
     void deliver(std::uint16_t src_node, tr::view::rope_t frame);
     // Refresh/insert into the last-heard table, using the frame's arrival stamp.
     void touch_peer(std::uint16_t node, std::chrono::steady_clock::time_point now);
@@ -585,6 +620,33 @@ class transport_can : public transport_t, public bus_link_t {
     struct binding_t {
         can::advertise_t adv;
         bool deliver = true;
+        // True once the producer's endpoint allocator has come round past this
+        // binding: it was learned in a PRIOR lap, so no advertise of the current lap
+        // stands behind it and a slice resolving to it would be welded (#1011).
+        // Set by mark_prior_lap; never cleared — the fresh binding inserted after the
+        // sweep starts false, and the only exit from a prior lap is being replaced.
+        // Costs ZERO bytes: it lands in the tail padding `bool deliver` already had.
+        bool prior_lap = false;
+    };
+    /**
+     * @brief Per-remote-node receive state: its advertise byte stream, and the base
+     *        endpoint of the last advertise it was seen to place.
+     *
+     * One map instead of two. The lap test needs a single `std::uint16_t` per node and
+     * the control-stream buffer is already keyed by exactly that — a second
+     * `std::map<std::uint16_t, ...>` would have cost a whole map node (allocator
+     * header, three pointers, colour) to carry two bytes on a target where the RX
+     * buffers are injected precisely because the heap is scarce.
+     */
+    struct node_rx_t {
+        std::vector<std::byte> control; /**< @brief Accumulated advertise byte stream. */
+        // The base endpoint of the most recent advertise learned from this node.
+        // `alloc_base` issues strictly ascending bases and wraps to
+        // kCanFirstDataEndpoint, so a fresh base that does not EXCEED this one is proof
+        // the producer's allocator lapped. Starts at the control slot (0), which no
+        // conforming data advertise can claim, so a node's first advertise never reads
+        // as a lap.
+        std::uint16_t last_base = kCanControlEndpoint;
     };
     /**
      * @brief One data slice parked until its advertise lands, with the stamp that
@@ -606,7 +668,9 @@ class transport_can : public transport_t, public bus_link_t {
     // entry per distinct base a node advertises, structurally bounded by the 12-bit
     // endpoint space per node.
     std::map<std::uint32_t, binding_t> learned_;
-    std::map<std::uint16_t, std::vector<std::byte>> control_;  // per-node advertise byte stream
+    // node id -> its advertise byte stream + last advertised base (the lap witness).
+    // Growth is one entry per distinct node heard, bounded by the 13-bit node space.
+    std::map<std::uint16_t, node_rx_t> nodes_;
     // Data slices awaiting their advertise. Drawn from the injected resource (the
     // RX thread must not reach the global heap), bounded in COUNT by max_pending
     // and in AGE by rx_ttl; append-ordered, so both the stale prefix and the
@@ -618,10 +682,11 @@ class transport_can : public transport_t, public bus_link_t {
     // per-slice path has one indirect call either way.
     mem::mem_backend_t* rx_backend_ = nullptr;
 
-    // Drop counters (#912, #1103). Written on the RX/TX threads, read by anyone.
+    // Drop counters (#912, #1103, #1011). Written on the RX/TX threads, read by anyone.
     std::atomic<std::uint64_t> dropped_rx_{0};
     std::atomic<std::uint64_t> dropped_tx_{0};
     std::atomic<std::uint64_t> dropped_presink_{0};
+    std::atomic<std::uint64_t> dropped_stale_binding_{0};
 
     // the last-heard peer table (ADR-0044) — node id -> entry, insert-only
     mutable std::mutex peers_m_;

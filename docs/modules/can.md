@@ -246,6 +246,14 @@ gate rejects — the same rule that forbids `@ref`-ing a private.
 :project: libtracer
 ```
 
+The first slot the endpoint allocator may hand out, published under the same rule: it is
+the value `alloc_base` wraps back to, so `dropped_stale_binding()`'s doc `@ref`s it when it
+explains how the receiver observes a lap.
+
+```{doxygenvariable} tr::net::kCanFirstDataEndpoint
+:project: libtracer
+```
+
 ```{doxygenclass} tr::net::transport_can
 :project: libtracer
 :members:

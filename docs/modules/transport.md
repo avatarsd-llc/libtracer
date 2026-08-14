@@ -67,7 +67,7 @@ the rope form for an owning link, the span form otherwise (`fwd_router.cpp:873,7
 Every socket transport in the tree declares the owning tier: UDP
 (`transport_udp.hpp:111`), TCP client and server (`transport_tcp.hpp:207,372`),
 WebSocket server and client (`transport_ws.hpp:225,416`), CAN
-(`transport_can.hpp:510`), QUIC (`transport_quic.hpp:153`) and WebTransport
+(`transport_can.hpp:541`), QUIC (`transport_quic.hpp:153`) and WebTransport
 (`transport_webtransport.hpp:182`). The borrowed-span path is the base-class default
 and the tier an out-of-tree transport gets for free.
 
@@ -85,7 +85,7 @@ tags each inbound frame with the sending peer's name. No vertex is created for a
 peer and no peer state is stored.
 
 `transport_t::bus()` returns the facet or `nullptr`. CAN always returns it
-(`transport_can.hpp:491`); the TCP and WebSocket **servers** return it when
+(`transport_can.hpp:522`); the TCP and WebSocket **servers** return it when
 configured peer-named — one implementation, on the slot-server base both of them
 inherit (`posix_endpoint.hpp:409`); every other kind keeps the `nullptr` default.
 
