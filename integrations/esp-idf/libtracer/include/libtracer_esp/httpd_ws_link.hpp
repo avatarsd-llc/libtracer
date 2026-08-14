@@ -110,8 +110,10 @@
  *     snapshot was a `std::vector`, whose THROWING allocator put an abort ahead of
  *     every nothrow fallback on this exact path.
  * Peer slots remain heap, grown on demand and RECYCLED in place (never shrunk), so
- * the endpoint `peer_link` hands out stays pointer-valid for the link's life. Their
- * allocation is per SESSION (a new peer past the high-water mark), never per frame.
+ * the handle `peer_link` hands out stays pointer-valid for the link's life. Their
+ * allocation is per SESSION (a new peer past the high-water mark), never per frame — and
+ * so is the resolution handle's (#1013): the pool grows to the peer population once and
+ * is recycled from there, so a forward hop's resolve costs no allocation at all.
  *
  * WHAT IS CONFIGURABLE, and what is not (#1160). The three numbers that ARE this link's
  * per-link RAM — the RX scratch, the TX pool depth and a slot's inline capacity, together
@@ -1005,42 +1007,35 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     static constexpr std::size_t kMaxPreauthenticated = 24;
 
    private:
-    struct gate_t;         // the handler-admission gate + teardown barrier (in the .cpp)
-    struct session_t;      // one peer slot's connection state (defined in the .cpp)
-    struct session_ref_t;  // a session identity that survives fd reuse (defined in the .cpp)
-    struct tx_work_t;      // one queued outbound frame (defined in the .cpp)
-    struct tx_slot_t;      // one pre-allocated TX work slot (defined in the .cpp)
-    struct detach_req_t;   // the teardown session-detach work item (defined in the .cpp)
-    struct close_req_t;    // the close_peer work item (defined in the .cpp)
+    struct gate_t;            // the handler-admission gate + teardown barrier (in the .cpp)
+    struct session_t;         // one peer slot's connection state (defined in the .cpp)
+    struct session_ref_t;     // a session identity that survives fd reuse (defined in the .cpp)
+    struct tx_work_t;         // one queued outbound frame (defined in the .cpp)
+    struct tx_slot_t;         // one pre-allocated TX work slot (defined in the .cpp)
+    struct detach_req_t;      // the teardown session-detach work item (defined in the .cpp)
+    struct close_req_t;       // the close_peer work item (defined in the .cpp)
+    class peer_resolution_t;  // one RESOLUTION's directed endpoint (defined in the .cpp)
 
     /**
-     * @brief The directed per-peer sending endpoint @ref peer_link hands out:
-     *        `send()` writes a BINARY frame to that peer's socket only (via the
-     *        owning link's httpd send queue). No-op once the peer has departed.
+     * @brief Take a resolution handle for @p slot at its CURRENT generation — the object
+     *        @ref peer_link returns (#1013). Caller holds @ref peers_m_.
      *
-     * It keeps the base `link_up()` (`true`) DELIBERATELY, and that is the one place in
-     * this component where the #1059 liveness question is answered by the default rather
-     * than by state: a session's `open`/`dead` flags live under `peers_m_` as plain bools,
-     * so an honest answer here would mean either taking that mutex inside a `noexcept`
-     * poll (which the httpd task can already be holding) or mirroring the flags into an
-     * atomic that could drift from them. Nothing polls this endpoint — it is a private
-     * type handed to the routing plane purely to SEND, and a departed peer is reported to
-     * that plane by the eviction seam, not by a poll — so the mirror would buy an unused
-     * answer with a new divergence. Revisit if a puller ever appears (#1203).
+     * Deduplicated per LIVE SESSION: two callers that resolve the same peer between two
+     * claims share one handle, which is safe precisely because they resolved against the
+     * same generation. Returns nullptr only when the pool could not be grown, and a
+     * refused resolution is an honest "no such peer" rather than a handle that might
+     * outlive its session.
      */
-    class peer_endpoint_t final : public transport_t {
-       public:
-        void send(std::span<const std::byte> frame) override;
-        /** @brief Directed scatter-gather send: gathered once into the nothrow tx
-         *         work buffer (no intermediate flatten temporary — see the owning
-         *         link's iovec @ref httpd_ws_link_t::send). */
-        void send(std::span<const std::span<const std::byte>> iov) override;
-
-       private:
-        friend class httpd_ws_link_t;
-        httpd_ws_link_t* owner_ = nullptr;
-        session_t* slot_ = nullptr;
-    };
+    [[nodiscard]] peer_resolution_t* acquire_resolution(session_t* slot);
+    /**
+     * @brief Retire @p slot's resolution handle, if it holds one — the session it named
+     *        is over (@ref peers_m_ held).
+     *
+     * @param inert When true the handle is also unbound from the link, for the teardown
+     *              path that LEAKS the slot shell rather than freeing it: the handle must
+     *              land on valid, inert memory rather than dereference an abandoned slot.
+     */
+    void retire_resolution(session_t* slot, bool inert);
 
     // --- httpd trampolines (static; recover `this` from req->user_ctx / work arg) ---
     static esp_err_t ws_handler(httpd_req_t* req);  // the WS URI handler (data frames)
@@ -1386,10 +1381,12 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *         request's session, which no detach can reach (see @ref detach_sessions). */
     void abandon_session(int fd);
 
-    /** @brief Take a slot out of service without freeing it: clear its fd/open and cut
-     *         the endpoint facade loose, so a callback or a directed send that outlives
-     *         the link lands on valid, inert memory. Caller holds @ref peers_m_. */
-    static void neutralise(session_t* slot);
+    /** @brief Take a slot out of service without freeing it: clear its fd/open and cut its
+     *         resolution handle loose, so a callback or a directed send that outlives the
+     *         link lands on valid, inert memory. Caller holds @ref peers_m_. Non-static
+     *         since #1013 — the handle it cuts loose belongs to the LINK's pool, not to
+     *         the slot. */
+    void neutralise(session_t* slot);
 
     /**
      * @brief The server handle. ATOMIC because the TX path is documented as safe to run
@@ -1582,6 +1579,36 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *         httpd task's accept/close. The reassembly buffer is httpd-task-only. */
     mutable std::mutex peers_m_;
     std::vector<std::unique_ptr<session_t>> slots_;  // grown on demand; recycled in place
+    /**
+     * @brief The resolution-handle pool `peer_link` hands out of (#1013) — grown on
+     *        demand, never shrunk, and recycled through @ref free_resolutions_.
+     *
+     * One entry per LIVE resolution plus @ref kResolutionSpare in quarantine, so the pool
+     * is bounded by the socket budget and not by traffic: a handle is per RESOLUTION, but
+     * a second resolution of the same live session reuses the first's, and every handle
+     * comes back when its session ends. The entries are separately allocated for the
+     * reason the slot shells are — the teardown that cannot retire the server's callbacks
+     * LEAKS them rather than freeing memory a queued send may still address.
+     */
+    std::vector<std::unique_ptr<peer_resolution_t>> resolutions_;
+    /** @brief Retired handles, oldest first: `peer_link` recycles from the HEAD and
+     *         @ref retire_resolution appends at the TAIL, so a handle just retired is the
+     *         LAST one handed back out (see @ref kResolutionSpare). */
+    peer_resolution_t* free_resolutions_ = nullptr;
+    peer_resolution_t* free_resolutions_tail_ = nullptr; /**< @brief Its tail (peers_m_). */
+    std::size_t free_resolutions_n_ = 0;                 /**< @brief Its length (peers_m_). */
+    /**
+     * @brief Retired handles kept in quarantine before any is recycled.
+     *
+     * A recycled handle is restamped for a DIFFERENT session, so a caller still holding
+     * it would be back where #1013 started. The quarantine is what makes that unreachable
+     * in practice rather than merely unlikely: `peer_link` grows the pool until this many
+     * retired handles are queued ahead of the one it would reuse, so a caller would have
+     * to be suspended between its resolve and its send across this many further session
+     * departures on the whole link — the contract on `bus_link_t::peer_link` is resolve
+     * per use, and one forward hop is what sits between the two.
+     */
+    static constexpr std::size_t kResolutionSpare = 4;
     /** @brief Once-allocated RX scratch (httpd-task-only, so lock-free by construction):
      *         a frame that fits reads here instead of a per-frame allocation. */
     std::unique_ptr<std::byte[]> rx_scratch_;

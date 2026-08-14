@@ -770,7 +770,7 @@ ANCHORS = [
     # integrations/esp-idf/libtracer/httpd_ws_link.cpp
     ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:78',
      '* (F2b, 2026-07-09): the /unit batch apply overflowed 8 KB and needed ~12 KB. It is named'),
-    ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:191',
+    ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:193',
      'static constexpr std::size_t kRequiredHttpdStack = 12288;'),
     ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:578', 'if (chunk.empty()) return true;'),
     ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:584',
@@ -1025,7 +1025,7 @@ ANCHORS = [
      'result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::byte> child_key,'),
     ('integrations/esp-idf/libtracer/include/libtracer_esp/esp_ws_client_link.hpp:176',
      '#include "esp_transport.h"'),
-    ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:150',
+    ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:152',
      '#include "esp_http_server.h"'),
     ('integrations/esp-idf/libtracer/include/libtracer_esp/twai_link.hpp:36',
      '#include "esp_twai.h"'),

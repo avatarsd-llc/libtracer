@@ -673,13 +673,13 @@ struct httpd_ws_link_t::gate_t {
 /**
  * @brief One peer slot: a single inbound WebSocket client's connection state.
  *
- * Slots are recycled in place across connections (never freed before the link), so
- * the @ref peer_endpoint_t `peer_link` hands out stays pointer-valid for the link's
- * life. Threading: `fd`/`open`/`name` are read cross-thread (peer_link /
- * enumerate_peers / a send's fd snapshot) and written by the httpd task
- * (accept/close) — all under `peers_m_`. `asm_buf` is touched only on the httpd
- * task (RX reassembly). `endpoint` and `gate` are set once at creation and never
- * change.
+ * Slots are recycled in place across connections (never freed before the link), so a
+ * @ref peer_resolution_t may name one for as long as the link lives — it compares the
+ * generation it captured rather than trusting the slot's current one. Threading:
+ * `fd`/`open`/`name` are read cross-thread (peer_link / enumerate_peers / a send's fd
+ * snapshot) and written by the httpd task (accept/close) — all under `peers_m_`.
+ * `asm_buf` is touched only on the httpd task (RX reassembly). `gate` is set once at
+ * creation and never changes.
  */
 struct httpd_ws_link_t::session_t {
     /**
@@ -828,7 +828,17 @@ struct httpd_ws_link_t::session_t {
      * read on a diagnostic path, and never worth a heap chunk on a small-heap target.
      */
     char subject[httpd_ws_link_t::kMaxSubjectChars + 1] = {};
-    peer_endpoint_t endpoint; /**< @brief The directed facade `peer_link` returns. */
+    /**
+     * @brief The resolution handle currently naming THIS session, or null (peers_m_).
+     *
+     * Not an endpoint OF the slot — the slot no longer owns one (#1013). It is a cache of
+     * the handle `peer_link` minted for the session in it, so a second resolution between
+     * two claims reuses the first's instead of consuming another pool entry: both
+     * resolutions saw the same generation, so one object answers for both. Retired to the
+     * link's free list the moment the session ends (@ref httpd_ws_link_t::retire_resolution),
+     * which is what bounds the pool to the peer population.
+     */
+    peer_resolution_t* resolution = nullptr;
     /**
      * @brief Passive traffic counters for the session currently holding this slot
      *        (peers_m_, like everything else cross-thread here) — see link_stats.hpp.
@@ -870,16 +880,81 @@ struct httpd_ws_link_t::session_t {
  * stale SINCE IT WAS MINTED always FAILS the check rather than resolving to whoever now
  * holds the descriptor.
  *
- * @note That is the guarantee, and it is narrower than "this endpoint is peer X". The
- *       reference is only as good as the moment of minting: a caller that resolves a peer,
- *       is preempted, and sends afterwards mints from the slot's CURRENT generation, so the
- *       check is self-satisfying for whoever holds the slot then. Closing that needs an
- *       identity captured at RESOLVE time, which the shared per-slot endpoint cannot carry.
- *       Tracked as #1013; do not read this type as making the directed path safe.
+ * @note The guarantee is exactly as good as the moment of MINTING, which is why the
+ *       directed path no longer mints here at all. A caller that resolved a peer, was
+ *       preempted, and sent afterwards used to mint from the slot's CURRENT generation,
+ *       so the check was self-satisfying for whoever held the slot by then (#1013). The
+ *       generation is now captured at RESOLVE time and carried by
+ *       @ref httpd_ws_link_t::peer_resolution_t, and this pair is COPIED out of it — so
+ *       a directed send can never observe a newer generation than the one its caller
+ *       resolved against. The broadcast producer still mints, correctly: it resolves its
+ *       destinations and enqueues them inside one call, with no window between.
  */
 struct httpd_ws_link_t::session_ref_t {
     session_t* slot = nullptr; /**< @brief The peer slot; compared, never dereferenced blind. */
     std::uint32_t gen = 0;     /**< @brief @ref session_t::gen at the moment of minting. */
+};
+
+/**
+ * @brief What @ref httpd_ws_link_t::peer_link hands back: ONE RESOLUTION of a peer name,
+ *        carrying the session identity it resolved against (#1013).
+ *
+ * `send()` writes a BINARY frame to that SESSION's socket only (via the owning link's
+ * httpd send queue), and is a counted no-op once that session has departed.
+ *
+ * The type this replaced was one object per SLOT for the link's life, so it had nothing
+ * of its own to check a send against and re-read the slot's generation when the send
+ * finally ran. That read is the whole of #1013: between a caller resolving a peer and
+ * that caller sending, the httpd task can close the session and accept another onto the
+ * same descriptor — a browser reload — and a generation minted after the swap describes
+ * the STRANGER, so the check passed and one authenticated session's directed reply was
+ * written into another's socket. Stamping the shared per-slot object at resolve time was
+ * explicitly rejected as the fix: two callers resolving one slot at different generations
+ * overwrite each other's stamp, which narrows the window while reading like a closure.
+ *
+ * So the identity is captured HERE, at the resolve, and @ref gen_ is never re-read from
+ * the slot. A send validates the slot against the generation the CALLER saw; a session
+ * that departed in between fails that test and the frame is dropped and counted, exactly
+ * as a send to a peer that had already gone is.
+ *
+ * Lifetime: handles come from @ref httpd_ws_link_t::resolutions_, are recycled through
+ * its free list when their session ends, and — like the peer slots — are pointer-valid
+ * for the link's life, because the teardown that cannot retire the server's callbacks
+ * leaks them rather than freeing them.
+ *
+ * It keeps the base `link_up()` (`true`) DELIBERATELY, and that is the one place in this
+ * component where the #1059 liveness question is answered by the default rather than by
+ * state: a session's `open`/`dead` flags live under `peers_m_` as plain bools, so an
+ * honest answer here would mean either taking that mutex inside a `noexcept` poll (which
+ * the httpd task can already be holding) or mirroring the flags into an atomic that could
+ * drift from them. Nothing polls this handle — it is a private type handed to the routing
+ * plane purely to SEND, and a departed peer is reported to that plane by the eviction
+ * seam, not by a poll — so the mirror would buy an unused answer with a new divergence.
+ * Revisit if a puller ever appears (#1203).
+ */
+class httpd_ws_link_t::peer_resolution_t final : public transport_t {
+   public:
+    void send(std::span<const std::byte> frame) override;
+    /** @brief Directed scatter-gather send: gathered once into the nothrow tx work buffer
+     *         (no intermediate flatten temporary — see the owning link's iovec
+     *         @ref httpd_ws_link_t::send). */
+    void send(std::span<const std::span<const std::byte>> iov) override;
+
+   private:
+    friend class httpd_ws_link_t;
+    httpd_ws_link_t* owner_ = nullptr; /**< @brief The resolving link; null once retired
+                                        *          into inert memory by a teardown. */
+    session_t* slot_ = nullptr;        /**< @brief The slot this resolution named. */
+    /**
+     * @brief @ref session_t::gen AT THE RESOLVE — the field that closes #1013.
+     *
+     * Written once per stamping, under `peers_m_`, and only ever COMPARED afterwards.
+     * Nothing re-reads the slot's generation into it, which is the entire difference
+     * between this type and the per-slot endpoint it replaced.
+     */
+    std::uint32_t gen_ = 0;
+    /** @brief Free-list link while retired; meaningless while stamped (peers_m_). */
+    peer_resolution_t* free_next_ = nullptr;
 };
 
 /**
@@ -1504,6 +1579,16 @@ void httpd_ws_link_t::abandon_sessions() {
             ++leaked;
         }
         slots_.clear();
+        // The resolution handles go the same way, and for the same reason (#1013): the
+        // routing plane may still hold one, and `neutralise` has just made every one of
+        // them inert, so leaking the pool is what keeps that inert object at a valid
+        // address. Freeing it here would turn a no-op send into a use-after-free — the
+        // precedent the leaked slot shells beside it set (#815).
+        for (auto& r : resolutions_) (void)r.release();
+        resolutions_.clear();
+        free_resolutions_ = nullptr;
+        free_resolutions_tail_ = nullptr;
+        free_resolutions_n_ = 0;
     }
     ESP_LOGW(kTag,
              "%u session slot(s) leaked at teardown: the adopted server still holds "
@@ -1527,13 +1612,12 @@ void httpd_ws_link_t::neutralise(session_t* slot) {
     // Take the slot out of service without freeing it. The server may still hold it as a
     // session ctx and WILL run free_ctx on it eventually; the gate already makes that
     // call inert, and leaving the shell allocated is what makes it land on valid memory.
-    // Clearing `open`/`fd` also keeps it out of any later snapshot, and the endpoint
-    // facade's own null-owner case covers a directed send that outlives the link.
+    // Clearing `open`/`fd` also keeps it out of any later snapshot, and the resolution
+    // handle's own null-owner case covers a directed send that outlives the link.
     slot->open = false;
     slot->fd = -1;
     slot->asm_buf.clear();
-    slot->endpoint.owner_ = nullptr;
-    slot->endpoint.slot_ = nullptr;
+    retire_resolution(slot, /*inert=*/true);
 }
 
 // ---------------------------------------------------------------------------
@@ -1773,11 +1857,14 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
                 auto s = std::make_unique<session_t>();
                 slot = s.get();
                 slot->gate = gate_.load(std::memory_order_relaxed);
-                slot->endpoint.owner_ = this;
-                slot->endpoint.slot_ = slot;
                 slots_.push_back(std::move(s));
                 idx = slots_.size() - 1;
             }
+            // Belt and braces: every path that frees a slot retires its handle first, so
+            // this is a no-op — but a slot must NEVER carry a handle stamped at a
+            // generation it is about to leave behind, and that invariant belongs at the
+            // claim, next to the bump that would break it.
+            retire_resolution(slot, /*inert=*/false);
             // ADR-0073 §2: the routable NAME is the slot index, legal by construction, and
             // the `<ip>:<port>` goes to the diagnostics field instead of into the graph.
             slot->name = slot_name(idx);
@@ -2200,6 +2287,12 @@ std::string httpd_ws_link_t::reclaim_slot(session_t* slot) {
         slot->open = false;
         slot->fd = -1;
         slot->name.clear();
+        // The session this slot carried is over, so the handle that NAMED that session is
+        // spent: back to the pool, where it waits out the quarantine before it can be
+        // restamped (#1013). Anyone still holding it now fails the generation test rather
+        // than reaching whoever lands here next — which is the whole point of retiring it
+        // instead of re-pointing it.
+        retire_resolution(slot, /*inert=*/false);
         // The address goes with the name. Unobservable today (the claim rewrites it before
         // `open`, and only open slots are reported), but it is the same hygiene the TX
         // verdicts below get, and for the same reason: a recycled slot must carry nothing
@@ -2992,35 +3085,43 @@ void httpd_ws_link_t::send(std::span<const std::span<const std::byte>> iov) {
     }
 }
 
-void httpd_ws_link_t::peer_endpoint_t::send(std::span<const std::byte> frame) {
+void httpd_ws_link_t::peer_resolution_t::send(std::span<const std::byte> frame) {
     const std::span<const std::byte> one[] = {frame};
     send(std::span<const std::span<const std::byte>>(one));
 }
 
-void httpd_ws_link_t::peer_endpoint_t::send(std::span<const std::span<const std::byte>> iov) {
+void httpd_ws_link_t::peer_resolution_t::send(std::span<const std::span<const std::byte>> iov) {
     // The directed reply path (fwd_router hands the reply rope's iovec here): one
     // nothrow gather into the tx work item, no intermediate flatten temporary.
-    if (owner_ == nullptr || slot_ == nullptr) return;
-    // The endpoint is bound to a SLOT for the link's life, and slots outlive the sessions
-    // they carry — so "which peer is this endpoint for" is only answered together with the
-    // generation. A directed FWD reply resolved against a stale one would be delivered to
-    // whichever tab reconnected onto the slot, on a link whose whole point is that a reply
-    // reaches only the tab that asked (#954).
+    //
+    // ONE load into a local, for the reason queue_send records (#963): a teardown may be
+    // writing this member while a producer reads it.
+    httpd_ws_link_t* const owner = owner_;
+    if (owner == nullptr) return;  // retired into inert memory by a teardown
+    // The identity test #1013 exists for. `gen_` was captured when the CALLER resolved this
+    // peer, and is only ever COMPARED here — never re-read from the slot, which is what the
+    // shared per-slot endpoint this replaced had to do. Between a resolve and its send the
+    // httpd task can close the session and accept another onto the same descriptor AND the
+    // same recycled slot — a browser reload — and a generation minted after that swap
+    // describes the stranger, so the check passed and the reply was written into the wrong
+    // socket, on a link whose whole point is that a reply reaches only the tab that asked
+    // (#954).
     session_ref_t to;
     {
-        const std::lock_guard lock(owner_->peers_m_);
-        if (!slot_->open || slot_->dead) {
+        const std::lock_guard lock(owner->peers_m_);
+        session_t* const slot = slot_;
+        if (slot == nullptr || !slot->open || slot->dead || slot->gen != gen_) {
             // Counted HERE as well as at queue_send's head (#953), and it has to be: this
             // early-out is the one a directed reply actually takes, so a counter only at
             // the queue_send locus would read zero for the very path most likely to race a
             // departure. Same field either way — it is one event with two detection sites,
             // and each drops exactly one frame.
-            owner_->tx_to_dead_peer_.fetch_add(1, std::memory_order_relaxed);
-            return;  // departed or condemned => no-op
+            owner->tx_to_dead_peer_.fetch_add(1, std::memory_order_relaxed);
+            return;  // departed, condemned, or SUPERSEDED => no-op
         }
-        to = session_ref_t{slot_, slot_->gen};
+        to = session_ref_t{slot, gen_};
     }
-    owner_->queue_send(to, iov);
+    owner->queue_send(to, iov);
 }
 
 // ---------------------------------------------------------------------------
@@ -3076,8 +3177,78 @@ transport_t* httpd_ws_link_t::peer_link(std::string_view peer) {
     // plane a working endpoint for a peer that has presented nothing, which is the whole
     // gate defeated by one lookup — a directed FWD reply does not consult the census.
     for (const auto& s : slots_)
-        if (s->open && !s->dead && !s->auth_pending && s->name == peer) return &s->endpoint;
+        if (s->open && !s->dead && !s->auth_pending && s->name == peer)
+            return acquire_resolution(s.get());
     return nullptr;
+}
+
+httpd_ws_link_t::peer_resolution_t* httpd_ws_link_t::acquire_resolution(session_t* slot) {
+    // A second resolution of the SAME live session answers with the first's handle. Both
+    // saw the same generation — that is what makes sharing safe here and what made the
+    // per-SLOT endpoint unsafe: the hazard was ever sharing one object ACROSS generations.
+    // It is also what bounds the pool by the peer population instead of by traffic, so a
+    // forward hop's resolve allocates nothing in steady state.
+    if (slot->resolution != nullptr) return slot->resolution;
+    peer_resolution_t* got = nullptr;
+    // Grow before recycling, until the quarantine is stocked (kResolutionSpare). A handle
+    // is restamped for a DIFFERENT session when it comes back out, so handing back the one
+    // most recently retired would reproduce #1013 for a caller still holding it; the free
+    // list is FIFO and this keeps a depth of retirements between the two events.
+    if (free_resolutions_n_ > kResolutionSpare) {
+        got = free_resolutions_;
+        free_resolutions_ = got->free_next_;
+        if (free_resolutions_ == nullptr) free_resolutions_tail_ = nullptr;
+        --free_resolutions_n_;
+        got->free_next_ = nullptr;
+    } else if (resolutions_.size() < slots_.size() + kResolutionSpare) {
+        // Same shape as the slot claim's own growth a few lines up: one small object per
+        // peer past the high-water mark, never per frame.
+        auto r = std::make_unique<peer_resolution_t>();
+        got = r.get();
+        resolutions_.push_back(std::move(r));
+    } else if (free_resolutions_ != nullptr) {
+        // At the cap with a shallow quarantine: recycle rather than refuse. Reachable only
+        // when the pool is already sized for every slot, i.e. when the retirements ahead of
+        // this one are the link's whole peer population.
+        got = free_resolutions_;
+        free_resolutions_ = got->free_next_;
+        if (free_resolutions_ == nullptr) free_resolutions_tail_ = nullptr;
+        --free_resolutions_n_;
+        got->free_next_ = nullptr;
+    }
+    // Nothing to hand out => an honest "no such peer" (the caller's frame is dropped and
+    // counted at ITS end), never a handle that could name the wrong session. FAIL CLOSED is
+    // the whole point of the change; a misdelivery is not a lesser failure than a drop.
+    if (got == nullptr) return nullptr;
+    got->owner_ = this;
+    got->slot_ = slot;
+    got->gen_ = slot->gen;  // the CAPTURE — read once, here, under peers_m_ (#1013)
+    slot->resolution = got;
+    return got;
+}
+
+void httpd_ws_link_t::retire_resolution(session_t* slot, bool inert) {
+    peer_resolution_t* const r = slot->resolution;
+    if (r == nullptr) return;
+    slot->resolution = nullptr;
+    if (inert) {
+        // The teardown fork: this slot's shell is about to be LEAKED rather than freed, so
+        // the handle must not keep a pointer into it. Unbinding is what makes a send that
+        // outlives the link land on valid, inert memory — the same rule `neutralise` keeps
+        // for the slot itself.
+        r->owner_ = nullptr;
+        r->slot_ = nullptr;
+    }
+    // Append at the TAIL: the free list is FIFO so that the handle just retired is the LAST
+    // one handed back out (see kResolutionSpare).
+    r->free_next_ = nullptr;
+    if (free_resolutions_tail_ != nullptr) {
+        free_resolutions_tail_->free_next_ = r;
+    } else {
+        free_resolutions_ = r;
+    }
+    free_resolutions_tail_ = r;
+    ++free_resolutions_n_;
 }
 
 bool httpd_ws_link_t::close_peer(std::string_view peer) {
