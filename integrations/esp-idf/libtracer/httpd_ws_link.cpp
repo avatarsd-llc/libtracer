@@ -53,10 +53,17 @@ constexpr const char* kTag = "httpd_ws";
  * trades how long a teardown blocks against how often that leak is taken. An adopted
  * server we do not own exposes no timeout of its own to derive it from — the send/recv
  * wait it was configured with belongs to the caller's `httpd_config_t`, not to us.
+ *
+ * DELIBERATELY FIXED (#1160). It is reached only on a teardown of an ADOPTED server, it
+ * costs no RAM, and both outcomes are already safe and logged — so the only thing a knob
+ * would let an embedder choose is how long their own destructor blocks before taking a
+ * leak they are told about. That is not a resource trade, and it is not on any hot path;
+ * a node that finds this bound wrong has a wedged server task, which is the thing to fix.
  */
 constexpr int kDrainTurns = 200;
 
-/** @brief One drain turn, milliseconds — see @ref kDrainTurns. */
+/** @brief One drain turn, milliseconds — see @ref kDrainTurns. Fixed for the same reason,
+ *         and it is only the resolution at which that one bound is sampled. */
 constexpr int kDrainSliceMs = 5;
 
 /** @brief The calling task's identity, as the opaque token `server_task_` latches. */
@@ -98,12 +105,28 @@ constexpr std::size_t kStackHeadroomFloor =
  * an unbounded length is a heap-exhaustion lever. Graph control-plane TLVs are far
  * smaller; a frame or reassembly past this is treated as abuse and the peer is
  * dropped (or the message discarded).
+ *
+ * DELIBERATELY FIXED, and not one of #1160's constructor arguments. It costs NO RAM — it
+ * is the ceiling on a per-frame nothrow allocation, not a buffer — so there is nothing to
+ * trade, and what it bounds is an attack rather than a workload: an embedder who raises it
+ * is not tuning a node, they are widening a heap-exhaustion lever on the one path a
+ * stranger controls. A deployment that legitimately needs larger control TLVs has outgrown
+ * the assumption behind the number, which is a change to this file with its reasoning, not
+ * a knob turn.
  */
 constexpr std::size_t kMaxFrameBytes = 32768;
 
-/** @brief Sockets reserved beyond the peer cap: httpd's internal working sockets
- *         plus headroom so the (cap+1)th peer is still ACCEPTED and can be refused
- *         cleanly in the handshake handler rather than held in the SYN backlog. */
+/**
+ * @brief Sockets reserved beyond the peer cap: httpd's internal working sockets
+ *        plus headroom so the (cap+1)th peer is still ACCEPTED and can be refused
+ *        cleanly in the handshake handler rather than held in the SYN backlog.
+ *
+ * DELIBERATELY FIXED (#1160): it is a fact about `esp_http_server`'s own socket
+ * bookkeeping plus the one spare that makes a refusal a clean 1-frame close instead of a
+ * SYN-backlog stall — not a budget of ours. Raising it would buy an embedder nothing they
+ * cannot get by raising `max_peers`, which is already an argument; lowering it breaks the
+ * refusal path this component promises.
+ */
 constexpr std::size_t kInternalSockSlack = 3;
 
 /**
@@ -116,6 +139,12 @@ constexpr std::size_t kInternalSockSlack = 3;
  * socket looks open. Three in a row distinguishes the two — one drop is noise, two can
  * straddle a burst, three consecutive means the drain isn't keeping up at all. This is a
  * brokenness detector, not a tunable, so it is a named constant and NOT a config knob.
+ * #1160 asked the question again, knob by knob, and the answer did not change: this is the
+ * only thing standing between one silently-stalled peer and the httpd task being parked
+ * for the whole watchdog window, so an embedder who could raise it could disable the
+ * protection that keeps the node alive — and one who could lower it to 1 would condemn
+ * peers for a single burst. It is also a DIVISOR of the send bound below
+ * (@ref derive_send_timeout_ms), so a knob over it would silently re-time every socket.
  *
  * The trichotomy is unchanged by #835; what changed is WHOSE evidence feeds it. It is
  * now the failed sends — which name their destination by construction — and no longer
@@ -160,9 +189,17 @@ constexpr std::uint32_t kTaskWdtSeconds = CONFIG_ESP_TASK_WDT_TIMEOUT_S;
 constexpr std::uint32_t kTaskWdtSeconds = 5;
 #endif
 
-/** @brief Peer cap assumed when the caller passes `max_peers == 0` (unbounded): the
- *         shared lwIP socket pool is small, so an unbounded cap still needs a finite
- *         socket budget — and the same finite number is the send bound's divisor. */
+/**
+ * @brief Peer cap assumed when the caller passes `max_peers == 0` (unbounded): the
+ *        shared lwIP socket pool is small, so an unbounded cap still needs a finite
+ *        socket budget — and the same finite number is the send bound's divisor.
+ *
+ * DELIBERATELY FIXED (#1160), because the knob for it already exists and is better: pass
+ * `max_peers`. This number is only ever consulted when the caller declined to state one,
+ * so a second knob would be a configurable value for the case "the embedder configured
+ * nothing" — and the adopting constructor already LOGS a warning when it has to fall back
+ * to it, naming the figure it assumed.
+ */
 constexpr std::size_t kDefaultPeerCap = 4;
 
 /**
@@ -241,48 +278,8 @@ constexpr int kKeepProbes = 3;          /**< @brief Unanswered probes before dea
 }
 
 /**
- * @brief Reusable RX scratch capacity, bytes — a frame at or under this reads into
- *        a once-allocated buffer instead of taking a per-frame heap allocation.
- *
- * The httpd task is the only RX thread and delivery is synchronous (borrowed,
- * serviced in-call), so ONE scratch per link suffices and needs no lock. Graph
- * control TLVs — writes, subscribes, value pushes — sit well under this; a larger
- * frame (up to kMaxFrameBytes) falls back to the exact-size nothrow heap path,
- * trading one allocation for not pinning 32 KB of RAM permanently.
- */
-constexpr std::size_t kRxScratchBytes = 2048;
-
-/**
- * @brief TX work slots pre-allocated per link, claimed lock-free by sending tasks
- *        (see @ref httpd_ws_link_t::tx_slot_t).
- *
- * The pool IS the link's OUTSTANDING-SEND bound — how many frames may be in flight toward
- * the httpd task at one instant — and deliberately NOT a fan-out width. It is sized past
- * the steady-state in-flight depth (a reply plus a couple of subscription pushes) and
- * never allocates; what a burst past it does is @ref httpd_ws_link_t::claim_tx_slot_waiting's
- * subject, not this constant's.
- *
- * That distinction is the #1187 correction. Until then a fan-out wider than this dropped
- * every destination past the fourth, and on a UNICORE target it did so deterministically:
- * the producer task posts its whole sweep before the httpd task can run once, so no slot
- * can free mid-pass and the SAME prefix of the peer set won every pass — a publish-order
- * loss with a silent tail, reproduced bit-identically on two boards (#1187). Sizing the
- * pool to the widest fan-out an embedder might have is not the answer to that: the number
- * is an in-flight depth, and a wide sweep at any depth would find the same cliff one peer
- * later. Waiting for the drain is (see @ref kTxWaitSliceMs).
- *
- * This is the depth AVAILABLE TO ANY SENDER, and #1218 is why that has to be said: the
- * in-call reserve is a slot of its own (@ref kTxReplySlots) on top of this number, never a
- * slice taken out of it. Carved out of the pool instead, it silently made every off-task
- * fan-out one destination narrower than the bound documented here — so a sweep that had
- * always FIT started waiting for a drain, every pass, and paid the whole regression
- * (#1218) for a reply that was not even pending.
- */
-constexpr std::size_t kTxPoolSlots = 4;
-
-/**
- * @brief TX work slots held back for sends issued ON the httpd task — ADDITIONAL to
- *        @ref kTxPoolSlots, never carved out of it (#1218).
+ * @brief TX work slots held back for sends issued ON the httpd task — ADDITIONAL to the
+ *        configured pool depth, never carved out of it (#1218).
  *
  * A send issued on the httpd task (a request's reply, serviced in-call) is the one sender
  * that cannot wait for a slot: the task that would free one is the task that is asking, so
@@ -294,18 +291,19 @@ constexpr std::size_t kTxPoolSlots = 4;
  * That the reserve is EXTRA is the whole of #1218. #1187 implemented it by shortening the
  * scan an off-task claimer was allowed — which cost every producer a slot permanently,
  * whether or not any request was in flight, and turned a fan-out of exactly
- * @ref kTxPoolSlots (which had always fit, at the offered rate) into one that had to wait
- * for the drain on every single pass. The reserve is not free — it costs one slot of RAM
- * per link (a shell plus @ref kTxInlineBytes) — and that price is the honest one: a
- * guarantee for a claimer that cannot wait has to be a slot nobody else can take, not a
- * narrower bound for everybody else.
+ * @ref httpd_ws_link_t::tx_slot_capacity (which had always fit, at the offered rate) into
+ * one that had to wait for the drain on every single pass. The reserve is not free — it
+ * costs one slot of RAM per link (a shell plus @ref httpd_ws_link_t::tx_inline_bytes) —
+ * and that price is the honest one: a guarantee for a claimer that cannot wait has to be a
+ * slot nobody else can take, not a narrower bound for everybody else.
+ *
+ * DELIBERATELY FIXED, and not a ctor argument like the three sizes around it (#1160). It
+ * is not a depth an embedder can trade: the shape it answers is "one reply per serviced
+ * request", and esp_http_server services requests one at a time on one task, so a second
+ * reserved slot could never be claimed and a zeroth would reinstate the #1187 ack loss.
+ * Its RAM cost travels with `tx_inline_bytes`, which IS configurable.
  */
 constexpr std::size_t kTxReplySlots = 1;
-
-/** @brief TX work slots ALLOCATED per link: the sender-visible pool plus the in-call
- *         reserve (@ref kTxPoolSlots, @ref kTxReplySlots). The reserve is the tail of the
- *         array, so a slot index below @ref kTxPoolSlots is claimable by anyone. */
-constexpr std::size_t kTxSlotsTotal = kTxPoolSlots + kTxReplySlots;
 
 /**
  * @brief One turn a WAITING send spends off the CPU before re-trying the pool,
@@ -347,16 +345,6 @@ constexpr std::uint32_t kTxWaitSliceMs = 1;
 [[nodiscard]] constexpr std::int64_t tx_wait_bound_us(std::uint32_t send_timeout_ms) noexcept {
     return static_cast<std::int64_t>(send_timeout_ms) * kIdfWsWriteLegs * 1000;
 }
-
-/**
- * @brief Inline payload capacity of one TX work slot, bytes.
- *
- * Sized past the common outbound frames (value pushes, directed replies, census)
- * so a steady-state send gathers straight into the slot with NO allocation; a
- * larger frame (e.g. a composed-root snapshot reply) keeps the pooled shell but
- * takes a nothrow heap payload. Roughly one Ethernet MTU.
- */
-constexpr std::size_t kTxInlineBytes = 1600;
 
 /**
  * @brief Destinations one fan-out chunk holds — the ON-STACK snapshot a broadcast walks
@@ -405,6 +393,22 @@ constexpr std::int64_t kMinAuthSweepUs = 100000;
 [[nodiscard]] constexpr std::int64_t resolve_auth_deadline_us(std::uint32_t ms) {
     const std::int64_t chosen = ms != 0 ? ms : httpd_ws_link_t::kDefaultAuthDeadlineMs;
     return chosen * 1000;
+}
+
+/**
+ * @brief Resolve one of the three buffer-sizing constructor arguments (#1160): @p want,
+ *        or @p fallback when the caller left it 0.
+ *
+ * The SAME "0 means take the default" idiom `send_timeout_ms` and `auth_deadline_ms`
+ * already use on these constructors, so an embedder learns one convention for the whole
+ * argument list. There is no clamp and no ceiling: this component does not know the
+ * target's heap, and inventing an upper bound here would be exactly the synthetic limit
+ * the RAM-bearing three were made arguments to avoid. A value too large simply fails to
+ * allocate, and @ref httpd_ws_link_t::alloc_buffers already reports that as the link
+ * dropping every send on the counted path.
+ */
+[[nodiscard]] constexpr std::size_t resolve_size(std::size_t want, std::size_t fallback) noexcept {
+    return want != 0 ? want : fallback;
 }
 
 /**
@@ -930,7 +934,7 @@ struct httpd_ws_link_t::tx_work_t {
  * @brief One pre-allocated TX work slot: claimed lock-free (a CAS on @ref busy) by
  *        any sending task in @ref claim_tx_slot, released by the httpd task once
  *        its send drains (@ref release_tx_work) — so a steady-state send allocates
- *        nothing. The pool (kTxSlotsTotal of these — kTxPoolSlots claimable by any
+ *        nothing. The pool (`tx_slots_total_` of these — `tx_pool_slots_` claimable by any
  *        sender plus the in-call reserve) is allocated once per link.
  *
  * A single flag is the WHOLE lifetime, and that is a statement about the ESP-IDF floor
@@ -952,9 +956,11 @@ struct httpd_ws_link_t::tx_work_t {
  *       land. Only the silent-success case went away.
  */
 struct httpd_ws_link_t::tx_slot_t {
-    std::atomic<bool> busy{false};        /**< @brief Claimed flag (acquire/release). */
-    tx_work_t work;                       /**< @brief The slot's embedded work item. */
-    std::byte inline_buf[kTxInlineBytes]; /**< @brief Inline payload storage. */
+    std::atomic<bool> busy{false};   /**< @brief Claimed flag (acquire/release). */
+    tx_work_t work;                  /**< @brief The slot's embedded work item. */
+    std::byte* inline_buf = nullptr; /**< @brief This slot's slice of the link's inline
+                                      *          payload block (@ref httpd_ws_link_t::tx_inline_),
+                                      *          bound once in alloc_buffers. */
 };
 
 /**
@@ -1003,11 +1009,17 @@ struct httpd_ws_link_t::close_req_t {
 };
 
 httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, std::size_t max_peers, bool peer_named,
-                                 std::uint32_t send_timeout_ms, std::uint32_t auth_deadline_ms)
+                                 std::uint32_t send_timeout_ms, std::uint32_t auth_deadline_ms,
+                                 std::size_t rx_scratch_bytes, std::size_t tx_pool_slots,
+                                 std::size_t tx_inline_bytes)
     : port_(bind_port),
       max_peers_(max_peers),
       auth_deadline_us_(resolve_auth_deadline_us(auth_deadline_ms)),
-      peer_named_(peer_named) {
+      peer_named_(peer_named),
+      rx_scratch_bytes_(resolve_size(rx_scratch_bytes, kDefaultRxScratchBytes)),
+      tx_inline_bytes_(resolve_size(tx_inline_bytes, kDefaultTxInlineBytes)),
+      tx_pool_slots_(resolve_size(tx_pool_slots, kDefaultTxPoolSlots)),
+      tx_slots_total_(tx_pool_slots_ + kTxReplySlots) {
     if (!open_gate()) return;  // ok() stays false; nothing was registered
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port = bind_port;
@@ -1066,10 +1078,16 @@ httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, std::size_t max_peers,
 
 httpd_ws_link_t::httpd_ws_link_t(httpd_handle_t external, const char* uri_pattern,
                                  std::size_t max_peers, bool peer_named,
-                                 std::uint32_t send_timeout_ms, std::uint32_t auth_deadline_ms)
+                                 std::uint32_t send_timeout_ms, std::uint32_t auth_deadline_ms,
+                                 std::size_t rx_scratch_bytes, std::size_t tx_pool_slots,
+                                 std::size_t tx_inline_bytes)
     : max_peers_(max_peers),
       auth_deadline_us_(resolve_auth_deadline_us(auth_deadline_ms)),
-      peer_named_(peer_named) {
+      peer_named_(peer_named),
+      rx_scratch_bytes_(resolve_size(rx_scratch_bytes, kDefaultRxScratchBytes)),
+      tx_inline_bytes_(resolve_size(tx_inline_bytes, kDefaultTxInlineBytes)),
+      tx_pool_slots_(resolve_size(tx_pool_slots, kDefaultTxPoolSlots)),
+      tx_slots_total_(tx_pool_slots_ + kTxReplySlots) {
     if (!open_gate()) return;  // ok() stays false; nothing was registered
     // The adopted server's httpd_config_t belongs to the caller and esp_http_server
     // exposes no reader for it, so the clamp uses IDF's default send_wait_timeout — the
@@ -1169,14 +1187,31 @@ void httpd_ws_link_t::alloc_buffers() {
     // outbound frame can be gathered, so a link that could not allocate one drops every
     // send on the counted enqueue-drop path (@ref note_enqueue_drop) instead of quietly
     // moving a hot publish path onto the global heap.
-    rx_scratch_.reset(new (std::nothrow) std::byte[kRxScratchBytes]);
-    tx_pool_.reset(new (std::nothrow) tx_slot_t[kTxSlotsTotal]);
+    rx_scratch_.reset(new (std::nothrow) std::byte[rx_scratch_bytes_]);
+    // The size and the pointer must never disagree: on_data_frame decides "does this frame
+    // fit the scratch" from rx_scratch_bytes_, so a failed allocation has to zero it or a
+    // frame would be memcpy'd into nothing.
+    if (rx_scratch_ == nullptr) rx_scratch_bytes_ = 0;
+    tx_pool_.reset(new (std::nothrow) tx_slot_t[tx_slots_total_]);
+    tx_inline_.reset(new (std::nothrow) std::byte[tx_slots_total_ * tx_inline_bytes_]);
+    // Two allocations, one pool: a slot with no payload storage behind it is not a usable
+    // slot, so the pair fails together. Dropping the array is what puts every send on the
+    // counted enqueue-drop path (@ref note_enqueue_drop) rather than leaving a claimable
+    // slot whose inline_buf is null.
+    if (tx_pool_ == nullptr || tx_inline_ == nullptr) {
+        tx_pool_.reset();
+        tx_inline_.reset();
+        return;
+    }
     // Bind each slot to its embedded work item ONCE, here, and never again. The
     // back-pointer is a property of the slot, not of the claim: the work item is how the
     // httpd task finds the slot to release, and a claimer re-storing the same value into it
-    // while that release is in flight would be a plain data race for no gain.
-    if (tx_pool_ != nullptr)
-        for (std::size_t i = 0; i < kTxSlotsTotal; ++i) tx_pool_[i].work.slot = &tx_pool_[i];
+    // while that release is in flight would be a plain data race for no gain. The slot's
+    // slice of the inline block is bound on the same terms and for the same reason.
+    for (std::size_t i = 0; i < tx_slots_total_; ++i) {
+        tx_pool_[i].work.slot = &tx_pool_[i];
+        tx_pool_[i].inline_buf = tx_inline_.get() + i * tx_inline_bytes_;
+    }
 }
 
 httpd_ws_link_t::tx_slot_t* httpd_ws_link_t::claim_tx_slot(bool in_call) {
@@ -1195,11 +1230,11 @@ httpd_ws_link_t::tx_slot_t* httpd_ws_link_t::claim_tx_slot(bool in_call) {
     // perform, while an off-task producer can, so a slot it does not take costs it latency
     // and never a frame. Reaching for the reserve before the pool is what keeps that
     // guarantee from being paid for out of the fan-out width: a reply in flight leaves all
-    // kTxPoolSlots claimable, so a producer sweep that fits the pool still fits it.
+    // tx_pool_slots_ claimable, so a producer sweep that fits the pool still fits it.
     if (in_call)
-        for (std::size_t i = kTxPoolSlots; i < kTxSlotsTotal; ++i)
+        for (std::size_t i = tx_pool_slots_; i < tx_slots_total_; ++i)
             if (take(i)) return &tx_pool_[i];
-    for (std::size_t i = 0; i < kTxPoolSlots; ++i)
+    for (std::size_t i = 0; i < tx_pool_slots_; ++i)
         if (take(i)) return &tx_pool_[i];
     return nullptr;  // every slot in flight this instant — the caller waits, or drops
 }
@@ -1296,7 +1331,7 @@ httpd_ws_link_t::~httpd_ws_link_t() {
         bool busy = true;
         for (int turn = 0; turn < kDrainTurns && busy; ++turn) {
             busy = false;
-            for (std::size_t i = 0; i < kTxSlotsTotal; ++i)
+            for (std::size_t i = 0; i < tx_slots_total_; ++i)
                 if (tx_pool_[i].busy.load(std::memory_order_acquire)) busy = true;
             if (busy) std::this_thread::sleep_for(std::chrono::milliseconds(kDrainSliceMs));
         }
@@ -1308,12 +1343,14 @@ httpd_ws_link_t::~httpd_ws_link_t() {
             // at all (the work runs on the task that is sleeping here). The in-flight
             // tx_work still reads the slot's payload and release-stores its busy flag,
             // so freeing the pool now is a use-after-free — leak it instead: a
-            // bounded, teardown-only loss (kTxSlotsTotal inline slots) that the
-            // drained path never pays. tx_work touches only the work item and the
-            // caller's still-running server handle, never this link, so the leaked
-            // pool is the one allocation that must outlive us.
+            // bounded, teardown-only loss that the drained path never pays. tx_work
+            // touches only the work item and the caller's still-running server handle,
+            // never this link, so the leaked pool is the one allocation that must outlive
+            // us — BOTH halves of it since #1160: the slot array and the inline payload
+            // block the slots point into, which an in-flight send is still reading from.
             ESP_LOGW(kTag, "tx pool leaked at teardown: a queued send outlived the drain bound");
             (void)tx_pool_.release();
+            (void)tx_inline_.release();
         }
     }
     // The gate outlives the link exactly when the server does. Owning mode: httpd_stop
@@ -1650,7 +1687,7 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
     std::unique_ptr<std::byte[]> heap_payload;
     std::byte* payload = nullptr;
     if (frame.len != 0) {
-        if (rx_scratch_ != nullptr && frame.len <= kRxScratchBytes) {
+        if (rx_scratch_ != nullptr && frame.len <= rx_scratch_bytes_) {
             payload = rx_scratch_.get();
         } else {
             heap_payload.reset(new (std::nothrow) std::byte[frame.len]);
@@ -2327,7 +2364,7 @@ void httpd_ws_link_t::queue_send(const session_ref_t& to,
     // spans are gone by the time the httpd task runs tx_work. The destination is a
     // pre-allocated pool slot claimed lock-free (CAS), gathered straight into its inline
     // buffer — no allocation at all. The single remaining arm that allocates is a frame
-    // past kTxInlineBytes, which keeps its pooled shell and takes a nothrow heap payload.
+    // past tx_inline_bytes_, which keeps its pooled shell and takes a nothrow heap payload.
     //
     // A pool that has nothing free is where this used to grow a heap work item and post it
     // anyway, which turned a bounded, observable condition into an unbounded, invisible
@@ -2349,7 +2386,7 @@ void httpd_ws_link_t::queue_send(const session_ref_t& to,
         work->gate = g;
         work->to = to;
         work->len = total;
-        if (total <= kTxInlineBytes) {
+        if (total <= tx_inline_bytes_) {
             dst = slot->inline_buf;
         } else {
             work->owned.reset(new (std::nothrow) std::byte[total]);
@@ -2419,12 +2456,24 @@ httpd_ws_link_t::stats_t httpd_ws_link_t::stats() const noexcept {
 std::size_t httpd_ws_link_t::tx_slots_busy() const noexcept {
     if (tx_pool_ == nullptr) return 0;
     std::size_t busy = 0;
-    for (std::size_t i = 0; i < kTxSlotsTotal; ++i)
+    for (std::size_t i = 0; i < tx_slots_total_; ++i)
         if (tx_pool_[i].busy.load(std::memory_order_relaxed)) ++busy;
     return busy;
 }
 
-std::size_t httpd_ws_link_t::tx_slot_capacity() noexcept { return kTxPoolSlots; }
+std::size_t httpd_ws_link_t::tx_slot_capacity() const noexcept { return tx_pool_slots_; }
+
+std::size_t httpd_ws_link_t::rx_scratch_bytes() const noexcept { return rx_scratch_bytes_; }
+
+std::size_t httpd_ws_link_t::tx_inline_bytes() const noexcept { return tx_inline_bytes_; }
+
+std::size_t httpd_ws_link_t::buffer_bytes() const noexcept {
+    // What was actually allocated, not what was asked for: rx_scratch_bytes_ is zeroed on a
+    // failed RX allocation, and a link whose pool failed reports no pool cost at all.
+    const std::size_t pool =
+        tx_pool_ != nullptr ? tx_slots_total_ * (sizeof(tx_slot_t) + tx_inline_bytes_) : 0;
+    return rx_scratch_bytes_ + pool;
+}
 
 std::size_t httpd_ws_link_t::tx_reply_reserve() noexcept { return kTxReplySlots; }
 

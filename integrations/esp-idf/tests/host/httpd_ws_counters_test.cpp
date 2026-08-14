@@ -215,7 +215,7 @@ void test_pool_exhaustion_is_counted() {
     // whole reason it got a field of its own. These sends are issued ON the httpd task, so
     // the depth is the pool PLUS the in-call reserve (#1218).
     const std::size_t depth =
-        httpd_ws_link_t::tx_slot_capacity() + httpd_ws_link_t::tx_reply_reserve();
+        httpd_ws_link_t::kDefaultTxPoolSlots + httpd_ws_link_t::tx_reply_reserve();
     check(depth > 0, "the pool has a capacity to exhaust");
     for (std::size_t i = 0; i < depth + 2; ++i) to->send(std::span<const std::byte>(kBody));
 

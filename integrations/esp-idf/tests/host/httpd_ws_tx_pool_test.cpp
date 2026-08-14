@@ -134,7 +134,7 @@ void test_refused_enqueues_never_cost_a_slot() {
     if (peer == nullptr) return;
     drain();
 
-    const std::size_t capacity = httpd_ws_link_t::tx_slot_capacity();
+    const std::size_t capacity = httpd_ws_link_t::kDefaultTxPoolSlots;
     const std::size_t rounds = 8 * capacity;
     fake_httpd::instance().set_queue_refusing(true);
     for (std::size_t i = 0; i < rounds; ++i) peer->send(std::span<const std::byte>(kBody));
@@ -189,7 +189,7 @@ void test_a_burst_past_the_pool_drops_and_counts() {
     fake_httpd::instance().set_send_script(kFd, {send_result_t::FULL});
 
     const std::size_t depth =
-        httpd_ws_link_t::tx_slot_capacity() + httpd_ws_link_t::tx_reply_reserve();
+        httpd_ws_link_t::kDefaultTxPoolSlots + httpd_ws_link_t::tx_reply_reserve();
     // Warm up on the ordinary path and drain, so anything first-use (the fake's deque node,
     // a lazy init in the log) is spent OUTSIDE the window below.
     peer->send(std::span<const std::byte>(kBody));
@@ -231,7 +231,7 @@ void test_the_pooled_frames_of_an_over_offer_all_go_out() {
     fake_httpd::instance().set_send_script(kFd, {send_result_t::FULL});
 
     const std::size_t depth =
-        httpd_ws_link_t::tx_slot_capacity() + httpd_ws_link_t::tx_reply_reserve();
+        httpd_ws_link_t::kDefaultTxPoolSlots + httpd_ws_link_t::tx_reply_reserve();
     const std::size_t sent_before = fake_httpd::instance().frames_sent();
     for (std::size_t i = 0; i < 2 * depth; ++i) peer->send(std::span<const std::byte>(kBody));
     drain();
@@ -275,7 +275,7 @@ void test_concurrent_claims_refusals_and_drains_wedge_nothing() {
     drain();
     fake_httpd::instance().set_send_script(kFd, {send_result_t::FULL});
 
-    const std::size_t capacity = httpd_ws_link_t::tx_slot_capacity();
+    const std::size_t capacity = httpd_ws_link_t::kDefaultTxPoolSlots;
     const std::size_t sent_before = fake_httpd::instance().frames_sent();
     const std::size_t refused_before = fake_httpd::instance().queue_drops();
     // Two entries deep: enough that work really drains, small enough that a great many
@@ -309,6 +309,69 @@ void test_concurrent_claims_refusals_and_drains_wedge_nothing() {
     reset(link);
 }
 
+// ---------------------------------------------------------------------------
+// 5 — #1160: the RAM-bearing three are constructor arguments, and they BIND.
+// ---------------------------------------------------------------------------
+/**
+ * @brief A link constructed with its own sizes reports them, and the pool depth it
+ *        reports is the depth it actually has.
+ *
+ * The accessors alone would be a weak test — three getters returning three fields prove
+ * nothing about the buffers. So the pool depth is checked the way the cases above check
+ * the default one: offer a burst past the CONFIGURED capacity against a stalled drain and
+ * count the slots that were claimable. A link that stored `tx_pool_slots` but still
+ * allocated the default four would pass the getter and fail here.
+ *
+ * The defaults are pinned in the same breath: a link built the historical way must report
+ * exactly the three `kDefault*` figures, which is what makes "0 means the default" a
+ * contract rather than a coincidence.
+ */
+void test_the_ctor_sizes_bind() {
+    std::printf("a link constructed with its own buffer sizes:\n");
+    {
+        auto stock = make_link();
+        check_eq(stock->rx_scratch_bytes(), httpd_ws_link_t::kDefaultRxScratchBytes,
+                 "a stock link takes the default RX scratch");
+        check_eq(stock->tx_slot_capacity(), httpd_ws_link_t::kDefaultTxPoolSlots,
+                 "a stock link takes the default pool depth");
+        check_eq(stock->tx_inline_bytes(), httpd_ws_link_t::kDefaultTxInlineBytes,
+                 "a stock link takes the default inline capacity");
+        check_eq(stock->buffer_bytes() != 0, true, "and it reports a per-link buffer cost");
+        reset(stock);
+    }
+
+    constexpr std::size_t kSlots = 2;
+    constexpr std::size_t kRx = 512;
+    constexpr std::size_t kInline = 256;
+    auto link =
+        std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true, 0, 0, kRx, kSlots, kInline);
+    check(link->ok(), "the sized link registered its URI");
+    check_eq(link->rx_scratch_bytes(), kRx, "it reports the RX scratch it was given");
+    check_eq(link->tx_slot_capacity(), kSlots, "it reports the pool depth it was given");
+    check_eq(link->tx_inline_bytes(), kInline, "it reports the inline capacity it was given");
+
+    claim(kFd);
+    tr::net::transport_t* const peer = only_peer(*link);
+    check(peer != nullptr, "the peer resolved to a directed endpoint");
+    if (peer == nullptr) return;
+    drain();
+
+    // The drain is stopped, so a claimed slot stays claimed: the number of sends that can
+    // be in flight at once IS the configured depth, not the default one. The in-call
+    // reserve is on TOP of it (#1218) and this suite sends from the server task, so the
+    // ceiling is `kSlots + tx_reply_reserve()` — the same sum the default-sized cases above
+    // check as 4 + 1.
+    fake_httpd::instance().set_queue_capacity(0);
+    for (std::size_t i = 0; i < httpd_ws_link_t::kDefaultTxPoolSlots + kSlots; ++i)
+        peer->send(std::span<const std::byte>(kBody));
+    check_eq(link->tx_slots_busy(), kSlots + httpd_ws_link_t::tx_reply_reserve(),
+             "only the CONFIGURED slots were claimable — the default depth is gone");
+    drain();
+    check_eq(link->tx_slots_busy(), 0, "and they all came back");
+
+    reset(link);
+}
+
 }  // namespace
 
 int main() {
@@ -317,6 +380,7 @@ int main() {
     test_a_burst_past_the_pool_drops_and_counts();
     test_the_pooled_frames_of_an_over_offer_all_go_out();
     test_concurrent_claims_refusals_and_drains_wedge_nothing();
+    test_the_ctor_sizes_bind();
     std::printf(g_failures == 0 ? "\nALL PASS\n" : "\n%d FAILURE(S)\n", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

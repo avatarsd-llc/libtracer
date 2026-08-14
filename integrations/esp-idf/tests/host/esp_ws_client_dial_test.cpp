@@ -316,6 +316,42 @@ void test_oversize_frame_is_refused_and_counted() {
     }
 }
 
+/**
+ * @brief #1160 — the effective configuration is READABLE: the buffer sizes per link, the
+ *        five timing bounds per image.
+ *
+ * The complaint #1160 records is not only that the numbers were unsettable but that a node
+ * could not even REPORT them: an inbound-drop streak names a ceiling nobody can quote. The
+ * buffer accessors are checked against the sizes this case constructs with, so a getter
+ * wired to the wrong member fails here rather than reporting a plausible constant.
+ *
+ * The timing block is checked as INVARIANTS, never as literals: the two derived bounds
+ * must stand in their documented relation to each other (the write budget is a quarter
+ * window spent over three legs; the dial is half a window), and the three Kconfig ones
+ * must be positive. Asserting `100`/`200`/`1500` here would pin the DEFAULT and make the
+ * knobs untestable — the whole point is that a build may legitimately change them.
+ */
+void test_the_effective_config_is_readable() {
+    std::printf("#1160 the effective sizes and timing bounds are readable:\n");
+    fake_ws::reset();
+    {
+        tr::net::esp_ws_client_link_t link("127.0.0.1", 8080, "/ws", {}, 1024, 768, 0);
+        check(link.rx_bytes() == 1024, "rx_bytes() reports the RX buffer this link was given");
+        check(link.tx_bytes() == 768, "tx_bytes() reports the TX scratch this link was given");
+    }
+    const auto t = tr::net::esp_ws_client_link_t::timing();
+    check(t.read_timeout_ms > 0 && t.poll_ms > 0 && t.reconnect_backoff_ms > 0,
+          "the three Kconfig bounds are positive");
+    check(t.dial_timeout_ms > 0 && t.write_timeout_ms > 0, "the derived pair is bounded");
+    // A dial plus a full write budget must fit one watchdog window: the dial is half a
+    // window and the write budget (three legs of write_timeout_ms) is a quarter, so a
+    // whole write budget has to fit inside the dial bound. Stated as the inequality
+    // rather than as an equality because the per-leg share is an integer division.
+    check(3 * t.write_timeout_ms <= t.dial_timeout_ms,
+          "one full write budget still fits inside the dial bound (a quarter window "
+          "inside a half)");
+}
+
 }  // namespace
 
 int main() {
@@ -324,6 +360,7 @@ int main() {
     test_every_dial_carries_the_headers();
     test_no_headers_leaves_the_field_null();
     test_oversize_frame_is_refused_and_counted();
+    test_the_effective_config_is_readable();
     if (g_failures != 0) {
         std::printf("FAILED: %d check(s)\n", g_failures);
         return 1;

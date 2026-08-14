@@ -385,6 +385,43 @@ class esp_ws_client_link_t : public transport_t {
      */
     [[nodiscard]] stats_t stats() const;
 
+    /** @brief Effective reusable RX capacity, bytes — the ctor's `rx_bytes` as this link
+     *         actually allocated it. A message past it is dropped whole (@ref dropped_rx),
+     *         so a node reporting an inbound-drop streak can now report the ceiling that
+     *         produced it instead of quoting a constant from third-party sources (#1160). */
+    [[nodiscard]] std::size_t rx_bytes() const noexcept { return rx_buf_.size(); }
+
+    /** @brief Effective reusable TX scratch capacity, bytes — the ctor's `tx_bytes`. An
+     *         outbound frame past it is dropped whole and charged to `stats().c.tx_drops`
+     *         (#1160). */
+    [[nodiscard]] std::size_t tx_bytes() const noexcept { return tx_buf_.size(); }
+
+    /**
+     * @brief The client's effective timing policy, milliseconds — every blocking bound
+     *        this link rides, readable rather than buried in the .cpp (#1160).
+     *
+     * Three of the five are `LIBTRACER_WS_CLIENT_*` Kconfig knobs, per-IMAGE because they
+     * are recv-loop cadence and re-dial policy with no per-link RAM behind them. The other
+     * two are NOT knobs and must not become any: they are DERIVED from
+     * `CONFIG_ESP_TASK_WDT_TIMEOUT_S`, which is the system's own statement of how long a
+     * task may go unfed, and the derivation is what keeps one stalled peer inside a single
+     * watchdog window. A second knob over them would let an embedder set a bound the
+     * watchdog cannot survive, so the way to move them is to move the watchdog — which is
+     * already a Kconfig option, one level up, where the invariant is stated once.
+     */
+    struct timing_t {
+        int dial_timeout_ms = 0;      /**< @brief DERIVED: half the watchdog window. */
+        int write_timeout_ms = 0;     /**< @brief DERIVED: the per-leg share of a quarter
+                                       *          window (`esp_transport_write` spends it
+                                       *          three times per frame). */
+        int read_timeout_ms = 0;      /**< @brief Kconfig: read after a positive poll. */
+        int poll_ms = 0;              /**< @brief Kconfig: one recv-loop poll turn. */
+        int reconnect_backoff_ms = 0; /**< @brief Kconfig: wait before a re-dial. */
+    };
+
+    /** @brief The compiled-in @ref timing_t — a build property, so `static`. */
+    [[nodiscard]] static timing_t timing() noexcept;
+
    private:
     /** @brief The recv thread body: (re)connect, then poll+read+deliver until stopped. */
     void recv_loop();

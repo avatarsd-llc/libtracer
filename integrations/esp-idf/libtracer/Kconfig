@@ -83,6 +83,58 @@ menu "libtracer"
             on silicon by constructing an IDF-native link and handing it to
             transport_vertex_t::provide_link.
 
+    # WebSocket CLIENT timing (#1160). These three are the esp_ws_client_link_t recv
+    # loop's cadence and its re-dial policy: POLICY, not derivations, and with no
+    # per-link RAM behind them — so they are per-IMAGE Kconfig rather than constructor
+    # arguments (which is what the RAM-bearing sizes got instead). Every default is the
+    # historical literal, so a stock build compiles the values this link always had.
+    #
+    # The link's OTHER two bounds — the dial timeout and the write timeout — are
+    # deliberately NOT here. They are derived from CONFIG_ESP_TASK_WDT_TIMEOUT_S, and
+    # that derivation is what keeps one stalled peer inside a single watchdog window; a
+    # knob over them would let a node be configured into a watchdog panic. Move the
+    # watchdog instead. All five are readable at runtime via
+    # esp_ws_client_link_t::timing().
+
+    config LIBTRACER_WS_CLIENT_READ_TIMEOUT_MS
+        int "WS client: read timeout after a positive poll (ms)"
+        depends on LIBTRACER_TRANSPORT_WS
+        range 1 60000
+        default 100
+        help
+            How long esp_ws_client_link_t's recv thread waits for bytes that
+            esp_transport_poll_read has already reported as readable. Short by
+            design — the data is buffered in the stack, so this bounds a stall,
+            it does not pace anything. Raise it only on a target whose lwIP
+            hands the poll and the data to the recv thread far apart.
+
+    config LIBTRACER_WS_CLIENT_POLL_MS
+        int "WS client: recv-loop poll turn (ms)"
+        depends on LIBTRACER_TRANSPORT_WS
+        range 1 10000
+        default 200
+        help
+            One turn of the client recv loop: how long it parks in
+            esp_transport_poll_read before re-checking the stop flag. This is the
+            teardown-latency knob — a destructor cannot join the recv thread
+            faster than one turn — traded against how often an idle link wakes
+            the CPU. Lower it for a node that tears links down on a UI action;
+            raise it on a battery node where an idle WS client is pure overhead.
+
+    config LIBTRACER_WS_CLIENT_RECONNECT_BACKOFF_MS
+        int "WS client: backoff before re-dialing (ms)"
+        depends on LIBTRACER_TRANSPORT_WS
+        range 1 600000
+        default 1500
+        help
+            Upper bound on the wait after a failed or lost connection before the
+            recv thread dials again. An UPPER bound only: the wait is on a
+            condition variable the destructor signals, so a teardown never pays
+            it. Raise it for a fleet that must not hammer a peer that is down;
+            lower it on a bench node chasing a peer reboot. It is also what a
+            refused admission costs before the next dial, so a node whose peer
+            gates admission pays this per rejected attempt.
+
     config LIBTRACER_TRANSPORT_CAN
         bool "Build the CAN transport"
         default y
