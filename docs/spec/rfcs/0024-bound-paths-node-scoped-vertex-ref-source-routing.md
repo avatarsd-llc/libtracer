@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0024 |
 | **Title** | Bound paths: node-scoped vertex-ref source routing |
-| **Status** | **accepted** (2026-08-03, maintainer-ratified, comment window waived). The whole document is ratified, and **§4-§7 are now incorporated in full** as of the forwarding car (2026-08-03): `docs/spec/v1.md` §3 and `docs/reference/05-protocol-tlvs.md` §`0x14` cite the wire form (§4), the routing semantics (§5-§7) and the **hop rules** normatively, `docs/reference/03-addressing.md` carries the two-forms rule, and `docs/reference/13-network-formation.md` the bound diameter ([#809](https://github.com/avatarsd-llc/libtracer/issues/809)). The forwarder's element-consuming hop (§4.1, §5.1 step 4) and the origin-side bind (§7.2/§7.4) ship with that car; §7.1's accumulation gains **erratum 1** below, which is what makes multi-hop minting safe. **ONE** clause remains ratified and NOT incorporated: the §5.3 **NACK** carrying the failing hop index, whose spelling §9.2 still leaves open. A drop is already the conformant behaviour without it; the NACK only makes the origin's recovery faster. §7.1's **"Symmetry, ruled in"** reverse-direction option — which **erratum 2** below records as having had no wire spelling, every candidate contradicting an already-incorporated normative sentence — is now **incorporated via amendment 1** (2026-08-14, [#1223](https://github.com/avatarsd-llc/libtracer/issues/1223)): spelling (b), forwarder-contributed, the origin's frame bit-identical. The **§8 bench gate is discharged** with the forwarding car: no shipped shape regresses with disjoint ranges under §8.2's protocol (16 interleaved pairs, `taskset -c 2`, both arms collated, first round discarded), the mandatory four-link `reply-spread` arm is level, and §8.4's per-hop question is answered in §3.4 — the first build of the car answered it NEGATIVE and the three costs behind that are recorded there. |
+| **Status** | **accepted** (2026-08-03, maintainer-ratified, comment window waived). The whole document is ratified, and **§4-§7 are now incorporated in full** as of the forwarding car (2026-08-03): `docs/spec/v1.md` §3 and `docs/reference/05-protocol-tlvs.md` §`0x14` cite the wire form (§4), the routing semantics (§5-§7) and the **hop rules** normatively, `docs/reference/03-addressing.md` carries the two-forms rule, and `docs/reference/13-network-formation.md` the bound diameter ([#809](https://github.com/avatarsd-llc/libtracer/issues/809)). The forwarder's element-consuming hop (§4.1, §5.1 step 4) and the origin-side bind (§7.2/§7.4) ship with that car; §7.1's accumulation gains **erratum 1** below, which is what makes multi-hop minting safe. **ONE** clause remains ratified and NOT incorporated: the §5.3 **NACK** carrying the failing hop index, whose spelling §9.2 still leaves open. A drop is already the conformant behaviour without it; the NACK only makes the origin's recovery faster — **erratum 4** (§5.3) records which arm emits an addressed refusal echo today and which drops silently, and that the asymmetry is intended rather than an oversight. §7.1's **"Symmetry, ruled in"** reverse-direction option — which **erratum 2** below records as having had no wire spelling, every candidate contradicting an already-incorporated normative sentence — is now **incorporated via amendment 1** (2026-08-14, [#1223](https://github.com/avatarsd-llc/libtracer/issues/1223)): spelling (b), forwarder-contributed, the origin's frame bit-identical. **Erratum 3** (§7.1) settles the one frame amendment 1 left unspelled — the last hop of a reverse-list delivery egresses a canonical **empty `PATH`**, so the client's frame is bit-identical in the delivery direction too. The **§8 bench gate is discharged** with the forwarding car: no shipped shape regresses with disjoint ranges under §8.2's protocol (16 interleaved pairs, `taskset -c 2`, both arms collated, first round discarded), the mandatory four-link `reply-spread` arm is level, and §8.4's per-hop question is answered in §3.4 — the first build of the car answered it NEGATIVE and the three costs behind that are recorded there. |
 | **Author(s)** | AvatarSD (maintainer) — written up from the 2026-08-02 grill, in which the design below was **ruled**, not proposed |
 | **Created** | 2026-08-02 |
 | **Comment window** | waived by default while solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"); invoke explicitly if outside input is wanted. Verified: `docs/implementations.md:13` still reads `_(none yet)_`, so the waiver's revert trigger has not fired. |
@@ -436,6 +436,34 @@ and the peek path already tolerates a missing second child
 the extension is additive; the argument against it is that reusing a route-handle control frame
 for a non-label concept violates §2.1's vocabulary rule.
 
+**Erratum 4 ([#1260](https://github.com/avatarsd-llc/libtracer/issues/1260), 2026-08-14) — the
+NACK is scoped to the delivery arm, and the asymmetry is intended.** (Numbered in the order raised;
+errata 1-3 are in §7.1.)
+
+- **What the text says.** The paragraph above reads "It drops the frame and returns a NACK", with
+  no arm named — every refused bound-form frame, forwarded or delivered alike.
+- **What the behaviour is.** The reference core returns the NACK on the **one-element bound
+  `WRITE` delivery** arm only (the reverse-list delivery of §7.1 amendment 1: an addressed
+  `tr::path::invalid` echo of the refused `PATH_REF`). The **pre-existing multi-element forward**
+  arm — a hop that cannot validate element 0 of a residual it was asked to forward — **drops
+  silently**, exactly as it has since the forwarding car.
+- **Which change made them diverge.** [#1259](https://github.com/avatarsd-llc/libtracer/pull/1259).
+  The forward arm shipped with the forwarding car, before any NACK spelling existed; the delivery
+  arm is new, and it needs the echo for a second reason the forward arm does not have — the
+  producer's step-5 reclaim (`evict_route_edges`) correlates that echo to retire the stale edge on
+  its first post-mortem delivery.
+- **Why the asymmetry stands rather than being widened.** A silent drop is **already the
+  conformant behaviour**: §9.2 still leaves the NACK's own spelling open, so the clause above is
+  ratified-but-not-incorporated and the NACK only makes the origin's recovery *faster*, never
+  more correct. Extending it to the forward arm was priced: it is affordable only behind a
+  `[[gnu::noinline]]` helper, because inline it risks repartitioning `route_fwd_forward` — already
+  +208 B at #1259, and that exact hazard cost 12% there. That is real risk spent on a cold path
+  for a latency improvement the origin's canonical fallback already delivers.
+- **Why it is an erratum.** It records which frames a shipped implementation emits and alters no
+  wire surface — it adds no frame, removes none, and changes no byte of any conformance vector.
+  It withdraws no ruling either: when §9.2's spelling is settled the NACK may be widened by
+  amendment, and this erratum is the record of where it is *not* emitted today.
+
 The origin's recovery is the one that already exists and is already known to work: **fall back to
 the canonical form and re-mint.** RFC-0004 §E.1's self-heal in one line — drop, signal,
 re-establish — reached here without a re-advertise round, because the canonical path the origin
@@ -690,6 +718,39 @@ of this amendment and are not re-derived. The normative content, in full:
   fact: `docs/implementations.md:13` still reads `_(none yet)_`, and the reference core ships the
   strip rule with this amendment. A deployment that pins commits inside that window (as
   `docs/spec/v1.md`'s draft banner instructs) must not enable the reverse mint across those hosts.
+
+**Erratum 3 ([#1260](https://github.com/avatarsd-llc/libtracer/issues/1260), 2026-08-14) — the
+LAST hop of a reverse-list delivery egresses a canonical EMPTY `PATH`, not a zero-element
+`PATH_REF`.** (Errata are numbered in the order they are raised, not by the section they sit in;
+erratum 4 is in §5.3.)
+
+- **What the text says.** §5.1 step 4 and the incorporated hop rules
+  (`docs/reference/05-protocol-tlvs.md` §`0x14` §routing semantics) describe a bound hop as
+  consuming element 0 and re-heading the `dst` one element shorter, and the terminus as the hop
+  with exactly one element left, which *applies* the operation. Read literally against a hop that
+  consumes the final element and still has a frame to emit, that says "shrink to zero elements" —
+  i.e. an empty `PATH_REF`. Nothing in amendment 1 says otherwise: it specifies the responder's
+  local consumption and the residual rules for lists **longer than one element**, never the frame
+  the hop consuming the FINAL element toward a session puts on the wire.
+- **What the behaviour is.** That hop re-heads the `dst` as a **canonical empty `PATH`**
+  (`0x06`, `PL=1`, length 0) — the delivery has arrived, the remaining address is empty, and the
+  frame the session's client sees is byte-identical to the pre-amendment canonical delivery.
+  Shipped in [#1259](https://github.com/avatarsd-llc/libtracer/pull/1259)
+  (`fwd_pre_t::dst_to_path`, `fwd_router_t::route_bound_session_delivery`).
+- **Which change made them diverge.** Amendment 1 itself. Before it no hop ever consumed the
+  final element toward a party that is not a bound-form reader, so the case had no frame and
+  needed no spelling; the one-element bound delivery arm created it.
+- **Why this spelling, and why blessing it is free.** It is what amendment 1 already promises
+  one sentence over — "the origin's frame is bit-identical to today". An origin client that
+  never speaks the bound form must never be *answered* in it either, or the amendment's
+  client-compatibility claim holds in one direction only. And an empty `PATH_REF` would be a
+  second empty-address spelling on the wire for a case the canonical form already spells.
+- **Why it is an erratum.** It alters no wire surface: **76/76 conformance vectors are
+  bit-identical** across the change (`fwd/fwd-bound-forward`, `fwd/fwd-bound-forwarded` and
+  `fwd/fwd-mint-request` included), and no conforming implementation's behaviour changes,
+  because no other spelling was ever specified *or* shipped for this frame. Per
+  `GOVERNANCE.md` §"Errata, amendments, and the comment window", that is exactly an erratum:
+  the decision was made, only the text was silent.
 
 ### 7.2 (a) implicit, heuristic-free
 
