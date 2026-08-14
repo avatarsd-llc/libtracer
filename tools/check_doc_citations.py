@@ -712,7 +712,7 @@ ANCHORS = [
     # The multi-peer servers' per-chunk receive scratch — ONE buffer since #871 folded the
     # tcp and ws poll loops into slot_server_t (it used to be one apiece, cited as
     # transport_tcp.cpp:508 and transport_ws.cpp:420).
-    ('core/src/posix_endpoint.cpp:613', 'std::array<std::byte, 4096> chunk;',
+    ('core/src/posix_endpoint.cpp:617', 'std::array<std::byte, 4096> chunk;',
      'void slot_server_t::service_peer(session_base_t& s) {'),
     # core/src/rope.cpp
     ('core/src/rope.cpp:21', 'if (!all_host()) {'),
@@ -1009,7 +1009,7 @@ ANCHORS = [
     ('core/src/path.cpp:117',
      'return std::unexpected(status_t::INVALID_PATH);',
      'if (p.field_.steps.size() > kMaxFieldDepth)'),
-    ('core/src/posix_endpoint.cpp:679',
+    ('core/src/posix_endpoint.cpp:683',
      'return false;',
      'if (s->open.load(std::memory_order_relaxed)) return true;'),
     ('core/src/route_handle.cpp:34', 'auto sp = std::allocate_shared<link_tables_t>('),

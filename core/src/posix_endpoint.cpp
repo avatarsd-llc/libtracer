@@ -469,9 +469,13 @@ void slot_server_t::enumerate_peers(const peer_visitor_t& visit) const {
  * whoever occupies the slot at send time, which is precisely the stranger. Hence the
  * resolve-per-use contract on @ref bus_link_t::peer_link.
  *
- * No production caller is exposed (all re-resolve per send), so this is an API hazard
- * rather than a live defect; the fix that removes it structurally is explicit
- * per-session naming, which must land across both server planes at once (#1013).
+ * No production caller is exposed (all re-resolve per send), so this remains an API
+ * hazard rather than a live defect. The ESP plane's equivalent hazard was closed
+ * independently under #1013 via a per-resolution handle that stamps the slot and the
+ * generation it resolved against, so a send compares that generation instead of
+ * re-reading the slot's — "both server planes at once" was not how it played out.
+ * Whether the POSIX plane adopts the same structural fix is an open maintainer call;
+ * #1013's resolution is the precedent to point at, not a plan already decided.
  */
 transport_t* slot_server_t::peer_link(std::string_view peer) {
     const std::lock_guard lock(peers_m_);
