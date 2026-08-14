@@ -27,7 +27,7 @@ back. That makes a route **loop-free by construction** and needs **no per-hop de
 is no flooding, and no `(origin, ts)` suppression table. Two parallel links to the same peer are
 therefore *two different explicit addresses* — deliberate redundancy chosen by the addresser, not
 auto-multipath discovered by the router. `0x0D ROUTER` is a reserved, decodable wire code
-(`type_t::ROUTER`, `core/include/libtracer/tlv.hpp:48`) with no implemented mechanism behind it;
+(`type_t::ROUTER`, `core/include/libtracer/tlv.hpp:50`) with no implemented mechanism behind it;
 source routing needs none.
 
 Four dispositions. Three are decided by resolving the **first `dst` segment** against the registry; the fourth is decided by the `dst`'s own type code, because a bound address has no segment to resolve:
@@ -223,8 +223,8 @@ flowchart TB
   consumer that did not need contiguity. `m` must stay alive while its span is read.
 - **The default delivery leg copies nothing.** A full-route `FWD{WRITE}` fan-out scatter-gathers a
   fresh stack head, the stored return-route bytes, an empty `src`, and one span per link of the
-  stored value (`core/src/fwd_router.cpp:2304`). The `COMPACT` leg is the one that flattens,
-  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:2126`) — single-link, that
+  stored value (`core/src/fwd_router.cpp:2306`). The `COMPACT` leg is the one that flattens,
+  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:2128`) — single-link, that
   flatten is a zero-copy adopt, and multi-link it draws from the router's injected `flat` backend
   (#730), not the global heap.
 - **All rope flattens on the forward AND terminus paths draw from the injected seam.** `flat`
@@ -255,7 +255,7 @@ flowchart TB
   instead of raising an exception that `-fno-exceptions` would turn into `abort()`. A dropped fresh
   `ADVERTISE` self-heals through the peer's `HANDLE_NACK`. The residual is the label store: a
   **compact-flagged** flow's first delivery on a link resolves its label *before* those three steps
-  (`fwd_router.cpp:2133`), and that allocates its `link_tables_t` and its egress entry from the
+  (`fwd_router.cpp:2135`), and that allocates its `link_tables_t` and its egress entry from the
   `std::pmr::memory_resource` (`route_handle.cpp:34-42`, `:236-237`), which reports exhaustion by
   throwing — so that one leg can still abort under `-fno-exceptions`
   ([#603](https://github.com/avatarsd-llc/libtracer/issues/603)). A flow that is not
