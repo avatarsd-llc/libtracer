@@ -24,10 +24,18 @@ every source basename in the tree; a basename carried by two files is an ERROR,
 not a guess — the doc must spell the full path. Generated headers (`config.hpp`)
 count as sources, so the configuration pages' knob citations are pinnable too.
 
-Coverage is the pin list, not the doc set: a citation with no entry below is NOT checked,
-so `OK N verified` counts the pins, never "every citation in the docs". Build and tooling
-files are not sources and used to be unreadable here at all, which is how two rotted
-`LIBTRACER_NO_ATOMIC` citations sat beside a verified one in the same sentence (#1052).
+Coverage USED to be the pin list rather than the doc set, and that is what #1243 closed. A
+citation with no entry below was not checked, so a citation a PR *introduced* pointed
+wherever it liked — at a comment, at a blank line, at a transposed line number — and rode a
+green `OK N verified` out of CI, because the verify pass only ever walked @ref ANCHORS. Five
+of them did exactly that on one 2026-08-13 hygiene run. @ref unanchored_citations closes the
+loop in the failing direction: every cited `file:line` span in a LIVING doc must be pinned by
+an anchor somewhere inside it, exactly as the reverse rule already fails a pin no doc cites.
+Adding a citation therefore means adding its anchor in the same PR — one rule, both ways,
+and the pin count is a COVERAGE count rather than a sample.
+
+Build and tooling files are not sources and used to be unreadable here at all, which is how
+two rotted `LIBTRACER_NO_ATOMIC` citations sat beside a verified one in one sentence (#1052).
 @ref CITABLE_NON_SOURCE_PATHS enrols the ones whose citations ARE pinned — an explicit
 allowlist, because covering non-source files wholesale is a maintainer's call.
 
@@ -46,7 +54,7 @@ history on every refactor.
 
 `--repin` is the other half (#836): when a source edit HAS moved cited lines, it rewrites
 every citation spelling from a line map instead of leaving a `sed` sweep to find them.
-Three rules are load-bearing there, each paid for:
+The rules below are load-bearing there, each paid for:
 
 * **One pass.** A re-pin builds the whole map first and rewrites the ORIGINAL text once.
   A sequential pass feeds its own output — rewrite `1114 -> 1118` and the next rule in
@@ -66,10 +74,15 @@ Three rules are load-bearing there, each paid for:
   the same reason those genres are not enrolled above: an ADR or an RFC cites the tree as
   it stood, and moving its citations forward rewrites the record. Their moves are counted
   and reported, never applied.
+* **A HOLD is a verdict, not a remark.** `--repin` used to exit 0 whether it re-pinned
+  everything or held half of it for a human, so a rebase procedure that ran it and looked at
+  the exit status read "held" as "done" and shipped stale citations (#1243). A run that ends
+  with anything held now exits non-zero and says so on its last line.
 
 Usage:  python3 tools/check_doc_citations.py
         python3 tools/check_doc_citations.py --repin [--from-rev REV] [--apply]
-Exits non-zero on the first stale citation, listing every one it found.
+Exits non-zero on the first stale citation, listing every one it found; `--repin` exits
+non-zero when it held a citation back rather than re-pinning it.
 Gated by `.github/workflows/doc-citations.yml`; unit tests in
 `tools/tests/test_check_doc_citations.py`.
 """
@@ -781,6 +794,165 @@ ANCHORS = [
      '"${LIBTRACER_ROOT}/core/src/route_handle.cpp"'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:173',
      'list(APPEND LIBTRACER_SRCS "${LIBTRACER_ROOT}/core/src/transport_can.cpp")'),
+
+    # --- #1243: the backfill that made the pin list a COVERAGE list.
+    #
+    # 71 citations were live in the doc surfaces and pinned by NOTHING. The verify pass
+    # walked the table, so every one of them was accepted without ever being read — which is
+    # how five newly-written citations pointing at a comment, a blank line and a transposed
+    # line number rode a green `OK 382` out of one hygiene run. @ref unanchored_citations now
+    # fails a cited span no anchor covers, and these are the anchors that debt bought.
+    #
+    # TWELVE of the 71 could not be pinned as written, because the cited line was not the line
+    # the prose describes. Those citations were re-pinned in the SAME commit — a phantom
+    # `twai_link.hpp:455` a bare `:455` inherited across an out-of-repo `.c` citation, a
+    # `:2152`/`:2154` pair that had rotted off the COMPACT emit calls onto `subscribe_toward`,
+    # a `graph.cpp:1098` on a bare `}`, a `transport_vertex.cpp:152` on a blank line, and a
+    # `fwd_router.cpp:1066` that named a queue splice instead of the `deref_vertex_slot` the
+    # sentence points at. Every one of them was invisible to the gate before this.
+    #
+    # The last two of the twelve are the rule earning its keep in the wild rather than in a
+    # test. The ESP component CHANGELOG's #963.4 entry says three IDF components are "named by
+    # headers under `include/libtracer_esp/`" — a claim only an `#include` line can support.
+    # Two of the three cited a `#include <atomic>` and a stray doc-comment instead, and stayed
+    # invisible until #1160 shifted `httpd_ws_link.hpp` and this gate reddened on the rebase.
+    # They now pin `esp_http_server.h` and `esp_transport.h`, the lines that carry the claim.
+    ('bench/bench_forward_heap.cpp:8',
+     '* @warning **What this gate does NOT cover.** It drives `capture_transport_t`, a stub link that'),
+    ('core/include/libtracer/can.hpp:361',
+     'if (path_len > kAdvertiseMaxPathLen) return std::nullopt;  // wedge bound (see constant)'),
+    ('core/include/libtracer/config.hpp:159',
+     '* every index taken falls back to copying the CURRENT array under the vertex stripe mutex,'),
+    ('core/include/libtracer/fwd_router.hpp:324',
+     '[[nodiscard]] graph::result_t<void> subscribe_toward(const graph::path_t& producer,'),
+    ('core/include/libtracer/fwd_router.hpp:825',
+     '*         link delivers ropes (nullptr on the borrowed-span path). @p bus_child is the'),
+    ('core/include/libtracer/graph.hpp:554',
+     "* @brief This node's own reference to @p vh — the MINT side of a bound-path element"),
+    ('core/include/libtracer/graph.hpp:938',
+     "* @brief Write a resolved vertex's value: `assign` then deliver (RFC-0008 §D)."),
+    ('core/include/libtracer/graph.hpp:946',
+     '* @brief Field-write by handle: resolve the @ref vertex_handle_t and @ref field_path_t'),
+    ('core/include/libtracer/graph.hpp:1179',
+     "* deactivates the edge slot and unwinds the RFC-0005 listener bookkeeping (descendants'"),
+    ('core/include/libtracer/graph.hpp:1547',
+     'void count_external_drop(external_drop_t why, std::uint64_t n) noexcept;'),
+    ('core/include/libtracer/mem_pool.hpp:172',
+     '* This is **opt-in construction only** — no seam defaults to it. `heap_backend()` remains'),
+    ('core/include/libtracer/path.hpp:50',
+     "* separates field levels, `[` / `]` delimit the grammar's index suffix (which sits"),
+    ('core/include/libtracer/path.hpp:230', 'inline path_t::path_t(std::string_view text) {'),
+    ('core/include/libtracer/posix_endpoint.hpp:421',
+     "/** @brief Visit the currently-OPEN peers' names, `p<slot>` (#426). */"),
+    ('core/include/libtracer/tlv.hpp:59', 'PATH_REF = 0x14,'),
+    ('core/include/libtracer/transport.hpp:157',
+     '[[nodiscard]] virtual bool peer_named() const noexcept { return true; }'),
+    ('core/include/libtracer/vertex.hpp:228', 'struct delivery_policy_t {'),
+    ('core/include/libtracer/vertex.hpp:578', 'enum class delivery_mode_t : std::uint8_t {'),
+    ('core/include/libtracer/vertex.hpp:943', 'struct alignas(pub_edge_t) edge_pub_t {'),
+    ('core/include/libtracer/vertex.hpp:1041',
+     'inline void scan_retired_edges(edge_block_t& b) noexcept {'),
+    ('core/include/libtracer/vertex.hpp:2231',
+     'if (!pin.valid()) {  // domain exhausted: the pre-#635 path, for these threads only'),
+    ('core/include/libtracer/vertex.hpp:2901',
+     '*        displaced one. Call with the stripe lock held; the caller runs'),
+    ('core/include/libtracer/vertex.hpp:3065', 'const std::size_t doff = off;'),
+    ('core/include/libtracer/vertex.hpp:3142',
+     '// padding — 8-byte, then 4-byte, then flag bytes), with everything the write hot'),
+    ('core/src/fwd_router.cpp:781',
+     "// segment, which is what keeps two buses' same-named peers distinct on the way back."),
+    ('core/src/fwd_router.cpp:832', 'bus->set_peer_receiver('),
+    ('core/src/fwd_router.cpp:1162',
+     'transport_t* fwd_router_t::bound_egress(wire::path_ref_element_t e, std::string_view caller,'),
+    ('core/src/fwd_router.cpp:1184',
+     'bool fwd_router_t::adopt_binding(graph::path_t& path, std::string_view link_name,'),
+    ('core/src/fwd_router.cpp:1687',
+     'mem::block_array_t<std::span<const std::byte>> iov{rx_for(inbound_ctx)};'),
+    ('core/src/fwd_router.cpp:1824',
+     'const wire::grammar::rope_cursor cur{frame};',
+     'if (!frame.all_host()) return;'),
+    ('core/src/fwd_router.cpp:2013', 'const auto payload_view = view::over_bytes(payload_bytes);'),
+    ('core/src/fwd_router.cpp:2020',
+     'graph_.count_external_drop(graph::graph_t::external_drop_t::OUT_OF_MEMORY, 1);',
+     'if (!value.try_reserve(1)) {'),
+    ('core/src/fwd_router.cpp:2041',
+     'graph_.count_external_drop(graph::graph_t::external_drop_t::NO_TARGET, 1);',
+     'if (!binding) {'),
+    ('core/src/fwd_router.cpp:2126',
+     'const std::optional<graph::vertex_handle_t> v = resolve_route_vertex(route_path);'),
+    ('core/src/fwd_router.cpp:2130',
+     'graph_.count_external_drop(graph::graph_t::external_drop_t::NO_TARGET, 1);',
+     '// the same outcome either way: an admitted delivery with nowhere to land.'),
+    ('core/src/fwd_router.cpp:2133',
+     '// `payload` is a wire-encoded TLV (never empty); `nullopt` is exactly an alloc'),
+    ('core/src/fwd_router.cpp:2137',
+     'graph_.count_external_drop(graph::graph_t::external_drop_t::OUT_OF_MEMORY, 1);',
+     'const auto payload_view = view::over_bytes(payload);'),
+    ('core/src/fwd_router.cpp:2245', 'if (fresh) emit_advertise(*link, label, route);'),
+    ('core/src/fwd_router.cpp:2303',
+     'constexpr std::array<std::byte, 4> empty_src{std::byte{0x06}, std::byte{0x40}, std::byte{0x00},'),
+    ('core/src/fwd_router.cpp:2304',
+     'std::byte{0x00}};',
+     'constexpr std::array<std::byte, 4> empty_src{std::byte{0x06}, std::byte{0x40}, std::byte{0x00},'),
+    ('core/src/graph.cpp:609', 'return acl_allows(v.get(), caller, right);'),
+    ('core/src/graph.cpp:868',
+     'if (ancestor != nullptr && !acl_allows(ancestor, caller, acl_right_t::CREATE))'),
+    ('core/src/graph.cpp:932',
+     'void graph_t::count_external_drop(external_drop_t why, std::uint64_t n) noexcept {'),
+    ('core/src/graph.cpp:1092',
+     '// The wildcard spelling is RESERVED in the subject-token space (#908): the wire has one'),
+    ('core/src/graph.cpp:1093',
+     '// spelling for a subject, so a principal that could BE `EVERYONE@` is indistinguishable'),
+    ('core/src/graph.cpp:1154',
+     'if (!acl_allows(v, caller, acl_right_t::READ))',
+     'result_t<value_ref_t> graph_t::read(vertex_handle_t vh, std::string_view caller) const {'),
+    ('core/src/graph.cpp:1346', '// nested publish must not be able to swallow this tally).'),
+    ('core/src/graph.cpp:1537',
+     'const std::expected<view_t, tr::view::flatten_err_t> head =',
+     '// a DEVICE-link value, which no retry makes CPU-decodable, is TYPE_MISMATCH.'),
+    ('core/src/graph.cpp:1580', 'if (!parsed) return std::unexpected(parsed.error());'),
+    ('core/src/graph.cpp:1706', 'if (!detail::try_assign(copy, k)) return false;'),
+    ('core/src/graph.cpp:1803',
+     '// Empty-set fast path (the per-eager-write case when nobody uses assign+propagate):'),
+    ('core/src/graph.cpp:2054',
+     '// status (ADR-0060 §3), the same one the store leg answers on exhaustion.'),
+    ('core/src/graph.cpp:2321', 'if (!tlv) return std::unexpected(status_t::TYPE_MISMATCH);'),
+    ('core/src/graph.cpp:2492',
+     '// (NAME key, NAME/SETTINGS value), read through the ONE pair-consuming walk,'),
+    ('core/src/graph.cpp:2618', 'result_t<view_t> graph_t::read_settings(vertex_t* v) const {'),
+    ('core/src/op_resolve_walk.hpp:296',
+     'p.mint_request = (op_byte & kFwdOpFlagMintRequest) != 0;'),
+    ('core/src/op_resolve_walk.hpp:302',
+     '// count bound). What an element MEANS is settled at the deref, in resolve_node.'),
+    ('core/src/op_resolve_walk.hpp:633',
+     '// `vertex_slot` returns the index and the generation TOGETHER, from one lock hold. Read'),
+    ('core/src/op_resolve_walk.hpp:789',
+     'graph.write(v, has_field ? field : field_path_t{}, value, inbound_link);'),
+    ('core/src/op_resolve_walk.hpp:954',
+     'const std::optional<vertex_handle_t> bound = graph.deref_vertex_slot(e.index, e.generation);'),
+    ('core/src/path.cpp:117',
+     'return std::unexpected(status_t::INVALID_PATH);',
+     'if (p.field_.steps.size() > kMaxFieldDepth)'),
+    ('core/src/posix_endpoint.cpp:546',
+     'return false;',
+     'if (s->open.load(std::memory_order_relaxed)) return true;'),
+    ('core/src/route_handle.cpp:34', 'auto sp = std::allocate_shared<link_tables_t>('),
+    ('core/src/route_handle.cpp:236',
+     '// Exhaustion returns `{0, false}`, records nothing, and leaves the caller to send the'),
+    ('core/src/transport_tcp.cpp:51',
+     '*        count is chosen by the sending peer) and answered by DROPPING the'),
+    ('core/src/transport_vertex.cpp:64',
+     'if (const auto v = cfg.u32("backoff")) s.backoff_ms = *v;'),
+    ('core/src/transport_vertex.cpp:99',
+     '"listener", [this](graph::graph_t&, std::vector<std::byte> key, const tlv_t* config) {'),
+    ('core/src/transport_vertex.cpp:213',
+     'result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::byte> child_key,'),
+    ('integrations/esp-idf/libtracer/include/libtracer_esp/esp_ws_client_link.hpp:176',
+     '#include "esp_transport.h"'),
+    ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:150',
+     '#include "esp_http_server.h"'),
+    ('integrations/esp-idf/libtracer/include/libtracer_esp/twai_link.hpp:36',
+     '#include "esp_twai.h"'),
 ]
 
 
@@ -1063,6 +1235,36 @@ def cited_locations(context: str, filemap: dict = None) -> tuple:
     """
     spans, errors = citation_spans(context, filemap)
     return {f"{p}:{n}" for p, lo, hi in spans for n in range(lo, hi + 1)}, errors
+
+
+def unanchored_citations(text: str, anchor_locs, filemap: dict = None) -> list:
+    """Cited spans in one doc that no @ref ANCHORS entry pins — the #1243 false green.
+
+    The verify pass walks the PIN LIST: it proves that every anchor still holds, and says
+    nothing whatever about a citation with no anchor. So the one citation a reviewer cannot
+    check by eye — the NEW one, written in the PR under review — was the one citation the
+    gate did not check either. Five wrong ones (a comment line, a transposed line number)
+    shipped green that way on 2026-08-13.
+
+    This is the same rule the dead-pin check already applies in reverse ("pinned here but no
+    doc cites it any more"), pointed the other way: a cited span is pinned, or it is refused.
+    A RANGE counts as pinned when an anchor sits on ANY line inside it — a doc that points at
+    a `/**` means the block, and the table's convention is to pin the most distinctive line
+    within a cited range rather than its head.
+
+    `anchor_locs` is the set of `path:line` strings the table pins. Only LIVING docs are
+    asked: the dated genres (@ref HISTORICAL_GENRES) are never anchored, for the reason this
+    file's header gives.
+    """
+    spans, _ = citation_spans(text, filemap)
+    out = []
+    for path, lo, hi in dict.fromkeys(spans):
+        if any(f"{path}:{n}" in anchor_locs for n in range(lo, hi + 1)):
+            continue
+        cite = f"{path}:{lo}" + (f"-{hi}" if hi != lo else "")
+        out.append(f"`{cite}` is cited here but pinned by no ANCHORS entry — add an anchor "
+                   f"pinning the cited line's text, or drop the line number")
+    return out
 
 
 def citation_index(docs, filemap: dict = None) -> dict:
@@ -1396,11 +1598,15 @@ def repin(from_rev: str = None, apply: bool = False) -> int:
     targets = [(REPO / "tools" / "check_doc_citations.py", repin_anchor_table)] + [
         (doc, None) for doc in all_docs()
     ]
-    # An enrolled path whose anchors all still resolve has not moved, so its citations
-    # need no attention and saying otherwise is noise. Only a path with a MOVED anchor is
-    # reported below.
+    # A path whose anchors all still resolve, at the same lines, has not moved: its citations
+    # need no attention and saying otherwise is noise — 32 identical "held" lines on every
+    # clean run is how a report gets ignored. IN PLAY is broader than "moved": a line the map
+    # sends to None (a deleted or rewritten block) is exactly a citation that needs a human,
+    # so it counts too. On a clean tree every anchor is a fixed point, nothing is in play, and
+    # a hold that survives that filter is a real one — which is what lets a HOLD carry the
+    # exit status below (#1243) without reddening every clean run.
     shifted = {p for p, m in maps.items()
-               if any(new is not None and new != old for old, new in m.items())}
+               if any(new is None or new != old for old, new in m.items())}
     total, historical, held_all, enrolled_held = 0, 0, list(notes), []
     for path, table_fn in targets:
         try:
@@ -1419,9 +1625,10 @@ def repin(from_rev: str = None, apply: bool = False) -> int:
         # Two different reasons a citation is held, and saying "no derivable shift" for
         # both would misreport the enrolled one as a map gap the tool could close (#1095).
         for p, n in held:
+            if p not in shifted:
+                continue  # the file did not move; there is nothing to re-pin and nothing to say
             if p in CITABLE_NON_SOURCE_PATHS:
-                if p in shifted:
-                    enrolled_held.append(f"{rel}: {p}:{n}")
+                enrolled_held.append(f"{rel}: {p}:{n}")
             else:
                 held_all.append(f"{rel}: {p}:{n} — no derivable shift, re-pin by hand")
         if not moves:
@@ -1440,11 +1647,20 @@ def repin(from_rev: str = None, apply: bool = False) -> int:
               f"(ANCHOR_ENTRY_RE matches source suffixes only, so the table entry would "
               f"stay put while the doc moved). Re-pin the doc AND its anchor, by hand.")
     verb = "rewritten" if apply else "would move (dry run; pass --apply to write)"
-    print(f"\n{total} citation(s) {verb}; {len(dict.fromkeys(held_all))} held for a human"
-          f"; {len(dict.fromkeys(enrolled_held))} in enrolled non-source paths need a hand re-pin.")
+    n_held, n_enrolled = len(dict.fromkeys(held_all)), len(dict.fromkeys(enrolled_held))
+    print(f"\n{total} citation(s) {verb}; {n_held} held for a human"
+          f"; {n_enrolled} in enrolled non-source paths need a hand re-pin.")
     if historical:
         print(f"      {historical} more sit in {', '.join(g.rstrip('/') for g in HISTORICAL_GENRES)} "
               f"and were left alone — a dated record cites the tree as it stood.")
+    # A HOLD is part of the VERDICT (#1243). This printed its holds and then exited 0, so a
+    # rebase procedure that gated on the exit status read "held" as "done" and carried stale
+    # citations through — the same false green the verify pass had, one command over. A run
+    # that left anything for a human says so where a shell can see it.
+    if n_held or n_enrolled:
+        print(f"HELD  {n_held + n_enrolled} citation(s) were NOT re-pinned and need a hand — "
+              f"this run is INCOMPLETE (exit 1). Re-run this gate after fixing them.")
+        return 1
     return 0
 
 
@@ -1475,6 +1691,7 @@ def main(argv: list = None) -> int:
         parser.error("--from-rev and --apply are only meaningful with --repin")
 
     filemap = source_map()
+    anchor_locs = {entry[0] for entry in ANCHORS}
     docs, failures, drifted = [], [], []
     for doc in all_docs():
         try:
@@ -1492,6 +1709,11 @@ def main(argv: list = None) -> int:
         # All of them describe history.
         if not is_historical(rel):
             failures += [f"{rel}: {e}" for e in dict.fromkeys(unverifiable_citations(text))]
+            # The other half of the same rule (#1243): a citation the gate CAN read but no
+            # anchor pins is not verified either, and used to pass in silence. Named with the
+            # doc, so the fix is "add this anchor", not "go find who cites this".
+            failures += [f"{rel}: {e}"
+                         for e in dict.fromkeys(unanchored_citations(text, anchor_locs, filemap))]
     index = citation_index(docs, filemap)
     present = set(index)
 

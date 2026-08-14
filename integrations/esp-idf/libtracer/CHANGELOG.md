@@ -547,8 +547,8 @@ core 0.10.0 reaches it.
 
 - **Public headers now propagate their ESP-IDF dependencies (#963.4).** `esp_http_server`,
   `tcp_transport` and `esp_driver_twai` moved from `PRIV_REQUIRES` to **`REQUIRES`**. Those
-  three are named by headers under `include/libtracer_esp/` (`httpd_ws_link.hpp:139`,
-  `esp_ws_client_link.hpp:157`, `twai_link.hpp:36-37`), and `PRIV_REQUIRES` does not
+  three are named by headers under `include/libtracer_esp/` (`httpd_ws_link.hpp:150`,
+  `esp_ws_client_link.hpp:176`, `twai_link.hpp:36-37`), and `PRIV_REQUIRES` does not
   propagate include dirs — so a dependent that included one of ours without independently
   requiring the base component died with `esp_http_server.h: No such file or directory` and
   no hint that libtracer was the cause. `lwip` and `esp_driver_gpio` stay private: they are
@@ -598,8 +598,8 @@ core 0.10.0 reaches it.
   longer derive to "block forever" (#956).** Two further corrections to
   `derive_send_timeout_ms`, on top of the strike cap (#840):
   - `SO_SNDTIMEO` is a **per-`send` property**, and `httpd_ws_send_frame_async` writes a
-    frame as a header call plus a payload call (`esp_http_server/src/httpd_ws.c:447`,
-    `:455`), so one frame to one stalled peer parked the httpd task for **twice** what the
+    frame as a header call plus a payload call (`esp_http_server/src/httpd_ws.c:447,455`),
+    so one frame to one stalled peer parked the httpd task for **twice** what the
     derivation claimed. `kIdfWsWriteLegs` is now the third divisor.
   - The division had **no floor**: a large-but-legal `max_peers` truncated it to `0`, and
     `SO_SNDTIMEO = 0` means *block forever* — exactly the failure the derivation exists to
