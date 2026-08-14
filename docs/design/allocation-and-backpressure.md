@@ -57,17 +57,17 @@ heap and byte-identical behaviour (`core/include/libtracer/graph.hpp:325-327`).
 | Seam | Type | What it allocates | Exhaustion |
 | --- | --- | --- | --- |
 | `mr_` (`graph.hpp:1835`) | `std::pmr::memory_resource*` | the small control *objects* of a stored write: the `shared_ptr` control block and the `rope_t` wrapping the value's links | throws — structurally cannot report by value |
-| `value_backend_` (`graph.hpp:1914`) | `mem::mem_backend_t*` | the graph's **payload** byte `segment`s: the durable buffer holding a vertex's last-known value when the write path must own its bytes, and (since #831) **both** folded READs' POINT headers — the composed root's per-node header and the `":children"` listing's per-member + outer header | `nullptr` → the operation answers `BACKPRESSURE` |
-| `ctl_` (`graph.hpp:2003`) | `mem::block_source_t*` | every allocation a peer can provoke | `nullptr` → the operation answers a status |
+| `value_backend_` (`graph.hpp:1845`) | `mem::mem_backend_t*` | the graph's **payload** byte `segment`s: the durable buffer holding a vertex's last-known value when the write path must own its bytes, and (since #831) **both** folded READs' POINT headers — the composed root's per-node header and the `":children"` listing's per-member + outer header | `nullptr` → the operation answers `BACKPRESSURE` |
+| `ctl_` (`graph.hpp:1934`) | `mem::block_source_t*` | every allocation a peer can provoke | `nullptr` → the operation answers a status |
 
 Three seams rather than one because the three contracts differ: cache hooks, `owns_bytes` and
 ISR-safety belong to a byte buffer; object construction belongs to `std::pmr`; reporting exhaustion
 by value belongs to `block_source_t`. `ctl_` is deliberately a *different C++ type* from `mr_` so
 the two contracts — may-be-null versus must-not-be-null — cannot be transposed by a one-token edit,
 and so retiring `mr_` later is a compile error rather than a silent rebind (`graph.hpp:312-324`,
-restated at `graph.hpp:1994-1995`). `ctl_` is declared last in the object on purpose: no hot path
+restated at `graph.hpp:1925-1926`). `ctl_` is declared last in the object on purpose: no hot path
 reads it, so placing it there leaves every other member at the byte offset it had before the seam
-existed, which keeps the forward-hop bench measuring the same layout (`graph.hpp:1997-2001`).
+existed, which keeps the forward-hop bench measuring the same layout (`graph.hpp:1928-1932`).
 
 `fwd_router_t` carries the same failable seam separately as its `rx` parameter
 (`core/include/libtracer/fwd_router.hpp:179`), because the terminus arena decode belongs to the
