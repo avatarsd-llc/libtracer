@@ -610,7 +610,7 @@ a reply already being assembled.
 :members:
 ```
 
-```{doxygentypedef} tr::graph::sub_observer_t
+```{doxygentypedef} tr::graph::sub_observer_fn_t
 :project: libtracer
 ```
 
