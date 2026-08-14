@@ -409,11 +409,20 @@ struct no_mint_t {
  *
  * **The two directions are told apart by TYPE, never by position** (RFC-0024 §7.1
  * amendment 2): the forward mint ANSWER on a reply is a `PATH_REF` (`0x14`), the REVERSE list
- * on a mint-flagged request a `PATH_REF_REVERSE` (`0x15`). @p Want is that discriminant, and
- * it is free: the loop below already compares each tail child's type byte, so a caller asking
- * for the other constant compiles to the same instruction. A positional rule ("the only
- * trailing child") would have cost the same here and foreclosed a raw `PATH_REF` payload on a
- * mint-flagged WRITE, which is why the type carries the role.
+ * on a mint-flagged request a `PATH_REF_REVERSE` (`0x15`). @p want is that discriminant, and
+ * it is free: the loop below already compares each tail child's type byte, so asking for the
+ * other constant is the same compare. A positional rule ("the only trailing child") would
+ * have cost the same here and foreclosed a raw `PATH_REF` payload on a mint-flagged WRITE,
+ * which is why the type carries the role.
+ *
+ * **`want` is a RUNTIME parameter, and that is measured, not stylistic.** As a template
+ * parameter it reads better and folds to an immediate — and it costs **+14% on the fixed
+ * forward hop and +23% on the 64-link demux scan** (`bench_forward_demux`, reproduced against
+ * `main`), because two instantiations stop being one shared out-of-line function and get
+ * inlined into the two `noinline` mint helpers instead, which repartitions the `flatten`ed
+ * `rebuild_fwd_forward` the whole demux path runs. This is exactly the hazard the mint
+ * helpers' own `noinline` notes describe. One shared copy, one register argument: the
+ * pre-amendment code shape, and level with it.
  *
  * FINDING the answer and being able to ADD to it are two different answers, and the caller
  * needs both: a hop that finds a list it cannot extend MUST STRIP it (§7.1 erratum 1), never
@@ -425,16 +434,16 @@ struct no_mint_t {
  * @param cur   Cursor over the frame.
  * @param from  First byte after `src` — where the frame's trailing children begin.
  * @param end   End of the FWD body.
- * @tparam Want The mint list's type: `PATH_REF` on a reply, `PATH_REF_REVERSE` on a
- *              mint-flagged request (RFC-0024 §7.1 amendment 2). A TEMPLATE parameter, not a
- *              runtime one, so the compare below is against an IMMEDIATE at both call sites
- *              and the two directions cannot share a generic copy that reloads it.
+ * @param want The mint list's type: `PATH_REF` on a reply, `PATH_REF_REVERSE` on a
+ *              mint-flagged request (RFC-0024 §7.1 amendment 2). A RUNTIME parameter, and
+ *              deliberately so — see the note above on why a template one is not free here.
  * @retval std::nullopt No trailing child of type @p want at all, or a malformed tail. The
  *         frame carries no mint exchange in this direction and is forwarded untouched.
  */
-template <wire::type_t Want = wire::type_t::PATH_REF, class Cursor>
-[[nodiscard]] std::optional<trailing_mint_t> peek_trailing_mint(const Cursor& cur, std::size_t from,
-                                                                std::size_t end) {
+template <class Cursor>
+[[nodiscard]] std::optional<trailing_mint_t> peek_trailing_mint(
+    const Cursor& cur, std::size_t from, std::size_t end,
+    wire::type_t want = wire::type_t::PATH_REF) {
     std::size_t pos = from;
     std::size_t ref_pos = 0;
     std::size_t ref_body_len = 0;
@@ -442,10 +451,10 @@ template <wire::type_t Want = wire::type_t::PATH_REF, class Cursor>
     while (pos < end) {
         const auto h = read_fwd_header(cur, pos);
         if (!h || h->total == 0 || pos + h->total > end) return std::nullopt;
-        // ONE compare, exactly as before amendment 2 gave the reverse list its own code —
-        // `want` is a constant at every call site, so no cursor read and no body peek is
-        // added to any hop by the discriminant being a type rather than a position.
-        found = h->type == Want;
+        // ONE compare, exactly as before amendment 2 gave the reverse list its own code:
+        // a register compare where it used to be an immediate one. No cursor read and no
+        // body peek is added to any hop by the discriminant being a type, not a position.
+        found = h->type == want;
         ref_pos = pos;
         ref_body_len = h->body_len;
         if (found && !wire::path_ref_body_valid(h->opt.pl, h->opt.ll, h->body_len))
@@ -1021,7 +1030,7 @@ template <class Cursor, class MintFn>
                                                  std::size_t body_end, MintFn& mint_fn,
                                                  fwd_rebuild_t& r) {
     const std::optional<trailing_mint_t> found =
-        peek_trailing_mint<wire::type_t::PATH_REF>(cur, pos, body_end);
+        peek_trailing_mint(cur, pos, body_end, wire::type_t::PATH_REF);
     if (!found) return 0;
     // The tail stops short of the mint answer either way: this hop re-heads it one element
     // longer, or removes it. It is never relayed untouched.
@@ -1086,7 +1095,7 @@ template <class Cursor, class MintFn>
                                                            std::size_t body_end, MintFn& mint_fn,
                                                            fwd_rebuild_t& r) {
     const std::optional<trailing_mint_t> found =
-        peek_trailing_mint<wire::type_t::PATH_REF_REVERSE>(cur, pos, body_end);
+        peek_trailing_mint(cur, pos, body_end, wire::type_t::PATH_REF_REVERSE);
     // The ONE call — after the frame is known mint-flagged, at most once per hop.
     const std::optional<wire::path_ref_element_t> mint =
         (!found || found->can_contribute) ? mint_fn() : std::nullopt;
