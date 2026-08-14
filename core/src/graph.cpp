@@ -2608,6 +2608,21 @@ result_t<view_t> graph_t::read_schema(vertex_t* v) const {
     return *out;
 }
 
+/**
+ * @brief The largest `:identity` record the RFC-0011 §B kind registry can produce.
+ *
+ * Every kind fixes its key length, so the record's length is a function of the registry
+ * rather than of anything a caller supplies — this is a consequence of §B, NOT a synthetic
+ * cap on user data. ed25519, the only kind today, serializes to exactly 60 bytes
+ * (`SETTINGS{ NAME "kind" VALUE u8, NAME "key" VALUE 32B }`); the headroom absorbs a
+ * registry addition without a reader change.
+ *
+ * It exists so @ref graph_t::read_identity can copy the record out under its lock WITHOUT
+ * allocating under that lock. @ref graph_t::set_identity is the single writer and checks
+ * against it, which is what makes the reader's buffer provably sufficient.
+ */
+constexpr std::size_t kMaxIdentityRecordBytes = 96;
+
 result_t<void> graph_t::set_identity(std::uint8_t kind, std::span<const std::byte> key) {
     // The RFC-0011 §B identity-kind registry. `0x00` is reserved-invalid; every other
     // kind fixes its key length, so a length that contradicts the kind is a malformed
@@ -2628,6 +2643,12 @@ result_t<void> graph_t::set_identity(std::uint8_t kind, std::span<const std::byt
 
     std::vector<std::byte> record;
     wire::emit_tlv(record, type_t::SETTINGS, opt_t{.pl = true}, members);
+    // The single-writer half of @ref kMaxIdentityRecordBytes. Unreachable at today's
+    // registry (ed25519 is 60 bytes and every other kind was refused above); it is here so
+    // that a future §B addition whose record outgrows the reader's stack buffer fails
+    // LOUDLY at the one install site rather than overflowing that buffer.
+    if (record.size() > kMaxIdentityRecordBytes) return std::unexpected(status_t::TYPE_MISMATCH);
+
     // Publish under the lock (#1049). The record is BUILT above, outside it, so the only
     // thing serialized is the swap that frees the previous buffer — the buffer a concurrent
     // `read_identity` may be memcpying from, on behalf of a peer that has authenticated
@@ -2651,11 +2672,25 @@ result_t<view_t> graph_t::read_identity() const {
     // Shared-locked across the emptiness test AND the copy (#1049): those two straddled a
     // possible install/clear, either of which frees the buffer the copy reads. Concurrent
     // reads still run in parallel; the only exclusion is against a rotation.
-    const std::shared_lock lock(identity_mutex_);
-    if (identity_record_.empty()) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+    //
+    // The lock deliberately does NOT span the ALLOCATION. The bytes land in a stack buffer
+    // the §B registry bounds (@ref kMaxIdentityRecordBytes, enforced at the single install
+    // site) and `over_bytes` runs after the unlock, because holding a lock across an
+    // allocator call is what would stop `identity_mutex_` being a LEAF: the moment that
+    // allocator becomes an injected `block_source_t` carrying its own `Sync` policy
+    // (#873 / ADR-0079), a lock-ordering obligation appears that does not exist today.
+    // Copying first costs one memcpy of at most 96 bytes on a cold path and removes it.
+    std::array<std::byte, kMaxIdentityRecordBytes> scratch;
+    std::size_t len = 0;
+    {
+        const std::shared_lock lock(identity_mutex_);
+        if (identity_record_.empty()) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+        len = identity_record_.size();
+        std::memcpy(scratch.data(), identity_record_.data(), len);
+    }
     // Pre-serialized at install, so every vertex of this node serves BYTE-IDENTICAL
     // bytes (§C.1) — the invariant that makes the record a valid cross-path key.
-    const auto out = view::over_bytes(identity_record_);
+    const auto out = view::over_bytes(std::span<const std::byte>(scratch.data(), len));
     if (!out) return std::unexpected(status_t::BACKPRESSURE);
     return *out;
 }

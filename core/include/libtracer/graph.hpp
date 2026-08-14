@@ -1974,6 +1974,12 @@ class graph_t {
     // and the read is cold (one identity read per peer per pin), so the lock costs nothing
     // anywhere that matters. Same reasoning as child_types_ above: a std::vector has no
     // pointer-sized word for the slot mechanism to publish.
+    //
+    // The reader copies these bytes out through a stack buffer and allocates only after
+    // unlocking, so this mutex is a strict LEAF — acquired at three sites, holding nothing
+    // else, calling no allocator. That is what keeps it free of a lock-ordering obligation
+    // once #873 injects a `block_source_t` (whose `Sync` policy may take its own lock) at
+    // the allocation site.
     mutable std::shared_mutex identity_mutex_;
     std::vector<std::byte> identity_record_;
     // Bubbling-walk instrumentation (RFC-0005) — see ancestor_walks().
