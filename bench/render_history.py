@@ -282,6 +282,34 @@ FAMILIES: list[dict] = [
          names=[("heap allocs per reg_escape (probe)", "blocks escaping the seam"),
                 ("heap bytes per reg_escape (probe)", "live bytes escaping the seam")],
          log=True, fmt="num", ylabel="value (per-series units)"),
+    # The two RAM censuses (#1228). Recorded on the PINNED host only — the hosted store
+    # has no census points, so on that source these cards simply do not appear, which is
+    # the same behaviour as any other bench-local-only family. Charted rather than merely
+    # gated because the ratchet is warn-first: a warning nobody reads still leaves a
+    # picture, and the picture is what shows a 4-byte-per-commit creep that never trips
+    # any single run's band.
+    dict(id="mem-conn-ram", section="memory", suite="latency",
+         title="Per-connection RAM — what one connection costs, by transport",
+         cond="bench_conn_ram · pinned host · live heap bytes one connection adds, and what "
+              "is still held after it is torn down (target: the same number, and no growth "
+              "at all across a connect/disconnect cycle)",
+         names=[("conn-ram tcp-server per_conn", "TCP · per connection"),
+                ("conn-ram ws-server per_conn", "WS · per connection"),
+                ("conn-ram tcp-server after_td", "TCP · retained after teardown"),
+                ("conn-ram ws-server after_td", "WS · retained after teardown")],
+         log=False, fmt="bytes", ylabel="bytes per connection"),
+    dict(id="mem-node-census", section="memory", suite="latency",
+         title="Whole-node RAM census — a 100-vertex node, stage by stage",
+         cond="bench_ram_census_tcp · pinned host · the 4..64 B mixed arm, live heap at each "
+              "stage from an empty graph to steady state under a real remote peer process. "
+              "TREND-ONLY: nothing here is gated",
+         names=[("node-census mixed S_A_bytes", "empty graph"),
+                ("node-census mixed S_B1_bytes", "+ 100 vertices registered"),
+                ("node-census mixed S_B_bytes", "+ their values written"),
+                ("node-census mixed S_C_bytes", "+ router & SPEC-created listener"),
+                ("node-census mixed S_D_bytes", "+ peer process connected"),
+                ("node-census mixed S_E_bytes", "steady state after the op storm")],
+         log=True, fmt="bytes", ylabel="live heap bytes"),
     dict(id="mem-heap", section="memory", suite="latency", title="Heap & memory footprint",
          cond="allocator probe (allocs / bytes per hop) + whole-run max RSS — mixed units, log axis",
          names=[("heap allocs per forward (probe)", "allocs/forward"),
@@ -433,6 +461,8 @@ INSTRUMENT_SOURCES: list[tuple[str, list[str]]] = [
     (r"^compact-", ["bench/bench_compact_delivery.cpp"]),
     (r"^heap (allocs|bytes) per ", ["bench/bench_forward_heap.cpp"]),
     (r"max RSS$", ["bench/bench_libtracer.cpp"]),
+    (r"^conn-ram ", ["bench/bench_conn_ram.cpp"]),
+    (r"^node-census ", ["bench/bench_ram_census_tcp.cpp"]),
 ]
 # Shared harness: a change here can move EVERY series, so it marks all of them.
 HARNESS_SOURCES = ["bench/bench_common.hpp", "bench/CMakeLists.txt",

@@ -24,7 +24,8 @@ for a local `preview.html` of the same charts.
 | `bench_fanout_clone_storm` | **many-core refcount contention**: T threads clone+release one shared segment — the per-subscriber fan-out primitive under wide fan-out (ADR-0032 128-core row). |
 | `bench_await_wakeup_storm` | **many-core await fan-in**: one writer storms writes while W threads `await` one vertex — condvar/notify_all + vertex-lock scaling (ADR-0032 128-core row). |
 | `bench_route_handle_contention` | **per-link-lock contention**: T producers doing steady-state `ensure_egress` reuse-reads on one hot link (its header carries the finding that `shared_mutex` does not help). |
-| `bench_ram_census_tcp` | **whole-node RAM census**: the heap a 100-vertex graph (values 4..64 B, mixed int / array / STREAM) holds, staged from an empty `graph_t` through a `/net:children[]`-created TCP listener to steady state under a real remote peer **process**. |
+| `bench_conn_ram` | **per-connection RAM census**: what one connection costs on each transport (TCP / WS / UDP / CAN) — link base, per-connection bytes, what survives teardown. **Gated (warn)** on the pinned host — see [the RAM censuses in CI](#the-ram-censuses-in-ci-1228). |
+| `bench_ram_census_tcp` | **whole-node RAM census**: the heap a 100-vertex graph (values 4..64 B, mixed int / array / STREAM) holds, staged from an empty `graph_t` through a `/net:children[]`-created TCP listener to steady state under a real remote peer **process**. **Trend-only** on the pinned host. |
 | `bench_rx_source_topology` | **RX failable-source topology**: T receive threads forwarding rope frames through a shared heap, one shared pool, or one pool per child — the measurement behind [ADR-0067](../docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md) §3. |
 
 ### `bench_forward_heap` — the 16KB-RAM zero-heap forward gate (ADR-0038)
@@ -239,9 +240,78 @@ Three arms differing in exactly one variable (every value 4 B, the 4..64 B mix, 
 the first repetition is discarded. The figures are near-deterministic — a spread wider than a
 few bytes means an unwaited thread or a broken instrument, not noise.
 
-Diagnostic, **not** a `perf.yml` gate, and deliberately **not** wired into the generated
-performance page. It does not count pthread stacks (`mmap`ed, invisible to any `operator new`
-counter) or static RAM — the footprint sentinel prices those.
+Not a `perf.yml` gate: it runs on the **pinned host** (`perf-local.yml`), where it is
+**trend-only** — see below. It does not count pthread stacks (`mmap`ed, invisible to any
+`operator new` counter) or static RAM — the footprint sentinel prices those.
+
+### The RAM censuses in CI (#1228)
+
+Steady-state RAM is the axis that decides whether a node fits the 16 KB target, and it used
+to be the only cost axis measured **exclusively by hand** — latency, allocations, code size
+and flash all had a gate or a recorded trend. Both censuses now run on every main push in
+[`perf-local.yml`](../.github/workflows/perf-local.yml), on the fixed pinned host, and
+publish into the **same** `dev/bench-local` store on the same commit axis as the latency
+trend (`bench/ram_census.py emit` merges them into the file `perf_emit_benchmark.py` just
+wrote — one collation and publish pipeline, not two). Series names are
+`conn-ram <arm> <metric>` and `node-census <arm> <metric>`, in bytes (or `blocks` for the
+allocator block counts); a row whose median is **0** is not recorded, because the store
+trends a ratio and a ratio against zero can never alert.
+
+| instrument | in CI | why |
+| --- | --- | --- |
+| `bench_conn_ram` (per-connection) | published **+ gated (warn)** | its per-connection columns are byte-stable run to run |
+| `bench_ram_census_tcp` (whole node) | published, **trend-only** | it gains a ratchet only after the per-connection one has proven quiet |
+
+**Trend-only is not gated.** The whole-node census has **no pins at all** — nothing about it
+fails or warns today. It forks and reaps its own remote peer process, and a peer that fails
+to come up costs that commit its census point with a `::notice::`, never the job.
+
+**The warn-first ratchet.** `bench/ram_census.py gate` compares the per-connection figures
+against **measured** pins in [`ram_census_pins.json`](ram_census_pins.json) — the same shape
+as the flash-footprint drift check: a pin, a band, a warning annotation, and a re-pin that
+only ever happens in a PR. It is never auto-ratcheted. The band is **±8 B or ±0.5%,
+whichever is larger**, and that comes from measurement, not from taste: over 4 process
+invocations × 9 repetitions on a quiet host every pinned row's median was **byte-identical**
+(0 B, 0.00% cross-run) and the widest within-run `[min..max]` on any pinned row was **4 B**
+(`tcp-server per_conn`, 280..284). 8 B is 2× that worst observed spread — the same
+2×-observed-noise rule the Cortex-M0 drift check adopted. The 0.5% term exists only for the
+two ~64 KB `link_base` rows, where an allocator/libc packaging change can move the overhead
+term without any design regression. The **high-water** columns are deliberately unpinned:
+`tcp-server hw_peak` moved 66% across runs and ~41 KB within one, so a band on it would fire
+on a transient buffer rather than on a connection's cost.
+
+A **failure to measure is not a budget verdict** (#982's precedent): a missing or unparsable
+transcript, a drifting NULL arm, or a pinned row the run does not produce fails the gate in
+**either** mode. And because the warn path is invisible by construction, every pinned-host
+run re-proves it with a doctored baseline — if a 4 KB induced growth does not produce a
+warning annotation, that step reds the job.
+
+```sh
+cmake --build bench/build --target bench_conn_ram -j
+./bench/build/bench_conn_ram --no-can --reps=5 | tee conn.txt   # CI's exact invocation
+python3 bench/ram_census.py gate --conn-raw conn.txt --pins bench/ram_census_pins.json
+```
+
+**Re-pinning** (growth that is understood and accepted, or a shrink — a pin left above the
+truth makes the next growth free):
+
+```sh
+python3 bench/ram_census.py gate --conn-raw conn.txt \
+    --pins bench/ram_census_pins.json --emit-pins > /tmp/pins.json
+cp /tmp/pins.json bench/ram_census_pins.json     # then commit it, with the reason, in a PR
+```
+
+Take the transcript on the **pinned host** where the gate runs. These figures contain the
+`sizeof` of every transport, so they are compiler- and allocator-bound: measured on a
+toolchain other than the one recorded in the pin file, the gate still reports drift but
+enforces in **warn** mode only — an unattributable difference must never red main.
+
+**Activation.** The flip from `--mode warn` to `--mode fail` in `perf-local.yml` is a
+deliberate PR edit, and its criterion lives in the pin file (`activation`), next to the pins
+it governs, rather than in a comment that would rot: **20 consecutive pinned-host samples
+banked with no unexplained warning, and the pins re-taken on the bench host's own
+toolchain**. That is about a release's worth of main pushes here. A threshold picked before
+the noise is known is the unreachable-budget failure mode this repo already hit once.
 
 ### `bench_rx_source_topology` — where a bounded RX source may sit (ADR-0067 §3)
 
