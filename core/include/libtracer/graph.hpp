@@ -1736,9 +1736,10 @@ class graph_t {
     // Called from the ONE admission door, at the note_subscriber_added bump, with no other
     // lock held. An empty `link` is a no-op: that is the LOCAL spelling, and a local edge is
     // not reachable by any link teardown (the #1056 empty-key rule, mirrored here so the
-    // index cannot grow an entry no eviction can ever name). Idempotent — a vertex already
-    // listed for `link` is not listed twice, which is what keeps a peer that re-subscribes
-    // to the same vertex from growing its own departure cost without bound.
+    // index cannot grow an entry no eviction can ever name). Idempotent AT THE INSERT (#1266,
+    // which is where this promise finally became true) — a vertex already listed for `link`
+    // is not listed twice, which is what keeps a peer that re-subscribes to the same vertex
+    // from growing its own departure cost, its arena footprint, or its sort bill.
     void index_link_vertex(std::string_view link, vertex_t* v);
     // The candidate vertices an eviction for `link_name` must visit — see the definition.
     // `take` removes the index entry (whole-link teardown) instead of copying it
@@ -2087,13 +2088,17 @@ class graph_t {
      * hangup, which is the allocation #1071 called out. It now allocates nothing at all —
      * the candidate list IS this entry, moved out.
      */
-    /** @brief One link's candidate list, plus the size it was last compacted at. */
+    /** @brief One link's candidate list, plus where its sorted prefix ends. */
     struct link_entry_t {
-        std::pmr::vector<vertex_t*> vs; /**< @brief Candidates; may hold duplicates. */
-        std::size_t compacted = 0;      /**< @brief `vs.size()` after the last compaction. */
+        std::pmr::vector<vertex_t*> vs; /**< @brief The link's DISTINCT candidate vertices:
+                                         *          `[0, compacted)` sorted, then an unsorted
+                                         *          tail (`graph_t::index_link_vertex`). */
+        std::size_t compacted = 0;      /**< @brief Where the sorted prefix ends — `vs.size()`
+                                         *          as of the last compaction. */
     };
-    /** @brief Compaction floor — below this a link's list never sorts, so the common peer
-     *         with a handful of subscriptions pays nothing but the append. */
+    /** @brief How long a link's UNSORTED tail may get before it is merged into the sorted
+     *         prefix — so the membership test's linear half stays a handful of pointers and
+     *         the sort is paid per NEW vertex, never per subscribe. */
     static constexpr std::size_t kLinkIndexCompactFloor = 8;
 
     // `mutable` because the entries are a CACHE of where a link's edges may be: the

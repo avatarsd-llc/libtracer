@@ -15,7 +15,7 @@
     {
       "binary": "bench_libtracer",
       "symbol": "tr::graph::graph_t::fan_out(",
-      "bytes": 1474
+      "bytes": 1522
     },
     {
       "binary": "bench_libtracer",

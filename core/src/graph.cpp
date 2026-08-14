@@ -701,16 +701,47 @@ std::size_t graph_t::parked_seam_count() const {
 }
 
 /**
- * @brief Drop duplicate vertices from one link's candidate list, in place.
+ * @brief Re-establish one link's candidate list as SORTED and unique, in place.
  *
- * Duplicates are a SPACE problem only, never a correctness one: visiting a vertex twice costs
- * a second `vertex_t::evict_link_edges` that finds the link's edges already gone and reports
- * 0. That is what lets the insert below be a bare append and pay for order here, amortized,
- * instead of on every subscribe.
+ * The list is a sorted prefix plus an unsorted tail (see `graph_t::index_link_vertex`); this
+ * folds the tail in. The `unique` pass is belt-and-braces now that the insert is idempotent —
+ * a duplicate would be a SPACE problem only, never a correctness one, since visiting a vertex
+ * twice costs a second `vertex_t::evict_link_edges` that finds the link's edges already gone
+ * and reports 0.
  */
 static void compact_candidates(std::pmr::vector<vertex_t*>& vs) {
     std::sort(vs.begin(), vs.end());
     vs.erase(std::unique(vs.begin(), vs.end()), vs.end());
+}
+
+/**
+ * @brief Is @p v already a candidate in @p vs, whose first @p sorted entries are sorted?
+ *
+ * The membership half of `graph_t::index_link_vertex`'s idempotent insert: a binary search
+ * over the sorted prefix, then a scan of the tail the compaction floor bounds.
+ *
+ * Written out rather than composed from `std::binary_search` + `std::find`, which is what it
+ * plainly is. The two extra `<algorithm>` instantiations enlarged this translation unit
+ * enough to move GCC's inter-procedural budget, and the budget was spent on the DELIVERY
+ * path: `vertex_t::copy_published` +667 B and `graph_t::fan_out` +48 B, for a control-plane
+ * change that touches neither. Ablate by restoring the two-algorithm form — the symbol
+ * ratchet goes red on `fan_out` naming exactly that.
+ */
+static bool candidates_contain(const std::pmr::vector<vertex_t*>& vs, std::size_t sorted,
+                               const vertex_t* v) {
+    std::size_t lo = 0;
+    std::size_t hi = sorted;
+    while (lo < hi) {
+        const std::size_t mid = lo + (hi - lo) / 2;
+        if (vs[mid] == v) return true;
+        if (vs[mid] < v)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    for (std::size_t i = sorted; i < vs.size(); ++i)
+        if (vs[i] == v) return true;
+    return false;
 }
 
 void graph_t::index_link_vertex(std::string_view link, vertex_t* v) {
@@ -723,18 +754,30 @@ void graph_t::index_link_vertex(std::string_view link, vertex_t* v) {
                           link_entry_t{.vs = std::pmr::vector<vertex_t*>(mr_)})
                  .first;
     link_entry_t& e = it->second;
-    // A bare APPEND, deliberately — this is the subscribe path, and #1071's acceptance
-    // criteria reject paying for the departure fix here. The obvious alternative, keeping the
-    // list sorted so membership is a binary search, makes the Nth subscription memmove N/2
-    // pointers: measured at 200 subscriptions over one link it cost +19% on the subscribe
-    // path against a ±1.6% A/A null, which is a reject. Appending is O(1).
+    // IDEMPOTENT — a vertex already listed for this link is not listed again. That is what
+    // the declaration has always promised, and what this file's own bound argument assumes;
+    // the code did not do it, and that gap is where the subscribe path's cost actually was
+    // (#1266). The predecessor appended unconditionally and squashed duplicates later, so a
+    // peer re-subscribing over its own handful of vertices — the steady state, since a
+    // subscription is renewed far more often than a new vertex is first subscribed — grew a
+    // list oscillating between D and 2D+8 entries: an arena allocation whenever it outgrew
+    // its capacity, and an `O(D log D)` sort every D+8 subscribes, forever, for no distinct
+    // vertex gained. Measured by ablation, that append-plus-amortized-sort was the larger
+    // half of the index's per-subscribe cost.
+    //
+    // `vs` is `[0, compacted)` SORTED and unique, followed by an unsorted tail the compaction
+    // below keeps under `kLinkIndexCompactFloor`. So membership is a binary search over the
+    // prefix plus a bounded scan of the tail, with NO memmove — which is what made a fully
+    // sorted insert a reject (+19% on this path, #1071, from the N/2-pointer shift the Nth
+    // subscription paid). A genuinely new vertex still lands with a bare `push_back`.
+    if (candidates_contain(e.vs, e.compacted, v)) return;
     e.vs.push_back(v);
-    // Compaction is amortized against the last compacted size, so the list stays inside 2x
-    // the peer's distinct vertex count (plus a small floor, so a handful of subscriptions
-    // never sorts at all) while each individual subscribe stays O(1) amortized. Without a
-    // bound a peer that re-subscribes to the same vertex in a loop would grow this forever,
-    // which on a node sized in kilobytes is the wrong failure.
-    if (e.vs.size() >= 2 * e.compacted + kLinkIndexCompactFloor) {
+    // With the membership test above the list IS the distinct set, so compaction no longer
+    // bounds unbounded growth — nothing can grow it past the vertices this link subscribed
+    // on. What it bounds now is the TAIL, i.e. how long the linear half of that test can get:
+    // merging every `kLinkIndexCompactFloor` NEW vertices keeps the scan at a handful of
+    // pointers, and the sort is paid per new vertex rather than per subscribe.
+    if (e.vs.size() - e.compacted >= kLinkIndexCompactFloor) {
         compact_candidates(e.vs);
         e.compacted = e.vs.size();
     }
