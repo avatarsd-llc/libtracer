@@ -835,6 +835,29 @@ struct subscriber_t {
 };
 
 /**
+ * @brief The edge record's WIDTH, pinned (#1266).
+ *
+ * Both halves are per-edge storage on a node whose subscriber arena is measured in
+ * kilobytes, and the hot half is what the fan-out loop streams — #380 §3 split the cold
+ * members out for exactly that reason, and the split is only worth anything while the hot
+ * record stays narrow. These numbers moved silently more than once (a member added to the
+ * wrong half costs nothing a test can see until the RAM census runs), so they are stated
+ * where a change to either struct has to walk past them.
+ *
+ * 64-bit hosts only: the widths are pointer-sized-member sums, so an MCU build legitimately
+ * differs and a `sizeof` pin there would be a false alarm rather than a guard.
+ */
+static_assert(sizeof(void*) != 8 || sizeof(subscriber_t) == 80,
+              "the HOT edge record is 80 B — see #380 §3; move new members to the cold half");
+static_assert(sizeof(void*) != 8 || alignof(subscriber_t) == 8,
+              "the HOT edge record is 8-aligned; it lives in a vector");
+static_assert(sizeof(void*) != 8 || sizeof(subscriber_remote_t) == 120,
+              "the COLD edge half is 120 B — price any growth against the per-edge RAM");
+static_assert(sizeof(void*) != 8 || alignof(subscriber_remote_t) == 8,
+              "the COLD edge half is 8-aligned; it is unique_ptr-owned, so its address is "
+              "stable across a slot-vector reallocation");
+
+/**
  * @brief The dispatch-relevant snapshot of one ACTIVE subscription edge.
  *
  * What @ref vertex_t::snapshot_edges copies out under an edge pin so the graph can

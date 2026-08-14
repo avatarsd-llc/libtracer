@@ -98,6 +98,28 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Fixed
 
+- **The per-link subscriber index's insert is IDEMPOTENT, as its contract has always said —
+  so a peer that renews a subscription stops paying arena RAM and a sort for it**
+  ([#1266](https://github.com/avatarsd-llc/libtracer/issues/1266), follow-up to
+  [#1071](https://github.com/avatarsd-llc/libtracer/issues/1071) / PR #1263). No signature
+  changes; the behaviour behind `graph_t::link_edge_candidates` and both eviction entry points
+  does. `graph_t::index_link_vertex` documented that "a vertex already listed for `link` is not
+  listed twice", and did not do it: it appended unconditionally and squashed duplicates in a
+  later amortized compaction, so a link's candidate list oscillated between D and 2D+8 entries
+  forever — an arena reallocation whenever it outgrew capacity plus an `O(D log D)` sort every
+  D+8 subscribes, for no distinct vertex gained. `link_edge_candidates` could not reveal the
+  gap because it compacts before reporting, which is how the claim survived. The list is now
+  `[0, compacted)` sorted plus a tail bounded by the compaction floor, and membership is a
+  binary search plus a bounded scan — no memmove, so the sorted-insert form #1071 rejected
+  (+19% on the subscribe path) is not reintroduced. Measured on the pinned host, 4 links / 8
+  vertices with each subscription renewed ten times: index arena footprint **1552 B → 784 B**
+  (peak 1680 → 816, allocator churn 2544 → 1008), i.e. it no longer depends on how often a peer
+  renews. Subscribe path 0.955–0.999 against `main`, at or below its paired A/A null at 4 / 8 /
+  16 / 32 / 65 links; departure and delivery unchanged. **`#1266`'s premise is not confirmed**:
+  ablation puts the name lookup (mutex + hash + `unordered_map` find) at 24–39 ns of the index's
+  52–69 ns, so interning the link key — the issue's proposal — cannot reach the ~5 ns it
+  predicts, and a prototype that did intern it measured no faster and cost 1.2 KB of text.
+
 - **Host stream sends no longer block INDEFINITELY on a stalled peer, and no longer hold the
   write mutex while they do** ([#838](https://github.com/avatarsd-llc/libtracer/issues/838);
   the host twin of [#835](https://github.com/avatarsd-llc/libtracer/issues/835) / PR #837).

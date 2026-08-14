@@ -470,6 +470,77 @@ void test_index_recreated_after_a_full_eviction() {
 }
 
 /**
+ * @brief #1266: the index insert is IDEMPOTENT, and many peers sharing a name prefix stay
+ *        independent of one another across a departure.
+ *
+ * `index_link_vertex`'s declaration has always promised that "a vertex already listed for
+ * `link` is not listed twice" — the promise the candidate list's bound rests on. The code did
+ * not keep it: it appended unconditionally and squashed duplicates in a later amortized
+ * compaction, so a peer renewing a subscription it already holds grew the list to 2D+8 and
+ * paid a sort for it, repeatedly, forever. `link_edge_candidates` could not see the gap
+ * because it compacts before reporting, which is exactly why the claim survived so long.
+ *
+ * This pins it where a caller CAN see it: a long run of repeat subscriptions must leave the
+ * departure's cost where one subscription left it, and it must do so with the compaction
+ * floor (8) crossed many times over, so a regression to append-then-compact shows up as a
+ * count above the distinct set rather than as a silent slowdown.
+ *
+ * The bystander half uses the names the ESP link actually mints (`<ip>:<port>`, #1071's own
+ * scenario), so the prefix-sharing case is covered by construction: 96 peers whose keys agree
+ * for their first ten characters must each index exactly their own vertices, and one of them
+ * departing must disturb no other.
+ */
+void test_index_insert_is_idempotent() {
+    std::printf("#1266 — the index insert is idempotent, and peers stay independent:\n");
+    graph_t g;
+    const tr::testing::remote_sink_guard_t sink_guard_many(
+        g, [](const tr::graph::remote_delivery_t&, const rope_t&) {});
+
+    constexpr int kLinks = 96;  // well past any node's live-link count, prefixes all shared
+    std::vector<std::string> peers;
+    std::vector<vertex_handle_t> vs;
+    for (int i = 0; i < kLinks; ++i) {
+        peers.push_back("192.168.4." + std::to_string(i % 250 + 1) + ":" +
+                        std::to_string(40000 + i));
+        vs.push_back(g.register_vertex(path_t("/v" + std::to_string(i)), role_t::STORED_VALUE));
+    }
+    // Each peer subscribes on its OWN vertex and on one it shares with its neighbour, so a
+    // confusion between two records shows up as a candidate count of 1 or 3, not just as a
+    // failed lookup.
+    for (int i = 0; i < kLinks; ++i) {
+        check(wire_sub(g, vs[i], peers[i], "own"), "the peer subscribes on its own vertex");
+        check(wire_sub(g, vs[(i + 1) % kLinks], peers[i], "shared"), "and on its neighbour's");
+    }
+    bool all_two = true;
+    for (int i = 0; i < kLinks; ++i) all_two &= g.link_edge_candidates(peers[i]) == 2;
+    check(all_two, "every one of the 96 prefix-sharing peers indexes exactly its own 2 vertices");
+
+    // The idempotence itself: 200 renewals over the two vertices this peer already holds.
+    // That is 25x the compaction floor, so an append-then-compact insert reaches 2D+8 and
+    // sorts repeatedly on the way; an idempotent one does nothing at all after the search.
+    for (int rep = 0; rep < 200; ++rep)
+        check(wire_sub(g, vs[0], peers[0], "again"), "peer 0 re-subscribes on a vertex it holds");
+    check(g.link_edge_candidates(peers[0]) == 2,
+          "200 renewals later its departure still visits exactly its 2 vertices");
+    // And a genuinely NEW vertex still lands — idempotence must not have become inertness.
+    check(wire_sub(g, vs[3], peers[0], "new"), "the same peer subscribes on a THIRD vertex");
+    check(g.link_edge_candidates(peers[0]) == 3, "which does add to its departure's cost");
+
+    // A departure in the middle of the live set disturbs exactly one peer.
+    const int mid = kLinks / 2;
+    check(g.evict_link_edges(peers[mid]) == 2, "a middle peer departs, taking both its edges");
+    check(g.link_edge_candidates(peers[mid]) == 0, "its index entry is gone");
+    bool rest_intact = true;
+    for (int i = 1; i < kLinks; ++i)
+        if (i != mid) rest_intact &= g.link_edge_candidates(peers[i]) == 2;
+    check(rest_intact, "every other prefix-sharing peer still indexes exactly its own 2 vertices");
+
+    // The departed name is free to come back, on its own fresh entry.
+    check(wire_sub(g, vs[mid], peers[mid], "redial"), "the departed peer redials");
+    check(g.link_edge_candidates(peers[mid]) == 1, "and is indexed on its own, one vertex");
+}
+
+/**
  * @brief #1071: the index is a SUPERSET, and a stale entry is a no-op rather than a fault.
  *
  * Individual removals — an explicit unsubscribe, a route-scoped reclaim — deliberately do
@@ -1233,6 +1304,7 @@ int main() {
     test_evict_scoped_to_link();
     test_departure_cost_is_scoped_to_the_peer();
     test_index_recreated_after_a_full_eviction();
+    test_index_insert_is_idempotent();
     test_stale_index_entries_are_harmless();
     test_field_write_admitted_edge_is_indexed_under_its_caller();
     test_local_unsubscribe();
