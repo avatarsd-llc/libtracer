@@ -520,7 +520,7 @@ void register_client(graph_t& g) {
     g_client_writes = 0;
     g_client_last = 0;
     tr::graph::handlers_t h;
-    h.on_write = [](const rope_t& v) -> tr::graph::result_t<void> {
+    h.on_write = [](const rope_t& v, const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
         ++g_client_writes;
         const tr::view::view_t flat = v.flatten();
         const std::span<const std::byte> b = flat.bytes();

@@ -108,12 +108,15 @@ On acceptance the check may bind a **subject** to the session: the identity of w
 the other end, as text (an identity that is natively bytes — a public key — is spelled in
 hex or base64).
 
-The session *carries* the subject and publishes it for operators. **What it means to a
-handler** — per-caller ACL evaluation, `on_write` caller identity — is not settled here; that
-is tracked separately as
-[#375](https://github.com/avatarsd-llc/libtracer/issues/375). The authentication frame is
-the right place to *capture* an identity because it is the first moment one is known; it is
-not the right place to decide the whole authorization model.
+The session *carries* the subject and publishes it for operators. The **handler-side half**
+now exists: `on_write` takes a `write_ctx_t` whose `subject` is the writer's resolved subject
+token — the very value the vertex's ACL gate was evaluated against
+([#375](https://github.com/avatarsd-llc/libtracer/issues/375) Part 1). What is still open is
+the **join**: a session subject bound here does not yet become the graph's caller context for
+frames that arrive on that session, so today a handler sees the inbound link's (or bus peer's)
+name rather than an authenticated session identity. The authentication frame is the right
+place to *capture* an identity because it is the first moment one is known; it is not the
+right place to decide the whole authorization model.
 
 ## The deadline
 

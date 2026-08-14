@@ -681,7 +681,10 @@ int main() {
         probe::arm();
         for (std::vector<std::byte>& key : reg_keys) {
             tr::graph::handlers_t h;
-            h.on_write = [](const tr::view::rope_t&) -> tr::graph::result_t<void> { return {}; };
+            h.on_write = [](const tr::view::rope_t&,
+                            const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
+                return {};
+            };
             reg_ok =
                 reg_ok && reg_graph
                               .register_vertex_key(std::move(key), tr::graph::role_t::STORED_VALUE,

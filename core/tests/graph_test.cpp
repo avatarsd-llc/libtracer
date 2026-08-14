@@ -137,7 +137,8 @@ void test_handler() {
     auto written = std::make_shared<std::vector<std::byte>>();
     tr::graph::handlers_t h;
     h.on_read = [] { return make_value({0x2A}); };  // always 42
-    h.on_write = [written](const tr::view::rope_t& in) -> tr::graph::result_t<void> {
+    h.on_write = [written](const tr::view::rope_t& in,
+                           const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
         const auto b = in.only().bytes();
         written->assign(b.begin(), b.end());
         return {};
@@ -263,7 +264,8 @@ void test_subscribe_target() {
     graph_t g;
     auto sink_seen = std::make_shared<int>(-1);
     tr::graph::handlers_t h;
-    h.on_write = [sink_seen](const tr::view::rope_t& in) -> tr::graph::result_t<void> {
+    h.on_write = [sink_seen](const tr::view::rope_t& in,
+                             const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
         *sink_seen = std::to_integer<int>(in.only().bytes()[0]);
         return {};
     };
@@ -315,7 +317,8 @@ void test_subscribe_via_field_write_and_unsubscribe() {
     graph_t g;
     auto sink_seen = std::make_shared<int>(0);
     tr::graph::handlers_t h;
-    h.on_write = [sink_seen](const tr::view::rope_t& in) -> tr::graph::result_t<void> {
+    h.on_write = [sink_seen](const tr::view::rope_t& in,
+                             const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
         *sink_seen += std::to_integer<int>(in.only().bytes()[0]);
         return {};
     };
@@ -352,7 +355,8 @@ void test_subscribers_indexed_write_discriminates() {
     auto seen_b = std::make_shared<int>(0);
     auto sink = [](std::shared_ptr<int> tally) {
         tr::graph::handlers_t h;
-        h.on_write = [tally](const tr::view::rope_t& in) -> tr::graph::result_t<void> {
+        h.on_write = [tally](const tr::view::rope_t& in,
+                             const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
             *tally += std::to_integer<int>(in.only().bytes()[0]);
             return {};
         };
@@ -432,7 +436,8 @@ void test_subscribers_addressed_whole() {
         graph_t g;
         auto sink_seen = std::make_shared<int>(0);
         tr::graph::handlers_t h;
-        h.on_write = [sink_seen](const tr::view::rope_t& in) -> tr::graph::result_t<void> {
+        h.on_write = [sink_seen](const tr::view::rope_t& in,
+                                 const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
             *sink_seen += std::to_integer<int>(in.only().bytes()[0]);
             return {};
         };
@@ -765,7 +770,8 @@ void test_delivery_terminates_at_target() {
     };
     (void)g.subscribe(path_t("/out"), on_out);
     tr::graph::handlers_t hc;
-    hc.on_write = [&g](const tr::view::rope_t& in) -> tr::graph::result_t<void> {
+    hc.on_write = [&g](const tr::view::rope_t& in,
+                       const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
         return g.write(path_t("/out"), in);  // re-emit on the controller's own execution
     };
     (void)g.register_vertex(path_t("/ctrl"), role_t::HANDLER, std::move(hc));

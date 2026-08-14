@@ -5,7 +5,7 @@
     {
       "binary": "bench_libtracer",
       "symbol": "tr::graph::graph_t::dispatch_edge_target",
-      "bytes": 567
+      "bytes": 595
     },
     {
       "binary": "bench_libtracer",
