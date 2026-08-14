@@ -21,6 +21,15 @@
 # NOISE: the bench host also serves other repos' CI, so single points can catch a
 # noisy neighbour. The series is read by medians over points, the alert threshold
 # is a soft signal, and the hard verdicts stay with perf.yml's interleaved gates.
+#
+# RAM (#1228): this workflow also carries the two RAM-census instruments. Steady-state
+# RAM is what decides whether a node fits the 16 KB target, and it was the only cost
+# axis with neither a gate nor a recorded trend. Both censuses publish here (same
+# store, same commit axis as the latency trend); the PER-CONNECTION figure additionally
+# carries a WARN-FIRST drift ratchet against measured pins, while the WHOLE-NODE census
+# is TREND-ONLY — do not read its published series as gated. The criterion for flipping
+# the ratchet to `--mode fail` lives in bench/ram_census_pins.json, next to the pins it
+# governs, rather than in this comment.
 name: perf-local
 
 on:
@@ -64,7 +73,8 @@ jobs:
         run: |
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
           cmake --build bench/build --target bench_libtracer bench_forward_heap \
-            bench_forward_demux bench_compact_delivery -j "$(nproc)"
+            bench_forward_demux bench_compact_delivery \
+            bench_conn_ram bench_ram_census_tcp -j "$(nproc)"
 
       # QUIESCENCE (#1236). The build above just ran `-j$(nproc)` and the 1-minute load
       # average is still carrying it, so this WAITS for the machine rather than checking
@@ -143,6 +153,84 @@ jobs:
         if: steps.guard.outputs.bank == 'true'
         run: python3 bench/host_guard.py bracket --pre bench/aa_pre.txt --post bench/aa_post.txt
 
+      # --- RAM census (#1228) ----------------------------------------------------
+      # Steady-state RAM decides whether a node fits the 16 KB target, and it was the
+      # one cost axis with neither a gate nor a recorded trend: latency, allocations,
+      # code size and flash all have one. Both censuses run HERE, after the A/A pair
+      # closes, on purpose — they take ~90 s and are load-INSENSITIVE (allocator byte
+      # counts, not time), so running them inside the bracket would widen the window
+      # the A/A pair is supposed to bracket for nothing.
+      #
+      # They are also NOT conditioned on the quiescence guard's `bank`. That split is
+      # deliberate: banking a *series* point on a busy host is what #1236 exists to
+      # refuse, but the RAM figures do not move with load, so the GATE below still
+      # gets to render a verdict on a commit whose timing sample was skipped.
+      #
+      # --no-can: the CAN arms need a privileged kernel `vcan0` this host does not
+      # carry (can-vcan-e2e.yml owns that path). The pin file does not pin a CAN arm,
+      # and if it ever did the gate would fail it as a dead pin rather than pass while
+      # measuring less.
+      - name: Per-connection RAM census (bench_conn_ram)
+        run: |
+          set -o pipefail
+          taskset -c "$BENCH_CPU" ./bench/build/bench_conn_ram --no-can --reps=5 \
+            | tee bench/bench_conn_ram_raw.txt
+          [ -s bench/bench_conn_ram_raw.txt ] || \
+            echo "::warning::no per-connection census transcript — its series will not be recorded"
+
+      # The whole-node census forks its own remote peer PROCESS (before any graph,
+      # socket or thread exists — forking a threaded process under a counting
+      # allocator can deadlock in the child) and reaps it itself, so peer lifetime is
+      # the binary's job, not a manual step. A peer that fails to come up makes the
+      # binary exit non-zero: that costs this commit its census point with a notice,
+      # never the pinned-host job. TREND-ONLY — no pins, no ratchet (see
+      # bench/ram_census_pins.json `activation.whole_node_census`).
+      - name: Whole-node RAM census (bench_ram_census_tcp, forks its own peer)
+        run: |
+          if taskset -c "$BENCH_CPU" ./bench/build/bench_ram_census_tcp --reps=6 \
+               >bench/bench_ram_census_tcp_raw.txt 2>bench/bench_ram_census_tcp_err.txt; then
+            cat bench/bench_ram_census_tcp_raw.txt
+          else
+            cat bench/bench_ram_census_tcp_err.txt || true
+            : >bench/bench_ram_census_tcp_raw.txt
+            echo "::notice::whole-node census skipped (peer process or an arm failed) — its series is not recorded this commit"
+          fi
+
+      # WARN-FIRST (#1228). The pins are MEASURED per-connection values, the band is 2x
+      # the measured run-to-run spread, and the flip to `--mode fail` is a deliberate PR
+      # edit governed by the activation criterion recorded in the pin file — never an
+      # auto-ratchet. An instrument failure (no transcript, a drifting NULL arm, a pin
+      # the run does not produce) reds this step in EITHER mode: a failure to measure is
+      # not a budget verdict.
+      - name: Per-connection RAM drift ratchet (warn-first)
+        run: |
+          python3 bench/ram_census.py gate \
+            --conn-raw bench/bench_conn_ram_raw.txt \
+            --pins bench/ram_census_pins.json \
+            --mode warn
+
+      # A live negative control on every run: the warn path is invisible by
+      # construction (nothing turns red when it fires), so a doctored baseline proves
+      # each run that the annotation still comes out. Without this the ratchet could
+      # warn on nothing for its entire warn-first life and read exactly the same.
+      - name: The ratchet must warn on an induced growth (dry run, doctored baseline)
+        run: |
+          python3 - <<'PY'
+          import json, pathlib
+          p = json.loads(pathlib.Path("bench/ram_census_pins.json").read_text())
+          for pin in p["pins"]:
+              pin["value"] = pin["value"] - 4096  # induce +4 KB of "growth"
+          pathlib.Path("/tmp/doctored_pins.json").write_text(json.dumps(p))
+          PY
+          out=$(python3 bench/ram_census.py gate --conn-raw bench/bench_conn_ram_raw.txt \
+                  --pins /tmp/doctored_pins.json --mode warn)
+          echo "$out"
+          case "$out" in
+            *"::warning::per-connection RAM drift"*) echo "warn path is live" ;;
+            *) echo "::error::the ratchet did not warn on a 4 KB induced growth — it is vacuous"
+               exit 1 ;;
+          esac
+
       - name: Emit history metrics + stamp the host onto every point
         if: steps.guard.outputs.bank == 'true'
         run: |
@@ -156,6 +244,16 @@ jobs:
             --time-v bench/bench_libtracer_time.txt \
             --out-smaller bench/benchmark_output.json \
             --out-bigger bench/benchmark_throughput.json
+          # The RAM censuses MERGE into the smaller-is-better file the emitter just
+          # wrote, rather than opening a second store: same commit axis as the latency
+          # trend, same host/compiler stamp below, same publish step. Bytes are
+          # smaller-is-better, so no second suite is needed. Rows whose median is 0 are
+          # skipped — a ratio against zero is undefined and would render a flat line
+          # that can never alert; the gate asserts those exactly instead.
+          python3 bench/ram_census.py emit \
+            --conn-raw bench/bench_conn_ram_raw.txt \
+            --node-raw bench/bench_ram_census_tcp_raw.txt \
+            --merge bench/benchmark_output.json
           # benchmark-action renders each point's `extra` in the chart tooltip — this
           # is where "which host produced this number" lives, per bench, per point.
           # It now also carries the COMPILER (a toolchain bump and a code change used
@@ -182,6 +280,8 @@ jobs:
             bench/bench_forward_demux_raw.txt
             bench/bench_compact_delivery_raw.txt
             bench/bench_zenoh_raw.txt
+            bench/bench_conn_ram_raw.txt
+            bench/bench_ram_census_tcp_raw.txt
             bench/aa_pre.txt
             bench/aa_post.txt
           retention-days: 90

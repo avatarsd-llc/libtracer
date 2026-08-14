@@ -1,0 +1,39 @@
+{
+  "_comment": "Per-connection RAM pins (#1228), consumed by bench/ram_census.py. MEASURED values, never round ceilings — a pin left above the truth makes the next growth free. Re-pin ONLY by a deliberate PR edit: python3 bench/ram_census.py gate --conn-raw <transcript> --pins bench/ram_census_pins.json --emit-pins",
+  "_instrument": "bench_conn_ram --no-can (the CAN arms need a privileged vcan0 the bench host does not carry; can-vcan-e2e.yml owns that path). Pinning a CAN arm here would fail the gate as a dead pin, which is the intended reading.",
+  "_measured_spread": "Measured over 4 process invocations x 9 repetitions on one quiet host (g++ 13.3.0, Release). CROSS-RUN: every pinned row's median was byte-identical across all four invocations — 0 B, 0.00%. IN-RUN: the widest [min..max] on any pinned row was 4 B (tcp-server per_conn and after_td, 280..284, 1.4%); every other pinned row was exactly 0 B. This is why a bar far tighter than the timing gate's ~5% is defensible here. The high-water columns are excluded for the opposite reason: tcp-server hw_peak moved 16680..33072 across runs (16392 B, 66%) and 40992 B within one, and the ws-server high-water pair moved ~7 KB (6%) across runs — pinning either would fire on a transient buffer, not on a connection's cost.",
+  "band_bytes": 8,
+  "band_pct": 0.5,
+  "measured_spread_bytes": 4,
+  "_band_rationale": "8 B = 2x the widest measured spread (4 B), the same 2x-observed-noise rule the flash-footprint drift check adopted. The 0.5% term exists only for the two ~64 KB link_base rows (~328 B there): those are a caller-sized buffer plus allocator overhead, and a libc/allocator packaging change can move the overhead term without any design regression. Every small row is governed by the 8 B floor.",
+  "toolchain": "c++ 13.3.0",
+  "_toolchain": "These figures contain the sizeof of every transport, so they are compiler- and allocator-bound. Measured on a different toolchain than the pin, the gate reports drift but enforces in warn mode only — an unattributable difference must never red main.",
+  "activation": {
+    "mode": "warn",
+    "samples": 20,
+    "criterion": "Flip perf-local.yml's `--mode warn` to `--mode fail` once 20 consecutive pinned-host samples have been banked with no unexplained RAM_CENSUS_GATE warning AND the pins have been re-taken on the bench host's own toolchain. 20 points is about a release's worth of main pushes here, which is the same evidence bar the Cortex-M0 drift check set before its own flip. Until then a threshold picked before the noise is known is the unreachable-budget failure mode this repo already hit once.",
+    "whole_node_census": "bench_ram_census_tcp is TREND-ONLY and deliberately has no pins. It gains a ratchet only after this one has proven quiet — do not read its published series as gated."
+  },
+  "pins": [
+    { "arm": "tcp-server", "metric": "link_base", "value": 464 },
+    { "arm": "tcp-server", "metric": "per_conn", "value": 280 },
+    { "arm": "tcp-server", "metric": "after_td", "value": 280 },
+    { "arm": "tcp-server", "metric": "recycle", "value": 0 },
+    { "arm": "ws-server", "metric": "link_base", "value": 464 },
+    { "arm": "ws-server", "metric": "per_conn", "value": 376 },
+    { "arm": "ws-server", "metric": "after_td", "value": 376 },
+    { "arm": "ws-server", "metric": "recycle", "value": 0 },
+    { "arm": "udp-span", "metric": "link_base", "value": 65760 },
+    { "arm": "udp-span", "metric": "per_conn", "value": 0 },
+    { "arm": "udp-span", "metric": "after_td", "value": 0 },
+    { "arm": "udp-span", "metric": "recycle", "value": 0 },
+    { "arm": "udp-rope-heap", "metric": "link_base", "value": 65816 },
+    { "arm": "udp-rope-heap", "metric": "per_conn", "value": -16 },
+    { "arm": "udp-rope-heap", "metric": "after_td", "value": -16 },
+    { "arm": "udp-rope-heap", "metric": "recycle", "value": 0 },
+    { "arm": "udp-rope-pool", "metric": "link_base", "value": 216 },
+    { "arm": "udp-rope-pool", "metric": "per_conn", "value": 0 },
+    { "arm": "udp-rope-pool", "metric": "after_td", "value": 0 },
+    { "arm": "udp-rope-pool", "metric": "recycle", "value": 0 }
+  ]
+}

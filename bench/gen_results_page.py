@@ -294,13 +294,16 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "receive thread are attributed separately.",
         "allocations · bytes, per frame per direction"),
     instrument_t(
-        "bench_conn_ram.cpp", "counted", (),
+        "bench_conn_ram.cpp", "counted", ("memory",),
         "Stands up a real server transport and drives K raw client peers at it, reading the live "
         "heap balance when the server is up and quiesced, at K established connections, and "
         "after teardown.",
-        "live bytes per link · live bytes per connection"),
+        "live bytes per link · live bytes per connection",
+        "per-connection bytes drift past a measured ±8 B / ±0.5% band — WARN-first on the "
+        "pinned host (bench/ram_census_pins.json carries the pins and the activation "
+        "criterion for the flip to fail)"),
     instrument_t(
-        "bench_ram_census_tcp.cpp", "counted", (),
+        "bench_ram_census_tcp.cpp", "counted", ("memory",),
         "Prices a 100-vertex node — mixed int, array and stream values, 4–64 B each — stage by "
         "stage on the live heap balance: empty graph, vertices registered, values written, TCP "
         "listener up, a second-process peer connected, and the steady state after a mixed op "

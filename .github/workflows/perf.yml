@@ -80,6 +80,12 @@ jobs:
       # consumer" are gate rules even though they run in perf-local.yml.
       - name: Bench-host quiescence-guard tests
         run: python3 bench/test_host_guard.py
+      # The RAM-census series + warn ratchet (#1228), tested here for the same reason:
+      # it runs on the pinned host, and for its whole warn-first life a wrong verdict is
+      # INVISIBLE — nothing turns red to report it. These are the only check that the
+      # ratchet warns on drift rather than on nothing, and they need no build.
+      - name: RAM-census decision-rule tests
+        run: python3 bench/test_ram_census.py
       # The bench's ARGV contract (#1040), also before anything is timed. An unrecognised
       # mode used to fall through into the full default sweep and exit 0, which in a
       # cross-commit A/B silently joins one axis against every axis on the same row keys.
