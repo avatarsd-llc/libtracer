@@ -143,8 +143,8 @@ Subscription edges are never destroyed while the graph lives. `unsubscribe` only
 **deactivates** the slot; an in-flight delivery has already snapshotted the edge and
 completes. The caller-owned `ctx` (or, for the templated overload, the callable itself)
 must therefore stay alive past any delivery that may still be running, not merely past
-the `unsubscribe` call (`core/include/libtracer/graph.hpp:1146-1147`, `:1166` for the
-callable-by-address form, `:1179`).
+the `unsubscribe` call (`core/include/libtracer/graph.hpp:1181-1182`, `:1201` for the
+callable-by-address form, `:1214`).
 ```
 
 ```{admonition} No strings on the hot path
@@ -194,7 +194,7 @@ for (...) g.write(v, p.field(), setpoint_tlv);           // hot loop — zero st
 ## What a read hands back
 
 `read` and `await` return `result_t<value_ref_t>`, not `result_t<rope_t>`
-(`core/include/libtracer/graph.hpp:936,1023` by handle, `:1387,1393` by path;
+(`core/include/libtracer/graph.hpp:971,1058` by handle, `:1456,1462` by path;
 `value_ref_t` at `core/include/libtracer/vertex.hpp:214`). A `value_ref_t` is an **owning
 reference** to the value the vertex published: the LKV slot holds it as a
 `std::shared_ptr<const rope_t>`, so handing that reference back costs a refcount clone of
@@ -339,16 +339,36 @@ total over a `status_t` that had no member for it.
 
 ## Setup-time seams
 
-Five installers configure a graph before frames flow. Each is set once at wiring time and
-is **not thread-safe against concurrent use afterwards** — the op paths read them without
-a lock precisely because nothing writes them once traffic starts.
+Five installers configure a graph before frames flow. Each is set once at wiring time,
+from one thread. That is the **doctrine**, and since #1049 it is stated by the API rather
+than requested in a comment: the three callback seams are spelled `configure_*` and take
+the ADR-0047 `{fn, ctx}` pair, never a `std::function`.
+
+The shape is the enforcement. A `std::function` cannot be handed to a racing reader at
+all — assigning one *destroys the old target*, freeing its captures while a reader may be
+inside the call — whereas a bare function pointer is one word, so the pair publishes
+through a [`sink_slot_t`](fwd-router.md) exactly as the router's five sinks do. A fan-out,
+an ACL gate or a subscribe that races an install therefore sees the whole new pair, the
+whole old one, or *no sink for that one operation*; it never sees a new `fn` beside a stale
+`ctx`, and never a freed capture. The read costs what the null check it replaces cost: one
+relaxed load when nothing is installed.
+
+The two remaining seams are not callbacks and the slot does not reach them, so they take a
+lock instead — which is free, because both are control-plane cold. The child-type catalog
+is a `std::map` whose lookup runs from a **peer's bytes**; the identity record is a buffer
+whose read is served **above the READ gate**, to a peer that has authenticated nothing
+(RFC-0011 §C), and which install and clear both free. Neither lock touches a read, write or
+dispatch path.
+
+The `ctx` pointer is the caller's, and must outlive every operation that can still reach
+the seam: clearing a sink does not stop a dispatch already in flight.
 
 | Seam | Effect | Default |
 | --- | --- | --- |
 | `register_child_type(type, factory)` | populates the in-band creation catalog: which `type` selector a `:children[]` `SPEC` write may instantiate | only the built-in `stored_value`; an unregistered `type` answers `SCHEMA_NOT_FOUND` |
 | `set_identity(kind, key)` / `clear_identity()` | installs the node-scoped record `read <vertex>:identity` serves, byte-identical from every vertex | absent — `:identity` answers `SCHEMA_NOT_FOUND` |
-| `set_remote_delivery_sink(sink)` | where the producer fan-out hands each **remote** subscriber's delivery | **null — remote subscriber slots are stored but never deliver** |
-| `set_subject_resolver(resolver)` | maps a caller context to a subject token, enabling ACL evaluation | **none — enforcement is entirely off; every operation is allowed** |
+| `configure_remote_delivery_sink(fn, ctx)` | where the producer fan-out hands each **remote** subscriber's delivery | **null — remote subscriber slots are stored but never deliver** |
+| `configure_subject_resolver(fn, ctx)` | maps a caller context to a subject token, enabling ACL evaluation | **none — enforcement is entirely off; every operation is allowed** |
 | `subscribe_wire(v, source, route, link)` | the inbound `:subscribers[]` append: one parse, the SUBSCRIBE gate, the slot append, the durability latch the subscriber requested | — (called by the FWD resolver, not a default) |
 
 The two defaults in bold are load-bearing and are the two failure modes a node wired by

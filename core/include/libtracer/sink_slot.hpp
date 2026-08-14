@@ -29,6 +29,13 @@
  * inside a publish reports NO SINK for that frame rather than waiting, which is
  * also what keeps a single-core RTOS out of the unbounded-priority-inversion
  * corner ADR-0063 erratum 1 rejected a spinlock over.
+ *
+ * The class lives in the LAYER-NEUTRAL `tr` namespace rather than in `tr::net`
+ * (#1049). It is a pure publication primitive over `<atomic>` with no libtracer
+ * dependency at all, and L4 (`tr::graph`) now holds its three configuration sinks
+ * in one — so leaving it spelled `tr::net::` would have pointed an L4 member at
+ * the transport plane, which sits ABOVE L4 and depends on it. `tr::net::sink_slot_t`
+ * remains a working alias so the router and its docs keep their spelling.
  */
 #pragma once
 
@@ -36,7 +43,7 @@
 #include <cstdint>
 #include <type_traits>
 
-namespace tr::net {
+namespace tr {
 
 /**
  * @brief One `{function pointer, context}` observer pair, published coherently.
@@ -113,6 +120,20 @@ class sink_slot_t {
     }
 
     /**
+     * @brief The ONE-load filter: false iff the slot is certainly empty.
+     *
+     * Exposed for a caller whose read site is inside an `always_inline` body it must
+     * keep small — the L4 per-edge dispatch loop (#1049) — so the cheap test can stay
+     * there while the coherent @ref get moves into the out-of-line leg it guards. It is
+     * NOT a check-then-call licence: the guarded leg still dispatches from a @ref get
+     * snapshot and does nothing when that snapshot is empty. A `true` here is only ever
+     * a hint, exactly as the identical load inside @ref get is.
+     */
+    [[nodiscard]] bool installed() const noexcept {
+        return fn_.load(std::memory_order_relaxed) != nullptr;
+    }
+
+    /**
      * @brief Read the pair coherently; dispatch from the result, never from the members.
      *
      * @return The installed pair, or `{nullptr, nullptr}` when no sink is installed
@@ -154,5 +175,19 @@ class sink_slot_t {
     std::atomic<Fn> fn_{nullptr};
     std::atomic<void*> ctx_{nullptr};
 };
+
+}  // namespace tr
+
+namespace tr::net {
+
+/**
+ * @brief The transport plane's spelling of @ref tr::sink_slot_t.
+ *
+ * The class moved to the layer-neutral `tr` namespace when L4 took a dependency on it
+ * (#1049); this alias keeps `fwd_router_t` and every downstream `tr::net::sink_slot_t`
+ * compiling unchanged.
+ */
+template <typename Fn>
+using sink_slot_t = tr::sink_slot_t<Fn>;
 
 }  // namespace tr::net

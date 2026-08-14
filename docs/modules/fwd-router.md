@@ -186,8 +186,8 @@ class child_registry_t {                 // the one NAME -> link demux table (AD
 }  // namespace tr::net
 ```
 
-Signature source: `core/include/libtracer/fwd_router.hpp:177` (constructor), `:267`
-(`add_child`), `:324` (`subscribe_toward`), `:426-438` (the sink function-pointer types);
+Signature source: `core/include/libtracer/fwd_router.hpp:177` (constructor), `:273`
+(`add_child`), `:330` (`subscribe_toward`), `:432-444` (the sink function-pointer types);
 `core/include/libtracer/child_registry.hpp:267` (`add`), `:517` (`resolve_peer`), `:532`
 (`erase`), `:565` (`entry_by_name`), `:586` (`by_name`), `:627`/`:637` (`size`/`live_size`).
 
@@ -216,7 +216,7 @@ flowchart TB
   address size grows with hop count, which is what `ADVERTISE`/`COMPACT` route handles exist to
   amortise on a steady flow.
 - **A reply is delivered as a rope, never flattened by the router**
-  (`core/include/libtracer/fwd_router.hpp:440-449`). A sink that wants contiguous bytes holds
+  (`core/include/libtracer/fwd_router.hpp:446-455`). A sink that wants contiguous bytes holds
   `const view_t m = reply.materialize()` and reads `m.bytes()`; a **single-link reply — the common
   case — is returned zero-copy, no allocation and no copy**, and only a multi-link reply pays one
   flatten, on demand. The escape hatch sits at the consumer, so the router never pays for a
@@ -290,7 +290,7 @@ the role default. Extra transport kinds join the catalog through `register_trans
 file ever learning about it.
 
 **The write is ACL-gated.** The `:children[]` append is gated on the parent vertex's `CREATE`
-right and denied with `PERMISSION_DENIED` otherwise (`core/src/graph.cpp:2421-2422`). Under
+right and denied with `PERMISSION_DENIED` otherwise (`core/src/graph.cpp:2443-2444`). Under
 [RFC-0014 — creator endpoint, connection lifecycle and link liveness](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)
 that gate relocates onto the creator endpoint's own ACL and gains its removal counterpart: a `NAME`
 write is gated on `WRITE` — **not** `DELETE` — per
@@ -319,7 +319,7 @@ adopt; `/net` itself is likewise only the recommended root convention (a constru
 **Creation is all-or-nothing.** A connection is built in three steps — register the identity
 vertex, insert the `conns_` entry, wire the link into the router's `child_registry_t` — and only
 the last can be refused: `add_child` answers `false` when the registry cannot grow, and it is the
-only place that can say so (`core/include/libtracer/fwd_router.hpp:267`,
+only place that can say so (`core/include/libtracer/fwd_router.hpp:273`,
 `core/include/libtracer/child_registry.hpp:267`). A refusal unwinds the first two in reverse —
 retire the vertex, then erase the entry, which destroys the config-constructed socket — publishes
 no liveness, and answers `BACKPRESSURE` (`core/src/transport_vertex.cpp:414-417`). Discarding that
@@ -436,7 +436,9 @@ tested against hand-built frames with no live transport.
   is templated over a cursor concept and yields **offsets, never spans**, so the
   same logic serves a contiguous frame and a link-walking rope and the caller
   re-slices from its own cursor.
-- **`sink_slot_t`** holds each of the router's five observability/terminus sinks —
+- **`sink_slot_t`** (`tr::sink_slot_t` — layer-neutral since #1049, when L4 took its
+  three configuration seams into one; `tr::net::sink_slot_t` remains an alias)
+  holds each of the router's five observability/terminus sinks —
   reply, inbound-FWD, raw-frame, compact-delivery, stale-label. A sink is a
   `{function pointer, context}` pair set from a control thread and read on every
   transport receive thread, so the two halves have to be published as a unit: a
@@ -468,7 +470,7 @@ tested against hand-built frames with no live transport.
 :members:
 ```
 
-```{doxygenclass} tr::net::sink_slot_t
+```{doxygenclass} tr::sink_slot_t
 :project: libtracer
 :members:
 ```

@@ -74,7 +74,7 @@ tr::view::view_t val_u8(std::uint8_t b) {
  * The empty (local) context never reaches a resolver — `graph_t::acl_allows` settles it
  * as trusted before invoking one (#905) — so the error arm here means DENY, nothing else.
  */
-std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(std::string_view caller) {
+std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(void*, std::string_view caller) {
     return as_bytes(caller);
 }
 
@@ -164,7 +164,7 @@ void test_revive_is_fresh() {
 void test_confused_deputy() {
     std::printf("§B.6: revived path inherits the PARENT ACL, not the retired owner's:\n");
     graph_t g;
-    g.set_subject_resolver(caller_is_subject);
+    g.configure_subject_resolver(caller_is_subject, nullptr);
     (void)g.register_vertex(path_t("/net"), role_t::STORED_VALUE);
     vertex_handle_t b = g.register_vertex(path_t("/net/b"), role_t::STORED_VALUE);
 

@@ -160,7 +160,7 @@ reply_facts_t reply_facts(const tr::view::rope_t& reply) {
  * The empty (local) context never reaches a resolver — `graph_t::acl_allows` settles it
  * as trusted before invoking one (#905) — so the error arm here means DENY, nothing else.
  */
-std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(std::string_view caller) {
+std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(void*, std::string_view caller) {
     const auto* p = reinterpret_cast<const std::byte*>(caller.data());
     return subject_token_t(p, p + caller.size());
 }
@@ -458,7 +458,7 @@ void test_residual_length_drops() {
 void test_mint_denied_by_acl() {
     std::printf("a denied operation mints NOTHING (§6.1 anti-enumeration):\n");
     graph_t g;
-    g.set_subject_resolver(caller_is_subject);
+    g.configure_subject_resolver(caller_is_subject, nullptr);
     op_resolver_t resolver(g);
     const vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
     (void)g.write(v, make_value(b_value({0x05})));
@@ -493,7 +493,7 @@ void test_mint_denied_by_acl() {
 void test_revocation_is_immediate() {
     std::printf("a revoked right takes effect on the next op over an existing binding (§6.2):\n");
     graph_t g;
-    g.set_subject_resolver(caller_is_subject);
+    g.configure_subject_resolver(caller_is_subject, nullptr);
     op_resolver_t resolver(g);
     const vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
     (void)g.write(v, make_value(b_value({0x05})));
@@ -678,7 +678,7 @@ void test_conformance_vectors() {
 
     // The §6.3 pair, deny half: the same request, denied, IS the vector's frame.
     graph_t gd;
-    gd.set_subject_resolver(caller_is_subject);
+    gd.configure_subject_resolver(caller_is_subject, nullptr);
     op_resolver_t rd(gd);
     const vertex_handle_t vd = gd.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
     (void)vd;

@@ -39,6 +39,7 @@
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/path.hpp"
+#include "libtracer/sink_slot.hpp"
 #include "libtracer/status.hpp"
 #include "libtracer/vertex.hpp"
 #include "libtracer/view.hpp"
@@ -95,7 +96,7 @@ static_assert(sizeof(vertex_handle_t) == sizeof(vertex_t*));
  * A pure description of one remote subscription edge: the consumer's accumulated
  * return route and this node's NAME for the link it arrived on, both opaque to L4,
  * plus the `vertex_t::subscriber_t` delivery_compact opt-in. The injected sink
- * (a `tr::net` concern — @ref graph_t::set_remote_delivery_sink) interprets these:
+ * (a `tr::net` concern — @ref graph_t::configure_remote_delivery_sink) interprets these:
  * it maps @ref link to a transport child and emits a full-route `FWD{WRITE}` or,
  * when @ref delivery_compact, an auto-promoted label `COMPACT` (RFC-0004 §D/§E.1).
  * @ref link is borrowed for the sink call only; @ref return_route is a refcount
@@ -114,6 +115,19 @@ struct remote_delivery_t {
     std::string_view caller;
     bool delivery_compact = false; /**< @brief Opt-in to label-compacted delivery. */
 };
+
+/**
+ * @brief The remote-delivery sink itself — what @ref graph_t::configure_remote_delivery_sink
+ *        installs and the producer fan-out calls per remote subscription edge.
+ *
+ * @note The ADR-0047 `{fn, ctx}` shape, NOT a `std::function` (#1049) — see
+ *       `subject_resolver_fn_t` for why. This is the one of the three on the WRITE hot
+ *       path, so it is also the one where the `std::function` indirect call and its
+ *       destroy-on-assign were most expensive; @p ctx is caller-owned (the
+ *       `tr::net::fwd_router_t`) and must outlive every dispatch the graph can still make,
+ *       exactly as `receiver_slot_t`'s context must.
+ */
+using remote_delivery_fn_t = void (*)(void* ctx, const remote_delivery_t& sub, const rope_t& value);
 
 /**
  * @brief An opaque handle to ONE in-process subscription — the token @ref graph_t::unsubscribe
@@ -195,13 +209,23 @@ using subject_token_t = std::vector<std::byte>;
  *          inbound link NAME — cannot reach the trusted arm. The predecessor of this type
  *          returned `std::optional`, whose `nullopt` meant "fully trusted": an
  *          unresolvable caller was granted everything, `WRITE_ACL` and `CREATE` included.
+ *
+ * @note The ADR-0047 `{fn, ctx}` shape, NOT a `std::function` (#1049). The predecessor was
+ *       a `std::function` in a plain member that the ACL gate read on every gated read and
+ *       write while a public setter could assign it — and assigning a `std::function`
+ *       DESTROYS the old target, so a setter racing a gate freed the resolver's captured
+ *       state while a reader was inside the call. A bare function pointer is publishable in
+ *       one word, so the pair lives in a @ref tr::sink_slot_t and the gate reads a coherent
+ *       snapshot for the same single load the null check already cost. Whatever state the
+ *       resolver needs travels in @p ctx, which the caller owns and must keep alive across
+ *       every possible gated operation.
  */
-using subject_resolver_t =
-    std::function<std::expected<subject_token_t, wire::err_t>(std::string_view caller)>;
+using subject_resolver_fn_t =
+    std::expected<subject_token_t, wire::err_t> (*)(void* ctx, std::string_view caller);
 
 /**
  * @brief One EXTERNAL mutation of a producer's `:subscribers[]` — what @ref
- *        graph_t::set_subscription_observer reports.
+ *        graph_t::configure_subscription_observer reports.
  *
  * "External" is exactly the ADR-0018 caller context being NON-EMPTY: the op arrived through
  * `op_resolver_t` carrying an inbound link NAME. It is the same discriminator the SUBSCRIBE
@@ -259,9 +283,13 @@ struct sub_event_t {
  *          simpler ground that an observer which mutates the graph while a `:subscribers[]`
  *          write is mid-flight makes the event stream depend on its own side effects.
  *          Deferral — queueing the event and acting on it from the app's own task — is the
- *          APP's job, exactly as it is for @ref graph_t::set_remote_delivery_sink.
+ *          APP's job, exactly as it is for @ref graph_t::configure_remote_delivery_sink.
+ *
+ * @note The ADR-0047 `{fn, ctx}` shape, NOT a `std::function` (#1049) — see
+ *       `subject_resolver_fn_t` for why. @p ctx is caller-owned and must outlive every
+ *       subscription mutation the graph can still report.
  */
-using sub_observer_t = std::function<void(const sub_event_t&)>;
+using sub_observer_fn_t = void (*)(void* ctx, const sub_event_t& event);
 
 /**
  * @brief The L4 in-process graph runtime: the Composite vertex tree plus the whole data
@@ -911,9 +939,16 @@ class graph_t {
      *        to a @ref child_factory_t.
      *
      * A `:children[]` SPEC write whose `type` is unregistered returns `SCHEMA_NOT_FOUND`
-     * (the ENOTTY of an unsupported creation). Not thread-safe against concurrent creation
-     * — call at setup, before frames flow (mirrors the delivery sink). The built-in
-     * `stored_value` type is registered by the constructor.
+     * (the ENOTTY of an unsupported creation). The built-in `stored_value` type is
+     * registered by the constructor.
+     *
+     * CONFIGURATION, like the three `configure_*` sinks: populate the catalog at setup,
+     * before frames flow. Unlike them the catalog is a `std::map`, so #1049's `{fn, ctx}`
+     * publication does not reach it — a concurrent insert rebalances a tree the in-band
+     * creation path may be walking. Registration and lookup therefore take a lock, which
+     * costs nothing: both are control-plane cold (one map lookup per created vertex) and
+     * neither is on a read, write or dispatch path. Violating the setup-only contract is
+     * consequently slow rather than corrupting.
      */
     void register_child_type(std::string type, child_factory_t factory);
 
@@ -1221,8 +1256,16 @@ class graph_t {
      * elsewhere; a claim is nevertheless exactly what a TOFU peer needs to pin, and what
      * a topology walk needs to dedup. Treat an unpinned identity accordingly.
      *
-     * Idempotent and re-callable; the last install wins. Call before frames flow (the
-     * `register_child_type` thread contract).
+     * Idempotent and re-callable; the last install wins. CONFIGURATION, like
+     * @ref register_child_type — install before frames flow.
+     *
+     * Install, `clear_identity` and `read_identity` nevertheless serialize on one
+     * lock (#1049), because this is the one member on that list whose READ is served ABOVE
+     * the READ gate — an unauthenticated peer may pin the key on first use (RFC-0011 §C),
+     * which is deliberate. The read memcpys the stored record, so a rotation racing it would
+     * otherwise be a remotely-reachable use-after-free. All three verbs are cold, so the
+     * lock is invisible; a runtime rotation is therefore SAFE here, merely outside the
+     * doctrine.
      *
      * @param kind The RFC-0011 §B identity-kind (`0x01` = ed25519 raw public key).
      * @param key  The raw public key. Length MUST match @p kind (ed25519 ⇒ exactly 32).
@@ -1268,16 +1311,28 @@ class graph_t {
      * @brief Install the sink the producer fan-out hands each REMOTE subscriber's delivery
      *        to (#136, RFC-0004 §D/§E.1).
      *
-     * Set once at wiring time by the transport plane (`tr::net::fwd_router_t`) before frames
-     * flow; the sink fires on whatever thread calls @ref write (outside the vertex lock),
-     * and on @ref subscribe for a transient-local latch. L4 keeps it as an opaque
-     * `std::function`, so the graph never depends on a transport. A null sink (the default)
-     * ⇒ remote slots are stored but never deliver. The value reaches the sink as a rope
-     * (ADR-0053 §6): a single-link value materializes zero-copy, a multi-link value is
+     * CONFIGURATION, not a runtime knob (#1049): install it at wiring time, from ONE thread,
+     * before frames flow. The verb is named `configure_` to say so in the API rather than in
+     * a comment asking callers to be careful — `tr::net::fwd_router_t`'s constructor installs
+     * it, and a router constructed against a graph that is already serving frames is
+     * UNSUPPORTED. The sink then fires on whatever thread calls @ref write (outside the
+     * vertex lock), and on @ref subscribe for a transient-local latch. L4 keeps it as an
+     * opaque function pointer, so the graph never depends on a transport. A null @p fn (the
+     * default) ⇒ remote slots are stored but never deliver. The value reaches the sink as a
+     * rope (ADR-0053 §6): a single-link value materializes zero-copy, a multi-link value is
      * handed over as the rope it is.
+     *
+     * The pair is published through a @ref tr::sink_slot_t, so violating the contract is
+     * DEFINED rather than undefined: a fan-out racing an install either sees the whole new
+     * pair, the whole old one, or no sink for that one edge — never a new `fn` beside a
+     * stale `ctx`, and never the freed capture state the `std::function` predecessor could
+     * hand it. What the slot does NOT do is stop a dispatch already in flight, so @p ctx
+     * must outlive every write that can still reach the fan-out.
+     *
+     * @param fn  The sink; @p ctx is handed back as its first argument. Null clears.
+     * @param ctx Caller-owned context; must outlive every possible dispatch.
      */
-    void set_remote_delivery_sink(
-        std::function<void(const remote_delivery_t&, const rope_t&)> sink);
+    void configure_remote_delivery_sink(remote_delivery_fn_t fn, void* ctx) noexcept;
 
     /**
      * @brief Install the pluggable subject resolver (ADR-0018) — the ACL enforcement switch.
@@ -1303,10 +1358,19 @@ class graph_t {
      * resolver that passes a caller-supplied identity through could otherwise mint a principal
      * indistinguishable from the wildcard ACE.
      *
-     * Set once at wiring time, before frames flow — read-only afterwards on the op
-     * paths, so no lock (the remote-sink / child-catalog contract).
+     * CONFIGURATION, not a runtime knob (#1049): install it at wiring time, from ONE thread,
+     * before frames flow — which the verb's name now says, and the `{fn, ctx}` shape makes
+     * safe to get wrong. The gate reads the pair through a `tr::sink_slot_t`: with no
+     * resolver that is ONE relaxed load, exactly what the null check cost, and with one
+     * installed the gate dispatches from a coherent snapshot, so a concurrent
+     * install/replace can neither pair a new `fn` with a stale `ctx` nor free the state a
+     * running resolver is standing on. @p ctx must outlive every gated operation.
+     *
+     * @param fn  The resolver; @p ctx is handed back as its first argument. Null (the
+     *            default) DISABLES enforcement.
+     * @param ctx Caller-owned context; must outlive every gated operation.
      */
-    void set_subject_resolver(subject_resolver_t resolver);
+    void configure_subject_resolver(subject_resolver_fn_t fn, void* ctx) noexcept;
 
     /**
      * @brief Install the EXTERNAL subscription observer — a callback fired on every
@@ -1332,12 +1396,17 @@ class graph_t {
      *   therefore treat its own link-down signal as the removal for every edge of that link.
      * - `unsubscribe(subscription_t)` is a local door and stays silent like the rest.
      *
-     * Set ONCE at wiring time, before frames flow — read-only afterwards on the resolver
-     * path, so no lock (the `set_remote_delivery_sink` / `set_subject_resolver` contract).
-     * A null observer (the default) costs one null check on the subscribe path and nothing
-     * anywhere else.
+     * CONFIGURATION, not a runtime knob (#1049): install it at wiring time, from ONE thread,
+     * before frames flow — the `configure_remote_delivery_sink` /
+     * `configure_subject_resolver` contract, now stated by the verb and enforced by the
+     * `{fn, ctx}` shape rather than requested in a comment. A null @p fn (the default) costs
+     * one relaxed load on the subscribe path and nothing anywhere else. @p ctx must outlive
+     * every subscription mutation the graph can still report.
+     *
+     * @param fn  The observer; @p ctx is handed back as its first argument. Null clears.
+     * @param ctx Caller-owned context; must outlive every reportable mutation.
      */
-    void set_subscription_observer(sub_observer_t observer);
+    void configure_subscription_observer(sub_observer_fn_t fn, void* ctx) noexcept;
 
     /**
      * @brief The wire `:subscribers[]` APPEND — the same admission door as the local
@@ -1684,20 +1753,23 @@ class graph_t {
     [[nodiscard]] result_t<subscription_t> admit_subscriber(
         vertex_t* v, subscriber_t s, std::string_view caller,
         std::optional<std::size_t> slot = std::nullopt);
-    // Fire the external-subscription observer for ONE slot mutation (set_subscription_observer).
-    // Returns immediately when no observer is installed or `caller` is EMPTY — the latter is
-    // the whole external/local discrimination, in one place. `sub_tlv` is the slot's stored
-    // SUBSCRIBER TLV (empty for a callback-only slot, which no external door can create);
-    // the event's target key is decoded from its PATH child. Called with NO graph lock held,
-    // after the mutation has landed — see sub_observer_t's re-entrancy warning.
+    // Fire the external-subscription observer for ONE slot mutation
+    // (configure_subscription_observer). Returns immediately when no observer is installed or
+    // `caller` is EMPTY — the latter is the whole external/local discrimination, in one place.
+    // `sub_tlv` is the slot's stored SUBSCRIBER TLV (empty for a callback-only slot, which no
+    // external door can create); the event's target key is decoded from its PATH child. Called with
+    // NO graph lock held, after the mutation has landed — see sub_observer_fn_t's re-entrancy
+    // warning.
     void notify_subscription(sub_event_t::kind_t kind, const vertex_t* v, std::string_view caller,
                              const view_t& sub_tlv, std::size_t slot) const;
     // True iff a subscription event is worth building at all — an installed observer AND an
     // external (non-empty) caller context. Guards the pre-reads the observer needs (the
     // displaced slot's stored SUBSCRIBER on a replace/clear) so an app that installs nothing
-    // pays exactly one null check.
+    // pays exactly one relaxed load. A HINT only: `notify_subscription` re-reads the slot
+    // coherently and dispatches from THAT snapshot, so a clear landing between the two
+    // simply drops the event rather than calling a destroyed target (#1049).
     [[nodiscard]] bool observing_subscriptions(std::string_view caller) const noexcept {
-        return subscription_observer_ != nullptr && !caller.empty();
+        return subscription_observer_.installed() && !caller.empty();
     }
     // Field surface: ":settings.<f>", ":settings.app.<name…>" (RFC-0010),
     // ":subscribers[]" / "[N]", ":children[]".
@@ -1866,26 +1938,43 @@ class graph_t {
     // (which is keyed by rendered key bytes) from ever touching a real vertex's entry.
     std::unique_ptr<vertex_t> anchor_root_;
     // The device creation catalog (#82, ADR-0017): SPEC `type` -> factory. Populated at
-    // setup (register_child_type), read-only once frames flow, so no lock (same contract
-    // as remote_sink_). `std::less<>` enables heterogeneous string_view lookup.
+    // setup (register_child_type) — configuration, per #1049's ruling, exactly like the
+    // three sinks below. `std::less<>` enables heterogeneous string_view lookup.
+    //
+    // It is a std::map, so #1049's {fn, ctx} + slot mechanism does not reach it: there is no
+    // pointer-sized word to publish, and the read walks a red-black tree an insert would be
+    // rebalancing. The lookup runs from a PEER's bytes (create_child) and is control-plane
+    // cold — one vertex creation — so the arm that costs nothing where it lands is a lock,
+    // and it is taken here rather than on any hot path. It buys a defined outcome for a
+    // caller that violates the setup-only contract instead of a corrupted tree walk.
+    mutable std::shared_mutex child_types_mutex_;
     std::map<std::string, child_factory_t, std::less<>> child_types_;
-    // The remote-delivery sink (#136). Set once before frames flow, then read-only on
-    // the write hot path — no lock needed (a benign data race with a late setup write
-    // is excluded by the "configure before frames flow" contract, mirroring fwd_router).
-    std::function<void(const remote_delivery_t&, const rope_t&)> remote_sink_;
-    // The pluggable subject resolver (#81, ADR-0018). Null (default) => ACL enforcement
-    // disabled. Same set-once-before-frames-flow contract as remote_sink_.
-    subject_resolver_t subject_resolver_;
-    // The external-subscription observer (set_subscription_observer). Same
-    // set-once-before-frames-flow contract as subject_resolver_; null by default, so an app
-    // that installs nothing pays one null check on the subscribe/clear path.
-    sub_observer_t subscription_observer_;
+    // The three CONFIGURATION sinks (#1049). Each is the ADR-0047 {fn, ctx} pair published
+    // through a sink_slot_t — the mechanism #914 established for fwd_router_t's five, hoisted
+    // to the layer-neutral `tr` namespace so L4 can hold one without naming the net plane.
+    // The doctrine is setup-only and the verbs are named `configure_*` to say it; the slot is
+    // what makes a violation DEFINED (a skipped dispatch) rather than the use-after-free the
+    // std::function predecessors had, since assigning a std::function destroys the old
+    // target — freeing its captures while a reader is inside the call. An unset slot reads as
+    // one relaxed load, which is what the null check on the plain member cost.
+    tr::sink_slot_t<remote_delivery_fn_t> remote_sink_;         // read on the write hot path
+    tr::sink_slot_t<subject_resolver_fn_t> subject_resolver_;   // read by the ACL gate
+    tr::sink_slot_t<sub_observer_fn_t> subscription_observer_;  // read on subscribe/clear
     // The NODE's identity record, pre-serialized (#406, RFC-0011 §B): the complete
     // SETTINGS{kind,key} TLV, built once at install so every `:identity` read is a copy
     // of settled bytes rather than a re-emit — the "all vertices return byte-identical
     // records" invariant (§C.1) then holds by construction, not by discipline. Empty =
-    // no keypair installed => SCHEMA_NOT_FOUND (§C.3). Same set-before-frames-flow
-    // contract as subject_resolver_.
+    // no keypair installed => SCHEMA_NOT_FOUND (§C.3). Configuration, per #1049.
+    //
+    // Guarded, and this is the member where that is not merely tidy (#1049): the identity
+    // facet resolves ABOVE the READ gate so an unauthenticated peer can pin the key on first
+    // use, so `read_identity` is reachable, by design, from a peer that has proved nothing.
+    // The read tests emptiness and then MEMCPYs the buffer; install and clear both free the
+    // old one. Straddling that with a reassignment is a remotely-reachable use-after-free,
+    // and the read is cold (one identity read per peer per pin), so the lock costs nothing
+    // anywhere that matters. Same reasoning as child_types_ above: a std::vector has no
+    // pointer-sized word for the slot mechanism to publish.
+    mutable std::shared_mutex identity_mutex_;
     std::vector<std::byte> identity_record_;
     // Bubbling-walk instrumentation (RFC-0005) — see ancestor_walks().
     mutable std::atomic<std::uint64_t> ancestor_walks_{0};

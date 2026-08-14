@@ -50,6 +50,7 @@
 #include <vector>
 
 #include "fwd_frame_builder.hpp"
+#include "graph_sinks.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -334,9 +335,10 @@ void test_evict_scoped_to_link() {
     vertex_handle_t x = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
 
     std::size_t cli = 0, other = 0;
-    g.set_remote_delivery_sink([&](const tr::graph::remote_delivery_t& d, const rope_t&) {
-        (d.link == "cli" ? cli : other) += 1;
-    });
+    const tr::testing::remote_sink_guard_t sink_guard(
+        g, [&](const tr::graph::remote_delivery_t& d, const rope_t&) {
+            (d.link == "cli" ? cli : other) += 1;
+        });
     std::size_t local = 0;
     auto on_local = [&](const rope_t&) { ++local; };
 
@@ -391,7 +393,8 @@ void test_evict_scoped_to_link() {
 void test_departure_cost_is_scoped_to_the_peer() {
     std::printf("#1071 — a departure's cost tracks the departing peer, not the graph:\n");
     graph_t g;
-    g.set_remote_delivery_sink([](const tr::graph::remote_delivery_t&, const rope_t&) {});
+    const tr::testing::remote_sink_guard_t sink_guard2(
+        g, [](const tr::graph::remote_delivery_t&, const rope_t&) {});
 
     vertex_handle_t mine = g.register_vertex(path_t("/mine"), role_t::STORED_VALUE);
     check(wire_sub(g, mine, "cli", "m0"), "the peer under test subscribes on ONE vertex");
@@ -444,9 +447,10 @@ void test_index_recreated_after_a_full_eviction() {
     std::printf("#1071 — a same-NAME redial is indexed, and evictable, again:\n");
     graph_t g;
     std::size_t cli = 0;
-    g.set_remote_delivery_sink([&](const tr::graph::remote_delivery_t& d, const rope_t&) {
-        if (d.link == "cli") ++cli;
-    });
+    const tr::testing::remote_sink_guard_t sink_guard3(
+        g, [&](const tr::graph::remote_delivery_t& d, const rope_t&) {
+            if (d.link == "cli") ++cli;
+        });
     vertex_handle_t v = g.register_vertex(path_t("/v"), role_t::STORED_VALUE);
 
     check(wire_sub(g, v, "cli", "first"), "the first session subscribes");
@@ -478,9 +482,10 @@ void test_stale_index_entries_are_harmless() {
     std::printf("#1071 — a stale index entry costs a no-op, never a wrong answer:\n");
     graph_t g;
     std::size_t cli = 0;
-    g.set_remote_delivery_sink([&](const tr::graph::remote_delivery_t& d, const rope_t&) {
-        if (d.link == "cli") ++cli;
-    });
+    const tr::testing::remote_sink_guard_t sink_guard4(
+        g, [&](const tr::graph::remote_delivery_t& d, const rope_t&) {
+            if (d.link == "cli") ++cli;
+        });
     vertex_handle_t v = g.register_vertex(path_t("/v"), role_t::STORED_VALUE);
     vertex_handle_t w = g.register_vertex(path_t("/w"), role_t::STORED_VALUE);
 
@@ -604,7 +609,8 @@ void test_slot_reuse_and_index_stability() {
 
     // The reused slots DELIVER (the reclaimed shell became a real edge again).
     std::size_t hits = 0;
-    g.set_remote_delivery_sink(
+    const tr::testing::remote_sink_guard_t sink_guard5(
+        g,
         [&](const tr::graph::remote_delivery_t& d, const rope_t&) { hits += d.link == "cli:2"; });
     check(g.write(v, make_value({0x11})).has_value(), "write /v");
     check(hits == 3, "D, E and F (two reused slots + one appended) all deliver");
@@ -833,8 +839,8 @@ void test_concurrent_evict_vs_writes() {
     vertex_handle_t v = g.register_vertex(path_t("/v"), role_t::STORED_VALUE);
     vertex_handle_t u = g.register_vertex(path_t("/v/u"), role_t::STORED_VALUE);
     std::atomic<std::size_t> delivered{0};
-    g.set_remote_delivery_sink(
-        [&](const tr::graph::remote_delivery_t&, const rope_t&) { delivered.fetch_add(1); });
+    const tr::testing::remote_sink_guard_t sink_guard6(
+        g, [&](const tr::graph::remote_delivery_t&, const rope_t&) { delivered.fetch_add(1); });
     check(wire_sub(g, v, "cli", "s0") && wire_sub(g, v, "keep", "k0"), "seed edges");
 
     std::thread writer([&] {

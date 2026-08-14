@@ -1088,7 +1088,7 @@ class AmbiguousAnchorGateTest(unittest.TestCase):
 
     # `if (!acl_allows(v, caller, acl_right_t::READ))` is the same statement in four ACL
     # gates of `graph.cpp` — a real repeated line, so this cannot pass on a fixture quirk.
-    CITATION = "the read gate is at `core/src/graph.cpp:1154`\n"
+    CITATION = "the read gate is at `core/src/graph.cpp:1163`\n"
     ANCHOR_TEXT = "if (!acl_allows(v, caller, acl_right_t::READ))"
 
     @contextlib.contextmanager
@@ -1110,20 +1110,20 @@ class AmbiguousAnchorGateTest(unittest.TestCase):
             os.remove(doc)
 
     def test_an_unscoped_repeated_anchor_is_reported(self):
-        with self._gate_over([(f"{GRAPH}:1154", self.ANCHOR_TEXT)]) as out:
+        with self._gate_over([(f"{GRAPH}:1163", self.ANCHOR_TEXT)]) as out:
             self.assertIn("AMBIGUOUS", out)
-            self.assertIn(f"{GRAPH}:1154", out)
+            self.assertIn(f"{GRAPH}:1163", out)
 
     def test_the_report_says_how_to_fix_it(self):
         # The message has to name the remedy, because the anchor RESOLVES: nothing about the
         # cited line looks wrong, and "tighten the scope" is not guessable from a bare FAIL.
-        with self._gate_over([(f"{GRAPH}:1154", self.ANCHOR_TEXT)]) as out:
+        with self._gate_over([(f"{GRAPH}:1163", self.ANCHOR_TEXT)]) as out:
             self.assertIn("Tighten the anchor text", out)
 
     def test_a_scope_that_disambiguates_passes(self):
-        # `graph_t::read` owns the 1154 gate; the scope names it, and no other candidate
+        # `graph_t::read` owns the 1163 gate; the scope names it, and no other candidate
         # carries that signature above it.
-        scoped = [(f"{GRAPH}:1154", self.ANCHOR_TEXT, "result_t<value_ref_t> graph_t::read(")]
+        scoped = [(f"{GRAPH}:1163", self.ANCHOR_TEXT, "result_t<value_ref_t> graph_t::read(")]
         with self._gate_over(scoped) as out:
             self.assertNotIn("AMBIGUOUS", out)
 

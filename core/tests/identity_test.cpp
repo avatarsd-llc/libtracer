@@ -67,7 +67,7 @@ std::vector<std::byte> as_bytes(std::string_view s) {
  * The empty (local) context never reaches a resolver — `graph_t::acl_allows` settles it
  * as trusted before invoking one (#905) — so the error arm here means DENY, nothing else.
  */
-std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(std::string_view caller) {
+std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(void*, std::string_view caller) {
     return as_bytes(caller);
 }
 
@@ -183,7 +183,7 @@ void test_every_vertex_answers_identically() {
 void test_read_is_pre_auth() {
     std::printf("RFC-0011 §C.2: :identity is served through a CLOSED acl (pre-auth):\n");
     graph_t g;
-    g.set_subject_resolver(caller_is_subject);
+    g.configure_subject_resolver(caller_is_subject, nullptr);
     check(g.set_identity(0x01, demo_key()).has_value(), "identity installed");
     const auto v = g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
     (void)g.write(v, make_value(demo_key()));
@@ -294,7 +294,7 @@ void test_no_write_surface() {
 void test_record_has_no_sub_addressing() {
     std::printf("RFC-0011 §C.4: served whole — no member or indexed addressing:\n");
     graph_t g;
-    g.set_subject_resolver(caller_is_subject);
+    g.configure_subject_resolver(caller_is_subject, nullptr);
     check(g.set_identity(0x01, demo_key()).has_value(), "identity installed");
     (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
 

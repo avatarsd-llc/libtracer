@@ -48,6 +48,54 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   whole suite green on a TSO host. The evidence half of the same question — an
   `ubuntu-24.04-arm` CI leg that can actually exhibit the anomaly — landed earlier under #1140.
 
+### Changed
+
+- **BREAKING — `graph_t`'s three callback configuration seams take the ADR-0047 `{fn, ctx}`
+  pair, and are spelled `configure_*`**
+  ([#1049](https://github.com/avatarsd-llc/libtracer/issues/1049); the L4 analogue of
+  [#914](https://github.com/avatarsd-llc/libtracer/issues/914) / PR #1048).
+  `set_remote_delivery_sink(std::function<void(const remote_delivery_t&, const rope_t&)>)`
+  → `configure_remote_delivery_sink(remote_delivery_fn_t, void*)`; `set_subject_resolver` →
+  `configure_subject_resolver(subject_resolver_fn_t, void*)`; `set_subscription_observer` →
+  `configure_subscription_observer(sub_observer_fn_t, void*)`. The types `subject_resolver_t`
+  and `sub_observer_t` are **replaced** by `subject_resolver_fn_t` / `sub_observer_fn_t`, and
+  `remote_delivery_fn_t` is new; the rename is deliberate, so a stale caller gets "no such
+  member" rather than a confusing conversion error.
+
+  The three were plain `std::function` members with public setters, read on the write hot
+  path, on every gated read and write, and on the subscribe path — under a comment citing the
+  "configure before frames flow" contract #914 RETIRED at the router. The defect is worse than
+  the router's was: assigning a `std::function` **destroys the old target**, freeing its
+  captured state, so a setter racing a reader that is already *inside* the call is a
+  use-after-free, not a torn pair. `sink_slot_t` could not be pointed at them — it statically
+  requires a pointer-sized function pointer — so the types were narrowed to that shape first.
+  Each seam is now a `sink_slot_t`: a reader sees the whole new pair, the whole old one, or no
+  sink for that one operation. `ctx` is caller-owned and must outlive every dispatch, exactly
+  as `receiver_slot_t`'s must. Migration is mechanical — hoist the capture into a context
+  object and pass a captureless thunk, which is what `fwd_router_t` now does with `this`.
+
+  **`tr::net::sink_slot_t` moved to the layer-neutral `tr::sink_slot_t`**, since an L4 member
+  spelled `tr::net::` would point down at a plane that sits above it. `tr::net::sink_slot_t`
+  remains a working alias; no net-plane caller changes.
+
+  **Cost: none measured.** Interleaved A/B of `bench_libtracer` against an A/A null from the
+  same commit — the plain read, the scalar write and the wide fan-out are all inside the A/A
+  band. An unset slot is one relaxed load, which is what the null check on the plain member
+  cost; the coherent read on the remote leg is kept out of the `always_inline` per-edge
+  dispatch body, whose test stays the single load it was.
+- **The child-type catalog and the node identity record are locked, not merely documented**
+  ([#1049](https://github.com/avatarsd-llc/libtracer/issues/1049)). No signature change.
+  Both were declared under the same retired contract and neither is a callback, so the
+  `{fn, ctx}` publication cannot reach them. `register_child_type` inserts into a `std::map`
+  that the in-band `:children[]` creation path — driven by a **peer's bytes** — walks;
+  `set_identity` / `clear_identity` free a buffer that `read_identity` tests for emptiness and
+  then memcpys, and that facet resolves **above** the READ gate so an unauthenticated peer can
+  pin the key on first use (RFC-0011 §C.2), which makes the use-after-free remotely reachable.
+  Both paths are control-plane cold — one map lookup per created vertex, one identity read per
+  peer per pin — so each took a lock rather than a publication trick, and no read, write or
+  dispatch path is touched. Setup-only remains the doctrine; the locks make violating it slow
+  rather than corrupting.
+
 ### Fixed
 
 - **Host stream sends no longer block INDEFINITELY on a stalled peer, and no longer hold the

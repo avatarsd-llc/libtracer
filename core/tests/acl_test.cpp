@@ -188,7 +188,7 @@ std::optional<std::vector<std::byte>> acl_readback(graph_t& g, const path_t& p) 
  * The empty (local) context never reaches a resolver — `graph_t::acl_allows` settles it
  * as trusted before invoking one (#905) — so the error arm here means DENY, nothing else.
  */
-std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(std::string_view caller) {
+std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(void*, std::string_view caller) {
     return as_bytes(caller);
 }
 
@@ -204,7 +204,7 @@ constexpr std::string_view kUnnameable = "ghost";
  * as FULLY TRUSTED and waved through every gate, `WRITE_ACL` and `CREATE` included (#905).
  */
 std::expected<subject_token_t, tr::wire::err_t> resolver_cannot_name_ghost(
-    std::string_view caller) {
+    void*, std::string_view caller) {
     if (caller == kUnnameable) return std::unexpected(tr::wire::err_t::ACCESS_DENIED);
     return as_bytes(caller);
 }
@@ -348,7 +348,7 @@ void test_storage_roundtrip() {
 void test_outer_acl_shape() {
     std::printf("outer :acl container shape + canonical read-back (#907):\n");
     graph_t g;
-    g.set_subject_resolver(caller_is_subject);
+    g.configure_subject_resolver(caller_is_subject, nullptr);
     const vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
     const auto acl_field = path_t::parse("/x:acl");
     // A stored value, so a READ that is ALLOWED answers OK rather than NOT_FOUND — the gate
@@ -488,7 +488,7 @@ void test_subset_rejections() {
         // acceptance but real ADR-0020 evaluation coverage for the LIBTRACER_ACL_FULL config.
         graph_t gf;
         const vertex_handle_t v = gf.register_vertex(path_t("/d"), role_t::STORED_VALUE);
-        gf.set_subject_resolver(caller_is_subject);
+        gf.configure_subject_resolver(caller_is_subject, nullptr);
         const auto w = gf.write(
             path_t("/d:acl"),
             make_value(make_acl({
@@ -516,14 +516,14 @@ void test_open_by_default() {
     }
     {  // resolver installed, vertex has no ACL => open
         graph_t g;
-        g.set_subject_resolver(caller_is_subject);
+        g.configure_subject_resolver(caller_is_subject, nullptr);
         vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
         check(write_u8(g, v, 1, "peer-a").has_value(), "resolver + no ACL => WRITE allowed");
         check(g.read(v, "peer-a").has_value(), "resolver + no ACL => READ allowed");
     }
     {  // resolver installed, trusted (local, empty-context) caller => allowed
         graph_t g;
-        g.set_subject_resolver(caller_is_subject);
+        g.configure_subject_resolver(caller_is_subject, nullptr);
         vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
         (void)g.write(
             path_t("/x:acl"),
@@ -536,7 +536,7 @@ void test_open_by_default() {
 void test_gated_ops() {
     std::printf("every gated op, allow + deny (resolver installed):\n");
     graph_t g;
-    g.set_subject_resolver(caller_is_subject);
+    g.configure_subject_resolver(caller_is_subject, nullptr);
     vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
     (void)write_u8(g, v, 7);  // seed an LKV (trusted local write)
 
@@ -652,7 +652,7 @@ void test_gated_ops() {
 void test_flat_knob_surface_is_withdrawn() {
     std::printf("flat protocol knobs: withdrawn, caller-independently (RFC-0022 §3.B):\n");
     graph_t g;
-    g.set_subject_resolver(caller_is_subject);
+    g.configure_subject_resolver(caller_is_subject, nullptr);
     vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
     // peer-a holds WRITE; peer-none holds nothing. Installed by the trusted local caller.
     check(g.write(path_t("/x:acl"),
@@ -746,7 +746,7 @@ void test_flat_knob_surface_is_withdrawn() {
 void test_denied_caller_disclosure_parity() {
     std::printf("namespace-governed disclosure — read/write parity (#435):\n");
     graph_t g;
-    g.set_subject_resolver(caller_is_subject);
+    g.configure_subject_resolver(caller_is_subject, nullptr);
     vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
     check(
         g.write(path_t("/x:acl"),
@@ -837,7 +837,7 @@ void test_denied_caller_disclosure_parity() {
 void test_acl_and_schema_are_addressed_whole() {
     std::printf(":acl / :schema are addressed whole — no member or slot addressing:\n");
     graph_t g;
-    g.set_subject_resolver(caller_is_subject);
+    g.configure_subject_resolver(caller_is_subject, nullptr);
     vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
 
     const std::vector<std::byte> original =
@@ -882,7 +882,7 @@ void test_acl_and_schema_are_addressed_whole() {
 void test_expiry() {
     std::printf("ACE expiry (expires_ns, absolute ns since epoch):\n");
     graph_t g;
-    g.set_subject_resolver(caller_is_subject);
+    g.configure_subject_resolver(caller_is_subject, nullptr);
     vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
     (void)write_u8(g, v, 7);
 
@@ -900,7 +900,7 @@ void test_expiry() {
 void test_inheritance() {
     std::printf("inheritance — effective ACL = own + INHERIT-flagged ancestor ACEs:\n");
     graph_t g;
-    g.set_subject_resolver(caller_is_subject);
+    g.configure_subject_resolver(caller_is_subject, nullptr);
     (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
     vertex_handle_t child = g.register_vertex(path_t("/dev/temp"), role_t::STORED_VALUE);
     vertex_handle_t grandchild = g.register_vertex(path_t("/dev/temp/raw"), role_t::STORED_VALUE);
@@ -952,7 +952,7 @@ void test_inheritance() {
 void test_two_acl_fan_in() {
     std::printf("two-ACL gating (ADR-0026) — fan-out SUBSCRIBE + fan-in WRITE:\n");
     graph_t g;
-    g.set_subject_resolver(caller_is_subject);
+    g.configure_subject_resolver(caller_is_subject, nullptr);
     vertex_handle_t src = g.register_vertex(path_t("/src"), role_t::STORED_VALUE);
     vertex_handle_t dst = g.register_vertex(path_t("/dst"), role_t::STORED_VALUE);
 
@@ -997,7 +997,7 @@ void test_two_acl_fan_in() {
 void test_remote_path() {
     std::printf("remote path — FWD terminus consults the ACL (0x0050 tr::access::denied):\n");
     graph_t g;
-    g.set_subject_resolver(caller_is_subject);
+    g.configure_subject_resolver(caller_is_subject, nullptr);
     op_resolver_t resolver(g);
     vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
     (void)write_u8(g, v, 7);
@@ -1077,7 +1077,7 @@ void test_remote_path() {
 void test_gates_no_test_defended() {
     std::printf("the ACL gates a mutation sweep found undefended:\n");
     graph_t g;
-    g.set_subject_resolver(caller_is_subject);
+    g.configure_subject_resolver(caller_is_subject, nullptr);
     const vertex_handle_t v = g.register_vertex(path_t("/g"), role_t::STORED_VALUE);
     (void)g.register_vertex(path_t("/g/kid"), role_t::STORED_VALUE);
     (void)write_u8(g, v, 7);  // trusted local write seeds an LKV
@@ -1177,7 +1177,7 @@ void test_gates_no_test_defended() {
 void test_resolver_deny_arm_is_denied_at_every_gate() {
     std::printf("the resolver's ERROR arm DENIES at every gate (#905):\n");
     graph_t g;
-    g.set_subject_resolver(resolver_cannot_name_ghost);
+    g.configure_subject_resolver(resolver_cannot_name_ghost, nullptr);
     const vertex_handle_t v = g.register_vertex(path_t("/g"), role_t::STORED_VALUE);
     (void)write_u8(g, v, 7);  // trusted local write seeds an LKV
 
@@ -1284,12 +1284,13 @@ void test_deny_arm_stops_remote_fan_in() {
     std::printf("the resolver's ERROR arm stops remote-edge fan-in delivery (#905):\n");
     graph_t g;
     bool revoked = false;
-    g.set_subject_resolver(
-        [&revoked](std::string_view caller) -> std::expected<subject_token_t, tr::wire::err_t> {
-            if (revoked && caller == "link-a")
+    g.configure_subject_resolver(
+        [](void* ctx, std::string_view caller) -> std::expected<subject_token_t, tr::wire::err_t> {
+            if (*static_cast<const bool*>(ctx) && caller == "link-a")
                 return std::unexpected(tr::wire::err_t::ACCESS_DENIED);
             return as_bytes(caller);
-        });
+        },
+        &revoked);
     const vertex_handle_t src = g.register_vertex(path_t("/src"), role_t::STORED_VALUE);
     const vertex_handle_t sink = g.register_vertex(path_t("/sink"), role_t::STORED_VALUE);
 
@@ -1327,9 +1328,11 @@ void test_deny_arm_stops_remote_fan_in() {
 void test_empty_caller_is_trusted_without_the_resolver() {
     std::printf("the empty (local) caller is trusted without consulting the resolver (#905):\n");
     graph_t g;
-    g.set_subject_resolver([](std::string_view) -> std::expected<subject_token_t, tr::wire::err_t> {
-        return std::unexpected(tr::wire::err_t::ACCESS_DENIED);
-    });
+    g.configure_subject_resolver(
+        [](void*, std::string_view) -> std::expected<subject_token_t, tr::wire::err_t> {
+            return std::unexpected(tr::wire::err_t::ACCESS_DENIED);
+        },
+        nullptr);
     const vertex_handle_t v = g.register_vertex(path_t("/l"), role_t::STORED_VALUE);
 
     check(write_u8(g, v, 5).has_value(), "local WRITE succeeds under a name-nobody resolver");
@@ -1368,7 +1371,7 @@ void test_empty_caller_is_trusted_without_the_resolver() {
 void test_reserved_wildcard_subject_is_refused() {
     std::printf("the EVERYONE@ spelling is reserved against a resolved subject (#908):\n");
     graph_t g;
-    g.set_subject_resolver(caller_is_subject);
+    g.configure_subject_resolver(caller_is_subject, nullptr);
     const vertex_handle_t guarded = g.register_vertex(path_t("/w"), role_t::STORED_VALUE);
     const vertex_handle_t bare = g.register_vertex(path_t("/o"), role_t::STORED_VALUE);
     (void)write_u8(g, guarded, 7);  // trusted local writes seed both LKVs

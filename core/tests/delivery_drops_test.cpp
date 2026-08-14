@@ -103,7 +103,7 @@ std::vector<std::byte> allow_only(std::string_view subject, acl_right_t right) {
  * The empty (local) context never reaches a resolver — `graph_t::acl_allows` settles it
  * as trusted before invoking one (#905) — so the error arm here means DENY, nothing else.
  */
-std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(std::string_view caller) {
+std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(void*, std::string_view caller) {
     return as_bytes(caller);
 }
 
@@ -148,7 +148,7 @@ void test_missing_target_is_counted() {
 void test_denied_fan_in_is_counted() {
     std::printf("\nthe target's :acl denies the edge's caller — counted separately:\n");
     graph_t g;
-    g.set_subject_resolver(caller_is_subject);
+    g.configure_subject_resolver(caller_is_subject, nullptr);
     (void)g.register_vertex(path_t("/sink"), role_t::STORED_VALUE);
     vertex_handle_t src = g.register_vertex(path_t("/src"), role_t::STORED_VALUE);
 

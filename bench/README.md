@@ -421,7 +421,7 @@ craft libtracer":
 > `bridge_t` envelope, deleted with the bridge itself in
 > [ADR-0040](../docs/adr/0040-net-plane-is-explicit-source-routed-only.md) — the net plane is
 > explicit-source-routed `FWD` only. Neither mode is emitted today
-> (`bench_libtracer.cpp:16`, `:1246`); `bridge_t`, `router_wrap`, `router_unwrap`, `kMaxHops`,
+> (`bench_libtracer.cpp:16`, `:1248`); `bridge_t`, `router_wrap`, `router_unwrap`, `kMaxHops`,
 > `export_vertex` and `run_routers` survive in `core/` and `bench/` only inside comments
 > and `core/CHANGELOG.md`'s record of their removal — not one declaration, definition or
 > call of any of them is left (`grep -rn` over both trees, 2026-08-08), and the

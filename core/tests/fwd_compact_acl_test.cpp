@@ -135,7 +135,7 @@ std::optional<std::uint32_t> stored_u32(const graph_t& g, vertex_handle_t v) {
  * The empty (local) context never reaches a resolver — `graph_t::acl_allows` settles it as
  * trusted before invoking one (#905) — so the error arm here would mean DENY, and is unused.
  */
-std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(std::string_view caller) {
+std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(void*, std::string_view caller) {
     return as_bytes(caller);
 }
 
@@ -180,7 +180,7 @@ void test_compact_denied_on_the_cold_arm() {
           "the target holds a seeded value (trusted local write, before any ACL)");
     check(install_acl(g, "/sink:acl", acl_allowing("peer-z", acl_right_t::WRITE)),
           "an ACL granting WRITE to `peer-z` ALONE is installed");
-    g.set_subject_resolver(caller_is_subject);  // enforcement on
+    g.configure_subject_resolver(caller_is_subject, nullptr);  // enforcement on
 
     fwd_router_t router(g);
     rec_link_t hostile;  // NOT `peer-z`
@@ -228,7 +228,7 @@ void test_compact_denied_on_the_warm_arm() {
     check(g.write(sink, make_value(b_value_u32(kSeed))).has_value(), "the target is seeded");
     check(install_acl(g, "/sink:acl", acl_allowing("peer-z", acl_right_t::WRITE)),
           "an ACL granting WRITE to `peer-z` is installed");
-    g.set_subject_resolver(caller_is_subject);
+    g.configure_subject_resolver(caller_is_subject, nullptr);
 
     fwd_router_t router(g);
     rec_link_t z;
@@ -318,7 +318,7 @@ void test_denied_compact_is_counted() {
     check(g.write(sink, make_value(b_value_u32(kSeed))).has_value(), "the target is seeded");
     check(install_acl(g, "/sink:acl", acl_allowing("peer-z", acl_right_t::WRITE)),
           "an ACL granting WRITE to `peer-z` ALONE is installed");
-    g.set_subject_resolver(caller_is_subject);
+    g.configure_subject_resolver(caller_is_subject, nullptr);
 
     fwd_router_t router(g);
     rec_link_t hostile;  // NOT `peer-z`

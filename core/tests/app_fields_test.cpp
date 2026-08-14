@@ -104,7 +104,7 @@ bool fails_with(const tr::graph::result_t<void>& r, status_t s) {
  * The empty (local) context never reaches a resolver — `graph_t::acl_allows` settles it
  * as trusted before invoking one (#905) — so the error arm here means DENY, nothing else.
  */
-std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(std::string_view caller) {
+std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(void*, std::string_view caller) {
     return as_bytes(caller);
 }
 
@@ -282,7 +282,7 @@ void test_field_set_is_closed() {
 void test_gating() {
     std::printf("access gating (RFC-0010 sketch 3):\n");
     graph_t g;
-    g.set_subject_resolver(caller_is_subject);
+    g.configure_subject_resolver(caller_is_subject, nullptr);
     const vertex_handle_t v = g.register_vertex(path_t("/dev/y"), role_t::STORED_VALUE);
 
     std::vector<app_field_t> table;
