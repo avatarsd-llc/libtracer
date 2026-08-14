@@ -74,6 +74,12 @@ jobs:
       # against the recorded false-failure and true-regression sample sets.
       - name: Perf-gate decision-rule tests
         run: python3 bench/test_perf_gate.py
+      # The pinned host's quiescence rules (#1236), tested here because the guard decides
+      # whether a sample is banked AT ALL — and under the two-tier policy the pinned store
+      # is the blocking tier, so "skip when busy" and "flagged samples are ignored by the
+      # consumer" are gate rules even though they run in perf-local.yml.
+      - name: Bench-host quiescence-guard tests
+        run: python3 bench/test_host_guard.py
       # The bench's ARGV contract (#1040), also before anything is timed. An unrecognised
       # mode used to fall through into the full default sweep and exit 0, which in a
       # cross-commit A/B silently joins one axis against every axis on the same row keys.

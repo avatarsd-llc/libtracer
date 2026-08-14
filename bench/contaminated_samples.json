@@ -1,0 +1,42 @@
+{
+  "_comment": [
+    "Bench-local samples banked BEFORE the #1236 quiescence guard existed, judged",
+    "contaminated by the machine rather than moved by the commit. Read by",
+    "bench/host_guard.py:load_known_contaminated and honoured by the history",
+    "renderer; the raw points stay in the gh-pages store untouched, because the",
+    "datum is evidence and only the JUDGEMENT about it belongs in git.",
+    "",
+    "Heuristic (reproducible, and the bar is stated so the list can be argued with):",
+    "a sample is listed when more than 25% of its metrics are >10% slower than the",
+    "median of the five samples either side of it. A real code regression moves a",
+    "FAMILY of related rows by a plausible step; a busy neighbour moves a quarter of",
+    "the whole board at once, including rows the commit cannot reach, by margins",
+    "(+130%, +155%) no in-process delivery change has ever produced here.",
+    "",
+    "Only samples that predate the guard need listing. Everything measured after it",
+    "flags itself at measure time through the A/A bracket, in its own `extra` field."
+  ],
+  "heuristic": {
+    "window": 5,
+    "slow_threshold_pct": 10,
+    "min_slow_fraction_pct": 25,
+    "suite": "libtracer bench-local latency (ns, smaller is better, fixed pinned host)"
+  },
+  "samples": [
+    {
+      "commit": "df1716ad3b33496156883617a64374f8c20f2ecf",
+      "sample": 132,
+      "reason": "130/344 metrics >10% slow vs neighbours (37.8%), worst +155% — host load, not #1211"
+    },
+    {
+      "commit": "3b28d15bb4b992c9c9682360370ad9b50a000218",
+      "sample": 141,
+      "reason": "104/386 metrics >10% slow vs neighbours (26.9%), worst +133% — the sample #1236 was filed on"
+    },
+    {
+      "commit": "26e75d6cde9fadc3e5d6cac63407c83d93642020",
+      "sample": 142,
+      "reason": "117/386 metrics >10% slow vs neighbours (30.3%), worst +150% — host load, not #1226"
+    }
+  ]
+}
