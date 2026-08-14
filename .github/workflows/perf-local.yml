@@ -213,17 +213,21 @@ jobs:
       # construction (nothing turns red when it fires), so a doctored baseline proves
       # each run that the annotation still comes out. Without this the ratchet could
       # warn on nothing for its entire warn-first life and read exactly the same.
+      # The doctored copy goes under RUNNER_TEMP, never a fixed /tmp name: the pinned
+      # host is self-hosted and shared, so /tmp is neither reliably writable by the
+      # runner user nor safe to claim by a predictable path.
       - name: The ratchet must warn on an induced growth (dry run, doctored baseline)
         run: |
-          python3 - <<'PY'
-          import json, pathlib
+          doctored="${RUNNER_TEMP:-.}/doctored_pins.json"
+          python3 - "$doctored" <<'PY'
+          import json, pathlib, sys
           p = json.loads(pathlib.Path("bench/ram_census_pins.json").read_text())
           for pin in p["pins"]:
               pin["value"] = pin["value"] - 4096  # induce +4 KB of "growth"
-          pathlib.Path("/tmp/doctored_pins.json").write_text(json.dumps(p))
+          pathlib.Path(sys.argv[1]).write_text(json.dumps(p))
           PY
           out=$(python3 bench/ram_census.py gate --conn-raw bench/bench_conn_ram_raw.txt \
-                  --pins /tmp/doctored_pins.json --mode warn)
+                  --pins "$doctored" --mode warn)
           echo "$out"
           case "$out" in
             *"::warning::per-connection RAM drift"*) echo "warn path is live" ;;
