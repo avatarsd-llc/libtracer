@@ -10,6 +10,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-08-14
+
 ### Added
 
 - **`httpd_ws_link_t::close_peer()` — a listener can now drop ONE inbound session by name**
