@@ -306,6 +306,29 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     set_tests_properties(httpd_ws_session_identity
         PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
+    # #1146 — close_peer: the administrative teardown of ONE inbound session, on the same
+    # fake. The subject here is the CONTROL QUEUE rather than the socket: the close must be
+    # marshalled onto the httpd task (the task that owns the descriptor's lifetime), so the
+    # return value is only as honest as httpd_queue_work's verdict — which is why the suite
+    # stages a FULL mbox and a refusing control socket, the two refusal routes the
+    # component's ESP-IDF floor makes visible.
+    add_executable(httpd_ws_close_peer_test
+        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_close_peer_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
+    target_include_directories(httpd_ws_close_peer_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(httpd_ws_close_peer_test PRIVATE libtracer)
+    target_link_options(httpd_ws_close_peer_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    libtracer_test_warnings(httpd_ws_close_peer_test)
+    add_test(NAME httpd_ws_close_peer COMMAND httpd_ws_close_peer_test)
+    # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
+    # every case here constructs an adopting link — same exemption as the suites above.
+    set_tests_properties(httpd_ws_close_peer
+        PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+
     # #949 — the TX SLOT POOL as the link's outstanding-send bound, on the same fake.
     # It replaces the #944 strand suite: above the component's ESP-IDF floor (>=5.5.5) a
     # full control mbox refuses the enqueue instead of binning it in silence, so the slot

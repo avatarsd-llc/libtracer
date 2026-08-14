@@ -12,6 +12,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`httpd_ws_link_t::close_peer()` — a listener can now drop ONE inbound session by name**
+  ([#1146](https://github.com/avatarsd-llc/libtracer/issues/1146)). The "revoke this
+  controller" action, matching what core's `slot_server_t` has always offered; previously
+  the link inherited `bus_link_t`'s `false`, so the capability was absent. Callable from any
+  task, and it keeps the base contract HONESTLY: `true` means the teardown really was
+  initiated. It cannot close in-call — `esp_http_server` owns the descriptor's lifetime on
+  its own task, and an off-task `shutdown` of a stale fd lands on whoever inherited the
+  number (#954) — so the close is marshalled onto the httpd task like every send, and the
+  return value is `httpd_queue_work`'s verdict. That verdict is only trustworthy above the
+  component's ESP-IDF floor (`>=5.5.5`), where the control-mbox slot is reserved through a
+  counting semaphore before the `sendto`: below it a full queue was binned inside lwIP while
+  still reporting success, which would have made `true` a lie told precisely when the queue
+  is fullest, i.e. when a stalling peer most deserves revoking (#949). A refused enqueue is
+  a plain `false` with the session untouched, so a caller may retry. The queued item carries
+  the session's `(slot, generation)` identity minted at the call — never a name or a
+  descriptor, because `p<slot>` is a pure function of the slot index and a reclaimed slot
+  re-earns it — so a peer that departs before the item drains cannot have its successor
+  closed in its place. The peer is told why: a CLOSE frame carrying the new
+  **`httpd_ws_link_t::kCloseRevoked`** (4403, mnemonic for HTTP 403), distinct from
+  `kCloseAuthFailed`/`kCloseAuthTimeout` because a revoked client should stop reconnecting
+  rather than re-prompt or retry. The departure reaches the routing plane through the
+  ordinary `free_ctx` seam, so subscriber-edge eviction is unchanged. A FLAT link still
+  answers `false` — it has one routing identity for every tab it carries.
+
 - **`httpd_ws_link_t::tx_reply_reserve()`**
   ([#1218](https://github.com/avatarsd-llc/libtracer/issues/1218)) — TX work slots held
   back for sends issued ON the httpd task, **additional to `tx_slot_capacity()`**. The
