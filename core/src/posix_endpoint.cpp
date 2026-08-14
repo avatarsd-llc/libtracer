@@ -17,6 +17,7 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -38,7 +39,31 @@ constexpr int MSG_NOSIGNAL = 0;
 enum class write_fault_t : std::uint8_t {
     RESUME,         /**< @brief EINTR on a healthy connection — resume where the write stopped. */
     PEER_GONE,      /**< @brief This socket is dead — drop the rest silently (#66 lifecycle). */
+    STALLED,        /**< @brief The socket's bounded send expired: the peer is not taking
+                                bytes (#838). Healthy call, healthy socket, absent peer. */
     MALFORMED_CALL, /**< @brief The arguments were rejected — OUR defect, not a disconnect. */
+};
+
+/**
+ * @brief The deadline that bounds ONE record's write — and, with it, the write-mutex hold
+ *        the caller is inside (#838).
+ *
+ * A per-syscall `SO_SNDTIMEO` alone does not bound a RECORD: a stream write may need
+ * several syscalls, and a peer that accepts one byte per timeout would restart the clock
+ * forever. So the bound is a monotonic deadline taken once at the top of the record and
+ * consulted before every attempt. `bound_ms == 0` reproduces the pre-#838 unbounded
+ * behaviour exactly, for sockets that carry no send timeout at all.
+ */
+struct send_deadline_t {
+    std::chrono::steady_clock::time_point at{}; /**< @brief When the record is abandoned. */
+    bool bounded = false;                       /**< @brief False ⇒ no deadline at all. */
+
+    explicit send_deadline_t(std::uint32_t bound_ms)
+        : at(std::chrono::steady_clock::now() + std::chrono::milliseconds(bound_ms)),
+          bounded(bound_ms != 0) {}
+
+    /** @brief True once the record may no longer be worked on. */
+    [[nodiscard]] bool expired() const { return bounded && std::chrono::steady_clock::now() >= at; }
 };
 
 /** @brief Process-wide malformed-call tally (#948) — see @ref write_fault_stats_t. */
@@ -48,9 +73,9 @@ std::atomic<std::uint64_t> g_malformed_calls{0};
 std::atomic<int> g_last_malformed_errno{0};
 
 /**
- * @brief The ONE write-fault policy both full-write helpers share (#903 / #948).
+ * @brief The ONE write-fault policy both full-write helpers share (#903 / #948 / #838).
  *
- * Three outcomes, not two — conflating the last with the middle is #948, where one
+ * Four outcomes, not two — conflating the last with the middle is #948, where one
  * unimplemented flag on one platform's `sendmsg` made every data frame vanish while the
  * connection stayed up, looking exactly like a peer that never asked for anything:
  *
@@ -64,6 +89,13 @@ std::atomic<int> g_last_malformed_errno{0};
  *   rest silently, link-down is #66 lifecycle. `EBADF`/`ENOTSOCK` sit here deliberately —
  *   a recycled fd is indistinguishable from a vanished peer, and a teardown race must not
  *   fabricate a defect report in the counter below.
+ * - **STALLED.** `EAGAIN`/`EWOULDBLOCK`: the socket's `SO_SNDTIMEO` (#838, armed by
+ *   @ref posix_endpoint_t::set_snd_timeout) expired with nothing written, because the
+ *   peer's receive window is full. Nothing is wrong with the call OR the socket — the PEER
+ *   is not taking bytes. It used to land in MALFORMED_CALL below, which would both mis-file
+ *   a stalled peer as a libtracer defect and abandon the record after one re-attempt; it is
+ *   its own arm precisely so the record can be retried until the caller's deadline and then
+ *   attributed to the peer that earned it.
  * - **MALFORMED_CALL.** Everything else: the kernel rejected the ARGUMENTS (`EOPNOTSUPP`,
  *   `EINVAL`, …) or ran short of buffers (`ENOBUFS`). The socket is fine and the bytes are
  *   still deliverable, so this must never be read as a disconnect — it is counted, its errno
@@ -77,6 +109,11 @@ write_fault_t classify_write_fault(ssize_t n) {
     switch (errno) {
         case EINTR:
             return write_fault_t::RESUME;
+        case EAGAIN:
+#if EWOULDBLOCK != EAGAIN
+        case EWOULDBLOCK:
+#endif
+            return write_fault_t::STALLED;
         case EPIPE:
         case ECONNRESET:
         case ECONNABORTED:
@@ -142,6 +179,41 @@ ssize_t send_gather(int fd, const msghdr* msg) {
     }
     return ::sendmsg(fd, msg, MSG_NOSIGNAL);
 }
+
+/**
+ * @brief The plain full-write loop, carrying the record's deadline and its
+ *        already-on-the-wire fact (#838).
+ *
+ * @param fd       The destination socket.
+ * @param bytes    The remaining bytes of the record.
+ * @param dl       The record's deadline (see @ref send_deadline_t).
+ * @param progress Whether EARLIER bytes of this record already reached the socket — what
+ *                 makes an abandoned write a framing desync rather than a clean miss.
+ */
+write_result_t write_all_bounded(int fd, std::span<const std::byte> bytes,
+                                 const send_deadline_t& dl, bool progress) {
+    std::size_t off = 0;
+    bool retry_spent = false;
+    while (off < bytes.size()) {
+        // The deadline is checked BEFORE the attempt, so a record whose budget is already
+        // spent costs no further syscall — and the caller's write-mutex hold ends here.
+        if (dl.expired()) return {write_outcome_t::STALLED, progress};
+        const ssize_t n = send_bytes(fd, bytes.data() + off, bytes.size() - off);
+        if (n <= 0) {
+            const write_fault_t fault = classify_write_fault(n);
+            if (fault == write_fault_t::RESUME) continue;
+            if (fault == write_fault_t::STALLED) continue;  // re-attempt until the deadline
+            if (fault == write_fault_t::PEER_GONE)
+                return {write_outcome_t::FAILED, progress};  // dead socket → drop the rest
+            if (!retry_malformed_call(retry_spent)) return {write_outcome_t::FAILED, progress};
+            continue;  // our call, not the peer: the bytes are still deliverable
+        }
+        off += static_cast<std::size_t>(n);
+        progress = true;
+        retry_spent = false;
+    }
+    return {write_outcome_t::COMPLETE, false};  // whole record on the wire ⇒ nothing partial
+}
 }  // namespace
 
 write_fault_stats_t write_fault_stats() noexcept {
@@ -187,6 +259,14 @@ void posix_endpoint_t::set_rcv_timeout(int fd) {
     ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 }
 
+void posix_endpoint_t::set_snd_timeout(int fd) {
+    // The same 100 ms quantum as the receive side, and for the same reason: it is what
+    // makes a blocked syscall return so the loop above it can re-check the world — here
+    // the record deadline (#838), there stop_.
+    timeval tv{.tv_sec = 0, .tv_usec = static_cast<suseconds_t>(kBoundedWaitMs) * 1000};
+    ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+}
+
 int posix_endpoint_t::poll_readable(int fd) {
     pollfd pfd{.fd = fd, .events = POLLIN, .revents = 0};
     return ::poll(&pfd, 1, 100);
@@ -204,29 +284,23 @@ stream_endpoint_t::~stream_endpoint_t() {
     if (leftover >= 0) ::close(leftover);
 }
 
-void stream_endpoint_t::write_all(int fd, std::span<const std::byte> bytes) {
-    if (fd < 0) return;
-    std::size_t off = 0;
-    bool retry_spent = false;
-    while (off < bytes.size()) {
-        const ssize_t n = send_bytes(fd, bytes.data() + off, bytes.size() - off);
-        if (n <= 0) {
-            const write_fault_t fault = classify_write_fault(n);
-            if (fault == write_fault_t::RESUME) continue;
-            if (fault == write_fault_t::PEER_GONE) return;  // dead socket → drop the rest
-            if (!retry_malformed_call(retry_spent)) return;
-            continue;  // our call, not the peer: the bytes are still deliverable
-        }
-        off += static_cast<std::size_t>(n);
-        retry_spent = false;
-    }
+write_result_t stream_endpoint_t::write_all(int fd, std::span<const std::byte> bytes,
+                                            std::uint32_t bound_ms) {
+    if (fd < 0) return {write_outcome_t::FAILED, false};
+    return write_all_bounded(fd, bytes, send_deadline_t(bound_ms), /*progress=*/false);
 }
 
-void stream_endpoint_t::write_all_iov(int fd, std::span<const ::iovec> vec) {
-    if (fd < 0) return;
+write_result_t stream_endpoint_t::write_all_iov(int fd, std::span<const ::iovec> vec,
+                                                std::uint32_t bound_ms) {
+    if (fd < 0) return {write_outcome_t::FAILED, false};
+    const send_deadline_t dl(bound_ms);
+    bool progress = false;  // has ANY byte of this record reached the socket
     bool retry_spent = false;
     std::size_t i = 0;  // the first entry not yet fully written
     while (i < vec.size()) {
+        // Bounded per record, not per syscall (#838): the deadline covers this loop, the
+        // nested write_all below, and therefore the caller's whole write_m_ hold.
+        if (dl.expired()) return {write_outcome_t::STALLED, progress};
         msghdr msg{};
         // sendmsg does not modify the iovec array; the cast is the C API's
         // missing const, not a licence to consume the caller's gather (#932).
@@ -236,11 +310,14 @@ void stream_endpoint_t::write_all_iov(int fd, std::span<const ::iovec> vec) {
         if (n <= 0) {
             const write_fault_t fault = classify_write_fault(n);
             if (fault == write_fault_t::RESUME) continue;
-            if (fault == write_fault_t::PEER_GONE) return;  // dead socket → drop the rest
-            if (!retry_malformed_call(retry_spent)) return;
+            if (fault == write_fault_t::STALLED) continue;  // re-attempt until the deadline
+            if (fault == write_fault_t::PEER_GONE)
+                return {write_outcome_t::FAILED, progress};  // dead socket → drop the rest
+            if (!retry_malformed_call(retry_spent)) return {write_outcome_t::FAILED, progress};
             continue;  // our call, not the peer: the bytes are still deliverable
         }
         retry_spent = false;
+        progress = true;
         std::size_t done = static_cast<std::size_t>(n);
         // Advance past every fully-written entry — the stream may stop at any
         // byte boundary.
@@ -254,12 +331,42 @@ void stream_endpoint_t::write_all_iov(int fd, std::span<const ::iovec> vec) {
             // re-gather from the next entry boundary: the gather stays read-only,
             // so a fan-out needs no per-peer copy. This is the rare slow path — a
             // complete gathered write never lands here.
-            write_all(fd, std::span<const std::byte>(
-                              static_cast<const std::byte*>(vec[i].iov_base) + done,
-                              vec[i].iov_len - done));
+            const write_result_t tail = write_all_bounded(
+                fd,
+                std::span<const std::byte>(static_cast<const std::byte*>(vec[i].iov_base) + done,
+                                           vec[i].iov_len - done),
+                dl, /*progress=*/true);
+            if (tail.outcome != write_outcome_t::COMPLETE) return tail;
             ++i;
         }
     }
+    return {write_outcome_t::COMPLETE, false};
+}
+
+bool stream_endpoint_t::note_write_result(const write_result_t& r, int fd, std::uint8_t& streak) {
+    if (r.outcome != write_outcome_t::STALLED) {
+        // Any record that COMPLETES clears the streak — the trichotomy's middle arm: a peer
+        // that misses one frame and takes the next was riding out a burst, not broken.
+        // A FAILED write is #66 lifecycle (the socket is already dead), so it neither
+        // counts a stall nor accrues one.
+        if (r.outcome == write_outcome_t::COMPLETE) streak = 0;
+        return false;
+    }
+    stalled_tx_.fetch_add(1, std::memory_order_relaxed);
+    if (streak < kMaxConsecutiveStalls) ++streak;
+    // A half-written record has desynced this stream's framing permanently, so it condemns
+    // the session at once, bypassing the streak (#837's short-write rule). Otherwise the
+    // streak decides.
+    if (r.partial || streak >= kMaxConsecutiveStalls) {
+        // shutdown, never close: the fd stays owned by whoever opened it, every later write
+        // on it fails immediately instead of waiting out another bound, and the readable-
+        // at-EOF this raises is what the recv/poll thread turns into the ORDINARY remote-
+        // departure teardown — one teardown path, with its departure notification, rather
+        // than a second one invented here (the slot_server_t::close_peer discipline).
+        if (fd >= 0) ::shutdown(fd, SHUT_RDWR);
+        streak = 0;  // the verdict is spent; the session is on its way out
+    }
+    return true;  // the frame was shed — the caller counts it in its own dropped_tx_
 }
 
 void stream_endpoint_t::send_all_locked(std::span<const std::byte> bytes) {
@@ -267,7 +374,10 @@ void stream_endpoint_t::send_all_locked(std::span<const std::byte> bytes) {
     // reset conn_fd_ underneath us; read the fd inside the lock to pair with
     // teardown_peer.
     const std::lock_guard lock(write_m_);
-    write_all(conn_fd_.load(std::memory_order_relaxed), bytes);
+    const int fd = conn_fd_.load(std::memory_order_relaxed);
+    // One peer in this "round", so the whole liveness window is this record's bound (#838).
+    const write_result_t r = write_all(fd, bytes, derive_send_bound_ms(liveness_window_ms_, 1));
+    (void)note_write_result(r, fd, tx_stall_streak_);
 }
 
 void stream_endpoint_t::teardown_peer(int fd) {
@@ -386,15 +496,30 @@ bool slot_server_t::close_peer(std::string_view peer) {
     return false;
 }
 
-void slot_server_t::broadcast_iov(std::span<const ::iovec> rec) {
+std::size_t slot_server_t::broadcast_iov(std::span<const ::iovec> rec) {
     // No per-peer copy and no scratch store: write_all_iov reads the gather
     // without consuming it (#932), so every peer writes from the same record.
     const std::lock_guard plock(peers_m_);
     const std::lock_guard wlock(write_m_);
+    // Count the round FIRST: the per-peer bound is the liveness window divided by the peers
+    // this round writes to, so the WHOLE fan-out — every peer stalled — still releases both
+    // locks inside one window (#838). The divisor is the round's own size, a fact in hand,
+    // not a guessed cap.
+    std::size_t open_peers = 0;
+    for (const std::unique_ptr<session_base_t>& s : slots_)
+        if (s->open.load(std::memory_order_relaxed)) ++open_peers;
+    const std::uint32_t bound = derive_send_bound_ms(liveness_window_ms_, open_peers);
+
+    std::size_t shed = 0;
     for (const std::unique_ptr<session_base_t>& s : slots_) {
         if (!s->open.load(std::memory_order_relaxed)) continue;
-        write_all_iov(s->fd.load(std::memory_order_relaxed), rec);
+        const int fd = s->fd.load(std::memory_order_relaxed);
+        const write_result_t r = write_all_iov(fd, rec, bound);
+        // A stalled peer strikes only ITSELF: the peers behind it in this round still get
+        // the record, and only its own session is condemned once it is provably broken.
+        if (note_write_result(r, fd, s->tx_stall_streak)) ++shed;
     }
+    return shed;
 }
 
 void slot_server_t::accept_peer() {
@@ -430,6 +555,11 @@ void slot_server_t::accept_peer() {
         ::inet_ntop(AF_INET, &remote.sin_addr, ip, sizeof(ip));
         slot->endpoint_str = std::string(ip) + ':' + std::to_string(ntohs(remote.sin_port));
     }
+    // The bounded send, armed here rather than in either derived on_accept: an accepted
+    // peer's socket is a shared-machinery fact, and #838 is a defect of the SHARED write
+    // path — both stream servers write through broadcast_iov and their directed facades, so
+    // both peer planes get the bound from one site (and a new stream server inherits it).
+    set_snd_timeout(fd);
     // Socket options and the slot's protocol buffers, then its handshake stance: a raw
     // stream peer is open the moment it is accepted, a WS peer only past its 101.
     const bool opens_now = on_accept(*slot, fd);
@@ -513,6 +643,9 @@ void slot_server_t::teardown_slot(session_base_t& s) {
         was_open = s.open.load(std::memory_order_relaxed);
         s.open.store(false, std::memory_order_relaxed);
         fd = s.fd.exchange(-1, std::memory_order_relaxed);
+        // Under the same lock the senders mutate it: a stalled peer's strikes die with its
+        // session and are never inherited by whoever next claims this slot (#838).
+        s.tx_stall_streak = 0;
     }
     if (fd >= 0) ::close(fd);
     on_slot_reset(s);

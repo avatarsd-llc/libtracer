@@ -86,10 +86,113 @@ struct write_fault_stats_t {
 };
 
 /**
- * @brief Read the @ref write_fault_stats_t tally (relaxed; a diagnostic read, not a
+ * @brief Read the `write_fault_stats`_t tally (relaxed; a diagnostic read, not a
  *        synchronizer).
  */
 [[nodiscard]] write_fault_stats_t write_fault_stats() noexcept;
+
+/**
+ * @brief The default peer LIVENESS WINDOW, milliseconds — how long a peer may fail to
+ *        take bytes before it is treated as broken (#838).
+ *
+ * The bound's provenance is an APP-PROVIDED liveness window, not a core literal: the
+ * deployer injects it (`liveness_window` — see the stream transports' constructors and the
+ * `tcp`/`ws` factory keys), exactly as `connect_timeout`, CAN's `peer_ttl` (ADR-0044) and
+ * `httpd_ws_link_t::send_timeout_ms` are injected. An MCU derives its own bound from the
+ * task watchdog (`T = TWDT / cap`, #835); a host has no watchdog to derive from, so the
+ * injection arm IS the answer there.
+ *
+ * This value is what an unconfigured deployment gets, and it exists because "safe unless
+ * you opt out" beats "buggy unless you opt in": before #838 a host stream send was
+ * UNBOUNDED, so one peer that stopped reading froze the sending application thread — and
+ * everything queued behind it — forever. Ten seconds is a conservative clamp on that: far
+ * longer than any healthy loopback/LAN peer needs to accept one frame (so it never fires
+ * in normal operation), and far shorter than "never" (so a stalled peer is detected and
+ * shed while the node is still alive). It is the fallback of last resort — a deployment
+ * that knows its own SLA injects that number instead.
+ */
+inline constexpr std::uint32_t kDefaultLivenessWindowMs = 10000;
+
+/**
+ * @brief The floor under every derived per-record send bound, milliseconds.
+ *
+ * Two jobs, neither of them a policy knob. (1) A derived bound is a DIVISION
+ * (window ÷ peers in the round) and a division has no natural floor — the #956 lesson from
+ * #837's MCU twin, where `SO_SNDTIMEO = 0` means *block forever*, so a bound that rounds
+ * to zero would restore the very defect being fixed. (2) It is the same 100 ms quantum
+ * @ref posix_endpoint_t::set_rcv_timeout and @ref posix_endpoint_t::poll_readable already
+ * use for "one bounded wait before re-checking the world" — a write that cannot move one
+ * byte inside the interval the read side already treats as a whole pass is not making
+ * progress. Not a new number: the one this file already lives by.
+ */
+inline constexpr std::uint32_t kBoundedWaitMs = 100;
+
+/**
+ * @brief Consecutive STALLED records to one peer that mark its connection broken (#838).
+ *
+ * The brokenness-detector trichotomy #837 established, transferred verbatim: one stalled
+ * record is transient backpressure — dropping that one frame is the lean response, and the
+ * next record that completes resets the count. Two can straddle a burst. Three in a row,
+ * with no completed record in between, means the peer is not riding out a burst at all: it
+ * is silently missing every frame while its socket still looks open. A brokenness
+ * detector, not a tunable — hence a named constant and NOT a config knob.
+ */
+inline constexpr std::uint8_t kMaxConsecutiveStalls = 3;
+
+/**
+ * @brief How a full-record write to one peer ended (#838).
+ *
+ * The stream transports need more than "it returned": a record that only PARTLY reached
+ * the socket has desynced that stream's framing permanently (every later byte parses under
+ * the wrong length), which is a different fault class from a record that never started —
+ * and both are different from the peer simply being gone.
+ */
+enum class write_outcome_t : std::uint8_t {
+    COMPLETE, /**< @brief Every byte of the record reached the socket. */
+    STALLED,  /**< @brief The send bound expired with the record unfinished — the peer is
+                          not taking bytes. */
+    FAILED,   /**< @brief Abandoned: the socket is dead (#66 lifecycle), or the call itself
+                          was rejected past its one re-attempt (counted in
+                          `write_fault_stats`). */
+};
+
+/**
+ * @brief The result of one full-record write — its outcome plus whether the stream
+ *        survived it (#838).
+ */
+struct write_result_t {
+    write_outcome_t outcome = write_outcome_t::COMPLETE; /**< @brief How the write ended. */
+    /**
+     * @brief True when SOME but not all of the record reached the socket.
+     *
+     * On a live connection this is a permanent framing desync, so it condemns the session
+     * IMMEDIATELY, bypassing the `kMaxConsecutiveStalls` streak — the same rule #837's
+     * short-write guard applies on the MCU (a different fault class: the stream is broken,
+     * not a frame missing). Meaningless once the socket is dead.
+     */
+    bool partial = false;
+};
+
+/**
+ * @brief Derive the per-record send bound for a round covering @p peers peers, ms (#838).
+ *
+ * One full fan-out round — one bounded record to EVERY peer in it, all of them stalled —
+ * must fit inside ONE liveness window, because the round is what holds the write lock and
+ * the sending application thread. So the window is divided by the number of peers actually
+ * in the round (a fact in hand at the call site, not a guessed cap), and floored at
+ * `kBoundedWaitMs` so the division can never yield "block forever".
+ *
+ * @param window_ms The peer liveness window (0 ⇒ `kDefaultLivenessWindowMs`).
+ * @param peers     How many peers this round writes to (0 and 1 both mean "one bound").
+ * @return The per-record bound in milliseconds, never 0.
+ */
+[[nodiscard]] constexpr std::uint32_t derive_send_bound_ms(std::uint32_t window_ms,
+                                                           std::size_t peers) noexcept {
+    const std::uint32_t window = window_ms != 0 ? window_ms : kDefaultLivenessWindowMs;
+    const std::uint32_t n = peers > 1 ? static_cast<std::uint32_t>(peers) : 1U;
+    const std::uint32_t bound = window / n;
+    return bound > kBoundedWaitMs ? bound : kBoundedWaitMs;
+}
 
 /**
  * @brief The shared recv-thread scaffold of the POSIX socket transports.
@@ -173,6 +276,24 @@ class posix_endpoint_t {
      * @param fd The socket to arm.
      */
     static void set_rcv_timeout(int fd);
+
+    /**
+     * @brief Arm the bounded SEND timeout (`SO_SNDTIMEO`, `kBoundedWaitMs`) on @p fd (#838).
+     *
+     * The egress twin of @ref set_rcv_timeout, and the syscall-level half of the #838 fix:
+     * without it a `send`/`sendmsg` into a peer whose TCP receive window is full blocks
+     * INDEFINITELY — with the write mutex held — so one stalled-but-not-dead peer freezes
+     * the sending application thread and everything queued behind it.
+     *
+     * The option is deliberately the short 100 ms quantum rather than the policy bound: it
+     * is what makes each blocked syscall RETURN so the software deadline
+     * (@ref stream_endpoint_t::write_all_iov's @p bound_ms, derived from the liveness
+     * window) can be observed. Putting the policy bound on the socket instead would bound
+     * each syscall but not the record, since a stream write may need several.
+     *
+     * @param fd The socket to arm.
+     */
+    static void set_snd_timeout(int fd);
 
     /**
      * @brief One bounded readability wait: `poll(2)` for POLLIN with a 100 ms timeout on @p fd.
@@ -280,10 +401,21 @@ class stream_endpoint_t : protected posix_endpoint_t {
      * disconnect (#948). The caller holds @ref write_m_ per the
      * write-serialization invariant.
      *
+     * A peer that stops taking bytes is bounded by @p bound_ms (#838): the record is
+     * abandoned once the deadline passes, and @ref write_result_t says whether the stream
+     * survived it. The caller holds @ref write_m_ for the whole call, so this bound is
+     * also the bound on that lock hold — which is the actual defect #838 fixes, since an
+     * unbounded write under the mutex froze every other sender on the link too.
+     *
      * @param fd    The destination fd; a negative fd is a no-op.
      * @param bytes The bytes to write.
+     * @param bound_ms Deadline for the WHOLE record, ms; 0 = unbounded (the pre-#838
+     *        behaviour, kept for sockets with no `SO_SNDTIMEO` armed — there a blocked
+     *        write never returns to observe a deadline anyway).
+     * @return How the write ended.
      */
-    static void write_all(int fd, std::span<const std::byte> bytes);
+    static write_result_t write_all(int fd, std::span<const std::byte> bytes,
+                                    std::uint32_t bound_ms = 0);
 
     /**
      * @brief Write the gathered @p vec entries to @p fd completely as ONE record,
@@ -303,10 +435,44 @@ class stream_endpoint_t : protected posix_endpoint_t {
      * lifecycle). The caller holds @ref write_m_ per the write-serialization
      * invariant.
      *
+     * The @p bound_ms deadline covers the WHOLE record, resume path included, exactly as
+     * in @ref write_all (#838).
+     *
      * @param fd  The destination fd; a negative fd is a no-op.
      * @param vec The entries to gather, in order, as ONE record.
+     * @param bound_ms Deadline for the whole record, ms; 0 = unbounded (see @ref write_all).
+     * @return How the write ended.
      */
-    static void write_all_iov(int fd, std::span<const ::iovec> vec);
+    static write_result_t write_all_iov(int fd, std::span<const ::iovec> vec,
+                                        std::uint32_t bound_ms = 0);
+
+    /**
+     * @brief Account one finished write and condemn a peer that keeps stalling (#838).
+     *
+     * The per-class policy of the #838 ruling, at the one seam every stream sender passes
+     * through. A STALLED record is never silently dropped: it is counted
+     * (@ref stalled_tx_, and the caller's own `dropped_tx_` via the return value) so the
+     * shed frame is visible to an observer, and the peer that caused it accrues a strike.
+     * The peer is then CLOSED — `shutdown(SHUT_RDWR)`, which takes effect on this line,
+     * needs no cooperation from the stalled socket, makes every later write fail at once
+     * and raises the readable-at-EOF the recv/poll thread turns into the ordinary
+     * remote-departure teardown (the same path @ref slot_server_t::close_peer uses) — in
+     * two cases:
+     *
+     * - `write_result_t::partial`: the record half-reached the wire, so this stream's
+     *   framing is desynced permanently. Immediate, bypassing the streak.
+     * - @p streak reaching `kMaxConsecutiveStalls`: the peer is broken, not busy.
+     *
+     * Call with @ref write_m_ held (it reads the fd and mutates @p streak, both of which
+     * that lock guards) and with the fd the record was written to.
+     *
+     * @param r      The write's result.
+     * @param fd     The peer socket the record went to.
+     * @param streak The peer's consecutive-stall count, updated in place (reset by any
+     *               completed record).
+     * @retval true  The frame was SHED — the caller ticks its own `dropped_tx_`.
+     */
+    bool note_write_result(const write_result_t& r, int fd, std::uint8_t& streak);
 
     /**
      * @brief Write @p bytes to the live peer as one serialized record.
@@ -350,6 +516,17 @@ class stream_endpoint_t : protected posix_endpoint_t {
     std::mutex write_m_;           /**< @brief Serializes writes to @ref conn_fd_ (see the
                                                write-serialization invariant). */
     std::atomic<int> conn_fd_{-1}; /**< @brief The live peer connection (-1 = none). */
+    /** @brief The injected peer liveness window, ms (0 = `kDefaultLivenessWindowMs`) —
+     *         the number every per-record send bound on this endpoint derives from
+     *         (`derive_send_bound_ms`). Set once at construction, read-only after. */
+    std::uint32_t liveness_window_ms_ = 0;
+    /** @brief Records shed because their send bound expired (#838) — the "how many frames
+     *         did a stalled peer cost us" counter, distinct from the other `dropped_tx_`
+     *         causes. Relaxed: a diagnostic tally, not a synchronizer. */
+    std::atomic<std::uint64_t> stalled_tx_{0};
+    /** @brief The ONE peer's consecutive-stall streak (guarded by @ref write_m_) — the
+     *         multi-peer servers keep one per slot instead. */
+    std::uint8_t tx_stall_streak_ = 0;
 };
 
 /**
@@ -391,6 +568,18 @@ class slot_server_t : public transport_t, public bus_link_t, protected stream_en
 
     /** @brief The actual bound TCP port (resolves an ephemeral 0 request). */
     [[nodiscard]] std::uint16_t local_port() const noexcept { return bound_port_; }
+
+    /** @brief Records shed because their send bound expired, summed over every peer this
+     *         server has carried (#838) — the subset of `dropped_tx()` a stalled peer
+     *         caused. `kMaxConsecutiveStalls` of them in a row on one session, or any
+     *         one that half-reached the wire, closes that session. */
+    [[nodiscard]] std::uint64_t stalled_tx() const noexcept {
+        return stalled_tx_.load(std::memory_order_relaxed);
+    }
+
+    /** @brief The injected peer liveness window this server bounds its sends by, ms —
+     *         the value as configured, `0` meaning `kDefaultLivenessWindowMs` (#838). */
+    [[nodiscard]] std::uint32_t liveness_window_ms() const noexcept { return liveness_window_ms_; }
 
     /**
      * @brief The @ref bus_link_t facet (ADR-0044) when constructed `peer_named`, else
@@ -477,6 +666,11 @@ class slot_server_t : public transport_t, public bus_link_t, protected stream_en
         /** @brief The directed facade @ref peer_link returns — the derived slot's own
          *         member, registered here by @ref make_session. */
         transport_t* peer_endpoint = nullptr;
+        /** @brief This session's consecutive-stall streak (#838) — guarded by `write_m_`,
+         *         like the two atomics above, because it is mutated by exactly the senders
+         *         that hold it. Cleared as the slot is recycled, so a stalled peer's
+         *         strikes can never be inherited by its successor in the slot. */
+        std::uint8_t tx_stall_streak = 0;
     };
 
     /**
@@ -486,9 +680,14 @@ class slot_server_t : public transport_t, public bus_link_t, protected stream_en
      *                   deployment-injected bound (RFC-0006) — a connection beyond it is
      *                   accepted and immediately closed (a clean refusal, not a hung SYN).
      * @param peer_named Expose the @ref bus_link_t facet (see @ref bus).
+     * @param liveness_window_ms The app-provided peer liveness window, ms (0 =
+     *                   `kDefaultLivenessWindowMs`) — see @ref broadcast_iov for how
+     *                   one fan-out round is bounded by it (#838).
      */
-    slot_server_t(std::size_t max_peers, bool peer_named)
-        : max_peers_(max_peers), peer_named_(peer_named) {}
+    slot_server_t(std::size_t max_peers, bool peer_named, std::uint32_t liveness_window_ms = 0)
+        : max_peers_(max_peers), peer_named_(peer_named) {
+        liveness_window_ms_ = liveness_window_ms;
+    }
 
     /**
      * @brief Closes the listen socket and sweeps every slot's fd.
@@ -545,9 +744,19 @@ class slot_server_t : public transport_t, public bus_link_t, protected stream_en
      * straight from @p rec — no per-peer copy, and no scratch store that could exhaust
      * and drop the frame. Takes @ref peers_m_ → `write_m_`, the header lock order.
      *
+     * The ROUND is bounded (#838): the per-peer record bound is the liveness window
+     * divided by the number of open peers this round actually writes to
+     * (`derive_send_bound_ms`), so a fan-out in which EVERY peer has stopped reading
+     * still releases both locks — and the calling application thread — inside one window
+     * instead of blocking forever on the first stalled peer. A peer whose record stalls is
+     * counted and strikes only ITSELF (@ref stream_endpoint_t::note_write_result); the
+     * healthy peers behind it in the same round still get the frame.
+     *
      * @param rec The assembled record (framing entry first, payload spans after).
+     * @return How many peers the record was SHED for (each one a `dropped_tx_` the caller
+     *         ticks — the counters live in the derived servers).
      */
-    void broadcast_iov(std::span<const ::iovec> rec);
+    std::size_t broadcast_iov(std::span<const ::iovec> rec);
 
     /**
      * @name Variance points (runtime virtuals — ADR-0047 §4 wiring-frequency).

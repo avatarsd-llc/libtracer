@@ -145,12 +145,15 @@ a field on `conn_settings_t`, and no kind can read another kind's key.
 | --- | --- | --- | --- | --- |
 | `peer_named` | `VALUE` u8 (flag) | LISTEN | `0` | Non-zero exposes the `bus_link_t` facet (ADR-0044): each accepted peer gets its own return-route identity and the connection's `:children[]` enumerates live peers. Without it a listener is a **broadcast** link — `send` fans out to every open peer and no peer is individually addressable. |
 | `max_peers` | `VALUE` u32 | LISTEN | `0` | Concurrent-peer admission cap. `0` = uncapped by this key (still bounded by the host's resources, per RFC-0006). |
+| `liveness_window` | `VALUE` u32 | DIAL + LISTEN | `0` | The peer **liveness window** (#838): how long a peer may fail to take bytes before it is treated as broken. It bounds every send (and the write-mutex hold it takes) — each record gets `window ÷ peers-in-this-round`, floored at 100 ms — so a stalled peer can no longer freeze the sending thread. Three consecutive stalled records to one peer, or one that half-reached the wire, close that peer. `0` = the conservative 10 s default clamp, **never** "unbounded". The number is the deployer's, exactly as `connect_timeout` and CAN's `peer_ttl` are; it converges into RFC-0014 §S5's single liveness contract. |
 
 <!-- config-keys:end -->
 
-Both are ignored on a DIAL: a client has exactly one peer, itself.
+The first two are ignored on a DIAL: a client has exactly one peer, itself. `liveness_window`
+applies to both roles — a dialled client can be stalled by its server just as a listener can by
+a peer.
 
-### `ws` — the same two keys, verbatim
+### `ws` — the same keys, verbatim
 
 <!-- config-keys:begin core/src/builtin_transport_ws.cpp -->
 
@@ -158,6 +161,7 @@ Both are ignored on a DIAL: a client has exactly one peer, itself.
 | --- | --- | --- | --- | --- |
 | `peer_named` | `VALUE` u8 (flag) | LISTEN | `0` | As `tcp`: the ADR-0044 per-peer identity facet instead of a broadcast link. |
 | `max_peers` | `VALUE` u32 | LISTEN | `0` | As `tcp`: the concurrent-peer admission cap. |
+| `liveness_window` | `VALUE` u32 | DIAL + LISTEN | `0` | As `tcp`: the peer liveness window every send is bounded by (#838). The shipped case here is a throttled background browser tab that stops reading — it now costs counted frames and its own session, not the server's sending thread. |
 
 <!-- config-keys:end -->
 

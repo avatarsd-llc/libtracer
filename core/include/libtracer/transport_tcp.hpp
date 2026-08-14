@@ -134,10 +134,19 @@ class tcp_transport_t : public transport_t, private stream_endpoint_t {
      *                  historical shape) decodes it on the recv thread into
      *                  whatever sink is installed by then — possibly none, in
      *                  which case it is dropped with no counter moving.
+     * @param liveness_window_ms The app-provided PEER LIVENESS WINDOW in ms, `0` =
+     *                  `kDefaultLivenessWindowMs` (#838): how long this peer may fail to
+     *                  take bytes before it is treated as broken. It bounds every `send`
+     *                  (and the write-mutex hold it takes), so no peer can freeze the
+     *                  sending thread; `kMaxConsecutiveStalls` records in a row that hit
+     *                  it — or one that half-reached the wire — close the connection. The
+     *                  same contract CAN's `peer_ttl` (ADR-0044) states, and the number
+     *                  RFC-0014's §S5 liveness engine converges on.
      */
     tcp_transport_t(const std::string& peer_host, std::uint16_t peer_port,
                     mem::mem_backend_t* backend = &mem::heap_backend(), std::size_t max_frame = 0,
-                    std::size_t recv_stack = 0, bool defer_recv = false);
+                    std::size_t recv_stack = 0, bool defer_recv = false,
+                    std::uint32_t liveness_window_ms = 0);
 
     /**
      * @brief LISTEN mode: bind+listen on @p bind_port, accept ONE inbound peer.
@@ -151,10 +160,12 @@ class tcp_transport_t : public transport_t, private stream_endpoint_t {
      * @param backend   The RX memory seam — see the DIAL constructor.
      * @param recv_stack Recv-thread stack size in bytes, 0 = platform default
      *                  (`posix_endpoint_t::start`).
+     * @param liveness_window_ms The peer liveness window — see the DIAL constructor (#838).
      */
     explicit tcp_transport_t(std::uint16_t bind_port,
                              mem::mem_backend_t* backend = &mem::heap_backend(),
-                             std::size_t max_frame = 0, std::size_t recv_stack = 0);
+                             std::size_t max_frame = 0, std::size_t recv_stack = 0,
+                             std::uint32_t liveness_window_ms = 0);
 
     /** @brief Stop the receive thread and close all sockets. */
     ~tcp_transport_t() override;
@@ -243,6 +254,18 @@ class tcp_transport_t : public transport_t, private stream_endpoint_t {
         return dropped_tx_.load(std::memory_order_relaxed);
     }
 
+    /** @brief The subset of @ref dropped_tx a STALLED peer caused (#838): records abandoned
+     *         because their send bound expired. `kMaxConsecutiveStalls` in a row — or one
+     *         that half-reached the wire — closes the connection, so a non-zero count with
+     *         @ref link_up still true is a peer that is falling behind but recovering. */
+    [[nodiscard]] std::uint64_t stalled_tx() const noexcept {
+        return stalled_tx_.load(std::memory_order_relaxed);
+    }
+
+    /** @brief The peer liveness window this link bounds its sends by, ms, as constructed
+     *         (`0` ⇒ `kDefaultLivenessWindowMs`) (#838). */
+    [[nodiscard]] std::uint32_t liveness_window_ms() const noexcept { return liveness_window_ms_; }
+
     /** @brief The interface-level snapshot (#932) — the concrete accessors above, as the
      *         one shape a generic `transport_t*` holder reads. */
     [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
@@ -329,11 +352,19 @@ class transport_tcp_server : public slot_server_t {
      * @param recv_stack Poll-thread stack size in bytes, 0 = platform default
      *                   (`posix_endpoint_t::start`). One thread serves every
      *                   peer, so this is the whole server's recv-stack knob.
+     * @param liveness_window_ms The app-provided PEER LIVENESS WINDOW in ms, `0` =
+     *                   `kDefaultLivenessWindowMs` (#838). One fan-out round is bounded
+     *                   by it (each peer gets window ÷ peers-in-the-round), so a peer that
+     *                   stops reading can no longer freeze the sending thread — or the
+     *                   other peers' frames — behind it; a session that stalls
+     *                   `kMaxConsecutiveStalls` records in a row, or once mid-record, is
+     *                   closed.
      */
     explicit transport_tcp_server(std::uint16_t bind_port,
                                   mem::mem_backend_t* backend = &mem::heap_backend(),
                                   std::size_t max_frame = 0, std::size_t max_peers = 0,
-                                  bool peer_named = false, std::size_t recv_stack = 0);
+                                  bool peer_named = false, std::size_t recv_stack = 0,
+                                  std::uint32_t liveness_window_ms = 0);
 
     /** @brief Stop the poll thread and close all sockets. */
     ~transport_tcp_server() override;

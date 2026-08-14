@@ -206,8 +206,9 @@ struct transport_ws_server::session_t : slot_server_t::session_base_t {
 
 transport_ws_server::transport_ws_server(std::uint16_t bind_port, mem::mem_backend_t* backend,
                                          std::size_t max_frame, std::size_t max_peers,
-                                         bool peer_named, std::size_t recv_stack)
-    : slot_server_t(max_peers, peer_named), backend_(backend) {
+                                         bool peer_named, std::size_t recv_stack,
+                                         std::uint32_t liveness_window_ms)
+    : slot_server_t(max_peers, peer_named, liveness_window_ms), backend_(backend) {
     max_frame_ = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
     if (!bind_listen(bind_port)) return;
     start([this] { run(); }, recv_stack);
@@ -229,7 +230,9 @@ std::unique_ptr<slot_server_t::session_base_t> transport_ws_server::make_session
 }
 
 bool transport_ws_server::on_accept(session_base_t& base, int fd) {
-    (void)fd;  // no per-socket option: WS rides the shared stream setup
+    (void)fd;  // no per-socket option of its own: WS rides the shared stream setup, which
+               // since #838 includes the bounded SO_SNDTIMEO armed in accept_peer
+
     session_t& s = static_cast<session_t&>(base);
     s.hs_buf.clear();
     s.buf.clear();
@@ -279,8 +282,10 @@ void transport_ws_server::send(std::span<const std::span<const std::byte>> iov) 
 
     // The shared fan-out writes this ONE gather to every peer under the header lock
     // order, peers_m_ → write_m_: write_all_iov does not consume it (#932), so no
-    // per-peer copy is taken.
-    broadcast_iov(std::span<const ::iovec>(vec, n));
+    // per-peer copy is taken. It is also where the round's #838 send bound is derived and
+    // applied; every peer the bound shed is counted here.
+    dropped_tx_.fetch_add(broadcast_iov(std::span<const ::iovec>(vec, n)),
+                          std::memory_order_relaxed);
 }
 
 void transport_ws_server::peer_endpoint_t::send(std::span<const std::byte> frame) {
@@ -312,7 +317,13 @@ void transport_ws_server::peer_endpoint_t::send(std::span<const std::span<const 
         owner_->dropped_tx_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    write_all_iov(slot_->fd.load(std::memory_order_relaxed), std::span<const ::iovec>(vec, n));
+    // One peer in this round ⇒ the whole liveness window is this record's bound (#838), and
+    // a stall strikes this session alone.
+    const int fd = slot_->fd.load(std::memory_order_relaxed);
+    const write_result_t r = write_all_iov(fd, std::span<const ::iovec>(vec, n),
+                                           derive_send_bound_ms(owner_->liveness_window_ms(), 1));
+    if (owner_->note_write_result(r, fd, slot_->tx_stall_streak))
+        owner_->dropped_tx_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void transport_ws_server::on_readable(session_base_t& base, const std::byte* data,
@@ -346,7 +357,10 @@ void transport_ws_server::on_readable(session_base_t& base, const std::byte* dat
         for (std::size_t i = 0; i < resp.size(); ++i) bytes[i] = static_cast<std::byte>(resp[i]);
         {
             const std::lock_guard lock(write_m_);
-            write_all(fd, bytes);
+            // Bounded like every other write on this socket (#838): the handshake reply
+            // runs on the POLL thread, so an unbounded one would stall every peer this
+            // server has, not just the one being admitted.
+            write_all(fd, bytes, derive_send_bound_ms(liveness_window_ms_, 1));
             // Publish the slot as OPEN while still holding the write lock, so the
             // "101 is on the wire" and "senders may use this slot" transitions are one
             // step. Storing it after the lock is released opens a window in which the peer
@@ -458,8 +472,11 @@ bool transport_ws_server::drain_frames(session_t& s) {
                 const std::size_t plen =
                     ws::encode_server_control(pong, ws::opcode_t::PONG, frame.payload);
                 const std::lock_guard lock(write_m_);
+                // Bounded (#838): this is the poll thread, so a PONG into a stalled peer
+                // used to hold write_m_ — and stop every peer's ingress — indefinitely.
                 write_all(s.fd.load(std::memory_order_relaxed),
-                          std::span<const std::byte>(pong.data(), plen));
+                          std::span<const std::byte>(pong.data(), plen),
+                          derive_send_bound_ms(liveness_window_ms_, 1));
                 break;
             }
             case ws::opcode_t::CLOSE:
@@ -476,8 +493,10 @@ bool transport_ws_server::drain_frames(session_t& s) {
 
 transport_ws_client::transport_ws_client(const std::string& host, std::uint16_t port,
                                          mem::mem_backend_t* backend, std::size_t max_frame,
-                                         std::size_t recv_stack, bool defer_recv)
+                                         std::size_t recv_stack, bool defer_recv,
+                                         std::uint32_t liveness_window_ms)
     : backend_(backend), recv_stack_(recv_stack) {
+    liveness_window_ms_ = liveness_window_ms;                      // the #838 send bound's source
     max_frame_ = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
     // Seed the per-frame masking-key stream with something that varies between
     // connections (steady_clock + this address). Not crypto-strong — RFC 6455
@@ -498,6 +517,11 @@ transport_ws_client::transport_ws_client(const std::string& host, std::uint16_t 
         ::close(fd);
         return;
     }
+
+    // The bounded send (#838), armed before the first byte goes out: without it the
+    // handshake request AND every later frame block forever on a peer that stops reading,
+    // with write_m_ held.
+    set_snd_timeout(fd);
 
     // Bytes the server pipelined behind its 101 — carried out of the handshake and into
     // the recv loop's buffer, never re-read from the socket (they are already off it).
@@ -577,7 +601,12 @@ void transport_ws_client::send(std::span<const std::byte> frame) {
         dropped_tx_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    write_all(fd, std::span<const std::byte>(tx_buf_.data(), n));
+    // Bounded by the liveness window (#838): the hold used to span a fully blocking write,
+    // so a server that stopped reading froze this thread and every sender behind it.
+    const write_result_t r = write_all(fd, std::span<const std::byte>(tx_buf_.data(), n),
+                                       derive_send_bound_ms(liveness_window_ms_, 1));
+    if (note_write_result(r, fd, tx_stall_streak_))
+        dropped_tx_.fetch_add(1, std::memory_order_relaxed);  // shed by the bound, counted
 }
 
 bool transport_ws_client::handshake(int fd, const std::string& host, std::uint16_t port,
@@ -607,7 +636,9 @@ bool transport_ws_client::handshake(int fd, const std::string& host, std::uint16
     for (std::size_t i = 0; i < req.size(); ++i) bytes[i] = static_cast<std::byte>(req[i]);
     {
         const std::lock_guard lock(write_m_);
-        write_all(fd, bytes);
+        // Bounded (#838) — this runs in the CONSTRUCTOR, so an unbounded write here hangs
+        // the application thread that is wiring the link.
+        write_all(fd, bytes, derive_send_bound_ms(liveness_window_ms_, 1));
     }
 
     // Read the response header block (CRLFCRLF), bounded so a stuck peer cannot
@@ -712,7 +743,9 @@ void transport_ws_client::serve(int fd, std::vector<std::byte> pipelined) {
                     const std::size_t plen = ws::encode_client_control(
                         pong, ws::opcode_t::PONG, frame.payload, next_mask_key());
                     const std::lock_guard lock(write_m_);
-                    write_all(fd, std::span<const std::byte>(pong.data(), plen));
+                    // Bounded (#838): the recv thread must not be parked in a write.
+                    write_all(fd, std::span<const std::byte>(pong.data(), plen),
+                              derive_send_bound_ms(liveness_window_ms_, 1));
                     break;
                 }
                 case ws::opcode_t::CLOSE:

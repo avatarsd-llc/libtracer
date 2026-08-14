@@ -48,6 +48,56 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   whole suite green on a TSO host. The evidence half of the same question — an
   `ubuntu-24.04-arm` CI leg that can actually exhibit the anomaly — landed earlier under #1140.
 
+### Fixed
+
+- **Host stream sends no longer block INDEFINITELY on a stalled peer, and no longer hold the
+  write mutex while they do** ([#838](https://github.com/avatarsd-llc/libtracer/issues/838);
+  the host twin of [#835](https://github.com/avatarsd-llc/libtracer/issues/835) / PR #837).
+  `tcp_transport_t::send`, `transport_ws_client::send` and both servers' per-peer writes held
+  `write_m_` across a fully blocking `write_all_iov`/`write_all` with **no `SO_SNDTIMEO`
+  anywhere**. A peer that was stalled-not-dead — alive, socket open, TCP receive window full —
+  parked the SENDING APPLICATION THREAD inside that syscall forever, and because deliveries run
+  on the writer's thread (`write` → `fan_out` → `deliver_remote` → `send`) one such subscriber
+  froze the writing application and everything queued behind the mutex with it. Now: every
+  stream socket gets a bounded `SO_SNDTIMEO` at admission/dial, and every record carries a
+  monotonic **deadline** derived from the peer LIVENESS WINDOW — so the bound is on the record
+  (and therefore on the lock hold), not merely on one syscall. `EAGAIN`/`EWOULDBLOCK` became its
+  own write-fault class (`STALLED`); it previously fell into `MALFORMED_CALL`, which would have
+  mis-filed a stalled peer as a libtracer defect. A stalled record is **counted, never silently
+  dropped** (`stalled_tx()`, and the link's existing `dropped_tx()`), and the peer that caused it
+  is closed — immediately if the record half-reached the wire (that stream's framing is desynced
+  permanently), otherwise at `kMaxConsecutiveStalls` (3) consecutive stalls with no completed
+  record in between, #837's brokenness-detector trichotomy transferred verbatim. The close is a
+  `shutdown(SHUT_RDWR)`, so the recv/poll thread runs the ORDINARY remote-departure teardown and
+  its departure notification, and a strike never outlives the session that earned it.
+  **In scope:** tcp client + listen, ws client, and both servers' per-peer/broadcast writes.
+  **Out of scope, deliberately:** quic / webtransport (native flow control) and CAN (already has
+  `peer_ttl`), per the issue's scope ruling.
+
+### Added
+
+- **The peer LIVENESS WINDOW: `liveness_window_ms` on all four host stream transports, and the
+  `liveness_window` config key on `tcp` and `ws`**
+  ([#838](https://github.com/avatarsd-llc/libtracer/issues/838)). The #838 bound's provenance is
+  an **app-provided liveness window**, injected exactly as `connect_timeout`, CAN's `peer_ttl`
+  (ADR-0044) and `httpd_ws_link_t::send_timeout_ms` are — not a core literal, and not derived,
+  because a host has no task watchdog to derive from the way the MCU link does. `tcp_transport_t`
+  (both constructors), `transport_tcp_server`, `transport_ws_client` and `transport_ws_server`
+  each gained a trailing `liveness_window_ms` parameter (default `0` = the conservative
+  `kDefaultLivenessWindowMs` **10 s** clamp — "safe unless you opt out", since today's unbounded
+  block is the bug); the `tcp`/`ws` factories parse the same number from the kind-private
+  `liveness_window` key (VALUE u32, ms). Existing call sites are source-compatible. New
+  accessors `liveness_window_ms()` and `stalled_tx()` on all four. The per-record bound is
+  `derive_send_bound_ms(window, peers-in-this-round)`, floored at `kBoundedWaitMs` (100 ms —
+  a bound that rounds to 0 means *block forever*, the #956 lesson), so one whole fan-out round
+  with EVERY peer stalled still releases both locks inside one window. `stream_endpoint_t`'s two
+  full-write helpers now RETURN a `write_result_t` (outcome + whether the record half-landed) and
+  take an optional per-record bound; `slot_server_t::broadcast_iov` returns how many peers it
+  shed for. Framed as the liveness window rather than a fifth independent timeout knob so it
+  converges into RFC-0014 §S5's single liveness contract later; S5's engine is NOT built here —
+  a keepalive clock cannot unblock a send already stuck inside `write_all_iov`, which is why the
+  per-send bound is what makes that clock enforceable at all.
+
 ## [0.12.0] — 2026-08-14
 
 ### Added

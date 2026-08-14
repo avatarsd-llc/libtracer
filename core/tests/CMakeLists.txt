@@ -1257,6 +1257,18 @@ target_link_libraries(tcp_test PRIVATE libtracer)
 libtracer_test_warnings(tcp_test)
 add_test(NAME tcp COMMAND tcp_test)
 
+# #838 — the host twin of #835: a stream send into a peer that stopped reading is BOUNDED
+# (the write mutex is held across it, so an unbounded one froze every sender on the link),
+# the shed frame is counted, and a peer that keeps stalling — or half-takes one record — is
+# closed with attribution instead of blocked on forever. The helper-level arms run over a
+# socketpair whose buffers are full; the last arm drives a real tcp_transport_t against a
+# peer that never reads, which HANGS on the pre-fix code.
+add_executable(send_stall_test send_stall_test.cpp)
+target_link_libraries(send_stall_test PRIVATE libtracer)
+libtracer_test_warnings(send_stall_test)
+add_test(NAME send_stall COMMAND send_stall_test)
+set_tests_properties(send_stall PROPERTIES TIMEOUT 60)
+
 # #903 — the stream_endpoint_t full-write helpers under a REAL signal storm: a
 # socketpair with a small SO_SNDBUF, a deliberately slow reader, and SIGUSR1
 # (no SA_RESTART) fired at the writer thread, so a blocked send returns EINTR
