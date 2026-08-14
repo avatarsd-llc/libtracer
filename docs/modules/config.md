@@ -152,6 +152,10 @@ satisfy.
 :project: libtracer
 ```
 
+```{doxygenvariable} tr::graph::kWeaklyOrdered
+:project: libtracer
+```
+
 ```{doxygentypedef} tr::graph::acl_policy_t
 :project: libtracer
 ```

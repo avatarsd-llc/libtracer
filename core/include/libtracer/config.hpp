@@ -278,6 +278,37 @@ struct default_config_t {
      * single-core chip and equally of an SMP chip whose spinner and holder share a core.
      */
     static constexpr bool kSpinWaitSafe = true;
+
+    /**
+     * @brief Whether this target's memory model may REORDER a later relaxed load ahead of an
+     *        earlier `seq_cst` store — i.e. whether it is anything WEAKER than x86-64's TSO
+     *        (#1143).
+     *
+     * The one knob here that is not a size, a policy or a preference: it states what the
+     * hardware does, so that an ordering precondition can be a `static_assert` instead of a
+     * paragraph. The precondition it carries today is the delivery-skip Dekker pair (#635,
+     * #1140) — `vertex_t::own_subs_ordered` against ADR-0049's subscribe latch — whose
+     * `seq_cst` halves are argued from the code rather than from coverage, because a relaxed
+     * ablation leaves the whole suite green wherever CI happens to run.
+     * `kDeliverySkipOrder` (`vertex.hpp`) is the constant this refuses to see weakened.
+     *
+     * **Default `true`: assume weak unless a target says otherwise.** The two directions are
+     * not symmetric. Saying `true` on a TSO host costs exactly nothing — the orders this gates
+     * are already `seq_cst` on every target, so the assertion is satisfied as shipped and no
+     * instruction changes. Saying `false` on a target that is actually weak silently disarms
+     * the check on the one class of target it exists for, and the shipped set is mostly that
+     * class: rv32 (esp32c6/c3), Cortex-M0, and the `ubuntu-24.04-arm` CI leg (#1140) are all
+     * weakly ordered, and a raw `-I` consumer — a vendored source drop, the footprint gate —
+     * states nothing at all. The value that is safe to inherit in silence is therefore the
+     * strict one.
+     *
+     * It never SELECTS a weaker order: nothing reads this to relax an access, so a target that
+     * sets it `false` gets the same instructions, only a check that stops firing. Override
+     * fragment: `static constexpr bool kWeaklyOrdered = false;` — worth setting only for an
+     * x86-64-only build that wants the freedom to relax those loads, which is a decision to
+     * take deliberately rather than by omission.
+     */
+    static constexpr bool kWeaklyOrdered = true;
 };
 
 }  // namespace tr::graph
@@ -328,6 +359,8 @@ inline constexpr std::size_t kHazardReaderSlots = config_t::kHazardReaderSlots;
 inline constexpr std::size_t kEdgePinSlots = config_t::kEdgePinSlots;
 /** @brief @ref default_config_t::kPinPayloadRatio for this build. */
 inline constexpr std::uint32_t kPinPayloadRatio = config_t::kPinPayloadRatio;
+/** @brief @ref default_config_t::kWeaklyOrdered for this build. */
+inline constexpr bool kWeaklyOrdered = config_t::kWeaklyOrdered;
 /** @brief @ref default_config_t::acl_policy_t for this build. */
 using acl_policy_t = config_t::acl_policy_t;
 /** @brief @ref default_config_t::lkv_slot_t for this build. */

@@ -67,6 +67,49 @@ static_assert(!std::is_same_v<lkv_slot_t, hazard_slot_t> || detail_hp::kClaimWor
               "atomics of pointer width");
 
 /**
+ * @brief The memory order of the DELIVERY-SKIP Dekker pair (#635, #1140) — the one order in
+ *        this library whose value is a correctness precondition on the TARGET rather than a
+ *        local choice, so it is named once instead of spelled at each of its two sites.
+ *
+ * The pair is `vertex_t::own_subs_ordered` / `vertex_t::bump_own_subs`, and the argument for
+ * `seq_cst` is written out at the former: a publisher that SKIPS a delivery on a zero count
+ * must be in one total order with a subscriber that is concurrently taking ADR-0049's
+ * durability latch, or the new subscriber latches the pre-write value and the publish that
+ * raced it reaches nobody. Both halves take this order, so the pairing has one spelling and
+ * cannot be half-weakened by an edit that reaches only one site.
+ *
+ * It is `constexpr` and it is asserted below because relaxing it is UNTESTABLE where CI
+ * mostly runs: on x86-64 the `seq_cst` LKV store lowers to a locked `xchg`, so even a relaxed
+ * load of zero cannot observe the pre-store world and the suite stays green through the
+ * ablation. The `ubuntu-24.04-arm` leg (#1140) is the coverage half of that answer; this
+ * constant and @ref tr::graph::kWeaklyOrdered are the refusal half.
+ */
+inline constexpr std::memory_order kDeliverySkipOrder = std::memory_order_seq_cst;
+
+/**
+ * @brief A weakly-ordered target may not weaken the delivery-skip pair (#1143).
+ *
+ * The precondition #1140 could previously only state in prose, now compiler-checked: on a
+ * target that reorders a later relaxed load ahead of an earlier `seq_cst` store — every
+ * shipped MCU target, and any many-core aarch64 host — the skip gate's two halves must share
+ * one total order, which nothing weaker than `seq_cst` gives them. Ablating
+ * `kDeliverySkipOrder` now fails the BUILD on those targets instead of passing the suite
+ * on a TSO host and shipping a lost delivery to the ones CI cannot run.
+ *
+ * A build that sets @ref tr::graph::kWeaklyOrdered to `false` states that its target orders
+ * that pair in hardware and takes the ablation's consequences on itself; nothing here selects
+ * a weaker order on its behalf.
+ */
+static_assert(!kWeaklyOrdered || kDeliverySkipOrder == std::memory_order_seq_cst,
+              "this target is weakly ordered (tr::graph::kWeaklyOrdered), so the delivery-skip "
+              "gate vertex_t::own_subs_ordered and its subscriber-side bump must both be "
+              "seq_cst: anything weaker leaves a publisher's skip and a concurrent "
+              "subscriber's ADR-0049 latch load out of one total order, and the racing publish "
+              "reaches nobody (#635, #1140). Restore kDeliverySkipOrder, or -- only for a "
+              "target whose hardware really does order it -- set kWeaklyOrdered = false in the "
+              "libtracer/config_override.hpp fragment.");
+
+/**
  * @brief The terminal value of a vertex's retirement generation (RFC-0024 §4.4 rule 3).
  *
  * The generation SATURATES here rather than wrapping. Wrapping is the #603 failure class
@@ -2741,9 +2784,13 @@ class vertex_t {
      * latch load — so the latch carries the value the skipped fan-out would have delivered.
      * The other interleaving (count already bumped, slot not yet appended) costs one
      * pointless lock acquisition that snapshots nothing, never a lost delivery.
+     *
+     * Both halves take `kDeliverySkipOrder`, which a weakly-ordered target
+     * (@ref tr::graph::kWeaklyOrdered) `static_assert`s is still `seq_cst` — so the argument
+     * above is a build failure when it stops holding, not only a paragraph (#1143).
      */
     [[nodiscard]] std::uint32_t own_subs_ordered() const noexcept {
-        return own_subs_.load(std::memory_order_seq_cst);
+        return own_subs_.load(kDeliverySkipOrder);
     }
     /**
      * @brief Adjust the own active-slot count by @p delta (subscribe/unsubscribe).
@@ -2752,7 +2799,7 @@ class vertex_t {
      *       stronger order costs nothing that is measured.
      */
     void bump_own_subs(std::int32_t delta) noexcept {
-        own_subs_.fetch_add(static_cast<std::uint32_t>(delta), std::memory_order_seq_cst);
+        own_subs_.fetch_add(static_cast<std::uint32_t>(delta), kDeliverySkipOrder);
     }
     /** @brief The active subscriber slots on strict ancestors — the one relaxed load the
      *         write hot path pays before deciding whether to walk ancestors at all.
