@@ -295,7 +295,7 @@ class ShippedPins(unittest.TestCase):
     def setUp(self):
         self.pins = json.loads((pathlib.Path(rc.HERE) / "ram_census_pins.json").read_text())
 
-    def test_the_shipped_pins_pass_against_a_shipped_shape_transcript(self):
+    def test_only_the_stable_columns_are_pinned(self):
         for p in self.pins["pins"]:
             self.assertIn(p["metric"], rc.GATEABLE,
                           "only the run-to-run stable per-connection columns may be pinned")
