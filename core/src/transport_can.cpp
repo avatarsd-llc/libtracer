@@ -320,15 +320,13 @@ void transport_can::send_impl(std::span<const std::byte> frame, std::uint16_t ta
 
     const std::lock_guard lock(tx_m_);
 
-    // Own the bytes so view_can_frames_t can carve zero-copy subviews out of them.
+    // Own the bytes so the framing can carve zero-copy subviews out of them.
     const auto payload = tr::view::over_bytes(frame);
     if (!payload) {
         dropped_tx_.fetch_add(1, std::memory_order_relaxed);  // alloc failure => backpressure drop
         return;
     }
-    const tr::view::view_can_frames_t frames =
-        tr::view::view_can_frames_t::split(*payload, cfg_.mode);
-    const std::size_t count = frames.frame_count();
+    const std::size_t count = tr::view::can_frame_count(*payload, cfg_.mode);
     if (count == 0) {
         dropped_tx_.fetch_add(1, std::memory_order_relaxed);
         return;
@@ -366,7 +364,7 @@ void transport_can::send_impl(std::span<const std::byte> frame, std::uint16_t ta
 
     const bool fd = cfg_.mode == tr::view::can_frame_mode_t::FD;
     for (std::size_t i = 0; i < count; ++i) {
-        const tr::view::view_t window = frames.frame(i);
+        const tr::view::view_t window = tr::view::can_frame_at(*payload, cfg_.mode, i);
         const std::span<const std::byte> wb = window.bytes();
         const auto slice_id = can::slice_can_id(base_fields, i);
         if (!slice_id) {

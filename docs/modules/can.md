@@ -31,9 +31,11 @@ bytes. Endpoint slot `0` is reserved for the advertise stream, data groups start
 at the next slot, and a peer that has been silent past the liveness window leaves
 the enumeration on its own — there is no orchestrator to tell it to.
 
-**The splitter** (`tr::view::view_can_frames_t`) is L1, not transport: it cuts a
-view into per-frame windows, each a subview over the same segment, never a
-memcpy. `can_frame_mode_t` selects the classic 8-byte or CAN-FD 64-byte data
+**The splitter** (`tr::view::can_frame_count` / `can_frame_at`) is L1, not
+transport: it cuts a view into per-frame windows, each a subview over the same
+segment, never a memcpy. It is a pair of free functions, not an object — a window
+is a pure function of the payload length, the mode and the index, so there is no
+table to hold and nothing to allocate. `can_frame_mode_t` selects the classic 8-byte or CAN-FD 64-byte data
 field, and `can_fd_dlc_round_up` handles CAN-FD's non-contiguous length ladder.
 
 **The reassembler** (`tr::net::can_reassembly_t`) is the far side: `(origin,
@@ -158,9 +160,12 @@ with its platform's blocking primitive.
 :project: libtracer
 ```
 
-```{doxygenclass} tr::view::view_can_frames_t
+```{doxygenfunction} tr::view::can_frame_count
 :project: libtracer
-:members:
+```
+
+```{doxygenfunction} tr::view::can_frame_at
+:project: libtracer
 ```
 
 ```{doxygenfunction} tr::view::can_max_data

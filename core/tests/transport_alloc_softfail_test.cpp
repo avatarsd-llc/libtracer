@@ -913,10 +913,10 @@ void test_can_emit_advertise_wire_identical() {
  *
  * The free `encode_advertise_header` being stack-only proves nothing about `transport_can` —
  * only this drives the site `send_impl` actually reaches. The budget is DERIVED rather than
- * hard-coded: a send legitimately owns exactly two allocating steps, the payload block
- * (`view::over_bytes`) and the window table (`view_can_frames_t::split`), so running those
- * two standalone gives the number `send` must not exceed. Both halves of the deleted
- * allocation show up here as one over budget on EVERY send — `encode_advertise`'s
+ * hard-coded: a send legitimately owns exactly ONE allocating step, the payload block
+ * (`view::over_bytes`), so running it standalone gives the number `send` must not exceed —
+ * the framing adds nothing, which is the point asserted just below. Both halves of the
+ * deleted allocation show up here as one over budget on EVERY send — `encode_advertise`'s
  * `std::vector`, and the `adv.path = cfg_.path` copy that used to feed it (the path is past
  * the SSO bound on purpose).
  */
@@ -931,37 +931,42 @@ void test_can_send_advertise_allocates_nothing() {
 
     const std::vector<std::byte> payload(24, std::byte{0xA5});  // 3 CLASSIC windows
 
-    // The budget. `owned`/`windows` outlive the measured lambda so the optimizer cannot
-    // elide the very allocations being counted.
+    // The budget. `owned` outlives the measured lambda so the optimizer cannot elide the
+    // very allocation being counted.
     std::optional<tr::view::view_t> owned;
-    tr::view::view_can_frames_t windows;
-    const std::size_t budget = count_allocs([&] {
-        owned = tr::view::over_bytes(payload);
-        windows = tr::view::view_can_frames_t::split(*owned, cfg.mode);
-    });
-    check(owned.has_value() && windows.frame_count() == 3, "the budget's two steps ran");
+    const std::size_t budget = count_allocs([&] { owned = tr::view::over_bytes(payload); });
+    check(owned.has_value() && tr::view::can_frame_count(*owned, cfg.mode) == 3,
+          "the budget's one step ran, over a 3-window payload");
 
-    // #1110 — split itself now allocates NOTHING, asserted directly. The derived budget
-    // above cannot say this: it is a count, and it would go on passing at 2 as contentedly
-    // as at 1. The payload here is deliberately large, because the growth this replaced
-    // scaled with the payload — 4096 bytes is 512 CLASSIC windows, i.e. ~9 reallocations of
-    // a std::vector<view_t> on a count the SENDING PEER chooses, and a THROWING push_back
-    // on the -fno-exceptions profile. Deriving the windows makes that the same zero.
+    // #1110/#932 — the framing itself allocates NOTHING, asserted directly. The derived
+    // budget above cannot say this: it is a count, and it would go on passing at 2 as
+    // contentedly as at 1. The payload here is deliberately large, because the growth this
+    // replaced scaled with the payload — 4096 bytes is 512 CLASSIC windows, i.e. ~9
+    // reallocations of a std::vector<view_t> on a count the SENDING PEER chooses, and a
+    // THROWING push_back on the -fno-exceptions profile. Deriving each window on demand
+    // makes that the same zero, and walking ALL 512 here (not just counting them) is what
+    // proves the derivation kept no hidden table.
     const std::vector<std::byte> wide_payload(4096, std::byte{0x5A});
     const auto wide_owned = tr::view::over_bytes(wide_payload);
     check(wide_owned.has_value(), "the wide payload block was taken (outside the count)");
-    tr::view::view_can_frames_t wide_windows;
-    const std::size_t split_allocs = count_allocs(
-        [&] { wide_windows = tr::view::view_can_frames_t::split(*wide_owned, cfg.mode); });
-    check(split_allocs == 0, "view_can_frames_t::split allocates NOTHING, at any frame count");
-    check(wide_windows.frame_count() == 512, "  ...and still derives all 512 CLASSIC windows");
-    check(wide_windows.frame(511).length == 8 && wide_windows.frame(0).length == 8,
+    std::size_t wide_count = 0;
+    std::size_t wide_bytes = 0;
+    const std::size_t split_allocs = count_allocs([&] {
+        wide_count = tr::view::can_frame_count(*wide_owned, cfg.mode);
+        for (std::size_t i = 0; i < wide_count; ++i)
+            wide_bytes += tr::view::can_frame_at(*wide_owned, cfg.mode, i).length;
+    });
+    check(split_allocs == 0, "the CAN framing allocates NOTHING, at any frame count");
+    check(wide_count == 512, "  ...and still derives all 512 CLASSIC windows");
+    check(wide_bytes == wide_payload.size(), "  ...which tile the payload exactly, no gaps");
+    check(tr::view::can_frame_at(*wide_owned, cfg.mode, 511).length == 8 &&
+              tr::view::can_frame_at(*wide_owned, cfg.mode, 0).length == 8,
           "  ...whose first and last windows are the right size");
 
     raw->reset();  // forget the join hello — measure one send
     const std::size_t actual = count_allocs([&] { can_tx.send(payload); });
     check(actual == budget,
-          "a CAN send allocates for its payload and window table ONLY — the advertise adds none");
+          "a CAN send allocates for its payload block ONLY — framing and advertise add none");
 
     // ...and the advertise is still whole on the wire, walked out of two sources.
     const std::vector<std::byte> stream = raw->stream();

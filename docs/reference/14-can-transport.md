@@ -32,7 +32,7 @@ The reference-implementation symbols are:
 | Concern | Symbol | Header | Layer |
 | --- | --- | --- | --- |
 | 29-bit ID + advertise codec | `tr::net::can` | `can.hpp` | transport plane |
-| header-elided framing | `tr::view::view_can_frames_t` | `view_can.hpp` | L1 |
+| header-elided framing | `tr::view::can_frame_count` / `can_frame_at` | `view_can.hpp` | L1 |
 | multi-frame reassembly | `tr::net::can_reassembly_t` | `can_reassembly.hpp` | transport plane |
 | SocketCAN binding + raw-frame seam | `tr::net::transport_can`, `can_link_t`, `socketcan_link_t` | `transport_can.hpp` | transport plane |
 
@@ -134,8 +134,8 @@ allocator wraps back to the first data slot, leaving the control slot free.
 
 ## Framing modes: classic vs CAN-FD
 
-`view_can_frames_t::split(payload, mode)` chops one logical payload (a `view_t`)
-into the CAN **data-field windows** that carry it:
+`can_frame_count(payload, mode)` and `can_frame_at(payload, mode, i)` chop one
+logical payload (a `view_t`) into the CAN **data-field windows** that carry it:
 
 | Mode | Max data field | Notes |
 | --- | --- | --- |
@@ -144,9 +144,13 @@ into the CAN **data-field windows** that carry it:
 
 The split is **zero-copy** — each window is a `subview()` over the source segment,
 mirroring the existing `view`/`rope` primitives ([08-views-and-ownership](08-views-and-ownership.md));
-no payload byte is copied. `to_rope()` chains the windows back into a `rope_t`, the
-reassembled payload. A payload that fits one frame yields a single window; a larger
-one yields a sequence whose tail window holds the remainder.
+no payload byte is copied. A payload that fits one frame yields a single window; a
+larger one yields a sequence whose tail window holds the remainder, and the far side
+chains the windows back into a `rope_t` via `can_reassembly_t`.
+
+There is no splitter **object**: each window is a pure function of the payload length,
+the mode and the index, so the pair of free functions is the whole API. Nothing is
+stored, nothing is allocated, and the split cannot fail.
 
 On-wire, a CAN-FD frame can only be a valid DLC length, so an in-between window is
 padded up to the next legal size — `can_fd_dlc_round_up(len)` exposes that lattice.
@@ -329,7 +333,7 @@ identifier, or an error flag, so the ingress rule has nothing to judge.)
 `send(frame)` is emitted as one **group** under a single lock (so concurrent sends
 never interleave on the bus):
 
-1. The frame is split by `view_can_frames_t` into data-field windows.
+1. The frame is split by `can_frame_count` / `can_frame_at` into data-field windows.
 2. An **advertise manifest** is emitted first on the node's **control ID**
    (`[version|node|0]` — the lowest endpoint, hence highest bus priority, so the
    manifest out-arbitrates the data it governs). It is sliced into **classic ≤8-byte

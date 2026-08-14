@@ -334,7 +334,7 @@ struct transport_can_config_t {
  * @brief A `transport_t` over Linux SocketCAN — header-elided, self-establishing.
  *
  * Wires the increment-1 framing to a live bus. **Egress** (@ref send): the frame
- * is address-shift-fragmented by @ref tr::view::view_can_frames_t into CAN data
+ * is address-shift-fragmented by @ref tr::view::can_frame_at into CAN data
  * fields, an in-band @ref tr::net::can::advertise_t manifest (carrying the slice
  * count and exact total length) is emitted on the control ID, then the lean
  * id-matched data frames follow — CAN-FD windows DLC-padded up to a legal size.
