@@ -430,7 +430,7 @@ class transport_t {
         // profiles.
         std::size_t total = 0;
         for (const auto& s : iov) total += s.size();
-        mem::block_array_t<std::byte> tmp(mem::heap_source());
+        mem::block_array_t<std::byte> tmp(egress_source());
         // Honour the `probe_fail_hook` OOM-injection seam explicitly, exactly as
         // `iov_table_t::acquire` does: the hook lives inside `probe_bytes`, which the
         // failable seam does not route through, so a drop leg reached only via
@@ -447,6 +447,45 @@ class transport_t {
         }
         send(std::span<const std::byte>(out, total));
     }
+
+    /**
+     * @brief The EGRESS store this link's per-send gather allocations draw from
+     *        (ADR-0079's net-plane failable store, #873 family 1).
+     *
+     * Every allocation an outbound frame provokes on this link — the base
+     * @ref send(std::span<const std::span<const std::byte>>) gather temporary above, and the
+     * `tr::net::iov_table_t` overflow block of the socket transports that build a gather
+     * table — is drawn from HERE rather than from the process-wide `%mem::heap_source()`. The
+     * entry count and the byte count are both the SENDING peer's choice (a rope's link count
+     * x its region count), so this is the seam that makes "bounded node" a property the
+     * deployer injects (ADR-0079 §Decision 4) instead of one the library fixes: size the
+     * store and the egress path is bounded by it, with exhaustion answered the way it
+     * already is — the frame is DROPPED and counted, never truncated and never `abort()`.
+     *
+     * The default is the process heap, so a link nothing was wired into behaves exactly as
+     * it did before this seam existed.
+     */
+    [[nodiscard]] mem::block_source_t& egress_source() const noexcept { return *egress_src_; }
+
+    /**
+     * @brief Wire this link's egress store — the transport-factory injection point.
+     *
+     * Same contract as the receiver slots: call it during bring-up, BEFORE frames flow. The
+     * built-in factories apply it to every socket they construct (the `egress_src` argument
+     * of `register_builtin_transports`), which is how a deployer choosing ADR-0079's MID
+     * composition hands the whole net plane its own store, or its NARROW fan gives each
+     * link's own thread a contention-free one. @p src must outlive this transport.
+     *
+     * @warning A link's egress store is touched by EVERY thread that sends on that link, so
+     *          @p src must declare a concurrency contract covering them (`block_source_t`
+     *          §"each source declares its own"). `heap_source_t` does; a
+     *          `pool_source_t<sync_none_t>` or a `bump_source_t` does NOT, and belongs to a
+     *          link only one thread ever sends on — which is the ADR-0079 NARROW shape, and
+     *          the reason it is per-link rather than one node-wide store. None of the six
+     *          egress sites holds a transport lock across the allocation, so a locking
+     *          @p src introduces no lock-ordering obligation here (#1049).
+     */
+    void set_egress_source(mem::block_source_t& src) noexcept { egress_src_ = &src; }
 
     /**
      * @brief Register the borrowed-span sink for inbound frames (the bridge's ingest).
@@ -600,6 +639,11 @@ class transport_t {
      *         fire it (notify_down) while add_child is still installing it. */
     std::atomic<down_fn_t> down_fn_{nullptr};
     std::atomic<void*> down_ctx_{nullptr}; /**< @brief Its caller-owned context. */
+
+    /** @brief The injected egress store — see @ref egress_source. Not atomic: it is wired
+     *         once during bring-up, before any thread can send on this link, exactly as the
+     *         receiver slots are. */
+    mem::block_source_t* egress_src_ = &mem::heap_source();
 
    public:
     /**

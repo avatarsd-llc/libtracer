@@ -84,7 +84,11 @@ void parse_config(const tlv_t* config, conn_settings_t& s) {
 transport_vertex_t::transport_vertex_t(graph::graph_t& graph, fwd_router_t& router,
                                        std::string net_root, mem::mem_backend_t* rx_backend,
                                        slim_net_t)
-    : graph_(graph), router_(router), net_root_(std::move(net_root)), rx_backend_(rx_backend) {
+    : graph_(graph),
+      router_(router),
+      net_root_(std::move(net_root)),
+      rx_backend_(rx_backend),
+      egress_src_(&mem::heap_source()) {
     // Register the `/net` parent if it isn't already (it is the `:children[]` target).
     if (!graph_.find(path_t::parse(net_root_)->key())) {
         (void)graph_.register_vertex(*path_t::parse(net_root_), graph::role_t::STORED_VALUE);
@@ -115,9 +119,14 @@ transport_vertex_t::transport_vertex_t(graph::graph_t& graph, fwd_router_t& rout
 // here is the ONLY reference to register_builtin_transports, so it (and the builtins)
 // stay linked exactly when this ctor is reachable — @ref slim_net_t sheds them.
 transport_vertex_t::transport_vertex_t(graph::graph_t& graph, fwd_router_t& router,
-                                       std::string net_root, mem::mem_backend_t* rx_backend)
+                                       std::string net_root, mem::mem_backend_t* rx_backend,
+                                       mem::block_source_t* egress_src)
     : transport_vertex_t(graph, router, std::move(net_root), rx_backend, slim_net) {
-    register_builtin_transports(*this, rx_backend_);
+    // The ADR-0079 net-plane egress store (#873 family 1). A SLIM node never reaches here,
+    // so its `egress_src_` stays the process default the delegated ctor set — it registers
+    // its own factories and injects whatever store it wants into them directly.
+    if (egress_src != nullptr) egress_src_ = egress_src;
+    register_builtin_transports(*this, rx_backend_, egress_src_);
 }
 
 void transport_vertex_t::register_transport_type(std::string kind, transport_factory_t factory) {

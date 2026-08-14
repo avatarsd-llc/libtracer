@@ -764,6 +764,253 @@ void test_udp_send_iov_overflow_drops() {
 }
 
 // ---------------------------------------------------------------------------
+// #873 family 1 — WHICH store the egress gather draws from
+//
+// Everything above proves the egress path SOFT-FAILS. It says nothing about where the
+// bytes came from, and until #1287 the answer at all six sites was the process-wide
+// `mem::heap_source()` — so a deployer who wired a bounded source at every seam the API
+// offered still had these allocations escaping to the process heap, which is exactly the
+// gap ADR-0079 exists to close. The cases below pin the answer to
+// `transport_t::egress_source`, one per site: the base `send(iov)` gather
+// (`%transport.hpp`), tcp's `prefixed_iov_t` on all three of its senders, udp's datagram
+// gather, and ws's broadcast and directed-facade gathers.
+//
+// ABLATION-VERIFIED: put `mem::heap_source()` back at any one site and that site's case
+// FAILS on both of its assertions — the wired allocation count does not drop, and the
+// injected store stays at `used() == 0`. A guard that cannot redden on the known-bad
+// wiring is not a guard, so this was run rather than reasoned about.
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief A caller-owned, HARD-BOUNDED egress store: a bump over a fixed slab whose upstream
+ *        serves NOTHING, so the slab's size IS the cap on this link's egress allocation.
+ *
+ * This is ADR-0079's "bounded node is a property the deployer injects" in one object: a
+ * `heap_source_t` upstream would spill past the slab and bound nothing.
+ * @tparam N The slab size in bytes — `kRoomySlab` serves a wide gather, `1` cannot.
+ */
+template <std::size_t N>
+struct bounded_egress_t {
+    std::array<std::byte, N> slab{}; /**< @brief The whole budget. */
+    tr::mem::bump_source_t store{std::span<std::byte>(slab),
+                                 tr::mem::null_source()}; /**< @brief The injected seam. */
+};
+
+/** @brief Room for several `kWideSpans`-entry `::iovec` tables (~400 B each). */
+constexpr std::size_t kRoomySlab = 4096;
+
+using roomy_egress_t = bounded_egress_t<kRoomySlab>; /**< @brief Serves the wide gather. */
+using tight_egress_t = bounded_egress_t<1>;          /**< @brief Serves nothing at all. */
+
+/**
+ * @brief The non-vacuous half of the guard: @p send_wide's gather block must move OFF the
+ *        process heap the moment @p wire installs an injected store, and INTO that store.
+ *
+ * Two assertions, because either alone is weak. "One fewer process-heap allocation" alone
+ * would also hold if the site had simply stopped allocating; "the store was used" alone
+ * would also hold if the site drew from BOTH. Together they say the block came from there
+ * and only from there — and both of them redden on the un-injected wiring.
+ *
+ * @param egress    The store to install (its bump cursor is reset first, so a case may run
+ *                  this more than once).
+ * @param wire      Installs the store on whichever object owns the send — the link itself,
+ *                  or, for a directed peer facade, its OWNER (`owner_->egress_source()`).
+ * @param send_wide Sends a gather wide enough to overflow the inline entry array.
+ */
+template <class Wire, class Send>
+void check_gather_moves_to_injected_store(roomy_egress_t& egress, Wire&& wire, Send&& send_wide) {
+    const std::size_t on_heap = count_allocs(send_wide);
+    check(on_heap >= 1, "unwired, the wide gather does allocate from the process heap");
+    wire(egress.store);
+    egress.store.reset();
+    const std::size_t wired = count_allocs(send_wide);
+    check(wired + 1 == on_heap, "wired, ONE fewer process-heap allocation — the gather block");
+    check(egress.store.used() > 0, "and the INJECTED store is where that block came from");
+}
+
+/** @brief The base `transport_t::send(iov)` gather — every non-overriding transport's. */
+void test_default_send_iov_uses_injected_egress_source() {
+    std::printf("transport_t::send(iov) default gather — draws from the injected store:\n");
+    struct counting_link_t : tr::net::transport_t {
+        // The base send(iov) is deliberately NOT overridden — it is the case under test.
+        using tr::net::transport_t::send;
+        std::size_t sends = 0;
+        std::size_t bytes = 0;
+        void send(std::span<const std::byte> f) override {
+            ++sends;
+            bytes = f.size();
+        }
+    };
+    counting_link_t link;
+    const std::vector<std::byte> storage(kWideSpans, std::byte{0x71});
+    const auto iov = wide_gather(storage, kWideSpans);
+    const auto send_wide = [&] { link.send(std::span<const std::span<const std::byte>>(iov)); };
+
+    roomy_egress_t roomy;
+    check_gather_moves_to_injected_store(
+        roomy, [&](tr::mem::block_source_t& s) { link.set_egress_source(s); }, send_wide);
+    const std::size_t sent = link.sends;
+    check(sent >= 2 && link.bytes == kWideSpans, "the wired gathers still reached the wire whole");
+
+    // The store's SIZE is the cap: one too small to serve the gather bounds this link, and
+    // the answer is the drop the soft-fail cases above already pinned.
+    tight_egress_t tight;
+    link.set_egress_source(tight.store);
+    check(count_allocs(send_wide) == 0, "a refused injected store draws NOTHING from the heap");
+    check(link.sends == sent, "and the frame is DROPPED, never truncated onto the wire");
+}
+
+/** @brief tcp's one-peer `prefixed_iov_t` record (`transport_tcp.cpp`'s dial/listen link). */
+void test_tcp_send_iov_uses_injected_egress_source() {
+    std::printf("tcp send(iov) record — draws from the injected store:\n");
+    sink_t at_listener;
+    auto listener_rx = [&](std::span<const std::byte> f) { at_listener.push(f); };
+    tr::net::tcp_transport_t listener(std::uint16_t{0});
+    check(listener.ok(), "listener bound");
+    listener.set_receiver(listener_rx);
+    tr::net::tcp_transport_t dialer("127.0.0.1", listener.local_port());
+    check(dialer.ok(), "dialer connected");
+
+    const std::vector<std::byte> storage(kWideSpans, std::byte{0x72});
+    const auto iov = wide_gather(storage, kWideSpans);
+    const auto send_wide = [&] { dialer.send(std::span<const std::span<const std::byte>>(iov)); };
+
+    roomy_egress_t roomy;
+    check_gather_moves_to_injected_store(
+        roomy, [&](tr::mem::block_source_t& s) { dialer.set_egress_source(s); }, send_wide);
+    check(at_listener.wait_for(2, 2s), "the wired records still arrived");
+
+    tight_egress_t tight;
+    dialer.set_egress_source(tight.store);
+    check(count_allocs(send_wide) == 0, "a refused injected store draws NOTHING from the heap");
+    std::this_thread::sleep_for(200ms);
+    check(at_listener.n() == 2, "and the record was DROPPED, not truncated onto the stream");
+}
+
+/** @brief tcp's multi-peer broadcast record, and its directed facade's `owner_->` spelling. */
+void test_tcp_server_iov_uses_injected_egress_source() {
+    std::printf("tcp server broadcast + directed facade — draw from the injected store:\n");
+    sink_t at_peer;
+    auto peer_rx = [&](std::span<const std::byte> f) { at_peer.push(f); };
+    tr::net::transport_tcp_server server(0, &tr::mem::heap_backend(), /*max_frame=*/0,
+                                         /*max_peers=*/0, /*peer_named=*/true);
+    check(server.ok(), "peer-named tcp server bound");
+    tr::net::tcp_transport_t peer("127.0.0.1", server.local_port());
+    check(peer.ok(), "peer connected");
+    peer.set_receiver(peer_rx);
+    std::this_thread::sleep_for(150ms);  // let the accept complete
+
+    const std::vector<std::byte> storage(kWideSpans, std::byte{0x73});
+    const auto iov = wide_gather(storage, kWideSpans);
+    const auto wire = [&](tr::mem::block_source_t& s) { server.set_egress_source(s); };
+
+    // The BROADCAST override.
+    roomy_egress_t roomy;
+    const auto send_wide = [&] { server.send(std::span<const std::span<const std::byte>>(iov)); };
+    check_gather_moves_to_injected_store(roomy, wire, send_wide);
+    check(at_peer.wait_for(2, 2s), "the wired broadcasts still arrived");
+
+    // The DIRECTED facade: it has no store of its own by design — it draws from its OWNER's,
+    // so the one injection above bounds both senders on this link.
+    check(server.bus() != nullptr, "peer-named server exposes the bus facet");
+    std::string name;
+    server.bus()->enumerate_peers([&](std::string_view n) { name = std::string(n); });
+    check(!name.empty(), "the open peer enumerated");
+    tr::net::transport_t* const link = server.bus()->peer_link(name);
+    check(link != nullptr, "peer_link resolved it");
+    if (link == nullptr) return;
+    const auto send_directed = [&] {
+        link->send(std::span<const std::span<const std::byte>>(iov));
+    };
+    roomy.store.reset();
+    const std::size_t directed = count_allocs(send_directed);
+    check(directed == 0, "the directed record came from the OWNER's injected store");
+    check(roomy.store.used() > 0, "which is where its bytes are");
+    check(at_peer.wait_for(3, 2s), "and the directed record arrived");
+}
+
+/** @brief udp's datagram gather (`transport_udp.cpp`). */
+void test_udp_send_iov_uses_injected_egress_source() {
+    std::printf("udp send(iov) gather — draws from the injected store:\n");
+    sink_t at_b;
+    auto b_rx = [&](std::span<const std::byte> f) { at_b.push(f); };
+    tr::net::udp_transport_t b(0, "127.0.0.1", 0);
+    check(b.ok(), "udp receiver bound");
+    tr::net::udp_transport_t a(0, "127.0.0.1", b.local_port());
+    check(a.ok(), "udp sender bound");
+    b.set_receiver(b_rx);
+
+    const std::vector<std::byte> storage(kWideSpans, std::byte{0x74});
+    const auto iov = wide_gather(storage, kWideSpans);
+    const auto send_wide = [&] { a.send(std::span<const std::span<const std::byte>>(iov)); };
+
+    roomy_egress_t roomy;
+    check_gather_moves_to_injected_store(
+        roomy, [&](tr::mem::block_source_t& s) { a.set_egress_source(s); }, send_wide);
+    check(at_b.wait_for(2, 2s), "the wired datagrams still arrived");
+
+    tight_egress_t tight;
+    a.set_egress_source(tight.store);
+    check(count_allocs(send_wide) == 0, "a refused injected store draws NOTHING from the heap");
+    std::this_thread::sleep_for(200ms);
+    check(at_b.n() == 2, "and the datagram was DROPPED");
+}
+
+/** @brief ws's broadcast gather, and its directed facade's `owner_->` spelling. */
+void test_ws_server_iov_uses_injected_egress_source() {
+    std::printf("ws server broadcast + directed facade — draw from the injected store:\n");
+    tr::net::transport_ws_server server(0, &tr::mem::heap_backend(), /*max_frame=*/0,
+                                        /*max_peers=*/0, /*peer_named=*/true);
+    check(server.ok(), "peer-named ws server bound");
+    const int cfd = tcp_connect(server.local_port());
+    check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
+    check(wait_for_peers(server, 1, 2s), "the server registered the peer as open");
+
+    const std::vector<std::byte> storage(kWideSpans, std::byte{0x75});
+    const auto iov = wide_gather(storage, kWideSpans);
+    const auto drain = [&] {
+        return read_until(
+            cfd, [](const std::vector<std::byte>& v) { return v.size() >= kWideFrameBytes; }, 2s);
+    };
+
+    roomy_egress_t roomy;
+    const auto send_wide = [&] { server.send(std::span<const std::span<const std::byte>>(iov)); };
+    check_gather_moves_to_injected_store(
+        roomy, [&](tr::mem::block_source_t& s) { server.set_egress_source(s); }, send_wide);
+    check(drain().size() >= kWideFrameBytes, "the wired broadcast still arrived");
+
+    // The directed facade draws from its OWNER's store — the same one injection.
+    tr::net::transport_t* peer = nullptr;
+    for (int i = 0; i < 200 && peer == nullptr; ++i) {
+        peer = server.peer_link("p0");
+        if (peer == nullptr) std::this_thread::sleep_for(10ms);
+    }
+    check(peer != nullptr, "the peer resolved by name");
+    if (peer == nullptr) {
+        ::close(cfd);
+        return;
+    }
+    (void)drain();  // clear the second wired broadcast off the socket
+    roomy.store.reset();
+    const auto send_directed = [&] {
+        peer->send(std::span<const std::span<const std::byte>>(iov));
+    };
+    check(count_allocs(send_directed) == 0, "the directed gather came from the OWNER's store");
+    check(roomy.store.used() > 0, "which is where its bytes are");
+    check(drain().size() >= kWideFrameBytes, "and the directed frame arrived");
+
+    // A store too small to serve it bounds BOTH senders on this link.
+    tight_egress_t tight;
+    server.set_egress_source(tight.store);
+    check(count_allocs(send_wide) == 0, "a refused injected store draws NOTHING from the heap");
+    send_directed();
+    const auto nothing =
+        read_until(cfd, [](const std::vector<std::byte>& v) { return !v.empty(); }, 300ms);
+    check(nothing.empty(), "and both refused frames were DROPPED, never truncated");
+    ::close(cfd);
+}
+
+// ---------------------------------------------------------------------------
 // CAN (A1 — the allocation is DELETED, not made failable)
 // ---------------------------------------------------------------------------
 
@@ -1338,6 +1585,11 @@ int main() {
     test_tcp_server_broadcast_scratch_drops();
     test_default_send_iov_gather_drops();
     test_udp_send_iov_overflow_drops();
+    test_default_send_iov_uses_injected_egress_source();
+    test_tcp_send_iov_uses_injected_egress_source();
+    test_tcp_server_iov_uses_injected_egress_source();
+    test_udp_send_iov_uses_injected_egress_source();
+    test_ws_server_iov_uses_injected_egress_source();
     test_can_advertise_header_is_allocation_free();
     test_can_over_long_path_refused();
     test_can_emit_advertise_wire_identical();

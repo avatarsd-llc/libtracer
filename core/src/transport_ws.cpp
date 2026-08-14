@@ -273,7 +273,7 @@ void transport_ws_server::send(std::span<const std::span<const std::byte>> iov) 
     const std::size_t hlen = ws::encode_frame_header(header, ws::opcode_t::BINARY, total);
 
     std::array<::iovec, kMaxServerIov + 1> gather_inline;
-    iov_table_t<::iovec> gather_table(gather_inline);
+    iov_table_t<::iovec> gather_table(gather_inline, egress_source());
     const auto [vec, n] = build_server_iov(gather_table, header, hlen, iov);
     if (vec == nullptr) {  // gather store exhausted => drop the frame, and count it (#932)
         dropped_tx_.fetch_add(1, std::memory_order_relaxed);
@@ -305,7 +305,7 @@ void transport_ws_server::peer_endpoint_t::send(std::span<const std::span<const 
     const std::size_t hlen = ws::encode_frame_header(header, ws::opcode_t::BINARY, total);
 
     std::array<::iovec, kMaxServerIov + 1> inline_vec;
-    iov_table_t<::iovec> table(inline_vec);
+    iov_table_t<::iovec> table(inline_vec, owner_->egress_source());
     const auto [vec, n] = build_server_iov(table, header, hlen, iov);
     if (vec == nullptr) {  // gather store exhausted => drop the frame, and count it (#932)
         owner_->dropped_tx_.fetch_add(1, std::memory_order_relaxed);

@@ -232,10 +232,10 @@ So compose per deployment role, and load nothing else:
 Listeners are **config-created in-band**: a `SPEC` write to `/net:children[]`
 carrying a `kind` field creates a connection. The universal keys are `addr`, `kind`,
 `port`, `role`, `keepalive` (`core/src/transport_vertex.cpp:48`, read at `:59`); the
-two catalog child types are `client` and `listener` (`:94-102`); the created
+two catalog child types are `client` and `listener` (`:98-106`); the created
 connection mounts and routes at `/net/<module>/<name>`, the module **declared by the
-application** via `register_module` (`:128`) — declared-only per ADR-0073 §4, so an
-undeclared kind fails creation with `SCHEMA_NOT_FOUND` (`:162`). The accepted direction is
+application** via `register_module` (`:137`) — declared-only per ADR-0073 §4, so an
+undeclared kind fails creation with `SCHEMA_NOT_FOUND` (`:171`). The accepted direction is
 [RFC-0014 — creator endpoint, connection lifecycle and link liveness](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md),
 which replaces the single global catalog with a per-module creator endpoint
 `/net/<module>/conn`; that endpoint is not implemented, so a node built against this
@@ -307,7 +307,7 @@ without the project-side symbol, the line is inert.
   reconnect storm.
 - **Egress is gather, not copy.** The rope-to-wire path lowers to an iovec `sendmsg`
   (`core/src/posix_endpoint.cpp:293,180`; the TCP assembly is at
-  `core/src/transport_tcp.cpp:59-75`), and lwIP provides `sendmsg` unmodified. Do not
+  `core/src/transport_tcp.cpp:59-81`), and lwIP provides `sendmsg` unmodified. Do not
   flatten payloads before send; the only legitimate flatten is a substrate boundary
   DMA cannot span.
 - **Backpressure beats buffering.** Where a node buffers for a slow subscriber, the
