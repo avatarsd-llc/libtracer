@@ -803,13 +803,20 @@ ANCHORS = [
     # line number rode a green `OK 382` out of one hygiene run. @ref unanchored_citations now
     # fails a cited span no anchor covers, and these are the anchors that debt bought.
     #
-    # TEN of the 71 could not be pinned as written, because the cited line was not the line
+    # TWELVE of the 71 could not be pinned as written, because the cited line was not the line
     # the prose describes. Those citations were re-pinned in the SAME commit — a phantom
     # `twai_link.hpp:455` a bare `:455` inherited across an out-of-repo `.c` citation, a
     # `:2152`/`:2154` pair that had rotted off the COMPACT emit calls onto `subscribe_toward`,
     # a `graph.cpp:1098` on a bare `}`, a `transport_vertex.cpp:152` on a blank line, and a
     # `fwd_router.cpp:1066` that named a queue splice instead of the `deref_vertex_slot` the
     # sentence points at. Every one of them was invisible to the gate before this.
+    #
+    # The last two of the twelve are the rule earning its keep in the wild rather than in a
+    # test. The ESP component CHANGELOG's #963.4 entry says three IDF components are "named by
+    # headers under `include/libtracer_esp/`" — a claim only an `#include` line can support.
+    # Two of the three cited a `#include <atomic>` and a stray doc-comment instead, and stayed
+    # invisible until #1160 shifted `httpd_ws_link.hpp` and this gate reddened on the rebase.
+    # They now pin `esp_http_server.h` and `esp_transport.h`, the lines that carry the claim.
     ('bench/bench_forward_heap.cpp:8',
      '* @warning **What this gate does NOT cover.** It drives `capture_transport_t`, a stub link that'),
     ('core/include/libtracer/can.hpp:361',
@@ -940,10 +947,10 @@ ANCHORS = [
      '"listener", [this](graph::graph_t&, std::vector<std::byte> key, const tlv_t* config) {'),
     ('core/src/transport_vertex.cpp:213',
      'result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::byte> child_key,'),
-    ('integrations/esp-idf/libtracer/include/libtracer_esp/esp_ws_client_link.hpp:157',
-     '*     which is what makes `stats()` safe to call from a periodic task.'),
-    ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:119',
-     '#include <atomic>'),
+    ('integrations/esp-idf/libtracer/include/libtracer_esp/esp_ws_client_link.hpp:176',
+     '#include "esp_transport.h"'),
+    ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:150',
+     '#include "esp_http_server.h"'),
     ('integrations/esp-idf/libtracer/include/libtracer_esp/twai_link.hpp:36',
      '#include "esp_twai.h"'),
 ]

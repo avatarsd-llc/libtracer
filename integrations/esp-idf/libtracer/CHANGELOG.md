@@ -547,8 +547,8 @@ core 0.10.0 reaches it.
 
 - **Public headers now propagate their ESP-IDF dependencies (#963.4).** `esp_http_server`,
   `tcp_transport` and `esp_driver_twai` moved from `PRIV_REQUIRES` to **`REQUIRES`**. Those
-  three are named by headers under `include/libtracer_esp/` (`httpd_ws_link.hpp:139`,
-  `esp_ws_client_link.hpp:157`, `twai_link.hpp:36-37`), and `PRIV_REQUIRES` does not
+  three are named by headers under `include/libtracer_esp/` (`httpd_ws_link.hpp:150`,
+  `esp_ws_client_link.hpp:176`, `twai_link.hpp:36-37`), and `PRIV_REQUIRES` does not
   propagate include dirs — so a dependent that included one of ours without independently
   requiring the base component died with `esp_http_server.h: No such file or directory` and
   no hint that libtracer was the cause. `lwip` and `esp_driver_gpio` stay private: they are
