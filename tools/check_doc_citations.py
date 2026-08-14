@@ -698,7 +698,7 @@ ANCHORS = [
      '*     task stack (the batch apply overflows the 4 KB httpd default). The PORT-BINDING'),
 
     # --- re-added from the v0.7.1 docs sweep (absent from main's table) ---
-    ('core/include/libtracer/fwd_frame_view.hpp:896', 'inline constexpr std::size_t kFwdMaxIov = 10;'),
+    ('core/include/libtracer/fwd_frame_view.hpp:905', 'inline constexpr std::size_t kFwdMaxIov = 10;'),
     # ONE `bus()` since #871: both stream servers inherit slot_server_t's (they used to
     # restate it, cited as transport_tcp.hpp:343 and transport_ws.hpp:233).
     ('core/include/libtracer/posix_endpoint.hpp:409',
