@@ -71,6 +71,15 @@ struct collector_t {
     }
 };
 
+/** @brief Count backpressure drops as the framer decides them (the `on_drop` seam). */
+struct drop_counter_t {
+    std::size_t drops = 0;
+    void operator()() { ++drops; }
+};
+
+/** @brief For the cases whose subject is not backpressure. */
+constexpr auto ignore_drops = [] {};
+
 constexpr std::size_t kMax = 1u << 20;  // a generous frame cap for the normal cases
 
 }  // namespace
@@ -85,8 +94,9 @@ int main() {
         collector_t c;
         const bytes_t payload = ramp(10, 1);
         const bytes_t rec = record(payload);
-        const auto res = f.feed(heap, kMax, rec.data(), rec.size(), c);
-        check(!res.malformed && res.dropped == 0, "whole record: no malformed/drop");
+        drop_counter_t d;
+        const auto res = f.feed(heap, kMax, rec.data(), rec.size(), c, d);
+        check(!res.malformed && d.drops == 0, "whole record: no malformed/drop");
         check(c.frames.size() == 1 && c.frames[0] == payload, "one frame == the payload");
     }
 
@@ -96,7 +106,7 @@ int main() {
         collector_t c;
         const bytes_t payload = ramp(37, 5);
         const bytes_t rec = record(payload);
-        for (std::byte b : rec) f.feed(heap, kMax, &b, 1, c);
+        for (std::byte b : rec) f.feed(heap, kMax, &b, 1, c, ignore_drops);
         check(c.frames.size() == 1 && c.frames[0] == payload,
               "byte-by-byte feed reassembles the frame");
     }
@@ -110,7 +120,7 @@ int main() {
         bytes_t stream = record(a);
         const bytes_t rb = record(b);
         stream.insert(stream.end(), rb.begin(), rb.end());
-        f.feed(heap, kMax, stream.data(), stream.size(), c);
+        f.feed(heap, kMax, stream.data(), stream.size(), c, ignore_drops);
         check(c.frames.size() == 2 && c.frames[0] == a && c.frames[1] == b,
               "two records in one chunk => two ordered frames");
     }
@@ -124,7 +134,7 @@ int main() {
         bytes_t stream = empty;
         const bytes_t rr = record(real);
         stream.insert(stream.end(), rr.begin(), rr.end());
-        f.feed(heap, kMax, stream.data(), stream.size(), c);
+        f.feed(heap, kMax, stream.data(), stream.size(), c, ignore_drops);
         check(c.frames.size() == 1 && c.frames[0] == real,
               "empty record skipped; the next record delivers");
     }
@@ -134,7 +144,8 @@ int main() {
         tr::net::length_prefix_framer f;
         collector_t c;
         const bytes_t rec = record(ramp(100));  // claims 100 bytes...
-        const auto res = f.feed(heap, /*max_frame=*/8, rec.data(), rec.size(), c);  // ...cap is 8
+        const auto res = f.feed(heap, /*max_frame=*/8, rec.data(), rec.size(), c,
+                                ignore_drops);  // ...cap is 8
         check(res.malformed, "oversize prefix => result.malformed");
         check(c.frames.empty(), "no frame delivered from a malformed stream");
     }
@@ -149,15 +160,17 @@ int main() {
 
         be.fail = true;
         const bytes_t r1 = record(dropped_payload);
-        const auto res1 = f.feed(be, kMax, r1.data(), r1.size(), c);
-        check(res1.dropped == 1 && c.frames.empty(),
+        drop_counter_t d;
+        const auto res1 = f.feed(be, kMax, r1.data(), r1.size(), c, d);
+        check(!res1.malformed && d.drops == 1 && c.frames.empty(),
               "alloc failure drops the frame (dropped == 1), none delivered");
 
         be.fail = false;
         const bytes_t r2 = record(kept_payload);
-        const auto res2 = f.feed(be, kMax, r2.data(), r2.size(), c);
-        check(res2.dropped == 0 && c.frames.size() == 1 && c.frames[0] == kept_payload,
-              "framing resyncs: the next record delivers cleanly after a drop");
+        const auto res2 = f.feed(be, kMax, r2.data(), r2.size(), c, d);
+        check(
+            !res2.malformed && d.drops == 1 && c.frames.size() == 1 && c.frames[0] == kept_payload,
+            "framing resyncs: the next record delivers cleanly after a drop");
     }
 
     // 6b. (#932) A prefix beyond the backend's capacity but INSIDE the protocol cap
@@ -169,15 +182,16 @@ int main() {
         toggle_backend_t be;
         be.max_seg = 8;                        // this backend never allocates more than 8 bytes
         const bytes_t big = record(ramp(20));  // claims 20 > 8, though 20 < kMax
-        const auto res = f.feed(be, kMax, big.data(), big.size(), c);
+        drop_counter_t d;
+        const auto res = f.feed(be, kMax, big.data(), big.size(), c, d);
         check(!res.malformed, "a frame beyond backend.max_segment_size() is NOT malformed (#932)");
-        check(res.dropped == 1, "it is counted as a backpressure drop instead");
+        check(d.drops == 1, "it is counted as a backpressure drop instead");
         check(c.frames.empty(), "no frame delivered when the backend could never hold it");
 
         const bytes_t fits = ramp(6, 0x70);
         const bytes_t r2 = record(fits);
-        const auto res2 = f.feed(be, kMax, r2.data(), r2.size(), c);
-        check(res2.dropped == 0 && c.frames.size() == 1 && c.frames[0] == fits,
+        const auto res2 = f.feed(be, kMax, r2.data(), r2.size(), c, d);
+        check(!res2.malformed && d.drops == 1 && c.frames.size() == 1 && c.frames[0] == fits,
               "the over-capacity frame was DRAINED: framing resyncs and the next record delivers");
     }
 
@@ -188,7 +202,7 @@ int main() {
         toggle_backend_t be;
         be.max_seg = 8;
         const bytes_t rec = record(ramp(20));
-        const auto res = f.feed(be, /*max_frame=*/10, rec.data(), rec.size(), c);
+        const auto res = f.feed(be, /*max_frame=*/10, rec.data(), rec.size(), c, ignore_drops);
         check(res.malformed, "a length above max_frame is still malformed");
     }
 
@@ -197,10 +211,10 @@ int main() {
         tr::net::length_prefix_framer f;
         collector_t c;
         const bytes_t rec = record(ramp(5, 0x60));
-        f.feed(heap, kMax, rec.data(), 2, c);  // feed only 2 of the 4 prefix bytes
+        f.feed(heap, kMax, rec.data(), 2, c, ignore_drops);  // feed only 2 of the 4 prefix bytes
         check(c.frames.empty(), "no frame from a partial prefix");
         f.reset();
-        f.feed(heap, kMax, rec.data(), rec.size(), c);  // a fresh, complete record
+        f.feed(heap, kMax, rec.data(), rec.size(), c, ignore_drops);  // a fresh, complete record
         check(c.frames.size() == 1 && c.frames[0] == ramp(5, 0x60),
               "after reset, a complete record parses (no stale prefix bytes)");
     }
@@ -242,6 +256,54 @@ int main() {
               "configured_cap: the default itself passes through");
         check(framer_t::configured_cap(kDefault * 2) == kDefault,
               "configured_cap: a value ABOVE the default is clamped — tighten-only, never raise");
+    }
+
+    // 10. (#1255) A drop is reported BEFORE any frame that follows it in the SAME
+    //     chunk is delivered. This is the ordering the transports' `dropped_rx`
+    //     counters rest on: a receiver woken by the delivered frame must already be
+    //     able to see the drop that preceded it. One chunk carrying [dropped][kept]
+    //     is the exact shape the WebTransport backpressure test hits, where small
+    //     frames routinely coalesce into one msquic RECEIVE.
+    {
+        tr::net::length_prefix_framer f;
+        toggle_backend_t be;
+        be.max_seg = 8;  // 20 bytes can never be held; 6 can
+        const bytes_t kept_payload = ramp(6, 0x70);
+        bytes_t stream = record(ramp(20));  // dropped
+        const bytes_t rk = record(kept_payload);
+        stream.insert(stream.end(), rk.begin(), rk.end());  // ...then delivered, same chunk
+
+        drop_counter_t d;
+        std::size_t drops_visible_at_delivery = 0;
+        collector_t c;
+        auto observe = [&](tr::view::segment_ptr_t seg, std::size_t len) {
+            drops_visible_at_delivery = d.drops;  // what a receiver could see right now
+            c(std::move(seg), len);
+        };
+        const auto res = f.feed(be, kMax, stream.data(), stream.size(), observe, d);
+        check(!res.malformed && d.drops == 1, "one drop, one delivery, no malformed");
+        check(c.frames.size() == 1 && c.frames[0] == kept_payload, "the second record delivered");
+        check(drops_visible_at_delivery == 1,
+              "the drop is already counted when the following frame is delivered (#1255)");
+
+        // Ablation — the pre-fix shape, reconstructed: tally the drop locally and
+        // publish it only after the feed returns. The delivery then observes a STALE
+        // count, which is precisely the defect. Kept as an executable statement of
+        // WHY the callback exists, so a future revert to per-chunk batching fails here
+        // instead of intermittently in a live transport suite.
+        tr::net::length_prefix_framer f2;
+        std::size_t local_tally = 0;
+        std::size_t published = 0;
+        std::size_t published_visible_at_delivery = 0;
+        collector_t c2;
+        auto observe2 = [&](tr::view::segment_ptr_t seg, std::size_t len) {
+            published_visible_at_delivery = published;
+            c2(std::move(seg), len);
+        };
+        f2.feed(be, kMax, stream.data(), stream.size(), observe2, [&] { ++local_tally; });
+        published = local_tally;  // the old post-feed publication point
+        check(published == 1 && published_visible_at_delivery == 0,
+              "ablation: batching the count until after the feed hides it from the delivery");
     }
 
     return tr::testing::summary("length_prefix_framer");

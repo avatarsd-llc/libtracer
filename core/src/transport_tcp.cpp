@@ -414,16 +414,19 @@ void transport_tcp_server::on_readable(session_base_t& base, const std::byte* da
     // stored flag, not `peer_rx_.has_any()`: a mode is a wiring-time fact, not a
     // per-frame consequence of which sink someone happened to install — and this
     // reads a member instead of taking the slot's mutex once per frame.
-    const auto res = s.framer.feed(*backend_, max_frame_, data, len,
-                                   [this, &s](view::segment_ptr_t seg, std::size_t flen) {
-                                       // aggregate init — no handle copy (#845)
-                                       view::view_t frame{std::move(seg), 0, flen};
-                                       if (peer_named_)
-                                           peer_rx_.deliver(s.name, std::move(frame));
-                                       else
-                                           rx_.deliver(std::move(frame));
-                                   });
-    if (res.dropped != 0) dropped_rx_.fetch_add(res.dropped, std::memory_order_relaxed);
+    const auto res = s.framer.feed(
+        *backend_, max_frame_, data, len,
+        [this, &s](view::segment_ptr_t seg, std::size_t flen) {
+            // aggregate init — no handle copy (#845)
+            view::view_t frame{std::move(seg), 0, flen};
+            if (peer_named_)
+                peer_rx_.deliver(s.name, std::move(frame));
+            else
+                rx_.deliver(std::move(frame));
+        },
+        // At decision time, so a frame delivered later in this same chunk cannot reach
+        // an observer before the drop that preceded it is counted (#1255).
+        [this] { dropped_rx_.fetch_add(1, std::memory_order_relaxed); });
     if (res.malformed) {
         // Malformed (corrupt/hostile) or undeliverable: a desynced stream
         // cannot be re-framed — count it and tear this one peer down.

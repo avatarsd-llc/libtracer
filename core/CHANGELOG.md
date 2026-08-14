@@ -98,6 +98,27 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **`length_prefix_framer::feed` reports each backpressure drop AT DECISION TIME through a
+  new `on_drop` callback, and `result_t::dropped` is gone**
+  ([#1255](https://github.com/avatarsd-llc/libtracer/issues/1255)). `feed` takes one more
+  argument — a `void()` callable invoked once per frame shed to backpressure, the moment the
+  drop is decided — and `result_t` now carries only `malformed`, the single outcome that
+  STOPS the feed. The drop POLICY is untouched (what is shed and when is exactly #932's
+  rules), and `dropped_rx()` keeps its documented meaning; only the moment the count becomes
+  visible moves earlier. It had to move because a per-chunk tally can only be read after the
+  whole chunk is processed: one chunk routinely carries a dropped frame AND a delivered one
+  (small frames coalesce into a single msquic RECEIVE), so the count was published *after*
+  the delivery that followed the drop, and a receiver woken by that frame could read a stale
+  `dropped_rx()`. The ordering is now a documented contract of `feed` — `on_drop` always
+  precedes the `on_frame` of any later frame — and a relaxed atomic is enough to carry it,
+  because the increment is sequenced-before the delivery and rides whatever release/acquire
+  edge publishes the frame. Callers that ignore drops pass a no-op lambda; the non-drop path
+  is unchanged and allocation-free (the callback is a template parameter, invoked only on the
+  DROP arm). Both in-tree consumers — the shared msquic endpoint behind `quic_transport_t` /
+  `webtransport_transport_t`, and `transport_tcp_server` — now count inline, which makes the
+  framed transports consistent with `transport_udp` / `transport_ws` / `transport_can`, all
+  of which already counted at the drop site.
+
 - **`rope_t::flatten` is out-of-line again, and `rope_t::materialize` is inlinable again —
   25–48% back on every `materialize` path**
   ([#1250](https://github.com/avatarsd-llc/libtracer/issues/1250)). No signature, no

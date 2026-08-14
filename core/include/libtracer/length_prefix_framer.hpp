@@ -22,7 +22,12 @@
  * The state machine is transport-agnostic — no msquic types, no atomics, no
  * connection handle — so it is unit-tested directly (length_prefix_framer_test)
  * in the default build, without a live QUIC connection. The transport keeps its
- * own counters and shutdown, driven by the per-chunk `result_t`.
+ * own counters and shutdown: a drop is reported the moment it is decided (the
+ * `on_drop` callback), and the per-chunk `result_t` carries only what STOPS the
+ * feed. Counting drops per chunk instead was #1255: one chunk routinely carries
+ * a dropped frame and a delivered one, so a batched count published after the
+ * feed returned became visible to a receiver only AFTER the delivery that
+ * followed the drop — an observer woken by that frame could read a stale count.
  */
 #pragma once
 
@@ -158,36 +163,50 @@ class length_prefix_framer {
     /**
      * @brief The outcome of feeding one chunk (the transport applies the effects).
      *
-     * Deliveries happen inline through `on_frame`; this reports only what the
-     * transport must act on with its own counters / connection handle.
+     * Deliveries happen inline through `on_frame` and drops inline through
+     * `on_drop`; this reports only the one outcome that STOPS the feed, which the
+     * caller must act on with its connection handle. It deliberately carries no
+     * drop COUNT: a per-chunk tally can only be read after the whole chunk has
+     * been processed, i.e. after deliveries the drop preceded (#1255).
      */
     struct result_t {
-        std::size_t dropped = 0; /**< @brief Frames skipped to backpressure (the backend could
-                                       not hold them), drained so framing sync survives. */
-        bool malformed = false;  /**< @brief A prefix beyond the PROTOCOL cap was seen — stop,
-                                       shut the peer down. */
+        bool malformed = false; /**< @brief A prefix beyond the PROTOCOL cap was seen — stop,
+                                      shut the peer down. */
     };
 
     /**
-     * @brief Feed @p n bytes at @p p; deliver each completed frame via @p on_frame.
+     * @brief Feed @p n bytes at @p p; deliver each completed frame via @p on_frame and
+     *        report each backpressure drop via @p on_drop, both in arrival order.
+     *
+     * The ORDERING is the contract, not an implementation detail (#1255): `on_drop`
+     * runs at the moment the drop is decided, so it always precedes the `on_frame`
+     * of any frame that arrives after the dropped one — including when both share a
+     * single chunk, which is the common case for small frames. A caller whose
+     * `on_drop` bumps a counter therefore gives every receiver this guarantee: by
+     * the time a delivered frame is observable, every drop before it is already
+     * counted. A relaxed atomic is enough to carry it — the increment is
+     * sequenced-before the delivery, so whatever release/acquire edge publishes the
+     * frame to an observer (a sink's mutex, a queue) carries the count with it.
      *
      * @tparam OnFrame  Callable `void(tr::view::segment_ptr_t seg, std::size_t len)`
      *                  — `seg` owns exactly @p len bytes of one reassembled frame.
+     * @tparam OnDrop   Callable `void()` — one backpressure drop was just decided.
      * @param backend   Where each frame's segment is allocated (ADR-0042 §2/§4).
      * @param max_frame The caller's PROTOCOL frame ceiling (`configured_cap`): a prefix
      *                  beyond it is malformed and stops the feed. A frame within it that
      *                  the backend cannot hold — exhausted, or larger than any segment it
-     *                  produces (`effective_cap`) — is drained and counted in
-     *                  `result_t::dropped` instead, so local capacity backpressures a
+     *                  produces (`effective_cap`) — is drained and reported through
+     *                  @p on_drop instead, so local capacity backpressures a
      *                  legitimate peer rather than disconnecting it (#932).
      * @param p,n       The chunk (may split a prefix or a body arbitrarily).
      * @param on_frame  Invoked once per completed frame, in arrival order.
-     * @return Per-chunk `result_t`: frames dropped to backpressure, and whether
-     *         an oversize prefix stopped the feed (the caller shuts the peer down).
+     * @param on_drop   Invoked once per frame shed to backpressure, at decision time.
+     * @return Per-chunk `result_t`: whether an oversize prefix stopped the feed (the
+     *         caller shuts the peer down).
      */
-    template <class OnFrame>
+    template <class OnFrame, class OnDrop>
     result_t feed(mem::mem_backend_t& backend, std::size_t max_frame, const std::byte* p,
-                  std::size_t n, OnFrame&& on_frame) {
+                  std::size_t n, OnFrame&& on_frame, OnDrop&& on_drop) {
         result_t res;
         while (n > 0) {
             if (drain_left_ > 0) {
@@ -223,7 +242,11 @@ class length_prefix_framer {
                         res.malformed = true;
                         return res;
                     case prefix_decision_t::kind_t::DROP:
-                        ++res.dropped;
+                        // Report the drop HERE, before a single body byte is drained and
+                        // therefore before any later frame in this same chunk can be
+                        // delivered. Counting it into the returned result instead put the
+                        // publication after those deliveries (#1255).
+                        on_drop();
                         drain_left_ = len;
                         continue;
                     case prefix_decision_t::kind_t::ACCEPT:
