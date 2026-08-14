@@ -1,10 +1,18 @@
 # Arduino integration
 
-Packages libtracer as an Arduino library, distributed via the Arduino Library Manager.
+Arduino library metadata for libtracer. **Not distributed via the Arduino Library
+Manager** — see [Status](#status) below.
 
 ## Use
 
-Install via Library Manager (search "libtracer") or drop the repository into `~/Arduino/libraries/`.
+**Not available through the Library Manager** — libtracer has never been submitted
+to the registry and searching for it there finds nothing. Use the
+[PlatformIO package](../platformio/) or the
+[ESP-IDF managed component](../esp-idf/) instead.
+
+The `library.properties` here describes the intended Arduino packaging, but the
+layout does not satisfy the registry either: Arduino requires `library.properties`
+in the **repository root**, and this one lives in `integrations/arduino/`.
 
 ## Conformance profile
 
