@@ -28,9 +28,10 @@
 
 namespace tr::net {
 
-void register_builtin_transports(transport_vertex_t& vertex, mem::mem_backend_t* rx_backend) {
-    register_udp_transport(vertex, rx_backend);
-    register_tcp_transport(vertex, rx_backend);
+void register_builtin_transports(transport_vertex_t& vertex, mem::mem_backend_t* rx_backend,
+                                 mem::block_source_t* egress_src) {
+    register_udp_transport(vertex, rx_backend, egress_src);
+    register_tcp_transport(vertex, rx_backend, egress_src);
 }
 
 }  // namespace tr::net

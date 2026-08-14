@@ -11,6 +11,7 @@
  * TCP-less build carries no reference to tcp_transport_t. See builtin_transports.hpp.
  */
 #include <cstddef>
+#include <utility>
 
 #include "libtracer/builtin_transports.hpp"
 #include "libtracer/config_reader.hpp"
@@ -19,7 +20,8 @@
 
 namespace tr::net {
 
-void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_backend) {
+void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_backend,
+                            mem::block_source_t* egress_src) {
     // Built-in `tcp`: DIAL = tcp_transport_t(addr, port) — a SYNCHRONOUS TCP connect at
     // creation time (the peer's listener must be up, or the SPEC write fails TRANSPORT_DOWN);
     // LISTEN = transport_tcp_server(port), the multi-peer listener (the ws factory's
@@ -45,12 +47,12 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
     // name IT chooses via register_module (kTcpClientSuggestedModule /
     // kTcpServerSuggestedModule in transport_tcp.hpp are the suggested defaults).
     vertex.register_transport_type(
-        "tcp", [rx_backend](const conn_settings_t& s, const wire::tlv_t* raw_config) {
+        "tcp", [rx_backend, egress_src](const conn_settings_t& s, const wire::tlv_t* raw_config) {
             const config_reader_t cfg(raw_config);
             const bool peer_named = cfg.flag("peer_named").value_or(false);
             const auto max_peers = static_cast<std::size_t>(cfg.u32("max_peers").value_or(0));
             const std::uint32_t liveness_window = cfg.u32("liveness_window").value_or(0);
-            return dial_or_listen(
+            auto link = dial_or_listen(
                 s,
                 [&] {
                     // DEFERRED recv thread (#1045, the `ws` factory's shape): the connection is
@@ -70,6 +72,8 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
                         s.port, rx_backend, s.max_frame, max_peers, peer_named,
                         /*recv_stack=*/std::size_t{0}, liveness_window);
                 });
+            // The ADR-0079 egress store, wired before the link is handed to the router (#873).
+            return with_egress_source(std::move(link), egress_src);
         });
 }
 

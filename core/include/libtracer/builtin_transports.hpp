@@ -26,6 +26,7 @@
 
 #include "libtracer/graph.hpp"
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_source.hpp"
 #include "libtracer/transport.hpp"
 #include "libtracer/transport_vertex.hpp"
 
@@ -71,14 +72,42 @@ template <class Dial, class Listen>
     return listen();
 }
 
-/** @brief Register the built-in `udp` transport factory on @p vertex (needs transport_udp). */
-void register_udp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_backend);
+/**
+ * @brief Wire @p egress_src into a just-constructed link — the EGRESS half of a factory's
+ *        memory injection (#873 family 1, ADR-0079's net-plane failable store).
+ *
+ * The `rx_backend` argument every factory already carries is the INGRESS seam (ADR-0042 §2);
+ * this is its egress twin, and the two are deliberately separate objects: an inbound frame
+ * becomes a refcounted `segment_t` the receiver may keep, while an egress gather is a raw,
+ * per-send scratch block whose exhaustion answer is "drop this frame". Applied right after
+ * construction and before the link is wired into the router, which is the
+ * @ref transport_t::set_egress_source contract ("before frames flow").
+ *
+ * A failed construction passes through untouched, so a factory can wrap its
+ * `dial_or_listen` result in one expression.
+ * @param link       The factory's result — forwarded on unchanged.
+ * @param egress_src The store to wire; `nullptr` leaves the link on the process default.
+ */
+[[nodiscard]] inline graph::result_t<std::unique_ptr<transport_t>> with_egress_source(
+    graph::result_t<std::unique_ptr<transport_t>> link, mem::block_source_t* egress_src) noexcept {
+    if (link.has_value() && egress_src != nullptr) (*link)->set_egress_source(*egress_src);
+    return link;
+}
 
-/** @brief Register the built-in `tcp` transport factory on @p vertex (needs transport_tcp). */
-void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_backend);
+/** @brief Register the built-in `udp` transport factory on @p vertex (needs transport_udp).
+ *         @p egress_src is the ADR-0079 egress store — see `with_egress_source`. */
+void register_udp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_backend,
+                            mem::block_source_t* egress_src = &mem::heap_source());
 
-/** @brief Register the built-in `ws` transport factory on @p vertex (needs transport_ws). */
-void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_backend);
+/** @brief Register the built-in `tcp` transport factory on @p vertex (needs transport_tcp).
+ *         @p egress_src is the ADR-0079 egress store — see `with_egress_source`. */
+void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_backend,
+                            mem::block_source_t* egress_src = &mem::heap_source());
+
+/** @brief Register the built-in `ws` transport factory on @p vertex (needs transport_ws).
+ *         @p egress_src is the ADR-0079 egress store — see `with_egress_source`. */
+void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_backend,
+                           mem::block_source_t* egress_src = &mem::heap_source());
 
 /**
  * @brief Register every built-in transport factory compiled into this build.
@@ -89,7 +118,11 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
  * (from src/builtin_transports.cpp.in) that calls only the enabled register_*_transport.
  * @param vertex     The transport vertex to register the catalog entries on.
  * @param rx_backend The ADR-0042 §2 receive-segment seam threaded to owning transports.
+ * @param egress_src The ADR-0079 net-plane EGRESS store threaded to every socket these
+ *                   factories construct — see `with_egress_source`. Default: the
+ *                   process heap (today's behaviour, unchanged).
  */
-void register_builtin_transports(transport_vertex_t& vertex, mem::mem_backend_t* rx_backend);
+void register_builtin_transports(transport_vertex_t& vertex, mem::mem_backend_t* rx_backend,
+                                 mem::block_source_t* egress_src = &mem::heap_source());
 
 }  // namespace tr::net

@@ -111,7 +111,7 @@ void udp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
     // sending peer's choice, and the old throwing `reserve` made that an abort() under
     // `-fno-exceptions`.
     std::array<::iovec, kMaxInlineIov> inline_vec;
-    iov_table_t<::iovec> table(inline_vec);
+    iov_table_t<::iovec> table(inline_vec, egress_source());
     const std::size_t n = iov.size();
     ::iovec* vec = table.acquire(n);
     if (vec == nullptr) {  // gather store exhausted => drop the datagram, counted (#932)

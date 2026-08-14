@@ -34,6 +34,7 @@
 #include "libtracer/graph.hpp"
 #include "libtracer/key_view.hpp"
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_source.hpp"
 #include "libtracer/transport.hpp"
 
 namespace tr::net {
@@ -227,9 +228,21 @@ class transport_vertex_t {
      *                   process heap; a bounded host injects its pool over its
      *                   static slab. Must outlive this object (and thus every
      *                   owned transport).
+     * @param egress_src The EGRESS twin of @p rx_backend (#873 family 1, ADR-0079's
+     *                   net-plane failable store): the `block_source_t` every socket
+     *                   these built-in factories construct draws its per-send gather
+     *                   block from — the base `transport_t::send(iov)` temporary and the
+     *                   `iov_table_t` overflow, both sized by the SENDING peer. Sizing it
+     *                   is what bounds this node's egress allocation; exhaustion drops the
+     *                   frame and counts it, exactly as it already does. Default: the
+     *                   process heap, i.e. today's behaviour unchanged. Must outlive this
+     *                   object (and thus every owned transport). A kind's own factory
+     *                   registered later via @ref register_transport_type reaches the same
+     *                   store through @ref egress_source.
      */
     transport_vertex_t(graph::graph_t& graph, fwd_router_t& router, std::string net_root = "/net",
-                       mem::mem_backend_t* rx_backend = &mem::heap_backend());
+                       mem::mem_backend_t* rx_backend = &mem::heap_backend(),
+                       mem::block_source_t* egress_src = &mem::heap_source());
 
     /**
      * @brief SLIM ctor (@ref slim_net_t): bind to @p graph / @p router and register
@@ -262,6 +275,18 @@ class transport_vertex_t {
      *                plus the raw config TLV (for its kind-private keys).
      */
     void register_transport_type(std::string kind, transport_factory_t factory);
+
+    /**
+     * @brief This net plane's EGRESS store — the one the built-in factories wire into every
+     *        socket they construct (see the ctor's `egress_src`, #873 / ADR-0079).
+     *
+     * Exposed so a factory registered through @ref register_transport_type (the out-of-tree
+     * kinds — `quic`, `can`, an embedder's own) can hand the SAME store to the link it
+     * builds, via `tr::net::with_egress_source`, rather than silently leaving that kind's
+     * gather on the process heap while the built-ins are bounded. A deployer fanning the
+     * ADR-0079 NARROW shape ignores this and captures its own per-thread source instead.
+     */
+    [[nodiscard]] mem::block_source_t& egress_source() const noexcept { return *egress_src_; }
 
     /**
      * @brief Declare the MODULE that connections of @p kind and @p role mount under.
@@ -497,7 +522,8 @@ class transport_vertex_t {
     graph::graph_t& graph_;
     fwd_router_t& router_;
     std::string net_root_;
-    mem::mem_backend_t* rx_backend_;  // RX segment source for owned view-delivering sockets
+    mem::mem_backend_t* rx_backend_;   // RX segment source for owned view-delivering sockets
+    mem::block_source_t* egress_src_;  // TX gather store for owned sockets (#873 / ADR-0079)
     // Pre-supplied links awaiting their SPEC, and created connections, both by NAME;
     // the transport-factory catalog by config `kind`.
     std::map<std::string, transport_t*, std::less<>> pending_links_;

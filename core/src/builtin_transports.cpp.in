@@ -15,9 +15,11 @@
 
 namespace tr::net {
 
-void register_builtin_transports(transport_vertex_t& vertex, mem::mem_backend_t* rx_backend) {
+void register_builtin_transports(transport_vertex_t& vertex, mem::mem_backend_t* rx_backend,
+                                 mem::block_source_t* egress_src) {
     (void)vertex;
     (void)rx_backend;
+    (void)egress_src;
 @LIBTRACER_BUILTIN_TRANSPORT_CALLS@
 }
 

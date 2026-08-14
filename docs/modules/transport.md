@@ -50,7 +50,7 @@ A transport that can hand up *owning* frames implements the rope-receiver seam
 view delivery](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md),
 generalized to ropes by [ADR-0053 — lazy rope-backed decode, view partial-path
 routing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0053-lazy-rope-backed-decode-view-partial-path-routing.md)):
-it overrides `delivers_ropes()` (`core/include/libtracer/transport.hpp:533`) and
+it overrides `delivers_ropes()` (`core/include/libtracer/transport.hpp:572`) and
 delivers each inbound frame as a `rope_t` of refcounted links over segments drawn
 from a host-injected `mem_backend_t`. A contiguous frame is the single-link case; a
 scattered one — a CAN reassembly group, a fragmented WebSocket message — crosses the
@@ -290,6 +290,16 @@ flowchart LR
   **drops the frame** rather than aborting (`transport.hpp:416`). A transport with a
   native `sendmsg`/`writev` that does not override it silently pays a copy per
   forward hop and inherits a drop path it did not intend.
+- **The egress gather draws from the link's own injected store.** That temporary — and
+  the `iov_table_t` overflow block the socket transports' `::iovec` tables grow into —
+  comes from `transport_t::egress_source()`, a `mem::block_source_t` the transport
+  factory wires per link (`register_builtin_transports`' `egress_src` argument, fed by
+  `transport_vertex_t`'s), defaulting to the process heap. Both the entry count and the
+  byte count are the *sending peer's* choice, so sizing that store is what bounds a
+  node's egress allocation — [ADR-0079](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md)'s
+  "bounded node is a property the deployer injects". Exhaustion is unchanged: the frame
+  is dropped and counted, never truncated. A store whose concurrency contract is
+  single-threaded belongs to a link only one thread sends on.
 - **The link-down notifier is a routing seam, not a log hook.** It re-enters the
   routing plane to evict the departed link's subscriber edges, so it must be fired
   with no internal transport locks held; a connectionless kind simply never fires it.

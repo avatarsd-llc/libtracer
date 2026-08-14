@@ -65,12 +65,18 @@ struct prefixed_iov_t {
     static constexpr std::size_t kMaxInlineIov = tr::net::kMaxInlineIov;
     std::array<std::byte, kPrefixBytes> prefix;
     std::array<::iovec, kMaxInlineIov + 1> inline_vec;
-    iov_table_t<::iovec> table{inline_vec};
+    iov_table_t<::iovec> table;
     ::iovec* vec = nullptr;
     std::size_t n = 0;
     bool ok = false;
 
-    prefixed_iov_t(std::span<const std::span<const std::byte>> iov, std::size_t cap) {
+    /**
+     * @brief Assemble the record, overflowing into the SENDING LINK's egress store @p src
+     *        (`transport_t::egress_source`, #873 family 1) rather than the process heap.
+     */
+    prefixed_iov_t(std::span<const std::span<const std::byte>> iov, std::size_t cap,
+                   mem::block_source_t& src)
+        : table(inline_vec, src) {
         std::size_t total = 0;
         for (const std::span<const std::byte>& s : iov) total += s.size();
         if (total > cap) return;
@@ -203,7 +209,7 @@ void tcp_transport_t::send(std::span<const std::byte> frame) {
 }
 
 void tcp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
-    const prefixed_iov_t rec(iov, kMaxFrame);
+    const prefixed_iov_t rec(iov, kMaxFrame, egress_source());
     // Oversize for the cap, or a refused gather store: shed it, but COUNT it (#932) —
     // an egress drop used to be a bare return no observer could see.
     if (!rec.ok) {
@@ -392,7 +398,7 @@ void transport_tcp_server::send(std::span<const std::span<const std::byte>> iov)
     // Build the record ONCE, then hand the gather to the shared fan-out, which writes
     // it to every peer under the header lock order (peers_m_ → write_m_) — the gather
     // is read-only, so no per-peer copy is taken (#932).
-    const prefixed_iov_t rec(iov, tcp_transport_t::kMaxFrame);
+    const prefixed_iov_t rec(iov, tcp_transport_t::kMaxFrame, egress_source());
     if (!rec.ok) {
         dropped_tx_.fetch_add(1, std::memory_order_relaxed);  // shed, and counted (#932)
         return;
@@ -410,7 +416,7 @@ void transport_tcp_server::peer_endpoint_t::send(std::span<const std::byte> fram
 void transport_tcp_server::peer_endpoint_t::send(std::span<const std::span<const std::byte>> iov) {
     if (owner_ == nullptr || slot_ == nullptr) return;
     // The single-fd twin of the broadcast override: one gathered record, one peer.
-    const prefixed_iov_t rec(iov, tcp_transport_t::kMaxFrame);
+    const prefixed_iov_t rec(iov, tcp_transport_t::kMaxFrame, owner_->egress_source());
     if (!rec.ok) {
         owner_->dropped_tx_.fetch_add(1, std::memory_order_relaxed);  // shed, counted (#932)
         return;

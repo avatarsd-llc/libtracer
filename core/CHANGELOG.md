@@ -16,6 +16,33 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`net::transport_t::egress_source()` / `set_egress_source()` — the egress gather draws from
+  an INJECTED `mem::block_source_t`, not the process default**
+  ([#1287](https://github.com/avatarsd-llc/libtracer/issues/1287), family 1 of
+  [#873](https://github.com/avatarsd-llc/libtracer/issues/873);
+  [ADR-0079](../docs/adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md)). Six
+  hot egress sites drew their per-send gather block from the process-wide `mem::heap_source()`:
+  the base `transport_t::send(iov)` gather — the path **every non-overriding transport** lands
+  on, `transport_can` and any out-of-tree embedder's included — and the `net::iov_table_t`
+  overflow of the three socket transports that build an `::iovec` table (tcp's one-peer,
+  broadcast and directed-facade senders, udp's datagram gather, ws's broadcast and
+  directed-facade gathers). Both the entry count and the byte count are the **sending peer's**
+  choice (a rope's link count × its region count), so a deployer who wired a bounded source at
+  every seam the API offered still had these allocations escaping to the process heap — the gap
+  ADR-0079 §Decision 4 exists to close. Each link now carries its own store; sizing it bounds
+  this node's egress allocation, and exhaustion answers exactly as before (the frame is
+  **dropped and counted**, never truncated, never `abort()`). Wired by the transport factory:
+  `register_builtin_transports` / `register_udp_transport` / `register_tcp_transport` /
+  `register_ws_transport` take a new trailing `mem::block_source_t* egress_src`, fed by a new
+  trailing `egress_src` argument on the full `net::transport_vertex_t` constructor and applied
+  through the new `net::with_egress_source` helper; `transport_vertex_t::egress_source()`
+  exposes the plane's store to a factory registered later through `register_transport_type`
+  (`quic`, `can`, an embedder's own). Nothing is added to the shared `conn_settings_t` or to
+  `transport_vertex`'s config surface — the standing lean-transport rule. **Every new argument
+  defaults to `&mem::heap_source()`, so a build that wires nothing is unchanged bit for bit**;
+  the SLIM `transport_vertex_t` ctor is untouched. None of the six sites allocates while
+  holding a transport lock, so an injected source carrying its own `Sync` policy introduces no
+  lock-ordering obligation ([#1049](https://github.com/avatarsd-llc/libtracer/issues/1049)).
 - **`net::transport_can::dropped_stale_binding()` — the CAN weld, made observable and then
   refused** ([#1011](https://github.com/avatarsd-llc/libtracer/issues/1011)). A learned binding
   whose endpoint run no later advertise *overlapped* survived indefinitely, because the

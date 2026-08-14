@@ -10,13 +10,16 @@
  * generated register_builtin_transports() calls register_udp_transport only then, so a
  * UDP-less build carries no reference to udp_transport_t. See builtin_transports.hpp.
  */
+#include <utility>
+
 #include "libtracer/builtin_transports.hpp"
 #include "libtracer/transport_udp.hpp"
 #include "libtracer/transport_vertex.hpp"
 
 namespace tr::net {
 
-void register_udp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_backend) {
+void register_udp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_backend,
+                            mem::block_source_t* egress_src) {
     // Built-in `udp`: DIAL binds an ephemeral local port and targets `addr:port`;
     // LISTEN binds `port` peer-less — udp_transport_t then learns the peer from each
     // inbound datagram's source (the single-peer UDP-server shape), so replies to a
@@ -31,9 +34,10 @@ void register_udp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
     // library registers NEITHER (ADR-0073 §4): the application declares each module under a
     // name IT chooses via register_module (kUdpClientSuggestedModule /
     // kUdpServerSuggestedModule in transport_udp.hpp are the suggested defaults).
-    vertex.register_transport_type("udp", [rx_backend](const conn_settings_t& s,
-                                                       const wire::tlv_t* /*raw_config*/) {
-        return dial_or_listen(
+    vertex.register_transport_type("udp", [rx_backend, egress_src](
+                                              const conn_settings_t& s,
+                                              const wire::tlv_t* /*raw_config*/) {
+        auto link = dial_or_listen(
             s,
             [&] {
                 return make_checked<udp_transport_t>(0, s.addr, s.port, rx_backend, s.max_frame);
@@ -41,6 +45,8 @@ void register_udp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
             [&] {
                 return make_checked<udp_transport_t>(s.port, s.addr, 0, rx_backend, s.max_frame);
             });
+        // The ADR-0079 egress store, wired before the link is handed to the router (#873).
+        return with_egress_source(std::move(link), egress_src);
     });
 }
 
