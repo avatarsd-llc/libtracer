@@ -252,9 +252,10 @@ struct parsed_fwd_t {
     N src{};                     /**< accumulated return route (a PATH node) */
     std::optional<N> payload{};  /**< WRITE only (the value node) */
     /**
-     * @brief The reverse-direction `PATH_REF` list the forwarding hops accumulated
-     *        (RFC-0024 §7.1 amendment 1) — the request's trailing child, present only on a
-     *        mint-flagged request that crossed at least one contributing hop.
+     * @brief The reverse-direction `PATH_REF_REVERSE` (`0x15`) list the forwarding hops
+     *        accumulated (RFC-0024 §7.1 amendments 1 and 2) — the request's trailing child,
+     *        present only on a mint-flagged request that crossed at least one contributing
+     *        hop, and identified by its own type rather than by its position.
      *
      * One element SHORT of the route by construction: the hop into this responder is the
      * one no peer can mint for it, so the responder completes the list with its own
@@ -318,13 +319,13 @@ template <class N>
 
     std::optional<N> tail = ch.next();
     if (p.op == fwd_op_t::WRITE) {
-        // A mint-flagged request's LAST child may be the reverse-direction `PATH_REF`
-        // (RFC-0024 §7.1 amendment 1) — positionally AFTER the closed RFC-0004 §B list, so
-        // a `PATH_REF` here is the reverse list and never the payload when the flag is set.
-        // (The one shape sacrificed: a mint-flagged WRITE whose stored VALUE is itself a
-        // raw `PATH_REF` TLV and which carries no reverse list — no in-tree producer emits
-        // it, and an origin that needs it simply clears bit 7 on that write.)
-        if (tail && !(p.mint_request && tail->type() == type_t::PATH_REF)) {
+        // A mint-flagged request's LAST child may be the reverse-direction list, and it is
+        // told from the payload by its OWN TYPE — `PATH_REF_REVERSE` (`0x15`), never by
+        // position (RFC-0024 §7.1 amendment 2). A WRITE's payload is therefore whatever
+        // stands here as long as it is not that type, INCLUDING a raw `PATH_REF` VALUE:
+        // amendment 1's positional reading foreclosed that shape, and amendment 2 gives it
+        // back at zero cost, because this compare was always a compare.
+        if (tail && tail->type() != type_t::PATH_REF_REVERSE) {
             p.payload = *tail;
             tail = ch.next();
         }
@@ -336,8 +337,11 @@ template <class N>
         }
     }
     // The reverse list rides ONLY a mint-flagged request (§7.1 amendment 1); on an unflagged
-    // frame a trailing PATH_REF is not licensed and stays unparsed, exactly as before.
-    if (p.mint_request && tail && tail->type() == type_t::PATH_REF) p.reverse = *tail;
+    // frame a trailing `PATH_REF_REVERSE` is not licensed and stays unparsed. The flag gate
+    // is kept even though the type alone is now unambiguous: the amendment licenses the child
+    // on a mint-flagged request and nowhere else, and honouring an unlicensed one would bind
+    // a route no hop promised to have contributed to.
+    if (p.mint_request && tail && tail->type() == type_t::PATH_REF_REVERSE) p.reverse = *tail;
     return p;
 }
 
@@ -731,6 +735,13 @@ template <class N>
                             // One owned segment for the subscription's life (the ADR-0041
                             // §2 shape `return_route` uses one field over): a fresh 4-byte
                             // header, this node's element, then the hops' elements verbatim.
+                            //
+                            // Headed `PATH_REF` (`0x14`), not `PATH_REF_REVERSE`: the stored
+                            // form is an ADDRESS at rest — every delivery consumes element 0
+                            // locally and puts elements 1.. on the wire as the delivery's
+                            // bound `dst`, which is a `PATH_REF` by definition. `0x15` names
+                            // the accumulating list on a request in flight, and this blob
+                            // never travels in that role.
                             view::segment_ptr_t seg = view::segment_alloc(
                                 flat, 4u + wire::kPathRefElementBytes + rbody.size());
                             if (seg) {

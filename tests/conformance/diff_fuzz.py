@@ -68,9 +68,13 @@ CXX_FALLBACKS = [
 # 0x0F FWD / 0x10 FIELD are the RFC-0004 remote-operation frames; they are
 # structured TLVs the codec round-trips like any other, so adding them here fuzzes
 # all three cores on FWD/FIELD-shaped frames (ADR-0035 slice 1). 0x14 PATH_REF is the
-# bound-path form (RFC-0024 §4) — the one type with a body shape the generator must
-# honour, handled in `_gen_node`.
-REGISTRY_TYPES = [0x01, 0x02, 0x03, 0x04, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x14]
+# bound-path form (RFC-0024 §4) and 0x15 PATH_REF_REVERSE the reverse-direction list
+# (§7.1 amendment 2) — the two types with a body shape the generator must honour, and
+# it must honour it for BOTH: their grammar is identical, so a generator that knew only
+# 0x14 would emit 0x15 bodies every conforming core rejects (correctly) and report the
+# agreement as a mismatch. Handled in `_gen_node`.
+REGISTRY_TYPES = [0x01, 0x02, 0x03, 0x04, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
+                  0x14, 0x15]
 # Depth is receiver-resource-bounded (RFC-0006, no codec cap); the generator
 # nests shallowly so every core parses these frames at any declared budget.
 MAX_GEN_DEPTH = 6  # how deep this generator nests
@@ -117,11 +121,12 @@ def _gen_node(rng: Random, depth: int) -> bytes:
     # Structured (PL) only while we have depth budget; bias toward leaves.
     structured = depth < MAX_GEN_DEPTH and rng.random() < 0.4
 
-    # PATH_REF (0x14) is the one type whose body is NOT self-describing: a bare array of
-    # fixed 8-byte elements, PL and LL both forbidden, at most 255 elements (RFC-0024
-    # §4.2/§4.3). A generator that ignored that would emit frames every conforming core
-    # rejects — correctly — and report the agreement as a mismatch.
-    path_ref = type_b == 0x14
+    # PATH_REF (0x14) and PATH_REF_REVERSE (0x15) are the two types whose body is NOT
+    # self-describing: a bare array of fixed 8-byte elements, PL and LL both forbidden, at
+    # most 255 elements (RFC-0024 §4.2/§4.3, and §7.1 amendment 2 for the reverse code,
+    # whose body grammar is identical). A generator that ignored that would emit frames
+    # every conforming core rejects — correctly — and report the agreement as a mismatch.
+    path_ref = type_b in (0x14, 0x15)
     if path_ref:
         structured = False
 

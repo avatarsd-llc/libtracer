@@ -147,7 +147,7 @@ M.TYPE_NAMES = {
   [0x08] = "ERROR", [0x09] = "STATUS", [0x0A] = "ACL", [0x0B] = "SETTINGS",
   [0x0C] = "TIME", [0x0D] = "ROUTER", [0x0E] = "SPEC", [0x0F] = "FWD",
   [0x10] = "FIELD", [0x11] = "ADVERTISE", [0x12] = "COMPACT", [0x13] = "HANDLE_NACK",
-  [0x14] = "PATH_REF",
+  [0x14] = "PATH_REF", [0x15] = "PATH_REF_REVERSE",
 }
 
 -- Structured types (opt.PL SHOULD be 1). Used only for display hints.
@@ -281,16 +281,18 @@ function M.parse(b, off, depth, maxdepth)
   node.header_len = H
   node.length = (node.opt.LL == 1) and u32le(b, off + 2) or u16le(b, off + 2)
 
-  -- PATH_REF (0x14) is the one type whose body shape is not derivable from the header:
-  -- a bare array of fixed 8-byte elements, PL and LL both forbidden, at most 255
-  -- elements (RFC-0024 §4.2/§4.3). Anything else is tr::frame::invalid.
-  if t == 0x14 then
+  -- PATH_REF (0x14) and PATH_REF_REVERSE (0x15) are the two types whose body shape is not
+  -- derivable from the header: a bare array of fixed 8-byte elements, PL and LL both
+  -- forbidden, at most 255 elements (RFC-0024 §4.2/§4.3, and §7.1 amendment 2 for the
+  -- reverse code, whose body grammar is identical). Anything else is tr::frame::invalid.
+  if t == 0x14 or t == 0x15 then
+    local n = M.TYPE_NAMES[t]
     if node.opt.PL == 1 or node.opt.LL == 1 then
-      node.invalid = "PATH_REF with opt.PL/opt.LL set (tr::frame::invalid)"
+      node.invalid = n .. " with opt.PL/opt.LL set (tr::frame::invalid)"
     elseif node.length % 8 ~= 0 then
-      node.invalid = "PATH_REF length not a multiple of 8 (tr::frame::invalid)"
+      node.invalid = n .. " length not a multiple of 8 (tr::frame::invalid)"
     elseif node.length > 255 * 8 then
-      node.invalid = "PATH_REF over 255 elements (tr::frame::invalid)"
+      node.invalid = n .. " over 255 elements (tr::frame::invalid)"
     end
   end
 
@@ -780,7 +782,7 @@ if rawget(_G, "Proto") then
     if tvb:len() < 4 then return false end
     local node = M.parse(tvb:raw(), 0)
     if node.invalid or not node.total_len then return false end
-    if node.type == 0 or node.type > 0x14 then return false end   -- must be a known code
+    if node.type == 0 or node.type > 0x15 then return false end   -- must be a known code
     if node.opt.r7 ~= 0 or node.opt.r0 ~= 0 then return false end
     -- A verified CRC is near-conclusive; otherwise require an exact frame fit.
     local strong = (node.trailer and node.trailer.crc and node.trailer.crc.ok)

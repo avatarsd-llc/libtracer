@@ -24,9 +24,10 @@
  * 0x0E SPEC is the in-band vertex-creation spec. 0x0F FWD and 0x10 FIELD are the
  * remote-operation frames (RFC-0004 / ADR-0035, the v1 fast-track range
  * 0x0F-0x1F). All are structured (opt.PL=1) and handled generically by the codec.
- * 0x14 PATH_REF is the bound-path address form (RFC-0024 §4) and the one exception:
- * its body is a bare fixed-stride 8-byte record array (opt.PL=0), so the decoder
- * checks its shape by type.
+ * 0x14 PATH_REF is the bound-path address form (RFC-0024 §4) and 0x15
+ * PATH_REF_REVERSE the reverse-direction list a mint-flagged request accumulates
+ * (§7.1 amendment 2) — the two exceptions: their body is a bare fixed-stride
+ * 8-byte record array (opt.PL=0), so the decoder checks their shape by type.
  *
  * @readonly
  * @enum {number}
@@ -48,7 +49,21 @@ export const TYPE = Object.freeze({
   FWD: 0x0f,
   FIELD: 0x10,
   PATH_REF: 0x14,
+  PATH_REF_REVERSE: 0x15,
 });
+
+/**
+ * @brief True for either bound-path code — the two types whose body is a fixed-stride 8-byte
+ * element array rather than a self-describing payload (RFC-0024 §4.2, §7.1 amendment 2).
+ *
+ * `0x15` sits adjacent to `0x14` so this stays one masked compare on the per-TLV parse path.
+ *
+ * @param {number} typeB  the TLV's type byte
+ * @returns {boolean} true when the bound-path body shape rules apply (RFC-0024 §4.2/§4.3)
+ */
+export function isPathRefType(typeB) {
+  return (typeB & 0xfe) === TYPE.PATH_REF;
+}
 
 /** @brief The `PATH_REF` element stride — 8 bytes, `(u32 index, u32 generation)` LE (RFC-0024 §4.4). */
 export const PATH_REF_ELEMENT_BYTES = 8;
@@ -352,7 +367,7 @@ function parseOne(buf) {
   // The one per-type structural rule (RFC-0024 §4.2/§4.3), through the single predicate
   // encode() now shares — see pathRefBodyValid for the four clauses and why they are shape
   // rather than meaning.
-  if (typeB === TYPE.PATH_REF && !pathRefBodyValid(opt.pl, opt.ll, length)) {
+  if (isPathRefType(typeB) && !pathRefBodyValid(opt.pl, opt.ll, length)) {
     throw new CodecError(ERROR.FRAME_INVALID);
   }
   const tsSize = opt.ts ? (opt.tf ? 4 : 8) : 0;
@@ -477,7 +492,7 @@ export function encode(tlv) {
   // actually carry. A PATH_REF body is never structured, so `payload` IS the body length: an
   // opt.PL PATH_REF fails the PL clause before the children branch below ever runs.
   if (
-    (tlv.type & 0xff) === TYPE.PATH_REF &&
+    isPathRefType(tlv.type & 0xff) &&
     !pathRefBodyValid(tlv.opt.pl, tlv.opt.ll, tlv.payload.length)
   ) {
     return new Uint8Array(0);

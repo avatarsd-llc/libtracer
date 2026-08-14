@@ -8,7 +8,7 @@ FIELD{ NAME "subscribers", index_mode=WILDCARD } — :subscribers[*]
 
 The `[*]` spelling of RFC-0004 §C, and the third of the three index_mode values
 (`SCALAR=0`, `ELEMENT=1`, `WILDCARD=2` — `enum class index_mode_t` at
-`core/src/op_resolve_walk.hpp:296`). Three values, four wire spellings: `[N]` and
+`core/src/op_resolve_walk.hpp:297`). Three values, four wire spellings: `[N]` and
 `[]` share `ELEMENT=1` and differ by whether the index VALUE is present
 (RFC-0004 §C grammar; `op_resolve_walk.hpp:302-304`).
 

@@ -1139,6 +1139,26 @@ void test_reverse_mint_closes_the_disclosure() {
           "p0's identity anchor exists on A");
     bus.inject_peer("p0", b_fwd_mint(fwd_op_t::WRITE, b_path({"b", "sensor"}), b_path({}),
                                      b_field_subscribers_append(), b_subscriber("s1")));
+    // RFC-0024 §7.1 amendment 2, on the wire: A's forwarded request carries the reverse list
+    // as a TRAILING CHILD OF ITS OWN TYPE — `PATH_REF_REVERSE` (0x15), not a positionally
+    // identified `PATH_REF`. Asserted here rather than only through the behaviour below,
+    // because the type byte IS the amendment; the positional shape would deliver identical
+    // behaviour on this frame and is exactly what must not be relied on.
+    {
+        const auto& lg = a_to_b.log();
+        check(!lg.empty(), "A forwarded the mint-flagged subscribe to B");
+        const auto dec = tr::wire::decode(lg.back());
+        check(dec.has_value() && !dec->children.empty() &&
+                  dec->children.back().type == tr::wire::type_t::PATH_REF_REVERSE &&
+                  dec->children.back().payload.size() == 8,
+              "the forwarded request's LAST child is a one-element PATH_REF_REVERSE (0x15)");
+        // And the payload the WRITE actually carries is still a SUBSCRIBER — the reverse
+        // child is additive, never a replacement for the closed RFC-0004 §B child list.
+        bool has_subscriber = false;
+        for (const auto& c : dec->children)
+            if (c.type == tr::wire::type_t::SUBSCRIBER) has_subscriber = true;
+        check(has_subscriber, "the forwarded request still carries its SUBSCRIBER payload");
+    }
     const auto subs0 = gb.read_subscribers(sensor);
     check(subs0.has_value() && subs0->size() == 1, "B holds S1's remote edge");
 

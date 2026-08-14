@@ -136,8 +136,10 @@ std::vector<std::byte> encode(const tlv_t& tlv) {
     // doc makes shape the caller's problem, so that is a documented raw seam rather than a hole
     // — but it is a seam, not an absence. A PATH_REF body is never structured, so `payload`
     // IS the body length here: an `opt.pl` PATH_REF fails the PL clause before the children
-    // branch below ever runs. Refusing costs one predicted-not-taken compare per TLV.
-    if (tlv.type == type_t::PATH_REF &&
+    // branch below ever runs. Refusing costs one predicted-not-taken compare per TLV. The gate
+    // is `is_path_ref_type` rather than one code: the reverse list (0x15) carries the identical
+    // body grammar (RFC-0024 §7.1 amendment 2), so it is refused by the identical rule.
+    if (is_path_ref_type(tlv.type) &&
         !path_ref_body_valid(tlv.opt.pl, tlv.opt.ll, tlv.payload.size())) {
         return {};
     }
