@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0024 |
 | **Title** | Bound paths: node-scoped vertex-ref source routing |
-| **Status** | **accepted** (2026-08-03, maintainer-ratified, comment window waived). The whole document is ratified, and **§4-§7 are now incorporated in full** as of the forwarding car (2026-08-03): `docs/spec/v1.md` §3 and `docs/reference/05-protocol-tlvs.md` §`0x14` cite the wire form (§4), the routing semantics (§5-§7) and the **hop rules** normatively, `docs/reference/03-addressing.md` carries the two-forms rule, and `docs/reference/13-network-formation.md` the bound diameter ([#809](https://github.com/avatarsd-llc/libtracer/issues/809)). The forwarder's element-consuming hop (§4.1, §5.1 step 4) and the origin-side bind (§7.2/§7.4) ship with that car; §7.1's accumulation gains **erratum 1** below, which is what makes multi-hop minting safe. **ONE** clause remains ratified and NOT incorporated: the §5.3 **NACK** carrying the failing hop index, whose spelling §9.2 still leaves open. A drop is already the conformant behaviour without it; the NACK only makes the origin's recovery faster — **erratum 4** (§5.3) records which arm emits an addressed refusal echo today and which drops silently, and that the asymmetry is intended rather than an oversight. §7.1's **"Symmetry, ruled in"** reverse-direction option — which **erratum 2** below records as having had no wire spelling, every candidate contradicting an already-incorporated normative sentence — is now **incorporated via amendment 1** (2026-08-14, [#1223](https://github.com/avatarsd-llc/libtracer/issues/1223)): spelling (b), forwarder-contributed, the origin's frame bit-identical. **Amendment 2** (§7.1, 2026-08-14, [#1260](https://github.com/avatarsd-llc/libtracer/issues/1260)) gives that reverse list its **own type code** — `0x15` `PATH_REF_REVERSE`, carrying `0x14`'s body grammar unchanged — and **withdraws** amendment 1's positional identification of it; it ships inside v0.12.0 with the reference implementation. **Erratum 3** (§7.1) settles the one frame amendment 1 left unspelled — the last hop of a reverse-list delivery egresses a canonical **empty `PATH`**, so the client's frame is bit-identical in the delivery direction too. The **§8 bench gate is discharged** with the forwarding car: no shipped shape regresses with disjoint ranges under §8.2's protocol (16 interleaved pairs, `taskset -c 2`, both arms collated, first round discarded), the mandatory four-link `reply-spread` arm is level, and §8.4's per-hop question is answered in §3.4 — the first build of the car answered it NEGATIVE and the three costs behind that are recorded there. |
+| **Status** | **accepted** (2026-08-03, maintainer-ratified, comment window waived). The whole document is ratified, and **§4-§7 are now incorporated in full** as of the forwarding car (2026-08-03): `docs/spec/v1.md` §3 and `docs/reference/05-protocol-tlvs.md` §`0x14` cite the wire form (§4), the routing semantics (§5-§7) and the **hop rules** normatively, `docs/reference/03-addressing.md` carries the two-forms rule, and `docs/reference/13-network-formation.md` the bound diameter ([#809](https://github.com/avatarsd-llc/libtracer/issues/809)). The forwarder's element-consuming hop (§4.1, §5.1 step 4) and the origin-side bind (§7.2/§7.4) ship with that car; §7.1's accumulation gains **erratum 1** below, which is what makes multi-hop minting safe. **ONE** clause remains ratified and NOT incorporated: the §5.3 **NACK** carrying the failing hop index, whose spelling §9.2 still leaves open. A drop is already the conformant behaviour without it; the NACK only makes the origin's recovery faster — **erratum 4** (§5.3) records which arm emits an addressed refusal echo today and which drops silently, and that the asymmetry is intended rather than an oversight. §7.1's **"Symmetry, ruled in"** reverse-direction option — which **erratum 2** below records as having had no wire spelling, every candidate contradicting an already-incorporated normative sentence — is now **incorporated via amendment 1** (2026-08-14, [#1223](https://github.com/avatarsd-llc/libtracer/issues/1223)): spelling (b), forwarder-contributed, the origin's frame bit-identical. **Amendment 2** (§7.1, 2026-08-14, [#1260](https://github.com/avatarsd-llc/libtracer/issues/1260)) gives that reverse list its **own type code** — `0x15` `PATH_REF_REVERSE`, carrying `0x14`'s body grammar unchanged — and **withdraws** amendment 1's positional identification of it; it ships inside v0.12.0 with the reference implementation. **Erratum 3** (§7.1) settles the one frame amendment 1 left unspelled — the last hop of a reverse-list delivery egresses a canonical **empty `PATH`**, so the client's frame is bit-identical in the delivery direction too. The **§8 bench gate is discharged** with the forwarding car: no shipped shape regresses with disjoint ranges under §8.2's protocol (16 interleaved pairs, `taskset -c 2`, both arms collated, first round discarded), the mandatory four-link `reply-spread` arm is level, and §8.4's per-hop question is answered in §3.4 — the first build of the car answered it NEGATIVE and the three costs behind that are recorded there. **Amendment 3** (§2.1, 2026-08-15, [RFC-0027](0027-label-switched-path-compression.md)) narrows the §2.1 **vocabulary rule** to the **unqualified** word: "label" alone still means RFC-0004 §E.1's per-link `u16`, "a sentence that calls a vref a label is wrong" stands, and the qualified term "**path label**" is ratified as a third distinct concept. Vocabulary only — **no wire surface changes**. Separately, RFC-0027's acceptance ruling of the same date preserves §4.4 rule 3 / §9.3's *"the generation MUST saturate, never wrap"* **verbatim across both fields** by ruling RFC-0027's own generation **saturate-and-retire**; nothing in this document is withdrawn or qualified by that. |
 | **Author(s)** | AvatarSD (maintainer) — written up from the 2026-08-02 grill, in which the design below was **ruled**, not proposed |
 | **Created** | 2026-08-02 |
 | **Comment window** | waived by default while solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"); invoke explicitly if outside input is wanted. Verified: `docs/implementations.md:13` still reads `_(none yet)_`, so the waiver's revert trigger has not fired. |
@@ -90,9 +90,37 @@ This RFC does not compete for that traffic. It serves the traffic §E.1 structur
 **stateless** (a forwarder holding no per-flow table is the property RFC-0004 §E.1 itself calls
 "the cost, made precise"), and one-shot-shaped ops that never justify an advertise round.
 
-**Vocabulary rule (normative for the doc set).** "**Label**" remains RFC-0004 §E.1's per-link
-`u16` and nothing else. The new concept is a "**bound path**", built of "**vertex ref (vref)**"
-elements. A sentence that calls a vref a label is wrong (§11).
+**Vocabulary rule (normative for the doc set).** ~~"**Label**"~~ **"Label", unqualified,** remains
+RFC-0004 §E.1's per-link `u16` and nothing else. The new concept is a "**bound path**", built of
+"**vertex ref (vref)**" elements. A sentence that calls a vref a label is wrong (§11).
+**⚠ Narrowed by amendment 3 below (2026-08-15,
+[RFC-0027](0027-label-switched-path-compression.md)):** the rule binds the **unqualified** word;
+the **qualified** term "**path label**" is a third, distinct concept and is ratified.
+
+**Amendment 3 ([RFC-0027](0027-label-switched-path-compression.md), 2026-08-15) — the vocabulary
+rule binds the UNQUALIFIED word only; "path label" is ratified as a distinct term.** Maintainer
+ruling of 2026-08-15, taken as part of accepting RFC-0027 (that document's §11.1 collision 1,
+resolution **(a) qualify**; the alternative, renaming RFC-0027's concept, was rejected because it
+costs the MPLS reading the design leans on and would be re-invented as "label" in the first
+sentence of every discussion). **Instrument: amendment** — this alters a clause marked *"normative
+for the doc set"*. Comment window waived by default while solo-maintained
+(`docs/implementations.md:13` still reads `_(none yet)_`, so the waiver's revert trigger has not
+fired). The normative content, in full:
+
+- **Unqualified "label" is unchanged**: it means RFC-0004 §E.1's **per-link `u16`** delivery-route
+  alias and nothing else. Every existing sentence in the doc set stays correct as written.
+- **"A sentence that calls a vref a label is wrong" stands unchanged.** A vref is not a label of
+  any kind, qualified or not.
+- **"Path label" is a third, distinct term**, ratified by RFC-0027: a **32-bit, per-host,
+  per-path-element** alias (16-bit slot index + 16-bit generation) minted passively on a reply. It
+  MUST always be written **qualified** — never as bare "label" — and it is neither §E.1's link
+  label nor this RFC's vref.
+- The doc set therefore carries **three** related-but-distinct concepts, and the glossary separates
+  them in one place: §E.1's **label** (per-link, `u16`, swapped at every hop), this RFC's **vref**
+  (per-host, 8 B, carried end to end, swapped by nobody), and RFC-0027's **path label** (per-host,
+  4 B, per path *element*, read only by the host that minted it).
+- **No wire surface changes.** This amendment is vocabulary only: no type code, no field, no MUST
+  about bytes. `PATH_REF`/`PATH_REF_REVERSE` and every clause of §§4–7 are untouched.
 
 ### 2.2 It is not the resolve-once memo #504 closed
 

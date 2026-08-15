@@ -9,12 +9,12 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0027 |
 | **Title** | Label-switched path compression: minting a per-host path label across the wire |
-| **Status** | **proposed** (2026-08-15). The design below was **ruled** in the 2026-08-15 grilling session; this document is its transcription in normative form, not a proposal seeking a direction. What is open is the byte layout (§5.3, deferred pending conformance vectors in the RFC-0014 discipline) and the vocabulary/generation reconciliations §11 flags against [RFC-0024](0024-bound-paths-node-scoped-vertex-ref-source-routing.md). |
+| **Status** | **accepted** (2026-08-15; proposed 2026-08-15), maintainer-ratified; comment window waived by default per [GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window" (solo-maintainer clause) and not invoked. The design of §§4–10 was **ruled** in the 2026-08-15 grilling session; this document is its transcription in normative form, not a proposal seeking a direction. **All three §11.1 collisions the draft flagged are RESOLVED at acceptance** — see §11.1 and §16: **collision 1 (vocabulary)** is ruled **(a) qualify**, "**path label**" is ratified as a term distinct from RFC-0004 §E.1's per-link `u16` "label", carried into [RFC-0024](0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §2.1 by **amendment 3**; **collision 2 (generation)** is ruled **saturate-and-retire, NOT wrap** — a slot whose 16-bit generation reaches its maximum saturates and is **retired permanently**, never reused and never wrapped, which preserves RFC-0024 §4.4 rule 3 / §9.3's "MUST saturate, never wrap" at **zero wire cost**; **collision 3 (per-hop state)** is **accepted knowingly** as a recorded decision — RFC-0027 buys per-element degradation and terminus compaction at the price of a per-hop mint table, and the doc set states that trade rather than claiming statelessness on both forms. What remains open is **only the byte layout** (§5.3, deferred pending conformance vectors in the RFC-0014 discipline) and the §12.4 bench gate, which is normative for acceptance of the **implementation**, not of this document. Spec, `CONTEXT.md` and code edits land after acceptance, car by car (§12). |
 | **Author(s)** | AvatarSD (maintainer), with AI drafting |
 | **Created** | 2026-08-15 |
 | **Comment window** | waived by default while solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"); invoke explicitly if outside input is wanted. Verified: `docs/implementations.md:13` still reads `_(none yet)_`, so the waiver's revert trigger has not fired. |
 | **Instrument** | **Amendment.** This adds a new arm to the path-element encoding and a new MUST for any host that mints — `GOVERNANCE.md` §"Errata, amendments, and the comment window" names a new frame shape as amendment territory by example, and an erratum "may not alter the wire surface". |
-| **Tracking issue** | filed on acceptance. The measured motivation is [#1266](https://github.com/avatarsd-llc/libtracer/issues/1266) and [#1294](https://github.com/avatarsd-llc/libtracer/issues/1294); the local precedent is [#830](https://github.com/avatarsd-llc/libtracer/issues/830). |
+| **Tracking issue** | [#1325](https://github.com/avatarsd-llc/libtracer/issues/1325) — filed on acceptance (2026-08-15), carrying the acceptance train of §12. The measured motivation is [#1266](https://github.com/avatarsd-llc/libtracer/issues/1266) and [#1294](https://github.com/avatarsd-llc/libtracer/issues/1294); the local precedent is [#830](https://github.com/avatarsd-llc/libtracer/issues/830). |
 | **Target spec version** | v1 itself. `docs/spec/v1.md:1` reads "(DRAFT)" and `:3` reads "The wire format is not yet stable. Pin to a specific commit if you depend on this." Same route RFC-0018, RFC-0023, RFC-0024 and RFC-0026 took. |
 | **Scope** | **v-NEXT.** This RFC gates no release. |
 | **Descends from** | [#830](https://github.com/avatarsd-llc/libtracer/issues/830) (the local edge binding, merged — the mechanism this generalizes), [RFC-0024](0024-bound-paths-node-scoped-vertex-ref-source-routing.md) (the node-scoped `(slot, generation)` reference, accepted), [RFC-0004](0004-remote-operation-addressing.md) §E.1 (the per-link label plane, shipped) |
@@ -272,16 +272,26 @@ A slot has none of that. The host owns the namespace, hands out only free slots,
 has none (§8.3). **The collision class is closed by construction, which is the only closure this doc
 set accepts for a mis-delivery class.**
 
-### 4.3 The residual risk, quantified
+### 4.3 The residual risk, quantified — and CLOSED at acceptance
+
+> **⚠ Resolved by the acceptance ruling of 2026-08-15 (§4.3.1 below, §11.1 collision 2).** The
+> draft's residual below assumed a **wrapping** generation. The accepted rule is
+> **saturate-and-retire**, so the wrap sequence this subsection quantifies is **not reachable** and
+> the mis-delivery class it describes is **closed by construction**. The text is kept because the
+> arithmetic is what *prices* the ruling — it is the reason saturating is affordable — not because
+> the risk stands.
 
 The generation exists so that a label a sender still holds cannot validate against a *different*
 occupant of the same slot. A departure bumps the slot's generation (§7.1), so an ordinary stale label
 compares unequal and is refused.
 
-**The residual is precisely this:** a sender holds a label for slot *i* at generation *g*; between
+~~**The residual is precisely this:** a sender holds a label for slot *i* at generation *g*; between
 that frame and its next, slot *i* is minted and released **65 536 times**, wrapping its generation
 back to *g*; the sender's next frame then validates against an unrelated occupant. That is a
-mis-delivery, and it is the only sequence that produces one.
+mis-delivery, and it is the only sequence that produces one.~~ **Withdrawn by the acceptance ruling:
+under §4.3.1 the generation never returns to *g*, so this sequence does not exist.** What the
+paragraph identified correctly is that this was the *only* sequence producing a mis-delivery — which
+is precisely why closing it closes the class.
 
 Quantified, and it is negligible:
 
@@ -300,9 +310,38 @@ Quantified, and it is negligible:
   and no protocol step to run: the sender already holds the canonical original, uses it, and receives
   a fresh mint.
 
-**This is nonetheless a wrap, and RFC-0024 §4.4 rule 3 forbids wrapping a generation in normative
+~~**This is nonetheless a wrap, and RFC-0024 §4.4 rule 3 forbids wrapping a generation in normative
 MUST terms. §11.1 collision 2 flags that collision explicitly, prices the zero-wire-cost mitigation, and leaves
-the reconciliation to the maintainer rather than deciding it here.**
+the reconciliation to the maintainer rather than deciding it here.**~~ **Ruled 2026-08-15 at
+acceptance: there is no wrap. §4.3.1 is the normative rule; §11.1 collision 2 records the
+resolution.**
+
+### 4.3.1 Generation semantics, normative: saturate and retire, NEVER wrap
+
+**Ruled at acceptance, 2026-08-15 (§11.1 collision 2).** This is the
+normative generation rule of this RFC and it supersedes every "wrap" reading of the draft text
+above:
+
+- **A slot's generation MUST saturate, never wrap.** When a slot's 16-bit generation reaches its
+  maximum value, it **stops advancing**. It MUST NOT return to zero and MUST NOT return to any
+  earlier value.
+- **A saturated slot is RETIRED permanently.** It MUST NOT be minted into again — not after any
+  reclamation, not after a peer departs, not after the table empties, and not after a restart of the
+  flow. The slot is removed from the mintable set for the lifetime of the table.
+- **Retirement is invisible to correctness.** A host that cannot mint leaves the part a string
+  (§6.3), which is *exactly* §8.3's refuse-new degrade — the path this design already accepts as
+  benign. A retired slot costs one slot out of 65 536 per 65 536 reuses **of that one slot**, which
+  §4.3's arithmetic prices as unreachable in practice.
+- **Zero wire cost.** The label stays 32 bits, split 16/16 (§4.1); the byte layout of §5.3 is
+  unchanged; no frame, no flag and no field is added. The rule is entirely a constraint on what a
+  minting host may do with its own table.
+
+This preserves [RFC-0024](0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §4.4 rule 3
+(*"the generation MUST saturate, never wrap"*) and §9.3's conformance obligation (*"A host MUST NOT
+wrap a generation"*) **verbatim, across both fields**, so the doc set has **one** answer to the
+question rather than one per type code. The #603 misroute class is closed by construction here for
+the same reason it is closed there, and §7.1's existing "MUST NOT mint on a slot whose generation
+has saturated" is no longer a tension with anything — it is the whole mechanism.
 
 ### 4.4 Rejected label shapes
 
@@ -315,8 +354,9 @@ the reconciliation to the maintainer rather than deciding it here.**
 - **A `u64` label (32-bit index + 32-bit generation).** Rejected on the cost model: the index would
   gain headroom above a ceiling §8's per-peer mint budget already sits far below, and the
   generation's extra 16 bits buy time against a sequence §4.3 shows is not reachable — while
-  doubling the per-element cost of the one thing this RFC exists to make small. If §11.1 collision 2's
-  reconciliation lands on saturating rather than widening, no wire bit changes at all.
+  doubling the per-element cost of the one thing this RFC exists to make small. **Confirmed at
+  acceptance:** §11.1 collision 2 was ruled on **saturating** rather than widening (§4.3.1), so
+  **no wire bit changes at all** and the `u64` shape stays rejected on the same cost model.
 - **A `u16` label (no generation).** Rejected outright: a bare slot index with no staleness guard is
   the #603 failure — a reused slot mis-delivers, with no stamp to catch it, and no fallback
   triggers because nothing detects the staleness.
@@ -456,8 +496,11 @@ link teardown — the minting host **bumps that slot's generation**. The label t
 compares unequal and is refused. Generations only move forward, so a stale label never becomes valid
 by waiting (RFC-0024 §5.1's property, and the reason it is stated there as well).
 
-A host **MUST NOT** mint on a slot whose generation has saturated; it leaves the part a string
-(§6.3). See §11.1 collision 2 for the flagged tension between "saturate" here and §4.3's 16-bit wrap.
+A host **MUST NOT** mint on a slot whose generation has saturated; the slot is **retired
+permanently** (§4.3.1) and the host leaves the part a string (§6.3). ~~See §11.1 collision 2 for the
+flagged tension between "saturate" here and §4.3's 16-bit wrap.~~ **Resolved 2026-08-15 at
+acceptance: there is no tension — §4.3.1 makes saturate-and-retire the normative rule and withdraws
+the draft's wrap reading. This clause is that rule's enforcement point.**
 
 ### 7.2 A stale or unknown label answers `NOT_FOUND`, and the sender falls back
 
@@ -544,8 +587,11 @@ node worse.
 A peer that can put frames on a link can, at most: spend its own per-peer ceiling (bounded, §8.3);
 present labels it did not mint (refused by §7.2, one `NOT_FOUND` per attempt, no state); or present
 a stale label (refused by the generation, §7.1). It cannot enumerate (§8.1), cannot escalate
-(§8.2), and cannot cause an eviction of anyone else's labels (§8.3). The one residual is §4.3's
-wrap, flagged in §11.1 collision 2.
+(§8.2), and cannot cause an eviction of anyone else's labels (§8.3). ~~The one residual is §4.3's
+wrap, flagged in §11.1 collision 2.~~ **As of the 2026-08-15 acceptance ruling there is no
+residual**: §4.3.1's saturate-and-retire closes the wrap sequence by construction, so the worst an
+attacker achieves against the generation is to retire slots it already paid for out of its own
+per-peer ceiling — a bounded self-denial that degrades to the string path (§6.3).
 
 ## 9. Local IO is out of scope
 
@@ -594,10 +640,20 @@ binding, and RFC-0024 is the cross-node generalization of the same primitive at 
 §2.2's table is the comparison. Where the two agree, this document reuses RFC-0024's rules verbatim
 and says so (§4.4, §5.1, §5.3, §7.2, §8.1, §8.2, §8.3) rather than re-deriving them.
 
-Three things in RFC-0024's *normative* text collide with this design. Per the house rule they are
-flagged here, not silently overridden, and **none of them is decided by this document.**
+Three things in RFC-0024's *normative* text collide with this design. Per the house rule they were
+**flagged** in the proposed draft, not silently overridden, and the draft added that ~~**none of
+them is decided by this document.**~~ **All three were RULED by the maintainer on 2026-08-15 as part of this RFC's
+transition proposed → accepted**, which is the point at which an RFC's own text may be edited; each
+subsection below now records its resolution beside the collision it resolves, and the collisions are
+retained rather than deleted so the reasoning survives:
 
-#### Collision 1 — the vocabulary rule (RFC-0024 §2.1)
+| collision | ruling (2026-08-15) | where the change lands |
+| --- | --- | --- |
+| 1 — vocabulary (RFC-0024 §2.1) | **(a) qualify.** "**Path label**" is ratified as a distinct term; unqualified "label" still means RFC-0004 §E.1's per-link `u16`. | **RFC-0024 amendment 3** (§2.1 of that document); `CONTEXT.md` §12.2 entries in the acceptance train |
+| 2 — the generation (RFC-0024 §4.4 rule 3, §9.3) | **Saturate-and-retire, NOT wrap.** A slot whose generation saturates is retired permanently. RFC-0024's invariant is preserved verbatim, at **zero wire cost**. | **§4.3.1 of this RFC** (normative); §4.3, §4.4, §7.1, §8.4, §14, §15 annotated |
+| 3 — "no hop holds anything" (RFC-0024 §2.1, §12) | **Accepted knowingly.** The per-hop mint table is a deliberate, recorded surrender of RFC-0024's stateless-hop property, not an oversight. | **§11.1 collision 3 and §11.4 of this RFC** (recorded decision); no ADR is superseded |
+
+#### Collision 1 — the vocabulary rule (RFC-0024 §2.1) — RULED (a), 2026-08-15
 
 RFC-0024 §2.1 states a rule it marks **"normative for the doc set"**:
 
@@ -620,14 +676,34 @@ maintainer's**:
   leans on, and every reviewer will re-invent the word "label" in the first sentence of every
   discussion.
 
-**This document uses "path label" throughout in anticipation of (a)**, and does **not** edit
+~~**This document uses "path label" throughout in anticipation of (a)**, and does **not** edit
 `CONTEXT.md` — a proposed RFC does not move the canonical glossary, and moving it before this is
 ruled would be exactly the silent override the house rule forbids. §12.2 lists the entries an
-accepted RFC adds.
+accepted RFC adds.~~
 
-#### Collision 2 — the generation MUST NOT wrap (RFC-0024 §4.4 rule 3, §9.3)
+**RULING (maintainer, 2026-08-15, at acceptance): (a) QUALIFY.** "**Path label**" is ratified as a
+term of the doc set, **distinct** from RFC-0004 §E.1's per-link `u16` "label":
 
-This is the **load-bearing** one. RFC-0024 §4.4 rule 3 reads:
+- An **unqualified "label"** continues to mean **§E.1's per-link `u16` and nothing else**. RFC-0024
+  §2.1's rule is not withdrawn; it is **narrowed to the unqualified word**, and *"a sentence that
+  calls a vref a label is wrong"* stands unchanged.
+- This RFC's concept is **always** the qualified "**path label**" — never bare "label" — and is a
+  32-bit, per-host, per-path-element value. The three `(slot, generation)` concepts of the doc set
+  (§E.1's link label, RFC-0024's **vref**, RFC-0027's **path label**) are three different objects
+  and the vocabulary now separates them.
+- Grounds, in the ruling's own order: it is **cheapest** (every existing sentence in the doc set
+  stays correct), it **preserves the MPLS reading** the design's framing leans on, and a rename
+  would be re-invented as "label" in the first sentence of every discussion — a vocabulary rule
+  nobody can follow is not a vocabulary rule.
+
+**Where it lands.** RFC-0024 §2.1 carries **amendment 3 (2026-08-15)** recording the narrowing —
+appended in that document, with its original rule annotated rather than rewritten, per the house
+amendment discipline. The `CONTEXT.md` entries §12.2 enumerates land in the acceptance train.
+
+#### Collision 2 — the generation MUST saturate, and the slot retires — RULED, 2026-08-15
+
+This is the **load-bearing** one, and it is **resolved**: **saturate-and-retire, NOT wrap.**
+§4.3.1 carries the normative rule; this subsection records why. RFC-0024 §4.4 rule 3 reads:
 
 > **Therefore, normatively: the generation MUST saturate, never wrap.** […] A wrapped **generation**
 > is that same failure with the guard instead of the address: a stale vref **validates falsely**,
@@ -637,24 +713,36 @@ and §9.3 restates it as a conformance obligation: *"A host MUST NOT wrap a gene
 #603's ruling transposed, and #603 is on the record as a **misroute, not a drop**
 (`core/src/route_handle.cpp:175-177`).
 
-**RFC-0027's 16-bit generation wraps.** §4.3 states the sequence exactly and quantifies it as
-negligible; the maintainer ruled that a stale label costs a retry and never a misdelivery *except*
-through that one sequence, and that the string fallback self-corrects. **Both statements are
-compatible with each other and neither is compatible with RFC-0024 §9.3 read across to this field.**
-Whether RFC-0024's rule *reaches* this field is precisely the question: its subject is a `PATH_REF`
-element's generation, a different field on a different type code; but the failure class it names is
-identical, and "different field, same class" is how a doc set acquires two answers to one question.
+~~**RFC-0027's 16-bit generation wraps.**~~ **The draft's 16-bit generation wrapped.** §4.3 stated
+the sequence exactly and quantified it as negligible. The draft's own analysis is what settles the
+question: *"different field, same class" is how a doc set acquires two answers to one question* —
+RFC-0024 §9.3's subject is a `PATH_REF` element's generation, a different field on a different type
+code, **but the failure class is identical** (#603's misroute, on the record as a misroute and not a
+drop, `core/src/route_handle.cpp:175-177`). A doc set that answers "MUST NOT wrap" for one
+`(slot, generation)` field and "wraps, but negligibly" for the next is a doc set an implementer gets
+wrong once.
 
-The reconciliation is available at **zero wire cost** and is recorded here so that ruling it needs
-no re-derivation: **saturate the slot's generation instead of wrapping it, and retire the slot.** A
-saturated slot becomes permanently unmintable, the part stays a string, and §8.3's refuse-new policy
-already describes exactly that degrade — the wire format, the byte layout, and every other clause of
-this RFC are unchanged. The cost is one slot out of 65 536 per 65 536 reuses, which is
+**RULING (maintainer, 2026-08-15, at acceptance): SATURATE AND RETIRE. The generation MUST NOT
+wrap.** The reconciliation the draft priced is taken exactly as priced: **saturate the slot's
+generation instead of wrapping it, and retire the slot permanently.** A saturated slot becomes
+permanently unmintable, the part stays a string, and §8.3's refuse-new policy already describes
+exactly that degrade. **The wire format, the byte layout (§5.3), the 16/16 split (§4.1) and every
+other clause of this RFC are unchanged** — the rule constrains only what a minting host does with
+its own table. The cost is one slot out of 65 536 per 65 536 reuses **of that one slot**, which is
 indistinguishable from the exhaustion path this design already accepts as benign.
 
-**Flagged, not decided.** §15's falsification clause 3 is the other side of it.
+**What this buys:** RFC-0024's *"the generation MUST saturate, never wrap"* (§4.4 rule 3) and *"A
+host MUST NOT wrap a generation"* (§9.3) now read **across the whole doc set, unqualified**, for
+every `(slot, generation)` field it defines. There is **one** rule, not one per type code, and the
+#603 mis-delivery class is closed by construction in both places.
 
-#### Collision 3 — "no hop holds anything" (RFC-0024 §2.1, §12)
+~~**Flagged, not decided.**~~ **Decided.** The normative text is §4.3.1; §4.3, §4.4, §7.1 and §8.4
+carry the annotations. §15's falsification clause 3 is the other side of it and is likewise
+narrowed: the mitigation was priced at zero wire bytes and has been taken, so what remains
+falsifiable is only whether slot retirement churns the table in practice — a measurement, not an
+argument.
+
+#### Collision 3 — "no hop holds anything" (RFC-0024 §2.1, §12) — ACCEPTED KNOWINGLY, 2026-08-15
 
 RFC-0024 credits the bound path with holding **no state at any hop** — its §2.1 table reads *"no hop
 holds anything"*, and its §12 rejects *"a per-hop route cache keyed on canonical bytes"* as *"the
@@ -682,6 +770,33 @@ than assumed:
 RFC-0027 buys per-element degradation and terminus compaction at the price of per-hop state. They
 are different trades of the same primitive, and both are defensible. What is not defensible is a doc
 set that claims both properties at once, which is why §11.4 edits the reference pages.**
+
+**RULING (maintainer, 2026-08-15, at acceptance): the surrender is ACCEPTED KNOWINGLY, and is
+hereby a recorded decision rather than a flag.** In full, so it is not re-litigated as an oversight:
+
+- **RFC-0027 hosts hold per-hop state.** A minting host holds a **path-label table**. RFC-0024's
+  *"no hop holds anything"* is a property of the **bound path**, and it remains true of the bound
+  path. It is **not** a property of the net plane as a whole once RFC-0027 ships, and this document
+  says so in its own text rather than leaving the doc set to claim both.
+- **The trade is deliberate.** What the table buys is the pair of properties §2.2 and §3.3 name as
+  this design's distinguishing ones — **per-element degradation** (one non-minting hop does not
+  strip the route) and **terminus-residual compaction** (the depth term §3.2 prices at
+  +21.3 ns/segment). Neither is reachable with a stateless hop. The maintainer ruled the trade
+  worth making.
+- **It is not the shape RFC-0024 §12 rejected**, on the four grounds enumerated above: not keyed on
+  canonical bytes, no second invalidation mechanism, bounded by an injected resource with
+  refuse-not-evict, and not novel in a net plane that already carries §E.1's per-link label state.
+  §12's actual objection was the second invalidation mechanism, and there is none — the generation
+  bump is the invalidation, now saturating and retiring per §4.3.1.
+- **The worst case is today's behaviour.** A host that holds no table, or refuses to mint, or
+  exhausts its ceiling, is a host that forwards strings — which is what every host does today
+  (§6.3, §8.3). The state is an accelerator, never a correctness dependency, and a hop may still
+  reboot mid-operation because **the route still lives in the frame**.
+- **The instrument.** This is recorded **in this RFC's text and in §11.4's reference-page
+  qualifications**. Per §11.4's own rule the ADRs are **not** edited: the maintainer ruled the
+  ADR-0040 / ADR-0038 / ADR-0037 entries in §11.4's table to be **qualifications, not
+  contradictions**, so **no superseding ADR is required in the acceptance train**. §11.4 records
+  that ruling.
 
 ### 11.2 Where this leaves the two forms on one frame
 
@@ -711,16 +826,19 @@ are heterogeneous or the terminus residual is deep.
 The doc set characterizes forwarding as **stateless** in several places. With §E.1's label plane that
 claim was already qualified where it was made most precisely
 (`docs/reference/05-protocol-tlvs.md:1020`). **This RFC's minting is learned per-flow state, so the
-unqualified claims are no longer fair**, and this PR adds a short qualifying note — an admonition or
-a clause citing RFC-0027 as *proposed* — at the three places where the claim is made **bald**:
+unqualified claims are no longer fair**, and the qualifying notes — an admonition or a clause citing
+RFC-0027 — sit at the three places where the claim was made **bald**. The proposal PR added them
+citing RFC-0027 as *proposed*; **the acceptance PR updates all three to cite it as accepted**:
 
 - `docs/reference/00-overview.md:56` — *"a stateless `FWD` hop between links"*;
 - `docs/reference/02-graph-model.md:31` — *"the stateless component that routes `FWD` frames"*;
 - `docs/reference/04-communication-flows.md:279` — *"**Forwarders are stateless.** There is no
   per-request table"*.
 
-The reference pages are **not otherwise rewritten**: the claim is true today, this RFC is proposed,
-and the note says exactly that.
+The reference pages are **not otherwise rewritten**: the claim is true of the **bare** hop and stays
+true, this RFC is now **accepted but not yet implemented**, and the note says exactly that. The
+promotion of these notes to the fully qualified statement is §12.1's acceptance-train item, landing
+with the code that mints.
 
 **Deliberately NOT edited, and listed here instead** — an ADR is a dated record of a decision and is
 not revised because a later RFC is proposed against it (`CLAUDE.md`: *"design rationale and history
@@ -735,8 +853,30 @@ these:
 | [ADR-0037](../../adr/0037-net-side-channels-dissolve-into-vertex-tree-compositor.md):8, :22 | *"a stateless hop-by-hop FWD forwarder"*; *"The composite's statelessness **is** the leanness mechanism"* | The **compositor** claim (:22) is about the *transport-vertex composite* holding no data state, which this RFC does not touch. The `fwd_router_t` characterization (:8) is the one a shipped RFC-0027 qualifies. |
 | [ADR-0044](../../adr/0044-stateless-transport-peer-enumeration-separate-paths-client-side-identity.md) | peer enumeration is stateless and synthesized from live traffic | **No conflict.** ADR-0044's subject is the *peer listing* and its passive last-heard table; a label table is neither, and ADR-0044's own insert-only, population-bounded table is a close precedent for §8.3's shape. |
 
-If the maintainer judges any of these to be a contradiction rather than a qualification, the
-instrument is a superseding ADR in the acceptance train — not an edit here.
+~~If the maintainer judges any of these to be a contradiction rather than a qualification, the
+instrument is a superseding ADR in the acceptance train — not an edit here.~~
+
+**RULED (maintainer, 2026-08-15, at acceptance): all four table entries are QUALIFICATIONS, not
+contradictions. No superseding ADR is required, and none is opened.** The per-hop mint table is
+accepted knowingly (§11.1 collision 3), and the reading the table already takes is the ruled one:
+
+- **ADR-0040** — *explicit-source-routed-only*, *no flooding*, *no auto-multipath* and *dedup-free*
+  are the load-bearing decisions and are **untouched**; a path label is source routing spelled
+  shorter, and this RFC adds no dedup state. Only the word *"uniformly"* in "uniformly stateless"
+  narrows, and it narrows to what §E.1 had already narrowed it to.
+- **ADR-0038** — its **two-plane** model and its ranking (stateless full-route > label-compacted)
+  are **unchanged and correct**, and they place this design exactly where it belongs: below the
+  full-route plane on reliability-by-construction. The route still lives in the frame, so the
+  reboot-mid-operation property survives.
+- **ADR-0037** — the **compositor** claim (:22) is about the transport-vertex composite holding no
+  *data* state and is untouched. The `fwd_router_t` characterization (:8) is qualified by the same
+  note the reference pages carry.
+- **ADR-0044** — **no conflict**, as recorded; its insert-only, population-bounded table is a close
+  precedent for §8.3's shape rather than a claim RFC-0027 disturbs.
+
+An ADR is a dated record of a decision, and none of these decisions is reversed by this RFC. The
+qualification lives in §11.1 collision 3 and in the reference pages, which is where a reader looking
+for current behaviour goes.
 
 ## 12. Proposed change
 
@@ -760,9 +900,10 @@ RFC's own PR adds this document and §11.4's three reference-page notes, and not
 - `docs/reference/00-overview.md`, `02-graph-model.md`, `04-communication-flows.md` — §11.4's notes
   are promoted from "proposed" to the qualified statement.
 
-### 12.2 `CONTEXT.md` (on acceptance, **not** in this PR)
+### 12.2 `CONTEXT.md` — unblocked by the collision-1 ruling, lands in the acceptance train
 
-Pending §11.1 collision 1, an accepted RFC adds to §Graph, addressing & API:
+~~Pending §11.1 collision 1,~~ **§11.1 collision 1 is ruled (a) qualify (2026-08-15), so the
+glossary move is unblocked.** The accepted RFC adds to §Graph, addressing & API:
 
 - **Path label** — the 32-bit per-host per-element alias; host-assigned slot, never a hash; minted
   passively on a reply; stale ⇒ `NOT_FOUND` ⇒ string fallback; no withdraw, no aging. `_Avoid_`:
@@ -870,8 +1011,11 @@ Labelled per the standing rule — a quantitative claim names its instrument or 
 - **The local-delivery figure (62–77 ns/delivery amortized) is cited only to establish that §9's
   scope exclusion is justified**, never as a benefit of this RFC.
 - **§4.3's wrap arithmetic is arithmetic over an assumed mint rate.** No mint-rate measurement from
-  a deployment exists — which is precisely why §11.1 collision 2 flags the wrap rather than banking the
-  probability, and why the saturating mitigation is priced.
+  a deployment exists — which is precisely why §11.1 collision 2 ~~flags~~ **refused to bank** the
+  probability and ruled the **saturating** mitigation instead (§4.3.1). **Nothing now rests on that
+  arithmetic**: it prices how cheap slot retirement is, and it is no longer load-bearing for
+  correctness. What is still unmeasured is the **retirement rate** — how often a real deployment
+  saturates a slot at all — which is §15 clause 3's remaining falsifier.
 - **rv32 flash/RAM delta is UNMEASURED**, including the label table. The size census is the
   instrument; no "beat" is banked without it.
 
@@ -883,9 +1027,13 @@ Labelled per the standing rule — a quantitative claim names its instrument or 
    measurably cheaper than `resolve_mount_at` at realistic registry widths, §3.1 collapses and the
    case reduces to bytes alone — at which point §3.3 concedes a tie with `PATH_REF`, which already
    ships, and this RFC should be withdrawn in favour of extending RFC-0024 to the terminus residual.
-3. **The maintainer rules that §11.1 collision 2's wrap must saturate and the saturating variant proves
-   unaffordable.** The mitigation is priced at zero wire bytes, so this fires only if slot retirement
-   turns out to churn the table in practice — which would be a measurement, not an argument.
+3. ~~**The maintainer rules that §11.1 collision 2's wrap must saturate**~~ — **RULED 2026-08-15:
+   saturate-and-retire (§4.3.1).** That half of this clause has fired and cost zero wire bytes.
+   What survives as a falsifier is its second half: **the saturating variant proves unaffordable**
+   — which now fires only if slot retirement turns out to churn the table in practice, i.e. if a
+   real deployment retires slots fast enough to exhaust the table (§8.3's benign degrade becomes the
+   common case rather than the rare one). That would be a **measurement**, not an argument, and it
+   is the residual §14 names.
 4. **The per-hop label table's RAM cost is not affordable on rv32** at a realistic mint count (§8.3).
    ADR-0067's census banked *"libtracer's own static RAM is approximately zero"*, and a table is not
    zero.
@@ -905,16 +1053,44 @@ gains a registered implementer). Scope is **v-NEXT**; the spec edits of §12 lan
 after acceptance.
 
 The design of §§4–10 was **ruled** in the 2026-08-15 grilling session and is transcribed, not
-proposed. What this document genuinely leaves open, and what a reviewer should read for:
+proposed.
 
-1. **§11.1 collision 1** — the vocabulary rule. Qualify RFC-0024 §2.1 to "path label", or rename.
-   `CONTEXT.md` is deliberately not edited until this is ruled.
-2. **§11.1 collision 2** — the 16-bit generation wraps where RFC-0024 §9.3 says a generation MUST
-   NOT. The saturating mitigation costs zero wire bytes and is recorded so ruling it is cheap.
-3. **§5.3** — the byte layout, deferred pending conformance vectors in RFC-0014's discipline, and
-   its three open sub-questions (TLV child vs packed-segment tag; multi-segment vs single-segment
-   part; `path_lookup_key` admissibility).
-4. **§11.4** — whether the ADR claims listed there are qualifications (the reading taken here) or
-   contradictions warranting a superseding ADR in the acceptance train.
+### 16.1 Acceptance ruling — 2026-08-15
 
-Sustained objections and their resolution will be recorded here.
+**RFC-0027 is ACCEPTED.** Maintainer ruling of 2026-08-15, the same day the document was proposed;
+comment window **waived by default** under GOVERNANCE.md's solo-maintainer clause and **not
+invoked** — `docs/implementations.md:13` still reads `_(none yet)_`, so the waiver's revert trigger
+has not fired and a window would have had nobody to serve. The three points the draft left open to
+the maintainer were ruled together with acceptance:
+
+1. ~~**§11.1 collision 1** — the vocabulary rule. Qualify RFC-0024 §2.1 to "path label", or rename.
+   `CONTEXT.md` is deliberately not edited until this is ruled.~~ **RULED: (a) QUALIFY.** "**Path
+   label**" is ratified as a distinct term; an unqualified "label" still means RFC-0004 §E.1's
+   per-link `u16`, and RFC-0024 §2.1's rule is narrowed — not withdrawn — by **RFC-0024 amendment 3
+   (2026-08-15)**. `CONTEXT.md` §12.2's entries are unblocked and land in the acceptance train.
+2. ~~**§11.1 collision 2** — the 16-bit generation wraps where RFC-0024 §9.3 says a generation MUST
+   NOT. The saturating mitigation costs zero wire bytes and is recorded so ruling it is cheap.~~
+   **RULED: SATURATE-AND-RETIRE, NOT WRAP.** A slot whose 16-bit generation reaches its maximum
+   saturates and the slot is **retired permanently** — never reused, never wrapped. RFC-0024's
+   *"the generation MUST saturate, never wrap"* invariant is preserved **verbatim across both
+   fields**, at **zero wire cost**: no byte, no flag and no frame changes. Normative text: **§4.3.1**.
+3. ~~**§11.4** — whether the ADR claims listed there are qualifications (the reading taken here) or
+   contradictions warranting a superseding ADR in the acceptance train.~~ **RULED: the per-hop
+   mint table is ACCEPTED KNOWINGLY**, and RFC-0024's *"no hop holds anything"* is surrendered
+   deliberately for per-element degradation and terminus compaction. §11.1 collision 3 records the
+   decision; §11.4's four ADR entries are **qualifications, not contradictions**, so **no
+   superseding ADR is opened**.
+
+**What acceptance does NOT settle**, and what the acceptance train still owes:
+
+- **§5.3 — the byte layout**, deferred pending conformance vectors in RFC-0014's discipline, with
+  its three open sub-questions (TLV child vs packed-segment tag; multi-segment vs single-segment
+  part; `path_lookup_key` admissibility). The **semantics** of §§4–10 are ruled; the **bytes** are
+  not, and no wire surface is frozen by this acceptance.
+- **§12.4 — the bench gate**, which is normative for acceptance of the **implementation**. An
+  implementation that regresses any shipped shape — especially the four-link `reply-spread` arm —
+  is rejected regardless of this ruling.
+- **§12.1–§12.3 and §12.5** — the spec/reference incorporation, the `CONTEXT.md` entries, the code
+  and the vectors, landing car by car per RFC-0024 §9's precedent.
+
+Sustained objections and their resolution will continue to be recorded here.
