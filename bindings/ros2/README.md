@@ -90,7 +90,7 @@ Two consequences `qos.c` has to live with:
   per-subscription `depth` semantics must either enforce them in its own take-side buffer
   or report the owner's depth back through `rmw_get_subscriptions_info_by_topic`.
 - **A libtracer-only delivery mode is `rmw_tracer`-local, not a QoS extension.**
-  `delivery_mode_t` (`vertex.hpp:372` — `IF_NEWER` / `UNCONDITIONAL` / `EXPLICIT`; there is
+  `delivery_mode_t` (`vertex.hpp:376` — `IF_NEWER` / `UNCONDITIONAL` / `EXPLICIT`; there is
   no `ON_CHANGE` member) is owner-side and wiring-time via `graph_t::set_delivery_mode`
   (`core/src/graph.cpp:1773`) with no wire spelling. `rmw_tracer` may set it on vertices it
   owns; it cannot round-trip it to a remote peer.

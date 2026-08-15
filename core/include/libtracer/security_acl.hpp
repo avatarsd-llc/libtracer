@@ -15,17 +15,19 @@
  *   - full_acl_policy_t   — the security_acl host module (ordered
  *     first-match-per-bit with DENY), selected by LIBTRACER_ACL_FULL.
  *
- * The ACE DATA types (`acl_right_t`, `ace_type_t`, `kAceInherit`, `ace_t`) and the
- * typed ACE parse/build (`ace_t` ↔ wire ACL TLV, docs/reference/05 §0x0A) live here
- * too, so ACE edge cases (expiry, INHERIT, ordering) are unit-testable without a live
- * graph and tests need no hand-rolled byte builders.
+ * The typed ACE parse/build (`ace_t` ↔ wire ACL TLV, docs/reference/05 §0x0A) lives
+ * here too, so ACE edge cases (expiry, INHERIT, ordering) are unit-testable without a
+ * live graph and tests need no hand-rolled byte builders.
  *
- * The data types arrived from `vertex.hpp` in #868, which reverses this header's old
- * dependency: the ACL concern was SPLIT — the records in the vertex hub, the evaluation
- * and the codec here — so this header pulled the whole 3400-line hub to name four types
- * it fully owns the meaning of. Now `vertex.hpp` includes THIS one (it stores
- * `std::vector<ace_t>` in the vertex extension block), and a consumer that only wants the
- * ACL model no longer compiles the graph vertex to get it.
+ * The ACE RECORDS themselves are one header up, in `libtracer/acl_ace.hpp` (#868). They
+ * used to be declared in `vertex.hpp` while their evaluation lived here, so this header
+ * pulled a 3400-line vertex hub to name four types it owns the meaning of — the straddle
+ * #868 set out to end. It is ended by giving the records their own home rather than by
+ * folding them in beside the evaluator, because the two halves sit on OPPOSITE sides of
+ * the vertex: `vertex_ext_t` stores a `std::vector<ace_t>`, so the records are compiled by
+ * every net-plane TU, while nothing in the vertex core calls the policies or the codec.
+ * Declaring the records here would drag this header along with them — measured at 15 -> 100
+ * dependent TUs — and an ACL evaluation edit would rebuild the tree. See `acl_ace.hpp`.
  */
 #pragma once
 
@@ -36,6 +38,7 @@
 #include <string_view>
 #include <vector>
 
+#include "libtracer/acl_ace.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/config.hpp"
 #include "libtracer/frame.hpp"
@@ -49,53 +52,6 @@
  */
 
 namespace tr::graph {
-
-/**
- * @brief One right bit of an ACE `access_mask` (docs/reference/05 §0x0A, ADR-0020).
- *
- * Single-bit values so a gate tests exactly one right; a stored mask may carry any
- * OR of them. `WRITE_ACL` is precisely the `admin` right (modify the ACL / delegate).
- */
-enum class acl_right_t : std::uint32_t {
-    READ = 0x01,        /**< @brief Read the vertex value / control fields. */
-    WRITE = 0x02,       /**< @brief Write the vertex value / control fields (fan-in gate). */
-    SUBSCRIBE = 0x04,   /**< @brief Append a `:subscribers[]` edge (fan-out gate). */
-    CREATE = 0x08,      /**< @brief Create a child via `:children[]` (ADR-0017). */
-    DELETE = 0x10,      /**< @brief Remove a child (reserved; no core surface yet). */
-    READ_ACL = 0x20,    /**< @brief Read the `:acl` field. */
-    WRITE_ACL = 0x40,   /**< @brief Modify the `:acl` field — the `admin` right. */
-    WRITE_OWNER = 0x80, /**< @brief Transfer ownership (reserved; no core surface yet). */
-};
-
-/** @brief The one ACE flag the core subset honors: propagate to the subtree (ADR-0020). */
-inline constexpr std::uint8_t kAceInherit = 0x1;
-
-/** @brief An ACE's type (ADR-0020): ALLOW grants; DENY refuses (full policy only). */
-enum class ace_type_t : std::uint8_t {
-    ALLOW = 0, /**< @brief The ACE grants its mask's rights. */
-    DENY = 1,  /**< @brief The ACE refuses them — evaluated only by `full_acl_policy_t`
-                    (ADR-0050); the ALLOW-only profile rejects DENY at parse time. */
-};
-
-/**
- * @brief One parsed ACE of a vertex's `:acl` (ADR-0020 / #81).
- *
- * Evaluation is the pure per-target policy of ADR-0050 (`%security_acl.hpp`): the
- * default ALLOW-only MCU profile rejects a DENY ACE (or any flag bit beyond
- * `kAceInherit`) at write time with TYPE_MISMATCH, so stored ACEs never carry
- * semantics the selected evaluator would silently weaken; the full `security_acl`
- * host policy (LIBTRACER_ACL_FULL) stores DENY and evaluates ordered
- * first-match-per-bit.
- */
-struct ace_t {
-    ace_type_t type = ace_type_t::ALLOW; /**< @brief ALLOW or DENY (policy-gated at parse). */
-    std::uint8_t flags = 0;              /**< @brief ACE flags; only `kAceInherit` is accepted. */
-    std::vector<std::byte> subject;      /**< @brief Opaque subject token (ADR-0018); the special
-                                              subject `"EVERYONE@"` matches any resolved subject. */
-    std::uint32_t access_mask = 0; /**< @brief Granted rights (an OR of `acl_right_t` bits). */
-    std::uint64_t expires_ns = 0;  /**< @brief Absolute expiry, ns since the UNIX epoch;
-                                        0 = never expires. An expired ACE grants nothing. */
-};
 
 /**
  * @brief A pure policy's answer for one ACE list (ADR-0050).

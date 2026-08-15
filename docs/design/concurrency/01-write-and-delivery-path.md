@@ -45,7 +45,7 @@ reclones nothing (`graph.cpp:1553-1563`).
 
 Delivery runs outside the vertex lock, because a callback or a re-dispatch may re-enter the
 graph. The edge list therefore has to be copied out first. `fan_out` (`graph.cpp:1354`) does that
-in one call to `snapshot_edges` (`core/include/libtracer/vertex.hpp:1449`), which takes **no
+in one call to `snapshot_edges` (`core/include/libtracer/vertex.hpp:1453`), which takes **no
 lock at all** (#635): it copies the vertex's PUBLISHED, immutable-after-publish edge array
 (`subscriber.hpp:473`) into one of two buffers under a bounded per-participant **edge pin**
 (`core/include/libtracer/edge_pin.hpp:153`), and releases the pin before the caller's first
@@ -53,7 +53,7 @@ lock at all** (#635): it copies the vertex's PUBLISHED, immutable-after-publish 
 every vertex that merely hashed to the same stripe — ×16.6 at twenty-four threads
 ([ADR-0075](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0075-a-vertexs-edges-are-published-and-read-under-an-edge-pin.md)). It
 still serializes writer-vs-writer on the control plane, where a mutation builds the new array
-and swaps it in (`vertex.hpp:2131`); the displaced array is scanned and freed on the mutator's
+and swaps it in (`vertex.hpp:2135`); the displaced array is scanned and freed on the mutator's
 own thread, outside the lock, once no participant announces it (`subscriber.hpp:571`).
 
 It reaches that call only when something subscribes here. `fan_out` opens on
@@ -92,12 +92,12 @@ lock-free `own_subs()` count:
 `inline_buf` is an `edge_snapshot_t`, a raw byte array placement-constructed into, so a small
 fan-out neither allocates nor pays the zeroing a default-constructed `edge_view_t` array would
 (`subscriber.hpp:376-414`). Its width is `kInlineFanout` — the no-heap small-fan-out snapshot width,
-`edge_snapshot_t::kCapacity`, 8 (`vertex.hpp:523`, `subscriber.hpp:379`). A warm wide publish reuses the
+`edge_snapshot_t::kCapacity`, 8 (`vertex.hpp:527`, `subscriber.hpp:379`). A warm wide publish reuses the
 thread-local vector's capacity and so allocates nothing either.
 
 `own_subs()` is read without the lock, so the width it reports can be stale.
 That costs nothing but a re-read: **`snapshot_edges` re-checks the width against the published
-array** (`graph.cpp:1387-1388`, `vertex.hpp:2195`), so a subscriber added between the count and
+array** (`graph.cpp:1387-1388`, `vertex.hpp:2199`), so a subscriber added between the count and
 the copy costs at most one fallback allocation on the small path and never a wrong answer. Re-entrancy is
 handled by a `tls_busy` flag: a subscriber callback that re-publishes takes the local-buffer
 path, so the outer fan-out's thread-local buffer is never aliased, and the flag resets on scope
@@ -105,7 +105,7 @@ exit (`graph.cpp:1394-1418`).
 
 Both allocations inside the snapshot are nothrow. An unreservable overflow vector degrades the
 snapshot to the first `kInlineFanout` views and drops the rest of that delivery; an edge whose
-owning copies cannot be cloned is skipped, dropping that one delivery (`vertex.hpp:2201-2216`).
+owning copies cannot be cloned is skipped, dropping that one delivery (`vertex.hpp:2205-2220`).
 Neither can abort. A thread that cannot claim a pin cell — more concurrent publishers than
 `kEdgePinSlots` — copies the current array under the stripe mutex instead, which is the
 pre-#635 path for those threads and nobody else; correctness never depends on the constant.
@@ -244,14 +244,14 @@ struct delivery_drops_t {
 | `out_of_memory` | a `COMPACT` terminus could not take the payload view or reserve its rope | `fwd_router.cpp:2015-2017`, `:2022`, `:2139` |
 | `out_of_memory` | the nothrow delivery clone could not be allocated | `graph.cpp:1291-1294` |
 | `out_of_memory` | a HANDLER write's notify clone failed — the WHOLE fan-out is shed, one count per subscriber | `graph.cpp:1539` |
-| `out_of_memory` | an edge's owning copies (link NAME / stored caller) could not be allocated, so the snapshot skipped it | `vertex.hpp:2212` |
-| `fan_out_truncated` | the wide-fan-out overflow buffer could not be reserved, so every edge past the inline prefix was abandoned | `vertex.hpp:2207` |
+| `out_of_memory` | an edge's owning copies (link NAME / stored caller) could not be allocated, so the snapshot skipped it | `vertex.hpp:2216` |
+| `fan_out_truncated` | the wide-fan-out overflow buffer could not be reserved, so every edge past the inline prefix was abandoned | `vertex.hpp:2211` |
 
 The last three were **uncounted until #896**, and the handler one is why that mattered: it sheds
 every subscriber of the vertex and still returns success, so `delivery_drops()` — the only thing
 that could say so — read zero while a whole fan-out evaporated. The unit of every counter is
 therefore a **delivery**, not an event: a shed fan-out of N counts N, which is why the two
-snapshot sheds are tallied inside `vertex_t::snapshot_edges` (`vertex.hpp:1399`, its
+snapshot sheds are tallied inside `vertex_t::snapshot_edges` (`vertex.hpp:1403`, its
 `snapshot_drops_t`) and folded by `fan_out` (`graph.cpp:1407-1408`, `:1422-1423`) through
 `count_snapshot_drops` (`:994`) rather than counted as one at the caller. Every site **on
 this plane** goes through one door, `count_drop` (`:959`), so a path here that abandons an

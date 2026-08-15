@@ -19,11 +19,15 @@
  *   - libtracer/app_fields.hpp    — the RFC-0010 field tables (ADR-0058 storage classes)
  *   - libtracer/subscriber.hpp    — the subscription edges: slots, snapshots, published array
  *   - libtracer/vertex_stripe.hpp — the process-global lock-stripe table
- *   - libtracer/security_acl.hpp  — the ACE data types, now beside the evaluation that reads
- *                                   them (the split this header used to force is gone)
+ *   - libtracer/acl_ace.hpp       — the ACE records, which `vertex_ext_t` stores by value
  *
- * Including this header therefore still declares everything it declared before: the split is
- * a code MOVE, and the compatibility re-includes above are what keeps it one.
+ * The ACE records get their own header rather than joining `security_acl.hpp`: the records
+ * are UPSTREAM of this file and the evaluation/codec that reads them is DOWNSTREAM, so
+ * fusing the two would pull the codec into every net-plane TU. See `acl_ace.hpp`.
+ *
+ * Including this header therefore still declares everything it declared before EXCEPT the
+ * ACL policies and codec: the split is a code MOVE, and the re-includes above are what keeps
+ * it one.
  */
 #pragma once
 
@@ -47,6 +51,7 @@
 #include <utility>
 #include <vector>
 
+#include "libtracer/acl_ace.hpp"
 #include "libtracer/app_fields.hpp"
 #include "libtracer/config.hpp"
 #include "libtracer/edge_pin.hpp"
@@ -54,7 +59,6 @@
 #include "libtracer/path.hpp"
 #include "libtracer/path_ref.hpp"
 #include "libtracer/rope.hpp"
-#include "libtracer/security_acl.hpp"
 #include "libtracer/status.hpp"
 #include "libtracer/subscriber.hpp"
 #include "libtracer/vertex_stripe.hpp"
