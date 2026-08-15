@@ -126,3 +126,9 @@ jobs:
         run: python3 -m unittest discover -s tools/tests -p "test_check_config_keys.py" -v
       - name: Config-key gate (the connection-config page matches the source that reads the keys)
         run: python3 tools/check_config_keys.py
+      - name: Restore workspace ownership for the host runner
+        # This job runs as root inside `container:` on a self-hosted runner whose
+        # _work tree is shared with non-container jobs (perf-local's bench-local runs
+        # directly on the host); root-owned leftovers break their checkout cleanup.
+        if: always()
+        run: chown -R "$(stat -c '%u:%g' ..)" .

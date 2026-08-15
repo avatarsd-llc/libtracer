@@ -101,6 +101,12 @@ jobs:
           cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo -DLIBTRACER_ACL_FULL=${{ matrix.acl_full }} -DLIBTRACER_LKV_SLOT=${{ matrix.lkv_slot }}
           cmake --build core/build -j "$(nproc)"
           ctest --test-dir core/build --output-on-failure
+      - name: Restore workspace ownership for the host runner
+        # This job runs as root inside `container:` on a self-hosted runner whose
+        # _work tree is shared with non-container jobs (perf-local's bench-local runs
+        # directly on the host); root-owned leftovers break their checkout cleanup.
+        if: always()
+        run: chown -R "$(stat -c '%u:%g' ..)" .
 
   # MINIMAL MODULE SET (#1293). Every other leg here configures with the module options at
   # their defaults (all ON), so nothing in CI ever linked the closed module set ADR-0047
@@ -135,6 +141,12 @@ jobs:
   # `mark_pending`'s deferred skip (#1140) — is therefore untestable where CI runs, and both
   # were argued from the code rather than covered. aarch64 does NOT order a relaxed load
   # after a seq_cst store, which is the same property the shipped rv32 targets have and the
+      - name: Restore workspace ownership for the host runner
+        # This job runs as root inside `container:` on a self-hosted runner whose
+        # _work tree is shared with non-container jobs (perf-local's bench-local runs
+        # directly on the host); root-owned leftovers break their checkout cleanup.
+        if: always()
+        run: chown -R "$(stat -c '%u:%g' ..)" .
   # reason those arguments matter at all. This leg is the real evidence: same sources, same
   # ctest, a memory model that can actually exhibit the anomaly. Ablate it by relaxing any of
   # those ordered loads — the graph race guards can then fail HERE and nowhere else.
@@ -181,6 +193,12 @@ jobs:
             -DCMAKE_C_COMPILER=gcc-15 -DCMAKE_CXX_COMPILER=g++-15
           cmake --build core/build-gcc15 -j "$(nproc)"
           ctest --test-dir core/build-gcc15 --output-on-failure
+      - name: Restore workspace ownership for the host runner
+        # This job runs as root inside `container:` on a self-hosted runner whose
+        # _work tree is shared with non-container jobs (perf-local's bench-local runs
+        # directly on the host); root-owned leftovers break their checkout cleanup.
+        if: always()
+        run: chown -R "$(stat -c '%u:%g' ..)" .
 
   # Both sanitizer legs run against both LKV slot bindings (ADR-0069 §1) as parallel
   # matrix jobs rather than extra steps, so the second binding costs no wall clock.
@@ -253,6 +271,12 @@ jobs:
             -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/prefix"
           cmake --build "${RUNNER_TEMP}/consumer" -j
           "${RUNNER_TEMP}/consumer/app"
+      - name: Restore workspace ownership for the host runner
+        # This job runs as root inside `container:` on a self-hosted runner whose
+        # _work tree is shared with non-container jobs (perf-local's bench-local runs
+        # directly on the host); root-owned leftovers break their checkout cleanup.
+        if: always()
+        run: chown -R "$(stat -c '%u:%g' ..)" .
 
   # Compile EVERY bench target, run none of them (#781). The measuring workflows
   # (perf.yml, docs.yml) each name the handful of targets they execute, so a bench
@@ -276,6 +300,12 @@ jobs:
         run: |
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
           cmake --build bench/build -j
+      - name: Restore workspace ownership for the host runner
+        # This job runs as root inside `container:` on a self-hosted runner whose
+        # _work tree is shared with non-container jobs (perf-local's bench-local runs
+        # directly on the host); root-owned leftovers break their checkout cleanup.
+        if: always()
+        run: chown -R "$(stat -c '%u:%g' ..)" .
 
   # This workflow's own `paths:` trigger, gated against what its jobs actually build
   # (#1082). The list used to be hand-written — `core/**`, `bench/**`,
@@ -304,6 +334,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: core-ci's paths trigger covers everything core-ci builds
         run: python3 tools/gen_ci_paths.py --check
+      - name: Restore workspace ownership for the host runner
+        # This job runs as root inside `container:` on a self-hosted runner whose
+        # _work tree is shared with non-container jobs (perf-local's bench-local runs
+        # directly on the host); root-owned leftovers break their checkout cleanup.
+        if: always()
+        run: chown -R "$(stat -c '%u:%g' ..)" .
 
   format:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
@@ -325,6 +361,12 @@ jobs:
           mapfile -t files < <(find core/include core/src core/tests core/examples \
             tests/packaging -name '*.hpp' -o -name '*.cpp')
           clang-format --dry-run --Werror "${files[@]}"
+      - name: Restore workspace ownership for the host runner
+        # This job runs as root inside `container:` on a self-hosted runner whose
+        # _work tree is shared with non-container jobs (perf-local's bench-local runs
+        # directly on the host); root-owned leftovers break their checkout cleanup.
+        if: always()
+        run: chown -R "$(stat -c '%u:%g' ..)" .
 
   doxygen-gate:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
@@ -339,3 +381,9 @@ jobs:
         run: |
           apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq doxygen
           doxygen core/Doxyfile
+      - name: Restore workspace ownership for the host runner
+        # This job runs as root inside `container:` on a self-hosted runner whose
+        # _work tree is shared with non-container jobs (perf-local's bench-local runs
+        # directly on the host); root-owned leftovers break their checkout cleanup.
+        if: always()
+        run: chown -R "$(stat -c '%u:%g' ..)" .
