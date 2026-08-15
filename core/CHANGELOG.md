@@ -77,6 +77,25 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **BREAKING — a HANDLER's `on_write` takes a second argument: the writer's
+  `graph::write_ctx_t`** ([#375](https://github.com/avatarsd-llc/libtracer/issues/375)).
+  `handlers_t::on_write` (and its internal `value_handlers_t` mirror) go from
+  `std::function<result_t<void>(const rope_t&)>` to
+  `std::function<result_t<void>(const rope_t&, const write_ctx_t&)>`. **Every
+  `on_write` handler in every consumer must be updated**; there is no compatibility overload,
+  by ruling — a permanent dual overload costs a second ~32 B `std::function` in every
+  HANDLER-bearing extension block for a signature nobody would keep. The new
+  `write_ctx_t{subject}` carries the writer's resolved subject token — the ACL model's
+  `subject → rights` principal (ADR-0018) and the RFC-0010 subject-table integration point.
+  Before this, the ACL gate resolved the caller one stack frame before `on_write` and threw it
+  away, so an application handler could not see WHO wrote; now it is handed the identical
+  value the gate used, so a handler and the `:acl` that admitted the write cannot disagree.
+  **`subject` is BORROWED for the call** — the same contract as the `rope_t&` beside it —
+  **copy it if you retain it**. It is EMPTY for a local host write (`is_local_owner()`), which
+  is not a magic string but the same trusted-local discriminator `acl_allows` short-circuits
+  on (#905); there is deliberately no `OWNER@` sentinel (ADR-0020's erratum, #1033).
+  Cost: **0 added per-vertex bytes, 0 allocation, 0 contention** — the ctx is a stack-built
+  `string_view` pair on the existing write path.
 - **BREAKING — `graph_t`'s three callback configuration seams take the ADR-0047 `{fn, ctx}`
   pair, and are spelled `configure_*`**
   ([#1049](https://github.com/avatarsd-llc/libtracer/issues/1049); the L4 analogue of

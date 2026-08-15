@@ -1149,6 +1149,15 @@ target_link_libraries(fwd_compact_acl_test PRIVATE libtracer)
 libtracer_test_warnings(fwd_compact_acl_test)
 add_test(NAME fwd_compact_acl COMMAND fwd_compact_acl_test)
 
+# #375 — a HANDLER's on_write receives the writer's SUBJECT (tr::graph::write_ctx_t). Pins the
+# empty-token OWNER sentinel on both local doors, two links reaching one handler as two
+# distinct subjects, TWO PEERS ON ONE LINK staying distinguishable (the collapse #375
+# reported), and a delivered subscription presenting the EDGE's fan-in context.
+add_executable(write_ctx_test write_ctx_test.cpp)
+target_link_libraries(write_ctx_test PRIVATE libtracer)
+libtracer_test_warnings(write_ctx_test)
+add_test(NAME write_ctx COMMAND write_ctx_test)
+
 # RFC-0004 §E.1 (#716) — the MID-CHAIN reconnect self-heal: clear_link sweeps every ingress
 # binding, on ANY link, whose downstream half crossed the cleared link, so an origin that never
 # saw the reconnect stops streaming onto a dead out-label. Asserts RECOVERY end to end over a

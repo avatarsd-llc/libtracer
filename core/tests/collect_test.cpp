@@ -274,7 +274,10 @@ void test_park_is_keyed_on_handler_presence_not_role() {
 
     // And the third seam, for completeness: presence of ANY of the three allocates.
     handlers_t sv_write;
-    sv_write.on_write = [](const tr::view::rope_t&) -> tr::graph::result_t<void> { return {}; };
+    sv_write.on_write = [](const tr::view::rope_t&,
+                           const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
+        return {};
+    };
     const vertex_handle_t w =
         g.register_vertex(path_t("/dev/sv_write"), role_t::STORED_VALUE, std::move(sv_write));
     check(g.retire(w).has_value(), "retire a STORED_VALUE vertex carrying {on_write}");

@@ -167,7 +167,8 @@ void test_handler_sentinel() {
     graph_t g;
     int seen = -1;
     tr::graph::handlers_t h;
-    h.on_write = [&seen](const rope_t& in) -> tr::graph::result_t<void> {
+    h.on_write = [&seen](const rope_t& in,
+                         const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
         seen = std::to_integer<int>(in.only().bytes()[0]);
         return {};
     };
@@ -246,7 +247,8 @@ void test_handler_notify_clone_sheds_fan_out() {
     graph_t g;
     int handled = 0;
     tr::graph::handlers_t h;
-    h.on_write = [&handled](const rope_t&) -> tr::graph::result_t<void> {
+    h.on_write = [&handled](const rope_t&,
+                            const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
         ++handled;
         return {};
     };

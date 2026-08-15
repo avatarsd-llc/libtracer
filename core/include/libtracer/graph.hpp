@@ -1648,8 +1648,14 @@ class graph_t {
     // path that abandons a delivery without counting it" impossible to write by omission —
     // the same reason snapshot_edges takes its tally by reference. Whether a shed cost a
     // DELIVERY is the caller's call; count_store_drops is where each site records its answer.
+    // `caller` is the ACL caller context this store runs under — the very value the WRITE
+    // gate one frame up just evaluated — and it becomes `write_ctx_t::subject` on the
+    // HANDLER leg (#375). REQUIRED, not defaulted, for the same reason
+    // `fwd_router_t::deliver_local`'s is: empty means the trusted local host, so a defaulted
+    // parameter would let a new write path silently present a remote write to a handler as
+    // the owner's own.
     [[nodiscard]] result_t<std::shared_ptr<const rope_t>> store_value(
-        vertex_t* v, rope_t&& value, vertex_t::store_drops_t& drops);
+        vertex_t* v, rope_t&& value, vertex_t::store_drops_t& drops, std::string_view caller);
     // Branch-write decomposition (RFC-0005): a POINT payload written to `v` lands
     // each value-carrying node at the corresponding descendant vertex as a
     // refcount SUBVIEW of the written frame (creating missing vertices, CREATE-

@@ -54,7 +54,7 @@ moves only where the owner attached a seam:
 
 | Written surface | Owner seam | Registration |
 | --- | --- | --- |
-| The vertex **value** (`write /actuator/level VALUE{…}`) | `handlers_t::on_write` — receives the written rope; the value is **consumed, not stored** | `register_vertex(path, role_t::HANDLER, handlers)` |
+| The vertex **value** (`write /actuator/level VALUE{…}`) | `handlers_t::on_write` — receives the written rope **and a `write_ctx_t`** carrying the writer's `subject` (empty ⇒ the local host); the value is **consumed, not stored** | `register_vertex(path, role_t::HANDLER, handlers)` |
 | A declared **app field** (`write /actuator/level:settings.app.ramp_ms VALUE{…}`) | `handlers_t::on_app_field_write` — fires after the bytes are stored, with the field key and the written TLV | `register_vertex(…, handlers)`, or alongside a descriptor table |
 
 Both seams are declared on the same `handlers_t`; their signatures and the
@@ -63,6 +63,13 @@ lock/re-entrancy rules are in
 [graph — interface](../modules/graph.md#interface). The runtime validates
 *addressing* only — declared or undeclared, writable or not. Range, dtype and
 interlock checking is the owner's, in the seam.
+
+`on_write`'s second argument is the **write context**: `write_ctx_t::subject` is the
+writer's resolved subject token — exactly what the vertex's `:acl` was just evaluated
+against — and is **empty** for a local host write (`is_local_owner()`). It is *borrowed for
+the call*, the same contract as the rope beside it, so **copy it if you retain it**. A seam
+that needs per-writer behaviour (an auth endpoint, a per-operator interlock) keys off it
+instead of inventing an out-of-band channel.
 
 ### The legibility part (what makes it integrable by a stranger)
 
@@ -130,12 +137,12 @@ none — and remains a conforming node that any forwarder routes and any peer re
 
 Creation is not a new verb. It is an **append of a `SPEC` TLV to a parent's
 `:children[]` field**, gated by that parent's `CREATE` right
-(`core/src/graph.cpp:2484-2488`;
+(`core/src/graph.cpp:2490-2494`;
 [ADR-0020 — NFSv4-style ACEs with inheritance](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0020-acl-nfsv4-style-aces-with-inheritance.md)).
 The SPEC's `type` member names one of the device's registered child types and its
 optional `config` SETTINGS carries the instantiation parameters; an unregistered
 `type` answers `SCHEMA_NOT_FOUND`, the `ENOTTY` of an unsupported field
-(`graph_t::create_child`, `core/src/graph.cpp:2535-2562`). Reading `:children[]`
+(`graph_t::create_child`, `core/src/graph.cpp:2541-2568`). Reading `:children[]`
 returns the parent's **members**, never SPECs.
 
 On the `/net` plane the registered child types are `client` and `listener`

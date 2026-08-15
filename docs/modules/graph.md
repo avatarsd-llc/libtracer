@@ -57,11 +57,16 @@ struct delivery_policy_t {  // ONE subscription's delivery policy (RFC-0022 §3.
     std::uint16_t bits;     // 0-1 reliability | 2-4 priority | 5 durability_request | 6-15 rsvd
 };
 
+struct write_ctx_t {         // the per-call context a write carries into on_write (#375)
+    std::string_view subject;  // the writer's resolved subject token; EMPTY = the local host
+    bool is_local_owner() const noexcept;  // subject.empty()
+};                           // BORROWED for the call, like the rope beside it — copy if retained
+
 struct handlers_t {                                       // four seams, not two
-    std::function<result_t<rope_t>()>                   on_read;
-    std::function<result_t<void>(const rope_t&)>        on_write;
-    std::function<result_t<view_t>()>                   on_children;
-    std::function<void(std::string_view, const view_t&)> on_app_field_write;
+    std::function<result_t<rope_t>()>                        on_read;
+    std::function<result_t<void>(const rope_t&, const write_ctx_t&)> on_write;
+    std::function<result_t<view_t>()>                        on_children;
+    std::function<void(std::string_view, const view_t&)>     on_app_field_write;
 };
 
 using subscriber_fn_t = void (*)(void* ctx, const rope_t& value);
@@ -615,6 +620,11 @@ a reply already being assembled.
 ```
 
 ### Handlers and delivery policy
+
+```{doxygenstruct} tr::graph::write_ctx_t
+:project: libtracer
+:members:
+```
 
 ```{doxygenstruct} tr::graph::handlers_t
 :project: libtracer

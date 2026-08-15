@@ -510,6 +510,51 @@ struct app_field_group_t {
 };
 
 /**
+ * @brief The per-call context a write carries into a HANDLER's `on_write` (#375).
+ *
+ * A HANDLER is the one seam where application code REACTS to a write, so it is the one
+ * seam that needs to know WHO wrote. The graph already resolved that identity one stack
+ * frame earlier — the ACL gate (`graph_t::acl_allows`) runs immediately before the handler,
+ * on the same value — so this type hands the handler the datum the gate just used rather
+ * than making it re-derive one. It is the RFC-0010 ACL subject-table integration point: a
+ * handler that keys its own policy off @ref subject keys it off exactly what the vertex's
+ * `:acl` was evaluated against.
+ *
+ * @warning LIFETIME — @ref subject is BORROWED for the duration of the call, the SAME
+ *          contract the `rope_t&` alongside it carries: COPY IF RETAINED. It views bytes
+ *          owned by the router's inbound frame or by the caller's own storage, and both are
+ *          gone the moment `on_write` returns. Stashing the `string_view` in a member, a
+ *          map key, or a queued work item is a DANGLING read, not merely a stale one. Take
+ *          a `std::string` (or the token's bytes) if the identity must outlive the call.
+ */
+struct write_ctx_t {
+    /**
+     * @brief The resolved SUBJECT token of the writer — the ACL model's `subject → rights`
+     *        principal (CONTEXT.md §Access control, ADR-0018).
+     *
+     * EMPTY means the LOCAL HOST: the owner's own in-process write through the graph API.
+     * That is not a magic string but the very discriminator the ACL gate runs on — the empty
+     * caller context is the trusted-by-convention channel `graph_t::acl_allows` short-circuits
+     * BEFORE any resolver runs (#905), and a remote writer, which always carries a non-empty
+     * context, cannot spell it. Prefer @ref is_local_owner to comparing against `""`.
+     *
+     * @note There is no `OWNER@` sentinel and there must not be one: ADR-0020's erratum
+     *       (#1033) withdrew that name because no evaluator ever special-cased it, so an
+     *       `OWNER@` ACE matched nobody and LOCKED the vertex it was written to delegate.
+     *       The owner sentinel here is the EMPTY token, which no ACE can spell.
+     *
+     * @note Non-empty, this is the operation's caller context exactly as the gate saw it.
+     *       The token is PLUGGABLE (ADR-0018, ADR-0045 raw-key ed25519 TOFU) — a stronger
+     *       credential slots in without changing this seam or the ACL model.
+     */
+    std::string_view subject;
+
+    /** @brief True iff this write came from the LOCAL HOST (the owner's own API call) —
+     *         i.e. @ref subject is the empty owner token. */
+    [[nodiscard]] constexpr bool is_local_owner() const noexcept { return subject.empty(); }
+};
+
+/**
  * @brief User behavior for a Handler-role vertex.
  *
  * `on_children` additionally applies to ANY role: when set, a read of the vertex's
@@ -522,8 +567,9 @@ struct app_field_group_t {
  */
 struct handlers_t {
     std::function<result_t<rope_t>()> on_read; /**< @brief Supplies the vertex value on read. */
-    std::function<result_t<void>(const rope_t&)>
-        on_write;                                  /**< @brief Receives the written value. */
+    /** @brief Receives the written value and the writer's @ref write_ctx_t (#375). Both
+     *         arguments are borrowed for the call only — copy if retained. */
+    std::function<result_t<void>(const rope_t&, const write_ctx_t&)> on_write;
     std::function<result_t<view_t>()> on_children; /**< @brief Synthesized `:children[]` listing. */
     /**
      * @brief The owner apply seam (RFC-0010 §A.3): fires after a declared
@@ -556,8 +602,9 @@ struct handlers_t {
  */
 struct value_handlers_t {
     std::function<result_t<rope_t>()> on_read; /**< @brief Supplies the vertex value on read. */
-    std::function<result_t<void>(const rope_t&)>
-        on_write;                                  /**< @brief Receives the written value. */
+    /** @brief Receives the written value and the writer's @ref write_ctx_t (#375). Both
+     *         arguments are borrowed for the call only — copy if retained. */
+    std::function<result_t<void>(const rope_t&, const write_ctx_t&)> on_write;
     std::function<result_t<view_t>()> on_children; /**< @brief Synthesized `:children[]` listing. */
 };
 

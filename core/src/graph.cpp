@@ -1306,7 +1306,7 @@ namespace {
     // does. A shed append therefore loses that deferred delivery, and is counted at the
     // TARGET's own-subs width (the shed is the target's, not the source's).
     vertex_t::store_drops_t store_drops;
-    (void)store_value(target, std::move(clone), store_drops);
+    (void)store_value(target, std::move(clone), store_drops, e.caller);
     count_store_drops(target, store_drops);
 }
 
@@ -1428,12 +1428,18 @@ void graph_t::fan_out(vertex_t* v, const rope_t& value) {
 }
 
 result_t<std::shared_ptr<const rope_t>> graph_t::store_value(vertex_t* v, rope_t&& value,
-                                                             vertex_t::store_drops_t& drops) {
+                                                             vertex_t::store_drops_t& drops,
+                                                             std::string_view caller) {
     drops = vertex_t::store_drops_t{};
     if (v->role() == role_t::HANDLER) {
         const value_handlers_t& h = v->handlers();  // load once — a retire may swap it out
         if (!h.on_write) return std::unexpected(status_t::NOT_FOUND);
-        result_t<void> r = h.on_write(value);
+        // The subject is NOT re-derived here (#375): `caller` is the identical value the
+        // WRITE gate one stack frame up passed to `acl_allows`, so the handler and the ACL
+        // that admitted the write cannot disagree about who wrote. The ctx is a borrowed
+        // view built on the stack — no allocation, nothing stored on the vertex.
+        const write_ctx_t ctx{.subject = caller};
+        result_t<void> r = h.on_write(value, ctx);
         if (!r) return std::unexpected(r.error());
         v->note_write();
         return std::shared_ptr<const rope_t>{};  // handler consumed it — nothing stored
@@ -1516,7 +1522,7 @@ result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, std::string_view c
         // required by the signature, and that is the point: the seam cannot be skipped.
         vertex_t::store_drops_t store_drops;
         const result_t<std::shared_ptr<const rope_t>> stored =
-            store_value(v, std::move(value), store_drops);
+            store_value(v, std::move(value), store_drops, caller);
         if (!stored) return std::unexpected(stored.error());
         if (can_notify) {
             deliver_vertex(v, notify);
@@ -1540,7 +1546,7 @@ result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, std::string_view c
     }
     vertex_t::store_drops_t store_drops;
     const result_t<std::shared_ptr<const rope_t>> stored =
-        store_value(v, std::move(value), store_drops);
+        store_value(v, std::move(value), store_drops, caller);
     if (!stored) return std::unexpected(stored.error());
     if (v->role() == role_t::STREAM) {
         // Deliver the just-appended ring entry and advance the drain cursor, so a later
@@ -1573,7 +1579,7 @@ result_t<void> graph_t::assign(vertex_handle_t vh, rope_t value, std::string_vie
     if (is_branch_point(value, v->role())) return write_branch(v, value, caller, /*notify=*/false);
     vertex_t::store_drops_t store_drops;
     const result_t<std::shared_ptr<const rope_t>> stored =
-        store_value(v, std::move(value), store_drops);
+        store_value(v, std::move(value), store_drops, caller);
     if (!stored) return std::unexpected(stored.error());
     // A shed ring append here loses the delivery the NEXT covering sweep would have drained
     // — deferred, not eager, but lost all the same, and the sweep has no way to know an
@@ -1680,7 +1686,7 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, std::stri
     for (site_t& site : sites) {
         vertex_t::store_drops_t store_drops;
         if (result_t<std::shared_ptr<const rope_t>> r =
-                store_value(site.vx, site.node->store, store_drops))
+                store_value(site.vx, site.node->store, store_drops, caller))
             site.stored = std::move(*r);
         // Counted ONLY on the assign half. The notify half below delivers each covered site's
         // slice through fan_out and then mark_flushed()es the cursor, so on that path the ring

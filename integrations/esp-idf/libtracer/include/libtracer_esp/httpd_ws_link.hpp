@@ -903,10 +903,13 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
          * @ref peer_stats_t::subject beside `endpoint_str`. Truncated at
          * @ref kMaxSubjectChars.
          *
-         * This link BINDS it and publishes it; what it MEANS to a handler — per-caller ACL,
-         * `on_write` identity — is not decided here and is tracked as #375. Carrying it is
-         * this frame's job precisely because the frame is where a session's identity is
-         * first known.
+         * This link BINDS it and publishes it. The HANDLER-side half now exists (#375 Part 1):
+         * `tr::graph::handlers_t::on_write` receives a `write_ctx_t` whose `subject` is the
+         * writer's resolved subject token. What is still open is the JOIN — a subject bound
+         * here does not yet become the graph's caller context for frames arriving on this
+         * session, so a handler currently sees the inbound link's name. Carrying it is this
+         * frame's job regardless, precisely because the frame is where a session's identity
+         * is first known.
          */
         std::string_view subject;
     };

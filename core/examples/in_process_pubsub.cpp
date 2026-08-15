@@ -76,7 +76,8 @@ int main() {
     // A "sink" vertex backed by a callback handler — the target of a spec-faithful
     // SUBSCRIBER (subscriber 2 below re-dispatches to it).
     tr::graph::handlers_t sink;
-    sink.on_write = [&sink_got](const tr::view::rope_t& in) -> tr::graph::result_t<void> {
+    sink.on_write = [&sink_got](const tr::view::rope_t& in,
+                                const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
         sink_got = as_u32(in.only());
         std::printf("  [sink vertex /log/temp] received %u\n", sink_got);
         return {};
