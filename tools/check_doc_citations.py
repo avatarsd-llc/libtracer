@@ -203,18 +203,35 @@ ANCHORS = [
     ("core/src/transport_vertex.cpp:132",
      "void transport_vertex_t::register_transport_type(std::string kind, transport_factory_t factory) {"),
     ("core/src/transport_vertex.cpp:137", "transport_vertex_t::register_module"),
-    ("core/src/transport_vertex.cpp:171", "SCHEMA_NOT_FOUND", "transport_vertex_t::module_for"),
-    ("core/src/transport_vertex.cpp:214", "transport_vertex_t::provide_link"),
-    ("core/src/transport_vertex.cpp:297", "routing key IS the mount path"),
-    ("core/src/transport_vertex.cpp:304", "qualified += name"),
-    ("core/src/transport_vertex.cpp:323", "structural vertex, created lazily"),
-    ("core/src/transport_vertex.cpp:331", "register_vertex_key(mod_key"),
-    ("core/src/transport_vertex.cpp:423", "if (!router_.add_child(qualified, *link))"),
-    ("core/src/transport_vertex.cpp:432", "pending_links_.erase(pl)"),
-    ("core/src/transport_vertex.cpp:446", "if (constructed)"),
-    ("core/src/transport_vertex.cpp:448", "link_state_t::LISTENING : link_state_t::UP"),
+    # Three lines now spell SCHEMA_NOT_FOUND in this file — `module_for_locked`'s
+    # declared-only refusal (this one), `declaration_for_locked`'s unsupported-(module, kind)
+    # refusal that RFC-0014 S2b added below it, and the unregistered-kind refusal in creation.
+    # No scope separates all three, so the anchor is the WHOLE indented statement instead: the
+    # other two carry a leading `if (…)` on the same line and no longer match.
+    ("core/src/transport_vertex.cpp:175",
+     "    return std::unexpected(status_t::SCHEMA_NOT_FOUND);"),
+    # RFC-0014 S2b's creator endpoint: the mint site CONTEXT.md cites for "declaring a
+    # module mints /net/<module>/conn", and the dispatch site it cites for "the written
+    # TLV's TYPE selects the operation".
+    ("core/src/transport_vertex.cpp:202", "transport_vertex_t::mint_module_locked"),
+    ("core/src/transport_vertex.cpp:238", "transport_vertex_t::endpoint_write"),
+    ("core/src/transport_vertex.cpp:392", "transport_vertex_t::provide_link"),
+    ("core/src/transport_vertex.cpp:484", "routing key IS the mount path"),
+    # The qualified-key compose repeats since S2b: the creation path builds it here, and
+    # the endpoint's `NAME` remove builds the same key earlier in the file. The mount-path
+    # comment sits directly above THIS one and below the other.
+    ("core/src/transport_vertex.cpp:491", "qualified += name", "routing key IS the mount path"),
+    ("core/src/transport_vertex.cpp:509", "structural vertex, created lazily"),
+    # Two module-vertex mints since S2b — `register_module`'s eager one and creation's
+    # lazy one. The lazy-mint comment selects this (later) one.
+    ("core/src/transport_vertex.cpp:517", "register_vertex_key(mod_key",
+     "structural vertex, created lazily"),
+    ("core/src/transport_vertex.cpp:610", "if (!router_.add_child(qualified, *link))"),
+    ("core/src/transport_vertex.cpp:619", "pending_links_.erase(pl)"),
+    ("core/src/transport_vertex.cpp:638", "if (constructed)"),
+    ("core/src/transport_vertex.cpp:640", "? link_state_t::LISTENING"),
     ('core/src/transport_vertex.cpp:69', '[[nodiscard]] view_t link_state_value(link_state_t state) {'),
-    ('core/src/transport_vertex.cpp:257', 'std::string module;'),
+    ('core/src/transport_vertex.cpp:435', 'std::string module;'),
     # fwd-router.md's "Signature source" line — bare :NNN shorthands that had ALL rotted
     # silently (they cited the pre-#739 header). Anchored so they cannot rot again.
     # zero-copy-and-flatten.md's rope-tier citations and ADR-0072's stale-comment pointer —
@@ -242,10 +259,10 @@ ANCHORS = [
      "[[nodiscard]] transport_t* by_name(std::string_view name) const {"),
     ("core/include/libtracer/child_registry.hpp:627", "std::size_t size()"),
     ("core/include/libtracer/child_registry.hpp:637", "live_size"),
-    ("core/src/transport_vertex.cpp:426", "return std::unexpected(status_t::BACKPRESSURE);",
+    ("core/src/transport_vertex.cpp:613", "return std::unexpected(status_t::BACKPRESSURE);",
      "if (!router_.add_child(qualified, *link))"),
-    ("core/include/libtracer/transport_vertex.hpp:314", "result_t<void> register_module"),
-    ("core/include/libtracer/transport_vertex.hpp:98", "enum class link_state_t"),
+    ("core/include/libtracer/transport_vertex.hpp:348", "result_t<void> register_module"),
+    ("core/include/libtracer/transport_vertex.hpp:99", "enum class link_state_t"),
     ("core/src/graph.cpp:2433", "sel == field_sel_t::TAIL", 'step0.name == "subscribers"'),
     ("core/src/graph.cpp:2552", "!whole_field(field)", 'step0.name == "acl"'),
     ("core/src/graph.cpp:2592", "field_selector(field) != field_sel_t::APPEND"),
@@ -597,13 +614,13 @@ ANCHORS = [
     ('core/include/libtracer/transport_udp.hpp:111',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }'),
     # core/include/libtracer/transport_vertex.hpp
-    ('core/include/libtracer/transport_vertex.hpp:79',
+    ('core/include/libtracer/transport_vertex.hpp:80',
      'enum class conn_role_t : std::uint8_t { DIAL = 0, LISTEN = 1 };'),
-    ('core/include/libtracer/transport_vertex.hpp:122',
+    ('core/include/libtracer/transport_vertex.hpp:123',
      "* §5 leanness ruling): a kind's PRIVATE config (e.g. quic's `cert`/`key` PEM paths) never"),
-    ('core/include/libtracer/transport_vertex.hpp:141',
+    ('core/include/libtracer/transport_vertex.hpp:142',
      'std::uint32_t backoff_ms = 0;         /**< @brief DIAL self-heal retry interval (RFC-0014 §4);'),
-    ('core/include/libtracer/transport_vertex.hpp:144',
+    ('core/include/libtracer/transport_vertex.hpp:145',
      'std::uint32_t connect_timeout_ms = 0; /**< @brief DIAL connect-attempt deadline (RFC-0014 §4):'),
     # core/include/libtracer/transport_webtransport.hpp
     ('core/include/libtracer/transport_webtransport.hpp:182',
@@ -748,9 +765,9 @@ ANCHORS = [
     ('core/src/transport_vertex.cpp:102',
      'graph_.register_child_type(',
      'return make_connection(std::move(key), config, conn_role_t::DIAL);'),
-    ('core/src/transport_vertex.cpp:153',
+    ('core/src/transport_vertex.cpp:157',
      'result_t<std::string> transport_vertex_t::module_for(std::string_view kind,'),
-    ('core/src/transport_vertex.cpp:314',
+    ('core/src/transport_vertex.cpp:501',
      '// Compose the mount key: `<net_root>/<module>/<name>`, replacing the flat key the'),
     # core/src/transport_ws.cpp
     ('core/src/transport_ws.cpp:86',
@@ -1024,7 +1041,7 @@ ANCHORS = [
      'if (const auto v = cfg.u32("backoff")) s.backoff_ms = *v;'),
     ('core/src/transport_vertex.cpp:103',
      '"listener", [this](graph::graph_t&, std::vector<std::byte> key, const tlv_t* config) {'),
-    ('core/src/transport_vertex.cpp:222',
+    ('core/src/transport_vertex.cpp:400',
      'result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::byte> child_key,'),
     ('integrations/esp-idf/libtracer/include/libtracer_esp/esp_ws_client_link.hpp:176',
      '#include "esp_transport.h"'),

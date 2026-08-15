@@ -235,7 +235,7 @@ carrying a `kind` field creates a connection. The universal keys are `addr`, `ki
 two catalog child types are `client` and `listener` (`:98-106`); the created
 connection mounts and routes at `/net/<module>/<name>`, the module **declared by the
 application** via `register_module` (`:137`) — declared-only per ADR-0073 §4, so an
-undeclared kind fails creation with `SCHEMA_NOT_FOUND` (`:171`). The accepted direction is
+undeclared kind fails creation with `SCHEMA_NOT_FOUND` (`:175`). The accepted direction is
 [RFC-0014 — creator endpoint, connection lifecycle and link liveness](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md),
 which replaces the single global catalog with a per-module creator endpoint
 `/net/<module>/conn`; that endpoint is not implemented, so a node built against this

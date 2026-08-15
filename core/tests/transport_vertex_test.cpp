@@ -1444,11 +1444,20 @@ void test_ws_peer_named_config() {
     // registered — though a peer name IS a legal next-hop segment since #426).
     // RFC-0014 §1: /net enumerates MODULES; the connections themselves sit one level down
     // under theirs. Either way no peer gains a vertex, which is what this asserts.
-    check(enumerate_peers(node, "/net:children[]") == std::set<std::string>{"ws-server"},
-          "/net:children[] lists the module");
+    //
+    // Every DECLARED module is listed, not only the ones carrying a connection: since S2b a
+    // declaration mints the module vertex and its `conn` endpoint eagerly, which is what
+    // makes an empty module DISCOVERABLE — a creator has to find the endpoint before it can
+    // write the first SPEC to it.
+    check(enumerate_peers(node, "/net:children[]") ==
+              std::set<std::string>{"udp-client", "udp-server", "ws-client", "ws-server"},
+          "/net:children[] lists every declared module");
+    // The `conn` endpoint is listed alongside the members here: hiding it from the module's
+    // `:children[]` is RFC-0014 S4 (the enumeration-hide seam), which does not exist yet.
     check(
-        enumerate_peers(node, "/net/ws-server:children[]") == std::set<std::string>{"bus", "plain"},
-        "/net/ws-server:children[] lists only the two connections — no vertex per peer");
+        enumerate_peers(node, "/net/ws-server:children[]") ==
+            std::set<std::string>{"bus", "conn", "plain"},
+        "/net/ws-server:children[] lists the two connections + the endpoint — no vertex per peer");
 }
 
 /**
@@ -1513,6 +1522,173 @@ void test_unregistered_kind_is_schema_not_found() {
           "kind with a factory but no declared module => SCHEMA_NOT_FOUND");
     check(!node.find(path_t::parse("/net/udp-client/x")->key()).has_value(),
           "nothing mounted under the old derived /net/udp-client name");
+}
+
+/**
+ * @brief RFC-0014 S2b: declaring a module MINTS its `conn` creator endpoint, and a `SPEC`
+ *        write to that endpoint MATERIALIZES the connection.
+ *
+ * The endpoint door, end to end: no `type`, no `role` — the module in the path is both —
+ * and the connection lands at `/net/<module>/<name>` with its link in the router's single
+ * demux table, byte-identically to what the superseded `:children[]` door produces.
+ */
+void test_conn_endpoint_spec_creates() {
+    std::printf("RFC-0014 S2b: a SPEC write to /net/<module>/conn materializes a connection:\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    check(net.register_module("ws-client", "ws", conn_role_t::DIAL).has_value(),
+          "the application declares the module");
+    check(node.find(path_t::parse("/net/ws-client/conn")->key()).has_value(),
+          "declaring the module minted its creator endpoint at /net/<module>/conn");
+
+    tr::net::loopback_channel_t channel;
+    net.provide_link("ws-client", "up", channel.a());
+    const auto w = node.write(path_t("/net/ws-client/conn"), conn_spec_t("up").view());
+    check(w.has_value(), "SPEC{name=up} written to the endpoint succeeds");
+    check(node.find(path_t::parse("/net/ws-client/up")->key()).has_value(),
+          "the connection vertex exists at /net/<module>/<name>");
+    check(router.registry().size() == 1 &&
+              router.registry().by_name("net/ws-client/up") == &channel.a(),
+          "its link is wired into the router's child_registry_t");
+    // The role is POSITIONAL: the module declared DIAL, and the endpoint fixed it without
+    // the SPEC saying anything about a role.
+    const auto* s = net.settings_of("net/ws-client/up");
+    check(s != nullptr && s->role == conn_role_t::DIAL,
+          "the role came from the module, not from the payload");
+    channel.shutdown();
+}
+
+/** @brief RFC-0014 S2b: the endpoint dispatches a CONSTRUCTING SPEC too — the module's
+ *         declared kind selects the factory and the real socket comes up. */
+void test_conn_endpoint_constructs_socket() {
+    std::printf("RFC-0014 S2b: an endpoint SPEC drives the transport factory:\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    check(net.register_module("udp-server", "udp", conn_role_t::LISTEN).has_value(),
+          "declare the listen module");
+    const auto w =
+        node.write(path_t("/net/udp-server/conn"), conn_spec_t("srv").port(47161).view());
+    check(w.has_value(), "SPEC{name=srv, config{port}} constructs the bound socket");
+    check(read_link_state_byte(node, "/net/udp-server/srv") == 4,
+          "the constructed LISTEN reports LISTENING (0x04) — the role came from the module");
+}
+
+/**
+ * @brief RFC-0014 S2b: a malformed endpoint write is REFUSED and leaves NO side effect.
+ *
+ * Every refusal below is checked twice — the status, and that the graph and the router's
+ * demux table are exactly as they were. A creation that half-lands (a vertex with no route,
+ * a socket with no vertex) is the failure mode the SPEC-atomicity clause exists to forbid.
+ */
+void test_conn_endpoint_malformed_refuses() {
+    std::printf("RFC-0014 S2b: a malformed SPEC refuses with no side effects:\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    (void)net.register_module("udp-client", "udp", conn_role_t::DIAL);
+    const auto endpoint = path_t("/net/udp-client/conn");
+
+    // 1. A payload that is neither SPEC nor NAME never falls through to an ordinary assign.
+    std::vector<std::byte> value_tlv;
+    tr::wire::emit_tlv(value_tlv, type_t::VALUE, opt_t{}, std::span<const std::byte>{});
+    const auto bad_type = node.write(endpoint, owned(value_tlv));
+    check(!bad_type.has_value() && bad_type.error() == status_t::TYPE_MISMATCH,
+          "a VALUE payload => TYPE_MISMATCH (the endpoint never assigns)");
+
+    // 2. `name` is REQUIRED and stays required (ADR-0073 §5) — no node-assigned fallback.
+    const auto no_name = node.write(endpoint, conn_spec_t("").port(1).view());
+    check(!no_name.has_value() && no_name.error() == status_t::TYPE_MISMATCH,
+          "SPEC with an empty name => TYPE_MISMATCH (no node-assigned name)");
+
+    // 3. The wire minting boundary runs the shared segment predicate (ADR-0073 §1).
+    const auto bad_seg = node.write(endpoint, conn_spec_t("a/b").port(1).view());
+    check(!bad_seg.has_value() && bad_seg.error() == status_t::INVALID_PATH,
+          "SPEC naming an unaddressable segment => INVALID_PATH");
+
+    // 4. The reserved name, refused create-side BEFORE any socket is built.
+    const auto reserved = node.write(endpoint, conn_spec_t("conn").port(1).view());
+    check(!reserved.has_value() && reserved.error() == status_t::PATH_IN_USE,
+          "SPEC naming the reserved `conn` => PATH_IN_USE");
+    check(node.find(path_t::parse("/net/udp-client/conn")->key()).has_value(),
+          "the endpoint itself is untouched");
+
+    // 5. A kind this module does not construct is an unsupported catalog entry.
+    const auto wrong_kind =
+        node.write(endpoint, conn_spec_t("x").kind("ws").addr("127.0.0.1").port(1).view());
+    check(!wrong_kind.has_value() && wrong_kind.error() == status_t::SCHEMA_NOT_FOUND,
+          "SPEC naming a kind the module does not construct => SCHEMA_NOT_FOUND");
+
+    // 6. A config the kind cannot build from (a DIAL with no addr) fails in the factory.
+    const auto no_addr = node.write(endpoint, conn_spec_t("y").port(47162).view());
+    check(!no_addr.has_value() && no_addr.error() == status_t::TYPE_MISMATCH,
+          "SPEC whose config is missing a required key => TYPE_MISMATCH");
+
+    // NOTHING landed: no vertex, no route, no connection record.
+    for (const char* leaf : {"x", "y"}) {
+        std::string p = "/net/udp-client/";
+        p += leaf;
+        check(!node.find(path_t::parse(p)->key()).has_value(), "no vertex was minted");
+    }
+    check(router.registry().size() == 0, "no link was wired into the demux table");
+    check(net.settings_of("net/udp-client/x") == nullptr &&
+              net.settings_of("net/udp-client/y") == nullptr,
+          "no connection record was kept");
+}
+
+/** @brief RFC-0014 S2b: `SPEC` naming an existing connection is `PATH_IN_USE` — the
+ *         reject a retrying orchestrator reads as "already exists" (ADR-0073 §5). */
+void test_conn_endpoint_spec_in_use_is_idempotent_safe() {
+    std::printf("RFC-0014 S2b: a re-sent SPEC answers PATH_IN_USE (retry-idempotent):\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    (void)net.register_module("ws-client", "ws", conn_role_t::DIAL);
+    tr::net::loopback_channel_t channel;
+    net.provide_link("ws-client", "up", channel.a());
+    check(node.write(path_t("/net/ws-client/conn"), conn_spec_t("up").view()).has_value(),
+          "the first create succeeds");
+    const auto again = node.write(path_t("/net/ws-client/conn"), conn_spec_t("up").view());
+    check(!again.has_value() && again.error() == status_t::PATH_IN_USE,
+          "the retry answers PATH_IN_USE — one connection, and the client learns so");
+    check(router.registry().size() == 1, "still exactly one link in the demux table");
+    channel.shutdown();
+}
+
+/** @brief RFC-0014 S2b: a `NAME` write to the same endpoint REMOVES the connection —
+ *         absent name is a no-op success, the reserved name is refused. */
+void test_conn_endpoint_name_removes() {
+    std::printf("RFC-0014 S2b: a NAME write to /net/<module>/conn removes the connection:\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    (void)net.register_module("ws-client", "ws", conn_role_t::DIAL);
+    tr::net::loopback_channel_t channel;
+    net.provide_link("ws-client", "up", channel.a());
+    (void)node.write(path_t("/net/ws-client/conn"), conn_spec_t("up").view());
+    const auto endpoint = path_t("/net/ws-client/conn");
+
+    // The endpoint cannot self-destruct (RFC-0014 §2/§3 remove-side).
+    const auto self = node.write(endpoint, tr::net::conn_remove("conn"));
+    check(!self.has_value() && self.error() == status_t::PERMISSION_DENIED,
+          "NAME{conn} => PERMISSION_DENIED (the endpoint never routes to retire)");
+    check(node.find(path_t::parse("/net/ws-client/conn")->key()).has_value(),
+          "the endpoint still resolves");
+
+    // An unresolvable name is a NO-OP SUCCESS — the retried-remove leg.
+    check(node.write(endpoint, tr::net::conn_remove("never")).has_value(),
+          "NAME naming no connection is a no-op success");
+
+    check(node.write(endpoint, tr::net::conn_remove("up")).has_value(), "NAME{up} removes it");
+    check(!node.find(path_t::parse("/net/ws-client/up")->key()).has_value(),
+          "the connection vertex is retired");
+    check(router.registry().by_name("net/ws-client/up") == nullptr,
+          "and it is un-routed: the NAME no longer resolves to a link");
+    // Removing it again is the same no-op success, so a retried teardown is safe too.
+    check(node.write(endpoint, tr::net::conn_remove("up")).has_value(),
+          "a repeated remove is a no-op success");
+    channel.shutdown();
 }
 
 /** @brief ADR-0073 §1/§4: register_module is a minting boundary — the shared segment
@@ -1911,6 +2087,11 @@ int main() {
     test_refused_dial_is_transport_down();
     test_unregistered_kind_is_schema_not_found();
     test_register_module_rejects_reserved_chars();
+    test_conn_endpoint_spec_creates();
+    test_conn_endpoint_constructs_socket();
+    test_conn_endpoint_malformed_refuses();
+    test_conn_endpoint_spec_in_use_is_idempotent_safe();
+    test_conn_endpoint_name_removes();
     test_wire_name_reaches_add_child();
     test_app_chosen_root_and_module();
     test_structural_vertex_partition();

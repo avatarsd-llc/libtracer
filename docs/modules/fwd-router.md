@@ -290,7 +290,7 @@ the role default. Extra transport kinds join the catalog through `register_trans
 file ever learning about it.
 
 **The write is ACL-gated.** The `:children[]` append is gated on the parent vertex's `CREATE`
-right and denied with `PERMISSION_DENIED` otherwise (`core/src/graph.cpp:2594-2595`). Under
+right and denied with `PERMISSION_DENIED` otherwise (`core/src/graph.cpp:2594-2627`). Under
 [RFC-0014 — creator endpoint, connection lifecycle and link liveness](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)
 that gate relocates onto the creator endpoint's own ACL and gains its removal counterpart: a `NAME`
 write is gated on `WRITE` — **not** `DELETE` — per
@@ -299,19 +299,19 @@ write is gated on `WRITE` — **not** `DELETE` — per
 **Mount and routing are the same path.** A created connection lives at `/net/<module>/<name>` and
 routes by exactly that path: the routing key *is* the mount path, so the registry's precomputed
 NAME run is exactly the prefix a hop prepends to `src` and the forward path assembles nothing per
-hop (`core/src/transport_vertex.cpp:297-304,314-321`;
+hop (`core/src/transport_vertex.cpp:484-491,501-507`;
 [ADR-0061 — per-transport mount routing, strip-K L5 demux](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md)).
 The `/net/<module>` structural vertex is created lazily on first use, with `graph_.find` itself as the
-dedupe rather than a second source of truth (`core/src/transport_vertex.cpp:323-331`). Because a
+dedupe rather than a second source of truth (`core/src/transport_vertex.cpp:509-517`). Because a
 connection is addressed under `/net/<module>/`, a first-level local vertex cannot shadow one.
 
 **Module naming is declared-only, by the application**
 ([ADR-0073](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0073-naming-authority-the-application-mints-one-predicate-gates.md)
 §4). There is no derived default and no library-side auto-registration: linking a built-in
 transport registers no module name, and an undeclared `(kind, role)` pair fails creation with
-`SCHEMA_NOT_FOUND` (`core/src/transport_vertex.cpp:171`). The application declares each module
+`SCHEMA_NOT_FOUND` (`core/src/transport_vertex.cpp:175`). The application declares each module
 under a name it chooses through `register_module` (`core/src/transport_vertex.cpp:137`,
-`core/include/libtracer/transport_vertex.hpp:314`), a minting boundary gated by the shared
+`core/include/libtracer/transport_vertex.hpp:348`), a minting boundary gated by the shared
 segment-validity predicate — a reserved-character name answers `INVALID_PATH`. The built-in
 transports export *suggested*-name constants (`kWsClientSuggestedModule`, …) an application may
 adopt; `/net` itself is likewise only the recommended root convention (a constructor default).
@@ -322,25 +322,30 @@ the last can be refused: `add_child` answers `false` when the registry cannot gr
 only place that can say so (`core/include/libtracer/fwd_router.hpp:283`,
 `core/include/libtracer/child_registry.hpp:267`). A refusal unwinds the first two in reverse —
 retire the vertex, then erase the entry, which destroys the config-constructed socket — publishes
-no liveness, and answers `BACKPRESSURE` (`core/src/transport_vertex.cpp:423-426`). Discarding that
+no liveness, and answers `BACKPRESSURE` (`core/src/transport_vertex.cpp:610-613`). Discarding that
 `bool` left a connection reporting `UP` that no `dst` resolved, no inbound frame reached, and
 `remove_child` did not know about — a ghost a peer could mint by creating connections until the
 registry slab exhausted. A `provide_link` staging is consumed only once the wiring has succeeded
-(`core/src/transport_vertex.cpp:432`), so a retry after the pressure clears still finds its link.
+(`core/src/transport_vertex.cpp:619`), so a retry after the pressure clears still finds its link.
 
 **Liveness is the connection vertex's value.** `link_state_t` is six states —
 `DORMANT`, `DIALING`, `RECONNECTING`, `UP`, `LISTENING`, `BIND_FAILED`
-(`core/include/libtracer/transport_vertex.hpp:98-105`). `DIAL` links use the first four; `LISTEN`
+(`core/include/libtracer/transport_vertex.hpp:99-106`). `DIAL` links use the first four; `LISTEN`
 links report listen-socket reachability with the last two, never a per-accepted-peer state. The
 value is a 1-byte `VALUE` on the vertex, so it is `await`-able and subscribable: `subscribe
 /net/<module>/<name>` streams every transition. The liveness *engine* that would drive these
 automatically is not implemented — the value is set by the caller, and a config-constructed socket
-reports `UP` or `LISTENING` at creation (`core/src/transport_vertex.cpp:446-448`).
+reports `UP` or `LISTENING` at creation (`core/src/transport_vertex.cpp:638-641`).
 
 **The accepted direction, and what is not realised.** RFC-0014 replaces the single global
 `/net:children[]` catalog with a **per-module creator endpoint** at `/net/<module>/conn`, whose own
-`:schema` is that module's config catalog. That endpoint is accepted and **is not implemented**; the
-creation surface a peer can address is the `/net:children[]` catalog described above. One further
+`:schema` is that module's config catalog. **The endpoint itself is implemented** (S2b): declaring a
+module mints it, a `SPEC{name, config}` written there creates `/net/<module>/<name>` and a
+`NAME{<name>}` removes it, with transport and role positional. What is **not** implemented is the
+rest of the surface around it — the `conn:schema` catalog read (S3), hiding `conn` from
+`/net/<module>:children[]` (S4), the `CREATE`/`WRITE` gating split (S2c) and the link-liveness
+engine (S5) — and the `/net:children[]` catalog described above still works in parallel until S7
+retires it. One further
 boundary is open by design: RFC-0014 delivers the *link*, while third-party multi-hop `SUBSCRIBER`
 origination — making one node subscribe to another and then departing — is a separate unanswered
 question, so an orchestrator can create the wires' **links** in band without being able to
@@ -348,7 +353,7 @@ originate the **wires** ([#491]).
 
 ### Connection settings are transport-private
 
-`conn_settings_t` (`core/include/libtracer/transport_vertex.hpp:122`) and `conn_role_t` (`:79`) are
+`conn_settings_t` (`core/include/libtracer/transport_vertex.hpp:123`) and `conn_role_t` (`:80`) are
 a **device-private `:settings` facet** of a connection vertex
 ([ADR-0021 — the colon-field plane is the vertex ioctl](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0021-colon-field-plane-is-the-vertex-ioctl.md)
 draws the standard / device-private line). They live on the `tr::net` leaf record and are **never**

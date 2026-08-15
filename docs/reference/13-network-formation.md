@@ -160,12 +160,16 @@ overridable per node), never a library rule — with names like `ws-client`, `ws
 
 ```{admonition} Realisation status
 :class: note
-The per-module creator endpoint is **not implemented** in the reference implementation:
-neither `/net/<module>/conn`, nor the reserved-and-hidden `conn` name, nor per-module
-`:schema`-as-catalog, nor `NAME`-write removal. What is implemented is the addressing
-half — a created connection mounts and routes at `/net/<module>/<name>`, with the module
-name declared by the application (never library-derived — ADR-0073 §4) — reached through the `:children[]`
-creation spelling that RFC-0014 supersedes. RFC-0014's byte-level clauses (the
+The per-module creator endpoint is **implemented** (RFC-0014 S2b): declaring a module
+mints `/net/<module>/conn`, a `SPEC{name, config}` written there creates
+`/net/<module>/<name>` and a `NAME{<name>}` removes it, and the `conn` name is reserved in
+both directions. What is **not** implemented is the rest: per-module `:schema`-as-catalog
+(S3), HIDING `conn` from `/net/<module>:children[]` (S4 — it is enumerated alongside the
+member connections today), the `CREATE`/`WRITE` gating split (S2c) and the liveness engine
+(S5). The addressing half was already there — a created connection mounts and routes at
+`/net/<module>/<name>`, with the module name declared by the application (never
+library-derived — ADR-0073 §4) — and the `:children[]` creation spelling RFC-0014
+supersedes still works in parallel until S7 retires it. RFC-0014's byte-level clauses (the
 `SPEC`/`NAME`/`config` layout, the catalog reply bytes, the liveness encoding, the gate
 order, the error identities) are proposed pending code plus conformance vectors; its
 declaring clauses stand on acceptance.
@@ -297,7 +301,7 @@ write-only, non-propagating creator endpoint.
 `dormant` takes `0` so a resting link is the falsy default. **The byte encoding becomes
 normative on the merge of RFC-0014's conformance vectors** — the RFC defers it, so these
 values are the reference encoding until then (`link_state_t`,
-`core/include/libtracer/transport_vertex.hpp:98-105`). A `LISTEN` vertex's liveness
+`core/include/libtracer/transport_vertex.hpp:99-106`). A `LISTEN` vertex's liveness
 reports **listen-socket reachability**, not per-accepted-peer connectivity; accepted-peer
 count and identity are exposed through `:children[]` / `:settings`. Once up, a link is
 bidirectional regardless of who dialed — `role` says only *who initiates*. The liveness

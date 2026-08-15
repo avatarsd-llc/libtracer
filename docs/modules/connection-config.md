@@ -7,8 +7,10 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 ```{admonition} In one paragraph
 :class: tip
-Creating a connection is an ordinary write — `write /net:children[] += SPEC{type,
-name, config}` — and everything the new link needs is in that `config` SETTINGS TLV.
+Creating a connection is an ordinary write — `write /net/<module>/conn = SPEC{name,
+config}` at the RFC-0014 creator endpoint, or the superseded `write /net:children[] +=
+SPEC{type, name, config}` — and everything the new link needs is in that `config`
+SETTINGS TLV.
 Its keys come in two families. The **universal** ones (`kind`, `addr`, `port`,
 `role`, …) are parsed centrally into `tr::net::conn_settings_t`, which every
 transport kind shares. The **kind-private** ones are parsed by the selected kind's
@@ -90,6 +92,18 @@ graph.write(*path_t::parse("/net:children[]"), conn_spec_t("listener", "srv")
                                                    .flag("peer_named", true)   // ws-private
                                                    .u32("max_peers", 8)        // ws-private
                                                    .view());
+
+// The RFC-0014 creator-endpoint spelling (S2b): the module in the PATH fixes both the
+// transport and the role, so the SPEC carries neither a `type` nor a `role` — the same
+// config keys, one door down.
+graph.write(*path_t::parse("/net/ws-server/conn"), conn_spec_t("srv")
+                                                       .port(8080)
+                                                       .max_frame(4096)
+                                                       .flag("peer_named", true)
+                                                       .view());
+
+// Removal is the other half of that one control: a bare NAME, told apart by TLV type.
+graph.write(*path_t::parse("/net/ws-server/conn"), tr::net::conn_remove("srv"));
 ```
 
 The named setters are exactly the universal keys of the next section; the generic

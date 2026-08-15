@@ -54,7 +54,7 @@ The created connection vertex is mounted and routed at **`/net/<module>/<name>`*
 `<module>` **declared by the application** through `register_module` — modules are
 declared-only (ADR-0073 §4): the library derives and auto-registers no module names, and an
 undeclared `kind` fails creation with `SCHEMA_NOT_FOUND`
-(`core/src/transport_vertex.cpp:137-142,153-176,222-248`). `/net` itself is the recommended root
+(`core/src/transport_vertex.cpp:137-142,157-350,400-426`). `/net` itself is the recommended root
 convention (a constructor default, overridable per node). The per-module creator endpoint is
 the accepted direction and is **not implemented**: an integration written against
 this implementation writes the global `:children[]` catalog
