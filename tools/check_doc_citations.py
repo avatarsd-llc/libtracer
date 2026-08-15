@@ -814,9 +814,9 @@ ANCHORS = [
     ('tools/cortexm0_footprint.py:151', 'cxx_flags = ['),
     ('tools/cortexm0_footprint.py:158', '"-DLIBTRACER_NO_ATOMIC",'),
     ('tools/cortexm0_footprint.py:172', '"--specs=nano.specs",'),
-    ('core/tests/CMakeLists.txt:1372', 'add_executable(substrate_test_no_atomic'),
-    ('core/tests/CMakeLists.txt:1385', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
-    ('core/tests/CMakeLists.txt:1386', '    LIBTRACER_NO_ATOMIC'),
+    ('core/tests/CMakeLists.txt:1497', 'add_executable(substrate_test_no_atomic'),
+    ('core/tests/CMakeLists.txt:1510', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
+    ('core/tests/CMakeLists.txt:1511', '    LIBTRACER_NO_ATOMIC'),
     # The leading indent is load-bearing: the bare token also appears in the comment
     # three lines above the executable, and an anchor that matches both is not an anchor.
 
@@ -832,11 +832,11 @@ ANCHORS = [
     # `--repin` does NOT move these (see @ref repin_document): the ANCHORS table is
     # rewritten by source suffix only, so a doc citation that moved without its table
     # entry would leave the two out of step. The gate reds on both and names the page.
-    ('.github/workflows/core-ci.yml:133', 'matrix:', '  tsan:'),
+    ('.github/workflows/core-ci.yml:153', 'matrix:', '  tsan:'),
     # The flag the prose QUOTES verbatim ("-fsanitize=thread -g -O1"). The range head at
-    # 133 is `matrix:`, which the asan job carries too — hence the scope above; this one
+    # 153 is `matrix:`, which the asan job carries too — hence the scope above; this one
     # needs none and is the stronger guard of the two.
-    ('.github/workflows/core-ci.yml:142', '-DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"'),
+    ('.github/workflows/core-ci.yml:162', '-DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"'),
     ('.github/workflows/footprint-cortexm0.yml:13', '`--mode warn` governs the BUDGET VERDICT only'),
     ('bench/CMakeLists.txt:30', 'bench_libtracer_net (two-process ROUTER-flood bench) was retired'),
     ('bindings/typescript/packages/client/test/mesh-testbed.test.mjs:24',

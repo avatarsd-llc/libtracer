@@ -199,6 +199,20 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Fixed
 
+- **The MINIMAL module set builds its tests — `core/tests` is gated on the same module
+  options the library gates its sources on**
+  ([#1293](https://github.com/avatarsd-llc/libtracer/issues/1293);
+  [ADR-0047](../docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md)). No API change: a build-system
+  fix. `core/CMakeLists.txt` compiles the net/routing plane and each transport only when its
+  option is ON, while every target in `core/tests/CMakeLists.txt` was unconditional — so
+  `-DLIBTRACER_NET_PLANE=OFF` with all four transports OFF configured, compiled the library,
+  and then failed to LINK with hundreds of undefined references across 55 test and helper
+  targets. Each of those targets now carries the option(s) that build the symbols it names
+  (target-level guards, not in-source `#ifdef`s), and a new `build-test-minimal-set` leg in
+  `core-ci.yml` configures that set with `BUILD_TESTING=ON` and runs its reduced ctest suite,
+  so the configuration an MCU consumer selects is covered rather than assumed. The default
+  all-ON build registers exactly the same tests as before.
+
 - **The per-link subscriber index's insert is IDEMPOTENT, as its contract has always said —
   so a peer that renews a subscription stops paying arena RAM and a sort for it**
   ([#1266](https://github.com/avatarsd-llc/libtracer/issues/1266), follow-up to
