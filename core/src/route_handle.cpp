@@ -145,6 +145,22 @@ resolved_binding_t route_handle_t::resolved(std::string_view in_link, std::uint1
     return out;
 }
 
+std::size_t route_handle_t::copy_local_route(std::string_view in_link, std::uint16_t label,
+                                             std::span<std::byte> out) const {
+    const std::shared_ptr<link_tables_t> t = find_tables(in_link);
+    if (!t) return 0;
+    const std::lock_guard lock(t->m);
+    for (const ingress_entry_t& e : t->ingress) {
+        if (e.label != label) continue;
+        const std::size_t n = e.binding.local_route.size();
+        // Report the size even when it does not fit, so the caller can tell "too long for my
+        // buffer" (fall back to the owning form) from "no such binding" (nothing to report).
+        if (n != 0 && n <= out.size()) std::copy_n(e.binding.local_route.begin(), n, out.begin());
+        return n;
+    }
+    return 0;
+}
+
 void route_handle_t::cache_resolution(std::string_view in_link, std::uint16_t label,
                                       const resolved_binding_t& r) {
     const std::shared_ptr<link_tables_t> t = find_tables(in_link);

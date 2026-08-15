@@ -1965,6 +1965,62 @@ void fwd_router_t::on_advertise(std::string_view inbound_name, std::uint16_t lab
     (void)handles_.bind_ingress(inbound_name, label, std::move(term));
 }
 
+namespace {
+
+/**
+ * @brief Inline capacity for a warm delivery's observed local route, in bytes.
+ *
+ * Not the protocol maximum: a `dst` may carry `graph::kMaxSegments` segments of
+ * `graph::kMaxSegmentBytes` each (RFC-0023), which is ~17 KB and cannot sit in a receive
+ * thread's frame on a bounded node. This is the same two-segment working size the mount
+ * descent's scratch already uses, sized for the routes a delivery flow actually terminates
+ * at; anything wider takes the owning fallback below.
+ */
+inline constexpr std::size_t kCompactRouteInline = graph::kMaxSegmentBytes * 2;
+
+/**
+ * @brief Hand an installed COMPACT-delivery observer the bound local route + payload.
+ *
+ * The warm arm reaches this having already resolved (@ref route_handle_t::resolved) — it
+ * needs no route to WRITE, only to REPORT. Serving that report through
+ * @ref route_handle_t::lookup_ingress re-paid the owning copy (a `std::string` plus a
+ * `std::vector`, both allocating) on every observed frame, which is precisely the per-frame
+ * cost `resolved` was introduced to remove (ADR-0062). The route is copied into this frame
+ * instead, so the steady-state observed delivery allocates NOTHING — and cannot be turned
+ * into an allocation-failure drop by an observer that merely watches.
+ *
+ * Outlined (`noinline`) deliberately: the buffer must cost stack only when an observer is
+ * actually installed, not on every COMPACT.
+ *
+ * @param handles      The label store to read the binding out of.
+ * @param fn           The installed observer; never null (the caller tests the slot).
+ * @param ctx          The observer's opaque context.
+ * @param inbound_name This node's NAME for the link the COMPACT arrived on.
+ * @param label        The inbound label whose terminus binding was just delivered to.
+ * @param payload      The delivered payload TLV bytes, borrowed for the call.
+ */
+[[gnu::noinline]] void observe_compact_delivery(const route_handle_t& handles,
+                                                fwd_router_t::compact_delivery_fn_t fn, void* ctx,
+                                                std::string_view inbound_name, std::uint16_t label,
+                                                std::span<const std::byte> payload) {
+    std::array<std::byte, kCompactRouteInline> route{};
+    const std::size_t n = handles.copy_local_route(inbound_name, label, route);
+    // 0 ⇒ the binding went away between the write and this observation. The delivery still
+    // happened; there is simply no route left to name it by, so the observer is not called —
+    // the same silence an uninstalled sink gives, never a drop and never an error.
+    if (n == 0) return;
+    if (n <= route.size()) {
+        fn(ctx, std::span<const std::byte>(route.data(), n), payload);
+        return;
+    }
+    // Wider than the inline buffer. Rare enough to be worth an allocation rather than a
+    // frame sized for the protocol maximum, and the observation stays complete either way.
+    if (const std::optional<handle_binding_t> b = handles.lookup_ingress(inbound_name, label))
+        fn(ctx, b->local_route, payload);
+}
+
+}  // namespace
+
 void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label,
                               std::span<const std::byte> payload_bytes) {
     // `payload_bytes` is the already-contiguous wire encoding of the COMPACT payload TLV
@@ -2030,11 +2086,9 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
             }
             value.append(*payload_view);
             if (graph_.write(*rb.target, std::move(value), inbound_name).has_value()) {
-                if (const auto sink = delivery_.get(); sink.fn != nullptr) {
-                    const std::optional<handle_binding_t> b =
-                        handles_.lookup_ingress(inbound_name, label);
-                    if (b) sink.fn(sink.ctx, b->local_route, payload_bytes);
-                }
+                if (const auto sink = delivery_.get(); sink.fn != nullptr)
+                    observe_compact_delivery(handles_, sink.fn, sink.ctx, inbound_name, label,
+                                             payload_bytes);
             }
             return;
         }

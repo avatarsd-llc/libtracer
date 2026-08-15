@@ -208,8 +208,9 @@ int main() {
     const auto sink_path = path_t::parse("/sink");
     tr::graph::vertex_handle_t vC = graph_c.register_vertex(*sink_path, role_t::STORED_VALUE);
     fwd_router_t router_c(graph_c);
-    mailbox_t delivered;    // ordered payload bytes delivered to C
-    mailbox_t reply_inbox;  // subscribe / one-shot REPLY frames
+    mailbox_t delivered;        // ordered payload bytes delivered to C
+    mailbox_t delivered_route;  // the BOUND local route reported alongside each delivery
+    mailbox_t reply_inbox;      // subscribe / one-shot REPLY frames
     router_c.on_reply(
         [](void* ctx, const tr::view::rope_t& reply) {
             const tr::view::view_t mat = reply.materialize();
@@ -217,12 +218,23 @@ int main() {
             static_cast<mailbox_t*>(ctx)->push(std::vector<std::byte>(b.begin(), b.end()));
         },
         &reply_inbox);
+    // Both arguments are captured, not just the payload. The route half is the one the WARM
+    // arm serves without re-taking the owning binding, so a test that ignores it cannot tell
+    // a correct route from an empty span (#917).
+    struct delivery_obs_t {
+        mailbox_t* payloads;
+        mailbox_t* routes;
+    };
+    delivery_obs_t delivery_obs{&delivered, &delivered_route};
     router_c.on_compact_delivery(
-        [](void* ctx, std::span<const std::byte>, std::span<const std::byte> payload) {
-            static_cast<mailbox_t*>(ctx)->push(
-                std::vector<std::byte>(payload.begin(), payload.end()));
+        [](void* ctx, std::span<const std::byte> route, std::span<const std::byte> payload) {
+            auto* const obs = static_cast<delivery_obs_t*>(ctx);
+            // Route FIRST: `delivered` is what every wait_for_count below gates on, so pushing
+            // it last keeps the route mailbox guaranteed-populated by the time they return.
+            obs->routes->push(std::vector<std::byte>(route.begin(), route.end()));
+            obs->payloads->push(std::vector<std::byte>(payload.begin(), payload.end()));
         },
-        &delivered);
+        &delivery_obs);
     transport_ws_client c_to_a("127.0.0.1", srv_a.local_port());
     if (!c_to_a.ok()) {
         std::fprintf(stderr, "node C: ws client to A failed\n");
@@ -302,6 +314,16 @@ int main() {
         bool ordered = delivered.q.size() == kN;
         for (std::size_t i = 0; i < kN && ordered; ++i) ordered = (delivered.q[i] == expected[i]);
         check(ordered, "all N values arrive byte-exact and in order");
+    }
+    // The route half of the observation, on the WARM path (#917). Delivery 1 resolves cold and
+    // reports from the owning binding; deliveries 2..N are warm and report through the
+    // allocation-free copy — every one must name the SAME bound local route, `/sink`.
+    {
+        const std::lock_guard lock(delivered_route.m);
+        const std::vector<std::byte> want = b_path({"sink"});
+        bool all = delivered_route.q.size() == kN;
+        for (std::size_t i = 0; i < kN && all; ++i) all = (delivered_route.q[i] == want);
+        check(all, "every delivery — cold first, warm after — reports the bound route /sink");
     }
     // C's /sink LKV reflects the last delivered value (delivery-is-a-write).
     {
