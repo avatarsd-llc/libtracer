@@ -9,6 +9,16 @@
 # from source (cached by tag), configures the module (-DLIBTRACER_WITH_QUIC=ON),
 # and runs the FULL ctest suite (quic + webtransport included) plus ASan+UBSan
 # and TSan variants.
+#
+# RUNNER ROUTING: these legs stay on `ubuntu-24.04` — they were audited for the
+# `ci-local` self-hosted routing that core-ci.yml and doc-citations.yml now use, and
+# they do NOT qualify (phase 2). All three run `setarch -R`, i.e.
+# `personality(ADDR_NO_RANDOMIZE)`, which Docker's default seccomp profile denies with
+# EPERM — verified — so the `container: ubuntu:24.04` route that makes the other
+# migrations hermetic cannot run them at all. Routing them direct-on-host instead would
+# put an msquic source build (and its cached `~/msquic-install` prefix) on a machine
+# whose toolchain is not asserted, for the workflow with the heaviest dependency in the
+# repo. Revisit only after a runner-side `--security-opt seccomp=unconfined` decision.
 name: quic
 
 on:

@@ -3,6 +3,38 @@
 #
 # Core C++23 reference implementation CI: build + ctest, clang-format, and the
 # strict Doxygen documentation gate. Keeps `main` green on every change to core/.
+#
+# RUNNER ROUTING (self-hosted `ci-local`). Most x86 legs below pick the maintainer's
+# self-hosted runners when — and ONLY when — the run is trusted; every other run falls
+# back to `ubuntu-24.04`. The guard repeated in each `runs-on:` reads:
+#
+#   this repository (not a fork of it) AND (the event is not a pull_request OR the PR's
+#   head branch lives in this same repository, i.e. it is not a fork PR)
+#
+# SECURITY (public repo + self-hosted runner): fork code must never execute on the
+# self-hosted machine. A fork PR runs attacker-authored steps, and these runners are
+# non-ephemeral hardware on the maintainer's network — a single fork PR routed there
+# owns the box and everything it can reach. That expression is the ONLY thing standing
+# between a fork PR and that machine, so it is repeated verbatim per job (Actions does
+# not expand YAML anchors, and a shared `env:` cannot be read from `runs-on:`) rather
+# than factored out. Because the fallback is automatic, no required check ever waits on
+# hardware a fork cannot use. NEVER route here: a `pull_request_target` job, anything
+# touching secrets (release.yml, publish-npm.yml, docs.yml's deploy), the arm64 leg
+# below, or perf.yml (its interleaved gates are designed for hosted runners).
+#
+# CONTAINER: the self-hosted runners are bare machines, NOT the ubuntu-24.04 image —
+# there is no preinstalled tool set and the runner user has no passwordless sudo. Every
+# migrated job therefore runs inside `container: ubuntu:24.04` and apt-installs what it
+# needs as root (no `sudo` anywhere). The container applies on BOTH routes, so the
+# hosted fallback compiles in exactly the same environment — hermetic parity, not a
+# second configuration. Each migrated leg was run end-to-end in that container before
+# migrating (full ctest: 134/134).
+#
+# NOT MIGRATED, and why (phase 2): the sanitizer and TSan legs run `setarch -R`, and
+# Docker's default seccomp profile denies `personality(ADDR_NO_RANDOMIZE)` — verified
+# EPERM — so the container route cannot run them, while the direct-on-host route would
+# assume a toolchain these runners are not yet asserted to carry. The arm64 leg is a
+# different architecture and stays hosted permanently.
 name: core-ci
 
 on:
@@ -33,7 +65,8 @@ on:
 
 jobs:
   build-test:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
+    container: ubuntu:24.04
     # Build + ctest under BOTH ACL policy configs: the default ALLOW-only MCU
     # subset (acl_full=OFF) and the full security_acl host policy with DENY
     # (acl_full=ON). LIBTRACER_ACL_FULL swaps acl_policy_t at compile time, so
@@ -54,6 +87,14 @@ jobs:
             lkv_slot: hazard_slot_t
     name: build-test (acl_full=${{ matrix.acl_full }}, slot=${{ matrix.lkv_slot }})
     steps:
+      # Runs as root INSIDE the container — never `sudo`, which the self-hosted runner
+      # user does not have. `git` + `ca-certificates` come first because checkout falls
+      # back to a REST tarball without them.
+      - name: Toolchain (container has no preinstalled tool set)
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            build-essential cmake git ca-certificates
       - uses: actions/checkout@v4
       - name: Configure + build (C++23) + ctest
         run: |
@@ -69,8 +110,14 @@ jobs:
   # unconditional while the library sources were gated. This leg is the evidence: same
   # sources, the minimal option set, BUILD_TESTING=ON, and the reduced ctest suite run.
   build-test-minimal-set:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
+    container: ubuntu:24.04
     steps:
+      - name: Toolchain (container has no preinstalled tool set)
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            build-essential cmake git ca-certificates
       - uses: actions/checkout@v4
       - name: Configure + build (minimal module set) + ctest
         run: |
@@ -91,6 +138,9 @@ jobs:
   # reason those arguments matter at all. This leg is the real evidence: same sources, same
   # ctest, a memory model that can actually exhibit the anomaly. Ablate it by relaxing any of
   # those ordered loads — the graph race guards can then fail HERE and nowhere else.
+  # NOT routed to `ci-local`: the self-hosted runners are x86-64, and this leg exists
+  # precisely to run somewhere x86-64's TSO model does not hide the defect. Hosted,
+  # permanently.
   build-test-arm64:
     runs-on: ubuntu-24.04-arm
     steps:
@@ -107,14 +157,21 @@ jobs:
   # FNV-1a 64-bit-constant overflow on 32-bit size_t GCC 15 newly -Werror's).
   # GCC 15 is not in ubuntu-24.04's default repos; the toolchain test PPA carries it.
   build-test-gcc15:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
+    container: ubuntu:24.04
     steps:
-      - uses: actions/checkout@v4
-      - name: Install g++-15
+      # Same PPA as before, minus `sudo` (root in the container) plus
+      # software-properties-common, which the hosted image preinstalls and a bare
+      # ubuntu:24.04 does not. Same noble base, so apt resolves g++-15 identically.
+      - name: Install g++-15 (toolchain PPA)
         run: |
-          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq g++-15 gcc-15
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            build-essential cmake git ca-certificates software-properties-common
+          add-apt-repository -y ppa:ubuntu-toolchain-r/test
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq g++-15 gcc-15
+      - uses: actions/checkout@v4
       - name: Configure + build (C++23, GCC 15) + ctest
         env:
           CC: gcc-15
@@ -130,6 +187,11 @@ jobs:
   # hazard_slot_t is hand-rolled lock-free reclamation: ASan/LSan is what proves a
   # displaced node is neither freed under a reader nor leaked, and TSan is what proves
   # the announce/re-read protocol actually orders. A green single-threaded run does not.
+  # NOT routed to `ci-local` (phase 2): the `setarch -R` below sets
+  # `personality(ADDR_NO_RANDOMIZE)`, which Docker's default seccomp profile denies
+  # (EPERM), so the container route cannot run this leg — and without a container the
+  # job would assume a host toolchain these runners are not asserted to carry. Routing
+  # it needs a runner-side `--security-opt seccomp=unconfined` decision first.
   sanitizers:
     runs-on: ubuntu-24.04
     strategy:
@@ -147,6 +209,7 @@ jobs:
           # ASLR can make ASan/TSan abort in this runner; pin it off.
           setarch "$(uname -m)" -R ctest --test-dir core/build-asan --output-on-failure
 
+  # NOT routed to `ci-local` (phase 2) — same `setarch -R` seccomp bar as `sanitizers`.
   tsan:
     runs-on: ubuntu-24.04
     strategy:
@@ -170,8 +233,14 @@ jobs:
   # Catches broken install rules, a malformed package config, or a missing exported
   # target before they reach a consumer.
   install-consume:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
+    container: ubuntu:24.04
     steps:
+      - name: Toolchain (container has no preinstalled tool set)
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            build-essential cmake git ca-certificates
       - uses: actions/checkout@v4
       - name: Build + install core to a staging prefix
         run: |
@@ -194,8 +263,14 @@ jobs:
   # is a COMPILE gate, so it costs one build and cannot be confounded by a runner's
   # load. Ablate it by reverting any bench to a deleted API — the job goes red.
   bench-compile:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
+    container: ubuntu:24.04
     steps:
+      - name: Toolchain (container has no preinstalled tool set)
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            build-essential cmake git ca-certificates
       - uses: actions/checkout@v4
       - name: Configure + build every bench target (compile only, nothing is run)
         run: |
@@ -216,28 +291,51 @@ jobs:
   # exactly the changes that can invalidate it. Ablate it by deleting a `paths:` entry
   # — the job goes red naming that entry.
   ci-paths:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
+    container: ubuntu:24.04
     steps:
+      # `gen_ci_paths.py --check` runs a REAL configure of the core project and reads
+      # the CMake file-api back, so this leg needs the compiler too — not just python.
+      - name: Toolchain (container has no preinstalled tool set)
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            build-essential cmake git python3 ca-certificates
       - uses: actions/checkout@v4
       - name: core-ci's paths trigger covers everything core-ci builds
         run: python3 tools/gen_ci_paths.py --check
 
   format:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
+    container: ubuntu:24.04
     steps:
-      - uses: actions/checkout@v4
-      - name: clang-format (dry-run, error on diff)
+      - name: Toolchain (container has no preinstalled tool set)
         run: |
-          sudo apt-get update && sudo apt-get install -y clang-format
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git ca-certificates
+      - uses: actions/checkout@v4
+      # `clang-format` comes from the same noble archive the hosted image installed it
+      # from, so the enforced style is the same version's, not a second dialect.
+      - name: clang-format (dry-run, error on diff)
+        # The step needs bash for `mapfile` and process substitution; inside a
+        # `container:` job the runner may resolve the default shell to plain sh.
+        shell: bash
+        run: |
+          apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq clang-format
           mapfile -t files < <(find core/include core/src core/tests core/examples \
             tests/packaging -name '*.hpp' -o -name '*.cpp')
           clang-format --dry-run --Werror "${files[@]}"
 
   doxygen-gate:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
+    container: ubuntu:24.04
     steps:
+      - name: Toolchain (container has no preinstalled tool set)
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git ca-certificates
       - uses: actions/checkout@v4
       - name: Doxygen strict gate (undocumented public symbol = failure)
         run: |
-          sudo apt-get update && sudo apt-get install -y doxygen
+          apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq doxygen
           doxygen core/Doxyfile

@@ -851,11 +851,11 @@ ANCHORS = [
     # `--repin` does NOT move these (see @ref repin_document): the ANCHORS table is
     # rewritten by source suffix only, so a doc citation that moved without its table
     # entry would leave the two out of step. The gate reds on both and names the page.
-    ('.github/workflows/core-ci.yml:153', 'matrix:', '  tsan:'),
+    ('.github/workflows/core-ci.yml:216', 'matrix:', '  tsan:'),
     # The flag the prose QUOTES verbatim ("-fsanitize=thread -g -O1"). The range head at
     # 153 is `matrix:`, which the asan job carries too — hence the scope above; this one
     # needs none and is the stronger guard of the two.
-    ('.github/workflows/core-ci.yml:162', '-DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"'),
+    ('.github/workflows/core-ci.yml:225', '-DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"'),
     ('.github/workflows/footprint-cortexm0.yml:13', '`--mode warn` governs the BUDGET VERDICT only'),
     ('bench/CMakeLists.txt:30', 'bench_libtracer_net (two-process ROUTER-flood bench) was retired'),
     ('bindings/typescript/packages/client/test/mesh-testbed.test.mjs:24',
