@@ -279,6 +279,18 @@ export function routeKey(route: string[]): string {
   return route.length === 0 ? '/' : '/' + route.join('/');
 }
 
+/**
+ * @brief The RESERVED, protocol-owned leaf NAME of a module's creator endpoint —
+ *        `/net/<module>/conn` (RFC-0014 §1/§3).
+ *
+ * A module's `:children[]` lists this alongside its member connections, because the
+ * endpoint IS a vertex under the module. It is not a link: it is the write-driven control
+ * a creator sends `SPEC`/`NAME` to, with no peer behind it. Hiding it from the listing is
+ * RFC-0014 S4; a walker skips it either way, since a node older than S4 will keep listing
+ * it and a topology projection must not grow a node for a control surface.
+ */
+export const CONN_ENDPOINT_NAME = 'conn';
+
 /** @brief The NAME strings of a `:children[]` POINT listing. */
 function listingNames(tlv: Tlv): string[] {
   const names: string[] = [];
@@ -466,7 +478,15 @@ export async function walkTopology(
           const names = listingNames(
             await client.readField([...route, netRoot, module], ':children[]'),
           );
-          for (const name of names) links.push({ module, name });
+          // `conn` is the module's RESERVED creator endpoint, not a connection (RFC-0014
+          // §3): it is a control surface with no peer behind it, so descending into it
+          // would mint a phantom node the walk could never identify. RFC-0014 S4 will hide
+          // it from this listing at the source; until then the reserved name is skipped
+          // HERE, which is also what a walker must do against any node that predates S4.
+          for (const name of names) {
+            if (name === CONN_ENDPOINT_NAME) continue;
+            links.push({ module, name });
+          }
         } catch (err) {
           noteGap(
             'module',

@@ -30,7 +30,7 @@ export type {
 export { encodeValue, encodePath, encodeSubscriber, encodeConnSpec, firstChild, DELIVERY_DURABILITY_REQUEST } from './tlv.js';
 export type { ValueOptions, SubscriberOptions, ConnSpecOptions, ConnRole } from './tlv.js';
 
-export { walkTopology, routeKey } from './topology.js';
+export { walkTopology, routeKey, CONN_ENDPOINT_NAME } from './topology.js';
 export type {
   TopologyGraph,
   TopologyNode,

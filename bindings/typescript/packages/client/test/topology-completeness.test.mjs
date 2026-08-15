@@ -94,6 +94,32 @@ test('#676 baseline: a walk that reads everything is complete, with no gaps', as
   assert.equal(g.nodes.length, 3);
 });
 
+test('RFC-0014 S2b: the reserved `conn` endpoint is not walked as a connection', async () => {
+  // Every module lists its creator endpoint alongside its members until S4 hides it. It is
+  // a control surface with no peer behind it, so descending into it would mint a phantom
+  // node — and, because nothing answers below it, the walk would report a bogus gap too.
+  const { client, calls } = stubClient({
+    ...HEALTHY,
+    '/net/ws-client :children[]': listing(['b', 'conn']),
+    '/net/ws-client/b/net/ws-server :children[]': listing(['a', 'conn']),
+  });
+  const g = await walkTopology(client, { identify: identifyByRoute, maxDepth: 2 });
+
+  assert.equal(g.complete, true, 'skipping a control surface loses nothing');
+  assert.deepEqual(g.gaps, []);
+  assert.equal(g.nodes.length, 3, 'the endpoint did not become a node');
+  assert.equal(
+    calls.some((c) => c.startsWith('/net/ws-client/conn')),
+    false,
+    'the walk never even read below the endpoint',
+  );
+  assert.equal(
+    g.edges.some((e) => e.name === 'conn'),
+    false,
+    'and no edge names it',
+  );
+});
+
 test('#676 site 1: a failed /net read makes a leaf and clears complete', async () => {
   // b refuses its /net read. Under the old code b silently became a leaf, its subtree
   // vanished, and the result still said authoritative:true.
