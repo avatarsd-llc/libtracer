@@ -10,7 +10,7 @@
  * plain {function pointer, context} pairs (ADR-0047 hot-path shape), so the
  * per-frame snapshot is a trivial copy under an uncontended lock and the dirty
  * flag ceases to exist. The `Tag...` pack prepends transport-defined delivery
- * tags (a bus link's sending-peer name) to both sinks.
+ * tags (a bus link's sending-peer handle) to both sinks.
  */
 #pragma once
 
@@ -41,7 +41,7 @@ namespace tr::net {
  * responsibility and must cover every possible delivery.
  *
  * @tparam Tag Extra leading sink parameters a transport tags deliveries with
- *             (e.g. `std::string_view` — a bus link's sending-peer name).
+ *             (e.g. `peer_handle_t` — a bus link's sending-peer handle, #1294).
  */
 template <typename... Tag>
 class receiver_slot_t {

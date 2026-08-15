@@ -306,7 +306,7 @@ without the project-side symbol, the line is inert.
   fan-out payload did not fit. A session drop turns one slow subscriber into a
   reconnect storm.
 - **Egress is gather, not copy.** The rope-to-wire path lowers to an iovec `sendmsg`
-  (`core/src/posix_endpoint.cpp:293,180`; the TCP assembly is at
+  (`core/src/posix_endpoint.cpp:294,181`; the TCP assembly is at
   `core/src/transport_tcp.cpp:59-81`), and lwIP provides `sendmsg` unmodified. Do not
   flatten payloads before send; the only legitimate flatten is a substrate boundary
   DMA cannot span.

@@ -150,6 +150,12 @@ struct bus_link_impl_t : transport_t, tr::net::bus_link_t {
     void enumerate_peers(const tr::net::bus_link_t::peer_visitor_t& visit) const override {
         for (const auto& [n, l] : peers) visit(n);
     }
+    /** @brief The handle's index into @ref peers is its name (#1294). */
+    [[nodiscard]] std::string_view peer_name(tr::net::peer_handle_t peer,
+                                             std::span<char>) const override {
+        if (!peer.valid() || peer.index >= peers.size()) return {};
+        return peers[peer.index].first;
+    }
 };
 
 /** @brief A link that records what the router sends back, and can push ropes upward. */

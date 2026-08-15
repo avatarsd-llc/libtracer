@@ -87,10 +87,27 @@ struct bus_link_impl_t : tr::net::transport_t, tr::net::bus_link_t {
     tr::net::bus_link_t* bus() override { return this; }
     tr::net::transport_t* peer_link(std::string_view) override { return nullptr; }
     void enumerate_peers(const tr::net::bus_link_t::peer_visitor_t&) const override {}
-    /** @brief Drive an inbound frame up the peer-named slot, as a real bus adapter does. */
-    void deliver(std::string_view peer, std::span<const std::byte> frame) {
-        peer_rx_.deliver_borrowed(peer, frame);
+    /** @brief The handle's index into @ref names is the peer's name (#1294). */
+    [[nodiscard]] std::string_view peer_name(tr::net::peer_handle_t peer,
+                                             std::span<char>) const override {
+        if (!peer.valid() || peer.index >= names.size()) return {};
+        return names[peer.index];
     }
+    /**
+     * @brief Drive an inbound frame up the peer-named slot, as a real bus adapter does —
+     *        tagged with the peer's HANDLE (#1294), minted here on first sight of a name.
+     */
+    void deliver(std::string_view peer, std::span<const std::byte> frame) {
+        peer_rx_.deliver_borrowed(mint(peer), frame);
+    }
+    /** @brief The handle for @p peer, appending it to the census if it is new. */
+    tr::net::peer_handle_t mint(std::string_view peer) {
+        for (std::size_t i = 0; i < names.size(); ++i)
+            if (names[i] == peer) return {static_cast<std::uint32_t>(i), 1};
+        names.emplace_back(peer);
+        return {static_cast<std::uint32_t>(names.size() - 1), 1};
+    }
+    std::vector<std::string> names; /**< @brief index → peer name, the handle's meaning. */
 };
 
 /**

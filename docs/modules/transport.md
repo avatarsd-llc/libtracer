@@ -50,7 +50,7 @@ A transport that can hand up *owning* frames implements the rope-receiver seam
 view delivery](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md),
 generalized to ropes by [ADR-0053 — lazy rope-backed decode, view partial-path
 routing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0053-lazy-rope-backed-decode-view-partial-path-routing.md)):
-it overrides `delivers_ropes()` (`core/include/libtracer/transport.hpp:572`) and
+it overrides `delivers_ropes()` (`core/include/libtracer/transport.hpp:678`) and
 delivers each inbound frame as a `rope_t` of refcounted links over segments drawn
 from a host-injected `mem_backend_t`. A contiguous frame is the single-link case; a
 scattered one — a CAN reassembly group, a fragmented WebSocket message — crosses the
@@ -61,13 +61,13 @@ the callback needs this tier.
 There is deliberately no adapter that wraps a borrowed span into a rope; such a rope's
 refcounts would lie about lifetime. `fwd_router_t::add_child` (`core/src/fwd_router.cpp:741`)
 therefore branches on the link's declared capability and installs exactly one sink —
-the rope form for an owning link, the span form otherwise (`fwd_router.cpp:875,785`, and
-`fwd_router.cpp:829,836` for the peer-named bus equivalent).
+the rope form for an owning link, the span form otherwise (`fwd_router.cpp:887,785`, and
+`fwd_router.cpp:837,844` for the peer-named bus equivalent).
 
 Every socket transport in the tree declares the owning tier: UDP
 (`transport_udp.hpp:111`), TCP client and server (`transport_tcp.hpp:218,403`),
 WebSocket server and client (`transport_ws.hpp:233,429`), CAN
-(`transport_can.hpp:583`), QUIC (`transport_quic.hpp:153`) and WebTransport
+(`transport_can.hpp:606`), QUIC (`transport_quic.hpp:153`) and WebTransport
 (`transport_webtransport.hpp:182`). The borrowed-span path is the base-class default
 and the tier an out-of-tree transport gets for free.
 
@@ -76,13 +76,19 @@ and the tier an out-of-tree transport gets for free.
 A point-to-point link carries one peer, so the child NAME the router registers it
 under fully addresses the far side. A **bus** link reaches many peers over one wire
 and exposes them through the optional `bus_link_t` facet
-(`core/include/libtracer/transport.hpp:66`, [ADR-0044 — stateless transport peer
+(`core/include/libtracer/transport.hpp:141`, [ADR-0044 — stateless transport peer
 enumeration](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0044-stateless-transport-peer-enumeration-separate-paths-client-side-identity.md)):
 `enumerate_peers` synthesizes the currently-audible names from the wire's own live
 traffic, `peer_link` resolves one name to a directed sending endpoint, and
 `set_peer_receiver` / `set_peer_rope_receiver` replace the flat sink with one that
-tags each inbound frame with the sending peer's name. No vertex is created for a
-peer and no peer state is stored.
+tags each inbound frame with the sending peer's opaque **handle** — `peer_handle_t`,
+an 8-byte `(index, generation)` POD minted once when the peer becomes audible and
+valid until it departs (#1294) — from which `bus_link_t::peer_name` resolves the
+NAME the routing plane routes by. Names stay the ADDRESSING surface
+(`enumerate_peers`, `peer_link`, `close_peer`), because a name is what a routable
+`dst` segment carries; the per-frame identity is the handle, so a consumer that
+wants one no longer re-derives it from a string on every frame. No vertex is created
+for a peer and no peer state is stored.
 
 `transport_t::bus()` returns the facet or `nullptr`. CAN always returns it
 (`transport_can.hpp:564`); the TCP and WebSocket **servers** return it when
@@ -90,7 +96,7 @@ configured peer-named — one implementation, on the slot-server base both of th
 inherit (`posix_endpoint.hpp:598`); every other kind keeps the `nullptr` default.
 
 Whether a link's peer-named tier exists is one query, `bus_link_t::peer_named()`
-(`transport.hpp:157`): the constructed flag for the two stream servers
+(`transport.hpp:258`): the constructed flag for the two stream servers
 (`posix_endpoint.hpp:610`), `true` by construction for a kind that is a bus outright.
 `bus_link_t` **refuses** each of its peer-named wiring calls — `set_peer_receiver`,
 `set_peer_rope_receiver`, `set_peer_down_notifier` — while it is false. That refusal matters
@@ -110,7 +116,7 @@ Departure follows the same split. A **peer-named** server evicts exactly the dep
 (`notify_peer_down(name)`); a **flat** server has one routing identity for every peer it
 carries — the registered child NAME — so its only seam is the whole link
 (`transport_t::notify_down`), and it therefore waits until the **last** open session departs
-(`posix_endpoint.cpp:683`). Firing it on a mid-life close would evict the surviving peers'
+(`posix_endpoint.cpp:711`). Firing it on a mid-life close would evict the surviving peers'
 edges along with the departed one's.
 
 ## QUIC and WebTransport
@@ -287,7 +293,7 @@ flowchart LR
   and a callable destroyed early dangles exactly like a stale `ctx`.
 - **Overriding `send(iov)` is not optional for a scatter-gather wire.** The base
   implementation gathers into a temporary buffer and, when that allocation fails,
-  **drops the frame** rather than aborting (`transport.hpp:416`). A transport with a
+  **drops the frame** rather than aborting (`transport.hpp:522`). A transport with a
   native `sendmsg`/`writev` that does not override it silently pays a copy per
   forward hop and inherits a drop path it did not intend.
 - **The egress gather draws from the link's own injected store.** That temporary — and
@@ -314,7 +320,7 @@ they are the reason a new binding is small.
   owning-rope-versus-borrowed-span tier select. Its callbacks are plain
   `{function pointer, context}` pairs, so taking a snapshot on the receive path
   is a trivial copy under an uncontended lock rather than a heap allocation. Its
-  `Tag...` pack is how a bus link prepends the sending peer's name to both sinks.
+  `Tag...` pack is how a bus link prepends the sending peer's HANDLE to both sinks.
 - **`posix_endpoint_t`** is the receive-thread scaffold every POSIX socket
   transport shares: the stop flag, the thread lifecycle, and the bounded
   poll-and-recheck idioms that let a blocking socket loop notice a clean
@@ -340,6 +346,11 @@ they are the reason a new binding is small.
 :project: libtracer
 :members:
 :protected-members:
+```
+
+```{doxygenstruct} tr::net::peer_handle_t
+:project: libtracer
+:members:
 ```
 
 ```{doxygenclass} tr::net::bus_link_t

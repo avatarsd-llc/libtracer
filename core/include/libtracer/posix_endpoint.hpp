@@ -611,6 +611,17 @@ class slot_server_t : public transport_t, public bus_link_t, protected stream_en
     void enumerate_peers(const peer_visitor_t& visit) const override;
 
     /**
+     * @brief Resolve an inbound handle back to its peer name, `p<slot>` (#1294).
+     *
+     * A pure function of the handle's index, exactly as the accept-side stamp is
+     * (ADR-0073 §2) — formatted into @p scratch with no lock and no slot lookup, so the
+     * router pays nothing for asking on the delivery callback that a name string used to
+     * arrive on.
+     */
+    [[nodiscard]] std::string_view peer_name(peer_handle_t peer,
+                                             std::span<char> scratch) const override;
+
+    /**
      * @brief Resolve an open peer's name to its directed sending endpoint.
      *
      * Owned by the peer's slot and pointer-valid for this server's lifetime (slots are
@@ -660,6 +671,20 @@ class slot_server_t : public transport_t, public bus_link_t, protected stream_en
          *         device — a reconnecting peer may land in a different slot; device-stable
          *         identity is a named link (RFC-0014). */
         std::string name;
+        /** @brief This session's identity HANDLE, `(slot index, generation)` — what the
+         *         peer-receiver seam tags every inbound frame with (#1294).
+         *
+         * Minted at accept and RETIRED at teardown (`generation = 0`, i.e. not
+         * @ref peer_handle_t::valid), so a handle minted against the session that used to
+         * hold this slot never matches its successor — the same validate-on-use stamp the
+         * ESP link's session ref carries. Written on the poll thread under @ref peers_m_
+         * beside @ref name, and read on that thread by the delivery path.
+         */
+        peer_handle_t handle;
+        /** @brief This slot's monotonic tenancy counter — the source of the generation
+         *         @ref handle is minted at. Bumped once per accept (never reused, never
+         *         zero), so the counter survives the retire that clears @ref handle. */
+        std::uint32_t gen_seq = 0;
         /** @brief The remote `<ip>:<port>` — DIAGNOSTIC only, never a name and never in
          *         the graph (#584 owns any future per-peer facet). Refreshed per accept. */
         std::string endpoint_str;

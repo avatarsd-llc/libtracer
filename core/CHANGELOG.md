@@ -138,6 +138,37 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   now expects the link it is given to be open but NOT started. `write_raw` is unaffected:
   egress is live as soon as the link is open.
 
+- **BREAKING: the `net::bus_link_t` peer-receiver seam carries an opaque per-peer HANDLE, not a
+  name string** ([#1294](https://github.com/avatarsd-llc/libtracer/issues/1294)). The seam
+  re-supplied a `std::string_view` peer NAME on every inbound frame, so every consumer that
+  wanted a per-peer identity had to re-derive one from that string per frame — a hash and a map
+  find on the remote-subscribe path, and nothing at all to hang a per-peer auth subject off. It
+  now carries `net::peer_handle_t`, an 8-byte `(index, generation)` POD minted once when a peer
+  becomes audible and valid until it departs — the same node-local-index-plus-validate-on-use
+  stamp the in-tree edge binding and the ESP link's session ref already use. Concretely:
+
+  - `bus_link_t::peer_receiver_fn_t` / `peer_rope_receiver_fn_t` (and the callable-taking
+    `set_peer_receiver` / `set_peer_rope_receiver` sugar) take `peer_handle_t` where they took
+    `std::string_view`;
+  - `peer_up_fn_t` / `peer_down_fn_t` gain the handle as a leading parameter, beside the name
+    they already carried — arrival is where a handle is minted and departure is where it is
+    retired, so that is where a consumer binds and drops whatever hangs off it;
+  - a new pure virtual `bus_link_t::peer_name(peer_handle_t, std::span<char> scratch)` is the
+    ONE bridge back to the routing plane's NAME. Every kind answers it as a pure function of the
+    handle's index (`p<slot>`, `n<node>`), so it takes no lock and is safe to call per frame from
+    the delivery callback — which is what `fwd_router_t` does, once, where the name used to
+    arrive for free. **Every out-of-tree `bus_link_t` implementation must supply it.**
+
+  The ADDRESSING surface is unchanged and still speaks names: `enumerate_peers`, `peer_link` and
+  `close_peer` take and produce peer names, because a name is what a routable `dst` segment
+  carries. The handle is deliberately NOT a session reference (a session ref is one *supplier* of
+  a handle — an announce-census CAN peer has no session and still needs a stable link key) and
+  deliberately does NOT carry an auth subject (that is resolved from the handle at ACL-check
+  time). It is never absent: a link with no meaningful per-peer identity mints the constant
+  `net::kSolePeerHandle` at link-up, so no consumer needs a "handle absent" branch. This is a
+  clean break with no compatibility overload — the seam exists at exactly one place and this
+  changes it exactly once, rather than three times as #1266, #375 Part 2 and #1278 land.
+
 - **A wire `SUBSCRIBER`'s `PATH` target is now RESOLVED when it routes through a mount — a
   third party can wire a flow between two OTHER nodes and depart**
   ([#491](https://github.com/avatarsd-llc/libtracer/issues/491),

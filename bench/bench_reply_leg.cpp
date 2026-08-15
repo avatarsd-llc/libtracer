@@ -126,6 +126,11 @@ struct peer_bus_t : tr::net::transport_t, tr::net::bus_link_t {
         ++lookups;
         return name == "p0" ? &peer : nullptr;
     }
+    /** @brief The one peer this bus exposes, for any valid handle (#1294). */
+    [[nodiscard]] std::string_view peer_name(tr::net::peer_handle_t peer_h,
+                                             std::span<char>) const override {
+        return peer_h.valid() ? "p0" : std::string_view{};
+    }
 };
 
 /** @brief A PATH TLV over @p segs — the subscriber's stored return route. */

@@ -579,6 +579,29 @@ class transport_can : public transport_t, public bus_link_t {
      */
     [[nodiscard]] transport_t* peer_link(std::string_view peer) override;
 
+    /**
+     * @brief Resolve an inbound handle back to its `n<node-id>` peer name (#1294).
+     *
+     * The handle's index IS the bus node id and the name is a pure function of it, so this
+     * is `format_peer_name` and nothing else — no table lookup, no lock, no liveness check
+     * (an announce-census peer has no session whose liveness could be asked about, which is
+     * exactly why the generation is the constant `kAnnouncedPeerGeneration`).
+     */
+    [[nodiscard]] std::string_view peer_name(peer_handle_t peer,
+                                             std::span<char> scratch) const override;
+
+    /**
+     * @brief The generation every CAN peer handle carries (#1294).
+     *
+     * An announce-census bus learns of a peer from another node's traffic and has no
+     * accept/depart closure at all (RFC-0009 §D.5), so there is no tenancy for a generation
+     * to count: the node id alone IS the identity, and it is immune to the slot-reuse
+     * confusion a positional kind's generation exists to catch. It stays a non-zero
+     * constant so the handle is always @ref peer_handle_t::valid, per the seam's
+     * no-null-arm rule.
+     */
+    static constexpr std::uint32_t kAnnouncedPeerGeneration = 1;
+
     /** @brief True — the CAN bus reassembles into ropes and delivers them as-is. */
     [[nodiscard]] bool delivers_ropes() const override { return true; }
 

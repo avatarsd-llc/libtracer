@@ -141,7 +141,9 @@ std::uint16_t close_code(const fake_httpd::server_t::sent_frame_t& f) {
 }
 
 /** @brief `peer_down_fn_t` thunk: count the routing plane's eviction calls. */
-void count_peer_down(void* ctx, std::string_view) { ++*static_cast<int*>(ctx); }
+void count_peer_down(void* ctx, tr::net::peer_handle_t, std::string_view) {
+    ++*static_cast<int*>(ctx);
+}
 
 /** @brief Drain the fake's control queue — the httpd task's own loop. */
 void run_server() {

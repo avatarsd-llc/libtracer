@@ -475,6 +475,16 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     [[nodiscard]] transport_t* peer_link(std::string_view peer) override;
 
     /**
+     * @brief Resolve an inbound handle back to its `p<slot>` peer name (#1294).
+     *
+     * A pure function of the handle's index — the same formatting the claim edge stamps
+     * @ref session_t::name with (ADR-0073 §2) — so it takes no `peers_m_` and can be called
+     * from the delivery callback, on the httpd task, where the name used to arrive for free.
+     */
+    [[nodiscard]] std::string_view peer_name(peer_handle_t peer,
+                                             std::span<char> scratch) const override;
+
+    /**
      * @brief Close one peer's session by NAME — the "revoke this controller" action
      *        (#1146), callable from any task.
      *
@@ -1108,7 +1118,7 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * callback into router → graph; firing it here would run it under that mutex. The
      * name comes back instead and @ref on_session_closed fires it with the gate released.
      */
-    [[nodiscard]] std::string reclaim_slot(session_t* slot);
+    [[nodiscard]] std::string reclaim_slot(session_t* slot, peer_handle_t& handle);
     /**
      * @brief Fire the routing plane's eviction hook for the departed @p peer.
      *
@@ -1118,7 +1128,7 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * In FLAT mode the hook is the WHOLE link's, so it waits for the last open session
      * (@ref any_open_session, #889).
      */
-    void notify_departed(std::string_view peer);
+    void notify_departed(peer_handle_t handle, std::string_view peer);
     /**
      * @brief Announce a newly claimed slot as a live, named session (#1223 step 2).
      *
@@ -1130,7 +1140,7 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * neither `peers_m_` nor the gate's mutex held, because the notifier re-enters the graph.
      * FLAT mode announces nothing: it has one routing identity for every tab it carries.
      */
-    void notify_arrived(std::string_view peer);
+    void notify_arrived(peer_handle_t handle, std::string_view peer);
     /**
      * @brief True while ANY slot is still open — the flat mode's "is the link still up"
      *        question (#889).
@@ -1140,7 +1150,7 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * Takes `peers_m_`; must not be called holding it.
      */
     [[nodiscard]] bool any_open_session() const;
-    void deliver(std::string_view peer, std::span<const std::byte> frame);
+    void deliver(peer_handle_t peer, std::span<const std::byte> frame);
     // ONE gather-copy into a pool slot + httpd_queue_work; drops the frame (counted, never
     // aborting) when no slot is free, when the enqueue is refused, or on OOM. The
     // destination is a SESSION, never a bare fd — see @ref session_ref_t.

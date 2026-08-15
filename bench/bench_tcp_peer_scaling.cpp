@@ -179,7 +179,7 @@ struct counting_sink_t {
     std::atomic<std::uint64_t> frames{0};
 
     /** @brief The peer-named receiver callable (bound by address). */
-    void operator()(std::string_view, std::span<const std::byte>) {
+    void operator()(tr::net::peer_handle_t, std::span<const std::byte>) {
         frames.fetch_add(1, std::memory_order_relaxed);
     }
 };
