@@ -40,11 +40,11 @@
  * iov table's failure from a decode's.)
  */
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <mutex>
 #include <new>
 #include <span>
 #include <string_view>
@@ -90,34 +90,29 @@ class gated_source_t final : public tr::mem::block_source_t {
 
     /** @brief Watch (and, when @p refuse, deny) requests of exactly @p bytes / @p align. */
     void watch(std::size_t bytes, std::size_t align, bool refuse) noexcept {
-        const std::lock_guard lock(m_);
-        bytes_ = bytes;
-        align_ = align;
-        refuse_ = refuse;
-        served_ = 0;
-        refused_ = 0;
+        bytes_.store(bytes, std::memory_order_relaxed);
+        align_.store(align, std::memory_order_relaxed);
+        refuse_.store(refuse, std::memory_order_relaxed);
+        served_.store(0, std::memory_order_relaxed);
+        refused_.store(0, std::memory_order_relaxed);
     }
     /** @brief How many times the watched shape was requested and GRANTED. */
-    [[nodiscard]] std::size_t served() noexcept {
-        const std::lock_guard lock(m_);
-        return served_;
+    [[nodiscard]] std::size_t served() const noexcept {
+        return served_.load(std::memory_order_relaxed);
     }
     /** @brief How many times the watched shape was requested and DENIED. */
-    [[nodiscard]] std::size_t refused() noexcept {
-        const std::lock_guard lock(m_);
-        return refused_;
+    [[nodiscard]] std::size_t refused() const noexcept {
+        return refused_.load(std::memory_order_relaxed);
     }
 
     [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
-        {
-            const std::lock_guard lock(m_);
-            if (bytes == bytes_ && align == align_) {
-                if (refuse_) {
-                    ++refused_;
-                    return nullptr;
-                }
-                ++served_;
+        if (bytes == bytes_.load(std::memory_order_relaxed) &&
+            align == align_.load(std::memory_order_relaxed)) {
+            if (refuse_.load(std::memory_order_relaxed)) {
+                refused_.fetch_add(1, std::memory_order_relaxed);
+                return nullptr;
             }
+            served_.fetch_add(1, std::memory_order_relaxed);
         }
         return ::operator new(bytes, std::align_val_t{align}, std::nothrow);
     }
@@ -126,12 +121,15 @@ class gated_source_t final : public tr::mem::block_source_t {
     }
 
    private:
-    std::mutex m_;
-    std::size_t bytes_ = 0;
-    std::size_t align_ = 0;
-    bool refuse_ = false;
-    std::size_t served_ = 0;
-    std::size_t refused_ = 0;
+    // Atomics rather than a mutex: try_alloc is called with graph/router locks held, so a
+    // test-owned lock here hands TSan a cross-test lock-order cycle (map_mutex_ -> m_ in the
+    // read path, m_ -> map_mutex_ via add_child). Relaxed is enough — every armed/asserted
+    // transition happens-before the call it instruments on the test's own thread.
+    std::atomic<std::size_t> bytes_{0};
+    std::atomic<std::size_t> align_{0};
+    std::atomic<bool> refuse_{false};
+    std::atomic<std::size_t> served_{0};
+    std::atomic<std::size_t> refused_{0};
 };
 
 /**
