@@ -301,6 +301,23 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   into `data.js`, so it does not appear on the gh-pages charts; reproducing it means running the
   bench at both revisions, which is what was done here.
 
+### Removed
+
+- **`graph_t::has_first_level_child`**
+  ([#1303](https://github.com/avatarsd-llc/libtracer/issues/1303); added under
+  [#373](https://github.com/avatarsd-llc/libtracer/issues/373)). The placeholder-inclusive
+  first-level shadow test was published on `graph.hpp` for a transport-plane caller that never
+  landed: nothing in `core/`, the tests, the benches or the bindings called it, so the only
+  thing it did was hold `map_mutex_` in a function no one entered. This also discharges the
+  open Consequence
+  [ADR-0061](../docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md) recorded
+  ("retires the #373 `has_first_level_child` shadow-guard … only after verifying no other
+  first-level shadowing depends on it") — the verification is the caller sweep. Non-wire,
+  no RFC. An out-of-tree
+  embedder that called it can get the same answer from `find` plus a walk of
+  `read_children` on the root — the difference is only that `find` excludes unregistered
+  structural placeholders.
+
 ## [0.12.0] — 2026-08-14
 
 ### Added
