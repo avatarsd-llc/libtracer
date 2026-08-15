@@ -95,6 +95,9 @@ class twai_link_t : public can_link_t {
    public:
     /**
      * @brief Bring the on-chip TWAI controller up on @p config's pins/bitrate.
+     *
+     * Does not begin delivering: the dispatch thread is spawned by @ref start,
+     * after the owner has registered its sink (#1186).
      * @param config Pins, bitrate, queue depths, and the TX FULL-policy window.
      */
     explicit twai_link_t(const twai_link_config_t& config);
@@ -130,6 +133,16 @@ class twai_link_t : public can_link_t {
 
     /** @brief Register the inbound-frame sink (invoked on the dispatch thread). */
     void on_receive(rx_fn_t rx) override;
+
+    /**
+     * @brief Spawn the dispatch thread — call after @ref on_receive (#1186).
+     *
+     * A no-op when the controller never came up or the thread is already running.
+     * Nothing is lost by the split: the controller is enabled at construction, so
+     * the rx-done ISR keeps filling the RX queue meanwhile — this is the ESP-side
+     * counterpart of the kernel socket buffer `socketcan_link_t` relies on.
+     */
+    void start() override;
 
     /**
      * @brief The CAME-UP predicate: true if the controller enabled and the RX machinery
@@ -192,6 +205,8 @@ class twai_link_t : public can_link_t {
                                                     frame's wait, clamped to the task-watchdog
                                                     period at construction (#962). */
     std::atomic<std::uint32_t> tx_dropped_{0}; /**< @brief FULL-policy drop counter. */
+    std::size_t stack_size_ = 0;               /**< @brief Dispatch-thread stack hint, held from
+                                                    construction and spent at start() (#1186). */
     std::atomic<bool> stop_{false};
     std::thread thread_;
 };

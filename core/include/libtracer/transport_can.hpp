@@ -181,6 +181,15 @@ struct can_frame_data_t {
  * delivers inbound frames through the registered @ref rx_fn_t, which may fire on
  * an internal receive thread.
  *
+ * **Two-phase lifecycle (#1186).** Construction only OPENS the link — it must not
+ * begin reading. Inbound frames start flowing at @ref start, which the owner calls
+ * after @ref on_receive has been registered, so there is no window in which the
+ * link reads a frame with no sink to hand it to. Before this the receive thread was
+ * spawned by the constructor and the ordering requirement lived only in prose, which
+ * no well-behaved caller could satisfy; the two-phase shape makes it compile-checked
+ * for the implementer and explicit for the owner. Egress does NOT wait on @ref start —
+ * @ref write_raw is live as soon as the link is open.
+ *
  * **Which frames cross the seam is the seam's own rule, not each link's.** Every
  * port of a *physical* bus gates ingress on @ref can_rx_admissible and egress on
  * @ref can_tx_admissible, so a bus-visible divergence between two ports is a
@@ -210,8 +219,22 @@ class can_link_t {
      */
     virtual void write_raw(const can_frame_data_t& frame) = 0;
 
-    /** @brief Register the sink for inbound raw frames; set before frames flow. */
+    /** @brief Register the sink for inbound raw frames; set before @ref start. */
     virtual void on_receive(rx_fn_t rx) = 0;
+
+    /**
+     * @brief Begin reading from the bus — the second phase of the lifecycle (#1186).
+     *
+     * Spawns whatever machinery delivers inbound frames (a receive thread, a
+     * dispatch task) and is the FIRST point at which @ref rx_fn_t can fire. Call
+     * it once, after @ref on_receive; a second call is a no-op, and a link that
+     * failed to open stays silent rather than reporting an error — this seam has
+     * no error channel, and the open-time predicate (`ok()` on the ports that have
+     * one) already answers whether the link came up. Frames that arrived between
+     * open and this call are not lost: the kernel socket buffer / driver queue
+     * holds them until the first read.
+     */
+    virtual void start() = 0;
 };
 
 /**
@@ -219,24 +242,28 @@ class can_link_t {
  *
  * Opens a `socket(PF_CAN, SOCK_RAW, CAN_RAW)`, enables CAN-FD frames
  * (`CAN_RAW_FD_FRAMES`, best-effort — a classic-only controller still works),
- * binds to the named interface (e.g. `"vcan0"`/`"can0"`), and spawns a receive
- * thread that translates each kernel frame into a @ref can_frame_data_t for the
- * registered callback. The implementation is selected by the BUILD SYSTEM, not
- * by macros: Linux compiles `src/socketcan_link.cpp` (`<linux/can.h>`), every
- * other platform compiles `src/socketcan_link_stub.cpp`, whose @ref ok is always
- * false — so sanitizer/non-Linux builds stay clean and platform ports (e.g. the
- * ESP-IDF component's `twai_link_t`) implement @ref can_link_t in their own TU.
- * The send path is `MSG_NOSIGNAL`-equivalent (a raw CAN write cannot SIGPIPE)
- * and serialized; the fd is reset under the write lock before close on shutdown.
+ * binds to the named interface (e.g. `"vcan0"`/`"can0"`); @ref start then spawns
+ * the receive thread that translates each kernel frame into a
+ * @ref can_frame_data_t for the registered callback. The implementation is selected by the BUILD
+ * SYSTEM, not by macros: Linux compiles `src/socketcan_link.cpp` (`<linux/can.h>`), every other
+ * platform compiles `src/socketcan_link_stub.cpp`, whose @ref ok is always false — so
+ * sanitizer/non-Linux builds stay clean and platform ports (e.g. the ESP-IDF component's
+ * `twai_link_t`) implement @ref can_link_t in their own TU. The send path is
+ * `MSG_NOSIGNAL`-equivalent (a raw CAN write cannot SIGPIPE) and serialized; the fd is reset under
+ * the write lock before close on shutdown.
  */
 class socketcan_link_t : public can_link_t {
    public:
     /**
-     * @brief Open + bind a `CAN_RAW` socket on interface @p ifname.
+     * @brief Open + bind a `CAN_RAW` socket on interface @p ifname — no reading yet.
+     *
+     * The socket is live for TX on return; the receive thread is spawned by
+     * @ref start, not here (#1186).
      * @param ifname The CAN network interface name (e.g. `"vcan0"`).
      * @param recv_stack Receive-thread stack size in bytes, 0 = platform default.
      *        Non-zero right-sizes the dispatch thread on an MCU (applied via
-     *        `pthread_attr_setstacksize`; mirrors `net::posix_endpoint_t::start`).
+     *        `pthread_attr_setstacksize` at @ref start; mirrors
+     *        `net::posix_endpoint_t::start`).
      */
     explicit socketcan_link_t(const std::string& ifname, std::size_t recv_stack = 0);
 
@@ -252,6 +279,15 @@ class socketcan_link_t : public can_link_t {
     /** @brief Register the inbound-frame sink (invoked on the receive thread). */
     void on_receive(rx_fn_t rx) override;
 
+    /**
+     * @brief Spawn the receive thread — call after @ref on_receive (#1186).
+     *
+     * A no-op when the socket never opened or the thread is already running.
+     * Frames the kernel buffered since the bind are read by the first iteration,
+     * so the two-phase split loses nothing.
+     */
+    void start() override;
+
     /** @brief True if the socket opened and bound (false on non-Linux or any error). */
     [[nodiscard]] bool ok() const noexcept { return fd_ >= 0; }
 
@@ -260,9 +296,10 @@ class socketcan_link_t : public can_link_t {
     static void* thread_entry(void* self);  // pthread trampoline → run()
 
     int fd_ = -1;
-    rx_fn_t rx_;          // guarded by m_
-    std::mutex m_;        // guards rx_
-    std::mutex write_m_;  // serializes writes / fd teardown
+    std::size_t recv_stack_ = 0;  // receive-thread stack hint, applied at start()
+    rx_fn_t rx_;                  // guarded by m_
+    std::mutex m_;                // guards rx_
+    std::mutex write_m_;          // serializes writes / fd teardown
     std::atomic<bool> stop_{false};
     // pthread (not std::thread): its ctor throws on failure → std::abort under
     // -fno-exceptions; pthread_create returns an error code (see posix_endpoint).
@@ -371,7 +408,12 @@ class transport_can : public transport_t, public bus_link_t {
    public:
     /**
      * @brief Bind this transport to raw link @p link with node identity @p config.
-     * @param link   The owned raw-frame link (a @ref socketcan_link_t in production).
+     *
+     * Drives the link's two-phase lifecycle (#1186) on the owner's behalf:
+     * registers the receiver, THEN calls @ref can_link_t::start. A caller that
+     * hands its link here must not have started it.
+     * @param link   The owned raw-frame link (a @ref socketcan_link_t in production),
+     *               open but not yet started.
      * @param config This node's version/node/mode/path identity on the bus.
      */
     transport_can(std::unique_ptr<can_link_t> link, transport_can_config_t config);

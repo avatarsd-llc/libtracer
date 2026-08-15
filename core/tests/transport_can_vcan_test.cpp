@@ -274,6 +274,8 @@ int main() {
     auto guard_link = std::make_unique<tr::net::socketcan_link_t>("vcan0");
     check(guard_link->ok(), "seam-rule link bound to vcan0");
     guard_link->on_receive([&](const tr::net::can_frame_data_t& f) { admitted.on(f); });
+    // The seam is two-phase (#1186): the sink is registered, so the link may read.
+    guard_link->start();
 
     constexpr std::uint32_t kRemoteId = 0x1FEED1u;
     constexpr std::uint32_t kStandardId = 0x123u;  // 11-bit, no CAN_EFF_FLAG

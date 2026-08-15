@@ -10,6 +10,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING — `twai_link_t` follows the `can_link_t` seam's new two-phase lifecycle: the
+  dispatch thread is spawned by `start()`, not by the constructor**
+  ([#1186](https://github.com/avatarsd-llc/libtracer/issues/1186)). Construction still brings
+  the on-chip controller up exactly as before (pins, bitrate, queues, callbacks,
+  `twai_node_enable`), so `ok()` means what it always meant and TX is live on return — but
+  nothing pops `rx_queue_`, and hence nothing invokes the registered `rx_fn_t`, until
+  `start()`. Nothing is lost by the split: the rx-done ISR keeps filling that queue meanwhile,
+  the ESP-side counterpart of the kernel socket buffer `socketcan_link_t` relies on. `start()`
+  is idempotent and a no-op on a controller that never came up. **Migration**: a caller that
+  owns the link directly must call `link->start()` after `link->on_receive(...)`; a link handed
+  to `transport_can` needs no change — the transport drives both phases. The
+  `twai_link_config_t::stack_size` knob is unchanged; it is now spent at `start()` rather than
+  at construction. See [core/CHANGELOG.md](../../../core/CHANGELOG.md) for the seam itself.
+
 ### Fixed
 
 - **`httpd_ws_link_t`'s authentication deadline now bounds a socket that upgrades and then

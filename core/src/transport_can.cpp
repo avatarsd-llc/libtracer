@@ -135,6 +135,10 @@ transport_can::transport_can(std::unique_ptr<can_link_t> link, transport_can_con
     // branching per slice keeps the RX path at one indirect call either way.
     rx_backend_ = cfg_.rx_backend != nullptr ? cfg_.rx_backend : &tr::mem::heap_backend();
     link_->on_receive([this](const can_frame_data_t& f) { on_rx(f); });
+    // ...and only NOW does the link begin reading (#1186). The seam is two-phase
+    // precisely so this order is expressible: the receiver is installed first, so
+    // no inbound frame can reach a transport that has no sink registered yet.
+    link_->start();
     // Announce presence at join (ADR-0044): a hello advertise (slice_count == 0)
     // seeds every listener's last-heard table before any data flows, so a fresh
     // node is enumerable immediately. Liveness thereafter refreshes with traffic.

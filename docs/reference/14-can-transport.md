@@ -300,7 +300,18 @@ the byte-exact frame surfaces at the peer's receiver.
 ### The `can_link_t` seam (testable without kernel CAN)
 
 The raw frame I/O sits behind a small seam, `can_link_t` (`write_raw(frame)` + an
-`on_receive` callback), so the transport never touches a socket directly.
+`on_receive` callback + `start()`), so the transport never touches a socket directly.
+
+**The seam is two-phase.** Constructing a link only OPENS it — the link must not begin
+reading. Inbound frames start flowing at `start()`, which the owner calls *after*
+`on_receive` has been registered, so there is no window in which a link reads a frame
+with no sink to hand it to. `transport_can` drives both phases for the link it owns
+(register, then start), so a caller that hands its link to the transport does nothing
+extra; a caller that keeps a link to itself calls `start()` explicitly. Nothing is
+buffered by libtracer to make this work and nothing is lost by it: the kernel socket
+buffer (SocketCAN) and the driver RX queue (TWAI) hold what arrives between open and
+the first read. Egress does not wait on `start()` — `write_raw` is live as soon as the
+link is open.
 
 **Which frames cross the seam is the seam's rule, not each link's.** Ingress admits
 only 29-bit **data** frames — `can_rx_admissible(extended, remote, error)` — because
@@ -316,8 +327,9 @@ identifier, or an error flag, so the ingress rule has nothing to judge.)
 
 - **`socketcan_link_t`** — the production impl: `socket(PF_CAN, SOCK_RAW, CAN_RAW)`,
   `CAN_RAW_FD_FRAMES` enabled best-effort (a classic-only controller works unchanged),
-  bound to a named interface (`vcan0`/`can0`), with a receive thread that translates
-  each kernel `can_frame`/`canfd_frame` into a mode-agnostic `can_frame_data_t`.
+  bound to a named interface (`vcan0`/`can0`), with a receive thread — spawned at
+  `start()`, not at construction — that translates each kernel
+  `can_frame`/`canfd_frame` into a mode-agnostic `can_frame_data_t`.
   Platform selection is a build-system concern, not an in-source `#ifdef`: the Linux
   translation unit compiles on Linux and a no-op stub — whose `ok()` stays false, so
   a port such as an ESP-IDF TWAI link can supply the real `can_link_t` — compiles

@@ -28,6 +28,8 @@ void socketcan_link_t::on_receive(rx_fn_t rx) {
     rx_ = std::move(rx);
 }
 
+void socketcan_link_t::start() {}
+
 void socketcan_link_t::write_raw(const can_frame_data_t&) {}
 
 void socketcan_link_t::run() {}
