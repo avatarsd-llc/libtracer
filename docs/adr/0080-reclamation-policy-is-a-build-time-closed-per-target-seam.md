@@ -1,6 +1,6 @@
 # Reclamation of a user-code seam is a build-time-closed, per-target policy
 
-Status: **proposed** (2026-08-06, for [#894](https://github.com/avatarsd-llc/libtracer/issues/894) and [#897](https://github.com/avatarsd-llc/libtracer/issues/897)).
+Status: **accepted** (2026-08-15; proposed 2026-08-06, for [#894](https://github.com/avatarsd-llc/libtracer/issues/894) and [#897](https://github.com/avatarsd-llc/libtracer/issues/897)).
 
 When may libtracer free the memory behind a user-code seam — a subscription's `callback_ctx`, or an LKV node parked from a hazard slot — after the user asks to release it? The answer is **not one mechanism**: it is a **build-time-closed policy** selected on the same target axis as [ADR-0079](0079-allocation-store-composition-defaults-to-per-plane-mid.md)'s store composition. A single-threaded build reclaims at the local dispatch-stack grace point (or forbids the re-entrant case outright); a many-core build reclaims at a quiescent state (QSBR). The default is the policy that makes the two targets behave **identically**. There is **no runtime prose contract** asking the embedder to track in-flight state.
 
