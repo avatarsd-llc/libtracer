@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0027 |
 | **Title** | Label-switched path compression: minting a per-host path label across the wire |
-| **Status** | **accepted** (2026-08-15; proposed 2026-08-15), maintainer-ratified; comment window waived by default per [GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window" (solo-maintainer clause) and not invoked. The design of §§4–10 was **ruled** in the 2026-08-15 grilling session; this document is its transcription in normative form, not a proposal seeking a direction. **All three §11.1 collisions the draft flagged are RESOLVED at acceptance** — see §11.1 and §16: **collision 1 (vocabulary)** is ruled **(a) qualify**, "**path label**" is ratified as a term distinct from RFC-0004 §E.1's per-link `u16` "label", carried into [RFC-0024](0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §2.1 by **amendment 3**; **collision 2 (generation)** is ruled **saturate-and-retire, NOT wrap** — a slot whose 16-bit generation reaches its maximum saturates and is **retired permanently**, never reused and never wrapped, which preserves RFC-0024 §4.4 rule 3 / §9.3's "MUST saturate, never wrap" at **zero wire cost**; **collision 3 (per-hop state)** is **accepted knowingly** as a recorded decision — RFC-0027 buys per-element degradation and terminus compaction at the price of a per-hop mint table, and the doc set states that trade rather than claiming statelessness on both forms. What remains open is **only the byte layout** (§5.3, deferred pending conformance vectors in the RFC-0014 discipline) and the §12.4 bench gate, which is normative for acceptance of the **implementation**, not of this document. Spec, `CONTEXT.md` and code edits land after acceptance, car by car (§12). |
+| **Status** | **accepted** (2026-08-15; proposed 2026-08-15), maintainer-ratified; comment window waived by default per [GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window" (solo-maintainer clause) and not invoked. The design of §§4–10 was **ruled** in the 2026-08-15 grilling session; this document is its transcription in normative form, not a proposal seeking a direction. **All three §11.1 collisions the draft flagged are RESOLVED at acceptance** — see §11.1 and §16: **collision 1 (vocabulary)** is ruled **(a) qualify**, "**path label**" is ratified as a term distinct from RFC-0004 §E.1's per-link `u16` "label", carried into [RFC-0024](0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §2.1 by **amendment 3**; **collision 2 (generation)** is ruled **saturate-and-retire, NOT wrap** — a slot whose 16-bit generation reaches its maximum saturates and is **retired permanently**, never reused and never wrapped, which preserves RFC-0024 §4.4 rule 3 / §9.3's "MUST saturate, never wrap" at **zero wire cost**; **collision 3 (per-hop state)** is **accepted knowingly** as a recorded decision — RFC-0027 buys per-element degradation and terminus compaction at the price of a per-hop mint table, and the doc set states that trade rather than claiming statelessness on both forms. What remains open is **only the byte layout** (§5.3, deferred pending conformance vectors in the RFC-0014 discipline) and the §12.4 bench gate, which is normative for acceptance of the **implementation**, not of this document. **Amendment 4 (2026-08-15, §5.3.1) rules §5.3 sub-question 1 — the label element is a TLV child of `PATH`, not a tag in RFC-0018's packed segment grammar — and corrects that sub-question's premise: RFC-0018 and this RFC amend the same `PATH` body grammar and are NOT independent; the escape spelling that transcribes this ruling into a packed body is proposed, not ruled.** Spec, `CONTEXT.md` and code edits land after acceptance, car by car (§12). |
 | **Author(s)** | AvatarSD (maintainer), with AI drafting |
 | **Created** | 2026-08-15 |
 | **Comment window** | waived by default while solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"); invoke explicitly if outside input is wanted. Verified: `docs/implementations.md:13` still reads `_(none yet)_`, so the waiver's revert trigger has not fired. |
@@ -424,17 +424,54 @@ PATH_LABEL (0x16, PL=0, LL=0) {
 
 Open with the bytes, and to be settled with the vectors of §12.5:
 
-1. Whether the element is a TLV child of `PATH` (8 B, self-describing, composes with
-   [RFC-0018](0018-packed-path-segments.md)'s packing untouched) or a tag inside RFC-0018's packed
-   segment grammar (potentially 5 B, at the cost of coupling two encodings that currently do not
-   know about each other). **RFC-0018 is accepted and lands independently; whichever of the two
-   lands second re-runs §3.3's table**, exactly as RFC-0024 §10 requires of the same pairing.
+1. ~~Whether the element is a TLV child of `PATH` … or a tag inside RFC-0018's packed segment
+   grammar.~~ **RULED 2026-08-15 (Amendment 4, §5.3.1): TLV child of `PATH`.** The label element
+   is its own self-describing element, never a variant spelling of a name segment. §5.3.1 also
+   corrects this sub-question's premise: the two encodings are **not** independent, and the
+   "composes untouched" clause was wrong.
 2. Whether one label may cover a **multi-segment** part (a whole three-segment mount run — the
    assumption §3.3's arithmetic makes) or exactly one segment. §3.3's saving depends on the former;
    the semantics of §6's rewrite already are the former, since a hop's "local part" *is* its mount
    run.
 3. Whether a `PATH` carrying a label element is admissible as a `path_lookup_key` (it must not be —
    a label is not canonical bytes — so the key is the canonical original the sender still holds).
+
+### 5.3.1 Amendment 4 (2026-08-15, ruled) — the label element is a TLV child, and RFC-0018 is not independent of it
+
+**Ruled:** sub-question 1 above resolves to **TLV child of `PATH`**. A label is a `PATH_LABEL`
+element in its own right — self-describing by type code, skippable by length by a node that does
+not implement minting — and **never** a tag, flag bit, or reserved-length variant of a *name*
+segment. The 5-byte coupled spelling is rejected: 3 bytes per element does not buy welding two
+encodings whose only shared property is that they both live inside a `PATH`.
+
+**Correction to this sub-question's own premise, which was wrong.** The rejected text claimed a
+TLV child "composes with RFC-0018's packing untouched" and that the two RFCs "land independently".
+Neither survives inspection. RFC-0018 §5 amends `PATH` so that **`opt.PL` MUST be `0`** and the
+body is a sequence of `[u8 len][utf8 bytes]` records — a `PATH` body after RFC-0018 contains **no
+child TLVs at all**, so there is no position in which a `PATH_LABEL` child can sit. The two RFCs
+are about different things (RFC-0018 re-encodes the container; this RFC adds an addressing arm),
+but they are **not** independent: they amend the same `PATH` body grammar, and only one of the two
+body grammars can be normative at a time. This is a stronger interaction than "whichever lands
+second re-runs §3.3's table", and stating it as merely a table re-run understated it.
+
+**What that means for order of landing.** Today `PATH` is still `opt.PL=1` with `NAME` children
+(`docs/reference/05-protocol-tlvs.md:299`) — RFC-0018 is accepted but unimplemented
+([#680](https://github.com/avatarsd-llc/libtracer/issues/680) is open at S0). So the ruled
+spelling is directly encodable **now**: `PATH_LABEL` (`0x16`, `PL=0`, `LL=0`, `u32` LE body) as a
+child of `PATH`, 8 B per element, exactly §5.3's candidate block.
+
+**What is NOT ruled here, and is now the one open byte-layout question.** When RFC-0018 lands, the
+faithful transcription of *this* ruling into the packed grammar is RFC-0018 §8's reserved
+`len == 0` escape — `00 <u8 kind=0x16> <u8 len=4> <u32 label>`, **7 B** — which is the escape's
+stated purpose ("the natural place for a future non-literal segment") and which preserves every
+property this ruling selected for: self-describing, skippable by length rather than hard-rejected
+on an MCU that does not mint, and semantically uncoupled from name segments. It is *not* the
+rejected 5-byte option, which coupled the label to the name-segment grammar itself. That
+transcription is **proposed, not ruled** — it needs the maintainer's word because it is a second
+encoding of the same element, and because it changes RFC-0018's "`len == 0` … MUST be rejected by
+a resolver" into a conditional rejection. Until it is ruled, the two accepted RFCs must not both
+be implemented: **RFC-0027's element encoding blocks on RFC-0018's implementation order**, and
+#1325 car 2 records that as a dependency rather than a free re-run of §3.3.
 
 ## 6. Distribution is passive
 
