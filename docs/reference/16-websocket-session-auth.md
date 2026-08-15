@@ -135,10 +135,18 @@ is closed. Two properties matter more than the exact number:
 - **An expired session cannot deny a live peer its slot.** The reap that frees expired
   sessions runs when a new peer arrives, not only on the periodic sweep — so admission
   always answers from sessions that are still live, whatever the sweep's timing.
+- **The deadline bounds the SOCKET, not only the session.** The session is claimed lazily,
+  on the peer's first data frame, so a peer that completes the 101 and then sends nothing at
+  all never holds a session — and for a while it was therefore bounded by nothing here,
+  which is exactly the "open sockets, say nothing" case above. The implementation records
+  each upgraded socket at the pre-handshake, with its deadline, and the sweep closes an
+  un-spoken one on the raw descriptor with the same `4408`. The record set is fixed-size; a
+  handshake that would overflow it is **refused** — the 101 is never written — because a
+  socket with no record is a socket nothing can close.
 
-The deadline bounds *this* exposure and no other. A client that connects a TCP socket and
-never upgrades at all is an ordinary HTTP-server concern, governed by the server's own
-socket budget, and is neither worsened nor improved by anything here.
+The deadline bounds the exposure *from the upgrade onward* and no other. A client that
+connects a TCP socket and never upgrades at all is an ordinary HTTP-server concern, governed
+by the server's own socket budget, and is neither worsened nor improved by anything here.
 
 ## Close codes
 
@@ -172,9 +180,9 @@ about different actors and summing them hides which is happening:
 
 | Signal | Says |
 | --- | --- |
-| handshake refusals | a header/predicate check turned a peer away, or the peer cap was full — the peer never reached a session |
+| handshake refusals | a header/predicate check turned a peer away, the peer cap was full, or the pending-handshake record set was full — the peer never reached a session |
 | credential rejections | a credential was **offered and refused** — the shape of a brute-force attempt, or of a fleet holding a stale token |
-| deadline expiries | peers that connected and **said nothing** — a trickle is normal (a tab closed mid-login); a rate that tracks connection attempts is not |
+| deadline expiries | peers that connected and **said nothing** — both the session that stalled mid-handshake and the socket that upgraded and never spoke. A trickle is normal (a tab closed mid-login); a rate that tracks connection attempts is not |
 
 Unauthenticated sessions are deliberately **not** enumerated per-session. A per-session
 census of things that have not identified themselves is a census of an attacker's socket
