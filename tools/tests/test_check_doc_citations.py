@@ -72,6 +72,29 @@ def errs(text):
     return cdc.cited_locations(text, FILEMAP)[1]
 
 
+def located(path, anchor, scope=None):
+    """Every 1-based line of the REAL `path` the gate would call a hit for `anchor` (#1308).
+
+    Two probe classes below (`AmbiguousAnchorGateTest`, `UnanchoredCitationGateTest`) need a
+    citation aimed at a genuine line of `core/src/graph.cpp` — a line whose text repeats, and
+    a line no anchor pins. Both used to write the LINE NUMBER down, which made them
+    position-sensitive to the very file the gate exists to track: every PR that added or
+    removed a line above the probe moved it, the probe then exercised a different code path
+    than its name claimed, and two CI jobs went red on an assertion rather than on a
+    behaviour. One of them (`create_child` at a hardcoded `:2489`) had been stale long enough
+    to pass VACUOUSLY — a stale line yields DRIFT, and the test only checked for the absence
+    of AMBIGUOUS.
+
+    So the probes locate their line from the anchor TEXT at test time, and each class asserts
+    the property it needs of the result instead of assuming it. `cdc.anchor_hits` is
+    deliberately the locator: the probe then means "a hit" in exactly the sense the gate,
+    the drift report and the re-pin all mean it, rather than in a second sense a `str.find`
+    here would invent.
+    """
+    lines = (pathlib.Path(REPO) / path).read_text().split("\n")
+    return cdc.anchor_hits(lines, anchor, scope)
+
+
 class ResolveShorthandTest(unittest.TestCase):
     """The basename shorthand the design pages have always used."""
 
@@ -904,14 +927,48 @@ class UnanchoredCitationGateTest(unittest.TestCase):
 
     # The exact hygiene-run shape: a citation introduced by a PR, landing on a COMMENT line
     # inside `graph.cpp`, with no anchor. Before #1243 this printed `OK` and shipped.
-    NEW_CITATION = "the fold is at `core/src/graph.cpp:1273`\n"
-    RIGHT_ANCHOR = [("core/src/graph.cpp:1273",
-                     "// Fold BEFORE dispatching: these deliveries were abandoned inside the")]
+    #
+    # The probe LINE is located from this text at test time (#1308), never written down: the
+    # two properties it needs — the text sits on exactly one line, and no `ANCHORS` entry
+    # pins that line — are both properties of today's tree, and both are asserted below.
+    PROBE_TEXT = "// Fold BEFORE dispatching: these deliveries were abandoned inside the"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.hits = located(GRAPH, cls.PROBE_TEXT)
+        cls.line = cls.hits[0] if len(cls.hits) == 1 else None
+        # Read the REAL table now: `_gate_over` swaps `cdc.ANCHORS` out for a stand-in.
+        cls.anchored = {entry[0] for entry in cdc.ANCHORS}
+
+    @property
+    def NEW_CITATION(self):
+        return f"the fold is at `{GRAPH}:{self.line}`\n"
+
+    @property
+    def RIGHT_ANCHOR(self):
+        return [(f"{GRAPH}:{self.line}", self.PROBE_TEXT)]
+
+    def test_the_probe_text_sits_on_exactly_one_line(self):
+        # Located, so it cannot rot into a different line — but it CAN rot into no line at
+        # all (the comment reworded) or into several (the comment duplicated), and either
+        # would leave every case below probing something other than what it names.
+        self.assertEqual(len(self.hits), 1,
+                         f"{self.PROBE_TEXT!r} must name exactly one line of {GRAPH}; "
+                         f"found {self.hits}. Re-point PROBE_TEXT at a line that does.")
+
+    def test_no_ANCHORS_entry_pins_the_probe_line(self):
+        # THE property of this fixture, and the one that used to be assumed: the citation is
+        # uncovered only while no anchor sits on its line. A re-pin that lands one there
+        # turns every case below green for the wrong reason — a covered citation draws no
+        # coverage complaint, so the gate would look correct while checking nothing.
+        self.assertNotIn(f"{GRAPH}:{self.line}", self.anchored,
+                         "the probe line is now pinned by a real ANCHORS entry — move "
+                         "PROBE_TEXT to a graph.cpp line the table does not pin")
 
     def test_the_gate_reports_a_citation_no_anchor_pins(self):
         with self._gate_over("docs/design", self.NEW_CITATION) as out:
             self.assertIn("pinned by no ANCHORS entry", out)
-            self.assertIn("core/src/graph.cpp:1273", out)
+            self.assertIn(f"{GRAPH}:{self.line}", out)
 
     def test_the_report_names_the_citing_doc(self):
         with self._gate_over("docs/design", self.NEW_CITATION) as out:
@@ -926,7 +983,7 @@ class UnanchoredCitationGateTest(unittest.TestCase):
     def test_an_anchor_pointing_at_the_WRONG_line_still_fails(self):
         # Coverage is not a rubber stamp: the anchor is verified against the cited line's
         # text, so "add any anchor" is not a way past the gate.
-        wrong = [("core/src/graph.cpp:1273", "this text is not on that line")]
+        wrong = [(f"{GRAPH}:{self.line}", "this text is not on that line")]
         with self._gate_over("docs/design", self.NEW_CITATION, wrong) as out:
             self.assertIn("DRIFT", out)
 
@@ -1086,10 +1143,27 @@ class AmbiguousAnchorGateTest(unittest.TestCase):
     as uncited, so the exit code is 1 either way and proves nothing.
     """
 
-    # `if (!acl_allows(v, caller, acl_right_t::READ))` is the same statement in four ACL
+    # `if (!acl_allows(v, caller, acl_right_t::READ))` is the same statement in several ACL
     # gates of `graph.cpp` — a real repeated line, so this cannot pass on a fixture quirk.
-    CITATION = "the read gate is at `core/src/graph.cpp:1206`\n"
+    # `SCOPE` names the one this fixture means, and the LINE is located from the two at test
+    # time (#1308) rather than written down: what the class needs is "a line whose text
+    # repeats, which this scope pins down to one", and both halves are asserted below.
     ANCHOR_TEXT = "if (!acl_allows(v, caller, acl_right_t::READ))"
+    SCOPE = "result_t<value_ref_t> graph_t::read("
+    # The no-false-positive half needs the opposite property: a signature that occurs ONCE.
+    UNIQUE_TEXT = "result_t<void> graph_t::create_child(vertex_t* parent, const view_t& spec_value) {"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.hits = located(GRAPH, cls.ANCHOR_TEXT)
+        cls.scoped_hits = located(GRAPH, cls.ANCHOR_TEXT, cls.SCOPE)
+        cls.line = cls.scoped_hits[0] if len(cls.scoped_hits) == 1 else None
+        cls.unique_hits = located(GRAPH, cls.UNIQUE_TEXT)
+        cls.unique_line = cls.unique_hits[0] if len(cls.unique_hits) == 1 else None
+
+    @property
+    def CITATION(self):
+        return f"the read gate is at `{GRAPH}:{self.line}`\n"
 
     @contextlib.contextmanager
     def _gate_over(self, anchors):
@@ -1109,31 +1183,60 @@ class AmbiguousAnchorGateTest(unittest.TestCase):
             cdc.all_docs, cdc.ANCHORS = real_all_docs, real_anchors
             os.remove(doc)
 
+    def test_the_probe_anchor_text_really_does_repeat(self):
+        # The premise the whole class rests on, and the one it used to assume: an AMBIGUOUS
+        # verdict is only meaningful over an anchor that is genuinely ambiguous. If the
+        # duplicated statement is ever refactored down to one occurrence, every case below
+        # would pass by reporting nothing — so fail here, where the reason is legible.
+        self.assertGreater(len(self.hits), 1,
+                           f"{self.ANCHOR_TEXT!r} must appear on MORE than one line of "
+                           f"{GRAPH}; found {self.hits}. Re-point ANCHOR_TEXT at a "
+                           f"statement that still repeats.")
+
+    def test_the_probe_scope_selects_exactly_one_of_them(self):
+        # The other half of the premise: the scope is what turns the ambiguous anchor into an
+        # unambiguous one, so a scope that selected none (or still several) would make
+        # `test_a_scope_that_disambiguates_passes` vacuous.
+        self.assertEqual(len(self.scoped_hits), 1,
+                         f"scope {self.SCOPE!r} must select exactly one of {self.hits}; "
+                         f"selected {self.scoped_hits}")
+        self.assertIn(self.line, self.hits)
+
+    def test_the_unique_probe_anchor_text_really_is_unique(self):
+        # Paid for: this fixture used to name a hardcoded `:2489` that had drifted off
+        # `create_child` entirely, and the case still passed — a stale line reports DRIFT,
+        # never AMBIGUOUS, so "assertNotIn AMBIGUOUS" held for the wrong reason.
+        self.assertEqual(len(self.unique_hits), 1,
+                         f"{self.UNIQUE_TEXT!r} must appear on exactly one line of {GRAPH}; "
+                         f"found {self.unique_hits}")
+
     def test_an_unscoped_repeated_anchor_is_reported(self):
-        with self._gate_over([(f"{GRAPH}:1206", self.ANCHOR_TEXT)]) as out:
+        with self._gate_over([(f"{GRAPH}:{self.line}", self.ANCHOR_TEXT)]) as out:
             self.assertIn("AMBIGUOUS", out)
-            self.assertIn(f"{GRAPH}:1206", out)
+            self.assertIn(f"{GRAPH}:{self.line}", out)
 
     def test_the_report_says_how_to_fix_it(self):
         # The message has to name the remedy, because the anchor RESOLVES: nothing about the
         # cited line looks wrong, and "tighten the scope" is not guessable from a bare FAIL.
-        with self._gate_over([(f"{GRAPH}:1206", self.ANCHOR_TEXT)]) as out:
+        with self._gate_over([(f"{GRAPH}:{self.line}", self.ANCHOR_TEXT)]) as out:
             self.assertIn("Tighten the anchor text", out)
 
     def test_a_scope_that_disambiguates_passes(self):
-        # `graph_t::read` owns the 1206 gate; the scope names it, and no other candidate
-        # carries that signature above it.
-        scoped = [(f"{GRAPH}:1206", self.ANCHOR_TEXT, "result_t<value_ref_t> graph_t::read(")]
+        # `graph_t::read` owns the gate this fixture cites; the scope names it, and no other
+        # candidate carries that signature above it.
+        scoped = [(f"{GRAPH}:{self.line}", self.ANCHOR_TEXT, self.SCOPE)]
         with self._gate_over(scoped) as out:
             self.assertNotIn("AMBIGUOUS", out)
 
     def test_an_anchor_whose_text_appears_once_is_never_flagged(self):
         # The no-false-positive half: an ordinary unique anchor needs no scope and must not
-        # be asked for one, or the check costs more than the class it catches.
-        unique = [(f"{GRAPH}:2489",
-                   "result_t<void> graph_t::create_child(vertex_t* parent, const view_t& spec_value) {")]
+        # be asked for one, or the check costs more than the class it catches. It is aimed at
+        # the line `UNIQUE_TEXT` actually sits on, so the case now needs the anchor to
+        # RESOLVE — no DRIFT standing in for the silence it asserts.
+        unique = [(f"{GRAPH}:{self.unique_line}", self.UNIQUE_TEXT)]
         with self._gate_over(unique) as out:
             self.assertNotIn("AMBIGUOUS", out)
+            self.assertNotIn("DRIFT", out)
 
 
 if __name__ == "__main__":
