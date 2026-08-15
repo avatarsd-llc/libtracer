@@ -1025,6 +1025,8 @@ class fixed_link_t final : public tr::net::can_link_t {
         if (n_ < frames_.size()) frames_[n_++] = f;
     }
     void on_receive(rx_fn_t rx) override { rx_ = std::move(rx); }
+    /** @brief No receive machinery to spawn — this link is written to, never read (#1186). */
+    void start() override {}
 
     /** @brief Forget every recorded frame (drops the join hello before a measurement). */
     void reset() {
@@ -1059,6 +1061,8 @@ class recording_link_t final : public tr::net::can_link_t {
         frames_.push_back(f);
     }
     void on_receive(rx_fn_t rx) override { rx_ = std::move(rx); }
+    /** @brief No receive machinery to spawn — this link is written to, never read (#1186). */
+    void start() override {}
 
     [[nodiscard]] std::size_t count() const {
         const std::lock_guard lock(m_);

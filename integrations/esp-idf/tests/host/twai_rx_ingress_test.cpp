@@ -196,6 +196,7 @@ void run_refusal_case(const fake_twai::scripted_rx_frame_t& refused, std::string
     check(link->ok(), "the link came up on the fake controller");
     if (!link->ok()) return;
     link->on_receive([&rec](const can_frame_data_t& frame) { rec.record(frame); });
+    link->start();  // the seam's second phase (#1186): delivery begins here
 
     fake_twai::script_rx(refused);
     fake_twai::script_rx(sentinel());
@@ -263,6 +264,7 @@ void test_an_extended_data_frame_is_delivered() {
     check(link->ok(), "the link came up on the fake controller");
     if (!link->ok()) return;
     link->on_receive([&rec](const can_frame_data_t& frame) { rec.record(frame); });
+    link->start();  // the seam's second phase (#1186): delivery begins here
 
     const std::vector<std::uint8_t> payload = {0xDEu, 0xADu, 0xBEu, 0xEFu, 0x42u};
     fake_twai::scripted_rx_frame_t f;
@@ -302,6 +304,7 @@ void test_a_dlc_above_the_classic_width_is_truncated() {
     check(link->ok(), "the link came up on the fake controller");
     if (!link->ok()) return;
     link->on_receive([&rec](const can_frame_data_t& frame) { rec.record(frame); });
+    link->start();  // the seam's second phase (#1186): delivery begins here
 
     // Twenty-four scripted bytes, so the truncation observed below is the link's
     // clamp and not an artifact of a script that ran out of data.
@@ -366,6 +369,7 @@ void test_a_full_rx_queue_drops_rather_than_blocking() {
             gate_cv.wait(lock, [&gate_open] { return gate_open; });
         }
     });
+    link->start();  // the seam's second phase (#1186): delivery begins here
 
     // Frame 0 parks the dispatch thread inside the callback. Waiting for it to be
     // RECORDED is what makes the rest deterministic: the queue is provably empty

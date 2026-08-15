@@ -34,7 +34,8 @@ void* socketcan_link_t::thread_entry(void* self) {
     return nullptr;
 }
 
-socketcan_link_t::socketcan_link_t(const std::string& ifname, std::size_t recv_stack) {
+socketcan_link_t::socketcan_link_t(const std::string& ifname, std::size_t recv_stack)
+    : recv_stack_(recv_stack) {
     fd_ = ::socket(PF_CAN, SOCK_RAW, CAN_RAW);
     if (fd_ < 0) return;
 
@@ -62,12 +63,21 @@ socketcan_link_t::socketcan_link_t(const std::string& ifname, std::size_t recv_s
     // A receive timeout lets the recv loop poll stop_ for a clean shutdown.
     timeval tv{.tv_sec = 0, .tv_usec = 100000};  // 100 ms
     ::setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    // The receive thread is NOT spawned here (#1186): the socket is open and
+    // bound, so the kernel is already buffering, but nothing reads until start()
+    // — by which time the owner has registered its rx_fn_t.
+}
+
+void socketcan_link_t::start() {
+    // Idempotent, and silent on a link that never opened: the seam has no error
+    // channel, and ok() already answers whether the socket came up.
+    if (fd_ < 0 || started_) return;
 
     pthread_attr_t attr;
     ::pthread_attr_init(&attr);
     // A hint below the platform floor makes setstacksize return EINVAL and leaves
     // the default stacksize in place — fall back rather than fail the spawn.
-    if (recv_stack != 0) (void)::pthread_attr_setstacksize(&attr, recv_stack);
+    if (recv_stack_ != 0) (void)::pthread_attr_setstacksize(&attr, recv_stack_);
     started_ = (::pthread_create(&thread_, &attr, &socketcan_link_t::thread_entry, this) == 0);
     ::pthread_attr_destroy(&attr);
 }

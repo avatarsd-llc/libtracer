@@ -99,10 +99,7 @@ class fake_can_bus_t {
 
 class fake_link_t : public tr::net::can_link_t {
    public:
-    explicit fake_link_t(fake_can_bus_t& bus) : bus_(bus) {
-        bus_.attach(this);
-        worker_ = std::thread([this] { run(); });
-    }
+    explicit fake_link_t(fake_can_bus_t& bus) : bus_(bus) { bus_.attach(this); }
     ~fake_link_t() override {
         bus_.detach(this);
         {
@@ -120,6 +117,10 @@ class fake_link_t : public tr::net::can_link_t {
     void on_receive(rx_fn_t rx) override {
         const std::lock_guard lock(m_);
         rx_ = std::move(rx);
+    }
+    /** @brief The seam's second phase (#1186): nothing is delivered before this. */
+    void start() override {
+        if (!worker_.joinable()) worker_ = std::thread([this] { run(); });
     }
     void enqueue(const tr::net::can_frame_data_t& f) {
         const std::lock_guard lock(m_);
@@ -167,6 +168,7 @@ class frame_tap_t {
             const std::lock_guard lock(m_);
             frames_.push_back(f);
         });
+        link_.start();
     }
     [[nodiscard]] std::vector<tr::net::can_frame_data_t> snapshot() {
         const std::lock_guard lock(m_);

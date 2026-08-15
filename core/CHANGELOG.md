@@ -119,6 +119,25 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **BREAKING — `net::can_link_t` is now a TWO-PHASE seam: construction opens the link,
+  `start()` begins reading**
+  ([#1186](https://github.com/avatarsd-llc/libtracer/issues/1186)). The seam documented
+  "set before frames flow" for `on_receive`, but `socketcan_link_t`'s constructor spawned
+  the receive thread — so there was no ordering a caller could adopt that registered a sink
+  before the link could read. The requirement is now compile-checked instead of written down:
+  `can_link_t` gains a pure-virtual `start()`, `socketcan_link_t` and the ESP component's
+  `twai_link_t` split the thread spawn out of their constructors, and the owner registers
+  first and starts second. `start()` is idempotent and silent on a link that never opened
+  (the seam has no error channel; `ok()` already answers that). **No frames were being lost
+  and none are now**: the kernel socket buffer — and, on the TWAI port, the driver RX queue
+  the rx-done ISR keeps filling — holds what arrives between open and the first read.
+  **Migration**: an out-of-tree `can_link_t` implementation must add `start()` (spawn its
+  receive machinery there, not in the constructor); a caller that owns a link DIRECTLY must
+  call `link->start()` after `link->on_receive(...)`. A caller that hands its link to
+  `transport_can` needs no change at all — the transport drives both phases itself, and it
+  now expects the link it is given to be open but NOT started. `write_raw` is unaffected:
+  egress is live as soon as the link is open.
+
 - **A wire `SUBSCRIBER`'s `PATH` target is now RESOLVED when it routes through a mount — a
   third party can wire a flow between two OTHER nodes and depart**
   ([#491](https://github.com/avatarsd-llc/libtracer/issues/491),

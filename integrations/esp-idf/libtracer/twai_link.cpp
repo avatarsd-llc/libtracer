@@ -102,7 +102,8 @@ twai_link_t::twai_link_t(const twai_link_config_t& config)
     // so twai_node_transmit below never needs the driver's own (queue-full)
     // wait — the pool semaphore is the ONE backpressure point.
     : tx_pool_(config.tx_queue_depth + 1),
-      tx_timeout_ms_(clamp_tx_timeout_ms(config.tx_timeout_ms)) {
+      tx_timeout_ms_(clamp_tx_timeout_ms(config.tx_timeout_ms)),
+      stack_size_(config.stack_size) {
     // The ISR→dispatch handoff: fixed-size copies of the seam's frame record.
     rx_queue_ = xQueueCreate(config.rx_queue_depth, sizeof(can_frame_data_t));
     if (rx_queue_ == nullptr) return;
@@ -145,12 +146,22 @@ twai_link_t::twai_link_t(const twai_link_config_t& config)
     }
 
     node_ = node;
+    // The dispatch thread is NOT spawned here (#1186). The controller is enabled, so
+    // the rx-done ISR is already filling rx_queue_ — but nothing pops it, and hence
+    // nothing invokes rx_, until start(). The queue is the same holding buffer the
+    // kernel socket buffer is on the SocketCAN port: the split costs no frames.
+}
+
+void twai_link_t::start() {
+    // Idempotent, and silent on a controller that never came up: the seam has no
+    // error channel and ok() already answers that question.
+    if (node_ == nullptr || thread_.joinable()) return;
 
     // Right-size the dispatch thread's FreeRTOS task stack without inflating the global
     // CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT (libtracer #486). The save/set/spawn/restore
     // recipe this used to spell out in place now lives in esp_thread.hpp, shared with the
     // WS client link — which accepted the same knob and discarded it (#900).
-    thread_ = esp::spawn_thread(config.stack_size, "twai_rx", [this] { run(); });
+    thread_ = esp::spawn_thread(stack_size_, "twai_rx", [this] { run(); });
 }
 
 twai_link_t::~twai_link_t() {

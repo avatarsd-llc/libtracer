@@ -59,6 +59,11 @@ only; remote-request, 11-bit standard and error frames are not traffic) and
 decodes those flags from its own driver's representation, but does not get to reach
 its own verdict.
 
+The seam is **two-phase** (#1186): constructing a link opens it, and a separate
+`start()` is what begins reading — called after `on_receive`, so a link never reads a
+frame it has no sink for. `transport_can` drives both phases for the link it owns, so
+this is invisible to a caller that hands its link to the transport.
+
 **The TX pool** (`tr::net::can_tx_pool_t`) exists for *asynchronous* links only.
 A synchronous link needs none of it — the kernel copies the frame inside the
 write call. A driver that queues the frame *pointer* and formats the buffer later,
