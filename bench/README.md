@@ -313,6 +313,51 @@ banked with no unexplained warning, and the pins re-taken on the bench host's ow
 toolchain**. That is about a release's worth of main pushes here. A threshold picked before
 the noise is known is the unreachable-budget failure mode this repo already hit once.
 
+### The perf gate's verdict tiers (#1251)
+
+`perf_gate.py` makes the **same** comparison wherever it runs — same points, same
+thresholds, same interleaved A/B rules. What the caller declares is whether a breached
+ratchet may **stop the job**:
+
+| tier | a breached ratchet | declared by |
+| --- | --- | --- |
+| `--tier blocking` | fails the job (exit 1) | `perf.yml` → `gate-pr`, the per-PR gate |
+| `--tier advisory` | printed, annotated `::warning::`, exit 0 | `perf.yml` → `ratchet`, the three push replicas |
+
+This lived in a `perf.yml` comment for its whole life before #1251, and the gate had no
+tier concept at all — so "the pinned host blocks, the GitHub runners warn" described a
+mechanism that did not exist, and a policy that cannot be violated cannot be obeyed either.
+
+**The tier is not a threshold.** An advisory run reports exactly what a blocking run would
+have said; it must never quietly measure something weaker, or the two tiers stop being
+comparable and the advisory output stops being worth reading.
+
+**Why the push replicas are advisory.** Three replicas each rendered an independent
+blocking verdict, so any one of them could red `main` alone — stronger than the ruled
+policy, and the shape behind a CI failure later traced to the runner environment rather
+than to any commit (#1261). The ruled escalation is **2-of-3 agreement**, which needs an
+aggregation job the matrix does not have yet; until it exists a replica *reports*. Nothing
+is lost pre-merge: `gate-pr` already gated that commit against the same `main` baseline,
+blocking, before it could land.
+
+**The default is `advisory`.** A forgotten flag then under-enforces *loudly* — the breach
+is still printed and still annotated — rather than false-failing on a machine whose noise
+floor the bar was never calibrated against, which is what an unpinned laptop is. That is
+only safe because every CI invocation names its tier and `test_perf_gate.py`'s
+`WorkflowsDeclareTheirTier` reds the build if one does not.
+
+**A flagged sample cannot fail a PR.** `--sample-note` takes `host_guard.py bracket`'s
+verdict for the sample this run is about; if the sample is flagged `CONTAMINATED`, the
+blocking tier refuses to render a verdict on it and downgrades to advisory. That is the
+consumer half of the guard's rule — a suspect sample is flagged, never deleted, and the
+flag only means something if the gating consumer stops believing it. The predicate is
+imported from `host_guard.py`, not re-derived, so writer and reader cannot drift apart.
+
+**The pinned host runs no comparison gate.** `perf-local.yml` records the absolute trend
+and invokes `perf_gate.py` nowhere. The seam for making it the blocking tier exists and is
+tested; the HEAD-vs-parent leg that would use it does not. Do not read "pinned host =
+blocking tier" off any comment until a step in that workflow calls the gate.
+
 ### `bench_rx_source_topology` — where a bounded RX source may sit (ADR-0067 §3)
 
 ```sh

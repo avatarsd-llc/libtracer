@@ -16,12 +16,19 @@
 #  3. Push ratchet (`ratchet`) — every main push re-runs the same gate on THREE
 #     independently-drawn runners (redundant testing): each replica builds HEAD and its
 #     PARENT commit and gates HEAD against the parent on its own hardware. A pullback
-#     that lands anyway turns main red — and a single slow/noisy runner cannot
-#     manufacture a false verdict, because the other two replicas measured the same
-#     pair of commits on different machines.
+#     that lands anyway is reported by every replica that sees it — and a single
+#     slow/noisy runner cannot manufacture a verdict on its own, because the replicas
+#     are ADVISORY (see the tier note below): a replica announces its comparison, it
+#     does not stop the job by itself.
 #  4. History (`history`) — aggregates the three replicas' transcripts and records the
 #     BEST across runners per metric (min latency / max throughput), so the recorded
 #     trend approximates the code's capability, not the machine lottery.
+#  5. Verdict TIER (#1251) — declared per invocation as `perf_gate.py --tier {blocking,
+#     advisory}`, so this file DECLARES the policy instead of describing it. `blocking`
+#     means a breached ratchet fails the job; `advisory` runs the identical comparison
+#     on the identical thresholds and reports it without failing. Which invocation gets
+#     which is argued at the invocation, next to the flag, not here — that is the whole
+#     point of moving the policy out of a comment.
 name: perf
 
 on:
@@ -75,9 +82,16 @@ jobs:
       - name: Perf-gate decision-rule tests
         run: python3 bench/test_perf_gate.py
       # The pinned host's quiescence rules (#1236), tested here because the guard decides
-      # whether a sample is banked AT ALL — and under the two-tier policy the pinned store
-      # is the blocking tier, so "skip when busy" and "flagged samples are ignored by the
-      # consumer" are gate rules even though they run in perf-local.yml.
+      # whether a sample is banked AT ALL, and because its verdicts are what the BLOCKING
+      # tier consumes: `perf_gate.py --sample-note` refuses to render a blocking verdict
+      # on a sample host_guard.py flagged (`perf_gate.enforces`). "Skip when busy" and
+      # "a flagged sample cannot fail a PR" are therefore gate rules even though the
+      # instrument that produces them runs in perf-local.yml.
+      #
+      # NOTE, so this comment does not become the next piece of policy-as-prose: the
+      # pinned host does NOT run a comparison gate today — perf-local.yml records the
+      # absolute trend and runs no `perf_gate.py` leg at all. The seam the blocking tier
+      # would use exists and is tested; the pinned-host leg that would use it does not.
       - name: Bench-host quiescence-guard tests
         run: python3 bench/test_host_guard.py
       # The RAM-census series + warn ratchet (#1228), tested here for the same reason:
@@ -108,9 +122,15 @@ jobs:
         run: |
           cmake --build bench/build --target test_compose_record -j
           ./bench/build/test_compose_record
-      - name: Performance gate (INTERLEAVED same-runner A/B vs main)
+      # TIER: blocking. This is the repo's only PRE-MERGE perf verdict, and it is the one
+      # shape hardened against runner noise from the inside — same runner, interleaved
+      # A/B, and a fail that needs effect + disjoint ranges + a majority of pairs (#763).
+      # It stays blocking until a pinned-host comparison leg exists to take the role over;
+      # demoting it before then would leave the repo with no enforced perf gate anywhere,
+      # which is not what "the runners are warn-only" was ruled to mean.
+      - name: Performance gate (INTERLEAVED same-runner A/B vs main) — BLOCKING tier
         run: |
-          python3 bench/perf_gate.py \
+          python3 bench/perf_gate.py --tier blocking \
             --baseline-bench ../main-baseline/bench/build/bench_libtracer \
             --baseline-bench-fwd ../main-baseline/bench/build/bench_forward_heap
 
@@ -277,20 +297,30 @@ jobs:
           else
             echo "root commit — no parent to ratchet against"
           fi
-      - name: No-pullback ratchet (HEAD vs parent, this runner, interleaved)
+      # TIER: advisory. Three replicas each render this verdict independently, and each
+      # one used to be able to red main on its own — strictly stronger than the ruled
+      # policy, and the shape that produced a CI failure later traced to the runner
+      # environment rather than to any commit (#1261). The ruled escalation is 2-of-3
+      # agreement, which needs an aggregation job these three replicas do not have yet
+      # (#1251 stage 2); until it exists a replica REPORTS. Nothing is lost pre-merge:
+      # `gate-pr` above already gated the same commit against the same `main` baseline,
+      # blocking, before it could land.
+      - name: No-pullback ratchet (HEAD vs parent, this runner, interleaved) — ADVISORY tier
         run: |
           if [ -x ../parent-baseline/bench/build/bench_libtracer ]; then
             echo "== gate HEAD against its parent, interleaved on this runner =="
-            python3 bench/perf_gate.py \
+            python3 bench/perf_gate.py --tier advisory \
               --baseline-bench ../parent-baseline/bench/build/bench_libtracer \
               --baseline-bench-fwd ../parent-baseline/bench/build/bench_forward_heap
           else
             echo "== no parent build — absolute floors only =="
-            python3 bench/perf_gate.py --update-baseline
+            python3 bench/perf_gate.py --tier advisory --update-baseline
           fi
-      # if: always() is load-bearing, not defensive. The ratchet gate above EXITS
-      # NON-ZERO on a regression, which aborts the job — so without this the one
-      # commit guaranteed to have no artifact is the one that regressed, and the
+      # if: always() is load-bearing, not defensive. Under the ADVISORY tier the ratchet
+      # step above no longer exits non-zero on a regression — but it still can on a
+      # wiring error (an unknown --tier, an asymmetric memory arm), and any earlier step
+      # can abort the job — so without this the one commit at risk of having no artifact
+      # is exactly the one something went wrong on, and the
       # `history` job's own `always()` (which exists for exactly this case) has
       # nothing to download. That is how #385's merge produced a chart that jumps
       # straight from its parent to the next commit, and why the regression was
