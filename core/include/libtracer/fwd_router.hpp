@@ -635,6 +635,9 @@ class fwd_router_t {
      * malformed or non-FWD frame is dropped. Never blocks on a downstream peer
      * beyond the transport's own bounded send.
      *
+     * Runs on the calling (transport RX) thread and takes graph and router locks — the
+     * caller must hold no transport-internal locks across this call.
+     *
      * @param inbound_name This node's NAME for the link the frame arrived on.
      * @param frame        The complete inbound FWD frame bytes (borrowed; consumed
      *                     before this call returns — sends happen inline).
