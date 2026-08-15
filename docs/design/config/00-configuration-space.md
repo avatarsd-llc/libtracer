@@ -165,15 +165,15 @@ is a knob the fragment does not state at all (#1244).
 
 | knob | kind | default | ESP-IDF |
 | --- | --- | --- | --- |
-| `kVertexLockStripes` (`config.hpp:95`) | count | 16 | menuconfig `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` (`integrations/esp-idf/libtracer/CMakeLists.txt:279`) |
-| `kCacheLineBytes` (`:119`) | padding width | 64 | derived from `CONFIG_FREERTOS_UNICORE`, not exposed (`integrations/esp-idf/libtracer/CMakeLists.txt:297`) |
+| `kVertexLockStripes` (`config.hpp:95`) | count | 16 | menuconfig `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` (`integrations/esp-idf/libtracer/CMakeLists.txt:280`) |
+| `kCacheLineBytes` (`:119`) | padding width | 64 | derived from `CONFIG_FREERTOS_UNICORE`, not exposed (`integrations/esp-idf/libtracer/CMakeLists.txt:298`) |
 | `kHazardReaderSlots` (`:146`) | count | 64 | inherited — the refcount slot never builds the domain |
-| `kEdgePinSlots` (`:159`) | count | 32 | set to 8 (`integrations/esp-idf/libtracer/CMakeLists.txt:292`) |
+| `kEdgePinSlots` (`:159`) | count | 32 | set to 8 (`integrations/esp-idf/libtracer/CMakeLists.txt:293`) |
 | `kMaxVertexBytes64` / `kMaxVertexBytes32` (`:195` / `:213`) | RAM ratchet | 96 / 72 | the preset — deliberately not overridable |
 | `kPinPayloadRatio` (`:237`) | ratio | 0 — the `kPinNever` sentinel | the preset |
 | `acl_policy_t` (`:246`) | policy type | `allow_only_policy_t` | inherited — the full policy is not selectable |
 | `lkv_slot_t` (`:262`) | policy type | `sp_atomic_slot_t` | inherited — the hazard slot is not selectable |
-| `kSpinWaitSafe` (`:390`) | target fact | `true` | derived from `IDF_TARGET` — `false` on every chip, `true` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:313`) |
+| `kSpinWaitSafe` (`:390`) | target fact | `true` | derived from `IDF_TARGET` — `false` on every chip, `true` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:314`) |
 | `kWeaklyOrdered` (`:311`) | target fact | `true` | inherited — every ESP chip is weakly ordered, which is the default |
 
 Two CMake variables survive for one transition release, `-DLIBTRACER_ACL_FULL` and

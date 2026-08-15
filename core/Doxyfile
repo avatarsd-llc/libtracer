@@ -56,6 +56,7 @@ INPUT                  = core/include/libtracer/config.hpp \
                          core/include/libtracer/tlv_arena.hpp \
                          core/include/libtracer/tlv_emit.hpp \
                          core/include/libtracer/path_ref.hpp \
+                         core/include/libtracer/path_label.hpp \
                          core/include/libtracer/tracer.hpp \
                          core/include/libtracer/child_registry.hpp \
                          core/include/libtracer/op_resolve.hpp \
@@ -75,6 +76,7 @@ INPUT                  = core/include/libtracer/config.hpp \
                          core/include/libtracer/fwd_frame_view.hpp \
                          core/include/libtracer/grammar.hpp \
                          core/include/libtracer/route_handle.hpp \
+                         core/include/libtracer/path_label_table.hpp \
                          core/include/libtracer/ws.hpp \
                          core/include/libtracer/crc.hpp \
                          core/include/libtracer/loopback.hpp \
