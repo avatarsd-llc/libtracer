@@ -59,6 +59,7 @@ set(LIBTRACER_SRCS
     "${LIBTRACER_ROOT}/core/src/op_resolve.cpp"
     "${LIBTRACER_ROOT}/core/src/op_resolve_view.cpp"
     "${LIBTRACER_ROOT}/core/src/route_handle.cpp"
+    "${LIBTRACER_ROOT}/core/src/path_label_table.cpp"
     "${LIBTRACER_ROOT}/core/src/fwd_router.cpp"
     "${LIBTRACER_ROOT}/core/src/transport_vertex.cpp"
     "${LIBTRACER_ROOT}/core/src/loopback.cpp"
