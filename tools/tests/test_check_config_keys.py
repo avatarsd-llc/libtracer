@@ -78,6 +78,28 @@ class DeriveKeys(unittest.TestCase):
         """
         self.assertEqual(cck.derive_keys(src), {})
 
+    def test_marked_reader_is_not_connection_config(self):
+        # transport_vertex.cpp's shape since RFC-0014 S2b: the creation-SPEC ENVELOPE walk
+        # and the universal-key config walk live in ONE file, so the file cannot be excluded
+        # wholesale — the marked reader is exempted and the unmarked one still counts.
+        src = """
+            const wire::config_reader_t pairs(&spec);  // config-keys: not-connection-config
+            const auto n = pairs.name("name");
+            const config_reader_t cfg(config);
+            if (const auto v = cfg.name("addr")) ...;
+        """
+        self.assertEqual(cck.derive_keys(src), {"addr": "name"})
+
+    def test_the_marker_must_sit_on_the_construction_line(self):
+        # A marker in a PRECEDING comment does not exempt the reader: the rule is per line,
+        # so an exemption is always visible next to the thing it exempts.
+        src = """
+            // config-keys: not-connection-config
+            const config_reader_t cfg(config);
+            if (const auto v = cfg.name("addr")) ...;
+        """
+        self.assertEqual(cck.derive_keys(src), {"addr": "name"})
+
     def test_flag_and_u8_are_distinguishable(self):
         src = """
             const config_reader_t cfg(c);

@@ -274,7 +274,11 @@ result_t<void> transport_vertex_t::endpoint_create_locked(const std::string& mod
     // SPEC{ NAME "name" NAME <seg>, NAME "config" SETTINGS{ pairs }? } — no `type` and no
     // `role`: the module in the path already says both (RFC-0014 §1). Read through the ONE
     // pair-consuming walk, exactly as `graph_t::create_child` reads the `:children[]` SPEC.
-    const wire::config_reader_t pairs(&spec);
+    // The marker below exempts THIS reader from the connection-config page gate: it walks the
+    // SPEC ENVELOPE (`name`, `config`), not a connection config, so its keys are no kind's and
+    // belong on no row of docs/modules/connection-config.md. `graph_t::create_child` reads the
+    // other door's envelope through the same type and is excluded there for the same reason.
+    const wire::config_reader_t pairs(&spec);  // config-keys: not-connection-config
     const std::string_view name = pairs.name("name").value_or(std::string_view{});
     // `name` is REQUIRED and stays required (ADR-0073 §5, #622): an omitted name with a
     // node-assigned fallback would cost retry idempotency — a create retried over a link

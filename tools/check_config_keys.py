@@ -65,6 +65,16 @@ EXCLUDED = {
 
 # `const config_reader_t cfg(raw_config);` -> the variable every accessor hangs off.
 READER_CTOR = re.compile(r"\bconfig_reader_t\s+([A-Za-z_]\w*)\s*\(")
+# A reader construction line carrying this marker (as a trailing comment ON the ctor line
+# — the exemption is matched per line, so a marker in a preceding comment block does not
+# reach it) reads something that is NOT connection
+# config, so the keys it takes are not this page's subject. It is the per-reader form of
+# the whole-file `EXCLUDED` above, needed since RFC-0014 S2b put the creation-SPEC
+# ENVELOPE walk (`name`, `config`) in `transport_vertex.cpp` — the same file that also
+# holds the universal-key parse the page DOES document, so the file cannot be excluded
+# wholesale. The exemption is by VARIABLE NAME within the file, so an exempted reader
+# must not share its name with a documented one in the same translation unit.
+NOT_CONFIG = re.compile(r"config-keys:\s*not-connection-config")
 # `cfg.flag("insecure")` -> (receiver, accessor, key).
 ACCESSOR = re.compile(r"\b([A-Za-z_]\w*)\s*\.\s*(name|u8|u16|u32|flag)\s*\(\s*\"([^\"]*)\"\s*\)")
 
@@ -106,8 +116,16 @@ def derive_keys(text):
     future type) cannot smuggle a phantom key into the derived set. A file that
     constructs no reader derives nothing — which is how `builtin_transport_udp.cpp`
     proves it has no kind-private keys rather than merely being unmentioned.
+
+    A construction line carrying a trailing `config-keys: not-connection-config` marker
+    is skipped: its reader walks a different grammar (the creation-SPEC envelope), so its
+    keys belong to no kind and to no row on this page.
     """
     readers = set(READER_CTOR.findall(text))
+    # Drop the readers marked as reading something other than connection config.
+    for line in text.splitlines():
+        if NOT_CONFIG.search(line):
+            readers.difference_update(READER_CTOR.findall(line))
     if not readers:
         return {}
     keys = {}

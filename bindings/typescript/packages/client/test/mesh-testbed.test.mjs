@@ -193,21 +193,27 @@ test('mesh testbed: form a cyclic multi-node mesh in band, then route across it'
     // Ordinary vertex enumeration (NOT peer enumeration). RFC-0014 §1: /net enumerates the
     // MODULES, and each module enumerates its member connections — so a node's dials and its
     // listeners now list separately, which is the whole point of per-module scoping.
+    //
+    // Each module also lists its `conn` CREATOR ENDPOINT (RFC-0014 S2b) alongside the member
+    // connections: the endpoint is a real vertex under the module. Hiding it from this
+    // listing is S4 (the enumeration-hide seam), which does not exist yet — so it is
+    // asserted here rather than papered over, and these lines change again when S4 lands.
     assert.deepEqual(listingNames(await cli.a.readField(['net'], ':children[]')),
                      ['ws-client', 'ws-server']);
     assert.deepEqual(listingNames(await cli.a.readField(['net', 'ws-client'], ':children[]')),
-                     ['b', 'bus']);
+                     ['b', 'bus', 'conn']);
     assert.deepEqual(listingNames(await cli.a.readField(['net', 'ws-server'], ':children[]')),
-                     ['c', 'ctrl']);
+                     ['c', 'conn', 'ctrl']);
     // The module lists its children in NAME order, not dial order: b dials c first, yet
     // `bus` is listed first. (`hub` sorted after `c`, which is why this line moved.)
     assert.deepEqual(listingNames(await cli.b.readField(['net', 'ws-client'], ':children[]')),
-                     ['bus', 'c']);
+                     ['bus', 'c', 'conn']);
     assert.deepEqual(listingNames(await cli.b.readField(['net', 'ws-server'], ':children[]')),
-                     ['a', 'ctrl']);
-    assert.deepEqual(listingNames(await cli.c.readField(['net', 'ws-client'], ':children[]')), ['a']);
+                     ['a', 'conn', 'ctrl']);
+    assert.deepEqual(listingNames(await cli.c.readField(['net', 'ws-client'], ':children[]')),
+                     ['a', 'conn']);
     assert.deepEqual(listingNames(await cli.c.readField(['net', 'ws-server'], ':children[]')),
-                     ['b', 'ctrl']);
+                     ['b', 'conn', 'ctrl']);
     // The bus only ever listens, so it has no client module at all.
     assert.deepEqual(listingNames(await cli.bus.readField(['net'], ':children[]')), ['ws-server']);
     assert.deepEqual(listingNames(await cli.bus.readField(['net', 'ws-server'], ':children[]')),
@@ -318,9 +324,10 @@ test('mesh testbed: form a cyclic multi-node mesh in band, then route across it'
     assert.equal(new Set(peers).size, 2, 'the two dialers carry two distinct slot names');
 
     // NO vertex exists for a peer — the listing is synthesized on every read, so the module
-    // still holds exactly its two CONNECTIONS however many peers are audible.
+    // still holds exactly its two CONNECTIONS however many peers are audible (plus its own
+    // `conn` creator endpoint, which S4 will hide).
     assert.deepEqual(listingNames(await cli.bus.readField(['net', 'ws-server'], ':children[]')),
-                     ['ctrl', 'mesh']);
+                     ['conn', 'ctrl', 'mesh']);
   });
 });
 
