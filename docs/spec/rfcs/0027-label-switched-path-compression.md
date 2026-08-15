@@ -641,8 +641,8 @@ binding, and RFC-0024 is the cross-node generalization of the same primitive at 
 and says so (§4.4, §5.1, §5.3, §7.2, §8.1, §8.2, §8.3) rather than re-deriving them.
 
 Three things in RFC-0024's *normative* text collide with this design. Per the house rule they were
-**flagged** in the proposed draft, not silently overridden. ~~**none of them is decided by this
-document.**~~ **All three were RULED by the maintainer on 2026-08-15 as part of this RFC's
+**flagged** in the proposed draft, not silently overridden, and the draft added that ~~**none of
+them is decided by this document.**~~ **All three were RULED by the maintainer on 2026-08-15 as part of this RFC's
 transition proposed → accepted**, which is the point at which an RFC's own text may be edited; each
 subsection below now records its resolution beside the collision it resolves, and the collisions are
 retained rather than deleted so the reasoning survives:
