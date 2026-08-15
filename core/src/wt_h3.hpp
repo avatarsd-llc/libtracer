@@ -307,9 +307,24 @@ inline std::optional<std::string> read_string_body(std::span<const std::uint8_t>
 }  // namespace detail
 
 /**
+ * @brief The most field lines one encoded field section may carry (#1305).
+ *
+ * The input cap on a field section is in BYTES (kMaxHandshakeBytes, 16 KiB) but
+ * the decoder's cost is per ELEMENT: the cheapest representation is a one-byte
+ * Indexed Field Line, so a byte cap alone lets an UNAUTHENTICATED peer turn
+ * 16 KiB into ~16 400 elements. Only an element-count bound closes that gap.
+ * The extended-CONNECT handshake needs five field lines (`:method`,
+ * `:protocol`, `:scheme`, `:authority`, `:path`) and the 200 response one, so
+ * 32 is generous for every section this codec is ever asked to decode.
+ */
+inline constexpr std::size_t kMaxFieldSectionHeaders = 32;
+
+/**
  * Decode a complete QPACK encoded field section under the zero-dynamic-table
  * contract (see the file header): Required Insert Count MUST be 0 and every
- * representation must be static/literal. nullopt = malformed or out of subset.
+ * representation must be static/literal. nullopt = malformed, out of subset, or
+ * more than kMaxFieldSectionHeaders field lines — all three are refusals the
+ * caller already scopes to the stream.
  */
 inline std::optional<std::vector<header_t>> decode_field_section(std::span<const std::uint8_t> in) {
     // Encoded Field Section Prefix: Required Insert Count (8-bit prefix) +
@@ -323,6 +338,9 @@ inline std::optional<std::vector<header_t>> decode_field_section(std::span<const
 
     std::vector<header_t> out;
     while (!in.empty()) {
+        // Every arm below appends exactly one field line, so the ceiling is
+        // enforced once, here, before any of them can allocate.
+        if (out.size() >= kMaxFieldSectionHeaders) return std::nullopt;
         const std::uint8_t b = in[0];
         if ((b & 0x80) != 0) {
             // Indexed Field Line: 1 T IIIIII — static only (T=1).

@@ -200,6 +200,25 @@ void test_wt_h3_field_sections() {
     // Dynamic-table use (Required Insert Count != 0) is out of subset.
     const std::array<std::uint8_t, 3> dyn{0x02, 0x00, 0xc1};
     check(!tr::net::wt_h3::decode_field_section(dyn), "RIC != 0 (dynamic table) is rejected");
+
+    // #1305 — the header-count ceiling. One-byte Indexed Field Lines are the
+    // cheapest input per element, so the BYTE cap on a field section does not
+    // bound the decoder's cost; the element ceiling does.
+    const auto indexed_lines = [](std::size_t n) {
+        std::vector<std::uint8_t> s{0x00, 0x00};
+        for (std::size_t i = 0; i < n; ++i)
+            s.push_back(static_cast<std::uint8_t>(0xc0 | 15));  // :method: CONNECT
+        return s;
+    };
+    const auto at_ceiling = tr::net::wt_h3::decode_field_section(
+        indexed_lines(tr::net::wt_h3::kMaxFieldSectionHeaders));
+    check(at_ceiling && at_ceiling->size() == tr::net::wt_h3::kMaxFieldSectionHeaders,
+          "a section exactly at the header ceiling still decodes");
+    check(!tr::net::wt_h3::decode_field_section(
+              indexed_lines(tr::net::wt_h3::kMaxFieldSectionHeaders + 1)),
+          "one field line past the ceiling is refused");
+    check(!tr::net::wt_h3::decode_field_section(indexed_lines(16'000)),
+          "16 KiB of one-byte indexed lines is refused, not amplified");
 }
 
 // ---- end-to-end: the C++ WebTransport client against the C++ server ----
