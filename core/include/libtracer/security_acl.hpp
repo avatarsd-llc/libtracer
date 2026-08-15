@@ -15,10 +15,19 @@
  *   - full_acl_policy_t   — the security_acl host module (ordered
  *     first-match-per-bit with DENY), selected by LIBTRACER_ACL_FULL.
  *
- * The typed ACE parse/build (`ace_t` ↔ wire ACL TLV, docs/reference/05 §0x0A)
- * lives here too, so ACE edge cases (expiry, INHERIT, ordering) are
- * unit-testable without a live graph and tests need no hand-rolled byte
- * builders.
+ * The typed ACE parse/build (`ace_t` ↔ wire ACL TLV, docs/reference/05 §0x0A) lives
+ * here too, so ACE edge cases (expiry, INHERIT, ordering) are unit-testable without a
+ * live graph and tests need no hand-rolled byte builders.
+ *
+ * The ACE RECORDS themselves are one header up, in `libtracer/acl_ace.hpp` (#868). They
+ * used to be declared in `vertex.hpp` while their evaluation lived here, so this header
+ * pulled a 3400-line vertex hub to name four types it owns the meaning of — the straddle
+ * #868 set out to end. It is ended by giving the records their own home rather than by
+ * folding them in beside the evaluator, because the two halves sit on OPPOSITE sides of
+ * the vertex: `vertex_ext_t` stores a `std::vector<ace_t>`, so the records are compiled by
+ * every net-plane TU, while nothing in the vertex core calls the policies or the codec.
+ * Declaring the records here would drag this header along with them — measured at 15 -> 100
+ * dependent TUs — and an ACL evaluation edit would rebuild the tree. See `acl_ace.hpp`.
  */
 #pragma once
 
@@ -29,12 +38,12 @@
 #include <string_view>
 #include <vector>
 
+#include "libtracer/acl_ace.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/config.hpp"
 #include "libtracer/frame.hpp"
 #include "libtracer/status.hpp"
 #include "libtracer/tlv_emit.hpp"
-#include "libtracer/vertex.hpp"
 
 /**
  * @file
