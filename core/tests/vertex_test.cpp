@@ -6,7 +6,9 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * Covers: store/read_stored (LKV + seq bump), the STREAM ring keep-last trim and the
+ * Covers: the #867 visibility guard (the map-lock mutators are graph_t's, enforced by
+ * `static_assert` because no runtime test can observe access control),
+ * store/read_stored (LKV + seq bump), the STREAM ring keep-last trim and the
  * RFC-0008 §E drain cursor, wait_for_change wake/timeout, snapshot_edges under a
  * concurrent add_edge storm (inline→heap crossover included), clear_edge, the
  * transient-local add_edge latch, and set_acl/with_acl/with_aces.
@@ -22,6 +24,7 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <span>
 #include <string_view>
 #include <thread>
 #include <vector>
@@ -43,7 +46,44 @@ using tr::graph::subscriber_t;
 using tr::graph::vertex_t;
 using tr::view::rope_t;
 
+using tr::graph::handlers_t;
 using tr::testing::check;
+
+// -- #867 ruling 2: the map-lock mutators are graph_t's, and the COMPILER enforces it ------
+//
+// Access checking happens during substitution, so an inaccessible member makes a
+// requires-expression FALSE rather than ill-formed: these assertions observe the visibility
+// itself, which no runtime test can. Reverting the `private:` hunk in `vertex.hpp` re-satisfies
+// every concept below and turns this TU into three compile errors — that ablation IS the
+// evidence, since a green suite says nothing about an encapsulation the compiler owns.
+
+/** @brief True iff a caller outside `graph_t` can stamp a registration's identity onto a vertex. */
+template <typename V>
+concept fills_identity = requires(V& v) { v.fill(role_t::STORED_VALUE, handlers_t{}); };
+
+/** @brief True iff a caller outside `graph_t` can flip a vertex back to a placeholder. */
+template <typename V>
+concept unregisters = requires(V& v) { v.mark_unregistered(); };
+
+/** @brief True iff a caller outside `graph_t` can splice a node into the Composite child list. */
+template <typename V>
+concept adopts_child = requires(V& v, std::unique_ptr<V> c) { v.add_child(std::move(c)); };
+
+static_assert(!fills_identity<vertex_t>,
+              "#867: fill() is unique-map-lock state — only graph_t may stamp an identity");
+static_assert(!unregisters<vertex_t>,
+              "#867: mark_unregistered() is unique-map-lock state — only graph_t may retire");
+static_assert(!adopts_child<vertex_t>,
+              "#867: add_child() mutates the Composite tree — only graph_t may splice it");
+
+/** @brief What deliberately STAYS public on a bare vertex: the read + verb surface the
+ *         storage-layer tests below drive with no graph_t in sight. */
+static_assert(requires(vertex_t& v) {
+    v.role();
+    v.registered();
+    v.has_registered_child();
+    v.child_by_record(std::span<const std::byte>{});
+});
 
 /** @brief A single-link rope over a fresh owned heap segment holding one byte `b`. */
 rope_t make_value(std::uint8_t b) {

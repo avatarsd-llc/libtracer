@@ -77,6 +77,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **`graph::vertex_t::fill()`, `mark_unregistered()` and `add_child()` are `private` — the
+  map-lock mutators belong to `graph_t`, and the compiler now says so**
+  ([#867](https://github.com/avatarsd-llc/libtracer/issues/867), ruling 2). All three mutate
+  state whose invariant is "written only under `graph_t`'s UNIQUE map lock" — the registration
+  identity, the placeholder bit and the Composite child list — yet all three sat in `vertex_t`'s
+  first `public:` block, so any caller holding a `vertex_t*` could stamp an identity, retire a
+  node or splice the tree with no lock held and no ACL consulted.
+  [PR #1133](https://github.com/avatarsd-llc/libtracer/pull/1133) closed the half of this that
+  handed the pointer out (`subscription_t` became opaque); this closes the verbs themselves.
+  `vertex_t` now declares `friend class graph_t`, which is the only caller in tree (`graph.cpp`
+  — `register_vertex_key`, `retire_subtree`, `register_session_anchor`). **Pure visibility: no
+  signature, no body and no layout changed**, and the six hot-symbol ratchet pins come back
+  `+0`. `store()` deliberately stays public — it is the storage-layer verb the bare-`vertex_t`
+  unit tests drive with no `graph_t` in sight, and no public API hands out a graph-owned
+  `vertex_t*` for it to be abused through.
 - **`<libtracer/vertex.hpp>` split into five headers — no type moved out of `tr::graph`, and
   every one of them is still reachable through `vertex.hpp`**
   ([#868](https://github.com/avatarsd-llc/libtracer/issues/868)). The vertex hub had grown to

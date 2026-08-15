@@ -644,6 +644,9 @@ class vertex_t {
         return retire_gen_.load(std::memory_order_acquire);
     }
 
+   private:
+    friend class graph_t;  // sole caller of the map-lock mutators below (#867).
+
     /**
      * @brief Fill this node with a registration's identity: set the role and handlers, and
      *        mark it @ref registered.
@@ -661,8 +664,8 @@ class vertex_t {
     }
 
     /** @brief Flip this vertex back to a placeholder (invisible to `find`) — retirement's
-     *         inverse of the `registered_ = true` in @ref fill. Map-lock state; the caller
-     *         (`graph_t::retire`) MUST hold the graph map lock, same as @ref fill's writer.
+     *         inverse of the `registered_ = true` in `fill`. Map-lock state; the caller
+     *         (`graph_t::retire`) MUST hold the graph map lock, same as `fill`'s writer.
      *         Pairs with @ref revert_to_placeholder, which clears the vertex's own state. */
     void mark_unregistered() noexcept {
         if (!registered_) return;  // `retire_subtree` walks placeholders too
@@ -675,6 +678,7 @@ class vertex_t {
         if (parent_ != nullptr) parent_->refresh_registered_child();
     }
 
+   public:
     /** @brief Recompute `flag_t::REGISTERED_CHILD`. Unique-map-lock callers only. */
     void refresh_registered_child() noexcept {
         bool any = false;
@@ -695,7 +699,7 @@ class vertex_t {
      * exactly why this was invisible for so long: a flat aggregate reads like "scales fine"
      * until you notice that flat across a 24x thread range means each thread is 24x slower.
      *
-     * The counter is mutated only by @ref fill and @ref mark_unregistered, both of which run
+     * The counter is mutated only by `fill` and `mark_unregistered`, both of which run
      * under the graph's UNIQUE map lock, so mutations are already serialized; the atomic is
      * what makes the *read* race-free. A reader concurrent with a registration may observe
      * either side of it — exactly as it could when the fork took a shared lock, since the
@@ -712,6 +716,7 @@ class vertex_t {
         return test_flag(flag_t::REGISTERED_CHILD, std::memory_order_acquire);
     }
 
+   private:
     /**
      * @brief Adopt @p child into this node's child list and link its parent pointer.
      *
@@ -736,6 +741,7 @@ class vertex_t {
         return raw;
     }
 
+   public:
     /**
      * @brief The child whose own NAME record equals @p record byte-for-byte, or `nullptr` —
      *        one level of the O(segments) resolution walk (ADR-0057).
@@ -1920,7 +1926,7 @@ class vertex_t {
      * `set_delivery_mode` may run concurrently on another thread (#895) while this read holds
      * NO lock — which is the whole reason it needs to be atomic, and what distinguishes it
      * from the other plain members of the same byte group: `registered_` is map-lock state on
-     * both sides (see @ref mark_unregistered), so a plain `bool` is correct there.
+     * both sides (see `mark_unregistered`), so a plain `bool` is correct there.
      */
     [[nodiscard]] delivery_mode_t delivery_mode() const noexcept {
         return delivery_mode_.load(std::memory_order_relaxed);
@@ -2334,7 +2340,7 @@ class vertex_t {
     }
 
     /**
-     * @brief Install a registration's identity (constructor + @ref fill): allocate the
+     * @brief Install a registration's identity (constructor + `fill`): allocate the
      *        extension block iff this identity needs one — STREAM role (history ring) or
      *        any user handler — and store the cold members there. A plain leaf allocates
      *        nothing (#361 §1).
@@ -2481,7 +2487,7 @@ class vertex_t {
      *
      * Finds @p c by binary search on its own NAME record rather than by a stored index, which is
      * what lets @ref for_each_descendant ascend with no auxiliary storage. The list is kept
-     * sorted by that record (@ref add_child), so this is the same `lower_bound` @ref
+     * sorted by that record (`add_child`), so this is the same `lower_bound` @ref
      * child_by_record performs — O(log children).
      *
      * Identity is by ADDRESS, not by name: `lower_bound` lands on the first record that is not
