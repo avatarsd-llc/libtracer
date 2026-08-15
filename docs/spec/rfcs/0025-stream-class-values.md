@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0025 |
 | **Title** | Stream-class values: delivery classes over the rope primitive |
-| **Status** | **in-comment** (opened 2026-08-12; comment window **waived by default** per [GOVERNANCE](../../../.github/GOVERNANCE.md) single-maintainer rule — invoked explicitly only if outside input is wanted) |
+| **Status** | **accepted** (opened 2026-08-12, accepted 2026-08-12 by the merge of [PR #1192](https://github.com/avatarsd-llc/libtracer/pull/1192); implementation tracked by [#1204](https://github.com/avatarsd-llc/libtracer/issues/1204)). The comment window is **waived by default** per [GOVERNANCE](../../../.github/GOVERNANCE.md) single-maintainer rule — invoked explicitly only if outside input is wanted, and it was not invoked here. This line previously read `in-comment`, which under the waived-by-default rule is a state the RFC never occupied. |
 | **Author(s)** | AvatarSD (maintainer), with AI drafting |
 | **Created** | 2026-08-12 |
 | **Tracking issue** | [#879](https://github.com/avatarsd-llc/libtracer/issues/879) (folds [#863](https://github.com/avatarsd-llc/libtracer/issues/863), per-subscription delivery QoS) |
