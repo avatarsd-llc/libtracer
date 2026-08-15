@@ -922,6 +922,35 @@ struct fwd_rebuild_t {
     std::span<const std::byte> mount_tlv;
     /** @brief A 4-byte NAME header for @ref extra_seg. */
     std::array<std::byte, 4> extra_hdr;
+    /**
+     * @brief The inbound frame's trailer-TIMESTAMP window, re-emitted VERBATIM as the
+     *        outgoing frame's last bytes (#1109) — offset in bits 0-30, FORM in bit 31.
+     *
+     * Zero ⇒ the frame carried no stamp, unambiguously: a trailer sits past a TLV's own
+     * 4-byte header, so no stamped frame has a window at offset 0. Bit 31 (@ref kTsNarrow)
+     * is the `opt.TF` form the PRODUCER chose and this hop relays rather than picks —
+     * clear = the WIDE absolute stamp (8 bytes), set = the NARROW relative one (4). Read it
+     * through @ref ts_off and @ref ts_bytes, never raw. The CRC half of an inbound trailer
+     * is NOT here and never will be: the rebuilt body invalidates it, so it is dropped
+     * rather than forwarded stale (see @ref stack_writer::header).
+     *
+     * **One 4-byte word here, rather than an offset and a width at the end of this struct,
+     * is MEASURED, not tidiness** (#1235). It occupies the alignment hole after
+     * @ref extra_hdr, which keeps `sizeof(fwd_rebuild_t)` at **256**. The two `std::size_t`
+     * fields this replaced pushed it to 272, and that alone — with the members NEVER READ,
+     * the ablation that proved it — cost `fwd-demux-fixed 79B/fan1/1ep` **p50 +9.6% /
+     * throughput −9.3%** on the pinned host. A 264-byte intermediate (two `std::uint32_t`s)
+     * still cost +9.5%, so the step is at 256 and it is the whole object's size that
+     * matters, not the field count. Packing the form INTO the word rather than deriving it
+     * from the emitted head is measured too: the derived form left the rope hop's
+     * `route_fwd_forward` 16 B larger and the demux row 5 ns short of the parent, where this
+     * shape returns both to it.
+     *
+     * A frame whose body ends past @ref kTsNarrow cannot express its window here, so the
+     * rebuild drops the stamp AND its header bits together rather than declaring a trailer
+     * it will not emit — a 2 GiB single TLV, which no shipped transport will carry.
+     */
+    std::uint32_t ts_window = 0;
     /** @brief One dynamically-named trailing mount segment — a bus PEER, whose name is not
      *         known until the frame arrives and so cannot be precomputed. Empty means none;
      *         referenced, not copied, so it must outlive @ref gather. */
@@ -948,18 +977,24 @@ struct fwd_rebuild_t {
     stack_writer<4 + wire::kPathRefElementBytes> mint;
     std::size_t ref_body_off = 0; /**< @brief The trailing `PATH_REF`'s existing element array. */
     std::size_t ref_body_len = 0; /**< @brief Its length; 0 with a written @ref mint is H = 0. */
+    /** @brief @ref ts_window's bit 31: the stamp is the NARROW relative form (`opt.TF` set). */
+    static constexpr std::uint32_t kTsNarrow = 0x8000'0000u;
+
     /**
-     * @brief The inbound frame's trailer-TIMESTAMP window `[ts_off, ts_off + ts_len)`,
-     *        re-emitted VERBATIM as the outgoing frame's last bytes (#1109).
+     * @brief The preserved trailer timestamp's WIDTH in bytes — 0 (none), 4 (narrow) or 8
+     *        (wide), as the producer spelled it (#1109).
      *
-     * Zero length ⇒ the frame carried no stamp. Set for a stamped frame in either form
-     * (TF=0's 8 bytes or TF=1's 4 — this hop relays, it does not interpret), with the
-     * matching TS/TF bits preserved on the fresh head1 header. The CRC half of an inbound
-     * trailer is NOT here and never will be: the rebuilt body invalidates it, so it is
-     * dropped rather than forwarded stale (see @ref stack_writer::header).
+     * The forwarder never chooses a width: it reports the one @ref ts_window recorded from
+     * the inbound head, and @ref rebuild_fwd_forward sets that word and the outgoing head's
+     * TS/TF bits from the same `opt` in one place, so the emitted trailer and the header
+     * declaring it cannot disagree.
      */
-    std::size_t ts_off = 0;
-    std::size_t ts_len = 0; /**< @brief Trailer-TS byte count (0 / 4 / 8). */
+    [[nodiscard]] std::size_t ts_bytes() const {
+        return ts_window == 0 ? 0u : ((ts_window & kTsNarrow) != 0 ? 4u : 8u);
+    }
+
+    /** @brief The window's byte offset into the SOURCE cursor (bit 31 masked off). */
+    [[nodiscard]] std::size_t ts_off() const { return ts_window & ~kTsNarrow; }
 
     /** @brief True ⇔ every head fits its stack buffer (else the caller drops). */
     [[nodiscard]] bool ok() const { return head1.ok() && head2.ok() && mint.ok(); }
@@ -1005,9 +1040,27 @@ struct fwd_rebuild_t {
         // The preserved trailer timestamp goes LAST — after the whole body, mint included —
         // because that is where the grammar's `total = header + length + ts_size` reads it
         // (#1109). Verbatim source bytes: this hop reads no clock and rewrites no stamp.
-        if (ts_len > 0) cur.for_each_span(ts_off, ts_len, push);
+        if (const std::size_t ts = ts_bytes(); ts > 0) cur.for_each_span(ts_off(), ts, push);
     }
 };
+
+/**
+ * @brief The forward hop's stack object stays at or under **256 bytes** — a MEASURED ratchet
+ *        (#1235), not a style rule.
+ *
+ * This object is built on the stack of every forwarded frame, and its size is load-bearing
+ * on the shipped fast path: growing it to 272 by adding two `std::size_t` fields cost
+ * `fwd-demux-fixed 79B/fan1/1ep` **p50 +9.6% / throughput −9.3%** on the pinned host, and an
+ * ablation that added the same 16 bytes and NEVER READ THEM cost exactly the same — so the
+ * price is the size, not the work. A 264-byte intermediate was still +9.5%. The regression
+ * shipped for 16 samples because it walked under every PR-gate threshold; this assert is
+ * what makes the next such growth a compile error instead. A field that will not fit belongs
+ * in an alignment hole, or packed into a word that is already there (see
+ * @ref fwd_rebuild_t::ts_window).
+ */
+static_assert(sizeof(fwd_rebuild_t) <= 256,
+              "fwd_rebuild_t is a per-hop stack object; growing it past 256 B measurably "
+              "regresses the forward demux path (#1235)");
 
 /**
  * @brief The mint accumulation half of a forwarded REPLY's rebuild (RFC-0024 §7.1 step 2),
@@ -1322,16 +1375,24 @@ template <class Cursor, class MintFn = no_mint_t, class ReverseMintFn = no_mint_
     // relays (a hop does not interpret the value; the anchorless-TF=1 MUST-reject binds
     // where the stamp is CONSUMED). An inbound CRC is dropped, not preserved: the body
     // this hop emits differs from the one the CRC covered (see stack_writer::header).
-    if (outer_opt.ts) {
-        r.ts_off = body_end;
-        r.ts_len = outer_opt.tf ? 4u : 8u;
+    //
+    // The window is ONE word — offset plus the producer's form bit (`ts_window`, 4 bytes in
+    // an alignment hole, which is what keeps this struct at 256; #1235). A body ending past
+    // `kTsNarrow` cannot express its offset there, so the stamp and its header bits are
+    // dropped TOGETHER: a head that declares a trailer the gather cannot emit would be a
+    // frame its own receiver rejects, which is strictly worse than relaying it unstamped.
+    const bool keep_ts = outer_opt.ts && body_end < fwd_rebuild_t::kTsNarrow;
+    if (keep_ts) {
+        r.ts_window =
+            static_cast<std::uint32_t>(body_end) | (outer_opt.tf ? fwd_rebuild_t::kTsNarrow : 0u);
     }
 
     // head1: FWD header + op (copied) + new (shrunk) dst header. head2: new (grown)
     // src header + the prepended inbound NAME. Both fixed stack buffers — ZERO heap
     // on the forward hop (ADR-0038 inv. #2). An overflow (a malformed op TLV larger
     // than the buffer) yields an empty span ⇒ the caller drops, never a buffer overrun.
-    r.head1.header(wire::type_t::FWD, new_fwd_body, outer_opt);
+    r.head1.header(wire::type_t::FWD, new_fwd_body,
+                   keep_ts ? outer_opt : outer_opt.without_trailer());
     cur.for_each_span(op_pos, op_total, [&](std::span<const std::byte> s) { r.head1.raw(s); });
     // A bound `dst` re-heads as a `PATH_REF` with `opt = 0`: the shrink is an element, and the
     // body it now describes is still a fixed-stride record array, so `PL` stays clear

@@ -157,6 +157,25 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **BREAKING — `net::fwd_rebuild_t`'s trailer-TS window is one `std::uint32_t ts_window`
+  (offset + form bit) read through `ts_off()` / `ts_bytes()`; `ts_off`/`ts_len` as fields are
+  gone, and the struct is size-ratcheted at 256 B**
+  ([#1235](https://github.com/avatarsd-llc/libtracer/issues/1235)). The two `std::size_t`
+  fields #1109 added pushed this per-hop STACK object from 256 to 272 bytes, and that alone
+  cost `fwd-demux-fixed 79B/fan1/1ep` **p50 +9.6% / throughput −9.3%** on the pinned host —
+  a step that held for 16 samples because it walked under every PR-gate threshold. It is the
+  SIZE, not the work: an ablation that added the same 16 bytes and NEVER READ them reproduced
+  the regression exactly, while a 264-byte intermediate (two `std::uint32_t`s) was still
+  +9.5%. The window now occupies the alignment hole after `extra_hdr` as a single word —
+  offset in bits 0-30, the producer's `opt.TF` form in bit 31 — which restores the row to the
+  pre-#1198 band. A `static_assert(sizeof(fwd_rebuild_t) <= 256)` makes the next such growth
+  a compile error rather than a bench-series reading. **Wire behaviour is unchanged** —
+  #1109's stamp preservation, its TF=0 wide / TF=1 narrow relay (the width stays the
+  producer's choice; the forwarder never picks one) and the dropped inbound CRC all still
+  hold — with one new degenerate case stated rather than left implicit: a frame whose body
+  ends past 2 GiB cannot express its window, so the stamp and its header bits are dropped
+  TOGETHER instead of a head declaring a trailer the gather cannot emit.
+
 - **BREAKING — `net::can_link_t` is now a TWO-PHASE seam: construction opens the link,
   `start()` begins reading**
   ([#1186](https://github.com/avatarsd-llc/libtracer/issues/1186)). The seam documented
