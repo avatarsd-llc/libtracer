@@ -290,7 +290,7 @@ the role default. Extra transport kinds join the catalog through `register_trans
 file ever learning about it.
 
 **The write is ACL-gated.** The `:children[]` append is gated on the parent vertex's `CREATE`
-right and denied with `PERMISSION_DENIED` otherwise (`core/src/graph.cpp:2594-2595`). Under
+right and denied with `PERMISSION_DENIED` otherwise (`core/src/graph.cpp:2594-2627`). Under
 [RFC-0014 — creator endpoint, connection lifecycle and link liveness](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)
 that gate relocates onto the creator endpoint's own ACL and gains its removal counterpart: a `NAME`
 write is gated on `WRITE` — **not** `DELETE` — per

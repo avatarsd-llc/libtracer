@@ -321,10 +321,8 @@ Enforcement sits at the resolver, not at the codec. Three rules, in the order a 
 - **The resolver enforces the child-type rule**, when it turns a PATH into a vertex lookup key.
   A non-NAME child makes the address unspellable, so the op answers `ERROR{tr::path::invalid}`
   (`0x0021`) — *not* `tr::path::not_found`, which would wrongly assert that the address was
-  well-formed but absent. The distinction is about *disposition*: `invalid` tells a peer to stop,
-  `not_found` tells it the address may yet appear. (Enforcement also **precedes creation** on
-  every arm that still creates — a local write-create, a branch-write landing — so an
-  illegally-spelled path materializes nothing.)
+  well-formed but absent. Enforcement **precedes write-create**: a `WRITE` to an
+  illegally-spelled path creates nothing.
 - **The length and segment-count limits** are bounded where the address is constructed or
   admitted, not at decode.
 
@@ -490,7 +488,7 @@ Precedence is by position, with zero merge logic: the two parts describe disjoin
 A write whose payload TLV is a POINT is a **branch write** ([RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md)): the written tree is rooted **at the target vertex** — the root POINT's `NAME` MUST equal the target's leaf segment (mismatch ⇒ `ERROR{tr::path::invalid}`) — and it **decomposes**:
 
 - Each **value-carrying node** (a POINT with a `VALUE` child) is stored at the corresponding descendant vertex — the target's path extended by the chain of NAMEs — as a refcount-bumped **subview of the written frame** (zero copy, never re-encoded). Values are the truth at the vertices where they land; a branch is a view.
-- A landing vertex that does not exist is **created**, `mkdir -p` style, gated by the `CREATE` access bit on the nearest existing ancestor's effective ACL (§`0x0A`). Decomposition creates on the **remote** arm too, and needs no carve-out from [RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md) §D amendment 1: a branch write lands *beneath a `dst` that already resolved*, so the nearest existing ancestor is real and the `CREATE` check always runs, and the depth is bounded by the POINT nesting of a frame the peer already had to fit. What amendment 1 withdrew is the **unresolved-`dst`** create, where neither of those holds.
+- A landing vertex that does not exist is **created**, `mkdir -p` style, gated by the `CREATE` access bit on the nearest existing ancestor's effective ACL (§`0x0A`) — this is the same **write-creates** rule that applies to any data write to a nonexistent path.
 - Each covered subscription point is notified **once** with the smallest subview covering every value landed at-or-below it: the `VALUE` slice at a leaf landing site, the node's whole POINT subtree at an interior node, and the written TLV as-is at the root (and, via §`0x04` bubbling, above it).
 - **Strict shape** in a branch write: a node's children are exactly the leading `NAME`, at most one `VALUE`, and zero or more POINT sub-branches; anything else — or any trailer-carrying node in the tree — is rejected with `ERROR{tr::schema::type_mismatch}` and nothing lands (stored values are trailer-less at rest, [ADR-0041](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0041-terminus-arena-decode-span-contract.md) §4). A branch with no `VALUE` anywhere is a valid no-op.
 - **One store per vertex; no branch transaction.** A read of any vertex returns its latest stored value — never behind what a subscriber saw, legitimately newer. Admission (shape + ACL + creation gating) is all-or-nothing, but application is per-leaf: cross-leaf atomicity is **explicitly not promised**; snapshot coherence is the coherent-sampling `(origin, ts)` group ([ADR-0019](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0019-per-producer-monotonic-origin-timestamp.md)).
@@ -663,7 +661,7 @@ ACL (PL=1) {                                ; outer = ACE collection
 }
 ```
 
-`access_mask` bits: `READ=0x01 WRITE=0x02 SUBSCRIBE=0x04 CREATE=0x08 DELETE=0x10 READ_ACL=0x20 WRITE_ACL=0x40 WRITE_OWNER=0x80` (`0x100`+ reserved). The **`admin`** right is `WRITE_ACL` (modify the ACL / delegate); `CREATE` gates vertex creation — both the [RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md) write-creates path (local writes and branch-write landings; a remote write to an unresolved `dst` no longer creates at all, per §D amendment 1) and the creator endpoint of §`0x0E` ([ADR-0059](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md), which supersedes the `:children[]` creation-field spelling of [ADR-0017](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0017-in-band-vertex-creation-controller-orchestration.md)).
+`access_mask` bits: `READ=0x01 WRITE=0x02 SUBSCRIBE=0x04 CREATE=0x08 DELETE=0x10 READ_ACL=0x20 WRITE_ACL=0x40 WRITE_OWNER=0x80` (`0x100`+ reserved). The **`admin`** right is `WRITE_ACL` (modify the ACL / delegate); `CREATE` gates vertex creation — both the [RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md) write-creates path and the creator endpoint of §`0x0E` ([ADR-0059](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md), which supersedes the `:children[]` creation-field spelling of [ADR-0017](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0017-in-band-vertex-creation-controller-orchestration.md)).
 
 **Inheritance:** an ACE with `INHERIT` on a composite vertex applies to its whole subtree; a vertex's *effective* ACL is its own ACEs + inherited ancestor ACEs ([ADR-0020](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0020-acl-nfsv4-style-aces-with-inheritance.md)). **Evaluation:** ALLOW/DENY, ordered, first-match-per-bit. The **wire layout is the full NFSv4 model**; the required-modules MCU profile enforces a subset (ALLOW-only, single `INHERIT` flag); full DENY/ordered evaluation is the `security_acl` host module.
 
@@ -1174,9 +1172,9 @@ Vector: `path/path-value-children-illegal`.
 
 The related failure mode: answering `tr::path::not_found` instead of `tr::path::invalid`
 asserts that the address was well-formed but absent, which sends a peer retrying an address it
-can never spell. And because enforcement precedes creation, an implementation that checks the
-child type *after* the mkdir-p branch materializes vertices for addresses the spec says cannot
-be spelled — on a local write or a branch-write landing, the two arms that still create.
+can never spell. And because enforcement precedes write-create, an implementation that checks
+the child type *after* the mkdir-p branch materializes vertices for addresses the spec says
+cannot be spelled.
 
 ### Treating the field namespace as a list of readable facets
 
