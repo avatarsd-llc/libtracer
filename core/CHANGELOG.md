@@ -16,6 +16,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`net::route_handle_t::copy_local_route()` — the warm COMPACT delivery observation no longer
+  re-pays the owning lookup** ([#917](https://github.com/avatarsd-llc/libtracer/issues/917)).
+  A COMPACT that resolves to a local terminus took the allocation-free
+  `resolved()` view, wrote the payload, and then — whenever an
+  `fwd_router_t::on_compact_delivery` observer was installed — called `lookup_ingress()` again
+  purely to name the bound route for it. That is the whole two-allocation owning copy (a
+  `std::string` plus a `std::vector`) `resolved()` exists to remove, re-paid on every observed
+  frame. The new accessor copies just the terminus route bytes out under the link's own mutex
+  into caller storage: the steady-state observed delivery now allocates **nothing**, and an
+  observer that merely watches can no longer turn a delivery into an allocation-failure drop.
+  It returns the route's full size (`0` ⇒ no binding, or a forwarding swap, which has no local
+  route); a return greater than the destination's size means nothing was written and the
+  caller falls back to `lookup_ingress()`. No behaviour change for hosts that install no
+  observer, and none in what an observer is handed.
+
 - **`net::transport_t::egress_source()` / `set_egress_source()` — the egress gather draws from
   an INJECTED `mem::block_source_t`, not the process default**
   ([#1287](https://github.com/avatarsd-llc/libtracer/issues/1287), family 1 of

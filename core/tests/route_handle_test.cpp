@@ -22,6 +22,7 @@
 
 #include "libtracer/route_handle.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -661,6 +662,53 @@ void refused_bind_unwinds_the_take() {
     }
 }
 
+/**
+ * @brief `copy_local_route` — the allocation-free route read the warm COMPACT arm uses (#917).
+ *
+ * Four outcomes, and the reason all four are asserted is that the accessor reports them
+ * through ONE `std::size_t`: the caller distinguishes "gone" from "too long for my buffer"
+ * only by comparing the return against its own capacity. A test that checked the fitting case
+ * alone would let the too-long case silently degrade into "no observation at all", which is
+ * indistinguishable from a delivery that never happened.
+ */
+void copy_local_route_outcomes() {
+    std::printf(" copy_local_route (the warm arm's allocation-free route read):\n");
+    route_handle_t h;
+
+    const std::vector<std::byte> want = route_bytes(7);
+    handle_binding_t term;
+    term.terminus = true;
+    term.local_route = want;
+    check(h.bind_ingress("in", 3, std::move(term)), "a terminus binding with a route exists");
+    check(h.bind_ingress("in", 4, forward_binding("down")),
+          "and a forwarding swap, which has none");
+
+    // 1) It fits: the full route is written and its size returned.
+    std::array<std::byte, 16> buf{};
+    const std::size_t n = h.copy_local_route("in", 3, buf);
+    check(n == want.size(), "a fitting route reports its own size");
+    check(std::equal(want.begin(), want.end(), buf.begin()),
+          "and the bytes land byte-exact in the caller's buffer");
+
+    // 2) It does NOT fit: the size is still reported, and nothing is written. The untouched
+    //    buffer is the load-bearing half — the caller falls back to the owning form, so a
+    //    partial copy here would be a TRUNCATED route reported as a whole one.
+    std::array<std::byte, 2> tiny{};
+    const std::size_t big = h.copy_local_route("in", 3, tiny);
+    check(big == want.size(), "a route too long for the buffer still reports its size");
+    check(tiny[0] == std::byte{0} && tiny[1] == std::byte{0},
+          "and writes NOTHING — a short buffer is never partially filled");
+
+    // 3) A forwarding swap has no local route, and 4) an absent binding/link is the same 0.
+    check(h.copy_local_route("in", 4, buf) == 0, "a forwarding swap reports 0 (no local route)");
+    check(h.copy_local_route("in", 99, buf) == 0, "an unbound label reports 0");
+    check(h.copy_local_route("nope", 3, buf) == 0, "an unknown link reports 0, not a crash");
+
+    // The teardown window `cache_resolution` already guards, on this door too.
+    h.clear_link("in");
+    check(h.copy_local_route("in", 3, buf) == 0, "a departed link reports 0");
+}
+
 int main() {
     std::printf("route_handle_t (Brick 4 — per-connection pmr label tables):\n");
 
@@ -690,6 +738,7 @@ int main() {
     reconnect_inside_advertise();
     reconnect_race_invariant();
     refused_bind_unwinds_the_take();
+    copy_local_route_outcomes();
 
     return tr::testing::summary("route_handle");
 }

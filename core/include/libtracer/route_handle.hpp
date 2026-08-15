@@ -281,6 +281,32 @@ class route_handle_t {
     [[nodiscard]] resolved_binding_t resolved(std::string_view in_link, std::uint16_t label) const;
 
     /**
+     * @brief Copy a TERMINUS binding's local route bytes out, without allocating.
+     *
+     * The warm-COMPACT companion to @ref resolved. `resolved_binding_t` deliberately omits
+     * the route bytes because a warm delivery does not need them to WRITE — but an installed
+     * @ref fwd_router_t::on_compact_delivery observer is handed them, and serving it through
+     * @ref lookup_ingress made the warm path re-pay the whole owning copy (a `std::string`
+     * plus a `std::vector`) that @ref resolved exists to remove, per frame.
+     *
+     * The bytes are copied under the link's own mutex into caller storage rather than handed
+     * to a callback from under it: the observer is host code, and the lock order this class
+     * establishes is registry → table, so invoking anything re-entrant while holding a table
+     * mutex would invert it against @ref clear_link.
+     *
+     * @param in_link This node's NAME for the inbound link.
+     * @param label   The inbound label.
+     * @param out     Destination; written only when the route FITS.
+     * @return The route's full size in bytes — `0` when no binding exists (or it is a
+     *         forwarding swap, which has no local route). A return greater than
+     *         `out.size()` means nothing was written and the route is too long for @p out;
+     *         the caller falls back to the owning @ref lookup_ingress. Callers must
+     *         therefore test the returned size against @p out's, never assume a copy.
+     */
+    [[nodiscard]] std::size_t copy_local_route(std::string_view in_link, std::uint16_t label,
+                                               std::span<std::byte> out) const;
+
+    /**
      * @brief Record the resolution @p r against (@p in_link, @p label) so later frames skip it.
      *
      * Idempotent and best-effort: a binding that vanished between resolve and cache is simply
