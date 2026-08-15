@@ -203,7 +203,9 @@ it is a bug against a published rule, not a consequence of this proposal.)
 
 - `opt.PL` MUST be `0`. The body is not a child sequence.
 - The body is zero or more **segment records**, each `[u8 len][len bytes of UTF-8]`, in order.
-- `len` MUST be in `1..64`. `len == 0` is **reserved** (§8) and MUST be rejected by a resolver.
+- `len` MUST be in `1..64`. `len == 0` is the **escape record** of §8. It is **rejected in
+  canonical context and admissible in a frame path** — see §5.4 (Amendment 1); prior to that
+  amendment this clause read "reserved (§8) and MUST be rejected by a resolver" unconditionally.
 - Total path length ≤ 1024 bytes; segment count ≤ 255
   ([RFC-0023](0023-path-segment-cap-repriced-32-to-255.md)). *(Unchanged by this RFC, and both
   are already normative in `docs/reference/03-addressing.md` §path syntax. Under the packed body
@@ -260,6 +262,49 @@ rise, the correct instrument is §8's reserved escape, not a variable-width leng
 - **Arena child nodes for `PATH`.** With `opt.PL=0` the arena emits no per-segment child nodes, so
   every `path.children()` consumer on a `PATH` must be rewritten to walk the packed body. This is
   the largest single code cost and the draft's cost section did not name it.
+
+### 5.4 Amendment 1 (2026-08-15, ruled) — `len == 0` is the label escape, and this RFC implements first
+
+[RFC-0027](0027-label-switched-path-compression.md) §5.3.1 ruled its label element to be a
+self-describing element rather than a tag on a name segment. That ruling and this RFC's body
+grammar cannot both stand unchanged: after this RFC a `PATH` is `opt.PL=0` and holds **no child
+TLVs**, so there is no position for RFC-0027's `PATH_LABEL` child. **Ruled 2026-08-15:** the
+label element is carried in **§8's reserved escape**, and this RFC implements **before**
+RFC-0027's element car so the 8-byte child spelling is never built.
+
+**The escape, now normative.** A record with `len == 0` is:
+
+```
+00 <u8 kind> <u8 len> <len bytes>
+```
+
+For RFC-0027's label, `kind = 0x16` and `len = 4` (u32 LE: u16 index, u16 generation) — **7 B per
+element**, one byte under the 8 B of RFC-0027 §3.3's arithmetic, which that RFC re-runs on this
+spelling. The shape is §8's verbatim recommendation and is chosen for the reason §8 gave: it is
+self-delimiting, so the node least likely to implement minting can **skip** an escape record by
+length instead of hard-rejecting a frame it is only forwarding.
+
+**Where it is rejected, and why that is not a weakening.** The escape is admissible in a **frame
+path** only. It MUST be rejected wherever a path is used as a **canonical key** —
+`path_lookup_key` and every `key_view_t` comparison — because a label is not canonical bytes.
+That is RFC-0027 §5.3 sub-question 3, ruled here jointly because §5's injectivity guarantee
+depends on it: canonical keys stay pure-string and one-spelling-per-address, so §5.1's
+byte-prefix-implies-ancestor invariant is untouched and the existing `key_view` ancestor tests
+still must pass unmodified. A resolver that receives an escape record in key context rejects
+exactly as it does today.
+
+**Cost, on the axes this project judges by.** *Latency:* one comparison against zero per segment,
+on a walk that already bounds-checks the length it just loaded — §8's original argument, unchanged.
+Pure-string paths, which is every path until a hop mints, take the not-taken branch. *NARROW:*
+7 B/element and skip-by-length rather than reject; a node that never mints pays one predictable
+branch and no state. *WIDE:* neutral; the mint table, not the encoding, is where RFC-0027's
+per-hop state lives.
+
+**Implementation order is now a constraint, not a preference.** [#680](https://github.com/avatarsd-llc/libtracer/issues/680)
+(this RFC, at S0) lands before [#1325](https://github.com/avatarsd-llc/libtracer/issues/1325)'s
+element car. Taken in the other order the project would ship an 8 B child spelling and then
+migrate a shipped resolver to 7 B — one element with two wire spellings across a migration, which
+is the outcome this ruling exists to avoid.
 
 ## 6. Costs and blast radius
 
@@ -357,6 +402,12 @@ The recommended shape, **if** a label inside an address is ever justified, is
 `kind` can still *skip* it by length rather than hard-rejecting. This deliberately differs from
 the naive `00 <u16 label>` form: on an MCU, the node least likely to implement folding is exactly
 the node that must still step over it.
+
+> **This is no longer hypothetical (Amendment 1, §5.4).** RFC-0027's label element is carried in
+> exactly this escape with `kind = 0x16`, `len = 4`. The paragraph below explains why *`FOLD`* was
+> deferred; RFC-0027 is not `FOLD` — it is a host-assigned slot rather than a content-derived
+> fold, its motivating measurement is the +21.3 ns/segment terminus term rather than the refuted
+> depth-scaling premise, and it was accepted on that basis.
 
 **`FOLD` is deferred because its motivating measurement was refuted (§2.1) and its remaining case
 is not yet distinguishable from the mechanism that already ships.** RFC-0004 §E.1's `COMPACT`
