@@ -7,7 +7,7 @@
  * address-derived stripe selection, and the separately-guarded condvar table.
  *
  * Extracted from `vertex.hpp` (#868). This is process-global state, not vertex state —
- * a `constinit` table plus three free functions — and it was the one part of that header
+ * a `constinit` table plus its lookup functions — and it was the one part of that header
  * with no dependency on any vertex type at all, which is why it comes out cleanly.
  */
 #pragma once
