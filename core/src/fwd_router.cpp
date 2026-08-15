@@ -2153,15 +2153,12 @@ bool fwd_router_t::deliver_local(std::span<const std::byte> route_path,
     return graph_.write(*v, *payload_view, caller).has_value();
 }
 
-graph::result_t<void> fwd_router_t::subscribe_toward(const graph::path_t& producer,
-                                                     const graph::path_t& target) {
-    const std::optional<graph::vertex_handle_t> v = graph_.find(producer.key());
-    if (!v) return std::unexpected(graph::status_t::NOT_FOUND);
-
+graph::wire_target_split_t fwd_router_t::split_subscriber_target(
+    std::span<const std::byte> key) const {
     // Walk the target key's NAME records into the segment spans the shared descent takes —
     // the SAME resolve_mount_by the forward path walks a frame's dst into, so a bound
     // route and a routed frame cannot disagree about where a mount ends (ADR-0061).
-    const std::span<const std::byte> key = target.key();
+    //
     // The key's NAME records are walked LAZILY, exactly as the forward path walks a frame's
     // `dst` — no array, so a target routing through a mount of any width binds (#523). The
     // two fixed `kMountPeekMax`-sized arrays this replaces truncated a deeper target to its
@@ -2184,16 +2181,37 @@ graph::result_t<void> fwd_router_t::subscribe_toward(const graph::path_t& produc
     };
 
     const mount_hit_t hit = resolve_mount_by(registry_, key_at, key_retain);
-    // No mount, an exact-mount target (nothing below it to deliver to), or a bus PEER
-    // first hop (no directed registry entry to store — see the header doc) all fail the
-    // same way the string parser fails an unroutable spelling.
+    // NO mount at all is the one outcome that is not an error: the target names something
+    // this node terminates, which each caller answers for itself (RFC-0021 §4.B.2 / §7 q3 at
+    // the wire door, `INVALID_PATH` at `subscribe_toward`, which exists only to bind a
+    // mount-path target).
+    if (hit.link == nullptr && !hit.rejected) return {};
+    // A bus link's own NAME as the next hop (`rejected`, ADR-0073 §3 / RFC-0020), a bus PEER
+    // first hop (no directed registry entry to store — see `subscribe_toward`'s header doc,
+    // #741), and a target naming the mount EXACTLY (nothing below it to deliver to) are all
+    // the same answer: a mount was named, and no directed delivery can be bound through it.
     if (hit.link == nullptr || !hit.peer.empty() || walk.end_of(hit.strip_k) >= key.size())
-        return std::unexpected(graph::status_t::INVALID_PATH);
+        return graph::wire_target_split_t{.unroutable = true};
+    // The residual NAME records are reused verbatim: the key suffix IS the route payload.
+    return graph::wire_target_split_t{.link = hit.link_name,
+                                      .residual = key.subspan(walk.end_of(hit.strip_k))};
+}
+
+graph::result_t<void> fwd_router_t::subscribe_toward(const graph::path_t& producer,
+                                                     const graph::path_t& target) {
+    const std::optional<graph::vertex_handle_t> v = graph_.find(producer.key());
+    if (!v) return std::unexpected(graph::status_t::NOT_FOUND);
+
+    // The SAME descent the wire door borrows through the RFC-0021 seam, so the host-local
+    // dual and its wire twin cannot disagree about what a mount-path target means.
+    const graph::wire_target_split_t split = split_subscriber_target(target.key());
+    // No mount, an exact-mount target, or a bus PEER first hop all fail the same way the
+    // string parser fails an unroutable spelling.
+    if (split.link.empty()) return std::unexpected(graph::status_t::INVALID_PATH);
 
     // The return route is the residual below the mount, as ONE owned PATH TLV — the
-    // single copy every delivery then clones by refcount (ADR-0041 §2). The residual
-    // NAME records are reused verbatim: the key suffix IS the route payload.
-    const std::span<const std::byte> residual = key.subspan(walk.end_of(hit.strip_k));
+    // single copy every delivery then clones by refcount (ADR-0041 §2).
+    const std::span<const std::byte> residual = split.residual;
     std::vector<std::byte> route_tlv;
     wire::emit_tlv(route_tlv, wire::type_t::PATH, wire::opt_t{.pl = true}, residual);
     const auto route_view = view::over_bytes(route_tlv);
@@ -2207,7 +2225,7 @@ graph::result_t<void> fwd_router_t::subscribe_toward(const graph::path_t& produc
     const auto sub_view = view::over_bytes(sub_tlv);
     if (!sub_view) return std::unexpected(graph::status_t::BACKPRESSURE);
 
-    return graph_.subscribe_wire(*v, *sub_view, *route_view, std::string(hit.link_name));
+    return graph_.subscribe_wire(*v, *sub_view, *route_view, std::string(split.link));
 }
 
 void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const view::rope_t& value) {

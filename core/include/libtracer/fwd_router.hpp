@@ -208,6 +208,16 @@ class fwd_router_t {
                 return static_cast<fwd_router_t*>(ctx)->connection_ref(inbound_link);
             },
             this);
+        // The wire `:subscribers[]` door's target descent (RFC-0021, #491): a SUBSCRIBER's
+        // PATH child is an address in THIS node's frame, so deciding whether it leaves the
+        // node is a mount question — the transport plane's, which L4 cannot name. Installed
+        // here, through the same captureless {fn, ctx} pair, so a node that HAS a transport
+        // plane resolves mount-path targets and one that does not cannot.
+        graph_.configure_wire_target_resolver(
+            [](void* ctx, std::span<const std::byte> key) -> graph::wire_target_split_t {
+                return static_cast<fwd_router_t*>(ctx)->split_subscriber_target(key);
+            },
+            this);
     }
 
     fwd_router_t(const fwd_router_t&) = delete;
@@ -329,6 +339,24 @@ class fwd_router_t {
      */
     [[nodiscard]] graph::result_t<void> subscribe_toward(const graph::path_t& producer,
                                                          const graph::path_t& target);
+
+    /**
+     * @brief Split a subscriber target key at the mount it routes through (RFC-0021 §4.B) —
+     *        the descent @ref subscribe_toward and the wire `:subscribers[]` door share.
+     *
+     * The one place "does this target leave this node, and over which link" is decided, so
+     * the host-local dual and its wire twin (#491) cannot drift. Runs the ADR-0061 strip-K
+     * descent over the child registry, exactly as the forward path resolves a frame's `dst`.
+     *
+     * @param key The target's canonical key — concatenated `NAME` records. Its bytes must
+     *            outlive the returned split, whose `residual` borrows from them.
+     * @return `{}` (empty link, not unroutable) ⇔ NO mount matched — the target names
+     *         something this node terminates; `unroutable` ⇔ a mount was named but no
+     *         directed delivery can be bound through it; otherwise the mount's registry NAME
+     *         and the residual below it.
+     */
+    [[nodiscard]] graph::wire_target_split_t split_subscriber_target(
+        std::span<const std::byte> key) const;
 
     // -- bound paths (RFC-0024) -------------------------------------------------------
     // The origin's half of the bound form. The forwarder's half needs no API: it is a

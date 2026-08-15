@@ -2311,6 +2311,10 @@ void graph_t::configure_remote_delivery_sink(remote_delivery_fn_t fn, void* ctx)
     remote_sink_.set(fn, ctx);
 }
 
+void graph_t::configure_wire_target_resolver(wire_target_fn_t fn, void* ctx) noexcept {
+    wire_target_.set(fn, ctx);
+}
+
 result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view_t source_view, view_t return_route,
                                        std::string link, view_t reverse_route) {
     vertex_t* v = vh.get();
@@ -2335,21 +2339,62 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view_t source_view, v
     // and are not read again after it.
     if (!parse_wire_subscriber(*sub, s)) return std::unexpected(status_t::TYPE_MISMATCH);
     s.source_view = std::move(source_view);
-    // A PATH child names the consumer at ITS origin — never a local re-dispatch target;
-    // remote delivery rides the return route over the link (RFC-0004 §D). This door is the
-    // one that CLEARS the key the two field-write arms REQUIRE, so it stays out of the
-    // shared helper.
+    // RFC-0021 §4.A/§4.B.1: the `PATH` child, when it routes through a MOUNT, is the delivery
+    // target spelled in THIS (the producer's) frame — the same frame a `FWD`'s `dst` is
+    // resolved in, because a delivery IS a write (RFC-0004 §D). Binding it here is what makes
+    // third-party origination expressible (#491): the edge takes the MOUNT's link and the
+    // residual below it, so `evict_link_edges(<the writer's session>)` no longer matches and
+    // the subscription outlives the orchestrator that wrote it (§4.C — the whole point).
+    //
+    // Only the mount-routed arm is bound. A `PATH` that matches NO mount keeps today's
+    // arrival-session binding: §4.B.2's purely-local arm is §7's unruled open question 3, and
+    // in-tree wire senders (the TypeScript client's `subscribe`, most of `acl_test`) still
+    // spell the target in the CONSUMER's own frame, which §B.3's rejection would refuse
+    // outright. What is NOT tolerated is the mount-involving failure — §F: a target that
+    // names a mount it cannot deliver through must be an error, never a silent degrade to the
+    // arrival session, because that silence is exactly what made #491 look like it worked.
+    std::vector<std::byte> mount_route_tlv;  // outlives `route_view` below
+    // The link this edge DELIVERS over — the arrival link until a mount-routed target moves
+    // it. `link` itself is left alone: it is the ACL subject context the SUBSCRIBE gate and
+    // every delivery run under (#81, ADR-0026, RFC-0021 §E — the gate is the WRITER's, even
+    // when the data goes somewhere else), so the two must not be the same variable.
+    std::string delivery_link = link;
+    if (s.target_key && !s.target_key->empty()) {
+        if (const auto slot = wire_target_.get(); slot.fn != nullptr) {
+            const wire_target_split_t split = slot.fn(slot.ctx, *s.target_key);
+            if (split.unroutable) return std::unexpected(status_t::INVALID_PATH);
+            if (!split.link.empty()) {
+                // The residual as ONE owned PATH TLV — the single copy of the route every
+                // later delivery clones by refcount (ADR-0041 §2), the shape the accumulated
+                // `src` arrives in. An empty residual never reaches here: the descent reports
+                // a mount named exactly as `unroutable`.
+                wire::emit_tlv(mount_route_tlv, type_t::PATH, opt_t{.pl = true}, split.residual);
+                std::optional<view_t> route_view = view::over_bytes(mount_route_tlv);
+                if (!route_view) return std::unexpected(status_t::BACKPRESSURE);
+                return_route = *std::move(route_view);
+                delivery_link.assign(split.link);
+                // The reverse bound route is the ARRIVAL link's (RFC-0024 §7.1): it spells the
+                // way back to the writer, which is not where this edge delivers. Drop it —
+                // the mount route is canonical-only.
+                reverse_route = view_t{};
+            }
+        }
+    }
+    // A PATH child that named no mount stays what it always was here: the consumer at ITS
+    // origin, never a local re-dispatch target — remote delivery rides the return route over
+    // the link (RFC-0004 §D). This door is the one that CLEARS the key the two field-write
+    // arms REQUIRE, so it stays out of the shared helper.
     s.target_key.reset();
     subscriber_remote_t& r = s.ensure_remote();  // a wire subscriber always carries the cold half
-    r.caller = link;  // the fan-in gate context this edge's deliveries run under (#81)
+    r.caller = std::move(link);  // the fan-in gate context this edge's deliveries run under (#81)
     r.return_route = std::move(return_route);
     // The completed reverse bound route (RFC-0024 §7.1 amendment 1) — empty for every
     // canonical-only subscribe, and stored WITHOUT validation beyond what the resolver
     // already did: element 0 is this node's own mint, re-validated on every delivery.
     r.reverse_route = std::move(reverse_route);
-    r.link = std::move(link);
-    const std::string gate_ctx = r.caller;  // survives the move above (the SUBSCRIBE gate
-                                            // runs under the inbound link, #81/ADR-0026)
+    r.link = std::move(delivery_link);
+    const std::string gate_ctx = r.caller;  // the SUBSCRIBE gate runs under the ARRIVAL link
+                                            // (#81/ADR-0026), not the delivery one
     // A wire subscribe carries no host handle back — discard the slot (unsubscribe is the
     // wire :subscribers[N] clear, not this door's return).
     if (const auto r2 = admit_subscriber(v, std::move(s), gate_ctx); !r2)
