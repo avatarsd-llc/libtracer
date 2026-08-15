@@ -21,6 +21,26 @@
 # `tr::net::config_reader_t` accessor calls that actually read those keys. It needs the
 # same two trees (`docs/**`, `core/**`), the same zero build, and the same ~0.1 s, so a
 # second workflow would only duplicate this one's checkout.
+#
+# RUNNER ROUTING (self-hosted `ci-local`). This job's filter is the widest in the repo,
+# so it is also the one that fires most often — which is exactly what makes it worth
+# moving off hosted queue time. The guard in `runs-on:` picks the self-hosted runners
+# only when the run is trusted: this repository (not a fork of it) AND (the event is not
+# a pull_request OR the PR head branch lives in this same repository).
+#
+# SECURITY (public repo + self-hosted runner): fork code must never execute on the
+# self-hosted machine — those runners are non-ephemeral hardware on the maintainer's
+# network, and a fork PR runs attacker-authored steps. The expression is the ONLY thing
+# standing between a fork PR and that machine; keep it verbatim, and note Actions cannot
+# expand a YAML anchor or read a job `env:` from `runs-on:`, so it is repeated per job
+# by necessity. A fork PR falls back to `ubuntu-24.04`, so this required check never
+# waits on hardware a fork cannot use.
+#
+# CONTAINER: the self-hosted runners are bare machines with no preinstalled tool set and
+# no passwordless sudo, so the job runs in `container: ubuntu:24.04` on BOTH routes.
+# That image ships python 3.12 — the very version `setup-python` was pinning — so the
+# interpreter pin now comes from the image and the action is gone with it, one less
+# moving part in a job whose whole point is that it needs no toolchain.
 name: doc-citations
 
 on:
@@ -83,12 +103,16 @@ concurrency:
 
 jobs:
   check:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
+    container: ubuntu:24.04
     steps:
+      # Runs as root inside the container — never `sudo`. `git` + `ca-certificates`
+      # come first because checkout falls back to a REST tarball without them.
+      - name: python3 + git (container has no preinstalled tool set)
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3 git ca-certificates
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
       # The resolver reads three citation spellings (full path, basename shorthand,
       # bare `:N` continuation) and must not guess; its unit tests run FIRST so a
       # resolver bug reports as a resolver bug rather than as 300 phantom drifts.
