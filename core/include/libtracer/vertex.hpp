@@ -36,6 +36,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -504,6 +505,10 @@ struct vertex_ext_t {
     vertex_ext_t& operator=(const vertex_ext_t&) = delete;
 };
 
+/** @brief Declared here so @ref vertex_t can befriend the #1285 member-offset gate; defined
+ *         just after the type it measures. */
+struct vertex_layout_gate_t;
+
 /**
  * @brief An L4 graph vertex: a named, addressable position holding a value, a bounded
  *        history, or a user handler (docs/reference/11 §roles).
@@ -645,7 +650,8 @@ class vertex_t {
     }
 
    private:
-    friend class graph_t;  // sole caller of the map-lock mutators below (#867).
+    friend class graph_t;                // sole caller of the map-lock mutators below (#867).
+    friend struct vertex_layout_gate_t;  // reads the private member offsets the #1285 gate pins.
 
     /**
      * @brief Fill this node with a registration's identity: set the role and handlers, and
@@ -2405,10 +2411,18 @@ class vertex_t {
     // padding — 8-byte, then 4-byte, then flag bytes), with everything the write hot
     // path touches (LKV slot, subs, ext, seq, counters, mode flags) in the first ~96
     // bytes and the wide Composite child storage at the tail.
-
-    path_key_t name_;  // own canonical NAME record (one segment; empty at the root) — the
-                       // full key is rendered on demand by walking parent_ (ADR-0057);
-                       // immutable once the node is linked (lock-free parent walks)
+    //
+    // WITHIN the leading 8-byte group the LKV slot comes FIRST, and that is load-bearing
+    // rather than cosmetic (#1285). The slot is 16 bytes wide with an alignment of only 8,
+    // so at an offset of 24 — where it sat while `name_` led the group — its two words
+    // straddle a 64-byte cache line for exactly one of the four block alignments glibc can
+    // hand out (`address % 64 == 32`). That placement doubles the coherence footprint of
+    // every publish and was measured at x0.34 throughput with 1.9x the cache misses on the
+    // 8-thread single-vertex write arm. Starting the slot at a 16-byte-aligned offset makes
+    // the straddle unreachable for ANY 16-byte-aligned block, and offset 0 is the one such
+    // offset that needs no padding to reach: the reorder is free, `sizeof(vertex_t)` is
+    // unchanged on both ABIs, and @ref vertex_layout_gate_t pins it. `alignas(16)` on the
+    // member would NOT be free — it leaves an 8-byte hole and spends the #361 ratchet.
 
     // The stored value is a rope (ADR-0053 §6): a contiguous scalar is a single-link
     // rope (small-buffer inline, no extra alloc), a chunked stream keeps its links.
@@ -2419,6 +2433,11 @@ class vertex_t {
      *         documents that caveat and the contract any replacement must satisfy. Do not
      *         read "lock-free" here as "no serializing operation". */
     lkv_slot_t lkv_{};
+
+    path_key_t name_;  // own canonical NAME record (one segment; empty at the root) — the
+                       // full key is rendered on demand by walking parent_ (ADR-0057);
+                       // immutable once the node is linked (lock-free parent walks)
+
     // The fan-out edges (#635). Null until this vertex is first subscribed to, which is the
     // overwhelming majority of an MCU node's vertices — where an always-present empty
     // std::vector cost 24 B (12 on rv32) of pure header. Allocated once by ensure_edges under
@@ -2531,6 +2550,44 @@ class vertex_t {
         ++it;
         return it == sorted.end() ? nullptr : it->get();
     }
+};
+
+/**
+ * @brief The cache-line straddle gate (#1285), enforced beside the type it constrains.
+ *
+ * `lkv_` is the contended word of the write hot path: with the default `sp_atomic_slot_t`
+ * binding this libstdc++ keeps the spin lock as the LSB of the slot's second word, so N
+ * concurrent writers do `lock cmpxchg` on one address inside the slot. The slot is 16 bytes
+ * wide but only 8-byte aligned, so an offset that is 8-aligned-but-not-16 lets its two words
+ * land on DIFFERENT 64-byte cache lines for one of the four block alignments glibc can return
+ * — doubling the coherence footprint of every publish (measured x0.34 throughput, 1.9x cache
+ * misses, at `address % 64 == 32` with the slot at offset 24).
+ *
+ * Pinning the offset to a multiple of 16 makes that placement unreachable: any 16-byte-aligned
+ * block puts a 16-aligned interior offset back on a 16-byte boundary, and 16 bytes starting on
+ * a 16-byte boundary cannot cross a 64-byte one. This is a LAYOUT invariant, not an allocation
+ * one — 64-byte-aligning the vertex itself is a separate, RAM-costing decision that belongs to
+ * #873 / ADR-0079's placement store. The gate lives in the header for the same reason the size
+ * ratchets below do: every translation unit on every target evaluates it under its own binding,
+ * so a future member reorder cannot silently reintroduce the straddle.
+ *
+ * `offsetof` on a non-standard-layout type is conditionally supported; GCC and Clang both
+ * accept it and warn under `-Winvalid-offsetof`, which is suppressed narrowly here.
+ */
+struct vertex_layout_gate_t {
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winvalid-offsetof"
+#endif
+    static_assert(offsetof(vertex_t, lkv_) % 16 == 0,
+                  "vertex_t::lkv_ must start at a 16-byte-aligned offset (#1285) — otherwise "
+                  "the 16-byte, 8-aligned atomic slot straddles a 64-byte cache line for one "
+                  "malloc placement in four and the contended write path loses ~3x. Reorder "
+                  "the members to restore it; do NOT pad or alignas, that spends the #361 "
+                  "RAM ratchet asserted below");
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 };
 
 /**
