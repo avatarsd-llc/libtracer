@@ -214,10 +214,16 @@ test('mesh testbed: form a cyclic multi-node mesh in band, then route across it'
                      ['a', 'conn']);
     assert.deepEqual(listingNames(await cli.c.readField(['net', 'ws-server'], ':children[]')),
                      ['b', 'conn', 'ctrl']);
-    // The bus only ever listens, so it has no client module at all.
-    assert.deepEqual(listingNames(await cli.bus.readField(['net'], ':children[]')), ['ws-server']);
+    // The bus only ever listens — but `mesh_node` DECLARES both modules, and since S2b a
+    // declared module is minted (with its `conn` endpoint) whether or not it ever carries a
+    // connection. That is the point: a creator has to find `/net/ws-client/conn` before it
+    // can write the first SPEC to it, so an empty module must be discoverable.
+    assert.deepEqual(listingNames(await cli.bus.readField(['net'], ':children[]')),
+                     ['ws-client', 'ws-server']);
+    assert.deepEqual(listingNames(await cli.bus.readField(['net', 'ws-client'], ':children[]')),
+                     ['conn']);
     assert.deepEqual(listingNames(await cli.bus.readField(['net', 'ws-server'], ':children[]')),
-                     ['ctrl', 'mesh']);
+                     ['conn', 'ctrl', 'mesh']);
   });
 
   await t.test('a local read resolves at the terminus (no hop)', async () => {
