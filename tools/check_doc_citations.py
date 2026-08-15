@@ -833,9 +833,9 @@ ANCHORS = [
     ('tools/cortexm0_footprint.py:151', 'cxx_flags = ['),
     ('tools/cortexm0_footprint.py:158', '"-DLIBTRACER_NO_ATOMIC",'),
     ('tools/cortexm0_footprint.py:172', '"--specs=nano.specs",'),
-    ('core/tests/CMakeLists.txt:1528', 'add_executable(substrate_test_no_atomic'),
-    ('core/tests/CMakeLists.txt:1541', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
-    ('core/tests/CMakeLists.txt:1542', '    LIBTRACER_NO_ATOMIC'),
+    ('core/tests/CMakeLists.txt:1538', 'add_executable(substrate_test_no_atomic'),
+    ('core/tests/CMakeLists.txt:1551', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
+    ('core/tests/CMakeLists.txt:1552', '    LIBTRACER_NO_ATOMIC'),
     # The leading indent is load-bearing: the bare token also appears in the comment
     # three lines above the executable, and an anchor that matches both is not an anchor.
 
@@ -861,11 +861,11 @@ ANCHORS = [
     ('bindings/typescript/packages/client/test/mesh-testbed.test.mjs:24',
      "ADDRESSING: a connection's routing key IS its vertex path"),
     ('core/CMakeLists.txt:63', 'option(LIBTRACER_NET_PLANE'),
-    ('core/CMakeLists.txt:251', 'option(LIBTRACER_WITH_CUDA "Build the mem_cuda GPU backend'),
-    ('core/CMakeLists.txt:274', 'option(LIBTRACER_WITH_QUIC "Configure the libtracer_quic transport module'),
-    ('core/CMakeLists.txt:362', 'write_basic_package_version_file('),
-    ('core/CMakeLists.txt:373', 'if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND EXISTS'),
-    ('core/CMakeLists.txt:380', 'option(LIBTRACER_BUILD_EXAMPLES "Build the core examples"'),
+    ('core/CMakeLists.txt:252', 'option(LIBTRACER_WITH_CUDA "Build the mem_cuda GPU backend'),
+    ('core/CMakeLists.txt:275', 'option(LIBTRACER_WITH_QUIC "Configure the libtracer_quic transport module'),
+    ('core/CMakeLists.txt:363', 'write_basic_package_version_file('),
+    ('core/CMakeLists.txt:374', 'if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND EXISTS'),
+    ('core/CMakeLists.txt:381', 'option(LIBTRACER_BUILD_EXAMPLES "Build the core examples"'),
     # `docs/examples/index.md` cited the two `if(LIBTRACER_NET_PLANE)` lines (58, 73). That
     # text appears THREE times in this file and the scope filter cannot separate 58 from 73
     # — a scope must sit ABOVE its candidate, and everything above 58 is also above 73. The

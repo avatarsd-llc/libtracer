@@ -16,6 +16,24 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`wire::path_label_t` and `net::path_label_table_t` — the RFC-0027 path label and its mint
+  table** ([#1325](https://github.com/avatarsd-llc/libtracer/issues/1325)). The first car of
+  RFC-0027's acceptance train: the 32-bit per-host, per-path-element alias — `(u16 slot index,
+  u16 generation)` as one little-endian u32, host-assigned and never a content hash — plus the
+  per-host table that mints it. `path_label.hpp` (`tr::wire`, beside `path_ref.hpp`) owns the
+  value and its byte order; `path_label_table.hpp` (`tr::net`, keyed by the `peer_handle_t` the
+  receiver seam already carries) owns the state. The table draws every slot from an **injected**
+  `memory_resource` (ADR-0079's per-plane axis), carries a **per-peer ceiling**, and on
+  exhaustion **refuses a new mint** rather than evicting a live one — a refusal, a retirement and
+  a non-minting hop are all one benign case, the string path, which is what every host does
+  today. Generations **saturate and retire their slot permanently** (RFC-0027 §4.3.1's
+  acceptance ruling), which preserves RFC-0024 §4.4 rule 3 verbatim across both
+  `(slot, generation)` fields at zero wire cost and closes #603's mis-delivery class by
+  construction. **No wire surface is frozen**: RFC-0027 §5.3 defers the element framing pending
+  the §12.5 conformance vectors, so no TLV type code is assigned, no grammar rule is wired, and
+  a `PATH` with no label element is byte-identical to today's. Default-constructed, the table
+  mints nothing, so a host that does not opt in is unaffected.
+
 - **`graph_t::set_vertex_ceiling()` / `vertex_ceiling()` / `vertex_ceiling_refusals()` — vertex
   creation is now CHARGED against the vertex-slot census**
   ([#1314](https://github.com/avatarsd-llc/libtracer/issues/1314)). RFC-0005 §D branch-write

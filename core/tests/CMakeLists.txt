@@ -125,6 +125,16 @@ target_link_libraries(path_ref_test PRIVATE libtracer)
 libtracer_test_warnings(path_ref_test)
 add_test(NAME path_ref COMMAND path_ref_test)
 
+# RFC-0027's path label (path_label.hpp) and its mint table (path_label_table.cpp, so
+# NET_PLANE-gated like every other net-plane TU's test). Carries §4.3.1's
+# saturate-and-retire test, which nothing else can catch: the rule is invisible on the wire.
+if(LIBTRACER_NET_PLANE)
+    add_executable(path_label_test path_label_test.cpp)
+    target_link_libraries(path_label_test PRIVATE libtracer)
+    libtracer_test_warnings(path_label_test)
+    add_test(NAME path_label COMMAND path_label_test)
+endif()
+
 # The wire grammar's total-encoded-size bound (grammar.hpp, #921) — pinned at
 # 32-bit-`size_t` width, because the truncation it closes is unreachable at the
 # host's 64-bit width and a host-only vector would be a vacuous guard.

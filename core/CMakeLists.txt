@@ -94,6 +94,7 @@ if(LIBTRACER_NET_PLANE)
         src/op_resolve.cpp
         src/op_resolve_view.cpp
         src/route_handle.cpp
+        src/path_label_table.cpp
         src/fwd_router.cpp
         src/transport_vertex.cpp
     )
