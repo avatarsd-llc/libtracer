@@ -45,7 +45,7 @@ Process-wide by construction: one graph, one mutex. Guards the Composite child l
 a reallocation) and the `registered_` placeholder flag
 ([ADR-0057 — graph composite vertex tree](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0057-graph-composite-vertex-tree.md)).
 
-The list below is every acquisition in `graph.cpp` — **18 sites in 17 functions**, which is what
+The list below is every acquisition in `graph.cpp` — **17 sites in 16 functions**, which is what
 `grep -n map_mutex_ core/src/graph.cpp` returns once its two comment hits (`:382`, `:535`) are
 discounted. `evict_link_edges` is the one function that takes it twice.
 
@@ -56,7 +56,7 @@ discounted. `evict_link_edges` is the one function that takes it twice.
 | shared | `vertex_slot` (`:407`), `vertex_slot_at` (`:422`), `deref_vertex_slot` (`:448`), `vertex_slot_count` (`:396`) | per op, bound-path addressed only — see below |
 | shared | `field_write` (`:1690`) — the `:acl` branch only, not every `:field` write | per `:acl` write |
 | shared | `read_children` (`:1970`), `read_children_folded` (`:2073`), `read_subtree_folded` (`:2136`) | per composed read — these walk, so they need it |
-| shared | `note_subscriber_added` / `_removed` (`:652`, `:658`), `evict_link_edges` (`:562`, `:567`), `has_first_level_child` (`:728`), `parked_seam_count` (`:529`) | control plane |
+| shared | `note_subscriber_added` / `_removed` (`:652`, `:658`), `evict_link_edges` (`:562`, `:567`), `parked_seam_count` (`:529`) | control plane |
 
 `retire_subtree` (`:352`) takes nothing of its own: it is called from inside `retire`'s unique
 hold and recurses under it. The doc comment at `:535` states the same contract for the
@@ -73,7 +73,7 @@ acquisition is what stops the slot index and the retire generation straddling a 
 `retire`, which is how an element gets stamped with the successor tenant's number.
 
 The leaf/branch fork reads a per-vertex bit (`vertex_t::has_registered_child`,
-`core/include/libtracer/vertex.hpp:715`), called from `core/src/graph.cpp:1228`, and takes no
+`core/include/libtracer/vertex.hpp:715`), called from `core/src/graph.cpp:1220`, and takes no
 lock. The symbol exists on the vertex rather than on the graph, so a reader grepping for it finds
 a flag test rather than a lock acquisition.
 
@@ -174,7 +174,7 @@ Two limits, and the second hides the first:
    There the limit is the value's own reference count, and the `sp-load` calibration arm —
    1.4 M/s at T=24 — accounts for nearly all of the 1.74 M/s stock rate.
 
-The write path takes no map lock (`write_impl`, `graph.cpp:1492`), which is the entire "writes
+The write path takes no map lock (`write_impl`, `graph.cpp:1484`), which is the entire "writes
 scale 5×, reads do not" asymmetry.
 
 **A caution on the calibration arms.** `sp-load` measures 710 ns/op at T=24 against a whole real
