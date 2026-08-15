@@ -216,16 +216,21 @@ not at bind time on the producer.
 The orchestrator disconnects. The created controllers and transport connections
 remain in the devices — RAM, or NVS where the device persists them.
 
-:::{warning}
-**Subscriber edges do not survive a third-party orchestrator's departure.**
-A subscription written *over the wire* binds to the **arrival session**, not to the
-target the writer named: `graph_t::subscribe_wire` discards the SUBSCRIBER's PATH
-target (`core/src/graph.cpp:2342`) and delivery rides the accumulated `src` back to
-whoever wrote it — the orchestrator. Its departure then evicts the edge outright
-(`fwd_router_t::link_down` → `graph_t::evict_link_edges`). So the paragraph above
-holds only for a subscription the **consumer itself** wrote. Closing the gap needs a
-ruled wire behaviour for a mount-routed SUBSCRIBER target (RFC-0004 §D territory) —
-see §Boundaries.
+:::{note}
+**A subscriber edge survives the orchestrator's departure when — and only when — its
+target routes through a mount.** A `SUBSCRIBER` whose `PATH` names a path *through* a
+transport mount, spelled in the **producer's** frame
+(`/net/<module>/<link>/<consumer-path>`), binds the edge to that mount's link and the
+residual below it (`graph_t::subscribe_wire`, `core/src/graph.cpp:2375`), so
+`fwd_router_t::link_down` → `graph_t::evict_link_edges` on the orchestrator's session no
+longer matches it and the producer keeps delivering. That is RFC-0021 §4.B.1/§4.C, and
+it is what makes the departure above real for a third-party wire.
+
+A `SUBSCRIBER` with **no** `PATH`, or one whose `PATH` matches no mount, still binds to
+the **arrival session** and delivers back along the accumulated `src` — the
+consumer-subscribes-for-itself shape, unchanged. A target that names a mount it cannot
+deliver through (the mount exactly, or a bus link's own NAME — RFC-0020) is refused with
+`tr::path::invalid`, never silently degraded. See §Boundaries.
 :::
 **Two devices keep talking with no third party present**; the patch cable stays. A
 rebooted leaf re-establishes its links and subscriptions by re-issuing the same
@@ -378,15 +383,17 @@ automatic**:
   peer obtains, rotates or revokes one is not specified by the formation model. The
   `:identity` facet publishes a node's public key for pinning; it is not a key-management
   protocol.
-- **Removal of a connection is specified; origination of a *remote-owned subscription*
-  is not.** A cross-device wire is a subscription, not a link. For a departing
-  orchestrator to leave board A subscribed to a producer on board B, the `SUBSCRIBER`
-  append must be a multi-hop write whose accumulated `src` is A-rooted, originated by a
-  third party. RFC-0014 supplies and refcounts the *link* such a subscription rides, but
-  does not originate the subscription; third-party multi-hop `SUBSCRIBER` origination is
-  an open question ([#491](https://github.com/avatarsd-llc/libtracer/issues/491)). The
-  practical consequence: a departing orchestrator's **links** are creatable in-band,
-  while the **wires** through them may not be.
+- **Origination of a *remote-owned subscription* is specified only for a mount-routed
+  target.** A cross-device wire is a subscription, not a link. A departing orchestrator
+  leaves board A subscribed to a producer on board B by writing a `SUBSCRIBER` whose
+  `PATH` is spelled in **B's** frame — composable offline from the link name the
+  orchestrator itself minted, no read-back and no route walk
+  ([RFC-0021](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0021-wire-subscriber-target-frame-of-reference.md)
+  §4.B.1, [#491](https://github.com/avatarsd-llc/libtracer/issues/491)). What is **not**
+  specified is a wire `SUBSCRIBER` naming a purely **local** target on the producer
+  (RFC-0021 §4.B.2, unruled): that spelling keeps the arrival-session binding. The
+  bus-crossing variant is refused outright, not deferred — a bus link's own NAME is not a
+  routable next hop (RFC-0020).
 - **Teardown is soft or hard.** *Soft* — drop the last binding; the `DIAL` link goes
   dormant, the vertex persists, and it self-heals on next use. *Hard* — a `NAME` write
   retires the vertex; subscriptions routed through the link are cascade-evicted

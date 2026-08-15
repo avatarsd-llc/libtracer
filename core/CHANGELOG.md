@@ -77,6 +77,30 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **A wire `SUBSCRIBER`'s `PATH` target is now RESOLVED when it routes through a mount — a
+  third party can wire a flow between two OTHER nodes and depart**
+  ([#491](https://github.com/avatarsd-llc/libtracer/issues/491),
+  [RFC-0021](../docs/spec/rfcs/0021-wire-subscriber-target-frame-of-reference.md) §4.B.1/§4.C).
+  `graph_t::subscribe_wire` discarded the `PATH` child outright and bound every wire edge to
+  `(caller = the arrival session, return_route = the accumulated src)`, so an orchestrator's
+  subscription delivered back to the **orchestrator** and died with its session
+  (`evict_link_edges`). A `PATH` spelled in the **producer's** frame
+  (`/net/<module>/<link>/<consumer-path>`) is now run through the transport plane's ADR-0061
+  strip-K mount descent — the same descent `fwd_router_t::subscribe_toward` uses, now shared as
+  `net::fwd_router_t::split_subscriber_target` — and the edge binds to `(that mount's link, the
+  residual below it)`. It therefore outlives the writer's departure and dies with the
+  **delivery** link instead. **New API:** `graph_t::configure_wire_target_resolver(fn, ctx)`
+  plus `graph::wire_target_split_t` / `graph::wire_target_fn_t`, the ADR-0047 `{fn, ctx}` seam
+  L4 borrows the descent through; `fwd_router_t` installs it in its constructor, so a node with
+  a transport plane has it and one without behaves exactly as before.
+  **Deliberately unchanged, and NOT the full RFC:** a `SUBSCRIBER` with no `PATH`, or whose
+  `PATH` matches no mount, keeps the arrival-session binding byte for byte — RFC-0021 §4.B.2's
+  purely-local arm is unruled (§7 q3), and in-tree senders (the TypeScript client's
+  `subscribe`) still spell that `PATH` in the consumer's own frame. A target that names a mount
+  it cannot deliver through (the mount exactly, or a bus link's own NAME — RFC-0020) is refused
+  with `INVALID_PATH`, never silently degraded to the arrival session. The `SUBSCRIBE` gate and
+  the stored gate context stay the **writer's** (#81, ADR-0026, RFC-0021 §E); only the delivery
+  link moves.
 - **WIRE-VISIBLE: a remote fieldless `FWD{WRITE}` to an unresolved `dst` answers `NOT_FOUND`
   and no longer write-creates the vertex chain**
   ([#1139](https://github.com/avatarsd-llc/libtracer/issues/1139);

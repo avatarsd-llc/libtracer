@@ -68,7 +68,7 @@ again (`op_resolve_walk.hpp:965` and `fwd_router.cpp:1166-1172` → `deref_verte
 `map_mutex_` on both ends of the round trip that bound paths exist to make cheap. The two are not
 the same cost: `vertex_slot` **scans `vertex_slots_` linearly** inside the hold, while
 `deref_vertex_slot` and `vertex_slot_at` are a bounds check and one compare — the asymmetry
-`graph.hpp:632-639` states in the header. The hold is not incidental in either: one shared
+`graph.hpp:634-641` states in the header. The hold is not incidental in either: one shared
 acquisition is what stops the slot index and the retire generation straddling a concurrent
 `retire`, which is how an element gets stamped with the successor tenant's number.
 

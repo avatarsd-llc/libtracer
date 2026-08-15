@@ -257,11 +257,13 @@ struct sub_event_t {
      * EMPTY when the record carries no well-formed `PATH` at all (a bare remote subscriber,
      * whose consumer is named only by its return route over @ref link).
      *
-     * @warning Read it as the consumer's SPELLING, not as a local vertex. On a wire subscribe
-     *          that binds a REMOTE subscriber this `PATH` names the consumer at ITS OWN root
-     *          and resolves to nothing here — `subscribe_wire` deliberately drops it as a
-     *          re-dispatch target and delivers over the return route instead (RFC-0004 §D).
-     *          On a local-target append it IS a key in this graph. The two are not
+     * @warning Read it as the SPELLING the record carried, not as a local vertex. On a wire
+     *          subscribe it is one of two things and the event cannot tell them apart: a path
+     *          through one of THIS node's mounts, which `subscribe_wire` resolves and binds
+     *          the edge to (RFC-0021 §4.B.1), or the consumer's address at ITS OWN root, which
+     *          resolves to nothing here and is dropped as a re-dispatch target — delivery then
+     *          rides the return route (RFC-0004 §D).
+     *          On a local-target append it IS a key in this graph. The three are not
      *          distinguishable from the event alone; @ref link tells the observer which
      *          transport the op came from, and the app's own wiring says the rest.
      */
