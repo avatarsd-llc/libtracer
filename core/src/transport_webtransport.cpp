@@ -428,8 +428,12 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
                 rest = rest.subspan(len->consumed);
                 if (rest.size() < len->value) break;  // need the full field section
 
-                const auto headers =
-                    wt_h3::decode_field_section(rest.first(static_cast<std::size_t>(len->value)));
+                // The decode borrows: the headers are views into `fields` and
+                // into `c.acc` (through `rest`), so both outlive every read
+                // below and `c.acc` is not touched until they are done.
+                wt_h3::field_section_t fields;
+                const auto headers = wt_h3::decode_field_section(
+                    rest.first(static_cast<std::size_t>(len->value)), fields);
                 std::string_view method;
                 std::string_view protocol;
                 std::string_view req_path;
@@ -513,18 +517,22 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
         rest = rest.subspan(len->consumed);
         if (rest.size() < len->value) return;  // need the full field section
 
+        // Borrowed decode: `status` views `fields` or `c.acc`, so the verdict
+        // is taken BEFORE `c.acc` is cleared out from under it.
+        wt_h3::field_section_t fields;
         const auto headers =
-            wt_h3::decode_field_section(rest.first(static_cast<std::size_t>(len->value)));
+            wt_h3::decode_field_section(rest.first(static_cast<std::size_t>(len->value)), fields);
         std::string_view status;
         if (headers) {
             for (const auto& h : *headers) {
                 if (h.name == ":status") status = h.value;
             }
         }
+        const bool accepted = status == "200";
         c.kind = stream_ctx_t::kind_t::SESSION;
         c.acc.clear();
         c.acc.shrink_to_fit();
-        if (status == "200") {
+        if (accepted) {
             session.store(true, std::memory_order_relaxed);
             signal_session(true);
         } else {

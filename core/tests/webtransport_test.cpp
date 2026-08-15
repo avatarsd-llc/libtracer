@@ -159,8 +159,9 @@ void test_wt_h3_huffman() {
 void test_wt_h3_field_sections() {
     std::printf("wt_h3 — QPACK static-subset field sections:\n");
     // Our own extended CONNECT encoding decodes back to its five pseudo-headers.
+    tr::net::wt_h3::field_section_t store;
     const auto req = tr::net::wt_h3::encode_connect_field_section("robot.local:4433", "/");
-    const auto hdrs = tr::net::wt_h3::decode_field_section(req);
+    const auto hdrs = tr::net::wt_h3::decode_field_section(req, store);
     bool ok = hdrs.has_value();
     std::string method, scheme, authority, path, protocol;
     if (ok) {
@@ -186,20 +187,68 @@ void test_wt_h3_field_sections() {
     sec.push_back(0x89);  // value: H=1, length 9
     const auto hv = from_hex("25a849e95bb8e8b4bf");
     sec.insert(sec.end(), hv.begin(), hv.end());
-    const auto lit = tr::net::wt_h3::decode_field_section(sec);
+    tr::net::wt_h3::field_section_t lit_store;
+    const auto lit = tr::net::wt_h3::decode_field_section(sec, lit_store);
     check(lit && lit->size() == 1 && (*lit)[0].name == "custom-key" &&
               (*lit)[0].value == "custom-value",
           "a Huffman literal-name field line (browser shape) decodes");
+    // #1305 — the decode is NON-OWNING: a Huffman literal views the store's
+    // scratch, a raw literal the input buffer itself.
+    check((*lit)[0].name.data() >= lit_store.scratch.data() &&
+              (*lit)[0].name.data() < lit_store.scratch.data() + lit_store.scratch.size(),
+          "a Huffman literal name views the caller's scratch, not the heap");
+    std::string_view raw_authority;
+    if (hdrs) {
+        for (const auto& h : *hdrs)
+            if (h.name == ":authority") raw_authority = h.value;
+    }
+    check(raw_authority.data() >= reinterpret_cast<const char*>(req.data()) &&
+              raw_authority.data() < reinterpret_cast<const char*>(req.data() + req.size()),
+          "a raw literal value views the caller's input buffer");
 
     // The 200 response section decodes to :status 200.
-    const auto resp =
-        tr::net::wt_h3::decode_field_section(tr::net::wt_h3::encode_status_200_field_section());
+    const auto resp_bytes = tr::net::wt_h3::encode_status_200_field_section();
+    tr::net::wt_h3::field_section_t resp_store;
+    const auto resp = tr::net::wt_h3::decode_field_section(resp_bytes, resp_store);
     check(resp && resp->size() == 1 && (*resp)[0].name == ":status" && (*resp)[0].value == "200",
           "the 200 response section decodes to :status=200");
 
     // Dynamic-table use (Required Insert Count != 0) is out of subset.
     const std::array<std::uint8_t, 3> dyn{0x02, 0x00, 0xc1};
-    check(!tr::net::wt_h3::decode_field_section(dyn), "RIC != 0 (dynamic table) is rejected");
+    check(!tr::net::wt_h3::decode_field_section(dyn, store),
+          "RIC != 0 (dynamic table) is rejected");
+
+    // A Huffman literal larger than the scratch is refused, not amplified.
+    {
+        std::vector<std::uint8_t> big{0x00, 0x00};
+        const std::size_t huff_len = tr::net::wt_h3::kMaxFieldSectionScratch;
+        // 001 N=0 H=1 + a 3-bit-prefix length: a literal NAME, Huffman-coded.
+        tr::net::wt_h3::detail::append_prefixed_int(big, huff_len, 3, 0x28);
+        // All-zero bits: '0' is a 5-bit code, so this is the widest expansion.
+        big.insert(big.end(), huff_len, 0x00);
+        check(!tr::net::wt_h3::decode_field_section(big, store),
+              "a Huffman literal past the scratch ceiling is refused");
+    }
+
+    // #1305 — the header-count ceiling. One-byte Indexed Field Lines are the
+    // cheapest input per element, so the BYTE cap on a field section does not
+    // bound the decoder's cost; the element ceiling does.
+    const auto indexed_lines = [](std::size_t n) {
+        std::vector<std::uint8_t> s{0x00, 0x00};
+        for (std::size_t i = 0; i < n; ++i)
+            s.push_back(static_cast<std::uint8_t>(0xc0 | 15));  // :method: CONNECT
+        return s;
+    };
+    const auto exactly = indexed_lines(tr::net::wt_h3::kMaxFieldSectionHeaders);
+    const auto at_ceiling = tr::net::wt_h3::decode_field_section(exactly, store);
+    check(at_ceiling && at_ceiling->size() == tr::net::wt_h3::kMaxFieldSectionHeaders,
+          "a section exactly at the header ceiling still decodes");
+    const auto one_over = indexed_lines(tr::net::wt_h3::kMaxFieldSectionHeaders + 1);
+    check(!tr::net::wt_h3::decode_field_section(one_over, store),
+          "one field line past the ceiling is refused");
+    const auto flood = indexed_lines(16'000);
+    check(!tr::net::wt_h3::decode_field_section(flood, store),
+          "16 KiB of one-byte indexed lines is refused, not amplified");
 }
 
 // ---- end-to-end: the C++ WebTransport client against the C++ server ----
