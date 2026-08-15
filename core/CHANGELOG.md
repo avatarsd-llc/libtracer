@@ -337,6 +337,24 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Fixed
 
+- **The pre-auth WebTransport QPACK decode no longer amplifies 16 KiB into ~1.5 MiB of
+  throwing heap** ([#1305](https://github.com/avatarsd-llc/libtracer/issues/1305)). No public
+  API change: `wt_h3.hpp` is module-private. The extended-CONNECT field section an
+  UNAUTHENTICATED peer sends is capped in BYTES (`kMaxHandshakeBytes`, 16 KiB) while the
+  decoder's cost was per ELEMENT — the cheapest representation is a one-byte Indexed Field
+  Line, so 16 KiB became ~16 400 owning `header_t` elements (two `std::string`s each) grown by
+  bare `push_back` on an msquic worker thread, reached from libmsquic's non-unwindable C
+  frames where a `bad_alloc` is `std::terminate` in practice. Two changes, in the order that
+  matters: `decode_field_section` now enforces an element ceiling
+  (`kMaxFieldSectionHeaders = 32`, against the five field lines the handshake needs), which is
+  the semantic fix because only a count bound closes a count gap; and the decode is now
+  NON-OWNING — field lines are `std::string_view`s into the constexpr static table, into the
+  caller's input buffer, or into a caller-owned fixed Huffman scratch
+  (`kMaxFieldSectionScratch`, 4 KiB) supplied as a `wt_h3::field_section_t`. The decoder
+  allocates nothing at all now; every refusal returns `nullopt` and is handled by the existing
+  stream-scoped refusal path, matching #919's disposition. Both roles are covered — the LISTEN
+  side's CONNECT request and the DIAL side's CONNECT response go through the same decoder.
+
 - **The MINIMAL module set builds its tests — `core/tests` is gated on the same module
   options the library gates its sources on**
   ([#1293](https://github.com/avatarsd-llc/libtracer/issues/1293);

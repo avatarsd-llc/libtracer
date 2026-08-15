@@ -45,6 +45,7 @@
  */
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -179,12 +180,17 @@ inline constexpr huff_code_t kHuff[256] = {
 }  // namespace detail
 
 /**
- * Decode an RFC 7541 Huffman-coded string. Returns nullopt on an invalid code
- * or invalid padding (padding must be a strictly-shorter-than-8-bit prefix of
- * EOS, i.e. all ones).
+ * @brief Decode an RFC 7541 Huffman-coded string into CALLER-OWNED storage.
+ *
+ * Allocates nothing: the decoded bytes land in @p out, which the caller sizes.
+ * Returns the number of bytes written, or nullopt on an invalid code, invalid
+ * padding (padding must be a strictly-shorter-than-8-bit prefix of EOS, i.e.
+ * all ones), or an @p out too small to hold the result — the last is the
+ * peer-provoked case, and refusing it is the point (#1305).
  */
-inline std::optional<std::string> huffman_decode(std::span<const std::uint8_t> in) {
-    std::string out;
+inline std::optional<std::size_t> huffman_decode_into(std::span<const std::uint8_t> in,
+                                                      std::span<char> out) {
+    std::size_t written = 0;
     std::uint32_t cur = 0;
     std::uint8_t nbits = 0;
     for (const std::uint8_t byte : in) {
@@ -195,7 +201,8 @@ inline std::optional<std::string> huffman_decode(std::span<const std::uint8_t> i
             // Linear scan is fine: handshake header strings are tiny.
             for (int sym = 0; sym < 256; ++sym) {
                 if (detail::kHuff[sym].bits == nbits && detail::kHuff[sym].code == cur) {
-                    out.push_back(static_cast<char>(sym));
+                    if (written == out.size()) return std::nullopt;  // storage exhausted
+                    out[written++] = static_cast<char>(sym);
                     cur = 0;
                     nbits = 0;
                     break;
@@ -206,16 +213,35 @@ inline std::optional<std::string> huffman_decode(std::span<const std::uint8_t> i
     // Trailing padding: fewer than 8 bits, all ones (a prefix of EOS).
     if (nbits >= 8) return std::nullopt;
     if (cur != (1u << nbits) - 1u) return std::nullopt;
+    return written;
+}
+
+/**
+ * @brief The owning convenience wrapper over huffman_decode_into.
+ *
+ * Sized for the widest possible expansion (the shortest code is 5 bits, so at
+ * most 8/5 bytes out per byte in) and therefore never refuses for storage. Used
+ * where an owned string is wanted and the input is not peer-provoked — the
+ * decoder proper goes through huffman_decode_into into fixed scratch.
+ */
+inline std::optional<std::string> huffman_decode(std::span<const std::uint8_t> in) {
+    std::string out((in.size() * 8) / 5 + 1, '\0');
+    const auto written = huffman_decode_into(in, std::span<char>(out.data(), out.size()));
+    if (!written) return std::nullopt;
+    out.resize(*written);
     return out;
 }
 
 // ---- QPACK static-table subset + prefixed integers (RFC 9204 / RFC 7541 §5.1) ----
 
-/** One decoded header field. An EMPTY name marks a static-table entry beyond
- *  index 28 — a header the handshake validation ignores (see the file header). */
+/** One decoded header field, as NON-OWNING views (#1305): into the constexpr
+ *  static table, into the caller's input buffer, or into the decode store's
+ *  Huffman scratch — never onto the heap. An EMPTY name marks a static-table
+ *  entry beyond index 28 — a header the handshake validation ignores (see the
+ *  file header). */
 struct header_t {
-    std::string name;
-    std::string value;
+    std::string_view name;
+    std::string_view value;
 };
 
 namespace detail {
@@ -294,14 +320,22 @@ inline void append_prefixed_int(std::vector<std::uint8_t>& out, std::uint64_t v,
     out.push_back(static_cast<std::uint8_t>(v));
 }
 
-/** Read one QPACK string literal: H flag @p huffman, then the already-decoded
- *  length @p len of raw bytes at @p in. nullopt = truncated / bad Huffman. */
-inline std::optional<std::string> read_string_body(std::span<const std::uint8_t> in,
-                                                   std::uint64_t len, bool huffman) {
+/** Read one QPACK string literal as a VIEW: H flag @p huffman, then the
+ *  already-decoded length @p len of raw bytes at @p in. A raw literal views @p
+ *  in directly; a Huffman one decodes into @p scratch from @p used onward (and
+ *  advances @p used). nullopt = truncated, bad Huffman, or scratch exhausted. */
+inline std::optional<std::string_view> read_string_body(std::span<const std::uint8_t> in,
+                                                        std::uint64_t len, bool huffman,
+                                                        std::span<char> scratch,
+                                                        std::size_t& used) {
     if (in.size() < len) return std::nullopt;
     const auto body = in.first(static_cast<std::size_t>(len));
-    if (huffman) return huffman_decode(body);
-    return std::string(reinterpret_cast<const char*>(body.data()), body.size());
+    if (!huffman) return std::string_view(reinterpret_cast<const char*>(body.data()), body.size());
+    const auto written = huffman_decode_into(body, scratch.subspan(used));
+    if (!written) return std::nullopt;
+    const std::string_view out(scratch.data() + used, *written);
+    used += *written;
+    return out;
 }
 
 }  // namespace detail
@@ -320,13 +354,50 @@ inline std::optional<std::string> read_string_body(std::span<const std::uint8_t>
 inline constexpr std::size_t kMaxFieldSectionHeaders = 32;
 
 /**
- * Decode a complete QPACK encoded field section under the zero-dynamic-table
- * contract (see the file header): Required Insert Count MUST be 0 and every
- * representation must be static/literal. nullopt = malformed, out of subset, or
- * more than kMaxFieldSectionHeaders field lines — all three are refusals the
- * caller already scopes to the stream.
+ * @brief The Huffman-decoded literal bytes one field section may carry (#1305).
+ *
+ * Only Huffman-coded literals need storage of their own — raw literals are
+ * viewed in place. 4 KiB is far past what an extended CONNECT's `:authority`,
+ * `:path` and `:protocol` can legitimately need, and a section wanting more is
+ * refused like any other malformed one.
  */
-inline std::optional<std::vector<header_t>> decode_field_section(std::span<const std::uint8_t> in) {
+inline constexpr std::size_t kMaxFieldSectionScratch = 4096;
+
+/**
+ * @brief The caller-owned storage one field-section decode borrows (#1305).
+ *
+ * decode_field_section allocates NOTHING: the field lines land in this fixed
+ * array and the Huffman-decoded literals in this fixed scratch, so a peer's
+ * 16 KiB field section can no longer amplify into heap. The decoded headers are
+ * views — into the constexpr static table, into the caller's INPUT buffer, or
+ * into `scratch` — so both this store and the input buffer must outlive every
+ * read of the result, and the input must not be mutated meanwhile.
+ */
+struct field_section_t {
+    std::array<header_t, kMaxFieldSectionHeaders> headers; /**< Decoded lines, [0, count). */
+    std::size_t count = 0;                                 /**< Field lines decoded. */
+    std::array<char, kMaxFieldSectionScratch> scratch;     /**< Huffman-decoded literal bytes. */
+    std::size_t scratch_used = 0;                          /**< Bytes of `scratch` taken. */
+};
+
+/**
+ * Decode a complete QPACK encoded field section into @p store under the
+ * zero-dynamic-table contract (see the file header): Required Insert Count MUST
+ * be 0 and every representation must be static/literal. The result views @p in
+ * and @p store, and owns nothing. nullopt = malformed, out of subset, more than
+ * kMaxFieldSectionHeaders field lines, or more than kMaxFieldSectionScratch
+ * bytes of Huffman literal — all of them refusals the caller scopes to the
+ * stream.
+ */
+[[nodiscard]] inline std::optional<std::span<const header_t>> decode_field_section(
+    std::span<const std::uint8_t> in, field_section_t& store) {
+    store.count = 0;
+    store.scratch_used = 0;
+    const std::span<char> scratch(store.scratch);
+    const auto emit = [&store](std::string_view name, std::string_view value) {
+        store.headers[store.count++] = header_t{name, value};
+    };
+
     // Encoded Field Section Prefix: Required Insert Count (8-bit prefix) +
     // S bit / Delta Base (7-bit prefix). With RIC = 0 the base is 0 too.
     const auto ric = detail::read_prefixed_int(in, 8);
@@ -336,11 +407,10 @@ inline std::optional<std::vector<header_t>> decode_field_section(std::span<const
     if (!base) return std::nullopt;
     in = in.subspan(base->consumed);
 
-    std::vector<header_t> out;
     while (!in.empty()) {
-        // Every arm below appends exactly one field line, so the ceiling is
-        // enforced once, here, before any of them can allocate.
-        if (out.size() >= kMaxFieldSectionHeaders) return std::nullopt;
+        // Every arm below emits exactly one field line, so the ceiling is
+        // enforced once, here, before any of them can consume storage.
+        if (store.count >= kMaxFieldSectionHeaders) return std::nullopt;
         const std::uint8_t b = in[0];
         if ((b & 0x80) != 0) {
             // Indexed Field Line: 1 T IIIIII — static only (T=1).
@@ -350,9 +420,9 @@ inline std::optional<std::vector<header_t>> decode_field_section(std::span<const
             in = in.subspan(idx->consumed);
             if (idx->value < 29) {
                 const auto& e = detail::kStatic[idx->value];
-                out.push_back(header_t{std::string(e.name), std::string(e.value)});
+                emit(e.name, e.value);
             } else {
-                out.push_back(header_t{});  // ignored header (name intentionally empty)
+                emit({}, {});  // ignored header (name intentionally empty)
             }
         } else if ((b & 0xc0) == 0x40) {
             // Literal Field Line With Name Reference: 01 N T IIII — static only.
@@ -365,19 +435,21 @@ inline std::optional<std::vector<header_t>> decode_field_section(std::span<const
             const auto vlen = detail::read_prefixed_int(in, 7);
             if (!vlen) return std::nullopt;
             in = in.subspan(vlen->consumed);
-            const auto value = detail::read_string_body(in, vlen->value, h);
+            const auto value =
+                detail::read_string_body(in, vlen->value, h, scratch, store.scratch_used);
             if (!value) return std::nullopt;
             in = in.subspan(static_cast<std::size_t>(vlen->value));
-            std::string name;
-            if (idx->value < 29) name = std::string(detail::kStatic[idx->value].name);
-            out.push_back(header_t{std::move(name), std::move(*value)});
+            std::string_view name;
+            if (idx->value < 29) name = detail::kStatic[idx->value].name;
+            emit(name, *value);
         } else if ((b & 0xe0) == 0x20) {
             // Literal Field Line With Literal Name: 001 N H NNN.
             const bool name_h = (b & 0x08) != 0;
             const auto nlen = detail::read_prefixed_int(in, 3);
             if (!nlen) return std::nullopt;
             in = in.subspan(nlen->consumed);
-            const auto name = detail::read_string_body(in, nlen->value, name_h);
+            const auto name =
+                detail::read_string_body(in, nlen->value, name_h, scratch, store.scratch_used);
             if (!name) return std::nullopt;
             in = in.subspan(static_cast<std::size_t>(nlen->value));
             if (in.empty()) return std::nullopt;
@@ -385,16 +457,17 @@ inline std::optional<std::vector<header_t>> decode_field_section(std::span<const
             const auto vlen = detail::read_prefixed_int(in, 7);
             if (!vlen) return std::nullopt;
             in = in.subspan(vlen->consumed);
-            const auto value = detail::read_string_body(in, vlen->value, value_h);
+            const auto value =
+                detail::read_string_body(in, vlen->value, value_h, scratch, store.scratch_used);
             if (!value) return std::nullopt;
             in = in.subspan(static_cast<std::size_t>(vlen->value));
-            out.push_back(header_t{std::move(*name), std::move(*value)});
+            emit(*name, *value);
         } else {
             // 0000/0001 = post-base forms: impossible with RIC = 0.
             return std::nullopt;
         }
     }
-    return out;
+    return std::span<const header_t>(store.headers.data(), store.count);
 }
 
 // ---- handshake byte builders ----
