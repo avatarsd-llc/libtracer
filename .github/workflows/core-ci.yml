@@ -263,13 +263,13 @@ jobs:
       - name: Build + install core to a staging prefix
         run: |
           cmake -S core -B core/build-install -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release
-          cmake --build core/build-install -j
+          cmake --build core/build-install -j "$(nproc)"
           cmake --install core/build-install --prefix "${RUNNER_TEMP}/prefix"
       - name: Consume via find_package(libtracer)
         run: |
           cmake -S tests/packaging -B "${RUNNER_TEMP}/consumer" \
             -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/prefix"
-          cmake --build "${RUNNER_TEMP}/consumer" -j
+          cmake --build "${RUNNER_TEMP}/consumer" -j "$(nproc)"
           "${RUNNER_TEMP}/consumer/app"
       - name: Restore workspace ownership for the host runner
         # This job runs as root inside `container:` on a self-hosted runner whose
@@ -299,7 +299,7 @@ jobs:
       - name: Configure + build every bench target (compile only, nothing is run)
         run: |
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
-          cmake --build bench/build -j
+          cmake --build bench/build -j "$(nproc)"
       - name: Restore workspace ownership for the host runner
         # This job runs as root inside `container:` on a self-hosted runner whose
         # _work tree is shared with non-container jobs (perf-local's bench-local runs
