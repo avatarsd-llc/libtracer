@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0021 |
 | **Title** | The frame of reference of a wire SUBSCRIBER's PATH target |
-| **Status** | **accepted** — maintainer ruling 2026-08-01: §3's fork is resolved in favour of **(b), the producer's frame**, and §E is answered **1 — `SUBSCRIBE` is sufficient authority**. Comment window waived for a sole maintainer (precedent: RFC-0020). **Implementation is deferred past v0.7.0**: the wire is `DRAFT` and explicitly unstable (`docs/spec/v1.md` — *"Pin to a specific commit if you depend on this"*), so nothing is lost by landing it in a later release. |
+| **Status** | **accepted** — maintainer ruling 2026-08-01: §3's fork is resolved in favour of **(b), the producer's frame**, and §E is answered **1 — `SUBSCRIBE` is sufficient authority**. Comment window waived for a sole maintainer (precedent: RFC-0020). **Implemented in part (#491)**: §4.B.1 (mount-routed target) and the mount-involving refusals of §4.B.3 are live at the wire door; §4.B.2 (a purely LOCAL target through the wire door) is **not built** and stays with today's arrival-session binding — see §7 open question 3, which is still unruled and which in-tree senders make load-bearing. |
 | **Author** | filed from the #491 refutation, 2026-08-01 |
 | **Amends** | [RFC-0004](0004-remote-operation-addressing.md) §D (operation semantics), §E (delivery/fanout) |
 | **Tracking** | [#491](https://github.com/avatarsd-llc/libtracer/issues/491) |
@@ -53,8 +53,8 @@ A `SUBSCRIBER` carrying a `PATH` child MUST have that path resolved **from the r
 ### B. Resolution outcomes
 
 1. **Routes through a transport mount** — the leading segments name a registered mount, with a residual below it. The edge binds to `(link = that mount's registry identity, return_route = the residual)`. This is exactly what `subscribe_toward` computes in-process today.
-2. **Names a purely local vertex** — no mount is involved. The edge binds as a **local re-dispatch target**, identically to the in-process subscribe door.
-3. **Resolves to nothing**, or names a mount exactly with no residual, or (per [RFC-0020](0020-bus-name-not-a-routable-next-hop.md)) names a bus link's own connection NAME — the subscribe-write is **rejected**; §F fixes the code.
+2. **Names a purely local vertex** — no mount is involved. The edge binds as a **local re-dispatch target**, identically to the in-process subscribe door. **NOT IMPLEMENTED (#491):** the wire door binds only outcome 1, and a `PATH` matching no mount keeps the arrival-session binding — see §7 open question 3, which this outcome depends on and which is still unruled.
+3. **Resolves to nothing**, or names a mount exactly with no residual, or (per [RFC-0020](0020-bus-name-not-a-routable-next-hop.md)) names a bus link's own connection NAME — the subscribe-write is **rejected**; §F fixes the code. **Implemented for the mount-involving arms only:** a target that names no mount at all is the same address as outcome 2's and shares its deferral.
 
 ### C. Lifetime — the property the whole change exists for
 
@@ -93,7 +93,7 @@ A `PATH` child that fails §B.3 answers `tr::path::invalid` (`0x0021`), the code
 ## 5. Compatibility
 
 - **No new TLV, no new type code, no encoding change.** The `PATH` child already exists in the encoder and is pinned by the `tlv-types/subscriber-path` conformance vector — which is a **structural** vector ("structurally faithful", category `tlv-types`) and asserts nothing about the wire door's semantics, so it does not constrain this change.
-- **It is a behaviour change** for any sender that sends a `PATH` today and relies on it being ignored. The reference implementation ignores it, so nothing in this tree relies on the old reading; the protocol is `DRAFT`.
+- **It is a behaviour change** for any sender that sends a `PATH` today and relies on it being ignored. **Correction (#491, factual):** this RFC's claim that *"nothing in this tree relies on the old reading"* is wrong. The TypeScript client's `subscribe` sends `SUBSCRIBER{PATH <its own reply endpoint>}` on every subscription, and most of `core/tests/acl_test.cpp` spells the `PATH` the same way — the CONSUMER's frame, per reading (a). Under a full §B.3 those all answer `0x0021`. That is why the implementation binds outcome B.1 alone; the protocol is still `DRAFT`, so the remaining arms stay available to a later ruling.
 - §D keeps every consumer-subscribes-for-itself flow byte-identical.
 
 ## 6. Alternatives considered
@@ -106,5 +106,5 @@ A `PATH` child that fails §B.3 answers `tr::path::invalid` (`0x0021`), the code
 
 1. ~~§3's fork: reading (a) or (b)?~~ **Ruled 2026-08-01: (b), the producer's frame.** The decisive argument is §3's own: a `FWD`'s `dst` is resolved from the receiver's root and a subscription's delivery *is* a write, so under (a) the `SUBSCRIBER` `PATH` would be the only address on the wire spelled in the *sender's* frame. An inconsistency that arbitrary is far likelier to be an accident of implementation than a design. §5's one real caveat — that (b) is a behaviour change for a sender relying on the field being ignored — is void while the wire is `DRAFT` and pinning is instructed.
 2. ~~§E: is `SUBSCRIBE` sufficient authority?~~ **Ruled 2026-08-01: yes** — see §4.E.
-3. Should outcome B.2 (a local target through the wire door) be permitted at all, or is the wire door restricted to mount-routed targets? Permitting it makes the two doors uniform; restricting it keeps the wire door's blast radius smaller.
+3. Should outcome B.2 (a local target through the wire door) be permitted at all, or is the wire door restricted to mount-routed targets? Permitting it makes the two doors uniform; restricting it keeps the wire door's blast radius smaller. **Still open, and now load-bearing (#491):** the implementation restricted the door to mount-routed targets precisely because this is unruled — and because §5's correction shows the alternative (rejecting a non-mount `PATH`) breaks every in-tree sender that spells the target in its own frame. Ruling this decides whether those senders are corrected or the sender's-frame `PATH` keeps a defined meaning.
 4. Does the delivery-compaction opt-in (RFC-0004 §E.1) interact with a mount-routed target? The route handle is per `(link, route)`, and both are now the mount's — expected to work unchanged, but it wants a vector.

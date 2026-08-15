@@ -292,6 +292,56 @@ struct sub_event_t {
 using sub_observer_fn_t = void (*)(void* ctx, const sub_event_t& event);
 
 /**
+ * @brief What the transport plane made of a wire `SUBSCRIBER`'s `PATH` target, resolved
+ *        from THIS (the producer's) root — RFC-0021 §4.B.
+ *
+ * The target is one ordinary address in the producer's own frame, so deciding whether it
+ * leaves this node is a mount question and mounts are the transport plane's (ADR-0061's
+ * strip-K descent over the child registry). L4 cannot name that plane, so the split arrives
+ * through the `%wire_target_fn_t` seam and this struct is the whole of what L4 needs: the
+ * link to deliver over, and the route to deliver with.
+ */
+struct wire_target_split_t {
+    /**
+     * @brief The matched mount's REGISTRY identity — what the delivery sink resolves the
+     *        link by. EMPTY means no mount matched: the target names something local (or
+     *        nothing), which this door does not bind (see `%wire_target_fn_t`).
+     */
+    std::string_view link{};
+    /**
+     * @brief The residual NAME records BELOW the mount — the delivery route the first hop
+     *        forwards, exactly as an inbound `FWD`'s `dst` would carry it. Borrowed from the
+     *        key handed to the seam, so it is valid only for the duration of the call.
+     */
+    std::span<const std::byte> residual{};
+    /**
+     * @brief A mount WAS named, but it cannot carry a directed delivery — the target named
+     *        the mount exactly (nothing below it), or its first hop landed on a bus link's
+     *        own NAME (ADR-0073 §3 / RFC-0020). RFC-0021 §B.3: the subscribe-write is
+     *        REJECTED, never silently degraded to the arrival-session binding (§F).
+     */
+    bool unroutable = false;
+};
+
+/**
+ * @brief Resolve a wire `SUBSCRIBER`'s `PATH` target against this node's mounts (RFC-0021).
+ *
+ * @param ctx The caller-owned context installed beside the function.
+ * @param key The target's canonical key — concatenated `NAME` records, the `PATH` payload.
+ * @return The split; a default-constructed value (empty link, `unroutable == false`) means
+ *         NO mount matched, on which @ref graph_t::subscribe_wire keeps today's
+ *         arrival-session binding. The purely-local target of RFC-0021 §B.2 is deliberately
+ *         NOT bound through this door yet — §7 open question 3 is unruled, and in-tree wire
+ *         senders (the TypeScript client's `subscribe`, most `acl_test` subscribes) still
+ *         spell the `PATH` in the CONSUMER's own frame, which §B.3 would reject outright.
+ *
+ * @note The ADR-0047 `{fn, ctx}` shape, NOT a `std::function` (#1049), published through a
+ *       @ref tr::sink_slot_t like every other graph seam. Called at subscribe time only —
+ *       never on the delivery path.
+ */
+using wire_target_fn_t = wire_target_split_t (*)(void* ctx, std::span<const std::byte> key);
+
+/**
  * @brief The L4 in-process graph runtime: the Composite vertex tree plus the whole data
  *        API (register / read / write / await / subscribe, ADR-0006).
  *
@@ -1411,6 +1461,25 @@ class graph_t {
     void configure_subscription_observer(sub_observer_fn_t fn, void* ctx) noexcept;
 
     /**
+     * @brief Install the wire SUBSCRIBER target resolver (RFC-0021) — the transport plane's
+     *        mount descent, borrowed by the `:subscribers[]` wire door.
+     *
+     * With no resolver (the default) a wire `SUBSCRIBER`'s `PATH` child is inert, which is
+     * every pre-RFC-0021 embedder's behaviour, unchanged. With one installed,
+     * @ref subscribe_wire asks it whether the target routes through a mount and, when it
+     * does, binds the edge to `(that mount, the residual below it)` instead of to the
+     * session the subscribe-write arrived on — which is what lets a third party wire a flow
+     * between two OTHER nodes and then depart (#491).
+     *
+     * CONFIGURATION, not a runtime knob (#1049): `fwd_router_t` installs it in its
+     * constructor, so a node with a transport plane has it and one without cannot.
+     *
+     * @param fn  The resolver; @p ctx is handed back as its first argument. Null clears.
+     * @param ctx Caller-owned context; must outlive every wire subscribe.
+     */
+    void configure_wire_target_resolver(wire_target_fn_t fn, void* ctx) noexcept;
+
+    /**
      * @brief The wire `:subscribers[]` APPEND — the same admission door as the local
      *        sugars and field-writes (ADR-0049), plus the remote delivery binding.
      *
@@ -1964,7 +2033,7 @@ class graph_t {
     // caller that violates the setup-only contract instead of a corrupted tree walk.
     mutable std::shared_mutex child_types_mutex_;
     std::map<std::string, child_factory_t, std::less<>> child_types_;
-    // The three CONFIGURATION sinks (#1049). Each is the ADR-0047 {fn, ctx} pair published
+    // The four CONFIGURATION sinks (#1049). Each is the ADR-0047 {fn, ctx} pair published
     // through a sink_slot_t — the mechanism #914 established for fwd_router_t's five, hoisted
     // to the layer-neutral `tr` namespace so L4 can hold one without naming the net plane.
     // The doctrine is setup-only and the verbs are named `configure_*` to say it; the slot is
@@ -1975,6 +2044,7 @@ class graph_t {
     tr::sink_slot_t<remote_delivery_fn_t> remote_sink_;         // read on the write hot path
     tr::sink_slot_t<subject_resolver_fn_t> subject_resolver_;   // read by the ACL gate
     tr::sink_slot_t<sub_observer_fn_t> subscription_observer_;  // read on subscribe/clear
+    tr::sink_slot_t<wire_target_fn_t> wire_target_;             // read on a wire subscribe only
     // The NODE's identity record, pre-serialized (#406, RFC-0011 §B): the complete
     // SETTINGS{kind,key} TLV, built once at install so every `:identity` read is a copy
     // of settled bytes rather than a re-emit — the "all vertices return byte-identical

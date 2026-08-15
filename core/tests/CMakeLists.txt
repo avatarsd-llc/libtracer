@@ -1216,6 +1216,15 @@ if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_WS)
 endif()
 
 if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_WS)
+    # #491 / RFC-0021 — third-party orchestration end-to-end over LIVE production wiring
+    # (three full nodes, config-constructed ws sockets): orchestrator C creates B's link
+    # toward A through the creator surface, writes the subscription with the offline-composed
+    # B-rooted target, departs; delivery B -> A must continue.
+    add_executable(orchestrate_depart_test orchestrate_depart_test.cpp)
+    target_link_libraries(orchestrate_depart_test PRIVATE libtracer)
+    libtracer_test_warnings(orchestrate_depart_test)
+    add_test(NAME orchestrate_depart COMMAND orchestrate_depart_test)
+
     # RFC-0004 / ADR-0035 slice 4 — the route-handle: ws delivery-compaction over LIVE
     # transport_ws (producer B -> A forwarder -> consumer C). Proves the byte-delta of a
     # label-compacted COMPACT vs a full-route FWD, byte-exact ordered delivery, the
