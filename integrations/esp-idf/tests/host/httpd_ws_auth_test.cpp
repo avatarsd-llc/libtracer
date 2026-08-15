@@ -33,7 +33,15 @@
  *   7. an expired squatter cannot consume `max_peers` — the reap at the claim edge runs
  *      whether or not a tick has fired;
  *   8. a session that departs unauthenticated owes the routing plane no departure;
- *   9. the timer is retired by the destructor.
+ *   9. the timer is retired by the destructor;
+ *  10. (#1247) a socket that completes the 101 and sends NOTHING is closed at the deadline
+ *      with `kCloseAuthTimeout` — the case a sweep of `slots_` could not see, because such a
+ *      peer never reaches the lazy claim and therefore holds no session at all — while a link
+ *      with no hook leaves such a socket to the HTTP server exactly as before;
+ *  11. (#1247) the pending-handshake ledger that makes 10 possible is FIXED-SIZE, and the
+ *      handshake that would overflow it is refused BY VALUE rather than aborted. That case is
+ *      here precisely because it is ABLATABLE: remove the refusal and this suite reddens,
+ *      which an `assert` on a size argued to be unreachable could never do.
  *
  * What this suite deliberately does NOT claim: anything about a particular credential
  * scheme. The payload is opaque to the link by design, so what is provable here is the
@@ -474,6 +482,117 @@ void test_verdict_refuse_and_overload_exclusivity() {
     run_server();
 }
 
+/**
+ * @brief #1247 — the case the deadline was DOCUMENTED to stop and did not: a peer that
+ *        completes the 101 and then sends nothing at all.
+ *
+ * It never reaches the lazy claim, so it has no `session_t`, `auth_pending` is never set and
+ * a sweep of `slots_` has literally nothing to walk. Measured on the reference at 8 s against
+ * a 2000 ms deadline: still open, no close code. The socket is the scarce resource on an
+ * embedded node and this one was bounded by nothing this link owns.
+ */
+void test_silent_upgrade_is_closed_at_the_deadline() {
+    std::printf("#1247 a socket that upgrades and says NOTHING is closed at the deadline:\n");
+    reset_server();
+    // Long enough that the first tick lands INSIDE the window, so "not before it expires" is
+    // an observation rather than a race won by luck — the same shape as the squatter case.
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true, 0, 400);
+    link->set_auth_cb(&recording_auth, nullptr);
+    reset_hook({httpd_ws_link_t::auth_verdict_t::CONTINUE});
+    constexpr int kSilent = 700;
+
+    check(fake_httpd::instance().open_session(kSilent), "the handshake was answered");
+    // NO deliver_frame. That is the whole case.
+    check(peer_count(*link) == 0, "it holds no session — nothing claimed it");
+
+    check(fake_esp_timer_fire() == 1, "the sweep timer is armed");
+    run_server();
+    check(frames_for(kSilent).empty(), "a tick inside the window closes nothing");
+    check(link->stats().auth_expired == 0, "and counts nothing");
+
+    advance_ms(450);
+    check(fake_esp_timer_fire() == 1, "the timer fires again past the deadline");
+    check(fake_httpd::instance().run_one(), "the tick marshalled a sweep onto the httpd task");
+    const auto sent = frames_for(kSilent);
+    check(sent.size() == 1 && sent[0].type == HTTPD_WS_TYPE_CLOSE,
+          "the silent socket was sent a CLOSE — the fourth row of the issue's table");
+    if (sent.size() == 1)
+        check(close_code(sent[0]) == httpd_ws_link_t::kCloseAuthTimeout,
+              "carrying kCloseAuthTimeout, exactly as a stalled SESSION gets");
+    check(fake_httpd::instance().is_shut(kSilent), "and the socket was shut down");
+    check(link->stats().auth_expired == 1, "counted as an expiry");
+    check(link->stats().auth_rejected == 0, "and not as a refusal");
+
+    // Once only: the row is retired before its close runs, so a second tick has nothing left.
+    fake_httpd::instance().clear_sent_frames();
+    check(fake_esp_timer_fire() == 1, "a later tick still fires");
+    run_server();
+    check(link->stats().auth_expired == 1, "and the same socket is not expired twice");
+    run_server();
+}
+
+/** @brief A link with NO auth hook is unaffected: a silent upgraded socket is the HTTP
+ *         server's business, exactly as before #1247. */
+void test_no_hook_leaves_a_silent_socket_alone() {
+    std::printf("#1247 with no hook a silent socket is nobody's business but httpd's:\n");
+    reset_server();
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true, 0, 200);
+    constexpr int kSilent = 710;
+    check(fake_httpd::instance().open_session(kSilent), "the handshake was answered");
+    advance_ms(250);
+    run_server();
+    check(!fake_httpd::instance().is_shut(kSilent), "past the deadline it is still open");
+    check(link->stats().auth_expired == 0, "and nothing was expired");
+    fake_httpd::instance().close_session(kSilent);
+    run_server();
+}
+
+/**
+ * @brief #1247 (the 2026-08-15 ruling) — the acquisition that would overflow the pending
+ *        ledger is REFUSED BY VALUE, not asserted away.
+ *
+ * The ledger is fixed-size and now carries each un-spoken socket's deadline, so a row that
+ * went missing would be a socket nothing could ever close. The two candidates were sizing it
+ * "so overflow is unreachable" plus an `assert` — an invariant checked by reasoning, and an
+ * `abort()` in the field on an MCU — or refusing the handshake. This case is the one the
+ * refusal arm buys: it can be exercised, and it reddens if the refusal is removed.
+ */
+void test_full_ledger_refuses_the_handshake() {
+    std::printf("#1247 a full pending-handshake ledger refuses the next 101:\n");
+    reset_server();
+    // A short deadline, so the recovery half below is a sweep rather than a wait.
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true, 0, 200);
+    link->set_auth_cb(&recording_auth, nullptr);
+    reset_hook({httpd_ws_link_t::auth_verdict_t::CONTINUE});
+    constexpr int kBase = 720;
+    constexpr std::size_t kBound = httpd_ws_link_t::kMaxPendingHandshakes;
+
+    // Drive it to the bound: every one of these upgrades and then says nothing, which is
+    // exactly what a row costs.
+    bool all_admitted = true;
+    for (std::size_t i = 0; i < kBound; ++i)
+        all_admitted &= fake_httpd::instance().open_session(kBase + static_cast<int>(i));
+    check(all_admitted, "every handshake up to the bound was answered");
+    check(link->stats().peers_refused == 0, "and none of them was refused");
+
+    // The one that overflows it.
+    const int over = kBase + static_cast<int>(kBound);
+    check(!fake_httpd::instance().open_session(over), "the overflowing handshake is REFUSED");
+    check(!fake_httpd::instance().has_session(over), "no session was admitted for it");
+    check(link->stats().peers_refused == 1, "and the refusal is counted, not aborted");
+
+    // Self-clearing: the rows are freed by the deadline sweep, and the link takes handshakes
+    // again. A bound that never recovered would be a denial of service of its own.
+    advance_ms(250);
+    check(fake_esp_timer_fire() == 1, "the sweep timer fires past the deadline");
+    check(fake_httpd::instance().run_one(), "the tick marshalled a sweep onto the httpd task");
+    check(link->stats().auth_expired == kBound, "every silent socket was expired");
+    check(fake_httpd::instance().open_session(over + 1),
+          "and with the ledger drained a handshake is admitted again");
+    check(link->stats().peers_refused == 1, "with no further refusal");
+    run_server();
+}
+
 /** @brief The destructor retires the sweep timer. */
 void test_teardown_retires_the_timer() {
     std::printf("#1184 teardown retires the sweep:\n");
@@ -504,6 +623,9 @@ int main() {
     test_teardown_retires_the_timer();
     test_handshake_authentication_skips_the_frame();
     test_verdict_refuse_and_overload_exclusivity();
+    test_silent_upgrade_is_closed_at_the_deadline();
+    test_no_hook_leaves_a_silent_socket_alone();
+    test_full_ledger_refuses_the_handshake();
     if (g_failures != 0) {
         std::printf("FAILED: %d check(s)\n", g_failures);
         return 1;

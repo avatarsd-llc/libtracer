@@ -1717,16 +1717,37 @@ esp_err_t httpd_ws_link_t::ws_pre_handshake(httpd_req_t* req) {
         verdict_fn != nullptr ? verdict_fn(ctx, req)
         : fn != nullptr ? (fn(ctx, req) ? admission_verdict_t::ADMIT : admission_verdict_t::REFUSE)
                         : admission_verdict_t::ADMIT;
-    const bool admit = verdict != admission_verdict_t::REFUSE;
+    bool admit = verdict != admission_verdict_t::REFUSE;
     if (!admit) ESP_LOGW(kTag, "peer refused by admission hook (fd=%d)", httpd_req_to_sockfd(req));
-    // Record the pre-authentication BEFORE the 101 goes out, so the peer's first data frame
-    // — which may arrive on another httpd select round the instant the upgrade completes —
-    // can never race the note it has to read. `peers_m_` nests UNDER `m`, which is the
-    // permitted order (see gate_t), and the link is re-resolved through the gate the way
-    // every other latched callback does.
-    if (verdict == admission_verdict_t::ADMIT_AUTHENTICATED) {
+    // Open the ledger row BEFORE the 101 goes out, so the peer's first data frame — which may
+    // arrive on another httpd select round the instant the upgrade completes — can never race
+    // the row it has to consume. `peers_m_` nests UNDER `m`, which is the permitted order (see
+    // gate_t), and the link is re-resolved through the gate the way every other latched
+    // callback does.
+    //
+    // The row carries BOTH facts learned here: the handshake's verdict (#1245) and the instant
+    // this socket stops being worth holding if it never speaks (#1247). It is the only record
+    // of a silent upgrade that exists — esp_http_server answers the handshake itself and the
+    // session is claimed lazily on the first frame — so without it the deadline bounds a
+    // session that stalled mid-conversation and nothing at all bounds a socket that opened and
+    // said nothing, which is the case the reference names as the attack.
+    //
+    // Only on a link with an auth hook: without one there is no deadline to enforce, the
+    // verdict changes nothing about how a session is served, and a silent socket is the HTTP
+    // server's own business exactly as it always was. That is also what keeps the refusal
+    // below unreachable on such a link.
+    if (admit) {
         const std::lock_guard lock(gate->m);
-        if (gate->link != nullptr) gate->link->note_preauthenticated(httpd_req_to_sockfd(req));
+        httpd_ws_link_t* const self = gate->link;
+        if (self != nullptr && self->auth_fn_ != nullptr &&
+            !self->note_pending_handshake(httpd_req_to_sockfd(req),
+                                          verdict == admission_verdict_t::ADMIT_AUTHENTICATED)) {
+            // Refused BY VALUE and turned into the same clean abandon a REFUSE verdict gets:
+            // ESP_FAIL out of the pre-handshake, no 101, no session, no latched route. The
+            // alternative — admitting a socket the ledger cannot hold — would be admitting one
+            // nothing can ever close.
+            admit = false;
+        }
     }
     {
         const std::lock_guard lock(gate->m);
@@ -1821,6 +1842,18 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
                 break;
             }
         if (slot == nullptr) {
+            // Consume the pending-handshake row HERE, ahead of the cap test, because this
+            // socket has now spoken and the ledger only ever bounded silent ones (#1247).
+            // Consuming it also HANDS THE BOUND OVER: past this point the connection is either
+            // a session with its own `auth_deadline_us` or a refusal httpd is about to close,
+            // and in neither case may the sweep still see it as an un-spoken socket — it would
+            // otherwise be closed twice, on two different arguments, and counted twice.
+            // ...unless the HANDSHAKE authenticated it (#1245). A peer that presented a
+            // credential the admission predicate accepted has already answered the question
+            // the auth hook asks, and asking it again in-band is a question a native dialer
+            // cannot answer at all — it has no way to send an authentication frame, so a link
+            // serving both browsers and dialers would close every dialer at the deadline.
+            const bool preauthenticated = take_pending_handshake(fd);
             // No teardown test: the gate admitted this frame, so the barrier has not
             // snapshotted yet and a session armed here is still caught.
             // Admission cap: refuse cleanly (ESP_FAIL => httpd closes the socket).
@@ -1881,14 +1914,9 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
             // A link with an auth hook claims every session UNAUTHENTICATED, and the
             // deadline is stamped from the same clock reading the session is dated by. The
             // subject is cleared with it: slots are recycled in place, so a stale identity
-            // left here would be published for whoever landed on the slot next.
-            // ...unless the HANDSHAKE authenticated it (#1245). A peer that presented a
-            // credential the admission predicate accepted has already answered the question
-            // this hook asks, and asking it again in-band is a question a native dialer
-            // cannot answer at all — it has no way to send an authentication frame, so a
-            // link serving both browsers and dialers would close every dialer at the
-            // deadline. The record is CONSUMED here, which is what keeps it a handoff.
-            const bool preauthenticated = take_preauthenticated(fd);
+            // left here would be published for whoever landed on the slot next. ...unless the
+            // HANDSHAKE authenticated it (#1245): `preauthenticated` came out of the ledger row
+            // consumed above, ahead of the cap test.
             slot->auth_pending = auth_fn_ != nullptr && !preauthenticated;
             slot->auth_deadline_us =
                 slot->auth_pending ? slot->st.connected_at_us + auth_deadline_us_ : 0;
@@ -2084,6 +2112,52 @@ void httpd_ws_link_t::sweep_auth_deadlines() {
             close_session(expired[i], kCloseAuthTimeout);
         }
     }
+    sweep_pending_handshakes(now);
+}
+
+void httpd_ws_link_t::sweep_pending_handshakes(std::int64_t now) {
+    // The other half of the same deadline, and the half `slots_` cannot show (#1247). A peer
+    // that completed the 101 and sent NOTHING never reached the lazy claim, so it has no
+    // session, no `auth_pending` flag and nothing for the walk above to find — it was bounded
+    // only by whatever keepalive policy the embedder's HTTP server happened to carry. Its row
+    // in the ledger is the record that makes it reachable at all.
+    const httpd_handle_t h = handle_.load(std::memory_order_relaxed);
+    for (;;) {
+        int fd = -1;
+        {
+            const std::lock_guard lock(peers_m_);
+            std::size_t at = pending_n_;
+            for (std::size_t i = 0; i < pending_n_; ++i)
+                if (now >= pending_[i].deadline_us) {
+                    at = i;
+                    break;
+                }
+            if (at == pending_n_) break;
+            fd = pending_[at].fd;
+            // Retire the row BEFORE the close, and while still holding the lock: the close
+            // below runs unlocked, and a row left behind would be swept again on the next tick
+            // against a descriptor this link no longer has any claim on.
+            drop_pending_handshake(at);
+        }
+        // The server's own verdict on the descriptor, taken exactly as tx_work takes it. There
+        // is no session_t here to carry an identity, so this is the ONLY thing standing between
+        // a row whose socket already hung up and a `shutdown` on whoever was accepted onto the
+        // recycled number. A row that fails it is simply dropped: the socket it named is gone,
+        // which is the outcome the deadline wanted anyway.
+        if (h == nullptr || fd < 0 || httpd_ws_get_fd_info(h, fd) != HTTPD_WS_CLIENT_WEBSOCKET)
+            continue;
+        auth_expired_.fetch_add(1, std::memory_order_relaxed);
+        ESP_LOGW(kTag, "socket closed: upgraded and sent nothing within the auth deadline");
+        // The close code first and the shutdown second — close_session's order, for
+        // close_session's reason (after `shutdown` every write fails at once, so a code written
+        // afterwards never reaches the peer). Done inline rather than through close_session
+        // because there is no slot: the frame is written on the bare descriptor, which is all
+        // this connection ever cost us.
+        const std::byte payload[2] = {static_cast<std::byte>((kCloseAuthTimeout >> 8) & 0xFF),
+                                      static_cast<std::byte>(kCloseAuthTimeout & 0xFF)};
+        (void)send_now(nullptr, fd, HTTPD_WS_TYPE_CLOSE, payload);
+        condemn(fd);
+    }
 }
 
 esp_err_t httpd_ws_link_t::send_now(session_t* slot, int fd, int ws_type,
@@ -2141,39 +2215,53 @@ void httpd_ws_link_t::close_session(session_t* slot, std::uint16_t code) {
     condemn(fd);
 }
 
-void httpd_ws_link_t::note_preauthenticated(int fd) {
-    if (fd < 0) return;
-    const std::lock_guard lock(peers_m_);
-    // Overwrite a stale record for the same descriptor rather than adding a second. A
-    // descriptor is reused as soon as the kernel frees it, so a leftover from a handshake
-    // whose peer never sent a frame would otherwise pre-authenticate the NEXT connection to
-    // land on that number — the one way this mechanism could fail open.
-    for (std::size_t i = 0; i < preauth_n_; ++i)
-        if (preauth_fds_[i] == fd) return;  // already recorded; nothing to add
-    if (preauth_n_ == preauth_fds_.size()) {
-        // Full: drop the entry at the front to make room. `take_preauthenticated` fills a
-        // hole from the back, so the set is not ordered by age and this is not "the oldest"
-        // — it is one arbitrary handshake, which will be asked for a credential frame it may
-        // not be able to answer. That is the fail-CLOSED direction, and reaching it at all
-        // means more handshakes are in flight than the server has sockets.
-        for (std::size_t i = 1; i < preauth_n_; ++i) preauth_fds_[i - 1] = preauth_fds_[i];
-        --preauth_n_;
-        ESP_LOGW(kTag,
-                 "pre-authentication record set full - a handshake will be asked for a "
-                 "credential frame");
-    }
-    preauth_fds_[preauth_n_++] = fd;
-}
-
-bool httpd_ws_link_t::take_preauthenticated(int fd) noexcept {
+bool httpd_ws_link_t::note_pending_handshake(int fd, bool preauthenticated) {
     if (fd < 0) return false;
-    for (std::size_t i = 0; i < preauth_n_; ++i) {
-        if (preauth_fds_[i] != fd) continue;
-        preauth_fds_[i] = preauth_fds_[preauth_n_ - 1];  // order carries no meaning
-        --preauth_n_;
+    const std::lock_guard lock(peers_m_);
+    const std::int64_t deadline = esp_timer_get_time() + auth_deadline_us_;
+    // REPLACE a stale row for the same descriptor rather than adding a second. A descriptor is
+    // reused as soon as the kernel frees it, so a leftover from a handshake whose peer never
+    // sent a frame must not pre-authenticate the NEXT connection to land on that number (the
+    // one way the verdict half could fail open), nor charge it a deadline that has already
+    // half elapsed (the one way the deadline half could close a peer that just arrived).
+    for (std::size_t i = 0; i < pending_n_; ++i) {
+        if (pending_[i].fd != fd) continue;
+        pending_[i].deadline_us = deadline;
+        pending_[i].preauthenticated = preauthenticated;
         return true;
     }
+    if (pending_n_ == pending_.size()) {
+        // FULL, and the answer is a refusal by value — the caller turns this into ESP_FAIL and
+        // esp_http_server abandons the upgrade, which is the same clean close a REFUSE verdict
+        // gets. Not an assert on a size argued to be unreachable (#1247): the row carries this
+        // socket's deadline, so evicting one to make room would hand back an UNBOUNDED socket —
+        // precisely the resource this ledger exists to bound — and an abort() on an MCU is the
+        // one answer to exhaustion this project does not give anywhere else. Reaching this at
+        // all means more upgrades are in flight, un-spoken, than kMaxPendingHandshakes; the
+        // sweep frees rows at the deadline, so it is self-clearing.
+        ESP_LOGW(kTag, "pending-handshake ledger full (%u) - handshake refused (fd=%d)",
+                 static_cast<unsigned>(pending_.size()), fd);
+        return false;
+    }
+    pending_[pending_n_++] = pending_handshake_t{fd, deadline, preauthenticated};
+    return true;
+}
+
+bool httpd_ws_link_t::take_pending_handshake(int fd) noexcept {
+    if (fd < 0) return false;
+    for (std::size_t i = 0; i < pending_n_; ++i) {
+        if (pending_[i].fd != fd) continue;
+        const bool preauthenticated = pending_[i].preauthenticated;
+        drop_pending_handshake(i);
+        return preauthenticated;
+    }
     return false;
+}
+
+void httpd_ws_link_t::drop_pending_handshake(std::size_t at) noexcept {
+    if (at >= pending_n_) return;
+    pending_[at] = pending_[pending_n_ - 1];  // order carries no meaning
+    --pending_n_;
 }
 
 void httpd_ws_link_t::on_auth_message(session_t* slot, std::span<const std::byte> body) {
@@ -2618,9 +2706,14 @@ void httpd_ws_link_t::condemn(int fd) {
     //
     // It does NOT close the descriptor — `shutdown` never does — so httpd remains the
     // sole owner of the fd's lifetime and its own `close` stays correct. Calling it is
-    // safe against that lifetime because both callers run ON the httpd task (a tx_work
-    // item and a send override invoked from one), the single task that accepts and closes
-    // sockets, so the fd cannot be recycled underneath this call.
+    // safe against that lifetime because EVERY caller runs ON the httpd task — a tx_work
+    // item, a send override invoked from one, close_session (the auth verdicts and
+    // close_peer), and the pending-handshake sweep (#1247) — the single task that accepts
+    // and closes sockets, so the fd cannot be recycled underneath this call.
+    //
+    // The sweep is the one caller with no session_t behind its descriptor, so it is also
+    // the one that cannot lean on live_fd for identity; it tests the server's own
+    // `httpd_ws_get_fd_info` before reaching here instead. See sweep_pending_handshakes.
     if (::shutdown(fd, SHUT_RDWR) != 0) ESP_LOGW(kTag, "shutdown failed fd=%d (%d)", fd, errno);
     // Best-effort belt: if the control socket does have room, this reaps the session a
     // select cycle sooner. Its return is deliberately not trusted — see above — so a

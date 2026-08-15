@@ -634,8 +634,10 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
          * count means the producer is pushing to sessions long dead.
          */
         std::uint32_t tx_to_dead_peer = 0;
-        /** @brief Opening handshakes turned away — by the admission predicate or by
-         *         `max_peers`. These never reach a slot, so no session can carry them. */
+        /** @brief Opening handshakes turned away — by the admission predicate, by `max_peers`,
+         *         or (#1247) by a FULL pending-handshake ledger, which is what a link with an
+         *         auth hook answers instead of aborting; see @ref kMaxPendingHandshakes. These
+         *         never reach a slot, so no session can carry them. */
         std::uint32_t peers_refused = 0;
         /** @brief Sessions this link KILLED — a three-strike streak, a rejected short
          *         write, an auth verdict (@ref auth_rejected / @ref auth_expired name the
@@ -662,12 +664,16 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
          */
         std::uint32_t auth_rejected = 0;
         /**
-         * @brief Sessions closed because they did not authenticate within `auth_deadline_ms`.
+         * @brief Sessions — and, since #1247, un-spoken upgraded SOCKETS — closed because they
+         *        did not authenticate within `auth_deadline_ms`.
          *
-         * The squatter count. A steady trickle is normal — a browser tab closed mid-login,
-         * a peer that lost its network between the 101 and its first frame — while a rate
-         * that tracks connection attempts means something is opening sockets and never
-         * speaking, which is the exposure the deadline exists for.
+         * The squatter count, and it now counts BOTH shapes of squatter: the peer that spoke
+         * and then stalled (it holds a `session_t`) and the peer that completed the 101 and
+         * said nothing at all (it holds only a socket, which is the scarcer of the two on an
+         * embedded node). A steady trickle is normal — a browser tab closed mid-login, a peer
+         * that lost its network between the 101 and its first frame — while a rate that tracks
+         * connection attempts means something is opening sockets and never speaking, which is
+         * the exposure the deadline exists for.
          */
         std::uint32_t auth_expired = 0;
     };
@@ -849,10 +855,11 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * does not exist yet, because `esp_http_server` answers the handshake internally and this
      * link claims a session LAZILY on its first data frame. The verdict is therefore recorded
      * against the socket descriptor and consumed at that claim, both on the httpd task. The
-     * record set is FIXED-SIZE (@ref kMaxPreauthenticated): a handshake that overflows it, or
-     * one whose peer never sends a data frame, degrades to @ref admission_verdict_t::ADMIT —
-     * the session is asked for a credential frame. That is the whole failure mode, and it
-     * fails CLOSED.
+     * ledger is FIXED-SIZE (@ref kMaxPendingHandshakes) and, since #1247, an overflow REFUSES
+     * the handshake rather than dropping a row: a row that went missing used to cost its peer
+     * only a credential frame, but the same row now carries that socket's deadline, and a
+     * missing one would leave the socket bounded by nothing. Both arms fail CLOSED; this one
+     * fails closed on the resource that is actually scarce.
      */
     void set_admission_verdict_cb(admission_verdict_fn_t fn, void* ctx) noexcept {
         admission_verdict_fn_ = fn;
@@ -947,7 +954,11 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * one, subscribe, or be discovered by a peer that can.
      *
      * WHAT BOUNDS IT: the constructor's `auth_deadline_ms`. A session that has not been
-     * ACCEPTed within it is closed with @ref kCloseAuthTimeout. Without that bound an
+     * ACCEPTed within it is closed with @ref kCloseAuthTimeout — and since #1247 so is a
+     * SOCKET that completed the 101 and never sent a first frame at all, which has no session
+     * to bound and used to live until the HTTP server's own keepalive policy noticed it. That
+     * is the "open sockets, say nothing" case the deadline was documented to stop; it is now
+     * carried by the pending-handshake ledger (@ref pending_). Without that bound an
      * unauthenticated peer would hold one unit of `max_peers` for as long as it cared to,
      * which on an embedded slot pool is a cheap denial of service — and a NEW exposure, since
      * before this hook existed no unadmitted peer ever reached a slot at all.
@@ -1002,12 +1013,41 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *         truncated. Sized to hold a hex-spelled 32-byte public key (64 chars) with
      *         room for a scheme prefix. */
     static constexpr std::size_t kMaxSubjectChars = 127;
-    /** @brief How many handshakes may be awaiting their first data frame with an @ref
-     *         admission_verdict_t::ADMIT_AUTHENTICATED verdict recorded against them. Above
-     *         any `max_open_sockets` an ESP node runs, because an entry lives only for the
-     *         gap between the 101 and the peer's first frame. See @ref set_admission_cb for
-     *         what an overflow costs. */
-    static constexpr std::size_t kMaxPreauthenticated = 24;
+    /**
+     * @brief How many upgraded sockets may be awaiting their first data frame at once on a
+     *        link with an authentication hook installed — the size of the pending-handshake
+     *        ledger, and therefore a HARD bound on concurrent un-spoken upgrades.
+     *
+     * WHAT AN ENTRY IS. One row per socket that passed admission and has not yet claimed a
+     * session, carrying the handshake's verdict (#1245) and the instant its `auth_deadline_ms`
+     * runs out (#1247). It is a handoff between two points of the SAME connection's setup, not
+     * a table: the row is consumed at the lazy first-frame claim, or reaped by the deadline
+     * sweep, whichever comes first. A link with no auth hook records nothing and is bounded by
+     * nothing here.
+     *
+     * WHAT THE BOUND COSTS, and it is not "nothing". The `max_open_sockets`+1-th silent
+     * upgrade cannot be admitted, so the handshake is REFUSED: `ws_pre_handshake` answers
+     * `ESP_FAIL`, `esp_http_server` abandons the upgrade and closes the socket, and the
+     * refusal is counted in @ref stats_t::peers_refused. That is deliberate and was ruled on
+     * (#1247): the alternative — sizing this so overflow is "unreachable by construction" and
+     * asserting the invariant — is an invariant checked by reasoning rather than by the build,
+     * and on an MCU an `assert` is an `abort()` in the field. Exhaustion in this project is
+     * answered BY VALUE (ADR-0065's nothrow `try_alloc`, the egress store that drops and
+     * counts a frame rather than truncating it), and this ledger is not the one component that
+     * dies instead. Refusing is also the only arm that can be exercised AND ablated by a test,
+     * so it does not ship unverified.
+     *
+     * WHY IT IS NOT REACHED IN PRACTICE. A row lives only for the gap between the 101 and that
+     * peer's first frame, bounded above by `auth_deadline_ms`, so the ledger holds at most the
+     * upgrades in flight in one deadline window. 24 is above any `max_open_sockets` an ESP node
+     * runs — but "above" is a sizing argument, not a proof, which is exactly why the overflow
+     * arm exists and behaves.
+     */
+    static constexpr std::size_t kMaxPendingHandshakes = 24;
+    /** @brief Former name of @ref kMaxPendingHandshakes, kept so an embedder that read the
+     *         0.12.0 constant still compiles. The ledger it sizes now holds a row per pending
+     *         handshake rather than only per pre-authenticated one (#1247). */
+    static constexpr std::size_t kMaxPreauthenticated = kMaxPendingHandshakes;
 
    private:
     struct gate_t;            // the handler-admission gate + teardown barrier (in the .cpp)
@@ -1410,19 +1450,48 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     admission_verdict_fn_t admission_verdict_fn_ = nullptr;
     void* admission_ctx_ = nullptr;
     /**
-     * @brief Sockets whose handshake answered @ref admission_verdict_t::ADMIT_AUTHENTICATED
-     *        and which have not yet claimed a session. Entries `[0, preauth_n_)` are live.
+     * @brief One socket that passed admission and has not yet claimed a session — the row of
+     *        the pending-handshake ledger.
      *
-     * Written in @ref ws_pre_handshake and consumed at the lazy claim in @ref on_data_frame,
-     * both on the httpd task, under @ref peers_m_. FIXED-SIZE on purpose: this is a handoff
-     * between two points of the SAME connection's setup, not a table — an entry lives for the
-     * gap between the 101 and that peer's first frame. Sized well above any `max_open_sockets`
-     * an ESP node runs, and a full set drops its oldest entry, which costs that session
-     * nothing but a credential frame it may not be able to answer — the fail-CLOSED direction.
+     * Two facts about the SAME gap, because they are learned at the same instant and consumed
+     * on the same task: what the handshake decided about this peer (#1245) and when this
+     * un-spoken socket stops being worth holding (#1247).
      */
-    std::array<int, kMaxPreauthenticated> preauth_fds_{};
-    /** @brief How many entries of @ref preauth_fds_ are live. */
-    std::size_t preauth_n_ = 0;
+    struct pending_handshake_t {
+        int fd = -1; /**< @brief The socket the 101 was written on. */
+        /** @brief When @ref sweep_auth_deadlines must close it if it has still said nothing —
+         *         `esp_timer_get_time()` at the pre-handshake plus `auth_deadline_us_`. */
+        std::int64_t deadline_us = 0;
+        /** @brief The handshake answered @ref admission_verdict_t::ADMIT_AUTHENTICATED, so the
+         *         session it claims is served without a credential frame. */
+        bool preauthenticated = false;
+    };
+    /**
+     * @brief Sockets that passed admission and have not yet claimed a session. Entries
+     *        `[0, pending_n_)` are live.
+     *
+     * Written in @ref ws_pre_handshake, consumed at the lazy claim in @ref on_data_frame and
+     * reaped by @ref sweep_auth_deadlines — all three on the httpd task, under @ref peers_m_.
+     * FIXED-SIZE (@ref kMaxPendingHandshakes) on purpose: this is a handoff between two points
+     * of the SAME connection's setup, not a table.
+     *
+     * IT IS ALSO THE ONLY THING THAT SEES A SILENT UPGRADE. `esp_http_server` answers the
+     * handshake internally and this link claims a session lazily, so a peer that completes the
+     * 101 and then sends NOTHING has no `session_t` and is invisible to a sweep of `slots_` —
+     * the defect #1247 reported, against a reference text that named "open sockets, say
+     * nothing" as the attack the deadline stops. The row is stamped here, where the socket is
+     * first known, so the deadline bounds the socket rather than the session.
+     *
+     * POPULATED ONLY WHEN AN AUTH HOOK IS INSTALLED. Without one there is no deadline to
+     * enforce and a silent upgraded socket is the HTTP server's business exactly as before —
+     * which is also what keeps the overflow refusal below unreachable on such a link.
+     *
+     * A FULL LEDGER REFUSES THE HANDSHAKE; see @ref kMaxPendingHandshakes for why that, and
+     * not an assert on a size argued to be unreachable.
+     */
+    std::array<pending_handshake_t, kMaxPendingHandshakes> pending_{};
+    /** @brief How many entries of @ref pending_ are live. */
+    std::size_t pending_n_ = 0;
     /** @brief Post-handshake auth hook + its opaque ctx; null serves every session at once
      *         (the default) — see @ref set_auth_cb. Read on the httpd task, unlocked. */
     auth_fn_t auth_fn_ = nullptr;
@@ -1456,13 +1525,32 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *         resolving the link through the gate @p arg. */
     static void auth_sweep_work(void* arg);
     /**
-     * @brief Close every session whose authentication deadline has passed (httpd task only).
+     * @brief Close every session, and every un-spoken upgraded SOCKET, whose authentication
+     *        deadline has passed (httpd task only).
+     *
+     * TWO SETS, because the resource is claimed lazily and the scarce one is the socket
+     * (#1247). `slots_` holds the peers that spoke and then stalled; @ref pending_ holds the
+     * ones that completed the 101 and said nothing, which have no `session_t` to walk and were
+     * therefore bounded by nothing at all. A pending row is closed on the raw descriptor —
+     * there is no slot to condemn — after the server's own `httpd_ws_get_fd_info` confirms a
+     * websocket still lives there, so a row left behind by a socket that hung up cannot shut
+     * down whoever was accepted onto the recycled number.
      *
      * Snapshots the expired sessions under @ref peers_m_ and closes them with the lock
      * RELEASED, because @ref close_session takes it again — the same shape every other
      * close path here uses.
      */
     void sweep_auth_deadlines();
+    /**
+     * @brief Close every upgraded socket that has said NOTHING past its deadline (httpd task
+     *        only; @ref peers_m_ must NOT be held). @p now is @ref sweep_auth_deadlines' clock
+     *        reading, shared so both halves of one sweep judge against one instant.
+     *
+     * Takes @ref peers_m_ per row and RELEASES it around the close, the same shape the session
+     * half uses. Each row is retired before its close runs, so a tick that overlaps the next
+     * cannot sweep the same descriptor twice.
+     */
+    void sweep_pending_handshakes(std::int64_t now);
     /**
      * @brief Hand one whole message from an unauthenticated session to the auth hook and act
      *        on the verdict (httpd task only; @ref peers_m_ must NOT be held).
@@ -1472,23 +1560,35 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      */
     void on_auth_message(session_t* slot, std::span<const std::byte> body);
     /**
-     * @brief Record that @p fd's handshake answered @ref
-     *        admission_verdict_t::ADMIT_AUTHENTICATED (httpd task; takes @ref peers_m_).
+     * @brief Open @p fd's row in the pending-handshake ledger: the handshake's verdict plus
+     *        the deadline by which this socket must have spoken (httpd task; takes @ref
+     *        peers_m_).
      *
-     * Any stale entry for the same descriptor is overwritten rather than duplicated: a
-     * descriptor is reused the moment the kernel frees it, and a leftover from a handshake
-     * whose peer never spoke must not pre-authenticate whoever lands on it next.
+     * Any stale row for the same descriptor is REPLACED rather than duplicated: a descriptor
+     * is reused the moment the kernel frees it, and a leftover from a handshake whose peer
+     * never spoke must neither pre-authenticate whoever lands on it next nor charge them the
+     * previous connection's deadline.
+     *
+     * @return false when the ledger is FULL — the refusal the caller turns into `ESP_FAIL`,
+     *         abandoning the upgrade. Answered by value rather than asserted; see @ref
+     *         kMaxPendingHandshakes.
      */
-    void note_preauthenticated(int fd);
+    [[nodiscard]] bool note_pending_handshake(int fd, bool preauthenticated);
     /**
-     * @brief Consume @p fd's pre-authentication record, if it has one (httpd task; @ref
-     *        peers_m_ must ALREADY be held — this runs inside the claim's critical section).
+     * @brief Consume @p fd's ledger row, if it has one (httpd task; @ref peers_m_ must
+     *        ALREADY be held — this runs inside the claim's critical section).
      *
-     * @return true when the handshake authenticated this session, false otherwise. Consuming
-     *         rather than reading is what keeps the record set a handoff: an entry cannot
-     *         outlive the claim it was written for.
+     * @return true when the handshake authenticated this session, false otherwise (including
+     *         "no row"). Consuming rather than reading is what keeps the ledger a handoff: a
+     *         row cannot outlive the claim it was written for, and a claimed session is bounded
+     *         by its own @ref session_t deadline from here on.
      */
-    [[nodiscard]] bool take_preauthenticated(int fd) noexcept;
+    [[nodiscard]] bool take_pending_handshake(int fd) noexcept;
+    /**
+     * @brief Drop @p fd's ledger row without answering its verdict (httpd task; @ref peers_m_
+     *        must ALREADY be held). Used by the sweep, which has already decided to close it.
+     */
+    void drop_pending_handshake(std::size_t at) noexcept;
     /**
      * @brief Send @p payload to @p slot's socket RIGHT NOW rather than through the work
      *        queue (httpd task only; @ref peers_m_ must NOT be held).

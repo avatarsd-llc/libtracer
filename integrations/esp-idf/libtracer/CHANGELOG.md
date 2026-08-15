@@ -12,6 +12,49 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`httpd_ws_link_t`'s authentication deadline now bounds a socket that upgrades and then
+  says NOTHING** ([#1247](https://github.com/avatarsd-llc/libtracer/issues/1247)).
+  `docs/reference/16-websocket-session-auth.md` names "open sockets, say nothing" as the exact
+  attack the deadline exists to stop, and that was the one case it did not cover: measured at
+  8 s still open, no close code, against a documented 2000 ms deadline. The cause is a domain
+  mismatch, not an off-by-one — `esp_http_server` answers the handshake internally and this
+  link claims a `session_t` LAZILY on the peer's first data frame, so a peer that completes the
+  101 and sends nothing has no session, never sets `auth_pending`, and the sweep of `slots_` has
+  literally nothing to walk. The sweep was auditing the resource allocated lazily instead of the
+  one that is actually scarce: on an embedded node a server sized for ten sockets is spent by
+  ten silent upgrades, none of which ever costs the attacker a credential or a frame.
+
+  **What changed.** The pre-handshake now opens a row in a fixed-size per-socket ledger
+  carrying that socket's deadline (and, as before, the `ADMIT_AUTHENTICATED` verdict of #1245);
+  the deadline sweep walks it alongside `slots_` and closes an un-spoken socket on the raw
+  descriptor with the same `kCloseAuthTimeout`, counted in `stats_t::auth_expired`. The row is
+  consumed the moment the socket speaks, so exactly one of the two mechanisms bounds a
+  connection at any instant. The close is guarded by the server's own `httpd_ws_get_fd_info`,
+  the same second opinion `tx_work` takes, so a row left by a socket that already hung up
+  cannot shut down whoever was accepted onto the recycled descriptor. **A link with no auth
+  hook records nothing and is unaffected**: a silent upgraded socket remains the HTTP server's
+  business, exactly as before.
+
+  **A full ledger REFUSES the handshake** — `ws_pre_handshake` answers `ESP_FAIL`, no 101 is
+  written, and `stats_t::peers_refused` counts it. This is a behaviour change from #1246, where
+  a full record set evicted a row and the affected session merely degraded to `ADMIT`: the row
+  now carries that socket's deadline, so a missing row is a socket nothing can ever close, and
+  eviction would fail OPEN on the scarcer resource. The alternative considered and rejected was
+  sizing the ledger so overflow is "unreachable by construction" and asserting the invariant —
+  an invariant checked by reasoning rather than by the build, and on an MCU an `assert` is an
+  `abort()` in the field, on a node whose entire premise is that exhaustion is answered **by
+  value** (ADR-0065's nothrow `try_alloc`; the egress store that drops and counts a frame rather
+  than truncating it or dying). Refusal is also the only arm a test can exercise AND ablate; the
+  host suite drives the ledger to its bound, asserts the refusal, and reddens when the refusal
+  is removed.
+
+  **Public surface.** `kMaxPreauthenticated` is renamed `kMaxPendingHandshakes` — the ledger
+  now holds a row per pending handshake rather than only per pre-authenticated one — with the
+  old name kept as an alias so an embedder that read the 0.12.0 constant still compiles. The
+  bound and its consequence are documented on the type. Nothing else moves: no new constructor
+  argument, no new Kconfig knob (the deadline is already one), and the three rows of #1247's
+  measured table that were already correct are unchanged.
+
 - **`httpd_ws_link_t::peer_link()` now returns a PER-RESOLUTION handle, closing the
   `[resolve -> mint]` misdelivery window**
   ([#1013](https://github.com/avatarsd-llc/libtracer/issues/1013)). The half of #954 the
