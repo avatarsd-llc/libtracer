@@ -226,13 +226,12 @@ build if one does not.
 
 Details that make these trustworthy:
 
-- The per-PR gate watches **twelve canonical points** — a representative slice of the
+- The per-PR gate watches **fourteen canonical points** — a representative slice of the
   fan-out / payload / topic sweeps plus a fold-width point, one per *gated* family
   (`inproc` and `inproc-borrow` share one), so a pullback on any of those legs is caught and
   not just the 1:1 write. They are **not** the whole dispatch surface, and this page should
-  not be read as claiming they are: the path-target delivery legs
-  (`inproc-target-stored` / `inproc-target-handler`) are measured and charted but **ungated**,
-  as are `inproc-deliver`, the `eptype-*` sweep and the `-batch` twins. A pullback confined to
+  not be read as claiming they are: `inproc-deliver`, the `eptype-*` sweep and the `-batch`
+  twins are measured and charted but **ungated**. A pullback confined to
   those ships without the gate objecting. They are
   `perf_gate.py`'s `POINTS`, named here in full because this page is hand-written and a
   bare count says nothing about what is covered; each is keyed
@@ -246,7 +245,10 @@ Details that make these trustworthy:
   fold walk, 512 bytes held constant across four rope links and timed over a batch; and
   `lkv-store-heap/64/1/1` + `lkv-store-pool/64/1/1` — the L1 **rope-to-contiguous copy**
   (`rope_t::materialize`: one segment allocated from the backend plus the payload
-  `memcpy`), against the default heap and against a pooled backend.
+  `memcpy`), against the default heap and against a pooled backend; and
+  `inproc-target-handler/64/8/1` + `inproc-target-stored/64/8/1` — the **path-target**
+  dispatch legs at fan-out 8, edges carrying a target key rather than a callback, which
+  is the leg a wire `SUBSCRIBER` actually takes.
 
   Those last two are here because of what happened without them
   ([#1250](https://github.com/avatarsd-llc/libtracer/issues/1250)): reshaping
@@ -257,7 +259,26 @@ Details that make these trustworthy:
   so they add no wall-clock. Note the name: `lkv-store-*` measures the **copy-store
   allocation**, not the last-known-value slot.
 
-  Four of the twelve come from OTHER bench binaries, and they are here because of what
+  The `inproc-target-*` pair is gated at **fan-out 8** and nowhere else, for two measured
+  reasons ([#1077](https://github.com/avatarsd-llc/libtracer/issues/1077)). Fan 8 sits
+  exactly on `vertex_t::kInlineFanout`, the no-heap small-fan-out boundary, so it is the
+  width that prices the narrow-fan snapshot path — which is where that issue's ~**+5.5%**
+  step appeared, invisible to every gate at the time. And a layout control (the same
+  source rebuilt at three `-falign-functions` settings) measured this row as the most
+  layout-**stable** point of the whole sweep, **0.62%** across placements against ~15% for
+  `fold-b4`, so the false-red risk from code placement is near zero here. Both legs are
+  gated because `stored` carries the same shape as `handler`; it reads reliably now that
+  [`host_guard.py`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/host_guard.py)
+  rejects the contaminated windows that once put its own A/A null at −14.7%. Like the
+  `lkv-store-*` pair they add **no wall-clock**: the default sweep already emits both rows
+  at every fan width, so this is two more keys read out of output already collected. Both
+  gate on **all three legs** at the nominal +15% / +12% / −12%: a fan-8 row's p50 and mean
+  time the whole 8-subscriber publish (~640 ns and ~800 ns p50 respectively, against
+  per-delivery costs of ~62–80 ns), so they sit far above the sub-100 ns band where the
+  tick guard would demand an extra +25 ns absolute and blunt them the way it blunts
+  `fold-b4`.
+
+  Four of the fourteen come from OTHER bench binaries, and they are here because of what
   happened without them (#1173): `compact-forward` moved **+41%** across the v0.8.0 →
   v0.9.0 window while every gated point stayed flat, so the gate had nothing to object to.
   They are `compact-forward/64/1/1` and `compact-terminus/64/1/1` — the compact-delivery

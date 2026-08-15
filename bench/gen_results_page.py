@@ -185,7 +185,7 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "calibrated batch instead of one operation at a time. Its `fold-*`, `lkv-*` and "
         "`*alloc-mt*` rows are what the routing and memory chapters chart.",
         "ns p50 / p99 / mean · deliveries/s",
-        "per-PR + per-push gate, twelve canonical points"),
+        "per-PR + per-push gate, fourteen canonical points"),
     instrument_t(
         "bench_forward_demux.cpp", "framed", ("routing",),
         "Drives one FWD forward hop through the inbound link's own receiver against a registry "
