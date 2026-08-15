@@ -31,6 +31,33 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   caller falls back to `lookup_ingress()`. No behaviour change for hosts that install no
   observer, and none in what an observer is handed.
 
+- **The per-module `conn` CREATOR ENDPOINT — `SPEC`/`NAME` writes to `/net/<module>/conn` create
+  and remove connections (RFC-0014 S2b,
+  [#1302](https://github.com/avatarsd-llc/libtracer/issues/1302))**. RFC-0014's write-driven
+  dispatch seam, the one ADR-0059 decided the shape of and `transport_vertex.hpp` has carried an
+  "accepted, unimplemented" note about since. `net::transport_vertex_t::register_module` now
+  MINTS two vertices for the module it declares: the `<net_root>/<module>` grouping vertex
+  (previously created lazily on the first connection) and, below it, a `role_t::HANDLER`
+  endpoint at the new `net::kConnEndpointName` (`"conn"`). A write to that endpoint is
+  *executed*, not assigned, and the written TLV's TYPE selects which operation:
+  `SPEC{ name, config }` ⇒ create `<net_root>/<module>/<name>` atomically, `NAME{ <name> }` ⇒
+  remove it, any other payload ⇒ `TYPE_MISMATCH` (the endpoint never falls through to an
+  ordinary assign). Both the transport and the ROLE are positional — they *are* the module — so
+  the endpoint SPEC carries neither a `type` nor a `role`, and a config `role` pair written
+  there is ignored rather than honoured. The SPEC's `name` is REQUIRED and stays required
+  ([ADR-0073](../docs/adr/0073-naming-authority-the-application-mints-one-predicate-gates.md)
+  §5): a creator-chosen name is what makes a retried create idempotent (`PATH_IN_USE`, "already
+  exists") instead of appending a second connection. Refusals: empty name ⇒ `TYPE_MISMATCH`, a
+  name failing the shared segment predicate ⇒ `INVALID_PATH`, the reserved name `conn` ⇒
+  `PATH_IN_USE` on create and `PERMISSION_DENIED` on remove (the endpoint cannot self-destruct),
+  a kind the module does not declare ⇒ `SCHEMA_NOT_FOUND`; a `NAME` naming no connection is a
+  **no-op success**, so a retried teardown is safe too. Encoder side: `net::conn_spec_t` gains a
+  one-argument (name-only) constructor for the endpoint spelling and `net::conn_remove(name)`
+  builds the removal `NAME`. Nothing is added to the shared `conn_settings_t` or to
+  `transport_vertex`'s config surface — kind-private config is still parsed by the kind's own
+  factory from the raw config TLV (the standing lean-transport rule). The superseded
+  `/net:children[]` creation spelling is UNCHANGED and still works; RFC-0014 S7 retires it.
+
 - **`net::transport_t::egress_source()` / `set_egress_source()` — the egress gather draws from
   an INJECTED `mem::block_source_t`, not the process default**
   ([#1287](https://github.com/avatarsd-llc/libtracer/issues/1287), family 1 of
@@ -176,6 +203,18 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `std::string`, `std::shared_ptr`) cannot ride `block_array_t`'s memcpy relocation; each now
   states that residual **at the site**, and the `rope_t::try_reserve` / `try_to_iovec` doc
   comments name it explicitly.
+
+- **`register_module` now mints graph vertices, so `/net:children[]` enumerates every DECLARED
+  module — not only the ones already carrying a connection** (RFC-0014 S2b,
+  [#1302](https://github.com/avatarsd-llc/libtracer/issues/1302)). Discovery needs this: a
+  creator has to find `/net/<module>/conn` before it can write the first SPEC to it, and a
+  module that only appeared once it already had a connection could never be the first one
+  written to. Two visible consequences for a consumer that enumerates `/net`: an empty declared
+  module is now listed, and each `/net/<module>:children[]` listing carries `conn` alongside its
+  member connections — hiding the endpoint from that listing is RFC-0014 **S4** (the
+  enumeration-hide seam), which does not exist yet. `register_module` correspondingly gained a
+  failure mode: it returns the graph's own refusal (e.g. `BACKPRESSURE`) if the endpoint could
+  not be registered, and then declares nothing.
 - **`graph::vertex_t::fill()`, `mark_unregistered()` and `add_child()` are `private` — the
   map-lock mutators belong to `graph_t`, and the compiler now says so**
   ([#867](https://github.com/avatarsd-llc/libtracer/issues/867), ruling 2). All three mutate
@@ -311,6 +350,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `core-ci.yml` configures that set with `BUILD_TESTING=ON` and runs its reduced ctest suite,
   so the configuration an MCU consumer selects is covered rather than assumed. The default
   all-ON build registers exactly the same tests as before.
+
+- **A config-constructed connection publishes the liveness of the role its socket was actually
+  built with** (drive-by, [#1302](https://github.com/avatarsd-llc/libtracer/issues/1302)).
+  Creation published `UP`/`LISTENING` from the CATALOG TYPE's default role while handing the
+  factory the EFFECTIVE role from `conn_settings_t`. They differ exactly when a `:children[]`
+  SPEC overrode `role` in its config — so a `SPEC{type: "client", config{role: LISTEN}}` bound a
+  listen socket and then reported `UP` over it. Both reads are now the effective role. No
+  signature change; the endpoint door cannot reach this case at all, since there the role is
+  positional.
 
 - **The per-link subscriber index's insert is IDEMPOTENT, as its contract has always said —
   so a peer that renews a subscription stops paying arena RAM and a sort for it**

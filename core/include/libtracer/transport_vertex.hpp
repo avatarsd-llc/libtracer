@@ -29,6 +29,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "libtracer/graph.hpp"
@@ -148,6 +149,22 @@ struct conn_settings_t {
 };
 
 /**
+ * @brief The RESERVED, protocol-owned leaf NAME of a module's CREATOR ENDPOINT —
+ *        `<net_root>/<module>/conn` (RFC-0014 §1, S2b).
+ *
+ * Each module a application declares through @ref transport_vertex_t::register_module gets
+ * one endpoint vertex under this name, and a write to it is the connection lifecycle: a
+ * `SPEC{ name, config }` CREATES `<net_root>/<module>/<name>`, a `NAME{ <name> }` REMOVES it,
+ * and any other payload is refused `TYPE_MISMATCH` (RFC-0014 §2). Both transport and role are
+ * POSITIONAL — they are the module — so the SPEC carries neither a `type` nor a `role`.
+ *
+ * The name is reserved per module in BOTH directions (RFC-0014 §3): a SPEC may not name a
+ * connection `conn` (the endpoint vertex already occupies the key), and `NAME{conn}` is
+ * refused, so the endpoint cannot be made to destroy itself.
+ */
+inline constexpr std::string_view kConnEndpointName = "conn";
+
+/**
  * @brief Groups connection vertices under `/net` and makes each a `/` vertex (ADR-0027).
  *
  * Construct over a live @ref graph::graph_t and `fwd_router_t`. Registers a
@@ -155,6 +172,14 @@ struct conn_settings_t {
  * seam) so an in-band `write /net:children[] += SPEC{type, name, config}` instantiates
  * a connection vertex at `/net/<name>` and wires its transport into the router's
  * @ref child_registry_t — the single NAME→link demux table.
+ *
+ * There are TWO creation doors, and they share one body below the module resolution. The
+ * RFC-0014 door is the per-module CREATOR ENDPOINT (S2b): @ref register_module mints
+ * `<net_root>/<module>/conn` (the `%kConnEndpointName` constant), and a
+ * `SPEC{ name, config }` written there
+ * creates `<net_root>/<module>/<name>` while a `NAME{ <name> }` removes it — the module in
+ * the path fixes both the transport and the role, so the SPEC carries neither. The
+ * superseded `:children[]` door below remains until RFC-0014 S7 retires it.
  *
  * Creation resolves the MODULE first, then the transport — because the mount, the routing
  * key and the staging key are all `<module>/<name>`, and a NAME alone names none of them
@@ -305,11 +330,20 @@ class transport_vertex_t {
      * application code. Registration is a minting boundary, so the shared segment-validity
      * predicate (ADR-0073 §1) gates @p module: a name carrying a reserved character, empty,
      * or over the segment byte cap answers `INVALID_PATH` and registers nothing.
+     *
+     * **Declaring a module MINTS its creator endpoint** (RFC-0014 §1: "adding a module adds
+     * its creator endpoint and catalog"): this registers the `<net_root>/<module>` grouping
+     * vertex and, below it, the write-driven `<net_root>/<module>/conn`
+     * endpoint whose `SPEC`/`NAME` writes create and remove the module's connections. Both
+     * are idempotent — a second declaration naming the same module (a module serving two
+     * kinds) finds them and mints nothing.
      * @param module The module segment (e.g. `"ws-client"`, `"can"`); must satisfy
      *               `tr::graph::valid_segment`.
      * @param kind   The config `kind` this module constructs (e.g. `"ws"`).
      * @param role   The role this module fixes positionally.
-     * @return `INVALID_PATH` if @p module is not a valid path segment.
+     * @return `INVALID_PATH` if @p module is not a valid path segment; the graph's own
+     *         refusal (e.g. `BACKPRESSURE`) if the endpoint could not be registered — in
+     *         which case nothing is declared either.
      */
     [[nodiscard]] graph::result_t<void> register_module(std::string module, std::string kind,
                                                         conn_role_t role);
@@ -359,10 +393,11 @@ class transport_vertex_t {
      *       registered at `<net_root>` or `<net_root>/<module>` *before* this object got
      *       there answers `true` here: the predicate says "this key names a structural
      *       position of this net plane", not "this object registered this vertex".
-     * @note The RFC-0014 per-module creator endpoint `/net/<module>/conn` (accepted,
-     *       unimplemented) is **not** structural and answers `false`: it is an addressable
-     *       control surface with its own `:schema` catalog, not a grouping segment — and it
-     *       sits one level below the deepest structural position anyway.
+     * @note The RFC-0014 per-module creator endpoint `<net_root>/<module>/conn`
+     *       (implemented by S2b) is **not** structural and answers `false`:
+     *       it is an addressable control surface — a `role_t::HANDLER` vertex that EXECUTES
+     *       the `SPEC`/`NAME` writes reaching it — not a grouping segment, and it sits one
+     *       level below the deepest structural position anyway.
      * @param key The canonical PATH-payload key `for_each_vertex` hands its callback (no
      *            handle unwrapping needed — the signature matches).
      * @return true iff @p key is `<net_root>`, or `<net_root>/<module>` for a module of this
@@ -472,12 +507,90 @@ class transport_vertex_t {
         std::unique_ptr<transport_t> owned;  // config-constructed socket (see class docs)
     };
 
+    // One declared module: the segment it mounts under, the config `kind` it constructs, and
+    // the role it fixes positionally. Declared above the methods that name it because a
+    // member function's return type is parsed against the class-so-far.
+    struct module_decl_t {
+        std::string module;
+        std::string kind;
+        conn_role_t role;
+    };
+
     // The catalog factory shared by the `client`/`listener` types: parse the SPEC config,
     // resolve the link (provided > config-constructed), record the leaf, wire the link
     // into the router. `role` distinguishes the two types (a config `role` overrides).
     graph::result_t<graph::vertex_handle_t> make_connection(std::vector<std::byte> child_key,
                                                             const wire::tlv_t* config,
                                                             conn_role_t role);
+
+    /**
+     * @brief Creation's SECOND half, for a caller that already holds `ctl_m_` and has already
+     *        resolved the MODULE: stage-or-construct the link, mint the vertex, wire the router.
+     *
+     * The split is what lets the two creation doors share one body. The `:children[]` door
+     * (`%make_connection`) derives the module from the SPEC's `kind` or from the unique
+     * staging; the RFC-0014 creator endpoint knows it POSITIONALLY, from its own path. Only
+     * that resolution differs — everything from the staged-link lookup onward is one
+     * implementation, so the two doors cannot drift into two creation semantics.
+     * @param module   The module segment the connection mounts under.
+     * @param name     The connection's leaf NAME (already segment-validated).
+     * @param config   The SPEC's raw `config` SETTINGS, for the kind factory's private keys.
+     * @param settings The universal keys parsed out of @p config, with `role` (and, on the
+     *                 endpoint door, `kind`) already fixed by the module.
+     */
+    [[nodiscard]] graph::result_t<graph::vertex_handle_t> make_connection_locked(
+        const std::string& module, const std::string& name, const wire::tlv_t* config,
+        conn_settings_t settings);
+
+    /** @brief `remove_connection`'s body, for a caller that ALREADY holds `ctl_m_` — same
+     *         non-recursive-mutex constraint as `%module_for_locked`. */
+    [[nodiscard]] graph::result_t<void> remove_connection_locked(std::string_view name);
+
+    /**
+     * @brief Register `<net_root>/<module>` and its `conn` creator endpoint, idempotently.
+     *
+     * Called from @ref register_module under `ctl_m_`. The endpoint is a `role_t::HANDLER`
+     * vertex: its `on_write` seam is the RFC-0014 §2 dispatch, so a write is EXECUTED rather
+     * than assigned and the vertex stores no value.
+     */
+    [[nodiscard]] graph::result_t<void> mint_module_locked(const std::string& module);
+
+    /**
+     * @brief The creator endpoint's `on_write` body (RFC-0014 §2) — the payload TLV type
+     *        selects create vs. remove.
+     *
+     * `SPEC` ⇒ create, `NAME` ⇒ remove, anything else (including an empty or undecodable
+     * payload) ⇒ `TYPE_MISMATCH`. The endpoint never falls through to an ordinary assign.
+     * Takes `ctl_m_` itself, so the whole dispatch — parse, module lookup, socket
+     * construction, routing — is one control-plane critical section.
+     * @param module The module this endpoint creates into (captured at mint time; the path
+     *               IS the module, so it is never re-derived from the payload).
+     * @param value  The written value, exactly as the graph handed it over (borrowed).
+     */
+    [[nodiscard]] graph::result_t<void> endpoint_write(const std::string& module,
+                                                       const view::rope_t& value);
+
+    /** @brief The `SPEC` ⇒ create leg of `%endpoint_write`; caller holds `ctl_m_`. */
+    [[nodiscard]] graph::result_t<void> endpoint_create_locked(const std::string& module,
+                                                               const wire::tlv_t& spec);
+
+    /** @brief The `NAME` ⇒ remove leg of `%endpoint_write`; caller holds `ctl_m_`. */
+    [[nodiscard]] graph::result_t<void> endpoint_remove_locked(const std::string& module,
+                                                               std::string_view name);
+
+    /**
+     * @brief The declaration an endpoint write resolves its (kind, role) through; caller
+     *        holds `ctl_m_`.
+     *
+     * A module's endpoint fixes the role positionally, so the role comes from here and never
+     * from the payload. @p kind is the SPEC config's `kind` when it carried one — then the
+     * declaration must be THIS module's for that kind, or the kind is not one this endpoint
+     * creates (`SCHEMA_NOT_FOUND`). An empty @p kind takes the module's sole declaration;
+     * a module declared for two kinds is genuinely ambiguous without one (`TYPE_MISMATCH`),
+     * the same refusal the kind-less `:children[]` spelling gives an ambiguous staging.
+     */
+    [[nodiscard]] graph::result_t<module_decl_t> declaration_for_locked(
+        std::string_view module, std::string_view kind) const;
 
     /**
      * @brief `module_for`'s body, for a caller that ALREADY holds `ctl_m_`.
@@ -534,11 +647,6 @@ class transport_vertex_t {
     // connection creation, so an rbtree buys nothing a linear scan over a handful of entries
     // does not — and it costs a whole extra container instantiation in flash. Nothing here is
     // on the forward path.
-    struct module_decl_t {
-        std::string module;
-        std::string kind;
-        conn_role_t role;
-    };
     std::vector<module_decl_t> modules_;
 };
 

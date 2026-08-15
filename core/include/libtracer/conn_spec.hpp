@@ -101,6 +101,24 @@ class conn_spec_t {
         wire::emit_name(body_, name);
     }
 
+    /**
+     * @brief Begin the RFC-0014 CREATOR-ENDPOINT SPEC naming the connection @p name — the
+     *        payload written to `/net/<module>/conn`.
+     *
+     * The endpoint spelling carries `{ name, config }` and NO `type`: the module in the path
+     * fixes both the transport and the role, so there is no catalog type to select and a
+     * `role` pair is ignored by the endpoint (RFC-0014 §1 — the role is positional). Otherwise
+     * identical to the two-argument form: the same setters append the same `config` pairs.
+     *
+     * @param name The connection's leaf NAME — REQUIRED, and required by design (ADR-0073 §5):
+     *             a creator-chosen name is what makes a retried create idempotent
+     *             (`PATH_IN_USE` instead of a second connection).
+     */
+    explicit conn_spec_t(std::string_view name) {
+        wire::emit_name(body_, "name");
+        wire::emit_name(body_, name);
+    }
+
     /** @brief `role` — VALUE u8; overrides the catalog type's default direction. */
     conn_spec_t& role(conn_role_t value) { return u8("role", static_cast<std::uint8_t>(value)); }
 
@@ -221,6 +239,24 @@ class conn_spec_t {
     if (!kind.empty()) spec.kind(kind);
     if (!addr.empty()) spec.addr(addr);
     return spec.view();
+}
+
+/**
+ * @brief The REMOVAL payload — a bare `NAME{ <name> }` — written to `/net/<module>/conn`.
+ *
+ * The other half of the creator endpoint's one control (RFC-0014 §2): create and remove
+ * collapse onto the same vertex and are told apart by the written TLV's TYPE, so removal
+ * needs no verb and no field, just the connection's leaf NAME. Writing this for a name that
+ * does not resolve is a no-op success; writing it for the reserved endpoint name `conn` is
+ * refused (`PERMISSION_DENIED`) — the endpoint cannot be made to remove itself.
+ *
+ * @return An owned view of the NAME bytes (empty on allocation failure — see
+ *         @ref conn_spec_t::view).
+ */
+[[nodiscard]] inline view::view_t conn_remove(std::string_view name) {
+    std::vector<std::byte> out;
+    wire::emit_name(out, name);
+    return view::over_bytes(out).value_or(view::view_t{});
 }
 
 }  // namespace tr::net

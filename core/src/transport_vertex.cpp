@@ -140,6 +140,10 @@ result_t<void> transport_vertex_t::register_module(std::string module, std::stri
     // predicate gates the name here, exactly as path_t::parse gates the local string tier.
     if (!graph::valid_segment(module)) return std::unexpected(status_t::INVALID_PATH);
     const std::lock_guard ctl(ctl_m_);  // ADR-0063 §3 control-plane serialization
+    // "Adding a module adds its creator endpoint and catalog" (RFC-0014 §1). Minted BEFORE
+    // the declaration is recorded, so a refusal leaves nothing half-declared: a module whose
+    // endpoint could not be registered would advertise a (kind, role) the wire has no door to.
+    if (auto minted = mint_module_locked(module); !minted) return minted;
     for (module_decl_t& d : modules_) {
         if (d.kind == kind && d.role == role) {
             d.module = std::move(module);
@@ -169,6 +173,176 @@ result_t<std::string> transport_vertex_t::module_for_locked(std::string_view kin
     // an undeclared (kind, role) is an unsupported catalog entry, the same convention as
     // an unknown SPEC `type`. The application mints every module segment.
     return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+}
+
+/** @brief The declaration an endpoint write resolves its (kind, role) through. */
+result_t<transport_vertex_t::module_decl_t> transport_vertex_t::declaration_for_locked(
+    std::string_view module, std::string_view kind) const {
+    const module_decl_t* found = nullptr;
+    std::size_t hits = 0;
+    for (const module_decl_t& d : modules_) {
+        if (d.module != module) continue;
+        // A SPEC that DID name a kind must name one this module constructs. Silently
+        // creating the module's own kind instead would mount a connection the creator did
+        // not ask for — the kind is data the creator supplied, so a mismatch is refused.
+        if (!kind.empty() && d.kind != kind) continue;
+        ++hits;
+        found = &d;
+    }
+    // Not a (module, kind) this plane declares: the unsupported-catalog-entry convention,
+    // the same answer an unknown SPEC `type` and an unregistered transport kind give.
+    if (hits == 0) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+    // One module declared for two kinds, and a kind-less SPEC: genuinely ambiguous, so it is
+    // refused rather than resolved by declaration order — the same ruling (and the same
+    // status) the kind-less `:children[]` spelling gives two stagings sharing a leaf NAME.
+    if (hits > 1) return std::unexpected(status_t::TYPE_MISMATCH);
+    return *found;
+}
+
+result_t<void> transport_vertex_t::mint_module_locked(const std::string& module) {
+    // The `<net_root>/<module>` grouping vertex. graph_.find IS the dedupe — the same rule
+    // `make_connection_locked`'s lazy mint follows, and for the same reason: a separate
+    // seen-set would be a second source of truth for something the graph already knows.
+    std::vector<std::byte> mod_key;
+    wire::emit_name(mod_key, std::string_view(net_root_).substr(1));
+    wire::emit_name(mod_key, module);
+    if (!graph_.find(mod_key)) {
+        auto mod = graph_.register_vertex_key(mod_key, graph::role_t::STORED_VALUE, {});
+        if (!mod) return std::unexpected(mod.error());
+    }
+
+    std::vector<std::byte> endpoint_key = mod_key;
+    wire::emit_name(endpoint_key, kConnEndpointName);
+    if (graph_.find(endpoint_key)) return {};  // a second kind under the same module
+
+    // `role_t::HANDLER` is what makes the endpoint WRITE-ONLY AND VALUELESS (RFC-0014 §2):
+    // the graph runs `on_write` and stores no last-known-value, so the write is EXECUTED,
+    // never assigned. No `on_read` is installed either — a read answers NOT_FOUND until S3
+    // teaches `:schema` to serve the module's config catalog, which is the endpoint's only
+    // readable facet.
+    //
+    // The lambda captures the module by VALUE. The path is the module, so the dispatch never
+    // re-derives it from a payload the peer wrote — a creator cannot address one module's
+    // endpoint and have the connection mount under another.
+    graph::handlers_t handlers;
+    handlers.on_write = [this, module](const view::rope_t& value,
+                                       const graph::write_ctx_t&) -> result_t<void> {
+        return endpoint_write(module, value);
+    };
+    auto endpoint = graph_.register_vertex_key(std::move(endpoint_key), graph::role_t::HANDLER,
+                                               std::move(handlers));
+    if (!endpoint) return std::unexpected(endpoint.error());
+    return {};
+}
+
+result_t<void> transport_vertex_t::endpoint_write(const std::string& module,
+                                                  const view::rope_t& value) {
+    // A DEVICE-link payload is permanently un-parsable on the CPU (ADR-0024), so it is a
+    // malformed control write rather than a transient one — the same classification
+    // `graph_t::write`'s field surface makes.
+    if (!value.all_host()) return std::unexpected(status_t::TYPE_MISMATCH);
+    mem::mem_backend_t& backend = rx_backend_ != nullptr ? *rx_backend_ : mem::heap_backend();
+    // Single-link (every ordinary control write) is zero-copy; a rope that straddled links
+    // pays one flatten, and an exhausted backend surfaces as TRANSIENT backpressure rather
+    // than being read back as a truncated — and therefore "malformed" — SPEC (#917).
+    const auto flat = value.try_materialize(backend);
+    if (!flat) return std::unexpected(status_t::BACKPRESSURE);
+    const auto payload = wire::decode(*flat);
+    if (!payload) return std::unexpected(status_t::TYPE_MISMATCH);
+
+    // ONE critical section for the whole dispatch: parse, declaration lookup, socket
+    // construction and routing all happen under `ctl_m_`, so two peers writing the same
+    // endpoint cannot interleave into a half-built connection. Head of the declared lock
+    // order (this -> fwd_router_t -> graph_t -> the vertex stripe), and the graph holds none
+    // of its own locks across `on_write`, so nothing here descends against that order.
+    const std::lock_guard ctl(ctl_m_);  // ADR-0063 §3 control-plane serialization
+    switch (payload->type) {
+        case type_t::SPEC:
+            return endpoint_create_locked(module, *payload);
+        case type_t::NAME:
+            return endpoint_remove_locked(module, detail::as_string_view(payload->payload));
+        default:
+            // Any other payload — a VALUE, an empty write, a structured TLV that is neither
+            // control type. The endpoint NEVER falls through to an ordinary assign
+            // (RFC-0014 §2); a creator that meant to write data wrote to the wrong vertex.
+            return std::unexpected(status_t::TYPE_MISMATCH);
+    }
+}
+
+result_t<void> transport_vertex_t::endpoint_create_locked(const std::string& module,
+                                                          const tlv_t& spec) {
+    // SPEC{ NAME "name" NAME <seg>, NAME "config" SETTINGS{ pairs }? } — no `type` and no
+    // `role`: the module in the path already says both (RFC-0014 §1). Read through the ONE
+    // pair-consuming walk, exactly as `graph_t::create_child` reads the `:children[]` SPEC.
+    const wire::config_reader_t pairs(&spec);
+    const std::string_view name = pairs.name("name").value_or(std::string_view{});
+    // `name` is REQUIRED and stays required (ADR-0073 §5, #622): an omitted name with a
+    // node-assigned fallback would cost retry idempotency — a create retried over a link
+    // that dropped its reply would append a SECOND connection instead of answering
+    // PATH_IN_USE. The `p<slot>` fallback exists only for creator-LESS inbound peers, where
+    // there is no retry because the peer dialed us.
+    if (name.empty()) return std::unexpected(status_t::TYPE_MISMATCH);
+    // The wire minting boundary runs THE shared segment predicate (ADR-0073 §1) — the same
+    // one `graph_t::create_child` runs on the other door — so a name that enters the graph
+    // here is expressible in the addressing grammar. Without it the endpoint could mint an
+    // enumerable-but-unaddressable connection, which the `:children[]` door cannot.
+    if (!graph::valid_segment(name)) return std::unexpected(status_t::INVALID_PATH);
+    // The reserved name, refused BEFORE anything is built (RFC-0014 §3 create-side).
+    // Falling through would answer PATH_IN_USE anyway — `register_vertex_key` collides with
+    // the endpoint's own key — but only after the kind's factory had already dialed or bound
+    // a socket, which is the side effect a refusal must not have.
+    //
+    // KNOWN RFC AMBIGUITY (raised for S7, where these bytes become normative): §3's
+    // create-side clause says `tr::path::in_use` for the reserved name, which is what this
+    // answers; §2's "an empty or reserved name" clause says `tr::schema::type_mismatch`.
+    // The two contradict, and §3 is the clause specifically about the reserved name.
+    if (name == kConnEndpointName) return std::unexpected(status_t::PATH_IN_USE);
+
+    const tlv_t* config = pairs.settings("config");
+    conn_settings_t settings;
+    parse_config(config, settings);
+
+    const auto declared = declaration_for_locked(module, settings.kind);
+    if (!declared) return std::unexpected(declared.error());
+    // The role is POSITIONAL — it IS the module (RFC-0014 §1/§3) — so the declaration's role
+    // OVERWRITES whatever the config's `role` pair said. That pair is the superseded
+    // `:children[]` spelling's override, and honouring it here would let a creator mount a
+    // LISTEN socket under a module whose path promises DIAL.
+    settings.role = declared->role;
+    // A kind-less SPEC is the staged-link spelling; the module's declared kind is the kind
+    // this endpoint constructs, so recording it keeps `settings_of` honest about what the
+    // connection is. `make_connection_locked` still prefers a `provide_link` staging over
+    // the factory, so filling this in does not change WHICH link is used.
+    if (settings.kind.empty()) settings.kind = declared->kind;
+
+    const auto made =
+        make_connection_locked(module, std::string(name), config, std::move(settings));
+    if (!made) return std::unexpected(made.error());
+    // The endpoint is valueless: the handle the creation produced is the connection's, not
+    // this vertex's, and it is deliberately not published anywhere the write can return it.
+    return {};
+}
+
+result_t<void> transport_vertex_t::endpoint_remove_locked(const std::string& module,
+                                                          std::string_view name) {
+    // An empty NAME names nothing and is not an "absent" connection — it is a malformed
+    // control payload, so it is refused rather than swallowed as a no-op success.
+    if (name.empty()) return std::unexpected(status_t::TYPE_MISMATCH);
+    // Remove-side reserve (RFC-0014 §2/§3): the endpoint cannot self-destruct. Refused
+    // before the lookup, so it never reaches `retire()`.
+    if (name == kConnEndpointName) return std::unexpected(status_t::PERMISSION_DENIED);
+
+    std::string qualified(std::string_view(net_root_).substr(1));
+    qualified.push_back('/');
+    qualified += module;
+    qualified.push_back('/');
+    qualified += name;
+    // An unresolvable name — never created, or already removed — is a NO-OP SUCCESS at this
+    // layer (RFC-0014 §2). `retire()`'s own idempotence only covers an already-resolved
+    // handle, so the endpoint owns this leg: a retried remove after a dropped reply must
+    // answer the same as the first one, or teardown is not retry-safe either.
+    if (!conns_.contains(qualified)) return {};
+    return remove_connection_locked(qualified);
 }
 
 bool transport_vertex_t::is_structural(wire::key_view_t key) const {
@@ -287,6 +461,15 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::b
         if (hits > 1) return std::unexpected(status_t::TYPE_MISMATCH);
     }
 
+    // The module is resolved; everything below is the door-independent half (RFC-0014 S2b
+    // split the creator endpoint out as a SECOND door onto exactly this body).
+    return make_connection_locked(module, name, config, std::move(settings));
+}
+
+result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(const std::string& module,
+                                                                     const std::string& name,
+                                                                     const tlv_t* config,
+                                                                     conn_settings_t settings) {
     // With the module resolved, the staging is a DIRECT lookup: `pending_links_` is keyed by
     // exactly this string (see `provide_link`). No scan, and no way to reach a key whose
     // module half is not the one this connection mounts under.
@@ -312,13 +495,12 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::b
     // unrelated local vertex.
 
     // Compose the mount key: `<net_root>/<module>/<name>`, replacing the flat key the
-    // graph's `:children[]` machinery handed us.
+    // graph's `:children[]` machinery handed us (the endpoint door never had one).
     std::vector<std::byte> mount_key;
     for (std::string_view seg : {std::string_view(net_root_).substr(1), std::string_view(module),
                                  std::string_view(name)}) {
         wire::emit_name(mount_key, seg);
     }
-    child_key = std::move(mount_key);
 
     // The `/net/<module>` structural vertex, created lazily on first use. graph_.find IS the
     // dedupe — a separate seen-set would be a second source of truth (and another container
@@ -393,10 +575,11 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::b
     // Register the identity vertex at the composed /net/<name> key (graph owns addressing).
     // On failure the just-constructed socket (if any) is torn down by `owned`'s destructor.
     result_t<vertex_handle_t> v = graph_.register_vertex_key(
-        std::move(child_key), graph::role_t::STORED_VALUE, std::move(handlers));
+        std::move(mount_key), graph::role_t::STORED_VALUE, std::move(handlers));
     if (!v) return v;  // PATH_IN_USE on a duplicate connection name
 
     const bool constructed = owned != nullptr;
+    const conn_role_t effective_role = settings.role;
     conns_.insert_or_assign(
         qualified,
         conn_t{.vertex = *v, .settings = std::move(settings), .owned = std::move(owned)});
@@ -443,14 +626,27 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::b
     // on /net/<name> sees the bring-up. A DIAL socket is `UP`; a LISTEN socket that bound
     // is `LISTENING` (a bind failure returns an error from the factory above, so a
     // constructed LISTEN is always bound). Provided links report via set_link_state.
+    //
+    // The role read here is the EFFECTIVE one — the same field the factory was handed —
+    // not the catalog type's default. They differ only when a `:children[]` SPEC overrode
+    // `role` in its config, and in that case the old read published a `client` type's `UP`
+    // over a socket the factory had just BOUND as a listener.
     if (constructed)
-        (void)set_link_state_locked(
-            qualified, role == conn_role_t::LISTEN ? link_state_t::LISTENING : link_state_t::UP);
+        (void)set_link_state_locked(qualified, effective_role == conn_role_t::LISTEN
+                                                   ? link_state_t::LISTENING
+                                                   : link_state_t::UP);
     return v;
 }
 
 result_t<void> transport_vertex_t::remove_connection(std::string_view name) {
+    // The PUBLIC entry locks (#881); the RFC-0014 `NAME`-write dispatch already holds
+    // `ctl_m_` — a plain, NON-RECURSIVE std::mutex — so it calls the body directly.
     const std::lock_guard ctl(ctl_m_);  // ADR-0063 §3 control-plane serialization
+    return remove_connection_locked(name);
+}
+
+/** @brief `remove_connection`'s body, for a caller that already holds `ctl_m_`. */
+result_t<void> transport_vertex_t::remove_connection_locked(std::string_view name) {
     const auto it = conns_.find(name);
     if (it == conns_.end()) return std::unexpected(status_t::NOT_FOUND);
     // Un-route BEFORE anything is destroyed: after this the NAME resolves to nothing,
