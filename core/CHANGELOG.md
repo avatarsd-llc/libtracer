@@ -77,6 +77,34 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **`<libtracer/vertex.hpp>` split into four headers — no type moved out of `tr::graph`, and
+  every one of them is still reachable through `vertex.hpp`**
+  ([#868](https://github.com/avatarsd-llc/libtracer/issues/868)). The vertex hub had grown to
+  3421 lines fusing five unrelated concerns, and `graph.hpp` pulls it, so every net-plane TU
+  re-read all five whenever any one changed. The concerns now have homes:
+  **`<libtracer/app_fields.hpp>`** (the RFC-0010 field tables — `app_access_t`, `app_field_t`,
+  `app_field_slot_t` / `app_field_static_t`, `borrowed_fields_t`, `app_field_table_t`,
+  `app_field_group_t`), **`<libtracer/subscriber.hpp>`** (the subscription edges —
+  `delivery_policy_t`, `subscriber_fn_t`, `subscriber_remote_t`, `target_key_t`,
+  `target_binding_t`, `try_make_target_key`, `subscriber_t`, `edge_view_t`, `edge_latch_t`,
+  `edge_snapshot_t`, `pub_remote_t`, `pub_edge_t`, `edge_pub_t`, `edge_block_t` and the
+  edge-pin retire helpers), and **`<libtracer/vertex_stripe.hpp>`** (`kStripeAlign`,
+  `vertex_stripe_t`, `vertex_stripes`, `vertex_stripe_at` / `_index` / `_of` / `_cv`).
+  `vertex.hpp` includes all three, so **no existing include breaks**: code that named any of
+  these through `<libtracer/vertex.hpp>`, `<libtracer/graph.hpp>` or `<libtracer/tracer.hpp>`
+  compiles unchanged. Pure code motion — no declaration's text, signature or order within a
+  translation unit changed, and the six pinned hot-symbol sizes are byte-identical.
+- **The ACE data types move to `<libtracer/security_acl.hpp>`, and that header no longer
+  includes `<libtracer/vertex.hpp>`** ([#868](https://github.com/avatarsd-llc/libtracer/issues/868)).
+  `acl_right_t`, `ace_type_t`, `kAceInherit` and `ace_t` were declared in `vertex.hpp` while
+  their evaluation (`allow_only_policy_t`, `full_acl_policy_t`, `effective_acl_t`) and their
+  codec (`parse_acl`, `encode_acl`) lived in `security_acl.hpp`, which therefore had to pull
+  the whole vertex hub to name four records it fully owns. The dependency is now the right way
+  round: `vertex.hpp` includes `security_acl.hpp` (it stores `std::vector<ace_t>` in the vertex
+  extension block). **Include-path consequence, the one in this pair:** a TU that included
+  `<libtracer/security_acl.hpp>` alone and relied on it to drag in `vertex_t` / `graph_t`
+  must now include `<libtracer/vertex.hpp>` (or `<libtracer/graph.hpp>`) itself. The reverse
+  direction is unaffected — `<libtracer/vertex.hpp>` still declares the ACE types.
 - **BREAKING — a HANDLER's `on_write` takes a second argument: the writer's
   `graph::write_ctx_t`** ([#375](https://github.com/avatarsd-llc/libtracer/issues/375)).
   `handlers_t::on_write` (and its internal `value_handlers_t` mirror) go from
