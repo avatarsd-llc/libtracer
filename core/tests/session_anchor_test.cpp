@@ -279,6 +279,5 @@ void run() {
 int main() {
     std::printf("#1223 step 2 — session identity anchors on an accepted slot_server_t peer:\n");
     run();
-    std::printf("session_anchor_test: OK\n");
-    return 0;
+    return tr::testing::summary("session_anchor");
 }
