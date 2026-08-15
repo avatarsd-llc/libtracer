@@ -254,6 +254,38 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   a keepalive clock cannot unblock a send already stuck inside `write_all_iov`, which is why the
   per-send bound is what makes that clock enforceable at all.
 
+- **#838's RAM cost, priced and EXPLICITLY ACCEPTED: +16 B per link, +14–16 B per connection**
+  ([#838](https://github.com/avatarsd-llc/libtracer/issues/838)). Recorded here because it never
+  was — #838 merged as `aee923d5` without an entry pricing what the stalled-peer write bound
+  costs, and an unpriced cost is indistinguishable from a regression the next time someone reads
+  the census. It is neither: it is the accepted price of the bound, following the
+  [#1160](https://github.com/avatarsd-llc/libtracer/issues/1160) precedent, where a +226 B cost
+  was priced and waived on the record rather than silently absorbed. **What it bought:** a host
+  stream send can no longer block indefinitely on a stalled-not-dead peer, and no longer holds
+  `write_m_` while it does. **What it costs,** measured `aee923d5` against its parent
+  `2dcdbcdd` with `bench_conn_ram --no-can --reps=5` on the same host, same toolchain:
+
+  | metric | `2dcdbcdd` | `aee923d5` | Δ |
+  | --- | ---: | ---: | ---: |
+  | `sizeof tcp_client` | 264 | 280 | **+16 B** |
+  | `sizeof tcp_server` | 440 | 456 | **+16 B** |
+  | `sizeof ws_server` | 440 | 456 | **+16 B** |
+  | `sizeof ws_client` | 328 | 344 | **+16 B** |
+  | `tcp-server metric=link_base` | 464 | 480 | **+16 B** |
+  | `ws-server metric=link_base` | 464 | 480 | **+16 B** |
+  | `tcp-server metric=per_conn` (median) | 282 | 296 | **+14 B** |
+  | `ws-server metric=per_conn` | 376 | 392 | **+16 B** |
+
+  The 16 B is the two new per-link members — the `stalled_tx_` counter (8 B) and
+  `liveness_window_ms_` (4 B), padded to the alignment already there. **`udp` and `can` are
+  unchanged** (`sizeof udp` 216, `can` 800; every udp arm's `link_base` and `per_conn` byte-for-byte
+  identical), which is the scope ruling showing up in the numbers: #838 touched the host stream
+  transports only. **No RAM baseline is re-pinned by this entry** — it is accounting, not a gate
+  move. Note the per-connection census is emitted by `bench_conn_ram` into the `perf-local` run
+  log (`# sizeof:` and `RESULT … metric=per_conn`/`metric=link_base` rows) and is **not** carried
+  into `data.js`, so it does not appear on the gh-pages charts; reproducing it means running the
+  bench at both revisions, which is what was done here.
+
 ## [0.12.0] — 2026-08-14
 
 ### Added
