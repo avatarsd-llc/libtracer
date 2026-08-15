@@ -41,7 +41,12 @@
  *  11. (#1247) the pending-handshake ledger that makes 10 possible is FIXED-SIZE, and the
  *      handshake that would overflow it is refused BY VALUE rather than aborted. That case is
  *      here precisely because it is ABLATABLE: remove the refusal and this suite reddens,
- *      which an `assert` on a size argued to be unreachable could never do.
+ *      which an `assert` on a size argued to be unreachable could never do;
+ *  12. (#1334) a handshake-authenticated session claims its slot AT THE 101 and never enters
+ *      that ledger — so a peer entitled to be silent stays a peer past the deadline (the
+ *      regression 10's machinery caused), its `max_peers` slot is charged and refused at the
+ *      upgrade rather than one frame later, and the slot is released on close even though the
+ *      peer never spoke.
  *
  * What this suite deliberately does NOT claim: anything about a particular credential
  * scheme. The payload is opaque to the link by design, so what is provable here is the
@@ -434,6 +439,9 @@ void test_handshake_authentication_skips_the_frame() {
     g_admission_verdict = httpd_ws_link_t::admission_verdict_t::ADMIT_AUTHENTICATED;
     check(fake_httpd::instance().open_session(kHeader), "the handshake was answered");
     check(g_admission_calls == 1, "the three-valued predicate was consulted once");
+    // #1334: the slot is claimed AT THE 101 for this verdict, so the session exists before it
+    // has said anything. It used to be 0 here — claimed lazily, like every other session.
+    check(peer_count(*link) == 1, "and the session was a peer BEFORE its first frame");
     check(fake_httpd::instance().deliver_frame(kHeader, kBody) == ESP_OK,
           "its first frame dispatched");
     check(g_seen.empty(), "and went to the GRAPH, not to the credential hook");
@@ -449,13 +457,121 @@ void test_handshake_authentication_skips_the_frame() {
     check(link->stats().auth_rejected == 1, "which refused it");
     check(peer_count(*link) == 1, "leaving only the handshake-authenticated session served");
 
-    // The deadline must not reach the pre-authenticated session.
+    // The deadline must not reach the pre-authenticated session. NOTE what this arm does and
+    // does NOT prove: the session above has already SPOKEN, so before #1334 it survived here
+    // because its ledger row had been retired by the claim, not because no deadline existed —
+    // the comment that used to sit on the line below ("no deadline was armed for it") was
+    // untrue of the code it described, and the case that would have caught it (a
+    // pre-authenticated peer that never speaks) is
+    // @ref test_preauthenticated_silence_outlives_the_deadline. Under #1334 the claim happens
+    // at the 101 and no deadline is armed, so the statement is now literally true; this arm is
+    // kept as the "and it still holds for a peer that DID speak" half.
     advance_ms(250);
     check(fake_esp_timer_fire() == 1, "the sweep timer fires past the deadline");
     run_server();
     check(link->stats().auth_expired == 0, "and expires nothing — no deadline was armed for it");
     check(peer_count(*link) == 1, "the handshake-authenticated session is still a peer");
     fake_httpd::instance().close_session(kHeader);
+    run_server();
+}
+
+/**
+ * @brief #1334 — the case #1245 left uncovered: a handshake-authenticated peer that says
+ *        NOTHING must still be a peer past the auth deadline.
+ *
+ * This is the deployment the report is about — a link established ahead of demand, a
+ * subscriber that only ever receives, an idle control channel. Before #1334 such a session's
+ * only record was a pending-handshake row, whose ONLY retirement paths are the first-frame
+ * claim (which never comes) and the deadline sweep (which closes it with `kCloseAuthTimeout`).
+ * The peer reconnects, takes a fresh row with a fresh deadline, and the loop runs forever.
+ *
+ * The ablation is exact: put the pre-authenticated session back in the ledger and this reddens
+ * on `auth_expired`, while every other case in this file stays green — which is what made the
+ * defect survivable in the first place.
+ */
+void test_preauthenticated_silence_outlives_the_deadline() {
+    std::printf("#1334 a pre-authenticated peer that says NOTHING outlives the deadline:\n");
+    reset_server();
+    // A short deadline, so the silence below is measured against a sweep that really fires.
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true, 0, 200);
+    link->set_admission_verdict_cb(&preauth_admission, nullptr);
+    link->set_auth_cb(&recording_auth, nullptr);
+    reset_hook({httpd_ws_link_t::auth_verdict_t::REJECT});
+    g_admission_verdict = httpd_ws_link_t::admission_verdict_t::ADMIT_AUTHENTICATED;
+    constexpr int kSilent = 730;
+
+    check(fake_httpd::instance().open_session(kSilent), "the handshake was answered");
+    check(peer_count(*link) == 1, "and it claimed its slot at the 101, with no frame sent");
+    // NO deliver_frame, ever. That is the whole case.
+    advance_ms(250);
+    check(fake_esp_timer_fire() == 1, "the sweep timer fires past the deadline");
+    run_server();
+    check(link->stats().auth_expired == 0, "nothing expired — no deadline was armed for it");
+    check(frames_for(kSilent).empty(), "no CLOSE was written to it");
+    check(!fake_httpd::instance().is_shut(kSilent), "and the socket was never shut down");
+    check(peer_count(*link) == 1, "it is still a peer");
+
+    // A second window, because the reported symptom is a LOOP: the first sweep is the one that
+    // used to kill it, and a row re-armed by a reconnect would kill it again on the next.
+    advance_ms(250);
+    check(fake_esp_timer_fire() == 1, "a later tick fires too");
+    run_server();
+    check(link->stats().auth_expired == 0, "and still expires nothing");
+    check(peer_count(*link) == 1, "the idle authenticated link is simply idle");
+
+    // And it may speak whenever it likes — the session it holds is a SERVED one, not a
+    // pending one waiting to be promoted.
+    check(fake_httpd::instance().deliver_frame(kSilent, kBody) == ESP_OK,
+          "its eventual first frame dispatched");
+    check(g_seen.empty(), "and went to the GRAPH, never to the credential hook");
+    fake_httpd::instance().close_session(kSilent);
+    run_server();
+}
+
+/**
+ * @brief #1334 — charging the peer slot at the 101 means REFUSING at the 101, once, and
+ *        giving the slot back when the silent peer leaves.
+ *
+ * Two properties in one case because they are the same property from both ends. The refusal is
+ * the cost the ruling accepted: `max_peers` is the scarcer resource (~4 on IDF defaults) and it
+ * is now charged one step earlier for this verdict. It must be a CLEAN refusal — the upgrade
+ * abandoned, counted exactly once, never counted twice by the two stages that can now both
+ * decline. And the slot must come back: `on_session_closed` is the only path that reclaims one,
+ * so if the pre-handshake claim failed to arm it, a peer that upgraded, stayed silent and
+ * disconnected would leak its slot for the life of the link.
+ */
+void test_preauthenticated_cap_is_charged_at_the_handshake() {
+    std::printf("#1334 max_peers is charged, and released, at the 101:\n");
+    reset_server();
+    // max_peers = 1: the first pre-authenticated handshake takes the only slot.
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 1, true, 0, 200);
+    link->set_admission_verdict_cb(&preauth_admission, nullptr);
+    link->set_auth_cb(&recording_auth, nullptr);
+    reset_hook({httpd_ws_link_t::auth_verdict_t::REJECT});
+    int downs = 0;
+    link->set_peer_down_notifier(&count_peer_down, &downs);
+    g_admission_verdict = httpd_ws_link_t::admission_verdict_t::ADMIT_AUTHENTICATED;
+    constexpr int kFirst = 740;
+    constexpr int kSecond = 741;
+
+    check(fake_httpd::instance().open_session(kFirst), "the first handshake was answered");
+    check(peer_count(*link) == 1, "and spent the only slot");
+    check(!fake_httpd::instance().open_session(kSecond),
+          "the second is refused AT THE UPGRADE, not admitted and killed 10 s later");
+    check(!fake_httpd::instance().has_session(kSecond), "no session was admitted for it");
+    check(link->stats().peers_refused == 1,
+          "and the refusal is counted exactly ONCE — not by both stages that declined it");
+
+    // The slot comes back, though its peer never sent a single frame: the free_ctx armed at
+    // the 101 is what reclaims it.
+    fake_httpd::instance().close_session(kFirst);
+    run_server();
+    check(peer_count(*link) == 0, "the silent peer's slot was reclaimed on close");
+    check(downs == 1, "and its departure reached the routing plane, as its arrival did");
+    check(fake_httpd::instance().open_session(kSecond),
+          "so the next handshake is admitted on the freed slot");
+    check(link->stats().peers_refused == 1, "with no further refusal");
+    fake_httpd::instance().close_session(kSecond);
     run_server();
 }
 
@@ -624,6 +740,8 @@ int main() {
     test_pending_departure_notifies_nobody();
     test_teardown_retires_the_timer();
     test_handshake_authentication_skips_the_frame();
+    test_preauthenticated_silence_outlives_the_deadline();
+    test_preauthenticated_cap_is_charged_at_the_handshake();
     test_verdict_refuse_and_overload_exclusivity();
     test_silent_upgrade_is_closed_at_the_deadline();
     test_no_hook_leaves_a_silent_socket_alone();

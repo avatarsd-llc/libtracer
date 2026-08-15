@@ -67,30 +67,49 @@ server_t& instance() {
 }
 
 bool server_t::open_session(int fd, void* ctx, httpd_free_ctx_fn_t free_fn) {
-    // The pre-handshake predicate first, and OUTSIDE m_ — it re-enters the link (the
-    // gate's mutex), and the fake never holds its own lock across a call into the link.
-    // The request it gets is the opening GET as httpd_uri.c hands it over: the
-    // registration's user_ctx already attached, method GET, on this socket.
     const route_t route = g_route;
+    {
+        const std::lock_guard lock(m_);
+        // httpd_sess_new, which runs at ACCEPT — before the opening GET is parsed and long
+        // before the predicate below is dispatched. Seating it here rather than after the
+        // predicate is what makes `httpd_sess_set_ctx` from inside a pre-handshake land on a
+        // real session, as it does on the chip.
+        session_t sess;
+        sess.ctx = ctx;
+        sess.free_ctx = free_fn;
+        // Not upgraded yet: until the 101 is answered this is an ordinary HTTP client, which is
+        // what `httpd_ws_get_fd_info` reports for it.
+        sess.websocket = false;
+        // httpd_sess_new seeds the session from the server's clock WITHOUT advancing it, so a
+        // brand-new session starts level with the oldest existing one rather than ahead of it.
+        sess.lru_counter = lru_clock_;
+        sessions_[fd] = sess;
+    }
+    // The pre-handshake predicate, OUTSIDE m_ — it re-enters the link (the gate's mutex), and
+    // the fake never holds its own lock across a call into the link. The request it gets is the
+    // opening GET as httpd_uri.c hands it over: the registration's user_ctx already attached,
+    // method GET, on this socket.
     if (route.pre_handshake != nullptr) {
         httpd_req_t req = {};
         req.handle = static_cast<httpd_handle_t>(this);
         req.method = HTTP_GET;
         req.user_ctx = route.user_ctx;
         req.fd = fd;
-        if (route.pre_handshake(&req) != ESP_OK) return false;  // no 101, no session
+        if (route.pre_handshake(&req) != ESP_OK) {
+            // No 101 — the server closes the socket, which runs whatever ctx the session was
+            // carrying through its free_ctx. Nothing is left behind: no session, no latched
+            // route, nothing a later frame could dispatch through.
+            close_session(fd);
+            return false;
+        }
     }
     const std::lock_guard lock(m_);
-    session_t sess;
-    sess.ctx = ctx;
-    sess.free_ctx = free_fn;
+    const auto it = sessions_.find(fd);
+    if (it == sessions_.end()) return false;  // a predicate that closed its own socket
     // The handshake latches the route INTO the session; nothing later can revoke it.
-    sess.ws_handler = route.handler;
-    sess.ws_user_ctx = route.user_ctx;
-    // httpd_sess_new seeds the session from the server's clock WITHOUT advancing it, so a
-    // brand-new session starts level with the oldest existing one rather than ahead of it.
-    sess.lru_counter = lru_clock_;
-    sessions_[fd] = sess;
+    it->second.ws_handler = route.handler;
+    it->second.ws_user_ctx = route.user_ctx;
+    it->second.websocket = true;
     return true;
 }
 

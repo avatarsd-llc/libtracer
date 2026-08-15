@@ -28,6 +28,44 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`httpd_ws_link_t` no longer closes a handshake-authenticated peer that has said nothing —
+  such a session now claims its slot AT THE 101**
+  ([#1334](https://github.com/avatarsd-llc/libtracer/issues/1334)). A session the three-valued
+  admission predicate answered `ADMIT_AUTHENTICATED` for used to be recorded as a row in the
+  pending-handshake ledger #1247 introduced, and that ledger's only two retirement paths are
+  the lazy first-frame claim and the deadline sweep. A peer entitled to be silent — a link
+  established ahead of demand, a subscriber that only ever receives, an idle control channel —
+  takes neither, so the sweep closed it with `kCloseAuthTimeout` at `auth_deadline_ms`; it
+  reconnected, took a fresh row with a fresh deadline, and the loop ran forever. A native
+  dialer cannot escape it by speaking: presenting a credential IN-BAND is exactly the thing it
+  has no way to do, which is why #1245 gave it a handshake verdict in the first place.
+
+  **What changed.** The claim body is factored into one `claim_session` reached from two edges.
+  An `ADMIT_AUTHENTICATED` verdict claims its slot in `ws_pre_handshake`, before the 101, and
+  never enters the ledger at all: `auth_pending` is false and **no deadline is armed** — not
+  suppressed, unarmed — so the sweep has nothing to find. Every other session is claimed
+  lazily on its first frame, ledger-bound and swept, exactly as #1247 left it. The
+  slot-reclamation `free_ctx`, the per-socket policy, the stack sample and the #1223 arrival
+  seam all move with the claim, so a session claimed at the 101 is indistinguishable from one
+  claimed at a frame from there on; the two edges are mutually exclusive per connection.
+
+  **The alternative was ruled out**, not overlooked: exempting pre-authenticated rows from the
+  sweep leaves rows nothing ever retires (a socket closing does not retire one), so 24 idle
+  pre-authenticated links would fill the fixed ledger and every subsequent upgrade — including
+  plain `ADMIT` ones — would be refused. That is the same deployment, with a link-wide
+  admission stall instead of a per-socket reconnect loop.
+
+  **Observable surface.** (1) A session now EXISTS before its first frame for this verdict:
+  it is enumerable, resolvable and countable from the 101, and its `connected_at_us` is stamped
+  there — more accurate, not less. (2) `max_peers` is charged at the 101 for this verdict, so a
+  link at its cap refuses the upgrade outright (`peers_refused` +1, counted exactly once)
+  rather than admitting the peer and killing it `auth_deadline_ms` later; the claim reaps
+  expired sessions first, so an already-expired squatter cannot spend the slot. (3) The ledger
+  now holds only sessions whose entitlement is *not yet* known, which is what
+  `kMaxPendingHandshakes` always described. `pending_handshake_t::preauthenticated` is gone
+  along with the `bool` parameter of the private `note_pending_handshake`; the public
+  `kMaxPreauthenticated` alias is unchanged.
+
 - **`httpd_ws_link_t`'s authentication deadline now bounds a socket that upgrades and then
   says NOTHING** ([#1247](https://github.com/avatarsd-llc/libtracer/issues/1247)).
   `docs/reference/16-websocket-session-auth.md` names "open sockets, say nothing" as the exact
