@@ -317,6 +317,9 @@ jobs:
       # `clang-format` comes from the same noble archive the hosted image installed it
       # from, so the enforced style is the same version's, not a second dialect.
       - name: clang-format (dry-run, error on diff)
+        # The step needs bash for `mapfile` and process substitution; inside a
+        # `container:` job the runner may resolve the default shell to plain sh.
+        shell: bash
         run: |
           apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq clang-format
           mapfile -t files < <(find core/include core/src core/tests core/examples \
