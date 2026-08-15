@@ -30,7 +30,7 @@
     {
       "binary": "bench_compact_delivery",
       "symbol": "void tr::net::fwd_router_t::route_fwd_forward<tr::wire::grammar::rope_cursor>",
-      "bytes": 2215
+      "bytes": 2199
     }
   ]
 }
