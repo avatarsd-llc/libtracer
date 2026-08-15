@@ -69,6 +69,7 @@ using tr::graph::subscription_t;
 using tr::graph::vertex_handle_t;
 using tr::net::bus_link_t;
 using tr::net::fwd_router_t;
+using tr::net::peer_handle_t;
 using tr::net::transport_t;
 using tr::view::rope_t;
 using tr::view::view_t;
@@ -265,35 +266,49 @@ class fake_bus_t : public transport_t, public bus_link_t {
         return it == peers_.end() ? nullptr : it->second.get();
     }
 
+    /** @brief The handle's index into @ref names_ is the peer's name (#1294). */
+    [[nodiscard]] std::string_view peer_name(peer_handle_t peer, std::span<char>) const override {
+        if (!peer.valid() || peer.index >= names_.size()) return {};
+        return names_[peer.index];
+    }
+
     /** @brief The (created-on-first-use) endpoint for @p peer. */
     peer_ep_t& peer(std::string_view name) {
         std::unique_ptr<peer_ep_t>& ep = peers_[std::string(name)];
         if (!ep) ep = std::make_unique<peer_ep_t>();
         return *ep;
     }
-    /** @brief Poke one inbound frame tagged with the sending peer's name. */
+    /** @brief The handle for @p name, minting one on first sight (#1294). */
+    peer_handle_t mint(std::string_view name) {
+        for (std::size_t i = 0; i < names_.size(); ++i)
+            if (names_[i] == name) return {static_cast<std::uint32_t>(i), 1};
+        names_.emplace_back(name);
+        return {static_cast<std::uint32_t>(names_.size() - 1), 1};
+    }
+    /** @brief Poke one inbound frame tagged with the sending peer's HANDLE (#1294). */
     void inject_peer(std::string_view peer_name, std::span<const std::byte> frame) {
         (void)peer(peer_name);  // a peer that speaks exists
-        peer_rx_.deliver_borrowed(peer_name, frame);
+        peer_rx_.deliver_borrowed(mint(peer_name), frame);
     }
     /** @brief Simulate the bus observing @p peer_name's session dead. */
-    void peer_die(std::string_view peer_name) { notify_peer_down(peer_name); }
+    void peer_die(std::string_view peer_name) { notify_peer_down(mint(peer_name), peer_name); }
     /** @brief Simulate an ACCEPTING listener admitting @p peer_name — endpoint first (a peer
      *         that arrives is resolvable), then the arrival notifier, the `slot_server_t`
      *         order (#1254: the notifier is what registers the session's identity anchor). */
     void peer_arrive(std::string_view peer_name) {
         (void)peer(peer_name);
-        notify_peer_up(peer_name);
+        notify_peer_up(mint(peer_name), peer_name);
     }
     /** @brief Simulate the session FULLY torn down: the endpoint gone (so `peer_link`
      *         answers null, the RFC-0020 reject precondition), then the notifier. */
     void peer_kill(std::string_view peer_name) {
         peers_.erase(std::string(peer_name));
-        notify_peer_down(peer_name);
+        notify_peer_down(mint(peer_name), peer_name);
     }
 
    private:
     std::map<std::string, std::unique_ptr<peer_ep_t>> peers_; /**< @brief name → endpoint. */
+    std::vector<std::string> names_; /**< @brief index → peer name — the handle's meaning. */
 };
 
 /**

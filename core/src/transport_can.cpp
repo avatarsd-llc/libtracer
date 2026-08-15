@@ -227,6 +227,18 @@ transport_t* transport_can::peer_link(std::string_view peer) {
     return &it->second.endpoint;
 }
 
+std::string_view transport_can::peer_name(peer_handle_t peer, std::span<char> scratch) const {
+    // A pure re-formatting of the node id the handle's index IS — no `peers_` lookup and no
+    // TTL check, deliberately: this answers "what is this handle's NAME", not "is that peer
+    // still audible", which is `peer_link`'s question.
+    if (!peer.valid() || peer.index > can::kNodeMax) return {};
+    const peer_name_buf_t name = format_peer_name(static_cast<std::uint16_t>(peer.index));
+    const std::string_view view = name.view();
+    if (view.empty() || view.size() > scratch.size()) return {};
+    std::copy(view.begin(), view.end(), scratch.begin());
+    return std::string_view(scratch.data(), view.size());
+}
+
 void transport_can::peer_endpoint_t::send(std::span<const std::byte> frame) {
     owner_->send_impl(frame, node_.load(std::memory_order_relaxed));
 }
@@ -769,8 +781,11 @@ void transport_can::deliver(std::uint16_t src_node, tr::view::rope_t frame) {
     // sink is installed; otherwise the flat transport_t slot (the frame without
     // its peer name) — a single-peer consumer needs no bus facet.
     if (peer_rx_.has_any()) {
-        const peer_name_buf_t name = format_peer_name(src_node);
-        peer_rx_.deliver_rope(name.view(), std::move(frame));
+        // The HANDLE, not the name (#1294): a CAN peer's identity is its node id, so the
+        // handle is that id at the announce-census constant generation and the name the
+        // router grows into `src` is resolved back from it by `peer_name`.
+        peer_rx_.deliver_rope(peer_handle_t{src_node, transport_can::kAnnouncedPeerGeneration},
+                              std::move(frame));
         return;
     }
     if (rx_.has_any()) {

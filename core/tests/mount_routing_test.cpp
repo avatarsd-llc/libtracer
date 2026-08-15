@@ -74,9 +74,24 @@ struct bus_link_impl_t : tr::net::transport_t, tr::net::bus_link_t {
     void enumerate_peers(const tr::net::bus_link_t::peer_visitor_t& visit) const override {
         for (const auto& [n, l] : peers) visit(n);
     }
-    /** @brief Drive an inbound frame up the peer-named slot, as a real bus adapter does. */
+    /** @brief The handle's index into @ref peers is its name (#1294). */
+    [[nodiscard]] std::string_view peer_name(tr::net::peer_handle_t peer,
+                                             std::span<char>) const override {
+        if (!peer.valid() || peer.index >= peers.size()) return {};
+        return peers[peer.index].first;
+    }
+    /**
+     * @brief Drive an inbound frame up the peer-named slot, as a real bus adapter does —
+     *        tagged with the peer's HANDLE (#1294), which here is its index into
+     *        @ref peers at the sole generation this double ever mints.
+     */
     void deliver(std::string_view peer, std::span<const std::byte> frame) {
-        peer_rx_.deliver_borrowed(peer, frame);
+        for (std::size_t i = 0; i < peers.size(); ++i) {
+            if (peers[i].first != peer) continue;
+            peer_rx_.deliver_borrowed(tr::net::peer_handle_t{static_cast<std::uint32_t>(i), 1},
+                                      frame);
+            return;
+        }
     }
 };
 

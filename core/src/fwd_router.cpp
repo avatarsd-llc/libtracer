@@ -807,34 +807,42 @@ bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_sou
         // back to canonical, which is exactly what the canonical spelling already does with the
         // bus link's own name.
         child_rx_ctx_t& bctx = acquire_ctx(name, rx);
+        // The bus facet the frame paths resolve a peer handle's NAME through (#1294) —
+        // recorded before publication, like every other resolved-once fact on this ctx.
+        bctx.bus.store(bus, std::memory_order_relaxed);
         publish_ctx(bctx);
         // The session-identity pair (#1223 step 2). Arrival is a NEW seam and only an
         // ACCEPTING listener fires it — `set_peer_up_notifier` is what turns ADR-0044's
         // amended scope into a capability rather than a kind check here: an announce-census
         // bus never calls it, so a CAN peer still grows no vertex. Departure keeps doing
         // exactly what it did (`link_down`), with the anchor's retire in front of it.
+        // The lifecycle seams carry the peer's HANDLE beside its name (#1294). The router
+        // itself still keys its anchor and its eviction by NAME — a graph key is a path
+        // segment — so it takes the name and lets the handle go; the consumers the handle
+        // exists for (#1266's intern slot, #375 Part 2's subject) bind it at these two
+        // sites, which is where it is minted and retired.
         bus->set_peer_up_notifier(
-            [](void* c, std::string_view peer) {
+            [](void* c, peer_handle_t, std::string_view peer) {
                 auto* const cc = static_cast<child_rx_ctx_t*>(c);
                 cc->self->bus_peer_up(*cc, peer);
             },
             &bctx);
         bus->set_peer_down_notifier(
-            [](void* c, std::string_view peer) {
+            [](void* c, peer_handle_t, std::string_view peer) {
                 auto* const cc = static_cast<child_rx_ctx_t*>(c);
                 cc->self->bus_peer_down(*cc, peer);
             },
             &bctx);
         if (bus->delivers_ropes()) {
             bus->set_peer_rope_receiver(
-                [](void* c, std::string_view peer, view::rope_t frame) {
+                [](void* c, peer_handle_t peer, view::rope_t frame) {
                     auto* const cc = static_cast<child_rx_ctx_t*>(c);
                     cc->self->on_frame_rope_bus(*cc, peer, std::move(frame));
                 },
                 &bctx);
         } else {
             bus->set_peer_receiver(
-                [](void* c, std::string_view peer, std::span<const std::byte> frame) {
+                [](void* c, peer_handle_t peer, std::span<const std::byte> frame) {
                     auto* const cc = static_cast<child_rx_ctx_t*>(c);
                     cc->self->on_frame_bus(*cc, peer, frame);
                 },
@@ -845,6 +853,10 @@ bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_sou
     // Point-to-point: the inbound NAME is fixed per child, carried by a stable
     // per-child ctx (child_rx_ holds the address for the transport's lifetime).
     child_rx_ctx_t& ctx = acquire_ctx(name, rx);
+    // No bus facet on this tenancy — CLEARED rather than left, because a re-add rebinds
+    // this ctx (#884) and a name that used to be a bus mount must not keep answering with
+    // the facet it no longer has (#1294).
+    ctx.bus.store(nullptr, std::memory_order_relaxed);
     // The bound-path join (RFC-0024 §5.1), resolved ONCE per registration: the child's mount
     // run IS the canonical key of its connection vertex, so this is one map lookup of bytes
     // already in hand. A child whose vertex does not exist yet keeps `kNoConnSlot` and is
@@ -1339,18 +1351,34 @@ void fwd_router_t::on_frame(std::string_view inbound_name, std::span<const std::
     on_frame_impl(inbound_name, frame, nullptr);
 }
 
-void fwd_router_t::on_frame_bus(const child_rx_ctx_t& ctx, std::string_view peer,
+std::string_view fwd_router_t::resolve_peer_name(const child_rx_ctx_t& ctx, peer_handle_t peer,
+                                                 std::span<char> scratch) {
+    bus_link_t* const bus = ctx.bus.load(std::memory_order_relaxed);
+    if (bus == nullptr) return {};
+    return bus->peer_name(peer, scratch);
+}
+
+void fwd_router_t::on_frame_bus(const child_rx_ctx_t& ctx, peer_handle_t peer,
                                 std::span<const std::byte> frame) {
-    on_frame_impl(peer, frame, nullptr, &ctx, true);
+    // The handle is the seam's identity; the routing plane's is the NAME, so it is resolved
+    // here, once, on the transport's own receive thread — the scratch outlives the whole
+    // routing call below, which is what the resolved view may point into.
+    std::array<char, kPeerNameChars> scratch{};
+    const std::string_view name = resolve_peer_name(ctx, peer, scratch);
+    if (name.empty()) return;  // no bus facet, or a handle this kind does not name
+    on_frame_impl(name, frame, nullptr, &ctx, true);
 }
 
 void fwd_router_t::on_frame_rope(std::string_view inbound_name, view::rope_t frame) {
     on_frame_rope_impl(inbound_name, std::move(frame), nullptr, false);
 }
 
-void fwd_router_t::on_frame_rope_bus(const child_rx_ctx_t& ctx, std::string_view peer,
+void fwd_router_t::on_frame_rope_bus(const child_rx_ctx_t& ctx, peer_handle_t peer,
                                      view::rope_t frame) {
-    on_frame_rope_impl(peer, std::move(frame), &ctx, true);
+    std::array<char, kPeerNameChars> scratch{};
+    const std::string_view name = resolve_peer_name(ctx, peer, scratch);
+    if (name.empty()) return;  // see on_frame_bus
+    on_frame_rope_impl(name, std::move(frame), &ctx, true);
 }
 
 template <class Cursor, class Observe, class Reject, class Terminus, class Reply>

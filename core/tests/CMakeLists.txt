@@ -1402,6 +1402,17 @@ if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_TCP)
     add_test(NAME tcp COMMAND tcp_test)
 endif()
 
+if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_TCP)
+    # #1294 — the peer-receiver seam carries an opaque per-peer HANDLE, not a name string:
+    # the POD contract (8 B, reserved-zero generation, no null arm), `peer_name` as the one
+    # bridge back to the routing plane's name, the minted-handle round trip through delivery,
+    # and the generation bump that keeps a recycled slot from inheriting a session identity.
+    add_executable(peer_handle_seam_test peer_handle_seam_test.cpp)
+    target_link_libraries(peer_handle_seam_test PRIVATE libtracer)
+    libtracer_test_warnings(peer_handle_seam_test)
+    add_test(NAME peer_handle_seam COMMAND peer_handle_seam_test)
+endif()
+
 if(LIBTRACER_TRANSPORT_TCP)
     # #838 — the host twin of #835: a stream send into a peer that stopped reading is BOUNDED
     # (the write mutex is held across it, so an unbounded one froze every sender on the link),

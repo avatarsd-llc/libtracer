@@ -436,13 +436,13 @@ constexpr std::size_t kEndpointChars = kAddrChars + 6;
  *
  * Two measured decisions, both against an A/A null of 0 on this TU's `.text`:
  *
- * `noinline` for the SAME reason @ref peer_name is. Folded into
+ * `noinline` for the SAME reason @ref format_endpoint is. Folded into
  * @ref httpd_ws_link_t::on_data_frame — which reaches this once per session and is
  * otherwise the per-FRAME hot path — it cost **+1962 B in that one function**. Out of line
  * it costs a call on the claim edge and leaves the frame path's code layout the size it was.
  *
  * The digits are written here rather than by `std::to_string` because that instantiation is
- * **+1456 B** of this TU, and it is NOT shared with the one @ref peer_name already pulls in:
+ * **+1456 B** of this TU, and it is NOT shared with the one @ref format_endpoint already pulls in:
  * the body is duplicated per call site, so the second use pays full price again (`int` and
  * `std::size_t` overloads both, measured). A slot index is a small non-negative integer, so
  * the general path buys nothing here. Core's `slot_server_t` keeps `std::to_string`
@@ -498,7 +498,7 @@ constexpr std::size_t kEndpointChars = kAddrChars + 6;
  * it into that hot function. Keeping the call is what keeps the per-frame path's code layout
  * the size it was.
  */
-[[gnu::noinline]] void peer_name(int fd, char (&out)[kEndpointChars]) {
+[[gnu::noinline]] void format_endpoint(int fd, char (&out)[kEndpointChars]) {
     sockaddr_storage addr = {};
     socklen_t len = sizeof(addr);
     if (::getpeername(fd, reinterpret_cast<sockaddr*>(&addr), &len) == 0) {
@@ -708,6 +708,18 @@ struct httpd_ws_link_t::session_t {
      * queue, and that item drains within one pass of the httpd task's loop.
      */
     std::uint32_t gen = 0;
+    /**
+     * @brief This session's identity HANDLE, `(slot index, gen)` — what the peer-receiver
+     *        seam tags every inbound frame with (#1294).
+     *
+     * The same pair @ref httpd_ws_link_t::session_ref_t carries, published to the routing
+     * plane instead of kept private to the TX path: a session ref is one SUPPLIER of a
+     * handle, not the handle itself (#1294 ruling 1), and this is where this link supplies
+     * one. Stamped at the claim beside @ref name and RETIRED (generation 0) by
+     * @ref httpd_ws_link_t::reclaim_slot, so a handle minted against a departed tab never
+     * matches whoever lands on the slot next. Guarded by `peers_m_`, like the name.
+     */
+    peer_handle_t handle;
     bool open = false; /**< @brief True between handshake and close. */
     /**
      * @brief The peer's ROUTABLE name — `p<slot>` (ADR-0073 §2, #426, #994).
@@ -1824,6 +1836,7 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
     // reaches here has already been admitted.
     session_t* slot = nullptr;
     std::string peer;
+    peer_handle_t handle;
     bool newly_claimed = false;
     bool pending = false;  // this session has not authenticated yet — see session_t::auth_pending
     // Reap expired unauthenticated sessions BEFORE the cap is tested below. The periodic
@@ -1901,10 +1914,14 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
             // ADR-0073 §2: the routable NAME is the slot index, legal by construction, and
             // the `<ip>:<port>` goes to the diagnostics field instead of into the graph.
             slot->name = slot_name(idx);
-            peer_name(fd, slot->endpoint_str);
+            format_endpoint(fd, slot->endpoint_str);
             slot->asm_buf.clear();
             slot->fd = fd;
             ++slot->gen;  // a NEW session in a recycled slot: fail every stale ref (#954)
+            // The seam's handle is minted from that same bump (#1294) — one identity for
+            // the TX path and the routing plane, never two that could disagree. `gen` is
+            // never 0 after the increment on a claim, so the handle is always valid.
+            slot->handle = peer_handle_t{static_cast<std::uint32_t>(idx), slot->gen};
             slot->open = true;
             // The opening GET never reaches this handler, so THIS lazy first-frame claim
             // is the establish edge — the only honest place to stamp "connected at" and to
@@ -1924,6 +1941,7 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
             newly_claimed = true;
         }
         peer = slot->name;
+        handle = slot->handle;
         pending = slot->auth_pending;
     }
     // Reclaim the slot on close — armed once, when first claimed (the free_ctx fires on the
@@ -1943,7 +1961,7 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
         // so it grants a pending session nothing the auth narrowing withholds — and a
         // session closed at the auth deadline is torn down through the ordinary departure
         // seam, which retires it.
-        notify_arrived(peer);
+        notify_arrived(handle, peer);
     }
 
     // Reassembly — asm_buf is httpd-task-only, so no lock. The SPA sends one whole TLV
@@ -1957,7 +1975,7 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
         if (pending)
             on_auth_message(slot, body);
         else
-            deliver(peer, body);  // unfragmented: deliver borrowed, no extra copy
+            deliver(handle, body);  // unfragmented: deliver borrowed, no extra copy
         return ESP_OK;
     }
     if (frame.type == HTTPD_WS_TYPE_CONTINUE && slot->asm_buf.empty())
@@ -1991,7 +2009,7 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
         if (pending)
             on_auth_message(slot, message.bytes());
         else
-            deliver(peer, message.bytes());
+            deliver(handle, message.bytes());
     }
     return ESP_OK;
 }
@@ -2317,6 +2335,7 @@ void httpd_ws_link_t::on_session_closed(void* ctx) {
     gate_t* const gate = slot->gate;
     httpd_ws_link_t* owner = nullptr;
     std::string departed;
+    peer_handle_t departed_handle;
     {
         // Resolve the link through the gate. That is what makes this safe against a
         // concurrent teardown: a destructor can only shut the gate by taking this same
@@ -2327,7 +2346,7 @@ void httpd_ws_link_t::on_session_closed(void* ctx) {
         const std::lock_guard lock(gate->m);
         owner = gate->link;
         if (owner == nullptr) return;
-        departed = owner->reclaim_slot(slot);
+        departed = owner->reclaim_slot(slot, departed_handle);
         if (departed.empty()) return;  // nothing owed to the routing plane
         // A departure IS owed, and it is fired below with `m` RELEASED (#960). The mutex
         // is the wrong instrument to hold it under: it is the one each of the server's
@@ -2346,7 +2365,7 @@ void httpd_ws_link_t::on_session_closed(void* ctx) {
         // wait moves from the mutex to the condition variable; it does not disappear.
         ++gate->depth;
     }
-    owner->notify_departed(departed);
+    owner->notify_departed(departed_handle, departed);
     {
         // `owner` may be DESTROYED by now, exactly as at the tail of @ref ws_handler: the
         // notifier can drive an app teardown, and the barrier above is what let it start.
@@ -2357,8 +2376,9 @@ void httpd_ws_link_t::on_session_closed(void* ctx) {
     gate->cv.notify_all();
 }
 
-std::string httpd_ws_link_t::reclaim_slot(session_t* slot) {
+std::string httpd_ws_link_t::reclaim_slot(session_t* slot, peer_handle_t& handle) {
     std::string departed;
+    handle = peer_handle_t{};
     bool was_open;
     bool was_pending;
     {
@@ -2372,6 +2392,11 @@ std::string httpd_ws_link_t::reclaim_slot(session_t* slot) {
         slot->auth_deadline_us = 0;
         slot->subject[0] = '\0';
         departed = std::move(slot->name);
+        // RETIRE the seam's handle with the name (#1294): "valid until depart" means
+        // nothing this slot carries afterwards may be stamped with the departed session's
+        // identity. `gen` itself survives, so the next claim mints a fresh one.
+        handle = slot->handle;
+        slot->handle = peer_handle_t{};
         slot->open = false;
         slot->fd = -1;
         slot->name.clear();
@@ -2428,25 +2453,25 @@ std::string httpd_ws_link_t::reclaim_slot(session_t* slot) {
     return departed;
 }
 
-void httpd_ws_link_t::notify_departed(std::string_view peer) {
+void httpd_ws_link_t::notify_departed(peer_handle_t handle, std::string_view peer) {
     // Peer-named mode evicts just the departed peer's edges. A FLAT link has ONE routing
     // identity for every peer it carries — the registered child NAME — so its only seam is
     // the whole link, and firing that on a MID-LIFE close would evict the surviving tabs'
     // edges along with the departed one's. It waits for the last open session (#889) —
     // the same fork slot_server_t::teardown_slot takes, for the same reason.
     if (peer_named_) {
-        notify_peer_down(peer);
+        notify_peer_down(handle, peer);
     } else if (!any_open_session()) {
         notify_down();
     }
 }
 
-void httpd_ws_link_t::notify_arrived(std::string_view peer) {
+void httpd_ws_link_t::notify_arrived(peer_handle_t handle, std::string_view peer) {
     // Peer-named only, the same fork notify_departed takes and for the same reason: a flat
     // link has ONE routing identity for every tab it carries, so there is no per-session
     // identity to anchor. There is no flat-mode counterpart to notify_down() here — link-up
     // is the transport's own state, not a per-session event.
-    if (peer_named_) notify_peer_up(peer);
+    if (peer_named_) notify_peer_up(handle, peer);
 }
 
 bool httpd_ws_link_t::any_open_session() const {
@@ -2503,7 +2528,7 @@ void httpd_ws_link_t::note_rx_drop(session_t* slot) {
              (unsigned)adding, (unsigned)kMaxFrameBytes);
 }
 
-void httpd_ws_link_t::deliver(std::string_view peer, std::span<const std::byte> frame) {
+void httpd_ws_link_t::deliver(peer_handle_t peer, std::span<const std::byte> frame) {
     // Peer-named bus tag when the facet is on (each tab its own return route); the flat
     // point-to-point sink otherwise — matching what fwd_router_t::add_child installed.
     if (peer_named_)
@@ -3273,6 +3298,27 @@ transport_t* httpd_ws_link_t::peer_link(std::string_view peer) {
         if (s->open && !s->dead && !s->auth_pending && s->name == peer)
             return acquire_resolution(s.get());
     return nullptr;
+}
+
+std::string_view httpd_ws_link_t::peer_name(peer_handle_t peer, std::span<char> scratch) const {
+    // Positional by construction (ADR-0073 §2): the name a slot is stamped with at the
+    // claim IS 'p' + its index, so the inverse is that formatting and needs neither
+    // `peers_m_` nor the slot vector. Written out by hand for the reason @ref slot_name
+    // is — `std::to_string` is +1456 B of this TU per call site — and into the CALLER's
+    // scratch, so it heap-allocates nothing on the per-frame path.
+    if (!peer.valid() || scratch.size() < 2) return {};
+    char buf[24];
+    char* p = buf + sizeof(buf);
+    std::uint32_t idx = peer.index;
+    do {
+        *--p = static_cast<char>('0' + (idx % 10));
+        idx /= 10;
+    } while (idx != 0);
+    *--p = 'p';
+    const auto len = static_cast<std::size_t>(buf + sizeof(buf) - p);
+    if (len > scratch.size()) return {};
+    for (std::size_t i = 0; i < len; ++i) scratch[i] = p[i];
+    return std::string_view(scratch.data(), len);
 }
 
 httpd_ws_link_t::peer_resolution_t* httpd_ws_link_t::acquire_resolution(session_t* slot) {

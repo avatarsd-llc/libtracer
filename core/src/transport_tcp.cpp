@@ -452,7 +452,7 @@ void transport_tcp_server::on_readable(session_base_t& base, const std::byte* da
             // aggregate init — no handle copy (#845)
             view::view_t frame{std::move(seg), 0, flen};
             if (peer_named_)
-                peer_rx_.deliver(s.name, std::move(frame));
+                peer_rx_.deliver(s.handle, std::move(frame));
             else
                 rx_.deliver(std::move(frame));
         },

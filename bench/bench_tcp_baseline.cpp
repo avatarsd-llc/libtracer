@@ -145,7 +145,7 @@ struct sink_t {
     bool record = false;
 
     /** @brief The peer-named receiver callable, bound by address. */
-    void operator()(std::string_view, std::span<const std::byte> f) {
+    void operator()(tr::net::peer_handle_t, std::span<const std::byte> f) {
         frames.fetch_add(1, std::memory_order_relaxed);
         if (!record || f.size() <= kPhaseOffset) return;
         if (static_cast<frame_kind_t>(std::to_integer<std::uint8_t>(f[kPhaseOffset])) !=

@@ -1219,9 +1219,14 @@ void test_rope_delivery() {
     std::condition_variable cv;
     std::string peer;
     std::optional<tr::view::rope_t> got;
-    auto peer_rope_rx = [&](std::string_view name, tr::view::rope_t frame) {
+    // The seam tags the frame with the sender's HANDLE (#1294); the NAME the case asserts
+    // on is resolved back from it through the bus's own `peer_name`, which is the whole of
+    // the round trip this delivery is supposed to make.
+    tr::net::bus_link_t* rx_bus = nullptr;
+    auto peer_rope_rx = [&](tr::net::peer_handle_t handle, tr::view::rope_t frame) {
+        std::array<char, tr::net::kPeerNameChars> scratch{};
         const std::lock_guard lock(m);
-        peer = name;
+        peer = rx_bus != nullptr ? rx_bus->peer_name(handle, scratch) : std::string_view{};
         got = std::move(frame);  // the refcounted links outlive the callback
         cv.notify_all();
     };
@@ -1233,6 +1238,7 @@ void test_rope_delivery() {
 
     check(tx_b.delivers_ropes(), "transport_can::delivers_ropes() is true");
 
+    rx_bus = tx_b.bus();
     tx_b.set_peer_rope_receiver(peer_rope_rx);
 
     // 100 bytes in FD: slices 64 + 36; the 36-byte tail was padded to DLC 48 on

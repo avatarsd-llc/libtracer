@@ -312,6 +312,11 @@ class bus_capable_link_t : public tr::net::transport_t, public bus_link_t {
     [[nodiscard]] tr::net::transport_t* peer_link(std::string_view peer) override {
         return peer == "p0" ? this : nullptr;
     }
+    /** @brief One census peer, so every valid handle resolves to its name (#1294). */
+    [[nodiscard]] std::string_view peer_name(tr::net::peer_handle_t peer,
+                                             std::span<char>) const override {
+        return peer.valid() ? "p0" : std::string_view{};
+    }
 };
 
 /** @brief SPEC{ type, name } with no config — the provide_link-staged connection form. */

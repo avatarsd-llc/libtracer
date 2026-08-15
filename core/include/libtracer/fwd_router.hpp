@@ -731,6 +731,21 @@ class fwd_router_t {
          */
         std::atomic<mem::block_source_t*> rx{nullptr};
         /**
+         * @brief The bus facet this ctx's frames arrive through — null for a
+         *        point-to-point child (#1294).
+         *
+         * The inbound seam tags each frame with a `peer_handle_t`, and the NAME the routing
+         * plane grows into `src` is resolved from it by `bus_link_t::peer_name`. That
+         * resolution needs the link, and the receiver callback is a `{fn, ctx}` pair with no
+         * other capture, so the link is recorded here — once per registration, beside the
+         * child's other resolved-once facts.
+         *
+         * Atomic and relaxed for the same reason `rx` is: a re-add REBINDS this ctx
+         * (#884) from the control thread while the departing transport's receive thread may
+         * still read it, and `retired` carries the ordering edge for the rebind as a whole.
+         */
+        std::atomic<bus_link_t*> bus{nullptr};
+        /**
          * @brief This child's CONNECTION vertex slot index, resolved once at registration
          *        (RFC-0024 §5.1) — `kNoConnSlot` when the child has none.
          *
@@ -850,10 +865,23 @@ class fwd_router_t {
      * replies, departure) — those key both sides consistently and the registry's peer
      * fallback resolves them.
      */
-    void on_frame_bus(const child_rx_ctx_t& ctx, std::string_view peer,
+    void on_frame_bus(const child_rx_ctx_t& ctx, peer_handle_t peer,
                       std::span<const std::byte> frame);
     /** @brief Rope twin of `on_frame_bus`. */
-    void on_frame_rope_bus(const child_rx_ctx_t& ctx, std::string_view peer, view::rope_t frame);
+    void on_frame_rope_bus(const child_rx_ctx_t& ctx, peer_handle_t peer, view::rope_t frame);
+    /**
+     * @brief Resolve an inbound peer HANDLE to the peer NAME the routing plane routes by
+     *        (#1294) — the one place the seam's handle becomes a name again.
+     *
+     * Called once per inbound bus frame, on the transport's receive thread inside the
+     * delivery callback, which is exactly where the name used to arrive for free. Every
+     * kind answers it as a pure function of the handle's index (`p<slot>`, `n<node>`), so
+     * the resolution is a formatting into @p scratch and takes no transport lock.
+     * @retval {} The ctx carries no bus facet, or the handle names no peer of that kind —
+     *            the frame is then dropped, exactly as an unnamed inbound hop always was.
+     */
+    static std::string_view resolve_peer_name(const child_rx_ctx_t& ctx, peer_handle_t peer,
+                                              std::span<char> scratch);
     /** @brief The shared rope routing body; @p inbound_ctx is the link's receiver ctx when the
      *         frame arrived through one (nullptr on the public `on_frame_rope` entry). */
     void on_frame_rope_impl(std::string_view inbound_name, view::rope_t frame,

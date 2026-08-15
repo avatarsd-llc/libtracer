@@ -21,6 +21,7 @@
 #include <functional>
 #include <span>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 #include "libtracer/mem_heap.hpp"
@@ -38,6 +39,73 @@ using peer_id_t = std::array<std::byte, 16>;
 class transport_t;
 
 /**
+ * @brief An opaque per-peer LINK HANDLE — the identity the peer-receiver seam carries
+ *        (#1294), minted once when a peer becomes audible and valid until it departs.
+ *
+ * The seam used to re-supply a peer NAME string on every inbound frame, which forced every
+ * consumer that wanted a per-peer identity to re-derive one from that string per frame — a
+ * hash and a map find on the subscribe path (#1266), and nothing at all to hang a per-peer
+ * auth subject off (#375 Part 2). This handle is that identity, handed down instead.
+ *
+ * It is `(index, generation)`, the same node-local-index-plus-validate-on-use-stamp primitive
+ * the in-tree edge binding (#830), the RFC-0024 vref and the ESP link's session ref already
+ * mint — a 8-byte trivially-copyable POD, cheap to copy per frame and cheap to key a table by.
+ * The two fields are OPAQUE to a consumer: only the minting link knows what an index means,
+ * and a consumer may only compare handles, hash them, and hand them back.
+ *
+ * **It is not a session reference.** A session ref (`httpd_ws_link_t::session_ref_t`,
+ * #1146/#1262) is ONE SUPPLIER of a handle, not the handle itself: an announce-census CAN
+ * peer has no session at all and still needs a stable link key, so the handle is the general
+ * concept and the session ref produces one.
+ *
+ * **It does not carry the subject.** A per-peer auth subject is RESOLVED from the handle at
+ * ACL-check time rather than carried in it, which is what keeps the per-frame POD minimal
+ * (#1294 ruling 2).
+ *
+ * **It is never absent.** Every handle this seam hands down is `valid()`: a link with no
+ * meaningful per-peer identity mints `kSolePeerHandle` once at link-up and hands that down
+ * for every frame, so no consumer needs a "handle absent" branch (#1294 ruling 3).
+ */
+struct peer_handle_t {
+    /** @brief The minting link's own peer INDEX — meaningless to anyone else. */
+    std::uint32_t index = 0;
+    /** @brief The validate-on-use stamp; `0` is reserved to mean "no peer". */
+    std::uint32_t generation = 0;
+
+    /** @brief True iff this handle names a peer (a zero generation never does). */
+    [[nodiscard]] constexpr bool valid() const noexcept { return generation != 0; }
+
+    /** @brief The handle's whole identity as one integer — the key an interning
+     *         consumer (#1266) hashes, so it never has to know the field split. */
+    [[nodiscard]] constexpr std::uint64_t bits() const noexcept {
+        return (static_cast<std::uint64_t>(generation) << 32) | index;
+    }
+
+    /** @brief Handles compare by identity — same index AND same generation. */
+    [[nodiscard]] friend constexpr bool operator==(peer_handle_t, peer_handle_t) noexcept = default;
+};
+
+static_assert(sizeof(peer_handle_t) == 8, "the per-frame peer handle stays an 8-byte POD");
+static_assert(std::is_trivially_copyable_v<peer_handle_t>);
+
+/**
+ * @brief The handle a link with no meaningful per-peer identity mints at link-up (#1294
+ *        ruling 3) — one constant peer, valid for the link's whole life.
+ *
+ * A point-to-point kind exposing the bus facet for one peer, and a test double that carries
+ * exactly one far side, hand this down rather than an invalid handle: the seam is UNIVERSAL,
+ * so the "no peer identity here" case costs one constant at link-up instead of a branch in
+ * every consumer.
+ */
+inline constexpr peer_handle_t kSolePeerHandle{0, 1};
+
+/**
+ * @brief Scratch big enough for any peer NAME a bus link resolves (@ref
+ *        bus_link_t::peer_name) — `p<slot>` / `n<node>` are both far inside it.
+ */
+inline constexpr std::size_t kPeerNameChars = 32;
+
+/**
  * @brief The optional multi-peer (bus) capability of a transport link (ADR-0044).
  *
  * A point-to-point link (ws/tcp/udp/quic) carries exactly one peer, so its child
@@ -53,32 +121,65 @@ class transport_t;
  *    seam `child_registry_t` falls back to when a FWD's next `dst` segment
  *    names no static child — so a peer name IS a routable hop segment;
  *  - @ref set_peer_receiver replaces the flat inbound sink with a peer-named
- *    one: each inbound frame arrives tagged with the SENDING peer's name, which
- *    the router uses as the hop's inbound NAME — so the return route grown into
- *    `src` names the bus peer to route the reply back to, symmetrically, with no
- *    per-request state.
+ *    one: each inbound frame arrives tagged with the sending peer's @ref
+ *    peer_handle_t, from which @ref peer_name resolves the hop's inbound NAME —
+ *    so the return route grown into `src` names the bus peer to route the reply
+ *    back to, symmetrically, with no per-request state.
  *
  * Peer names are transport-defined but MUST be deterministic and collision-safe
  * within the bus (the CAN binding derives them from the structured ID's `node`
  * field). All three calls may race the transport's receive thread; impls
  * synchronize internally.
+ *
+ * **The per-frame identity is the HANDLE, not the name (#1294).** The name is the
+ * ADDRESSING surface — @ref enumerate_peers, @ref peer_link and @ref close_peer
+ * still speak it, because a name is what a routable `dst` segment carries. The
+ * inbound seam speaks handles, because a name is a string a consumer would have to
+ * re-derive an identity from on every frame. @ref peer_name is the one bridge
+ * between them.
  */
 class bus_link_t {
    public:
     /** @brief Visitor invoked once per currently-audible peer name. */
     using peer_visitor_t = std::function<void(std::string_view)>;
-    /** @brief The peer-named inbound sink fn: (ctx, sending peer's name, frame bytes). */
-    using peer_receiver_fn_t = receiver_slot_t<std::string_view>::span_fn_t;
+    /** @brief The peer-named inbound sink fn: (ctx, sending peer's HANDLE, frame bytes). */
+    using peer_receiver_fn_t = receiver_slot_t<peer_handle_t>::span_fn_t;
     /** @brief The OWNING peer-named sink fn (ADR-0053 §5): (ctx, sending peer's
-     *         name, the reassembled frame as the rope it already is — refcounted
+     *         HANDLE, the reassembled frame as the rope it already is — refcounted
      *         links the receiver may keep, subrope, or forward past the callback). */
-    using peer_rope_receiver_fn_t = receiver_slot_t<std::string_view>::rope_fn_t;
+    using peer_rope_receiver_fn_t = receiver_slot_t<peer_handle_t>::rope_fn_t;
 
     /**
      * @brief Visit the peers currently audible on the bus (a live-traffic snapshot).
      * @note Synthesized on the fly — no call allocates peer state or graph structure.
      */
     virtual void enumerate_peers(const peer_visitor_t& visit) const = 0;
+
+    /**
+     * @brief Resolve a peer HANDLE back to the peer NAME it addresses — the ONE bridge
+     *        between the handle the inbound seam carries and the name the routing plane
+     *        grows into `src` (#1294).
+     *
+     * Every kind answers this as a PURE FUNCTION of the handle's index, because every
+     * kind's peer name already is one: `slot_server_t` names a peer `p<slot>` for the slot
+     * it landed in, and @ref transport_can names one `n<node>` for its bus node id. So the
+     * call takes no lock, allocates nothing, and is safe to make from the delivery callback
+     * on the transport's own receive thread — which is where the router makes it, once per
+     * inbound frame, exactly where the name used to arrive for free.
+     *
+     * Being positional, the answer is about the SLOT and not about the session that
+     * occupies it — the same distinction @ref peer_link documents. A caller that wants the
+     * SESSION's identity holds the handle, whose generation is what tells the two apart.
+     *
+     * @param peer    The handle a delivery was tagged with.
+     * @param scratch Caller-owned characters the impl MAY format into; at least
+     *                `kPeerNameChars`. The returned view points either into @p scratch
+     *                or into storage the link owns for its lifetime, so it is valid for as
+     *                long as BOTH survive.
+     * @retval {} @p peer is not @ref peer_handle_t::valid, or names no peer of this kind.
+     */
+    [[nodiscard]] virtual std::string_view peer_name(peer_handle_t peer,
+                                                     std::span<char> scratch) const = 0;
 
     /**
      * @brief Resolve a peer NAME to a directed sending endpoint on this bus.
@@ -156,8 +257,10 @@ class bus_link_t {
      */
     [[nodiscard]] virtual bool peer_named() const noexcept { return true; }
 
-    /** @brief The peer-departure notifier fn: (ctx, the departed peer's NAME). */
-    using peer_down_fn_t = void (*)(void* ctx, std::string_view peer);
+    /** @brief The peer-departure notifier fn: (ctx, the departed peer's HANDLE, its NAME).
+     *         The handle is the one minted at arrival and is RETIRED by this call — after
+     *         it the link may hand the same index back at a higher generation. */
+    using peer_down_fn_t = void (*)(void* ctx, peer_handle_t handle, std::string_view peer);
 
     /**
      * @brief Register the peer-departure notifier — the bus half of the link-teardown
@@ -170,7 +273,8 @@ class bus_link_t {
      * `fwd_router_t::add_child` installs a notifier that evicts the departed peer's
      * subscriber edges and label state (`fwd_router_t::link_down`). Must be set before
      * frames flow, like the receivers; a kind with no departure concept simply never
-     * fires it.
+     * fires it. The peer's HANDLE rides alongside the name (#1294) so a consumer that keyed
+     * per-peer state by handle at arrival can drop it here without a name lookup.
      * @note REFUSED on a link that is not @ref peer_named — a flat link's departure is the
      *       whole link's (`transport_t::set_down_notifier`), so this wiring would be dead.
      * @param fn  The notifier; @p ctx is passed back as its first argument.
@@ -188,8 +292,10 @@ class bus_link_t {
         peer_down_fn_.store(fn, std::memory_order_release);
     }
 
-    /** @brief The peer-ARRIVAL notifier fn: (ctx, the arriving peer's NAME). */
-    using peer_up_fn_t = void (*)(void* ctx, std::string_view peer);
+    /** @brief The peer-ARRIVAL notifier fn: (ctx, the arriving peer's HANDLE, its NAME).
+     *         This is where the handle is MINTED, so it is also where a consumer binds
+     *         whatever hangs off it (an intern slot, #1266; an auth subject, #375 Part 2). */
+    using peer_up_fn_t = void (*)(void* ctx, peer_handle_t handle, std::string_view peer);
 
     /**
      * @brief Register the peer-ARRIVAL notifier — the seam that says "this node's own accept
@@ -249,9 +355,9 @@ class bus_link_t {
      * Routed through the `{fn, ctx}` overload, so the mode gate is stated once.
      */
     template <typename F>
-        requires std::invocable<F&, std::string_view, std::span<const std::byte>>
+        requires std::invocable<F&, peer_handle_t, std::span<const std::byte>>
     void set_peer_receiver(F& sink) noexcept {
-        set_peer_receiver([](void* c, std::string_view peer,
+        set_peer_receiver([](void* c, peer_handle_t peer,
                              std::span<const std::byte> f) { (*static_cast<F*>(c))(peer, f); },
                           &sink);
     }
@@ -283,9 +389,9 @@ class bus_link_t {
      * Routed through the `{fn, ctx}` overload, so the mode gate is stated once.
      */
     template <typename F>
-        requires std::invocable<F&, std::string_view, view::rope_t>
+        requires std::invocable<F&, peer_handle_t, view::rope_t>
     void set_peer_rope_receiver(F& sink) noexcept {
-        set_peer_rope_receiver([](void* c, std::string_view peer,
+        set_peer_rope_receiver([](void* c, peer_handle_t peer,
                                   view::rope_t f) { (*static_cast<F*>(c))(peer, std::move(f)); },
                                &sink);
     }
@@ -304,9 +410,9 @@ class bus_link_t {
      * own slot bookkeeping is done and with none of its internal locks held — the
      * notifier re-enters the routing plane (router → graph), which takes graph locks.
      */
-    void notify_peer_down(std::string_view peer) const {
+    void notify_peer_down(peer_handle_t handle, std::string_view peer) const {
         const peer_down_fn_t fn = peer_down_fn_.load(std::memory_order_acquire);
-        if (fn != nullptr) fn(peer_down_ctx_.load(std::memory_order_relaxed), peer);
+        if (fn != nullptr) fn(peer_down_ctx_.load(std::memory_order_relaxed), handle, peer);
     }
 
     /**
@@ -319,14 +425,14 @@ class bus_link_t {
      * the transport's mutex inside `graph_t::map_mutex_`, the reverse of the order
      * `fwd_router_t` documents.
      */
-    void notify_peer_up(std::string_view peer) const {
+    void notify_peer_up(peer_handle_t handle, std::string_view peer) const {
         const peer_up_fn_t fn = peer_up_fn_.load(std::memory_order_acquire);
-        if (fn != nullptr) fn(peer_up_ctx_.load(std::memory_order_relaxed), peer);
+        if (fn != nullptr) fn(peer_up_ctx_.load(std::memory_order_relaxed), handle, peer);
     }
 
     /** @brief The peer-named delivery-tier slot (the ONE tier-select mechanism);
      *         the bus adapter's receive path dispatches through it. */
-    receiver_slot_t<std::string_view> peer_rx_;
+    receiver_slot_t<peer_handle_t> peer_rx_;
 
    private:
     /** @brief Installed peer-departure sink. Atomic: a transport thread may fire

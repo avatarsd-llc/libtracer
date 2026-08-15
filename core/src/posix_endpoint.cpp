@@ -17,6 +17,7 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <string>
@@ -457,6 +458,19 @@ void slot_server_t::enumerate_peers(const peer_visitor_t& visit) const {
         if (s->open.load(std::memory_order_relaxed) && !s->name.empty()) visit(s->name);
 }
 
+std::string_view slot_server_t::peer_name(peer_handle_t peer, std::span<char> scratch) const {
+    // Positional by construction (ADR-0073 §2): the name a slot is stamped with at accept
+    // IS 'p' + its index, so the inverse is that same formatting and needs neither peers_m_
+    // nor the slot vector. That is what makes this callable per frame from the delivery
+    // callback at the cost the free string_view tag used to have.
+    if (!peer.valid() || scratch.size() < 2) return {};
+    scratch[0] = 'p';
+    const auto [end, ec] =
+        std::to_chars(scratch.data() + 1, scratch.data() + scratch.size(), peer.index);
+    if (ec != std::errc{}) return {};
+    return std::string_view(scratch.data(), static_cast<std::size_t>(end - scratch.data()));
+}
+
 /**
  * @brief Resolve `p<slot>` to that slot's directed endpoint — SLOT-scoped, not
  *        session-scoped (#1153).
@@ -555,6 +569,12 @@ void slot_server_t::accept_peer() {
         // pure function of the slot's position (ADR-0073 §2), so a reused slot gets the
         // SAME name back (teardown_slot moved the old string out for the eviction seam).
         slot->name = 'p' + std::to_string(idx);
+        // Mint this tenancy's HANDLE (#1294) beside the name, under the same lock and from
+        // the same slot index. The generation never repeats and never lands on 0 (which is
+        // reserved for "no peer"), so a handle minted against the session that used to hold
+        // this slot can never be mistaken for its successor's.
+        if (++slot->gen_seq == 0) slot->gen_seq = 1;
+        slot->handle = peer_handle_t{static_cast<std::uint32_t>(idx), slot->gen_seq};
         char ip[INET_ADDRSTRLEN] = {};
         ::inet_ntop(AF_INET, &remote.sin_addr, ip, sizeof(ip));
         slot->endpoint_str = std::string(ip) + ':' + std::to_string(ntohs(remote.sin_port));
@@ -600,6 +620,7 @@ void slot_server_t::accept_peer() {
 void slot_server_t::publish_peer_up(const session_base_t& s) {
     if (!peer_named_) return;
     std::string name;
+    peer_handle_t handle;
     {
         // The name is peers_m_-guarded state (enumerate_peers / peer_link read it off this
         // thread), so COPY it out under the lock and notify outside: the notifier re-enters
@@ -607,8 +628,9 @@ void slot_server_t::publish_peer_up(const session_base_t& s) {
         // order (`transport_vertex_t::ctl_m_` → router → `graph_t::map_mutex_`).
         const std::lock_guard lock(peers_m_);
         name = s.name;
+        handle = s.handle;
     }
-    if (!name.empty()) notify_peer_up(name);
+    if (!name.empty()) notify_peer_up(handle, name);
 }
 
 void slot_server_t::service_peer(session_base_t& s) {
@@ -627,6 +649,7 @@ void slot_server_t::service_peer(session_base_t& s) {
 
 void slot_server_t::teardown_slot(session_base_t& s) {
     std::string departed;
+    peer_handle_t departed_handle;
     {
         // Stop peer_link/enumerate resolution FIRST, so no new sender targets the dying
         // slot by name. Keep the name: it identifies the departed session to the eviction
@@ -634,6 +657,11 @@ void slot_server_t::teardown_slot(session_base_t& s) {
         const std::lock_guard lock(peers_m_);
         departed = std::move(s.name);
         s.name.clear();
+        // RETIRE the handle with the name (#1294): the seam's contract is "valid until
+        // depart", so nothing this slot delivers after this point may carry the departed
+        // session's identity. `gen_seq` survives, so the next accept mints a fresh one.
+        departed_handle = s.handle;
+        s.handle = peer_handle_t{};
     }
     int fd;
     bool was_open;
@@ -667,7 +695,7 @@ void slot_server_t::teardown_slot(session_base_t& s) {
     // or vanish between the answer and the notification.
     if (was_open && !departed.empty()) {
         if (peer_named_)
-            notify_peer_down(departed);
+            notify_peer_down(departed_handle, departed);
         else if (!any_open_session())
             notify_down();
     }

@@ -306,7 +306,7 @@ void test_teardown_inside_handler() {
     // serviced in-call on the server task, which is the #814 shape. Armed only after the
     // peer is established, so the teardown lands on a session that is already claimed.
     bool teardown_now = false;
-    auto sink = [&](std::string_view, std::span<const std::byte>) {
+    auto sink = [&](tr::net::peer_handle_t, std::span<const std::byte>) {
         if (teardown_now) link.reset();
     };
     link->set_peer_receiver(sink);

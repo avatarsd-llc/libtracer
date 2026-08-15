@@ -161,7 +161,7 @@ struct probe_t {
 };
 
 /** @brief The `peer_down_fn_t` thunk installed on the link. */
-void on_peer_down(void* ctx, std::string_view peer) {
+void on_peer_down(void* ctx, tr::net::peer_handle_t, std::string_view peer) {
     auto* const p = static_cast<probe_t*>(ctx);
     p->peer = std::string(peer);
     p->calls.fetch_add(1);

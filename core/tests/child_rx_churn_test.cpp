@@ -88,6 +88,11 @@ class bus_sink_link_t : public sink_link_t, public tr::net::bus_link_t {
     tr::net::bus_link_t* bus() override { return this; }
     void enumerate_peers(const peer_visitor_t&) const override {}
     tr::net::transport_t* peer_link(std::string_view) override { return nullptr; }
+    /** @brief No peers to name — this double never delivers through the seam (#1294). */
+    [[nodiscard]] std::string_view peer_name(tr::net::peer_handle_t,
+                                             std::span<char>) const override {
+        return {};
+    }
 };
 
 /** @brief Canonical `PATH{ NAME… }` bytes for @p segs, via the production emit helpers. */

@@ -435,7 +435,7 @@ bool transport_ws_server::drain_frames(session_t& s) {
                     !want_rope) {
                     const std::span<const std::byte> payload(frame.payload);
                     if (to_peer)
-                        peer_rx_.deliver_borrowed(s.name, payload);
+                        peer_rx_.deliver_borrowed(s.handle, payload);
                     else
                         rx_.deliver_borrowed(payload);
                     break;
@@ -457,7 +457,7 @@ bool transport_ws_server::drain_frames(session_t& s) {
                 // fragment (ADR-0053 §5): the rope sink takes it as-is; only
                 // a span-only sink pays the one materialize (in the slot).
                 if (to_peer)
-                    peer_rx_.deliver_rope(s.name, std::move(msg.message));
+                    peer_rx_.deliver_rope(s.handle, std::move(msg.message));
                 else
                     rx_.deliver_rope(std::move(msg.message));
                 break;

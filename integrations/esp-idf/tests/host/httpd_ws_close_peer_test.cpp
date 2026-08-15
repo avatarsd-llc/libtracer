@@ -111,7 +111,7 @@ bool sent_close_code(int fd, std::uint16_t code) {
 std::vector<std::string> g_departed;
 
 /** @brief The peer-down notifier `fwd_router_t::add_child` would install. */
-void note_departed(void* ctx, std::string_view peer) {
+void note_departed(void* ctx, tr::net::peer_handle_t, std::string_view peer) {
     (void)ctx;
     g_departed.emplace_back(peer);
 }

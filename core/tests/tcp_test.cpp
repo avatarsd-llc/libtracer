@@ -573,17 +573,23 @@ void test_config_constructed_tcp() {
     }
 }
 
-/** @brief The peer-named sink (the bus_link_t shape — the ws_transport_test twin). */
+/** @brief The peer-named sink: records the HANDLE each frame carried and the NAME it
+ *         resolves back to through the seam's own `peer_name` (#1294). */
 struct peer_sink_t {
     std::mutex m;
     std::condition_variable cv;
     std::vector<std::pair<std::string, std::vector<std::byte>>> frames;
+    /** @brief The link the handle is resolved against; set before frames flow. */
+    tr::net::bus_link_t* bus = nullptr;
 
     /** @brief The peer-named receiver callable (bound by address). */
-    void operator()(std::string_view peer, std::span<const std::byte> f) {
+    void operator()(tr::net::peer_handle_t peer, std::span<const std::byte> f) {
+        std::array<char, tr::net::kPeerNameChars> scratch{};
+        const std::string_view name =
+            bus != nullptr ? bus->peer_name(peer, scratch) : std::string_view{};
         {
             const std::lock_guard lock(m);
-            frames.emplace_back(std::string(peer), std::vector<std::byte>(f.begin(), f.end()));
+            frames.emplace_back(std::string(name), std::vector<std::byte>(f.begin(), f.end()));
         }
         cv.notify_all();
     }
@@ -615,6 +621,7 @@ void test_server_multi_peer_bus() {
     check(server.ok(), "listen socket bound");
     const std::uint16_t port = server.local_port();
     check(server.bus() != nullptr, "peer_named server exposes the bus_link_t facet (ADR-0044)");
+    srv_sink.bus = server.bus();
     server.bus()->set_peer_receiver(srv_sink);
 
     tcp_transport_t a("127.0.0.1", port);
@@ -914,6 +921,7 @@ void test_flat_server_rejects_peer_receiver() {
     server.set_receiver(flat_rx);
     // The out-of-contract path itself: the public base, named explicitly. A member-shadowing
     // guard would not catch this call, so the refusal has to live in bus_link_t.
+    peer_sink.bus = &static_cast<tr::net::bus_link_t&>(server);
     static_cast<tr::net::bus_link_t&>(server).set_peer_receiver(peer_sink);
 
     tcp_transport_t a("127.0.0.1", server.local_port());
@@ -966,6 +974,7 @@ void test_peer_named_server_does_not_downgrade_to_flat() {
 
     // The control: same connection, the RIGHT tier wired — so the silence above was the
     // tier decision, not a dead link.
+    peer_sink.bus = server.bus();
     server.bus()->set_peer_receiver(peer_sink);
     const auto f2 = test_frame(4, 0x32);
     a.send(f2);

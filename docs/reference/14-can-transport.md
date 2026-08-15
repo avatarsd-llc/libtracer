@@ -576,10 +576,12 @@ enumerable⇒addressable invariant, ADR-0073 §1): once a
 **within that endpoint's own table** (`child_registry_t::resolve_peer` →
 `bus_link_t::peer_link`), yielding a **directed** per-peer endpoint — the group's
 advertise carries `target_node`, so on the broadcast bus only the addressed peer
-delivers it. Inbound frames arrive tagged with the **sender's** peer name
-(`bus_link_t::set_peer_receiver`), which the router uses as the hop's inbound
-NAME — so the return route grown into `src` names the bus peer, and the reply is
-itself a directed send. The whole round trip:
+delivers it. Inbound frames arrive tagged with the **sender's** peer HANDLE
+(`bus_link_t::set_peer_receiver`, #1294) — for this bus, its node id at a constant
+generation, since an announce-census peer has no session to stamp — and the router
+resolves it back to the peer NAME through `bus_link_t::peer_name` and uses that as
+the hop's inbound NAME. So the return route grown into `src` names the bus peer, and
+the reply is itself a directed send. The whole round trip:
 
 ```{mermaid}
 sequenceDiagram
