@@ -1730,35 +1730,112 @@ esp_err_t httpd_ws_link_t::ws_pre_handshake(httpd_req_t* req) {
         : fn != nullptr ? (fn(ctx, req) ? admission_verdict_t::ADMIT : admission_verdict_t::REFUSE)
                         : admission_verdict_t::ADMIT;
     bool admit = verdict != admission_verdict_t::REFUSE;
-    if (!admit) ESP_LOGW(kTag, "peer refused by admission hook (fd=%d)", httpd_req_to_sockfd(req));
-    // Open the ledger row BEFORE the 101 goes out, so the peer's first data frame — which may
-    // arrive on another httpd select round the instant the upgrade completes — can never race
-    // the row it has to consume. `peers_m_` nests UNDER `m`, which is the permitted order (see
-    // gate_t), and the link is re-resolved through the gate the way every other latched
-    // callback does.
+    const int fd = httpd_req_to_sockfd(req);
+    if (!admit) ESP_LOGW(kTag, "peer refused by admission hook (fd=%d)", fd);
+    // TWO SHAPES OF ADMISSION, and which one this is was decided by the predicate above.
     //
-    // The row carries BOTH facts learned here: the handshake's verdict (#1245) and the instant
-    // this socket stops being worth holding if it never speaks (#1247). It is the only record
-    // of a silent upgrade that exists — esp_http_server answers the handshake itself and the
-    // session is claimed lazily on the first frame — so without it the deadline bounds a
-    // session that stalled mid-conversation and nothing at all bounds a socket that opened and
-    // said nothing, which is the case the reference names as the attack.
+    // (a) ADMIT_AUTHENTICATED — CLAIM THE SESSION HERE (#1334). The ledger below exists to
+    // carry an unanswered question across the gap between the 101 and a peer's first frame;
+    // this peer's entitlement is not an open question, it was settled by the opening GET. It
+    // used to take a ledger row anyway, and the row's only two retirement paths are the
+    // first-frame claim and the DEADLINE SWEEP — so a peer that is entitled to be silent (a
+    // subscriber that only receives, a link opened ahead of demand) took neither, and the
+    // sweep closed it with kCloseAuthTimeout at the deadline, over and over. Exempting it from
+    // the sweep instead would have left rows nothing ever retires, and 24 idle links would
+    // then fill the fixed ledger and refuse every further upgrade — the same deployment, a
+    // worse failure. Not carrying the row at all is what removes both.
     //
-    // Only on a link with an auth hook: without one there is no deadline to enforce, the
-    // verdict changes nothing about how a session is served, and a silent socket is the HTTP
-    // server's own business exactly as it always was. That is also what keeps the refusal
-    // below unreachable on such a link.
+    // (b) everything else — open the ledger row, unchanged. It goes in BEFORE the 101 so the
+    // peer's first data frame, which may arrive on another httpd select round the instant the
+    // upgrade completes, can never race the row it has to consume. It is the only record of a
+    // silent upgrade that exists — esp_http_server answers the handshake itself and such a
+    // session is claimed lazily on its first frame — so without it nothing at all bounds a
+    // socket that opened and said nothing, which is the case the reference names as the attack.
+    //
+    // Either way, only on a link with an auth hook: without one there is no deadline to
+    // enforce, the verdict changes nothing about how a session is served, and a silent socket
+    // is the HTTP server's own business exactly as it always was.
+    //
+    // LOCK ORDER. Both arms run under `gate->m` and the claim nests `peers_m_` under it, which
+    // is the permitted order (see gate_t) and the one this path already holds. The link is
+    // re-resolved through the gate the way every other latched callback does.
+    session_t* claimed = nullptr;
+    peer_handle_t claimed_handle;
+    std::string claimed_peer;
+    if (admit && verdict == admission_verdict_t::ADMIT_AUTHENTICATED) {
+        // Reap expired sessions BEFORE the cap test, with NO lock of ours held — the same
+        // ordering, and the same argument, as the first-frame claim (see on_data_frame): a
+        // tick that has not fired yet must not let an already-expired squatter spend the one
+        // unit of `max_peers` this claim needs. Skipping it would make an authenticated peer
+        // FARE WORSE at the 101 than it used to on its first frame, which is the opposite of
+        // what #1334 is for. Costs nothing on a link with no auth hook (the sweep returns on
+        // the null-hook test), and it is safe here because the raised `depth` — not the mutex —
+        // is what keeps the link alive across an unlocked call, exactly as ws_handler relies on
+        // for on_data_frame.
+        httpd_ws_link_t* sweeper = nullptr;
+        {
+            const std::lock_guard lock(gate->m);
+            sweeper = gate->link;
+        }
+        if (sweeper != nullptr) sweeper->sweep_auth_deadlines();
+    }
     if (admit) {
         const std::lock_guard lock(gate->m);
         httpd_ws_link_t* const self = gate->link;
-        if (self != nullptr && self->auth_fn_ != nullptr &&
-            !self->note_pending_handshake(httpd_req_to_sockfd(req),
-                                          verdict == admission_verdict_t::ADMIT_AUTHENTICATED)) {
-            // Refused BY VALUE and turned into the same clean abandon a REFUSE verdict gets:
-            // ESP_FAIL out of the pre-handshake, no 101, no session, no latched route. The
-            // alternative — admitting a socket the ledger cannot hold — would be admitting one
-            // nothing can ever close.
-            admit = false;
+        if (self != nullptr && self->auth_fn_ != nullptr) {
+            if (verdict == admission_verdict_t::ADMIT_AUTHENTICATED) {
+                const std::lock_guard peers(self->peers_m_);
+                claimed = self->claim_session(fd, /*authenticated=*/true);
+                if (claimed == nullptr) {
+                    // At `max_peers`, and the answer is the SAME clean abandon a REFUSE verdict
+                    // gets: ESP_FAIL out of the pre-handshake, no 101, no session, no latched
+                    // route. Strictly better than the alternative this replaces — admitting the
+                    // peer and then killing it at the deadline — and it is counted exactly
+                    // once, by the `!admit` arm below, never here as well.
+                    ESP_LOGW(kTag, "peer refused at the handshake: at max_peers=%u (fd=%d)",
+                             (unsigned)self->max_peers_, fd);
+                    admit = false;
+                } else {
+                    // Copied out under the lock: the announcement below runs with `peers_m_`
+                    // released and the slot's name is recycled in place at the next claim.
+                    claimed_handle = claimed->handle;
+                    claimed_peer = claimed->name;
+                }
+            } else if (!self->note_pending_handshake(fd)) {
+                // Refused BY VALUE and turned into the same clean abandon a REFUSE verdict gets.
+                // The alternative — admitting a socket the ledger cannot hold — would be
+                // admitting one nothing can ever close.
+                admit = false;
+            }
+        }
+    }
+    if (claimed != nullptr) {
+        // The claim edge's three side effects, run with EVERY lock of ours released and with
+        // the link kept alive by the raised `depth` — the same three the first-frame claim runs
+        // (see on_data_frame) and for the same reasons, so a session claimed at the 101 is
+        // indistinguishable from one claimed at a frame from here on.
+        //
+        // The free_ctx FIRST, and it is the load-bearing one: `on_session_closed` is the only
+        // path that ever reclaims a slot, so a session claimed here and never armed would leak
+        // its slot for the life of the link the moment its peer disconnected without speaking —
+        // which is precisely the peer this change exists to serve. The session already exists
+        // at this point (esp_http_server creates it at accept, before it parses the request
+        // this predicate is called from), so the ctx lands on the socket that is about to be
+        // upgraded.
+        httpd_sess_set_ctx(req->handle, fd, claimed, &httpd_ws_link_t::on_session_closed);
+        httpd_ws_link_t* self = nullptr;
+        {
+            const std::lock_guard lock(gate->m);
+            self = gate->link;
+        }
+        if (self != nullptr) {
+            self->bound_socket(fd);
+            self->check_httpd_stack();
+            // The arrival seam (#1223), announced here rather than under either lock because
+            // the notifier re-enters the routing plane and takes graph locks. This session is
+            // authenticated, so unlike the pending case there is nothing the narrowing is
+            // withholding from it.
+            self->notify_arrived(claimed_handle, claimed_peer);
         }
     }
     {
@@ -1774,6 +1851,91 @@ esp_err_t httpd_ws_link_t::ws_pre_handshake(httpd_req_t* req) {
     }
     gate->cv.notify_all();
     return admit ? ESP_OK : ESP_FAIL;
+}
+
+httpd_ws_link_t::session_t* httpd_ws_link_t::claim_session(int fd, bool authenticated) {
+    // ONE claim body, TWO edges (#1334) — the lazy first-frame one every ordinary session
+    // takes, and the eager pre-handshake one an already-authenticated session takes. Factored
+    // rather than duplicated because everything below is an INVARIANT of a claimed slot (the
+    // generation bump and the handle minted from it, the retired resolution, the positional
+    // name, the cleared subject); a second copy is a second place for one of them to rot.
+    //
+    // The caller holds `peers_m_`. It is not taken here, because both callers need a wider
+    // critical section than the claim itself: the first-frame path consumes the ledger row and
+    // reads the fresh name back under one hold, and the pre-handshake path nests this under
+    // `gate->m` — the documented order (peers_m_ UNDER m; see gate_t), which is also the order
+    // that path already holds when it gets here.
+    //
+    // Admission cap first, so a refusal costs no slot mutation at all.
+    if (max_peers_ != 0) {
+        std::size_t open_n = 0;
+        // `!dead` for the reason #963 gave enumerate_peers and peer_link: a condemned
+        // session is one the link has already refused to carry another frame for, and
+        // the reclaim that frees its slot is httpd's to schedule (a select round away
+        // when the server is healthy, and unbounded when it is not — which is exactly
+        // when condemn() gets used). Counting it as occupancy makes the cap answer
+        // from the session TABLE while every other question answers from
+        // REACHABILITY, and the peer it turns away is a live one being refused on
+        // behalf of a dead one. This is what makes the auth deadline's reap effective
+        // in the same call rather than one server pass later (#1184).
+        for (const auto& s : slots_)
+            if (s->open && !s->dead) ++open_n;
+        if (open_n >= max_peers_) return nullptr;  // the CALLER counts and names it
+    }
+    // The index is carried out of the search, not recomputed: it IS the peer's
+    // routable name below, so losing it here is what cost every ESP node its
+    // addressability (#994).
+    session_t* slot = nullptr;
+    std::size_t idx = 0;
+    for (std::size_t i = 0; i < slots_.size(); ++i)
+        if (slots_[i]->fd < 0) {
+            slot = slots_[i].get();
+            idx = i;
+            break;
+        }  // reuse a departed slot
+    if (slot == nullptr) {
+        auto s = std::make_unique<session_t>();
+        slot = s.get();
+        slot->gate = gate_.load(std::memory_order_relaxed);
+        slots_.push_back(std::move(s));
+        idx = slots_.size() - 1;
+    }
+    // Belt and braces: every path that frees a slot retires its handle first, so
+    // this is a no-op — but a slot must NEVER carry a handle stamped at a
+    // generation it is about to leave behind, and that invariant belongs at the
+    // claim, next to the bump that would break it.
+    retire_resolution(slot, /*inert=*/false);
+    // ADR-0073 §2: the routable NAME is the slot index, legal by construction, and
+    // the `<ip>:<port>` goes to the diagnostics field instead of into the graph.
+    slot->name = slot_name(idx);
+    format_endpoint(fd, slot->endpoint_str);
+    slot->asm_buf.clear();
+    slot->fd = fd;
+    ++slot->gen;  // a NEW session in a recycled slot: fail every stale ref (#954)
+    // The seam's handle is minted from that same bump (#1294) — one identity for
+    // the TX path and the routing plane, never two that could disagree. `gen` is
+    // never 0 after the increment on a claim, so the handle is always valid.
+    slot->handle = peer_handle_t{static_cast<std::uint32_t>(idx), slot->gen};
+    slot->open = true;
+    // THIS claim is the establish edge, whichever of the two it is — the only honest place to
+    // stamp "connected at" and to start this connection's counters. For an ordinary session
+    // that is its first data frame, because the opening GET never reaches the URI handler; for
+    // an already-authenticated one it is the pre-handshake, i.e. the 101 itself, which is
+    // strictly the more accurate of the two instants (#1334).
+    slot->st = {};
+    slot->st.connected_at_us = esp_timer_get_time();
+    // A link with an auth hook claims a session UNAUTHENTICATED unless the HANDSHAKE already
+    // settled it (#1245/#1334), and the deadline is stamped from the same clock reading the
+    // session is dated by. An authenticated session gets NO deadline — not a suppressed one, an
+    // unarmed one — because it has already answered the question the auth hook asks, and a
+    // native dialer cannot answer it a second time in-band: it has no way to send an
+    // authentication frame, so a deadline armed here would close every dialer that is entitled
+    // to stay silent. The subject is cleared either way: slots are recycled in place, so a
+    // stale identity left here would be published for whoever landed on the slot next.
+    slot->auth_pending = auth_fn_ != nullptr && !authenticated;
+    slot->auth_deadline_us = slot->auth_pending ? slot->st.connected_at_us + auth_deadline_us_ : 0;
+    slot->subject[0] = '\0';
+    return slot;
 }
 
 esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
@@ -1861,83 +2023,22 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
             // a session with its own `auth_deadline_us` or a refusal httpd is about to close,
             // and in neither case may the sweep still see it as an un-spoken socket — it would
             // otherwise be closed twice, on two different arguments, and counted twice.
-            // ...unless the HANDSHAKE authenticated it (#1245). A peer that presented a
-            // credential the admission predicate accepted has already answered the question
-            // the auth hook asks, and asking it again in-band is a question a native dialer
-            // cannot answer at all — it has no way to send an authentication frame, so a link
-            // serving both browsers and dialers would close every dialer at the deadline.
-            const bool preauthenticated = take_pending_handshake(fd);
+            take_pending_handshake(fd);
             // No teardown test: the gate admitted this frame, so the barrier has not
             // snapshotted yet and a session armed here is still caught.
-            // Admission cap: refuse cleanly (ESP_FAIL => httpd closes the socket).
-            if (max_peers_ != 0) {
-                std::size_t open_n = 0;
-                // `!dead` for the reason #963 gave enumerate_peers and peer_link: a condemned
-                // session is one the link has already refused to carry another frame for, and
-                // the reclaim that frees its slot is httpd's to schedule (a select round away
-                // when the server is healthy, and unbounded when it is not — which is exactly
-                // when condemn() gets used). Counting it as occupancy makes the cap answer
-                // from the session TABLE while every other question answers from
-                // REACHABILITY, and the peer it turns away is a live one being refused on
-                // behalf of a dead one. This is what makes the auth deadline's reap effective
-                // in the same call rather than one server pass later (#1184).
-                for (const auto& s : slots_)
-                    if (s->open && !s->dead) ++open_n;
-                if (open_n >= max_peers_) {
-                    peers_refused_.fetch_add(1, std::memory_order_relaxed);
-                    ESP_LOGW(kTag, "peer refused: at max_peers=%u", (unsigned)max_peers_);
-                    return ESP_FAIL;
-                }
-            }
-            // The index is carried out of the search, not recomputed: it IS the peer's
-            // routable name below, so losing it here is what cost every ESP node its
-            // addressability (#994).
-            std::size_t idx = 0;
-            for (std::size_t i = 0; i < slots_.size(); ++i)
-                if (slots_[i]->fd < 0) {
-                    slot = slots_[i].get();
-                    idx = i;
-                    break;
-                }  // reuse a departed slot
+            //
+            // `authenticated=false`: reaching this claim at all means the handshake did NOT
+            // authenticate this peer, because since #1334 one that did claimed its slot at the
+            // 101 and would have been found by the fd search above.
+            slot = claim_session(fd, /*authenticated=*/false);
             if (slot == nullptr) {
-                auto s = std::make_unique<session_t>();
-                slot = s.get();
-                slot->gate = gate_.load(std::memory_order_relaxed);
-                slots_.push_back(std::move(s));
-                idx = slots_.size() - 1;
+                // Admission cap: refuse cleanly (ESP_FAIL => httpd closes the socket). Counted
+                // and named HERE rather than inside the claim, because the other claim edge
+                // counts its refusal through the abandoned upgrade instead (#1334).
+                peers_refused_.fetch_add(1, std::memory_order_relaxed);
+                ESP_LOGW(kTag, "peer refused: at max_peers=%u", (unsigned)max_peers_);
+                return ESP_FAIL;
             }
-            // Belt and braces: every path that frees a slot retires its handle first, so
-            // this is a no-op — but a slot must NEVER carry a handle stamped at a
-            // generation it is about to leave behind, and that invariant belongs at the
-            // claim, next to the bump that would break it.
-            retire_resolution(slot, /*inert=*/false);
-            // ADR-0073 §2: the routable NAME is the slot index, legal by construction, and
-            // the `<ip>:<port>` goes to the diagnostics field instead of into the graph.
-            slot->name = slot_name(idx);
-            format_endpoint(fd, slot->endpoint_str);
-            slot->asm_buf.clear();
-            slot->fd = fd;
-            ++slot->gen;  // a NEW session in a recycled slot: fail every stale ref (#954)
-            // The seam's handle is minted from that same bump (#1294) — one identity for
-            // the TX path and the routing plane, never two that could disagree. `gen` is
-            // never 0 after the increment on a claim, so the handle is always valid.
-            slot->handle = peer_handle_t{static_cast<std::uint32_t>(idx), slot->gen};
-            slot->open = true;
-            // The opening GET never reaches this handler, so THIS lazy first-frame claim
-            // is the establish edge — the only honest place to stamp "connected at" and to
-            // start this connection's counters.
-            slot->st = {};
-            slot->st.connected_at_us = esp_timer_get_time();
-            // A link with an auth hook claims every session UNAUTHENTICATED, and the
-            // deadline is stamped from the same clock reading the session is dated by. The
-            // subject is cleared with it: slots are recycled in place, so a stale identity
-            // left here would be published for whoever landed on the slot next. ...unless the
-            // HANDSHAKE authenticated it (#1245): `preauthenticated` came out of the ledger row
-            // consumed above, ahead of the cap test.
-            slot->auth_pending = auth_fn_ != nullptr && !preauthenticated;
-            slot->auth_deadline_us =
-                slot->auth_pending ? slot->st.connected_at_us + auth_deadline_us_ : 0;
-            slot->subject[0] = '\0';
             newly_claimed = true;
         }
         peer = slot->name;
@@ -1951,8 +2052,10 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
         // The claim edge is also where the per-socket policy is applied — once per
         // session, on the socket that just became a peer's.
         bound_socket(fd);
-        // ...and so is the stack sample (#955). This is now the ONLY claim edge — the
-        // opening-GET one this used to share with was removed, so nothing samples twice.
+        // ...and so is the stack sample (#955). Twice per link now that #1334 added the
+        // pre-handshake claim edge, but never twice per SESSION: the two edges are mutually
+        // exclusive per connection (a session claimed at the 101 is found by the fd search
+        // above and `newly_claimed` stays false for every frame it ever sends).
         check_httpd_stack();
         // ...and so is the arrival seam (#1223). Here, not inside the peers_m_ hold above:
         // the notifier re-enters the routing plane and takes graph locks, which is the same
@@ -2233,19 +2336,17 @@ void httpd_ws_link_t::close_session(session_t* slot, std::uint16_t code) {
     condemn(fd);
 }
 
-bool httpd_ws_link_t::note_pending_handshake(int fd, bool preauthenticated) {
+bool httpd_ws_link_t::note_pending_handshake(int fd) {
     if (fd < 0) return false;
     const std::lock_guard lock(peers_m_);
     const std::int64_t deadline = esp_timer_get_time() + auth_deadline_us_;
     // REPLACE a stale row for the same descriptor rather than adding a second. A descriptor is
     // reused as soon as the kernel frees it, so a leftover from a handshake whose peer never
-    // sent a frame must not pre-authenticate the NEXT connection to land on that number (the
-    // one way the verdict half could fail open), nor charge it a deadline that has already
-    // half elapsed (the one way the deadline half could close a peer that just arrived).
+    // sent a frame must not charge the NEXT connection to land on that number a deadline that
+    // has already half elapsed — the one way this could close a peer that just arrived.
     for (std::size_t i = 0; i < pending_n_; ++i) {
         if (pending_[i].fd != fd) continue;
         pending_[i].deadline_us = deadline;
-        pending_[i].preauthenticated = preauthenticated;
         return true;
     }
     if (pending_n_ == pending_.size()) {
@@ -2261,19 +2362,17 @@ bool httpd_ws_link_t::note_pending_handshake(int fd, bool preauthenticated) {
                  static_cast<unsigned>(pending_.size()), fd);
         return false;
     }
-    pending_[pending_n_++] = pending_handshake_t{fd, deadline, preauthenticated};
+    pending_[pending_n_++] = pending_handshake_t{fd, deadline};
     return true;
 }
 
-bool httpd_ws_link_t::take_pending_handshake(int fd) noexcept {
-    if (fd < 0) return false;
+void httpd_ws_link_t::take_pending_handshake(int fd) noexcept {
+    if (fd < 0) return;
     for (std::size_t i = 0; i < pending_n_; ++i) {
         if (pending_[i].fd != fd) continue;
-        const bool preauthenticated = pending_[i].preauthenticated;
         drop_pending_handshake(i);
-        return preauthenticated;
+        return;
     }
-    return false;
 }
 
 void httpd_ws_link_t::drop_pending_handshake(std::size_t at) noexcept {

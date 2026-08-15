@@ -46,7 +46,9 @@ enum class send_result_t {
 struct session_t {
     void* ctx = nullptr;                    /**< @brief User context. */
     httpd_free_ctx_fn_t free_ctx = nullptr; /**< @brief Its destructor. */
-    bool websocket = true;                  /**< @brief Reported by ws_get_fd_info. */
+    /** @brief Reported by ws_get_fd_info. False between `httpd_sess_new` and the 101 — the
+     *         window @ref server_t::open_session runs its pre-handshake predicate in. */
+    bool websocket = true;
     /**
      * @brief The WebSocket route LATCHED into this session at handshake.
      *
@@ -91,15 +93,24 @@ struct session_t {
 class server_t {
    public:
     /**
-     * @brief Perform the opening handshake for a socket: run the registered
-     *        `ws_pre_handshake_cb`, and — only if it answered `ESP_OK` — admit the socket
-     *        into the session table and latch the WS route into it.
+     * @brief Perform the opening handshake for a socket: seat the session (as `httpd_sess_new`
+     *        does at ACCEPT), run the registered `ws_pre_handshake_cb`, and — only if it
+     *        answered `ESP_OK` — latch the WS route into the session and mark it upgraded.
      *
      * The order is `httpd_uri.c`'s and it is the whole point: the predicate runs BEFORE
      * the 101 and before `sd->ws_handler` / `sd->ws_user_ctx` are set, so a refusal leaves
      * a socket with no session and no latched route — nothing a later frame could
      * dispatch through. The refusal itself is the server's (`return ESP_FAIL` from
-     * `httpd_uri`, socket closed); the fake models it as "no session appears".
+     * `httpd_uri`, socket closed); the fake models it as "the session is torn down again",
+     * which runs its `free_ctx` exactly as httpd closing the socket would.
+     *
+     * THE SESSION EXISTS WHILE THE PREDICATE RUNS. `httpd_sess_new` is called from
+     * `httpd_accept_conn`, long before the request this predicate is dispatched from is even
+     * parsed, so a predicate that calls `httpd_sess_set_ctx` on its own socket is arming a
+     * session that is really there. The fake used to seat the session only AFTER the predicate
+     * returned, which made that call a silent no-op — and #1334's pre-handshake claim arms its
+     * slot-reclamation callback exactly there, so the old order would have hidden a slot leak
+     * rather than modelled it. `ws_get_fd_info` still reports HTTP until the upgrade completes.
      *
      * @param ctx      Optional pre-existing session context — a CO-TENANT's, when the
      *                 test is exercising descriptor reuse on the shared server.

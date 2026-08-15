@@ -54,7 +54,7 @@ perfectly good credential. So the handshake check answers **three** ways rather 
 | --- | --- |
 | refuse | no upgrade; the peer never reaches a session |
 | admit | upgraded, and **not** authenticated: a credential frame is required, and the deadline runs |
-| admit, authenticated | upgraded and served from the first frame; no credential frame, no deadline |
+| admit, authenticated | upgraded and served **from the 101**; no credential frame, no deadline, and the session may stay silent indefinitely |
 
 The third verdict is what makes the two admission points composable rather than exclusive. It
 is a property of one **session**, not a switch on the link: the same node answers "admit,
@@ -143,6 +143,16 @@ is closed. Two properties matter more than the exact number:
   un-spoken one on the raw descriptor with the same `4408`. The record set is fixed-size; a
   handshake that would overflow it is **refused** — the 101 is never written — because a
   socket with no record is a socket nothing can close.
+- **It bounds only the sockets whose entitlement is not yet known.** A handshake that answered
+  *admit, authenticated* has already given the answer the deadline exists to time out, so its
+  session is claimed at the 101 and takes no record and no deadline at all. Recording it
+  anyway is a defect with two heads: the sweep closes a perfectly good peer that simply had
+  nothing to say yet, and — since a closing socket does not retire a record — exempting such
+  records from the sweep instead would let idle authenticated links fill the fixed set and
+  stall admission for everybody. Claiming the session outright removes both. The cost is that
+  the peer cap is charged at the 101 for this verdict, which is the correct charge: the peer is
+  authenticated and entitled, and a refusal at the upgrade is a cleaner answer than admitting
+  it and closing it a deadline later.
 
 The deadline bounds the exposure *from the upgrade onward* and no other. A client that
 connects a TCP socket and never upgrades at all is an ordinary HTTP-server concern, governed
