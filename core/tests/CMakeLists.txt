@@ -11,6 +11,22 @@ function(libtracer_test_warnings tgt)
     endif()
 endfunction()
 
+# MODULE GATING (#1293). core/CMakeLists.txt compiles the net/routing plane and each
+# transport only when its option is ON, so a test target that NAMES a symbol from one of
+# those TUs must be gated on the SAME option — otherwise the minimal module set
+# (NET_PLANE=OFF plus every transport OFF) configures and compiles the library and then
+# fails to LINK its tests. The guards below are target-level on purpose: a test either
+# belongs to a module set or it does not, and an in-source #ifdef would hide which.
+#
+# The conditions mirror the library's own: `tr::net::stream_endpoint_t` and the rest of
+# posix_endpoint.cpp are compiled when ANY socket transport is on, so the few tests that
+# exercise that shared scaffold directly (rather than one transport) gate on this.
+if(LIBTRACER_TRANSPORT_TCP OR LIBTRACER_TRANSPORT_UDP OR LIBTRACER_TRANSPORT_WS)
+    set(LIBTRACER_ANY_SOCKET_TRANSPORT ON)
+else()
+    set(LIBTRACER_ANY_SOCKET_TRANSPORT OFF)
+endif()
+
 # Low-level primitive — little-endian (de)serialization (byteorder.hpp).
 add_executable(byteorder_test byteorder_test.cpp)
 target_link_libraries(byteorder_test PRIVATE libtracer)
@@ -39,14 +55,16 @@ target_link_libraries(length_prefix_framer_test PRIVATE libtracer)
 libtracer_test_warnings(length_prefix_framer_test)
 add_test(NAME length_prefix_framer COMMAND length_prefix_framer_test)
 
-# FWD offset-dispatch frame view (fwd_frame_view.hpp) — the extracted fwd_router
-# forward-plane cluster, tested directly over hand-built frames (span + rope
-# cursors): dst-seg / op / control peeks, the shrunk-dst/grown-src head rebuild
-# proved byte-exact vs a reference re-encode, and malformed rejects.
-add_executable(fwd_frame_view_test fwd_frame_view_test.cpp)
-target_link_libraries(fwd_frame_view_test PRIVATE libtracer)
-libtracer_test_warnings(fwd_frame_view_test)
-add_test(NAME fwd_frame_view COMMAND fwd_frame_view_test)
+if(LIBTRACER_NET_PLANE)
+    # FWD offset-dispatch frame view (fwd_frame_view.hpp) — the extracted fwd_router
+    # forward-plane cluster, tested directly over hand-built frames (span + rope
+    # cursors): dst-seg / op / control peeks, the shrunk-dst/grown-src head rebuild
+    # proved byte-exact vs a reference re-encode, and malformed rejects.
+    add_executable(fwd_frame_view_test fwd_frame_view_test.cpp)
+    target_link_libraries(fwd_frame_view_test PRIVATE libtracer)
+    libtracer_test_warnings(fwd_frame_view_test)
+    add_test(NAME fwd_frame_view COMMAND fwd_frame_view_test)
+endif()
 
 # The shared SPEC-config SETTINGS walk (config_reader.hpp) — the pair-consuming scan
 # every transport config parser funnels through (#927): the value-read-as-a-key hijack
@@ -77,26 +95,30 @@ target_compile_definitions(path_test PRIVATE
     LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 add_test(NAME path COMMAND path_test)
 
-# PATH_REF (0x14) codec — the bound-path envelope, element layout, count bound and
-# the structural rejects (RFC-0024 §4), plus the published vectors pinned against
-# the builder.
-# RFC-0024 car 2 — what a PATH_REF MEANS: the node-scoped slot index, the mint exchange,
-# and every way a bound path is refused rather than mis-routed.
-add_executable(bound_path_test bound_path_test.cpp)
-target_link_libraries(bound_path_test PRIVATE libtracer)
-libtracer_test_warnings(bound_path_test)
-target_compile_definitions(bound_path_test PRIVATE
-    LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
-add_test(NAME bound_path COMMAND bound_path_test)
+if(LIBTRACER_NET_PLANE)
+    # PATH_REF (0x14) codec — the bound-path envelope, element layout, count bound and
+    # the structural rejects (RFC-0024 §4), plus the published vectors pinned against
+    # the builder.
+    # RFC-0024 car 2 — what a PATH_REF MEANS: the node-scoped slot index, the mint exchange,
+    # and every way a bound path is refused rather than mis-routed.
+    add_executable(bound_path_test bound_path_test.cpp)
+    target_link_libraries(bound_path_test PRIVATE libtracer)
+    libtracer_test_warnings(bound_path_test)
+    target_compile_definitions(bound_path_test PRIVATE
+        LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
+    add_test(NAME bound_path COMMAND bound_path_test)
+endif()
 
-# RFC-0024 car 3 — the FORWARDER hop and the origin-side bind, over a three-node
-# loopback chain with production `/net:children[]` wiring.
-add_executable(bound_forward_test bound_forward_test.cpp)
-target_link_libraries(bound_forward_test PRIVATE libtracer)
-libtracer_test_warnings(bound_forward_test)
-target_compile_definitions(bound_forward_test PRIVATE
-    LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
-add_test(NAME bound_forward COMMAND bound_forward_test)
+if(LIBTRACER_NET_PLANE)
+    # RFC-0024 car 3 — the FORWARDER hop and the origin-side bind, over a three-node
+    # loopback chain with production `/net:children[]` wiring.
+    add_executable(bound_forward_test bound_forward_test.cpp)
+    target_link_libraries(bound_forward_test PRIVATE libtracer)
+    libtracer_test_warnings(bound_forward_test)
+    target_compile_definitions(bound_forward_test PRIVATE
+        LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
+    add_test(NAME bound_forward COMMAND bound_forward_test)
+endif()
 
 add_executable(path_ref_test path_ref_test.cpp)
 target_link_libraries(path_ref_test PRIVATE libtracer)
@@ -170,31 +192,37 @@ target_link_libraries(can_frames_test PRIVATE libtracer)
 libtracer_test_warnings(can_frames_test)
 add_test(NAME can_frames COMMAND can_frames_test)
 
-# #55 (increment 2) — transport_can SocketCAN binding, exercised over an in-memory
-# fake link (no kernel CAN needed; the real vcan path runs in the can-vcan-e2e CI job).
-add_executable(transport_can_test transport_can_test.cpp)
-target_link_libraries(transport_can_test PRIVATE libtracer)
-libtracer_test_warnings(transport_can_test)
-add_test(NAME transport_can COMMAND transport_can_test)
+if(LIBTRACER_TRANSPORT_CAN)
+    # #55 (increment 2) — transport_can SocketCAN binding, exercised over an in-memory
+    # fake link (no kernel CAN needed; the real vcan path runs in the can-vcan-e2e CI job).
+    add_executable(transport_can_test transport_can_test.cpp)
+    target_link_libraries(transport_can_test PRIVATE libtracer)
+    libtracer_test_warnings(transport_can_test)
+    add_test(NAME transport_can COMMAND transport_can_test)
+endif()
 
-# #848 — the transport EGRESS framing path soft-fails: a refusing allocator yields a
-# DROPPED FRAME AND A LIVE NODE (never abort()), across ws / tcp / udp / can, plus the
-# RFC 6455 §5.5 control-frame rules that make the PONG unfailable. This TU overrides the
-# global operator new with a fail-the-k-th-allocation injector, so it must stay its OWN
-# executable (the override is process-wide).
-add_executable(transport_alloc_softfail_test transport_alloc_softfail_test.cpp)
-target_link_libraries(transport_alloc_softfail_test PRIVATE libtracer)
-libtracer_test_warnings(transport_alloc_softfail_test)
-add_test(NAME transport_alloc_softfail COMMAND transport_alloc_softfail_test)
+if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_CAN AND LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_UDP AND LIBTRACER_TRANSPORT_WS)
+    # #848 — the transport EGRESS framing path soft-fails: a refusing allocator yields a
+    # DROPPED FRAME AND A LIVE NODE (never abort()), across ws / tcp / udp / can, plus the
+    # RFC 6455 §5.5 control-frame rules that make the PONG unfailable. This TU overrides the
+    # global operator new with a fail-the-k-th-allocation injector, so it must stay its OWN
+    # executable (the override is process-wide).
+    add_executable(transport_alloc_softfail_test transport_alloc_softfail_test.cpp)
+    target_link_libraries(transport_alloc_softfail_test PRIVATE libtracer)
+    libtracer_test_warnings(transport_alloc_softfail_test)
+    add_test(NAME transport_alloc_softfail COMMAND transport_alloc_softfail_test)
+endif()
 
-# ADR-0044 — stateless transport-peer enumeration + transparent per-peer FWD over
-# the CAN bus binding: join hellos -> synthesized /net/can0:children[], directed
-# forwarding to an announced peer with the reply routed back, peer expiry, and the
-# per-distinct-node peer-table growth. In-memory fake link, no kernel CAN.
-add_executable(transport_can_peers_test transport_can_peers_test.cpp)
-target_link_libraries(transport_can_peers_test PRIVATE libtracer)
-libtracer_test_warnings(transport_can_peers_test)
-add_test(NAME transport_can_peers COMMAND transport_can_peers_test)
+if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_CAN)
+    # ADR-0044 — stateless transport-peer enumeration + transparent per-peer FWD over
+    # the CAN bus binding: join hellos -> synthesized /net/can0:children[], directed
+    # forwarding to an announced peer with the reply routed back, peer expiry, and the
+    # per-distinct-node peer-table growth. In-memory fake link, no kernel CAN.
+    add_executable(transport_can_peers_test transport_can_peers_test.cpp)
+    target_link_libraries(transport_can_peers_test PRIVATE libtracer)
+    libtracer_test_warnings(transport_can_peers_test)
+    add_test(NAME transport_can_peers COMMAND transport_can_peers_test)
+endif()
 
 # #55 (increment 2) — real-bus smoke test over a kernel vcan0 device, plus the #931
 # can_link_t seam-rule vectors (an injected RTR / 11-bit standard frame must not
@@ -203,8 +231,9 @@ add_test(NAME transport_can_peers COMMAND transport_can_peers_test)
 # dedicated can-vcan-e2e CI job sets vcan0 up so the SocketCAN path runs for real.
 # LINUX-ONLY: it speaks <linux/can.h> directly to inject the frames no well-formed
 # link would emit — platform selection is a build-system concern, never an in-source
-# #ifdef (the same doctrine that picks socketcan_link.cpp over its stub).
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+# #ifdef (the same doctrine that picks socketcan_link.cpp over its stub). It also links
+# socketcan_link_t itself, so it needs the CAN module as well as the platform (#1293).
+if(LIBTRACER_TRANSPORT_CAN AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_executable(transport_can_vcan_test transport_can_vcan_test.cpp)
   target_link_libraries(transport_can_vcan_test PRIVATE libtracer)
   libtracer_test_warnings(transport_can_vcan_test)
@@ -306,28 +335,30 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     set_tests_properties(httpd_ws_session_identity
         PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
-    # #1071 — the DEPARTURE's cost, on the same fake but with a real graph_t + fwd_router_t
-    # behind the link: the subject is what a peer hanging up charges the httpd task, which is
-    # paid inside graph_t::evict_link_edges. Needs core/tests on the include path for the
-    # frame/value builders the wire-subscribe door takes.
-    add_executable(httpd_ws_departure_cost_test
-        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_departure_cost_test.cpp"
-        "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
-        "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
-    target_include_directories(httpd_ws_departure_cost_test PRIVATE
-        "${LIBTRACER_ESP_DIR}/tests/host"
-        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
-        "${LIBTRACER_ESP_DIR}/libtracer/include"
-        "${CMAKE_CURRENT_SOURCE_DIR}")
-    target_link_libraries(httpd_ws_departure_cost_test PRIVATE libtracer)
-    target_link_options(httpd_ws_departure_cost_test PRIVATE
-        "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
-    libtracer_test_warnings(httpd_ws_departure_cost_test)
-    add_test(NAME httpd_ws_departure_cost COMMAND httpd_ws_departure_cost_test)
-    # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and this
-    # suite constructs an adopting link — same exemption as the suites around it.
-    set_tests_properties(httpd_ws_departure_cost
-        PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+    if(LIBTRACER_NET_PLANE)
+        # #1071 — the DEPARTURE's cost, on the same fake but with a real graph_t + fwd_router_t
+        # behind the link: the subject is what a peer hanging up charges the httpd task, which is
+        # paid inside graph_t::evict_link_edges. Needs core/tests on the include path for the
+        # frame/value builders the wire-subscribe door takes.
+        add_executable(httpd_ws_departure_cost_test
+            "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_departure_cost_test.cpp"
+            "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
+            "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
+        target_include_directories(httpd_ws_departure_cost_test PRIVATE
+            "${LIBTRACER_ESP_DIR}/tests/host"
+            "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+            "${LIBTRACER_ESP_DIR}/libtracer/include"
+            "${CMAKE_CURRENT_SOURCE_DIR}")
+        target_link_libraries(httpd_ws_departure_cost_test PRIVATE libtracer)
+        target_link_options(httpd_ws_departure_cost_test PRIVATE
+            "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+        libtracer_test_warnings(httpd_ws_departure_cost_test)
+        add_test(NAME httpd_ws_departure_cost COMMAND httpd_ws_departure_cost_test)
+        # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and this
+        # suite constructs an adopting link — same exemption as the suites around it.
+        set_tests_properties(httpd_ws_departure_cost
+            PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+    endif()
 
     # #1146 — close_peer: the administrative teardown of ONE inbound session, on the same
     # fake. The subject here is the CONTROL QUEUE rather than the socket: the close must be
@@ -777,62 +808,78 @@ target_link_libraries(delivery_mode_race_test PRIVATE libtracer Threads::Threads
 libtracer_test_warnings(delivery_mode_race_test)
 add_test(NAME delivery_mode_race COMMAND delivery_mode_race_test)
 
-# #81-A — per-endpoint :acl structural storage (store/serve raw ACL TLV; no enforcement).
-add_executable(acl_test acl_test.cpp)
-target_link_libraries(acl_test PRIVATE libtracer)
-libtracer_test_warnings(acl_test)
-add_test(NAME acl COMMAND acl_test)
+if(LIBTRACER_NET_PLANE)
+    # #81-A — per-endpoint :acl structural storage (store/serve raw ACL TLV; no enforcement).
+    add_executable(acl_test acl_test.cpp)
+    target_link_libraries(acl_test PRIVATE libtracer)
+    libtracer_test_warnings(acl_test)
+    add_test(NAME acl COMMAND acl_test)
+endif()
 
-# #407 — graph_t::retire() vertex retirement (RFC-0009 §B/§C/§E.6).
-add_executable(mount_routing_test mount_routing_test.cpp)
-target_link_libraries(mount_routing_test PRIVATE libtracer)
-libtracer_test_warnings(mount_routing_test)
-add_test(NAME mount_routing COMMAND mount_routing_test)
+if(LIBTRACER_NET_PLANE)
+    # #407 — graph_t::retire() vertex retirement (RFC-0009 §B/§C/§E.6).
+    add_executable(mount_routing_test mount_routing_test.cpp)
+    target_link_libraries(mount_routing_test PRIVATE libtracer)
+    libtracer_test_warnings(mount_routing_test)
+    add_test(NAME mount_routing COMMAND mount_routing_test)
+endif()
 
-# #882 — a reconnect rebind that FLIPS a mount's shape (point-to-point <-> bus) must never
-# let a forward pair one publication's shape with another's link: that routes a bus link
-# point-to-point and its send() BROADCASTS (the #409 one-request/N-replies misroute).
-add_executable(mount_shape_flip_test mount_shape_flip_test.cpp)
-target_link_libraries(mount_shape_flip_test PRIVATE libtracer Threads::Threads)
-libtracer_test_warnings(mount_shape_flip_test)
-add_test(NAME mount_shape_flip COMMAND mount_shape_flip_test)
-set_tests_properties(mount_shape_flip PROPERTIES RUN_SERIAL TRUE TIMEOUT 300)
+if(LIBTRACER_NET_PLANE)
+    # #882 — a reconnect rebind that FLIPS a mount's shape (point-to-point <-> bus) must never
+    # let a forward pair one publication's shape with another's link: that routes a bus link
+    # point-to-point and its send() BROADCASTS (the #409 one-request/N-replies misroute).
+    add_executable(mount_shape_flip_test mount_shape_flip_test.cpp)
+    target_link_libraries(mount_shape_flip_test PRIVATE libtracer Threads::Threads)
+    libtracer_test_warnings(mount_shape_flip_test)
+    add_test(NAME mount_shape_flip COMMAND mount_shape_flip_test)
+    set_tests_properties(mount_shape_flip PROPERTIES RUN_SERIAL TRUE TIMEOUT 300)
+endif()
 
-# `add_child` under a REFUSING allocator (#523): the registry chunk is the one soft-failing
-# allocation on the control path, and it is driven by replacing the global NOTHROW
-# `operator new` — a whole-program decision, hence its own binary.
-add_executable(mount_add_oom_test mount_add_oom_test.cpp)
-target_link_libraries(mount_add_oom_test PRIVATE libtracer)
-libtracer_test_warnings(mount_add_oom_test)
-add_test(NAME mount_add_oom COMMAND mount_add_oom_test)
+if(LIBTRACER_NET_PLANE)
+    # `add_child` under a REFUSING allocator (#523): the registry chunk is the one soft-failing
+    # allocation on the control path, and it is driven by replacing the global NOTHROW
+    # `operator new` — a whole-program decision, hence its own binary.
+    add_executable(mount_add_oom_test mount_add_oom_test.cpp)
+    target_link_libraries(mount_add_oom_test PRIVATE libtracer)
+    libtracer_test_warnings(mount_add_oom_test)
+    add_test(NAME mount_add_oom COMMAND mount_add_oom_test)
+endif()
 
-# `make_connection` under the same REFUSING allocator (#930): a connection whose link cannot
-# be wired into the router is rolled back rather than published as a live-looking dead
-# connection. Its own binary for the same whole-program reason as mount_add_oom_test.
-add_executable(conn_add_oom_test conn_add_oom_test.cpp)
-target_link_libraries(conn_add_oom_test PRIVATE libtracer)
-libtracer_test_warnings(conn_add_oom_test)
-add_test(NAME conn_add_oom COMMAND conn_add_oom_test)
+if(LIBTRACER_NET_PLANE)
+    # `make_connection` under the same REFUSING allocator (#930): a connection whose link cannot
+    # be wired into the router is rolled back rather than published as a live-looking dead
+    # connection. Its own binary for the same whole-program reason as mount_add_oom_test.
+    add_executable(conn_add_oom_test conn_add_oom_test.cpp)
+    target_link_libraries(conn_add_oom_test PRIVATE libtracer)
+    libtracer_test_warnings(conn_add_oom_test)
+    add_test(NAME conn_add_oom COMMAND conn_add_oom_test)
+endif()
 
-add_executable(mount_width_test mount_width_test.cpp)
-target_link_libraries(mount_width_test PRIVATE libtracer)
-libtracer_test_warnings(mount_width_test)
-add_test(NAME mount_width COMMAND mount_width_test)
+if(LIBTRACER_NET_PLANE)
+    add_executable(mount_width_test mount_width_test.cpp)
+    target_link_libraries(mount_width_test PRIVATE libtracer)
+    libtracer_test_warnings(mount_width_test)
+    add_test(NAME mount_width COMMAND mount_width_test)
+endif()
 
-add_executable(compact_cache_test compact_cache_test.cpp)
-target_link_libraries(compact_cache_test PRIVATE libtracer)
-libtracer_test_warnings(compact_cache_test)
-add_test(NAME compact_cache COMMAND compact_cache_test)
+if(LIBTRACER_NET_PLANE)
+    add_executable(compact_cache_test compact_cache_test.cpp)
+    target_link_libraries(compact_cache_test PRIVATE libtracer)
+    libtracer_test_warnings(compact_cache_test)
+    add_test(NAME compact_cache COMMAND compact_cache_test)
+endif()
 
-# ADR-0063 §3: control-plane create/remove churn against a live forward reader. Its value is
-# under `-fsanitize=thread` (the tsan CI lane runs the whole suite), where it reports the
-# writer-vs-writer and rebind-vs-reader races; without TSan it still catches a lost or
-# duplicated child. RUN_SERIAL so a loaded CI machine does not starve its four threads.
-add_executable(net_control_plane_race_test net_control_plane_race_test.cpp)
-target_link_libraries(net_control_plane_race_test PRIVATE libtracer Threads::Threads)
-libtracer_test_warnings(net_control_plane_race_test)
-add_test(NAME net_control_plane_race COMMAND net_control_plane_race_test)
-set_tests_properties(net_control_plane_race PROPERTIES RUN_SERIAL TRUE TIMEOUT 300)
+if(LIBTRACER_NET_PLANE)
+    # ADR-0063 §3: control-plane create/remove churn against a live forward reader. Its value is
+    # under `-fsanitize=thread` (the tsan CI lane runs the whole suite), where it reports the
+    # writer-vs-writer and rebind-vs-reader races; without TSan it still catches a lost or
+    # duplicated child. RUN_SERIAL so a loaded CI machine does not starve its four threads.
+    add_executable(net_control_plane_race_test net_control_plane_race_test.cpp)
+    target_link_libraries(net_control_plane_race_test PRIVATE libtracer Threads::Threads)
+    libtracer_test_warnings(net_control_plane_race_test)
+    add_test(NAME net_control_plane_race COMMAND net_control_plane_race_test)
+    set_tests_properties(net_control_plane_race PROPERTIES RUN_SERIAL TRUE TIMEOUT 300)
+endif()
 
 # The published edge array + its edge pin (#635): a snapshot sees the old or the new edge
 # set and never a torn mixture, an unsubscribe stops delivering at once, the pin is never
@@ -845,35 +892,41 @@ libtracer_test_warnings(edge_publish_test)
 add_test(NAME edge_publish COMMAND edge_publish_test)
 set_tests_properties(edge_publish PROPERTIES RUN_SERIAL TRUE TIMEOUT 300)
 
-add_executable(registry_teardown_test registry_teardown_test.cpp)
-target_link_libraries(registry_teardown_test PRIVATE libtracer)
-libtracer_test_warnings(registry_teardown_test)
-add_test(NAME registry_teardown COMMAND registry_teardown_test)
+if(LIBTRACER_NET_PLANE)
+    add_executable(registry_teardown_test registry_teardown_test.cpp)
+    target_link_libraries(registry_teardown_test PRIVATE libtracer)
+    libtracer_test_warnings(registry_teardown_test)
+    add_test(NAME registry_teardown COMMAND registry_teardown_test)
+endif()
 
-# #884 — the router's OWN per-child table under create/remove churn: the twin of the
-# registry teardown contract above, one layer out. Every pointer involved stays live, so the
-# failures this pins are wrong-tenancy resolutions and unbounded growth, NOT memory errors —
-# which is why it is an ordinary host test and its ASan value is the report it does NOT make.
-add_executable(child_rx_churn_test child_rx_churn_test.cpp)
-target_link_libraries(child_rx_churn_test PRIVATE libtracer)
-libtracer_test_warnings(child_rx_churn_test)
-add_test(NAME child_rx_churn COMMAND child_rx_churn_test)
+if(LIBTRACER_NET_PLANE)
+    # #884 — the router's OWN per-child table under create/remove churn: the twin of the
+    # registry teardown contract above, one layer out. Every pointer involved stays live, so the
+    # failures this pins are wrong-tenancy resolutions and unbounded growth, NOT memory errors —
+    # which is why it is an ordinary host test and its ASan value is the report it does NOT make.
+    add_executable(child_rx_churn_test child_rx_churn_test.cpp)
+    target_link_libraries(child_rx_churn_test PRIVATE libtracer)
+    libtracer_test_warnings(child_rx_churn_test)
+    add_test(NAME child_rx_churn COMMAND child_rx_churn_test)
+endif()
 
 add_executable(retire_test retire_test.cpp)
 target_link_libraries(retire_test PRIVATE libtracer)
 libtracer_test_warnings(retire_test)
 add_test(NAME retire COMMAND retire_test)
 
-# #576 — graph_t::collect() / parked_seam_count(): the explicit end of retirement's
-# value-seam park. The load-bearing case is that the free runs OUTSIDE every graph lock
-# (a seam destructor that re-enters the graph must not deadlock), so this test carries a
-# watchdog and reports rather than hanging. It also pins the two contract properties an
-# embedder acts on: the park is keyed on handler PRESENCE (not role_t), and only a BUS
-# link's connection teardown parks anything (point-to-point parks zero).
-add_executable(collect_test collect_test.cpp)
-target_link_libraries(collect_test PRIVATE libtracer Threads::Threads)
-libtracer_test_warnings(collect_test)
-add_test(NAME collect COMMAND collect_test)
+if(LIBTRACER_NET_PLANE)
+    # #576 — graph_t::collect() / parked_seam_count(): the explicit end of retirement's
+    # value-seam park. The load-bearing case is that the free runs OUTSIDE every graph lock
+    # (a seam destructor that re-enters the graph must not deadlock), so this test carries a
+    # watchdog and reports rather than hanging. It also pins the two contract properties an
+    # embedder acts on: the park is keyed on handler PRESENCE (not role_t), and only a BUS
+    # link's connection teardown parks anything (point-to-point parks zero).
+    add_executable(collect_test collect_test.cpp)
+    target_link_libraries(collect_test PRIVATE libtracer Threads::Threads)
+    libtracer_test_warnings(collect_test)
+    add_test(NAME collect COMMAND collect_test)
+endif()
 
 # #82 — in-band :children[] SPEC vertex creation (ADR-0017). Reads the shared `spec/`
 # conformance vectors (#877), so it needs LIBTRACER_VECTORS_DIR.
@@ -916,34 +969,42 @@ target_compile_definitions(tlv_arena_test PRIVATE
     LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 add_test(NAME tlv_arena COMMAND tlv_arena_test)
 
-# Brick 4 (ADR-0038 §3 / ADR-0039) — per-connection pmr label tables incl. a
-# zero-global-heap lifecycle over a slab resource with a null upstream.
-add_executable(route_handle_test route_handle_test.cpp)
-target_link_libraries(route_handle_test PRIVATE libtracer)
-libtracer_test_warnings(route_handle_test)
-add_test(NAME route_handle COMMAND route_handle_test)
+if(LIBTRACER_NET_PLANE)
+    # Brick 4 (ADR-0038 §3 / ADR-0039) — per-connection pmr label tables incl. a
+    # zero-global-heap lifecycle over a slab resource with a null upstream.
+    add_executable(route_handle_test route_handle_test.cpp)
+    target_link_libraries(route_handle_test PRIVATE libtracer)
+    libtracer_test_warnings(route_handle_test)
+    add_test(NAME route_handle COMMAND route_handle_test)
+endif()
 
-# #739 — subscribe_toward: a local producer bound toward a mount-path target through
-# the shared strip-K descent (no caller-side link/route hand-split).
-add_executable(subscribe_toward_test subscribe_toward_test.cpp)
-target_link_libraries(subscribe_toward_test PRIVATE libtracer)
-libtracer_test_warnings(subscribe_toward_test)
-add_test(NAME subscribe_toward COMMAND subscribe_toward_test)
+if(LIBTRACER_NET_PLANE)
+    # #739 — subscribe_toward: a local producer bound toward a mount-path target through
+    # the shared strip-K descent (no caller-side link/route hand-split).
+    add_executable(subscribe_toward_test subscribe_toward_test.cpp)
+    target_link_libraries(subscribe_toward_test PRIVATE libtracer)
+    libtracer_test_warnings(subscribe_toward_test)
+    add_test(NAME subscribe_toward COMMAND subscribe_toward_test)
+endif()
 
-# #684 — the rebind-vs-forward race on the published mount run (a TSan vehicle that is
-# also a functional misroute detector on every build).
-add_executable(registry_rebind_race_test registry_rebind_race_test.cpp)
-target_link_libraries(registry_rebind_race_test PRIVATE libtracer)
-libtracer_test_warnings(registry_rebind_race_test)
-add_test(NAME registry_rebind_race COMMAND registry_rebind_race_test)
+if(LIBTRACER_NET_PLANE)
+    # #684 — the rebind-vs-forward race on the published mount run (a TSan vehicle that is
+    # also a functional misroute detector on every build).
+    add_executable(registry_rebind_race_test registry_rebind_race_test.cpp)
+    target_link_libraries(registry_rebind_race_test PRIVATE libtracer)
+    libtracer_test_warnings(registry_rebind_race_test)
+    add_test(NAME registry_rebind_race COMMAND registry_rebind_race_test)
+endif()
 
-# #914 — the router's five sink pairs are published as a unit: a setter racing the frame
-# path can no longer hand a new `fn` the previous sink's `ctx` (TSan vehicle + a functional
-# wrong-context detector on every build).
-add_executable(fwd_sink_race_test fwd_sink_race_test.cpp)
-target_link_libraries(fwd_sink_race_test PRIVATE libtracer Threads::Threads)
-libtracer_test_warnings(fwd_sink_race_test)
-add_test(NAME fwd_sink_race COMMAND fwd_sink_race_test)
+if(LIBTRACER_NET_PLANE)
+    # #914 — the router's five sink pairs are published as a unit: a setter racing the frame
+    # path can no longer hand a new `fn` the previous sink's `ctx` (TSan vehicle + a functional
+    # wrong-context detector on every build).
+    add_executable(fwd_sink_race_test fwd_sink_race_test.cpp)
+    target_link_libraries(fwd_sink_race_test PRIVATE libtracer Threads::Threads)
+    libtracer_test_warnings(fwd_sink_race_test)
+    add_test(NAME fwd_sink_race COMMAND fwd_sink_race_test)
+endif()
 
 # #1049 — the L4 analogue: graph_t's five configuration seams under a setter storm. The
 # three callback seams carry the same wrong-context detector as #914's; the child-type
@@ -954,14 +1015,16 @@ target_link_libraries(graph_config_race_test PRIVATE libtracer Threads::Threads)
 libtracer_test_warnings(graph_config_race_test)
 add_test(NAME graph_config_race COMMAND graph_config_race_test)
 
-# #419 — the two-mount route: one dst crossing TWO net/<module>/<name> mounts, driven
-# through three in-process routers chained by loopback link pairs. The behavioural binding
-# for the fwd/fwd-routed-two-mount conformance vector (HARNESS.md: a vector gates the codec
-# only), and the first FWD test in the tree with more than one forwarder.
-add_executable(fwd_two_mount_test fwd_two_mount_test.cpp)
-target_link_libraries(fwd_two_mount_test PRIVATE libtracer)
-libtracer_test_warnings(fwd_two_mount_test)
-add_test(NAME fwd_two_mount COMMAND fwd_two_mount_test)
+if(LIBTRACER_NET_PLANE)
+    # #419 — the two-mount route: one dst crossing TWO net/<module>/<name> mounts, driven
+    # through three in-process routers chained by loopback link pairs. The behavioural binding
+    # for the fwd/fwd-routed-two-mount conformance vector (HARNESS.md: a vector gates the codec
+    # only), and the first FWD test in the tree with more than one forwarder.
+    add_executable(fwd_two_mount_test fwd_two_mount_test.cpp)
+    target_link_libraries(fwd_two_mount_test PRIVATE libtracer)
+    libtracer_test_warnings(fwd_two_mount_test)
+    add_test(NAME fwd_two_mount COMMAND fwd_two_mount_test)
+endif()
 
 # M1 — conformance harness (links the built library).
 add_executable(conformance_runner conformance_runner.cpp)
@@ -1035,12 +1098,14 @@ target_link_libraries(folded_read_backend_test PRIVATE libtracer)
 libtracer_test_warnings(folded_read_backend_test)
 add_test(NAME folded_read_backend COMMAND folded_read_backend_test)
 
-# #477 — the store/delivery path's nothrow soft-fail discipline: OOM injected through
-# tr::detail::probe_fail_hook (store => BACKPRESSURE, delivery => drop/defer, never abort).
-add_executable(graph_oom_softfail_test graph_oom_softfail_test.cpp)
-target_link_libraries(graph_oom_softfail_test PRIVATE libtracer)
-libtracer_test_warnings(graph_oom_softfail_test)
-add_test(NAME graph_oom_softfail COMMAND graph_oom_softfail_test)
+if(LIBTRACER_NET_PLANE)
+    # #477 — the store/delivery path's nothrow soft-fail discipline: OOM injected through
+    # tr::detail::probe_fail_hook (store => BACKPRESSURE, delivery => drop/defer, never abort).
+    add_executable(graph_oom_softfail_test graph_oom_softfail_test.cpp)
+    target_link_libraries(graph_oom_softfail_test PRIVATE libtracer)
+    libtracer_test_warnings(graph_oom_softfail_test)
+    add_test(NAME graph_oom_softfail COMMAND graph_oom_softfail_test)
+endif()
 
 # ADR-0060 §2 thread-safe pool value_backend: concurrent alloc + cross-thread reclaim
 # (the tsan job in core-ci.yml builds this with -fsanitize=thread and runs it).
@@ -1099,101 +1164,123 @@ target_link_libraries(field_dispatch_test PRIVATE libtracer)
 libtracer_test_warnings(field_dispatch_test)
 add_test(NAME field_dispatch COMMAND field_dispatch_test)
 
-# RFC-0022 (as amended) — the per-subscription delivery policy, the removed vertex knobs,
-# and §3.F: the two surviving storage declarations are owner-side and inherited by NOBODY.
-add_executable(qos_policy_test qos_policy_test.cpp)
-target_link_libraries(qos_policy_test PRIVATE libtracer)
-libtracer_test_warnings(qos_policy_test)
-target_compile_definitions(qos_policy_test PRIVATE
-    LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
-add_test(NAME qos_policy COMMAND qos_policy_test)
+if(LIBTRACER_NET_PLANE)
+    # RFC-0022 (as amended) — the per-subscription delivery policy, the removed vertex knobs,
+    # and §3.F: the two surviving storage declarations are owner-side and inherited by NOBODY.
+    add_executable(qos_policy_test qos_policy_test.cpp)
+    target_link_libraries(qos_policy_test PRIVATE libtracer)
+    libtracer_test_warnings(qos_policy_test)
+    target_compile_definitions(qos_policy_test PRIVATE
+        LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
+    add_test(NAME qos_policy COMMAND qos_policy_test)
+endif()
 
-# RFC-0004 / ADR-0035 slice 2 — local FWD operation resolution + zero-copy FWD{REPLY}.
-add_executable(op_resolve_test op_resolve_test.cpp)
-target_link_libraries(op_resolve_test PRIVATE libtracer)
-libtracer_test_warnings(op_resolve_test)
-target_compile_definitions(op_resolve_test PRIVATE
-    LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
-add_test(NAME op_resolve COMMAND op_resolve_test)
+if(LIBTRACER_NET_PLANE)
+    # RFC-0004 / ADR-0035 slice 2 — local FWD operation resolution + zero-copy FWD{REPLY}.
+    add_executable(op_resolve_test op_resolve_test.cpp)
+    target_link_libraries(op_resolve_test PRIVATE libtracer)
+    libtracer_test_warnings(op_resolve_test)
+    target_compile_definitions(op_resolve_test PRIVATE
+        LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
+    add_test(NAME op_resolve COMMAND op_resolve_test)
+endif()
 
-# ADR-0053 §7 (3c-ii) — differential oracle: the owning rope-tier resolver
-# (resolve(tlv_view_t)) must produce byte-identical replies to the span-tier
-# arena resolver for the same request under every rope fragmentation.
-add_executable(op_resolve_view_test op_resolve_view_test.cpp)
-target_link_libraries(op_resolve_view_test PRIVATE libtracer)
-libtracer_test_warnings(op_resolve_view_test)
-add_test(NAME op_resolve_view COMMAND op_resolve_view_test)
+if(LIBTRACER_NET_PLANE)
+    # ADR-0053 §7 (3c-ii) — differential oracle: the owning rope-tier resolver
+    # (resolve(tlv_view_t)) must produce byte-identical replies to the span-tier
+    # arena resolver for the same request under every rope fragmentation.
+    add_executable(op_resolve_view_test op_resolve_view_test.cpp)
+    target_link_libraries(op_resolve_view_test PRIVATE libtracer)
+    libtracer_test_warnings(op_resolve_view_test)
+    add_test(NAME op_resolve_view COMMAND op_resolve_view_test)
+endif()
 
-# RFC-0004 / ADR-0035 slice 3 — multi-hop FWD forwarding + zero-copy src
-# accumulation over LIVE transport_ws (client -> A forwarder -> B terminus).
-add_executable(fwd_multihop_test fwd_multihop_test.cpp)
-target_link_libraries(fwd_multihop_test PRIVATE libtracer)
-libtracer_test_warnings(fwd_multihop_test)
-add_test(NAME fwd_multihop COMMAND fwd_multihop_test)
+if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_WS)
+    # RFC-0004 / ADR-0035 slice 3 — multi-hop FWD forwarding + zero-copy src
+    # accumulation over LIVE transport_ws (client -> A forwarder -> B terminus).
+    add_executable(fwd_multihop_test fwd_multihop_test.cpp)
+    target_link_libraries(fwd_multihop_test PRIVATE libtracer)
+    libtracer_test_warnings(fwd_multihop_test)
+    add_test(NAME fwd_multihop COMMAND fwd_multihop_test)
+endif()
 
-# RFC-0004 / ADR-0035 slice 4 — the route-handle: ws delivery-compaction over LIVE
-# transport_ws (producer B -> A forwarder -> consumer C). Proves the byte-delta of a
-# label-compacted COMPACT vs a full-route FWD, byte-exact ordered delivery, the
-# stale-label drop + re-advertise self-heal, and that a non-compact flow stays stateless.
-add_executable(fwd_compact_test fwd_compact_test.cpp)
-target_link_libraries(fwd_compact_test PRIVATE libtracer)
-libtracer_test_warnings(fwd_compact_test)
-add_test(NAME fwd_compact COMMAND fwd_compact_test)
+if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_WS)
+    # RFC-0004 / ADR-0035 slice 4 — the route-handle: ws delivery-compaction over LIVE
+    # transport_ws (producer B -> A forwarder -> consumer C). Proves the byte-delta of a
+    # label-compacted COMPACT vs a full-route FWD, byte-exact ordered delivery, the
+    # stale-label drop + re-advertise self-heal, and that a non-compact flow stays stateless.
+    add_executable(fwd_compact_test fwd_compact_test.cpp)
+    target_link_libraries(fwd_compact_test PRIVATE libtracer)
+    libtracer_test_warnings(fwd_compact_test)
+    add_test(NAME fwd_compact COMMAND fwd_compact_test)
+endif()
 
-# RFC-0004 §E.1/§F (#974) — a COMPACT delivery is ACL-gated under the INBOUND LINK's name,
-# like the full-route FWD{WRITE} it compacts. Both terminus write arms of on_compact (the
-# cold deliver_local one and the memoized warm one) are proven separately, each paired with
-# a positive control, plus the no-resolver default where nothing is enforced.
-add_executable(fwd_compact_acl_test fwd_compact_acl_test.cpp)
-target_link_libraries(fwd_compact_acl_test PRIVATE libtracer)
-libtracer_test_warnings(fwd_compact_acl_test)
-add_test(NAME fwd_compact_acl COMMAND fwd_compact_acl_test)
+if(LIBTRACER_NET_PLANE)
+    # RFC-0004 §E.1/§F (#974) — a COMPACT delivery is ACL-gated under the INBOUND LINK's name,
+    # like the full-route FWD{WRITE} it compacts. Both terminus write arms of on_compact (the
+    # cold deliver_local one and the memoized warm one) are proven separately, each paired with
+    # a positive control, plus the no-resolver default where nothing is enforced.
+    add_executable(fwd_compact_acl_test fwd_compact_acl_test.cpp)
+    target_link_libraries(fwd_compact_acl_test PRIVATE libtracer)
+    libtracer_test_warnings(fwd_compact_acl_test)
+    add_test(NAME fwd_compact_acl COMMAND fwd_compact_acl_test)
+endif()
 
-# #375 — a HANDLER's on_write receives the writer's SUBJECT (tr::graph::write_ctx_t). Pins the
-# empty-token OWNER sentinel on both local doors, two links reaching one handler as two
-# distinct subjects, TWO PEERS ON ONE LINK staying distinguishable (the collapse #375
-# reported), and a delivered subscription presenting the EDGE's fan-in context.
-add_executable(write_ctx_test write_ctx_test.cpp)
-target_link_libraries(write_ctx_test PRIVATE libtracer)
-libtracer_test_warnings(write_ctx_test)
-add_test(NAME write_ctx COMMAND write_ctx_test)
+if(LIBTRACER_NET_PLANE)
+    # #375 — a HANDLER's on_write receives the writer's SUBJECT (tr::graph::write_ctx_t). Pins the
+    # empty-token OWNER sentinel on both local doors, two links reaching one handler as two
+    # distinct subjects, TWO PEERS ON ONE LINK staying distinguishable (the collapse #375
+    # reported), and a delivered subscription presenting the EDGE's fan-in context.
+    add_executable(write_ctx_test write_ctx_test.cpp)
+    target_link_libraries(write_ctx_test PRIVATE libtracer)
+    libtracer_test_warnings(write_ctx_test)
+    add_test(NAME write_ctx COMMAND write_ctx_test)
+endif()
 
-# RFC-0004 §E.1 (#716) — the MID-CHAIN reconnect self-heal: clear_link sweeps every ingress
-# binding, on ANY link, whose downstream half crossed the cleared link, so an origin that never
-# saw the reconnect stops streaming onto a dead out-label. Asserts RECOVERY end to end over a
-# 3-node in-process chain, not merely the NACK.
-add_executable(fwd_reconnect_selfheal_test fwd_reconnect_selfheal_test.cpp)
-target_link_libraries(fwd_reconnect_selfheal_test PRIVATE libtracer)
-libtracer_test_warnings(fwd_reconnect_selfheal_test)
-add_test(NAME fwd_reconnect_selfheal COMMAND fwd_reconnect_selfheal_test)
+if(LIBTRACER_NET_PLANE)
+    # RFC-0004 §E.1 (#716) — the MID-CHAIN reconnect self-heal: clear_link sweeps every ingress
+    # binding, on ANY link, whose downstream half crossed the cleared link, so an origin that never
+    # saw the reconnect stops streaming onto a dead out-label. Asserts RECOVERY end to end over a
+    # 3-node in-process chain, not merely the NACK.
+    add_executable(fwd_reconnect_selfheal_test fwd_reconnect_selfheal_test.cpp)
+    target_link_libraries(fwd_reconnect_selfheal_test PRIVATE libtracer)
+    libtracer_test_warnings(fwd_reconnect_selfheal_test)
+    add_test(NAME fwd_reconnect_selfheal COMMAND fwd_reconnect_selfheal_test)
+endif()
 
-# #913 — a re-advertise cycle grows NOTHING: both ADVERTISE-emitting sites (the producer door
-# and the mid-chain forwarding swap) reuse the label already bound to an identical route, so a
-# reconnect loop cannot walk a link's 16-bit label space or its egress table. Counts distinct
-# labels and table entries across 51 cycles at every node of a two-hop chain.
-add_executable(fwd_readvertise_reuse_test fwd_readvertise_reuse_test.cpp)
-target_link_libraries(fwd_readvertise_reuse_test PRIVATE libtracer)
-libtracer_test_warnings(fwd_readvertise_reuse_test)
-add_test(NAME fwd_readvertise_reuse COMMAND fwd_readvertise_reuse_test)
+if(LIBTRACER_NET_PLANE)
+    # #913 — a re-advertise cycle grows NOTHING: both ADVERTISE-emitting sites (the producer door
+    # and the mid-chain forwarding swap) reuse the label already bound to an identical route, so a
+    # reconnect loop cannot walk a link's 16-bit label space or its egress table. Counts distinct
+    # labels and table entries across 51 cycles at every node of a two-hop chain.
+    add_executable(fwd_readvertise_reuse_test fwd_readvertise_reuse_test.cpp)
+    target_link_libraries(fwd_readvertise_reuse_test PRIVATE libtracer)
+    libtracer_test_warnings(fwd_readvertise_reuse_test)
+    add_test(NAME fwd_readvertise_reuse COMMAND fwd_readvertise_reuse_test)
+endif()
 
-# #833 — a REFUSED forwarding bind strands neither the out-label it took nor the egress route
-# retained with it. Drives the ingress table to its injected bound so the BIND is the step that
-# refuses, then asserts the downstream table returns to its pre-advertise census, the label
-# itself comes back, nothing went on the wire, and the shared entry an established flow rides
-# is left alone.
-add_executable(fwd_bind_refusal_unwind_test fwd_bind_refusal_unwind_test.cpp)
-target_link_libraries(fwd_bind_refusal_unwind_test PRIVATE libtracer)
-libtracer_test_warnings(fwd_bind_refusal_unwind_test)
-add_test(NAME fwd_bind_refusal_unwind COMMAND fwd_bind_refusal_unwind_test)
+if(LIBTRACER_NET_PLANE)
+    # #833 — a REFUSED forwarding bind strands neither the out-label it took nor the egress route
+    # retained with it. Drives the ingress table to its injected bound so the BIND is the step that
+    # refuses, then asserts the downstream table returns to its pre-advertise census, the label
+    # itself comes back, nothing went on the wire, and the shared entry an established flow rides
+    # is left alone.
+    add_executable(fwd_bind_refusal_unwind_test fwd_bind_refusal_unwind_test.cpp)
+    target_link_libraries(fwd_bind_refusal_unwind_test PRIVATE libtracer)
+    libtracer_test_warnings(fwd_bind_refusal_unwind_test)
+    add_test(NAME fwd_bind_refusal_unwind COMMAND fwd_bind_refusal_unwind_test)
+endif()
 
-# RFC-0004 / ADR-0035 slice 4 (#136) — the PRODUCER auto fan-out: a plain graph.write to a
-# vertex with a remote subscriber delivers a full-route FWD{WRITE} (or auto-promoted COMPACT)
-# with no explicit advertise/send. Covers the transient-local latch, the compact byte-delta,
-# reconnect self-heal, and a concurrent writer x clear_link race (the TSan gate).
-add_executable(fwd_fanout_test fwd_fanout_test.cpp)
-target_link_libraries(fwd_fanout_test PRIVATE libtracer)
-libtracer_test_warnings(fwd_fanout_test)
-add_test(NAME fwd_fanout COMMAND fwd_fanout_test)
+if(LIBTRACER_NET_PLANE)
+    # RFC-0004 / ADR-0035 slice 4 (#136) — the PRODUCER auto fan-out: a plain graph.write to a
+    # vertex with a remote subscriber delivers a full-route FWD{WRITE} (or auto-promoted COMPACT)
+    # with no explicit advertise/send. Covers the transient-local latch, the compact byte-delta,
+    # reconnect self-heal, and a concurrent writer x clear_link race (the TSan gate).
+    add_executable(fwd_fanout_test fwd_fanout_test.cpp)
+    target_link_libraries(fwd_fanout_test PRIVATE libtracer)
+    libtracer_test_warnings(fwd_fanout_test)
+    add_test(NAME fwd_fanout COMMAND fwd_fanout_test)
+endif()
 
 # RFC-0009 §D extended to peer departure — subscriber-edge eviction on link teardown:
 # evict_link_edges scoping + RFC-0005 counter unwind, §D.2 slot reuse/index stability,
@@ -1206,156 +1293,194 @@ target_link_libraries(delivery_drops_test PRIVATE libtracer)
 libtracer_test_warnings(delivery_drops_test)
 add_test(NAME delivery_drops COMMAND delivery_drops_test)
 
-add_executable(edge_eviction_test edge_eviction_test.cpp)
-target_link_libraries(edge_eviction_test PRIVATE libtracer)
-libtracer_test_warnings(edge_eviction_test)
-add_test(NAME edge_eviction COMMAND edge_eviction_test)
+if(LIBTRACER_NET_PLANE)
+    add_executable(edge_eviction_test edge_eviction_test.cpp)
+    target_link_libraries(edge_eviction_test PRIVATE libtracer)
+    libtracer_test_warnings(edge_eviction_test)
+    add_test(NAME edge_eviction COMMAND edge_eviction_test)
+endif()
 
-# ADR-0053 ④b — the FWD forward hop over a MULTI-LINK rope, without flattening: an oracle
-# equality that every adversarial split routes byte-identically to the contiguous path,
-# plus the terminus flatten fallback.
-add_executable(fwd_terminus_reject_test fwd_terminus_reject_test.cpp)
-target_link_libraries(fwd_terminus_reject_test PRIVATE libtracer)
-libtracer_test_warnings(fwd_terminus_reject_test)
-add_test(NAME fwd_terminus_reject COMMAND fwd_terminus_reject_test)
+if(LIBTRACER_NET_PLANE)
+    # ADR-0053 ④b — the FWD forward hop over a MULTI-LINK rope, without flattening: an oracle
+    # equality that every adversarial split routes byte-identically to the contiguous path,
+    # plus the terminus flatten fallback.
+    add_executable(fwd_terminus_reject_test fwd_terminus_reject_test.cpp)
+    target_link_libraries(fwd_terminus_reject_test PRIVATE libtracer)
+    libtracer_test_warnings(fwd_terminus_reject_test)
+    add_test(NAME fwd_terminus_reject COMMAND fwd_terminus_reject_test)
+endif()
 
-add_executable(fwd_malformed_control_test fwd_malformed_control_test.cpp)
-target_link_libraries(fwd_malformed_control_test PRIVATE libtracer)
-libtracer_test_warnings(fwd_malformed_control_test)
-add_test(NAME fwd_malformed_control COMMAND fwd_malformed_control_test)
+if(LIBTRACER_NET_PLANE)
+    add_executable(fwd_malformed_control_test fwd_malformed_control_test.cpp)
+    target_link_libraries(fwd_malformed_control_test PRIVATE libtracer)
+    libtracer_test_warnings(fwd_malformed_control_test)
+    add_test(NAME fwd_malformed_control COMMAND fwd_malformed_control_test)
+endif()
 
-# #730 — the router's flatten seam: every materialize() draws from the injected
-# mem_backend_t, and a refused flatten is answered by value (never stored empty).
-add_executable(fwd_flatten_backend_test fwd_flatten_backend_test.cpp)
-target_link_libraries(fwd_flatten_backend_test PRIVATE libtracer)
-libtracer_test_warnings(fwd_flatten_backend_test)
-add_test(NAME fwd_flatten_backend COMMAND fwd_flatten_backend_test)
+if(LIBTRACER_NET_PLANE)
+    # #730 — the router's flatten seam: every materialize() draws from the injected
+    # mem_backend_t, and a refused flatten is answered by value (never stored empty).
+    add_executable(fwd_flatten_backend_test fwd_flatten_backend_test.cpp)
+    target_link_libraries(fwd_flatten_backend_test PRIVATE libtracer)
+    libtracer_test_warnings(fwd_flatten_backend_test)
+    add_test(NAME fwd_flatten_backend COMMAND fwd_flatten_backend_test)
+endif()
 
-# #766 — the TERMINUS half of that seam: the rope-tier flattens one call below
-# resolve_terminus_rope draw from the same injection, and a refusal is answered by
-# value (drop, or an addressed BACKPRESSURE) instead of read as a short span.
-add_executable(terminus_flatten_backend_test terminus_flatten_backend_test.cpp)
-target_link_libraries(terminus_flatten_backend_test PRIVATE libtracer)
-libtracer_test_warnings(terminus_flatten_backend_test)
-add_test(NAME terminus_flatten_backend COMMAND terminus_flatten_backend_test)
+if(LIBTRACER_NET_PLANE)
+    # #766 — the TERMINUS half of that seam: the rope-tier flattens one call below
+    # resolve_terminus_rope draw from the same injection, and a refusal is answered by
+    # value (drop, or an addressed BACKPRESSURE) instead of read as a short span.
+    add_executable(terminus_flatten_backend_test terminus_flatten_backend_test.cpp)
+    target_link_libraries(terminus_flatten_backend_test PRIVATE libtracer)
+    libtracer_test_warnings(terminus_flatten_backend_test)
+    add_test(NAME terminus_flatten_backend COMMAND terminus_flatten_backend_test)
+endif()
 
-# #795 — the terminus reply's EGRESS-construction seam (ADR-0074): the FWD{REPLY}
-# head and the RFC-0024 mint draw from the injected `egress` backend, not the global
-# heap, and a refusal degrades by value (drop, or an addressed BACKPRESSURE).
-add_executable(terminus_egress_backend_test terminus_egress_backend_test.cpp)
-target_link_libraries(terminus_egress_backend_test PRIVATE libtracer)
-libtracer_test_warnings(terminus_egress_backend_test)
-add_test(NAME terminus_egress_backend COMMAND terminus_egress_backend_test)
+if(LIBTRACER_NET_PLANE)
+    # #795 — the terminus reply's EGRESS-construction seam (ADR-0074): the FWD{REPLY}
+    # head and the RFC-0024 mint draw from the injected `egress` backend, not the global
+    # heap, and a refusal degrades by value (drop, or an addressed BACKPRESSURE).
+    add_executable(terminus_egress_backend_test terminus_egress_backend_test.cpp)
+    target_link_libraries(terminus_egress_backend_test PRIVATE libtracer)
+    libtracer_test_warnings(terminus_egress_backend_test)
+    add_test(NAME terminus_egress_backend COMMAND terminus_egress_backend_test)
+endif()
 
-add_executable(fwd_rope_forward_test fwd_rope_forward_test.cpp)
-target_link_libraries(fwd_rope_forward_test PRIVATE libtracer)
-libtracer_test_warnings(fwd_rope_forward_test)
-add_test(NAME fwd_rope_forward COMMAND fwd_rope_forward_test)
+if(LIBTRACER_NET_PLANE)
+    add_executable(fwd_rope_forward_test fwd_rope_forward_test.cpp)
+    target_link_libraries(fwd_rope_forward_test PRIVATE libtracer)
+    libtracer_test_warnings(fwd_rope_forward_test)
+    add_test(NAME fwd_rope_forward COMMAND fwd_rope_forward_test)
+endif()
 
-# #83 Stage-1 — transport/connection as a / vertex (shell over the live fwd path).
-add_executable(transport_vertex_test transport_vertex_test.cpp)
-target_link_libraries(transport_vertex_test PRIVATE libtracer)
-libtracer_test_warnings(transport_vertex_test)
-add_test(NAME transport_vertex COMMAND transport_vertex_test)
+if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_UDP AND LIBTRACER_TRANSPORT_WS)
+    # #83 Stage-1 — transport/connection as a / vertex (shell over the live fwd path).
+    add_executable(transport_vertex_test transport_vertex_test.cpp)
+    target_link_libraries(transport_vertex_test PRIVATE libtracer)
+    libtracer_test_warnings(transport_vertex_test)
+    add_test(NAME transport_vertex COMMAND transport_vertex_test)
+endif()
 
 
-# M5 — UDP transport harness (raw frame + two-node end-to-end over localhost UDP).
-add_executable(udp_test udp_test.cpp)
-target_link_libraries(udp_test PRIVATE libtracer)
-libtracer_test_warnings(udp_test)
-target_compile_definitions(udp_test PRIVATE
-    LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
-add_test(NAME udp COMMAND udp_test)
+if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_UDP)
+    # M5 — UDP transport harness (raw frame + two-node end-to-end over localhost UDP).
+    add_executable(udp_test udp_test.cpp)
+    target_link_libraries(udp_test PRIVATE libtracer)
+    libtracer_test_warnings(udp_test)
+    target_compile_definitions(udp_test PRIVATE
+        LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
+    add_test(NAME udp COMMAND udp_test)
+endif()
 
-# M6 — TCP stream transport harness (length-prefix framing: split/coalesced writes,
-# oversize-prefix rejection, ADR-0042 owning delivery + backpressure drain, two-node
-# FWD end-to-end, and a config-created `kind=tcp` connection).
-add_executable(tcp_test tcp_test.cpp)
-target_link_libraries(tcp_test PRIVATE libtracer)
-libtracer_test_warnings(tcp_test)
-add_test(NAME tcp COMMAND tcp_test)
+if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_TCP)
+    # M6 — TCP stream transport harness (length-prefix framing: split/coalesced writes,
+    # oversize-prefix rejection, ADR-0042 owning delivery + backpressure drain, two-node
+    # FWD end-to-end, and a config-created `kind=tcp` connection).
+    add_executable(tcp_test tcp_test.cpp)
+    target_link_libraries(tcp_test PRIVATE libtracer)
+    libtracer_test_warnings(tcp_test)
+    add_test(NAME tcp COMMAND tcp_test)
+endif()
 
-# #838 — the host twin of #835: a stream send into a peer that stopped reading is BOUNDED
-# (the write mutex is held across it, so an unbounded one froze every sender on the link),
-# the shed frame is counted, and a peer that keeps stalling — or half-takes one record — is
-# closed with attribution instead of blocked on forever. The helper-level arms run over a
-# socketpair whose buffers are full; the last arm drives a real tcp_transport_t against a
-# peer that never reads, which HANGS on the pre-fix code.
-add_executable(send_stall_test send_stall_test.cpp)
-target_link_libraries(send_stall_test PRIVATE libtracer)
-libtracer_test_warnings(send_stall_test)
-add_test(NAME send_stall COMMAND send_stall_test)
-set_tests_properties(send_stall PROPERTIES TIMEOUT 60)
+if(LIBTRACER_TRANSPORT_TCP)
+    # #838 — the host twin of #835: a stream send into a peer that stopped reading is BOUNDED
+    # (the write mutex is held across it, so an unbounded one froze every sender on the link),
+    # the shed frame is counted, and a peer that keeps stalling — or half-takes one record — is
+    # closed with attribution instead of blocked on forever. The helper-level arms run over a
+    # socketpair whose buffers are full; the last arm drives a real tcp_transport_t against a
+    # peer that never reads, which HANGS on the pre-fix code.
+    add_executable(send_stall_test send_stall_test.cpp)
+    target_link_libraries(send_stall_test PRIVATE libtracer)
+    libtracer_test_warnings(send_stall_test)
+    add_test(NAME send_stall COMMAND send_stall_test)
+    set_tests_properties(send_stall PROPERTIES TIMEOUT 60)
+endif()
 
-# #903 — the stream_endpoint_t full-write helpers under a REAL signal storm: a
-# socketpair with a small SO_SNDBUF, a deliberately slow reader, and SIGUSR1
-# (no SA_RESTART) fired at the writer thread, so a blocked send returns EINTR
-# mid-frame. Both write_all and write_all_iov must resume, not truncate.
-add_executable(write_all_eintr_test write_all_eintr_test.cpp)
-target_link_libraries(write_all_eintr_test PRIVATE libtracer)
-libtracer_test_warnings(write_all_eintr_test)
-add_test(NAME write_all_eintr COMMAND write_all_eintr_test)
+if(LIBTRACER_ANY_SOCKET_TRANSPORT)
+    # #903 — the stream_endpoint_t full-write helpers under a REAL signal storm: a
+    # socketpair with a small SO_SNDBUF, a deliberately slow reader, and SIGUSR1
+    # (no SA_RESTART) fired at the writer thread, so a blocked send returns EINTR
+    # mid-frame. Both write_all and write_all_iov must resume, not truncate.
+    add_executable(write_all_eintr_test write_all_eintr_test.cpp)
+    target_link_libraries(write_all_eintr_test PRIVATE libtracer)
+    libtracer_test_warnings(write_all_eintr_test)
+    add_test(NAME write_all_eintr COMMAND write_all_eintr_test)
+endif()
 
-# #948 — the write-fault classification: a malformed send/sendmsg call (EOPNOTSUPP,
-# EINVAL) is OUR defect, not a dead socket, so it must be re-attempted and counted
-# rather than swallowed as a disconnect. Driven through the
-# tr::detail::write_fault_inject_hook seam, since a host kernel emits none of those
-# errnos here — a real-socket-only test would classify nothing.
-add_executable(write_fault_class_test write_fault_class_test.cpp)
-target_link_libraries(write_fault_class_test PRIVATE libtracer)
-libtracer_test_warnings(write_fault_class_test)
-add_test(NAME write_fault_class COMMAND write_fault_class_test)
+if(LIBTRACER_ANY_SOCKET_TRANSPORT)
+    # #948 — the write-fault classification: a malformed send/sendmsg call (EOPNOTSUPP,
+    # EINVAL) is OUR defect, not a dead socket, so it must be re-attempted and counted
+    # rather than swallowed as a disconnect. Driven through the
+    # tr::detail::write_fault_inject_hook seam, since a host kernel emits none of those
+    # errnos here — a real-socket-only test would classify nothing.
+    add_executable(write_fault_class_test write_fault_class_test.cpp)
+    target_link_libraries(write_fault_class_test PRIVATE libtracer)
+    libtracer_test_warnings(write_fault_class_test)
+    add_test(NAME write_fault_class COMMAND write_fault_class_test)
+endif()
 
-# #54 — transport_ws server socket layer (TCP accept + RFC6455 handshake + transport_t).
-add_executable(ws_transport_test ws_transport_test.cpp)
-target_link_libraries(ws_transport_test PRIVATE libtracer)
-libtracer_test_warnings(ws_transport_test)
-add_test(NAME ws_transport COMMAND ws_transport_test)
+if(LIBTRACER_TRANSPORT_WS)
+    # #54 — transport_ws server socket layer (TCP accept + RFC6455 handshake + transport_t).
+    add_executable(ws_transport_test ws_transport_test.cpp)
+    target_link_libraries(ws_transport_test PRIVATE libtracer)
+    libtracer_test_warnings(ws_transport_test)
+    add_test(NAME ws_transport COMMAND ws_transport_test)
+endif()
 
-# #872 — the WS DATA path is bounded by the injected (backend, max_frame) seam: an over-cap
-# declared length is refused off the frame HEADER (measured against the process peak RSS, not
-# inferred), fragments cannot sum past the cap, and backend exhaustion is counted backpressure.
-add_executable(ws_rx_bound_test ws_rx_bound_test.cpp)
-target_link_libraries(ws_rx_bound_test PRIVATE libtracer)
-libtracer_test_warnings(ws_rx_bound_test)
-add_test(NAME ws_rx_bound COMMAND ws_rx_bound_test)
+if(LIBTRACER_TRANSPORT_WS)
+    # #872 — the WS DATA path is bounded by the injected (backend, max_frame) seam: an over-cap
+    # declared length is refused off the frame HEADER (measured against the process peak RSS, not
+    # inferred), fragments cannot sum past the cap, and backend exhaustion is counted backpressure.
+    add_executable(ws_rx_bound_test ws_rx_bound_test.cpp)
+    target_link_libraries(ws_rx_bound_test PRIVATE libtracer)
+    libtracer_test_warnings(ws_rx_bound_test)
+    add_test(NAME ws_rx_bound COMMAND ws_rx_bound_test)
+endif()
 
-# transport_t seam conformance — ONE parameterized contract (send/receive, byte-identity,
-# scatter-gather, bidirectional, multi-frame, ADR-0042 owning view) over every
-# point-to-point adapter: in-process loopback + real localhost udp / tcp / ws.
-add_executable(transport_conformance_test transport_conformance_test.cpp)
-target_link_libraries(transport_conformance_test PRIVATE libtracer)
-libtracer_test_warnings(transport_conformance_test)
-add_test(NAME transport_conformance COMMAND transport_conformance_test)
+if(LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_UDP AND LIBTRACER_TRANSPORT_WS)
+    # transport_t seam conformance — ONE parameterized contract (send/receive, byte-identity,
+    # scatter-gather, bidirectional, multi-frame, ADR-0042 owning view) over every
+    # point-to-point adapter: in-process loopback + real localhost udp / tcp / ws.
+    add_executable(transport_conformance_test transport_conformance_test.cpp)
+    target_link_libraries(transport_conformance_test PRIVATE libtracer)
+    libtracer_test_warnings(transport_conformance_test)
+    add_test(NAME transport_conformance COMMAND transport_conformance_test)
+endif()
 
-# #54 (interop) — standalone transport_ws_server harness driven by the TypeScript
-# transport-ws interop test (a real TS TransportWs client over a live socket).
-# Deliberately NOT an add_test(): it is a helper binary the TS test spawns (see
-# bindings/typescript/packages/transport-ws/test/interop.test.mjs and the
-# ws-interop CI job), so it must not run as part of the C++ ctest suite.
-add_executable(ws_interop_server ws_interop_server.cpp)
-target_link_libraries(ws_interop_server PRIVATE libtracer)
-libtracer_test_warnings(ws_interop_server)
+if(LIBTRACER_TRANSPORT_WS)
+    # #54 (interop) — standalone transport_ws_server harness driven by the TypeScript
+    # transport-ws interop test (a real TS TransportWs client over a live socket).
+    # Deliberately NOT an add_test(): it is a helper binary the TS test spawns (see
+    # bindings/typescript/packages/transport-ws/test/interop.test.mjs and the
+    # ws-interop CI job), so it must not run as part of the C++ ctest suite.
+    add_executable(ws_interop_server ws_interop_server.cpp)
+    target_link_libraries(ws_interop_server PRIVATE libtracer)
+    libtracer_test_warnings(ws_interop_server)
+endif()
 
-# #56 / RFC-0004 (interop) — standalone FWD-serving node harness driven by the
-# TypeScript client SDK interop test (the web-UI<->device consumer proof). A
-# graph_t seeded with /sensor/temp behind a fwd_router_t + op_resolver_t, served
-# over a live transport_ws_server. Like ws_interop_server it is a helper binary
-# the TS test spawns, NOT an add_test() (it would otherwise block on its deadline).
-add_executable(fwd_node_server fwd_node_server.cpp)
-target_link_libraries(fwd_node_server PRIVATE libtracer)
-libtracer_test_warnings(fwd_node_server)
+if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_WS)
+    # #56 / RFC-0004 (interop) — standalone FWD-serving node harness driven by the
+    # TypeScript client SDK interop test (the web-UI<->device consumer proof). A
+    # graph_t seeded with /sensor/temp behind a fwd_router_t + op_resolver_t, served
+    # over a live transport_ws_server. Like ws_interop_server it is a helper binary
+    # the TS test spawns, NOT an add_test() (it would otherwise block on its deadline).
+    add_executable(fwd_node_server fwd_node_server.cpp)
+    target_link_libraries(fwd_node_server PRIVATE libtracer)
+    libtracer_test_warnings(fwd_node_server)
+endif()
 
-# #408 — one node of the containerized decentralized mesh testbed: a real host
-# node (graph_t + fwd_router_t + transport_vertex_t with the built-in socket
-# factories) that creates only its own LISTENERS in band and waits, while the TS
-# driver DIALS every inter-node link by writing a SPEC into its /net:children[]
-# remotely (tests/testbed/ + the mesh-testbed CI job). Like the two helpers above
-# it is a binary the driver spawns via docker compose, NOT an add_test() — it
-# would otherwise block the ctest suite on its deadline.
-add_executable(mesh_node mesh_node.cpp)
-target_link_libraries(mesh_node PRIVATE libtracer)
-libtracer_test_warnings(mesh_node)
+if(LIBTRACER_NET_PLANE)
+    # #408 — one node of the containerized decentralized mesh testbed: a real host
+    # node (graph_t + fwd_router_t + transport_vertex_t with the built-in socket
+    # factories) that creates only its own LISTENERS in band and waits, while the TS
+    # driver DIALS every inter-node link by writing a SPEC into its /net:children[]
+    # remotely (tests/testbed/ + the mesh-testbed CI job). Like the two helpers above
+    # it is a binary the driver spawns via docker compose, NOT an add_test() — it
+    # would otherwise block the ctest suite on its deadline.
+    add_executable(mesh_node mesh_node.cpp)
+    target_link_libraries(mesh_node PRIVATE libtracer)
+    libtracer_test_warnings(mesh_node)
+endif()
 
 # #60 (hardening) — ws frame-decoder differential-fuzz harness. Reads one hex
 # frame per stdin line and prints a canonical decode result (OK/NEED_MORE/ERR),
@@ -1529,10 +1654,12 @@ add_test(NAME spin_pool_guard COMMAND ${CMAKE_COMMAND}
          -DLT_PROBE=${CMAKE_CURRENT_SOURCE_DIR}/spin_pool_guard_probe.cpp
          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/spin_pool_guard.cmake)
 
-# #1223 step 2 — an accepted slot_server_t session's identity anchor: a real
-# transport_tcp_server, real dialled sockets, and the two hazards the shape had to clear
-# (unaddressable below the mount; :children[] untouched). Real threads ⇒ built under TSan.
-add_executable(session_anchor_test session_anchor_test.cpp)
-target_link_libraries(session_anchor_test PRIVATE libtracer)
-libtracer_test_warnings(session_anchor_test)
-add_test(NAME session_anchor COMMAND session_anchor_test)
+if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_TCP)
+    # #1223 step 2 — an accepted slot_server_t session's identity anchor: a real
+    # transport_tcp_server, real dialled sockets, and the two hazards the shape had to clear
+    # (unaddressable below the mount; :children[] untouched). Real threads ⇒ built under TSan.
+    add_executable(session_anchor_test session_anchor_test.cpp)
+    target_link_libraries(session_anchor_test PRIVATE libtracer)
+    libtracer_test_warnings(session_anchor_test)
+    add_test(NAME session_anchor COMMAND session_anchor_test)
+endif()

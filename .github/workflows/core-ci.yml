@@ -61,6 +61,26 @@ jobs:
           cmake --build core/build -j "$(nproc)"
           ctest --test-dir core/build --output-on-failure
 
+  # MINIMAL MODULE SET (#1293). Every other leg here configures with the module options at
+  # their defaults (all ON), so nothing in CI ever linked the closed module set ADR-0047
+  # promises: the L0/L1 substrate + wire codec + graph runtime, with the net/routing plane
+  # and every transport OFF. That is the configuration an MCU consumer selects, and it built
+  # the LIBRARY fine while its TESTS did not link at all — the test targets were
+  # unconditional while the library sources were gated. This leg is the evidence: same
+  # sources, the minimal option set, BUILD_TESTING=ON, and the reduced ctest suite run.
+  build-test-minimal-set:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure + build (minimal module set) + ctest
+        run: |
+          cmake -S core -B core/build-minimal -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DLIBTRACER_NET_PLANE=OFF \
+            -DLIBTRACER_TRANSPORT_TCP=OFF -DLIBTRACER_TRANSPORT_UDP=OFF \
+            -DLIBTRACER_TRANSPORT_WS=OFF -DLIBTRACER_TRANSPORT_CAN=OFF
+          cmake --build core/build-minimal -j "$(nproc)"
+          ctest --test-dir core/build-minimal --output-on-failure
+
   # WEAKLY-ORDERED host gate (#1140). Every other leg here runs x86-64, whose TSO model
   # hides an entire class of defect: a seq_cst store lowers to a locked `xchg`, so a LATER
   # RELAXED load of zero still cannot observe the pre-store world. Every acquire/release and
