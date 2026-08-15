@@ -16,6 +16,26 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`graph_t::set_vertex_ceiling()` / `vertex_ceiling()` / `vertex_ceiling_refusals()` — vertex
+  creation is now CHARGED against the vertex-slot census**
+  ([#1314](https://github.com/avatarsd-llc/libtracer/issues/1314)). RFC-0005 §D branch-write
+  decomposition created its landing vertices with no count bound: each site was *governed* (it
+  passed its CREATE and WRITE gates) but *uncounted*, so an authenticated writer grew the node's
+  vertex population by writing more and writing wider, with no refusal short of allocation
+  failure. That is the peer/writer-multiplied allocation class
+  [ADR-0079](../docs/adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md) fences
+  elsewhere — a per-call bound a caller can multiply is not a node bound. The census
+  (`vertex_slot_count()`, RFC-0024 §6.4) already counted every `vertex_t` allocation; it now also
+  *charges* one, in the single descent every creation door funnels through — local registration,
+  the write-create `mkdir -p`, and every branch-write landing site. Past the ceiling a creation
+  answers `BACKPRESSURE` (the injected-store exhaustion status, so no new refusal vocabulary) and
+  the refusal is tallied — #838's count-then-act shape rather than a second bespoke counter.
+  **Policy stays with the deployer** per ADR-0079 §Decision 4: the default is
+  `graph_t::kNoVertexCeiling`, so an un-sized node behaves exactly as before and the library fixes
+  no synthetic limit. The ceiling bounds ALLOCATIONS, not live occupancy — the census is
+  append-only because retirement revives in place — and session identity anchors are not charged,
+  being already bounded by the listener's `max_peers` accept policy.
+
 - **`net::route_handle_t::copy_local_route()` — the warm COMPACT delivery observation no longer
   re-pays the owning lookup** ([#917](https://github.com/avatarsd-llc/libtracer/issues/917)).
   A COMPACT that resolves to a local terminus took the allocation-free

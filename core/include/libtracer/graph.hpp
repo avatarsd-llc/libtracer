@@ -579,6 +579,60 @@ class graph_t {
      */
     [[nodiscard]] std::size_t vertex_slot_count() const noexcept;
 
+    /** @brief @ref set_vertex_ceiling's "no ceiling" value, and its default. */
+    static constexpr std::size_t kNoVertexCeiling = static_cast<std::size_t>(-1);
+
+    /**
+     * @brief Cap the node's vertex population at @p max_vertices allocations, charged
+     *        against the @ref vertex_slot_count census (#1314).
+     *
+     * The census already counts every `vertex_t` this graph ever allocated — including the
+     * placeholders a descent materializes and the landing sites an RFC-0005 §D branch write
+     * decomposes into. What it did not do was *charge* anything: every creation door
+     * (registration, the write-create `mkdir -p`, branch-write decomposition) allocated until
+     * the allocator itself refused. A branch writer that is already resolved and already
+     * WRITE-gated is therefore governed — every landing site passes its CREATE/WRITE gate —
+     * but its landing sites cost nothing, so "more writes, wider writes" is an unbounded
+     * vertex population multiplied by a peer's choice. That is the peer/writer-multiplied
+     * allocation class
+     * [ADR-0079](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md)
+     * fences elsewhere: a per-call bound a caller can multiply is not a node bound.
+     *
+     * This is the node bound, and it is the #838 shape — **count, then act** — over the census
+     * that already exists rather than a second, bespoke counter. Past the ceiling every
+     * creation door answers `BACKPRESSURE`, the same exhaustion status an injected
+     * @ref tr::mem::block_source_t answers with, so a caller that already handles a refusing
+     * store needs no new vocabulary. Refusals are counted (@ref vertex_ceiling_refusals) so a
+     * node can see the bound bite instead of inferring it from a failed write.
+     *
+     * **Policy stays with the deployer**, per ADR-0079 §Decision 4: the default is
+     * @ref kNoVertexCeiling, so an un-sized node behaves exactly as before and the library
+     * fixes no synthetic limit. When ADR-0079's stage-2 graph placement store lands and
+     * `vertex_t` itself draws from the injected `ctl` seam, the store's size becomes the
+     * natural bound and this ceiling becomes the coarse-grained backstop rather than the
+     * primary one.
+     *
+     * @note The census is append-only (retirement revives in place, it does not free), so the
+     *       ceiling is a high-water mark on ALLOCATIONS, not a live occupancy that a retire
+     *       gives back. That matches what it is bounding — memory a peer made this node
+     *       commit — and it is why no release path is needed.
+     * @note A refusal mid-descent leaves the levels already created in place, exactly like an
+     *       ACL denial partway down a write-create chain ("created-but-empty intermediates may
+     *       persist past a later denial", RFC-0005 §ACL). The bound holds regardless: those
+     *       levels are themselves charged.
+     * @note Session identity anchors are NOT charged here. They take a census slot but are
+     *       created through @ref register_session_anchor, which is already bounded by the
+     *       listener's `max_peers` accept policy; charging them twice would let graph growth
+     *       refuse a session admission the accept policy had already granted.
+     */
+    void set_vertex_ceiling(std::size_t max_vertices) noexcept;
+
+    /** @brief The ceiling in force (@ref kNoVertexCeiling when unset). */
+    [[nodiscard]] std::size_t vertex_ceiling() const noexcept;
+
+    /** @brief How many creations the ceiling has refused since construction (monotonic). */
+    [[nodiscard]] std::uint64_t vertex_ceiling_refusals() const noexcept;
+
     /**
      * @brief Register — or REVIVE — a session **identity anchor**: a vertex that exists to
      *        be REFERENCED and never to be ADDRESSED (#1223 step 2).
@@ -2114,6 +2168,17 @@ class graph_t {
      *         can see and nothing gains from.
      */
     mem::block_source_t* ctl_ = &mem::heap_source();
+
+    /** @brief The @ref set_vertex_ceiling bound, charged against `vertex_slots_.size()` (#1314).
+     *
+     * Atomic rather than map-lock state: the charge is read on the creation path, which already
+     * holds the unique map lock, but the deployer sizes and observes it from anywhere. Declared
+     * beside `ctl_` for the reason that member documents — a cold word inserted mid-object shifts
+     * `root_` and every hot member after it. */
+    std::atomic<std::size_t> vertex_ceiling_{kNoVertexCeiling};
+    /** @brief Creations the ceiling refused — the evidence the bound bit (#838's count-then-act).
+     */
+    mutable std::atomic<std::uint64_t> vertex_ceiling_refusals_{0};
 
     // ---- #1071: the per-link departure index. LAST, beside `ctl_`, and for the same
     // reason that member documents: no hot path reads these, so declaring them here

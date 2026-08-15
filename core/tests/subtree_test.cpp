@@ -375,6 +375,53 @@ void test_branch_write_acl_admission() {
           "nothing landed anywhere (admission is atomic)");
 }
 
+/**
+ * @brief A branch write's landing sites are CHARGED against the vertex-slot census (#1314).
+ *
+ * Decomposition below an already-resolved, already-WRITE-gated `dst` creates its landing
+ * vertices through the same `mkdir -p` door as any other write-create. They were governed
+ * (each passes CREATE/WRITE) but uncounted: nothing charged them, so "write more, write wider"
+ * grew the node's vertex population without a bound. With a ceiling in force the creation
+ * answers BACKPRESSURE and the refusal is tallied.
+ */
+void test_branch_write_vertex_ceiling() {
+    std::printf("branch-write decomposition is charged against the vertex census (#1314):\n");
+    graph_t g;
+    check(g.vertex_ceiling() == graph_t::kNoVertexCeiling, "default is no ceiling");
+    check(g.vertex_ceiling_refusals() == 0, "no refusals on a fresh graph");
+
+    const vertex_handle_t s = g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
+    // Pin the ceiling AT the current population: every further creation must be refused,
+    // and the already-resolved /s must still take a plain write.
+    const std::size_t at_rest = g.vertex_slot_count();
+    g.set_vertex_ceiling(at_rest);
+    check(g.vertex_ceiling() == at_rest, "the ceiling reads back");
+
+    check(g.write(s, make_value({0x01, 0, 1, 0, 7})).has_value(),
+          "a write to the EXISTING /s is unaffected — no creation, no charge");
+
+    // The decomposing write: /s/t and /s/u are landing sites that do not exist yet.
+    const std::vector<std::byte> branch =
+        point_tlv("s", cat({point_tlv("t", value_tlv({0x11})), point_tlv("u", value_tlv({0x22}))}));
+    const auto refused = g.write(s, make_value(branch));
+    check(!refused.has_value() && refused.error() == status_t::BACKPRESSURE,
+          "a landing site past the ceiling refuses the branch with BACKPRESSURE");
+    check(g.vertex_ceiling_refusals() > 0, "the refusal is counted");
+    check(g.vertex_slot_count() == at_rest, "the census did not grow — nothing was allocated");
+    check(!g.find(path_t{"/s/t"}.key()).has_value(), "no landing vertex materialized");
+
+    // The plain write-create door is charged by the same check — it is one door, not two.
+    const auto created = g.ensure_vertex(path_t{"/s/v"}.key());
+    check(!created.has_value() && created.error() == status_t::BACKPRESSURE,
+          "the write-create door is charged against the same census");
+
+    // Lifting the ceiling lets the same branch land: the bound is the deployer's, not a
+    // library-fixed limit.
+    g.set_vertex_ceiling(graph_t::kNoVertexCeiling);
+    check(g.write(s, make_value(branch)).has_value(), "the branch lands once the ceiling lifts");
+    check(g.vertex_slot_count() > at_rest, "and the landing sites now show in the census");
+}
+
 }  // namespace
 
 /**
@@ -433,6 +480,7 @@ int main() {
     test_write_creates();
     test_write_creates_acl_gate();
     test_branch_write_acl_admission();
+    test_branch_write_vertex_ceiling();
     test_demand_driven_predicate();
     return tr::testing::summary("subtree");
 }

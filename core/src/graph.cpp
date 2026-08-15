@@ -440,6 +440,18 @@ result_t<vertex_handle_t> graph_t::register_vertex_key_span(std::span<const std:
         const std::span<const std::byte> record{key.data() + i, e - i};
         vertex_t* child = node->child_by_record(record);
         if (child == nullptr) {
+            // Charge the creation against the vertex-slot census BEFORE allocating (#1314).
+            // This is the one door every creation goes through — a local registration, the
+            // write-create `mkdir -p`, and every landing site an RFC-0005 §D branch write
+            // decomposes into — so counting here is what makes decomposition's governed
+            // vertices COUNTED vertices. Count, then act (#838's shape): past the ceiling the
+            // creation answers BACKPRESSURE, the injected-store exhaustion status, and the
+            // refusal is tallied so the bound is observable rather than inferred. Default is
+            // kNoVertexCeiling, so an un-sized node is byte-for-byte unchanged.
+            if (vertex_slots_.size() >= vertex_ceiling_.load(std::memory_order_relaxed)) {
+                vertex_ceiling_refusals_.fetch_add(1, std::memory_order_relaxed);
+                return std::unexpected(status_t::BACKPRESSURE);
+            }
             // A placeholder is a plain STORED_VALUE with no handlers, so `adopt_identity`'s
             // early return fires and it allocates NO extension block.
             auto fresh =
@@ -513,6 +525,18 @@ std::uint32_t graph_t::retire_generation(vertex_handle_t vh) const noexcept {
 std::size_t graph_t::vertex_slot_count() const noexcept {
     const std::shared_lock lock(map_mutex_);
     return vertex_slots_.size();
+}
+
+void graph_t::set_vertex_ceiling(std::size_t max_vertices) noexcept {
+    vertex_ceiling_.store(max_vertices, std::memory_order_relaxed);
+}
+
+std::size_t graph_t::vertex_ceiling() const noexcept {
+    return vertex_ceiling_.load(std::memory_order_relaxed);
+}
+
+std::uint64_t graph_t::vertex_ceiling_refusals() const noexcept {
+    return vertex_ceiling_refusals_.load(std::memory_order_relaxed);
 }
 
 /**
