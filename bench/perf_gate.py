@@ -119,10 +119,9 @@ DEFAULT_TIER = "advisory"
 # Canonical points: (mode, size, fanout, endpoints). RESULT cols (collate.py):
 # RESULT sys mode size fan ep pub_s deliv_s mb_s p50ns p99ns meanns
 # One point per GATED family, so a regression on any of these legs is caught —
-# not just the 1:1 write. This is NOT the whole dispatch surface: the path-target
-# legs (inproc-target-stored / inproc-target-handler) are charted and published but
-# ungated, as are inproc-deliver, the eptype-* sweep and the -batch twins. Do not
-# restate this list as "anywhere on the dispatch surface" — docs/methodology.md did,
+# not just the 1:1 write. This is NOT the whole dispatch surface: inproc-deliver,
+# the eptype-* sweep and the -batch twins are charted and published but ungated. Do
+# not restate this list as "anywhere on the dispatch surface" — docs/methodology.md did,
 # and that sentence reaches the public performance page (#1041):
 #   inproc / inproc-borrow  — the canonical zero-copy / loaned 1:1 writes
 #   fan-out 1024            — the subscriber fan-out loop
@@ -130,6 +129,34 @@ DEFAULT_TIER = "advisory"
 #   mixed                   — the composed realistic topology
 #   fold-b4                 — the L0 inline-fold codec tier (batch-amortized)
 #   lkv-store-{heap,pool}   — the L1 rope->contiguous copy (`rope_t::materialize`)
+#   inproc-target-{handler,stored} @ fan 8 — the path-target dispatch legs
+#
+# The two `inproc-target-*` legs are here because of #1077, and fan 8 rather than any
+# other width for two measured reasons. That issue was opened on a ~+5.5% step at
+# `inproc-target-handler` fan 8 that no gate could see; the step was later absorbed by
+# ordinary fan-out/store work (#1129, #1174) and HEAD now runs ~11% FASTER than v0.8.0
+# there — but the guard gap it exposed is what kept the issue open, and #1235 is a live
+# instance of the same gap costing a sustained +10.5% / -10.4% step that walked under
+# these thresholds unwatched. Fan 8 is the width to watch because it sits exactly on
+# `vertex_t::kInlineFanout`, the no-heap small-fan-out boundary, so the narrow-fan
+# snapshot path is what it prices; and because the layout control run of 2026-08-14
+# measured it as the most layout-STABLE point of the whole sweep (0.62% spread across
+# three `-falign-functions` placements, against 15% for `fold-b4`), so the false-red
+# risk from code placement here is near zero. BOTH legs are gated: `stored` carries the
+# same shape as `handler`, and it is only readable at all now that `bench/host_guard.py`
+# (#1236) rejects the contaminated windows that once put its own A/A null at -14.7%.
+# Like the `lkv-store-*` pair these cost NO extra wall-clock — `bench_libtracer`'s
+# default sweep already emits both rows at every width in `kFanouts`; the gate simply
+# reads two more keys out of output it was already collecting.
+#
+# These two rows are NOT tick-quantized, unlike `fold-b4`. The p50/mean columns of a
+# fan-8 row time the whole 8-subscriber publish, not one delivery: measured ~640 ns p50 /
+# ~680 ns mean (`handler`) and ~800 / ~1030 (`stored`), against per-DELIVERY costs of
+# ~62-80 ns. Both baselines are far over the 100 ns line at which `LAT_TICK_NS` starts
+# demanding an absolute +25 ns, so all three legs gate at their nominal +15% / +12% /
+# -12% and the ~5-8% class of step this issue was opened on is inside their reach on the
+# mean leg. Do not read the ns figures here as per-delivery numbers; the published
+# charts derive those from deliv/s.
 #
 # The two `lkv-store-*` legs are here because of what happened without them (#1250):
 # reshaping `rope_t::flatten`'s wrapper cost 25-48% on EVERY `materialize` path — branch
@@ -161,6 +188,8 @@ POINTS = [
     ("main", "fold-b4", 512, 1, 1),
     ("main", "lkv-store-heap", 64, 1, 1),
     ("main", "lkv-store-pool", 64, 1, 1),
+    ("main", "inproc-target-handler", 64, 8, 1),
+    ("main", "inproc-target-stored", 64, 8, 1),
     ("compact", "compact-forward", 64, 1, 1),
     ("compact", "compact-terminus", 64, 1, 1),
     ("demux", "fwd-demux-fixed", 79, 1, 1),
