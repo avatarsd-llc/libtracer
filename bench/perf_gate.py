@@ -31,12 +31,19 @@ happens to hold the machine at the time (#763, #464).
 
   ./perf_gate.py --baseline-bench PATH   # PAIRED: interleave PATH (base) vs the candidate
   ./perf_gate.py --pairs N               # interleaved A/B pairs (default 4)
+  ./perf_gate.py --tier blocking         # a breached ratchet stops the job (see TIERS)
+  ./perf_gate.py --tier advisory         # the same comparison, reported, never fails
+  ./perf_gate.py --sample-note "..."     # host_guard's per-sample verdict (see TIERS)
   ./perf_gate.py                         # legacy: run + validate (records baseline on first run)
   ./perf_gate.py --update-baseline       # legacy: accept current numbers as the new baseline
   ./perf_gate.py --bench PATH            # time PATH as the CANDIDATE instead of the build output
   ./perf_gate.py --bench-fwd PATH        # probe PATH for the candidate's per-vertex memory
   ./perf_gate.py --baseline-bench-fwd P  # the baseline binary's per-vertex memory (paired)
   ./perf_gate.py --runs N                # legacy: best-of-N bench executions (default 3)
+
+The comparison this file makes is the same on every machine; what differs is whether a
+breached ratchet is allowed to STOP the job. That is the caller's TIER, declared on the
+command line rather than described in a workflow comment — see `TIERS` below.
 
 Exit 0 = PERF: PASS, 1 = PERF: FAIL (p50 up >15%, mean up >12%, deliveries/s down
 >12%, or per-vertex live bytes up >2%, vs the same-runner baseline, or — with no
@@ -71,6 +78,43 @@ BENCH_BY_KEY = {
     "demux": "bench_forward_demux",
 }
 BASELINE = HERE / "perf_baseline.json"
+
+# `is_contaminated` is host_guard.py's single contamination predicate, and it is IMPORTED
+# rather than re-derived here on purpose: "what counts as a suspect sample" has to be
+# decided in one place, or the tool that writes the flag and the tool that reads it drift
+# apart. host_guard.py sits beside this file, which is on sys.path for both the CLI
+# (script directory) and the tests (they insert it), but say so explicitly so a caller
+# that runs this file from elsewhere fails on the import instead of on the rule.
+sys.path.insert(0, str(HERE))
+from host_guard import is_contaminated  # noqa: E402
+
+# --- VERDICT TIERS (#1251): who a breached ratchet is allowed to stop --------------
+# The two-tier policy used to live in a `perf.yml` comment, which meant the gate could
+# neither obey nor violate it: `perf_gate.py` had no tier concept at all, so "the pinned
+# host blocks, the GitHub runners warn" was a claim about a mechanism that did not exist.
+# It is a flag now, and the workflow DECLARES its tier on the command line.
+#
+#   blocking  — a breached ratchet fails the job. The comparison stops a merge.
+#   advisory  — the SAME comparison, on the same thresholds, printed with the same
+#               numbers; the breach is announced (verdict line + a `::warning::`
+#               annotation) and the process still exits 0.
+#
+# The tier changes NOTHING about how the comparison is made. It is not a second, looser
+# threshold set and it must never become one: an advisory run that quietly measured
+# something weaker than a blocking run would make the two tiers incomparable, and the
+# whole value of the advisory tier is that its output can be read as "this is what the
+# blocking tier would have said here".
+#
+# DEFAULT = advisory, and the reasoning is about the callers rather than about taste.
+# Every CI caller passes `--tier` explicitly (test_perf_gate.py's `WorkflowsDeclareTheirTier`
+# fails the build if one does not), so the default is never what gates a PR — it is what a
+# maintainer gets from `./perf_gate.py` on an unpinned laptop against yesterday's numbers.
+# On that machine a blocking default fails on the machine rather than on the code, and the
+# lesson a reader takes from a red run they cannot reproduce is to stop reading the gate.
+# A forgotten flag therefore under-enforces LOUDLY (the breach is still printed, still
+# annotated, and the workflow lint reds) rather than false-failing quietly.
+TIERS = ("blocking", "advisory")
+DEFAULT_TIER = "advisory"
 
 # Canonical points: (mode, size, fanout, endpoints). RESULT cols (collate.py):
 # RESULT sys mode size fan ep pub_s deliv_s mb_s p50ns p99ns meanns
@@ -726,6 +770,81 @@ def mem_ratchet_legacy(cur: dict, base: dict | None, bench_fwd: pathlib.Path | N
     return []
 
 
+def enforces(tier: str, sample_note: str | None = None) -> tuple[bool, str]:
+    """@brief May THIS run's fails stop the job, and if not, what is the reason?
+
+    Two things can take the teeth out of a comparison, and they are different claims:
+
+      * the caller's tier is `advisory` — this runner is not one whose noise floor the
+        blocking bar was calibrated against, so its verdict is reported, not enforced;
+      * the SAMPLE is flagged. `host_guard.py` brackets the measured run with an A/A
+        null pair and flags the sample when the machine moved underneath it. Such a
+        sample is FLAGGED, never deleted — and the rule that makes flagging worth
+        anything is that a gating consumer stops believing it. A contaminated sample
+        that could still fail a PR would be the guard measuring the host and then
+        billing the code for it.
+
+    Returns (enforced, reason). `reason` is empty when the run enforces.
+    """
+    if tier != "blocking":
+        return False, "this caller's tier is advisory — reported, not enforced"
+    if is_contaminated(sample_note):
+        return False, (f"the sample is FLAGGED contaminated ({sample_note}) — the "
+                       f"blocking tier does not render a verdict on a sample taken "
+                       f"while the machine was moving")
+    return True, ""
+
+
+def render_verdict(fails: list[str], warns: list[str], tier: str,
+                   sample_note: str | None = None) -> int:
+    """@brief Print the verdict under its tier and return the process exit code.
+
+    Same numbers, same lines, same markers in both tiers — `!` for a breached ratchet,
+    `~` for the pre-existing soft-warn list (#792/#464), which is a DIFFERENT mechanism
+    and is untouched by the tier: it is a comparison the gate declines to call a
+    failure at all, in any tier, and it prints under its own marker either way.
+
+    The only thing the tier changes is the verdict line and the exit code, and an
+    unenforced breach is never quiet: it names itself in the verdict line AND raises a
+    `::warning::` annotation, because a downgraded failure that printed nothing would
+    be indistinguishable from a point that never regressed.
+    """
+    enforced, why = enforces(tier, sample_note)
+    if not fails:
+        print(f"PERF: PASS  [tier={tier}]")
+    elif enforced:
+        print("PERF: FAIL  [tier=blocking — this comparison stops the job]")
+    else:
+        print(f"PERF: FAIL (ADVISORY — {why}; this job is NOT failed) [tier={tier}]")
+        print(f"::warning::perf gate: {len(fails)} comparison(s) past the ratchet, "
+              f"reported but not failing this job — {why}")
+    for x in fails:
+        print("  ! " + x)
+    # Warnings print AFTER the verdict and under their own marker, never merged into
+    # the fail list. A downgraded failure that printed nothing would be indistinguishable
+    # from a point that never regressed, which is how a guard turns into a blind spot.
+    for x in warns:
+        print("  ~ " + x)
+    return 1 if (fails and enforced) else 0
+
+
+def _tier(args: list[str]) -> str:
+    """@brief The declared tier, or `DEFAULT_TIER`. An unknown tier REFUSES to run.
+
+    Exit 2 (a wiring error), not a silent fall-back to either tier: falling back to
+    blocking would fail a job on a typo, and falling back to advisory would turn one
+    into a gate that measures and never enforces.
+    """
+    if "--tier" not in args:
+        return DEFAULT_TIER
+    tier = args[args.index("--tier") + 1]
+    if tier not in TIERS:
+        print(f"perf_gate: unknown --tier {tier!r}; expected one of {', '.join(TIERS)}",
+              file=sys.stderr)
+        sys.exit(2)
+    return tier
+
+
 def _opt(args: list[str], name: str, default: pathlib.Path | None) -> pathlib.Path | None:
     """@brief Resolve an optional path-valued flag."""
     return pathlib.Path(args[args.index(name) + 1]).resolve() if name in args else default
@@ -747,6 +866,11 @@ def _siblings(bench: pathlib.Path) -> dict[str, pathlib.Path]:
 
 def main() -> int:
     args = sys.argv[1:]
+    tier = _tier(args)
+    # The A/A-bracket verdict for the sample this run is about, when the caller has one
+    # (`host_guard.py bracket` emits it as a step output). Absent = nothing is known
+    # about the machine, which is the state every GitHub runner is in.
+    sample_note = args[args.index("--sample-note") + 1] if "--sample-note" in args else None
     bench = _opt(args, "--bench", BENCH)
     bench_fwd = _opt(args, "--bench-fwd", BENCH_FWD)
     base_bench = _opt(args, "--baseline-bench", None)
@@ -763,16 +887,14 @@ def main() -> int:
     if base_bench is not None:
         pairs = int(args[args.index("--pairs") + 1]) if "--pairs" in args else PAIRS_DEFAULT
         print(f"Per-loop perf gate (libtracer in-process, INTERLEAVED baseline/candidate, "
+              f"tier {tier}, "
               f"fail: p50 +{(LAT_REGRESS - 1) * 100:.0f}% / "
               f"mean +{(MEAN_REGRESS - 1) * 100:.0f}% / "
               f"deliv -{(1 - TPUT_REGRESS) * 100:.0f}%):")
         fails = gate_paired(cand_bins, base_bins, pairs)
         fails += mem_ratchet(bench_fwd, base_fwd)
         fails += lkv_ratio_gate(bench)  # ADR-0060 same-run ratio (no baseline needed)
-        print("PERF: PASS" if not fails else "PERF: FAIL")
-        for x in fails:
-            print("  ! " + x)
-        return 0 if not fails else 1
+        return render_verdict(fails, [], tier, sample_note)
 
     runs = int(args[args.index("--runs") + 1]) if "--runs" in args else DEFAULT_RUNS
     cur = best_of(cand_bins, runs)
@@ -783,7 +905,8 @@ def main() -> int:
     mem_hdr = (f" / mem +{(MEM_REGRESS - 1) * 100:.0f}% / blocks +0"
                if any(k.startswith("mem:") for k in cur) else "")
     print(f"Per-loop perf gate (libtracer in-process, LEGACY best of {runs} run(s), "
-          f"fail: p50 +{(LAT_REGRESS - 1) * 100:.0f}% / mean +{(MEAN_REGRESS - 1) * 100:.0f}% / "
+          f"tier {tier}, fail: p50 +{(LAT_REGRESS - 1) * 100:.0f}% / "
+          f"mean +{(MEAN_REGRESS - 1) * 100:.0f}% / "
           f"deliv -{(1 - TPUT_REGRESS) * 100:.0f}%{mem_hdr}):")
     fails += mem_ratchet_legacy(cur, base, bench_fwd)
     for k, v in cur.items():
@@ -832,15 +955,7 @@ def main() -> int:
     if base is None or "--update-baseline" in args:
         BASELINE.write_text(json.dumps(cur, indent=2) + "\n")
         print(f"  ({'recorded' if base is None else 'updated'} baseline -> {BASELINE.name})")
-    print("PERF: PASS" if not fails else "PERF: FAIL")
-    for x in fails:
-        print("  ! " + x)
-    # Warnings print AFTER the verdict and under their own marker, never merged into
-    # the fail list. A downgraded failure that printed nothing would be indistinguishable
-    # from a point that never regressed, which is how a guard turns into a blind spot.
-    for x in warns:
-        print("  ~ " + x)
-    return 0 if not fails else 1
+    return render_verdict(fails, warns, tier, sample_note)
 
 
 if __name__ == "__main__":

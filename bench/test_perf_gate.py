@@ -14,6 +14,12 @@ The memory-ratchet cases cover the other defect class the gate has now shown: no
 wrong verdict but an ABSENT one — a probe that could not run, printed nothing, and
 passed (#792).
 
+The TIER cases cover a third: a rule that existed only as prose. The two-tier verdict
+policy lived in a `perf.yml` comment while `perf_gate.py` had no tier concept at all,
+so the policy could be neither obeyed nor violated (#1251). These pin the disposition
+of a fail under each tier, the default when no tier is declared, and the rule that a
+sample `host_guard.py` FLAGGED cannot fail a PR through the blocking tier.
+
     python3 bench/test_perf_gate.py            # or: python3 -m unittest discover -s bench
 """
 from __future__ import annotations
@@ -21,6 +27,7 @@ from __future__ import annotations
 import contextlib
 import io
 import pathlib
+import re
 import sys
 import tempfile
 import unittest
@@ -403,6 +410,174 @@ class PointsAreDocumented(unittest.TestCase):
                         f"{self.GEN}'s instrument registry does not say "
                         f"'{self.WORDS[n]} canonical points' — POINTS now has {n} entries "
                         f"and the published instrument table has rotted (#1041)")
+
+
+class VerdictTier(unittest.TestCase):
+    """@brief #1251: the two-tier policy, as a rule the gate can actually apply.
+
+    Before this the policy was a `perf.yml` comment and `perf_gate.py` had no tier
+    concept, so "the pinned host blocks, the runners warn" described a mechanism that
+    did not exist. What the tier decides is the DISPOSITION of a fail — never how the
+    comparison is made — so every case below feeds the two tiers the SAME fail list.
+    """
+
+    FAILS = ["inproc/64/1/1 p50 pullback: 130ns vs base 100ns (+30%), reproduced in "
+             "4/4 interleaved pairs with disjoint ranges"]
+    # Exactly the shape `host_guard.py stamp` writes into a point's `extra`.
+    FLAGGED = ("box · pinned cpu2 · gcc 15.1.0 · "
+               "CONTAMINATED (A/A bracket 9.4% > 6.0% band)")
+
+    def verdict(self, fails, tier, note=None, warns=()):
+        """@brief (exit_code, stdout) for one rendered verdict."""
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = pg.render_verdict(list(fails), list(warns), tier, note)
+        return rc, buf.getvalue()
+
+    def test_blocking_fails_on_a_breached_ratchet(self):
+        rc, out = self.verdict(self.FAILS, "blocking")
+        self.assertEqual(rc, 1)
+        self.assertIn("PERF: FAIL", out)
+        self.assertIn("tier=blocking", out)
+        self.assertNotIn("ADVISORY", out)
+
+    def test_advisory_does_not_fail_on_the_same_input(self):
+        """The load-bearing pair: identical input, identical numbers, exit 0."""
+        rc, out = self.verdict(self.FAILS, "advisory")
+        self.assertEqual(rc, 0)
+        self.assertIn("PERF: FAIL", out)          # the comparison is still reported ...
+        self.assertIn("ADVISORY", out)            # ... and says why it is not enforced
+        self.assertIn("::warning::", out)         # ... loudly enough to be seen
+
+    def test_the_tier_never_hides_the_numbers(self):
+        """An unenforced breach prints exactly what an enforced one prints."""
+        _, blocking = self.verdict(self.FAILS, "blocking")
+        _, advisory = self.verdict(self.FAILS, "advisory")
+        for line in self.FAILS:
+            self.assertIn("  ! " + line, blocking)
+            self.assertIn("  ! " + line, advisory)
+
+    def test_a_flagged_sample_cannot_fail_the_blocking_tier(self):
+        """host_guard.py FLAGS a suspect sample, never deletes it — and the whole value
+        of flagging is that a gating consumer stops believing it. A contaminated sample
+        that could still red a PR would bill the code for the machine."""
+        rc, out = self.verdict(self.FAILS, "blocking", self.FLAGGED)
+        self.assertEqual(rc, 0)
+        self.assertIn("FLAGGED contaminated", out)
+        self.assertIn("::warning::", out)         # downgraded, never silent
+        self.assertIn("  ! " + self.FAILS[0], out)
+
+    def test_a_clean_sample_note_still_enforces(self):
+        """The ablation for the case above: it is the FLAG that disarms the tier, not
+        the mere presence of a note. A host descriptor with no verdict on it enforces."""
+        rc, _ = self.verdict(self.FAILS, "blocking", "box · pinned cpu2 · gcc 15.1.0")
+        self.assertEqual(rc, 1)
+
+    def test_contamination_is_decided_by_host_guards_own_predicate(self):
+        """One rule, one place. `enforces` imports `is_contaminated` rather than
+        re-deriving the token, so the writer and the reader cannot drift apart."""
+        import host_guard
+        self.assertIs(pg.is_contaminated, host_guard.is_contaminated)
+        self.assertTrue(host_guard.is_contaminated(self.FLAGGED))
+
+    def test_a_passing_run_is_a_pass_in_either_tier(self):
+        for tier in pg.TIERS:
+            with self.subTest(tier=tier):
+                rc, out = self.verdict([], tier)
+                self.assertEqual(rc, 0)
+                self.assertIn("PERF: PASS", out)
+                self.assertIn(f"tier={tier}", out)
+
+    def test_the_soft_warn_list_is_a_different_mechanism_and_survives(self):
+        """`warns` (#792/#464) is a comparison the gate declines to call a failure in
+        ANY tier — measured, reported, never fatal. It is not the tier and the tier
+        must not have absorbed it: it keeps its own `~` marker and never reads as a
+        fail, including in the blocking tier."""
+        warn = ("fold-b4/512/1/1 throughput pullback — NOT FAILED: the same point's "
+                "latency legs contradict it")
+        for tier in pg.TIERS:
+            with self.subTest(tier=tier):
+                rc, out = self.verdict([], tier, warns=[warn])
+                self.assertEqual(rc, 0)
+                self.assertIn("PERF: PASS", out)
+                self.assertIn("  ~ " + warn, out)
+                self.assertNotIn("  ! ", out)
+
+    def test_default_tier_is_advisory(self):
+        """A forgotten flag must under-enforce LOUDLY rather than red a machine the bar
+        was never calibrated against. The workflow lint below is what keeps that safe."""
+        self.assertEqual(pg.DEFAULT_TIER, "advisory")
+        self.assertEqual(pg._tier([]), "advisory")
+        self.assertEqual(pg._tier(["--pairs", "4"]), "advisory")
+
+    def test_a_declared_tier_wins_over_the_default(self):
+        for tier in pg.TIERS:
+            with self.subTest(tier=tier):
+                self.assertEqual(pg._tier(["--tier", tier, "--pairs", "4"]), tier)
+
+    def test_an_unknown_tier_refuses_to_run(self):
+        """Neither fall-back is honest: to blocking would red a job on a typo, to
+        advisory would turn a gate into an instrument that never enforces."""
+        with self.assertRaises(SystemExit) as cm, \
+                contextlib.redirect_stderr(io.StringIO()):
+            pg._tier(["--tier", "warn"])
+        self.assertEqual(cm.exception.code, 2)
+
+
+class WorkflowsDeclareTheirTier(unittest.TestCase):
+    """@brief Every CI invocation of the gate must name its tier on the command line.
+
+    This is what makes an advisory DEFAULT safe. The default exists for a maintainer's
+    laptop; if a workflow ever inherits it, the repo would silently hold a gate that
+    measures and never enforces — the exact failure mode #1251 was filed about, one
+    layer down. So the YAML has to say the word.
+    """
+
+    WORKFLOWS = pathlib.Path(__file__).resolve().parents[1] / ".github" / "workflows"
+    # `python3 …/perf_gate.py`, and never `test_perf_gate.py` — the unit-test step is
+    # not a gate invocation and has no tier to declare.
+    INVOKE = re.compile(r"python3\s+\S*(?<!test_)perf_gate\.py")
+
+    def invocations(self) -> list[tuple[str, str]]:
+        """@brief (workflow name, whole shell command) for each gate invocation.
+
+        Continuation lines are joined, because the tier flag may sit on any of them.
+        """
+        found = []
+        for wf in sorted(self.WORKFLOWS.glob("*.yml")):
+            lines = wf.read_text().splitlines()
+            i = 0
+            while i < len(lines):
+                text = lines[i].strip()
+                if not text.startswith("#") and self.INVOKE.search(text):
+                    j = i
+                    while text.endswith("\\") and j + 1 < len(lines):
+                        j += 1
+                        text = text[:-1] + " " + lines[j].strip()
+                    found.append((wf.name, text))
+                    i = j
+                i += 1
+        return found
+
+    def test_there_is_at_least_one_invocation_to_check(self):
+        """Without this the lint below passes loudest when it has nothing to read —
+        a renamed workflow directory would make it vacuous rather than red."""
+        if not self.WORKFLOWS.is_dir():        # bench/ checked out alone
+            self.skipTest(f"{self.WORKFLOWS} not present")
+        self.assertTrue(self.invocations(), f"no perf_gate.py invocation found under "
+                                            f"{self.WORKFLOWS} — has the lint gone blind?")
+
+    def test_every_invocation_declares_a_valid_tier(self):
+        if not self.WORKFLOWS.is_dir():
+            self.skipTest(f"{self.WORKFLOWS} not present")
+        for name, cmd in self.invocations():
+            with self.subTest(workflow=name):
+                self.assertIn("--tier", cmd,
+                              f"{name} invokes perf_gate.py without --tier, so its "
+                              f"verdict policy is whatever the default happens to be: "
+                              f"{cmd}")
+                tier = cmd.split("--tier", 1)[1].split()[0]
+                self.assertIn(tier, pg.TIERS, f"{name} declares --tier {tier}")
 
 
 if __name__ == "__main__":

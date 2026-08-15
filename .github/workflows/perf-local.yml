@@ -22,6 +22,14 @@
 # noisy neighbour. The series is read by medians over points, the alert threshold
 # is a soft signal, and the hard verdicts stay with perf.yml's interleaved gates.
 #
+# TIER (#1251): this workflow runs NO comparison gate — no `perf_gate.py` leg at all.
+# It records the absolute trend; it renders no pass/fail on a commit. The ruled
+# two-tier policy makes this host the BLOCKING tier, and the seam for that now exists
+# (`perf_gate.py --tier blocking --sample-note "<the bracket verdict below>"`, which
+# refuses to fail on a sample the guard flagged), but the leg that would use it — a
+# HEAD-vs-parent build and interleaved comparison on this machine — does not. Do not
+# read "pinned host = blocking tier" off this file until a step below invokes the gate.
+#
 # RAM (#1228): this workflow also carries the two RAM-census instruments. Steady-state
 # RAM is what decides whether a node fits the 16 KB target, and it was the only cost
 # axis with neither a gate nor a recorded trend. Both censuses publish here (same

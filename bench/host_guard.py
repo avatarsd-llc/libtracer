@@ -13,8 +13,11 @@ the commit.
 
 That was a bent trend chart while the pinned store was advisory. It stops being
 merely cosmetic under the two-tier gate policy, where this host becomes the BLOCKING
-tier at a ~5% bar: a contaminated point there does not mislead a reader, it fails a
-PR. Hence three instruments, in the order the workflow uses them:
+tier at a ~5% bar: a contaminated point there would not mislead a reader, it would
+fail a PR. The consumer side of that is built (`perf_gate.py --sample-note` refuses to
+render a blocking verdict on a flagged sample); the pinned-host gate leg that would
+call it is not, so today these verdicts still only guard the store. Hence three
+instruments, in the order the workflow uses them:
 
   * `wait` — hold until the machine goes quiet, and say so if it never does. NOT a
     bare pre-flight check: the workflow's own `cmake --build -j31` immediately
@@ -212,10 +215,10 @@ def contamination_note(reason: str) -> str:
 def is_contaminated(extra: str | None) -> bool:
     """@brief Does this point's `extra` string declare the sample suspect?
 
-    The single predicate every consumer must use — the history renderer today, the
-    blocking-tier gate when #1251 lands — so "what counts as contaminated" is decided
-    in one place and cannot drift between the tool that writes it and the tool that
-    reads it.
+    The single predicate every consumer must use — the history renderer, and
+    `perf_gate.py`'s `enforces`, which imports THIS function rather than re-deriving
+    the rule (#1251) — so "what counts as contaminated" is decided in one place and
+    cannot drift between the tool that writes it and the tool that reads it.
     """
     return bool(extra) and CONTAM_TOKEN in extra
 

@@ -208,9 +208,21 @@ thresholds, one hard invariant:
 | mechanism | when | comparison | threshold | effect |
 | --- | --- | --- | --- | --- |
 | **per-PR hard gate** ([`perf_gate.py`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/perf_gate.py)) | every PR | PR build vs `main` build, **one runner, interleaved A/B** | p50 **+15%** · mean **+12%** · deliveries/s **−12%** · per-vertex bytes **+2%** — *and* disjoint ranges *and* a majority of pairs | fails the PR |
-| **push ratchet** | every `main` push | HEAD vs its parent, **three independently-drawn runners** | same as above | turns `main` red |
+| **push ratchet** | every `main` push | HEAD vs its parent, **three independently-drawn runners** | same as above | **advisory** — each replica reports (see the tier note below) |
 | **forward-hop zero-alloc gate** | every CI run | absolute | `> 0` allocations on the forward hop | fails the build |
 | **soft trend alert** | per `main` commit | vs previous point, **cross-runner** | series drifts past **125%** | a comment, *not* a verdict |
+
+**Verdict tiers.** The comparison is the same wherever it runs; what a caller declares is
+whether a breached ratchet may *stop the job*. `perf_gate.py --tier blocking` fails on a
+breach, `--tier advisory` prints the identical numbers and the identical verdict line and
+exits 0 — with a `::warning::` annotation, so an unenforced breach is never quiet. The tier
+is **not** a second, looser threshold set: an advisory run reports exactly what a blocking
+run would have said. The per-PR gate is blocking; the three push replicas are advisory,
+because a single noisy runner should not carry a verdict alone and the ruled escalation
+(two of the three replicas agreeing) is not built yet. Omit the flag and you get
+**advisory** — the safe default for a maintainer's own machine, where the bar was never
+calibrated; every CI invocation declares its tier explicitly and a unit test fails the
+build if one does not.
 
 Details that make these trustworthy:
 
