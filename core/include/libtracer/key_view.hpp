@@ -232,6 +232,34 @@ class key_view_t {
     }
 
     /**
+     * @brief Invoke @p emit on each ancestor-prefix level, shallowest-first (the last
+     *        equals the whole key) — the `mkdir -p` creation order, ALLOCATING NOTHING.
+     *
+     * The storage-free form of @ref split_levels, for a caller on a peer-reachable path
+     * where a scratch container would be a heap draw it does not own (#1139).
+     *
+     * @param emit Called as `emit(key_view_t)` and returning `bool`; `false` STOPS the walk,
+     *             which this function then reports as failure. A caller that must not act on
+     *             a malformed key therefore walks TWICE — once with a `true`-returning @p emit
+     *             to validate the framing, then once to act — because raggedness is only
+     *             discovered at the last record.
+     * @return false if @p emit stopped the walk, the NAME framing is ragged (records do not
+     *         tile the key exactly), any record carries an illegal zero-length payload (see
+     *         the file header), or the key is empty; true otherwise.
+     */
+    template <class Emit>
+    [[nodiscard]] bool for_each_level(Emit&& emit) const {
+        std::size_t i = 0;
+        bool any = false;
+        for (std::size_t e = record_end(0); e != 0; e = record_end(e)) {
+            i = e;
+            any = true;
+            if (!emit(key_view_t{key_.first(i)})) return false;
+        }
+        return any && i == key_.size();
+    }
+
+    /**
      * @brief Append each ancestor-prefix level to @p out, shallowest-first (the
      *        last element equals the whole key) — the `mkdir -p` creation order.
      * @return false, appending nothing, if the NAME framing is ragged (records do
@@ -240,16 +268,13 @@ class key_view_t {
      */
     [[nodiscard]] bool split_levels(std::vector<key_view_t>& out) const {
         const std::size_t start = out.size();
-        std::size_t i = 0;
-        for (std::size_t e = record_end(0); e != 0; e = record_end(e)) {
-            i = e;
-            out.push_back(key_view_t{key_.first(i)});
-        }
-        if (i != key_.size() || out.size() == start) {
-            out.resize(start);
-            return false;
-        }
-        return true;
+        if (for_each_level([&out](key_view_t level) {
+                out.push_back(level);
+                return true;
+            }))
+            return true;
+        out.resize(start);
+        return false;
     }
 
    private:

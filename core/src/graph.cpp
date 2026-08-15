@@ -409,12 +409,21 @@ vertex_handle_t graph_t::register_vertex(const path_t& path, role_t role, handle
 
 result_t<vertex_handle_t> graph_t::try_register_vertex(const path_t& path, role_t role,
                                                        handlers_t handlers) {
-    return register_vertex_key(std::vector<std::byte>(path.key().begin(), path.key().end()), role,
-                               std::move(handlers));
+    return register_vertex_key_span(path.key(), role, std::move(handlers));
 }
 
 result_t<vertex_handle_t> graph_t::register_vertex_key(std::vector<std::byte> key, role_t role,
                                                        handlers_t handlers) {
+    // The owning-vector spelling is the public door and nothing more: the descent below
+    // never retains the argument — every record it keeps is copied into the vertex's own
+    // `path_key_t` — so the vector is pure convenience for a caller that already has one,
+    // and callers that hold borrowed bytes take the span door instead of allocating a copy
+    // to satisfy this signature (#1139).
+    return register_vertex_key_span(key, role, std::move(handlers));
+}
+
+result_t<vertex_handle_t> graph_t::register_vertex_key_span(std::span<const std::byte> key,
+                                                            role_t role, handlers_t handlers) {
     const std::unique_lock lock(map_mutex_);
     // Descend the Composite tree (ADR-0057), creating unregistered PLACEHOLDER nodes for
     // missing intermediate levels — invisible to find/read_children until a registration
@@ -932,29 +941,44 @@ result_t<vertex_t*> graph_t::ensure_vertex_ptr(std::span<const std::byte> key,
         if (ancestor != nullptr && !acl_allows(ancestor, caller, acl_right_t::CREATE))
             return std::unexpected(status_t::PERMISSION_DENIED);
     }
-    // Validate the key's NAME-encoding framing and collect the per-level prefixes,
-    // then create every missing level shallowest-first (`mkdir -p`).
-    std::vector<key_view_t> levels;
-    if (!key_view_t{key}.split_levels(levels)) return std::unexpected(status_t::INVALID_PATH);
+    // Validate the key's NAME-encoding framing, then create every missing level
+    // shallowest-first (`mkdir -p`). TWO walks, storing nothing between them (#1139/#873):
+    // this used to collect the per-level prefixes into a `std::vector<key_view_t>` and copy
+    // each level into a fresh `std::vector<std::byte>` for the registration call, and BOTH
+    // drew from the global heap — bypassing the injected `ctl_` seam on a path a remote
+    // branch write can still drive, which is exactly the bypass ADR-0065 exists against.
+    // Removing the scratch entirely is a stronger bound than routing it to an injected
+    // source: it was the part that scaled with the key's DEPTH, which is the peer's choice.
+    // (The `vertex_t` objects a registration allocates are NOT addressed here — that is the
+    // wider #873 arena question.) `record_end` is pointer arithmetic, so the second walk
+    // costs no allocation. The validation pass must come FIRST and separately: raggedness is
+    // discovered at the LAST record, so a walk that created as it went would materialize
+    // the valid prefix of an illegally-spelled key before refusing it (#436's rule, one
+    // layer down from the resolver that enforces it on the wire).
+    const key_view_t kv{key};
+    if (!kv.for_each_level([](key_view_t) noexcept { return true; }))
+        return std::unexpected(status_t::INVALID_PATH);
     vertex_t* leaf = nullptr;
-    for (const key_view_t level : levels) {
+    std::optional<status_t> failed;
+    (void)kv.for_each_level([&](key_view_t level) {
         const std::span<const std::byte> pk = level.bytes();
         if (vertex_t* existing = find_ptr(pk)) {
             leaf = existing;
-            continue;
+            return true;
         }
-        result_t<vertex_handle_t> made =
-            register_vertex_key(std::vector<std::byte>(pk.begin(), pk.end()), role_t::STORED_VALUE);
+        result_t<vertex_handle_t> made = register_vertex_key_span(pk, role_t::STORED_VALUE, {});
         if (made) {
             leaf = made->get();
-            continue;
+            return true;
         }
         if (made.error() == status_t::PATH_IN_USE) {  // lost a benign creation race
             leaf = find_ptr(pk);
-            if (leaf != nullptr) continue;
+            if (leaf != nullptr) return true;
         }
-        return std::unexpected(made.error());
-    }
+        failed = made.error();
+        return false;
+    });
+    if (failed) return std::unexpected(*failed);
     return leaf;  // never null: the deepest level was just found or created
 }
 

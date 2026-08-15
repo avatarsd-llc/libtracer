@@ -220,7 +220,7 @@ remain in the devices — RAM, or NVS where the device persists them.
 **Subscriber edges do not survive a third-party orchestrator's departure.**
 A subscription written *over the wire* binds to the **arrival session**, not to the
 target the writer named: `graph_t::subscribe_wire` discards the SUBSCRIBER's PATH
-target (`core/src/graph.cpp:2318`) and delivery rides the accumulated `src` back to
+target (`core/src/graph.cpp:2342`) and delivery rides the accumulated `src` back to
 whoever wrote it — the orchestrator. Its departure then evicts the edge outright
 (`fwd_router_t::link_down` → `graph_t::evict_link_edges`). So the paragraph above
 holds only for a subscription the **consumer itself** wrote. Closing the gap needs a
@@ -243,7 +243,9 @@ machine managed automatically (RFC-0014).
   write-creates rule of [RFC-0005 — Subtree subscriptions](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md) §D
   and to revive-by-data-write (RFC-0009 §E.1) — a config-less connection would violate
   the atomicity creation protects. Re-creation is `SPEC`-only. **The only lazy
-  establishment is reconnection.**
+  establishment is reconnection.** (Since §D amendment 1 the *remote* arm needs no exception
+  at all — a peer's write to an unresolved address is `not_found` everywhere. The exception
+  still binds the local host API, which does write-create.)
 - **Refcount gates `DIAL` links.** A *binding* is anything that needs the peer
   reachable — a standing subscription or `await` routed through the link, plus a
   transient hold for the duration of a one-shot `read`/`write`/`FWD`. It is **per-hop

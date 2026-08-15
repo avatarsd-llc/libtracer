@@ -189,7 +189,7 @@ The callback form is sugar over the primitive
 `subscribe(const path_t&, subscriber_fn_t fn, void* ctx)` with
 `subscriber_fn_t = void (*)(void*, const rope_t&)`
 (`core/include/libtracer/subscriber.hpp:105`). The sugar takes the callable as `F&`
-(`core/include/libtracer/graph.hpp:1201-1204`), so a temporary lambda written inline at
+(`core/include/libtracer/graph.hpp:1203-1206`), so a temporary lambda written inline at
 the call site does not compile — and would dangle if it did. **Lifetime obligation:**
 the bound callable is the `ctx`, and `ctx` must outlive every possible delivery;
 `unsubscribe` only deactivates the edge slot, and a delivery already in flight

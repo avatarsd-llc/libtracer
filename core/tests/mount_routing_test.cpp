@@ -794,10 +794,13 @@ void test_reject_and_terminus_agree_on_trailered_routes() {
     // Arm 1: the bus-NAME hop the router rejects. Arm 2: a READ of an unknown LOCAL dst, which
     // the terminus resolver refuses NOT_FOUND. Different refusals, same route to answer on.
     //
-    // Arm 2 is a READ on purpose. A WRITE with no field takes `resolve_node`'s
-    // `op == WRITE && !has_field` branch, where `graph.ensure_vertex` CREATES the vertex and
-    // the reply comes back `kind=RESULT` — so the case would still guard (both replies leave
-    // through the same assembler) while advertising terminus-refusal coverage it never ran.
+    // Arm 2 is a READ for a reason that has since been removed and is kept as a record: a
+    // fieldless WRITE used to take `resolve_node`'s write-creates branch, CREATE the vertex
+    // and come back `kind=RESULT` — the case would have guarded (both replies leave through
+    // the same assembler) while advertising terminus-refusal coverage it never ran. Since
+    // RFC-0005 amendment 1 (#1139) a fieldless WRITE refuses NOT_FOUND like everything else,
+    // so either op would exercise the refusal now. The READ stays: it is the op whose miss
+    // answer was never in question.
     router.on_frame("net/ws-client/in",
                     framed(tr::graph::fwd_op_t::WRITE, {"net", "ws-server", "srv", "zzz"}));
     router.on_frame("net/ws-client/in", framed(tr::graph::fwd_op_t::READ, {"nosuch"}));

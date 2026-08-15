@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0005 |
 | **Title** | Subtree subscriptions: vertical bubbling, branch-write decomposition, write-creates |
-| **Status** | **accepted** (2026-07-03, maintainer-ratified design grill) |
+| **Status** | **accepted** (2026-07-03, maintainer-ratified design grill). **Amendment 1** (§D, 2026-08-15, [#1139](https://github.com/avatarsd-llc/libtracer/issues/1139)) narrows §D's creation MUST to the **local** arm: a **remote** `FWD{WRITE}` with no `:field` selector to an unresolved `dst` answers `tr::path::not_found` and creates nothing; creation from a peer goes through the [ADR-0059](../../adr/0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md) creator endpoint, where it is typed, catalogued and ACL-gated. The **local** host API keeps write-creating, and §B's decomposition still creates landing vertices beneath an already-resolved, already-gated target. §A bubbling, §B decomposition and §C's one-store invariant are untouched. |
 | **Author(s)** | AvatarSD (maintainer) |
 | **Created** | 2026-07-03 |
 | **Comment window** | waived by the maintainer (solo-maintainer project, GOVERNANCE.md window dead ceremony) |
@@ -51,7 +51,9 @@ child (the vertex's own value).
    delivered, when, at what cost to non-subscribed writers) were unratified and
    unimplemented. This RFC pins them. A newly **appeared** child surfaces as its
    first write bubbling to the parent subscriber (and write-creates means
-   appearance *is* the first write); a child's **value change** surfaces the
+   appearance *is* the first write — after **amendment 1** a peer-originated
+   appearance is a create through the ADR-0059 creator endpoint, which is itself
+   a write and bubbles identically); a child's **value change** surfaces the
    same way. Child **removal** delivery was the one open point of #66 —
    explicitly out of scope here (there was no vertex-delete surface yet). It is
    no longer open: ruled 2026-08-12 by
@@ -209,7 +211,11 @@ sequenceDiagram
   exist MUST create it — and every missing intermediate level — as
   stored-value vertices, then proceed as a normal write. This replaces the
   previous `tr::path::not_found` outcome for local `write(path)` and for the
-  remote `FWD{WRITE}` terminus.
+  remote `FWD{WRITE}` terminus. **⚠ Narrowed by amendment 1 below (2026-08-15,
+  [#1139](https://github.com/avatarsd-llc/libtracer/issues/1139)):** the MUST
+  binds the **local** arm only. At the remote `FWD{WRITE}` terminus the
+  pre-RFC-0005 `tr::path::not_found` **stands**, and a peer creates through the
+  ADR-0059 creator endpoint instead.
 - Creation is gated by the **existing `CREATE` access bit** (docs/reference/05
   §`0x0A`, ADR-0017/0020) evaluated on the **nearest existing ancestor**'s
   effective ACL — exactly the ACL every vertex of the missing chain would
@@ -222,6 +228,68 @@ sequenceDiagram
   they could address), and `read`/`await` of a nonexistent vertex keep
   `tr::path::not_found`. Subscribing to a not-yet-existing vertex is therefore
   still an error; pre-create it with a data write (or `:children[]`) first.
+
+**Amendment 1 ([#1139](https://github.com/avatarsd-llc/libtracer/issues/1139), 2026-08-15) — the
+REMOTE arm of §D is withdrawn: a peer's fieldless `FWD{WRITE}` to an unresolved `dst` answers
+`tr::path::not_found` and creates nothing.** Maintainer ruling on
+[#1139](https://github.com/avatarsd-llc/libtracer/issues/1139) (option A, 2026-08-12, with the
+local-overload sub-question ruled the same day). **Instrument: amendment**, not erratum —
+`GOVERNANCE.md` §"Errata, amendments, and the comment window" reserves "a behaviour a conforming
+peer could observe" for an amendment, and this changes a `MUST` and the reply a peer gets. Comment
+window waived by default while solo-maintained, invoked here as waived
+(`docs/implementations.md:13` still reads `_(none yet)_`, so the waiver's revert trigger has not
+fired). The normative content, in full:
+
+- **The remote rule.** A `FWD{WRITE}` with **no `:field` selector** whose `dst` resolves to no
+  vertex at the terminus MUST answer `tr::path::not_found` (`0x0020`) and MUST NOT create the
+  target or any intermediate level. This is the same answer `read`, `await` and a `:field` write
+  already give, so the terminus now has **one** miss answer rather than one per op class. The
+  caller backs off and retries until whatever owns that structure establishes it — `not_found`'s
+  disposition is permanent-for-this-address, and that is the honest report: the address does not
+  exist and this peer is not the party who may bring it into being.
+- **The local rule is unchanged, deliberately.** `graph_t::write(path, value)` and the rest of the
+  in-process host API keep write-creating, `mkdir -p` and all, under the §D CREATE gate as
+  written. The in-process caller is the node's **own** trusted code and owns its graph's
+  structure; creation authority is *local-or-governed-channel*. **The asymmetry is the ruling, not
+  an oversight left inside it** — two write paths with different creation semantics is normally a
+  trap, and it is admitted here because the two paths differ in exactly the property that
+  matters: one caller is the owner, the other is a peer.
+- **§B decomposition still creates, and needs no carve-out to.** A branch write lands values at
+  descendants of a `dst` that **resolved** — so the creation gate has a real nearest existing
+  ancestor (the target itself, already WRITE-gated by admission), the depth is bounded by the
+  `POINT` nesting of a frame the peer already had to fit and pay for, and the catalog-free column
+  is the only one left. That is a governed create, not the ungoverned one this amendment removes.
+- **Creation from a peer has a channel, and had one before this amendment.** ADR-0059 (accepted
+  2026-07-17) makes creation and removal **writes to a creator endpoint vertex**: device-known
+  types only, ACL-gated, the catalog declared per vertex — so the permission is per-vertex and the
+  logic behind it polymorphic by construction. [RFC-0013](0013-creatable-child-type-catalog.md) §7
+  already stated the split in as many words ("a plain **data** write still creates stored-value
+  vertices `mkdir -p`-style **without consulting any catalog**"). Relative to that channel, remote
+  write-create contributed only: no catalog, an untyped `STORED_VALUE`, **no ACL at all when the
+  graph holds no ancestor above the address**, no count bound, no depth bound, and allocations
+  drawn from the global heap rather than the node's injected source. Every column it won is a
+  column nobody asked to win.
+- **§1's appearance mechanism survives intact.** "A newly appeared child surfaces as its first
+  write bubbling to the parent subscriber (and write-creates means appearance *is* the first
+  write)" is what made this arm look load-bearing. It is not, because **a create through the
+  creator endpoint IS a write to a vertex** and bubbles to the parent subscriber exactly as
+  before. Only the *origin* of an appearance moves — from "any peer writing any address" to "a
+  create the device's own catalog admitted". Nothing about §A changes.
+- **Compatibility.** Newly-erroring space, not newly-defined space: the §D remote behaviour
+  reverts to the `tr::path::not_found` that preceded RFC-0005, inside the same unreleased v1
+  draft. `docs/implementations.md:13` reads `_(none yet)_`, so no registered implementation
+  depends on it. A peer that relied on write-create to materialize its own address must move to
+  the creator endpoint. **No conformance vector changes**: the v1 vectors are decode/encode byte
+  vectors, and no vector encodes a terminus's answer to an unresolved-`dst` WRITE.
+- **The allocator bypass is closed on the same PR, and would have been either way.** §D's
+  creation path drew its per-level scratch and its per-level key copy from the **global heap**,
+  bypassing the graph's injected `block_source_t` — [#873](https://github.com/avatarsd-llc/libtracer/issues/873)'s
+  bypass, on the one path a remote peer could drive. Those temporaries are now gone entirely
+  (the level walk stores nothing and the registration takes borrowed bytes) — a stronger bound
+  than routing them to an injected source, since they were the part that scaled with the key's
+  DEPTH, which is the peer's choice. The path still serves the local and §B arms that remain.
+  (The `vertex_t` objects themselves stay heap-allocated; that is #873's wider arena question,
+  not this amendment's.)
 
 ### E. Explicitly out of scope (recorded rationale)
 
@@ -271,7 +339,10 @@ delivery is the written TLV as-is); ~~a composed subtree-read op (§C)~~
   the codec already parses it generically. New behavior occupies previously-
   erroring space: writes that returned `tr::path::not_found` now create, and
   `POINT` payloads that stored opaquely now decompose — both are v1-draft
-  refinements ratified before any release froze the old behavior.
+  refinements ratified before any release froze the old behavior. (**Amendment 1**
+  gives the first half back on the remote arm: a peer's fieldless `FWD{WRITE}` to
+  an unresolved `dst` returns to `tr::path::not_found`, inside the same unreleased
+  v1 draft and with no registered implementation to migrate.)
 - New vectors MAY be added under `tlv-types/` for POINT-with-VALUE (additive;
   adding a vector is not a spec change per spec §4).
 - Implementations migrate by (1) bubbling writes to ancestor subscribers,
