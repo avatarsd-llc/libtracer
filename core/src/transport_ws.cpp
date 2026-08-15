@@ -317,11 +317,12 @@ void transport_ws_server::peer_endpoint_t::send(std::span<const std::span<const 
         owner_->dropped_tx_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    // One peer in this round ⇒ the whole liveness window is this record's bound (#838), and
-    // a stall strikes this session alone.
+    // One peer in this round, but not one peer on this node: the bound divides by the
+    // admission cap so that N concurrent directed sends to N stalled peers sum to one
+    // window rather than N of them (#1295). A stall still strikes this session alone.
     const int fd = slot_->fd.load(std::memory_order_relaxed);
-    const write_result_t r = write_all_iov(fd, std::span<const ::iovec>(vec, n),
-                                           derive_send_bound_ms(owner_->liveness_window_ms(), 1));
+    const write_result_t r =
+        write_all_iov(fd, std::span<const ::iovec>(vec, n), owner_->directed_send_bound_ms());
     if (owner_->note_write_result(r, fd, slot_->tx_stall_streak))
         owner_->dropped_tx_.fetch_add(1, std::memory_order_relaxed);
 }
@@ -359,8 +360,10 @@ void transport_ws_server::on_readable(session_base_t& base, const std::byte* dat
             const std::lock_guard lock(write_m_);
             // Bounded like every other write on this socket (#838): the handshake reply
             // runs on the POLL thread, so an unbounded one would stall every peer this
-            // server has, not just the one being admitted.
-            write_all(fd, bytes, derive_send_bound_ms(liveness_window_ms_, 1));
+            // server has, not just the one being admitted. The DIRECTED bound, not the
+            // whole window — one poll pass can owe a reply to every slot, so the sum is
+            // what has to fit the window (#1295).
+            write_all(fd, bytes, directed_send_bound_ms());
             // Publish the slot as OPEN while still holding the write lock, so the
             // "101 is on the wire" and "senders may use this slot" transitions are one
             // step. Storing it after the lock is released opens a window in which the peer
@@ -474,9 +477,10 @@ bool transport_ws_server::drain_frames(session_t& s) {
                 const std::lock_guard lock(write_m_);
                 // Bounded (#838): this is the poll thread, so a PONG into a stalled peer
                 // used to hold write_m_ — and stop every peer's ingress — indefinitely.
+                // Divided by the admission cap for the same reason the handshake reply is:
+                // one pass can owe a PONG to every slot (#1295).
                 write_all(s.fd.load(std::memory_order_relaxed),
-                          std::span<const std::byte>(pong.data(), plen),
-                          derive_send_bound_ms(liveness_window_ms_, 1));
+                          std::span<const std::byte>(pong.data(), plen), directed_send_bound_ms());
                 break;
             }
             case ws::opcode_t::CLOSE:

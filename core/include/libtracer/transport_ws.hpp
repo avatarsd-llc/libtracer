@@ -164,10 +164,15 @@ class transport_ws_server : public slot_server_t {
      *                  no-synthetic-limits doctrine). It is checked against the
      *                  DECLARED length in the WS frame header, so an oversize
      *                  announcement is refused before one body byte is buffered.
-     * @param max_peers Concurrent-peer admission cap; 0 = unbounded (host
-     *                  default). A deployment-injected bound (RFC-0006) —
-     *                  a connection beyond it is accepted and immediately
-     *                  closed (a clean refusal, not a hung SYN).
+     * @param max_peers Concurrent-peer admission cap. A deployment-injected
+     *                  bound (RFC-0006) — a connection beyond it is accepted
+     *                  and immediately closed (a clean refusal, not a hung
+     *                  SYN). `0` no longer means UNBOUNDED (#1295): it takes
+     *                  the liveness window's own ceiling
+     *                  (`window / kBoundedWaitMs`), and a larger request is
+     *                  clamped to that ceiling, because the cap is the
+     *                  denominator every send bound divides by. Read the
+     *                  enforced value back from `slot_server_t::max_peers`.
      * @param peer_named Expose the @ref bus_link_t facet (see @ref bus). A
      *                   wiring-time deployment choice: the browser-SPA/tabs
      *                   server sets it so each tab gets its own return route;
@@ -179,11 +184,13 @@ class transport_ws_server : public slot_server_t {
      *                   server's recv-stack knob.
      * @param liveness_window_ms The app-provided PEER LIVENESS WINDOW in ms, `0` =
      *                   `kDefaultLivenessWindowMs` (#838). One fan-out round is bounded
-     *                   by it (each peer gets window ÷ peers-in-the-round), so a browser
-     *                   tab that stops reading — a throttled background tab is the shipped
-     *                   case — can no longer freeze the sending thread or the other tabs'
-     *                   frames behind it; a session that stalls `kMaxConsecutiveStalls`
-     *                   records in a row, or once mid-record, is closed.
+     *                   by it (each peer gets window ÷ peers-in-the-round) and a DIRECTED
+     *                   send by window ÷ @p max_peers (#1295), so a browser tab that stops
+     *                   reading — a throttled background tab is the shipped case — can no
+     *                   longer freeze the sending thread or the other tabs' frames behind
+     *                   it, on either path; a session that stalls `kMaxConsecutiveStalls`
+     *                   records in a row, or once mid-record, is closed. It also SIZES the
+     *                   peer cap: see @p max_peers.
      */
     explicit transport_ws_server(std::uint16_t bind_port,
                                  mem::mem_backend_t* backend = &mem::heap_backend(),

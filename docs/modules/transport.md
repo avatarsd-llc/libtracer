@@ -65,8 +65,8 @@ the rope form for an owning link, the span form otherwise (`fwd_router.cpp:887,7
 `fwd_router.cpp:837,844` for the peer-named bus equivalent).
 
 Every socket transport in the tree declares the owning tier: UDP
-(`transport_udp.hpp:111`), TCP client and server (`transport_tcp.hpp:218,403`),
-WebSocket server and client (`transport_ws.hpp:233,429`), CAN
+(`transport_udp.hpp:111`), TCP client and server (`transport_tcp.hpp:218,409`),
+WebSocket server and client (`transport_ws.hpp:240,436`), CAN
 (`transport_can.hpp:606`), QUIC (`transport_quic.hpp:153`) and WebTransport
 (`transport_webtransport.hpp:182`). The borrowed-span path is the base-class default
 and the tier an out-of-tree transport gets for free.
@@ -93,11 +93,11 @@ for a peer and no peer state is stored.
 `transport_t::bus()` returns the facet or `nullptr`. CAN always returns it
 (`transport_can.hpp:564`); the TCP and WebSocket **servers** return it when
 configured peer-named — one implementation, on the slot-server base both of them
-inherit (`posix_endpoint.hpp:598`); every other kind keeps the `nullptr` default.
+inherit (`posix_endpoint.hpp:675`); every other kind keeps the `nullptr` default.
 
 Whether a link's peer-named tier exists is one query, `bus_link_t::peer_named()`
 (`transport.hpp:258`): the constructed flag for the two stream servers
-(`posix_endpoint.hpp:610`), `true` by construction for a kind that is a bus outright.
+(`posix_endpoint.hpp:687`), `true` by construction for a kind that is a bus outright.
 `bus_link_t` **refuses** each of its peer-named wiring calls — `set_peer_receiver`,
 `set_peer_rope_receiver`, `set_peer_down_notifier` — while it is false. That refusal matters
 because `bus_link_t` is a public base: on a flat server the setters are reachable by an
@@ -116,7 +116,7 @@ Departure follows the same split. A **peer-named** server evicts exactly the dep
 (`notify_peer_down(name)`); a **flat** server has one routing identity for every peer it
 carries — the registered child NAME — so its only seam is the whole link
 (`transport_t::notify_down`), and it therefore waits until the **last** open session departs
-(`posix_endpoint.cpp:711`). Firing it on a mid-life close would evict the surviving peers'
+(`posix_endpoint.cpp:714`). Firing it on a mid-life close would evict the surviving peers'
 edges along with the departed one's.
 
 ## QUIC and WebTransport

@@ -26,6 +26,13 @@
  *     RETURNS, the frame is counted rather than silently lost, and the link is torn down.
  *     Before the fix this arm hangs the test process; that is the regression it exists to
  *     redden.
+ *
+ * A third level was added by **#1295**, which found the bound was a per-CALL property
+ * rather than a node one: a directed send is a round of ONE, so it took the whole window
+ * for itself, and N of them to N stalled peers serialized N windows behind the same write
+ * mutex. The residual arms are the cap derivation that makes the denominator real
+ * (`derive_max_peers` — `max_peers = 0` is no longer "uncapped") and the concurrent
+ * directed batch that has to fit inside one window on a real peer-named server.
  */
 
 #include <arpa/inet.h>
@@ -220,6 +227,52 @@ void test_bound_derivation() {
 }
 
 /**
+ * @brief #1295 — the admission cap is what makes the denominator real, so it is derived
+ *        from the window rather than taken on trust.
+ */
+void test_max_peers_derivation() {
+    std::printf("the concurrent-peer cap is resolved against the window, never 'unbounded':\n");
+    using tr::net::derive_max_peers;
+    using tr::net::derive_send_bound_ms;
+    using tr::net::max_admissible_peers;
+
+    check(max_admissible_peers(10000) == 100,
+          "the ceiling is window / kBoundedWaitMs — past it every peer draws the FLOOR and "
+          "the aggregate stops fitting the window");
+    check(max_admissible_peers(0) == tr::net::kDefaultLivenessWindowMs / tr::net::kBoundedWaitMs,
+          "an unconfigured window resolves its ceiling from the default clamp");
+    check(max_admissible_peers(50) == 1, "a window under one floor still admits ONE peer");
+
+    check(derive_max_peers(10000, 0) == 100,
+          "0 is no longer UNBOUNDED (#1295): it takes the ceiling, which is a number");
+    check(derive_max_peers(10000, 8) == 8, "a cap inside the ceiling is honoured verbatim");
+    check(derive_max_peers(10000, 4096) == 100,
+          "and one above it is CLAMPED — the extra slots could only be admitted by making "
+          "the node's aggregate blocking claim untrue");
+
+    // The property the whole ruling rests on, stated as arithmetic: whatever window and
+    // requested cap a deployment injects, ONE per-record bound times the peers that can
+    // hold one fits inside one window — so the peers a hostile party can open no longer
+    // multiply the node's blocking. (A window narrower than kBoundedWaitMs is the one
+    // irreducible case: the floor is a quantum, not a divisible budget, and the cap then
+    // collapses to a single peer.)
+    bool aggregate_fits = true;
+    for (const std::uint32_t w : {0U, 50U, 100U, 400U, 1200U, 10000U, 600000U})
+        for (const std::size_t req : {std::size_t{0}, std::size_t{1}, std::size_t{7},
+                                      std::size_t{64}, std::size_t{100000}}) {
+            const std::size_t cap = derive_max_peers(w, req);
+            const std::uint32_t window = w != 0 ? w : tr::net::kDefaultLivenessWindowMs;
+            const std::size_t budget =
+                window > tr::net::kBoundedWaitMs ? window : tr::net::kBoundedWaitMs;
+            if (cap < 1 || static_cast<std::size_t>(derive_send_bound_ms(w, cap)) * cap > budget)
+                aggregate_fits = false;
+        }
+    check(aggregate_fits,
+          "bound x cap <= one window, for every window and every requested cap — the node "
+          "aggregate, not a per-call property a peer multiplies by reconnecting");
+}
+
+/**
  * @brief Arm 7: the end-to-end property, over a real `tcp_transport_t`.
  *
  * A peer that accepts the connection and then never reads a byte. Pre-#838 the first send
@@ -283,6 +336,106 @@ void test_tcp_link_sheds_and_drops_a_stalled_peer() {
     ::close(listener);
 }
 
+/**
+ * @brief #1295, the arm that matters: N concurrent DIRECTED sends to N stalled peers cost
+ *        the node ONE window, not N of them.
+ *
+ * The defect this reddens on: a directed send is a round of one, so it used to pass `1` as
+ * the divisor and take the WHOLE liveness window for itself. Directed sends on one server
+ * serialize behind `write_m_`, so N callers targeting N stalled peers queued up N full
+ * windows — bounded per call, unbounded per node, which a peer multiplies simply by
+ * opening more connections. With the fix the divisor is the admission cap, so the batch
+ * fits one window however many peers are stalled.
+ *
+ * Restore the `1` at `transport_tcp_server::peer_endpoint_t::send` and the elapsed time
+ * below goes from about one window to about `peers` windows — past the assertion.
+ */
+void test_concurrent_directed_sends_share_one_window() {
+    std::printf("N concurrent directed sends to N stalled peers cost ONE window, not N:\n");
+    // Sized so the division is exact: window/peers is well above kBoundedWaitMs, and so the
+    // per-record bound is a real quotient rather than the floor.
+    const std::uint32_t window = 1600;
+    const std::size_t peers = 4;
+    tr::net::transport_tcp_server server(0, &tr::mem::heap_backend(), /*max_frame=*/0, peers,
+                                         /*peer_named=*/true, /*recv_stack=*/0, window);
+    check(server.ok(), "the peer-named listener is up");
+    check(server.max_peers() == peers, "the injected cap is the one enforced");
+    check(server.directed_send_bound_ms() == window / peers,
+          "and a DIRECTED send divides by that cap — not by the round's size of one");
+
+    // N clients that connect, then never read a byte. Small receive buffers so a couple of
+    // frames fill each window instead of megabytes of them.
+    std::vector<int> clients;
+    for (std::size_t i = 0; i < peers; ++i) {
+        const int c = ::socket(AF_INET, SOCK_STREAM, 0);
+        check(c >= 0, "client socket");
+        const int small = 4096;
+        ::setsockopt(c, SOL_SOCKET, SO_RCVBUF, &small, sizeof(small));
+        sockaddr_in to{};
+        to.sin_family = AF_INET;
+        to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        to.sin_port = htons(server.local_port());
+        check(::connect(c, reinterpret_cast<sockaddr*>(&to), sizeof(to)) == 0, "client connected");
+        clients.push_back(c);
+    }
+
+    // Wait for every slot to be accepted and named, so the directed lookups all resolve.
+    std::size_t seen = 0;
+    for (int i = 0; i < 400 && seen < peers; ++i) {
+        seen = 0;
+        server.bus()->enumerate_peers([&seen](std::string_view) { ++seen; });
+        if (seen < peers) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    check(seen == peers, "every peer occupies a slot and is directed-addressable");
+
+    // Each thread drives ONE peer: push frames until its socket stops taking bytes, then
+    // ride the stall out. The jam is INSIDE the timed region on purpose — the record that
+    // finally stalls half-reached the wire, and a partial record condemns the session at
+    // once (#838's short-write rule), so a peer cannot be pre-jammed and still be there to
+    // block on afterwards. Buffer fills are memcpy-speed; the only thing worth milliseconds
+    // in here is the blocking, which is exactly what is being measured. Sends past the
+    // condemnation fail immediately and cost nothing.
+    const std::vector<std::byte> frame(512 * 1024);
+    const int frames_per_peer = 24;
+    std::atomic<int> ready{0};
+    std::atomic<bool> go{false};
+    std::vector<std::thread> senders;
+    for (std::size_t i = 0; i < peers; ++i)
+        senders.emplace_back([&server, &frame, &ready, &go, frames_per_peer, i] {
+            const std::string name = "p" + std::to_string(i);
+            ready.fetch_add(1, std::memory_order_relaxed);
+            while (!go.load(std::memory_order_acquire)) std::this_thread::yield();
+            for (int n = 0; n < frames_per_peer; ++n) {
+                // Resolve per use, never cached across a departure (#1153).
+                tr::net::transport_t* to_peer = server.bus()->peer_link(name);
+                if (to_peer == nullptr) return;
+                to_peer->send(std::span<const std::byte>(frame));
+            }
+        });
+    while (ready.load(std::memory_order_relaxed) < static_cast<int>(peers))
+        std::this_thread::yield();
+    const auto t0 = clock_t_::now();
+    go.store(true, std::memory_order_release);
+    for (std::thread& t : senders) t.join();
+    const std::int64_t took = ms_since(t0);
+
+    check(server.stalled_tx() >= peers,
+          "every peer did stall — the measurement below is of real blocking, not of a "
+          "batch that happened to fit in the socket buffers");
+    check(took < 2 * static_cast<std::int64_t>(window),
+          "and the whole batch fits about ONE window — before #1295 each directed send took "
+          "a full window of its own, so N of them took N windows, which is what this fails on");
+    check(took >= static_cast<std::int64_t>(window / peers),
+          "not passing by giving up early either: a stalled peer still got its share");
+    std::printf(
+        "  peers=%zu window=%u ms directed bound=%u ms — the concurrent batch took "
+        "%lld ms, stalled=%llu\n",
+        peers, window, server.directed_send_bound_ms(), static_cast<long long>(took),
+        static_cast<unsigned long long>(server.stalled_tx()));
+
+    for (const int c : clients) ::close(c);
+}
+
 }  // namespace
 
 int main() {
@@ -292,7 +445,11 @@ int main() {
     test_partial_record_condemns_at_once();
     test_completion_resets_the_streak();
     test_bound_derivation();
+    test_max_peers_derivation();
     test_tcp_link_sheds_and_drops_a_stalled_peer();
-    std::printf("send_stall_test: all checks passed\n");
-    return 0;
+    test_concurrent_directed_sends_share_one_window();
+    // The shared runner's verdict, not a hard-coded "all checks passed": this suite used to
+    // print that line and `return 0` whatever the counter said, so a red check here could
+    // never redden ctest — and #1295's guard is only a guard if it can (#874's summary).
+    return tr::testing::summary("send_stall_test");
 }

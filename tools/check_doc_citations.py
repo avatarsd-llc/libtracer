@@ -606,7 +606,7 @@ ANCHORS = [
     ('core/include/libtracer/transport_tcp.hpp:218',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'tcp_transport_t& operator=(const tcp_transport_t&) = delete;'),
-    ('core/include/libtracer/transport_tcp.hpp:403',
+    ('core/include/libtracer/transport_tcp.hpp:409',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'transport_tcp_server& operator=(const transport_tcp_server&) = delete;'),
     # core/include/libtracer/transport_udp.hpp
@@ -626,10 +626,10 @@ ANCHORS = [
     ('core/include/libtracer/transport_webtransport.hpp:182',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }'),
     # core/include/libtracer/transport_ws.hpp
-    ('core/include/libtracer/transport_ws.hpp:233',
+    ('core/include/libtracer/transport_ws.hpp:240',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'void send(std::span<const std::span<const std::byte>> iov) override;'),
-    ('core/include/libtracer/transport_ws.hpp:429',
+    ('core/include/libtracer/transport_ws.hpp:436',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'transport_ws_client& operator=(const transport_ws_client&) = delete;'),
     # core/include/libtracer/vertex.hpp
@@ -732,7 +732,7 @@ ANCHORS = [
     # The multi-peer servers' per-chunk receive scratch — ONE buffer since #871 folded the
     # tcp and ws poll loops into slot_server_t (it used to be one apiece, cited as
     # transport_tcp.cpp:508 and transport_ws.cpp:420).
-    ('core/src/posix_endpoint.cpp:639', 'std::array<std::byte, 4096> chunk;',
+    ('core/src/posix_endpoint.cpp:642', 'std::array<std::byte, 4096> chunk;',
      'void slot_server_t::service_peer(session_base_t& s) {'),
     # core/src/rope.cpp
     ('core/src/rope.cpp:21', 'if (!all_host()) {'),
@@ -781,7 +781,7 @@ ANCHORS = [
     # which #871 moved out of this TU into slot_server_t::bind_listen; the entry sheds the
     # scope entirely instead, because the array is now spelled `pristine_inline` here and
     # `inline_vec` only in the directed facade — one anchor, one hit, no positional filter.
-    ('core/src/transport_ws.cpp:682', 'std::array<std::byte, 4096> chunk;',
+    ('core/src/transport_ws.cpp:686', 'std::array<std::byte, 4096> chunk;',
      'void transport_ws_client::serve(int fd, std::vector<std::byte> pipelined) {'),
     # core/tests/registry_teardown_test.cpp
     ('core/tests/registry_teardown_test.cpp:275', 'void test_digest_paths_agree() {'),
@@ -803,7 +803,7 @@ ANCHORS = [
     ('core/include/libtracer/fwd_frame_view.hpp:905', 'inline constexpr std::size_t kFwdMaxIov = 10;'),
     # ONE `bus()` since #871: both stream servers inherit slot_server_t's (they used to
     # restate it, cited as transport_tcp.hpp:343 and transport_ws.hpp:233).
-    ('core/include/libtracer/posix_endpoint.hpp:598',
+    ('core/include/libtracer/posix_endpoint.hpp:675',
      '[[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }'),
     ('core/include/libtracer/edge_pin.hpp:153', 'class pin_t {'),
     ('core/src/fwd_router.cpp:887', 'link.set_rope_receiver('),
@@ -935,7 +935,7 @@ ANCHORS = [
     ('core/include/libtracer/path.hpp:50',
      "* separates field levels, `[` / `]` delimit the grammar's index suffix (which sits"),
     ('core/include/libtracer/path.hpp:230', 'inline path_t::path_t(std::string_view text) {'),
-    ('core/include/libtracer/posix_endpoint.hpp:610',
+    ('core/include/libtracer/posix_endpoint.hpp:687',
      "/** @brief Visit the currently-OPEN peers' names, `p<slot>` (#426). */"),
     ('core/include/libtracer/tlv.hpp:61', 'PATH_REF = 0x14,'),
     ('core/include/libtracer/transport.hpp:258',
@@ -1029,7 +1029,7 @@ ANCHORS = [
     ('core/src/path.cpp:117',
      'return std::unexpected(status_t::INVALID_PATH);',
      'if (p.field_.steps.size() > kMaxFieldDepth)'),
-    ('core/src/posix_endpoint.cpp:711',
+    ('core/src/posix_endpoint.cpp:714',
      'return false;',
      'if (s->open.load(std::memory_order_relaxed)) return true;'),
     ('core/src/route_handle.cpp:34', 'auto sp = std::allocate_shared<link_tables_t>('),

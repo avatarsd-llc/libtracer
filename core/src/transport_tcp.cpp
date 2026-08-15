@@ -426,11 +426,13 @@ void transport_tcp_server::peer_endpoint_t::send(std::span<const std::span<const
         owner_->dropped_tx_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    // One peer in this round, so the bound is the whole liveness window (#838) — and the
-    // strike, if it stalls, lands on THIS session, the one that earned it.
+    // One peer in this round, but NOT one peer on this node: every open peer can be the
+    // target of a concurrent directed send, and they serialize behind this same write_m_.
+    // So the bound divides by the admission cap, which makes the sum over all of them one
+    // window instead of one window EACH (#1295). The strike, if it stalls, still lands on
+    // THIS session, the one that earned it.
     const int fd = slot_->fd.load(std::memory_order_relaxed);
-    const write_result_t r =
-        write_all_iov(fd, rec.span(), derive_send_bound_ms(owner_->liveness_window_ms(), 1));
+    const write_result_t r = write_all_iov(fd, rec.span(), owner_->directed_send_bound_ms());
     if (owner_->note_write_result(r, fd, slot_->tx_stall_streak))
         owner_->dropped_tx_.fetch_add(1, std::memory_order_relaxed);
 }
