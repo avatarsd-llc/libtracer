@@ -34,8 +34,11 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
     // kind-private config keys):
     //  - `peer_named` (VALUE u8, nonzero = true; default false) exposes the bus_link_t
     //    facet — each inbound peer gets its own return-route identity (board↔board).
-    //  - `max_peers` (VALUE u32; default 0 = unbounded, host-bounded per RFC-0006) is
-    //    the concurrent-peer admission cap.
+    //  - `max_peers` (VALUE u32) is the concurrent-peer admission cap (RFC-0006). Default
+    //    0 no longer means UNBOUNDED (#1295): the transport resolves it through
+    //    derive_max_peers, so an omitted key takes the liveness window's own ceiling and
+    //    an over-ceiling request is clamped to it. The cap is the denominator every send
+    //    bound divides by, so "no cap" would mean "no bound".
     // A third tcp-private key, honored on BOTH halves and mirroring ws's verbatim (#838):
     //  - `liveness_window` (VALUE u32, ms; default 0 = kDefaultLivenessWindowMs) — how long
     //    a peer may fail to take bytes before it is broken. It is the send bound's

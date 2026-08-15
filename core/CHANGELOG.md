@@ -169,6 +169,35 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   clean break with no compatibility overload — the seam exists at exactly one place and this
   changes it exactly once, rather than three times as #1266, #375 Part 2 and #1278 land.
 
+- **BREAKING (behaviour): `max_peers = 0` no longer means UNCAPPED on the tcp/ws stream
+  servers, and a DIRECTED send is bounded by `window / max_peers` rather than by the whole
+  liveness window** ([#1295](https://github.com/avatarsd-llc/libtracer/issues/1295), the
+  residual split out of [#838](https://github.com/avatarsd-llc/libtracer/issues/838)).
+  #838's per-record send bound is `window ÷ peers-in-this-round`, which is right for a
+  broadcast fan but made a *directed* send — `bus_link_t::peer_link(name)->send()` — a round
+  of ONE that took the entire window for itself. Directed sends on one server serialize
+  behind the same `write_m_`, so N callers targeting N stalled peers accumulated N full
+  windows: bounded per call, unbounded per node, and multiplied simply by a peer opening
+  more connections (the ADR-0079 class of defect). Two changes, and they are one fix:
+  - `transport_tcp_server` / `transport_ws_server` (and the shared `net::slot_server_t`)
+    now resolve their admission cap through the new `net::derive_max_peers`. A `max_peers`
+    of `0` — the constructor default and the `max_peers` config key's default — takes the
+    liveness window's own ceiling (`net::max_admissible_peers` = `window / kBoundedWaitMs`,
+    so **100** on the default 10 s window) instead of admitting peers without limit, and a
+    request ABOVE that ceiling is clamped to it. **A deployment that relied on `0` to accept
+    unlimited concurrent peers will now see connections past the cap refused cleanly** (the
+    existing at-cap behaviour: accepted, then immediately closed). Widen `liveness_window`
+    to raise the ceiling, or inject the `max_peers` you want. The enforced value is readable
+    from the new `net::slot_server_t::max_peers()`.
+  - directed sends, and the ws poll thread's handshake reply and PONG, now take
+    `net::slot_server_t::directed_send_bound_ms()` (`window ÷ max_peers`) instead of the
+    whole window. The aggregate over every peer that can be stalled is one window — the same
+    claim `broadcast_iov` makes for the fan — rather than one window each.
+
+  The broadcast round still divides by the peers actually in it, unchanged. No wire, config
+  TLV, or `conn_settings_t` surface changes: `max_peers` remains a kind-private key parsed by
+  the tcp/ws factories out of the raw config TLV.
+
 - **A wire `SUBSCRIBER`'s `PATH` target is now RESOLVED when it routes through a mount — a
   third party can wire a flow between two OTHER nodes and depart**
   ([#491](https://github.com/avatarsd-llc/libtracer/issues/491),

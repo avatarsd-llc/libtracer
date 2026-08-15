@@ -557,7 +557,10 @@ void slot_server_t::accept_peer() {
                 break;
             }
         if (slot == nullptr) {
-            if (max_peers_ != 0 && slots_.size() >= max_peers_) {
+            // max_peers_ is the RESOLVED cap (derive_max_peers), so there is no "0 means
+            // uncapped" arm left to test: an unconfigured server takes the window's own
+            // ceiling rather than infinity (#1295).
+            if (slots_.size() >= max_peers_) {
                 ::close(fd);  // clean refusal at the deployment cap, not a hung SYN
                 return;
             }

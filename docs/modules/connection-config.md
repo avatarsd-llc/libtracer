@@ -158,8 +158,8 @@ a field on `conn_settings_t`, and no kind can read another kind's key.
 | key | value | applies to | default | meaning |
 | --- | --- | --- | --- | --- |
 | `peer_named` | `VALUE` u8 (flag) | LISTEN | `0` | Non-zero exposes the `bus_link_t` facet (ADR-0044): each accepted peer gets its own return-route identity and the connection's `:children[]` enumerates live peers. Without it a listener is a **broadcast** link — `send` fans out to every open peer and no peer is individually addressable. |
-| `max_peers` | `VALUE` u32 | LISTEN | `0` | Concurrent-peer admission cap. `0` = uncapped by this key (still bounded by the host's resources, per RFC-0006). |
-| `liveness_window` | `VALUE` u32 | DIAL + LISTEN | `0` | The peer **liveness window** (#838): how long a peer may fail to take bytes before it is treated as broken. It bounds every send (and the write-mutex hold it takes) — each record gets `window ÷ peers-in-this-round`, floored at 100 ms — so a stalled peer can no longer freeze the sending thread. Three consecutive stalled records to one peer, or one that half-reached the wire, close that peer. `0` = the conservative 10 s default clamp, **never** "unbounded". The number is the deployer's, exactly as `connect_timeout` and CAN's `peer_ttl` are; it converges into RFC-0014 §S5's single liveness contract. |
+| `max_peers` | `VALUE` u32 | LISTEN | `0` | Concurrent-peer admission cap (RFC-0006); a connection beyond it is accepted and immediately closed. `0` is **no longer uncapped** (#1295): it takes the liveness window's own ceiling, `window ÷ 100 ms` — **100** on the default 10 s window — and a larger request is clamped to that ceiling. The cap is the denominator a directed send's bound divides by, so an uncapped server had no bound at all; to admit more peers, widen `liveness_window`. |
+| `liveness_window` | `VALUE` u32 | DIAL + LISTEN | `0` | The peer **liveness window** (#838): how long a peer may fail to take bytes before it is treated as broken. It bounds every send (and the write-mutex hold it takes) — a broadcast record gets `window ÷ peers-in-this-round` and a **directed** record `window ÷ max_peers` (#1295), both floored at 100 ms — so a stalled peer can no longer freeze the sending thread, and N stalled peers cost the node one window rather than N. Three consecutive stalled records to one peer, or one that half-reached the wire, close that peer. `0` = the conservative 10 s default clamp, **never** "unbounded". It also SIZES `max_peers` above. The number is the deployer's, exactly as `connect_timeout` and CAN's `peer_ttl` are; it converges into RFC-0014 §S5's single liveness contract. |
 
 <!-- config-keys:end -->
 
@@ -174,7 +174,7 @@ a peer.
 | key | value | applies to | default | meaning |
 | --- | --- | --- | --- | --- |
 | `peer_named` | `VALUE` u8 (flag) | LISTEN | `0` | As `tcp`: the ADR-0044 per-peer identity facet instead of a broadcast link. |
-| `max_peers` | `VALUE` u32 | LISTEN | `0` | As `tcp`: the concurrent-peer admission cap. |
+| `max_peers` | `VALUE` u32 | LISTEN | `0` | As `tcp`: the concurrent-peer admission cap, with `0` resolving to the liveness window's ceiling rather than "uncapped" (#1295). |
 | `liveness_window` | `VALUE` u32 | DIAL + LISTEN | `0` | As `tcp`: the peer liveness window every send is bounded by (#838). The shipped case here is a throttled background browser tab that stops reading — it now costs counted frames and its own session, not the server's sending thread. |
 
 <!-- config-keys:end -->
