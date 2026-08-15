@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0027 |
 | **Title** | Label-switched path compression: minting a per-host path label across the wire |
-| **Status** | **accepted** (2026-08-15; proposed 2026-08-15), maintainer-ratified; comment window waived by default per [GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window" (solo-maintainer clause) and not invoked. The design of §§4–10 was **ruled** in the 2026-08-15 grilling session; this document is its transcription in normative form, not a proposal seeking a direction. **All three §11.1 collisions the draft flagged are RESOLVED at acceptance** — see §11.1 and §16: **collision 1 (vocabulary)** is ruled **(a) qualify**, "**path label**" is ratified as a term distinct from RFC-0004 §E.1's per-link `u16` "label", carried into [RFC-0024](0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §2.1 by **amendment 3**; **collision 2 (generation)** is ruled **saturate-and-retire, NOT wrap** — a slot whose 16-bit generation reaches its maximum saturates and is **retired permanently**, never reused and never wrapped, which preserves RFC-0024 §4.4 rule 3 / §9.3's "MUST saturate, never wrap" at **zero wire cost**; **collision 3 (per-hop state)** is **accepted knowingly** as a recorded decision — RFC-0027 buys per-element degradation and terminus compaction at the price of a per-hop mint table, and the doc set states that trade rather than claiming statelessness on both forms. What remains open is **only the byte layout** (§5.3, deferred pending conformance vectors in the RFC-0014 discipline) and the §12.4 bench gate, which is normative for acceptance of the **implementation**, not of this document. **Amendment 4 (2026-08-15, §5.3.1) rules §5.3 sub-question 1 — the label element is a TLV child of `PATH`, not a tag in RFC-0018's packed segment grammar — and corrects that sub-question's premise: RFC-0018 and this RFC amend the same `PATH` body grammar and are NOT independent. **Amendment 5 (2026-08-15, §5.3.2) settles the wire spelling: RFC-0018's `len == 0` escape record (`00 <kind=0x16> <len=4> <u32>`, 7 B), sub-question 3 ruled NOT admissible as a `path_lookup_key`, and RFC-0018 implements before this RFC's element car. Sub-question 2 (multi-segment coverage) is the only §5.3 item still open.** Spec, `CONTEXT.md` and code edits land after acceptance, car by car (§12). |
+| **Status** | **accepted** (2026-08-15; proposed 2026-08-15), maintainer-ratified; comment window waived by default per [GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window" (solo-maintainer clause) and not invoked. The design of §§4–10 was **ruled** in the 2026-08-15 grilling session; this document is its transcription in normative form, not a proposal seeking a direction. **All three §11.1 collisions the draft flagged are RESOLVED at acceptance** — see §11.1 and §16: **collision 1 (vocabulary)** is ruled **(a) qualify**, "**path label**" is ratified as a term distinct from RFC-0004 §E.1's per-link `u16` "label", carried into [RFC-0024](0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §2.1 by **amendment 3**; **collision 2 (generation)** is ruled **saturate-and-retire, NOT wrap** — a slot whose 16-bit generation reaches its maximum saturates and is **retired permanently**, never reused and never wrapped, which preserves RFC-0024 §4.4 rule 3 / §9.3's "MUST saturate, never wrap" at **zero wire cost**; **collision 3 (per-hop state)** is **accepted knowingly** as a recorded decision — RFC-0027 buys per-element degradation and terminus compaction at the price of a per-hop mint table, and the doc set states that trade rather than claiming statelessness on both forms. What remains open is **only the byte layout** (§5.3, deferred pending conformance vectors in the RFC-0014 discipline) and the §12.4 bench gate, which is normative for acceptance of the **implementation**, not of this document. **Amendment 4 (2026-08-15, §5.3.1) rules §5.3 sub-question 1 — the label element is a TLV child of `PATH`, not a tag in RFC-0018's packed segment grammar — and corrects that sub-question's premise: RFC-0018 and this RFC amend the same `PATH` body grammar and are NOT independent. **Amendment 5 (2026-08-15, §5.3.2) settles the wire spelling: RFC-0018's `len == 0` escape record (`00 <kind=0x16> <len=4> <u32>`, 7 B), sub-question 3 ruled NOT admissible as a `path_lookup_key`, and RFC-0018 implements before this RFC's element car. **Amendment 6 (2026-08-15, §5.3.3) rules sub-question 2: one label covers a hop's whole local part (its entire mount run), not one segment — with which §5.3 is CLOSED and no byte-layout question remains open.** Spec, `CONTEXT.md` and code edits land after acceptance, car by car (§12). |
 | **Author(s)** | AvatarSD (maintainer), with AI drafting |
 | **Created** | 2026-08-15 |
 | **Comment window** | waived by default while solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"); invoke explicitly if outside input is wanted. Verified: `docs/implementations.md:13` still reads `_(none yet)_`, so the waiver's revert trigger has not fired. |
@@ -430,10 +430,10 @@ Open with the bytes, and to be settled with the vectors of §12.5:
    corrects this sub-question's premise: the two encodings are **not** independent, and the
    "composes untouched" clause was wrong. **Wire spelling settled by Amendment 5 (§5.3.2):
    RFC-0018's `len == 0` escape, 7 B; RFC-0018 implements first.**
-2. Whether one label may cover a **multi-segment** part (a whole three-segment mount run — the
-   assumption §3.3's arithmetic makes) or exactly one segment. §3.3's saving depends on the former;
-   the semantics of §6's rewrite already are the former, since a hop's "local part" *is* its mount
-   run.
+2. ~~Whether one label may cover a **multi-segment** part … or exactly one segment.~~ **RULED
+   2026-08-15 (Amendment 6, §5.3.3): multi-segment.** One label covers a hop's whole local part —
+   its entire mount run — which is what §3.3's arithmetic assumes and what §6's rewrite semantics
+   already describe.
 3. ~~Whether a `PATH` carrying a label element is admissible as a `path_lookup_key`~~ — **RULED
    2026-08-15 (Amendment 5, §5.3.2): NOT admissible.** A label is not canonical bytes, so the key
    is the canonical original the sender still holds; canonical keys stay pure-string, which is
@@ -504,6 +504,54 @@ the cost lands only where labels exist. The win is unchanged and is the reason f
 every depth. *NARROW:* 7 B/element, one predictable branch, and no obligation to understand
 minting — a non-minting MCU skips by length and forwards. *WIDE:* neutral in the encoding; the
 per-hop mint table remains the priced state (§11.1 collision 3).
+
+### 5.3.3 Amendment 6 (2026-08-15, ruled) — one label covers a whole local part, not one segment
+
+**Ruled:** §5.3 sub-question 2 resolves to **multi-segment**. A minted label stands for a hop's
+entire **local part** — the whole mount run it strips, however many segments that is — and not for
+one segment. With Amendment 5 this closes §5.3 entirely; nothing in the byte layout is open.
+
+**This is a ratification, not a change of direction.** §6.1 already says each hop "rewrites its own
+local part of `src`/`dst`", and §1 already defines a label as saying "which of the local parts
+*this hop* already resolved". A hop's local part *is* its mount run (§3.2's descent: each hop
+strips its whole mount run and forwards the residual). The per-segment reading would have
+contradicted the rewrite semantics the RFC was accepted with; this amendment states the ruled
+reading so no implementer has to infer it.
+
+**Why per-segment was not taken, on the axes this project judges by.**
+
+- **Latency — this is the whole point of the RFC.** The cost being removed is `resolve_mount_at`
+  folding a digest chain over the *leading segments* and comparing candidate mount slots, per hop,
+  per frame — measured at **140–184 ns of receiver demux across fan 1–64** (§3.2,
+  `bench/bench_forward_demux.cpp`). A per-segment label would replace each name with a label but
+  still leave a **multi-element walk and a per-element table lookup** where a single deref belongs,
+  turning an O(1) local resolution back into O(segments). The measured prize (§3.2's +21.3 ns per
+  address segment, replaced by a deref **flat at 11 ns at every depth**) is a *per-segment* term:
+  a per-segment label preserves the very shape the RFC exists to delete.
+- **Bytes.** §3.3's arithmetic assumes one element per host part. Per-segment would cost one
+  element per segment — at Amendment 5's 7 B that is 21 B for a three-segment mount run against
+  7 B, and on the three-segment shape §3.3 prices it is worse than the packed string it replaces.
+- **NARROW.** Fewer, larger elements mean fewer table rows, fewer entries to walk and skip on a
+  non-minting node, and a mint table whose row count is bounded by *peers × hops* rather than by
+  address depth. Per-segment would make the per-hop state RFC-0027 already pays (§11.1 collision 3)
+  scale with how deeply anyone addresses, which is precisely the term a NARROW node cannot bound.
+- **WIDE.** Neutral on contention; the deref is one indexed load either way.
+
+**Two consequences worth stating, because implementations will hit them.**
+
+1. **A label is invalidated by any change to the mount run it stands for**, not merely by the
+   disappearance of one segment. This is already the ruled behaviour — the slot's generation bumps
+   and a stale label lands in the NOT_FOUND-class fallback to the string spelling (§4, §7) — but a
+   multi-segment label makes the *scope* of that invalidation explicit: re-mounting anywhere inside
+   a hop's local part retires that hop's label. A mint is never load-bearing (§6.3), so this is a
+   re-resolution, not an error.
+2. **Mixed granularity across hops is still legal and expected**, because the ruling is
+   per-*hop*-local-part, not per-route: a one-segment mount run mints a label covering one segment,
+   a three-segment run mints one covering three. §5's per-element `string | label` tag is unchanged,
+   and a hop that does not mint still leaves its part as a string.
+
+**§12.5's vectors must include a multi-segment case**: a three-segment mount run compacted to one
+label element, alongside the one-segment case, so the two cannot silently diverge.
 
 ## 6. Distribution is passive
 
