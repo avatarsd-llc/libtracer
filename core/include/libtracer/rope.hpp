@@ -123,7 +123,10 @@ class rope_t {
         }
         const std::size_t add = link_count();
         // Best effort: on soft-fail the indexed walk below is still correct, it just pays
-        // the ordinary spill/growth path that concat paid before.
+        // the ordinary spill/growth path that concat paid before. #981 residual: that
+        // fallback path is `std::vector<view_t>` growth, which under `-fno-exceptions`
+        // abort()s the node on OOM — see @ref try_reserve for why the chain cannot take the
+        // ADR-0065 failable seam.
         static_cast<void>(try_reserve(add));
         for (std::size_t i = 0; i < add; ++i) append(links()[i]);
         return *this;
@@ -148,6 +151,18 @@ class rope_t {
      * (an empty rope that still spills keeps the reserved capacity, making even that one
      * spill `reserve` a no-op). On failure the rope is unchanged and the caller drops the
      * reply (BACKPRESSURE) instead of aborting.
+     *
+     * @note #981 residual — the ONE thing this promise does not cover. "Instead of aborting"
+     *       is exact on every profile whose growth THROWS, and exact on ANY profile while
+     *       the chain still fits inline (that arm reaches no allocator). Once the chain
+     *       spills under `-fno-exceptions`, the `heap_` growth runs through
+     *       `%tr::detail::try_reserve`, which there can only PROBE the global heap, free the
+     *       probe block, and then run the throwing `reserve` — and a FreeRTOS context switch
+     *       in that window lets another task take the block, so the `reserve` hits
+     *       exhaustion inside a `noexcept` and abort()s the node (#850). The chain cannot
+     *       move to the ADR-0065 seam (`%tr::mem::block_array_t`) as it stands: `view_t` is
+     *       refcounted, and that container relocates by `memcpy` and never runs a
+     *       destructor. Closing it needs a failable array that relocates by MOVE (#873).
      *
      * The no-op arm is the ONLY thing this function body holds, so it stays cheap enough for
      * the compiler to inline (#1065). The spilling arm — the `max_size` guard, the allocator
@@ -298,6 +313,15 @@ class rope_t {
      * `-fno-exceptions`); the terminus reply egress builds this table per send, so on
      * a fragmented heap that aborted the node. This nothrow-reserves @p out to
      * @ref link_count first and drops the reply on failure. @p out is cleared on entry.
+     *
+     * @note #981 residual: `std::span` IS trivially copyable, so unlike the link chain this
+     *       table could sit on the ADR-0065 seam — but @p out is caller storage of a type
+     *       this signature fixes, so the migration is an API change (a
+     *       `%tr::mem::block_array_t` overload plus a source at every caller), not an
+     *       edit here. Until then the growth keeps `%tr::detail::try_reserve`'s
+     *       `-fno-exceptions` probe window: a task switch between the probe's free and the
+     *       `reserve` abort()s the node (#850). The router's own egress iov tables took
+     *       exactly that migration in #981 and no longer route through this helper.
      * @retval false The span table could not be reserved — @p out is left empty.
      */
     [[nodiscard]] bool try_to_iovec(std::vector<std::span<const std::byte>>& out) const noexcept {
@@ -380,6 +404,10 @@ class rope_t {
         // for every small reply). `have + links` cannot overflow — the max_size guard above
         // bounds it below SIZE_MAX.
         if (have + links <= kInline) return true;
+        // THE spill growth, and the one site that carries the whole rope's #981 residual:
+        // under `-fno-exceptions` this is probe-then-commit and abort()s the node when a
+        // racer takes the freed probe block (#850). See try_reserve's @note for why
+        // `vector<view_t>` cannot become a `block_array_t`.
         if (!tr::detail::try_reserve(heap_, have + links)) return false;
         // Force heap_ mode: migrate the inline links so subsequent append()s take the
         // push_back fast path and never re-enter the inline→heap spill reserve.

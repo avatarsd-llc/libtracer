@@ -7,6 +7,18 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
+ * @par The #981 `-fno-exceptions` probe residual does NOT reach this file
+ * The three `%tr::detail::try_reserve` sites below (`open_stream`,
+ * `on_peer_stream_started`, `accumulate`) keep that helper rather than migrating to the
+ * ADR-0065 failable seam, and the reason is the build, not the element type. This TU is
+ * compiled ONLY into `libtracer_quic`, an opt-in module gated on `LIBTRACER_WITH_QUIC` and
+ * on an installed msquic — a hosted-profile target. On every profile that compiles it the
+ * growth THROWS and `try_grow` catches in-frame (#923): ONE allocation, no probe, no window.
+ * The abort()-on-a-lost-race mode (#850) needs `-fno-exceptions`, which no build of this
+ * file uses. If msquic ever lands on an exception-free target, all three sites become live
+ * residuals and must migrate — their element types (`stream_ctx_t*`, `std::uint8_t`) are
+ * trivially copyable, so `%tr::mem::block_array_t` would take them directly.
+ *
  * The same msquic investment as Phase A; the core library never references any
  * of this. The H3/QPACK surface is the deliberately minimal subset in
  * src/wt_h3.hpp (see its header for exactly what is implemented and why it
@@ -197,6 +209,7 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
         // Not peer-reachable (local opens only), but it shares `ctxs` with the peer-driven
         // path, so the capacity is taken here too and BEFORE `StreamOpen` — a throw at the
         // `push_back` below would strand a started stream whose ctx msquic already holds.
+        // (#981: hosted-only TU — no probe window here; see the file header.)
         if (!detail::try_reserve(ctxs, ctxs.size() + 1)) return nullptr;
         auto ctx = std::unique_ptr<stream_ctx_t>(new (std::nothrow) stream_ctx_t());
         if (!ctx) return nullptr;
@@ -264,6 +277,7 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
         // about US, and taking down a session the peer already established because our heap
         // is tight is exactly the over-broad refusal #919 removed. So an OOM aborts just
         // this stream and returns true: the connection, and any live session on it, stay up.
+        // (#981: hosted-only TU — no probe window here; see the file header.)
         if (!detail::try_reserve(c.acc, c.acc.size() + n)) {
             refuse_stream(c);
             return true;
@@ -728,6 +742,7 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
         // established. `ctxs` is bounded by the concurrency caps in `session_settings` plus
         // the per-stream reclamation added in #1163, so this is a growth of a SMALL list —
         // the point is the disposition on failure, not the size.
+        // (#981: hosted-only TU — no probe window here; see the file header.)
         if (!detail::try_reserve(ctxs, ctxs.size() + 1)) return QUIC_STATUS_ABORTED;
         auto* c = new (std::nothrow) stream_ctx_t{};
         if (c == nullptr) return QUIC_STATUS_ABORTED;

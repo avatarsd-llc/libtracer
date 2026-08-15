@@ -1099,6 +1099,17 @@ libtracer_test_warnings(folded_read_backend_test)
 add_test(NAME folded_read_backend COMMAND folded_read_backend_test)
 
 if(LIBTRACER_NET_PLANE)
+    # #981 — the two try_* sites that migrated off the -fno-exceptions probe window
+    # (read_subtree_folded's collect stack, deliver_remote's egress iov table) really draw from
+    # the injected block_source_t, and answer its exhaustion by value. The injector refuses ONE
+    # exact block shape so the refusal is attributable, and every armed case asserts a positive
+    # "the seam was asked" instrument first — revert either migration and both halves redden.
+    # (Links fwd_router_t::deliver_remote, so the target needs the net plane.)
+    add_executable(try_probe_window_test try_probe_window_test.cpp)
+    target_link_libraries(try_probe_window_test PRIVATE libtracer)
+    libtracer_test_warnings(try_probe_window_test)
+    add_test(NAME try_probe_window COMMAND try_probe_window_test)
+
     # #477 — the store/delivery path's nothrow soft-fail discipline: OOM injected through
     # tr::detail::probe_fail_hook (store => BACKPRESSURE, delivery => drop/defer, never abort).
     add_executable(graph_oom_softfail_test graph_oom_softfail_test.cpp)
