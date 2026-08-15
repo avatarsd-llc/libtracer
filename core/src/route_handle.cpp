@@ -204,6 +204,16 @@ std::optional<std::vector<std::byte>> route_handle_t::egress_route(std::string_v
         // cannot be done here without an API change: `link_tables_t` holds `std::pmr::vector`s
         // and `detail::try_*` is typed to plain `std::vector`, which is the structural reason
         // this file is half-migrated.
+        //
+        // #981 residual, spelled as the crash mode: on the `-fno-exceptions` profile
+        // `try_assign` cannot catch, so it probes the global heap, frees the probe block and
+        // then runs the throwing `assign` on the inference the block is still free. A
+        // context switch in that window — this runs on a transport receive thread, so a
+        // racer is the normal case, not the exotic one — makes the `assign` hit exhaustion
+        // inside a `noexcept` and abort() the node (#850). `std::byte` IS trivially
+        // copyable, so `block_array_t` would hold this buffer; what blocks the migration is
+        // the `std::optional<std::vector<std::byte>>` in the public signature above, which
+        // every caller owns.
         std::vector<std::byte> out;
         if (!detail::try_assign(out, std::span<const std::byte>(e.route))) return std::nullopt;
         return out;

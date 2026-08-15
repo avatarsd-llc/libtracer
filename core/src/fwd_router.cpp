@@ -2018,6 +2018,10 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
                 return;
             }
             view::rope_t value;
+            // #981: no residual HERE. One link on a fresh rope is the inline no-op arm of
+            // `rope_t::try_reserve` — it reaches no allocator, so there is no probe window
+            // and nothing to migrate; the check stays because the return is [[nodiscard]]
+            // and a future kInline of 0 must not silently drop the guard.
             if (!value.try_reserve(1)) {
                 graph_.count_external_drop(graph::graph_t::external_drop_t::OUT_OF_MEMORY, 1);
                 return;
@@ -2280,13 +2284,16 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const vie
             head.raw(op_tlv);
             head.header_bare(type_t::PATH_REF, dst_body.size());
             if (head.ok()) {
-                std::vector<std::span<const std::byte>> iov;
-                if (!tr::detail::try_reserve(iov, 3 + value.link_count())) return;  // OOM
-                iov.push_back(head.span());
-                iov.push_back(dst_body);
-                iov.push_back(std::span<const std::byte>(empty_src));
-                for (const view_t& l : value.links()) iov.push_back(l.bytes());
-                out->send(std::span<const std::span<const std::byte>>(iov));
+                // The iov table on the ADR-0065 failable seam (#981) — see the default arm
+                // below for the argument; this arm is the same table, same element type.
+                mem::block_array_t<std::span<const std::byte>> iov(graph_.control_source());
+                if (!iov.reserve(3 + value.link_count())) return;  // OOM — drop
+                const bool built = iov.push_back(head.span()) && iov.push_back(dst_body) &&
+                                   iov.push_back(std::span<const std::byte>(empty_src));
+                if (!built) return;
+                for (const view_t& l : value.links())
+                    if (!iov.push_back(l.bytes())) return;
+                out->send(std::span<const std::span<const std::byte>>(iov.data(), iov.size()));
                 return;
             }
         }
@@ -2312,16 +2319,28 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const vie
     if (!head.ok()) return;
 
     // iov = head + route + empty_src + one span per value link (sized to the rope, no
-    // synthetic cap — the same per-send iov vector the rope terminus reply builds).
-    // Nothrow-reserved (#477): an OOM drops this delivery instead of a bad_alloc
-    // abort() on the writer thread — the try_to_iovec discipline (d352998).
-    std::vector<std::span<const std::byte>> iov;
-    if (!tr::detail::try_reserve(iov, 3 + value.link_count())) return;  // OOM — drop
-    iov.push_back(head.span());
-    iov.push_back(route);
-    iov.push_back(std::span<const std::byte>(empty_src));
-    for (const view_t& l : value.links()) iov.push_back(l.bytes());
-    link->send(std::span<const std::span<const std::byte>>(iov));
+    // synthetic cap — the same per-send iov table the rope terminus reply builds).
+    //
+    // MIGRATED to the ADR-0065 failable seam (#981), which is the destination `graph_t`'s
+    // `ctl` parameter names for "`fwd_router` iov". `std::vector` + `detail::try_reserve`
+    // was nothrow only where the growth THROWS: under `-fno-exceptions` that helper probes
+    // the global heap, frees the probe block, and then runs the throwing `reserve` on the
+    // inference that the block is still there — a writer-thread context switch in that
+    // window makes the `reserve` abort() the node (#850). A `block_array_t` growth is ONE
+    // refusable `try_alloc`, so there is no window to lose, and the table is drawn from the
+    // node's injected source rather than the global heap. `std::span` is trivially copyable,
+    // so the memcpy relocation is exact. Exhaustion still just drops this delivery.
+    mem::block_array_t<std::span<const std::byte>> iov(graph_.control_source());
+    if (!iov.reserve(3 + value.link_count())) return;  // OOM — drop
+    // Reserved to the exact final count above, so none of these can grow again; they are
+    // still checked because `push_back` is `[[nodiscard]]` and a silent short table would
+    // put a truncated frame on the wire.
+    const bool built = iov.push_back(head.span()) && iov.push_back(route) &&
+                       iov.push_back(std::span<const std::byte>(empty_src));
+    if (!built) return;
+    for (const view_t& l : value.links())
+        if (!iov.push_back(l.bytes())) return;
+    link->send(std::span<const std::span<const std::byte>>(iov.data(), iov.size()));
 }
 
 }  // namespace tr::net

@@ -77,6 +77,27 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **Two peer-sized growths moved off the `-fno-exceptions` probe window onto the injected
+  `mem::block_source_t`** ([#981](https://github.com/avatarsd-llc/libtracer/issues/981),
+  follow-up to [#923](https://github.com/avatarsd-llc/libtracer/issues/923); umbrella
+  [#873](https://github.com/avatarsd-llc/libtracer/issues/873)). `#923` made
+  `detail::try_reserve` / `try_push_back` report allocation failure by value on every profile
+  whose growth **throws**; under `-fno-exceptions` the helper can only probe the global heap,
+  free the probe block and then run the throwing `reserve`, so a task switch in that window
+  still `abort()`s the node ([#850](https://github.com/avatarsd-llc/libtracer/issues/850)).
+  `graph_t::read_subtree_folded`'s collect stack and `net::fwd_router_t`'s remote-delivery
+  egress iov tables — both sized by a **peer's** choice (which composed root it READs, how many
+  links the delivered value carries) and both holding trivially-copyable elements — now use
+  `mem::block_array_t` over the graph's injected `ctl` source: **one refusable `try_alloc` per
+  growth, no probe, no window**, and the blocks come from the node's own resource rather than
+  the process heap. No signature changed and the outcomes are the ones already documented
+  (`BACKPRESSURE` for the composed read, a dropped delivery for the fan-out) — what changes is
+  **which resource** they draw from, so a host that injects a bounded `ctl` now bounds these
+  two allocations too. The six hot-symbol ratchet pins come back `+0`. The remaining 28
+  `try_*` sites keep the helper because their element types (`view_t`, `std::vector<std::byte>`,
+  `std::string`, `std::shared_ptr`) cannot ride `block_array_t`'s memcpy relocation; each now
+  states that residual **at the site**, and the `rope_t::try_reserve` / `try_to_iovec` doc
+  comments name it explicitly.
 - **`graph::vertex_t::fill()`, `mark_unregistered()` and `add_child()` are `private` — the
   map-lock mutators belong to `graph_t`, and the compiler now says so**
   ([#867](https://github.com/avatarsd-llc/libtracer/issues/867), ruling 2). All three mutate

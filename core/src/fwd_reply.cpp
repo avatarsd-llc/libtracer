@@ -100,6 +100,13 @@ rope_t assemble_reply(const reply_route_t& route, reply_kind_t kind,
     // return an EMPTY rope; resolve_node's or_backpressure wrapper turns an empty success
     // reply into an addressed BACKPRESSURE error (the client falls back on the same link
     // rather than presuming it dead).
+    //
+    // #981 residual: a reply short enough to stay inline reaches no allocator at all, which
+    // is the common case here. A reply whose chain SPILLS grows `rope_t`'s
+    // `std::vector<view_t>`, and under `-fno-exceptions` that growth is probe-then-commit —
+    // a task switch between the probe's free and the `reserve` abort()s the node (#850).
+    // Refcounted `view_t` links cannot ride `block_array_t`'s memcpy relocation, so this
+    // site waits on a move-relocating failable array (#873) rather than migrating.
     if (!rope.try_reserve(1 + shared.size() + (trailing.empty() ? 0u : 1u) +
                           (route.echo_ts ? 1u : 0u)))
         return rope_t{};

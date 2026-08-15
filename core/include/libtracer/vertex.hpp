@@ -1028,6 +1028,13 @@ class vertex_t {
      * the drain returns 0 WITHOUT advancing the cursor, so the entries re-drain on the
      * next covering flush — deferred, never lost, never an abort.
      *
+     * @note #981 residual: "never an abort" holds where the growth THROWS. Under
+     *       `-fno-exceptions` `%tr::detail::try_reserve` degrades to probe-then-commit — the
+     *       probe block is freed before `reserve` takes one and a context switch in that
+     *       window makes the `reserve` abort() the node (#850). The snapshot cannot take the
+     *       ADR-0065 `%tr::mem::block_array_t` seam: its element is a `std::shared_ptr`,
+     *       which the seam's memcpy relocation would tear, and @p out is caller storage of a
+     *       type this signature fixes.
      * @note Counts ring APPENDS, never a `write_seq_` delta (#925): that sequence is the
      *       await/readiness cursor and bumps on a SHED append too, so the surplus would
      *       re-take an ALREADY-FLUSHED entry — a drain removes nothing from the ring.
@@ -2167,6 +2174,12 @@ class vertex_t {
                 e.binding = s.binding;
                 if (s.remote == nullptr) continue;  // the plain in-process edge: no cold half
                 e.remote.reset(new (std::nothrow) pub_remote_t{});
+                // #981 residual on the two owning string copies: `try_assign(std::string&)`
+                // is nothrow only where the growth throws. Under `-fno-exceptions` it is
+                // probe-then-commit and abort()s the node if a racer takes the freed probe
+                // block (#850). `std::string` is not trivially copyable, so the ADR-0065
+                // `block_array_t` seam does not apply; a link/caller name that must survive
+                // exhaustion needs an owned-bytes type on the failable seam (#873).
                 if (e.remote == nullptr ||
                     !tr::detail::try_assign(e.remote->link, s.remote->link) ||
                     !tr::detail::try_assign(e.remote->caller, s.remote->caller)) {
@@ -2202,6 +2215,12 @@ class vertex_t {
                                                     std::vector<edge_view_t>& overflow,
                                                     snapshot_drops_t& drops) noexcept {
         if (p == nullptr) return 0;
+        // #981 residual: the wide-fan-out overflow buffer keeps `try_reserve`'s
+        // `-fno-exceptions` probe window — a task switch between the probe's free and the
+        // `reserve` abort()s the node (#850). `edge_view_t` owns `std::string`s and
+        // refcounted views, so `block_array_t` (memcpy relocation) cannot hold it. The
+        // inline prefix below is the mitigation that exists today: a fan-out up to
+        // `kCapacity` reaches no allocator at all.
         const bool use_heap =
             p->count > edge_snapshot_t::kCapacity && tr::detail::try_reserve(overflow, p->count);
         const pub_edge_t* src = p->entries();
@@ -2247,6 +2266,10 @@ class vertex_t {
         out.target_key = in.target_key;  // refcount clone — nothrow
         out.binding = in.binding;        // two words, trivially copyable
         if (in.remote == nullptr) return true;
+        // #981 residual, same as `try_publish_edges`: these two `std::string` copies keep
+        // `try_assign`'s `-fno-exceptions` probe window (abort() on a lost race, #850) and
+        // cannot take the ADR-0065 seam. The in-process edge above returns before reaching
+        // them, so the hot fan-out leg is unaffected either way.
         if (!tr::detail::try_assign(out.link, in.remote->link) ||
             !tr::detail::try_assign(out.caller, in.remote->caller))
             return false;

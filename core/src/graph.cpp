@@ -265,6 +265,14 @@ struct branch_node_t {
     // open it with the sibling cursor past that NAME. The open-node stack grows
     // NOTHROW (#477 — a branch write runs on the writer thread): OOM soft-fails the
     // whole branch write as BACKPRESSURE (the store-leg status), never an abort.
+    //
+    // #981 residual, STATED HERE: "never an abort" holds only where the growth THROWS.
+    // Under `-fno-exceptions` `try_push_back` degrades to probe-then-commit — the probe
+    // block is freed before `reserve` asks for one, and a FreeRTOS context switch in that
+    // window lets another task take it, so the `reserve` hits exhaustion inside a `noexcept`
+    // and abort()s the MCU node (#850). This site cannot take the ADR-0065 failable seam:
+    // `open_t` owns a `std::vector<std::byte>` key, so it is neither trivially copyable nor
+    // trivially destructible and `block_array_t`'s memcpy relocation would tear it.
     const auto open = [&a, &stack](std::uint32_t node, std::vector<std::byte> k) -> result_t<void> {
         if (!a[node].opt.pl || !trailer_less(a[node]))
             return std::unexpected(status_t::TYPE_MISMATCH);
@@ -289,7 +297,11 @@ struct branch_node_t {
             bn.store = std::move(top.store);
             bn.subtree_has_value = subtree_value;
             bn.key = std::move(top.key);
-            if (!detail::try_push_back(out, std::move(bn)))  // nothrow plan growth (#477)
+            // Nothrow plan growth (#477). #981 residual: `branch_node_t` owns a
+            // `std::vector<std::byte>` key and a `view_t`, so it stays on `try_push_back`
+            // and keeps that helper's `-fno-exceptions` probe window — see the open-node
+            // stack above for the crash mode this leaves open on an MCU node.
+            if (!detail::try_push_back(out, std::move(bn)))
                 return std::unexpected(status_t::BACKPRESSURE);
             stack.pop_back();
             if (stack.empty()) return subtree_value;
@@ -310,7 +322,12 @@ struct branch_node_t {
                 return std::unexpected(status_t::TYPE_MISMATCH);
             // The child key = parent key + one NAME record, composed NOTHROW (#477):
             // reserve the exact final size (≤ 6-byte header even if emit_tlv widens),
-            // then the copy + emit cannot reallocate.
+            // then the copy + emit cannot reallocate. #981 residual: the key's element type
+            // IS trivially copyable, but the key is a `std::vector<std::byte>` because that
+            // is what `open_t`/`branch_node_t`/`ensure_vertex_ptr` all take, so it cannot
+            // move to `block_array_t` alone — and it keeps `try_reserve`'s
+            // `-fno-exceptions` probe window (abort() on a lost race, #850) until the whole
+            // key type migrates.
             std::vector<std::byte> child_key;
             if (!detail::try_reserve(child_key, top.key.size() + 6 + a[cn].body.size()))
                 return std::unexpected(status_t::BACKPRESSURE);
@@ -1077,6 +1094,12 @@ bool graph_t::try_build_key(const vertex_t* v, std::vector<std::byte>& out) noex
     // under -fno-exceptions on OOM — so those call sites render through this and drop
     // (or defer) their leg on failure instead. Same two-pass fill, same immutability
     // guarantees; read-plane callers keep build_key.
+    //
+    // #981 residual: nothrow here means "reports OOM by value where the growth throws".
+    // Under `-fno-exceptions` `try_reserve` is still probe-then-commit and a task switch
+    // between the probe's free and the `reserve` abort()s the node (#850). The out-param is
+    // a `std::vector<std::byte>` fixed by this function's public signature and by every
+    // caller that stores a key, so the ADR-0065 seam cannot be adopted at this site alone.
     std::size_t total = 0;
     for (const vertex_t* n = v; n->parent() != nullptr; n = n->parent()) total += n->name().size();
     out.clear();
@@ -1240,6 +1263,14 @@ namespace {
  *        (> kInline links) rope's copy grows a heap chain that threw bad_alloc — an
  *        abort() under `-fno-exceptions`. `try_reserve` is a no-op while the chain fits
  *        inline (the hot case), and on OOM the caller drops that delivery leg.
+ *
+ * #981 residual: only the INLINE arm is unconditionally safe (it reaches no allocator at
+ * all). Once the chain spills, `rope_t::try_reserve` grows a `std::vector<view_t>` through
+ * `detail::try_reserve`, which under `-fno-exceptions` is probe-then-commit — a task switch
+ * between the probe's free and the `reserve` still abort()s the node (#850). `view_t` is
+ * refcounted, so the rope's link chain cannot take the ADR-0065 `block_array_t` seam
+ * (memcpy relocation would drop the refcount clones); closing this needs a failable array
+ * that relocates by move, tracked on the umbrella (#873).
  * @retval false The chain could not be reserved — @p dst is empty, drop the leg.
  */
 [[nodiscard]] bool try_clone_rope(rope_t& dst, const rope_t& src) noexcept {
@@ -1632,6 +1663,9 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, std::stri
     // BACKPRESSURE, the injected-resource status, never an abort on the writer thread.
     std::vector<std::byte> root_key;
     if (!try_build_key(v, root_key)) return std::unexpected(status_t::BACKPRESSURE);
+    // #981 residual on the copy: `parse_key` is the `std::vector<std::byte>` the parser
+    // moves into `open_t`, so it is pinned to `try_assign` and keeps that helper's
+    // `-fno-exceptions` probe window (abort() on a lost race, #850).
     std::vector<std::byte> parse_key;
     if (!detail::try_assign(parse_key, root_key)) return std::unexpected(status_t::BACKPRESSURE);
     std::vector<branch_node_t> plan;  // post-order; plan.back() is the root
@@ -1654,8 +1688,11 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, std::stri
         std::shared_ptr<const rope_t> stored;
     };
     std::vector<site_t> sites;
-    if (!detail::try_reserve(sites, plan.size()))  // nothrow (#477): OOM => BACKPRESSURE
-        return std::unexpected(status_t::BACKPRESSURE);
+    // Nothrow (#477): OOM => BACKPRESSURE. #981 residual: `site_t` owns a `std::shared_ptr`,
+    // so the admission table cannot take the ADR-0065 seam (`block_array_t` relocates by
+    // memcpy) and this growth keeps `try_reserve`'s `-fno-exceptions` probe window — a task
+    // switch between the probe's free and the `reserve` abort()s the node (#850).
+    if (!detail::try_reserve(sites, plan.size())) return std::unexpected(status_t::BACKPRESSURE);
     for (const branch_node_t& node : plan) {
         if (node.store.empty()) continue;
         vertex_t* vx = nullptr;
@@ -1760,6 +1797,10 @@ void graph_t::propagate_impl(vertex_t* v) {
     };
     std::vector<std::vector<std::byte>> to_deliver;
     // Nothrow copy of one sweep key into the delivery snapshot; false stops the sweep.
+    // #981 residual: both helpers below keep the `-fno-exceptions` probe window (an abort()
+    // if a racer takes the freed probe block, #850). Neither can migrate — the snapshot's
+    // element type IS `std::vector<std::byte>`, which `block_array_t` rejects (not trivially
+    // copyable), and the key copy feeds that same element type.
     const auto collect = [&to_deliver](const std::vector<std::byte>& k) noexcept {
         std::vector<std::byte> copy;
         if (!detail::try_assign(copy, k)) return false;
@@ -2929,6 +2970,11 @@ result_t<rope_t> graph_t::read_children_folded(vertex_handle_t vh) const {
     // on soft-fail the concat below still produces the right chain, it just pays the
     // ordinary growth path. `concat` no longer reserves for us — that guard belongs to the
     // caller that knows the count, not to every 1-link delivery clone (#1022).
+    //
+    // #981 residual: a listing wide enough to spill grows the rope's `std::vector<view_t>`
+    // chain, and under `-fno-exceptions` that growth is probe-then-commit — a task switch
+    // between the probe's free and the `reserve` abort()s the node (#850). `view_t` is
+    // refcounted, so the chain cannot take `block_array_t`'s memcpy relocation (#873).
     static_cast<void>(out.try_reserve(members.link_count()));
     out.concat(members);  // empty members (no children) => header-only rope, len 0
     return out;
@@ -2957,7 +3003,7 @@ result_t<rope_t> graph_t::read_subtree_folded(vertex_handle_t vh, std::string_vi
     mem::mem_backend_t& hdr_backend = *value_backend_;
 
     // Pass 1 — collect, under ONE shared map lock: an ITERATIVE pre-order stack machine
-    // (house style, parse_branch_node). The stack is heap-backed, so its bound is the
+    // (house style, parse_branch_node). The stack is `ctl_`-backed, so its bound is the
     // allocator and it needs no synthetic cap. This comment used to attribute that to graph
     // depth being "kMaxSegments-bounded structurally"; it is not — kMaxSegments is enforced
     // only in path_t::parse, and a wire-driven write-create never passes through it. Per node:
@@ -2975,13 +3021,24 @@ result_t<rope_t> graph_t::read_subtree_folded(vertex_handle_t vh, std::string_vi
             std::size_t parent = 0; /**< @brief Its parent's index in `nodes`. */
         };
         const std::shared_lock lock(map_mutex_);
-        std::vector<work_t> stack;
-        // Every stack/nodes growth is a throwing std::vector spill that aborts under
-        // -fno-exceptions on OOM; route each through the nothrow try_push_back and drop
-        // the reply (BACKPRESSURE) on failure. A lambda cannot return the error, so the
-        // child push latches `oom` and the loop propagates it after each visit.
+        // MIGRATED to the ADR-0065 failable seam (#981): `work_t` is a pointer plus an index
+        // — trivially copyable and trivially destructible — so the collect stack takes
+        // `block_array_t` over the injected `ctl_` rather than a `std::vector` +
+        // `detail::try_push_back`. On the `-fno-exceptions` profile that helper can only
+        // PROBE the global heap and then run the throwing `reserve`, and a context switch in
+        // between lets another task take the just-freed block: the `reserve` then aborts()
+        // the node (#850). One refusable `try_alloc` per growth has no such window, and it
+        // draws from the node's own resource instead of the global heap. The node COUNT is
+        // peer-chosen (it picks which composed root to READ), so this is exactly the growth
+        // a peer can drive to exhaustion.
+        mem::block_array_t<work_t> stack(*ctl_);
+        // `nodes` stays on the throwing-growth-guarded helper: `snap_node_t` holds a
+        // `std::shared_ptr`, so it is neither trivially copyable nor trivially destructible
+        // and `block_array_t`'s memcpy relocation cannot carry it (#981 — the residual is
+        // documented at that push below). A lambda cannot return the error, so the child
+        // push latches `oom` and the loop propagates it after each visit.
         bool oom = false;
-        if (!detail::try_push_back(stack, work_t{.v = root, .parent = kNoParent}))
+        if (!stack.push_back(work_t{.v = root, .parent = kNoParent}))
             return std::unexpected(status_t::BACKPRESSURE);
         while (!stack.empty()) {
             const work_t w = stack.back();
@@ -2993,6 +3050,12 @@ result_t<rope_t> graph_t::read_subtree_folded(vertex_handle_t vh, std::string_vi
             n.parent = w.parent;
             n.body_len = (w.parent == kNoParent ? 0 : w.v->name().bytes().size()) +
                          (n.lkv ? n.lkv->total_length() : 0);
+            // #981 residual, STATED HERE: on the `-fno-exceptions` profile this growth is a
+            // probe-then-commit — `probe_bytes` frees its block before `reserve` takes one,
+            // and a task switch in that window makes the `reserve` abort() the node (#850).
+            // It cannot take the ADR-0065 seam: `snap_node_t` owns a `std::shared_ptr`, which
+            // `block_array_t`'s memcpy relocation would tear. Closing it needs a relocating
+            // failable array, not a change here.
             if (!detail::try_push_back(nodes, std::move(n)))
                 return std::unexpected(status_t::BACKPRESSURE);
             // Push the children, then reverse the just-pushed run: the LIFO pop then
@@ -3003,10 +3066,10 @@ result_t<rope_t> graph_t::read_subtree_folded(vertex_handle_t vh, std::string_vi
                 if (oom) return;              // a prior sibling push failed — stop growing
                 if (!c.registered()) return;  // placeholders are not members
                 if (!acl_allows(&c, caller, acl_right_t::READ)) return;  // PRUNE the subtree
-                if (!detail::try_push_back(stack, work_t{.v = &c, .parent = idx})) oom = true;
+                if (!stack.push_back(work_t{.v = &c, .parent = idx})) oom = true;
             });
             if (oom) return std::unexpected(status_t::BACKPRESSURE);
-            std::reverse(stack.begin() + first, stack.end());
+            std::reverse(stack.data() + first, stack.data() + stack.size());
         }
     }
 
@@ -3023,6 +3086,11 @@ result_t<rope_t> graph_t::read_subtree_folded(vertex_handle_t vh, std::string_vi
     std::size_t total_links = 0;
     for (const snap_node_t& n : nodes)
         total_links += 1u + (n.parent != kNoParent ? 1u : 0u) + (n.lkv ? n.lkv->link_count() : 0u);
+    // #981 residual: the reservation itself is the `std::vector<view_t>` growth this
+    // paragraph exists to make ONE growth — but under `-fno-exceptions` that one growth is
+    // still probe-then-commit and abort()s the node if a racer takes the freed probe block
+    // (#850). Refcounted `view_t` links cannot ride `block_array_t`'s memcpy relocation, so
+    // the seam migration waits on a move-relocating failable array (#873).
     rope_t out;
     if (!out.try_reserve(total_links)) return std::unexpected(status_t::BACKPRESSURE);
 
