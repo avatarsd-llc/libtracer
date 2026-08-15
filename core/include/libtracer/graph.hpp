@@ -1133,10 +1133,12 @@ class graph_t {
      * It does NOT rely on `kMaxSegments`, and this comment used to claim it did ("graph depth
      * is `kMaxSegments`-bounded structurally"). That claim is false: `kMaxSegments` is enforced
      * only in `path_t::parse` (`core/src/path.cpp:110`), the LOCAL string→bytes builder.
-     * `ensure_vertex` takes raw key bytes and counts nothing, so a wire-driven write-create
-     * already registers a vertex at any depth. The iterative walk is safe because it is
-     * iterative and resource-bounded — which is the real reason, and the only one that survives
-     * `kMaxSegments` being lifted.
+     * `ensure_vertex` takes raw key bytes and counts nothing, so a write-create already
+     * registers a vertex at any depth — locally without limit, and from the wire at whatever
+     * depth a branch write's POINT nesting reaches (RFC-0005 §D amendment 1 took the
+     * unresolved-`dst` arm away, but not decomposition's landing sites). The iterative walk is safe
+     * because it is iterative and resource-bounded — which is the real reason, and the only one
+     * that survives `kMaxSegments` being lifted.
      *
      * Resolver contract: with a subject resolver installed, `acl_allows` — and therefore
      * the resolver callback — runs O(nodes) times per composed read **under the shared
@@ -1486,6 +1488,18 @@ class graph_t {
      * is open, matching ACL-presence opt-in). A creation race lost to a concurrent
      * caller is benign (the winner's vertex is returned). @p key must be a
      * well-formed, non-empty canonical PATH-payload (else INVALID_PATH).
+     *
+     * @note This is the LOCAL creation door and the branch-write decomposition's landing
+     *       door — NOT the remote miss handler. Since RFC-0005 §D amendment 1
+     *       ([#1139](https://github.com/avatarsd-llc/libtracer/issues/1139)) a peer's
+     *       fieldless `FWD{WRITE}` to an unresolved `dst` answers NOT_FOUND and never
+     *       reaches here; a peer creates through the ADR-0059 creator endpoint. The
+     *       asymmetry is deliberate: the in-process caller owns its graph's structure.
+     * @note No SCRATCH allocation. The level walk stores nothing and the registration takes
+     *       borrowed key bytes, so the per-call temporaries that used to scale with the key's
+     *       DEPTH — the part a peer chose the size of — no longer draw from the global heap
+     *       behind the injected `block_source_t`'s back (#1139, #873). The `vertex_t` objects
+     *       themselves are still heap-allocated; that is the larger #873 arena question.
      */
     [[nodiscard]] result_t<vertex_handle_t> ensure_vertex(std::span<const std::byte> key,
                                                           std::string_view caller = {});
@@ -1609,6 +1623,13 @@ class graph_t {
     [[nodiscard]] vertex_t* find_ptr(std::span<const std::byte> key) const;
     [[nodiscard]] result_t<vertex_t*> ensure_vertex_ptr(std::span<const std::byte> key,
                                                         std::string_view caller);
+    // The whole body of @ref register_vertex_key, over BORROWED key bytes. The descent never
+    // retains the key, so the public owning-vector overload is a convenience wrapper and the
+    // graph's own callers (write-creates, path registration) pass a span rather than paying a
+    // heap copy just to spell the call (#1139/#873).
+    [[nodiscard]] result_t<vertex_handle_t> register_vertex_key_span(std::span<const std::byte> key,
+                                                                     role_t role,
+                                                                     handlers_t handlers);
     // Update the vertex value (LKV/history/handler), then fan out to subscribers.
     // `caller` is the ACL caller context gating the WRITE right (the API caller's
     // for a direct write; a delivered subscription's stored context terminates at

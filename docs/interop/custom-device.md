@@ -126,7 +126,7 @@ none — and remains a conforming node that any forwarder routes and any peer re
 | **`:acl` (ALLOW-only MCU subset)** | device-local authorization: who may read/write/subscribe/create | open device (fine on a trusted bus) |
 | **In-band creation** (`:children[]` `SPEC` write) | orchestrators instantiate your connections and controllers at run time, bounded by your own catalog | fixed function; wiring baked at build |
 | **Vertex retirement** | a dynamic child can be withdrawn: its address answers `PATH_NOT_FOUND`, its subscriber edges are evicted, and a later revive inherits nothing of the old owner | the tree only grows; a withdrawn child stays addressable and keeps delivering |
-| **Write-creates** | peers materialize vertices `mkdir -p`-style under CREATE ACL | static tree only |
+| **Write-creates** | your own local writes materialize vertices `mkdir -p`-style under CREATE ACL (a *peer* creates through the creator endpoint — a remote write to an unresolved address is `PATH_NOT_FOUND`) | static tree only |
 | **Multiple transports + FWD** | the device becomes a forwarder — one address space across CAN + IP | leaf node on one link |
 | **Header-elided framing** (e.g. CAN) | zero protocol overhead on constrained buses; the TLV header never hits the wire | full-TLV frames everywhere |
 | **Address-shift slicing** | payloads beyond one frame, grouped by `(origin, ts)` | payloads bounded by transport frame |
@@ -137,12 +137,12 @@ none — and remains a conforming node that any forwarder routes and any peer re
 
 Creation is not a new verb. It is an **append of a `SPEC` TLV to a parent's
 `:children[]` field**, gated by that parent's `CREATE` right
-(`core/src/graph.cpp:2523-2527`;
+(`core/src/graph.cpp:2547-2551`;
 [ADR-0020 — NFSv4-style ACEs with inheritance](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0020-acl-nfsv4-style-aces-with-inheritance.md)).
 The SPEC's `type` member names one of the device's registered child types and its
 optional `config` SETTINGS carries the instantiation parameters; an unregistered
 `type` answers `SCHEMA_NOT_FOUND`, the `ENOTTY` of an unsupported field
-(`graph_t::create_child`, `core/src/graph.cpp:2574-2601`). Reading `:children[]`
+(`graph_t::create_child`, `core/src/graph.cpp:2598-2625`). Reading `:children[]`
 returns the parent's **members**, never SPECs.
 
 On the `/net` plane the registered child types are `client` and `listener`

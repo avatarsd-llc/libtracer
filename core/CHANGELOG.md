@@ -77,6 +77,45 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **WIRE-VISIBLE: a remote fieldless `FWD{WRITE}` to an unresolved `dst` answers `NOT_FOUND`
+  and no longer write-creates the vertex chain**
+  ([#1139](https://github.com/avatarsd-llc/libtracer/issues/1139);
+  [RFC-0005](../docs/spec/rfcs/0005-subtree-subscriptions.md) §D **amendment 1**, maintainer
+  ruling option A). The terminus used to `mkdir -p` the target and every missing level above
+  it on a peer's data write. That path consulted no type catalog, produced an untyped
+  `STORED_VALUE`, counted nothing, bounded no depth, and — because the `CREATE` check is
+  evaluated on the nearest **existing** ancestor — ran **no ACL check at all** when the graph
+  held no ancestor above the address, i.e. for any brand-new top-level subtree. Creation from
+  a peer is now the [ADR-0059](../docs/adr/0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md)
+  creator endpoint's job, where it is typed, catalogued and ACL-gated; the caller backs off and
+  retries until whoever owns that structure establishes it. RFC-0005 §1's *appearance is the
+  first write* mechanism is untouched — a creator-endpoint create IS a write and bubbles to the
+  parent subscriber exactly as before; only the origin of an appearance moves.
+  **Unchanged, deliberately:** the local `graph_t::write(path, value)` overload still
+  write-creates (the in-process caller is the node's own trusted code and owns its graph's
+  structure — the asymmetry is the ruling, not an oversight), and RFC-0005 §B **branch-write
+  decomposition still creates its landing vertices**, because those land beneath a `dst` that
+  already resolved and was already WRITE-gated, at a depth the peer's own frame bounds. No
+  conformance vector changes: the v1 vectors are decode/encode byte vectors and none encodes a
+  terminus's answer to an unresolved-`dst` WRITE.
+- **`graph_t::ensure_vertex`'s SCRATCH allocations are gone — the write-create path no longer
+  draws per-level temporaries from the global heap behind the injected `block_source_t`**
+  ([#1139](https://github.com/avatarsd-llc/libtracer/issues/1139), family of
+  [#873](https://github.com/avatarsd-llc/libtracer/issues/873)). `ensure_vertex_ptr` collected
+  the per-level prefixes into a `std::vector<key_view_t>` and copied each level into a fresh
+  `std::vector<std::byte>` to satisfy `register_vertex_key`'s owning-vector signature; both
+  drew from the process heap, so a deployment that wired a bounded source did not get one on
+  this path. The level walk is now the new allocation-free
+  `wire::key_view_t::for_each_level(emit)` (public header addition; `split_levels` is
+  reimplemented on top of it and is behaviourally identical), and the registration takes
+  **borrowed** bytes through a private span-taking form — the descent never retained the key,
+  so the copy bought nothing. `graph_t::register_vertex_key(std::vector<std::byte>, …)` keeps
+  its signature and behaviour as the public door; `try_register_vertex` drops its copy too.
+  Framing validation still **precedes** creation (two cheap walks, not one), so an
+  illegally-spelled key still materializes no prefix. **Scope, stated plainly:** the `vertex_t`
+  objects a create registers are still `std::make_unique`d from the process heap — that is the
+  larger #873 arena question and is untouched here. What is closed is the per-call scratch, which
+  scaled with the key's DEPTH and was the part a peer chose the size of.
 - **Two peer-sized growths moved off the `-fno-exceptions` probe window onto the injected
   `mem::block_source_t`** ([#981](https://github.com/avatarsd-llc/libtracer/issues/981),
   follow-up to [#923](https://github.com/avatarsd-llc/libtracer/issues/923); umbrella

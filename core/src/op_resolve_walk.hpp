@@ -976,9 +976,10 @@ template <class N>
     // naming a transport child / unknown path is not local => ERROR(NOT_FOUND).
     std::vector<std::byte> key_fallback;
     // An illegal non-NAME child makes the dst unaddressable, not merely unknown: it is a
-    // malformed address, so it answers INVALID_PATH rather than NOT_FOUND, and it answers
-    // BEFORE the write-creates branch below — a WRITE must not mkdir-p a path the spec
-    // says cannot be spelled that way (#436).
+    // malformed address, so it answers INVALID_PATH rather than NOT_FOUND (#436). The
+    // distinction outlives the write-creates arm this used to guard (#1139): the two
+    // refusals carry different dispositions, and a malformed address must not be reported
+    // as an address that merely does not exist yet and might on the next retry.
     const result_t<std::span<const std::byte>> dst_key_r = path_lookup_key(req.dst, key_fallback);
     if (!dst_key_r) return reply_error(dst_key_r.error());
     const std::span<const std::byte> dst_key = *dst_key_r;
@@ -991,20 +992,25 @@ template <class N>
     // as the same kind=ERROR BACKPRESSURE an OOM'd reply assembly does (the client falls back
     // on the same link rather than presuming the node dead).
     if (!req.dst.spans_intact()) return reply_error(status_t::BACKPRESSURE);
-    std::optional<vertex_handle_t> found = graph.find(dst_key);
-    if (!found) {
-        // Write-creates (RFC-0005): a remote DATA write (no :field selector) to a
-        // nonexistent path creates it, mkdir-p style, CREATE-gated on the nearest
-        // existing ancestor under the inbound link's subject. Field ops and
-        // read/await keep NOT_FOUND — there is no vertex to control or serve.
-        if (req.op == fwd_op_t::WRITE && !has_field) {
-            const result_t<vertex_handle_t> made = graph.ensure_vertex(dst_key, inbound_link);
-            if (!made) return assemble_error_reply(route, made.error(), egress);
-            found = *made;
-        } else {
-            return assemble_error_reply(route, status_t::NOT_FOUND, egress);
-        }
-    }
+    const std::optional<vertex_handle_t> found = graph.find(dst_key);
+    // An unresolved dst answers NOT_FOUND for EVERY op, the fieldless WRITE included
+    // (RFC-0005 amendment 1, #1139). This arm used to write-create: a remote data WRITE
+    // mkdir-p'd its target and every missing level above it, consulting no type catalog,
+    // counting nothing, bounded by no depth, and — where the graph held no ancestor at all
+    // — gated by no ACL, since the CREATE check is on the nearest EXISTING ancestor and a
+    // brand-new top-level subtree has none. Creation from a peer now goes through the
+    // ADR-0059 creator endpoint, where it is typed, catalogued and ACL-gated; the caller
+    // backs off and retries until whoever owns that structure establishes it.
+    //
+    // The appearance mechanism RFC-0005 §1 hangs on this survives the change, because a
+    // create through the creator endpoint IS a write to a vertex and bubbles to the parent
+    // subscriber exactly as before — only the ORIGIN of an appearance moves, from "any peer
+    // writing any address" to "a create the device's own catalog admitted".
+    //
+    // The LOCAL `graph_t::write` overload keeps write-creating, deliberately: the in-process
+    // caller is the node's own trusted code and owns its graph's structure. The asymmetry is
+    // the point of the amendment, not an oversight left in it.
+    if (!found) return assemble_error_reply(route, status_t::NOT_FOUND, egress);
     return apply_op(graph, req, *found, inbound_link, frame_view, flat, egress, route, field,
                     has_field, reverse_ref_fn, reverse_ref_ctx);
 }

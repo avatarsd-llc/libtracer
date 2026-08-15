@@ -154,6 +154,42 @@ int main() {
         check(!key_view_t{ragged}.split_levels(ragged_levels),
               "split_levels rejects ragged framing");
         check(ragged_levels.empty(), "ragged split appends nothing");
+
+        // for_each_level — the allocation-free walk `split_levels` is built on, and the one
+        // the write-create path uses so it draws nothing from the heap (#1139/#873).
+        std::vector<key_view_t> walked;
+        check(key_view_t{abc}.for_each_level([&](key_view_t lv) {
+            walked.push_back(lv);
+            return true;
+        }),
+              "for_each_level walks a well-framed key");
+        check(walked.size() == 3 && bytes_eq(walked[0].bytes(), make_key({"a"})) &&
+                  bytes_eq(walked[2].bytes(), abc),
+              "for_each_level yields the SAME levels, in the same mkdir -p order");
+
+        // Raggedness is only discovered at the LAST record, so the walk visits the valid
+        // prefix before it reports failure. That is exactly why `ensure_vertex` validates in
+        // a separate pass before it creates anything.
+        std::size_t seen = 0;
+        check(!key_view_t{ragged}.for_each_level([&](key_view_t) {
+            ++seen;
+            return true;
+        }),
+              "for_each_level reports ragged framing as failure");
+        check(seen == 1, "...but only AFTER emitting the valid prefix — validate before acting");
+
+        // A `false` from the callback stops the walk and is reported as failure, so a caller
+        // cannot mistake an aborted walk for a completed one.
+        std::size_t before_stop = 0;
+        check(!key_view_t{abc}.for_each_level([&](key_view_t) {
+            ++before_stop;
+            return false;
+        }),
+              "a callback returning false stops the walk and reports failure");
+        check(before_stop == 1, "and it stops immediately, at the first level");
+
+        check(!key_view_t{}.for_each_level([](key_view_t) { return true; }),
+              "for_each_level of the root fails, like split_levels");
     }
 
     // ---- The shared record accessors (#888) -------------------------------------------

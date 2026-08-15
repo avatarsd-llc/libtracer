@@ -149,8 +149,10 @@ struct mount_hit_t {
      *         (ADR-0073 §3 / RFC-0020). A `dst` is a directed route to ONE terminus; the
      *         only routable segments below a multi-peer mount are its peer names, so a
      *         residual that resolves no peer must never fall through to the bus
-     *         transport's `send()` (which broadcasts) nor to the local terminus (where a
-     *         WRITE would mkdir-p a shadow vertex under the connection). */
+     *         transport's `send()` (which broadcasts) nor to the local terminus, which
+     *         would answer for an address that is not this node's to answer for. (Until
+     *         RFC-0005 amendment 1 the terminus leg was worse still: a WRITE there
+     *         mkdir-p'd a shadow vertex under the connection.) */
     bool rejected = false;
 };
 

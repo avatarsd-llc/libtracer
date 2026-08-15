@@ -745,25 +745,40 @@ void test_transport_down_reaches_the_wire() {
           "it is NOT tr::path::not_found — the code whose disposition says stop retrying");
 }
 
-void test_write_creates_remote() {
-    std::printf("write-creates over FWD (RFC-0005): a remote data WRITE creates the path:\n");
+void test_remote_write_does_not_create() {
+    std::printf(
+        "RFC-0005 amendment 1 (#1139): a remote data WRITE to an unregistered path is "
+        "NOT_FOUND and creates nothing:\n");
     graph_t g;
     op_resolver_t resolver(g);
 
-    // A remote DATA write to a nonexistent path creates it, mkdir-p style.
+    // The arm the amendment moved. This used to mkdir-p `/fresh/leaf` and reply RESULT,
+    // uncounted, depth-unbounded and — with no ancestor in the graph to hang a CREATE check
+    // on — ungated. Creation from a peer is the ADR-0059 creator endpoint's job now.
     const auto fwd = b_fwd(fwd_op_t::WRITE, b_path({"fresh", "leaf"}), b_path({"reply-ep"}), {},
                            b_value({0x5A}));
     auto reply = resolve_bytes(resolver, fwd);
-    check(reply.has_value(), "WRITE to an unregistered path resolves");
+    check(reply.has_value(), "WRITE to an unregistered path is ANSWERED (addressed refusal)");
     const auto dec = decode_reply(*reply);
-    check(value_u8(dec.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::RESULT),
-          "write-create replies kind=RESULT (not NOT_FOUND)");
-    check(g.read(path_t("/fresh/leaf")).has_value(), "the created vertex serves the written value");
-    check(g.find(path_t::parse("/fresh")->key()).has_value(),
-          "the intermediate level was created too (mkdir-p)");
+    check(value_u8(dec.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::ERROR),
+          "remote fieldless WRITE to an unregistered path => kind=ERROR");
+    check(status_error_code(dec.tlv.children[4]) == 0x0020 /*tr::path::not_found*/,
+          "the code is tr::path::not_found — the caller backs off until the owner establishes it");
+    check(!g.find(path_t::parse("/fresh/leaf")->key()).has_value(), "no target vertex was created");
+    check(!g.find(path_t::parse("/fresh")->key()).has_value(),
+          "and no intermediate level was created either — the whole mkdir-p chain is gone");
 
-    // A remote FIELD write to a nonexistent path still does NOT create — there is
-    // no vertex whose control surface it could address.
+    // The LOCAL host API is deliberately unchanged: the node's own trusted code may build
+    // its own structure. The asymmetry IS the amendment.
+    check(g.write(path_t("/fresh/leaf"), make_value(b_value({0x5A}))).has_value(),
+          "the LOCAL write() still write-creates the same path");
+    check(g.find(path_t::parse("/fresh")->key()).has_value(),
+          "and still mkdir-p's the intermediate level");
+    check(g.read(path_t("/fresh/leaf")).has_value(),
+          "the locally created vertex serves the written value");
+
+    // A remote FIELD write to a nonexistent path answers the same way, and always did —
+    // there is no vertex whose control surface it could address.
     std::vector<std::byte> field_body;
     tr::wire::emit_name(field_body, "settings");
     tr::wire::emit_name(field_body, "priority");
@@ -1106,7 +1121,7 @@ int main() {
     test_out_of_range_index_mode();
     test_undefined_opcode_answers_addressed_error();
     test_transport_down_reaches_the_wire();
-    test_write_creates_remote();
+    test_remote_write_does_not_create();
     test_subscription_observer();
     test_ts_echo();
     return tr::testing::summary("op_resolve");

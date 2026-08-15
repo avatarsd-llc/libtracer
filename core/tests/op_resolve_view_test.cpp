@@ -403,8 +403,11 @@ int main() {
               "the echoed stamp is on the reply and equals the request's");
     }
 
-    // A WRITE must not mkdir-p an illegally-spelled path either: the write-creates branch
-    // (RFC-0005) sits AFTER the key build, so the rejection has to come first.
+    // A WRITE must not mkdir-p an illegally-spelled path, and must say INVALID_PATH rather
+    // than NOT_FOUND about it. Since RFC-0005 amendment 1 (#1139) the remote arm creates
+    // nothing at all, so the no-vertex assertion below is over-determined — the DISPOSITION
+    // is what this case now guards: `invalid` tells the peer to stop, `not_found` would send
+    // it retrying an address it can never spell (#436).
     differential("WRITE PATH{VALUE} illegal child (ERROR, no write-create)", seed_temp_empty,
                  b_fwd(fwd_op_t::WRITE, b_path_value_children({"fresh", "leaf"}),
                        b_path({"reply-ep"}), {}, b_value({0x5A})),
