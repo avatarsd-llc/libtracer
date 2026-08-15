@@ -119,6 +119,19 @@ than as an epic.
 2. **Stage 2 — the graph placement store.** #843's fix (hot-`vertex_t` placement), gated on
    #1285's diagnosis landing first.
 
+   **Condition added 2026-08-15 (#1285, ruled): the store must specify *alignment*, not merely
+   placement.** The diagnosis landed, and it binds this stage: the hot-vertex arm is a function
+   of the object's address **mod 64** — `vertex_t`'s 16-byte `lkv_` atomic straddles a cache-line
+   boundary at one of glibc's four 16-byte-aligned placements — so a placement store that hands
+   out `sizeof(vertex_t)`-byte objects at a `sizeof`-stride rotates through the same four offsets
+   `malloc` does and buys nothing. Concretely: (a) the straddle itself is already unreachable
+   after #1330's member reorder (`offsetof(lkv_) % 16 == 0`, `static_assert`-pinned) *provided
+   the store never places at sub-16-byte alignment* — 16-byte alignment is the stage-2 floor,
+   not an optimisation; (b) the remaining ~1.5× (#1285 rec 2) requires **64-byte-aligned**
+   placement, which additionally lifts `own_subs_`/`listeners_above_` off the contended line —
+   that is the RAM-for-latency trade this stage exists to price, and its A/B must report the hot
+   vertex's `mod 64` offset so a mechanism change can be told from a placement re-roll.
+
 ### 3. Stage-1 scope — `tr::net` only, MECHANISM not POLICY
 
 | Plane | In scope? | Why |
