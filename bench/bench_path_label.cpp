@@ -41,18 +41,22 @@
  * implementation produced, which also makes this bench an end-to-end check that §6.1 point 4
  * ("the first reply returns to the original sender with fully-minted `src`") actually holds.
  *
- * @section residual What this bench CANNOT measure, stated where the number would be
+ * @section residual §12.4 clause 2 — the axis that decides, and it is now answerable
  *
- * §12.4 clause 2 asks for §3.2's depth table re-run in the label spelling — the TERMINUS residual
- * against address depth, which §3.3 calls the axis that decides. **This bench cannot answer it**,
- * and the reason is in the implementation rather than in the instrument: §6.1 point 3 requires
- * that *"the terminus does the same for the residual it resolved"*, and the shipped forwarder
- * mints on the FORWARDING leg only (`fwd_router_t::route_fwd_ingress`'s `hit.link != nullptr`
- * arm). A terminus resolves its residual and mints nothing, so there is no labelled spelling of a
- * residual to measure. What this file measures instead, and labels as such, is the `resid-*`
- * sweep: the residual depth held on the SAME route, so a reader can see that the terminus term
- * is identical in both arms and is therefore exactly the term the label spelling does not yet
- * touch.
+ * Clause 2 asks for §3.2's depth table re-run in the label spelling: the TERMINUS residual against
+ * address depth, which §3.3 nominates as the axis that decides, because the byte column of §3.3's
+ * own table ties `PATH_REF`. This file could not answer it for two cars running, and the reason
+ * was always in the implementation rather than in the instrument. Both halves have now landed:
+ *
+ *  - the terminus **mints** for the residual it resolved (§6.1 point 3, #1357), so the warm reply
+ *    carries `H + 1` labels rather than `H` — the terminus's own label at the tail of the run;
+ *  - the terminus **dereferences** one (§7.2, #1363), so a `dst` that is nothing but that run is
+ *    an address this chain can actually carry rather than an `H + 1`-th `NOT_FOUND`.
+ *
+ * So the `presid-*` sweep is now a real A/B on the depth axis: the string arm spells the residual
+ * as `depth` packed segments and the label arm spells it as **one 7-byte element, at every
+ * depth**. Both arms still send the same opcode to the same vertex over the same graphs with the
+ * same tables, and the per-direction frame census still voids a point that is not like-for-like.
  */
 
 #include <array>
@@ -280,6 +284,21 @@ struct chain_t {
             (void)graphs[nodes - 1]->register_vertex(*tr::graph::path_t::parse(acc),
                                                      tr::graph::role_t::STORED_VALUE);
         }
+        // The addressed vertex holds a value, and that is load-bearing rather than tidy: §8.1
+        // mints only on SUCCESS, so a READ of an empty vertex takes `apply_op`'s error arm, the
+        // terminus mints nothing, and the reply comes home one label short of point 4. A bench
+        // that seeded no value would measure a chain whose last part is permanently a string and
+        // report it as the label spelling's cost.
+        {
+            static const std::array<std::byte, 4> kSeed{std::byte{0xD2}, std::byte{0x04},
+                                                        std::byte{0x00}, std::byte{0x00}};
+            std::vector<std::byte> value;
+            tr::wire::emit_tlv(value, type_t::VALUE, opt_t{}, std::span<const std::byte>(kSeed));
+            tr::view::segment_ptr_t seg = tr::view::heap_alloc(value.size());
+            std::memcpy(seg->bytes.data(), value.data(), value.size());
+            (void)graphs[nodes - 1]->write(*tr::graph::path_t::parse(acc),
+                                           tr::view::view_t::over(std::move(seg)));
+        }
         // The connection vertices the children's mount keys join on — what a label
         // dereferences. Registered BEFORE `add_child`, because the join is made at
         // registration time and a child added first acquires no `conn_slot` to mint against.
@@ -435,15 +454,22 @@ template <typename Op>
     std::vector<std::byte> prefix;
     if (const std::optional<std::vector<std::byte>> body = src_body_of(c.origin.last))
         prefix = leading_labels(*body, minted);
-    if (minted != hops) {
+    // `hops + 1`, not `hops`: each forwarding hop contributes its own local part (§6.1 point 2)
+    // and the TERMINUS contributes the residual it resolved (point 3). Point 4's "fully-minted
+    // src" is exactly this count, and asserting it here is what makes the label arm's address
+    // the implementation's own output rather than a hand-spelling of what it ought to be.
+    if (minted != hops + 1) {
         std::printf(
             "VOID hops=%zu depth=%zu — the reply carried %zu minted labels, not %zu"
             " (origin frames=%zu last=%zuB src_body=%zuB)\n",
-            hops, depth, minted, hops, c.origin.frames, c.origin.last.size(),
+            hops, depth, minted, hops + 1, c.origin.frames, c.origin.last.size(),
             src_body_of(c.origin.last) ? src_body_of(c.origin.last)->size() : 0);
         return false;
     }
-    const std::vector<std::byte> dst_l = path_tlv_prefixed(prefix, c.residual());
+    // NOTHING is appended. The terminus's label REPLACED the residual's string bytes (§6.1), so
+    // the whole labelled address is the run the reply came home with — at depth 12 exactly as at
+    // depth 1, which is the shape clause 2 exists to price.
+    const std::vector<std::byte> dst_l = path_tlv_prefixed(prefix, {});
     const auto op_l = [&] { c.origin.inject(build_fwd(0x00, dst_l, src, ++v)); };
 
     // Traffic census, per direction, per arm — `bench_hop_chain`'s §guard rule.
@@ -464,11 +490,14 @@ template <typename Op>
     l.wire_bytes = c.wire_bytes();
     const std::size_t resolved = c.label_resolves() - resolves_before;
 
-    if (resolved != hops || c.label_not_found() != 0) {
+    // `hops + 1` again, and for the matching reason: `label_resolves_` counts a hop's deref to a
+    // LINK and a terminus's deref to a local VERTEX with one counter, because both are "a label
+    // stood for a resolution and the resolution was taken".
+    if (resolved != hops + 1 || c.label_not_found() != 0) {
         std::printf(
             "VOID hops=%zu depth=%zu — the label arm resolved %zu labels (want %zu),"
             " refusals=%zu. It is measuring a DROP, not a delivery.\n",
-            hops, depth, resolved, hops, c.label_not_found());
+            hops, depth, resolved, hops + 1, c.label_not_found());
         return false;
     }
     if (s.fwd_frames != l.fwd_frames || s.rev_frames != l.rev_frames) {
@@ -520,14 +549,21 @@ int main() {
             ok = run_point(h, 1, w, "plabel-string", "plabel-label") && ok;
 
     std::printf(
-        "# clause 2: the TERMINUS RESIDUAL against depth, one hop.\n"
-        "# READ THE NOTE: §6.1 point 3 requires the terminus to mint for the residual it\n"
-        "# resolved, and the shipped forwarder mints on the FORWARDING leg only. So the\n"
-        "# residual is spelled in strings in BOTH arms and the depth term below is common\n"
-        "# mode. This sweep does NOT answer §12.4 clause 2; it shows the size of the term\n"
-        "# that clause is about, and that the label spelling does not yet touch it.\n");
-    for (const std::size_t d : kResidualDepths)
-        ok = run_point(1, d, 8, "presid-string", "presid-label") && ok;
+        "# clause 2: the TERMINUS RESIDUAL against depth, one hop — THE AXIS THAT DECIDES.\n"
+        "# The string arm spells the residual as `depth` packed segments; the label arm\n"
+        "# spells it as ONE 7-byte element at every depth, because the terminus minted for\n"
+        "# the residual it resolved (§6.1 point 3) and dereferences that label on the way\n"
+        "# back in (§7.2). Read the label arm's slope against depth: flat is the claim.\n");
+    // The depth rides the MODE STRING here, and it has to since the label spelling landed: a
+    // point is keyed on (mode, size, fan, ep), the depth used to ride `size_bytes` because the
+    // residual's string bytes were in the frame — and the label arm's frame is now 45 B at every
+    // depth, so all five points would collapse onto one key and be pooled as repeats of each
+    // other. A slope read off pooled points is not a slope.
+    for (const std::size_t d : kResidualDepths) {
+        const std::string tag_s = "presid-string-d" + std::to_string(d);
+        const std::string tag_l = "presid-label-d" + std::to_string(d);
+        ok = run_point(1, d, 8, tag_s.c_str(), tag_l.c_str()) && ok;
+    }
 
     if (!ok) {
         std::printf(

@@ -1,0 +1,12 @@
+{
+  "name": "fwd-label-terminus-deref",
+  "category": "fwd",
+  "hex": "0F401D000100010000060007000016040000010006000900087265706C792D6570",
+  "total_bytes": 33,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "meaning": "FWD{ op=READ, dst=<path label 0:1>, src=/reply-ep } - the labelled request a TERMINUS dereferences to one of its OWN vertices (RFC-0027 7.2). The whole dst is the 7-byte label the terminus minted for the residual `/sensor/temp` in fwd/fwd-label-terminus-reply, presented back by the origin that received it.",
+    "note": "33 bytes against the 38 the string spelling costs. There is no name beside the label - a label REPLACES the bytes of the part it stands for (6.1) - so a host that cannot validate it has nothing to fall back to and answers tr::path::not_found (7.2, fwd/fwd-label-terminus-stale). Whether the label resolves to a link (a hop) or to a local vertex (this terminus) is a fact about the minting host's table, not about these bytes."
+  }
+}

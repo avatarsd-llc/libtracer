@@ -10,7 +10,8 @@
 namespace tr::graph {
 
 result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view inbound_link,
-                                        const view_t* frame_view) {
+                                        const view_t* frame_view,
+                                        const wire::path_ref_element_t* dst_label_target) {
     // The span-tier instantiation: the arena root (index 0) read through the
     // node-reader concept. Byte-identical to the pre-templating resolver.
     //
@@ -26,7 +27,7 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view
     return resolve_node(graph_, arena_node{&fwd, 0}, inbound_link, frame_view,
                         flat_ != nullptr ? *flat_ : mem::heap_backend(),
                         egress_ != nullptr ? *egress_ : mem::heap_backend(), reverse_ref_fn_,
-                        reverse_ref_ctx_, path_label_fn_, path_label_ctx_);
+                        reverse_ref_ctx_, path_label_fn_, path_label_ctx_, dst_label_target);
 }
 
 }  // namespace tr::graph

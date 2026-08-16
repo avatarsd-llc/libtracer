@@ -1072,10 +1072,17 @@ class fwd_router_t {
      * FWD{REPLY} is sent back over the link the request arrived on. @p frame_view
      * (non-null on the owning-delivery path) is threaded into the resolver for
      * the ADR-0042 §3 referenced WRITE store.
+     *
+     * @p dst_label_target is RFC-0027 §7.2's terminus deref: the vertex reference a LABELLED
+     * `dst` resolved to through this node's own label table, handed to the resolver because
+     * the label REPLACED the name it stands for and there is nothing left to look up.
+     * Non-null only on the `TERMINUS` arm of `route_label_forward` (see `label_dst_t`); nullptr for
+     * every other frame this node terminates, which is every frame today.
      */
     void resolve_terminus(std::string_view inbound_name, std::span<const std::byte> frame,
                           const view::view_t* frame_view,
-                          const child_rx_ctx_t* inbound_ctx = nullptr);
+                          const child_rx_ctx_t* inbound_ctx = nullptr,
+                          const wire::path_ref_element_t* dst_label_target = nullptr);
     /**
      * @brief Terminus over a MULTI-LINK rope: resolve straight off the rope, NO flatten.
      *
@@ -1093,7 +1100,8 @@ class fwd_router_t {
      * a contiguous frame view, so the rope tier stores its one ownership copy (no
      * `frame_view`). Reply routes back over @p inbound_name exactly as the arena path.
      */
-    void resolve_terminus_rope(std::string_view inbound_name, view::rope_t frame);
+    void resolve_terminus_rope(std::string_view inbound_name, view::rope_t frame,
+                               const wire::path_ref_element_t* dst_label_target = nullptr);
     /**
      * @brief Classify ONE inbound FWD frame and dispatch it — the ingress driver, once.
      *
@@ -1117,7 +1125,11 @@ class fwd_router_t {
      * @param  reject   Reply to a bus NAME + residual hop (ADR-0073 §3 / RFC-0020). Needs
      *                  contiguous bytes, which the rope tier buys with its one COLD flatten.
      * @param  terminus Resolve here: the arena decode on the contiguous tier, the lazy
-     *                  view-tier resolve straight off the rope on the other.
+     *                  view-tier resolve straight off the rope on the other. Takes the
+     *                  RFC-0027 §7.2 labelled-`dst` resolution (`const
+     *                  wire::path_ref_element_t*`, null for every string- and
+     *                  `PATH_REF`-spelled frame), because a label leaves no name to look up
+     *                  and the deref is made where the label table lives.
      * @param  reply    Hand a FWD{REPLY} that reached its originator to the reply sink.
      *
      * @pre `cur.size() >= 4` — the callers' own runt-frame gate has already run.
@@ -1150,6 +1162,25 @@ class fwd_router_t {
                            transport_t& child, const fwd_pre_t* pre = nullptr,
                            std::span<const std::byte> reply_label = {});
     /**
+     * @brief What the RFC-0027 §7.2 label branch decided about one inbound `dst`.
+     *
+     * Three answers and not two, because a label resolves to a `path_ref_element_t` and this
+     * node may be either of the things such an element can name: one of its own EGRESS
+     * connection vertices (a hop — car 4) or an ORDINARY vertex (a terminus — this car). The
+     * two are told apart by the element alone, never by the op or the frame, which is what
+     * keeps the labelled spelling agreeing with the string one: a name that descends to a
+     * mount is a hop and a name that resolves to a vertex is a terminus, and the label stands
+     * for exactly that already-made resolution.
+     */
+    enum class label_dst_t : std::uint8_t {
+        /** @brief Not a label at all — run the canonical mount descent, unchanged. */
+        NOT_LABELLED,
+        /** @brief Fully handled here: forwarded over the link the label named, or refused. */
+        HANDLED,
+        /** @brief A local vertex: resolve HERE, against the element the out-param carries. */
+        TERMINUS,
+    };
+    /**
      * @brief The LABELLED forward hop (RFC-0027 §7.2) — try to route @p cur by a path label
      *        standing in the first element of its canonical `dst`.
      *
@@ -1178,19 +1209,25 @@ class fwd_router_t {
      * **counted** (@ref label_not_found). The sender's recovery is the full-string path it
      * still holds, re-minted from the next reply.
      *
-     * @retval true  The frame was consumed — forwarded over the link the label named, or
-     *               refused with a `NOT_FOUND`-class answer. Either way the caller MUST NOT
-     *               fall through to its terminus arm: a labelled address this node could not
-     *               validate is not an address this node may apply locally.
-     * @retval false The `dst`'s first element is not a label at all — the overwhelmingly common
-     *               case, and the one that must cost nothing. The caller runs the canonical
-     *               mount descent exactly as it did before labels existed.
+     * **A label whose target is a LOCAL vertex is this node's TERMINUS residual** (§6.1 point
+     * 3's own mint, presented back). It cannot go through @ref bound_egress, which answers
+     * only for connection vertices — until this arm existed such a frame took §7.2's counted
+     * `NOT_FOUND`, and §12.4 axis 2 had nothing to time. The deref is made here, where the
+     * table and the peer identity live, and the RESULT travels to the terminus in @p
+     * terminus_target; §8.2's re-check is then the resolver's `graph_t::read` / `write` /
+     * `await` at that vertex — the string spelling's own gate, reused rather than restated,
+     * exactly as the hop arm reuses `bound_egress`.
+     *
+     * @param terminus_target Written only when `label_dst_t`'s `TERMINUS` is returned: this
+     *                        node's reference to the vertex the label aliased, for
+     *                        `resolve_terminus`. Untouched on every other answer.
      */
     template <class Cursor, class Reject>
-    [[nodiscard]] bool route_label_forward(std::string_view inbound_name,
-                                           const child_rx_ctx_t* inbound_ctx, bool from_peer,
-                                           const Cursor& cur, const fwd_pre_t& pre,
-                                           Reject&& reject);
+    [[nodiscard]] label_dst_t route_label_forward(std::string_view inbound_name,
+                                                  const child_rx_ctx_t* inbound_ctx, bool from_peer,
+                                                  const Cursor& cur, const fwd_pre_t& pre,
+                                                  Reject&& reject,
+                                                  wire::path_ref_element_t& terminus_target);
     /**
      * @brief RFC-0027 §6.1's reply-leg rewrite: the span this hop prepends to `src`, either its
      *        mount run (the default, and today's behaviour) or the label that replaces it.

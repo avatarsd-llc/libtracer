@@ -26,7 +26,7 @@ for a local `preview.html` of the same charts.
 | `bench_route_handle_contention` | **per-link-lock contention**: T producers doing steady-state `ensure_egress` reuse-reads on one hot link (its header carries the finding that `shared_mutex` does not help). |
 | `bench_conn_ram` | **per-connection RAM census**: what one connection costs on each transport (TCP / WS / UDP / CAN) — link base, per-connection bytes, what survives teardown. **Gated (warn)** on the pinned host — see [the RAM censuses in CI](#the-ram-censuses-in-ci-1228). |
 | `bench_ram_census_tcp` | **whole-node RAM census**: the heap a 100-vertex graph (values 4..64 B, mixed int / array / STREAM) holds, staged from an empty `graph_t` through a `/net:children[]`-created TCP listener to steady state under a real remote peer **process**. **Trend-only** on the pinned host. |
-| `bench_path_label` | **RFC-0027 §12.4's normative gate**: what a minted **path label** saves per hop, as a slope over hop count and over registry width — and, where the number would be, why the terminus-residual axis is not yet answerable. See [the RFC-0027 gate](#bench_path_label--the-rfc-0027-124-gate-1325-car-5). |
+| `bench_path_label` | **RFC-0027 §12.4's normative gate**: what a minted **path label** saves per hop, as a slope over hop count and over registry width, and what it saves on the TERMINUS RESIDUAL against address depth — clause 2's axis, the one §3.3 nominates as deciding. See [the RFC-0027 gate](#bench_path_label--the-rfc-0027-124-gate-1325-car-5). |
 | `bench_rx_source_topology` | **RX failable-source topology**: T receive threads forwarding rope frames through a shared heap, one shared pool, or one pool per child — the measurement behind [ADR-0067](../docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md) §3. |
 
 ### `bench_forward_heap` — the 16KB-RAM zero-heap forward gate (ADR-0038)
@@ -62,7 +62,7 @@ window, so **"the forward hop is heap-free by construction" is false as stated**
   nothing about it (`core/src/transport_tcp.cpp:51-55`).
 - **The multi-link rope arm.** A rope source's sub-span count is the sender's choice and is
   known only at run time, so that arm gathers into a `mem::block_array_t` drawn from the
-  injected receive source (`core/src/fwd_router.cpp:2090`). Nothrow (ADR-0065 — exhaustion
+  injected receive source (`core/src/fwd_router.cpp:2145`). Nothrow (ADR-0065 — exhaustion
   drops the frame rather than aborting), but **not** allocation-free.
 
 Read `bench_forward_heap` and `bench_transport_iov` together; neither is sufficient alone.
@@ -404,26 +404,42 @@ the arms and a mismatch **voids the run** with a non-zero exit — `bench_hop_ch
 which cost that bench a published number that was ~40 % reply leg.
 
 **The per-hop saving is a function of registry width, and reporting it as one number would
-be wrong.** Measured on an EPYC 9115 vCPU, `taskset -c 24`, 10 runs, medians of the p50:
+be wrong.** Re-measured on an EPYC 9115 vCPU, `taskset -c 24`, 10 runs, medians of the p50,
+**after the terminus mint (#1357) and deref (#1363) landed** — so both arms now carry a
+label at the terminus as well as at every hop:
 
 | children per hop | string ns/hop | label ns/hop | label's per-hop saving |
 | ---: | ---: | ---: | ---: |
-| 1 | 302.1 | 305.8 | **−3.6 ns (a cost)** |
-| 8 | 318.4 | 318.4 | **0.0 ns** |
-| 64 | 494.0 | 418.4 | **+75.6 ns (−15.3 %)** |
+| 1 | 307.1 | 304.9 | **+2.3 ns (−0.7 %)** |
+| 8 | 324.7 | 317.4 | **+7.3 ns (−2.2 %)** |
+| 64 | 496.4 | 432.4 | **+64.0 ns (−12.9 %)** |
 
 Read as slopes over `H ∈ {1, 2, 4, 8}`, because a single-hop point is the wrong instrument
-for a per-hop claim — the correction RFC-0024 §8.4 had to make on itself. The label arm also
-carries a **higher fixed cost** (+65 ns at width 64) and a lower per-hop one, which is
-exactly the shape a point measurement cannot see. The originator's frame shrinks
-**17 B/hop → 7 B/hop** in every arm.
+for a per-hop claim — the correction RFC-0024 §8.4 had to make on itself. **The per-hop win
+is still a WIDE-node property** and the 2026-08-16 ruling on #1325 stands: at width 1 the
+slope difference is 2.3 ns/hop, inside what this instrument should be asked to resolve.
+What changed is the FIXED term — the label arm was +12 ns at width 64 before and is now
+−21 / −30 ns at widths 1 and 8, because the terminus's own residual stopped being a string.
+The originator's frame shrinks **17 B/hop → 7 B/hop** in every arm.
 
-**The depth sweep (`presid-*`) does NOT answer §12.4 clause 2**, and says so where the number
-would be. §6.1 point 3 requires the terminus to mint for the residual it resolved; the
-shipped forwarder mints on the forwarding leg only, so the residual is a string in **both**
-arms. The sweep measures the term that clause is about — **10.9 ns per residual segment**,
-depth 1→12 — and shows the label spelling does not yet touch it (label arm 8.5 ns/segment,
-inside the ±15 ns pair spread).
+**§12.4 clause 2, the axis §3.3 nominates as deciding, now runs** — it could not before,
+because §6.1 point 3's terminus mint was unimplemented (#1357) and, once it was, a labelled
+residual addressed at a local vertex still took §7.2's `NOT_FOUND` for want of the terminus
+deref (#1363). One hop, width 8, residual depth 1→12, 10 runs:
+
+| residual depth | string p50 | label p50 | delta | string frame | label frame |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 757 ns | 720 ns | **−4.9 %** | 51 B | 45 B |
+| 2 | 820 ns | 720 ns | **−12.2 %** | 54 B | 45 B |
+| 4 | 827 ns | 720 ns | **−12.9 %** | 60 B | 45 B |
+| 8 | 870 ns | 720 ns | **−17.2 %** | 72 B | 45 B |
+| 12 | 905 ns | 720 ns | **−20.4 %** | 86 B | 45 B |
+
+**String 13.5 ns per residual segment; label 0.0 — flat, at every depth, to the nanosecond.**
+Every pair's ranges are disjoint, against an A/A null whose widest p50 excursion over the same
+10 runs is ±1.38 % (≤ 0.42 % on these five modes). That is the shape the claim predicts and
+the one §3.3 says the byte column cannot show: the label stands for the WHOLE residual
+(§5.3.3), so its cost does not grow with the address it replaces.
 
 Diagnostic, **not** a `perf.yml` gate: both arms are in one binary and the comparison is
 between two *spellings*, not two builds.

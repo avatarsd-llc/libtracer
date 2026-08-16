@@ -608,12 +608,15 @@ template <class N>
  * exactly what probing the canonical form yields (§6.1's anti-enumeration property).
  */
 template <class N>
-[[nodiscard]] result_t<rope_t> apply_op(
-    graph_t& graph, const parsed_fwd_t<N>& req, vertex_handle_t v, std::string_view inbound_link,
-    const view_t* frame_view, mem::mem_backend_t& flat, mem::mem_backend_t& egress,
-    const reply_route_t& route, const field_path_t& field, bool has_field,
-    op_resolver_t::reverse_ref_fn_t reverse_ref_fn = nullptr, void* reverse_ref_ctx = nullptr,
-    op_resolver_t::path_label_fn_t path_label_fn = nullptr, void* path_label_ctx = nullptr) {
+[[nodiscard]] result_t<rope_t> apply_op(graph_t& graph, const parsed_fwd_t<N>& req,
+                                        vertex_handle_t v, std::string_view inbound_link,
+                                        const view_t* frame_view, mem::mem_backend_t& flat,
+                                        mem::mem_backend_t& egress, const reply_route_t& route,
+                                        const field_path_t& field, bool has_field,
+                                        op_resolver_t::reverse_ref_fn_t reverse_ref_fn = nullptr,
+                                        void* reverse_ref_ctx = nullptr,
+                                        op_resolver_t::path_label_fn_t path_label_fn = nullptr,
+                                        void* path_label_ctx = nullptr, bool dst_labelled = false) {
     // The mint answer (RFC-0024 §7.5): this node's own reference to the target vertex, as a
     // one-element `PATH_REF` the origin stacks under whatever it already holds for the hops
     // in front of it. 4 + 8 bytes, on the reply only, and only when asked — the request side
@@ -637,9 +640,17 @@ template <class N>
     // as two calls they can straddle a retire, and the reply would then carry a well-formed
     // element naming the vertex's SUCCESSOR — the origin believing it bound the vertex its
     // operation actually reached.
+    //
+    // @p dst_labelled withholds it, and that is RFC-0027 §11.2's second clause rather than a
+    // policy of this function's own: *"a host SHOULD NOT bind a `PATH_REF` over a path whose
+    // elements are already labelled"*. An origin that spelled this `dst` as a label already
+    // holds one compression of the address; handing back the other spends two mechanisms to
+    // save what one already saved and doubles the staleness surface for a single route. The
+    // origin loses nothing it can act on — its label is live by construction (it just
+    // resolved) and its recovery from a stale one is the canonical path it still holds.
     std::array<std::byte, wire::path_ref_wire_bytes(1)> mint_buf{};
     std::span<const std::byte> mint;
-    if (req.mint_request) {
+    if (req.mint_request && !dst_labelled) {
         if (const std::optional<vertex_slot_t> slot = graph.vertex_slot(v)) {
             const wire::path_ref_element_t e{.index = slot->index, .generation = slot->generation};
             if (wire::emit_path_ref_into(mint_buf,
@@ -671,7 +682,16 @@ template <class N>
         // mint-flagged request is ASKING for one, so neither leg may reach the label mint and
         // the two forms never meet on one frame. Both are argument-shaped rather than
         // flag-shaped: there is no runtime switch here that could be forgotten.
-        if (path_label_fn == nullptr || req.dst_bound || req.mint_request) return route;
+        //
+        // @p dst_labelled is the third term and it is not §11.2's — it is §6.1's own arithmetic
+        // reaching its fixed point. The reply's `src` IS the request's `dst`, and on a labelled
+        // request that region is ALREADY the label: there is no string left for a mint to
+        // replace, and minting anyway would spend a second slot to write bytes the echo already
+        // carries. The label the origin presented is this node's own (it just dereferenced
+        // through this node's table), so the echo is the identical seven bytes a fresh mint
+        // would produce — which is exactly why re-minting buys nothing and costs a slot.
+        if (path_label_fn == nullptr || req.dst_bound || req.mint_request || dst_labelled)
+            return route;
         // What the label ALIASES: this node's own reference to the vertex the residual
         // resolved to, read as ONE pair under one lock hold (`vertex_slot`'s whole contract —
         // an index without the generation current when it was read names a slot, not a
@@ -906,7 +926,8 @@ template <class N>
     graph_t& graph, const N& root, std::string_view inbound_link, const view_t* frame_view,
     mem::mem_backend_t& flat, mem::mem_backend_t& egress,
     op_resolver_t::reverse_ref_fn_t reverse_ref_fn = nullptr, void* reverse_ref_ctx = nullptr,
-    op_resolver_t::path_label_fn_t path_label_fn = nullptr, void* path_label_ctx = nullptr) {
+    op_resolver_t::path_label_fn_t path_label_fn = nullptr, void* path_label_ctx = nullptr,
+    const wire::path_ref_element_t* dst_label_target = nullptr) {
     result_t<parsed_fwd_t<N>> parsed = parse_fwd(root);
     if (!parsed) return std::unexpected(parsed.error());
     const parsed_fwd_t<N>& req = *parsed;
@@ -1007,6 +1028,34 @@ template <class N>
     // came from a caller that is not the router — a direct resolve, a test, an embedder's own
     // sink — and for that caller the answer is unchanged and correct: this node is not a
     // forwarder for the frame, so it drops it rather than guessing which element is its own.
+    // RFC-0027 §7.2 at the TERMINUS — the labelled `dst`, already dereferenced. The one thing
+    // that is NOT here is a table lookup: this walk is instantiated for a graph with no
+    // transports at all, and a label table belongs to the transport plane that owns the peer
+    // identity a label is scoped to (§4.1). So the caller resolves and this arm applies, on
+    // the identical machinery the bound arm just below runs — which is not a shortcut but
+    // §8.2's requirement: *"evaluate `acl_allows` at the dereferenced vertex, for that
+    // operation's own right, exactly as the string form does."* Two implementations of that
+    // sentence could differ; one cannot.
+    //
+    // Placed AHEAD of the bound arm and of `path_lookup_key`, because a labelled `dst` is a
+    // canonical `PATH` by type (`dst_bound` is false for it) whose body would be refused as a
+    // lookup key — an escape record in key context, which RFC-0018 rejects and §7.2 forbids
+    // guessing past. Ahead of the bound arm too, though the two are mutually exclusive on the
+    // wire (§11.2), so the ordering states which spelling wins if a caller ever supplies both.
+    if (dst_label_target != nullptr) {
+        const std::optional<vertex_handle_t> bound =
+            graph.deref_vertex_slot(dst_label_target->index, dst_label_target->generation);
+        // §7.2's drop-never-mis-route, one clause of it: the label validated against the
+        // table, but the vertex it aliases retired between the mint and this frame. No
+        // re-resolution, no nearest match, no fall-through to the canonical walk — the label
+        // REPLACED the string bytes, so there is nothing left to walk. By value, which the
+        // router turns into a drop, exactly as the stale bound element below.
+        if (!bound) return std::unexpected(status_t::NOT_FOUND);
+        return apply_op(graph, req, *bound, inbound_link, frame_view, flat, egress, route, field,
+                        has_field, reverse_ref_fn, reverse_ref_ctx, path_label_fn, path_label_ctx,
+                        /*dst_labelled=*/true);
+    }
+
     if (req.dst_bound) {
         if (!req.dst.spans_intact()) return std::unexpected(status_t::BACKPRESSURE);
         const std::span<const std::byte> elems = req.dst.body();
