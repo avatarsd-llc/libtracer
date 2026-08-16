@@ -4,12 +4,12 @@ A bound request as it **arrives at a forwarder**: the `dst` is a `PATH_REF` with
 elements left, so this host is a hop and not the terminus (RFC-0024 §4.1).
 
 ```
-0F 40 31 00                       FWD, opt=0x40 (PL=1), length=49
+0F 40 2E 00                       FWD, opt=0x40 (PL=1), length=46
    01 00 01 00 00                 VALUE op = READ
    14 00 10 00                    PATH_REF, opt=0x00, length=16   ← the bound dst
       01 00 00 00 00 00 00 00     element 0: index=1,      generation=0
       EF BE 00 00 07 00 00 00     element 1: index=0xBEEF,  generation=7
-   06 40 0C 00 …                  PATH src = /reply-ep
+   06 00 09 00 …                  PATH src = /reply-ep       (PL=0, packed records)
    01 00 04 00 09 00 00 00        VALUE u32 = 9
 ```
 

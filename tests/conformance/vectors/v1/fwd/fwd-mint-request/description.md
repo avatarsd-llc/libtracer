@@ -11,10 +11,10 @@ grow the forwarded legs with a trailing reverse `PATH_REF` child; that never app
 origin's frame, so these bytes are unchanged by the amendment.)
 
 ```
-0F 40 2B 00                       FWD, opt=0x40 (PL=1), length=43
+0F 40 22 00                       FWD, opt=0x40 (PL=1), length=34
    01 00 01 00 80                 VALUE op = 0x80  ← READ (0x00) | mint request (bit 7)
-   06 40 12 00 …                  PATH /sensor/temp
-   06 40 0C 00 …                  PATH /reply-ep
+   06 00 0C 00 …                  PATH /sensor/temp         (PL=0, packed records)
+   06 00 09 00 …                  PATH /reply-ep            (PL=0, packed records)
 ```
 
 ## Why the flag lives in the `op` byte

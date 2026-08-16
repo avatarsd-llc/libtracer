@@ -19,11 +19,11 @@ The names below are the canonical type-code names; an implementation's own enume
 
 ### Structured TLVs
 
-Several core type codes are **structured** — they carry `opt.PL=1` and their payload is a concatenation of child TLVs. In the first block the structured types are: `0x04` SUBSCRIBER, `0x06` PATH, `0x07` POINT, `0x09` STATUS (when non-empty), `0x0A` ACL, `0x0B` SETTINGS, `0x0E` SPEC. In the fast-track range `0x0F` FWD, `0x10` FIELD and the `0x11`–`0x13` route-handle frames are structured as well (§the fast-track range); `0x14` PATH_REF and `0x15` PATH_REF_REVERSE are the two codes in that range that are not. Each entry below specifies its own children layout.
+Several core type codes are **structured** — they carry `opt.PL=1` and their payload is a concatenation of child TLVs. In the first block the structured types are: `0x04` SUBSCRIBER, `0x07` POINT, `0x09` STATUS (when non-empty), `0x0A` ACL, `0x0B` SETTINGS, `0x0E` SPEC. In the fast-track range `0x0F` FWD, `0x10` FIELD and the `0x11`–`0x13` route-handle frames are structured as well (§the fast-track range); `0x14` PATH_REF and `0x15` PATH_REF_REVERSE are the two codes in that range that are not. Each entry below specifies its own children layout.
 
 There is no generic container type: every structured container declares its purpose via its type code. User-range type codes (`0x80–0xFF`) MAY also be structured (set `opt.PL=1`) for application-defined records.
 
-`0x14` PATH_REF and `0x15` PATH_REF_REVERSE are deliberately **not** structured despite carrying addresses: their payload is a fixed-stride record array, so `opt.PL` MUST be 0 (§`0x14`, §`0x15`).
+**No address form is structured.** `0x14` PATH_REF and `0x15` PATH_REF_REVERSE carry a fixed-stride record array and `0x06` PATH carries a packed run of self-delimiting `[u8 len][utf8]` segment records ([RFC-0018](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0018-packed-path-segments.md)); all three set `opt.PL` = 0 (§`0x06`, §`0x14`, §`0x15`). A `PATH` was a `NAME`-child container before RFC-0018.
 
 ---
 
@@ -106,10 +106,15 @@ A single name segment. UTF-8 bytes, **no NUL terminator on the wire**.
 
 ### Where it appears
 
-- Inside PATH TLVs (one NAME per segment).
 - Inside SETTINGS as field-name keys.
 - Inside `:schema` responses as field labels.
+- Inside `:children[]` reads, as the member name beside each `POINT`.
 - Wherever a "label" is needed inside a structured TLV.
+
+> **Not inside a `PATH`.** Until [RFC-0018](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0018-packed-path-segments.md)
+> a `PATH` (`0x06`) body was one `NAME` child per segment. It is now a packed run of
+> `[u8 len][utf8]` records with no per-segment TLV header (§`0x06` PATH). `NAME` is unchanged and
+> un-retired — it keeps its type code, its fast-track range slot and every use above.
 
 ### Hex example
 
@@ -271,7 +276,7 @@ Type code `0x05` is a **reserved code with no assigned meaning** in v1. Structur
 - Receivers MUST treat `type=0x05` as a reserved-but-unassigned code per [01-data-format.md](01-data-format.md) §handling unknown type codes (skip safely, do not crash).
 - The code is not available for reuse; collision-prevention keeps it unassigned.
 
-The structural concept lives in the options bits: any TLV with `opt.PL=1` is a structured container holding concatenated child TLVs. The protocol's structured types are SUBSCRIBER (0x04), PATH (0x06), POINT (0x07), STATUS (0x09), ACL (0x0A), SETTINGS (0x0B), SPEC (0x0E) in the first block, plus FWD (0x0F), FIELD (0x10) and the route-handle frames ADVERTISE (0x11) / COMPACT (0x12) / HANDLE_NACK (0x13) in the fast-track range; PATH_REF (0x14) and PATH_REF_REVERSE (0x15) are the two codes in that range that are not. User-defined structured records use user-range type codes (`0x80–0xFF`) with `PL=1`.
+The structural concept lives in the options bits: any TLV with `opt.PL=1` is a structured container holding concatenated child TLVs. The protocol's structured types are SUBSCRIBER (0x04), POINT (0x07), STATUS (0x09), ACL (0x0A), SETTINGS (0x0B), SPEC (0x0E) in the first block, plus FWD (0x0F), FIELD (0x10) and the route-handle frames ADVERTISE (0x11) / COMPACT (0x12) / HANDLE_NACK (0x13) in the fast-track range; PATH_REF (0x14) and PATH_REF_REVERSE (0x15) are the two codes in that range that are not. PATH (0x06) is **not** structured either — since [RFC-0018](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0018-packed-path-segments.md) its body is a packed record run with `opt.PL=0`, so the three address forms (`0x06`, `0x14`, `0x15`) are all opaque-bodied. User-defined structured records use user-range type codes (`0x80–0xFF`) with `PL=1`.
 
 ### Why no generic container
 
@@ -281,55 +286,89 @@ A generic list would have no semantic meaning of its own — an un-named default
 
 ## `0x06` — PATH
 
-A hierarchical address. Structured TLV (`opt.PL=1`) whose children are NAME TLVs, one per segment. Distinct from a generic structured TLV in that the constraints below are *enforced*, not merely conventional — see [enforcement](#enforcement-of-the-path-constraints).
+A hierarchical address. An **opaque** TLV (`opt.PL=0`) whose body is a self-delimiting run of
+**segment records**, one per segment ([RFC-0018](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0018-packed-path-segments.md) §5).
+Distinct from an ordinary opaque TLV in that the constraints below are *enforced*, not merely
+conventional — see [enforcement](#enforcement-of-the-path-constraints).
+
+> **Amended.** Until RFC-0018 the body was a child sequence (`opt.PL=1`) of `NAME` TLVs, one per
+> segment, and "each child MUST be a `NAME`" was the invariant. `NAME` (`0x02`) is **not**
+> retired — it still spells SETTINGS keys and `:schema` labels; RFC-0018 removed it from `PATH`
+> bodies only.
 
 ### Payload layout
 
 ```
-PATH (PL=1) {
-  NAME segment_1
-  NAME segment_2
+PATH (PL=0) {
+  [u8 len_1][len_1 bytes UTF-8]        ← segment 1
+  [u8 len_2][len_2 bytes UTF-8]        ← segment 2
   ...
-  NAME segment_K
+  [u8 len_K][len_K bytes UTF-8]        ← segment K
 }
 ```
 
+The walk is `p += 1 + body[p]` — one byte load and one add, with no option decode and no header
+construction. An **empty** body is valid: it is the graph root (`/`), zero segments.
+
 ### Header settings
 
-- `opt.PL` MUST be `1`.
+- `opt.PL` MUST be `0`. The body is not a child sequence.
 
 ### Constraints
 
-- Each child MUST be a NAME TLV (`type=0x02`); other types are invalid in PATH context.
+- Each record's `len` MUST be in `1..64` (the per-segment limit of [03-addressing.md](03-addressing.md)
+  §path syntax; the `u8` length field caps it at 255 forever).
+- `len == 0` is the **escape record** — `00 <u8 kind> <u8 len> <len bytes>`, total `3 + len`
+  bytes ([RFC-0018](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0018-packed-path-segments.md) §8, made
+  normative by its §5.4 amendment 1). It is **admissible in a frame path** and **rejected in
+  canonical / key context** — see [enforcement](#enforcement-of-the-path-constraints).
+  `kind = 0x16` is reserved for the label element of
+  [RFC-0027](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0027-label-switched-path-compression.md);
+  no other `kind` is assigned, and nothing in this reference implementation mints one.
+- The records MUST **tile the body exactly**: a record whose declared length runs past the
+  body's end is ragged framing, not a short read.
 - Total path length ≤ 1024 bytes, measured as the **encoded `PATH` body** — the concatenated
-  `NAME` TLVs, i.e. exactly this TLV's own `length` field — **not** the sum of NAME bytes
-  plus segment separators, a unit that excludes the per-segment 4-byte `NAME` header and so
-  admits paths `path_t::parse` rejects (see [§path syntax](03-addressing.md)).
+  segment records, i.e. exactly this TLV's own `length` field — **not** the sum of segment
+  bytes plus separators, a unit that excludes the per-segment length byte and so admits paths
+  `path_t::parse` rejects (see [§path syntax](03-addressing.md)).
 - Segment count ≤ 255 ([RFC-0023](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0023-path-segment-cap-repriced-32-to-255.md)).
-  Under this body encoding the byte cap above binds first (each NAME costs `4 + len`, so
-  1024 bytes admit at most 204 segments); the count is the encoding-independent ceiling.
+  Under this body encoding a record costs `1 + len`, so 1024 bytes admit up to 512 one-byte
+  segments and the **count cap binds first** for segments averaging ≤ 3 bytes; past that the
+  byte cap binds. Under the retired `NAME`-child body each segment cost `4 + len`, the byte cap
+  bound first at 204 segments, and the count clause could never fire — the crossover is pinned
+  by the `path/path-deep-255-packed` vector.
 
 ### Enforcement of the PATH constraints
 
 Enforcement sits at the resolver, not at the codec. Three rules, in the order a frame meets them:
 
-- **The codec does not enforce these constraints, and is not expected to.** A PATH's children
-  are decoded as a generic child sequence; the bytes above are well-formed TLV and round-trip
-  byte-identically. That is deliberate — the constraint is about what an address *means*, not
-  about what the octets *are*, and it keeps codec-only cores (TypeScript, Rust) free of
-  resolver semantics.
-- **The resolver enforces the child-type rule**, when it turns a PATH into a vertex lookup key.
-  A non-NAME child makes the address unspellable, so the op answers `ERROR{tr::path::invalid}`
-  (`0x0021`) — *not* `tr::path::not_found`, which would wrongly assert that the address was
-  well-formed but absent. Enforcement **precedes write-create**: a `WRITE` to an
-  illegally-spelled path creates nothing.
+- **The codec does not enforce these constraints, and is not expected to.** A PATH's body is
+  decoded as opaque bytes; the bytes above round-trip byte-identically. That is deliberate —
+  the constraint is about what an address *means*, not about what the octets *are*, and it
+  keeps codec-only cores (TypeScript, Rust) free of resolver semantics. The packed body makes
+  this tier *cheaper*: there is no child-type rule left for the codec to not-enforce.
+- **The resolver enforces the record grammar**, when it turns a PATH into a vertex lookup key.
+  Ragged framing, an over-long segment, or an escape record in **canonical / key context**
+  makes the address unspellable, so the op answers `ERROR{tr::path::invalid}` (`0x0021`) —
+  *not* `tr::path::not_found`, which would wrongly assert that the address was well-formed but
+  absent. Enforcement **precedes write-create**: a `WRITE` to an illegally-spelled path creates
+  nothing.
 - **The length and segment-count limits** are bounded where the address is constructed or
   admitted, not at decode.
 
-Conformance vector: `path/path-value-children-illegal` carries the illegal spelling next to
-`path/path-sensor-temp`'s legal one — the same 22 bytes, differing only in each child's
-type byte. It is an `input.bin` case, not a `reject.bin` one: decode must succeed, because
-decode is not where the rule lives.
+**The two contexts, and why they differ.** In a **frame path** — a `FWD` `dst`/`src` a hop is
+relaying — a forwarder that does not implement an escape record's `kind` MUST step over it by
+its declared length rather than drop a frame it is only relaying; that is the whole reason the
+escape is self-delimiting. In **canonical / key context** — a vertex-map lookup key, an
+`ADVERTISE` route, a pre-encoded path handle — an escape record is rejected, because a label is
+not canonical bytes and the key must stay pure-string for the byte-prefix-implies-ancestor
+property [02-graph-model.md](02-graph-model.md) depends on.
+
+Conformance vectors: `path/path-escape-in-key-context` carries an escape that a frame admits and
+a key refuses; `path/path-record-overruns-body` carries a record whose declared length runs past
+the body. Both are `input.bin` cases, not `reject.bin` ones: decode must succeed, because decode
+is not where the rule lives. They replace `path/path-value-children-illegal`, retired with
+RFC-0018 — a packed record has no type byte, so a mistyped child is unrepresentable.
 
 ### Where it appears
 
@@ -342,7 +381,7 @@ decode is not where the rule lives.
 A path may be expressed two ways:
 
 - **String form**: `"/sensor/temp"` — a UTF-8 byte string with `/` separators. Used at the API surface for ergonomics. Stored as a single VALUE TLV when transported as data.
-- **PATH-TLV form**: a PATH TLV (structured, NAME children). Used inside structured TLVs (SUBSCRIBER, FWD) where segments must be addressable individually rather than re-split from a byte string.
+- **PATH-TLV form**: a PATH TLV (opaque body, packed segment records). Used inside structured TLVs (SUBSCRIBER, FWD) where segments must be addressable individually rather than re-split from a byte string.
 
 Both forms canonicalize to the same internal representation. Implementations MUST accept either form where a path is expected.
 
@@ -362,25 +401,25 @@ flowchart LR
   subgraph Outer["PATH TLV outer"]
     direction LR
     T["type<br/>= 0x06"]
-    O["opt<br/>PL=1"]
+    O["opt<br/>PL=0"]
     L["length<br/>u16 LE"]
   end
-  subgraph Children["payload (concatenated NAME children)"]
+  subgraph Records["payload (packed segment records)"]
     direction LR
-    N1["NAME segment_1<br/>02 00 LL LL bytes..."]
-    N2["NAME segment_2<br/>02 00 LL LL bytes..."]
-    NK["NAME segment_K<br/>02 00 LL LL bytes..."]
+    N1["segment_1<br/>SS bytes..."]
+    N2["segment_2<br/>SS bytes..."]
+    NK["segment_K<br/>SS bytes..."]
   end
-  Outer --> Children
+  Outer --> Records
   N1 --> N2 --> NK
 ```
 
 The encoder's invariants:
 
-- **Outer header** (4 bytes, default `LL=0`): `06 40 LL_lo LL_hi`. `0x40` = `PL=1` (bit 6) only, no TS, no CR, `LL=0`. (Note the distinction: `0x50` = PL+CR per [01-data-format.md](01-data-format.md) §options bitfield — "PL only" is `0x40`.)
-- **`length`** = sum of child NAME TLV total sizes. With no inner trailers, each NAME costs `4 + len(segment_bytes)`.
-- **Each NAME child**: `02 00 SS_lo SS_hi <segment_bytes>`, where `SS` is the segment's UTF-8 byte length (`1..64`).
-- **No inner trailers.** Children inside a PATH carry no TS and no CRC; the outer (when in transit) covers everything.
+- **Outer header** (4 bytes, default `LL=0`): `06 00 LL_lo LL_hi`. `0x00` = no PL, no TS, no CR, `LL=0`. (Note the distinction: `0x10` = CR only per [01-data-format.md](01-data-format.md) §options bitfield; the pre-RFC-0018 `0x40` set `PL=1` and is no longer a legal PATH option byte.)
+- **`length`** = sum of the segment records' total sizes; each record costs `1 + len(segment_bytes)`.
+- **Each segment record**: `SS <segment_bytes>`, where `SS` is the segment's UTF-8 byte length (`1..64`) as a single `u8`.
+- **No inner headers and no inner trailers.** A record is length byte plus text — there is no per-segment type byte, no option byte, and nothing inside a PATH that can carry a TS or a CRC; the outer (when in transit) covers everything. This is what gives an address exactly **one** spelling.
 - **Reserved characters** (`/ : . [ ] * ?`) MUST NOT appear inside any segment_bytes.
 
 > ⚠️ **Conformance gap — the reference encoder does not enforce the bracket half of that rule** (`core/include/libtracer/path.hpp:51-59` rejects only `/ : . * ?`; §`0x02` NAME §constraints, [03-addressing.md](03-addressing.md) §reserved characters). The invariant above is unchanged.
@@ -390,22 +429,22 @@ A path that resolves to more than 255 segments ([RFC-0023](https://github.com/av
 #### Byte literal — `/sensor/temp`
 
 ```
-06 40 12 00     ← outer: type=PATH(0x06), opt=PL=1 (0x40), length=18 (u16 LE)
-   02 00 06 00 73 65 6E 73 6F 72        ← NAME "sensor" (10 bytes)
-   02 00 04 00 74 65 6D 70              ← NAME "temp"   (8 bytes)
+06 00 0C 00     ← outer: type=PATH(0x06), opt=0x00 (PL=0), length=12 (u16 LE)
+   06 73 65 6E 73 6F 72                 ← record: len 6, "sensor" (7 bytes)
+   04 74 65 6D 70                       ← record: len 4, "temp"   (5 bytes)
 ```
 
-**22 bytes total** when stored as graph data (no outer trailer). When transmitted with CRC-32, the outer trailer adds 4 bytes; the inner NAME children are unchanged.
+**16 bytes total** when stored as graph data (no outer trailer) — 6 fewer than the 22 the retired NAME-child body cost. When transmitted with CRC-32, the outer trailer adds 4 bytes; the records are unchanged.
 
 #### Byte literal — `/camera/frame`
 
 ```
-06 40 13 00     ← outer: length=19 (opt=0x40 = PL only)
-   02 00 06 00 63 61 6D 65 72 61        ← NAME "camera" (10 bytes)
-   02 00 05 00 66 72 61 6D 65           ← NAME "frame"  (9 bytes)
+06 00 0D 00     ← outer: length=13 (opt=0x00, PL=0)
+   06 63 61 6D 65 72 61                 ← record: len 6, "camera" (7 bytes)
+   05 66 72 61 6D 65                    ← record: len 5, "frame"  (6 bytes)
 ```
 
-**23 bytes total.** A C macro emitting this literal is straightforward; a code generator emitting one per registered path is even simpler.
+**17 bytes total.** A C macro emitting this literal is straightforward; a code generator emitting one per registered path is even simpler.
 
 #### Conformance for the static form
 
@@ -970,7 +1009,7 @@ flowchart LR
 
 Three properties of the arena resolve:
 
-- **Span-aliased vertex lookup** — a canonical PATH body is byte-identical to the graph's vertex-map key, so dispatch uses the frame's own bytes as the key with zero materialization (a non-canonical PATH from a foreign encoder falls back to a re-emit, which rejects a non-NAME child before re-emitting it — §PATH enforcement).
+- **Span-aliased vertex lookup** — a canonical PATH body is byte-identical to the graph's vertex-map key, so dispatch uses the frame's own bytes as the key with zero materialization. Since [RFC-0018](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0018-packed-path-segments.md) that alias is **unconditional**: a packed body has exactly one spelling per address, so there is no non-canonical form to re-emit and no re-emit fallback to fall into. A body that does not tile into literal records is refused outright (§PATH enforcement).
 - **Trailer-sliced stores** — a stored WRITE value copies the node's header+body span exactly once (or, when the frame arrived as an owning view and the target vertex's OWNER opted in via `graph_t::set_pin_payload_ratio`, is **referenced** as a zero-copy subview of the refcounted frame — [ADR-0042](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md)); the trailer never lands at rest either way (a trailer-carrying payload always falls back to the sliced copy).
 - **Direct-emitted reply** — every reply-head length is known from the node spans, so the `FWD{REPLY}` head (including the route bytes, copied once) is emitted straight into one exactly-sized segment, and a READ's reply payload rides as a zero-copy refcounted rope.
 
@@ -1021,7 +1060,7 @@ A node holds label state **only** for the compact flows crossing it (bounded by 
 
 ### Bound path — `0x14` PATH_REF
 
-The **second normative address form** ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §4). The canonical `PATH` (`0x06`, NAME children) is untouched and stays the only form a cold peer can use; a `PATH_REF` spells the same route in **resolutions** rather than names — one element per **host**, each element that host's own reference to its next-hop connection vertex, the last element the terminus host's reference to the **target vertex itself**.
+The **second normative address form** ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §4). The canonical `PATH` (`0x06`, packed segment records) is untouched and stays the only form a cold peer can use; a `PATH_REF` spells the same route in **resolutions** rather than names — one element per **host**, each element that host's own reference to its next-hop connection vertex, the last element the terminus host's reference to the **target vertex itself**.
 
 
 #### Payload layout
@@ -1045,7 +1084,7 @@ The encoder's invariants:
 - **Both element fields are little-endian** u32, per [01-data-format.md](01-data-format.md) §frame layout.
 - **No inner trailers**, and no per-element header: element *i* is `body[8i .. 8i+8)`, computed rather than parsed. `opt.TS` / `opt.CR` remain the enclosing frame's business, exactly as for `PATH`.
 
-`PATH_REF` carries no NAME children, so [03-addressing.md](03-addressing.md)'s segment, name-length and 1024-byte path caps do not apply to it and continue to govern the canonical form alone.
+`PATH_REF` carries no segment records, so [03-addressing.md](03-addressing.md)'s segment, name-length and 1024-byte path caps do not apply to it and continue to govern the canonical form alone.
 
 #### The 255-element bound
 
@@ -1084,7 +1123,7 @@ Each hop **consumes element 0 and forwards the remainder**, the same monotone sh
 - the `dst` **shrinks by exactly one element** and nothing else about it changes. The `PATH_REF` re-heads with `opt = 0x00` — `PL` stays clear on the way out for the reason it was clear on the way in;
 - the `src` **grows canonically**, by the full mount run for the link the frame arrived on, exactly as it grows on a canonical forward. A bound path changes how the *forward* address is spelled and — with one licensed exception — nothing about the return route: the reply still routes home through the ordinary descent, and every hop on the way back may be a peer that does not implement the bound form at all. The exception is the reverse mint (RFC-0024 §7.1 amendment 1): on a **mint-flagged request**, a contributing hop also **prepends its own element** — its arrival identity's vertex ref — to the request's trailing reverse `PATH_REF` child, in lockstep with the canonical growth of `src`; a hop that cannot contribute **MUST strip that child entirely** rather than relay a list that skips a hop. `src` itself is never touched by this and stays canonical and complete.
 
-**The last hop of a reverse-list delivery.** A hop that consumes the **final** element of a bound `dst` and still has a frame to put on the wire — the delivery direction's last hop, which egresses to the session or connection that element names ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §7.1 erratum 3) — re-heads the `dst` as a **canonical empty `PATH`** (`0x06`, `PL=1`, length 0), **never** as a zero-element `PATH_REF`. The address is exhausted, and the party at the far end is an ordinary client that may not read the bound form at all: its frame is byte-identical to the canonical delivery it would have received before any binding existed. This is the delivery-direction half of the mint's "the origin's frame is bit-identical" property — a peer that never *speaks* the bound form is never *answered* in it either.
+**The last hop of a reverse-list delivery.** A hop that consumes the **final** element of a bound `dst` and still has a frame to put on the wire — the delivery direction's last hop, which egresses to the session or connection that element names ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §7.1 erratum 3) — re-heads the `dst` as a **canonical empty `PATH`** (`0x06`, `PL=0`, length 0), **never** as a zero-element `PATH_REF`. The address is exhausted, and the party at the far end is an ordinary client that may not read the bound form at all: its frame is byte-identical to the canonical delivery it would have received before any binding existed. This is the delivery-direction half of the mint's "the origin's frame is bit-identical" property — a peer that never *speaks* the bound form is never *answered* in it either.
 
 A host that implements only the terminus case remains **conformant**: it answers a one-element `PATH_REF` and drops any longer residual, which is the failure rule below and which the origin recovers from by falling back to the canonical form it still holds. Nothing about a route is lost by that choice — a route is only ever bound end to end by hosts that each chose to mint, so a host that does not forward simply never appears in a multi-element binding. Conformance vectors: [`fwd/fwd-bound-forward`](https://github.com/avatarsd-llc/libtracer/tree/main/tests/conformance/vectors/v1/fwd/fwd-bound-forward) and [`fwd/fwd-bound-forwarded`](https://github.com/avatarsd-llc/libtracer/tree/main/tests/conformance/vectors/v1/fwd/fwd-bound-forwarded) are the same operation one hop apart.
 
@@ -1155,20 +1194,26 @@ the other way round.
 
 ### Validating PATH in the codec
 
-The rule: PATH's child-type constraint is a **resolver** rule, not a codec rule. The codec
-decodes a PATH's children as a generic child sequence and round-trips them byte-identically;
-the resolver refuses to address a vertex through a non-NAME child, answering
+The rule: PATH's grammar constraint is a **resolver** rule, not a codec rule. The codec decodes a
+PATH's body as opaque bytes and round-trips them byte-identically; the resolver refuses to address
+a vertex through a body that does not tile into literal segment records, answering
 `ERROR{tr::path::invalid}` (`0x0021`).
 
 The failure mode: a codec that "validates" PATH pushes the check to the wrong layer, and the
 resolver — the layer that still has to build a lookup key — normalizes whatever it is handed.
-A resolver that re-materializes a non-canonical PATH by emitting every child body as a NAME,
-regardless of the child's actual type, silently rewrites `PATH{VALUE "sensor"}` into
-`PATH{NAME "sensor"}`'s key. Two byte-different PATHs then address one vertex, and every peer,
-cache and router keyed on PATH bytes has two spellings for one address. The fallback itself is
-legitimate — it exists for a foreign encoder's LL-widened or trailer-carrying NAMEs — so the
-correct shape is to reject a non-NAME child *before* re-emitting, not to delete the fallback.
-Vector: `path/path-value-children-illegal`.
+Two byte-different PATHs then address one vertex, and every peer, cache and router keyed on PATH
+bytes has two spellings for one address. Vectors: `path/path-escape-in-key-context`,
+`path/path-record-overruns-body`.
+
+> **How [RFC-0018](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0018-packed-path-segments.md)
+> changed the shape of this pitfall.** Under the retired NAME-child body the classic instance was
+> #436: a resolver re-materialized a non-canonical PATH by emitting every child body as a NAME
+> regardless of the child's actual type, silently rewriting `PATH{VALUE "sensor"}` into
+> `PATH{NAME "sensor"}`'s key. That whole class is now **structurally unrepresentable** — a packed
+> record has no type byte and no option byte, so there is nothing to mistype and no re-emit
+> fallback to get wrong; the body *is* the key. What survives is the second half of the rule: an
+> illegally-spelled address (ragged framing, or an escape record in key context) answers
+> `tr::path::invalid` rather than resolving to something.
 
 The related failure mode: answering `tr::path::not_found` instead of `tr::path::invalid`
 asserts that the address was well-formed but absent, which sends a peer retrying an address it

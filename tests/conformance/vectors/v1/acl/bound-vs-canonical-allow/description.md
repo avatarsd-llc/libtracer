@@ -4,11 +4,11 @@ The **allow** half of the pair RFC-0024 §6.3 mandates: the bound spelling of th
 [`fwd/fwd-read`](../../fwd/fwd-read/description.md) spells canonically.
 
 ```
-0F 40 21 00                       FWD, opt=0x40 (PL=1), length=33
+0F 40 1E 00                       FWD, opt=0x40 (PL=1), length=30
    01 00 01 00 00                 VALUE op = READ
    14 00 08 00                    PATH_REF, length=8        ← dst, the bound form
       02 00 00 00 00 00 00 00     element 0: index=2, generation=0
-   06 40 0C 00 …                  PATH src = /reply-ep
+   06 00 09 00 …                  PATH src = /reply-ep      (PL=0, packed records)
 ```
 
 **37 bytes against the canonical twin's 47**, on a two-segment address at `H = 1`. That

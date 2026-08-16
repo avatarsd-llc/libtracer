@@ -48,8 +48,9 @@ write(p, b);                // reuse — no re-parse
   held `path_t` never re-parses, and there is no `string_view` overload tempting a hot
   loop into parsing every iteration.
 - **`path_t` unchanged otherwise** — still the canonical PATH-TLV payload bytes (a
-  sequence of NAME children) plus the optional field tail; the vertex-map key is those
-  bytes. The constructor just parses-and-holds what `*parse` produced.
+  sequence of packed `[u8 len][utf8]` segment records since
+  [RFC-0018](../spec/rfcs/0018-packed-path-segments.md); NAME children when this ADR was
+  written) plus the optional field tail; the vertex-map key is those bytes. The constructor just parses-and-holds what `*parse` produced.
 
 ## Considered alternatives
 

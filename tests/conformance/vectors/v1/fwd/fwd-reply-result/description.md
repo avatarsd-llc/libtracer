@@ -41,25 +41,27 @@ A REPLY routes through the *same* `route_fwd_forward` a request does: `dst` shri
 
 ## Byte breakdown
 
-`0x0F FWD`, `opt.PL=1`, `length=0x006A` (106), 110 bytes total.
+`0x0F FWD`, `opt.PL=1`, `length=0x004F` (79), 83 bytes total. The two `PATH`s carry packed
+`[u8 len][utf8]` segment records ([RFC-0018](../../../../../docs/spec/rfcs/0018-packed-path-segments.md)),
+so each is `opt=0x00` and each segment costs `1 + len` rather than `4 + len`.
 
 | Offset | Bytes | Meaning |
 | --- | --- | --- |
-| 0 | `0F 40 6A 00` | FWD, PL=1, body length 106 |
+| 0 | `0F 40 4F 00` | FWD, PL=1, body length 79 |
 | 4 | `01 00 01 00 03` | VALUE u8 `0x03` — `op = REPLY` |
-| 9 | `06 40 3E 00` | PATH `dst`, body length 62 |
-| 13 | `02 00 03 00 "net"` | dst[0] — B's mount run for its link to A, segment 1 |
-| 20 | `02 00 08 00 "downlink"` | dst[1] — segment 2 (module) |
-| 32 | `02 00 01 00 "a"` | dst[2] — segment 3 (connection NAME) |
-| 37 | `02 00 03 00 "net"` | dst[3] — A's mount run for its link to the client, segment 1 |
-| 44 | `02 00 08 00 "downlink"` | dst[4] — segment 2 (module) |
-| 56 | `02 00 03 00 "cli"` | dst[5] — segment 3 (connection NAME) |
-| 63 | `02 00 08 00 "reply-ep"` | dst[6] — the originator's reply endpoint |
-| 75 | `06 40 12 00` | PATH `src`, body length 18 |
-| 79 | `02 00 06 00 "sensor"` | src[0] — the responder's own address at C |
-| 89 | `02 00 04 00 "temp"` | src[1] — … |
-| 97 | `01 00 01 00 00` | VALUE u8 `0x00` — `kind = RESULT` |
-| 102 | `01 00 04 00 D2 04 00 00` | VALUE u32 LE `1234` — the served value |
+| 9 | `06 00 29 00` | PATH `dst`, PL=0, body length 41 |
+| 13 | `03 "net"` | dst[0] — B's mount run for its link to A, segment 1 |
+| 17 | `08 "downlink"` | dst[1] — segment 2 (module) |
+| 26 | `01 "a"` | dst[2] — segment 3 (connection name) |
+| 28 | `03 "net"` | dst[3] — A's mount run for its link to the client, segment 1 |
+| 32 | `08 "downlink"` | dst[4] — segment 2 (module) |
+| 41 | `03 "cli"` | dst[5] — segment 3 (connection name) |
+| 45 | `08 "reply-ep"` | dst[6] — the originator's reply endpoint |
+| 54 | `06 00 0C 00` | PATH `src`, PL=0, body length 12 |
+| 58 | `06 "sensor"` | src[0] — the responder's own address at C |
+| 65 | `04 "temp"` | src[1] — … |
+| 70 | `01 00 01 00 00` | VALUE u8 `0x00` — `kind = RESULT` |
+| 75 | `01 00 04 00 D2 04 00 00` | VALUE u32 LE `1234` — the served value |
 
 ## What this vector does and does not gate
 

@@ -70,7 +70,8 @@ generalized to ropes per the glossary) hands upward, and the two tiers do not mi
 ### 3. Partial-path routing
 
 Routing consumes the lazy view incrementally: a hop parses **only the PATH prefix it
-needs** (the next NAME child), strips its segment, and forwards the remaining suffix +
+needs** (the next segment record — a NAME child before
+[RFC-0018](../spec/rfcs/0018-packed-path-segments.md)), strips its segment, and forwards the remaining suffix +
 payload **as rope sub-regions** — zero decode, zero copy of anything downstream of the
 current hop. Final decoding of the payload happens at the terminus; a structured write
 payload (several folded TLVs) may cross the entire graph undecoded.

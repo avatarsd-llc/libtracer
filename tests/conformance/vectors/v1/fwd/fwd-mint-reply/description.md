@@ -4,10 +4,10 @@ The answer to [`fwd/fwd-mint-request`](../fwd-mint-request/description.md): an o
 `FWD{REPLY}` with the minted binding appended as its **last** child (RFC-0024 §7.5).
 
 ```
-0F 40 44 00                       FWD, opt=0x40 (PL=1), length=68
+0F 40 3B 00                       FWD, opt=0x40 (PL=1), length=59
    01 00 01 00 03                 VALUE op = REPLY
-   06 40 0C 00 …                  PATH dst = /reply-ep      (the request's src)
-   06 40 12 00 …                  PATH src = /sensor/temp   (the request's dst)
+   06 00 09 00 …                  PATH dst = /reply-ep      (the request's src; PL=0)
+   06 00 0C 00 …                  PATH src = /sensor/temp   (the request's dst; PL=0)
    01 00 01 00 00                 VALUE kind = RESULT
    01 00 04 00 D2 04 00 00        VALUE u32 = 1234          (the answer itself)
    14 00 08 00                    PATH_REF, length=8        ← the mint

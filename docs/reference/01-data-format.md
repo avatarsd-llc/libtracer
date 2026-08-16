@@ -364,21 +364,21 @@ type = 0x01 VALUE
 
 **13 bytes total.**
 
-### PATH `/sensor/temp` (a structured TLV containing two NAME children), outer CRC-32
+### PATH `/sensor/temp` (an opaque TLV holding two packed segment records), outer CRC-32
 
 ```
-06 50 12 00 [18 bytes children] [4 bytes trailer_crc]
+06 10 0C 00 [12 bytes body] [4 bytes trailer_crc]
 ^  ^  ^^^^^
-|  |  length = 18 (sum of two child TLVs)
-|  opt = 0x50  (PL=1, CR=1)
+|  |  length = 12 (sum of two segment records)
+|  opt = 0x10  (PL=0, CR=1)
 type = 0x06 PATH
 
-  Children (18 bytes):
-  02 00 06 00 73 65 6E 73 6F 72   ← NAME "sensor", 10 bytes (no trailer)
-  02 00 04 00 74 65 6D 70           ← NAME "temp",  8 bytes (no trailer)
+  Body (12 bytes) — packed [u8 len][utf8] records:
+  06 73 65 6E 73 6F 72            ← len 6, "sensor",  7 bytes
+  04 74 65 6D 70                  ← len 4, "temp",    5 bytes
 ```
 
-**26 bytes total.** Inner NAMEs carry no trailer; outer CRC covers their bytes.
+**20 bytes total.** A segment record has no header of its own and can carry no trailer; the outer CRC covers the whole body ([RFC-0018](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0018-packed-path-segments.md)).
 
 ### Extended-length frame (`LL=1`)
 
@@ -448,7 +448,7 @@ For future readers wondering about paths not taken:
 - **Finite-pool length encoding** — a fixed set of length slot-classes on the wire. Rejected in favor of the LL bit; the slot-class concept survives only as a receive-buffer pooling convention internal to the runtime, not on the wire.
 - **Variable-width type field / type tree** — would let a router dispatch by content shape without payload parse. Rejected because libtracer routes by **path**, not type; schema is per-vertex (`:schema`); and adding wire-level type-tree encoding fights claim 5 ("the graph imposes no shape on user data"). Self-describing payloads use NAME-tagged children inside a structured TLV (a user-range type code with `PL=1`) instead. Cap'n Proto / FlatBuffers solved the schema-on-the-wire problem already; libtracer is deliberately schema-by-introspection.
 
-- **Generic `LIST` type code** — a generic structured-container type code with no specific semantic. Every structured TLV in the registry has a specific purpose (SUBSCRIBER, PATH, POINT, ACL, SETTINGS, STATUS, ERROR); user-defined structured records use user-range type codes (`0x80–0xFF`) with `PL=1`. The `PL` bit alone signals "has nested children"; the type byte tells what those children mean. Type code `0x05` is reserved with no assigned meaning and is not available for reuse (collision-prevention).
+- **Generic `LIST` type code** — a generic structured-container type code with no specific semantic. Every structured TLV in the registry has a specific purpose (SUBSCRIBER, POINT, ACL, SETTINGS, STATUS, ERROR); user-defined structured records use user-range type codes (`0x80–0xFF`) with `PL=1`. The `PL` bit alone signals "has nested children"; the type byte tells what those children mean. Type code `0x05` is reserved with no assigned meaning and is not available for reuse (collision-prevention).
 
 - **Per-frame version bit (`VR`)** — bit 7 of `opt` as a version-bump flag. Rejected. The wire format is committed once and not bumped per-frame; future incompatible changes (if ever needed) are versioned at the discovery layer (mDNS service name, port, etc.). The bit stays reserved.
 - **Per-TLV priority bits in `opt`** — priority is transport-time and per-link; the subscription's cached priority at L4 covers it ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.A). The bits are reclaimed for `LL`/`CW`/`TF` instead.

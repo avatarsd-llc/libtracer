@@ -5,9 +5,9 @@ The **deny** half of RFC-0024 §6.3's mandated pair: what
 when the caller is not allowed.
 
 ```
-0F 40 34 00                       FWD, opt=0x40 (PL=1), length=52
+0F 40 31 00                       FWD, opt=0x40 (PL=1), length=49
    01 00 01 00 03                 VALUE op = REPLY
-   06 40 0C 00 …                  PATH dst = /reply-ep
+   06 00 09 00 …                  PATH dst = /reply-ep      (PL=0, packed records)
    14 00 08 00                    PATH_REF src                ← the request's dst, echoed
       02 00 00 00 00 00 00 00     element 0: index=2, generation=0
    01 00 01 00 01                 VALUE kind = ERROR

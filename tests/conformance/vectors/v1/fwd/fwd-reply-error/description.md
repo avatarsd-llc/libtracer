@@ -32,27 +32,29 @@ The ERROR is structured (`opt.PL=1`) per RFC-0002 §C: its first child is a VALU
 
 ## Byte breakdown
 
-`0x0F FWD`, `opt.PL=1`, `length=0x0070` (112), 116 bytes total.
+`0x0F FWD`, `opt.PL=1`, `length=0x0055` (85), 89 bytes total. The two `PATH`s carry packed
+`[u8 len][utf8]` segment records ([RFC-0018](../../../../../docs/spec/rfcs/0018-packed-path-segments.md)),
+so each is `opt=0x00` and each segment costs `1 + len` rather than `4 + len`.
 
 | Offset | Bytes | Meaning |
 | --- | --- | --- |
-| 0 | `0F 40 70 00` | FWD, PL=1, body length 112 |
+| 0 | `0F 40 55 00` | FWD, PL=1, body length 85 |
 | 4 | `01 00 01 00 03` | VALUE u8 `0x03` — `op = REPLY` |
-| 9 | `06 40 3E 00` | PATH `dst`, body length 62 |
-| 13 | `02 00 03 00 "net"` | dst[0] — B's mount run for its link to A, segment 1 |
-| 20 | `02 00 08 00 "downlink"` | dst[1] — segment 2 (module) |
-| 32 | `02 00 01 00 "a"` | dst[2] — segment 3 (connection NAME) |
-| 37 | `02 00 03 00 "net"` | dst[3] — A's mount run for its link to the client, segment 1 |
-| 44 | `02 00 08 00 "downlink"` | dst[4] — segment 2 (module) |
-| 56 | `02 00 03 00 "cli"` | dst[5] — segment 3 (connection NAME) |
-| 63 | `02 00 08 00 "reply-ep"` | dst[6] — the originator's reply endpoint |
-| 75 | `06 40 12 00` | PATH `src`, body length 18 |
-| 79 | `02 00 06 00 "sensor"` | src[0] — the refused spelling, segment 1 |
-| 89 | `02 00 04 00 "temp"` | src[1] — the refused spelling, segment 2 |
-| 97 | `01 00 01 00 01` | VALUE u8 `0x01` — `kind = ERROR` |
-| 102 | `09 40 0A 00` | STATUS, PL=1, body length 10 |
-| 106 | `08 40 06 00` | ERROR, PL=1, body length 6 |
-| 110 | `01 00 02 00 20 00` | VALUE u16 LE `0x0020` — `tr::path::not_found` |
+| 9 | `06 00 29 00` | PATH `dst`, PL=0, body length 41 |
+| 13 | `03 "net"` | dst[0] — B's mount run for its link to A, segment 1 |
+| 17 | `08 "downlink"` | dst[1] — segment 2 (module) |
+| 26 | `01 "a"` | dst[2] — segment 3 (connection name) |
+| 28 | `03 "net"` | dst[3] — A's mount run for its link to the client, segment 1 |
+| 32 | `08 "downlink"` | dst[4] — segment 2 (module) |
+| 41 | `03 "cli"` | dst[5] — segment 3 (connection name) |
+| 45 | `08 "reply-ep"` | dst[6] — the originator's reply endpoint |
+| 54 | `06 00 0C 00` | PATH `src`, PL=0, body length 12 |
+| 58 | `06 "sensor"` | src[0] — the refused spelling, segment 1 |
+| 65 | `04 "temp"` | src[1] — the refused spelling, segment 2 |
+| 70 | `01 00 01 00 01` | VALUE u8 `0x01` — `kind = ERROR` |
+| 75 | `09 40 0A 00` | STATUS, PL=1, body length 10 |
+| 79 | `08 40 06 00` | ERROR, PL=1, body length 6 |
+| 83 | `01 00 02 00 20 00` | VALUE u16 LE `0x0020` — `tr::path::not_found` |
 
 ## What this vector does and does not gate
 

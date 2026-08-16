@@ -13,8 +13,11 @@ elements.
 
 ## Why this is a `reject.bin` case and not an `input.bin` one
 
-Contrast `path/path-value-children-illegal`, where an illegal PATH still round-trips
-because its children are well-formed TLVs and the constraint is a **resolver** rule. This
+Contrast `path/path-escape-in-key-context` and `path/path-record-overruns-body`, where an
+illegally-spelled canonical `PATH` still round-trips because its body is opaque bytes to the
+codec and the constraint is a **resolver** rule. (Before
+[RFC-0018](../../../../../docs/spec/rfcs/0018-packed-path-segments.md) the same contrast was drawn
+against `path/path-value-children-illegal`, now retired.) This
 one is different in kind: the count of a `PATH_REF` is not carried on the wire at all —
 RFC-0024 §4.3 removed a count field as a byte restating what the length already says — so
 the count **is** `length / 8`. A length of 12 does not describe a body any decoder can

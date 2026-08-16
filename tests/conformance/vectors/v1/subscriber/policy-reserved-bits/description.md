@@ -5,7 +5,7 @@
 
 ```
 SUBSCRIBER (PL=1) {
-  PATH (PL=1) { NAME "client" }
+  PATH (PL=0) { 06 "client" }
   SETTINGS (PL=1) {
     NAME "delivery_policy" VALUE u16=0xFFC1   ; bits 6-15 all set, plus reliability=1
   }

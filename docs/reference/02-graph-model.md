@@ -115,9 +115,14 @@ Both are the **Composite pattern**, but they compose *different things* and are 
 
   ```
   meaning  →   [ one TLV: header(4) | payload(6) ]          (one logical node)
-  storage  →   [ segment A: 06 40 12 ] [ segment B: 00 | 02 00 02 00 ]
+  storage  →   [ segment A: 06 00 06 ] [ segment B: 00 | 05 61 6C 70 68 61 ]
                                     ^ the header splits across the A/B boundary
   ```
+
+  (A `PATH` for `/alpha`: header `06 00 06 00`, body one packed `[u8 len][utf8]` segment record
+  `05 "alpha"`. The same applies *inside* the body — a record's length byte can fall in one
+  segment and its text in the next, which is why the packed walk reads single bytes through the
+  cursor rather than off a pointer, [RFC-0018](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0018-packed-path-segments.md) §5.1.)
 
 - **A `FWD` uses a rope but is not one.** The remote-operation envelope ([07-host-embedding.md](07-host-embedding.md)) composes *meaning* (op + routes + the payload TLV); the bytes a hop forwards stay a rope. A forward hop is "adjust the route heads, re-emit the rest via scatter-gather, never copy" — the forwarder never inherits or becomes a rope.
 
@@ -128,7 +133,7 @@ The two sections below are this same point made concrete: **Nested TLV structure
 When the `PL` (payload-is-structured) bit is set in the header `opt` byte, the payload is interpreted as a sequence of child TLVs concatenated end-to-end. Each child has its own header (4 or 6 bytes per [01-data-format.md](01-data-format.md), depending on `opt.LL`) and optional trailer; any child may itself have `PL=1` for further nesting.
 
 ```
-Outer structured TLV (PL=1, e.g. PATH, SETTINGS, FWD, or a user-range record):
+Outer structured TLV (PL=1, e.g. SETTINGS, FWD, POINT, or a user-range record):
   +-----------+--------+----------+
   | type=0xXX | opt=PL | length   |  header (4 bytes default; 6 if LL=1)
   +-----------+--------+----------+
@@ -231,7 +236,7 @@ A second-language implementation that fails this invariant is **not conforming**
 
 This is the structural rule that lets [03-addressing.md](03-addressing.md) §static path handles work. The graph runtime's vertex map is **keyed on the bytes of the PATH TLV's payload**, not on the string form of the path:
 
-- A vertex registered as `/sensor/temp` lives in the map at the key whose bytes are the canonical PATH TLV payload `NAME("sensor") + NAME("temp")`.
+- A vertex registered as `/sensor/temp` lives in the map at the key whose bytes are the canonical PATH TLV payload — the packed segment records `06 "sensor" 04 "temp"` ([RFC-0018](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0018-packed-path-segments.md)).
 - A write whose path argument is a build-time `.rodata` PATH TLV byte literal hashes / compares against that same key — no string is involved at any point.
 - A write whose path argument is the equivalent string `"sensor/temp"` is canonicalized into the same PATH TLV bytes once (by the slow-path string entry, if the implementation provides one) and then dispatched against the same key.
 
@@ -667,7 +672,7 @@ Both roles use the **same TLV substrate** — same wire format, same in-memory v
 At each **forward hop** (the leading `dst` mount run names a transport link):
 
 1. **Strip the leading `dst` mount run** — `net/<module>/<name>[/<peer>]` (RFC-0014 S2a), not one segment; the route shrinks toward the target.
-2. **Prepend the node's NAME for the inbound link to `src`** — the return route grows.
+2. **Prepend the node's segment record for the inbound link to `src`** — the return route grows.
 3. Re-emit the rest of the frame **untouched** over the named link (fresh trailer per the egress transport). The hop keeps no per-request state.
 
 At the **terminus** (the leading `dst` segments name a local vertex):
@@ -695,7 +700,7 @@ sequenceDiagram
     participant V as /wheel/left
 
     STM->>LB: FWD{ WRITE, dst=/esp/wheel/left, src=/stm, VALUE }
-    Note over LB: strip "esp" from dst<br/>prepend inbound-link NAME to src
+    Note over LB: strip "esp" from dst<br/>prepend inbound-link segment to src
     LB->>ESP: FWD{ WRITE, dst=/wheel/left, src=/can0/stm, VALUE }
     Note over ESP: leading dst segments are local ⇒ terminus<br/>shed the envelope, store bare VALUE
     ESP->>V: write (trailer-less at rest)

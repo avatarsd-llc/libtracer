@@ -298,9 +298,10 @@ template <class N>
 
     std::optional<N> dst = ch.next();
     // Two address forms, and the second changes nothing about the first (RFC-0024 §1): a
-    // canonical PATH of NAME children, or a PATH_REF whose body shape the grammar has already
-    // settled (path_ref.hpp — PL=0, LL=0, a whole number of 8-byte elements, at or under the
-    // count bound). What an element MEANS is settled at the deref, in resolve_node.
+    // canonical PATH of packed segment records (RFC-0018), or a PATH_REF whose body shape the
+    // grammar has already settled (path_ref.hpp — PL=0, LL=0, a whole number of 8-byte
+    // elements, at or under the count bound). What an element MEANS is settled at the deref, in
+    // resolve_node.
     if (!dst) return std::unexpected(status_t::INVALID_PATH);
     if (dst->type() == type_t::PATH_REF) {
         p.dst_bound = true;

@@ -3,7 +3,7 @@
 ```{admonition} In one paragraph
 :class: tip
 A **`path_t`** parses `/sensor/temp` (with an optional `:field.sub[N]` tail) into the
-**canonical PATH-TLV payload bytes** — the concatenated `NAME` children. Those
+**canonical PATH-TLV payload bytes** — the concatenated packed segment records. Those
 bytes, not the string, are the vertex-map key: dispatch is a byte compare, never a
 string parse on the hot path.
 ```
@@ -13,8 +13,8 @@ string parse on the hot path.
 `path_t::parse` validates and canonicalizes per the addressing rules (`reference/03`):
 strip a trailing `/`, reject empty segments (`//`) and unrooted paths, enforce the
 limits (≤64 B/segment, ≤1024 B total, ≤255 segments, ≤8 field steps). It emits the
-canonical key — e.g. `/sensor/temp` → `02 00 06 00 'sensor' 02 00 04 00 'temp'`
-(18 bytes) — and parses the `:`-tail into a `field_path_t` (`settings.app.setpoint`,
+canonical key — e.g. `/sensor/temp` → `06 'sensor' 04 'temp'`
+(12 bytes; each record is `[u8 len][utf8]`, RFC-0018) — and parses the `:`-tail into a `field_path_t` (`settings.app.setpoint`,
 `subscribers[]`, `subscribers[3]`) for the field-write surface. `path_key_t` +
 `path_key_hash_t` (FNV-1a over the bytes) key the `unordered_map`.
 
@@ -48,7 +48,7 @@ exceptions, so both hold under `-fno-exceptions`.
 ```{mermaid}
 flowchart LR
     S["/sensor/temp:settings.app.setpoint"] --> P[path_t::parse]
-    P --> K["key bytes<br/>NAME sensor · NAME temp"]
+    P --> K["key bytes<br/>06 &quot;sensor&quot; · 04 &quot;temp&quot;"]
     P --> F["field<br/>settings → app → setpoint"]
     K --> M{{"vertex map<br/>(byte-keyed)"}}
     classDef e fill:#dbeafe,stroke:#1e40af
@@ -74,9 +74,9 @@ flowchart LR
   stitch buffer is two segments' worth, `std::array<std::byte, kMaxSegmentBytes * 2>`
   (`core/src/fwd_router.cpp`), and no longer scales with how wide a mount is (#523).
 - **Ordinary names cost no heap block.** `path_key_t` holds records up to 16 bytes inline
-  (`path_key_t::kInlineBytes`, `core/include/libtracer/path.hpp:252`) — a NAME record is a
-  4-byte TLV header plus the segment text, so a name of up to 12 characters never
-  allocates; longer records spill to a single owned block.
+  (`path_key_t::kInlineBytes`, `core/include/libtracer/path.hpp:252`) — a packed segment
+  record is a 1-byte length prefix plus the segment text, so a name of up to 15 characters
+  never allocates; longer records spill to a single owned block.
 
 ## API reference
 
@@ -101,8 +101,8 @@ Generated from `core/include/libtracer/path.hpp` by Doxygen.
 
 A path is looked up by an owned copy of its canonical bytes rather than by a
 string. `path_key_t` is that copy, with a small-buffer optimization sized so that
-a NAME record — a 4-byte TLV header plus the segment text — fits inline for names
-up to twelve characters, which is the overwhelming norm; longer records spill to
+a packed segment record — a 1-byte length prefix plus the segment text — fits inline
+for names up to fifteen characters, which is the overwhelming norm; longer records spill to
 one heap block. It is immutable after construction, matching its use: a vertex's
 name never changes. `path_key_hash_t` and `path_key_eq_t` are the hash-map
 bindings over it, and `target_key_t` is the delivery-target key `try_make_target_key`

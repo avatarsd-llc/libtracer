@@ -5,7 +5,7 @@ The #995 family disposition on the RFC-0022 §3.A QoS SETTINGS — the
 
 ```
 SUBSCRIBER (PL=1) {
-  PATH (PL=1) { NAME "client" }
+  PATH (PL=0) { 06 "client" }
   SETTINGS (PL=1) {
     NAME "delivery_policy" VALUE u16=0x0001   ; well-formed — superseded below
     NAME "delivery_policy" VALUE u16=0x0021   ; well-formed — the LAST such: wins

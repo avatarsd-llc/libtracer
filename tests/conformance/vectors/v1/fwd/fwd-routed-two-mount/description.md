@@ -25,23 +25,25 @@ Both hops route by the RFC-0014 §S2a / ADR-0061 qualified mount key `net/<modul
 
 ## Byte breakdown
 
-`0x0F FWD`, `opt.PL=1`, `length=0x0057` (87), 91 bytes total.
+`0x0F FWD`, `opt.PL=1`, `length=0x003C` (60), 64 bytes total. The `PATH`s carry packed `[u8 len][utf8]` segment records
+([RFC-0018](../../../../../docs/spec/rfcs/0018-packed-path-segments.md)), so each is `opt=0x00` and each
+segment costs `1 + len` rather than `4 + len`.
 
 | Offset | Bytes | Meaning |
 | --- | --- | --- |
-| 0 | `0F 40 57 00` | FWD, PL=1, body length 87 |
+| 0 | `0F 40 3C 00` | FWD, PL=1, body length 60 |
 | 4 | `01 00 01 00 00` | VALUE u8 `0x00` — `op = READ` |
-| 9 | `06 40 3E 00` | PATH `dst`, body length 62 |
-| 13 | `02 00 03 00 "net"` | dst[0] — mount 1, segment 1 |
-| 20 | `02 00 06 00 "uplink"` | dst[1] — mount 1, segment 2 (module) |
-| 30 | `02 00 01 00 "b"` | dst[2] — mount 1, segment 3 (connection NAME) |
-| 35 | `02 00 03 00 "net"` | dst[3] — mount 2, segment 1 |
-| 42 | `02 00 06 00 "uplink"` | dst[4] — mount 2, segment 2 (module) |
-| 52 | `02 00 01 00 "c"` | dst[5] — mount 2, segment 3 (connection NAME) |
-| 57 | `02 00 06 00 "sensor"` | dst[6] — residual, resolved locally at C |
-| 67 | `02 00 04 00 "temp"` | dst[7] — residual, resolved locally at C |
-| 75 | `06 40 0C 00` | PATH `src`, body length 12 |
-| 79 | `02 00 08 00 "reply-ep"` | src[0] — the originator's reply endpoint |
+| 9 | `06 00 26 00` | PATH `dst`, PL=0, body length 38 |
+| 13 | `03 "net"` | dst[0] — mount 1, segment 1 |
+| 17 | `06 "uplink"` | dst[1] — mount 1, segment 2 (module) |
+| 24 | `01 "b"` | dst[2] — mount 1, segment 3 (connection name) |
+| 26 | `03 "net"` | dst[3] — mount 2, segment 1 |
+| 30 | `06 "uplink"` | dst[4] — mount 2, segment 2 (module) |
+| 37 | `01 "c"` | dst[5] — mount 2, segment 3 (connection name) |
+| 39 | `06 "sensor"` | dst[6] — residual, resolved locally at C |
+| 46 | `04 "temp"` | dst[7] — residual, resolved locally at C |
+| 51 | `06 00 09 00` | PATH `src`, PL=0, body length 9 |
+| 55 | `08 "reply-ep"` | src[0] — the originator's reply endpoint |
 
 ## What this vector does and does not gate
 
