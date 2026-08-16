@@ -287,9 +287,21 @@ A generic list would have no semantic meaning of its own — an un-named default
 ## `0x06` — PATH
 
 A hierarchical address. An **opaque** TLV (`opt.PL=0`) whose body is a self-delimiting run of
-**segment records**, one per segment ([RFC-0018](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0018-packed-path-segments.md) §5).
+**records** ([RFC-0018](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0018-packed-path-segments.md) §5).
 Distinct from an ordinary opaque TLV in that the constraints below are *enforced*, not merely
 conventional — see [enforcement](#enforcement-of-the-path-constraints).
+
+**Two layers, one sentence.** A `PATH` is a list of **path elements**; an element's kind is
+**NAME** or **LABEL**; a NAME element is encoded as a **segment record**, a LABEL element as an
+**escape record**. "Path element" is the model-layer word — what an address is *made of* — and the
+two record words are the encoding-layer ones, naming the differently-framed byte patterns that
+spell the two kinds. Both layers are canonical and neither replaces the other
+([#1347](https://github.com/avatarsd-llc/libtracer/issues/1347), ruled 2026-08-16): an escape is
+precisely *not* a segment, so the grammar below needs the record words, and an address is not a
+list of byte patterns, so the model needs the element word. An element **self-describes by its
+kind, never by its position** ([RFC-0027](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0027-label-switched-path-compression.md)
+§5.1). A `PATH` whose elements are all NAME — the canonical form — is byte-identical to the
+pre-RFC-0027 encoding.
 
 > **Amended.** Until RFC-0018 the body was a child sequence (`opt.PL=1`) of `NAME` TLVs, one per
 > segment, and "each child MUST be a `NAME`" was the invariant. `NAME` (`0x02`) is **not**
@@ -300,15 +312,20 @@ conventional — see [enforcement](#enforcement-of-the-path-constraints).
 
 ```
 PATH (PL=0) {
-  [u8 len_1][len_1 bytes UTF-8]        ← segment 1
-  [u8 len_2][len_2 bytes UTF-8]        ← segment 2
+  [u8 len_1][len_1 bytes UTF-8]        ← element 1, kind NAME — a segment record
+  [u8 len_2][len_2 bytes UTF-8]        ← element 2, kind NAME — a segment record
   ...
-  [u8 len_K][len_K bytes UTF-8]        ← segment K
+  [u8 len_K][len_K bytes UTF-8]        ← element K, kind NAME — a segment record
 }
 ```
 
 The walk is `p += 1 + body[p]` — one byte load and one add, with no option decode and no header
-construction. An **empty** body is valid: it is the graph root (`/`), zero segments.
+construction. An **empty** body is valid: it is the graph root (`/`), zero elements.
+
+A **LABEL** element occupies the same list and is encoded as an **escape record** — `00 <u8 kind>
+<u8 len> <len bytes>`, `kind = 0x16`, `len = 4` — so the walk over it is `p += 3 + body[p+2]`
+instead. That is the next bullet's rule, and the reason the two encodings need two names: the
+records are framed differently, while the elements they spell sit in one list.
 
 ### Header settings
 
@@ -322,9 +339,11 @@ construction. An **empty** body is valid: it is the graph root (`/`), zero segme
   bytes ([RFC-0018](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0018-packed-path-segments.md) §8, made
   normative by its §5.4 amendment 1). It is **admissible in a frame path** and **rejected in
   canonical / key context** — see [enforcement](#enforcement-of-the-path-constraints).
-  `kind = 0x16` is reserved for the label element of
-  [RFC-0027](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0027-label-switched-path-compression.md);
-  no other `kind` is assigned, and nothing in this reference implementation mints one.
+  `kind = 0x16` is reserved for the **LABEL** element of
+  [RFC-0027](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0027-label-switched-path-compression.md)
+  — the escape record is that element's encoding, not a third kind of thing; no other `kind` is
+  assigned, and a host that does not own the `kind` it meets steps over the record by its declared
+  length rather than reading it.
 - The records MUST **tile the body exactly**: a record whose declared length runs past the
   body's end is ragged framing, not a short read.
 - Total path length ≤ 1024 bytes, measured as the **encoded `PATH` body** — the concatenated
@@ -381,7 +400,7 @@ RFC-0018 — a packed record has no type byte, so a mistyped child is unrepresen
 A path may be expressed two ways:
 
 - **String form**: `"/sensor/temp"` — a UTF-8 byte string with `/` separators. Used at the API surface for ergonomics. Stored as a single VALUE TLV when transported as data.
-- **PATH-TLV form**: a PATH TLV (opaque body, packed segment records). Used inside structured TLVs (SUBSCRIBER, FWD) where segments must be addressable individually rather than re-split from a byte string.
+- **PATH-TLV form**: a PATH TLV (opaque body, packed records — one per path element). Used inside structured TLVs (SUBSCRIBER, FWD) where elements must be addressable individually rather than re-split from a byte string.
 
 Both forms canonicalize to the same internal representation. Implementations MUST accept either form where a path is expected.
 

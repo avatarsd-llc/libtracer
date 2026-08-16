@@ -256,6 +256,58 @@ struct path_element_census_t {
 }
 
 /**
+ * @brief Append ONE path element to @p out, whatever its kind — the inverse of
+ *        @ref path_element_at, and the one emitter a caller holding a `path_element_t` needs.
+ *
+ * The vocabulary this closes over is the model layer's: **a `PATH` is a list of path elements; an
+ * element's kind is NAME or LABEL; a NAME element is encoded as a segment record, a LABEL element
+ * as an escape record** (`CONTEXT.md` §Path element, ruled on #1347, 2026-08-16). The two record
+ * emitters stay exactly as they are — this switches between them so a caller copying, filtering or
+ * re-spelling a walked body does not re-derive the mapping from kind to record at every call site,
+ * which is where the two grammars get crossed.
+ *
+ * It lives HERE and not in `packed_path.hpp` for the reason that header states about itself: that
+ * one is **kind-agnostic** — it frames, spans and skips a record without knowing what any kind
+ * means, which is the property a non-implementing hop relies on. A switch on
+ * @ref path_element_kind_t must know what `0x16` means, so it belongs at the layer that already
+ * does, beside the reader whose inverse it is.
+ *
+ * The four kinds map as follows:
+ *
+ * - @ref path_element_kind_t::SEGMENT — one segment record, @ref emit_path_segment.
+ * - @ref path_element_kind_t::LABEL — one label element, @ref emit_path_label, which re-derives
+ *   the bytes from the DECODED @ref path_element_t::label rather than copying the payload span,
+ *   so a value that could not be minted cannot be laundered back onto the wire by round-trip.
+ * - @ref path_element_kind_t::FOREIGN — the escape record verbatim, kind and payload,
+ *   @ref emit_path_escape. Relaying a kind this host does not own is exactly what §5.2 requires
+ *   of a non-implementing hop, so it is an emit and not a refusal.
+ * - @ref path_element_kind_t::MALFORMED — false, appending nothing. A record with no reading has
+ *   no re-spelling either.
+ *
+ * @return False, appending NOTHING, when the element has no legal spelling: a MALFORMED element,
+ *         an empty or over-long SEGMENT payload, a LABEL carrying the reserved zero generation
+ *         (§4.1 — @ref emit_path_label's own refusal, inherited unchanged), or a FOREIGN payload
+ *         past @ref kPackedSegMaxBytes.
+ *
+ * @note Emitting is never minting. This says how an element is SPELLED; WHEN a hop replaces its
+ *       local part with a label is RFC-0027 §6.2's trigger and lives in the forwarder.
+ */
+[[nodiscard]] inline bool emit_path_element(std::vector<std::byte>& out,
+                                            const path_element_t& element) {
+    switch (element.kind) {
+        case path_element_kind_t::SEGMENT:
+            return emit_path_segment(out, element.payload);
+        case path_element_kind_t::LABEL:
+            return emit_path_label(out, element.label);
+        case path_element_kind_t::FOREIGN:
+            return emit_path_escape(out, element.escape_kind, element.payload);
+        case path_element_kind_t::MALFORMED:
+            break;
+    }
+    return false;
+}
+
+/**
  * @brief Append @p body to @p out with @p count elements from index @p first replaced by one
  *        label element — RFC-0027 amendment 6's multi-segment splice.
  *

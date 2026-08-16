@@ -225,6 +225,43 @@ RFC ties the bound path and beats nothing it does not already beat**. The byte c
   deref, but *structurally the same* is an argument, not an instrument. §14 labels it, and §12.4
   makes the measurement a condition of acceptance under the same bench protocol RFC-0024 §8 fixed.
 
+### 3.5 Editorial note (2026-08-16) — the vocabulary this RFC's prose is read in
+
+**Editorial, not an erratum and not an amendment.** Nothing normative moves: no clause of §§4–12
+changes meaning, no byte changes, no conformance vector changes. This note fixes the *words* the
+rest of the document is to be read in, because [#1347](https://github.com/avatarsd-llc/libtracer/issues/1347)
+ruled the model-layer term on 2026-08-16 — after this RFC was accepted (2026-08-15) and after
+amendments 4–6 settled the bytes. The prose below it is left as written, in the dated-instrument
+discipline this document already applies to its own superseded candidates (§5.3.1, §5.3.2) and to
+RFC-0004 and the ADRs (§12.3, §11.4).
+
+The ruled sentence, in full:
+
+> A `PATH` is a list of **path elements**; an element's kind is **NAME** or **LABEL**; a NAME
+> element is encoded as a **segment record**, a LABEL element as an **escape record**.
+
+Three consequences for reading this document:
+
+1. **"Path element" is the model-layer term** — the canonical word for what an address is composed
+   of, and already the code's (`tr::wire::path_element_t`, `path_element_at`, `core/include/libtracer/path_element.hpp`).
+   §5's title ("a per-element tag") and §5.1–§5.2's "element" were always this word; §3.3's "label
+   element" and the §1 summary's "per-ELEMENT tag" are the same word, and they are now the
+   *canonical* one rather than an incidental one.
+2. **"Segment record" and "escape record" are the encoding-layer terms and are NOT dropped.**
+   #1347 evaluated dropping "segment record" against the maintainer's criterion — drop it *if the
+   result is cleaner* — and the criterion **failed**: an escape is precisely not a segment, so
+   amendment 5's own sentence (the element "is RFC-0018 §8's escape record") stops being statable
+   with one word. The perf dimension is measured at exactly zero (64/64 artifacts byte-identical
+   across the rename), so nothing about this is a performance argument in either direction.
+3. **Where this RFC says only "record", read "the encoding of an element".** §5.3.1's
+   "`[u8 len][utf8 bytes]` records", §5.3.2's "escape record", §12.5 erratum 1's "an escape record
+   is not a TLV" — all remain exactly correct as encoding-layer statements. They are not restated
+   in element terms here, because a dated instrument is not rewritten to match a later vocabulary
+   ruling; it carries the ruling as a note, which is this one.
+
+The descriptive pages carry the two-layer sentence in force: `docs/reference/05-protocol-tlvs.md`
+§`0x06`, and `CONTEXT.md` §Path element.
+
 ## 4. The label
 
 ### 4.1 Shape — 32 bits, split 16/16

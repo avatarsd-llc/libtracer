@@ -181,6 +181,68 @@ void foreign_versus_malformed() {
           "one, which would be inventing the rest of somebody's route");
 }
 
+/**
+ * @brief `emit_path_element` — the ONE emitter, driven by an element's kind (#1347, 2026-08-16).
+ *
+ * The model layer says a `PATH` is a list of path elements whose kind is NAME or LABEL; the
+ * encoding layer says a NAME element is a segment record and a LABEL element an escape record.
+ * The wrapper is where those two sentences meet, so the test that earns it is a round trip: walk
+ * a MIXED body with `path_element_at` and re-emit every element through the one call, byte for
+ * byte. A wrapper that crossed the two grammars — spelling a label as a segment record, or a
+ * segment as an escape — would produce a well-formed body naming a DIFFERENT address, which is
+ * the mis-delivery class this codec closes by construction everywhere else.
+ */
+void emit_element_round_trips() {
+    std::vector<std::byte> label_rec;
+    check(tr::wire::emit_path_label(label_rec, kLabel), "the label element spells");
+    const std::array<std::byte, 2> foreign_pay{std::byte{0xAA}, std::byte{0xBB}};
+
+    // Both ruled kinds in one body, plus a kind this host does not own — the shape §5.2 calls
+    // expected rather than exceptional.
+    const std::vector<std::byte> body =
+        packed({"net", "ws-client"}) + label_rec + escape(0x17, foreign_pay) + packed({"temp"});
+
+    std::vector<std::byte> out;
+    std::size_t segments = 0;
+    std::size_t labels = 0;
+    std::size_t foreign = 0;
+    path_element_cursor_t cur(body);
+    while (const auto el = cur.next()) {
+        check(el->ok(), "the mixed body walks cleanly before anything is re-emitted");
+        check(tr::wire::emit_path_element(out, *el),
+              "…and every element re-spells through ONE call");
+        segments += el->kind == path_element_kind_t::SEGMENT ? 1 : 0;
+        labels += el->kind == path_element_kind_t::LABEL ? 1 : 0;
+        foreign += el->kind == path_element_kind_t::FOREIGN ? 1 : 0;
+    }
+    check(segments == 3 && labels == 1 && foreign == 1,
+          "the walk really did carry both ruled kinds and a foreign one through the wrapper");
+    check(out.size() == body.size() && std::equal(out.begin(), out.end(), body.begin()),
+          "emit_path_element is the byte-exact inverse of path_element_at, across kinds");
+
+    // A LABEL is re-derived from the DECODED value, not copied as bytes, so the reserved zero
+    // generation cannot be laundered onto the wire by round-tripping a record that carries it
+    // (§4.1; `emit_path_label`'s refusal, inherited unchanged).
+    std::vector<std::byte> reserved_out;
+    const path_element_t reserved{.kind = path_element_kind_t::LABEL,
+                                  .label = path_label_t{.index = 7, .generation = 0}};
+    check(!tr::wire::emit_path_element(reserved_out, reserved) && reserved_out.empty(),
+          "a LABEL element carrying the reserved generation refuses, appending NOTHING");
+
+    // A record with no reading has no re-spelling.
+    const std::vector<std::byte> ragged{std::byte{9}, std::byte{'a'}};
+    std::vector<std::byte> malformed_out;
+    check(!tr::wire::emit_path_element(malformed_out, path_element_at(ragged, 0)) &&
+              malformed_out.empty(),
+          "a MALFORMED element refuses, appending NOTHING");
+
+    // The refusals leave the buffer exactly as they found it, mid-body as well as empty.
+    std::vector<std::byte> partial = packed({"net"});
+    const std::size_t before = partial.size();
+    check(!tr::wire::emit_path_element(partial, path_element_t{}) && partial.size() == before,
+          "a default-constructed element is MALFORMED and cannot truncate a body in progress");
+}
+
 /** @brief Amendment 6 — one label covers a hop's whole local part, one segment or five. */
 void splice_replaces_a_run() {
     const std::vector<std::byte> canonical =
@@ -336,6 +398,7 @@ int main() {
     literal_elements();
     mixed_elements();
     foreign_versus_malformed();
+    emit_element_round_trips();
     splice_replaces_a_run();
     origin_side_cache();
     one_compression_per_address();
