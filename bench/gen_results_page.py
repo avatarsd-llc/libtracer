@@ -278,6 +278,13 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "actually carries so the address collapse is asserted rather than assumed.",
         "ns p50 per hop · wire bytes per hop"),
     instrument_t(
+        "bench_path_label.cpp", "framed", (),
+        "Carries one `FWD{op=READ}` through a chain of real forwarder hops twice, differing "
+        "only in whether each hop's mount run is spelled as its segments or as the RFC-0027 "
+        "path label that hop minted for it, swept over hop count, registry width and terminus "
+        "residual depth — so a per-hop claim is read off a slope and never off a point.",
+        "ns p50 per hop · originator frame bytes"),
+    instrument_t(
         "bench_transport_iov.cpp", "counted", (),
         "Assembles the real transports' `::iovec` table at rising span counts to find the width "
         "at which it stops fitting inline and allocates.",
