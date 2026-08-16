@@ -80,10 +80,39 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   today. Generations **saturate and retire their slot permanently** (RFC-0027 §4.3.1's
   acceptance ruling), which preserves RFC-0024 §4.4 rule 3 verbatim across both
   `(slot, generation)` fields at zero wire cost and closes #603's mis-delivery class by
-  construction. **No wire surface is frozen**: RFC-0027 §5.3 defers the element framing pending
-  the §12.5 conformance vectors, so no TLV type code is assigned, no grammar rule is wired, and
-  a `PATH` with no label element is byte-identical to today's. Default-constructed, the table
-  mints nothing, so a host that does not opt in is unaffected.
+  construction. Default-constructed, the table mints nothing, so a host that does not opt in is
+  unaffected. (Car 1 froze no wire surface; the element that carries the value is car 2, below.)
+
+- **The RFC-0027 label ELEMENT — `wire::emit_path_label`, `wire::path_label_at`,
+  `wire::path_label_record_valid`, `wire::kPathLabelRecordBytes`, and the kind-agnostic
+  `wire::emit_path_escape` / `wire::packed_escape_kind` / `wire::packed_escape_payload`**
+  ([#1325](https://github.com/avatarsd-llc/libtracer/issues/1325) car 2). RFC-0027 §5.3 is
+  **closed** by its amendments 4–6 and this is the spelling they ruled: a label element is
+  RFC-0018 §8's escape record, **`00 <u8 kind = 0x16> <u8 len = 4> <u32 LE label>` — 7 bytes**,
+  inside the packed `PATH` body. Three consequences the API shape carries:
+  - **No `PATH_LABEL` TLV type code exists.** §5.3's candidate 8-byte child spelling is *never
+    built* (amendment 5), so `tlv.hpp` is untouched, `0x16`–`0x1F` stays the unassigned type
+    range, and the element has no option byte — which is why
+    **`wire::path_label_body_valid(pl, ll, len)` is REMOVED** and replaced by
+    `path_label_record_valid(kind, payload_len)`. Its `PL`/`LL` clauses are unrepresentable
+    under the ruled spelling; the two clauses that survive are the kind and the length, and
+    they are checked (and vectored) separately.
+  - **A label covers a hop's whole local part**, not one segment (amendment 6): the record is
+    7 bytes whether the mount run it stands for is one segment or five, so nothing in the
+    element encodes the run's width and no core may infer it.
+  - **A labelled `PATH` is not a `path_lookup_key`** (amendment 5, §5.3 sub-question 3). That
+    refusal needed no new code — `packed_path_valid_key` already rejects every escape record —
+    but it now has a test, which is what the ruling asked for.
+
+  `packed_path.hpp` stays **kind-agnostic** (it frames, spans and skips a record without knowing
+  what a kind means — the property a non-implementing hop relies on) and `path_label.hpp` owns
+  `0x16`. Emitting the record is **not** minting one: RFC-0027 §6.2's trigger, the reply-leg
+  rewrite and the deref are later cars. **Conformance:** a new `path-label/` category —
+  `label-roundtrip`, `label-mixed`, `label-multi-segment`, `label-wrong-length`,
+  `label-foreign-kind` — pinned byte-exact against this emitter in `path_label_test.cpp`. No
+  existing vector changes: a `PATH` with no label element is byte-identical to today's, and the
+  escape record it uses was already admissible in a frame path since RFC-0018 landed in this
+  same unreleased cycle.
 
 - **`graph_t::set_vertex_ceiling()` / `vertex_ceiling()` / `vertex_ceiling_refusals()` — vertex
   creation is now CHARGED against the vertex-slot census**

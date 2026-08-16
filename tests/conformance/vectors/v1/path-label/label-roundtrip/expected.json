@@ -1,0 +1,28 @@
+{
+  "name": "label-roundtrip",
+  "category": "path-label",
+  "hex": "0600070000160401000200",
+  "total_bytes": 11,
+  "decoded": {
+    "type": "0x06 PATH",
+    "opt": {
+      "raw": "0x00",
+      "PL": 0,
+      "TS": 0,
+      "CR": 0,
+      "LL": 0,
+      "CW": 0,
+      "TF": 0,
+      "reserved_bit7": 0,
+      "reserved_bit0": 0
+    },
+    "length": 7,
+    "payload_hex": "00160401000200",
+    "trailer": {
+      "ts": null,
+      "crc": null
+    },
+    "meaning": "A PATH whose ONE element is an RFC-0027 path label: the RFC-0018 escape record `00 <kind=0x16> <len=4> <u32 LE>`, 7 bytes, carrying slot index 1 at generation 2. This is the terminus-residual shape - the whole address is one hop's local part, so the minting hop replaced all of it. The label is HOST-SCOPED: these bytes mean a vertex only on the host that minted them, and mean nothing anywhere else.",
+    "note": "The label VALUE is one little-endian u32 split 16/16 - index in the low half, generation in the high half (RFC-0027 4.1). Generation 0 is reserved 'no label' and never reaches the wire."
+  }
+}

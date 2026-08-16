@@ -1,0 +1,28 @@
+{
+  "name": "label-wrong-length",
+  "category": "path-label",
+  "hex": "06000D000673656E736F72001603010002",
+  "total_bytes": 17,
+  "decoded": {
+    "type": "0x06 PATH",
+    "opt": {
+      "raw": "0x00",
+      "PL": 0,
+      "TS": 0,
+      "CR": 0,
+      "LL": 0,
+      "CW": 0,
+      "TF": 0,
+      "reserved_bit7": 0,
+      "reserved_bit0": 0
+    },
+    "length": 13,
+    "payload_hex": "0673656E736F72001603010002",
+    "trailer": {
+      "ts": null,
+      "crc": null
+    },
+    "meaning": "A label element whose declared payload is THREE bytes, not four. A label is exactly 4 bytes (RFC-0027 4.1), so these bytes are a malformed address: a hop that implements labels MUST refuse them - ERROR{tr::path::invalid} (0x0021) - and MUST NOT read a short field as a label. A hop that does not implement kind 0x16 still steps over the record by its declared length, which is why the frame is carriable at all.",
+    "note": "Not a reject.bin case: a packed PATH body is opt.PL = 0, opaque bytes to the codec, so there is nothing here for a codec to refuse - the same reasoning as path/path-escape-in-key-context. The requirement is a RESOLVER requirement."
+  }
+}

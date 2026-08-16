@@ -1,18 +1,22 @@
 /**
  * @file
- * @brief The RFC-0027 path-label value and mint table — codec, mint, lookup, retire,
- *        SATURATE-AND-RETIRE, and the §8.3 bounds.
+ * @brief The RFC-0027 path-label value, its §5.3 ELEMENT, and the mint table — codec, element
+ *        grammar, the §12.5 vectors, mint, lookup, retire, SATURATE-AND-RETIRE, and §8.3.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * Two halves, and the second is the one that needs a test at all.
+ * Three halves, and the last is the one that needs a test at all.
  *
  * The codec half pins §4.1's 32-bit value: a u16 slot index and a u16 generation, one
- * little-endian u32, with `0` reserved as "no label". §5.3's element FRAMING is
- * deferred pending the §12.5 conformance vectors, so nothing here asserts a type code
- * or a `PATH` child — only the four bytes the ruling already fixed, and the leading
- * candidate's structural predicate.
+ * little-endian u32, with `0` reserved as "no label".
+ *
+ * The element half pins §5.3, now CLOSED by amendments 4-6: the label element is
+ * RFC-0018 §8's escape record at `kind = 0x16`, 7 bytes, mixable with name records in
+ * any order, one element per hop's whole local part, and NEVER admissible as a
+ * `path_lookup_key`. `conformance_vectors` builds each §12.5 `path-label/` vector from
+ * the emitter and asserts it byte-for-byte, so the vectors pin the spelling rather than
+ * merely accompanying it (ADR-0028: the C++ core is golden).
  *
  * The table half pins §§7-8 and, above all, **§4.3.1**: the generation saturates and
  * the slot RETIRES PERMANENTLY, never wraps. That rule is invisible on the wire — no
@@ -25,14 +29,22 @@
 
 #include "libtracer/path_label.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory_resource>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <vector>
 
+#include "libtracer/packed_path.hpp"
 #include "libtracer/path_label_table.hpp"
+#include "libtracer/tlv_emit.hpp"
 #include "libtracer/transport.hpp"
 #include "test_support.hpp"
 
@@ -51,6 +63,24 @@ constexpr peer_handle_t kPeerB{9, 1};
 
 /** @brief A stand-in resolution: what a label aliases is opaque to the table. */
 constexpr path_label_target_t kTarget{.index = 42, .generation = 3};
+
+/** @brief The raw bytes of a conformance vector's `input.bin`. */
+std::vector<std::byte> vector_bytes(std::string_view case_dir) {
+    const std::filesystem::path p =
+        std::filesystem::path{LIBTRACER_VECTORS_DIR} / case_dir / "input.bin";
+    std::ifstream f(p, std::ios::binary);
+    const std::vector<char> raw((std::istreambuf_iterator<char>(f)),
+                                std::istreambuf_iterator<char>());
+    std::vector<std::byte> out(raw.size());
+    for (std::size_t i = 0; i < raw.size(); ++i)
+        out[i] = static_cast<std::byte>(static_cast<unsigned char>(raw[i]));
+    return out;
+}
+
+/** @brief Byte equality over two spans. */
+bool same(std::span<const std::byte> a, std::span<const std::byte> b) {
+    return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin());
+}
 
 /** @brief §4.1's value: the 16/16 split, the reserved zero, and the u32 round trip. */
 void value_shape() {
@@ -73,14 +103,152 @@ void byte_layout() {
     check(tr::wire::path_label_load(body) == path_label_t{.index = 0x1234, .generation = 0xABCD},
           "path_label_load is path_label_store's inverse");
 
-    // §5.3's leading-candidate structural rules, PL/LL/length — the shape the §12.5 vectors
-    // will confirm or replace. Nothing here is wired into the grammar yet, by design.
-    check(tr::wire::path_label_body_valid(false, false, 4), "a 4-byte PL=0/LL=0 body is the shape");
-    check(!tr::wire::path_label_body_valid(true, false, 4), "PL=1 on a scalar body is rejected");
-    check(!tr::wire::path_label_body_valid(false, true, 4), "LL=1 under a 4-byte body is rejected");
-    check(!tr::wire::path_label_body_valid(false, false, 3) &&
-              !tr::wire::path_label_body_valid(false, false, 8),
-          "a body that is not exactly one label is rejected (label-wrong-length)");
+    // §5.3.2's two structural clauses, kept apart: the kind names the element, the length
+    // says it is exactly one label. Two clauses, two vectors (RFC-0024 §9.4).
+    check(tr::wire::path_label_record_valid(0x16, 4), "kind 0x16 with a 4-byte payload is a label");
+    check(!tr::wire::path_label_record_valid(0x17, 4),
+          "a foreign kind is NOT a label, whatever its length (label-foreign-kind)");
+    check(
+        !tr::wire::path_label_record_valid(0x16, 3) && !tr::wire::path_label_record_valid(0x16, 8),
+        "a payload that is not exactly one label is rejected (label-wrong-length)");
+    check(tr::wire::kPathLabelRecordBytes == 7,
+          "a label ELEMENT is 7 bytes: 00 <kind> <len> + the 4-byte value (§5.3.2)");
+}
+
+/**
+ * @brief §5.3's ruled element — RFC-0018's escape at `kind = 0x16`, emitted and read back.
+ *
+ * The three amendments in one place: the element is its own self-describing record (4), it is
+ * the 7-byte escape and NOT the 8-byte `PATH_LABEL` TLV child (5), and it is the same 7 bytes
+ * whether the local part it stands for is one segment or five (6).
+ */
+void element_grammar() {
+    const path_label_t label{.index = 1, .generation = 2};
+    std::vector<std::byte> body;
+    check(tr::wire::emit_path_label(body, label), "a valid label emits its element");
+    check(body.size() == tr::wire::kPathLabelRecordBytes, "the element is 7 bytes");
+    check(body[0] == std::byte{0x00} && body[1] == std::byte{0x16} && body[2] == std::byte{0x04},
+          "the framing is the RFC-0018 escape: len 0, kind 0x16, payload length 4");
+    check(tr::wire::path_label_at(body, 0) == label, "the element reads back as the label emitted");
+
+    // §4.1's reserved generation never reaches the wire, not even through a default-constructed
+    // struct — the emitter refuses it rather than spelling a label nobody minted.
+    std::vector<std::byte> refused;
+    check(!tr::wire::emit_path_label(refused, path_label_t{}) && refused.empty(),
+          "generation 0 is refused, appending NOTHING");
+
+    // §5.2: names and labels mix in any order, and a label is read by its KIND, never by its
+    // position — which is why the second element below is found by walking, not by counting.
+    std::vector<std::byte> mixed;
+    (void)tr::wire::emit_path_segment(mixed, "sensor");
+    check(tr::wire::emit_path_label(mixed, label), "a label follows a name");
+    (void)tr::wire::emit_path_segment(mixed, "temp");
+    const path_label_t saturated{.index = 0x0102, .generation = tr::wire::kPathLabelMaxGeneration};
+    check(tr::wire::emit_path_label(mixed, saturated), "a name follows a label");
+    std::size_t at = 0;
+    std::vector<path_label_t> seen;
+    while (at < mixed.size()) {
+        const std::size_t span = tr::wire::packed_record_span(mixed, at);
+        check(span != 0, "every record in a mixed body is well framed");
+        if (const auto l = tr::wire::path_label_at(mixed, at)) seen.push_back(*l);
+        at += span;
+    }
+    check(seen.size() == 2 && seen[0] == label && seen[1] == saturated,
+          "a mixed body walks with `p += span` and yields exactly its label elements");
+    check(saturated.valid(),
+          "generation 0xFFFF is a USABLE label — saturation forbids the next MINT, not this use");
+
+    // §5.3 sub-question 3, ruled NOT admissible: a labelled PATH is never a canonical key,
+    // while its pure-string twin still is. This is what keeps RFC-0018 §5's injectivity and
+    // §5.1's byte-prefix-implies-ancestor invariant true once labels exist.
+    check(!tr::wire::packed_path_valid_key(mixed), "a labelled PATH is NOT a path_lookup_key");
+    std::vector<std::byte> strings;
+    (void)tr::wire::emit_path_segment(strings, "sensor");
+    (void)tr::wire::emit_path_segment(strings, "temp");
+    check(tr::wire::packed_path_valid_key(strings), "its pure-string twin still is");
+
+    // A foreign kind is somebody else's element: skippable by length, and NEVER read as a
+    // label — the mis-delivery a length-only check would cause (label-foreign-kind).
+    std::vector<std::byte> foreign;
+    const std::array<std::byte, 4> four{std::byte{1}, std::byte{0}, std::byte{2}, std::byte{0}};
+    check(tr::wire::emit_path_escape(foreign, 0x17, four), "an unassigned kind still frames");
+    check(tr::wire::packed_record_span(foreign, 0) == 7, "and is skippable by its declared length");
+    check(!tr::wire::path_label_at(foreign, 0).has_value(),
+          "a foreign kind carrying four bytes is NOT read as a label");
+
+    // A short payload is a malformed address, not a label read short (label-wrong-length).
+    std::vector<std::byte> short_body;
+    const std::array<std::byte, 3> three{std::byte{1}, std::byte{0}, std::byte{2}};
+    check(tr::wire::emit_path_escape(short_body, tr::wire::kPackedEscapeKindLabel, three),
+          "a 3-byte payload at kind 0x16 is well FRAMED");
+    check(tr::wire::packed_record_span(short_body, 0) == 6, "so a non-implementing hop skips it");
+    check(!tr::wire::path_label_at(short_body, 0).has_value(),
+          "but a hop that implements labels reads NOTHING from it");
+    check(!tr::wire::path_label_at(strings, 0).has_value(), "a literal segment is not a label");
+}
+
+/**
+ * @brief §12.5's vectors, byte-exact against this emitter — the C++ core is golden (ADR-0028).
+ *
+ * Building the bytes here rather than asserting a hex literal is what makes the vectors a PIN:
+ * a change to the element spelling reddens this test, and a re-blessing that does not re-run
+ * the emitter cannot pass it.
+ */
+void conformance_vectors() {
+    const auto path_frame = [](std::span<const std::byte> body) {
+        std::vector<std::byte> out;
+        tr::wire::emit_tlv(out, tr::wire::type_t::PATH, tr::wire::opt_t{}, body);
+        return out;
+    };
+
+    std::vector<std::byte> one;
+    check(tr::wire::emit_path_label(one, path_label_t{.index = 1, .generation = 2}),
+          "label-roundtrip's element emits");
+    check(same(path_frame(one), vector_bytes("path-label/label-roundtrip")),
+          "path-label/label-roundtrip is byte-exact against the emitter");
+
+    std::vector<std::byte> mixed;
+    (void)tr::wire::emit_path_segment(mixed, "sensor");
+    (void)tr::wire::emit_path_label(mixed, path_label_t{.index = 1, .generation = 2});
+    (void)tr::wire::emit_path_segment(mixed, "temp");
+    (void)tr::wire::emit_path_label(
+        mixed, path_label_t{.index = 0x0102, .generation = tr::wire::kPathLabelMaxGeneration});
+    check(same(path_frame(mixed), vector_bytes("path-label/label-mixed")),
+          "path-label/label-mixed is byte-exact against the emitter");
+
+    // §5.3.3: the run /net/downlink/a is 15 packed bytes and ONE 7-byte element — the element
+    // is the same width whatever the run's depth, which is the amendment's whole content.
+    std::vector<std::byte> run;
+    for (const std::string_view s : {"net", "downlink", "a"})
+        (void)tr::wire::emit_path_segment(run, s);
+    check(run.size() == 15, "the three-segment mount run packs to 15 bytes");
+    std::vector<std::byte> multi;
+    (void)tr::wire::emit_path_label(multi, path_label_t{.index = 3, .generation = 1});
+    check(multi.size() == tr::wire::kPathLabelRecordBytes,
+          "and compacts to one 7-byte element, not one per segment (§5.3.3)");
+    for (const std::string_view s : {"sensor", "temp"}) (void)tr::wire::emit_path_segment(multi, s);
+    check(same(path_frame(multi), vector_bytes("path-label/label-multi-segment")),
+          "path-label/label-multi-segment is byte-exact against the emitter");
+
+    std::vector<std::byte> wrong_len;
+    (void)tr::wire::emit_path_segment(wrong_len, "sensor");
+    const std::array<std::byte, 3> three{std::byte{1}, std::byte{0}, std::byte{2}};
+    (void)tr::wire::emit_path_escape(wrong_len, tr::wire::kPackedEscapeKindLabel, three);
+    check(same(path_frame(wrong_len), vector_bytes("path-label/label-wrong-length")),
+          "path-label/label-wrong-length is byte-exact against the emitter");
+    check(!tr::wire::path_label_at(wrong_len, 7).has_value() &&
+              !tr::wire::packed_path_valid_key(wrong_len),
+          "and it is neither a label nor a key");
+
+    std::vector<std::byte> foreign;
+    (void)tr::wire::emit_path_segment(foreign, "sensor");
+    const std::array<std::byte, 2> two{std::byte{0xAA}, std::byte{0xBB}};
+    (void)tr::wire::emit_path_escape(foreign, 0x17, two);
+    check(same(path_frame(foreign), vector_bytes("path-label/label-foreign-kind")),
+          "path-label/label-foreign-kind is byte-exact against the emitter");
+    check(!tr::wire::path_label_at(foreign, 7).has_value() &&
+              tr::wire::packed_record_span(foreign, 7) == 5,
+          "and it is skipped by length, never read as a label");
 }
 
 /** @brief Mint then look up — the whole point of the table, and the peer scoping around it. */
@@ -226,6 +394,8 @@ void ceiling_and_capacity() {
 int main() {
     value_shape();
     byte_layout();
+    element_grammar();
+    conformance_vectors();
     mint_and_lookup();
     release_bumps_and_reuses();
     saturate_and_retire();

@@ -1,0 +1,28 @@
+{
+  "name": "label-mixed",
+  "category": "path-label",
+  "hex": "06001A000673656E736F72001604010002000474656D700016040201FFFF",
+  "total_bytes": 30,
+  "decoded": {
+    "type": "0x06 PATH",
+    "opt": {
+      "raw": "0x00",
+      "PL": 0,
+      "TS": 0,
+      "CR": 0,
+      "LL": 0,
+      "CW": 0,
+      "TF": 0,
+      "reserved_bit7": 0,
+      "reserved_bit0": 0
+    },
+    "length": 26,
+    "payload_hex": "0673656E736F72001604010002000474656D700016040201FFFF",
+    "trailer": {
+      "ts": null,
+      "crc": null
+    },
+    "meaning": "A PATH mixing name and label elements in BOTH orders - a name before a label and a label before a name. RFC-0027 5.2: a PATH MAY carry any mixture, in any order; there is no 'fully minted' state and no all-or-nothing rule, because a hop that does not mint leaves its own part spelled as strings while every other hop's part still compacts.",
+    "note": "The second label sits at generation 0xFFFF - the SATURATION point of RFC-0027 4.3.1. It is a legal, usable label; what saturation forbids is the NEXT mint into that slot, which retires permanently rather than wrapping."
+  }
+}

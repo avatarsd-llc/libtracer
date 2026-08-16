@@ -1,0 +1,28 @@
+{
+  "name": "label-foreign-kind",
+  "category": "path-label",
+  "hex": "06000C000673656E736F72001702AABB",
+  "total_bytes": 16,
+  "decoded": {
+    "type": "0x06 PATH",
+    "opt": {
+      "raw": "0x00",
+      "PL": 0,
+      "TS": 0,
+      "CR": 0,
+      "LL": 0,
+      "CW": 0,
+      "TF": 0,
+      "reserved_bit7": 0,
+      "reserved_bit0": 0
+    },
+    "length": 12,
+    "payload_hex": "0673656E736F72001702AABB",
+    "trailer": {
+      "ts": null,
+      "crc": null
+    },
+    "meaning": "An escape record at an UNASSIGNED kind (0x17), sitting where a label could have sat. An element is read by its KIND and never by its position (RFC-0027 5.1): this is not a label, and a core MUST NOT read its 2-byte payload as one. A forwarder steps over it by its declared length and relays the frame - the node least likely to implement a kind is exactly the node that must still step over it (RFC-0018 8).",
+    "note": "The paired negative of path-label/label-wrong-length: kind and length are two clauses and they get two vectors, because a core that enforces only one of them passes a vector that merges them (RFC-0024 9.4). In KEY context both are refused anyway - any escape record makes a PATH inadmissible as a path_lookup_key (RFC-0027 amendment 5)."
+  }
+}

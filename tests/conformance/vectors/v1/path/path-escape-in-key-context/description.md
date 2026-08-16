@@ -3,17 +3,19 @@
 A packed `PATH` (RFC-0018) whose second record is the **§5.4 escape**:
 
 ```
-06 00 0D 00                       PATH, opt = 0x00 (PL MUST be 0), body 13 bytes
+06 00 0E 00                       PATH, opt = 0x00 (PL MUST be 0), body 14 bytes
    06 73 65 6E 73 6F 72              record: len 6, "sensor"
    00 16 04 01 00 02 00              ESCAPE: len 0, kind 0x16, len 4, u32 LE 0x00020001
 ```
 
 The escape is `00 <u8 kind> <u8 len> <len bytes>` — self-delimiting on purpose, so the node
 least likely to implement `kind` is still able to **skip** it by length rather than dropping a
-frame it is only relaying (RFC-0018 §8). `kind = 0x16` is reserved for
+frame it is only relaying (RFC-0018 §8). `kind = 0x16` is
 [RFC-0027](../../../../../docs/spec/rfcs/0027-label-switched-path-compression.md)'s label
-element; nothing in the reference core mints one yet, and this vector does not require that it
-can.
+element — the `path-label/` vectors are its own category — and nothing in the reference core
+**mints** one yet, which this vector does not require that it can. What this vector owns is the
+**key-context refusal**, which is kind-agnostic: *any* escape record makes a `PATH` inadmissible
+as a `path_lookup_key`.
 
 ## The rule this pins
 
