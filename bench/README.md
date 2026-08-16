@@ -26,6 +26,7 @@ for a local `preview.html` of the same charts.
 | `bench_route_handle_contention` | **per-link-lock contention**: T producers doing steady-state `ensure_egress` reuse-reads on one hot link (its header carries the finding that `shared_mutex` does not help). |
 | `bench_conn_ram` | **per-connection RAM census**: what one connection costs on each transport (TCP / WS / UDP / CAN) — link base, per-connection bytes, what survives teardown. **Gated (warn)** on the pinned host — see [the RAM censuses in CI](#the-ram-censuses-in-ci-1228). |
 | `bench_ram_census_tcp` | **whole-node RAM census**: the heap a 100-vertex graph (values 4..64 B, mixed int / array / STREAM) holds, staged from an empty `graph_t` through a `/net:children[]`-created TCP listener to steady state under a real remote peer **process**. **Trend-only** on the pinned host. |
+| `bench_path_label` | **RFC-0027 §12.4's normative gate**: what a minted **path label** saves per hop, as a slope over hop count and over registry width — and, where the number would be, why the terminus-residual axis is not yet answerable. See [the RFC-0027 gate](#bench_path_label--the-rfc-0027-124-gate-1325-car-5). |
 | `bench_rx_source_topology` | **RX failable-source topology**: T receive threads forwarding rope frames through a shared heap, one shared pool, or one pool per child — the measurement behind [ADR-0067](../docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md) §3. |
 
 ### `bench_forward_heap` — the 16KB-RAM zero-heap forward gate (ADR-0038)
@@ -380,6 +381,52 @@ per-child tracks the heap within run-to-run spread. Peak slab is reported on std
 Diagnostic, **not** a `perf.yml` gate, for the same reason as the two storms above. Run it
 at least three times before drawing a conclusion — a single run of this workload showed a
 27 % single-thread pool win that three runs deleted.
+
+### `bench_path_label` — the RFC-0027 §12.4 gate (#1325 car 5)
+
+```sh
+cmake --build bench/build --target bench_path_label -j
+taskset -c 24 ./bench/build/bench_path_label   # RESULT mode=plabel-{string,label} / presid-*
+```
+
+[RFC-0027](../docs/spec/rfcs/0027-label-switched-path-compression.md) §12.4 makes a bench
+gate **normative for acceptance of the implementation**, and no instrument in the tree
+answered it. `bench_hop_chain` measures RFC-0004 §E.1's per-link route handle (a `COMPACT`
+frame), not a **path label**; it is fixed at four hops, and its own arms self-void as
+non-comparable. So this harness exists.
+
+A chain of `H + 1` real `fwd_router_t` hops carries the **same** `FWD{op=READ}` twice,
+differing only in how `dst` is spelled — the full canonical address, or the 7-byte label
+element each hop minted for its own mount run. The labels are read off the reply the
+implementation itself emits (§6.1 erratum 2), never hand-spelled, so the bench doubles as an
+end-to-end check that §6.1 point 4 holds. Per-direction frame counts are compared between
+the arms and a mismatch **voids the run** with a non-zero exit — `bench_hop_chain`'s lesson,
+which cost that bench a published number that was ~40 % reply leg.
+
+**The per-hop saving is a function of registry width, and reporting it as one number would
+be wrong.** Measured on an EPYC 9115 vCPU, `taskset -c 24`, 10 runs, medians of the p50:
+
+| children per hop | string ns/hop | label ns/hop | label's per-hop saving |
+| ---: | ---: | ---: | ---: |
+| 1 | 302.1 | 305.8 | **−3.6 ns (a cost)** |
+| 8 | 318.4 | 318.4 | **0.0 ns** |
+| 64 | 494.0 | 418.4 | **+75.6 ns (−15.3 %)** |
+
+Read as slopes over `H ∈ {1, 2, 4, 8}`, because a single-hop point is the wrong instrument
+for a per-hop claim — the correction RFC-0024 §8.4 had to make on itself. The label arm also
+carries a **higher fixed cost** (+65 ns at width 64) and a lower per-hop one, which is
+exactly the shape a point measurement cannot see. The originator's frame shrinks
+**17 B/hop → 7 B/hop** in every arm.
+
+**The depth sweep (`presid-*`) does NOT answer §12.4 clause 2**, and says so where the number
+would be. §6.1 point 3 requires the terminus to mint for the residual it resolved; the
+shipped forwarder mints on the forwarding leg only, so the residual is a string in **both**
+arms. The sweep measures the term that clause is about — **10.9 ns per residual segment**,
+depth 1→12 — and shows the label spelling does not yet touch it (label arm 8.5 ns/segment,
+inside the ±15 ns pair spread).
+
+Diagnostic, **not** a `perf.yml` gate: both arms are in one binary and the comparison is
+between two *spellings*, not two builds.
 
 ## What is measured
 
