@@ -7,6 +7,12 @@ versioning/publish strategy.
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-08-16
+
+### Added
+
+- **`CONN_ENDPOINT_NAME` (`"conn"`), and `walkTopology` skips it** ([#1302](https://github.com/avatarsd-llc/libtracer/issues/1302); RFC-0014 §3, core S2b). Every module's `:children[]` now lists its **creator endpoint** alongside its member connections, because the endpoint is a real vertex under the module. It is not a link: it is the write-only control a creator sends `SPEC`/`NAME` to, with no peer behind it — so the topology walk descended into it, minted a phantom node, and then reported a bogus gap for the subtree that was never there. The reserved name is now skipped, and exported so a caller filtering its own listing spells it the same way. Skipping is right regardless of RFC-0014 **S4** (which will hide the endpoint from that listing at the source): a node older than S4 keeps listing it, and this client talks to those too.
+
 ### Changed
 
 - **A `PATH` (`0x06`) body is packed `[u8 len][utf8]` segment records
@@ -27,10 +33,6 @@ versioning/publish strategy.
 - `nameTlv` still validates a segment and `NAME` is otherwise untouched — it remains the wire's
   string carrier for SETTINGS keys, `:schema` labels and `:children[]` members. RFC-0018
   removes `NAME` from `PATH` bodies only.
-
-### Added
-
-- **`CONN_ENDPOINT_NAME` (`"conn"`), and `walkTopology` skips it** ([#1302](https://github.com/avatarsd-llc/libtracer/issues/1302); RFC-0014 §3, core S2b). Every module's `:children[]` now lists its **creator endpoint** alongside its member connections, because the endpoint is a real vertex under the module. It is not a link: it is the write-only control a creator sends `SPEC`/`NAME` to, with no peer behind it — so the topology walk descended into it, minted a phantom node, and then reported a bogus gap for the subtree that was never there. The reserved name is now skipped, and exported so a caller filtering its own listing spells it the same way. Skipping is right regardless of RFC-0014 **S4** (which will hide the endpoint from that listing at the source): a node older than S4 keeps listing it, and this client talks to those too.
 
 ## [0.12.0] — 2026-08-14
 

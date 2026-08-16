@@ -59,6 +59,7 @@ MODEL = os.environ.get("RELEASE_NOTES_MODEL", "claude-haiku-4-5-20251001")
 # jobs: a package that ships under the tag must speak in the release body.
 DEFAULT_CHANGELOGS = [
     "core/CHANGELOG.md",
+    "bindings/ros2/CHANGELOG.md",
     "bindings/rust/CHANGELOG.md",
     "bindings/typescript/CHANGELOG.md",
     "integrations/esp-idf/libtracer/CHANGELOG.md",
@@ -68,6 +69,7 @@ DEFAULT_CHANGELOGS = [
 # directory, so adding a package changelog needs no edit here to work.
 PACKAGE_LABELS = {
     "core": "core — C++ reference implementation",
+    "bindings/ros2": "bindings/ros2 — the `rmw_tracer` stub (source-only, not published to any registry)",
     "bindings/rust": "bindings/rust — the `libtracer` crate",
     "bindings/typescript": "bindings/typescript — the `@avatarsd-llc/libtracer-*` npm packages",
     "integrations/esp-idf/libtracer": "integrations/esp-idf — the ESP component",

@@ -12,6 +12,7 @@ Run with ``python3 -m unittest discover -s tools/tests`` (no third-party deps).
 """
 import io
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -34,6 +35,27 @@ def read(path):
 def bullets(text):
     """Every top-level `- ` bullet in `text`, as a set — the content-preservation probe."""
     return {line for line in text.split("\n") if line.startswith("- ")}
+
+
+def packages_dating_back_to(version):
+    """`DEFAULT_CHANGELOGS` entries whose history reaches back to @p version.
+
+    A package changelog that *starts* after the probed release contributes nothing
+    to that older body, and correctly so: `bindings/ros2/CHANGELOG.md` begins at
+    `[0.13.0]`, so it has no 0.7.0 or 0.9.0 section to publish and no `[Unreleased]`
+    content to fall back to. Filtering on the changelog's OWN earliest version keeps
+    #676's invariant strict — every package that existed at @p version must still
+    contribute — instead of weakening it to "whoever happens to have content".
+    """
+    out = []
+    for path in grn.DEFAULT_CHANGELOGS:
+        versions = re.findall(
+            r"(?m)^##\s*\[(\d+)\.(\d+)\.(\d+)\]", read(os.path.join(REPO, path))
+        )
+        earliest = min((tuple(int(p) for p in v) for v in versions), default=None)
+        if earliest is not None and earliest <= tuple(int(p) for p in version.split(".")):
+            out.append(path)
+    return out
 
 
 def unfenced_headings(lines, prefix="### "):
@@ -286,10 +308,11 @@ class ReleaseNotesTest(unittest.TestCase):
 
     def test_the_real_090_body_fits_under_githubs_limit(self):
         """The regression itself: v0.9.0's body was 191 358 characters and 422'd."""
+        expected = packages_dating_back_to("0.9.0")
         cwd = os.getcwd()
         os.chdir(REPO)
         try:
-            sections = grn.collect_sections(grn.DEFAULT_CHANGELOGS, "0.9.0")
+            sections = grn.collect_sections(expected, "0.9.0")
             full = grn.render_sections(sections)
             text, truncated = grn.render_sections(sections, budget=grn.GITHUB_BODY_LIMIT)
         finally:
@@ -297,7 +320,10 @@ class ReleaseNotesTest(unittest.TestCase):
         self.assertGreater(len(full), 125_000, "fixture is stale — this release no longer overflows")
         self.assertTrue(truncated)
         self.assertLessEqual(len(text), grn.GITHUB_BODY_LIMIT)
-        self.assertEqual(text.count("#### "), len(grn.DEFAULT_CHANGELOGS))
+        # Fair share must drop NOBODY: every package that shipped in 0.9.0 survives
+        # truncation whole enough to keep its heading. That is #676's guarantee.
+        self.assertEqual(text.count("#### "), len(expected))
+        self.assertGreaterEqual(len(expected), 4, "0.9.0 shipped four packages")
 
     def test_unknown_package_falls_back_to_its_directory(self):
         """A new package changelog needs no table edit to get a heading."""
@@ -359,11 +385,29 @@ class RepoChangelogTest(unittest.TestCase):
     """The tools, applied to the real tree — the release path they will actually take."""
 
     def test_every_package_contributes_to_a_release_body(self):
-        """Right now, each of the four packages has unreleased content to publish."""
+        """Every package that existed at the probed release has content to publish."""
+        expected = packages_dating_back_to("0.7.0")
         cwd = os.getcwd()
         os.chdir(REPO)
         try:
-            sections = grn.collect_sections(grn.DEFAULT_CHANGELOGS, "0.7.0")
+            sections = grn.collect_sections(expected, "0.7.0")
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(len(sections), len(expected))
+        self.assertGreaterEqual(len(expected), 4, "0.7.0 shipped four packages")
+
+    def test_the_release_being_cut_publishes_every_package(self):
+        """The cut itself: at the tree's own VERSION, nobody contributes nothing.
+
+        The historical probes above cannot catch a package added this cycle whose
+        section is missing — `bindings/ros2` postdates both of them. This one reads
+        `VERSION`, so it covers exactly the body the next tag will publish.
+        """
+        version = read(os.path.join(REPO, "VERSION")).strip()
+        cwd = os.getcwd()
+        os.chdir(REPO)
+        try:
+            sections = grn.collect_sections(grn.DEFAULT_CHANGELOGS, version)
         finally:
             os.chdir(cwd)
         self.assertEqual(len(sections), len(grn.DEFAULT_CHANGELOGS))
@@ -373,7 +417,7 @@ class RepoChangelogTest(unittest.TestCase):
         cwd = os.getcwd()
         os.chdir(REPO)
         try:
-            body = grn.render_sections(grn.collect_sections(grn.DEFAULT_CHANGELOGS, "0.7.0"))
+            body = grn.render_sections(grn.collect_sections(packages_dating_back_to("0.7.0"), "0.7.0"))
         finally:
             os.chdir(cwd)
         self.assertIn("`walkTopology` composes routes from mount paths", body)

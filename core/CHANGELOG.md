@@ -14,56 +14,7 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
-### Changed
-
-- **A `PATH` (`0x06`) body is now packed `[u8 len][utf8]` segment records, not `NAME` children
-  ([RFC-0018](../docs/spec/rfcs/0018-packed-path-segments.md),
-  [#680](https://github.com/avatarsd-llc/libtracer/issues/680)) — BREAKING on the wire and on
-  the C++ API.** `opt.PL` is `0`; the body is a self-delimiting run of records and the walk is
-  `p += 1 + body[p]`. `/sensor/temp` goes 18 bytes to 12, a four-hop `dst` 146 B to 104 B, and
-  the resolve leg 34 ns to ~20 ns (`bench_forward_demux` axis 3 grew a `fwd-demux-resolve-literal`
-  arm so the two encodings are timed in ONE binary — RFC-0018 falsifier 1).
-  - **The vertex-map key IS the `PATH` body**, so it moves with the encoding:
-    `path_t::key()`, `graph_t::find`, `key_view_t` and every stored `path_key_t` are packed
-    bytes now. A `key_view_t` record is a one-byte length prefix; `record_end` /
-    `record_from` / `record_cursor_t` / `child_record_under` answer in the new offsets.
-  - **`arena_tlv_t::canonical_path` is REMOVED**, and with it `is_canonical_name` and the
-    per-child bookkeeping the terminus decode ran for it. The flag asked whether a `PATH`'s
-    children were all bare `NAME`s, because a legal peer could spell one address several
-    ways (`opt.LL`, a per-segment trailer) and a byte key would then miss. A packed record has
-    no option byte and no type byte, so there is exactly ONE spelling per address: the body is
-    the key unconditionally, and the span-alias (ADR-0041 §3) is guaranteed rather than tested.
-    That also closes the second, still-open locus of
-    [#436](https://github.com/avatarsd-llc/libtracer/issues/436) — `wire::path_key` could
-    mistype a child; a packed body has none. `path_lookup_key` lost its `fallback` parameter
-    for the same reason.
-  - **`wire::path_key(const tlv_t&)`** now returns the packed body and refuses a structured
-    (`opt.PL = 1`) `PATH`, ragged framing, or an escape record, where it used to refuse a
-    non-`NAME` child.
-  - **New header `libtracer/packed_path.hpp`** (`tr::wire`) owns the grammar in one place:
-    `emit_path_segment`, `packed_record_span` (frame-path context — steps OVER the RFC-0018
-    §5.4 `len == 0` escape), `packed_path_valid_key` (canonical/key context — REJECTS it), and
-    the escape constants. Nothing mints an escape; `kind = 0x16` is reserved for RFC-0027's
-    label element, and building the SKIP path now is what keeps that RFC from reopening this
-    code.
-  - **`net::stack_writer::name` becomes `path_seg`**, and a new `header_path` writes the
-    `opt.PL = 0` `PATH` header the rebuild emits. `encode_mount_tlv` /
-    `child_registry_t`'s mount run emit packed records; `fwd_rebuild_t::extra_hdr` is one byte.
-  - **Unmoved on purpose:** `NAME` (`0x02`) and `wire::emit_name` are untouched — they still
-    spell SETTINGS keys, `:schema` labels and `:children[]` members. RFC-0018 removes `NAME`
-    from `PATH` bodies only, so `read_children` / `read_children_folded` /
-    `read_subtree_folded` keep emitting `POINT{NAME …}` byte-identically; they write the
-    `NAME` header beside the `POINT` one rather than borrowing the key record, which keeps
-    both folds at the link count their reservations are sized against.
-  - **The RFC-0023 caps trade places.** A one-byte segment costs 2 bytes packed instead of 5,
-    so `kMaxPathBytes` (1024) admits 512 records and `kMaxSegments` (255) is what binds —
-    where before the byte cap fired at 204 segments and the count clause could never trigger.
-    Pinned by the new `path/path-deep-255-packed` vector.
-  - **Conformance:** 27 vectors carrying a `PATH` were re-blessed from this reference
-    (ADR-0028). `path/path-value-children-illegal` is **retired** — it is unrepresentable —
-    and replaced by `path/path-escape-in-key-context` and `path/path-record-overruns-body`,
-    which pin what remains of its rule: an illegally-spelled address answers
-    `ERROR{tr::path::invalid}` rather than resolving to something.
+## [0.13.0] — 2026-08-16
 
 ### Added
 
@@ -235,7 +186,110 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   whole suite green on a TSO host. The evidence half of the same question — an
   `ubuntu-24.04-arm` CI leg that can actually exhibit the anomaly — landed earlier under #1140.
 
+- **The peer LIVENESS WINDOW: `liveness_window_ms` on all four host stream transports, and the
+  `liveness_window` config key on `tcp` and `ws`**
+  ([#838](https://github.com/avatarsd-llc/libtracer/issues/838)). The #838 bound's provenance is
+  an **app-provided liveness window**, injected exactly as `connect_timeout`, CAN's `peer_ttl`
+  (ADR-0044) and `httpd_ws_link_t::send_timeout_ms` are — not a core literal, and not derived,
+  because a host has no task watchdog to derive from the way the MCU link does. `tcp_transport_t`
+  (both constructors), `transport_tcp_server`, `transport_ws_client` and `transport_ws_server`
+  each gained a trailing `liveness_window_ms` parameter (default `0` = the conservative
+  `kDefaultLivenessWindowMs` **10 s** clamp — "safe unless you opt out", since today's unbounded
+  block is the bug); the `tcp`/`ws` factories parse the same number from the kind-private
+  `liveness_window` key (VALUE u32, ms). Existing call sites are source-compatible. New
+  accessors `liveness_window_ms()` and `stalled_tx()` on all four. The per-record bound is
+  `derive_send_bound_ms(window, peers-in-this-round)`, floored at `kBoundedWaitMs` (100 ms —
+  a bound that rounds to 0 means *block forever*, the #956 lesson), so one whole fan-out round
+  with EVERY peer stalled still releases both locks inside one window. `stream_endpoint_t`'s two
+  full-write helpers now RETURN a `write_result_t` (outcome + whether the record half-landed) and
+  take an optional per-record bound; `slot_server_t::broadcast_iov` returns how many peers it
+  shed for. Framed as the liveness window rather than a fifth independent timeout knob so it
+  converges into RFC-0014 §S5's single liveness contract later; S5's engine is NOT built here —
+  a keepalive clock cannot unblock a send already stuck inside `write_all_iov`, which is why the
+  per-send bound is what makes that clock enforceable at all.
+
+- **#838's RAM cost, priced and EXPLICITLY ACCEPTED: +16 B per link, +14–16 B per connection**
+  ([#838](https://github.com/avatarsd-llc/libtracer/issues/838)). Recorded here because it never
+  was — #838 merged as `aee923d5` without an entry pricing what the stalled-peer write bound
+  costs, and an unpriced cost is indistinguishable from a regression the next time someone reads
+  the census. It is neither: it is the accepted price of the bound, following the
+  [#1160](https://github.com/avatarsd-llc/libtracer/issues/1160) precedent, where a +226 B cost
+  was priced and waived on the record rather than silently absorbed. **What it bought:** a host
+  stream send can no longer block indefinitely on a stalled-not-dead peer, and no longer holds
+  `write_m_` while it does. **What it costs,** measured `aee923d5` against its parent
+  `2dcdbcdd` with `bench_conn_ram --no-can --reps=5` on the same host, same toolchain:
+
+  | metric | `2dcdbcdd` | `aee923d5` | Δ |
+  | --- | ---: | ---: | ---: |
+  | `sizeof tcp_client` | 264 | 280 | **+16 B** |
+  | `sizeof tcp_server` | 440 | 456 | **+16 B** |
+  | `sizeof ws_server` | 440 | 456 | **+16 B** |
+  | `sizeof ws_client` | 328 | 344 | **+16 B** |
+  | `tcp-server metric=link_base` | 464 | 480 | **+16 B** |
+  | `ws-server metric=link_base` | 464 | 480 | **+16 B** |
+  | `tcp-server metric=per_conn` (median) | 282 | 296 | **+14 B** |
+  | `ws-server metric=per_conn` | 376 | 392 | **+16 B** |
+
+  The 16 B is the two new per-link members — the `stalled_tx_` counter (8 B) and
+  `liveness_window_ms_` (4 B), padded to the alignment already there. **`udp` and `can` are
+  unchanged** (`sizeof udp` 216, `can` 800; every udp arm's `link_base` and `per_conn` byte-for-byte
+  identical), which is the scope ruling showing up in the numbers: #838 touched the host stream
+  transports only. **No RAM baseline is re-pinned by this entry** — it is accounting, not a gate
+  move. Note the per-connection census is emitted by `bench_conn_ram` into the `perf-local` run
+  log (`# sizeof:` and `RESULT … metric=per_conn`/`metric=link_base` rows) and is **not** carried
+  into `data.js`, so it does not appear on the gh-pages charts; reproducing it means running the
+  bench at both revisions, which is what was done here.
+
 ### Changed
+
+- **A `PATH` (`0x06`) body is now packed `[u8 len][utf8]` segment records, not `NAME` children
+  ([RFC-0018](../docs/spec/rfcs/0018-packed-path-segments.md),
+  [#680](https://github.com/avatarsd-llc/libtracer/issues/680)) — BREAKING on the wire and on
+  the C++ API.** `opt.PL` is `0`; the body is a self-delimiting run of records and the walk is
+  `p += 1 + body[p]`. `/sensor/temp` goes 18 bytes to 12, a four-hop `dst` 146 B to 104 B, and
+  the resolve leg 34 ns to ~20 ns (`bench_forward_demux` axis 3 grew a `fwd-demux-resolve-literal`
+  arm so the two encodings are timed in ONE binary — RFC-0018 falsifier 1).
+  - **The vertex-map key IS the `PATH` body**, so it moves with the encoding:
+    `path_t::key()`, `graph_t::find`, `key_view_t` and every stored `path_key_t` are packed
+    bytes now. A `key_view_t` record is a one-byte length prefix; `record_end` /
+    `record_from` / `record_cursor_t` / `child_record_under` answer in the new offsets.
+  - **`arena_tlv_t::canonical_path` is REMOVED**, and with it `is_canonical_name` and the
+    per-child bookkeeping the terminus decode ran for it. The flag asked whether a `PATH`'s
+    children were all bare `NAME`s, because a legal peer could spell one address several
+    ways (`opt.LL`, a per-segment trailer) and a byte key would then miss. A packed record has
+    no option byte and no type byte, so there is exactly ONE spelling per address: the body is
+    the key unconditionally, and the span-alias (ADR-0041 §3) is guaranteed rather than tested.
+    That also closes the second, still-open locus of
+    [#436](https://github.com/avatarsd-llc/libtracer/issues/436) — `wire::path_key` could
+    mistype a child; a packed body has none. `path_lookup_key` lost its `fallback` parameter
+    for the same reason.
+  - **`wire::path_key(const tlv_t&)`** now returns the packed body and refuses a structured
+    (`opt.PL = 1`) `PATH`, ragged framing, or an escape record, where it used to refuse a
+    non-`NAME` child.
+  - **New header `libtracer/packed_path.hpp`** (`tr::wire`) owns the grammar in one place:
+    `emit_path_segment`, `packed_record_span` (frame-path context — steps OVER the RFC-0018
+    §5.4 `len == 0` escape), `packed_path_valid_key` (canonical/key context — REJECTS it), and
+    the escape constants. Nothing mints an escape; `kind = 0x16` is reserved for RFC-0027's
+    label element, and building the SKIP path now is what keeps that RFC from reopening this
+    code.
+  - **`net::stack_writer::name` becomes `path_seg`**, and a new `header_path` writes the
+    `opt.PL = 0` `PATH` header the rebuild emits. `encode_mount_tlv` /
+    `child_registry_t`'s mount run emit packed records; `fwd_rebuild_t::extra_hdr` is one byte.
+  - **Unmoved on purpose:** `NAME` (`0x02`) and `wire::emit_name` are untouched — they still
+    spell SETTINGS keys, `:schema` labels and `:children[]` members. RFC-0018 removes `NAME`
+    from `PATH` bodies only, so `read_children` / `read_children_folded` /
+    `read_subtree_folded` keep emitting `POINT{NAME …}` byte-identically; they write the
+    `NAME` header beside the `POINT` one rather than borrowing the key record, which keeps
+    both folds at the link count their reservations are sized against.
+  - **The RFC-0023 caps trade places.** A one-byte segment costs 2 bytes packed instead of 5,
+    so `kMaxPathBytes` (1024) admits 512 records and `kMaxSegments` (255) is what binds —
+    where before the byte cap fired at 204 segments and the count clause could never trigger.
+    Pinned by the new `path/path-deep-255-packed` vector.
+  - **Conformance:** 27 vectors carrying a `PATH` were re-blessed from this reference
+    (ADR-0028). `path/path-value-children-illegal` is **retired** — it is unrepresentable —
+    and replaced by `path/path-escape-in-key-context` and `path/path-record-overruns-body`,
+    which pin what remains of its rule: an illegally-spelled address answers
+    `ERROR{tr::path::invalid}` rather than resolving to something.
 
 - **BREAKING — `net::fwd_rebuild_t`'s trailer-TS window is one `std::uint32_t ts_window`
   (offset + form bit) read through `ts_off()` / `ts_bytes()`; `ts_off`/`ts_len` as fields are
@@ -551,6 +605,38 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   dispatch path is touched. Setup-only remains the doctrine; the locks make violating it slow
   rather than corrupting.
 
+### Removed
+
+- **BREAKING (source) — `net::iov_table_t`'s `mem::block_source_t& src` argument no longer
+  defaults to `mem::heap_source()`; the overflow source is now MANDATORY**
+  ([#873](https://github.com/avatarsd-llc/libtracer/issues/873) family 1). #1287 wired all
+  three socket gather sites (`transport_tcp.cpp`'s `prefixed_iov_t`, `transport_udp.cpp`,
+  `transport_ws.cpp` x2) onto the sending link's `transport_t::egress_source()`, which left
+  the default argument as the last un-injected path in the family — an API-shaped invitation
+  to draw the peer-sized overflow block off the process-wide heap and quietly escape the
+  bound a deployer injected. Census: ZERO in-tree call sites relied on it (the one
+  construction that did, `bench_failable_census`'s `iov_table_overflow_gather` arm, measures
+  the heap draw on purpose and now names `tr::mem::heap_source()` explicitly). **No runtime
+  change** — the emitted code for every injecting caller is identical; what changes is that
+  omitting the source is now a compile error instead of a silent global-heap path.
+  Out-of-tree callers that omitted the argument pass `mem::heap_source()` to restore the old
+  behaviour, or better, the store whose size is meant to bound their egress.
+
+- **`graph_t::has_first_level_child`**
+  ([#1303](https://github.com/avatarsd-llc/libtracer/issues/1303); added under
+  [#373](https://github.com/avatarsd-llc/libtracer/issues/373)). The placeholder-inclusive
+  first-level shadow test was published on `graph.hpp` for a transport-plane caller that never
+  landed: nothing in `core/`, the tests, the benches or the bindings called it, so the only
+  thing it did was hold `map_mutex_` in a function no one entered. This also discharges the
+  open Consequence
+  [ADR-0061](../docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md) recorded
+  ("retires the #373 `has_first_level_child` shadow-guard … only after verifying no other
+  first-level shadowing depends on it") — the verification is the caller sweep. Non-wire,
+  no RFC. An out-of-tree
+  embedder that called it can get the same answer from `find` plus a walk of
+  `read_children` on the root — the difference is only that `find` excludes unregistered
+  structural placeholders.
+
 ### Fixed
 
 - **`vertex_t`'s members are reordered so the LKV slot cannot straddle a cache line —
@@ -664,94 +750,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   **In scope:** tcp client + listen, ws client, and both servers' per-peer/broadcast writes.
   **Out of scope, deliberately:** quic / webtransport (native flow control) and CAN (already has
   `peer_ttl`), per the issue's scope ruling.
-
-### Added
-
-- **The peer LIVENESS WINDOW: `liveness_window_ms` on all four host stream transports, and the
-  `liveness_window` config key on `tcp` and `ws`**
-  ([#838](https://github.com/avatarsd-llc/libtracer/issues/838)). The #838 bound's provenance is
-  an **app-provided liveness window**, injected exactly as `connect_timeout`, CAN's `peer_ttl`
-  (ADR-0044) and `httpd_ws_link_t::send_timeout_ms` are — not a core literal, and not derived,
-  because a host has no task watchdog to derive from the way the MCU link does. `tcp_transport_t`
-  (both constructors), `transport_tcp_server`, `transport_ws_client` and `transport_ws_server`
-  each gained a trailing `liveness_window_ms` parameter (default `0` = the conservative
-  `kDefaultLivenessWindowMs` **10 s** clamp — "safe unless you opt out", since today's unbounded
-  block is the bug); the `tcp`/`ws` factories parse the same number from the kind-private
-  `liveness_window` key (VALUE u32, ms). Existing call sites are source-compatible. New
-  accessors `liveness_window_ms()` and `stalled_tx()` on all four. The per-record bound is
-  `derive_send_bound_ms(window, peers-in-this-round)`, floored at `kBoundedWaitMs` (100 ms —
-  a bound that rounds to 0 means *block forever*, the #956 lesson), so one whole fan-out round
-  with EVERY peer stalled still releases both locks inside one window. `stream_endpoint_t`'s two
-  full-write helpers now RETURN a `write_result_t` (outcome + whether the record half-landed) and
-  take an optional per-record bound; `slot_server_t::broadcast_iov` returns how many peers it
-  shed for. Framed as the liveness window rather than a fifth independent timeout knob so it
-  converges into RFC-0014 §S5's single liveness contract later; S5's engine is NOT built here —
-  a keepalive clock cannot unblock a send already stuck inside `write_all_iov`, which is why the
-  per-send bound is what makes that clock enforceable at all.
-
-- **#838's RAM cost, priced and EXPLICITLY ACCEPTED: +16 B per link, +14–16 B per connection**
-  ([#838](https://github.com/avatarsd-llc/libtracer/issues/838)). Recorded here because it never
-  was — #838 merged as `aee923d5` without an entry pricing what the stalled-peer write bound
-  costs, and an unpriced cost is indistinguishable from a regression the next time someone reads
-  the census. It is neither: it is the accepted price of the bound, following the
-  [#1160](https://github.com/avatarsd-llc/libtracer/issues/1160) precedent, where a +226 B cost
-  was priced and waived on the record rather than silently absorbed. **What it bought:** a host
-  stream send can no longer block indefinitely on a stalled-not-dead peer, and no longer holds
-  `write_m_` while it does. **What it costs,** measured `aee923d5` against its parent
-  `2dcdbcdd` with `bench_conn_ram --no-can --reps=5` on the same host, same toolchain:
-
-  | metric | `2dcdbcdd` | `aee923d5` | Δ |
-  | --- | ---: | ---: | ---: |
-  | `sizeof tcp_client` | 264 | 280 | **+16 B** |
-  | `sizeof tcp_server` | 440 | 456 | **+16 B** |
-  | `sizeof ws_server` | 440 | 456 | **+16 B** |
-  | `sizeof ws_client` | 328 | 344 | **+16 B** |
-  | `tcp-server metric=link_base` | 464 | 480 | **+16 B** |
-  | `ws-server metric=link_base` | 464 | 480 | **+16 B** |
-  | `tcp-server metric=per_conn` (median) | 282 | 296 | **+14 B** |
-  | `ws-server metric=per_conn` | 376 | 392 | **+16 B** |
-
-  The 16 B is the two new per-link members — the `stalled_tx_` counter (8 B) and
-  `liveness_window_ms_` (4 B), padded to the alignment already there. **`udp` and `can` are
-  unchanged** (`sizeof udp` 216, `can` 800; every udp arm's `link_base` and `per_conn` byte-for-byte
-  identical), which is the scope ruling showing up in the numbers: #838 touched the host stream
-  transports only. **No RAM baseline is re-pinned by this entry** — it is accounting, not a gate
-  move. Note the per-connection census is emitted by `bench_conn_ram` into the `perf-local` run
-  log (`# sizeof:` and `RESULT … metric=per_conn`/`metric=link_base` rows) and is **not** carried
-  into `data.js`, so it does not appear on the gh-pages charts; reproducing it means running the
-  bench at both revisions, which is what was done here.
-
-### Removed
-
-- **BREAKING (source) — `net::iov_table_t`'s `mem::block_source_t& src` argument no longer
-  defaults to `mem::heap_source()`; the overflow source is now MANDATORY**
-  ([#873](https://github.com/avatarsd-llc/libtracer/issues/873) family 1). #1287 wired all
-  three socket gather sites (`transport_tcp.cpp`'s `prefixed_iov_t`, `transport_udp.cpp`,
-  `transport_ws.cpp` x2) onto the sending link's `transport_t::egress_source()`, which left
-  the default argument as the last un-injected path in the family — an API-shaped invitation
-  to draw the peer-sized overflow block off the process-wide heap and quietly escape the
-  bound a deployer injected. Census: ZERO in-tree call sites relied on it (the one
-  construction that did, `bench_failable_census`'s `iov_table_overflow_gather` arm, measures
-  the heap draw on purpose and now names `tr::mem::heap_source()` explicitly). **No runtime
-  change** — the emitted code for every injecting caller is identical; what changes is that
-  omitting the source is now a compile error instead of a silent global-heap path.
-  Out-of-tree callers that omitted the argument pass `mem::heap_source()` to restore the old
-  behaviour, or better, the store whose size is meant to bound their egress.
-
-- **`graph_t::has_first_level_child`**
-  ([#1303](https://github.com/avatarsd-llc/libtracer/issues/1303); added under
-  [#373](https://github.com/avatarsd-llc/libtracer/issues/373)). The placeholder-inclusive
-  first-level shadow test was published on `graph.hpp` for a transport-plane caller that never
-  landed: nothing in `core/`, the tests, the benches or the bindings called it, so the only
-  thing it did was hold `map_mutex_` in a function no one entered. This also discharges the
-  open Consequence
-  [ADR-0061](../docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md) recorded
-  ("retires the #373 `has_first_level_child` shadow-guard … only after verifying no other
-  first-level shadowing depends on it") — the verification is the caller sweep. Non-wire,
-  no RFC. An out-of-tree
-  embedder that called it can get the same answer from `find` plus a walk of
-  `read_children` on the root — the difference is only that `find` excludes unregistered
-  structural placeholders.
 
 ## [0.12.0] — 2026-08-14
 

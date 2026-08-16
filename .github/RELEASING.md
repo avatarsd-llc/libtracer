@@ -113,6 +113,17 @@ CI-published registries, not unnecessary. CMake `FetchContent` is already covere
    before cutting that the release is the one the maintainer intends to carry it:
    consumers pin a range, so a break lands on them at the next bump. State every
    break in the release summary, not only in the CHANGELOG body.
+   (Since `v0.13.0` there is a **fifth**:
+   [`bindings/ros2/CHANGELOG.md`](../bindings/ros2/CHANGELOG.md). `rmw_tracer`
+   splits the two axes — it is **excluded from the version bump**
+   (`sync-version.py` does not stamp it and its `package.xml` stays `0.0.0`,
+   because it publishes to no registry) but **included in the release notes**
+   (`gen_release_notes.py`'s `DEFAULT_CHANGELOGS`, so it contributes its own
+   `#### bindings/ros2` section). Those are independent: publishing nowhere is a
+   reason not to mint a version, not a reason to leave its users uninformed —
+   and `tools/tests/test_release_tools.py` asserts strict set equality between
+   `DEFAULT_CHANGELOGS` and every tracked `CHANGELOG.md`, so a new package
+   changelog is a fifth **gated** one whether or not it ships to a registry.)
 4. **CI is green on `main`** — all workflows, including `core-ci` (build + ctest +
    sanitizers + the `install-consume` packaging guard), `conformance` (3-core
    cross-match + diff-fuzz), `esp-idf`, `quic`, and `docs`.
@@ -126,7 +137,7 @@ CI-published registries, not unnecessary. CMake `FetchContent` is already covere
    only creates conflicts for every PR still in flight. Do it mechanically:
    ```sh
    python3 tools/consolidate_changelog.py \
-     core/CHANGELOG.md bindings/rust/CHANGELOG.md \
+     core/CHANGELOG.md bindings/ros2/CHANGELOG.md bindings/rust/CHANGELOG.md \
      bindings/typescript/CHANGELOG.md integrations/esp-idf/libtracer/CHANGELOG.md \
      --release X.Y.Z --write
    ```
@@ -183,7 +194,7 @@ CI-published registries, not unnecessary. CMake `FetchContent` is already covere
 - **This repo's standing rule:** a release is cut only when the maintainer
   explicitly says so. Reconciling the version markers (`tools/sync-version.py`) is
   **not** a release — only the signed `vX.Y.Z` tag is.
-- **Released so far:** `v0.3.0` (2026-07-08) through `v0.12.0` (2026-08-14).
+- **Released so far:** `v0.3.0` (2026-07-08) through `v0.13.0` (2026-08-16).
   `VERSION` reads the most recently shipped release, so the next cut bumps it.
   Do not take this list as authoritative —
   `git tag -l 'v*'` and `gh release list` are; it is here so a reader knows the
