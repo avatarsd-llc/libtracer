@@ -1124,6 +1124,15 @@ effect sits below the leg's noise floor).
   `src` is the label standing for the residual it resolved, byte-exact against what the node
   emits. The residual half of the bullet above, and the base of the accumulation point 4
   describes; bound by `core/tests/path_label_terminus_test.cpp` for the same reason.
+- **`fwd/fwd-label-terminus-deref`** (#1363) — §7.2 at a terminus: the label of the bullet above
+  **presented back**, dereferenced to the local vertex it aliases. The whole `dst` is one 7-byte
+  element and there is no name beside it — 33 bytes where the string spelling costs 38 — and the
+  reply it earns is byte-identical to the string spelling's, which is §8.2's *"exactly as the
+  string form does"* asserted rather than argued. This is the frame §12.4 **axis 2** times: the
+  mint creates a labelled residual, the deref is what resolving one costs.
+- **`fwd/fwd-label-terminus-stale`** (#1363) — its negative: a label the terminus cannot validate
+  answers `tr::path::not_found`, applies nothing, repairs nothing and mints nothing, with the
+  refused label echoed in the reply's `src` because a refusing terminus rewrites no region at all.
 - `fwd/fwd-label-stale` — a stale generation answers `NOT_FOUND` and delivers nothing.
 - **`acl/label-vs-string-allow` and `acl/label-vs-string-deny`** — §8.2's mandated pair, asserting
   **byte-identical** outcomes between the two spellings. A by-construction argument is not a test;

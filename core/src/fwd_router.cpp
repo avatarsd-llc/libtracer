@@ -1351,13 +1351,16 @@ bool fwd_router_t::route_bound_session_delivery(std::string_view inbound_name,
 }
 
 template <class Cursor, class Reject>
-bool fwd_router_t::route_label_forward(std::string_view inbound_name,
-                                       const child_rx_ctx_t* inbound_ctx, bool from_peer,
-                                       const Cursor& cur, const fwd_pre_t& pre, Reject&& reject) {
+fwd_router_t::label_dst_t fwd_router_t::route_label_forward(std::string_view inbound_name,
+                                                            const child_rx_ctx_t* inbound_ctx,
+                                                            bool from_peer, const Cursor& cur,
+                                                            const fwd_pre_t& pre, Reject&& reject,
+                                                            wire::path_ref_element_t& out_target) {
     // The `dst` body window the peek already opened — no header is re-read to find it.
-    if (pre.dst_body_off >= pre.dst_end) return false;
+    if (pre.dst_body_off >= pre.dst_end) return label_dst_t::NOT_LABELLED;
     const std::size_t body_len = pre.dst_end - pre.dst_body_off;
-    if (body_len < wire::kPathLabelRecordBytes) return false;  // too short to BE a label
+    if (body_len < wire::kPathLabelRecordBytes)
+        return label_dst_t::NOT_LABELLED;  // too short to BE a label
 
     // Only the FIRST element can be this hop's own local part: a path is read left to right and
     // every hop reads the element that stands where its mount run stood (§5.2's rule that an
@@ -1372,7 +1375,7 @@ bool fwd_router_t::route_label_forward(std::string_view inbound_name,
     // segment, a foreign escape and a ragged record all answer the same way: false, and the
     // caller runs the canonical mount descent exactly as it did before labels existed. This is
     // where `dispatch_edge_target`'s fall-through shape lives — the branch a string path takes.
-    if (el.kind != wire::path_element_kind_t::LABEL) return false;
+    if (el.kind != wire::path_element_kind_t::LABEL) return label_dst_t::NOT_LABELLED;
 
     // From here the address IS labelled, and §7.2 governs every exit. A host with no table
     // never minted this label, so it cannot validate it and MUST NOT guess: the answer is the
@@ -1398,7 +1401,7 @@ bool fwd_router_t::route_label_forward(std::string_view inbound_name,
         // the label REPLACED the string bytes and there is nothing left to walk.
         label_not_found_.fetch_add(1, std::memory_order_relaxed);
         reject(graph::status_t::NOT_FOUND);
-        return true;
+        return label_dst_t::HANDLED;
     }
 
     // The op's own right at the dereferenced vertex — §8.2, and the reading is RFC-0024 §6.2's
@@ -1420,8 +1423,40 @@ bool fwd_router_t::route_label_forward(std::string_view inbound_name,
         default:
             label_not_found_.fetch_add(1, std::memory_order_relaxed);
             reject(graph::status_t::NOT_FOUND);
-            return true;
+            return label_dst_t::HANDLED;
     }
+
+    // HOP or TERMINUS, decided by the element and by nothing else (§7.2). A label stands for
+    // an already-made resolution, and the two things this node's own reference can name are an
+    // EGRESS connection vertex — a hop, the arm below — and an ordinary vertex, which is a
+    // residual this node resolves itself (§6.1 point 3's own mint, presented back). The
+    // discriminant is the conn-slot lookup `bound_egress` makes anyway, hoisted so the hop arm
+    // repeats no work: a slot that names no live child is not an egress, and a slot that does
+    // belongs wholly to the hop arm — including every way that arm can then refuse (tombstoned
+    // link, bus child, ACL). There is deliberately NO fall-through between the two.
+    if (ctx_by_conn_slot(target->index) == nullptr) {
+        // The deref, here rather than at the terminus, so §7.2's refusal is the ADDRESSED and
+        // COUNTED `NOT_FOUND` this branch gives everywhere else. The label validated against
+        // the table but its vertex retired in between — §7.1's other half — and the resolver's
+        // own by-value refusal would be an uncounted silent drop instead. The resolver still
+        // re-derefs, because a public entry point validates its own input; that second read is
+        // one slot load on a leg that is about to decode and apply a whole frame.
+        if (!graph_.deref_vertex_slot(target->index, target->generation)) {
+            label_not_found_.fetch_add(1, std::memory_order_relaxed);
+            reject(graph::status_t::NOT_FOUND);
+            return label_dst_t::HANDLED;
+        }
+        // §8.2 is NOT evaluated here, and that is the reuse rule rather than an omission: the
+        // terminus's own gate is `graph_t::read` / `write` / `await` at the resolved vertex,
+        // under this link's subject — the identical call the string spelling makes, in the
+        // identical place. A second `allows` here would be a second implementation of one
+        // normative sentence, which is exactly what §8.2's "exactly as the string form does"
+        // forbids; the hop arm reuses `bound_egress` for the same reason one line below.
+        label_resolves_.fetch_add(1, std::memory_order_relaxed);
+        out_target = *target;
+        return label_dst_t::TERMINUS;
+    }
+
     // §8.2's re-check runs inside `bound_egress`, and the reuse is the POINT: a labelled
     // operation evaluates `acl_allows` at the dereferenced vertex, for that operation's own
     // right, through the identical code the bound form runs — a generation match authorizes
@@ -1432,7 +1467,7 @@ bool fwd_router_t::route_label_forward(std::string_view inbound_name,
     if (link == nullptr) {
         label_not_found_.fetch_add(1, std::memory_order_relaxed);
         reject(graph::status_t::NOT_FOUND);
-        return true;
+        return label_dst_t::HANDLED;
     }
     // Consume the label element and forward the residual, through the ONE rebuild locus. One
     // label covers the hop's WHOLE local part (§5.3.3), so what is stripped is one element
@@ -1447,7 +1482,7 @@ bool fwd_router_t::route_label_forward(std::string_view inbound_name,
     // reply's `dst` is the request's ACCUMULATED `src`, which grows in mount runs on request
     // legs, so a labelled reply-`dst` is not a shape this design produces.
     route_fwd_forward(inbound_name, inbound_ctx, from_peer, 1, cur, *link, &label_pre);
-    return true;
+    return label_dst_t::HANDLED;
 }
 
 template <class Cursor, class Reject>
@@ -1585,9 +1620,26 @@ bool fwd_router_t::route_fwd_ingress(std::string_view inbound_name, const Cursor
     // no injected table (§6.3's conformant default) never enters, never reads the `dst` body's
     // first bytes, and reaches `resolve_mount_at` having executed one not-taken branch — which
     // is the whole of what the plain-string forwarding path pays for this RFC.
-    if (labels_ != nullptr && kind == fwd_dst_kind_t::PATH_LABEL &&
-        route_label_forward(inbound_name, inbound_ctx, from_peer, cur, pre, reject))
-        return true;
+    if (labels_ != nullptr && kind == fwd_dst_kind_t::PATH_LABEL) {
+        wire::path_ref_element_t label_target{};
+        switch (route_label_forward(inbound_name, inbound_ctx, from_peer, cur, pre, reject,
+                                    label_target)) {
+            case label_dst_t::HANDLED:
+                return true;
+            case label_dst_t::TERMINUS:
+                // §7.2's deref landed on a LOCAL vertex, so this node is the labelled
+                // residual's terminus and the frame stops here. It does NOT pass through the
+                // `peek_fwd_op` REPLY test at the bottom of this driver, and must not: the
+                // label branch's own opcode switch already refused a labelled REPLY (a shape
+                // §6.1 never produces — a reply's `dst` is the request's accumulated `src`),
+                // so what reaches here is one of the three request opcodes, resolved against
+                // the element rather than against a name nothing spelled.
+                terminus(&label_target);
+                return true;
+            case label_dst_t::NOT_LABELLED:
+                break;
+        }
+    }
     {
         // The reader outlives the forward hop on purpose: a resolved bus PEER name is a view
         // into its retained stitch slot and is referenced right through the egress `gather`.
@@ -1648,7 +1700,7 @@ bool fwd_router_t::route_fwd_ingress(std::string_view inbound_name, const Cursor
         reply();
         return true;
     }
-    terminus();
+    terminus(nullptr);
     return true;
 }
 
@@ -1698,10 +1750,10 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
                     reject_bus_name_hop(registry_, inbound_name, flat->bytes(), *egress_, status);
                 },
                 /* terminus */
-                [&] {
+                [&](const wire::path_ref_element_t* label_target) {
                     // A request FWD is resolved straight off the rope (ADR-0053 3c-iii — NO
                     // flatten, verify-at-access §4).
-                    resolve_terminus_rope(inbound_name, std::move(frame));
+                    resolve_terminus_rope(inbound_name, std::move(frame), label_target);
                 },
                 /* reply */
                 [&] {
@@ -1754,7 +1806,10 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
             [&](graph::status_t status) {
                 reject_bus_name_hop(registry_, inbound_name, frame, *egress_, status);
             },
-            /* terminus */ [&] { resolve_terminus(inbound_name, frame, frame_view, inbound_ctx); },
+            /* terminus */
+            [&](const wire::path_ref_element_t* label_target) {
+                resolve_terminus(inbound_name, frame, frame_view, inbound_ctx, label_target);
+            },
             /* reply */
             [&] {
                 // The step-5 reclaim (#1223) runs BEFORE the sink and without one: an
@@ -2099,7 +2154,8 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
 }
 
 void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<const std::byte> frame,
-                                    const view_t* frame_view, const child_rx_ctx_t* inbound_ctx) {
+                                    const view_t* frame_view, const child_rx_ctx_t* inbound_ctx,
+                                    const wire::path_ref_element_t* dst_label_target) {
     // Local request terminus (ADR-0041 §5): arena-decode straight from the
     // node's injected resource (ADR-0039 §1) — the library keeps no buffer of
     // its own; a bounded host injects a pool resource over its slab and the
@@ -2111,7 +2167,10 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
     // (transient-local) fires inside resolve.
     const auto arena = wire::decode_into(frame, rx_for(inbound_ctx));
     if (!arena) return;  // malformed frame ⇒ drop
-    auto reply = resolver_.resolve(*arena, inbound_name, frame_view);
+    // §7.2's terminus deref rides as the fourth argument and nothing else changes: a labelled
+    // `dst` is resolved against the element the label branch already produced, and a `nullptr`
+    // — every frame a non-labelling node terminates — is the shipped call byte for byte.
+    auto reply = resolver_.resolve(*arena, inbound_name, frame_view, dst_label_target);
     if (!reply) return;                    // structurally non-request ⇒ drop
     if (reply->link_count() == 0) return;  // assemble OOM ⇒ empty rope ⇒ drop (no garbage frame)
     if (transport_t* in = registry_.by_name(inbound_name)) {
@@ -2123,7 +2182,8 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
     }
 }
 
-void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::rope_t frame) {
+void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::rope_t frame,
+                                         const wire::path_ref_element_t* dst_label_target) {
     // ADR-0053 3c-iii: the multi-link request terminus, resolved straight off the
     // rope — the interim flatten is gone. Adopt the frame as a lazy view: over()
     // anchors the root header + total-size bounds, and verify() adds the root
@@ -2143,7 +2203,7 @@ void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::ro
     // the reverse, and that misreading nearly justified deleting the tier.) Reply routes
     // back over the inbound link, its dst the request's accumulated src, as at the arena
     // terminus.
-    auto reply = resolver_.resolve(*view, inbound_name, nullptr);
+    auto reply = resolver_.resolve(*view, inbound_name, nullptr, dst_label_target);
     if (!reply) return;                    // structurally non-request ⇒ drop
     if (reply->link_count() == 0) return;  // assemble OOM ⇒ empty rope ⇒ drop (no garbage frame)
     if (transport_t* in = registry_.by_name(inbound_name)) {

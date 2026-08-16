@@ -201,12 +201,45 @@ class op_resolver_t {
      *                     (empty ⇒ local resolution, no remote-subscriber binding).
      * @param frame_view   The owning frame view when the link delivers views
      *                     (ADR-0042); nullptr on the borrowed-span path.
+     * @param dst_label_target **RFC-0027 §7.2 at a terminus** — the vertex a LABELLED `dst`
+     *                     already dereferenced to, or nullptr, which is every string- and
+     *                     `PATH_REF`-spelled request and therefore every request a host with
+     *                     no injected label table ever sees.
+     *
+     *                     A label REPLACES the string bytes of the part it stands for (§6.1),
+     *                     so a labelled `dst` that reaches its terminus carries no name to
+     *                     look up: `path_lookup_key` refuses an escape record in key context
+     *                     and must, because reading a peer's slot index as UTF-8 is the
+     *                     guessing §7.2 forbids. The address is resolved BEFORE this call, by
+     *                     the transport plane that owns the label table
+     *                     (`%tr::net::path_label_table_t`), and what arrives here is that
+     *                     resolution: this node's own reference to the vertex the label
+     *                     aliases — the identical element RFC-0024's bound spelling carries.
+     *
+     *                     Non-null means **resolve against this element and not against
+     *                     `dst`'s bytes**, on the SAME arm the bound spelling takes: one
+     *                     `deref_vertex_slot`, then the operation's own ACL gate inside
+     *                     `graph_t::read` / `write` / `await` at the dereferenced vertex.
+     *                     That reuse is how §8.2's *"exactly as the string form does"*
+     *                     becomes one implementation instead of two kept in agreement. A
+     *                     stale element — the vertex retired between the label's mint and
+     *                     this frame — answers `NOT_FOUND` on the error side, which the
+     *                     router turns into a drop, exactly as a stale `PATH_REF` does.
+     *
+     *                     Two MINTS are suppressed while it is set, and both are §11.2's rule
+     *                     rather than an optimisation: this address is already spelled in one
+     *                     compressed form, so the reply neither mints a second label into it
+     *                     (there is nothing left to replace — the request's `dst`, which the
+     *                     reply echoes as its `src`, IS the label) nor answers an RFC-0024
+     *                     mint request with a `PATH_REF` for it (*"SHOULD NOT bind a
+     *                     `PATH_REF` over a path whose elements are already labelled"*).
      * @return The reply as a @ref view::rope_t (head segment + roped payload views),
      *         or a `status_t` on a malformed/non-request frame.
      */
-    [[nodiscard]] result_t<view::rope_t> resolve(const wire::tlv_arena_t& fwd,
-                                                 std::string_view inbound_link = {},
-                                                 const view::view_t* frame_view = nullptr);
+    [[nodiscard]] result_t<view::rope_t> resolve(
+        const wire::tlv_arena_t& fwd, std::string_view inbound_link = {},
+        const view::view_t* frame_view = nullptr,
+        const wire::path_ref_element_t* dst_label_target = nullptr);
 
     /**
      * @brief Resolve a rope-delivered request FWD (the lazy `tlv_view_t` tier) and
@@ -225,12 +258,19 @@ class op_resolver_t {
      *                     (empty ⇒ local resolution, no remote-subscriber binding).
      * @param frame_view   Reserved for the ADR-0042 owning-store seam; the rope
      *                     tier stores its one ownership copy, so pass `nullptr`.
+     * @param dst_label_target The RFC-0027 §7.2 labelled-`dst` resolution, with exactly the
+     *                     meaning and the two suppressed mints the arena overload documents
+     *                     at length. Both tiers take it because a labelled request may
+     *                     arrive fragmented like any other, and the two tiers answering one
+     *                     logical request differently is the drift ADR-0053 §7's single walk
+     *                     exists to make impossible.
      * @return The reply as a @ref view::rope_t, or a `status_t` on a
      *         malformed/non-request frame.
      */
-    [[nodiscard]] result_t<view::rope_t> resolve(const wire::tlv_view_t& fwd,
-                                                 std::string_view inbound_link = {},
-                                                 const view::view_t* frame_view = nullptr);
+    [[nodiscard]] result_t<view::rope_t> resolve(
+        const wire::tlv_view_t& fwd, std::string_view inbound_link = {},
+        const view::view_t* frame_view = nullptr,
+        const wire::path_ref_element_t* dst_label_target = nullptr);
 
     /**
      * @brief The responder's own reverse-direction element supplier (RFC-0024 §7.1

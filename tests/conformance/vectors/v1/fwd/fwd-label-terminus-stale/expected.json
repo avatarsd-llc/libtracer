@@ -1,0 +1,12 @@
+{
+  "name": "fwd-label-terminus-stale",
+  "category": "fwd",
+  "hex": "0F403000010001000306000900087265706C792D6570060007000016040B000500010001000109400A0008400600010002002000",
+  "total_bytes": 52,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "meaning": "FWD{ op=REPLY, dst=/reply-ep, src=<path label 11:5>, kind=ERROR, STATUS{ ERROR{ VALUE u16=0x0020 } } } - the answer a terminus gives a label it cannot validate (RFC-0027 7.2): tr::path::not_found, nothing forwarded, nothing applied, nothing repaired.",
+    "note": "The refused label is echoed back in the reply's src because the reply's src IS the request's dst - the terminus rewrites nothing on a refusal, and in particular does not mint. One answer covers every way validation can fail: out of range, generation mismatch, unminted slot, a label this host never minted, and a label whose peer identity was re-stamped by a re-added child. The sender's recovery is the full-string path it still holds."
+  }
+}

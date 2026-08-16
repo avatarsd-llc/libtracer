@@ -16,6 +16,46 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **The RFC-0027 TERMINUS deref — a fourth parameter on both `graph::op_resolver_t::resolve`
+  overloads, `const wire::path_ref_element_t* dst_label_target`**
+  ([#1363](https://github.com/avatarsd-llc/libtracer/issues/1363)). Defaulted to `nullptr`, so
+  every existing call site is source- and byte-compatible; non-null only on the one arm that
+  produces it. §7.2's other half: until this landed, a labelled `dst` whose target was a **local
+  vertex** rather than an egress link took a counted `tr::path::not_found`, because
+  `route_label_forward` resolved a label only through `bound_egress` — which answers for
+  connection vertices and nothing else. **§12.4 axis 2 could not run**, and axis 2 is the axis
+  §3.3 nominates as the one that decides.
+  - **Why the resolver is told the answer rather than finding it.** A label REPLACES the name it
+    stands for (§6.1), so a labelled `dst` carries nothing to look up — `path_lookup_key` refuses
+    an escape record in key context, and reading a peer's slot index as UTF-8 is exactly the
+    guessing §7.2 forbids. The table that could resolve it is the transport plane's, keyed on the
+    peer identity a label is scoped to (§4.1), and this graph-layer resolver deliberately cannot
+    name either. So the deref happens where the table lives and the RESULT travels: the identical
+    `wire::path_ref_element_t` RFC-0024's bound spelling carries.
+  - **§8.2 is satisfied by reuse, not by restatement.** The element takes the same arm the bound
+    spelling takes — one `deref_vertex_slot`, then the operation's own gate inside
+    `graph_t::read` / `write` / `await` at the dereferenced vertex, under the inbound link's
+    subject. That is the string spelling's gate, in the string spelling's place, so *"exactly as
+    the string form does"* is one implementation rather than two kept in agreement. A generation
+    match authorizes nothing, and at a terminus a denial is therefore spelled `tr::access::denied`
+    — what a string probe of the same address yields (§8.1's anti-enumeration property, read
+    against the terminus rather than against a hop, where the string probe yields nothing and the
+    answer is `not_found`).
+  - **`fwd_router_t::route_label_forward` now answers three ways, not two** (`label_dst_t`):
+    not-labelled, handled here, or *this node is the labelled residual's terminus*. The
+    discriminant is the conn-slot lookup `bound_egress` already made — a slot naming a live child
+    is a hop and belongs wholly to the hop arm, including every way that arm then refuses. There
+    is no fall-through between the two, in either direction.
+  - **Two mints are suppressed on a labelled request**, both §11.2 rather than optimisation: no
+    second label (the reply's `src` IS the request's `dst`, which is already the label — §6.1's
+    rewrite at its fixed point, and re-minting would spend a slot to write bytes the echo already
+    carries) and no RFC-0024 `PATH_REF` answer to a mint-flagged one (*"SHOULD NOT bind a
+    `PATH_REF` over a path whose elements are already labelled"*).
+  - §7.2's refusals are unchanged and stay counted: an unknown, foreign or stale label forwards
+    nothing, applies nothing, repairs nothing, mints nothing and moves no table state.
+  - Vectors `fwd/fwd-label-terminus-deref` and `fwd/fwd-label-terminus-stale`, both bound by
+    `core/tests/path_label_terminus_test.cpp` against the production wiring.
+
 - **The RFC-0027 TERMINUS mint — `graph::op_resolver_t::path_label_fn_t` and
   `op_resolver_t::on_path_label`**
   ([#1357](https://github.com/avatarsd-llc/libtracer/issues/1357)). §6.1 point 3 — *"the
@@ -50,7 +90,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   - **§7.1's departure bump covers both halves**: `release_child_label` now releases the
     terminus label beside the forwarding one, so a departing child leaves no live slot owned by
     a peer identity that is about to be re-stamped.
-  - **NOT included, and stated rather than discovered:** the terminus-local **deref** — a
+  - **NOT included in THIS entry, and stated rather than discovered** (it landed separately as
+    #1363, the entry above): the terminus-local **deref** — a
     labelled `dst` whose target is a local vertex rather than an egress link. `route_label_forward`
     resolves a label only to a link, so such a frame takes §7.2's counted `NOT_FOUND` today.
     Nothing can send one yet (origin-side adoption is still unwired), but **§12.4 axis 2 needs
