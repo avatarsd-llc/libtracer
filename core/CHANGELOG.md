@@ -56,6 +56,31 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   - Vectors `fwd/fwd-label-terminus-deref` and `fwd/fwd-label-terminus-stale`, both bound by
     `core/tests/path_label_terminus_test.cpp` against the production wiring.
 
+- **`wire::emit_path_element` — the ONE emitter for a path element, whatever its kind**
+  (`path_element.hpp`, [#1347](https://github.com/avatarsd-llc/libtracer/issues/1347)). A
+  non-breaking ADDITION: it switches on `path_element_kind_t` over the existing
+  `emit_path_segment` / `emit_path_label` / `emit_path_escape`, which are unchanged and remain
+  the way to spell one record when the caller already knows which record it wants. It is the
+  byte-exact inverse of `path_element_at`, so a caller copying, filtering or re-spelling a walked
+  body no longer re-derives the kind→record mapping at each call site — the place the two
+  grammars get crossed, and a crossing would spell a well-formed body naming a *different*
+  address.
+  - **It refuses, appending nothing**, for a `MALFORMED` element, an empty or over-long
+    `SEGMENT`, a `FOREIGN` payload past `kPackedSegMaxBytes`, and a `LABEL` carrying the reserved
+    zero generation — the last inherited unchanged from `emit_path_label`, because the LABEL arm
+    re-derives bytes from the *decoded* `path_label_t` rather than copying the payload span, so a
+    value no host could mint cannot be laundered onto the wire by round-tripping a record.
+  - **It lives in `path_element.hpp`, not `packed_path.hpp`.** That header is deliberately
+    kind-agnostic — it frames, spans and skips a record without knowing what any kind means,
+    which is the property a non-implementing hop relies on. A switch on the element kind must
+    know what `0x16` means, so it sits at the layer that already does, beside the reader whose
+    inverse it is.
+  - Vocabulary, per #1347's 2026-08-16 ruling: **a `PATH` is a list of path elements; an
+    element's kind is NAME or LABEL; a NAME element is encoded as a segment record, a LABEL
+    element as an escape record.** "Path element" is the canonical model-layer term; "segment
+    record" and "escape record" stay as the encoding-layer ones. No identifier is renamed and no
+    byte moves.
+
 - **The RFC-0027 TERMINUS mint — `graph::op_resolver_t::path_label_fn_t` and
   `op_resolver_t::on_path_label`**
   ([#1357](https://github.com/avatarsd-llc/libtracer/issues/1357)). §6.1 point 3 — *"the
