@@ -1228,10 +1228,13 @@ the maintainer were ruled together with acceptance:
 
 **What acceptance does NOT settle**, and what the acceptance train still owes:
 
-- **§5.3 — the byte layout**, deferred pending conformance vectors in RFC-0014's discipline, with
+- ~~**§5.3 — the byte layout**, deferred pending conformance vectors in RFC-0014's discipline, with
   its three open sub-questions (TLV child vs packed-segment tag; multi-segment vs single-segment
   part; `path_lookup_key` admissibility). The **semantics** of §§4–10 are ruled; the **bytes** are
-  not, and no wire surface is frozen by this acceptance.
+  not, and no wire surface is frozen by this acceptance.~~ **CLOSED 2026-08-15 by amendments 4, 5
+  and 6** (§5.3.1–§5.3.3): the element is RFC-0018 §8's escape record at `kind = 0x16` (7 B), one
+  label covers a hop's whole local part, and a labelled `PATH` is **not** a `path_lookup_key`. The
+  bytes were **implemented and vectored** in #1325 car 2 — see §12.5 and its erratum 1.
 - **§12.4 — the bench gate**, which is normative for acceptance of the **implementation**. An
   implementation that regresses any shipped shape — especially the four-link `reply-spread` arm —
   is rejected regardless of this ruling.
