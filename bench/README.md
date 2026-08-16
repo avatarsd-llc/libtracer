@@ -11,6 +11,12 @@ every docs build and published on the
 committed figures, no speed-up ratios. This README is the methodology; run `./grid.sh`
 for a local `preview.html` of the same charts.
 
+> **Never commit a bench build tree.** Everything below builds in-tree, and PR #1356
+> managed to commit 34 compiled ELFs (~49 MB) from one. The `no-binaries` CI job
+> (`tools/check_no_binaries.py`) now fails any PR whose diff adds binary content, with the
+> conformance vectors as the sole exemption; run it locally before pushing if you have
+> built here.
+
 ## Harnesses
 
 | script | what it measures |

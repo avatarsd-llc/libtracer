@@ -1,0 +1,79 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# The committed-binary gate (#1359).
+#
+# PR #1356 added 34 compiled ELFs — a whole `bench/buildA/` tree, ~49 MB — and every CI
+# job in the repo went green. A human caught it at the merge gate. The `.gitignore`
+# widening that landed with it closes that one spelling; an ignore rule is a convenience
+# that stops accidental staging, not a gate. This job is the gate: it fails a PR whose
+# diff against the merge base adds binary content, so a build tree named something the
+# ignore rules never anticipated (`out/`, `cmake-build-debug/`, `obj/`, a stray `a.out`)
+# cannot reach `main` green. Merged history is permanent — the fix afterwards is a
+# history rewrite of `main`, which is far worse than a red check on a PR.
+#
+# NO `paths:` FILTER, DELIBERATELY. Every other structural gate in this repo is filtered
+# to the trees it watches; this one must not be. A path filter here would recreate exactly
+# the hole being closed: a binary dropped in an unfiltered tree would skip the job, and a
+# skipped required check reports as green. The whole point is that no diff escapes it.
+# It is also why this is its own workflow rather than a job inside an existing one —
+# `paths:` is a workflow-level property, and the only unfiltered PR workflow in the tree
+# is `conformance.yml`, whose subject is protocol vectors, not repository hygiene. A red
+# `conformance / no-binaries` would misdescribe the failure to whoever hits it.
+#
+# Cost: one checkout and ~0.3 s of python, no toolchain, no build.
+name: no-binaries
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: no-binaries-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      # Full history: the check diffs against the MERGE BASE, so both endpoints and
+      # their common ancestor have to be present.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # An unverified gate is how #1356 happened. The gate's own suite runs first, so a
+      # classifier bug reports as a classifier bug rather than as a phantom clean diff —
+      # it drives real throwaway repositories through both arms (red on a committed ELF,
+      # green on a conformance vector).
+      - name: Gate unit tests (red on an ELF, green on a conformance vector)
+        run: python3 -m unittest discover -s tools/tests -p "test_check_no_binaries.py" -v
+      - name: Resolve the diff endpoints
+        run: |
+          set -euo pipefail
+          case "${{ github.event_name }}" in
+            pull_request)
+              BASE='${{ github.event.pull_request.base.sha }}'
+              HEAD='${{ github.event.pull_request.head.sha }}'
+              ;;
+            push)
+              BASE='${{ github.event.before }}'
+              HEAD='${{ github.sha }}'
+              # A force-push or a branch creation leaves `before` unreachable (or all
+              # zeros); the previous commit is the honest fallback.
+              git cat-file -e "${BASE}^{commit}" 2>/dev/null || BASE="${HEAD}^"
+              ;;
+            *)
+              BASE='origin/${{ github.event.repository.default_branch }}'
+              HEAD='${{ github.sha }}'
+              ;;
+          esac
+          echo "BASE=${BASE}" >> "$GITHUB_ENV"
+          echo "HEAD=${HEAD}" >> "$GITHUB_ENV"
+          echo "diffing ${BASE}...${HEAD}"
+      - name: No committed binaries in this diff
+        run: python3 tools/check_no_binaries.py --base "$BASE" --head "$HEAD"
