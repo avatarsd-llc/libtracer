@@ -47,20 +47,22 @@ costs a `find` over a handful of direct children and cannot put a wrong byte on 
 
 `0x0F FWD`, `opt.PL=1`, `length=0x0082` (130), 134 bytes total. Offsets **4–101** are
 `fwd/fwd-reply-error` verbatim (see its table); only the STATUS differs. The 4-byte
-header is not shared — this vector's outer FWD length is `0x0082` where that one's is
-`0x0070`, so the two `input.bin` files first differ at offset 2.
+header is not shared — this vector's outer FWD length is `0x0067` where that one's is
+`0x0055`, so the two `input.bin` files first differ at offset 2. The `PATH`s carry packed `[u8 len][utf8]` segment records
+([RFC-0018](../../../../../docs/spec/rfcs/0018-packed-path-segments.md)), so each is `opt=0x00` and each
+segment costs `1 + len` rather than `4 + len`.
 
 | Offset | Bytes | Meaning |
 | --- | --- | --- |
-| 0 | `0F 40 82 00` | FWD, PL=1, body length 130 (18 more than the twin — the DESCRIPTION) |
+| 0 | `0F 40 67 00` | FWD, PL=1, body length 103 (18 more than the twin — the DESCRIPTION) |
 | 4 | `01 00 01 00 03` | VALUE u8 `0x03` — `op = REPLY` |
-| 9 | `06 40 3E 00` … | PATH `dst` = `/net/downlink/a/net/downlink/cli/reply-ep` (unchanged) |
-| 75 | `06 40 12 00` … | PATH `src` = `/sensor/temp`, the refused spelling (unchanged) |
-| 97 | `01 00 01 00 01` | VALUE u8 `0x01` — `kind = ERROR` |
-| 102 | `09 40 1C 00` | STATUS, PL=1, body length 28 |
-| 106 | `03 00 0E 00 "no such vertex"` | **child 0** — DESCRIPTION (`0x03`), the optional human detail |
-| 124 | `08 40 06 00` | **child 1** — ERROR, PL=1, body length 6 |
-| 128 | `01 00 02 00 20 00` | VALUE u16 LE `0x0020` — `tr::path::not_found` |
+| 9 | `06 00 29 00` … | PATH `dst` = `/net/downlink/a/net/downlink/cli/reply-ep`, PL=0, body 41 (unchanged) |
+| 54 | `06 00 0C 00` … | PATH `src` = `/sensor/temp`, PL=0, body 12, the refused spelling (unchanged) |
+| 70 | `01 00 01 00 01` | VALUE u8 `0x01` — `kind = ERROR` |
+| 75 | `09 40 1C 00` | STATUS, PL=1, body length 28 |
+| 79 | `03 00 0E 00 "no such vertex"` | **child 0** — DESCRIPTION (`0x03`), the optional human detail |
+| 97 | `08 40 06 00` | **child 1** — ERROR, PL=1, body length 6 |
+| 101 | `01 00 02 00 20 00` | VALUE u16 LE `0x0020` — `tr::path::not_found` |
 
 ## What this vector does and does not gate
 

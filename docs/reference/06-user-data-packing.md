@@ -565,12 +565,14 @@ void tim2_irq_handler() {            // hard-real-time ISR
 The encoded PATH TLV, verbatim, as it sits in `.rodata`:
 
 ```
-06 40 12 00                                ← outer PATH TLV: type=0x06, opt=PL=1 (0x40), length=18
-   02 00 06 00 73 65 6E 73 6F 72           ← NAME "sensor"
-   02 00 04 00 74 65 6D 70                 ← NAME "temp"
+06 00 0C 00                                ← outer PATH TLV: type=0x06, opt=0x00 (PL=0), length=12
+   06 73 65 6E 73 6F 72                    ← record: len 6, "sensor"
+   04 74 65 6D 70                          ← record: len 4, "temp"
 ```
 
-22 bytes of flash. Zero RAM. Zero per-write allocation.
+16 bytes of flash. Zero RAM. Zero per-write allocation. *(22 bytes before
+[RFC-0018](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0018-packed-path-segments.md) packed the body —
+a pre-encoded PATH shrinks by 3 bytes per segment.)*
 
 The parse-once constructor and its validation contract are recorded in [ADR-0054, `path_t` parse-once constructor](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0054-path-t-parse-once-constructor.md).
 

@@ -394,15 +394,20 @@ partially-applied frame is not a reachable outcome.
 
 ### Keys — `key_view_t`
 
-A vertex-map key is the concatenated NAME-TLV encodings of its path, so every
-ancestor / descendant / child relation is a byte operation and no string form is
-ever materialized. `key_view_t` is the navigation over those bytes and the single
-home of that walking.
+A vertex-map key is the concatenated packed segment records of its path — each
+`[u8 len][utf8]`, [RFC-0018](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0018-packed-path-segments.md)
+— so every ancestor / descendant / child relation is a byte operation and no
+string form is ever materialized. `key_view_t` is the navigation over those bytes
+and the single home of that walking.
 
-Why a byte prefix means "ancestor": two *valid* keys can share a byte prefix only
-where it lands on a NAME-segment boundary, because a differing length header
-would break the byte match one record earlier. A strict byte-prefix of a valid
-key is therefore exactly a strict ancestor of it.
+Why a byte prefix means "ancestor": records are self-delimiting and parsed
+left-to-right, so a shared byte prefix parses identically in both keys and every
+prefix boundary lands on a record boundary — a differing length byte breaks the
+byte match one record earlier. `/a` (`01 'a'`) is a prefix of `/a/b`
+(`01 'a' 01 'b'`); `/ab` (`02 'a' 'b'`) correctly is not. A strict byte-prefix of
+a valid key is therefore exactly a strict ancestor of it. This is why an escape
+record is refused in key context: a key must stay pure-string for the property to
+be stated over its bytes at all.
 
 ```{doxygenclass} tr::wire::key_view_t
 :project: libtracer

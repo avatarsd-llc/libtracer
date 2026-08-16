@@ -106,46 +106,51 @@ lets a recorder or forwarder *attach* integrity at egress and *strip* it at ingr
 **without touching the payload bytes**: at rest a value is `header+payload`; in
 transit it grows a trailer; the payload is byte-identical through both.
 
-### 4 · a structured `PATH` `/sensor/temp` (22 bytes)
+### 4 · a packed `PATH` `/sensor/temp` (16 bytes)
 
-`opt.PL=1`, so the payload is **child TLVs concatenated** — two `NAME`s.
+`opt.PL=0` — the payload is **not** child TLVs. It is a self-delimiting run of
+**segment records**, each `[u8 len][utf8]`
+([RFC-0018](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0018-packed-path-segments.md)).
 
 ```text
- 06 40 12 00 │ 02 00 06 00 73 65 6E 73 6F 72 │ 02 00 04 00 74 65 6D 70
- └──┬───────┘ └────────────┬──────────────┘ └──────────┬──────────┘
-    │           NAME "sensor" (10 bytes)        NAME "temp" (8 bytes)
-    │           02=NAME 00=opt 0006=len  s e n s o r
+ 06 00 0C 00 │ 06 73 65 6E 73 6F 72 │ 04 74 65 6D 70
+ └──┬───────┘ └──────────┬────────┘ └───────┬──────┘
+    │           "sensor" (7 bytes)    "temp" (5 bytes)
+    │           06=len  s e n s o r
     │
-    type=0x06 PATH · opt=0x40 (PL=1) · length=0x0012=18  (= 10 + 8 child bytes)
+    type=0x06 PATH · opt=0x00 (PL=0) · length=0x000C=12  (= 7 + 5 record bytes)
 ```
 
-Walking it is the **same loop** as the outer frame: read a 4-byte header, jump
-`length`, repeat. No special list type, no nesting markers — structure *is*
-concatenation. And those 18 payload bytes are **exactly** the vertex-map key
-([path](path.md); `path_t::key`, `core/include/libtracer/path.hpp`): the address on
-the wire and the address in memory are the same bytes.
+Walking it is *cheaper* than the outer frame's loop, not the same one: read one
+length byte, jump `1 + len`, repeat — no option decode and no header to construct.
+A record carries no type byte and no option byte, which is the whole point: an
+address has exactly **one** spelling. And those 12 payload bytes are **exactly** the
+vertex-map key ([path](path.md); `path_t::key`,
+`core/include/libtracer/path.hpp`): the address on the wire and the address in
+memory are the same bytes. `len == 0` is the reserved escape record
+(`00 <kind> <len> <bytes>`) — a forwarder steps over one, a key rejects it.
 
 ### 5 · a `FWD` frame (the remote-operation envelope)
 
 A remote write carried by the source-routed `FWD` (`0x0F`,
 [reference/05 §reserved range](../reference/05-protocol-tlvs.md)): the op code, the
 explicit route to the target (`dst`), the accumulated way back (`src`), then the
-payload TLV — `FWD{ op=WRITE, dst=/b/temp, src=(empty), VALUE 0x2A }`, 35 bytes:
+payload TLV — `FWD{ op=WRITE, dst=/b/temp, src=(empty), VALUE 0x2A }`, 29 bytes:
 
 ```text
- 0F 40 1F 00                              ← FWD · opt=0x40 (PL=1) · length=0x001F=31
+ 0F 40 19 00                              ← FWD · opt=0x40 (PL=1) · length=0x0019=25
  │ 01 00 01 00 01                         ← VALUE op: 1 byte, WRITE=0x01
- │ 06 40 0D 00                            ← PATH dst (PL=1), 13 child bytes
- │   02 00 01 00 62                       ←   NAME "b"    (the next-hop link)
- │   02 00 04 00 74 65 6D 70              ←   NAME "temp" (the target on the peer)
- │ 06 40 00 00                            ← PATH src (PL=1), empty — grows per hop
+ │ 06 00 07 00                            ← PATH dst (PL=0), 7 body bytes
+ │   01 62                                ←   record "b"    (the next-hop link)
+ │   04 74 65 6D 70                       ←   record "temp" (the target on the peer)
+ │ 06 00 00 00                            ← PATH src (PL=0), empty — grows per hop
  │ 01 00 01 00 2A                         ← VALUE payload: the byte 0x2A
 ```
 
 Every child is one of the shapes above — the frame is examples 2 and 4,
 concatenated. A forwarding hop reads just the three leading headers **by offset**:
-it strips `NAME "b"` from `dst` (shrinking it toward the target), prepends its own
-name for the inbound link to `src` (the return route), and sends the rest of the
+it strips the record `01 62` (`"b"`) from `dst` (shrinking it toward the target),
+prepends its own segment record for the inbound link to `src` (the return route), and sends the rest of the
 frame onward **untouched** — the payload bytes are never copied or re-encoded
 (`rebuild_fwd_forward`, `core/include/libtracer/fwd_frame_view.hpp`, emits two
 rebuilt headers and gathers every other region as an offset window into the source).
@@ -163,7 +168,7 @@ value, and the graph node are one buffer.
 
 ```{mermaid}
 flowchart LR
-    B["bytes:<br/>06 40 12 00 02 00 …"]:::b
+    B["bytes:<br/>06 00 0C 00 06 &quot;sensor&quot; …"]:::b
     B --> W["on the wire<br/>(a frame)"]
     B --> M["in memory<br/>(a borrowed view, no copy)"]
     B --> G["in the graph<br/>(the vertex's value / key)"]

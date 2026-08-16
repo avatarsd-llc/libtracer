@@ -71,7 +71,7 @@ The transport is **injected** (not constructed) so the client is browser/Node-ag
 | Method | Wire product | Pinned by |
 | --- | --- | --- |
 | `encodeValue(bytes, opts)` | `VALUE` TLV (`type=0x01`), opt per `opts` (LL/TS/CR) | `value-bool-true`, `value-ll-u32`, `value-ts-abs` |
-| `encodePath(segs)` | `PATH` TLV (`type=0x06`, PL=1) of `NAME` children | `path-sensor-temp`, spec §3.1 |
+| `encodePath(segs)` | `PATH` TLV (`type=0x06`, PL=0) of packed `[u8 len][utf8]` segment records (RFC-0018) | `path-sensor-temp`, spec §3.1 |
 | `encodeSubscriber(targetPath)` | `SUBSCRIBER` TLV (`type=0x04`, PL=1) wrapping a `PATH` | `subscriber-path` |
 | `write(value)` | emits `encodeValue(value)` as one frame | VALUE vectors |
 | `subscribe(targetPath, h)` | emits `encodeSubscriber(targetPath)` as one frame; registers `h` | `subscriber-path` + VALUE decode |

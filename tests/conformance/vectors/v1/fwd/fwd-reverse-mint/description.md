@@ -5,10 +5,10 @@ one hop has contributed its reverse-direction element (RFC-0024 §7.1 amendment 
 amendment 2):
 
 ```
-0F 40 2D 00                       FWD, opt=0x40 (PL=1), length=45
+0F 40 24 00                       FWD, opt=0x40 (PL=1), length=36
    01 00 01 00 80                 VALUE op = 0x80  ← READ (0x00) | mint request (bit 7)
-   06 40 08 00 …                  PATH /temp        ← the residual: this hop consumed /sensor
-   06 40 0C 00 …                  PATH /net/a       ← src, grown canonically by the arrival mount
+   06 00 05 00 …                  PATH /temp        ← the residual: this hop consumed /sensor
+   06 00 06 00 …                  PATH /net/a       ← src, grown canonically by the arrival mount
    15 00 08 00                    PATH_REF_REVERSE, length=8 (one element)
       07 00 00 00 03 00 00 00     the hop's own ref to the identity the request arrived on
 ```

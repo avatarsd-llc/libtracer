@@ -28,21 +28,28 @@ There is **no wildcard grammar**. Subscriptions do not need one: every subscript
 - All names are UTF-8, case-sensitive, **case-folded NOT performed** (Unicode normalization is the application's responsibility — `/Sensor/temp` and `/sensor/temp` are different paths).
 - Maximum **single-name** length: 64 bytes (UTF-8 encoded).
 - Maximum **total path** length: 1024 bytes, measured as the **encoded `PATH` body** — the
-  concatenated `NAME` TLVs, i.e. exactly the `PATH` TLV's `length` field. Each segment
-  therefore costs its 4-byte `NAME` header plus its UTF-8 bytes, not its bytes alone
-  (see the note on the cap's unit below).
-- Maximum **segment depth**: 255 ([RFC-0023](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0023-path-segment-cap-repriced-32-to-255.md) — chosen from the wire's own widths, superseding the inherited 32; the total-path byte cap above binds tighter whenever mean encoded segment cost exceeds 4 bytes, which under the current NAME-TLV encoding is always, giving an effective ceiling of 204). (An addressing limit on PATH construction; the TLV parser itself has no depth cap — nesting is receiver-resource-bounded per [RFC-0006](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0006-resource-bounded-nesting-depth.md).)
+  concatenated packed segment records, i.e. exactly the `PATH` TLV's `length` field. Each
+  segment therefore costs its 1-byte length prefix plus its UTF-8 bytes, not its bytes alone
+  ([RFC-0018](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0018-packed-path-segments.md); see the
+  note on the cap's unit below).
+- Maximum **segment depth**: 255 ([RFC-0023](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0023-path-segment-cap-repriced-32-to-255.md) — chosen from the wire's own widths, superseding the inherited 32; the total-path byte cap above binds tighter whenever mean encoded segment cost exceeds 4 bytes, which under the packed record body means a mean segment longer than 3 bytes. Shorter than that, the 255 count binds — a real crossover, where the retired `NAME`-child encoding cost `4 + len` per segment and capped the depth at 204 so the count clause could never fire). (An addressing limit on PATH construction; the TLV parser itself has no depth cap — nesting is receiver-resource-bounded per [RFC-0006](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0006-resource-bounded-nesting-depth.md).)
 - Maximum **field-chain depth**: 8 (e.g., `:settings.transport_tcp.tls.cipher.suite` is at the limit).
 - Maximum **index value**: 65535 (fits in u16).
 
 A path that violates any limit MUST be rejected with `ERROR{tr::path::invalid}`.
 
 > **The cap's unit is the encoded `PATH` body — and the unit is load-bearing.**
-> It is neither the string form `/a/b/c` nor the sum of NAME bytes plus segment separators:
-> `path_t::parse` counts the accumulated `emit_name` output, which **includes** a 4-byte
-> `NAME` header per segment, so the number the cap bounds is exactly the `PATH` TLV's
-> `length` field. For 32 segments of 29 bytes the three readings give 960, 959 and 1056 —
-> far enough apart that a path one reading calls conforming another rejects. The
+> It is not the sum of segment bytes plus separators: `path_t::parse` counts the accumulated
+> `emit_path_segment` output, which **includes** the 1-byte length prefix per segment, so the
+> number the cap bounds is exactly the `PATH` TLV's `length` field. For 32 segments of 29 bytes
+> that is 960, against 959 for bytes-plus-separators — one byte apart here, and further apart
+> the deeper the path, so a path one reading calls conforming another rejects. *(Under the
+> retired `NAME`-child body the same path encoded to 1056, which is why this note exists at all
+> and why the reading matters more than the arithmetic:
+> [RFC-0018](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0018-packed-path-segments.md) moved the number
+> without moving the rule. A packed body happens to be the same length as the string form
+> `/a/b/c`, a length prefix costing exactly what a separator does — a coincidence of this
+> encoding, not a definition; the cap is still stated over the encoded body.)* The
 > encoded-body reading is the one C++ and Rust both implement. See
 > [RFC-0019](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0019-path-depth-bounded-by-bytes.md) §4.3, which depends on this
 > unit being unambiguous.
@@ -69,7 +76,7 @@ A path that violates any limit MUST be rejected with `ERROR{tr::path::invalid}`.
 An index appears in two places, and they are **different planes**:
 
 - **On a field step** (`:name[N]`, `:name[]`, `:name[*]`) — resolved against the vertex's field schema, and carried on the wire by the FIELD level's `index_mode` byte ([§the index form on the wire](#the-index-form-on-the-wire)).
-- **On an address segment** — the grammar reserves the form (`segment = name [ index ]`, with `index` sitting *outside* `name`), but v1 assigns it no wire carrier: a PATH TLV's children are all NAME TLVs ([05-protocol-tlvs.md](05-protocol-tlvs.md) §`0x06`), a NAME must not contain `[` or `]` (§Reserved characters below), and there is no separate index field. An address-segment index encoding, if one ever lands, travels **outside the NAME bytes** and needs an RFC amendment ([#996](https://github.com/avatarsd-llc/libtracer/issues/996) ruling; cf. the declined range-slice proposal in `.out-of-scope/range-slice-addressing.md`). The interoperable v1 construction for indexed endpoints is one registered **child** vertex per concrete index — `/camera/frame/7` — which also makes a subtree subscription on `/camera/frame` observe every index (§pitfalls).
+- **On an address segment** — the grammar reserves the form (`segment = name [ index ]`, with `index` sitting *outside* `name`), but v1 assigns it no wire carrier: a PATH TLV's body is packed segment records with no per-segment type or option byte ([05-protocol-tlvs.md](05-protocol-tlvs.md) §`0x06`), a segment must not contain `[` or `]` (§Reserved characters below), and there is no separate index field. An address-segment index encoding, if one ever lands, travels **outside the segment bytes** and needs an RFC amendment ([#996](https://github.com/avatarsd-llc/libtracer/issues/996) ruling; cf. the declined range-slice proposal in `.out-of-scope/range-slice-addressing.md`). The interoperable v1 construction for indexed endpoints is one registered **child** vertex per concrete index — `/camera/frame/7` — which also makes a subtree subscription on `/camera/frame` observe every index (§pitfalls).
 
 On a field step:
 
@@ -375,7 +382,7 @@ flowchart LR
   subgraph Build["Build time"]
     S["Source path string<br/>&quot;/sensor/temp&quot;"]
     M["path_t(&quot;/sensor/temp&quot;)<br/>parse-once ctor / codegen"]
-    R[".rodata bytes:<br/>06 40 12 00 ... NAME &quot;sensor&quot; ... NAME &quot;temp&quot;"]
+    R[".rodata bytes:<br/>06 00 0C 00 ... 06 &quot;sensor&quot; ... 04 &quot;temp&quot;"]
     S --> M --> R
   end
 
@@ -430,9 +437,9 @@ void on_sample(float t) {
 Encoding the literal once walks the path, rejects reserved characters, counts segments, and emits the byte sequence:
 
 ```
-06 PL=1+CR=0  LL=0  length=u16  | type, opt, length
-02 00 06 00 's' 'e' 'n' 's' 'o' 'r'   ← NAME "sensor" (10 bytes)
-02 00 04 00 't' 'e' 'm' 'p'           ← NAME "temp"   (8  bytes)
+06 PL=0+CR=0  LL=0  length=u16  | type, opt, length  (06 00 0C 00)
+06 's' 'e' 'n' 's' 'o' 'r'            ← record: len 6, "sensor" (7 bytes)
+04 't' 'e' 'm' 'p'                    ← record: len 4, "temp"   (5 bytes)
 ```
 
 Since `.rodata` is read-only, the bytes are never modified. The router's dispatch table indexes by **byte-equality on the PATH TLV's payload**, so two TLVs that name the same vertex hash and compare identically regardless of where their bytes live (flash, heap, or transport receive buffer).
@@ -565,7 +572,7 @@ Each entry states the rule, then the shape of the failure an implementation prod
 
 ### A segment index read as a field index
 
-**Rule.** The two index planes are not interchangeable (§index forms). A field index travels as a FIELD level's `index_mode`. A segment index has **no carrier at all in v1**: a PATH TLV's children are all NAME TLVs ([05-protocol-tlvs.md](05-protocol-tlvs.md) §`0x06`) and a NAME must not contain `[` or `]` (§Reserved characters), so a bracketed segment such as `/camera/frame[7]` is rejected with `ERROR{tr::path::invalid}` at every minting boundary ([#996](https://github.com/avatarsd-llc/libtracer/issues/996)).
+**Rule.** The two index planes are not interchangeable (§index forms). A field index travels as a FIELD level's `index_mode`. A segment index has **no carrier at all in v1**: a PATH TLV's body is packed segment records ([05-protocol-tlvs.md](05-protocol-tlvs.md) §`0x06`) and a segment must not contain `[` or `]` (§Reserved characters), so a bracketed segment such as `/camera/frame[7]` is rejected with `ERROR{tr::path::invalid}` at every minting boundary ([#996](https://github.com/avatarsd-llc/libtracer/issues/996)).
 
 **Failure mode.** An implementation that invents a resolution rule *below* `/camera/frame` for the `[7]` will not interoperate: no conformance vector under `path/` carries a bracketed segment, so nothing pins the byte spelling, and giving `[n]` a value-plane meaning is the subject of a draft proposal ([RFC-0017](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0017-element-addressing-value-plane-index.md)) rather than settled v1. The interoperable construction is one registered vertex per concrete index (§indexed slot paths).
 

@@ -6,7 +6,7 @@ carries only the pre-existing `delivery_compact` key, so no `delivery_policy` is
 
 ```
 SUBSCRIBER (PL=1) {
-  PATH (PL=1) { NAME "client" }        ; the consumer's delivery target
+  PATH (PL=0) { 06 "client" }        ; the consumer's delivery target
   SETTINGS (PL=1) {
     NAME "delivery_compact" VALUE u8=0 ; the only key a pre-RFC-0022 sender emitted
   }

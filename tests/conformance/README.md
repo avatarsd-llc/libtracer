@@ -39,7 +39,7 @@ Four golden frames, taken byte-for-byte from the reference worked examples:
 | ---- | ---- | ---- | ---- |
 | `framing` | `empty-status-ok` | 4 | `09 00 00 00` (empty STATUS=OK / unsubscribe sentinel) |
 | `tlv-types` | `value-bool-true` | 5 | `01 00 01 00 01` (VALUE boolean true) |
-| `path` | `path-sensor-temp` | 22 | `06 40 12 00 …` (static PATH `/sensor/temp`, `opt=0x40` PL-only) |
+| `path` | `path-sensor-temp` | 16 | `06 00 0C 00 06 "sensor" 04 "temp"` (static PATH `/sensor/temp`, `opt=0x00` — packed segment records, RFC-0018) |
 | `crc` | `value-crc32c` | 13 | `01 10 05 00 AA BB CC DD EE B6 C9 12 23` (VALUE + CRC-32C `0x2312C9B6`) |
 
 ## Adding vectors

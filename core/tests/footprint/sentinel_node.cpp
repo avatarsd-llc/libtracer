@@ -68,11 +68,11 @@ int main() {
     // Substrate: a bounded pool over the static slab (alloc-or-nullptr, no heap).
     mem::pool_t pool(g_slab, 256);
 
-    // Wire: build "/sensor/temp" as a PATH TLV with NAME children (the addressing
-    // shape §3.1.2 places in .rodata on a real node), encode it, key it.
-    // path_key returns an optional since #681 (a PATH child that is not a NAME is
-    // rejected rather than keyed); the branch is what an MCU caller actually links,
-    // so the fixture takes it rather than asserting the value away.
+    // Wire: build "/sensor/temp" as a PATH TLV with a packed segment-record body
+    // (RFC-0018 — the addressing shape §3.1.2 places in .rodata on a real node),
+    // encode it, key it. path_key returns an optional since #681 (a body that does not
+    // tile into literal records is rejected rather than keyed); the branch is what an
+    // MCU caller actually links, so the fixture takes it rather than asserting it away.
     std::vector<std::byte> packed_path;
     for (const std::string_view seg : {std::string_view{"sensor"}, std::string_view{"temp"}})
         (void)wire::emit_path_segment(packed_path, seg);

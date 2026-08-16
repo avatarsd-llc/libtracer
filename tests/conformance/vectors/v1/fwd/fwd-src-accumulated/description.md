@@ -28,26 +28,28 @@ Two hops of accumulation therefore mean **two mount runs, six segments** of `src
 
 ## Byte breakdown
 
-`0x0F FWD`, `opt.PL=1`, `length=0x0073` (115), 119 bytes total.
+`0x0F FWD`, `opt.PL=1`, `length=0x004F` (79), 83 bytes total. The `PATH`s carry packed `[u8 len][utf8]` segment records
+([RFC-0018](../../../../../docs/spec/rfcs/0018-packed-path-segments.md)), so each is `opt=0x00` and each
+segment costs `1 + len` rather than `4 + len`.
 
 | Offset | Bytes | Meaning |
 | --- | --- | --- |
-| 0 | `0F 40 73 00` | FWD, PL=1, body length 115 |
+| 0 | `0F 40 4F 00` | FWD, PL=1, body length 79 |
 | 4 | `01 00 01 00 00` | VALUE u8 `0x00` — `op = READ` |
-| 9 | `06 40 28 00` | PATH `dst`, body length 40 |
-| 13 | `02 00 03 00 "net"` | dst[0] — C's mount, segment 1 |
-| 20 | `02 00 06 00 "uplink"` | dst[1] — C's mount, segment 2 (module) |
-| 30 | `02 00 01 00 "d"` | dst[2] — C's mount, segment 3 (connection NAME) |
-| 35 | `02 00 06 00 "sensor"` | dst[3] — residual, resolved locally at D |
-| 45 | `02 00 04 00 "temp"` | dst[4] — residual, resolved locally at D |
-| 53 | `06 40 3E 00` | PATH `src`, body length 62 |
-| 57 | `02 00 03 00 "net"` | src[0] — B's inbound mount run, segment 1 |
-| 64 | `02 00 08 00 "downlink"` | src[1] — B's inbound mount run, segment 2 (module) |
-| 76 | `02 00 01 00 "a"` | src[2] — B's inbound mount run, segment 3 (NAME) |
-| 81 | `02 00 03 00 "net"` | src[3] — A's inbound mount run, segment 1 |
-| 88 | `02 00 08 00 "downlink"` | src[4] — A's inbound mount run, segment 2 (module) |
-| 100 | `02 00 03 00 "cli"` | src[5] — A's inbound mount run, segment 3 (NAME) |
-| 107 | `02 00 08 00 "reply-ep"` | src[6] — the originator's reply endpoint |
+| 9 | `06 00 19 00` | PATH `dst`, PL=0, body length 25 |
+| 13 | `03 "net"` | dst[0] — C's mount, segment 1 |
+| 17 | `06 "uplink"` | dst[1] — C's mount, segment 2 (module) |
+| 24 | `01 "d"` | dst[2] — C's mount, segment 3 (connection name) |
+| 26 | `06 "sensor"` | dst[3] — residual, resolved locally at D |
+| 33 | `04 "temp"` | dst[4] — residual, resolved locally at D |
+| 38 | `06 00 29 00` | PATH `src`, PL=0, body length 41 |
+| 42 | `03 "net"` | src[0] — B's inbound mount run, segment 1 |
+| 46 | `08 "downlink"` | src[1] — B's inbound mount run, segment 2 (module) |
+| 55 | `01 "a"` | src[2] — B's inbound mount run, segment 3 (name) |
+| 57 | `03 "net"` | src[3] — A's inbound mount run, segment 1 |
+| 61 | `08 "downlink"` | src[4] — A's inbound mount run, segment 2 (module) |
+| 70 | `03 "cli"` | src[5] — A's inbound mount run, segment 3 (name) |
+| 74 | `08 "reply-ep"` | src[6] — the originator's reply endpoint |
 
 ## What this vector does and does not gate
 

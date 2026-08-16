@@ -34,7 +34,8 @@ enum class type_t : std::uint8_t {
     NAME = 0x02,        /**< @brief UTF-8 name segment. */
     DESCRIPTION = 0x03, /**< @brief Human-readable description. */
     SUBSCRIBER = 0x04,  /**< @brief Subscriber registration edge. */
-    PATH = 0x06,        /**< @brief Structured path (a sequence of NAME children). */
+    PATH = 0x06,        /**< @brief Path address; opaque body of packed `[u8 len][utf8]`
+                             segment records (RFC-0018), NOT `NAME` children. */
     POINT = 0x07,       /**< @brief A point in a path/graph. */
     ERROR = 0x08,       /**< @brief Error report. */
     STATUS = 0x09,      /**< @brief Status report. */
