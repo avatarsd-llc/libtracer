@@ -65,20 +65,6 @@ struct fwd_hdr_t {
 };
 
 /**
- * @brief Read ONE TLV header at absolute offset @p pos of @p cur (no descent).
- *
- * Templated over the grammar `Cursor` concept (ADR-0053 ④b): the forward plane
- * reads its dispatch offsets through the SAME byte-source seam the one grammar
- * validates through — `span_cursor` for the contiguous path, the rope cursor for
- * a scatter-gather frame, with no per-cursor offset math. `cur.region(pos, …)`
- * narrows either source in O(1) before the header parse.
- *
- * @tparam Cursor A grammar byte-source cursor (span or rope).
- * @param  cur    The cursor positioned at the frame's first byte.
- * @param  pos    Absolute offset of the header to read.
- * @retval std::nullopt @p pos is out of range or the grammar rejects the header.
- */
-/**
  * @brief One packed `dst`/`src` segment record read through the cursor seam (RFC-0018 §5).
  *
  * The whole record grammar for the FORWARD plane, in one place: `[u8 len][len bytes]`, plus
@@ -122,6 +108,20 @@ template <class Cursor>
                         .escape = true};
 }
 
+/**
+ * @brief Read ONE TLV header at absolute offset @p pos of @p cur (no descent).
+ *
+ * Templated over the grammar `Cursor` concept (ADR-0053 ④b): the forward plane
+ * reads its dispatch offsets through the SAME byte-source seam the one grammar
+ * validates through — `span_cursor` for the contiguous path, the rope cursor for
+ * a scatter-gather frame, with no per-cursor offset math. `cur.region(pos, …)`
+ * narrows either source in O(1) before the header parse.
+ *
+ * @tparam Cursor A grammar byte-source cursor (span or rope).
+ * @param  cur    The cursor positioned at the frame's first byte.
+ * @param  pos    Absolute offset of the header to read.
+ * @retval std::nullopt @p pos is out of range or the grammar rejects the header.
+ */
 template <class Cursor>
 [[nodiscard]] std::optional<fwd_hdr_t> read_fwd_header(
     const Cursor& cur, std::size_t pos,

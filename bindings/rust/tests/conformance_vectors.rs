@@ -257,7 +257,10 @@ fn path_sensor_temp() {
         libtracer::path::tlv_to_path(&decoded).unwrap(),
         "/sensor/temp"
     );
-    assert_eq!(decoded.children.len(), 2);
+    // RFC-0018: a packed PATH has NO child TLVs — the two segments are records in its body.
+    assert!(decoded.children.is_empty());
+    assert!(!decoded.opt.pl);
+    assert_eq!(decoded.payload, b"\x06sensor\x04temp");
     // segments builder equivalence
     assert_eq!(
         encode(&libtracer::tlv_builders::path(&["sensor", "temp"]).unwrap()),
@@ -300,24 +303,22 @@ fn path_rejects_reserved_and_overlong() {
         BuildError::NotRooted
     );
     // RFC-0023 repriced the cap 32 -> 255: 33 segments is now LEGAL, and this case was
-    // inverted from a must-reject. 33 * (4 + 1) = 165 encoded bytes, far under MAX_PATH_BYTES.
+    // inverted from a must-reject. Packed, 33 * (1 + 1) = 66 bytes — far under MAX_PATH_BYTES.
     let thirty_three = format!("/{}", vec!["a"; 33].join("/"));
     assert_eq!(
         libtracer::path::split_path(&thirty_three).unwrap().len(),
         33
     );
     assert!(libtracer::path::path_to_tlv(&thirty_three).is_ok());
-    // 204 segments = 1020 bytes: the byte-derived ceiling under this body encoding, and the
-    // deepest PATH today's NAME-TLV grammar can express (RFC-0023 §4.2).
+    // 204 segments: 408 bytes packed, nowhere near the byte cap that used to bind here.
     let two_oh_four = format!("/{}", vec!["a"; 204].join("/"));
     assert!(libtracer::path::path_to_tlv(&two_oh_four).is_ok());
-    // 205 = 1025 bytes: rejected by the BYTE cap, not the count. Under this encoding the count
-    // clause can never fire; it becomes binding only under RFC-0018's packed body.
-    let two_oh_five = format!("/{}", vec!["a"; 205].join("/"));
-    assert_eq!(
-        libtracer::path::path_to_tlv(&two_oh_five).unwrap_err(),
-        BuildError::PathTooLong
-    );
+    // THE CROSSOVER (RFC-0018 §5): 255 one-byte segments are 510 packed bytes, so the COUNT
+    // cap is what binds now — under the retired NAME-child encoding the same path was 1275
+    // bytes and the BYTE cap fired first, which is why RFC-0023 §4.2 said the count clause
+    // could never trigger. It can now.
+    let two_five_five = format!("/{}", vec!["a"; 255].join("/"));
+    assert!(libtracer::path::path_to_tlv(&two_five_five).is_ok());
     // too many segments (> 255) — the count clause itself, checked at the split tier where no
     // byte budget has been accumulated yet.
     let many = format!("/{}", vec!["a"; 256].join("/"));
@@ -333,16 +334,21 @@ fn path_rejects_reserved_and_overlong() {
 }
 
 /**
- * @brief Build a PATH TLV with `n` one-byte NAME segments WITHOUT going through
+ * @brief Build a PATH TLV with `n` one-byte PACKED segment records WITHOUT going through
  * `tlv_builders::path` — i.e. bypassing the construction-tier admission gate, the way
- * bytes arriving off the wire do. `n` above 204 is not expressible through the builders.
+ * bytes arriving off the wire do. `n` above 255 is not expressible through the builders.
  */
 fn raw_path_tlv(n: usize) -> Tlv {
+    let mut payload = Vec::with_capacity(2 * n);
+    for _ in 0..n {
+        payload.push(1u8);
+        payload.push(b'a');
+    }
     Tlv {
         type_code: libtracer::type_code::PATH,
-        opt: Opt::structured(),
-        payload: Vec::new(),
-        children: (0..n).map(|_| libtracer::name("a").unwrap()).collect(),
+        opt: Opt::default(),
+        payload,
+        children: Vec::new(),
         trailer: None,
     }
 }
@@ -352,20 +358,22 @@ fn raw_path_tlv(n: usize) -> Tlv {
  * an accumulated `src` return route deeper than the admission bounds must DECODE, because
  * the codec tier does not enforce them (`reference/05` §"Enforcement of the PATH
  * constraints"). 256 one-byte segments overshoot BOTH accumulative bounds at once — the
- * count (256 > 255) and the body budget (256 × 5 = 1280 > 1024) — and the bytes are
- * still well-formed TLV that must round-trip byte-identically.
+ * count (256 > 255) — and the bytes are still well-formed TLV that must round-trip
+ * byte-identically. Packed, 600 records is what it takes to overshoot the BYTE budget too
+ * (600 × 2 = 1200 > 1024), so this case now uses that depth to keep exercising both clauses
+ * at once, exactly as it did when a segment cost five bytes.
  */
 #[test]
 fn path_decode_admits_over_limit_accumulated_src_route() {
-    let deep = raw_path_tlv(256);
+    let deep = raw_path_tlv(600);
     let bin = encode(&deep);
     let decoded = decode(&bin).unwrap();
     assert_eq!(encode(&decoded), bin, "over-limit PATH must round-trip");
-    assert_eq!(decoded.children.len(), 256);
+    assert_eq!(decoded.payload.len(), 1200);
 
     let rendered = libtracer::path::tlv_to_path(&decoded)
         .expect("decode tier must not enforce the accumulative PATH bounds");
-    assert_eq!(rendered, format!("/{}", vec!["a"; 256].join("/")));
+    assert_eq!(rendered, format!("/{}", vec!["a"; 600].join("/")));
 
     // …and through the FWD accessor the route actually arrives on. Built by hand because
     // `encode_fwd` runs the construction-tier gate, which legitimately rejects this depth.
@@ -401,19 +409,51 @@ fn path_decode_admits_over_limit_accumulated_src_route() {
 fn path_admission_enforces_segment_count() {
     // 33 segments: legal since RFC-0023 repriced 32 → 255.
     assert!(libtracer::path::admit_path_tlv(&raw_path_tlv(33)).is_ok());
-    // 204 segments = 1020 bytes: the deepest this body encoding can express.
-    assert!(libtracer::path::admit_path_tlv(&raw_path_tlv(204)).is_ok());
-    // 205 = 1025 bytes: the byte budget binds first under this encoding.
-    assert_eq!(
-        libtracer::path::admit_path_tlv(&raw_path_tlv(205)).unwrap_err(),
-        BuildError::PathTooLong
-    );
-    // 256 segments: the count clause itself — checked BEFORE the byte accumulation, so it
-    // is this error and not PathTooLong that surfaces. Deleting the count check in
-    // `admit_path_tlv` reddens exactly this assertion.
+    // 255 segments = 510 packed bytes: the count cap, exactly, and now REACHABLE.
+    assert!(libtracer::path::admit_path_tlv(&raw_path_tlv(255)).is_ok());
+    // 256 segments: the count clause itself, and under the packed body it is the ONLY clause
+    // that can fire at this depth (512 bytes, half the byte budget). Deleting the count check
+    // in `admit_path_tlv` reddens exactly this assertion — where before RFC-0018 the byte cap
+    // would have caught it anyway and hidden the deletion.
     assert_eq!(
         libtracer::path::admit_path_tlv(&raw_path_tlv(256)).unwrap_err(),
         BuildError::TooManySegments
+    );
+    // And the byte budget still exists, one clause further out: 600 records are 1200 bytes.
+    assert_eq!(
+        libtracer::path::admit_path_tlv(&raw_path_tlv(600)).unwrap_err(),
+        BuildError::PathTooLong
+    );
+    // The RFC-0018 §5.4 escape is refused at the admission door: admission IS canonical/key
+    // context, and a label is not canonical bytes.
+    let with_escape = Tlv {
+        type_code: libtracer::type_code::PATH,
+        opt: Opt::default(),
+        payload: vec![
+            6, b's', b'e', b'n', b's', b'o', b'r', 0x00, 0x16, 0x04, 1, 0, 2, 0,
+        ],
+        children: Vec::new(),
+        trailer: None,
+    };
+    assert_eq!(
+        libtracer::path::admit_path_tlv(&with_escape).unwrap_err(),
+        BuildError::SegmentLength
+    );
+    assert_eq!(
+        libtracer::path::tlv_to_path(&with_escape).unwrap_err(),
+        BuildError::SegmentLength
+    );
+    // Ragged framing: a record whose declared length runs past the body.
+    let ragged = Tlv {
+        type_code: libtracer::type_code::PATH,
+        opt: Opt::default(),
+        payload: vec![9, b'b', b'a', b'd'],
+        children: Vec::new(),
+        trailer: None,
+    };
+    assert_eq!(
+        libtracer::path::admit_path_tlv(&ragged).unwrap_err(),
+        BuildError::SegmentLength
     );
     // The admission gate is also the child-type and segment-syntax gate.
     assert_eq!(
@@ -1796,7 +1836,7 @@ fn acl_bound_vs_canonical_allow() {
     let canonical = assert_vector_consistent("fwd/fwd-read");
     assert_eq!(
         hex(&bound),
-        "0f402100010001000014000800020000000000000006400c00020008007265706c792d6570"
+        "0f401e00010001000014000800020000000000000006000900087265706c792d6570"
     );
     assert!(
         bound.len() < canonical.len(),
@@ -1815,10 +1855,12 @@ fn acl_bound_vs_canonical_allow() {
             generation: 0
         })
     );
-    // The canonical twin's dst is a PATH of NAME children — the two forms, side by side.
+    // The canonical twin's dst is a PACKED PATH (RFC-0018 — `opt.PL = 0`, records not
+    // children) — the two address forms, side by side, and the reason the byte comparison
+    // above is now a narrower win than it was: the canonical spelling got cheaper too.
     let c = decode(&canonical).unwrap();
     assert_eq!(c.children[1].type_code, libtracer::type_code::PATH);
-    assert!(c.children[1].opt.pl);
+    assert!(!c.children[1].opt.pl && c.children[1].children.is_empty());
     // The FWD parser accepts both spellings in `dst` and says which it got.
     let pf = libtracer::fwd::decode_fwd(&bound).unwrap();
     assert!(pf.dst_bound && !pf.mint_request);
@@ -1869,11 +1911,11 @@ fn fwd_bound_forward_is_one_hop_from_forwarded() {
     let after = assert_vector_consistent("fwd/fwd-bound-forwarded");
     assert_eq!(
         hex(&before),
-        "0f4031000100010000140010000100000000000000efbe00000700000006400c00020008007265706c792d65700100040009000000"
+        "0f402e000100010000140010000100000000000000efbe00000700000006000900087265706c792d65700100040009000000"
     );
     assert_eq!(
         hex(&after),
-        "0f403000010001000014000800efbe0000070000000640130002000300636c69020008007265706c792d65700100040009000000"
+        "0f402a00010001000014000800efbe00000700000006000d0003636c69087265706c792d65700100040009000000"
     );
 
     let bf = libtracer::fwd::decode_fwd(&before).unwrap();
@@ -1912,8 +1954,20 @@ fn fwd_bound_forward_is_one_hop_from_forwarded() {
     // canonical hop builds, so a peer that never speaks the bound form still answers.
     assert_eq!(bt.children[2].type_code, libtracer::type_code::PATH);
     assert_eq!(at.children[2].type_code, libtracer::type_code::PATH);
-    assert_eq!(bt.children[2].children.len(), 1, "src = /reply-ep");
-    assert_eq!(at.children[2].children.len(), 2, "src = /cli/reply-ep");
+    assert_eq!(
+        libtracer::tlv_builders::packed_segments(&bt.children[2].payload)
+            .unwrap()
+            .len(),
+        1,
+        "src = /reply-ep"
+    );
+    assert_eq!(
+        libtracer::tlv_builders::packed_segments(&at.children[2].payload)
+            .unwrap()
+            .len(),
+        2,
+        "src = /cli/reply-ep"
+    );
 
     // The payload rode through untouched.
     assert_eq!(
@@ -1937,8 +1991,11 @@ fn path_reserved_brackets() {
     let bin = assert_vector_consistent("path/path-reserved-brackets");
     let tlv = decode(&bin).unwrap();
     assert_eq!(tlv.type_code, libtracer::type_code::PATH);
-    assert_eq!(tlv.children.len(), 2);
-    let seg = |i: usize| core::str::from_utf8(&tlv.children[i].payload).unwrap();
+    // RFC-0018: the segments are packed records in the body, not NAME children.
+    assert!(tlv.children.is_empty());
+    let records = libtracer::tlv_builders::packed_segments(&tlv.payload).unwrap();
+    assert_eq!(records.len(), 2);
+    let seg = |i: usize| core::str::from_utf8(records[i]).unwrap();
     assert_eq!(seg(0), "camera");
     assert_eq!(seg(1), "frame[7]");
 

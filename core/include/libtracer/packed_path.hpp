@@ -33,7 +33,7 @@
  * escape; `kind = 0x16` is reserved for RFC-0027's label element.
  *
  * The two contexts are two functions here, named for the rule they enforce
- * (@ref packed_path_valid_key vs @ref packed_record_span), so no call site has to
+ * (`packed_path_valid_key` vs `packed_record_span`), so no call site has to
  * decide the question with a bool argument it might pass the wrong way.
  */
 
@@ -88,7 +88,7 @@ inline constexpr std::uint8_t kPackedEscapeKindLabel = 0x16;
  *        the **canonical / key** context rule (RFC-0018 §5.4).
  *
  * An escape record answers false here, and that is the whole asymmetry with
- * @ref packed_record_span: a label is not canonical bytes, so a `PATH` carrying one is
+ * `packed_record_span`: a label is not canonical bytes, so a `PATH` carrying one is
  * never a `path_lookup_key` and never a vertex-map key. Keeping canonical keys
  * pure-string is what preserves `key_view_t`'s byte-prefix-implies-ancestor invariant
  * unchanged, which is RFC-0018 falsifier 4.

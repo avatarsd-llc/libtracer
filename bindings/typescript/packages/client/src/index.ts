@@ -27,7 +27,16 @@ export type {
   ClientOptions,
 } from './client.js';
 
-export { encodeValue, encodePath, encodeSubscriber, encodeConnSpec, firstChild, DELIVERY_DURABILITY_REQUEST } from './tlv.js';
+export {
+  encodeValue,
+  encodePath,
+  encodeSubscriber,
+  encodeConnSpec,
+  firstChild,
+  pathSegments,
+  PACKED_ESCAPE_LEN,
+  DELIVERY_DURABILITY_REQUEST,
+} from './tlv.js';
 export type { ValueOptions, SubscriberOptions, ConnSpecOptions, ConnRole } from './tlv.js';
 
 export { walkTopology, routeKey, CONN_ENDPOINT_NAME } from './topology.js';

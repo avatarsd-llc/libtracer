@@ -27,6 +27,7 @@ import {
   LibtracerClient,
   encodeValue,
   encodePath,
+  pathSegments,
   encodeSubscriber,
   encodeConnSpec,
   DELIVERY_DURABILITY_REQUEST,
@@ -165,17 +166,36 @@ test('invalid path segments are rejected before any bytes are emitted', () => {
   assert.throws(() => encodePath(['x'.repeat(65)]), /1\.\.64/);
 });
 
-test('the segment cap is 255 and the 1024-byte body cap binds first (RFC-0023)', () => {
-  // 33 segments: rejected by the inherited cap of 32, legal now. 33 * (4 + 1) = 165 bytes.
-  assert.equal(encodePath(Array(33).fill('a')).length, 4 + 33 * 5);
-  // 204 segments = 1020 bytes: the byte-derived ceiling under this body encoding.
-  assert.equal(encodePath(Array(204).fill('a')).length, 4 + 1020);
-  // 205 = 1025 bytes: the BYTE cap fires, not the count. This client had NO byte check at
-  // all before RFC-0023 §5.6 — it would have emitted a non-conforming PATH.
-  assert.throws(() => encodePath(Array(205).fill('a')), /at most 1024 bytes/);
-  // 256 segments: over the count cap too. The count clause becomes the binding one only
-  // under RFC-0018's packed body.
+test('the segment cap is 255 and, packed, the COUNT binds first (RFC-0023 / RFC-0018)', () => {
+  // 33 segments: rejected by the inherited cap of 32, legal now. Packed: 33 * (1 + 1) = 66.
+  assert.equal(encodePath(Array(33).fill('a')).length, 4 + 33 * 2);
+  // 204 segments: 408 bytes packed — nowhere near the byte cap that used to bind here.
+  assert.equal(encodePath(Array(204).fill('a')).length, 4 + 408);
+  // THE CROSSOVER (RFC-0018 §5): 255 one-byte segments are 510 bytes, so the COUNT cap is
+  // what fires now. Under the retired NAME-child encoding the same path was 1275 bytes and
+  // the BYTE cap fired first — which is why RFC-0023 §4.2 recorded that the count clause
+  // could never trigger. It can.
+  assert.equal(encodePath(Array(255).fill('a')).length, 4 + 510);
   assert.throws(() => encodePath(Array(256).fill('a')), /at most 255 segments/);
+  // And the byte cap still exists, one clause further out: 20 segments of 64 bytes are
+  // 20 * 65 = 1300 bytes, over the 1024 budget, at a segment count well inside the cap.
+  assert.throws(() => encodePath(Array(20).fill('x'.repeat(64))), /at most 1024 bytes/);
+});
+
+test('pathSegments round-trips a packed PATH and refuses the RFC-0018 escape', () => {
+  const dec = decode(encodePath(['sensor', 'temp']));
+  assert.deepEqual(pathSegments(dec), ['sensor', 'temp']);
+  // The graph root: an empty body, zero segments.
+  assert.deepEqual(pathSegments({ ...dec, payload: new Uint8Array(0) }), []);
+  // The §5.4 escape — admissible in a frame path, refused in KEY context, which is what a
+  // caller asking for segments is in.
+  const escaped = new Uint8Array([6, 115, 101, 110, 115, 111, 114, 0x00, 0x16, 0x04, 1, 0, 2, 0]);
+  assert.throws(() => pathSegments({ ...dec, payload: escaped }), /escape record/);
+  // Ragged framing: a record whose declared length runs past the body.
+  assert.throws(() => pathSegments({ ...dec, payload: new Uint8Array([9, 98, 97, 100]) }),
+    /runs past the body/);
+  // A structured (pre-RFC-0018) PATH is not a packed one.
+  assert.throws(() => pathSegments({ ...dec, opt: { ...dec.opt, pl: true } }), /packed PATH/);
 });
 
 /* ----------------------------------------------------- RFC-0004 FWD / FIELD --- */
@@ -227,7 +247,8 @@ test('encodeField matches the field-indexed / field-nested / field-append vector
 
 /** @brief The NAME segments of a decoded PATH TLV, as strings. */
 function pathSegs(path) {
-  return path.children.filter((c) => c.type === TYPE.NAME).map((c) => new TextDecoder().decode(c.payload));
+  // RFC-0018: a PATH body is packed `[u8 len][utf8]` records, not NAME children.
+  return pathSegments(path);
 }
 
 /**
@@ -593,7 +614,7 @@ test('acl/bound-vs-canonical-allow is the bound spelling, and it is the shorter 
   const canonical = vector('fwd/fwd-read');
   assert.equal(
     hex(bound),
-    '0f402100010001000014000800020000000000000006400c00020008007265706c792d6570',
+    '0f401e00010001000014000800020000000000000006000900087265706c792d6570',
   );
   // The byte count IS the case for the form, so it is pinned against the twin.
   assert.ok(bound.length < canonical.length, `${bound.length} < ${canonical.length}`);
@@ -603,10 +624,14 @@ test('acl/bound-vs-canonical-allow is the bound spelling, and it is the shorter 
   assert.equal(pf.dstBound, true);
   assert.equal(pf.dst.type, TYPE.PATH_REF);
   assert.ok(sameBytes(pf.dst.payload, pathRefBody([[2, 0]])));
-  // …and the canonical twin's dst is a PATH of NAME children: the two forms, side by side.
+  // …and the canonical twin's dst is a PACKED PATH (RFC-0018 — records, not children): the
+  // two address forms side by side, and the reason the bound spelling's byte win is narrower
+  // than it was — the canonical one got cheaper too.
   const cf = decodeFwd(canonical);
   assert.equal(cf.dstBound, false);
   assert.equal(cf.dst.type, TYPE.PATH);
+  assert.equal(cf.dst.opt.pl, false);
+  assert.deepEqual(pathSegments(cf.dst), ['sensor', 'temp']);
 });
 
 test('acl/bound-vs-canonical-deny denies, carries no mint, and agrees on the outcome', () => {
@@ -635,11 +660,11 @@ test('fwd-bound-forward / fwd-bound-forwarded are one hop apart, byte for byte',
   const after = vector('fwd/fwd-bound-forwarded');
   assert.equal(
     hex(before),
-    '0f4031000100010000140010000100000000000000efbe00000700000006400c00020008007265706c792d65700100040009000000',
+    '0f402e000100010000140010000100000000000000efbe00000700000006000900087265706c792d65700100040009000000',
   );
   assert.equal(
     hex(after),
-    '0f403000010001000014000800efbe0000070000000640130002000300636c69020008007265706c792d65700100040009000000',
+    '0f402a00010001000014000800efbe00000700000006000d0003636c69087265706c792d65700100040009000000',
   );
 
   const bf = decodeFwd(before);
@@ -661,11 +686,13 @@ test('fwd-bound-forward / fwd-bound-forwarded are one hop apart, byte for byte',
   // every canonical hop builds and a peer that never speaks the bound form still answers.
   assert.equal(bf.src.type, TYPE.PATH);
   assert.equal(af.src.type, TYPE.PATH);
-  assert.equal(bf.src.children.length, 1, 'src = /reply-ep');
-  assert.equal(af.src.children.length, 2, 'src = /cli/reply-ep — the inbound mount prepended');
+  assert.deepEqual(pathSegments(bf.src), ['reply-ep'], 'src = /reply-ep');
+  assert.deepEqual(pathSegments(af.src), ['cli', 'reply-ep'],
+    'src = /cli/reply-ep — the inbound mount prepended');
 
   // Exactly 8 bytes of dst left, and the payload rode through untouched.
-  assert.equal(before.length - after.length, PATH_REF_ELEMENT_BYTES - 7 /* src grew by 7 */);
+  // A packed mount segment costs 1 + len, so 'cli' grows src by 4 where a NAME cost 7.
+  assert.equal(before.length - after.length, PATH_REF_ELEMENT_BYTES - 4 /* src grew by 4 */);
   assert.equal(hex(before.subarray(before.length - 8)), hex(after.subarray(after.length - 8)));
 });
 
@@ -735,15 +762,16 @@ test('path/path-reserved-brackets: codec carries the bytes, the validator refuse
   const bytes = vector('path/path-reserved-brackets');
   const dec = decode(bytes);
   assert.equal(dec.type, TYPE.PATH);
-  assert.equal(dec.children.length, 2);
-  const text = (t) => Buffer.from(t.payload).toString('utf8');
-  assert.equal(text(dec.children[0]), 'camera');
-  assert.equal(text(dec.children[1]), 'frame[7]');
+  // RFC-0018: the segments are packed records in the body, not NAME children.
+  assert.equal(dec.children.length, 0);
+  const segs = pathSegments(dec);
+  assert.deepEqual(segs, ['camera', 'frame[7]']);
   assert.ok(sameBytes(encode(dec), bytes), 'round-trip is byte-exact');
 
-  // The validator's verdict over the vector's own NAME payloads.
-  assert.doesNotThrow(() => encodePath([text(dec.children[0])]), 'control: `camera` builds');
-  assert.throws(() => encodePath(['camera', text(dec.children[1])]), RangeError,
+  // The validator's verdict over the vector's own segment bytes. The codec carries them —
+  // a packed record's payload is free bytes, exactly as a NAME payload was.
+  assert.doesNotThrow(() => encodePath([segs[0]]), 'control: `camera` builds');
+  assert.throws(() => encodePath(['camera', segs[1]]), RangeError,
     '`frame[7]` is refused (reference/03 MUST, normative via spec v1 §3)');
 
   // The full seven-character set, exactly.

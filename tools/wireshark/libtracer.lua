@@ -379,14 +379,34 @@ end
 function M._semantics(b, node)
   local t = node.type
 
-  if t == 0x06 then -- PATH: join NAME children into /a/b/c
-    local segs = {}
-    for _, c in ipairs(node.children) do
-      if c.type == 0x02 and c.payload_off then
-        segs[#segs + 1] = string.sub(b, c.payload_off + 1, c.payload_off + c.length)
+  if t == 0x06 then -- PATH: walk the packed `[u8 len][utf8]` records into /a/b/c (RFC-0018)
+    -- A PATH body is `opt.PL = 0` since RFC-0018, so there are no children to join: the
+    -- segments are records in the body itself. A `len == 0` record is the §5.4 ESCAPE
+    -- (`00 <kind> <len> <payload>`), which a FRAME path may legally carry and this
+    -- dissector must therefore DISPLAY rather than give up on — it is shown as
+    -- `<esc:KK=hex>` in place of a segment, so an operator can see a label riding an
+    -- address. Ragged framing stops the walk and is marked, so a truncated or hostile
+    -- body renders as what it is instead of silently as a shorter address.
+    local segs, at, ragged = {}, node.payload_off, false
+    local body_end = node.payload_off + node.length
+    while at < body_end do
+      local len = string.byte(b, at + 1)
+      if len == nil then ragged = true break end
+      if len == 0 then
+        if at + 3 > body_end then ragged = true break end
+        local kind = string.byte(b, at + 2)
+        local elen = string.byte(b, at + 3)
+        if at + 3 + elen > body_end then ragged = true break end
+        segs[#segs + 1] = string.format("<esc:%02X=%s>", kind, tohex(b, at + 3, elen))
+        at = at + 3 + elen
+      else
+        if at + 1 + len > body_end then ragged = true break end
+        segs[#segs + 1] = string.sub(b, at + 2, at + 1 + len)
+        at = at + 1 + len
       end
     end
     node.path_str = "/" .. table.concat(segs, "/")
+    if ragged then node.path_str = node.path_str .. " <ragged>" end
 
   elseif t == 0x0F then -- FWD: VALUE op, PATH dst, PATH src, [VALUE kind (REPLY)]
     local fwd, paths, values = {}, {}, {}

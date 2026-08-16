@@ -188,8 +188,8 @@ class child_registry_t {                 // the one NAME -> link demux table (AD
 
 Signature source: `core/include/libtracer/fwd_router.hpp:177` (constructor), `:283`
 (`add_child`), `:340` (`subscribe_toward`), `:460-472` (the sink function-pointer types);
-`core/include/libtracer/child_registry.hpp:267` (`add`), `:517` (`resolve_peer`), `:532`
-(`erase`), `:565` (`entry_by_name`), `:586` (`by_name`), `:627`/`:637` (`size`/`live_size`).
+`core/include/libtracer/child_registry.hpp:268` (`add`), `:518` (`resolve_peer`), `:533`
+(`erase`), `:566` (`entry_by_name`), `:587` (`by_name`), `:628`/`:638` (`size`/`live_size`).
 
 ## Routing one inbound frame
 
@@ -223,8 +223,8 @@ flowchart TB
   consumer that did not need contiguity. `m` must stay alive while its span is read.
 - **The default delivery leg copies nothing.** A full-route `FWD{WRITE}` fan-out scatter-gathers a
   fresh stack head, the stored return-route bytes, an empty `src`, and one span per link of the
-  stored value (`core/src/fwd_router.cpp:2415`). The `COMPACT` leg is the one that flattens,
-  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:2216`) — single-link, that
+  stored value (`core/src/fwd_router.cpp:2437`). The `COMPACT` leg is the one that flattens,
+  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:2238`) — single-link, that
   flatten is a zero-copy adopt, and multi-link it draws from the router's injected `flat` backend
   (#730), not the global heap.
 - **All rope flattens on the forward AND terminus paths draw from the injected seam.** `flat`
@@ -255,7 +255,7 @@ flowchart TB
   instead of raising an exception that `-fno-exceptions` would turn into `abort()`. A dropped fresh
   `ADVERTISE` self-heals through the peer's `HANDLE_NACK`. The residual is the label store: a
   **compact-flagged** flow's first delivery on a link resolves its label *before* those three steps
-  (`fwd_router.cpp:2223`), and that allocates its `link_tables_t` and its egress entry from the
+  (`fwd_router.cpp:2245`), and that allocates its `link_tables_t` and its egress entry from the
   `std::pmr::memory_resource` (`route_handle.cpp:34-42`, `:262-263`), which reports exhaustion by
   throwing — so that one leg can still abort under `-fno-exceptions`
   ([#603](https://github.com/avatarsd-llc/libtracer/issues/603)). A flow that is not
@@ -281,16 +281,16 @@ vertex.
 
 **Creation is an ordinary write.** A `SPEC` appended to the `/net` catalog field —
 `write /net:children[] += SPEC{...}` — instantiates a connection. The SPEC's config carries a
-`kind` selector naming a registered transport factory (`core/src/transport_vertex.cpp:48` documents
-the config shape; `kind` is read at `:59`), plus the universal keys `addr`, `port`, `role`,
+`kind` selector naming a registered transport factory (`core/src/transport_vertex.cpp:49` documents
+the config shape; `kind` is read at `:60`), plus the universal keys `addr`, `port`, `role`,
 `keepalive`, `max_frame`, `backoff` and `connect_timeout`. Two catalog child types are registered
-against the graph, `client` and `listener` (`core/src/transport_vertex.cpp:98,102`), which supply
+against the graph, `client` and `listener` (`core/src/transport_vertex.cpp:99,103`), which supply
 the role default. Extra transport kinds join the catalog through `register_transport_type`
-(`core/src/transport_vertex.cpp:132`) — that is how the QUIC module extends a node without this
+(`core/src/transport_vertex.cpp:133`) — that is how the QUIC module extends a node without this
 file ever learning about it.
 
 **The write is ACL-gated.** The `:children[]` append is gated on the parent vertex's `CREATE`
-right and denied with `PERMISSION_DENIED` otherwise (`core/src/graph.cpp:2618-2651`). Under
+right and denied with `PERMISSION_DENIED` otherwise (`core/src/graph.cpp:2639-2672`). Under
 [RFC-0014 — creator endpoint, connection lifecycle and link liveness](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)
 that gate relocates onto the creator endpoint's own ACL and gains its removal counterpart: a `NAME`
 write is gated on `WRITE` — **not** `DELETE` — per
@@ -299,18 +299,18 @@ write is gated on `WRITE` — **not** `DELETE` — per
 **Mount and routing are the same path.** A created connection lives at `/net/<module>/<name>` and
 routes by exactly that path: the routing key *is* the mount path, so the registry's precomputed
 NAME run is exactly the prefix a hop prepends to `src` and the forward path assembles nothing per
-hop (`core/src/transport_vertex.cpp:484-491,501-507`;
+hop (`core/src/transport_vertex.cpp:485-492,502-508`;
 [ADR-0061 — per-transport mount routing, strip-K L5 demux](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md)).
 The `/net/<module>` structural vertex is created lazily on first use, with `graph_.find` itself as the
-dedupe rather than a second source of truth (`core/src/transport_vertex.cpp:509-517`). Because a
+dedupe rather than a second source of truth (`core/src/transport_vertex.cpp:510-518`). Because a
 connection is addressed under `/net/<module>/`, a first-level local vertex cannot shadow one.
 
 **Module naming is declared-only, by the application**
 ([ADR-0073](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0073-naming-authority-the-application-mints-one-predicate-gates.md)
 §4). There is no derived default and no library-side auto-registration: linking a built-in
 transport registers no module name, and an undeclared `(kind, role)` pair fails creation with
-`SCHEMA_NOT_FOUND` (`core/src/transport_vertex.cpp:175`). The application declares each module
-under a name it chooses through `register_module` (`core/src/transport_vertex.cpp:137`,
+`SCHEMA_NOT_FOUND` (`core/src/transport_vertex.cpp:176`). The application declares each module
+under a name it chooses through `register_module` (`core/src/transport_vertex.cpp:138`,
 `core/include/libtracer/transport_vertex.hpp:348`), a minting boundary gated by the shared
 segment-validity predicate — a reserved-character name answers `INVALID_PATH`. The built-in
 transports export *suggested*-name constants (`kWsClientSuggestedModule`, …) an application may
@@ -320,13 +320,13 @@ adopt; `/net` itself is likewise only the recommended root convention (a constru
 vertex, insert the `conns_` entry, wire the link into the router's `child_registry_t` — and only
 the last can be refused: `add_child` answers `false` when the registry cannot grow, and it is the
 only place that can say so (`core/include/libtracer/fwd_router.hpp:283`,
-`core/include/libtracer/child_registry.hpp:267`). A refusal unwinds the first two in reverse —
+`core/include/libtracer/child_registry.hpp:268`). A refusal unwinds the first two in reverse —
 retire the vertex, then erase the entry, which destroys the config-constructed socket — publishes
-no liveness, and answers `BACKPRESSURE` (`core/src/transport_vertex.cpp:610-613`). Discarding that
+no liveness, and answers `BACKPRESSURE` (`core/src/transport_vertex.cpp:611-614`). Discarding that
 `bool` left a connection reporting `UP` that no `dst` resolved, no inbound frame reached, and
 `remove_child` did not know about — a ghost a peer could mint by creating connections until the
 registry slab exhausted. A `provide_link` staging is consumed only once the wiring has succeeded
-(`core/src/transport_vertex.cpp:619`), so a retry after the pressure clears still finds its link.
+(`core/src/transport_vertex.cpp:620`), so a retry after the pressure clears still finds its link.
 
 **Liveness is the connection vertex's value.** `link_state_t` is six states —
 `DORMANT`, `DIALING`, `RECONNECTING`, `UP`, `LISTENING`, `BIND_FAILED`
@@ -335,7 +335,7 @@ links report listen-socket reachability with the last two, never a per-accepted-
 value is a 1-byte `VALUE` on the vertex, so it is `await`-able and subscribable: `subscribe
 /net/<module>/<name>` streams every transition. The liveness *engine* that would drive these
 automatically is not implemented — the value is set by the caller, and a config-constructed socket
-reports `UP` or `LISTENING` at creation (`core/src/transport_vertex.cpp:638-641`).
+reports `UP` or `LISTENING` at creation (`core/src/transport_vertex.cpp:639-642`).
 
 **The accepted direction, and what is not realised.** RFC-0014 replaces the single global
 `/net:children[]` catalog with a **per-module creator endpoint** at `/net/<module>/conn`, whose own

@@ -137,22 +137,22 @@ none — and remains a conforming node that any forwarder routes and any peer re
 
 Creation is not a new verb. It is an **append of a `SPEC` TLV to a parent's
 `:children[]` field**, gated by that parent's `CREATE` right
-(`core/src/graph.cpp:2616-2620`;
+(`core/src/graph.cpp:2637-2641`;
 [ADR-0020 — NFSv4-style ACEs with inheritance](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0020-acl-nfsv4-style-aces-with-inheritance.md)).
 The SPEC's `type` member names one of the device's registered child types and its
 optional `config` SETTINGS carries the instantiation parameters; an unregistered
 `type` answers `SCHEMA_NOT_FOUND`, the `ENOTTY` of an unsupported field
-(`graph_t::create_child`, `core/src/graph.cpp:2667-2694`). Reading `:children[]`
+(`graph_t::create_child`, `core/src/graph.cpp:2688-2715`). Reading `:children[]`
 returns the parent's **members**, never SPECs.
 
 On the `/net` plane the registered child types are `client` and `listener`
-(`core/src/transport_vertex.cpp:98-105`); the `config` member `kind` selects which
-transport factory builds the link (`core/src/transport_vertex.cpp:59`, factories
-registered through `register_transport_type` at `:132`). The created connection is
+(`core/src/transport_vertex.cpp:99-106`); the `config` member `kind` selects which
+transport factory builds the link (`core/src/transport_vertex.cpp:60`, factories
+registered through `register_transport_type` at `:133`). The created connection is
 mounted and routed at **`/net/<module>/<name>`**, where `module` is **declared by the
 application** through `register_module` — modules are declared-only (ADR-0073 §4); an
 undeclared kind fails creation with `SCHEMA_NOT_FOUND`
-(`core/src/transport_vertex.cpp:157-175,435-461`).
+(`core/src/transport_vertex.cpp:158-176,436-462`).
 
 A per-module creator endpoint — `/net/<module>/conn`, one self-contained module per
 *(transport, role)*, replacing the single global catalog — is the accepted

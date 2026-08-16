@@ -102,7 +102,7 @@ A single name segment. UTF-8 bytes, **no NUL terminator on the wire**.
 - MUST NOT contain reserved characters (`/ : . [ ] * ?`).
 - MUST be valid UTF-8. Invalid byte sequences MUST be rejected with `ERROR{tr::path::invalid}`.
 
-> ⚠️ **Conformance gap — the reference implementation accepts `[` and `]` in a NAME.** Its segment predicate rejects only `/ : . * ?`, by its own account a deliberate temporary subset held until address-index parsing lands ([03-addressing.md](03-addressing.md) §reserved characters, `core/include/libtracer/path.hpp:50-58`). The rule above is unchanged.
+> ⚠️ **Conformance gap — the reference implementation accepts `[` and `]` in a NAME.** Its segment predicate rejects only `/ : . * ?`, by its own account a deliberate temporary subset held until address-index parsing lands ([03-addressing.md](03-addressing.md) §reserved characters, `core/include/libtracer/path.hpp:51-59`). The rule above is unchanged.
 
 ### Where it appears
 
@@ -383,7 +383,7 @@ The encoder's invariants:
 - **No inner trailers.** Children inside a PATH carry no TS and no CRC; the outer (when in transit) covers everything.
 - **Reserved characters** (`/ : . [ ] * ?`) MUST NOT appear inside any segment_bytes.
 
-> ⚠️ **Conformance gap — the reference encoder does not enforce the bracket half of that rule** (`core/include/libtracer/path.hpp:50-58` rejects only `/ : . * ?`; §`0x02` NAME §constraints, [03-addressing.md](03-addressing.md) §reserved characters). The invariant above is unchanged.
+> ⚠️ **Conformance gap — the reference encoder does not enforce the bracket half of that rule** (`core/include/libtracer/path.hpp:51-59` rejects only `/ : . * ?`; §`0x02` NAME §constraints, [03-addressing.md](03-addressing.md) §reserved characters). The invariant above is unchanged.
 
 A path that resolves to more than 255 segments ([RFC-0023](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0023-path-segment-cap-repriced-32-to-255.md)), has a single segment longer than 64 bytes, or whose **encoded `PATH` body** exceeds the addressing-level cap MUST fail to encode.
 
@@ -956,7 +956,7 @@ sequenceDiagram
     Note over C,N: WRITE/AWAIT/subscribe ride the same shape<br/>an error returns kind=ERROR + STATUS{ERROR}
 ```
 
-At the terminus — the one place a node reads the whole FWD tree — the frame is decoded into a flat **arena** rather than an owning tree ([ADR-0041](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0041-terminus-arena-decode-span-contract.md)): the decoder parses it into pre-order span-nodes (`{type, opt, wire — trailer-excluded, body, end, canonical_path}`), every span pointing into the inbound frame, and the resolver runs over that arena. The nodes are drawn from an injected **nothrow** block source — a host that supplies a bounded source over its own slab gets a terminus that allocates nothing from the global heap, and one whose exhaustion is a `tr::tlv::nesting_too_deep` reject rather than an allocation failure ([ADR-0065](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md)).
+At the terminus — the one place a node reads the whole FWD tree — the frame is decoded into a flat **arena** rather than an owning tree ([ADR-0041](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0041-terminus-arena-decode-span-contract.md)): the decoder parses it into pre-order span-nodes (`{type, opt, wire — trailer-excluded, body, end}`), every span pointing into the inbound frame, and the resolver runs over that arena. The nodes are drawn from an injected **nothrow** block source — a host that supplies a bounded source over its own slab gets a terminus that allocates nothing from the global heap, and one whose exhaustion is a `tr::tlv::nesting_too_deep` reject rather than an allocation failure ([ADR-0065](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md)).
 
 ```{mermaid}
 flowchart LR

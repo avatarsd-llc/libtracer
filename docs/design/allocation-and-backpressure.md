@@ -135,10 +135,10 @@ reason each is out is different — so they are named here rather than left to b
 | --- | --- | --- |
 | `own_wire`'s SINGLE-link ownership copy (rope tier) | `core/src/op_resolve_view.cpp:150` | **Closed by #793.** Same function, same ADR-0041 §2 obligation and same peer-drivability as the multi-link flatten beside it — one function must not draw from two allocators. |
 | `own_wire`'s ownership copy (SPAN tier) | `core/src/op_resolve_walk.hpp:163` | **Closed by #801.** The same ADR-0041 §2 copy on the other tier, and the arena tier's *only* allocating site (its `wire()`/`body()` spans are borrowed from the frame). Which tier runs is decided by the delivering transport — a rope-delivering child vs a span-delivering one — so leaving it on the global heap made a stored value's provenance depend on the link it arrived over. It is the MCU terminus's ordinary case, not an exotic one: a synchronous CAN/UART child delivers a contiguous span. |
-| The terminus **arena** | `core/src/fwd_router.cpp:1741` — `wire::decode_into(frame, rx_for(inbound_ctx))` | **Already bounded, by a different seam.** It draws from the router's injected `rx` (`block_source_t`), which is the seam [ADR-0065](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md) created *specifically* so exhaustion returns `nullptr` instead of throwing. Routing it through `flat` would move it from a nothrow seam to a segment seam and buy nothing: a node injecting `rx` already bounds it. "Not covered by `flat`" was never the same claim as "not covered". |
+| The terminus **arena** | `core/src/fwd_router.cpp:1747` — `wire::decode_into(frame, rx_for(inbound_ctx))` | **Already bounded, by a different seam.** It draws from the router's injected `rx` (`block_source_t`), which is the seam [ADR-0065](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md) created *specifically* so exhaustion returns `nullptr` instead of throwing. Routing it through `flat` would move it from a nothrow seam to a segment seam and buy nothing: a node injecting `rx` already bounds it. "Not covered by `flat`" was never the same claim as "not covered". |
 | The reply **head segment** (and its RFC-0024 mint) | `core/src/fwd_reply.cpp:130` — `view::segment_alloc(egress, head_len)` inside `assemble_reply` | **Closed by #795, by its OWN injection.** Not folded into `flat` — see below. |
-| The composed-root folded READ's per-node **POINT headers** | `core/src/graph.cpp:3202` — `folded_point_header(hdr_backend, n.body_len)` in `read_subtree_folded`'s pass-3 emit, over the shared seam draw at `core/src/graph.cpp:3000` | **Closed by #831, on the EXISTING value seam.** No new injection: these are *payload* framing (each header's length field wraps that node's stored TLV and the name record below it), so they belong to `value_backend_`'s byte class, not to `egress`, which is sized against route bytes. The count is peer-influenced — a peer picks the composed root and thus how many nodes fold — and the segments escape in the reply rope, which is exactly the cross-thread self-routed reclaim [ADR-0060](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0060-lkv-copy-store-injected-value-backend.md) §2 already requires of this backend. Refusal degrades by value (`BACKPRESSURE`), unchanged. |
-| The `":children"` folded READ's per-member + outer **POINT headers** | `core/src/graph.cpp:3046` and `:3058` — `folded_point_header(hdr_backend, …)` in `read_children_folded` | **Closed by #831, same seam, same commit.** The *same defect class* on the other folded read, and the one the wire actually reaches first: a `":children"` field READ routes to `read_children_folded` (`core/src/graph.cpp:3243`), not to `read_subtree_folded`. Both folded reads now frame through **one** file-local `folded_point_header` (`core/src/graph.cpp:3000`), so the `ll` auto-widen boundary and the seam they draw from cannot drift apart again. It framed one header per registered child via `view::over_bytes` (plus the outer listing header) — each a global-heap `segment` escaping in the reply rope — at a count a peer likewise chooses, by picking whose listing to read. Named here explicitly so the composed-root fix is not read as closing a set of one. The child NAME records stay **borrowed in place** (zero copy) and are not a byte source at all. |
+| The composed-root folded READ's per-node **POINT headers** | `core/src/graph.cpp:3276` — `folded_point_header(hdr_backend, n.body_len)` in `read_subtree_folded`'s pass-3 emit, over the shared seam draw at `core/src/graph.cpp:3069` | **Closed by #831, on the EXISTING value seam.** No new injection: these are *payload* framing (each header's length field wraps that node's stored TLV and the name record below it), so they belong to `value_backend_`'s byte class, not to `egress`, which is sized against route bytes. The count is peer-influenced — a peer picks the composed root and thus how many nodes fold — and the segments escape in the reply rope, which is exactly the cross-thread self-routed reclaim [ADR-0060](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0060-lkv-copy-store-injected-value-backend.md) §2 already requires of this backend. Refusal degrades by value (`BACKPRESSURE`), unchanged. |
+| The `":children"` folded READ's per-member + outer **POINT headers** | `core/src/graph.cpp:3118` and `:3130` — `folded_member_header(hdr_backend, body, seg.size())` and `folded_point_header(hdr_backend, members_len)` in `read_children_folded` | **Closed by #831, same seam, same commit.** The *same defect class* on the other folded read, and the one the wire actually reaches first: a `":children"` field READ routes to `read_children_folded` (`core/src/graph.cpp:3323`), not to `read_subtree_folded`. Both folded reads now frame through **one** file-local `folded_point_header` (`core/src/graph.cpp:3069`), so the `ll` auto-widen boundary and the seam they draw from cannot drift apart again. It framed one header per registered child via `view::over_bytes` (plus the outer listing header) — each a global-heap `segment` escaping in the reply rope — at a count a peer likewise chooses, by picking whose listing to read. Named here explicitly so the composed-root fix is not read as closing a set of one. The child's segment TEXT stays **borrowed in place** (zero copy) and is not a byte source at all — since [RFC-0018](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0018-packed-path-segments.md) packed the key record, the member's `NAME` framing is emitted rather than borrowed and rides the SAME owned segment as the `POINT` header, so the draw is one header wider and the draw COUNT is unchanged. |
 
 The reply head is reachable from the bounded-node resolve path — every terminus reply allocates
 it, on **both** tiers (`assemble_reply` lives in a shared TU, so the arena/MCU terminus runs
@@ -197,11 +197,11 @@ std::array<std::byte, 4096> stack;
 mem::bump_source_t src(stack, *ctl_);
 ```
 
-(`core/src/graph.cpp:1693-1694`.) Three properties follow, and each closes a different failure mode:
+(`core/src/graph.cpp:1714-1715`.) Three properties follow, and each closes a different failure mode:
 
 - **A bounded node that injected `ctl` gets its own store here too.** The overflow leg draws from
   that injection rather than from the global heap, so the node's memory bound covers **this
-  arena** (`graph.cpp:1690-1692`). Read that literally: it is a statement about the decode arena, not
+  arena** (`graph.cpp:1711-1713`). Read that literally: it is a statement about the decode arena, not
   a general one about every allocation near it. Each seam is covered because it was injected and
   the site was pointed at it, one site at a time — the router's flattens went uncovered for a
   release precisely because they looked like they were included in a sentence like this one (#730).
@@ -226,18 +226,18 @@ defines for "exceeds this receiver's decode resources".
 
 | Allocation | Site | Failure answer |
 | --- | --- | --- |
-| Branch-write flatten into the value backend | `core/src/graph.cpp:1675-1680` | the refusal's cause (#917): `flatten_err_t::NO_MEMORY` → `BACKPRESSURE`, `NOT_HOST` → `TYPE_MISMATCH` |
-| Field-write flatten into the value backend | `core/src/graph.cpp:1993-1999` | same two-verdict split as the branch-write row above |
-| Branch-write root key render (`try_build_key`) | `core/src/graph.cpp:1712-1713` | `false` → `BACKPRESSURE` |
-| Branch-write parse-key copy (`detail::try_assign`) | `core/src/graph.cpp:1718` | `false` → `BACKPRESSURE` |
-| Branch-write decode arena | `core/src/graph.cpp:1693-1696` | decode error → `TYPE_MISMATCH` |
-| Per-delivery COMPACT flatten (egress) | `core/src/fwd_router.cpp:2351-2352` | the delivery is **dropped** |
-| Per-delivery frame build | *deleted* (#885) — the COMPACT leg gathers off a stack head (`core/src/fwd_router.cpp:2354`) instead of building a frame | n/a: there is nothing left to refuse |
-| Ingress `ADVERTISE` route flatten | flatten `core/src/fwd_router.cpp:1866` (the make-contiguous seam the ADVERTISE arm asks at `:1816`), answered at `:1823` | the empty flatten **fails the `wire::decode`** ⇒ the frame is **dropped**; the label stays **unbound** (the peer's COMPACTs draw a `HANDLE_NACK`) |
-| Ingress `COMPACT` payload flatten | flatten `core/src/fwd_router.cpp:1866` (the same seam, asked at `:1835`), answered at `:1842` | the delivery is **dropped**; the subscriber keeps its last-known value |
-| Bus-name rejection reply flatten (cold) | flatten `core/src/fwd_router.cpp:1200`, answered by the `wire::decode` opening `reject_bus_name_hop` | the frame is **dropped** by value — no reply |
-| Terminus per-node span materialize (rope tier) | flatten `core/src/op_resolve_view.cpp:258`, answered at `core/src/op_resolve_walk.hpp:882` / `core/src/op_resolve_walk.hpp:994` | a refusal on the reply's own route bytes ⇒ `BACKPRESSURE` on the error side ⇒ the frame is **dropped**; anywhere else before dispatch ⇒ an **addressed** `kind=ERROR STATUS{BACKPRESSURE}` reply |
-| Terminus ownership flatten (rope tier, ADR-0053 ⑤, MULTI-link) | flatten `core/src/op_resolve_view.cpp:140`, answered by the empty-value guards in `resolve_node` (`core/src/op_resolve_walk.hpp:799-800`) | the write is **not stored** — the vertex keeps its previous value — and the reply is `BACKPRESSURE` |
+| Branch-write flatten into the value backend | `core/src/graph.cpp:1696-1701` | the refusal's cause (#917): `flatten_err_t::NO_MEMORY` → `BACKPRESSURE`, `NOT_HOST` → `TYPE_MISMATCH` |
+| Field-write flatten into the value backend | `core/src/graph.cpp:2014-2020` | same two-verdict split as the branch-write row above |
+| Branch-write root key render (`try_build_key`) | `core/src/graph.cpp:1733-1734` | `false` → `BACKPRESSURE` |
+| Branch-write parse-key copy (`detail::try_assign`) | `core/src/graph.cpp:1739` | `false` → `BACKPRESSURE` |
+| Branch-write decode arena | `core/src/graph.cpp:1714-1717` | decode error → `TYPE_MISMATCH` |
+| Per-delivery COMPACT flatten (egress) | `core/src/fwd_router.cpp:2373-2374` | the delivery is **dropped** |
+| Per-delivery frame build | *deleted* (#885) — the COMPACT leg gathers off a stack head (`core/src/fwd_router.cpp:2376`) instead of building a frame | n/a: there is nothing left to refuse |
+| Ingress `ADVERTISE` route flatten | flatten `core/src/fwd_router.cpp:1872` (the make-contiguous seam the ADVERTISE arm asks at `:1822`), answered at `:1829` | the empty flatten **fails the `wire::decode`** ⇒ the frame is **dropped**; the label stays **unbound** (the peer's COMPACTs draw a `HANDLE_NACK`) |
+| Ingress `COMPACT` payload flatten | flatten `core/src/fwd_router.cpp:1872` (the same seam, asked at `:1841`), answered at `:1848` | the delivery is **dropped**; the subscriber keeps its last-known value |
+| Bus-name rejection reply flatten (cold) | flatten `core/src/fwd_router.cpp:1206`, answered by the `wire::decode` opening `reject_bus_name_hop` | the frame is **dropped** by value — no reply |
+| Terminus per-node span materialize (rope tier) | flatten `core/src/op_resolve_view.cpp:258`, answered at `core/src/op_resolve_walk.hpp:880` / `core/src/op_resolve_walk.hpp:992` | a refusal on the reply's own route bytes ⇒ `BACKPRESSURE` on the error side ⇒ the frame is **dropped**; anywhere else before dispatch ⇒ an **addressed** `kind=ERROR STATUS{BACKPRESSURE}` reply |
+| Terminus ownership flatten (rope tier, ADR-0053 ⑤, MULTI-link) | flatten `core/src/op_resolve_view.cpp:140`, answered by the empty-value guards in `resolve_node` (`core/src/op_resolve_walk.hpp:797-798`) | the write is **not stored** — the vertex keeps its previous value — and the reply is `BACKPRESSURE` |
 | Terminus ownership **copy** (rope tier, ADR-0041 §2, SINGLE-link) | copy `core/src/op_resolve_view.cpp:150`, answered by the same guards | the write is **not stored** — the vertex keeps its previous value — and the reply is `BACKPRESSURE` |
 | Terminus ownership **copy** (SPAN tier, ADR-0041 §2) | copy `core/src/op_resolve_walk.hpp:163`, answered by the same guards | the write is **not stored** — the vertex keeps its previous value — and the reply is `BACKPRESSURE`. Note this row's refusal does **not** set the walk's `spans_intact()` flag, and must not: an arena span is borrowed from the frame, so a refused copy shortens nothing and the empty view is the whole channel |
 | Terminus reply **head** + mint (egress seam, both tiers) | alloc `core/src/fwd_reply.cpp:130`, answered at `core/src/op_resolve_walk.hpp:548` | a refused RESULT head yields an empty rope; `or_backpressure` answers an **addressed** `kind=ERROR STATUS{BACKPRESSURE}` when the smaller error head can still be built, else the frame is **dropped** — never an abort, never a `kind=RESULT` on bytes it could not allocate. A refused mint is not an error: the plain reply is rebuilt without it |
@@ -268,8 +268,8 @@ command. Each of the three has its own case — a row nothing can fail is a row 
 reverting any one site's seam fails that site's case and no other.
 
 **Two of those three rows are answered by a decode, not by a guard.** The refusal early-outs
-beside the `ADVERTISE` (`core/src/fwd_router.cpp:1823`, still an `empty()` test — that arm reads a
-span through the make-contiguous seam) and bus-name (`core/src/fwd_router.cpp:1495-1497`, since
+beside the `ADVERTISE` (`core/src/fwd_router.cpp:1829`, still an `empty()` test — that arm reads a
+span through the make-contiguous seam) and bus-name (`core/src/fwd_router.cpp:1501-1503`, since
 #917 a `!flat` test on the named refusal rather than an `empty()` guess) flattens are redundant
 with the `wire::decode` that follows each — deleting either changes nothing observable, verified by
 ablation — and the code
@@ -286,13 +286,13 @@ nobody can fail is a guard nobody can prove.
 
 The key render and its parse copy are nothrow so that OOM soft-fails the branch write as
 `BACKPRESSURE`, the injected-resource status — **never an abort on the writer thread**
-(`graph.cpp:1712-1718`).
+(`graph.cpp:1733-1739`).
 
 The remote-delivery leg answers differently on purpose. A stored write that reached its LKV has
 succeeded; the fan-out to one subscriber is a separate obligation, and a subscriber missing
 one value under heap exhaustion is valid delivery behaviour where failing the write is not. Every
 per-delivery allocation on that writer-thread leg is nothrow, and a failed flatten or frame build
-drops that one delivery (`core/src/fwd_router.cpp:2351-2352`). Dropping *invisibly* is the part that
+drops that one delivery (`core/src/fwd_router.cpp:2373-2374`). Dropping *invisibly* is the part that
 needs an answer, which is why `graph_t::delivery_drops()` exists
 (`core/include/libtracer/graph.hpp:1715`): four relaxed monotonic counters — `no_target`, `denied`,
 `out_of_memory`, `fan_out_truncated` (`graph.hpp:1683-1705`) — incremented only on a drop, so the
@@ -302,11 +302,11 @@ memory is as visible as a local one; `denied` is not among that door's causes be
 is counted at the WRITE gate itself, on every plane. Nothing in the library reads them; a
 deployment chooses whether to alarm. What they count is shed **deliveries**: the sharpest OOM shed
 is a HANDLER write whose notify clone fails, which abandons the vertex's whole subscriber set and
-still returns success (`core/src/graph.cpp:1610`), so it moves the counter by the fan-out width
+still returns success (`core/src/graph.cpp:1631`), so it moves the counter by the fan-out width
 rather than by one (#896).
 
 A dropped fresh ADVERTISE on the COMPACT leg self-heals: the peer answers the unknown label with
-`HANDLE_NACK` and the next delivery re-advertises (`fwd_router.cpp:2330`). Since #885 the router
+`HANDLE_NACK` and the next delivery re-advertises (`fwd_router.cpp:2352`). Since #885 the router
 itself no longer has a way to drop one for want of memory — the frame is gathered off a stack head
 — so the surviving drop is the transport's, not the label plane's.
 
