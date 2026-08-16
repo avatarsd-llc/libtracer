@@ -154,11 +154,20 @@ void foreign_versus_malformed() {
     check(path_element_at(wrong_len, 4).kind == path_element_kind_t::MALFORMED,
           "…and refuses it as MALFORMED, not as an unknown kind to be skipped");
 
-    // The reserved zero generation: a value no host ever mints, so no table could answer for it.
+    // The reserved zero generation: STRUCTURALLY a label element (§12.5 erratum 1 fixes exactly
+    // two clauses, the kind and the len, and this record satisfies both), carrying a value no
+    // host ever minted. The refusal it earns is §7.2's NOT_FOUND-class one at the deref, with
+    // the sender falling back to strings — not `tr::path::invalid`, which is the answer to a
+    // malformed ADDRESS. Classifying it as malformed here would answer the wrong error code on
+    // the wire, and a wire-surface divergence is an amendment's business, not a codec's.
     const std::array<std::byte, 4> zero_gen{std::byte{7}, std::byte{0}, std::byte{0}, std::byte{0}};
     const std::vector<std::byte> reserved = escape(tr::wire::kPackedEscapeKindLabel, zero_gen);
-    check(path_element_at(reserved, 0).kind == path_element_kind_t::MALFORMED,
-          "generation 0 is 'no label' — refused in the grammar, before any table is touched");
+    const path_element_t reserved_el = path_element_at(reserved, 0);
+    check(reserved_el.kind == path_element_kind_t::LABEL && !reserved_el.label.valid(),
+          "generation 0 reads as a LABEL element carrying an invalid path label — the deref "
+          "refuses it with NOT_FOUND, which is §7.2's answer for an unminted slot");
+    check(path_element_census(reserved).well_formed && path_element_census(reserved).labels == 1,
+          "…so it does NOT make the body malformed: a value-level refusal is not a structural one");
 
     // A ragged record: the length byte claims more than the body holds.
     const std::vector<std::byte> ragged{std::byte{9}, std::byte{'a'}};
@@ -220,56 +229,80 @@ void splice_replaces_a_run() {
     check(!tr::wire::emit_path_labelled(out, canonical, 0, 3, path_label_t{}) && out.empty(),
           "an unmintable label (the reserved zero generation) never reaches the wire");
     check(!tr::wire::emit_path_labelled(out, multi, 0, 2, kLabel) && out.empty(),
-          "a run holding an element that is already a label refuses — §11.2 in the codec: two "
-          "compressions of one address save the bytes one of them already saved");
+          "a run holding an element that is already a label refuses — §5.3.3 with §6.1: what a "
+          "label stands for is the mount RUN a hop strips, and that is a run of names");
+
+    // The run bound is checked BEFORE any `first + count` is formed. Unguarded, both of these
+    // wrap: the first appends a 7-byte label to a body it must not touch (violating §6.1's
+    // replaces-never-appends), and the second emits `net/ws-client/board-01/<label>/…` — a
+    // well-formed spelling of a DIFFERENT address, which is the mis-delivery class this design
+    // closes by construction everywhere else.
+    constexpr std::size_t kMax = static_cast<std::size_t>(-1);
+    check(!tr::wire::emit_path_labelled(out, canonical, kMax, 1, kLabel) && out.empty(),
+          "`first = SIZE_MAX, count = 1` refuses and appends nothing — the sum never wraps");
+    check(!tr::wire::emit_path_labelled(out, canonical, kMax - 1, 3, kLabel) && out.empty(),
+          "nor does `first = SIZE_MAX - 1, count = 3`, which wrapped to an in-run window that "
+          "spliced a label into a route it was never given");
+    check(!tr::wire::emit_path_labelled(out, canonical, 0, kMax, kLabel) && out.empty(),
+          "a count past the body refuses on the byte bound, before the walk");
 }
 
 /** @brief RFC-0027 §6.1's origin-side cache, and §9's layering rule made structural. */
 void origin_side_cache() {
     tr::graph::path_t p("/net/ws-client/board-01/sensor/temp");
     const std::vector<std::byte> canonical(p.key().begin(), p.key().end());
-    check(!p.labelled().cached && p.labelled().body.empty(),
+    check(!p.path_label().cached && p.path_label().body.empty(),
           "a path is unlabelled until a minted reply comes back — no allocation, nothing read");
     check(tr::wire::packed_path_valid_key(p.key()),
           "and `parse` never produces a labelled body: canonical keys stay pure-string (§9)");
 
     std::vector<std::byte> minted;
     check(tr::wire::emit_path_labelled(minted, canonical, 0, 3, kLabel), "a reply comes minted");
-    check(p.cache_labelled(minted), "the net tier caches the spelling the reply carried");
-    check(p.labelled().cached && p.labelled().body == minted, "…verbatim");
+    check(p.cache_path_label(minted), "the net tier caches the spelling the reply carried");
+    check(p.path_label().cached && p.path_label().body == minted, "…verbatim");
 
     check(std::ranges::equal(p.key(), canonical),
           "THE layering rule (§9): caching a label does not move the vertex-map key. The "
           "canonical bytes are what the label was minted FROM and what a refusal falls back "
           "to, so they are never discarded");
-    check(!tr::wire::packed_path_valid_key(p.labelled().body),
+    check(!tr::wire::packed_path_valid_key(p.path_label().body),
           "and the labelled spelling is not a lookup key, whatever a caller does with it");
 
     tr::graph::path_t copy = p;
-    check(copy.labelled().body == minted,
+    check(copy.path_label().body == minted,
           "a path is a VALUE: copying it copies the slot, and neither copy holds a handle into "
           "the tier that filled it");
 
-    p.clear_labelled();
-    check(!p.labelled().cached && p.labelled().body.empty(),
+    p.clear_path_label();
+    check(!p.path_label().cached && p.path_label().body.empty(),
           "§7.2's recovery is forgetting the bytes — no withdraw, no unbind, no lease, no TTL");
 
     // Refusals: each leaves the path exactly as it was.
-    check(!p.cache_labelled(canonical) && !p.labelled().cached,
+    check(!p.cache_path_label(canonical) && !p.path_label().cached,
           "a body with NO label element is refused — `key()` already holds that spelling");
-    check(!p.cache_labelled({}) && !p.labelled().cached, "an empty body is not a minted reply");
+    check(!p.cache_path_label({}) && !p.path_label().cached, "an empty body is not a minted reply");
     const std::array<std::byte, 3> shortpay{std::byte{1}, std::byte{0}, std::byte{0}};
-    check(!p.cache_labelled(escape(tr::wire::kPackedEscapeKindLabel, shortpay)),
+    check(!p.cache_path_label(escape(tr::wire::kPackedEscapeKindLabel, shortpay)),
           "a malformed label element is refused here too: caching one would hand the next "
           "operation an address the far hop must refuse");
     std::vector<std::byte> oversize;
     while (oversize.size() <= tr::graph::kMaxPathBytes)
         (void)tr::wire::emit_path_segment(oversize, "padpadpadpadpad");
     oversize = oversize + minted;
-    check(!p.cache_labelled(oversize), "and the canonical byte bound binds both spellings");
+    check(!p.cache_path_label(oversize), "and the canonical byte bound binds both spellings");
 }
 
-/** @brief RFC-0027 §11.2 — a path carries one compression of its address, not two. */
+/**
+ * @brief RFC-0027 §11.2 — the ONE arm of the recommendation this car implements, and the
+ *        deliberate asymmetry beside it.
+ *
+ * §11.2 is *"Recommended, pending the §12.4 measurement"* and reads SHOULD NOT twice, leaving
+ * the per-route choice to a host implementing both. So the refusal lands only on the surface
+ * this car introduces — `cache_path_label`, where stating it costs nothing because no caller
+ * exists yet — and `bind` keeps RFC-0024's shipped behaviour exactly. Tightening a shipped API
+ * on a SHOULD, before the measurement that would justify it, is a bigger change than the
+ * recommendation asks for.
+ */
 void one_compression_per_address() {
     const std::array<tr::wire::path_ref_element_t, 2> refs{
         tr::wire::path_ref_element_t{.index = 1, .generation = 1},
@@ -281,17 +314,19 @@ void one_compression_per_address() {
     check(tr::wire::emit_path_labelled(minted, canonical, 0, 3, kLabel), "a minted spelling");
 
     check(bound_first.bind(refs), "a path binds a PATH_REF as it always has");
-    check(!bound_first.cache_labelled(minted) && !bound_first.labelled().cached,
-          "and then refuses a labelled spelling on top of it (§11.2)");
+    check(!bound_first.cache_path_label(minted) && !bound_first.path_label().cached,
+          "and a bound path then refuses a path-label spelling on top of it (§11.2)");
 
     tr::graph::path_t labelled_first("/net/ws-client/board-01/sensor/temp");
-    check(labelled_first.cache_labelled(minted), "the other order: labels first");
-    check(!labelled_first.bind(refs) && !labelled_first.binding().bound,
-          "…and the bind is refused, so whichever spelling arrived first stands");
+    check(labelled_first.cache_path_label(minted), "the other order: path labels first");
+    check(labelled_first.bind(refs) && labelled_first.binding().bound,
+          "…and `bind` is UNCHANGED — RFC-0024's shipped surface is not tightened on a SHOULD "
+          "that is itself pending §12.4's measurement");
 
-    labelled_first.clear_labelled();
-    check(labelled_first.bind(refs),
-          "dropping one form frees the other — the exclusion is structural, not a latch");
+    labelled_first.clear_path_label();
+    check(!labelled_first.path_label().cached && labelled_first.bind(refs),
+          "dropping the path-label form frees the other arm — the refusal is a state check, "
+          "not a latch");
 }
 
 }  // namespace

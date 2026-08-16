@@ -128,9 +128,12 @@ struct path_binding_t {
 };
 
 /**
- * @brief A path's LABELLED spelling: the packed `PATH` body a fully-minted reply came back
+ * @brief A path's PATH-LABEL spelling: the packed `PATH` body a fully-minted reply came back
  *        with (RFC-0027 §6.1) — the second opaque slot a @ref path_t carries beside its
  *        canonical bytes.
+ *
+ * Always the qualified **path label** (§11.1 collision 1, ruled *(a) qualify* at acceptance):
+ * an unqualified "label" is RFC-0004 §E.1's per-link `u16` and nothing else.
  *
  * RFC-0027's distribution is passive: no host asks for a label and no frame carries a request.
  * Each forwarding hop rewrites its own local part of `src`/`dst` from string to the label it
@@ -231,7 +234,6 @@ class path_t {
      * @return true iff the binding was recorded.
      */
     bool bind(std::span<const wire::path_ref_element_t> elements) {
-        if (labels_.cached) return false;  // RFC-0027 §11.2 — one compression per address
         if (elements.empty() || elements.size() > wire::kMaxPathRefElements) return false;
         binding_.elements.assign(elements.begin(), elements.end());
         binding_.bound = true;
@@ -250,11 +252,18 @@ class path_t {
         binding_.bound = false;
     }
 
-    /** @brief This path's labelled spelling, if a reply came back minted (RFC-0027 §6.1). */
-    [[nodiscard]] const path_label_cache_t& labelled() const noexcept { return labels_; }
+    /**
+     * @brief This path's PATH-LABEL spelling, if a reply came back minted (RFC-0027 §6.1).
+     *
+     * Named for the qualified term throughout, never bare "label": §11.1 collision 1 was ruled
+     * **(a) qualify** at acceptance, so an unqualified "label" still means RFC-0004 §E.1's
+     * per-link `u16` and nothing else (`route_handle.hpp`'s is one), and this RFC's concept is
+     * always the **path label**.
+     */
+    [[nodiscard]] const path_label_cache_t& path_label() const noexcept { return labels_; }
 
     /**
-     * @brief Cache the labelled spelling @p body a minted reply came back with (RFC-0027 §6.1).
+     * @brief Cache the path-label spelling @p body a minted reply came back with (§6.1).
      *
      * **The NET TIER's call, never the application's** (§9). The bytes are a packed `PATH`
      * body: a mixture of literal segments and label elements, in any order, exactly as the
@@ -265,29 +274,32 @@ class path_t {
      * reading or no point:
      *
      * - a body that does not walk cleanly, or that refuses the address on any record — a
-     *   malformed label element is `tr::path::invalid`, and caching one would hand the next
+     *   malformed element is `tr::path::invalid`, and caching one would hand the next
      *   operation an address the far hop must refuse;
-     * - a body carrying **no** label element — a pure-string spelling is what @ref key already
-     *   holds, and caching a second copy of it would buy a second thing to invalidate;
+     * - a body carrying **no** path-label element — a pure-string spelling is what @ref key
+     *   already holds, and caching a second copy of it would buy a second thing to invalidate;
      * - a body past `%kMaxPathBytes`, the same bound the canonical form is parsed under;
-     * - a path that is already BOUND (`PATH_REF`). §11.2: two compressions of one address
-     *   spend two mechanisms to save the bytes one of them already saved, and double the
-     *   staleness surface for a single route. Whichever spelling arrived first stands; the
-     *   choice of which form to seek per route is the mint call site's (car 4).
+     * - a path that is already BOUND (`PATH_REF`). §11.2 recommends against carrying two
+     *   compressions of one address — they save the bytes one of them already saved and double
+     *   the staleness surface for a single route — and this is the one arm where the refusal
+     *   costs nothing to state, because the slot is new. It is deliberately NOT symmetric:
+     *   `bind` is RFC-0024's shipped surface and keeps its behaviour exactly, since §11.2 is a
+     *   SHOULD pending §12.4's measurement and the per-route choice is the mint call site's
+     *   (car 4). @ref clear_path_label frees this arm whenever a caller wants the other form.
      *
-     * @return true iff the labelled spelling was cached.
+     * @return true iff the path-label spelling was cached.
      */
-    bool cache_labelled(std::span<const std::byte> body);
+    bool cache_path_label(std::span<const std::byte> body);
 
     /**
-     * @brief Drop the labelled spelling and fall back to the canonical one (RFC-0027 §7.2).
+     * @brief Drop the path-label spelling and fall back to the canonical one (RFC-0027 §7.2).
      *
      * What an origin does on a `NOT_FOUND`-class refusal. There is nothing to withdraw
      * anywhere — no unbind frame, no lease, no TTL, no aging (§7.3) — so forgetting the bytes
      * IS the recovery: the next operation goes out in strings, which always work, and the
      * reply after it re-mints.
      */
-    void clear_labelled() noexcept {
+    void clear_path_label() noexcept {
         labels_.body.clear();
         labels_.cached = false;
     }
@@ -305,6 +317,20 @@ class path_t {
     // hot path reads it — §9's local-IO exclusion is structural, not a convention.
     path_label_cache_t labels_;
 };
+
+/**
+ * @brief A `path_t` is FIFTEEN pointer-widths: four owning containers plus a count.
+ *
+ * Pinned, not observed. A path is a parse-once VALUE the API takes by `const&`, and each of the
+ * two opaque slots (RFC-0024's binding, RFC-0027's path label) added a container to it — the
+ * exact growth an unwatched type absorbs one RFC at a time until somebody embeds it in a hot
+ * struct and pays for it per vertex. Expressed in `sizeof(void*)` so it holds identically on
+ * rv32 and on a 64-bit host, which is the whole point of pinning a shape rather than a number:
+ * a change here is a deliberate edit, and it is the moment to ask whether the new member wants
+ * to be a slot at all. Same instrument, same reason, as `sizeof(path_label_t) == 4`.
+ */
+static_assert(sizeof(path_t) == 15 * sizeof(void*),
+              "a path_t's shape is a ratchet — grow it deliberately or not at all");
 
 inline path_t::path_t(std::string_view text) {
     result_t<path_t> p = parse(text);

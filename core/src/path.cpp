@@ -154,13 +154,13 @@ namespace {
 /**
  * @brief RFC-0027 §6.1's origin-side cache — validate a minted spelling, then keep it.
  *
- * The walk is `path_element_census`, which is the same reader a forwarder uses, so the origin
- * cannot come to a different conclusion about a body than the hop that wrote it. It lives here
- * rather than in the header for the reason every L4 walk does: the census is init-time-shaped
- * work off the canonical hot path, and inlining it into every translation unit that merely
- * holds a `path_t` would price it into cores that never see a label.
+ * The walk is `wire::path_element_census`, which is the same reader a forwarder uses, so the
+ * origin cannot come to a different conclusion about a body than the hop that wrote it. This
+ * validator lives here rather than in the header because it is the only place `path.hpp` would
+ * otherwise have to pull the element codec into every translation unit that merely holds a
+ * `path_t` — a core that never sees a path label neither includes nor instantiates it.
  */
-bool path_t::cache_labelled(std::span<const std::byte> body) {
+bool path_t::cache_path_label(std::span<const std::byte> body) {
     if (binding_.bound) return false;  // RFC-0027 §11.2 — one compression per address
     if (body.empty() || body.size() > kMaxPathBytes) return false;
     const wire::path_element_census_t census = wire::path_element_census(body);

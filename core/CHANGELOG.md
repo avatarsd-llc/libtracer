@@ -16,39 +16,53 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
-- **The RFC-0027 mixed-element codec and the origin-side label cache — `path_element.hpp`
+- **The RFC-0027 mixed-element codec and the origin-side path-label cache — `path_element.hpp`
   (`wire::path_element_t`, `wire::path_element_kind_t`, `wire::path_element_at`,
   `wire::path_element_cursor_t`, `wire::path_element_census`, `wire::emit_path_labelled`) and
-  `graph::path_label_cache_t` with `path_t::labelled` / `path_t::cache_labelled` /
-  `path_t::clear_labelled`** ([#1325](https://github.com/avatarsd-llc/libtracer/issues/1325)
+  `graph::path_label_cache_t` with `path_t::path_label` / `path_t::cache_path_label` /
+  `path_t::clear_path_label`** ([#1325](https://github.com/avatarsd-llc/libtracer/issues/1325)
   car 3). Car 2 settled how ONE label element is spelled; this is the surface that reads and
   writes a **mixed** packed `PATH` body, which RFC-0027 §5.2 makes the expected shape rather
-  than an edge case:
+  than an edge case. Named for the **qualified** term throughout — §11.1 collision 1 was ruled
+  *(a) qualify* at acceptance, so an unqualified "label" still means RFC-0004 §E.1's per-link
+  `u16` (`route_handle_t`'s) and nothing else:
   - **An element self-describes by its kind, never by its position** (§5.1). `path_element_at`
     classifies the record where it stands as one of four answers, and
     `path_element_cursor_t` is the `p += bytes` walk over them.
-  - **A foreign escape kind and a malformed label are DIFFERENT answers** (§12.5 erratum 1). A
+  - **A foreign escape kind and a malformed record are DIFFERENT answers** (§12.5 erratum 1). A
     kind this host does not own is `FOREIGN` — stepped over by its declared length, which is
     the property a non-minting hop relies on — while a `kind = 0x16` record whose payload is
-    not exactly one label is `MALFORMED` and refuses the address (`tr::path::invalid`). Car 2's
+    not exactly four bytes is `MALFORMED` and refuses the address (`tr::path::invalid`). Car 2's
     `path_label_at` answers `nullopt` to both, correctly, because a hop reading one element
     responds to both the same way; a hop reading a whole body does not, and folding the two
     would let a length-only check read another kind's payload against the local table.
+  - **The structural clauses stay exactly TWO** — the `kind` and the declared `len` — and no
+    third is invented. A record satisfying both IS a `LABEL` element even when it carries the
+    reserved zero generation: that value names no slot any host minted, but the refusal it
+    earns is §7.2's `NOT_FOUND`-class one at the deref with a string fallback, and answering
+    `tr::path::invalid` for it instead would be a wire-surface divergence.
   - **`emit_path_labelled` replaces a RUN of literal segments with one label element**
-    (amendment 6): one label covers a hop's whole local part, its entire mount run, so the
+    (amendment 6): one path label covers a hop's whole local part, its entire mount run, so the
     record is the same 7 bytes whether the run is one segment or five. The splice **replaces**
-    bytes and never appends (§6.1), and it refuses — appending nothing — an unmintable label,
-    an out-of-range run, a body that does not walk cleanly, or a run holding anything that is
-    already a compressed spelling (§11.2 in the codec).
-  - **`path_t` gains RFC-0027 §6.1's origin-side cache**: the labelled spelling a fully-minted
+    bytes and never appends (§6.1), and it refuses — appending nothing — an unmintable label, an
+    empty, out-of-range or arithmetically wrapping run, a body that does not walk cleanly, or a
+    run holding anything but literal segments (§5.3.3 with §6.1: what a label stands for is the
+    mount run a hop strips, and a mount run is a run of names). Its `out` buffer must not alias
+    the body it splices — documented, because car 4's reply-leg rewrite is the caller that would
+    reach for it.
+  - **`path_t` gains RFC-0027 §6.1's origin-side cache**: the path-label spelling a fully-minted
     reply came back with, beside the RFC-0024 binding slot it already carried. It is
     **opaque to the application and normatively so (§9)** — filled and validated by the net
     tier, never appearing in a host-API call, a path the application constructs, or a local
     resolution. `key()` keeps answering the canonical bytes whatever is cached, because a
-    labelled `PATH` is not a `path_lookup_key`. `cache_labelled` refuses a body with no label
-    element, a malformed one, an oversize one, or a path that is already `PATH_REF`-bound —
-    and `bind` refuses symmetrically while a labelled spelling is cached, so §11.2's
-    one-compression-per-address rule is structural rather than remembered.
+    labelled `PATH` is not a `path_lookup_key`. `cache_path_label` refuses a body with no label
+    element, a malformed one, an oversize one, or a path that is already `PATH_REF`-bound
+    (§11.2's one arm where the refusal costs nothing to state, because the surface is new).
+    **`bind` is unchanged**: §11.2 is a SHOULD pending §12.4's measurement, and RFC-0024's
+    shipped surface is not tightened ahead of it.
+  - **`sizeof(path_t)` is now pinned** at fifteen pointer-widths. Each of the two opaque slots
+    added a container to a type the API passes by `const&`; the pin makes the next one a
+    deliberate edit rather than an absorbed one.
 
   **Nothing mints.** §6.2's trigger, the reply-leg rewrite, the table deref and the
   `NOT_FOUND` answer are car 4. No wire surface moves: the spelling is car 2's, unchanged, and

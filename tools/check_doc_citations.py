@@ -537,8 +537,8 @@ ANCHORS = [
     ('core/include/libtracer/path.hpp:34', 'inline constexpr std::size_t kMaxPathBytes = 1024;'),
     ('core/include/libtracer/path.hpp:36', 'inline constexpr std::size_t kMaxSegments = 255;'),
     ('core/include/libtracer/path.hpp:38', 'inline constexpr std::size_t kMaxFieldDepth = 8;'),
-    ('core/include/libtracer/path.hpp:330', 'static constexpr std::size_t kInlineBytes = 16;'),
-    ('core/include/libtracer/path.hpp:191', 'explicit path_t(std::string_view text);'),
+    ('core/include/libtracer/path.hpp:356', 'static constexpr std::size_t kInlineBytes = 16;'),
+    ('core/include/libtracer/path.hpp:194', 'explicit path_t(std::string_view text);'),
     # core/include/libtracer/receiver_slot.hpp
     ('core/include/libtracer/receiver_slot.hpp:143', 'frame.try_materialize(backend);'),
     # core/include/libtracer/rope.hpp
@@ -934,7 +934,7 @@ ANCHORS = [
      '* This is **opt-in construction only** — no seam defaults to it. `heap_backend()` remains'),
     ('core/include/libtracer/path.hpp:51',
      "* separates field levels, `[` / `]` delimit the grammar's index suffix (which sits"),
-    ('core/include/libtracer/path.hpp:309', 'inline path_t::path_t(std::string_view text) {'),
+    ('core/include/libtracer/path.hpp:335', 'inline path_t::path_t(std::string_view text) {'),
     ('core/include/libtracer/posix_endpoint.hpp:687',
      "/** @brief Visit the currently-OPEN peers' names, `p<slot>` (#426). */"),
     ('core/include/libtracer/tlv.hpp:62', 'PATH_REF = 0x14,'),
