@@ -55,6 +55,7 @@ using tr::graph::graph_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
 using tr::graph::vertex_handle_t;
+using tr::graph::vertex_slot_t;
 using tr::net::fwd_router_t;
 using tr::testing::check;
 
@@ -119,6 +120,26 @@ vertex_handle_t register_mount(graph_t& g, tr::net::bus_link_t& bus) {
     check(v.has_value(), "the mount vertex registers at /net/tcp-server/srv");
     return *v;
 }
+
+/**
+ * @brief The FIRST churn cycle whose sample read a generation below the standing bound —
+ *        everything needed to name the cause, recorded where it happened (#1339).
+ *
+ * The churn loop used to reduce twenty samples to one accumulated `bool`, so every failure
+ * printed the same sentence and a reader had no way to separate the two very different things
+ * it can mean. A genuine #1223 disclosure — a recycled slot handing back a generation an
+ * earlier tenant already used — is @ref same_slot with @ref observed below @ref bound, and is
+ * the reason this assertion exists at all. A fresh allocation answering for `id0` (@ref
+ * same_slot false) is a revive-in-place failure, a different bug in a different place. Keeping
+ * the numbers means the next occurrence is read rather than re-litigated.
+ */
+struct gen_regression_t {
+    int cycle = 0;              /**< @brief The 0-based churn iteration that sampled it. */
+    std::uint32_t bound = 0;    /**< @brief The generation the previous cycle's retire left. */
+    std::uint32_t observed = 0; /**< @brief The live anchor's generation at this cycle. */
+    std::uint32_t index = 0;    /**< @brief The anchor's vertex-map slot index right then. */
+    bool same_slot = false;     /**< @brief @ref index is S1's slot, not a fresh allocation. */
+};
 
 /** @brief The mount's `:children[]` bytes, flattened for byte comparison. */
 bytes_t children_bytes(const graph_t& g, vertex_handle_t mount) {
@@ -236,22 +257,65 @@ void run() {
     const std::size_t slots_with_one_anchor = node.vertex_slot_count();
     std::uint32_t last_gen = node.retire_generation(a1);
     int cycles = 0;
-    bool monotonic = true;
+    int no_arrival = 0;
+    int vanished = 0;
+    int no_departure = 0;
+    std::optional<gen_regression_t> regression;
     for (int i = 0; i < 20; ++i) {
         auto c = std::make_unique<client_t>(port);
         if (!c->ok()) continue;
-        if (!wait_until([&] { return node.find_session_anchor(id0).has_value(); })) continue;
-        ++cycles;
-        // Accumulated rather than asserted per iteration: one line of verdict, not twenty.
-        monotonic =
-            monotonic && node.vertex_slot(*node.find_session_anchor(id0))->generation >= last_gen;
+        // A cycle whose anchor never came up DID NOT HAPPEN, and is skipped whole: no sample
+        // is taken, and — the part that used to be missing — `last_gen` is left exactly where
+        // the last cycle that did happen put it. The bound is only ever the generation a
+        // completed retire left behind, never one that a skipped cycle failed to advance.
+        if (!wait_until([&] { return node.find_session_anchor(id0).has_value(); })) {
+            ++no_arrival;
+            continue;
+        }
+        // Re-looked-up and TESTED, never dereferenced blind. The poll above and this read are
+        // two separate lookups against a graph three transport threads are mutating, so the
+        // anchor can retire between them (a straggling teardown for the slot's previous
+        // tenant), and `vertex_slot` independently answers nullopt for a SATURATED generation.
+        // `operator*` on either empty optional reads uninitialized storage, and the verdict
+        // would then be whatever the stack happened to hold — which is exactly how a
+        // monotonically-increasing atomic counter can be reported as moving backwards.
+        const std::optional<vertex_handle_t> live = node.find_session_anchor(id0);
+        const std::optional<vertex_slot_t> slot =
+            live.has_value() ? node.vertex_slot(*live) : std::nullopt;
+        if (slot.has_value()) {
+            ++cycles;
+            // First occurrence only: the later ones are consequences of the same event, and
+            // the cycle that BROKE the order is the one worth naming.
+            if (slot->generation < last_gen && !regression.has_value())
+                regression = gen_regression_t{.cycle = i,
+                                              .bound = last_gen,
+                                              .observed = slot->generation,
+                                              .index = slot->index,
+                                              .same_slot = slot->index == slot1->index};
+        } else {
+            ++vanished;
+        }
         c.reset();
-        if (!wait_until([&] { return !node.find_session_anchor(id0).has_value(); })) continue;
+        if (!wait_until([&] { return !node.find_session_anchor(id0).has_value(); })) {
+            ++no_departure;
+            continue;
+        }
         last_gen = node.retire_generation(a1);
     }
     std::printf("  %d connect/disconnect cycles; final generation=%u\n", cycles, last_gen);
+    // Printed only when something was skipped, so a green run stays one line — but when the
+    // count is short, WHICH gate dropped the cycles is on the record instead of inferred.
+    if (no_arrival + vanished + no_departure > 0)
+        std::printf("  skipped: %d never anchored, %d vanished under the sample, %d never left\n",
+                    no_arrival, vanished, no_departure);
     check(cycles >= 10, "enough cycles ran for the bound to mean something");
-    check(monotonic, "the generation never moved backwards across any recycle");
+    if (regression.has_value())
+        std::printf(
+            "  BROKEN AT CYCLE %d: generation=%u at slot index=%u (%s S1's slot %u), against a "
+            "bound of %u left by the previous completed retire\n",
+            regression->cycle, regression->observed, regression->index,
+            regression->same_slot ? "IS" : "is NOT", slot1->index, regression->bound);
+    check(!regression.has_value(), "the generation never moved backwards across any recycle");
     check(last_gen > gen_after_retire, "churn advanced the generation");
     check(node.vertex_slot_count() == slots_with_one_anchor,
           "the vertex map did NOT grow across the churn — anchors are bounded by max_peers");
