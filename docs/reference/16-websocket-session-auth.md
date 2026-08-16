@@ -118,6 +118,16 @@ name rather than an authenticated session identity. The authentication frame is 
 place to *capture* an identity because it is the first moment one is known; it is not the
 right place to decide the whole authorization model.
 
+A subject is **not** the same claim as a peer *name*, and the two are deliberately kept
+apart ([ADR-0082](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0082-auth-subject-and-peer-named-are-decoupled-claims-default-stays-false.md)):
+the subject answers *who wrote this*, while a listener's `peer_named` flag answers *where in
+the graph this peer appears*. A name is assigned locally by the transport at accept and
+attests nothing about the far end; only a subject bound by a check like the one above carries
+a claim worth authorizing against. They compose, and neither implies the other — so turn
+`peer_named` on when you must address, ACL or tear down an individual peer by name (and
+budget its per-peer session-anchor vertex), and read the subject when you need identity for
+an auth decision. `peer_named` stays **off** by default for exactly that reason.
+
 ## The deadline
 
 An unauthenticated session is a **new** kind of resource holder. Before the frame existed, a
