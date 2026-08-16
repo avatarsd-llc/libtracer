@@ -969,6 +969,12 @@ void test_for_each_vertex_concurrent_register() {
         }
     });
 
+    // Hold the walk phase until the writer has landed its first registration. Without this
+    // gate, 200 fast walk rounds can complete before the OS schedules the writer thread at
+    // all, and the "really did register concurrently" self-check below races the scheduler
+    // instead of pinning the interleaving it exists to prove (#1343).
+    while (written.load(std::memory_order_relaxed) == 0) std::this_thread::yield();
+
     int pre_seen = 0;
     bool ordered = true;
     for (int round = 0; round < 200; ++round) {
