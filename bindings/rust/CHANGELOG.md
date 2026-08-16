@@ -8,6 +8,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-08-16
+
 ### Changed
 
 - **A `PATH` (`0x06`) body is packed `[u8 len][utf8]` segment records

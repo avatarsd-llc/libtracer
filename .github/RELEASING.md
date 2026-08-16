@@ -113,6 +113,11 @@ CI-published registries, not unnecessary. CMake `FetchContent` is already covere
    before cutting that the release is the one the maintainer intends to carry it:
    consumers pin a range, so a break lands on them at the next bump. State every
    break in the release summary, not only in the CHANGELOG body.
+   ([`bindings/ros2/CHANGELOG.md`](../bindings/ros2/CHANGELOG.md) exists since
+   `v0.13.0` but is **not** a fifth gated package: `rmw_tracer` publishes to no
+   registry, so it is neither stamped by `sync-version.py` nor passed to
+   `gen_release_notes.py`, and it does not appear in the release body. It is a
+   repo-local record for a binding that is still being built out.)
 4. **CI is green on `main`** — all workflows, including `core-ci` (build + ctest +
    sanitizers + the `install-consume` packaging guard), `conformance` (3-core
    cross-match + diff-fuzz), `esp-idf`, `quic`, and `docs`.
@@ -183,7 +188,7 @@ CI-published registries, not unnecessary. CMake `FetchContent` is already covere
 - **This repo's standing rule:** a release is cut only when the maintainer
   explicitly says so. Reconciling the version markers (`tools/sync-version.py`) is
   **not** a release — only the signed `vX.Y.Z` tag is.
-- **Released so far:** `v0.3.0` (2026-07-08) through `v0.12.0` (2026-08-14).
+- **Released so far:** `v0.3.0` (2026-07-08) through `v0.13.0` (2026-08-16).
   `VERSION` reads the most recently shipped release, so the next cut bumps it.
   Do not take this list as authoritative —
   `git tag -l 'v*'` and `gh release list` are; it is here so a reader knows the

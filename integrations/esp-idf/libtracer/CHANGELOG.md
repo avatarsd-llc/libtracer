@@ -10,6 +10,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-08-16
+
 ### Changed
 
 - **BREAKING — `twai_link_t` follows the `can_link_t` seam's new two-phase lifecycle: the
