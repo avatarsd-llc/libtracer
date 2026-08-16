@@ -33,6 +33,7 @@ We use DCO rather than a CLA to keep the contribution barrier low. The maintaine
 4. CI must be green.
 5. For C/C++ changes, run `clang-format` (config in `.clang-format`).
 6. Public API changes require a note in the relevant `CHANGELOG.md`.
+7. **Never commit build output.** The `no-binaries` job fails any PR whose diff adds binary content — compiled artifacts, object files, static libraries, stray build trees. The one exception is a conformance vector (`tests/conformance/vectors/vN/<group>/<case>/input.bin`). Reproduce the check locally with `tools/check_no_binaries.py` (defaults to `origin/main...HEAD`); if it fires, delete the build directory and amend rather than adding an ignore rule.
 
 Cutting a release (version bump, tag, registry publishes) follows [RELEASING.md](RELEASING.md).
 
