@@ -77,10 +77,12 @@ constexpr int kChainDepth = 24;
  *         assigners multiply the chance that one of them is inside it when the flip lands. */
 constexpr int kAssignThreads = 3;
 /** @brief Covering sweeps the observer runs. Each one is a complete claim; the run stops
- *         early the moment a sweep double-delivers. */
+ *         early the moment a sweep double-delivers. This is a FLOOR, not a cap: a run that
+ *         retires it with the instrument still dead keeps sweeping (see the loop below). */
 constexpr int kSweeps = 20000;
-/** @brief Wall-clock ceiling. Expiry is not a failure — the sweeps are the budget — but it
- *         keeps a loaded CI runner from stalling the suite. */
+/** @brief Wall-clock ceiling. Expiry with a LIVE instrument is not a failure — the sweeps are
+ *         the budget — and it keeps a loaded CI runner from stalling the suite. Expiry with a
+ *         dead instrument is the one case the liveness guards below turn into a FAIL. */
 constexpr int kRunCeilingMs = 60000;
 
 using tr::testing::check;
@@ -134,13 +136,27 @@ void test_no_double_delivery_across_a_mode_flip() {
         std::chrono::steady_clock::now() + std::chrono::milliseconds(kRunCeilingMs);
     int worst = 0;
     int sweeps = 0;
-    for (; sweeps < kSweeps; ++sweeps) {
+    // The sweep count is a floor, not a bound. Retiring kSweeps proves nothing unless the
+    // instrument was LIVE for them — the leaf actually delivered and the flipper actually
+    // flipped — and on a loaded or single-core runner the observer can retire every sweep
+    // before the OS ever schedules the flipper at all (#1352). So keep sweeping past kSweeps
+    // while the instrument is dead, and let only the wall-clock ceiling end that wait; a
+    // deadline that expires with the instrument still dead falls through to the guards below,
+    // which are right to refuse to call such a run a pass.
+    for (;;) {
         g_hits.store(0, std::memory_order_relaxed);
         g.propagate(root);  // the only deliverer in this test
         const int hits = g_hits.load(std::memory_order_relaxed);
         if (hits > worst) worst = hits;
+        ++sweeps;
         if (worst > 1) break;  // the defect, observed — no reason to keep racing
+        const bool live = worst >= 1 && flips.load(std::memory_order_relaxed) > 0;
+        if (live && sweeps >= kSweeps) break;
         if ((sweeps & 0x3ff) == 0 && std::chrono::steady_clock::now() > deadline) break;
+        // Nothing has raced yet: hand the CPU over rather than burning the whole ceiling
+        // spinning the racer's own threads out of a single core. Once live this is skipped
+        // entirely, so the common-case run keeps its full-speed sweep budget.
+        if (!live) std::this_thread::yield();
     }
     stop.store(true, std::memory_order_relaxed);
     for (std::thread& m : markers) m.join();
