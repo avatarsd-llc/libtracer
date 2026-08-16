@@ -8,6 +8,7 @@
 #include <charconv>
 
 #include "libtracer/packed_path.hpp"
+#include "libtracer/path_element.hpp"
 #include "libtracer/tlv_emit.hpp"
 
 namespace tr::graph {
@@ -149,6 +150,25 @@ namespace {
     return static_cast<std::size_t>(h);
 }
 }  // namespace
+
+/**
+ * @brief RFC-0027 §6.1's origin-side cache — validate a minted spelling, then keep it.
+ *
+ * The walk is `path_element_census`, which is the same reader a forwarder uses, so the origin
+ * cannot come to a different conclusion about a body than the hop that wrote it. It lives here
+ * rather than in the header for the reason every L4 walk does: the census is init-time-shaped
+ * work off the canonical hot path, and inlining it into every translation unit that merely
+ * holds a `path_t` would price it into cores that never see a label.
+ */
+bool path_t::cache_labelled(std::span<const std::byte> body) {
+    if (binding_.bound) return false;  // RFC-0027 §11.2 — one compression per address
+    if (body.empty() || body.size() > kMaxPathBytes) return false;
+    const wire::path_element_census_t census = wire::path_element_census(body);
+    if (!census.well_formed || census.labels == 0) return false;
+    labels_.body.assign(body.begin(), body.end());
+    labels_.cached = true;
+    return true;
+}
 
 std::size_t path_key_hash_t::operator()(const path_key_t& k) const noexcept {
     return fnv1a_key(k.bytes());

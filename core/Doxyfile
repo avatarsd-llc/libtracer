@@ -58,6 +58,7 @@ INPUT                  = core/include/libtracer/config.hpp \
                          core/include/libtracer/tlv_emit.hpp \
                          core/include/libtracer/path_ref.hpp \
                          core/include/libtracer/path_label.hpp \
+                         core/include/libtracer/path_element.hpp \
                          core/include/libtracer/tracer.hpp \
                          core/include/libtracer/child_registry.hpp \
                          core/include/libtracer/op_resolve.hpp \

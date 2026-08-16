@@ -537,8 +537,8 @@ ANCHORS = [
     ('core/include/libtracer/path.hpp:34', 'inline constexpr std::size_t kMaxPathBytes = 1024;'),
     ('core/include/libtracer/path.hpp:36', 'inline constexpr std::size_t kMaxSegments = 255;'),
     ('core/include/libtracer/path.hpp:38', 'inline constexpr std::size_t kMaxFieldDepth = 8;'),
-    ('core/include/libtracer/path.hpp:252', 'static constexpr std::size_t kInlineBytes = 16;'),
-    ('core/include/libtracer/path.hpp:160', 'explicit path_t(std::string_view text);'),
+    ('core/include/libtracer/path.hpp:330', 'static constexpr std::size_t kInlineBytes = 16;'),
+    ('core/include/libtracer/path.hpp:191', 'explicit path_t(std::string_view text);'),
     # core/include/libtracer/receiver_slot.hpp
     ('core/include/libtracer/receiver_slot.hpp:143', 'frame.try_materialize(backend);'),
     # core/include/libtracer/rope.hpp
@@ -814,8 +814,8 @@ ANCHORS = [
     ('core/src/graph.cpp:1122',
      'vertex_t* graph_t::find_ptr(std::span<const std::byte> key) const {'),
     ('core/src/graph.cpp:2420', 'delivery_link.assign(split.link);'),
-    ('core/src/path.cpp:97', 'if (!valid_segment(seg)) return std::unexpected(status_t::INVALID_PATH);'),
-    ('core/src/path.cpp:118', 'if (step.empty()) return std::unexpected(status_t::INVALID_PATH);'),
+    ('core/src/path.cpp:98', 'if (!valid_segment(seg)) return std::unexpected(status_t::INVALID_PATH);'),
+    ('core/src/path.cpp:119', 'if (step.empty()) return std::unexpected(status_t::INVALID_PATH);'),
     ('core/src/route_handle.cpp:82', 't.ingress.push_back(ingress_entry_t{.label = label, .binding = std::move(binding)});'),
     ('core/src/route_handle.cpp:198', 't->egress.push_back(egress_entry_t{', 'bool route_handle_t::record_egress(std::string_view out_link, std::uint16_t label,'),
     ('core/src/route_handle.cpp:273', 't->egress.push_back(egress_entry_t{', 'std::pair<std::uint16_t, bool> route_handle_t::ensure_egress(std::string_view out_link,'),
@@ -833,9 +833,9 @@ ANCHORS = [
     ('tools/cortexm0_footprint.py:151', 'cxx_flags = ['),
     ('tools/cortexm0_footprint.py:158', '"-DLIBTRACER_NO_ATOMIC",'),
     ('tools/cortexm0_footprint.py:172', '"--specs=nano.specs",'),
-    ('core/tests/CMakeLists.txt:1542', 'add_executable(substrate_test_no_atomic'),
-    ('core/tests/CMakeLists.txt:1555', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
-    ('core/tests/CMakeLists.txt:1556', '    LIBTRACER_NO_ATOMIC'),
+    ('core/tests/CMakeLists.txt:1552', 'add_executable(substrate_test_no_atomic'),
+    ('core/tests/CMakeLists.txt:1565', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
+    ('core/tests/CMakeLists.txt:1566', '    LIBTRACER_NO_ATOMIC'),
     # The leading indent is load-bearing: the bare token also appears in the comment
     # three lines above the executable, and an anchor that matches both is not an anchor.
 
@@ -934,7 +934,7 @@ ANCHORS = [
      '* This is **opt-in construction only** — no seam defaults to it. `heap_backend()` remains'),
     ('core/include/libtracer/path.hpp:51',
      "* separates field levels, `[` / `]` delimit the grammar's index suffix (which sits"),
-    ('core/include/libtracer/path.hpp:231', 'inline path_t::path_t(std::string_view text) {'),
+    ('core/include/libtracer/path.hpp:309', 'inline path_t::path_t(std::string_view text) {'),
     ('core/include/libtracer/posix_endpoint.hpp:687',
      "/** @brief Visit the currently-OPEN peers' names, `p<slot>` (#426). */"),
     ('core/include/libtracer/tlv.hpp:62', 'PATH_REF = 0x14,'),
@@ -1026,7 +1026,7 @@ ANCHORS = [
      'graph.write(v, has_field ? field : field_path_t{}, value, inbound_link);'),
     ('core/src/op_resolve_walk.hpp:964',
      'const std::optional<vertex_handle_t> bound = graph.deref_vertex_slot(e.index, e.generation);'),
-    ('core/src/path.cpp:123',
+    ('core/src/path.cpp:124',
      'return std::unexpected(status_t::INVALID_PATH);',
      'if (p.field_.steps.size() > kMaxFieldDepth)'),
     ('core/src/posix_endpoint.cpp:714',

@@ -14,6 +14,48 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Added
+
+- **The RFC-0027 mixed-element codec and the origin-side label cache — `path_element.hpp`
+  (`wire::path_element_t`, `wire::path_element_kind_t`, `wire::path_element_at`,
+  `wire::path_element_cursor_t`, `wire::path_element_census`, `wire::emit_path_labelled`) and
+  `graph::path_label_cache_t` with `path_t::labelled` / `path_t::cache_labelled` /
+  `path_t::clear_labelled`** ([#1325](https://github.com/avatarsd-llc/libtracer/issues/1325)
+  car 3). Car 2 settled how ONE label element is spelled; this is the surface that reads and
+  writes a **mixed** packed `PATH` body, which RFC-0027 §5.2 makes the expected shape rather
+  than an edge case:
+  - **An element self-describes by its kind, never by its position** (§5.1). `path_element_at`
+    classifies the record where it stands as one of four answers, and
+    `path_element_cursor_t` is the `p += bytes` walk over them.
+  - **A foreign escape kind and a malformed label are DIFFERENT answers** (§12.5 erratum 1). A
+    kind this host does not own is `FOREIGN` — stepped over by its declared length, which is
+    the property a non-minting hop relies on — while a `kind = 0x16` record whose payload is
+    not exactly one label is `MALFORMED` and refuses the address (`tr::path::invalid`). Car 2's
+    `path_label_at` answers `nullopt` to both, correctly, because a hop reading one element
+    responds to both the same way; a hop reading a whole body does not, and folding the two
+    would let a length-only check read another kind's payload against the local table.
+  - **`emit_path_labelled` replaces a RUN of literal segments with one label element**
+    (amendment 6): one label covers a hop's whole local part, its entire mount run, so the
+    record is the same 7 bytes whether the run is one segment or five. The splice **replaces**
+    bytes and never appends (§6.1), and it refuses — appending nothing — an unmintable label,
+    an out-of-range run, a body that does not walk cleanly, or a run holding anything that is
+    already a compressed spelling (§11.2 in the codec).
+  - **`path_t` gains RFC-0027 §6.1's origin-side cache**: the labelled spelling a fully-minted
+    reply came back with, beside the RFC-0024 binding slot it already carried. It is
+    **opaque to the application and normatively so (§9)** — filled and validated by the net
+    tier, never appearing in a host-API call, a path the application constructs, or a local
+    resolution. `key()` keeps answering the canonical bytes whatever is cached, because a
+    labelled `PATH` is not a `path_lookup_key`. `cache_labelled` refuses a body with no label
+    element, a malformed one, an oversize one, or a path that is already `PATH_REF`-bound —
+    and `bind` refuses symmetrically while a labelled spelling is cached, so §11.2's
+    one-compression-per-address rule is structural rather than remembered.
+
+  **Nothing mints.** §6.2's trigger, the reply-leg rewrite, the table deref and the
+  `NOT_FOUND` answer are car 4. No wire surface moves: the spelling is car 2's, unchanged, and
+  no conformance vector is added or altered. Measured cost of the cache slot on the Cortex-M0
+  required-modules sentinel: **+28 B flash, +0 B RAM** — an unlabelled path holds one empty
+  vector, allocates nothing, and nothing on the canonical hot path reads it.
+
 ## [0.13.0] — 2026-08-16
 
 ### Added
