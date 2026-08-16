@@ -694,6 +694,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Removed
 
+- **BREAKING (source) — `net::iov_table_t`'s `mem::block_source_t& src` argument no longer
+  defaults to `mem::heap_source()`; the overflow source is now MANDATORY**
+  ([#873](https://github.com/avatarsd-llc/libtracer/issues/873) family 1). #1287 wired all
+  three socket gather sites (`transport_tcp.cpp`'s `prefixed_iov_t`, `transport_udp.cpp`,
+  `transport_ws.cpp` x2) onto the sending link's `transport_t::egress_source()`, which left
+  the default argument as the last un-injected path in the family — an API-shaped invitation
+  to draw the peer-sized overflow block off the process-wide heap and quietly escape the
+  bound a deployer injected. Census: ZERO in-tree call sites relied on it (the one
+  construction that did, `bench_failable_census`'s `iov_table_overflow_gather` arm, measures
+  the heap draw on purpose and now names `tr::mem::heap_source()` explicitly). **No runtime
+  change** — the emitted code for every injecting caller is identical; what changes is that
+  omitting the source is now a compile error instead of a silent global-heap path.
+  Out-of-tree callers that omitted the argument pass `mem::heap_source()` to restore the old
+  behaviour, or better, the store whose size is meant to bound their egress.
+
 - **`graph_t::has_first_level_child`**
   ([#1303](https://github.com/avatarsd-llc/libtracer/issues/1303); added under
   [#373](https://github.com/avatarsd-llc/libtracer/issues/373)). The placeholder-inclusive

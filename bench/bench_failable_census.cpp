@@ -637,7 +637,9 @@ int run_guard() {
         // fan-out into slot_server_t::broadcast_iov (it was two sites before that).
         {"iov_table_overflow_gather", expect_t::GUARDED,
          [] {
-             tr::net::iov_table_t<::iovec> table(inline_vec);
+             // The source is MANDATORY since #873 family 1 removed the `heap_source()`
+             // default; this arm measures the process-heap draw, so it names it explicitly.
+             tr::net::iov_table_t<::iovec> table(inline_vec, tr::mem::heap_source());
              ::iovec* v = table.acquire(inline_vec.size() + 8);  // past the inline bound
              asm volatile("" : : "r"(v) : "memory");
          }},

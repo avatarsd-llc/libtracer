@@ -84,10 +84,16 @@ class iov_table_t {
      * @brief A table over the caller's stack array @p inline_vec, overflowing into @p src.
      *
      * @param inline_vec The caller's stack entry array (the no-allocation fast path).
-     * @param src        The failable seam the overflow block is drawn from.
+     * @param src        The failable seam the overflow block is drawn from. MANDATORY
+     *                   (#873 family 1): there is no default, so a caller that injects
+     *                   nothing is a COMPILE ERROR rather than a silent draw on the
+     *                   process-wide `%mem::heap_source()`. Every socket transport passes
+     *                   its own `transport_t::egress_source()`, which is what makes the
+     *                   store's size the node's egress bound; a caller that genuinely
+     *                   wants the process heap must now say `mem::heap_source()` out loud.
+     *                   Must outlive the table.
      */
-    explicit iov_table_t(std::span<Entry> inline_vec,
-                         mem::block_source_t& src = mem::heap_source()) noexcept
+    explicit iov_table_t(std::span<Entry> inline_vec, mem::block_source_t& src) noexcept
         : inline_(inline_vec), overflow_(src) {}
 
     /**
