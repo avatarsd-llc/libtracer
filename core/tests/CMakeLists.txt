@@ -139,6 +139,16 @@ if(LIBTRACER_NET_PLANE)
     add_test(NAME path_label COMMAND path_label_test)
 endif()
 
+# RFC-0027 car 3 — the MIXED-element codec (path_element.hpp) and the origin-side label
+# cache on path_t (§6.1). Deliberately NOT net-plane-gated: both live at L2/L4 and neither
+# links a net-plane TU, so a core built without the transport plane still gets the layering
+# checks of §9 — which is the arm most likely to erode, since it is a rule about what must
+# NOT appear on a surface.
+add_executable(path_label_codec_test path_label_codec_test.cpp)
+target_link_libraries(path_label_codec_test PRIVATE libtracer)
+libtracer_test_warnings(path_label_codec_test)
+add_test(NAME path_label_codec COMMAND path_label_codec_test)
+
 # The wire grammar's total-encoded-size bound (grammar.hpp, #921) — pinned at
 # 32-bit-`size_t` width, because the truncation it closes is unreachable at the
 # host's 64-bit width and a host-only vector would be a vacuous guard.
