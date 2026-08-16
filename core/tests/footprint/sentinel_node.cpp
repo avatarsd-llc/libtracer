@@ -32,6 +32,12 @@
 
 #include "libtracer/frame.hpp"
 #include "libtracer/mem_pool.hpp"
+// The packed PATH grammar (RFC-0018). Header-only and included DIRECTLY: the three
+// headers that pull it in transitively — `key_view.hpp`, `child_registry.hpp`,
+// `fwd_frame_view.hpp` — are graph and net-plane surfaces this P0 fixture deliberately
+// does not link, so nothing else in the required-module set declares
+// `wire::emit_path_segment`. It adds no translation unit to `REQUIRED_MODULES`.
+#include "libtracer/packed_path.hpp"
 #include "libtracer/path.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/tlv_arena.hpp"
