@@ -25,6 +25,7 @@
  * materialized span, which the rope tier had to build regardless.
  */
 
+#include <array>
 #include <optional>
 #include <utility>
 
@@ -278,9 +279,13 @@ class view_node {
 
 }  // namespace
 
-result_t<rope_t> op_resolver_t::resolve(const wire::tlv_view_t& fwd, std::string_view inbound_link,
+result_t<rope_t> op_resolver_t::resolve(const wire::tlv_view_t& fwd, const inbound_ref_t& inbound,
                                         const view_t* frame_view,
                                         const wire::path_ref_element_t* dst_label_target) {
+    // The terminus subject derivation, identical to the arena tier's — one helper, so the
+    // two tiers cannot answer one logical request under two different principals.
+    std::array<char, net::kPeerNameChars> subject_scratch{};
+    const std::string_view subject = subject_for(inbound, subject_scratch);
     // The owning rope-tier instantiation: the lazy view root read through the
     // node-reader concept. Same walk as the arena tier — nothing here names a
     // decode representation (ADR-0053 §7).
@@ -294,7 +299,7 @@ result_t<rope_t> op_resolver_t::resolve(const wire::tlv_view_t& fwd, std::string
     // `egress` is the reply head + mint seam (#795, ADR-0074), separate from the flatten seam
     // the walk's nodes carry: it is passed straight to `resolve_node` because only the reply
     // builders draw from it, never a node's `wire()`/`body()`. Default heap when un-injected.
-    return resolve_node(graph_, root, inbound_link, frame_view, root.backend(),
+    return resolve_node(graph_, root, inbound.link, subject, frame_view, root.backend(),
                         egress_ != nullptr ? *egress_ : mem::heap_backend(), reverse_ref_fn_,
                         reverse_ref_ctx_, path_label_fn_, path_label_ctx_, dst_label_target);
 }

@@ -199,7 +199,7 @@ for (...) g.write(v, p.field(), setpoint_tlv);           // hot loop — zero st
 ## What a read hands back
 
 `read` and `await` return `result_t<value_ref_t>`, not `result_t<rope_t>`
-(`core/include/libtracer/graph.hpp:1077,1164` by handle, `:1583,1589` by path;
+(`core/include/libtracer/graph.hpp:1077,1164` by handle, `:1594,1600` by path;
 `value_ref_t` at `core/include/libtracer/vertex.hpp:237`). A `value_ref_t` is an **owning
 reference** to the value the vertex published: the LKV slot holds it as a
 `std::shared_ptr<const rope_t>`, so handing that reference back costs a refcount clone of
@@ -374,7 +374,7 @@ the seam: clearing a sink does not stop a dispatch already in flight.
 | `set_identity(kind, key)` / `clear_identity()` | installs the node-scoped record `read <vertex>:identity` serves, byte-identical from every vertex | absent — `:identity` answers `SCHEMA_NOT_FOUND` |
 | `configure_remote_delivery_sink(fn, ctx)` | where the producer fan-out hands each **remote** subscriber's delivery | **null — remote subscriber slots are stored but never deliver** |
 | `configure_subject_resolver(fn, ctx)` | maps a caller context to a subject token, enabling ACL evaluation | **none — enforcement is entirely off; every operation is allowed** |
-| `subscribe_wire(v, source, route, link)` | the inbound `:subscribers[]` append: one parse, the SUBSCRIBE gate, the slot append, the durability latch the subscriber requested | — (called by the FWD resolver, not a default) |
+| `subscribe_wire(v, source, route, link, reverse, caller)` | the inbound `:subscribers[]` append: one parse, the SUBSCRIBE gate, the slot append, the durability latch the subscriber requested. `link` is WHERE the edge delivers; `caller` is WHO subscribed (empty ⇒ the same as `link`, every pre-#375-Part-2 caller) | — (called by the FWD resolver, not a default) |
 
 The two defaults in bold are load-bearing and are the two failure modes a node wired by
 hand hits first. A graph with no remote-delivery sink accepts remote subscribes and

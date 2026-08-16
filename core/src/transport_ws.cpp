@@ -434,6 +434,13 @@ bool transport_ws_server::drain_frames(session_t& s) {
                 // fast path on the span tier: borrowed payload, no owning copy.
                 const bool to_peer = peer_named_;
                 const bool want_rope = to_peer ? peer_rx_.has_rope() : rx_.has_rope();
+                // The FLAT tier carries no per-frame tag by construction, so the WHO the
+                // subject seam needs is stamped here instead (#375 Part 2, ADR-0082): the
+                // session's handle, on the poll thread, immediately before the delivery that
+                // consumes it. The peer-named tier passes the same handle as an argument, so
+                // this is redundant there and left unconditional rather than branched — one
+                // 8-byte store beats a predictable branch it would only sometimes skip.
+                delivering_ = s.handle;
                 if (frame.op == ws::opcode_t::BINARY && frame.fin && !s.assembler.assembling &&
                     !want_rope) {
                     const std::span<const std::byte> payload(frame.payload);

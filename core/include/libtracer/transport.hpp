@@ -26,6 +26,7 @@
 
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
+#include "libtracer/peer_handle.hpp"
 #include "libtracer/receiver_slot.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/view.hpp"
@@ -37,73 +38,6 @@ namespace tr::net {
 using peer_id_t = std::array<std::byte, 16>;
 
 class transport_t;
-
-/**
- * @brief An opaque per-peer LINK HANDLE — the identity the peer-receiver seam carries
- *        (#1294), minted once when a peer becomes audible and valid until it departs.
- *
- * The seam used to re-supply a peer NAME string on every inbound frame, which forced every
- * consumer that wanted a per-peer identity to re-derive one from that string per frame — a
- * hash and a map find on the subscribe path (#1266), and nothing at all to hang a per-peer
- * auth subject off (#375 Part 2). This handle is that identity, handed down instead.
- *
- * It is `(index, generation)`, the same node-local-index-plus-validate-on-use-stamp primitive
- * the in-tree edge binding (#830), the RFC-0024 vref and the ESP link's session ref already
- * mint — a 8-byte trivially-copyable POD, cheap to copy per frame and cheap to key a table by.
- * The two fields are OPAQUE to a consumer: only the minting link knows what an index means,
- * and a consumer may only compare handles, hash them, and hand them back.
- *
- * **It is not a session reference.** A session ref (`httpd_ws_link_t::session_ref_t`,
- * #1146/#1262) is ONE SUPPLIER of a handle, not the handle itself: an announce-census CAN
- * peer has no session at all and still needs a stable link key, so the handle is the general
- * concept and the session ref produces one.
- *
- * **It does not carry the subject.** A per-peer auth subject is RESOLVED from the handle at
- * ACL-check time rather than carried in it, which is what keeps the per-frame POD minimal
- * (#1294 ruling 2).
- *
- * **It is never absent.** Every handle this seam hands down is `valid()`: a link with no
- * meaningful per-peer identity mints `kSolePeerHandle` once at link-up and hands that down
- * for every frame, so no consumer needs a "handle absent" branch (#1294 ruling 3).
- */
-struct peer_handle_t {
-    /** @brief The minting link's own peer INDEX — meaningless to anyone else. */
-    std::uint32_t index = 0;
-    /** @brief The validate-on-use stamp; `0` is reserved to mean "no peer". */
-    std::uint32_t generation = 0;
-
-    /** @brief True iff this handle names a peer (a zero generation never does). */
-    [[nodiscard]] constexpr bool valid() const noexcept { return generation != 0; }
-
-    /** @brief The handle's whole identity as one integer — the key an interning
-     *         consumer (#1266) hashes, so it never has to know the field split. */
-    [[nodiscard]] constexpr std::uint64_t bits() const noexcept {
-        return (static_cast<std::uint64_t>(generation) << 32) | index;
-    }
-
-    /** @brief Handles compare by identity — same index AND same generation. */
-    [[nodiscard]] friend constexpr bool operator==(peer_handle_t, peer_handle_t) noexcept = default;
-};
-
-static_assert(sizeof(peer_handle_t) == 8, "the per-frame peer handle stays an 8-byte POD");
-static_assert(std::is_trivially_copyable_v<peer_handle_t>);
-
-/**
- * @brief The handle a link with no meaningful per-peer identity mints at link-up (#1294
- *        ruling 3) — one constant peer, valid for the link's whole life.
- *
- * A point-to-point kind exposing the bus facet for one peer, and a test double that carries
- * exactly one far side, hand this down rather than an invalid handle: the seam is UNIVERSAL,
- * so the "no peer identity here" case costs one constant at link-up instead of a branch in
- * every consumer.
- */
-inline constexpr peer_handle_t kSolePeerHandle{0, 1};
-
-/**
- * @brief Scratch big enough for any peer NAME a bus link resolves (@ref
- *        bus_link_t::peer_name) — `p<slot>` / `n<node>` are both far inside it.
- */
-inline constexpr std::size_t kPeerNameChars = 32;
 
 /**
  * @brief The optional multi-peer (bus) capability of a transport link (ADR-0044).
@@ -697,6 +631,57 @@ class transport_t {
      * (one target is an rv32 core without the A extension).
      */
     [[nodiscard]] virtual bool link_up() const noexcept { return true; }
+
+    /**
+     * @brief The peer HANDLE of the frame this link is delivering RIGHT NOW — the WHO seam
+     *        (#375 Part 2), answerable at either setting of `peer_named` (ADR-0082).
+     *
+     * The bus seam already tags each frame with its peer, so a peer-named link's consumers
+     * never need this. A FLAT link has no such seam by design — one routing identity for
+     * every peer it carries — and ADR-0082 is explicit that the two claims are independent:
+     * a subject must be reachable at `peer_named=false` or the decouple is not real. This is
+     * the door that makes it reachable WITHOUT the addressing facet: the link states which
+     * peer the in-flight frame came from, and nothing about where that peer sits in the graph.
+     *
+     * @warning Valid ONLY for the duration of a receive callback, read on the thread that is
+     *          running it. Outside one the answer is unspecified (implementations return the
+     *          last delivery's handle or a default one); it is never a query about link state.
+     * @return The in-flight frame's peer, or a default-constructed (not
+     *         @ref peer_handle_t::valid) handle when this kind has no per-peer identity —
+     *         the DEFAULT, so a dialer, a datagram kind and every custom transport keep
+     *         today's behaviour: the subject falls back to the inbound link's own name.
+     */
+    [[nodiscard]] virtual peer_handle_t inbound_peer() const noexcept { return {}; }
+
+    /**
+     * @brief The SUBJECT token of the peer @p peer names — *who wrote this*, never *where*
+     *        (ADR-0082 §Decision 1).
+     *
+     * Called at the resolve TERMINUS, once per locally-terminating operation, to derive the
+     * ACL caller context (ADR-0018's pluggable subject token) and the `graph::write_ctx_t`
+     * a HANDLER sees. It is deliberately NOT `bus_link_t::peer_name`: that is an ADDRESSING
+     * answer gated on the bus facet, and this must answer on a FLAT link too. A kind whose
+     * two answers coincide — the stream servers, whose subject is the same `p<slot>` session
+     * token their peer name is — implements both from one place.
+     *
+     * @warning The token attests to NOTHING about the far end on its own: it is minted by
+     *          this node's own transport at accept, exactly as ADR-0082 §Guidance warns. An
+     *          authenticated subject is the identity-layer's job (ADR-0045); this is the
+     *          per-writer discriminator the ACL evaluates until one exists.
+     * @param peer    The handle to resolve — typically @ref inbound_peer's answer.
+     * @param scratch Caller storage the token may be formatted into, at least
+     *                `kPeerNameChars` bytes. The returned view points either into
+     *                @p scratch or at storage that outlives the call.
+     * @retval {} @p peer is not @ref peer_handle_t::valid, or this kind mints no per-peer
+     *            subject — the DEFAULT, on which the terminus falls back to the inbound
+     *            link's own name, i.e. exactly the pre-#375 caller context.
+     */
+    [[nodiscard]] virtual std::string_view peer_subject(peer_handle_t peer,
+                                                        std::span<char> scratch) const {
+        (void)peer;
+        (void)scratch;
+        return {};
+    }
 
     /** @brief The link-down notifier fn: (ctx) — the link carries its own identity via ctx. */
     using down_fn_t = void (*)(void* ctx);

@@ -16,6 +16,70 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`<libtracer/peer_handle.hpp>` — `net::peer_handle_t`, `net::kSolePeerHandle` and
+  `net::kPeerNameChars` now live in a header of their own**
+  ([#375](https://github.com/avatarsd-llc/libtracer/issues/375) Part 2). Pure relocation out of
+  `transport.hpp`, which includes it and re-exports all three, so **no existing spelling
+  changes**. The split exists because the handle is now carried THROUGH the L4 resolve seam and
+  `tr::graph` may not include the transport plane's header (core/STYLE.md — dependencies point
+  up the layers only). The new header pulls in `<cstdint>` and `<type_traits>` and nothing else.
+
+- **`transport_t::inbound_peer()` and `transport_t::peer_subject()` — the WHO seam, answerable
+  at either setting of `peer_named`** ([#375](https://github.com/avatarsd-llc/libtracer/issues/375)
+  Part 2, ruled by [ADR-0082](../docs/adr/0082-auth-subject-and-peer-named-are-decoupled-claims-default-stays-false.md)).
+  Two new virtuals, both defaulting to "this kind has no per-peer identity", so every existing
+  transport — in-tree or out — compiles and behaves exactly as before. `inbound_peer` names the
+  peer whose frame the link is delivering right now (valid only inside a receive callback);
+  `peer_subject` resolves a handle to the ACL subject token that peer writes under. They are on
+  `transport_t` and NOT on `bus_link_t` deliberately: `bus_link_t::peer_name` is an ADDRESSING
+  answer that a FLAT listener does not expose, and ADR-0082 rules the subject a separate claim
+  that must be reachable at `peer_named=false`. `slot_server_t` (the tcp/ws listeners)
+  implements both from its existing `p<slot>` session tag.
+
+- **`graph::inbound_ref_t` and `op_resolver_t::on_peer_subject` — the resolve seam carries the
+  peer HANDLE, and the subject is derived from it at the terminus**
+  ([#375](https://github.com/avatarsd-llc/libtracer/issues/375) Part 2 fused with
+  [#1266](https://github.com/avatarsd-llc/libtracer/issues/1266)). `inbound_ref_t` is the
+  request's inbound identity as TWO claims — `link` (where it arrived; the return route) and
+  `peer` (who sent it; the `peer_handle_t` minted at accept, #1294) — plus an opaque `origin`
+  token the subject supplier reads back. `on_peer_subject` is the injected `{fn, ctx}` derivation
+  (the ADR-0047 shape `on_reverse_ref` and `on_path_label` already use); `fwd_router_t` installs
+  one that forwards to `transport_t::peer_subject`. With no supplier, no valid handle, or a
+  supplier that declines, the subject IS `link` — byte for byte the caller context the resolver
+  used before.
+
+### Changed
+
+- **`op_resolver_t::resolve`'s second parameter is a `graph::inbound_ref_t`, not a
+  `std::string_view`** ([#375](https://github.com/avatarsd-llc/libtracer/issues/375) Part 2).
+  Source-compatible for every existing call: `inbound_ref_t` is implicitly constructible from
+  anything a `std::string_view` is, so `resolve(fwd, "up")` and `resolve(fwd, name)` keep
+  compiling and keep meaning what they meant. A caller that took the function's ADDRESS, or
+  spelled the parameter type, must update.
+
+- **`graph_t::subscribe_wire` takes a sixth argument, `std::string caller`** (defaulted, so no
+  existing call changes). It is the SUBJECT the admission is gated under and the fan-in context
+  every later delivery re-gates under — *who subscribed*, as against `link`'s *where to
+  deliver*. EMPTY means "the same as `link`", which is what this door did before the two claims
+  were separated.
+
+- **BEHAVIOUR — a peer on a link that mints a per-peer subject is now authorized AS THAT PEER,
+  at either setting of `peer_named`** ([#375](https://github.com/avatarsd-llc/libtracer/issues/375)
+  Part 2). On the tcp/ws listeners this is a real change at `peer_named=false`: the ACL caller
+  context, the `write_ctx_t::subject` a HANDLER sees, and a wire subscription's stored fan-in
+  context go from the shared LINK name (e.g. `up`) to the writer's own session token (`p0`,
+  `p1`, …). **An ACE that named a FLAT listener's link in order to grant every peer on it stops
+  matching** — re-spell it as the wildcard subject, or as one ACE per peer. This is the
+  conflation #375 was opened about: at `peer_named=false` every writer previously authenticated
+  as the wire it arrived on. `peer_named`'s own default is UNCHANGED at `false` (ADR-0082 §2)
+  and no addressing behaviour moves — the subject is derived from the frame's `peer_handle_t`,
+  not from the name it arrived under. Every other kind (dialers, UDP, CAN, loopback, custom
+  transports) mints no per-peer subject and is byte-identical to before. The label-switched
+  `COMPACT` delivery derives the SAME subject as the full-route `FWD{WRITE}`, so the two
+  spellings of one write cannot be gated under two different principals.
+
+### Added
+
 - **The RFC-0027 TERMINUS deref — a fourth parameter on both `graph::op_resolver_t::resolve`
   overloads, `const wire::path_ref_element_t* dst_label_target`**
   ([#1363](https://github.com/avatarsd-llc/libtracer/issues/1363)). Defaulted to `nullptr`, so
@@ -774,7 +838,7 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   by ruling — a permanent dual overload costs a second ~32 B `std::function` in every
   HANDLER-bearing extension block for a signature nobody would keep. The new
   `write_ctx_t{subject}` carries the writer's resolved subject token — the ACL model's
-  `subject → rights` principal (ADR-0018) and the RFC-0010 subject-table integration point.
+  `subject → rights` principal (ADR-0018) and the ACL subject-table integration point.
   Before this, the ACL gate resolved the caller one stack frame before `on_write` and threw it
   away, so an application handler could not see WHO wrote; now it is handed the identical
   value the gate used, so a handler and the `:acl` that admitted the write cannot disagree.

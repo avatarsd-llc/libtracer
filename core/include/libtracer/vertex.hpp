@@ -272,9 +272,17 @@ class value_ref_t {
  * seam that needs to know WHO wrote. The graph already resolved that identity one stack
  * frame earlier — the ACL gate (`graph_t::acl_allows`) runs immediately before the handler,
  * on the same value — so this type hands the handler the datum the gate just used rather
- * than making it re-derive one. It is the RFC-0010 ACL subject-table integration point: a
- * handler that keys its own policy off @ref subject keys it off exactly what the vertex's
- * `:acl` was evaluated against.
+ * than making it re-derive one. It is the ACL subject-table integration point (ADR-0018 —
+ * authorization over a pluggable subject token; ADR-0082 for why the subject is a claim of
+ * its own and not a spelling of `peer_named`): a handler that keys its own policy off
+ * @ref subject keys it off exactly what the vertex's `:acl` was evaluated against.
+ *
+ * @note This sentence used to cite **RFC-0010**, which is the wrong document — RFC-0010 is
+ *       *owner-writable application property fields* (the field descriptor table, the
+ *       reserved `settings.app` namespace and owner-defined `:schema`) and says nothing
+ *       about subjects or access control. The subject-token model is ADR-0018's; the
+ *       decoupling of that token from peer addressing is ADR-0082's, which itself points
+ *       back at this comment as the integration point it feeds. Corrected with #375 Part 2.
  *
  * @warning LIFETIME — @ref subject is BORROWED for the duration of the call, the SAME
  *          contract the `rope_t&` alongside it carries: COPY IF RETAINED. It views bytes

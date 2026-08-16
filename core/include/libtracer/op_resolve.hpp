@@ -26,14 +26,17 @@
 #pragma once
 
 #include <chrono>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <span>
 #include <string_view>
+#include <type_traits>
 
 #include "libtracer/graph.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/path_ref.hpp"
+#include "libtracer/peer_handle.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/status.hpp"
 #include "libtracer/tlv_arena.hpp"
@@ -81,6 +84,71 @@ enum class reply_kind_t : std::uint8_t {
 
 /** @brief Default AWAIT deadline when a FWD carries no `await_timeout` child. */
 inline constexpr std::chrono::nanoseconds kDefaultAwaitTimeout = std::chrono::seconds(1);
+
+/**
+ * @brief The inbound identity of a resolved operation: WHERE it arrived and WHO sent it
+ *        (#375 Part 2 / #1266, fused — the 2026-08-16 ruling on #375).
+ *
+ * Two claims, and ADR-0082 is the reason they are two fields rather than one string:
+ *
+ *  - @ref link is ADDRESSING. It is this node's NAME for the link (or bus peer) the request
+ *    arrived over, and it is what a remote subscription's deliveries route back through. It
+ *    has always been the resolver's `inbound_link` and its meaning is unchanged.
+ *  - @ref peer is IDENTITY. It is the opaque per-peer handle the transport minted at accept
+ *    (#1294) and the peer-receiver seam tags each frame with — eight bytes, register-passed,
+ *    carried instead of re-supplying a name string per frame. The operation's ACL SUBJECT is
+ *    derived FROM it, at the terminus, through @ref op_resolver_t::on_peer_subject.
+ *
+ * Before the fusion these were the same `std::string_view`, which is exactly what made a
+ * per-writer subject unreachable at `peer_named=false`: one FLAT link has one name for every
+ * peer on it. Splitting them is what lets the subject differ per writer while the return
+ * route stays the link's.
+ *
+ * The converting constructor from a `std::string_view` is deliberate and load-bearing for
+ * compatibility: `resolve(fwd, "up")` still means what it always did — no handle, so the
+ * subject IS the link name, byte for byte the pre-fusion behaviour.
+ */
+struct inbound_ref_t {
+    /** @brief This node's NAME for the link the request arrived on; empty ⇒ LOCAL
+     *         resolution (no remote-subscriber binding, the trusted local ACL door). */
+    std::string_view link;
+    /** @brief The interned per-peer identity of the writer (`tr::net::peer_handle_t`,
+     *         #1294). Not `valid()` ⇒ this kind supplied none, and the subject falls back
+     *         to @ref link. */
+    net::peer_handle_t peer;
+    /**
+     * @brief An OPAQUE token the subject supplier interprets — never dereferenced here.
+     *
+     * A handle is meaningful only to the link that minted it, so resolving one to a subject
+     * needs to know WHICH link. The router passes its own per-child receive context through
+     * this field and reads it back inside its supplier; every other caller leaves it null.
+     * It is a `const void*` because `tr::graph` is L4 and may not name a transport type
+     * (core/STYLE.md — dependencies point up the layers only).
+     */
+    const void* origin = nullptr;
+
+    /** @brief A resolve with no peer identity: the subject is the link name itself. */
+    constexpr inbound_ref_t() noexcept = default;
+    /**
+     * @brief Implicit from a bare link NAME — the pre-#375-Part-2 spelling, unchanged.
+     *
+     * Templated over anything a `std::string_view` is constructible from, rather than taking
+     * one directly, because a `resolve(fwd, "up")` would otherwise need TWO user-defined
+     * conversions (`const char[3]` → `string_view` → here) and stop compiling. The point of
+     * the implicit door is that no existing caller has to change; a door every literal misses
+     * is not that door.
+     */
+    template <class S>
+        requires std::constructible_from<std::string_view, const S&> &&
+                 (!std::same_as<std::remove_cvref_t<S>, inbound_ref_t>)
+    constexpr inbound_ref_t(const S& inbound_link) noexcept  // NOLINT(*-explicit-*)
+        : link(inbound_link) {}
+    /** @brief The full form the router builds: a link name, its frame's peer, and the
+     *         opaque token its subject supplier resolves that peer against. */
+    constexpr inbound_ref_t(std::string_view inbound_link, net::peer_handle_t inbound_peer,
+                            const void* supplier_origin) noexcept
+        : link(inbound_link), peer(inbound_peer), origin(supplier_origin) {}
+};
 
 /**
  * @brief Resolves an arena-decoded FWD against a local graph and builds the FWD{REPLY} rope.
@@ -167,18 +235,22 @@ class op_resolver_t {
      * missing the required `op`/`dst`/`src` children) that no reply can describe,
      * and for a REPLY frame (which is routed, not resolved, here).
      *
-     * A non-empty @p inbound_link makes an inbound `:subscribers[]` WRITE bind a
+     * A non-empty `inbound.link` makes an inbound `:subscribers[]` WRITE bind a
      * REMOTE subscriber (#136): the slot retains this request's accumulated return
-     * route (`src`, copied once — trailer-sliced) and @p inbound_link, so the
+     * route (`src`, copied once — trailer-sliced) and `inbound.link`, so the
      * producer fan-out delivers a `FWD{WRITE}` / auto-promoted `COMPACT` back over
-     * that link (RFC-0004 §D/§E.1). An empty @p inbound_link is the local-only
+     * that link (RFC-0004 §D/§E.1). An empty `inbound.link` is the local-only
      * field-write — so `fwd_router_t`, which knows the link, passes it; a bare
      * local resolve does not.
      *
-     * @p inbound_link is also the operation's ACL caller context (#81, ADR-0018):
-     * every graph call the terminus makes passes it through, so with a subject
-     * resolver installed a denied op replies `kind=ERROR` with
-     * `STATUS{ERROR{VALUE tr::access::denied}}` (0x0050).
+     * The operation's ACL caller context (#81, ADR-0018) is the SUBJECT, which is
+     * derived HERE, at the terminus, and threaded through every graph call the walk
+     * makes — so with a subject resolver installed a denied op replies `kind=ERROR`
+     * with `STATUS{ERROR{VALUE tr::access::denied}}` (0x0050). The derivation is
+     * `inbound.peer` through the installed supplier (@ref on_peer_subject), falling
+     * back to `inbound.link` when there is no valid handle, no supplier, or the
+     * supplier declines — which is every caller that passes a bare link name, and is
+     * byte for byte what the resolver did before the two claims were split.
      *
      * The arena (and the frame it borrows) only needs to outlive this call: every
      * span the reply retains is copied once to its owner (ADR-0041 §2) — or, on an
@@ -197,8 +269,12 @@ class op_resolver_t {
      * its subscription-scoped one-copy behavior.
      *
      * @param fwd          An arena-decoded request FWD (from `wire::decode_into`).
-     * @param inbound_link This node's NAME for the link the request arrived on
-     *                     (empty ⇒ local resolution, no remote-subscriber binding).
+     * @param inbound      WHERE the request arrived and WHO sent it (@ref inbound_ref_t) —
+     *                     implicitly constructible from a bare link NAME, which is the
+     *                     pre-#375-Part-2 spelling and behaves identically. An empty
+     *                     `inbound.link` is a local resolution (no remote-subscriber
+     *                     binding); a valid `inbound.peer` is what the installed subject
+     *                     supplier (@ref on_peer_subject) derives the ACL subject from.
      * @param frame_view   The owning frame view when the link delivers views
      *                     (ADR-0042); nullptr on the borrowed-span path.
      * @param dst_label_target **RFC-0027 §7.2 at a terminus** — the vertex a LABELLED `dst`
@@ -237,7 +313,7 @@ class op_resolver_t {
      *         or a `status_t` on a malformed/non-request frame.
      */
     [[nodiscard]] result_t<view::rope_t> resolve(
-        const wire::tlv_arena_t& fwd, std::string_view inbound_link = {},
+        const wire::tlv_arena_t& fwd, const inbound_ref_t& inbound = {},
         const view::view_t* frame_view = nullptr,
         const wire::path_ref_element_t* dst_label_target = nullptr);
 
@@ -254,8 +330,8 @@ class op_resolver_t {
      * same logical request (the differential oracle in `op_resolve_view_test`).
      *
      * @param fwd          A rope-backed request FWD (`wire::tlv_view_t::over`).
-     * @param inbound_link This node's NAME for the link the request arrived on
-     *                     (empty ⇒ local resolution, no remote-subscriber binding).
+     * @param inbound      WHERE the request arrived and WHO sent it, exactly as the arena
+     *                     overload documents (@ref inbound_ref_t).
      * @param frame_view   Reserved for the ADR-0042 owning-store seam; the rope
      *                     tier stores its one ownership copy, so pass `nullptr`.
      * @param dst_label_target The RFC-0027 §7.2 labelled-`dst` resolution, with exactly the
@@ -268,7 +344,7 @@ class op_resolver_t {
      *         malformed/non-request frame.
      */
     [[nodiscard]] result_t<view::rope_t> resolve(
-        const wire::tlv_view_t& fwd, std::string_view inbound_link = {},
+        const wire::tlv_view_t& fwd, const inbound_ref_t& inbound = {},
         const view::view_t* frame_view = nullptr,
         const wire::path_ref_element_t* dst_label_target = nullptr);
 
@@ -291,6 +367,44 @@ class op_resolver_t {
     void on_reverse_ref(reverse_ref_fn_t fn, void* ctx) noexcept {
         reverse_ref_fn_ = fn;
         reverse_ref_ctx_ = ctx;
+    }
+
+    /**
+     * @brief The SUBJECT supplier (#375 Part 2 / #1266): asked, at most once per resolve and
+     *        only for a request carrying a valid `inbound_ref_t::peer`, for the ACL subject
+     *        token that peer writes under.
+     *
+     * This is where *"the subject is derived at the terminus from the handle"* actually
+     * happens. The handle is opaque and the table that gives it meaning belongs to the
+     * transport plane, which this graph-layer resolver deliberately cannot name — so the
+     * derivation is injected as a bare `{fn, ctx}` pair, the ADR-0047 seam shape
+     * @ref on_reverse_ref and @ref on_path_label already use. `fwd_router_t` installs one
+     * that forwards to `transport_t::peer_subject` on the link the frame arrived over.
+     *
+     * Called at most ONCE per resolve, before any graph call, and never for a local resolve:
+     * the derived token is then the caller context for every gate the walk runs — the READ
+     * gate, the WRITE gate, the SUBSCRIBE gate and the `graph::write_ctx_t` a HANDLER sees —
+     * so a handler and the `:acl` that admitted its write cannot disagree.
+     *
+     * **An EMPTY answer is the conformant default, not an error**: the subject falls back to
+     * `inbound_ref_t::link`, i.e. exactly the caller context the resolver used before the
+     * split. Every embedder with no installed supplier is that case, so no shipped
+     * deployment's gate decisions move until a link starts minting per-peer subjects.
+     *
+     * @param ctx     The caller-owned context handed to @ref on_peer_subject.
+     * @param inbound The request's inbound identity — `peer` is the handle to resolve and
+     *                `origin` is the opaque token the installer put there.
+     * @param scratch At least `%tr::net::kPeerNameChars` bytes of storage the token may be
+     *                formatted into; it outlives the whole resolve, so the returned view may
+     *                point into it.
+     */
+    using subject_fn_t = std::string_view (*)(void* ctx, const inbound_ref_t& inbound,
+                                              std::span<char> scratch);
+
+    /** @brief Install the subject supplier (null @p fn uninstalls). */
+    void on_peer_subject(subject_fn_t fn, void* ctx) noexcept {
+        subject_fn_ = fn;
+        subject_ctx_ = ctx;
     }
 
     /**
@@ -340,6 +454,23 @@ class op_resolver_t {
     void* reverse_ref_ctx_ = nullptr;            /**< @brief Its caller-owned context. */
     path_label_fn_t path_label_fn_ = nullptr;    // RFC-0027 §6.1 point 3 terminus mint seam
     void* path_label_ctx_ = nullptr;             /**< @brief Its caller-owned context. */
+    subject_fn_t subject_fn_ = nullptr;          // #375 Part 2 terminus subject derivation
+    void* subject_ctx_ = nullptr;                /**< @brief Its caller-owned context. */
+
+    /**
+     * @brief Derive the operation's ACL subject from @p inbound — the ONE place the split
+     *        between *where it arrived* and *who sent it* is collapsed back to a token.
+     *
+     * Shared by both `resolve` overloads so the two tiers cannot drift (ADR-0053 §7's rule
+     * for the walk, applied to its caller context). Every guard below degrades to
+     * `inbound.link`, which is what the resolver has always used.
+     */
+    [[nodiscard]] std::string_view subject_for(const inbound_ref_t& inbound,
+                                               std::span<char> scratch) const {
+        if (subject_fn_ == nullptr || !inbound.peer.valid()) return inbound.link;
+        const std::string_view s = subject_fn_(subject_ctx_, inbound, scratch);
+        return s.empty() ? inbound.link : s;
+    }
 };
 
 }  // namespace tr::graph

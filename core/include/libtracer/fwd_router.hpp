@@ -210,6 +210,12 @@ class fwd_router_t {
                 return static_cast<fwd_router_t*>(ctx)->connection_ref(inbound_link);
             },
             this);
+        // The terminus SUBJECT seam (#375 Part 2 / #1266): the resolver carries the frame's
+        // opaque `peer_handle_t` but only the transport plane can say what peer it names, so
+        // the derivation is injected through the same captureless {fn, ctx} pair. Installed
+        // unconditionally and costing nothing until a link actually mints a per-peer subject
+        // — with none, the thunk answers empty and the resolver keeps the inbound link name.
+        resolver_.on_peer_subject(&fwd_router_t::peer_subject_thunk, this);
         // The wire `:subscribers[]` door's target descent (RFC-0021, #491): a SUBSCRIBER's
         // PATH child is an address in THIS node's frame, so deciding whether it leaves the
         // node is a mount question — the transport plane's, which L4 cannot name. Installed
@@ -808,6 +814,23 @@ class fwd_router_t {
          */
         std::atomic<bus_link_t*> bus{nullptr};
         /**
+         * @brief The registered transport itself — the door the TERMINUS asks for the
+         *        writer's SUBJECT (#375 Part 2).
+         *
+         * `bus` above is the ADDRESSING facet and is null on a FLAT child by construction;
+         * ADR-0082 rules that the subject is the OTHER claim and must be reachable at
+         * `peer_named=false`, so it cannot be asked through that facet. This is the same
+         * object, unfacetted: the terminus asks it which peer the in-flight frame came from
+         * (`transport_t::inbound_peer`) and what subject that peer writes under
+         * (`transport_t::peer_subject`). Both default to "none", so a kind that mints no
+         * per-peer identity leaves the subject at the inbound link's own name.
+         *
+         * Atomic and relaxed for the reason `rx` and `bus` are: a re-add REBINDS this ctx
+         * (#884) from the control thread while the departing transport's receive thread may
+         * still read it, and `retired` carries the ordering edge for the rebind as a whole.
+         */
+        std::atomic<transport_t*> link{nullptr};
+        /**
          * @brief This child's CONNECTION vertex slot index, resolved once at registration
          *        (RFC-0024 §5.1) — `kNoConnSlot` when the child has none.
          *
@@ -1051,18 +1074,52 @@ class fwd_router_t {
      * @retval {} The ctx carries no bus facet, or the handle names no peer of that kind —
      *            the frame is then dropped, exactly as an unnamed inbound hop always was.
      */
+    /**
+     * @brief The peer HANDLE a locally-terminating frame is written under — the WHO half of
+     *        the ingress identity (#375 Part 2), resolved at the point of use.
+     *
+     * On a bus the seam already tagged the frame, and @p peer is simply handed back. On a
+     * FLAT link there is no such tag — that is what `peer_named=false` MEANS — so the link
+     * itself is asked which peer it is delivering right now (`transport_t::inbound_peer`).
+     * Called only where the answer is consumed (a terminus resolve, a local COMPACT
+     * delivery) and never on a forwarding hop, so a relayed frame pays nothing for it.
+     * @return The frame's peer, or a handle that is not `valid()` when there is no receive
+     *         context, no registered link, or the kind mints no per-peer identity — on which
+     *         the subject stays the inbound link's own name.
+     */
+    [[nodiscard]] static peer_handle_t terminus_peer(const child_rx_ctx_t* ctx,
+                                                     peer_handle_t peer) noexcept;
+    /**
+     * @brief Derive the SUBJECT a locally-terminating write is gated under, from the peer
+     *        handle — the router's own use of the seam the resolver reaches through
+     *        `graph::op_resolver_t::on_peer_subject`.
+     *
+     * Shared by that supplier and by the label-switched COMPACT delivery, which resolves no
+     * FWD and so never passes through the resolver: two delivery shapes carrying the same
+     * peer's write MUST be gated under the same principal, or a deny on one is a bypass
+     * through the other.
+     * @retval {} No per-peer subject is derivable — the caller keeps the inbound link name.
+     */
+    [[nodiscard]] static std::string_view peer_subject_of(const child_rx_ctx_t* ctx,
+                                                          peer_handle_t peer,
+                                                          std::span<char> scratch);
+    /** @brief The `graph::op_resolver_t::subject_fn_t` trampoline: reads the receive context
+     *         back out of the opaque `inbound_ref_t::origin` the terminus put there. */
+    static std::string_view peer_subject_thunk(void* ctx, const graph::inbound_ref_t& inbound,
+                                               std::span<char> scratch);
     static std::string_view resolve_peer_name(const child_rx_ctx_t& ctx, peer_handle_t peer,
                                               std::span<char> scratch);
     /** @brief The shared rope routing body; @p inbound_ctx is the link's receiver ctx when the
      *         frame arrived through one (nullptr on the public `on_frame_rope` entry). */
     void on_frame_rope_impl(std::string_view inbound_name, view::rope_t frame,
-                            const child_rx_ctx_t* inbound_ctx, bool from_peer);
+                            const child_rx_ctx_t* inbound_ctx, bool from_peer,
+                            peer_handle_t peer = {});
     /** @brief The shared routing body: @p frame_view is the owning frame when the
      *         link delivers ropes (nullptr on the borrowed-span path). @p bus_child is the
      *         owning child's qualified name when the frame came from a bus peer, else empty. */
     void on_frame_impl(std::string_view inbound_name, std::span<const std::byte> frame,
                        const view::view_t* frame_view, const child_rx_ctx_t* inbound_ctx = nullptr,
-                       bool from_peer = false);
+                       bool from_peer = false, peer_handle_t peer = {});
     /**
      * @brief Terminus: arena-decode @p frame (ADR-0041) and resolve + reply.
      *
@@ -1082,7 +1139,8 @@ class fwd_router_t {
     void resolve_terminus(std::string_view inbound_name, std::span<const std::byte> frame,
                           const view::view_t* frame_view,
                           const child_rx_ctx_t* inbound_ctx = nullptr,
-                          const wire::path_ref_element_t* dst_label_target = nullptr);
+                          const wire::path_ref_element_t* dst_label_target = nullptr,
+                          peer_handle_t peer = {});
     /**
      * @brief Terminus over a MULTI-LINK rope: resolve straight off the rope, NO flatten.
      *
@@ -1101,7 +1159,9 @@ class fwd_router_t {
      * `frame_view`). Reply routes back over @p inbound_name exactly as the arena path.
      */
     void resolve_terminus_rope(std::string_view inbound_name, view::rope_t frame,
-                               const wire::path_ref_element_t* dst_label_target = nullptr);
+                               const wire::path_ref_element_t* dst_label_target = nullptr,
+                               const child_rx_ctx_t* inbound_ctx = nullptr,
+                               peer_handle_t peer = {});
     /**
      * @brief Classify ONE inbound FWD frame and dispatch it — the ingress driver, once.
      *
@@ -1439,7 +1499,8 @@ class fwd_router_t {
      *                subspans, so it never answers empty for a non-empty window.
      */
     template <class Cursor, class Contig>
-    void dispatch_control(std::string_view inbound_name, const Cursor& cur, Contig&& contig);
+    void dispatch_control(std::string_view inbound_name, const Cursor& cur, Contig&& contig,
+                          const child_rx_ctx_t* inbound_ctx = nullptr, peer_handle_t peer = {});
     /**
      * @brief Dispatch a multi-link control frame (ADVERTISE / COMPACT / HANDLE_NACK)
      *        rope-native (ADR-0055 §2).
@@ -1453,12 +1514,14 @@ class fwd_router_t {
      * eagerly in `on_frame_impl`. This is the sink that let the interim
      * `on_frame_rope` whole-frame flatten be deleted (ADR-0053 ⑥ / ADR-0055 §3).
      */
-    void on_control_rope(std::string_view inbound_name, view::rope_t frame);
+    void on_control_rope(std::string_view inbound_name, view::rope_t frame,
+                         const child_rx_ctx_t* inbound_ctx = nullptr, peer_handle_t peer = {});
     /** @brief Learn (or re-advertise downstream) a `label ↔ route` binding (RFC-0004 §E.1). */
     void on_advertise(std::string_view inbound_name, std::uint16_t label, const wire::tlv_t& route);
     /** @brief Forward (swap label) or locally deliver a label-compacted COMPACT payload. */
     void on_compact(std::string_view inbound_name, std::uint16_t label,
-                    std::span<const std::byte> payload_bytes);
+                    std::span<const std::byte> payload_bytes,
+                    const child_rx_ctx_t* inbound_ctx = nullptr, peer_handle_t peer = {});
     /** @brief Re-advertise an egress binding in response to a downstream HANDLE_NACK. */
     void on_nack(std::string_view inbound_name, std::uint16_t label);
     /** @brief The vertex a bound route names, or nullopt — the memoizable half of

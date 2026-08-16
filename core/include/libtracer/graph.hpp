@@ -1569,10 +1569,21 @@ class graph_t {
      * the forwarding hops contributed. Stored beside @p return_route as the delivery
      * optimisation + liveness check; empty (the default, and every pre-amendment caller)
      * keeps the subscription canonical-only, byte-identical to before.
+     *
+     * @p caller is the SUBJECT this admission is gated under and the fan-in context every
+     * later delivery through the edge re-gates under — *who subscribed*, as against @p link's
+     * *where to deliver* (ADR-0082 §Decision 1; the two were one string until #375 Part 2).
+     * EMPTY means "the same as @p link", which is every pre-split caller and is byte for byte
+     * what this door did before: a FLAT listener's peers all subscribed as their shared link
+     * name. A terminus that derived a per-writer subject from the frame's `peer_handle_t`
+     * passes it here, and then the SUBSCRIBE gate, the stored `subscriber_remote_t::caller`
+     * and each delivery's WRITE re-gate all name the writer rather than the wire it used.
+     * The delivery link is unaffected, which is the point of splitting them: the edge still
+     * routes back over @p link (or, for a mount-routed target, over the mount).
      */
     [[nodiscard]] result_t<void> subscribe_wire(vertex_handle_t v, view_t source_view,
                                                 view_t return_route, std::string link,
-                                                view_t reverse_route = {});
+                                                view_t reverse_route = {}, std::string caller = {});
 
     /**
      * @brief Read by path — resolve the path key once (guarded map lookup), then the hot path.

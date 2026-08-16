@@ -27,6 +27,15 @@
  *    PEERS ON ONE LINK, one HANDLER, one mount: the subjects still differ and name the
  *    PEERS, not the link they share. Before #375 the handler saw nothing at all; a handler
  *    keyed on the link name would see one principal where there are two.
+ *  - @ref test_flat_link_peers_are_distinguishable_at_peer_named_false — the ADR-0082
+ *    requirement, and the one shape the bus case cannot stand in for. TWO PEERS ON ONE
+ *    **FLAT** LINK (`peer_named=false`, no `bus_link_t` facet at all): both frames arrive
+ *    under the single registered child name, and the subjects STILL differ and name the
+ *    peers — because the subject is derived at the terminus from the frame's
+ *    `net::peer_handle_t`, not from the name it arrived under (#375 Part 2).
+ *  - @ref test_a_link_with_no_per_peer_subject_keeps_the_link_name — the fallback that keeps
+ *    the split non-breaking: a link overriding neither subject door presents the inbound
+ *    link name, exactly as every caller saw before the two claims were separated.
  *  - @ref test_subscription_delivery_presents_the_edge_subject — a delivered subscription
  *    terminates at its target as a write under the EDGE's stored fan-in context (ADR-0051
  *    §6.2), so the target handler sees that context and not the producer's writer.
@@ -108,6 +117,45 @@ struct bus_link_impl_t : tr::net::transport_t, tr::net::bus_link_t {
         return {static_cast<std::uint32_t>(names.size() - 1), 1};
     }
     std::vector<std::string> names; /**< @brief index → peer name, the handle's meaning. */
+};
+
+/**
+ * @brief A FLAT (`peer_named=false`) multi-peer link — the ADR-0082 case.
+ *
+ * It exposes NO bus facet (`bus()` stays null, inherited from `transport_t`), so every frame
+ * it delivers arrives on the point-to-point tier under the link's own registered child name:
+ * one routing identity for every peer it carries, which is precisely what `peer_named=false`
+ * means and what this double must model faithfully. What it DOES answer is the two subject
+ * doors — which peer the in-flight frame came from, and what token that peer writes under —
+ * exactly as `slot_server_t` does with its `p<slot>` session tag.
+ */
+struct flat_link_impl_t : tr::net::transport_t {
+    void send(std::span<const std::byte>) override {}
+    void send(std::span<const std::span<const std::byte>>) override {}
+    /** @brief The in-flight frame's peer, stamped by @ref deliver just before it. */
+    [[nodiscard]] tr::net::peer_handle_t inbound_peer() const noexcept override {
+        return delivering;
+    }
+    /** @brief The handle's index into @ref subjects is the peer's subject token. */
+    [[nodiscard]] std::string_view peer_subject(tr::net::peer_handle_t peer,
+                                                std::span<char>) const override {
+        if (!peer.valid() || peer.index >= subjects.size()) return {};
+        return subjects[peer.index];
+    }
+    /** @brief Drive an inbound frame up the FLAT slot, stamping the sender first. */
+    void deliver(std::string_view peer, std::span<const std::byte> frame) {
+        delivering = mint(peer);
+        rx_.deliver_borrowed(frame);
+    }
+    /** @brief The handle for @p peer, appending it to the census if it is new. */
+    tr::net::peer_handle_t mint(std::string_view peer) {
+        for (std::size_t i = 0; i < subjects.size(); ++i)
+            if (subjects[i] == peer) return {static_cast<std::uint32_t>(i), 1};
+        subjects.emplace_back(peer);
+        return {static_cast<std::uint32_t>(subjects.size() - 1), 1};
+    }
+    std::vector<std::string> subjects;   /**< @brief index → subject, the handle's meaning. */
+    tr::net::peer_handle_t delivering{}; /**< @brief @ref inbound_peer's storage. */
 };
 
 /**
@@ -246,6 +294,76 @@ void test_two_bus_peers_on_one_link_are_distinguishable() {
 }
 
 /**
+ * @brief `peer_named=false` — a FLAT link's two peers STILL present two distinct subjects.
+ *
+ * The hard requirement ADR-0082 puts on this car, and the one case that cannot be satisfied
+ * by anything the bus case proves. The link exposes no `bus_link_t` facet, so both frames
+ * arrive on the point-to-point tier under the single registered child name `net/ws-server/srv`
+ * — the addressing claim is genuinely collapsed, exactly as the shipped default collapses it,
+ * and the `peer_named` default is untouched by this file. The subject nevertheless names the
+ * WRITER, because it is derived at the terminus from the frame's `peer_handle_t` rather than
+ * from the name the frame arrived under.
+ *
+ * A realization that only produced a subject on a bus link would re-couple the two claims and
+ * contradict ADR-0082; this case is what makes that failure mode red rather than arguable.
+ */
+void test_flat_link_peers_are_distinguishable_at_peer_named_false() {
+    std::printf("a FLAT (peer_named=false) link's two peers present two distinct subjects:\n");
+    graph_t g;
+    std::vector<seen_t> log;
+    (void)register_recorder(g, "/sink", log);
+
+    fwd_router_t router(g);
+    flat_link_impl_t flat;
+    (void)router.add_child("net/ws-server/srv", flat);
+    check(flat.bus() == nullptr, "the link really is FLAT — no bus facet to fall back on");
+
+    flat.deliver("p0",
+                 b_fwd(fwd_op_t::WRITE, b_path({"sink"}), b_path({"origin"}), {}, b_payload()));
+    flat.deliver("p1",
+                 b_fwd(fwd_op_t::WRITE, b_path({"sink"}), b_path({"origin"}), {}, b_payload()));
+
+    check(log.size() == 2, "both peers' writes reached the handler");
+    if (log.size() == 2) {
+        check(!log[0].local_owner && !log[1].local_owner,
+              "neither peer's write is presented as the local owner");
+        check(log[0].subject == "p0" && log[1].subject == "p1",
+              "each write names the SENDING PEER, at peer_named=false");
+        check(log[0].subject != "net/ws-server/srv" && log[1].subject != "net/ws-server/srv",
+              "and not the one link name both peers share");
+        check(log[0].subject != log[1].subject,
+              "so per-writer authorization is reachable without the addressing facet");
+    }
+}
+
+/**
+ * @brief A link that mints NO per-peer subject keeps the inbound link name — the fallback.
+ *
+ * The other half of the requirement, and the one that keeps the change non-breaking: a
+ * dialer, a datagram kind, a custom transport and every double in the tree answer the two
+ * new doors with their defaults, and for them the terminus must present exactly the caller
+ * context it presented before the split. Reverting only the derivation would leave this
+ * green — which is why it is stated as its own case rather than assumed.
+ */
+void test_a_link_with_no_per_peer_subject_keeps_the_link_name() {
+    std::printf("a link minting no per-peer subject keeps the inbound link name:\n");
+    graph_t g;
+    std::vector<seen_t> log;
+    (void)register_recorder(g, "/sink", log);
+
+    fwd_router_t router(g);
+    sink_link_t plain;  // neither door overridden — the transport_t defaults
+    (void)router.add_child("up", plain);
+    router.on_frame("up",
+                    b_fwd(fwd_op_t::WRITE, b_path({"sink"}), b_path({"origin"}), {}, b_payload()));
+
+    check(log.size() == 1, "the write reached the handler");
+    if (log.size() == 1)
+        check(log[0].subject == "up" && !log[0].local_owner,
+              "the subject is the inbound link's own name, exactly as before the split");
+}
+
+/**
  * @brief A delivered subscription presents the EDGE's fan-in context, not the producer's.
  *
  * Delivery terminates at the target as an ordinary write under the edge's stored caller
@@ -281,6 +399,8 @@ int main() {
     test_local_host_write_is_the_owner_sentinel();
     test_two_links_are_distinguishable();
     test_two_bus_peers_on_one_link_are_distinguishable();
+    test_flat_link_peers_are_distinguishable_at_peer_named_false();
+    test_a_link_with_no_per_peer_subject_keeps_the_link_name();
     test_subscription_delivery_presents_the_edge_subject();
     return tr::testing::summary("write_ctx");
 }

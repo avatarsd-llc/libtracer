@@ -111,12 +111,20 @@ hex or base64).
 The session *carries* the subject and publishes it for operators. The **handler-side half**
 now exists: `on_write` takes a `write_ctx_t` whose `subject` is the writer's resolved subject
 token — the very value the vertex's ACL gate was evaluated against
-([#375](https://github.com/avatarsd-llc/libtracer/issues/375) Part 1). What is still open is
-the **join**: a session subject bound here does not yet become the graph's caller context for
-frames that arrive on that session, so today a handler sees the inbound link's (or bus peer's)
-name rather than an authenticated session identity. The authentication frame is the right
-place to *capture* an identity because it is the first moment one is known; it is not the
-right place to decide the whole authorization model.
+([#375](https://github.com/avatarsd-llc/libtracer/issues/375) Part 1). **Part 2 built the
+transport half**: every locally-terminating frame carries the opaque `peer_handle_t` its link
+minted at accept, and the terminus derives the caller context from that handle through
+`transport_t::peer_subject` — at either setting of `peer_named`, so a per-writer subject no
+longer depends on the addressing facet. A stream listener answers that door with its `p<slot>`
+session token.
+
+What is still open is the last step of the **join**: a subject bound by the authentication
+check below is not yet what `peer_subject` returns for that session, so a handler sees the
+session's transport-minted token rather than the identity the peer actually proved. The seam
+to close it is now one override away — the link already knows the handle and already holds the
+session's bound subject beside it. The authentication frame is the right place to *capture* an
+identity because it is the first moment one is known; it is not the right place to decide the
+whole authorization model.
 
 A subject is **not** the same claim as a peer *name*, and the two are deliberately kept
 apart ([ADR-0082](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0082-auth-subject-and-peer-named-are-decoupled-claims-default-stays-false.md)):
