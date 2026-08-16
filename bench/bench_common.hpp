@@ -135,6 +135,69 @@ template <typename Op>
 }
 
 /**
+ * @brief Timed-window floor (ns) at which the clock's own cost stops moving the per-op figure.
+ *
+ * Measured on the pinned bench host against `fwd-rope-hop/79/1/1`, a ~238 ns operation, by
+ * forcing the batch instead of calibrating it: batch 1 reads **260 ns**, batch 2 **250 ns**,
+ * batch 4 **242 ns**, and batch 8 and above **236–240 ns**. The gap is the sample's own two
+ * `now_ns()` reads plus the loop, ~**22 ns per sample** on this host. Divided over a window of
+ * this length that term is ~0.11 % of the reported figure, an order of magnitude below the
+ * ~1 % same-binary agreement the benches are read at.
+ */
+inline constexpr std::uint64_t kMinBatchWindowNs = 20'000;
+
+/**
+ * @brief Calibrate a batch by TARGET WINDOW instead of by plateau — the deterministic twin
+ *        of @ref calibrate_batch (#1358).
+ *
+ * @section why_not_plateau Why the plateau rule is not safe to gate behind
+ *
+ * @ref calibrate_batch stops at the first batch whose per-op figure is not at least
+ * `kBatchPlateau` better than the previous batch's. That test compares two *timed* quantities,
+ * so the machine gets a vote in the answer: one disturbed measurement at batch 1 or 2 makes the
+ * next doubling look like it did not help, and the calibrator latches a batch far below the one
+ * it would have picked a second later. The chosen batch is then a **discrete, per-execution
+ * lottery** — and because the clock term is charged per SAMPLE rather than per op, the batch
+ * the lottery lands on shifts the reported number: on the pinned host `bench_forward_rope`'s
+ * `links=1` point reads 260 / 250 / 242 / ~238 ns at batch 1 / 2 / 4 / >=8. Repeated executions
+ * of the same binary were observed latching batches of 2, 4, 8, 16 and 32 on that point, so a
+ * same-binary A/A comparison could differ by up to ~8 % with **nothing but the calibrator**
+ * between the two arms, in two clusters rather than a spread. Contamination makes it worse in
+ * exactly the wrong way: a busy neighbour perturbs the very comparison the plateau rule turns
+ * on, so the lottery is most biased precisely when the host is least trustworthy.
+ *
+ * @section how_window Why a window floor fixes it
+ *
+ * The plateau rule is only ever a proxy for "the window is long enough that the clock does not
+ * matter". Asking that question directly — keep doubling until the measured window reaches
+ * @p min_window_ns — removes the comparison, and with it the lottery: the batch becomes a
+ * function of the operation's own cost, which is stable to ~1 %, so repeated executions pick
+ * the SAME batch. It also self-scales across a sweep's arms, which a hardcoded floor cannot:
+ * a 238 ns hop needs 128 iterations to fill the window and a 4.3 µs hop needs 8, and each
+ * arm keeps the largest sample count its cost allows rather than paying the slowest arm's batch.
+ *
+ * @ref calibrate_batch is deliberately left in place and unchanged. Its callers' points are
+ * banked in the perf history, and re-calibrating them would step every one of those series for
+ * a reason that has nothing to do with the code under test; migration is per-bench and
+ * deliberate.
+ *
+ * @param op             The operation to time; called (many) times, so it must be repeatable.
+ * @param min_window_ns  Shortest acceptable timed window; defaults to @ref kMinBatchWindowNs.
+ * @return The smallest power-of-two batch whose window reaches @p min_window_ns, clamped to
+ *         @ref kMaxBatch.
+ */
+template <typename Op>
+[[nodiscard]] std::size_t calibrate_batch_for_window(
+    Op&& op, std::uint64_t min_window_ns = kMinBatchWindowNs) {
+    for (std::size_t batch = 1; batch < kMaxBatch; batch *= 2) {
+        const std::uint64_t a = now_ns();
+        for (std::size_t i = 0; i < batch; ++i) op();
+        if (now_ns() - a >= min_window_ns) return batch;
+    }
+    return kMaxBatch;
+}
+
+/**
  * @brief Smallest sample count at which a p999 describes a distribution rather than one draw.
  *
  * The reported p999 is the order statistic at index `floor(0.999 * n)`, so the number of

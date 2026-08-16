@@ -72,23 +72,6 @@ std::size_t sink = 0;
     return v > 0.0 ? v : 1.0;
 }
 
-constexpr double kPlateau = 0.05;  // <5% improvement from doubling ⇒ amortized
-
-/** @brief Double the batch until amortizing the clock stops helping (see bench_forward_demux). */
-template <typename Hop>
-[[nodiscard]] std::size_t calibrate_batch(Hop&& hop) {
-    double prev = 0.0;
-    for (std::size_t batch = 1; batch <= (1U << 20); batch *= 2) {
-        const std::uint64_t a = bench::now_ns();
-        for (std::size_t i = 0; i < batch; ++i) hop();
-        const double per_hop =
-            static_cast<double>(bench::now_ns() - a) / static_cast<double>(batch);
-        if (prev > 0.0 && per_hop > prev * (1.0 - kPlateau)) return batch;
-        prev = per_hop;
-    }
-    return 1U << 20;
-}
-
 /** @brief A transport that only counts what it was handed — no I/O, no allocation. */
 struct capture_transport_t : transport_t {
     std::size_t sends = 0;
@@ -185,7 +168,11 @@ void run_point(std::size_t links) {
     const tr::view::rope_t proto = rope_of(frame, links);
     const auto hop = [&] { in_link.deliver(proto); };
 
-    const std::size_t batch = calibrate_batch(hop);
+    // Window-floored, NOT plateau-calibrated (#1358): the plateau rule compares two timed
+    // quantities, so a disturbed reading latches a batch of 2 or 4 where 128 was due, and this
+    // point reads ~8% high at those batches. A window floor makes the batch a function of the
+    // hop's own cost, so two executions of the same binary agree.
+    const std::size_t batch = bench::calibrate_batch_for_window(hop);
 
     bench::Latency lat;
     const std::uint64_t deadline_ns = static_cast<std::uint64_t>(budget_seconds() * 1e9);
