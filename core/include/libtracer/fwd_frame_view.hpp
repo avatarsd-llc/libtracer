@@ -576,14 +576,45 @@ inline constexpr std::size_t kDstSegCacheSlots =
  * Offsets, not spans, for the reason every peek here uses them: the source may be a rope, so
  * the caller re-slices from its own cursor.
  *
+ * **It BORROWS the cursor, which must outlive it** — and it is the only thing in this cluster
+ * that does. Every peek here (@ref peek_fwd_dst, @ref peek_fwd_first_dst_seg,
+ * @ref rebuild_fwd_forward) consumes its cursor within the call and hands back offsets, so a
+ * caller may pass a temporary to any of them; this walker keeps reading through the cursor
+ * after the constructor returns, so a temporary there is a dangling read on the first
+ * @ref at. Stated here because it was not, and because a caller cannot infer it from a
+ * signature that takes `const Cursor&` like every other function on the page — the rvalue
+ * constructors below turn the mistake into a COMPILE error rather than a sanitizer finding.
+ *
  * @tparam Cursor A grammar byte-source cursor (span or rope).
  */
 template <class Cursor>
 class dst_seg_walk_t {
    public:
-    /** @brief Walk the `dst` window @p pre describes, over @p cur. */
+    /**
+     * @brief Walk the `dst` window @p pre describes, over @p cur.
+     *
+     * @p cur is BORROWED — this object holds a pointer to it and reads through that pointer
+     * on every @ref at, so @p cur must outlive the walk. @p pre is copied (three integers),
+     * so it need not.
+     */
     dst_seg_walk_t(const Cursor& cur, const fwd_pre_t& pre) noexcept
         : cur_(&cur), body_off_(pre.dst_body_off), end_(pre.dst_end), pos_(pre.dst_body_off) {}
+
+    /**
+     * @brief A TEMPORARY cursor is refused at compile time (both value categories).
+     *
+     * `dst_seg_walk_t<span_cursor> w(span_cursor{frame}, pre);` reads exactly like the
+     * `peek_fwd_dst(span_cursor{frame}, pre)` one line above it and is the one spelling that
+     * is wrong: the temporary dies at the end of the full expression and every later `at()`
+     * reads a dead stack slot. That is not hypothetical — it is what a test wrote and what
+     * ASan caught as `stack-use-after-scope` through `read_packed_seg`. Deleting these makes
+     * the shape unrepresentable instead of merely documented, at zero runtime cost; a caller
+     * with a temporary in hand names it first, which is what the three in-tree call sites
+     * already do.
+     */
+    dst_seg_walk_t(Cursor&&, const fwd_pre_t&) = delete;
+    /** @brief The `const` rvalue spelling of the same mistake — deleted for the same reason. */
+    dst_seg_walk_t(const Cursor&&, const fwd_pre_t&) = delete;
 
     /**
      * @brief Segment @p i's `[body_off, body_len)`.

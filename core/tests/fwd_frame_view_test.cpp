@@ -409,10 +409,14 @@ int main() {
         check(tr::net::peek_fwd_first_dst_seg(span_cursor{skip_frame}).has_value(),
               "an escape BEHIND the leading segment leaves the frame routable");
         {
+            // The cursor is NAMED, not a temporary: `dst_seg_walk_t` borrows it and reads
+            // through it on every `at()`, unlike the peeks above, which consume theirs
+            // within the call. (Its deleted rvalue constructors now refuse a temporary
+            // outright — this line is what taught them to.)
+            const span_cursor skip_cur{skip_frame};
             tr::net::fwd_pre_t pre;
-            check(tr::net::peek_fwd_dst(span_cursor{skip_frame}, pre),
-                  "...and the dst window still opens");
-            tr::net::dst_seg_walk_t<span_cursor> walk(span_cursor{skip_frame}, pre);
+            check(tr::net::peek_fwd_dst(skip_cur, pre), "...and the dst window still opens");
+            tr::net::dst_seg_walk_t<span_cursor> walk(skip_cur, pre);
             const auto s0 = walk.at(0);
             const auto s1 = walk.at(1);
             check(s0 && s0->second == 2, "segment 0 is the two-byte literal `in`");
