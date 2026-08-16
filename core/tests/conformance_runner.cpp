@@ -30,6 +30,7 @@
 #include <utility>
 #include <vector>
 
+#include "libtracer/packed_path.hpp"
 #include "libtracer/path_ref.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -171,12 +172,16 @@ tlv_t status_ok() { return tlv_t{.type = type_t::STATUS}; }
 tlv_t value(std::span<const std::byte> p) { return tlv_t{.type = type_t::VALUE, .payload = p}; }
 tlv_t name(std::span<const std::byte> p) { return tlv_t{.type = type_t::NAME, .payload = p}; }
 
-tlv_t path2(std::span<const std::byte> a, std::span<const std::byte> b) {
-    tlv_t t{.type = type_t::PATH};
-    t.opt.pl = true;
-    t.children.push_back(name(a));
-    t.children.push_back(name(b));
-    return t;
+/**
+ * @brief A packed two-segment `PATH` (RFC-0018): `opt.PL = 0`, body = `[u8 len][bytes]`
+ *        records. The body bytes are OWNED by @p storage, which must outlive the TLV.
+ */
+tlv_t path2(std::span<const std::byte> a, std::span<const std::byte> b,
+            std::vector<std::byte>& storage) {
+    storage.clear();
+    (void)tr::wire::emit_path_segment(storage, a);
+    (void)tr::wire::emit_path_segment(storage, b);
+    return tlv_t{.type = type_t::PATH, .payload = std::span<const std::byte>(storage)};
 }
 
 tlv_t value_crc(std::span<const std::byte> p) {
@@ -325,7 +330,8 @@ int main(int argc, char** argv) {
     };
     golden("framing/empty-status-ok", status_ok());
     golden("tlv-types/value-bool-true", value(b_true));
-    golden("path/path-sensor-temp", path2(s_sensor, s_temp));
+    std::vector<std::byte> sensor_temp_body;
+    golden("path/path-sensor-temp", path2(s_sensor, s_temp, sensor_temp_body));
     golden("crc/value-crc32c", value_crc(b_val));
 
     std::printf("Encode/decode symmetry (every encode() success must decode()):\n");
@@ -352,7 +358,7 @@ int main(int argc, char** argv) {
         const symmetry_case_t cases[] = {
             {"empty STATUS", status_ok(), true},
             {"VALUE over opaque bytes", value(b_val), true},
-            {"structured PATH of two NAMEs", path2(s_sensor, s_temp), true},
+            {"packed PATH of two segment records", path2(s_sensor, s_temp, sensor_temp_body), true},
             {"VALUE with a CRC32C trailer", value_crc(b_val), true},
             {"PATH_REF, two elements", path_ref(ref_body), true},
             {"PATH_REF, zero elements", path_ref(empty_body), true},
@@ -384,8 +390,16 @@ int main(int argc, char** argv) {
               "empty STATUS encodes to 09 00 00 00");
     }
     {
-        const auto dec = tr::wire::decode(read_file(vroot / "path/path-sensor-temp" / "input.bin"));
-        check(dec.has_value() && dec->children.size() == 2, "PATH decodes to 2 NAME children");
+        // The bytes are BOUND: `decode` borrows, and the packed body is read through the
+        // decoded node's payload span, so a temporary here would dangle.
+        const std::vector<std::byte> path_bytes =
+            read_file(vroot / "path/path-sensor-temp" / "input.bin");
+        const auto dec = tr::wire::decode(path_bytes);
+        // RFC-0018: the body is packed records, so a PATH decodes as ONE opaque node whose
+        // payload tiles into `06 'sensor' 04 'temp'` — 12 bytes, no child TLVs at all.
+        check(dec.has_value() && !dec->opt.pl && dec->children.empty() &&
+                  dec->payload.size() == 12 && tr::wire::packed_path_valid_key(dec->payload),
+              "PATH decodes to one packed 12-byte body of two literal records");
     }
     {
         const std::vector<std::byte> bad{std::byte{0x09}, std::byte{0x01}, std::byte{0},

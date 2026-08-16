@@ -190,9 +190,9 @@ std::vector<std::byte> b_name(std::string_view s) {
 /** @brief A `PATH` TLV over the given `/`-segments. */
 std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> body;
-    for (const std::string_view s : segs) tr::wire::emit_name(body, s);
+    for (const std::string_view s : segs) (void)tr::wire::emit_path_segment(body, s);
     std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
     return out;
 }
 

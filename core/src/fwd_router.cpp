@@ -22,6 +22,7 @@
 #include "libtracer/key_view.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
+#include "libtracer/packed_path.hpp"
 #include "libtracer/path.hpp"
 #include "libtracer/rope_decode.hpp"
 #include "libtracer/tlv_emit.hpp"
@@ -343,23 +344,28 @@ template <class Cursor>
     std::array<std::size_t, kSegViewSlots> seg_end;
     // Segment 0 came free with the peek's gate — the same header, read once.
     seg[0] = rd.in_place(pre.seg0_off, pre.seg0_len);
-    seg_end[0] = pre.seg0_off + pre.seg0_len;  // a NAME body is its TLV's tail
+    seg_end[0] = pre.seg0_off + pre.seg0_len;  // a packed record's payload is its tail
     bool all_in_place = !seg[0].empty();
     std::size_t n = 1;
     std::size_t pos = seg_end[0];
     bool ends_in_run = true;
     while (n < kSegViewSlots) {
         if (pos >= pre.dst_end) break;  // the address ended inside the run
-        const auto h = read_fwd_header(cur, pos);
-        // A non-NAME child is where an ADDRESS stops (a FIELD selector, say) — the run ends
-        // here exactly as the walker's `at` would report it.
-        if (!h || h->type != wire::type_t::NAME) break;
+        const auto rec = read_packed_seg(cur, pos, pre.dst_end);
+        // Ragged framing is where an ADDRESS stops — the run ends here exactly as the
+        // walker's `at` would report it.
+        if (!rec) break;
+        pos += rec->total;
+        // The RFC-0018 §5.4 escape is STEPPED OVER, not resolved: nothing mints one, and a
+        // forwarder relays a record whose `kind` it does not implement rather than dropping
+        // a frame it is only carrying. It occupies no segment index, so `strip_k` still
+        // counts literal segments and `seg_end` still bounds the consumed run.
+        if (rec->escape) continue;
         // Empty means "not addressable as a view into the frame" — unroutable, OR straddling a
         // rope link. Either way the deep arm re-reads it and answers correctly.
-        seg[n] = rd.in_place(h->body_off, h->body_len);
+        seg[n] = rd.in_place(rec->body_off, rec->body_len);
         if (seg[n].empty()) all_in_place = false;
-        seg_end[n] = h->body_off + h->body_len;
-        pos += h->total;
+        seg_end[n] = pos;
         ++n;
     }
     // Filled the run with bytes still to come: the address MAY continue past the locals, so it
@@ -1872,7 +1878,15 @@ void fwd_router_t::on_control_rope(std::string_view inbound_name, view::rope_t f
 
 void fwd_router_t::on_advertise(std::string_view inbound_name, std::uint16_t label,
                                 const tlv_t& route) {
-    if (route.type != type_t::PATH) return;
+    // A route is an ADDRESS, and this is canonical / key context: it must be a packed `PATH`
+    // (`opt.PL = 0`) whose body tiles exactly into LITERAL records — no ragged length, no
+    // RFC-0018 §5.4 escape. Refusing here rather than at the bind is what keeps the label
+    // UNBOUND for a malformed route: before RFC-0018 an undecodable body was caught by the
+    // frame decode itself, because a `PATH` was a child run and garbage children failed the
+    // grammar. A packed body is opaque to the grammar, so the address rule has to be checked
+    // by the one tier that owns it — here and in `resolve_route_vertex`'s `path_key`.
+    if (route.type != type_t::PATH || route.opt.pl || !wire::packed_path_valid_key(route.payload))
+        return;
 
     // The mount-shape stamp (#765), read BEFORE the descent, never after. Read after, a
     // registration that landed between the descent and the store would be stamped as though
@@ -1892,12 +1906,17 @@ void fwd_router_t::on_advertise(std::string_view inbound_name, std::uint16_t lab
     // ADVERTISE naming a mount of any width binds exactly the route a FWD to it would take
     // (#523). It used to collect into a `kMountPeekMax`-sized array, which silently truncated
     // a deeper route to the first four segments before resolving it.
-    const auto adv_at = [&route](std::size_t i) -> std::optional<std::string_view> {
-        // LEADING NAMEs only — stopping at the first non-NAME keeps the segment indices
-        // positional, so `strip_k` never names a child that is not the segment it resolved.
-        if (i >= route.children.size() || route.children[i].type != type_t::NAME)
-            return std::nullopt;
-        return detail::as_string_view(route.children[i].payload);
+    // The route's PACKED records, walked by the shared canonical-key cursor (RFC-0018): an
+    // ADVERTISE route is a `PATH` body, which is exactly what `key_view_t` navigates, so the
+    // segment indices come from the SAME framing decode the vertex map keys on. That also
+    // settles the escape: `key_view_t` is canonical/key context and reports a `len == 0`
+    // record as ragged, so a route carrying a label binds NOTHING rather than binding a
+    // truncation — the §5.4 rejection, arriving for free through the one locus that owns it.
+    wire::key_view_t::record_cursor_t adv_walk{wire::key_view_t{route.payload}};
+    const auto adv_at = [&adv_walk](std::size_t i) -> std::optional<std::string_view> {
+        const std::optional<wire::key_view_t::record_t> rec = adv_walk.at(i);
+        if (!rec) return std::nullopt;
+        return detail::as_string_view(rec->payload);
     };
     // The decoded route outlives this call, so a segment is already in storage that outlives
     // the hop: retaining is the identity here.
@@ -1919,10 +1938,12 @@ void fwd_router_t::on_advertise(std::string_view inbound_name, std::uint16_t lab
         // out-label, record the swap, retain the stripped egress route (for NACK
         // re-advertise), and re-advertise downstream with the new label (MPLS-style swap).
         const std::string down_name(hit.link_name);
+        // Strip the K consumed records off the PACKED body — a byte slice, where it used to
+        // be a child-vector erase (RFC-0018). `end_of` is the same cursor the descent walked,
+        // so the split cannot disagree with the resolution that produced `strip_k`.
         tlv_t stripped = route;
-        stripped.children.erase(
-            stripped.children.begin(),
-            stripped.children.begin() + static_cast<std::ptrdiff_t>(hit.strip_k));
+        stripped.payload =
+            route.payload.subspan(std::min(adv_walk.end_of(hit.strip_k), route.payload.size()));
         const std::vector<std::byte> stripped_bytes = wire::encode(stripped);
 
         // Sample the downstream link's clear epoch BEFORE minting anything against it (#827).
@@ -2197,8 +2218,9 @@ std::optional<graph::vertex_handle_t> fwd_router_t::resolve_route_vertex(
     // sources of truth for "which vertex does this label mean".
     const auto route = wire::decode(route_path);
     if (!route || route->type != type_t::PATH) return std::nullopt;
-    // A route with a non-NAME child is not an address (#681): binding a label to it would
-    // resolve a vertex the sender never named. No vertex, no binding, no delivery.
+    // A route whose body is not a run of literal packed records is not an address (#681, and
+    // RFC-0018's escape-in-key-context rule): binding a label to it would resolve a vertex the
+    // sender never named. No vertex, no binding, no delivery.
     const auto key = wire::path_key(*route);
     if (!key) return std::nullopt;
     return graph_.find(*key);
@@ -2237,11 +2259,11 @@ bool fwd_router_t::deliver_local(std::span<const std::byte> route_path,
 
 graph::wire_target_split_t fwd_router_t::split_subscriber_target(
     std::span<const std::byte> key) const {
-    // Walk the target key's NAME records into the segment spans the shared descent takes —
+    // Walk the target key's packed records into the segment spans the shared descent takes —
     // the SAME resolve_mount_by the forward path walks a frame's dst into, so a bound
     // route and a routed frame cannot disagree about where a mount ends (ADR-0061).
     //
-    // The key's NAME records are walked LAZILY, exactly as the forward path walks a frame's
+    // The key's packed records are walked LAZILY, exactly as the forward path walks a frame's
     // `dst` — no array, so a target routing through a mount of any width binds (#523). The
     // two fixed `kMountPeekMax`-sized arrays this replaces truncated a deeper target to its
     // first four segments and then resolved the truncation.
@@ -2274,7 +2296,7 @@ graph::wire_target_split_t fwd_router_t::split_subscriber_target(
     // the same answer: a mount was named, and no directed delivery can be bound through it.
     if (hit.link == nullptr || !hit.peer.empty() || walk.end_of(hit.strip_k) >= key.size())
         return graph::wire_target_split_t{.unroutable = true};
-    // The residual NAME records are reused verbatim: the key suffix IS the route payload.
+    // The residual packed records are reused verbatim: the key suffix IS the route payload.
     return graph::wire_target_split_t{.link = hit.link_name,
                                       .residual = key.subspan(walk.end_of(hit.strip_k))};
 }
@@ -2295,7 +2317,7 @@ graph::result_t<void> fwd_router_t::subscribe_toward(const graph::path_t& produc
     // single copy every delivery then clones by refcount (ADR-0041 §2).
     const std::span<const std::byte> residual = split.residual;
     std::vector<std::byte> route_tlv;
-    wire::emit_tlv(route_tlv, wire::type_t::PATH, wire::opt_t{.pl = true}, residual);
+    wire::emit_tlv(route_tlv, wire::type_t::PATH, wire::opt_t{}, residual);
     const auto route_view = view::over_bytes(route_tlv);
     if (!route_view) return std::unexpected(graph::status_t::BACKPRESSURE);
 
@@ -2377,7 +2399,7 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const vie
             constexpr std::array<std::byte, 5> op_tlv{
                 std::byte{0x01}, std::byte{0x00}, std::byte{0x01}, std::byte{0x00},
                 std::byte{std::to_underlying(fwd_op_t::WRITE)}};
-            constexpr std::array<std::byte, 4> empty_src{std::byte{0x06}, std::byte{0x40},
+            constexpr std::array<std::byte, 4> empty_src{std::byte{0x06}, std::byte{0x00},
                                                          std::byte{0x00}, std::byte{0x00}};
             const std::size_t body_len =
                 op_tlv.size() + 4u + dst_body.size() + empty_src.size() + value.total_length();
@@ -2411,7 +2433,7 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const vie
     constexpr std::array<std::byte, 5> op_tlv{std::byte{0x01}, std::byte{0x00}, std::byte{0x01},
                                               std::byte{0x00},
                                               std::byte{std::to_underlying(fwd_op_t::WRITE)}};
-    constexpr std::array<std::byte, 4> empty_src{std::byte{0x06}, std::byte{0x40}, std::byte{0x00},
+    constexpr std::array<std::byte, 4> empty_src{std::byte{0x06}, std::byte{0x00}, std::byte{0x00},
                                                  std::byte{0x00}};
     const std::size_t body_len =
         op_tlv.size() + route.size() + empty_src.size() + value.total_length();

@@ -75,9 +75,9 @@ std::vector<std::byte> b_name(std::string_view s) {
 
 std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> body;
-    for (const std::string_view s : segs) tr::wire::emit_name(body, s);
+    for (const std::string_view s : segs) (void)tr::wire::emit_path_segment(body, s);
     std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
     return out;
 }
 
@@ -102,7 +102,9 @@ std::vector<std::byte> b_value_u8(std::uint8_t v) {
 using tr::testing::fwd_envelope;
 
 /** @brief A well-formed `FWD`, the shape everything else deviates from. */
+using tr::testing::append_path_escape;
 using tr::testing::b_fwd;
+using tr::testing::b_path_body;
 
 std::vector<std::byte> cat(std::initializer_list<std::vector<std::byte>> parts) {
     std::vector<std::byte> out;
@@ -203,13 +205,31 @@ int main() {
                 fwd_envelope(cat(
                     {b_value_u8(static_cast<std::uint8_t>(fwd_op_t::READ)), b_path({"sensor"})})));
 
-    // :253 — a PATH's children MUST be NAME (the invariant RFC-0004 §C restates).
+    // RFC-0018 §5 — a `dst` PATH body that does not tile into literal packed records is a
+    // MALFORMED ADDRESS, answered `tr::path::invalid`. This replaces the pre-RFC
+    // "a PATH's children MUST be NAME" case (RFC-0004 §C), which is unrepresentable now that
+    // a PATH body holds no child TLVs at all: the two shapes below are what remains of it —
+    // a length that overruns the body, and the §5.4 escape record in KEY context.
     {
-        std::vector<std::byte> bad_path;
-        tr::wire::emit_tlv(bad_path, type_t::PATH, opt_t{.pl = true}, b_value_u8(7));
+        std::vector<std::byte> ragged;
+        ragged.push_back(std::byte{0x09});  // claims nine bytes, carries three
+        for (const char c : std::string_view("bad")) ragged.push_back(static_cast<std::byte>(c));
+        const std::vector<std::byte> bad_path = b_path_body(ragged);
         check(answered_error(resolve_bytes(r, b_fwd(fwd_op_t::READ, bad_path, b_path({"back"}))),
                              0x0021),
-              "a dst PATH whose child is a VALUE, not a NAME, is ANSWERED tr::path::invalid");
+              "a dst PATH with a ragged packed record is ANSWERED tr::path::invalid");
+        still_works(r);
+
+        std::vector<std::byte> escaped;
+        (void)tr::wire::emit_path_segment(escaped, "sensor");
+        const std::array<std::byte, 4> label{std::byte{1}, std::byte{0}, std::byte{2},
+                                             std::byte{0}};
+        append_path_escape(escaped, tr::wire::kPackedEscapeKindLabel, label);
+        const std::vector<std::byte> label_path = b_path_body(escaped);
+        check(answered_error(resolve_bytes(r, b_fwd(fwd_op_t::READ, label_path, b_path({"back"}))),
+                             0x0021),
+              "a dst PATH carrying the len==0 escape is ANSWERED tr::path::invalid in key "
+              "context (RFC-0018 §5.4)");
         still_works(r);
     }
 

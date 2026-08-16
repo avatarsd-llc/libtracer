@@ -1,13 +1,13 @@
 {
   "name": "path-reserved-brackets",
   "category": "path",
-  "hex": "064016000200060063616d657261020008006672616d655b375d",
-  "total_bytes": 26,
+  "hex": "060010000663616D657261086672616D655B375D",
+  "total_bytes": 20,
   "decoded": {
     "type": "0x06 PATH",
     "opt": {
-      "raw": "0x40",
-      "PL": 1,
+      "raw": "0x00",
+      "PL": 0,
       "TS": 0,
       "CR": 0,
       "LL": 0,
@@ -16,24 +16,17 @@
       "reserved_bit7": 0,
       "reserved_bit0": 0
     },
-    "length": 22,
-    "children": [
-      {
-        "type": "0x02 NAME",
-        "length": 6,
-        "payload_utf8": "camera"
-      },
-      {
-        "type": "0x02 NAME",
-        "length": 8,
-        "payload_utf8": "frame[7]"
-      }
-    ],
+    "length": 16,
     "trailer": {
       "ts": null,
       "crc": null
     },
     "meaning": "codec-legal bytes whose second NAME is NOT a valid segment",
-    "reserved_characters": "/:.[]*?"
+    "reserved_characters": "/:.[]*?",
+    "packed_segments": [
+      "camera",
+      "frame[7]"
+    ],
+    "payload_hex": "0663616D657261086672616D655B375D"
   }
 }

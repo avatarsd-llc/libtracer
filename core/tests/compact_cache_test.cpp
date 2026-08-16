@@ -59,9 +59,9 @@ struct rec_link_t : tr::net::transport_t {
 
 std::vector<std::byte> path_tlv(std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> body;
-    for (std::string_view s : segs) tr::wire::emit_name(body, s);
+    for (std::string_view s : segs) (void)tr::wire::emit_path_segment(body, s);
     std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
     return out;
 }
 
@@ -508,7 +508,7 @@ void test_advertise_with_non_name_child_binds_nothing() {
         body, type_t::VALUE, opt_t{},
         std::span<const std::byte>(reinterpret_cast<const std::byte*>(seg.data()), seg.size()));
     std::vector<std::byte> bad_route;
-    tr::wire::emit_tlv(bad_route, type_t::PATH, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(bad_route, type_t::PATH, opt_t{}, body);
 
     router.on_frame("net/ws-client/up", tr::net::encode_advertise(21, bad_route));
     router.on_frame("net/ws-client/up", tr::net::encode_compact(21, value_tlv(7)));

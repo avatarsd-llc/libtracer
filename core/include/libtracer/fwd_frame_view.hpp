@@ -29,6 +29,7 @@
 #include "libtracer/config.hpp"
 #include "libtracer/grammar.hpp"
 #include "libtracer/op_resolve.hpp"
+#include "libtracer/packed_path.hpp"
 #include "libtracer/path_ref.hpp"
 #include "libtracer/tlv_emit.hpp"
 
@@ -77,6 +78,50 @@ struct fwd_hdr_t {
  * @param  pos    Absolute offset of the header to read.
  * @retval std::nullopt @p pos is out of range or the grammar rejects the header.
  */
+/**
+ * @brief One packed `dst`/`src` segment record read through the cursor seam (RFC-0018 §5).
+ *
+ * The whole record grammar for the FORWARD plane, in one place: `[u8 len][len bytes]`, plus
+ * the `len == 0` ESCAPE `00 <u8 kind> <u8 len> <payload>` (§5.4 Amendment 1). This is
+ * **frame-path** context, so an escape is a record to STEP OVER — a forwarder that does not
+ * implement its `kind` relays the frame rather than dropping one it is only carrying. The
+ * canonical / key context, where the escape is refused, is `packed_path_valid_key` and
+ * `key_view_t::record_end`; the two are two functions on purpose.
+ *
+ * Byte-at-a-time through the cursor, never through a span, for the reason
+ * @ref read_path_ref_element is: on the rope tier a record may straddle a link boundary and
+ * there is then no span to hand a span-taking parser. Three `byte_at` calls at worst, no
+ * scratch and no stitch slot.
+ */
+struct packed_seg_t {
+    std::size_t body_off = 0; /**< @brief Offset of the segment's payload bytes. */
+    std::size_t body_len = 0; /**< @brief Payload length; 0 only for an escape. */
+    std::size_t total = 0;    /**< @brief Whole record size — `1 + len`, or `3 + len`. */
+    bool escape = false;      /**< @brief True ⇔ the `len == 0` escape record (§5.4). */
+};
+
+/**
+ * @brief Read the packed segment record at absolute offset @p at, bounded by @p end.
+ * @retval std::nullopt Ragged: no length byte before @p end, or a record running past it.
+ */
+template <class Cursor>
+[[nodiscard]] std::optional<packed_seg_t> read_packed_seg(const Cursor& cur, std::size_t at,
+                                                          std::size_t end) {
+    if (at >= end) return std::nullopt;
+    const auto len = static_cast<std::uint8_t>(cur.byte_at(at));
+    if (len != wire::kPackedEscapeLen) {
+        if (at + 1 + len > end) return std::nullopt;
+        return packed_seg_t{.body_off = at + 1, .body_len = len, .total = 1 + len};
+    }
+    if (at + wire::kPackedEscapeOverhead > end) return std::nullopt;
+    const auto esc = static_cast<std::uint8_t>(cur.byte_at(at + 2));
+    if (at + wire::kPackedEscapeOverhead + esc > end) return std::nullopt;
+    return packed_seg_t{.body_off = at + wire::kPackedEscapeOverhead,
+                        .body_len = esc,
+                        .total = wire::kPackedEscapeOverhead + esc,
+                        .escape = true};
+}
+
 template <class Cursor>
 [[nodiscard]] std::optional<fwd_hdr_t> read_fwd_header(
     const Cursor& cur, std::size_t pos,
@@ -200,9 +245,10 @@ enum class fwd_dst_kind_t : std::uint8_t {
  * the `dst`'s depth or element count.
  *
  * The two arms diverge only at the `dst` header's type code:
- *   - `PATH` — the canonical address. The leading child must be a NAME (a `dst` whose first
- *     child is not a NAME is not an address), and @ref fwd_pre_t::strip_at starts at the body
- *     because only `strip_k` can say how much of it this hop consumes.
+ *   - `PATH` — the canonical address, a packed record run with `opt.PL = 0` (RFC-0018). The
+ *     leading record must be a LITERAL segment (a `dst` whose first record is the label
+ *     escape is not an address this node can descend), and @ref fwd_pre_t::strip_at starts at
+ *     the body because only `strip_k` can say how much of it this hop consumes.
  *   - `PATH_REF` — the bound address. The four STRUCTURAL rules (`opt.PL = 0`, `opt.LL = 0`,
  *     `length % 8 == 0`, `length <= 2040`) are checked through `tr::wire::path_ref_body_valid`
  *     — the one locus that owns them — and @ref fwd_pre_t::strip_at is known HERE, past
@@ -246,11 +292,15 @@ template <class Cursor>
         if (!wire::path_ref_body_valid(dst_h->opt.pl, dst_h->opt.ll, dst_h->body_len))
             return fwd_dst_kind_t::NONE;
     } else {
-        if (dst_h->type != wire::type_t::PATH || dst_h->body_len == 0) return fwd_dst_kind_t::NONE;
-        const auto seg_h = read_fwd_header(cur, dst_h->body_off);
-        if (!seg_h || seg_h->type != wire::type_t::NAME) return fwd_dst_kind_t::NONE;
-        seg0_off = seg_h->body_off;
-        seg0_len = seg_h->body_len;
+        if (dst_h->type != wire::type_t::PATH || dst_h->opt.pl || dst_h->body_len == 0)
+            return fwd_dst_kind_t::NONE;
+        // Segment 0 is a packed record, and it must be a LITERAL one: an address whose first
+        // record is the label escape names no mount here (nothing mints yet), so the frame
+        // falls through to the terminus arm exactly as a non-NAME leading child used to.
+        const auto seg0 = read_packed_seg(cur, dst_h->body_off, dst_h->body_off + dst_h->body_len);
+        if (!seg0 || seg0->escape) return fwd_dst_kind_t::NONE;
+        seg0_off = seg0->body_off;
+        seg0_len = seg0->body_len;
     }
     pre.valid = true;
     pre.fwd_opt = fwd_h->opt;
@@ -554,11 +604,15 @@ class dst_seg_walk_t {
      */
     void prefill() {
         while (cached_ < kDstSegCacheSlots && pos_ < end_) {
-            const auto h = read_fwd_header(*cur_, pos_);
-            if (!h || h->type != wire::type_t::NAME) return;
-            last_ = {h->body_off, h->body_len};
+            const auto r = read_packed_seg(*cur_, pos_, end_);
+            if (!r) return;
+            if (r->escape) {  // step over a label record this node does not implement
+                pos_ += r->total;
+                continue;
+            }
+            last_ = {r->body_off, r->body_len};
             cache_[cached_++] = last_;
-            pos_ += h->total;
+            pos_ += r->total;
             ++have_;
         }
     }
@@ -582,20 +636,21 @@ class dst_seg_walk_t {
      *         ask is behind it) until segment @p i is in hand. */
     [[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>> walk_to(std::size_t i) {
         if (i < have_) {
-            // Behind the walk but past the cache: resume from the last cached segment. A NAME
-            // body is its TLV's tail, so the next header starts at `off + len` — no stored
-            // "next position" and no second field per entry.
+            // Behind the walk but past the cache: resume from the last cached segment. A
+            // packed record's payload is its tail, so the next record starts at `off + len`
+            // — no stored "next position" and no second field per entry.
             have_ = cached_;
             pos_ =
                 cached_ == 0 ? body_off_ : cache_[cached_ - 1].first + cache_[cached_ - 1].second;
         }
         while (have_ <= i) {
             if (pos_ >= end_) return std::nullopt;
-            const auto h = read_fwd_header(*cur_, pos_);
-            if (!h || h->type != wire::type_t::NAME) return std::nullopt;
-            last_ = {h->body_off, h->body_len};
+            const auto r = read_packed_seg(*cur_, pos_, end_);
+            if (!r) return std::nullopt;
+            pos_ += r->total;
+            if (r->escape) continue;  // stepped over, not counted as a segment
+            last_ = {r->body_off, r->body_len};
             if (have_ < kDstSegCacheSlots) cache_[cached_++] = last_;
-            pos_ += h->total;
             ++have_;
         }
         return last_;
@@ -605,8 +660,10 @@ class dst_seg_walk_t {
     /**
      * @brief Where segment @p i ENDS — the `strip_at` the head rebuild wants.
      *
-     * A NAME body is its TLV's tail, so the consumed run ends at `body_off + body_len` of the
-     * last stripped segment. Returns `std::nullopt` if that segment does not exist.
+     * A packed record's payload is its tail, so the consumed run ends at
+     * `body_off + body_len` of the last stripped segment. Returns `std::nullopt` if that
+     * segment does not exist. An escape record STEPPED OVER inside the run is inside
+     * `[body, end_of(i))` too, so the strip stays a single contiguous shrink.
      */
     [[nodiscard]] std::optional<std::size_t> end_of(std::size_t i) {
         const auto s = at(i);
@@ -633,7 +690,7 @@ class dst_seg_walk_t {
  *
  * A FWD whose first `dst` segment names a transport child is a forward hop that
  * never needs the decoded tree. Returns the `[body_off, body_len)` of the first
- * dst-segment NAME iff the frame is a structured FWD with an op VALUE + a
+ * packed dst-segment record iff the frame is a structured FWD with an op VALUE + a
  * non-empty dst PATH; nullopt otherwise (malformed, non-FWD, or empty dst ⇒ the
  * caller falls back to the full-decode terminus path). Offsets, not a span, so
  * the result is source-agnostic — the caller re-slices the segment bytes from
@@ -655,11 +712,12 @@ template <class Cursor>
     const std::size_t dst_pos = fwd_h->body_off + op_h->total;
     if (dst_pos >= body_end) return std::nullopt;
     const auto dst_h = read_fwd_header(cur, dst_pos);
-    if (!dst_h || dst_h->type != wire::type_t::PATH || dst_h->body_len == 0) return std::nullopt;
-    // dst.child[0] = first segment NAME
-    const auto seg_h = read_fwd_header(cur, dst_h->body_off);
-    if (!seg_h || seg_h->type != wire::type_t::NAME) return std::nullopt;
-    return std::pair{seg_h->body_off, seg_h->body_len};
+    if (!dst_h || dst_h->type != wire::type_t::PATH || dst_h->opt.pl || dst_h->body_len == 0)
+        return std::nullopt;
+    // dst record[0] = the first packed segment (RFC-0018); an escape names no transport child
+    const auto seg0 = read_packed_seg(cur, dst_h->body_off, dst_h->body_off + dst_h->body_len);
+    if (!seg0 || seg0->escape) return std::nullopt;
+    return std::pair{seg0->body_off, seg0->body_len};
 }
 
 /**
@@ -806,16 +864,38 @@ class stack_writer {
         buf_[len_++] = static_cast<std::byte>(body_len & 0xFF);
         buf_[len_++] = static_cast<std::byte>((body_len >> 8) & 0xFF);
     }
-    /** @brief Append a complete NAME TLV over @p s (type, opt=0, u16 len, bytes). */
-    void name(std::string_view s) {
-        if (len_ + 4 + s.size() > N || s.size() > 0xFFFFu) {
+    /**
+     * @brief Append a `PATH` header for @p body_len — `opt.PL = 0`, `LL` auto-widened.
+     *
+     * Its own method rather than @ref header, because a packed `PATH` body is NOT a child
+     * run: `opt.PL = 1` would make a generic walker read the first body bytes as a TLV
+     * header and mis-frame the whole address (RFC-0018 §5 — the same MUST that
+     * @ref header_bare states for `PATH_REF`). And not @ref header_bare either, because
+     * that one refuses to widen: a `PATH` body may legally pass 0xFFFF, where a `PATH_REF`
+     * body cannot.
+     */
+    void header_path(std::size_t body_len) {
+        wire::opt_t opt{};
+        if (body_len > 0xFFFFu) opt.ll = true;
+        const std::size_t width = opt.ll ? 4u : 2u;
+        if (len_ + 2 + width > N) {
             overflow_ = true;
             return;
         }
-        buf_[len_++] = static_cast<std::byte>(std::to_underlying(wire::type_t::NAME));
-        buf_[len_++] = std::byte{0};
-        buf_[len_++] = static_cast<std::byte>(s.size() & 0xFF);
-        buf_[len_++] = static_cast<std::byte>((s.size() >> 8) & 0xFF);
+        buf_[len_++] = static_cast<std::byte>(std::to_underlying(wire::type_t::PATH));
+        buf_[len_++] = static_cast<std::byte>(opt.encode());
+        for (std::size_t i = 0; i < width; ++i)
+            buf_[len_++] = static_cast<std::byte>((body_len >> (8 * i)) & 0xFF);
+    }
+
+    /** @brief Append one packed PATH segment record over @p s (`[u8 len][bytes]`, RFC-0018).
+     *         An empty @p s would spell the §5.4 escape, so it overflows rather than mints. */
+    void path_seg(std::string_view s) {
+        if (len_ + 1 + s.size() > N || s.empty() || s.size() > wire::kPackedSegMaxBytes) {
+            overflow_ = true;
+            return;
+        }
+        buf_[len_++] = static_cast<std::byte>(s.size());
         for (char c : s) buf_[len_++] = static_cast<std::byte>(c);
     }
     /** @brief Copy opaque @p bytes verbatim (the op TLV). */
@@ -845,16 +925,16 @@ class stack_writer {
 
 /** @brief Capacity of the forward hop's first head: FWD hdr(≤6) + op TLV(small) + PATH hdr(≤6). */
 inline constexpr std::size_t kFwdHead1Cap = 64;
-/** @brief Capacity of the forward hop's second head: PATH hdr(≤6) + one NAME(≤4+segment). */
+/** @brief Capacity of the forward hop's second head: the grown src PATH header alone. */
 // The grown src PATH header alone — 2 type/opt bytes plus a 2- or 4-byte length. This is a
 // STRUCTURAL bound (the widest TLV header the format has), not a budget: the prepended mount
-// NAMEs are emitted as bare 4-byte headers and their bytes are referenced from the caller's
-// storage by @ref fwd_rebuild_t::gather, never copied in here. An earlier revision copied them
-// into this buffer, which silently made the buffer size a cap on how long a connection NAME
+// records are emitted as bare one-byte length prefixes and their bytes are referenced from the
+// caller's storage by @ref fwd_rebuild_t::gather, never copied in here. An earlier revision copied
+// them into this buffer, which silently made the buffer size a cap on how long a connection NAME
 // could be — a synthetic limit on user-chosen data (forbidden by RFC-0006/0007 + ADR-0051), and
 // one whose breach was a dropped LEGAL frame rather than a clean rejection. A mount path is now
-// bounded only by the wire's own `u16` NAME length and by the outgoing frame fitting the link's
-// `max_frame`/MTU.
+// bounded only by the packed record's own `u8` length field and by the outgoing frame fitting
+// the link's `max_frame`/MTU.
 inline constexpr std::size_t kFwdSrcHdrCap = 6;
 
 /**
@@ -917,11 +997,11 @@ inline constexpr std::size_t kFwdMaxIov = 10;
 struct fwd_rebuild_t {
     stack_writer<kFwdHead1Cap> head1;  /**< @brief FWD header + op (copied) + shrunk dst header. */
     stack_writer<kFwdSrcHdrCap> head2; /**< @brief The grown src PATH header. */
-    /** @brief The inbound mount as ALREADY-ENCODED NAME TLVs, emitted as ONE span and never
+    /** @brief The inbound mount as ALREADY-ENCODED packed records, emitted as ONE span and never
      *         copied. Precomputed once per child (#508), so a hop does no per-segment work. */
     std::span<const std::byte> mount_tlv;
-    /** @brief A 4-byte NAME header for @ref extra_seg. */
-    std::array<std::byte, 4> extra_hdr;
+    /** @brief The one-byte packed length prefix for @ref extra_seg (RFC-0018). */
+    std::array<std::byte, 1> extra_hdr;
     /**
      * @brief The inbound frame's trailer-TIMESTAMP window, re-emitted VERBATIM as the
      *        outgoing frame's last bytes (#1109) — offset in bits 0-30, FORM in bit 31.
@@ -1329,19 +1409,27 @@ template <class Cursor, class MintFn = no_mint_t, class ReverseMintFn = no_mint_
         : mint_flagged ? rebuild_request_reverse_mint(cur, pos, body_end, reverse_mint_fn, r)
                        : 0u;
 
-    // The K leading dst segments (NAMEs) this hop consumes. The peek already walked exactly
+    // The K leading dst segment RECORDS this hop consumes. The peek already walked exactly
     // these, so a caller that recorded where they end hands the answer over; `strip_at` below
     // `dst_body_off` means it did not, and the walk runs as before.
+    //
+    // Under RFC-0018 the walk is `strip_at += 1 + len` — one byte load and an add where it was
+    // a `parse_header` option decode, and the strip stays the same zero-copy shrink: the
+    // residual `dst` is still emitted as ONE untouched span with a fresh 4-byte `PATH` header,
+    // and no length table is rewritten (§5.1).
     std::size_t strip_at = dst_body_off;
     if (pre != nullptr && pre->valid && pre->strip_at >= dst_body_off) {
         strip_at = pre->strip_at;
         if (strip_at > dst_end) return std::nullopt;  // dst shorter than the mount
     } else {
-        for (std::size_t i = 0; i < strip_k; ++i) {
+        for (std::size_t i = 0; i < strip_k;) {
             if (strip_at >= dst_end) return std::nullopt;  // dst shorter than the mount
-            const auto seg_h = read_fwd_header(cur, strip_at);
-            if (!seg_h || seg_h->type != wire::type_t::NAME) return std::nullopt;
-            strip_at += seg_h->total;
+            const auto rec = read_packed_seg(cur, strip_at, dst_end);
+            if (!rec) return std::nullopt;
+            strip_at += rec->total;
+            // An escape record inside the consumed run is stepped over and does NOT count
+            // against `strip_k` — the descent counted literal segments, so the strip must too.
+            if (!rec->escape) ++i;
         }
     }
     r.rem_dst_off = strip_at;
@@ -1349,12 +1437,14 @@ template <class Cursor, class MintFn = no_mint_t, class ReverseMintFn = no_mint_
 
     // The inbound mount path appended to src (grow) — empty for a REPLY (no accumulation).
     // The precomputed run is already-encoded bytes, so it contributes its own length; a
-    // dynamic peer segment adds a 4-byte NAME header plus its bytes. The only bound left is
-    // the format's own `u16` NAME length field — beyond that a mount path is limited solely
-    // by the frame fitting the link's `max_frame`/MTU, never by a buffer budget.
-    if (extra_seg.size() > 0xFFFFu) return std::nullopt;  // exceeds the NAME length field
+    // dynamic peer segment adds ONE length byte plus its bytes. The only bound left is the
+    // packed record's `u8` length field — beyond that a mount path is limited solely by the
+    // frame fitting the link's `max_frame`/MTU, never by a buffer budget.
+    // The packed record's length field is a `u8` (RFC-0018 §5), which is the wire's own bound
+    // on a segment and now the only one: a peer name longer than this has no spelling at all.
+    if (extra_seg.size() > wire::kPackedSegMaxBytes) return std::nullopt;
     const std::size_t inbound_name_len =
-        is_reply ? 0u : mount_tlv.size() + (extra_seg.empty() ? 0u : 4u + extra_seg.size());
+        is_reply ? 0u : mount_tlv.size() + (extra_seg.empty() ? 0u : 1u + extra_seg.size());
 
     const std::size_t new_dst_body = r.rem_dst_len;
     const std::size_t new_src_body = src_h->body_len + inbound_name_len;
@@ -1404,21 +1494,18 @@ template <class Cursor, class MintFn = no_mint_t, class ReverseMintFn = no_mint_
         // hop (`dst_to_path`): the consumed element was the final one and the peer behind
         // the egress is an origin, so it receives the canonical delivery shape (§7.1
         // amendment 1 — the origin never speaks the bound form).
-        r.head1.header(wire::type_t::PATH, new_dst_body);
+        r.head1.header_path(new_dst_body);
     }
 
     if (src_ref) {
         r.head2.header_bare(wire::type_t::PATH_REF, new_src_body);
     } else {
-        r.head2.header(wire::type_t::PATH, new_src_body);
+        r.head2.header_path(new_src_body);
     }
     if (!is_reply) {
         r.mount_tlv = mount_tlv;
         if (!extra_seg.empty()) {
-            r.extra_hdr[0] = static_cast<std::byte>(std::to_underlying(wire::type_t::NAME));
-            r.extra_hdr[1] = std::byte{0};
-            r.extra_hdr[2] = static_cast<std::byte>(extra_seg.size() & 0xFF);
-            r.extra_hdr[3] = static_cast<std::byte>((extra_seg.size() >> 8) & 0xFF);
+            r.extra_hdr[0] = static_cast<std::byte>(extra_seg.size());
             r.extra_seg = extra_seg;
         }
     }
@@ -1427,30 +1514,29 @@ template <class Cursor, class MintFn = no_mint_t, class ReverseMintFn = no_mint_
 }
 
 /**
- * @brief Encode @p segs as a run of NAME TLVs — the precomputed mount prefix (#508).
+ * @brief Encode @p segs as a run of packed PATH records — the precomputed mount prefix (#508).
  *
  * Built ONCE per child, at registration, and handed to every hop as
- * @ref fwd_rebuild_t::mount_tlv. Canonical form (`opt = 0`, `u16` length) is chosen here
- * deliberately: we are EMITTING, so there is no encoding variance to be wrong about — unlike
- * MATCHING an inbound path, where a peer may legally send `opt.LL=1` and byte comparison
- * would break conformance (ADR-0062 §Considered options).
- * @return The encoded run, or nullopt if a segment exceeds the NAME length field.
+ * @ref fwd_rebuild_t::mount_tlv. Under RFC-0018 there is only ONE form to emit — a record is
+ * `[u8 len][bytes]` with no option byte — so the ADR-0062 §"Considered options" caveat this
+ * used to carry (a peer may legally spell the same NAME with `opt.LL = 1`, so emitting and
+ * matching are different problems) simply no longer applies: emitting and matching are now the
+ * same bytes.
+ * @return The encoded run, or nullopt if a segment is empty (it would spell the §5.4 escape)
+ *         or exceeds the record's `u8` length field.
  */
 [[nodiscard]] inline std::optional<std::vector<std::byte>> encode_mount_tlv(
     std::span<const std::string_view> segs) {
     std::vector<std::byte> out;
     std::size_t total = 0;
     for (const std::string_view s : segs) {
-        if (s.size() > 0xFFFFu) return std::nullopt;
-        total += 4u + s.size();
+        if (s.empty() || s.size() > wire::kPackedSegMaxBytes) return std::nullopt;
+        total += 1u + s.size();
     }
     out.reserve(total);
-    // The oversize check above is what makes this a straight substitution: `emit_tlv`
-    // auto-widens a body past 0xFFFF to a 4-byte length (setting `opt.ll`), whereas a mount
-    // run is peeked by OFFSET against a fixed 4-byte NAME header. Refusing first means
-    // `emit_name` never widens here, so the bytes are identical to the hand-rolled push it
-    // replaces (ADR-0048 §3 — one representation of the header layout).
-    for (const std::string_view s : segs) wire::emit_name(out, s);
+    for (const std::string_view s : segs) {
+        if (!wire::emit_path_segment(out, s)) return std::nullopt;
+    }
     return out;
 }
 

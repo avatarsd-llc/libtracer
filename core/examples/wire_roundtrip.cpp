@@ -62,12 +62,16 @@ int main() {
     const std::string seg0 = "sensor";
     const std::string seg1 = "temp";
 
-    // Build a structured PATH TLV (opt.pl = payload-is-children) with a CRC trailer
-    // (opt.cr — encode recomputes the CRC-32C over the body).
+    // Build a PACKED PATH TLV (RFC-0018 — `opt.PL = 0`, the body is a run of
+    // `[u8 len][bytes]` segment records) with a CRC trailer (opt.cr — encode recomputes
+    // the CRC-32C over the body).
+    std::vector<std::byte> packed;
+    (void)tr::wire::emit_path_segment(packed, seg0);
+    (void)tr::wire::emit_path_segment(packed, seg1);
     tlv_t path;
     path.type = type_t::PATH;
-    path.opt = opt_t{.pl = true, .cr = true};
-    path.children = {name_tlv(seg0), name_tlv(seg1)};
+    path.opt = opt_t{.cr = true};
+    path.payload = std::span<const std::byte>(packed);
 
     // Encode the model to wire bytes, then decode those bytes back into a tree.
     const std::vector<std::byte> wire = tr::wire::encode(path);
@@ -83,19 +87,23 @@ int main() {
                     static_cast<unsigned>(decoded->type), decoded->children.size(),
                     (decoded->trailer && decoded->trailer->crc) ? "present" : "absent");
         check(ok, decoded->type == type_t::PATH, "decoded root is a PATH");
-        check(ok, decoded->opt.pl, "decoded root is structured (opt.pl)");
-        check(ok, decoded->children.size() == 2, "decoded PATH has two NAME children");
+        check(ok, !decoded->opt.pl, "a packed PATH is NOT structured (opt.PL = 0, RFC-0018)");
+        check(ok, decoded->children.empty(), "a packed PATH has no child TLVs");
+        check(ok, decoded->payload.size() == 1 + seg0.size() + 1 + seg1.size(),
+              "the body is one length byte per segment plus the segment text");
         check(ok, decoded->trailer && decoded->trailer->crc.has_value(),
               "decoded PATH carries the verified CRC trailer");
-        // The decoded payloads borrow the encoded buffer — zero copy.
-        if (decoded->children.size() == 2) {
-            const auto c0 = decoded->children[0].payload;
-            check(ok, c0.data() >= wire.data() && c0.data() < wire.data() + wire.size(),
-                  "decoded NAME payload is a span INTO the encoded buffer (zero copy)");
+        // The decoded payload borrows the encoded buffer — zero copy.
+        {
+            const auto body = decoded->payload;
+            check(ok, body.data() >= wire.data() && body.data() < wire.data() + wire.size(),
+                  "the packed body is a span INTO the encoded buffer (zero copy)");
             const auto want = bytes_of(seg0);
             const bool same =
-                c0.size() == want.size() && std::equal(c0.begin(), c0.end(), want.begin());
-            check(ok, same, "first NAME child round-trips to \"sensor\"");
+                body.size() > want.size() &&
+                static_cast<std::size_t>(static_cast<std::uint8_t>(body[0])) == want.size() &&
+                std::equal(want.begin(), want.end(), body.begin() + 1);
+            check(ok, same, "the first packed record round-trips to \"sensor\"");
         }
         // The strongest round-trip invariant: re-encoding the decoded tree
         // reproduces the exact wire bytes (byte-identical, CRC and all).

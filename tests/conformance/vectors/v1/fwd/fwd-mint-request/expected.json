@@ -1,8 +1,8 @@
 {
   "name": "fwd-mint-request",
   "category": "fwd",
-  "hex": "0F402B000100010080064012000200060073656E736F720200040074656D7006400C00020008007265706C792D6570",
-  "total_bytes": 47,
+  "hex": "0F402200010001008006000C000673656E736F720474656D7006000900087265706C792D6570",
+  "total_bytes": 38,
   "decoded": {
     "type": "0x0F FWD",
     "structured": true,

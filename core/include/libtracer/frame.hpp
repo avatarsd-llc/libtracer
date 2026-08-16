@@ -165,13 +165,17 @@ inline void stamp_ts(tlv_t& tlv, wire_clock_t& clock) noexcept { stamp_ts(tlv, c
 /**
  * @brief The canonical PATH-payload key of a decoded PATH TLV — the graph vertex-map key.
  *
- * The concatenated NAME-child encodings. One locus for what `graph_t`, `op_resolver_t`,
- * and `fwd_router_t` each previously rebuilt inline.
- * Every child MUST be a `NAME` (`docs/reference/05-protocol-tlvs.md`: *"Each child MUST be a
- * NAME TLV (`type=0x02`); other types are invalid in PATH context"*). A non-`NAME` child yields
- * `std::nullopt` rather than a key: this used to re-emit ANY child's payload through
- * `wire::emit_name`, so a peer's `PATH{VALUE "sensor"}` composed byte-identical key bytes to the
- * legal `PATH{NAME "sensor"}` and resolved `/sensor` — #436's shape, one tier up, and #681.
+ * The PATH body's packed `[u8 len][bytes]` segment records, copied (RFC-0018 — `opt.PL = 0`,
+ * so the body IS the key). One locus for what `graph_t`, `op_resolver_t`, and `fwd_router_t`
+ * each previously rebuilt inline.
+ *
+ * This is **canonical / key** context, so the framing is checked and the RFC-0018 §5.4
+ * `len == 0` escape is REJECTED — a label is not canonical bytes. A ragged or escape-bearing
+ * body yields `std::nullopt` rather than a key. Before RFC-0018 the same `nullopt` guarded a
+ * non-`NAME` child: this function re-emitted ANY child's payload through `wire::emit_name`, so
+ * a peer's `PATH{VALUE "sensor"}` composed byte-identical key bytes to the legal
+ * `PATH{NAME "sensor"}` and resolved `/sensor` (#436's shape, one tier up, and #681). A packed
+ * body has no children to mistype, so that class of divergence is structurally gone.
  *
  * @note Returning `nullopt` rather than an empty vector is load-bearing. `graph_t::find_ptr`
  *       walks segments from the root, so an EMPTY key exits its loop immediately and resolves
@@ -179,7 +183,8 @@ inline void stamp_ts(tlv_t& tlv, wire_clock_t& clock) noexcept { stamp_ts(tlv, c
  *       which is worse than the bug.
  *
  * @param path A decoded PATH @ref tlv_t.
- * @return The canonical key bytes, or `nullopt` if any child is not a `NAME`.
+ * @return The canonical key bytes, or `nullopt` if the body is not a run of literal packed
+ *         records (ragged framing, an escape record, or a structured `opt.PL = 1` PATH).
  */
 [[nodiscard]] std::optional<std::vector<std::byte>> path_key(const tlv_t& path);
 

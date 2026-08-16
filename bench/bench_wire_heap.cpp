@@ -542,8 +542,8 @@ void arm_loopback() {
 /** @brief Append a NAME-only PATH TLV over @p segs. */
 void emit_path(std::vector<std::byte>& out, std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> body;
-    for (std::string_view s : segs) tr::wire::emit_name(body, s);
-    tr::wire::emit_tlv(out, tr::wire::type_t::PATH, tr::wire::opt_t{.pl = true}, body);
+    for (std::string_view s : segs) (void)tr::wire::emit_path_segment(body, s);
+    tr::wire::emit_tlv(out, tr::wire::type_t::PATH, tr::wire::opt_t{}, body);
 }
 
 /** @brief `FWD{ op=WRITE, dst, src, VALUE }` — the frame a forward hop shrinks and grows. */

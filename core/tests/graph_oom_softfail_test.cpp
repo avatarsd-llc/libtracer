@@ -112,11 +112,10 @@ std::vector<std::byte> b_name(std::string_view s) {
 std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> body;
     for (const std::string_view s : segs) {
-        const std::vector<std::byte> n = b_name(s);
-        body.insert(body.end(), n.begin(), n.end());
+        (void)tr::wire::emit_path_segment(body, s);
     }
     std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
     return out;
 }
 using tr::testing::b_fwd;
@@ -305,7 +304,7 @@ void test_remote_edge_copy_drop() {
         std::string link = "lnk" + std::to_string(i);
         link.append(kLinkLen - link.size(), 'x');
         check(g.subscribe_wire(v, make_value({0x04, 0x40, 0x00, 0x00}),
-                               make_value({0x06, 0x40, 0x00, 0x00}), std::move(link))
+                               make_value({0x06, 0x00, 0x00, 0x00}), std::move(link))
                   .has_value(),
               "bind a remote subscriber over a long-named link");
     }

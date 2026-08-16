@@ -119,7 +119,7 @@ void emit_path(std::vector<std::byte>& out, std::initializer_list<std::string_vi
             body, type_t::NAME, opt_t{},
             std::span<const std::byte>(reinterpret_cast<const std::byte*>(s.data()), s.size()));
     }
-    tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
 }
 
 std::vector<std::byte> make_fwd(std::initializer_list<std::string_view> dst,

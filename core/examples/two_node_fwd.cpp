@@ -66,9 +66,9 @@ std::vector<std::byte> fwd_write(std::initializer_list<std::string_view> dst,
     tr::wire::emit_tlv(body, tr::wire::type_t::VALUE, tr::wire::opt_t{},
                        std::span<const std::byte>(&op, 1));
     std::vector<std::byte> dst_segs;
-    for (std::string_view s : dst) tr::wire::emit_name(dst_segs, s);
-    tr::wire::emit_tlv(body, tr::wire::type_t::PATH, tr::wire::opt_t{.pl = true}, dst_segs);
-    tr::wire::emit_tlv(body, tr::wire::type_t::PATH, tr::wire::opt_t{.pl = true},
+    for (std::string_view s : dst) (void)tr::wire::emit_path_segment(dst_segs, s);
+    tr::wire::emit_tlv(body, tr::wire::type_t::PATH, tr::wire::opt_t{}, dst_segs);
+    tr::wire::emit_tlv(body, tr::wire::type_t::PATH, tr::wire::opt_t{},
                        std::span<const std::byte>{});  // src: empty, grows per hop
     body.insert(body.end(), payload_value_tlv.begin(), payload_value_tlv.end());
     std::vector<std::byte> frame;

@@ -16,6 +16,7 @@
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/key_view.hpp"
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/packed_path.hpp"
 #include "libtracer/path.hpp"
 #include "libtracer/tlv_emit.hpp"
 
@@ -204,15 +205,15 @@ result_t<void> transport_vertex_t::mint_module_locked(const std::string& module)
     // `make_connection_locked`'s lazy mint follows, and for the same reason: a separate
     // seen-set would be a second source of truth for something the graph already knows.
     std::vector<std::byte> mod_key;
-    wire::emit_name(mod_key, std::string_view(net_root_).substr(1));
-    wire::emit_name(mod_key, module);
+    (void)wire::emit_path_segment(mod_key, std::string_view(net_root_).substr(1));
+    (void)wire::emit_path_segment(mod_key, module);
     if (!graph_.find(mod_key)) {
         auto mod = graph_.register_vertex_key(mod_key, graph::role_t::STORED_VALUE, {});
         if (!mod) return std::unexpected(mod.error());
     }
 
     std::vector<std::byte> endpoint_key = mod_key;
-    wire::emit_name(endpoint_key, kConnEndpointName);
+    (void)wire::emit_path_segment(endpoint_key, kConnEndpointName);
     if (graph_.find(endpoint_key)) return {};  // a second kind under the same module
 
     // `role_t::HANDLER` is what makes the endpoint WRITE-ONLY AND VALUELESS (RFC-0014 §2):
@@ -503,7 +504,7 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(const std::
     std::vector<std::byte> mount_key;
     for (std::string_view seg : {std::string_view(net_root_).substr(1), std::string_view(module),
                                  std::string_view(name)}) {
-        wire::emit_name(mount_key, seg);
+        (void)wire::emit_path_segment(mount_key, seg);
     }
 
     // The `/net/<module>` structural vertex, created lazily on first use. graph_.find IS the
@@ -511,8 +512,8 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(const std::
     // instantiation) for something the graph already knows.
     {
         std::vector<std::byte> mod_key;
-        wire::emit_name(mod_key, std::string_view(net_root_).substr(1));
-        wire::emit_name(mod_key, module);
+        (void)wire::emit_path_segment(mod_key, std::string_view(net_root_).substr(1));
+        (void)wire::emit_path_segment(mod_key, module);
         if (!graph_.find(mod_key)) {
             (void)graph_.register_vertex_key(mod_key, graph::role_t::STORED_VALUE, {});
         }

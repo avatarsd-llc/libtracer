@@ -1294,9 +1294,9 @@ class silent_link_t final : public tr::net::transport_t {
 /** @brief A `PATH{NAME ...}` TLV, built outside every armed window. */
 std::vector<std::byte> label_route(std::string_view seg) {
     std::vector<std::byte> body;
-    tr::wire::emit_name(body, seg);
+    (void)tr::wire::emit_path_segment(body, seg);
     std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, tr::wire::type_t::PATH, tr::wire::opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, tr::wire::type_t::PATH, tr::wire::opt_t{}, body);
     return out;
 }
 

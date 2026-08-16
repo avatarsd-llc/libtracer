@@ -79,11 +79,9 @@ tr::view::view_t value_u8(std::uint8_t x) {
 
 /** @brief A SUBSCRIBER TLV naming a single-segment target path (the wire subscribe form). */
 tr::view::view_t subscriber_tlv(std::string_view target_segment) {
-    const std::vector<std::byte> name_bytes = as_bytes(target_segment);
-    tlv_t name{.type = type_t::NAME, .payload = name_bytes};
-    tlv_t path{.type = type_t::PATH};
-    path.opt.pl = true;
-    path.children.push_back(name);
+    std::vector<std::byte> packed_body;
+    (void)tr::wire::emit_path_segment(packed_body, target_segment);
+    tlv_t path{.type = type_t::PATH, .payload = packed_body};  // packed, PL = 0
     tlv_t sub{.type = type_t::SUBSCRIBER};
     sub.opt.pl = true;
     sub.children.push_back(path);

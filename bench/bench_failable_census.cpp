@@ -215,10 +215,10 @@ std::vector<std::byte> make_route(std::size_t segs) {
     for (std::size_t i = 0; i < segs; ++i) {
         char nb[24];
         std::snprintf(nb, sizeof nb, "seg%04zu", i);
-        tr::wire::emit_name(body, std::string_view(nb));
+        (void)tr::wire::emit_path_segment(body, std::string_view(nb));
     }
     std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, tr::wire::type_t::PATH, tr::wire::opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, tr::wire::type_t::PATH, tr::wire::opt_t{}, body);
     return out;
 }
 
@@ -425,16 +425,13 @@ int run_blocks() {
         census_t c;
         static constexpr char kSeg[] = "segment";
         const std::span<const std::byte> seg(reinterpret_cast<const std::byte*>(kSeg), 7);
+        static std::vector<std::byte> packed;
+        packed.clear();
+        for (std::size_t i = 0; i < 4; ++i) (void)tr::wire::emit_path_segment(packed, seg);
         const tr::wire::tlv_t tlv = [&] {
             tr::wire::tlv_t t;
-            t.type = tr::wire::type_t::PATH;
-            t.opt = tr::wire::opt_t{.pl = true};
-            for (std::size_t i = 0; i < 4; ++i) {
-                tr::wire::tlv_t n;
-                n.type = tr::wire::type_t::NAME;
-                n.payload = seg;
-                t.children.push_back(std::move(n));
-            }
+            t.type = tr::wire::type_t::PATH;  // packed body, PL = 0 (RFC-0018)
+            t.payload = std::span<const std::byte>(packed);
             return t;
         }();
         g_allocs = g_frees = g_bytes = 0;

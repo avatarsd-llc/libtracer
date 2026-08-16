@@ -145,26 +145,107 @@ struct capture_transport_t : transport_t {
     std::size_t sink = 0;
 };
 
-/** @brief Append a NAME-only PATH TLV over @p segs. */
+/** @brief Append a PACKED PATH TLV over @p segs (RFC-0018 — `opt.PL = 0`). */
 void emit_path(std::vector<std::byte>& out, std::initializer_list<std::string_view> segs) {
+    std::vector<std::byte> body;
+    for (std::string_view s : segs) (void)tr::wire::emit_path_segment(body, s);
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
+}
+
+/**
+ * @brief Append the PRE-RFC-0018 `PATH` spelling over @p segs — a structured body of NAME
+ *        children — so falsifier 1's two arms can time the same address two ways.
+ *
+ * This is the ONLY place the retired encoding survives, and it is here rather than in the
+ * core because the core no longer emits it and must not learn to again. It is what makes
+ * the comparison honest: the packed arm is timed against the encoding it replaces, in one
+ * binary, on the same address, rather than against a number recorded on another host.
+ */
+void emit_path_literal(std::vector<std::byte>& out, std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> body;
     for (std::string_view s : segs) tr::wire::emit_name(body, s);
     tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
 }
 
+/** @brief Which `dst`/`src` spelling a bench frame carries — falsifier 1's two arms. */
+enum class path_form_t : std::uint8_t {
+    PACKED,  /**< @brief RFC-0018 `[u8 len][bytes]` records, the shipped encoding. */
+    LITERAL, /**< @brief The retired `NAME`-child body, for the comparison only. */
+};
+
 /** @brief FWD{ op=WRITE, dst, src, VALUE } — the frame a forward hop shrinks and grows. */
 std::vector<std::byte> make_fwd(std::initializer_list<std::string_view> dst,
                                 std::initializer_list<std::string_view> src,
-                                std::span<const std::byte> payload) {
+                                std::span<const std::byte> payload,
+                                path_form_t form = path_form_t::PACKED) {
     std::vector<std::byte> body;
     const std::byte op{static_cast<std::uint8_t>(tr::graph::fwd_op_t::WRITE)};
     tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
-    emit_path(body, dst);
-    emit_path(body, src);
+    if (form == path_form_t::PACKED) {
+        emit_path(body, dst);
+        emit_path(body, src);
+    } else {
+        emit_path_literal(body, dst);
+        emit_path_literal(body, src);
+    }
     tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, payload);
     std::vector<std::byte> frame;
     tr::wire::emit_tlv(frame, type_t::FWD, opt_t{.pl = true}, body);
     return frame;
+}
+
+/**
+ * @brief The PRE-RFC-0018 resolve leg: open the `dst` window and walk the mount run over a
+ *        `NAME`-child body — the same rejections, filling the same @ref tr::net::fwd_pre_t.
+ *
+ * A transcription of what `peek_fwd_dst` + `dst_seg_walk_t` did before this RFC, kept here
+ * and nowhere else. RFC-0018 falsifier 1 is stated as an in-binary comparison for a reason:
+ * *"if the packed arm does not beat the literal arm on the resolve leg, this RFC is void"*,
+ * and a comparison against a remembered number cannot falsify anything. So both arms read
+ * the SAME frame content through the SAME four structural header reads, fill the same
+ * `fwd_pre_t`, and perform the same rejections; only the segment-record grammar differs.
+ *
+ * @return The number of leading segments walked, accumulated by the caller so the optimizer
+ *         cannot delete the walk.
+ */
+template <class Cursor>
+[[nodiscard]] std::size_t resolve_literal(const Cursor& cur, std::size_t want) {
+    tr::net::fwd_pre_t pre{};
+    const auto fwd_h = tr::net::read_fwd_header(cur, 0);
+    if (!fwd_h || fwd_h->type != type_t::FWD || !fwd_h->opt.pl) return 0;
+    const std::size_t body_end = fwd_h->body_off + fwd_h->body_len;
+    const auto op_h = tr::net::read_fwd_header(cur, fwd_h->body_off);
+    if (!op_h || op_h->type != type_t::VALUE) return 0;
+    const std::size_t dst_pos = fwd_h->body_off + op_h->total;
+    if (dst_pos >= body_end) return 0;
+    const auto dst_h = tr::net::read_fwd_header(cur, dst_pos);
+    if (!dst_h || dst_h->type != type_t::PATH || dst_h->body_len == 0) return 0;
+    const auto seg_h = tr::net::read_fwd_header(cur, dst_h->body_off);
+    if (!seg_h || seg_h->type != type_t::NAME) return 0;
+    pre.valid = true;
+    pre.fwd_opt = fwd_h->opt;
+    pre.body_end = body_end;
+    pre.op_pos = fwd_h->body_off;
+    pre.op_total = op_h->total;
+    pre.op_body_off = op_h->body_off;
+    pre.op_body_len = op_h->body_len;
+    pre.dst_body_off = dst_h->body_off;
+    pre.dst_end = dst_h->body_off + dst_h->body_len;
+    pre.after_dst = dst_pos + dst_h->total;
+    pre.seg0_off = seg_h->body_off;
+    pre.seg0_len = seg_h->body_len;
+    pre.strip_at = dst_h->body_off;
+    // The mount-run walk: one `read_fwd_header` per segment, which is the term this RFC
+    // deletes. Segment 0 came free with the gate above, exactly as it does today.
+    std::size_t n = 1;
+    std::size_t pos = seg_h->body_off + seg_h->body_len;
+    while (n < want && pos < pre.dst_end) {
+        const auto h = tr::net::read_fwd_header(cur, pos);
+        if (!h || h->type != type_t::NAME) break;
+        pos += h->total;
+        ++n;
+    }
+    return n;
 }
 
 /**
@@ -291,12 +372,13 @@ std::uint64_t run_point(std::size_t links, std::size_t target_pos, const char* m
  * points production takes, so this is a decomposition of the shipped path — not a model of a
  * hypothetical one.
  */
-[[nodiscard]] std::uint64_t run_leg(const char* mode, bool rebuild_leg) {
+[[nodiscard]] std::uint64_t run_leg(const char* mode, bool rebuild_leg,
+                                    path_form_t form = path_form_t::PACKED) {
     const std::byte payload[4] = {std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE},
                                   std::byte{0xEF}};
     const std::vector<std::byte> frame =
         make_fwd({"net", "ws-client", "out", "sensor", "temp"}, {"reply"},
-                 std::span<const std::byte>(payload, 4));
+                 std::span<const std::byte>(payload, 4), form);
     const tr::wire::grammar::span_cursor cur{frame};
 
     // Accumulated so the optimizer cannot delete the call it is here to time.
@@ -313,6 +395,12 @@ std::uint64_t run_point(std::size_t links, std::size_t target_pos, const char* m
     (void)tr::net::peek_fwd_dst(cur, pre);
 
     const auto leg = [&] {
+        if (form == path_form_t::LITERAL) {
+            // Falsifier 1's control arm — the retired encoding, same frame, same rejections,
+            // same `fwd_pre_t` fill, three segments walked.
+            sink += resolve_literal(cur, 3);
+            return;
+        }
         if (rebuild_leg) {
             // Strip the two-segment local mount run (`net` / `ws-client`) — the same K the hop
             // strips, so the emitted head matches the one the hop builds.
@@ -381,7 +469,16 @@ int main() {
 
     // Axis 3 — what a resolution cache could and could not remove from that fixed hop.
     std::printf("\n");
+    // RFC-0018 FALSIFIER 1, in this binary: the resolve leg, timed over the PACKED body and
+    // over the retired NAME-child body, on the same address with the same rejections and the
+    // same `fwd_pre_t` fill. Order-alternated (packed, literal, packed) so a warm-up or a
+    // frequency ramp cannot be mistaken for the difference — the two packed readings bracket
+    // the literal one, and the SUMMARY below prints their spread alongside the delta.
+    // **If the packed arm does not beat the literal arm here, RFC-0018 is void** (§10.1).
     const std::uint64_t resolve_ns = run_leg("fwd-demux-resolve", false);
+    const std::uint64_t resolve_lit_ns =
+        run_leg("fwd-demux-resolve-literal", false, path_form_t::LITERAL);
+    const std::uint64_t resolve_ns2 = run_leg("fwd-demux-resolve", false);
     const std::uint64_t rebuild_ns = run_leg("fwd-demux-rebuild", true);
 
     const double hop = static_cast<double>(fixed.empty() ? 0 : fixed[0]);
@@ -400,5 +497,22 @@ int main() {
         static_cast<unsigned long long>(resolve_ns), hop,
         hop == 0.0 ? 0.0 : 100.0 * static_cast<double>(resolve_ns) / hop, scan_hi,
         kLinkCounts[std::size(kLinkCounts) - 1]);
+
+    // Falsifier 1's verdict line. `packed_spread` is the honest error bar: the two packed
+    // readings were taken either side of the literal one, so a delta smaller than their own
+    // spread is not a result.
+    const double packed =
+        0.5 * (static_cast<double>(resolve_ns) + static_cast<double>(resolve_ns2));
+    const double spread = static_cast<double>(resolve_ns > resolve_ns2 ? resolve_ns - resolve_ns2
+                                                                       : resolve_ns2 - resolve_ns);
+    const double lit = static_cast<double>(resolve_lit_ns);
+    std::printf(
+        "\nFALSIFIER-1 resolve leg: packed_p50_ns=%.1f (spread %.1f over two readings)"
+        " literal_p50_ns=%.1f\n"
+        "            delta_ns=%.1f (%.1f%% of the literal leg) verdict=%s\n"
+        "            RFC-0018 §10.1: the packed arm MUST beat the literal arm here or the"
+        " RFC is void.\n",
+        packed, spread, lit, lit - packed, lit == 0.0 ? 0.0 : 100.0 * (lit - packed) / lit,
+        (lit - packed) > spread ? "PACKED-WINS" : "INCONCLUSIVE-OR-REFUTED");
     return 0;
 }

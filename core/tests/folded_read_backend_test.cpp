@@ -143,6 +143,19 @@ using tr::testing::check;
  */
 constexpr std::size_t kShortHeaderBytes = 4;
 
+/**
+ * @brief The header draw for a node that ALSO carries its own leading `NAME` TLV: the POINT
+ *        header plus that `NAME` header, in ONE segment.
+ *
+ * Since RFC-0018 a vertex-map key record is packed (`[u8 len][bytes]`) rather than a `NAME`
+ * TLV, so the `:children` / composed-read member's `NAME` framing is EMITTED instead of
+ * borrowed from the key. It shares the POINT header's segment on purpose — that is what keeps
+ * the folds at the same LINK count they had before, which is what these instruments' reserve
+ * arithmetic and the transports' iovec-spill budget are stated against. The draw is one
+ * header wider; the draw COUNT is unchanged.
+ */
+constexpr std::size_t kNamedHeaderBytes = kShortHeaderBytes + 4;
+
 /** @brief The subtree the fixture builds: the root plus four registered descendants. */
 constexpr int kNodeCount = 5;
 
@@ -198,6 +211,13 @@ class arming_backend_t final : public tr::mem::mem_backend_t {
     [[nodiscard]] bool all_served_size(std::size_t n) const noexcept {
         return !sizes_.empty() && std::all_of(sizes_.begin(), sizes_.end(),
                                               [n](std::size_t s) noexcept { return s == n; });
+    }
+    /** @brief Were ALL served draws either @p a or @p b bytes — the folded header widths,
+     *         which differ by whether the node also carries its own `NAME` header. */
+    [[nodiscard]] bool all_served_size_either(std::size_t a, std::size_t b) const noexcept {
+        return !sizes_.empty() &&
+               std::all_of(sizes_.begin(), sizes_.end(),
+                           [a, b](std::size_t s) noexcept { return s == a || s == b; });
     }
 
    private:
@@ -279,8 +299,8 @@ int main() {
         const auto r = g.read_subtree_folded(root, "peer");
         check(r.has_value(), "the folded read succeeds through the injected backend");
         check(be.served() == kNodeCount, "one seam draw per folded node (the header count)");
-        check(be.all_served_size(kShortHeaderBytes),
-              "every seam draw is exactly the POINT header width");
+        check(be.all_served_size_either(kShortHeaderBytes, kNamedHeaderBytes),
+              "every seam draw is the POINT header width, plus the NAME header below the root");
         check(be.refusals() == 0, "an unarmed backend refuses nothing");
     }
 
@@ -370,8 +390,9 @@ int main() {
         check(r.has_value(), "the folded :children read succeeds through the injected backend");
         check(be.served() == kDirectChildCount + 1,
               "one seam draw per registered child, plus the outer listing header");
-        check(be.all_served_size(kShortHeaderBytes),
-              "every :children seam draw is exactly the POINT header width");
+        check(be.all_served_size_either(kShortHeaderBytes, kNamedHeaderBytes),
+              "every :children seam draw is the POINT header width, plus each member's NAME "
+              "header");
         check(be.refusals() == 0, "an unarmed backend refuses nothing on the :children fold");
     }
 

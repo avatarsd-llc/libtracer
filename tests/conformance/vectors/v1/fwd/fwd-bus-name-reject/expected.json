@@ -1,12 +1,12 @@
 {
   "name": "fwd-bus-name-reject",
   "category": "fwd",
-  "hex": "0F403E00010001000006402500020003006E65740200090077732D736572766572020003007372760200060073656E736F7206400C00020008007265706C792D6570",
-  "total_bytes": 66,
+  "hex": "0F402F00010001000006001900036E65740977732D736572766572037372760673656E736F7206000900087265706C792D6570",
+  "total_bytes": 51,
   "decoded": {
     "type": "0x0F FWD",
     "structured": true,
-    "meaning": "FWD{ op=READ, dst=/net/ws-server/srv/sensor, src=/reply-ep } \u2014 dst routes THROUGH a multi-peer (bus) link's own connection NAME with a residual below it that names no peer",
-    "note": "RFC-0020 (ADR-0073 \u00a73), amending RFC-0004 \u00a7B: valid, round-trip-safe bytes at the CODEC layer (the 3-core conformance machine stays green). At the ROUTING layer, when net/ws-server/srv is a multi-peer link and 'sensor' names no current peer, the frame MUST be rejected \u2014 a single directed kind=ERROR reply STATUS=ERROR(tr::path::invalid=0x0021) along the accumulated src \u2014 and MUST NOT be broadcast over the bus endpoint nor resolved against the local graph. A dst naming the mount exactly, or continuing through a peer name (p<slot>), is unaffected. The C++ mount_routing_test asserts the rejection."
+    "meaning": "FWD{ op=READ, dst=/net/ws-server/srv/sensor, src=/reply-ep } — dst routes THROUGH a multi-peer (bus) link's own connection NAME with a residual below it that names no peer",
+    "note": "RFC-0020 (ADR-0073 §3), amending RFC-0004 §B: valid, round-trip-safe bytes at the CODEC layer (the 3-core conformance machine stays green). At the ROUTING layer, when net/ws-server/srv is a multi-peer link and 'sensor' names no current peer, the frame MUST be rejected — a single directed kind=ERROR reply STATUS=ERROR(tr::path::invalid=0x0021) along the accumulated src — and MUST NOT be broadcast over the bus endpoint nor resolved against the local graph. A dst naming the mount exactly, or continuing through a peer name (p<slot>), is unaffected. The C++ mount_routing_test asserts the rejection."
   }
 }

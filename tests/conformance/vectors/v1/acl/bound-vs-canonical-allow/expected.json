@@ -1,8 +1,8 @@
 {
   "name": "bound-vs-canonical-allow",
   "category": "acl",
-  "hex": "0F402100010001000014000800020000000000000006400C00020008007265706C792D6570",
-  "total_bytes": 37,
+  "hex": "0F401E00010001000014000800020000000000000006000900087265706C792D6570",
+  "total_bytes": 34,
   "decoded": {
     "type": "0x0F FWD",
     "structured": true,

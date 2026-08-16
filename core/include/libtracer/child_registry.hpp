@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/packed_path.hpp"
 #include "libtracer/tlv.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/transport.hpp"
@@ -704,13 +705,16 @@ class child_registry_t {
 
    private:
     /**
-     * @brief Encode qualified name @p name (`"a/b"`) as a run of NAME TLVs, one per segment.
+     * @brief Encode qualified name @p name (`"a/b"`) as a run of packed PATH segment
+     *        records, one per segment (`[u8 len][bytes]`, RFC-0018).
      *
-     * Canonical form (`opt = 0`, `u16` length) is chosen deliberately: this is EMITTING, so
-     * there is no encoding variance to be wrong about — unlike MATCHING an inbound path,
-     * where a peer may legally send `opt.LL=1` and byte comparison would break conformance
-     * (ADR-0062 §Considered options). A segment too long for the length field yields an empty
-     * run, and the hop falls back to encoding the name per-frame.
+     * Under the packed body there is only ONE form to emit — a record has no option byte —
+     * so the ADR-0062 §"Considered options" caveat this used to carry (emitting and MATCHING
+     * are different problems, because a peer may legally spell the same NAME with
+     * `opt.LL = 1`) no longer applies: emitting and matching are now the same bytes. A
+     * segment that is empty (it would spell the §5.4 escape) or too long for the record's
+     * `u8` length field yields an empty run, and the hop falls back to encoding the name
+     * per-frame.
      */
     [[nodiscard]] static std::vector<std::byte> encode_mount_name(std::string_view name) {
         std::vector<std::byte> out;
@@ -719,12 +723,7 @@ class child_registry_t {
             const std::size_t slash = name.find('/', at);
             const std::string_view seg = name.substr(
                 at, slash == std::string_view::npos ? std::string_view::npos : slash - at);
-            // Refuse before emitting: `emit_tlv` would auto-widen a body past 0xFFFF to a
-            // 4-byte length, and this mount run is read back by offset against a fixed 4-byte
-            // NAME header. With the check first the bytes match the hand-rolled push exactly
-            // (ADR-0048 §3 — one representation of the header layout).
-            if (seg.size() > 0xFFFFu) return {};
-            wire::emit_name(out, seg);
+            if (!wire::emit_path_segment(out, seg)) return {};
             if (slash == std::string_view::npos) break;
             at = slash + 1;
         }

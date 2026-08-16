@@ -77,8 +77,8 @@ struct recording_link_t : tr::net::transport_t {
 /** @brief `["a","b",…]` as a PATH TLV appended to @p out. */
 void emit_path(std::vector<std::byte>& out, std::span<const std::string> segs) {
     std::vector<std::byte> body;
-    for (const std::string& s : segs) tr::wire::emit_name(body, s);
-    tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
+    for (const std::string& s : segs) (void)tr::wire::emit_path_segment(body, s);
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
 }
 
 /** @brief A `FWD{WRITE, dst, src, payload}` frame over the given segment lists. */
@@ -98,10 +98,13 @@ std::vector<std::vector<std::string>> paths_of(std::span<const std::byte> frame)
     if (!dec || dec->type != type_t::FWD) return out;
     for (const auto& child : dec->children) {
         if (child.type != type_t::PATH) continue;
+        // Packed records (RFC-0018): `[u8 len][bytes]` in the PATH's own payload.
         std::vector<std::string> segs;
-        for (const auto& seg : child.children) {
-            if (seg.type == type_t::NAME)
-                segs.emplace_back(tr::detail::as_string_view(seg.payload));
+        for (std::size_t at = 0; at < child.payload.size();) {
+            const auto len = static_cast<std::size_t>(static_cast<std::uint8_t>(child.payload[at]));
+            if (len == 0 || at + 1 + len > child.payload.size()) break;
+            segs.emplace_back(tr::detail::as_string_view(child.payload.subspan(at + 1, len)));
+            at += 1 + len;
         }
         out.push_back(std::move(segs));
     }
@@ -318,9 +321,12 @@ void test_deep_mount_planes_agree() {
     if (down.sent.size() == 2) {
         const auto dec = tr::wire::decode(down.sent[1]);
         if (dec && dec->children.size() >= 2) {
-            for (const auto& seg : dec->children[1].children) {
-                if (seg.type == type_t::NAME)
-                    adv_residual.emplace_back(tr::detail::as_string_view(seg.payload));
+            const std::span<const std::byte> body = dec->children[1].payload;
+            for (std::size_t at = 0; at < body.size();) {
+                const auto len = static_cast<std::size_t>(static_cast<std::uint8_t>(body[at]));
+                if (len == 0 || at + 1 + len > body.size()) break;
+                adv_residual.emplace_back(tr::detail::as_string_view(body.subspan(at + 1, len)));
+                at += 1 + len;
             }
         }
     }

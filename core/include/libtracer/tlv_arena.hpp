@@ -54,16 +54,16 @@ struct arena_tlv_t {
      * An opaque node's `end` is its own index + 1.
      */
     std::uint32_t end = 0;
-
-    /**
-     * @brief For a PATH node: every child header is exactly `02 00 <u16 len>`.
-     *
-     * True iff the body is byte-identical to the canonical `path_key` form, so
-     * it can be used as the graph vertex-map key with zero materialization
-     * (ADR-0041 §3). Always false for non-PATH nodes.
-     */
-    bool canonical_path = false;
 };
+
+/*
+ * The `canonical_path` flag is GONE (RFC-0018 §4). It asked "is every child header exactly
+ * `02 00 <u16 len>`?" — the question a NAME-child `PATH` body forced, because a legal peer
+ * could spell the same address with `opt.LL = 1` or a per-segment trailer and a byte key
+ * would then miss. A packed `PATH` body has no per-segment option byte and so exactly ONE
+ * spelling per address: the body IS the vertex-map key, unconditionally and with zero
+ * materialization, and there is no longer a property to flag or a fallback to flag it for.
+ */
 
 /**
  * @brief A frame decoded as a flat pre-order node array over borrowed spans.

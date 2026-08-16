@@ -121,8 +121,8 @@ constexpr std::size_t kCounts[] = {8, 64};
 /** @brief `["a","b"]` as a PATH TLV appended to @p out. */
 void emit_path(std::vector<std::byte>& out, const std::vector<std::string>& segs) {
     std::vector<std::byte> body;
-    for (const std::string& s : segs) tr::wire::emit_name(body, s);
-    tr::wire::emit_tlv(out, tr::wire::type_t::PATH, tr::wire::opt_t{.pl = true}, body);
+    for (const std::string& s : segs) (void)tr::wire::emit_path_segment(body, s);
+    tr::wire::emit_tlv(out, tr::wire::type_t::PATH, tr::wire::opt_t{}, body);
 }
 
 /** @brief A `FWD{WRITE, dst, src=[origin], payload}` frame. */

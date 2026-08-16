@@ -223,9 +223,9 @@ class rec_link_t : public transport_t {
 /** @brief A `PATH` TLV over the given `/`-segments. */
 std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> body;
-    for (const std::string_view s : segs) tr::wire::emit_name(body, s);
+    for (const std::string_view s : segs) (void)tr::wire::emit_path_segment(body, s);
     std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
     return out;
 }
 
@@ -282,7 +282,8 @@ reply_facts_t read_reply(std::span<const std::byte> frame) {
     if (static_cast<fwd_op_t>(std::to_integer<std::uint8_t>(op.payload[0])) != fwd_op_t::REPLY)
         return f;
     f.is_fwd_reply = true;
-    if (dec->children[1].type == type_t::PATH) f.route_bytes = dec->children[1].children.size();
+    if (dec->children[1].type == type_t::PATH)
+        f.route_bytes = dec->children[1].payload.size();  // packed body (RFC-0018)
     for (const tlv_t& c : dec->children)
         if (c.type == type_t::PATH_REF) f.has_path_ref = true;
     const tlv_t& kind = dec->children[3];

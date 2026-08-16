@@ -19,9 +19,10 @@
  * a multi-link one pays one flatten). The OWNERSHIP path is scatter-gather (ADR-0053
  * ⑤): `own_wire` adopts a multi-link flatten instead of copying it twice, and
  * `pin_wire` stores an opted-in payload as a zero-copy subrope of the delivery
- * (ADR-0042 §3 on the rope tier). `canonical_path()` is `false`: the view re-emits
- * its PATH key via `emit_name`, producing the identical canonical lookup bytes
- * (ADR-0041 §3) without span-aliasing a borrowed frame.
+ * (ADR-0042 §3 on the rope tier). There is no `canonical_path()` any more: under
+ * RFC-0018 a `PATH` body is packed records with one spelling per address, so
+ * `path_lookup_key` reads `body()` on BOTH tiers — here that is the node's own
+ * materialized span, which the rope tier had to build regardless.
  */
 
 #include <optional>
@@ -74,7 +75,6 @@ class view_node {
     [[nodiscard]] type_t type() const noexcept { return v_->type(); }
     [[nodiscard]] opt_t opt() const noexcept { return v_->opt(); }
     [[nodiscard]] bool structured() const noexcept { return v_->structured(); }
-    [[nodiscard]] bool canonical_path() const noexcept { return false; }
 
     /** @brief The decoded trailer timestamp, if `opt.TS` — the view's own bounded stitched
      *         read (#1109; the reply echo asks this of the request's root). */

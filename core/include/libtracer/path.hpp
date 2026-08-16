@@ -3,11 +3,11 @@
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * L4 addressing. A path_t is the canonical PATH-TLV payload bytes (a sequence of
- * NAME children) that key a vertex in the graph map — docs/reference/02 §dispatch
- * keys on the PATH payload bytes, never on the string form. path_t::parse builds
- * and validates those bytes once (at registration); the hot path compares bytes.
- * A field tail after ':' (e.g. ":settings.deadline_ns", ":subscribers[]") parses
- * into a field_path_t for field-write/read. See docs/reference/03-addressing.md.
+ * packed `[u8 len][bytes]` segment records, RFC-0018) that key a vertex in the graph map —
+ * docs/reference/02 §dispatch keys on the PATH payload bytes, never on the string form.
+ * path_t::parse builds and validates those bytes once (at registration); the hot path compares
+ * bytes. A field tail after ':' (e.g. ":settings.deadline_ns", ":subscribers[]") parses into a
+ * field_path_t for field-write/read. See docs/reference/03-addressing.md.
  */
 #pragma once
 
@@ -27,17 +27,18 @@
 
 namespace tr::graph {
 
-/** @brief Max bytes in one NAME segment (docs/reference/03 §limits). */
+/** @brief Max bytes in one path segment (docs/reference/03 §limits; the packed record's
+ *         `u8` length field caps it at 255 forever, RFC-0018 §5). */
 inline constexpr std::size_t kMaxSegmentBytes = 64;
 /** @brief Max bytes in a whole canonical PATH payload (docs/reference/03 §limits). */
 inline constexpr std::size_t kMaxPathBytes = 1024;
-/** @brief Max NAME segments in a path (reference/03 §limits; RFC-0023: min(255, byte cap)). */
+/** @brief Max segments in a path (reference/03 §limits; RFC-0023: min(255, byte cap)). */
 inline constexpr std::size_t kMaxSegments = 255;
 /** @brief Max steps in a `:field` tail (docs/reference/03 §limits). */
 inline constexpr std::size_t kMaxFieldDepth = 8;
 
 /**
- * @brief True iff @p seg is valid as ONE NAME segment of the addressing grammar.
+ * @brief True iff @p seg is valid as ONE segment of the addressing grammar.
  *
  * THE segment predicate (ADR-0073 §1): every boundary where a name enters the graph —
  * the local string parser, a wire `SPEC` creation carrying a child name, a module
@@ -127,7 +128,7 @@ struct path_binding_t {
 };
 
 /**
- * @brief A parsed, canonical path: the PATH-TLV payload bytes (NAME children) plus the
+ * @brief A parsed, canonical path: the PATH-TLV payload bytes (packed records) plus the
  *        optional @ref field_path_t tail. The payload bytes are the vertex-map key.
  *
  * Dispatch keys on the parsed bytes (@ref key), never the string form — parse once,
@@ -172,13 +173,13 @@ class path_t {
      */
     [[nodiscard]] static result_t<path_t> parse(std::string_view text);
 
-    /** @brief The vertex-map key: the canonical PATH-TLV payload bytes (NAME children). */
+    /** @brief The vertex-map key: the canonical PATH-TLV payload bytes (packed records). */
     [[nodiscard]] std::span<const std::byte> key() const noexcept {
         return {payload_.data(), payload_.size()};
     }
     /** @brief The parsed `:field` tail (empty when the path addresses the vertex value). */
     [[nodiscard]] const field_path_t& field() const noexcept { return field_; }
-    /** @brief The number of NAME segments in the path. */
+    /** @brief The number of segments in the path. */
     [[nodiscard]] std::size_t segment_count() const noexcept { return segments_; }
 
     /** @brief This path's bound form, if a mint has completed (RFC-0024 §7.4). */
@@ -218,7 +219,7 @@ class path_t {
     }
 
    private:
-    std::vector<std::byte> payload_;  // canonical PATH-TLV payload (NAME children)
+    std::vector<std::byte> payload_;  // canonical PATH-TLV payload (packed segment records)
     field_path_t field_;
     std::size_t segments_ = 0;
     // The RFC-0024 §7.4 opaque slot. Empty for every path that has never been bound, which is
@@ -234,19 +235,19 @@ inline path_t::path_t(std::string_view text) {
 }
 
 /**
- * @brief Owned byte key (a copy of a path's canonical payload / one NAME record).
+ * @brief Owned byte key (a copy of a path's canonical payload / one segment record).
  *
- * Small-buffer type (#380 §2): records up to @ref kInlineBytes live inline — a NAME
- * record is a 4-byte TLV header plus the segment text, so virtually every vertex name
- * fits and costs NO heap block (a `std::vector` here allocated ~32 B per named
+ * Small-buffer type (#380 §2): records up to @ref kInlineBytes live inline — a packed
+ * record is ONE length byte plus the segment text (RFC-0018), so virtually every vertex
+ * name fits and costs NO heap block (a `std::vector` here allocated ~32 B per named
  * vertex). Longer records spill to one owned heap allocation. Immutable after
  * construction/assignment (matches its use: a vertex's name never changes,
  * ADR-0057). Move leaves the source empty.
  */
 class path_key_t {
    public:
-    /** @brief Records at or under this many bytes are stored inline (no heap): a NAME
-     *         record is a 4-byte TLV header + the segment text, so names up to 12
+    /** @brief Records at or under this many bytes are stored inline (no heap): a packed
+     *         record is one length byte + the segment text, so names up to 15
      *         characters — the overwhelming norm — never allocate. */
     static constexpr std::size_t kInlineBytes = 16;
 
