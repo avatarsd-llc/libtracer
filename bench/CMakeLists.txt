@@ -286,9 +286,11 @@ target_compile_options(bench_pin_net PRIVATE -Wall -Wextra)
 # RFC-0027 §12.4 clauses 1 and 2 — the PATH-LABEL bench gate, which that RFC makes NORMATIVE for
 # acceptance of the implementation. Sweeps HOP COUNT so a per-hop claim is read off a slope
 # rather than off a point (the correction RFC-0024 §8.4 had to make on itself), and sweeps the
-# terminus residual DEPTH beside it so the term §12.4 clause 2 is about is visible even though
-# the shipped forwarder does not yet mint for it. Diagnostic, not a perf gate: both arms live in
-# one binary and the comparison is between two SPELLINGS, not two builds.
+# terminus residual DEPTH beside it — clause 2's own axis, and the one §3.3 nominates as
+# deciding. That sweep became a real A/B only once the terminus both MINTED for the residual it
+# resolved (#1357) and DEREFERENCED the label that came back (#1363); before that the residual
+# was a string in both arms. Diagnostic, not a perf gate: both arms live in one binary and the
+# comparison is between two SPELLINGS, not two builds.
 add_executable(bench_path_label bench_path_label.cpp)
 target_link_libraries(bench_path_label PRIVATE libtracer)
 target_compile_options(bench_path_label PRIVATE -Wall -Wextra)
