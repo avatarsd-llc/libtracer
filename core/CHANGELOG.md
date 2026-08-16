@@ -473,6 +473,31 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Fixed
 
+- **`vertex_t`'s members are reordered so the LKV slot cannot straddle a cache line —
+  `sizeof(vertex_t)` is unchanged, but the object's INTERNAL layout is not**
+  ([#1285](https://github.com/avatarsd-llc/libtracer/issues/1285)). **ABI note:** the private
+  members are reordered, so any object file compiled against an older `vertex.hpp` must be
+  rebuilt. No declaration, signature, or size changes: 96 B on x86-64 and 72 B on rv32, exactly
+  as the #361 RAM ratchets pin them. `lkv_` — the `std::atomic<std::shared_ptr<const rope_t>>`
+  the write hot path contends on — is 16 bytes wide with an alignment of only 8, and it sat at
+  offset 24 because `name_` (24 B) led the member block. glibc hands out 16-byte-aligned blocks,
+  so a vertex lands at `address % 64 ∈ {0, 16, 32, 48}`, and at `32` the slot's two words fall on
+  DIFFERENT 64-byte cache lines. This libstdc++ keeps the slot's spin lock as the LSB of its
+  second word (there is no address-hashed lock table), so under N-way contention that placement
+  dirties two lines per publish instead of one: measured **×0.34 throughput** with **1.9× the
+  cache misses and 2.2× the cache references** on the 8-thread single-vertex write arm, i.e. a
+  one-in-four allocator coin-flip that cost 3×. Moving `lkv_` to the head of the member block
+  puts it at offset **0** on both ABIs, and a 16-byte object starting on a 16-byte boundary
+  cannot cross a 64-byte one — the straddle is now unreachable for *every* glibc placement. A
+  new `vertex_layout_gate_t` static-asserts `offsetof(vertex_t, lkv_) % 16 == 0` in the header,
+  beside the size ratchets, so every target evaluates it under its own binding and no future
+  member edit can silently reintroduce the straddle. The reorder is deliberately NOT padding:
+  `alignas(16)` on the member would leave an 8-byte hole and spend the ratchet. 64-byte-aligning
+  the vertex *allocation* — which would additionally lift `own_subs_`/`listeners_above_` off the
+  contended line, at a real RAM cost — is explicitly out of scope here and belongs to
+  [ADR-0079](../docs/adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md)'s
+  placement store.
+
 - **The pre-auth WebTransport QPACK decode no longer amplifies 16 KiB into ~1.5 MiB of
   throwing heap** ([#1305](https://github.com/avatarsd-llc/libtracer/issues/1305)). No public
   API change: `wt_h3.hpp` is module-private. The extended-CONNECT field section an
