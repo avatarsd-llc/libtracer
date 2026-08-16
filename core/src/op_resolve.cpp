@@ -26,7 +26,7 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view
     return resolve_node(graph_, arena_node{&fwd, 0}, inbound_link, frame_view,
                         flat_ != nullptr ? *flat_ : mem::heap_backend(),
                         egress_ != nullptr ? *egress_ : mem::heap_backend(), reverse_ref_fn_,
-                        reverse_ref_ctx_);
+                        reverse_ref_ctx_, path_label_fn_, path_label_ctx_);
 }
 
 }  // namespace tr::graph

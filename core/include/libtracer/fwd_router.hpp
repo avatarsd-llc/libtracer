@@ -247,7 +247,20 @@ class fwd_router_t {
      * Call during setup, before frames flow, on the same terms as the constructor's seams.
      * @p labels must outlive the router.
      */
-    void configure_path_labels(path_label_table_t* labels) noexcept { labels_ = labels; }
+    void configure_path_labels(path_label_table_t* labels) noexcept {
+        labels_ = labels;
+        // The TERMINUS half of §6.1's rewrite (point 3), installed HERE and not in the
+        // constructor, so the seam pointer the resolver tests is null on every node that does
+        // not label. A string-only terminus therefore pays one not-taken branch on a member
+        // it was already going to read, and never a call — the same cost story the forwarding
+        // half's `labels_` null test tells, at the other end of the route.
+        const graph::op_resolver_t::path_label_fn_t thunk =
+            [](void* ctx, std::string_view inbound_link,
+               wire::path_ref_element_t target) -> std::span<const std::byte> {
+            return static_cast<fwd_router_t*>(ctx)->terminus_label_record(inbound_link, target);
+        };
+        resolver_.on_path_label(labels != nullptr ? thunk : nullptr, this);
+    }
 
     /** @brief The injected mint table, or null when this node does not mint (§6.3). */
     [[nodiscard]] path_label_table_t* path_labels() const noexcept { return labels_; }
@@ -951,6 +964,45 @@ class fwd_router_t {
          * node. The pair table is deferred, and the degrade is the designed benign one.
          */
         std::atomic<std::uint64_t> path_label_for{0};
+        /**
+         * @brief This child's TERMINUS path label (RFC-0027 §6.1 point 3) — `0` ⇒ none.
+         *
+         * The forwarding half above and this one are two different labels because they stand
+         * for two different things, and merging them would be a mis-delivery: `path_label`
+         * aliases the CONNECTION VERTEX behind a child (what a hop forwards through), while
+         * this one aliases the LOCAL VERTEX a residual resolved to (what a terminus applies an
+         * operation at). Both are owned by the peer on the other side of this child — the
+         * origin that will present the label back — which is why one ctx holds both.
+         *
+         * **Where §6.2's trigger lives on the terminus half.** Zero until the first operation
+         * this node terminates for this child, and no other condition: no use counter, no
+         * threshold, no hotness estimate, no timer, no aging. A non-zero value is reused for
+         * every later reply to the SAME residual, so the table is touched once per child.
+         *
+         * Same release/acquire discipline as `path_label`: release-stored last, so a reader
+         * sees the encoded bytes and the owning peer whole or sees no label at all.
+         */
+        std::atomic<std::uint32_t> terminus_label{0};
+        /** @brief The 7 encoded bytes of `terminus_label` — `00 16 04 <u32 LE>` (§5.3.2). */
+        std::array<std::byte, wire::kPathLabelRecordBytes> terminus_label_tlv{};
+        /** @brief The peer `terminus_label` was minted for, as `peer_handle_t::bits()`. */
+        std::atomic<std::uint64_t> terminus_label_for{0};
+        /**
+         * @brief What `terminus_label` aliases: `(index << 32) | generation` of the local
+         *        vertex the residual resolved to, packed so one relaxed load answers "is this
+         *        the same residual?".
+         *
+         * **ONE terminus label per child, first come — and the second residual stays a
+         * string.** A child that terminates operations at several vertices could be given a
+         * label for each, but that is a per-child MAP, whose row count would scale with how
+         * many addresses a peer happens to touch rather than with links — the exact term a
+         * NARROW node cannot bound, and the reason §5.3.3 rules one label per whole local
+         * part. So this holds one, and a residual that does not match it is left as the string
+         * it already is. §6.3 makes that refusal free: the operation proceeds normally and
+         * nothing on the route notices. The `(egress peer, target)` pair table that would
+         * label them all is the same deferred shape `path_label_for` names.
+         */
+        std::atomic<std::uint64_t> terminus_label_target{0};
     };
 
     /**
@@ -1164,6 +1216,34 @@ class fwd_router_t {
                                                                   const Cursor& cur,
                                                                   const fwd_pre_t* pre,
                                                                   std::string_view outbound_name);
+    /**
+     * @brief RFC-0027 §6.1 point 3 — the TERMINUS's label for the residual it just resolved,
+     *        minted once per child and reused thereafter.
+     *
+     * The `op_resolver_t::path_label_fn_t` seam's body. The resolver knows which vertex the
+     * residual resolved to and nothing about peers or tables; this knows the peer behind
+     * @p inbound_link and owns the table, and neither has to learn the other's half.
+     *
+     * WHO the label is minted for is the same question the forwarding half answers and takes
+     * the same answer: the peer the REPLY goes out to, because that origin is the one that
+     * will present the label back. At a terminus the reply leaves over the link the request
+     * arrived on, so the inbound child is both what the label is minted for and where it is
+     * cached — the two ctxs the forwarding half has to keep apart are one ctx here.
+     *
+     * §8.1 is the caller's guarantee and it is stated on both sides: this is reached only
+     * after the operation's own ACL gate answered success, so no label is ever minted for a
+     * destination an ancestor ACL hides.
+     *
+     * @param inbound_link This node's NAME for the link the request arrived on.
+     * @param target       This node's own reference to the vertex the residual resolved to.
+     * @return The 7 encoded bytes, valid while this child holds the label — or EMPTY, which
+     *         is the conformant answer for every refusal at once (§6.3): no injected table, a
+     *         bus child, a retired child, a different residual already holding this child's
+     *         one label, or the §8.3 ceiling.
+     */
+    [[nodiscard]] std::span<const std::byte> terminus_label_record(std::string_view inbound_link,
+                                                                   path_label_target_t target);
+
     /**
      * @brief Mint this child's path label if it has none yet (§6.2's trigger), and answer the
      *        encoded 7-byte element — or `{}` when this hop leaves its part a string (§6.3).

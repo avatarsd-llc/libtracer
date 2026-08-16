@@ -1120,6 +1120,10 @@ effect sits below the leg's noise floor).
 - `fwd/fwd-label-mint-reply` — a reply leg carrying a hop's own part rewritten from strings to a
   label, byte-exact against what the router emits. The harness routes nothing, so the behavioural
   claim is bound by a core test, as `fwd/fwd-bound-forward` is bound by `bound_forward_test.cpp`.
+- **`fwd/fwd-label-terminus-reply`** (#1357) — §6.1 **point 3**: a terminus's reply whose whole
+  `src` is the label standing for the residual it resolved, byte-exact against what the node
+  emits. The residual half of the bullet above, and the base of the accumulation point 4
+  describes; bound by `core/tests/path_label_terminus_test.cpp` for the same reason.
 - `fwd/fwd-label-stale` — a stale generation answers `NOT_FOUND` and delivers nothing.
 - **`acl/label-vs-string-allow` and `acl/label-vs-string-deny`** — §8.2's mandated pair, asserting
   **byte-identical** outcomes between the two spellings. A by-construction argument is not a test;
