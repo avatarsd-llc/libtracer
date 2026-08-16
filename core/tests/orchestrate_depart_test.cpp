@@ -88,11 +88,6 @@ void check(bool ok, std::string_view what) {
 void append(std::vector<std::byte>& dst, const std::vector<std::byte>& src) {
     dst.insert(dst.end(), src.begin(), src.end());
 }
-std::vector<std::byte> b_name(std::string_view s) {
-    std::vector<std::byte> out;
-    tr::wire::emit_name(out, s);
-    return out;
-}
 std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> body;
     for (std::string_view s : segs) (void)tr::wire::emit_path_segment(body, s);

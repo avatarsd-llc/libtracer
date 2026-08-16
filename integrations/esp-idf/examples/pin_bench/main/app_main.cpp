@@ -84,13 +84,6 @@ constexpr std::size_t kSlots = 24;
 /** @brief Stores timed per (arm, vertex-count) cell. */
 constexpr std::size_t kIters = 2000;
 
-/** @brief A NAME TLV. */
-std::vector<std::byte> b_name(std::string_view s) {
-    std::vector<std::byte> out;
-    tr::wire::emit_name(out, s);
-    return out;
-}
-
 /** @brief A PATH TLV over `segs`. */
 std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> body;

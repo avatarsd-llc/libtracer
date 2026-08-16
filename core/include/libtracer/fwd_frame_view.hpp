@@ -94,13 +94,13 @@ template <class Cursor>
 [[nodiscard]] std::optional<packed_seg_t> read_packed_seg(const Cursor& cur, std::size_t at,
                                                           std::size_t end) {
     if (at >= end) return std::nullopt;
-    const auto len = static_cast<std::uint8_t>(cur.byte_at(at));
+    const std::size_t len = static_cast<std::uint8_t>(cur.byte_at(at));
     if (len != wire::kPackedEscapeLen) {
         if (at + 1 + len > end) return std::nullopt;
         return packed_seg_t{.body_off = at + 1, .body_len = len, .total = 1 + len};
     }
     if (at + wire::kPackedEscapeOverhead > end) return std::nullopt;
-    const auto esc = static_cast<std::uint8_t>(cur.byte_at(at + 2));
+    const std::size_t esc = static_cast<std::uint8_t>(cur.byte_at(at + 2));
     if (at + wire::kPackedEscapeOverhead + esc > end) return std::nullopt;
     return packed_seg_t{.body_off = at + wire::kPackedEscapeOverhead,
                         .body_len = esc,

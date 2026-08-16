@@ -56,11 +56,6 @@ using tr::testing::check;
 constexpr int kCycles = 51;
 
 // --- wire builders (canonical bytes via the production emit helpers) ----------
-std::vector<std::byte> b_name(std::string_view s) {
-    std::vector<std::byte> out;
-    tr::wire::emit_name(out, s);
-    return out;
-}
 std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> body;
     for (std::string_view s : segs) {

@@ -104,11 +104,6 @@ rope_t three_link() {
 }
 
 // --- FWD wire builders + reply decoders (the op_resolve_test idiom) -----------
-std::vector<std::byte> b_name(std::string_view s) {
-    std::vector<std::byte> out;
-    tr::wire::emit_name(out, s);
-    return out;
-}
 std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> body;
     for (const std::string_view s : segs) {
