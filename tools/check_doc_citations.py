@@ -215,23 +215,23 @@ ANCHORS = [
     # TLV's TYPE selects the operation".
     ("core/src/transport_vertex.cpp:203", "transport_vertex_t::mint_module_locked"),
     ("core/src/transport_vertex.cpp:239", "transport_vertex_t::endpoint_write"),
-    ("core/src/transport_vertex.cpp:393", "transport_vertex_t::provide_link"),
-    ("core/src/transport_vertex.cpp:485", "routing key IS the mount path"),
+    ("core/src/transport_vertex.cpp:392", "transport_vertex_t::provide_link"),
+    ("core/src/transport_vertex.cpp:484", "routing key IS the mount path"),
     # The qualified-key compose repeats since S2b: the creation path builds it here, and
     # the endpoint's `NAME` remove builds the same key earlier in the file. The mount-path
     # comment sits directly above THIS one and below the other.
-    ("core/src/transport_vertex.cpp:492", "qualified += name", "routing key IS the mount path"),
-    ("core/src/transport_vertex.cpp:510", "structural vertex, created lazily"),
+    ("core/src/transport_vertex.cpp:491", "qualified += name", "routing key IS the mount path"),
+    ("core/src/transport_vertex.cpp:509", "structural vertex, created lazily"),
     # Two module-vertex mints since S2b — `register_module`'s eager one and creation's
     # lazy one. The lazy-mint comment selects this (later) one.
-    ("core/src/transport_vertex.cpp:518", "register_vertex_key(mod_key",
+    ("core/src/transport_vertex.cpp:517", "register_vertex_key(mod_key",
      "structural vertex, created lazily"),
-    ("core/src/transport_vertex.cpp:611", "if (!router_.add_child(qualified, *link))"),
-    ("core/src/transport_vertex.cpp:620", "pending_links_.erase(pl)"),
-    ("core/src/transport_vertex.cpp:639", "if (constructed)"),
-    ("core/src/transport_vertex.cpp:641", "? link_state_t::LISTENING"),
+    ("core/src/transport_vertex.cpp:610", "if (!router_.add_child(qualified, *link))"),
+    ("core/src/transport_vertex.cpp:619", "pending_links_.erase(pl)"),
+    ("core/src/transport_vertex.cpp:638", "if (constructed)"),
+    ("core/src/transport_vertex.cpp:640", "? link_state_t::LISTENING"),
     ('core/src/transport_vertex.cpp:70', '[[nodiscard]] view_t link_state_value(link_state_t state) {'),
-    ('core/src/transport_vertex.cpp:436', 'std::string module;'),
+    ('core/src/transport_vertex.cpp:435', 'std::string module;'),
     # fwd-router.md's "Signature source" line — bare :NNN shorthands that had ALL rotted
     # silently (they cited the pre-#739 header). Anchored so they cannot rot again.
     # zero-copy-and-flatten.md's rope-tier citations and ADR-0072's stale-comment pointer —
@@ -259,7 +259,7 @@ ANCHORS = [
      "[[nodiscard]] transport_t* by_name(std::string_view name) const {"),
     ("core/include/libtracer/child_registry.hpp:628", "std::size_t size()"),
     ("core/include/libtracer/child_registry.hpp:638", "live_size"),
-    ("core/src/transport_vertex.cpp:614", "return std::unexpected(status_t::BACKPRESSURE);",
+    ("core/src/transport_vertex.cpp:613", "return std::unexpected(status_t::BACKPRESSURE);",
      "if (!router_.add_child(qualified, *link))"),
     ("core/include/libtracer/transport_vertex.hpp:348", "result_t<void> register_module"),
     ("core/include/libtracer/transport_vertex.hpp:99", "enum class link_state_t"),
@@ -767,7 +767,7 @@ ANCHORS = [
      'return make_connection(std::move(key), config, conn_role_t::DIAL);'),
     ('core/src/transport_vertex.cpp:158',
      'result_t<std::string> transport_vertex_t::module_for(std::string_view kind,'),
-    ('core/src/transport_vertex.cpp:502',
+    ('core/src/transport_vertex.cpp:501',
      '// Compose the mount key: `<net_root>/<module>/<name>`, replacing the flat key the'),
     # core/src/transport_ws.cpp
     ('core/src/transport_ws.cpp:86',
@@ -1041,7 +1041,7 @@ ANCHORS = [
      'if (const auto v = cfg.u32("backoff")) s.backoff_ms = *v;'),
     ('core/src/transport_vertex.cpp:104',
      '"listener", [this](graph::graph_t&, std::vector<std::byte> key, const tlv_t* config) {'),
-    ('core/src/transport_vertex.cpp:401',
+    ('core/src/transport_vertex.cpp:400',
      'result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::byte> child_key,'),
     ('integrations/esp-idf/libtracer/include/libtracer_esp/esp_ws_client_link.hpp:176',
      '#include "esp_transport.h"'),

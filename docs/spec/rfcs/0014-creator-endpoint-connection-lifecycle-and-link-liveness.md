@@ -126,8 +126,11 @@ One control vertex serves both; the **TLV type of the written value** selects wh
 
 - **`SPEC` ⇒ create.** The device validates the `name` (non-empty, non-reserved — see §3) and the
   `config` against its `conn:schema` catalog. An unknown/malformed config →
-  `ERROR{tr::schema::not_found}` / `ERROR{tr::schema::type_mismatch}`; an empty or reserved name →
-  `ERROR{tr::schema::type_mismatch}`. `SPEC` naming a **name that already exists** (live or retired
+  `ERROR{tr::schema::not_found}` / `ERROR{tr::schema::type_mismatch}`; an **empty** name (or any
+  other schema-shape violation of the SPEC envelope) → `ERROR{tr::schema::type_mismatch}`, while the
+  **reserved** name → `ERROR{tr::path::in_use}` — the path is literally occupied by the endpoint
+  vertex, so this is what the `register_vertex_key` seam produces anyway (see §3 create-side).
+  `SPEC` naming a **name that already exists** (live or retired
   but re-registered) → `ERROR{tr::path::in_use}` — reconfiguration is via the connection's `:settings`,
   never re-SPEC. (A retrying orchestrator treats `PATH_IN_USE` as "already exists," so the reject is
   idempotent-safe.) On success the child `/net/<module>/<name>` exists **atomically** (one write

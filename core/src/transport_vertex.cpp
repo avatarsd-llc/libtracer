@@ -296,11 +296,10 @@ result_t<void> transport_vertex_t::endpoint_create_locked(const std::string& mod
     // Falling through would answer PATH_IN_USE anyway — `register_vertex_key` collides with
     // the endpoint's own key — but only after the kind's factory had already dialed or bound
     // a socket, which is the side effect a refusal must not have.
-    //
-    // KNOWN RFC AMBIGUITY (raised for S7, where these bytes become normative): §3's
-    // create-side clause says `tr::path::in_use` for the reserved name, which is what this
-    // answers; §2's "an empty or reserved name" clause says `tr::schema::type_mismatch`.
-    // The two contradict, and §3 is the clause specifically about the reserved name.
+    // §2 used to say `tr::schema::type_mismatch` here, contradicting §3; the RFC now says
+    // `tr::path::in_use` in both clauses (#492 S7), leaving `type_mismatch` for the empty
+    // name and the SPEC envelope's schema-shape violations. So this early return is a
+    // side-effect guard only — it answers exactly what falling through would.
     if (name == kConnEndpointName) return std::unexpected(status_t::PATH_IN_USE);
 
     const tlv_t* config = pairs.settings("config");
