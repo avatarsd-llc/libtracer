@@ -23,6 +23,7 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -234,6 +235,22 @@ enum class fwd_dst_kind_t : std::uint8_t {
     NONE,     /**< @brief Not a structured FWD, or a `dst` in neither routable form. */
     PATH,     /**< @brief A canonical `PATH` of NAMEs — the mount descent's address. */
     PATH_REF, /**< @brief A BOUND address (RFC-0024 §4) — a fixed-stride element array. */
+    /**
+     * @brief A canonical `PATH` whose FIRST record is an escape — RFC-0027's labelled address.
+     *
+     * Told apart from the plain `PATH` answer because the two take different routes and must not be
+     * confused: a canonical `PATH` opens with a NAME the mount descent folds a digest over, and
+     * this opens with a record that is not a name at all. Descending it would read a peer-supplied
+     * slot index as UTF-8.
+     *
+     * A node that does not implement minting treats it exactly as it treated a non-NAME
+     * leading child before RFC-0027 existed — it names no mount here, so the frame falls to
+     * the terminus arm and is refused there. That is why this is a distinct answer rather than
+     * a flag on the plain `PATH` answer: the ONE branch a non-minting node takes on it is the one
+     * it already took, and it takes it without a table, without a lookup, and without reading the
+     * record.
+     */
+    PATH_LABEL,
 };
 
 /**
@@ -294,11 +311,31 @@ template <class Cursor>
     } else {
         if (dst_h->type != wire::type_t::PATH || dst_h->opt.pl || dst_h->body_len == 0)
             return fwd_dst_kind_t::NONE;
-        // Segment 0 is a packed record, and it must be a LITERAL one: an address whose first
-        // record is the label escape names no mount here (nothing mints yet), so the frame
-        // falls through to the terminus arm exactly as a non-NAME leading child used to.
+        // Segment 0 is a packed record, and WHICH kind it is decides which arm routes the
+        // frame. A literal record is the canonical address the mount descent walks; an ESCAPE
+        // is RFC-0027's labelled address, which has no name to descend and is answered by the
+        // label branch instead (or, on a node that does not mint, by the terminus arm — the
+        // same fall-through a non-NAME leading child has always taken).
         const auto seg0 = read_packed_seg(cur, dst_h->body_off, dst_h->body_off + dst_h->body_len);
-        if (!seg0 || seg0->escape) return fwd_dst_kind_t::NONE;
+        if (!seg0) return fwd_dst_kind_t::NONE;
+        if (seg0->escape) {
+            pre.valid = true;
+            pre.fwd_opt = fwd_h->opt;
+            pre.body_end = body_end;
+            pre.op_pos = fwd_h->body_off;
+            pre.op_total = op_h->total;
+            pre.op_body_off = op_h->body_off;
+            pre.op_body_len = op_h->body_len;
+            pre.dst_body_off = dst_h->body_off;
+            pre.dst_end = dst_h->body_off + dst_h->body_len;
+            pre.after_dst = dst_pos + dst_h->total;
+            // `seg0_off`/`seg0_len` stay zero: there is no literal segment 0, and a descent
+            // that read them would be reading the escape's payload as a name. `strip_at` is
+            // left at the body start for the label branch to set once it knows the record's
+            // width — the same contract the canonical arm has with the descent.
+            pre.strip_at = dst_h->body_off;
+            return fwd_dst_kind_t::PATH_LABEL;
+        }
         seg0_off = seg0->body_off;
         seg0_len = seg0->body_len;
     }
@@ -1313,6 +1350,25 @@ template <class Cursor, class MintFn>
  *                       Empty when the mount is fully precomputed.
  * @param  strip_k       How many leading dst segments this hop consumes.
  * @param  pre           The offsets the routing peek already read, or nullptr to re-parse.
+ * @param  reply_label   RFC-0027 6.1's minted spelling of THIS hop's own local part, as the
+ *                       already-encoded 7-byte label element, or empty to mint nothing.
+ *                       already-encoded 7-byte label element, or empty to mint nothing.
+ *
+ *                       This is the one region a REPLY's `src` may grow by, and it exists
+ *                       because 6.1 requires the first reply to reach the original sender
+ *                       already minted: a hop's local part is stripped from the reply's `dst`
+ *                       and echoed nowhere else, so a label that replaced it would otherwise
+ *                       have no way home. What is prepended is strictly SHORTER than the
+ *                       string run it stands for (7 bytes against a mount run's 10 and up),
+ *                       which is 6.1's "replaces, never appends" in the accounting 6.1 itself
+ *                       uses — the comparison is against the string spelling of the same
+ *                       accumulation, not against a reply that accumulates nothing.
+ *
+ *                       It narrows RFC-0004 B's "a reply accumulates no return route" to
+ *                       NON-MINTING hops, which is a normative tension RFC-0027 6.1 already
+ *                       decided at acceptance and which is recorded as an erratum in that
+ *                       RFC's log rather than assumed here. Empty is the default and the
+ *                       conformant behaviour, so a node that never mints is byte-unchanged.
  * @param  mint_fn       This hop's mint contribution, supplied LAZILY: invoked at most once,
  *                       and only on a forwarded REPLY that actually carries an extendable
  *                       mint answer. Laziness is the whole point — deciding eagerly meant
@@ -1343,7 +1399,7 @@ template <class Cursor, class MintFn = no_mint_t, class ReverseMintFn = no_mint_
 [[gnu::flatten]] [[nodiscard]] std::optional<fwd_rebuild_t> rebuild_fwd_forward(
     const Cursor& cur, std::span<const std::byte> mount_tlv, std::string_view extra_seg,
     std::size_t strip_k, const fwd_pre_t* pre = nullptr, MintFn mint_fn = MintFn{},
-    ReverseMintFn reverse_mint_fn = ReverseMintFn{}) {
+    ReverseMintFn reverse_mint_fn = ReverseMintFn{}, std::span<const std::byte> reply_label = {}) {
     // The frame's leading headers were already parsed by the `dst` peek that routed this hop.
     // When the caller hands them over, re-reading them is pure duplicated work — profiling put
     // ~88% of a 1-link forward hop in header parsing, most of it exactly this. There is still
@@ -1475,7 +1531,8 @@ template <class Cursor, class MintFn = no_mint_t, class ReverseMintFn = no_mint_
     // on a segment and now the only one: a peer name longer than this has no spelling at all.
     if (extra_seg.size() > wire::kPackedSegMaxBytes) return std::nullopt;
     const std::size_t inbound_name_len =
-        is_reply ? 0u : mount_tlv.size() + (extra_seg.empty() ? 0u : 1u + extra_seg.size());
+        is_reply ? reply_label.size()
+                 : mount_tlv.size() + (extra_seg.empty() ? 0u : 1u + extra_seg.size());
 
     const std::size_t new_dst_body = r.rem_dst_len;
     const std::size_t new_src_body = src_h->body_len + inbound_name_len;
@@ -1533,12 +1590,14 @@ template <class Cursor, class MintFn = no_mint_t, class ReverseMintFn = no_mint_
     } else {
         r.head2.header_path(new_src_body);
     }
-    if (!is_reply) {
-        r.mount_tlv = mount_tlv;
-        if (!extra_seg.empty()) {
-            r.extra_hdr[0] = static_cast<std::byte>(extra_seg.size());
-            r.extra_seg = extra_seg;
-        }
+    // RFC-0027 §6.1's reply-leg contribution rides the SAME field the request leg's mount run
+    // rides, because it is the same region of the frame: the bytes prepended to `src`. Empty
+    // for every hop that does not mint — which is every hop today — so a REPLY's `src` is
+    // byte-identical to what it has always been and no shipped vector moves.
+    r.mount_tlv = is_reply ? reply_label : mount_tlv;
+    if (!is_reply && !extra_seg.empty()) {
+        r.extra_hdr[0] = static_cast<std::byte>(extra_seg.size());
+        r.extra_seg = extra_seg;
     }
 
     return r;

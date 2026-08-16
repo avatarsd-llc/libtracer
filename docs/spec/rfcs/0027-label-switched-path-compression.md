@@ -581,6 +581,51 @@ Two properties fall out and are both required:
   rejecting an unknown opcode. **This RFC spends none of that**, because a hop that does not
   understand a rewritten element never receives one: only the hop that minted a label ever reads it.
 
+#### Erratum 2 (2026-08-16) — the reply leg's own `src` is where a minted part travels, and RFC-0004 §B is narrowed to non-minting hops
+
+An **erratum**, not an amendment: §6.1 above is already accepted normative text and it already
+requires that *"the first reply therefore returns to the original sender with fully-minted `src`
+and `dst`"*. What was never written down is **which region of the reply frame carries the
+minted part**, and implementing car 4 ([#1325](https://github.com/avatarsd-llc/libtracer/issues/1325))
+established that the accepted text has exactly one reading that the shipped frame admits. No
+wire surface moves for any host that does not mint.
+
+**The finding.** On a reply, the shipped forwarder consumes its own local part out of the
+reply's `dst` (the accumulated return route) and forwards `src` — the echoed request `dst` —
+untouched, because *"a reply accumulates no return route"* (RFC-0004 §B). So a hop's local part
+is **stripped and echoed nowhere**: a label that replaced it would have no way home, and §6.1
+point 4 would be unsatisfiable. The three candidate regions and their dispositions:
+
+1. **The reply's `dst`.** Consumed, not rewritten — whatever a hop writes there it also removes.
+2. **A trailing accumulation** beside the payload, as RFC-0024 §7.1 does with `PATH_REF`.
+   Refused by §6.1's own words: the rewrite *"never appends"*.
+3. **The reply's `src`.** The only region that survives to the origin. **Ruled.**
+
+**Normative, and narrow.** A **minting** hop relaying a reply prepends its own local part to
+that reply's `src`, spelled as one path-label element. A **non-minting** hop accumulates
+nothing, exactly as today. RFC-0004 §B's *"a reply accumulates no return route"* is therefore
+**narrowed to non-minting hops** — which is every host that ships today, so `fwd/fwd-reply-result`,
+`fwd/fwd-reply-error` and every other reply vector are byte-unchanged and remain correct.
+
+**Why this is an erratum and not an amendment.** It alters no byte layout, adds no type code, no
+flag and no frame; it changes nothing a conformant host does today; and it states the only
+reading under which §6.1 — accepted, ruled, and unamended — is implementable at all. Per
+`GOVERNANCE.md`, an erratum may not alter the wire surface, and this does not: the label element
+is amendment 5's unchanged 7-byte escape, sitting in a `PATH` body that already admits it (§5.2).
+
+**§6.1's "replaces, never appends" is preserved in §6.1's own accounting.** The comparison the
+clause makes is against the **string spelling of the same accumulation** — the mount run the
+label stands for — not against a reply that accumulates nothing. On the shipped
+`net/<module>/<name>` shape that is **7 bytes against 13**. The inequality reverses on a
+one-segment mount name, which is precisely the reading amendment 6 rejected and precisely why
+§5.3.3 rules one label per *whole local part*.
+
+**What is still open, and is NOT ruled here:** the origin-side adoption of that minted `src` —
+the analogue of RFC-0024's `adopt_binding`, which must prepend the origin's own first-hop part
+(the one hop no peer ever sees, §4.1) before handing the bytes to `path_t::cache_path_label`.
+Car 4 implements the forwarder and leaves the origin unwired; the vectors and the binding test
+pin the hop's emission, not the round trip.
+
 ### 6.2 Each subscription's first fire triggers path creation and minting
 
 **Normative.** The mint trigger is the **first fire of a subscription** — the event that creates the

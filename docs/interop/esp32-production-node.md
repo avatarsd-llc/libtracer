@@ -68,7 +68,7 @@ the value backend and the failable control source
 (`core/include/libtracer/graph.hpp:405-407`) — and the **four** of
 `fwd_router_t`: the pmr resource, the failable `rx` source, the `flat` byte backend
 its rope flattens draw from, and the `egress` byte backend the terminus reply head
-draws from (`core/include/libtracer/fwd_router.hpp:177-182`; `egress` is #795 /
+draws from (`core/include/libtracer/fwd_router.hpp:179-184`; `egress` is #795 /
 ADR-0074, and the `max_label_bindings_per_link` bound sits between the last two). The full set of
 build-time and injected bounds is catalogued in
 [the configuration space](../design/config/00-configuration-space.md); the failure

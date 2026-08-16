@@ -1,0 +1,12 @@
+{
+  "name": "label-vs-string-deny",
+  "category": "acl",
+  "hex": "0F403700010001000306000900087265706C792D657006000E00001604000001000673656E736F72010001000109400A0008400600010002002000",
+  "total_bytes": 59,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "meaning": "FWD{ op=REPLY, dst=/reply-ep, src=<path label 0:1>/sensor, kind=ERROR, STATUS{ ERROR{ VALUE u16=0x0020 tr::path::not_found } } } - what acl/label-vs-string-allow's frame answers when the caller is NOT allowed.",
+    "note": "The refusal is tr::path::not_found and NOT tr::access::denied, deliberately: RFC-0027 8.1's anti-enumeration property requires a labelled probe to yield what a string probe yields, never `exists + here is a handle to it`. Answering `denied` would confirm the label is live, so a denied label and a stale one are made indistinguishable. The reply's src echoes the refused spelling so the sender can correlate it and fall back to the full-string path it still holds (7.2)."
+  }
+}

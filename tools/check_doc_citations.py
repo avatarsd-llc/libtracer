@@ -236,14 +236,14 @@ ANCHORS = [
     # silently (they cited the pre-#739 header). Anchored so they cannot rot again.
     # zero-copy-and-flatten.md's rope-tier citations and ADR-0072's stale-comment pointer —
     # all four had rotted on main and were re-asserted by a mechanical +24 shift (#768 verify).
-    ("core/include/libtracer/fwd_router.hpp:909", "Terminus over a MULTI-LINK rope"),
-    ("core/include/libtracer/fwd_router.hpp:915", "64 KB / 2 links"),
-    ("core/include/libtracer/fwd_router.hpp:961", "The forward hop, read entirely by OFFSET"),
-    ("core/include/libtracer/fwd_router.hpp:177", "explicit fwd_router_t"),
-    ("core/include/libtracer/fwd_router.hpp:283", "bool add_child"),
-    ("core/include/libtracer/fwd_router.hpp:461", "using reply_fn_t"),
-    ('core/include/libtracer/fwd_router.hpp:179', 'mem::block_source_t* rx = &mem::heap_source(),'),
-    ('core/include/libtracer/fwd_router.hpp:180', 'mem::mem_backend_t* flat = &mem::heap_backend(),'),
+    ("core/include/libtracer/fwd_router.hpp:1028", "Terminus over a MULTI-LINK rope"),
+    ("core/include/libtracer/fwd_router.hpp:1034", "64 KB / 2 links"),
+    ("core/include/libtracer/fwd_router.hpp:1080", "The forward hop, read entirely by OFFSET"),
+    ("core/include/libtracer/fwd_router.hpp:179", "explicit fwd_router_t"),
+    ("core/include/libtracer/fwd_router.hpp:332", "bool add_child"),
+    ("core/include/libtracer/fwd_router.hpp:510", "using reply_fn_t"),
+    ('core/include/libtracer/fwd_router.hpp:181', 'mem::block_source_t* rx = &mem::heap_source(),'),
+    ('core/include/libtracer/fwd_router.hpp:182', 'mem::mem_backend_t* flat = &mem::heap_backend(),'),
     # ("core/include/libtracer/fwd_router.hpp", "Slot addresses are NOT stable") — anchor
     # DROPPED (#892). Its only citer was ADR-0072's `fwd_router.hpp:596-605`, and an ADR is a
     # DATED record that `--repin` deliberately never rewrites. So the anchor tracked a line the
@@ -346,26 +346,26 @@ ANCHORS = [
      "field_write read an empty head"),
     ("core/src/graph.cpp:2450", "result_t<void> graph_t::field_write"),
     ("core/src/graph.cpp:2639", "acl_right_t::CREATE", 'step0.name == "children"'),
-    ("core/src/fwd_router.cpp:2335", "fwd_router_t::deliver_remote"),
-    ("core/src/fwd_router.cpp:2373", "value.try_materialize(*flat_)"),
-    ("core/src/fwd_router.cpp:2374", "if (!flat) return;", "A REFUSED materialize drops the delivery"),
-    ("core/src/fwd_router.cpp:2376", "emit_compact", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:2641", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:2679", "value.try_materialize(*flat_)"),
+    ("core/src/fwd_router.cpp:2680", "if (!flat) return;", "A REFUSED materialize drops the delivery"),
+    ("core/src/fwd_router.cpp:2682", "emit_compact", "fwd_router_t::deliver_remote"),
     # The FULL-ROUTE delivery leg's iov, and the scope is load-bearing: this exact statement
     # appears four times in the file and TWICE inside `deliver_remote` — once in the bound
     # reverse-list arm and once in the default full-route arm below it. The old scope named
     # the function, which both arms are inside, so a re-pin resolved the citation onto the
     # bound arm (the wrong paragraph). "Default: full-route" sits between the two and only
     # ever above this one.
-    ("core/src/fwd_router.cpp:2457",
+    ("core/src/fwd_router.cpp:2763",
      "mem::block_array_t<std::span<const std::byte>> iov(graph_.control_source());",
      "Default: full-route"),
     # #730 — the two INGRESS flatten guards. Anchored because the whole point of the
     # seam is that these are testable; a citation to them silently rotting would be the
     # first step back to "the guard nobody can prove still works".
-    ("core/src/fwd_router.cpp:1829", "if (route.empty() && head->child1_total != 0) return;"),
-    ("core/src/fwd_router.cpp:1848", "if (payload.empty() && head->child1_total != 0) return;"),
-    ("core/src/fwd_router.cpp:1841", "const std::span<const std::byte> payload = contig(head->child1_off, head->child1_total);"),
-    ("core/src/fwd_router.cpp:1501", "frame.subrope(0, frame.total_length()).try_materialize",
+    ("core/src/fwd_router.cpp:2135", "if (route.empty() && head->child1_total != 0) return;"),
+    ("core/src/fwd_router.cpp:2154", "if (payload.empty() && head->child1_total != 0) return;"),
+    ("core/src/fwd_router.cpp:2147", "const std::span<const std::byte> payload = contig(head->child1_off, head->child1_total);"),
+    ("core/src/fwd_router.cpp:1687", "frame.subrope(0, frame.total_length()).try_materialize",
      "if (hit.rejected) {"),
     # #766/#793 — the terminus resolver's three rope-tier draws, and the two allocations the
     # seam docs name as NOT covered by `flat`. These were cited by four doc pages and anchored
@@ -378,7 +378,7 @@ ANCHORS = [
     ("core/src/fwd_reply.cpp:130", "view::segment_alloc(egress, head_len)"),
     ('core/src/fwd_reply.cpp:33', "*        the u16 the kind=ERROR reply's ERROR{VALUE} identity carries."),
     ('core/src/fwd_reply.cpp:139', 'out.tlv_sliced(route.dst_wire);'),
-    ("core/src/fwd_router.cpp:1747", "decode_into(frame, rx_for(inbound_ctx))"),
+    ("core/src/fwd_router.cpp:2053", "decode_into(frame, rx_for(inbound_ctx))"),
     # `vertex.hpp:<parent_>` was pinned here TWICE, and the only doc that cites it is
     # `docs/spec/rfcs/0019` — a historical genre this tool's own header excludes from
     # pinning ("dated records of a decision ... pinning them would demand rewriting
@@ -465,13 +465,13 @@ ANCHORS = [
      '[[nodiscard]] inline std::expected<tlv_t, err_t> decode(const view::view_t& v) {'),
     # core/include/libtracer/fwd_frame_view.hpp
     # core/include/libtracer/fwd_router.hpp
-    ('core/include/libtracer/fwd_router.hpp:98',
+    ('core/include/libtracer/fwd_router.hpp:100',
      "* @param flat  The byte backend EVERY rope flatten on the router's forward AND terminus"),
-    ('core/include/libtracer/fwd_router.hpp:178',
+    ('core/include/libtracer/fwd_router.hpp:180',
      'std::pmr::memory_resource* mr = std::pmr::get_default_resource(),'),
-    ('core/include/libtracer/fwd_router.hpp:477',
+    ('core/include/libtracer/fwd_router.hpp:526',
      "* Invoked (with the `FWD{REPLY}` frame as a @ref view::rope_t) when a REPLY's first"),
-    ('core/include/libtracer/fwd_router.hpp:1183',
+    ('core/include/libtracer/fwd_router.hpp:1387',
      '[[nodiscard]] mem::block_source_t& rx_for(const child_rx_ctx_t* ctx) const noexcept {'),
     # core/include/libtracer/grammar.hpp
     ('core/include/libtracer/grammar.hpp:461',
@@ -667,20 +667,20 @@ ANCHORS = [
     ('core/src/frame.cpp:120', 'std::array<grammar::walk_frame_t<grammar::span_cursor>, 8> slots;'),
     ('core/src/frame.cpp:121', 'grammar::walk_stack_t<grammar::span_cursor> stack(slots, &mem::heap_source());'),
     # core/src/fwd_router.cpp
-    ('core/src/fwd_router.cpp:747',
+    ('core/src/fwd_router.cpp:755',
      'bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_source_t* rx) {'),
-    ('core/src/fwd_router.cpp:1469',
+    ('core/src/fwd_router.cpp:1655',
      'void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_t frame,'),
-    ('core/src/fwd_router.cpp:1475', 'if (frame.link_count() == 1) {'),
-    ('core/src/fwd_router.cpp:1531', '// A REPLY that reaches its originator here is handed to the sink'),
-    ('core/src/fwd_router.cpp:1857',
+    ('core/src/fwd_router.cpp:1661', 'if (frame.link_count() == 1) {'),
+    ('core/src/fwd_router.cpp:1717', '// A REPLY that reaches its originator here is handed to the sink'),
+    ('core/src/fwd_router.cpp:2163',
      'void fwd_router_t::on_control_rope(std::string_view inbound_name, view::rope_t frame) {'),
-    ('core/src/fwd_router.cpp:1808', 'const auto head = peek_control(cur, wire::grammar::crc_check_t::VERIFY);'),
-    ('core/src/fwd_router.cpp:1822', 'const std::span<const std::byte> route = contig(head->child1_off, head->child1_total);'),
-    ('core/src/fwd_router.cpp:1872', 'frame.subrope(off, total).try_materialize(*flat_);'),
-    ('core/src/fwd_router.cpp:2352',
+    ('core/src/fwd_router.cpp:2114', 'const auto head = peek_control(cur, wire::grammar::crc_check_t::VERIFY);'),
+    ('core/src/fwd_router.cpp:2128', 'const std::span<const std::byte> route = contig(head->child1_off, head->child1_total);'),
+    ('core/src/fwd_router.cpp:2178', 'frame.subrope(off, total).try_materialize(*flat_);'),
+    ('core/src/fwd_router.cpp:2658',
      "// else. A dropped fresh ADVERTISE self-heals via the peer's HANDLE_NACK (§E.1). NOT yet"),
-    ('core/src/fwd_router.cpp:2433',
+    ('core/src/fwd_router.cpp:2739',
      'constexpr std::array<std::byte, 5> op_tlv{std::byte{0x01}, std::byte{0x00}, std::byte{0x01},'),
     # core/src/graph.cpp
     ('core/src/graph.cpp:266', 'const view_t& frame_view, std::vector<std::byte> key,'),
@@ -800,14 +800,14 @@ ANCHORS = [
      '*     task stack (the batch apply overflows the 4 KB httpd default). The PORT-BINDING'),
 
     # --- re-added from the v0.7.1 docs sweep (absent from main's table) ---
-    ('core/include/libtracer/fwd_frame_view.hpp:1016', 'inline constexpr std::size_t kFwdMaxIov = 10;'),
+    ('core/include/libtracer/fwd_frame_view.hpp:1053', 'inline constexpr std::size_t kFwdMaxIov = 10;'),
     # ONE `bus()` since #871: both stream servers inherit slot_server_t's (they used to
     # restate it, cited as transport_tcp.hpp:343 and transport_ws.hpp:233).
     ('core/include/libtracer/posix_endpoint.hpp:675',
      '[[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }'),
     ('core/include/libtracer/edge_pin.hpp:153', 'class pin_t {'),
-    ('core/src/fwd_router.cpp:893', 'link.set_rope_receiver('),
-    ('core/src/fwd_router.cpp:843', 'bus->set_peer_rope_receiver('),
+    ('core/src/fwd_router.cpp:901', 'link.set_rope_receiver('),
+    ('core/src/fwd_router.cpp:851', 'bus->set_peer_rope_receiver('),
     ('core/src/graph.cpp:1122', 'vertex_t* graph_t::find_ptr(std::span<const std::byte> key) const {'),
     # Was pinned to :990's `shared_lock` — seventeen identical lines in this file. Re-pinned
     # inside the SAME cited span (`graph.cpp:989-990`) to the signature that takes the lock.
@@ -833,9 +833,9 @@ ANCHORS = [
     ('tools/cortexm0_footprint.py:151', 'cxx_flags = ['),
     ('tools/cortexm0_footprint.py:158', '"-DLIBTRACER_NO_ATOMIC",'),
     ('tools/cortexm0_footprint.py:172', '"--specs=nano.specs",'),
-    ('core/tests/CMakeLists.txt:1552', 'add_executable(substrate_test_no_atomic'),
-    ('core/tests/CMakeLists.txt:1565', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
-    ('core/tests/CMakeLists.txt:1566', '    LIBTRACER_NO_ATOMIC'),
+    ('core/tests/CMakeLists.txt:1566', 'add_executable(substrate_test_no_atomic'),
+    ('core/tests/CMakeLists.txt:1579', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
+    ('core/tests/CMakeLists.txt:1580', '    LIBTRACER_NO_ATOMIC'),
     # The leading indent is load-bearing: the bare token also appears in the comment
     # three lines above the executable, and an anchor that matches both is not an anchor.
 
@@ -916,9 +916,9 @@ ANCHORS = [
      'if (path_len > kAdvertiseMaxPathLen) return std::nullopt;  // wedge bound (see constant)'),
     ('core/include/libtracer/config.hpp:159',
      '* every index taken falls back to copying the CURRENT array under the vertex stripe mutex,'),
-    ('core/include/libtracer/fwd_router.hpp:340',
+    ('core/include/libtracer/fwd_router.hpp:389',
      '[[nodiscard]] graph::result_t<void> subscribe_toward(const graph::path_t& producer,'),
-    ('core/include/libtracer/fwd_router.hpp:890',
+    ('core/include/libtracer/fwd_router.hpp:1009',
      '*         link delivers ropes (nullptr on the borrowed-span path). @p bus_child is the'),
     ('core/include/libtracer/graph.hpp:688',
      "* @brief This node's own reference to @p vh — the MINT side of a bound-path element"),
@@ -952,39 +952,39 @@ ANCHORS = [
     ('core/include/libtracer/vertex.hpp:2334', 'const std::size_t doff = off;'),
     ('core/include/libtracer/vertex.hpp:2411',
      '// padding — 8-byte, then 4-byte, then flag bytes), with everything the write hot'),
-    ('core/src/fwd_router.cpp:791',
+    ('core/src/fwd_router.cpp:799',
      "// segment, which is what keeps two buses' same-named peers distinct on the way back."),
-    ('core/src/fwd_router.cpp:850', 'bus->set_peer_receiver('),
-    ('core/src/fwd_router.cpp:1184',
+    ('core/src/fwd_router.cpp:858', 'bus->set_peer_receiver('),
+    ('core/src/fwd_router.cpp:1241',
      'transport_t* fwd_router_t::bound_egress(wire::path_ref_element_t e, std::string_view caller,'),
-    ('core/src/fwd_router.cpp:1206',
+    ('core/src/fwd_router.cpp:1263',
      'bool fwd_router_t::adopt_binding(graph::path_t& path, std::string_view link_name,'),
-    ('core/src/fwd_router.cpp:1725',
+    ('core/src/fwd_router.cpp:2031',
      'mem::block_array_t<std::span<const std::byte>> iov{rx_for(inbound_ctx)};'),
-    ('core/src/fwd_router.cpp:1862',
+    ('core/src/fwd_router.cpp:2168',
      'const wire::grammar::rope_cursor cur{frame};',
      'if (!frame.all_host()) return;'),
-    ('core/src/fwd_router.cpp:2122', 'const auto payload_view = view::over_bytes(payload_bytes);'),
-    ('core/src/fwd_router.cpp:2133',
+    ('core/src/fwd_router.cpp:2428', 'const auto payload_view = view::over_bytes(payload_bytes);'),
+    ('core/src/fwd_router.cpp:2439',
      'graph_.count_external_drop(graph::graph_t::external_drop_t::OUT_OF_MEMORY, 1);',
      'if (!value.try_reserve(1)) {'),
-    ('core/src/fwd_router.cpp:2152',
+    ('core/src/fwd_router.cpp:2458',
      'graph_.count_external_drop(graph::graph_t::external_drop_t::NO_TARGET, 1);',
      'if (!binding) {'),
-    ('core/src/fwd_router.cpp:2238',
+    ('core/src/fwd_router.cpp:2544',
      'const std::optional<graph::vertex_handle_t> v = resolve_route_vertex(route_path);'),
-    ('core/src/fwd_router.cpp:2242',
+    ('core/src/fwd_router.cpp:2548',
      'graph_.count_external_drop(graph::graph_t::external_drop_t::NO_TARGET, 1);',
      '// the same outcome either way: an admitted delivery with nowhere to land.'),
-    ('core/src/fwd_router.cpp:2245',
+    ('core/src/fwd_router.cpp:2551',
      '// `payload` is a wire-encoded TLV (never empty); `nullopt` is exactly an alloc'),
-    ('core/src/fwd_router.cpp:2249',
+    ('core/src/fwd_router.cpp:2555',
      'graph_.count_external_drop(graph::graph_t::external_drop_t::OUT_OF_MEMORY, 1);',
      'const auto payload_view = view::over_bytes(payload);'),
-    ('core/src/fwd_router.cpp:2375', 'if (fresh) emit_advertise(*link, label, route);'),
-    ('core/src/fwd_router.cpp:2436',
+    ('core/src/fwd_router.cpp:2681', 'if (fresh) emit_advertise(*link, label, route);'),
+    ('core/src/fwd_router.cpp:2742',
      'constexpr std::array<std::byte, 4> empty_src{std::byte{0x06}, std::byte{0x00}, std::byte{0x00},'),
-    ('core/src/fwd_router.cpp:2437',
+    ('core/src/fwd_router.cpp:2743',
      'std::byte{0x00}};',
      'constexpr std::array<std::byte, 4> empty_src{std::byte{0x06}, std::byte{0x00}, std::byte{0x00},'),
     ('core/src/graph.cpp:684', 'return acl_allows(v.get(), caller, right);'),

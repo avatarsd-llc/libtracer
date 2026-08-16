@@ -1,0 +1,12 @@
+{
+  "name": "label-vs-string-allow",
+  "category": "acl",
+  "hex": "0F402C00010001000106000E00001604000001000673656E736F7206000900087265706C792D65700100040005000000",
+  "total_bytes": 48,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "meaning": "FWD{ op=WRITE, dst=<path label 0:1>/sensor, src=/reply-ep, VALUE u32=5 } - the ALLOW half of the pair RFC-0027 8.2 mandates: the labelled spelling of an operation whose string twin spells dst=/net/uplink/b/sensor.",
+    "note": "Against a node where the label's slot is live and the dereferenced vertex's :acl grants the caller WRITE, this frame and its string twin forward the SAME residual, byte for byte. A by-construction argument is not a test - RFC-0014 shipped two silent misroutes because no test used the production wiring - so the claim is bound by core/tests/path_label_forward_test.cpp."
+  }
+}
