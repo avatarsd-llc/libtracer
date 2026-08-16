@@ -152,7 +152,7 @@ registered through `register_transport_type` at `:133`). The created connection 
 mounted and routed at **`/net/<module>/<name>`**, where `module` is **declared by the
 application** through `register_module` — modules are declared-only (ADR-0073 §4); an
 undeclared kind fails creation with `SCHEMA_NOT_FOUND`
-(`core/src/transport_vertex.cpp:158-176,436-462`).
+(`core/src/transport_vertex.cpp:158-176,435-461`).
 
 A per-module creator endpoint — `/net/<module>/conn`, one self-contained module per
 *(transport, role)*, replacing the single global catalog — is the accepted
