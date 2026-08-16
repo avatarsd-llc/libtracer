@@ -295,7 +295,7 @@ result_t<rope_t> op_resolver_t::resolve(const wire::tlv_view_t& fwd, std::string
     // builders draw from it, never a node's `wire()`/`body()`. Default heap when un-injected.
     return resolve_node(graph_, root, inbound_link, frame_view, root.backend(),
                         egress_ != nullptr ? *egress_ : mem::heap_backend(), reverse_ref_fn_,
-                        reverse_ref_ctx_);
+                        reverse_ref_ctx_, path_label_fn_, path_label_ctx_);
 }
 
 }  // namespace tr::graph

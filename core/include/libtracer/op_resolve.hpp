@@ -26,7 +26,9 @@
 #pragma once
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string_view>
 
 #include "libtracer/graph.hpp"
@@ -251,12 +253,53 @@ class op_resolver_t {
         reverse_ref_ctx_ = ctx;
     }
 
+    /**
+     * @brief The TERMINUS's path-label supplier (RFC-0027 §6.1 point 3): asked, on a
+     *        successful operation only, for the label element standing for the residual this
+     *        node just resolved.
+     *
+     * §6.1 point 3 — *"the terminus does the same for the residual it resolved"* — is the
+     * residual half of the rewrite whose forwarding half rides `reply_label`. The reply's
+     * `src` IS the request's `dst` (the residual), so the terminus's rewrite is a
+     * SUBSTITUTION of that one region: the label REPLACES the string bytes and never appends,
+     * exactly as §6.1 requires in both directions, and it lands in the one region that
+     * survives to the origin (erratum 2).
+     *
+     * What is injected and why: a label is minted against a `peer_handle_t` out of a table
+     * the TRANSPORT plane owns (`%tr::net::path_label_table_t`), and this graph-layer resolver
+     * deliberately cannot name either. So the mapping from "the link this request arrived on"
+     * plus "the vertex it resolved to" to "seven encoded bytes" is injected as a bare
+     * `{fn, ctx}` pair — the ADR-0047 seam shape `on_reverse_ref` already uses.
+     *
+     * The contract each side holds:
+     *
+     * - **Post-auth, always** (§8.1). The supplier is called only after the operation's own
+     *   gates have passed — after `graph_t::read` / `write` / `await` / `subscribe_wire`
+     *   answered success — so no label is ever minted for a destination an ancestor ACL
+     *   hides, and a denied operation answers denied and nothing else.
+     * - **An EMPTY answer is the conformant default**, not an error (§6.3): the reply's `src`
+     *   stays the string it is today. Every host with no installed supplier is that case, so
+     *   no shipped reply's bytes move.
+     * - The returned span must be exactly `%tr::wire::kPathLabelRecordBytes` long and must
+     *   outlive the reply assembly; anything else is ignored and the part stays a string.
+     */
+    using path_label_fn_t = std::span<const std::byte> (*)(void* ctx, std::string_view inbound_link,
+                                                           wire::path_ref_element_t target);
+
+    /** @brief Install the terminus path-label supplier (null @p fn uninstalls). */
+    void on_path_label(path_label_fn_t fn, void* ctx) noexcept {
+        path_label_fn_ = fn;
+        path_label_ctx_ = ctx;
+    }
+
    private:
     graph_t& graph_;
     mem::mem_backend_t* flat_ = &mem::heap_backend();    // rope-tier terminus flattens (#766)
     mem::mem_backend_t* egress_ = &mem::heap_backend();  // reply head + mint egress bytes (#795)
     reverse_ref_fn_t reverse_ref_fn_ = nullptr;  // responder's reverse-mint seam (amendment 1)
     void* reverse_ref_ctx_ = nullptr;            /**< @brief Its caller-owned context. */
+    path_label_fn_t path_label_fn_ = nullptr;    // RFC-0027 §6.1 point 3 terminus mint seam
+    void* path_label_ctx_ = nullptr;             /**< @brief Its caller-owned context. */
 };
 
 }  // namespace tr::graph

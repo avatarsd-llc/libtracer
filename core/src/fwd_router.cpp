@@ -1841,14 +1841,73 @@ std::span<const std::byte> fwd_router_t::child_label_record(std::string_view inb
     return std::span<const std::byte>(ctx.path_label_tlv);
 }
 
+std::span<const std::byte> fwd_router_t::terminus_label_record(std::string_view inbound_link,
+                                                               path_label_target_t target) {
+    if (labels_ == nullptr) return {};
+    // The reply leaves over the link the request arrived on, so ONE ctx answers both halves of
+    // "who owns this label" and "where is it cached". A frame delivered through the public
+    // `on_frame` carries no ctx down here at all — the terminus is reached through the
+    // resolver, which knows only the link's NAME — so this is always the by-name lookup, which
+    // is `hop_mint`'s own fallback and correct for the same reason: the answer is a property
+    // of the LINK, not of how the frame reached the router.
+    const child_rx_ctx_t* const ctx = ctx_by_name(inbound_link);
+    if (ctx == nullptr || ctx->retired.load(std::memory_order_acquire)) return {};
+    // A BUS arrival is left a string, for the reason `label_src_prefix` gives at length: this
+    // ctx's `label_peer` is one identity for the whole child, so a label cached on it would be
+    // presentable by EVERY peer behind the bus — the owner check that makes §4.1's node-scope
+    // rule bite would be checking the wrong thing. §6.3 makes the refusal free.
+    if (ctx->bus.load(std::memory_order_relaxed) != nullptr) return {};
+    const peer_handle_t peer =
+        peer_handle_from_bits(ctx->label_peer.load(std::memory_order_relaxed));
+    if (!peer.valid()) return {};  // no identity to own the label ⇒ the residual stays a string
+    // The residual, packed into one word so the steady state is one relaxed load and one
+    // compare. Both halves are load-bearing: an index without the generation current when it
+    // was read names a slot, not a vertex.
+    const std::uint64_t want = (static_cast<std::uint64_t>(target.index) << 32) | target.generation;
+    // Already minted, for THIS peer and THIS residual: the steady state, and it never touches
+    // the table. Acquire, so the seven encoded bytes read below are the ones the minting thread
+    // finished writing.
+    if (const std::uint32_t bits = ctx->terminus_label.load(std::memory_order_acquire); bits != 0)
+        return ctx->terminus_label_for.load(std::memory_order_relaxed) == peer.bits() &&
+                       ctx->terminus_label_target.load(std::memory_order_relaxed) == want
+                   ? std::span<const std::byte>(ctx->terminus_label_tlv)
+                   : std::span<const std::byte>{};  // one label per child — see the ctx field
+
+    // §6.2's trigger fires HERE and nowhere else on this half: the first operation this node
+    // terminates for this child. No use counter, no hit threshold, no hotness estimate, no
+    // timer, no aging — the condition is that the node is already holding the resolution and
+    // has not yet spelled it.
+    const std::optional<wire::path_label_t> label = labels_->mint(peer, target);
+    if (!label) return {};  // §8.3 ceiling/capacity/all-retired ⇒ refuse-new, NOT an error
+    std::vector<std::byte> rec;
+    if (!wire::emit_path_label(rec, *label) || rec.size() != wire::kPathLabelRecordBytes) {
+        (void)labels_->release(*label);  // spelling refused ⇒ do not strand the slot
+        return {};
+    }
+    auto& ctx_mut = const_cast<child_rx_ctx_t&>(*ctx);
+    std::copy(rec.begin(), rec.end(), ctx_mut.terminus_label_tlv.begin());
+    ctx_mut.terminus_label_for.store(peer.bits(), std::memory_order_relaxed);
+    ctx_mut.terminus_label_target.store(want, std::memory_order_relaxed);
+    // Release-store LAST: the bytes, the owning peer and the residual it stands for are all
+    // whole before anything can observe the label as present.
+    ctx_mut.terminus_label.store(label->bits(), std::memory_order_release);
+    return std::span<const std::byte>(ctx->terminus_label_tlv);
+}
+
 void fwd_router_t::release_child_label(child_rx_ctx_t& ctx) noexcept {
+    // BOTH halves of §6.1's rewrite hang off this child and both depart with it — the
+    // forwarding label that aliases the connection vertex behind it, and the terminus label
+    // that aliases the vertex a residual resolved to. Releasing one and not the other would
+    // leave a live slot owned by a peer identity that is about to be re-stamped.
+    const std::uint32_t term_bits = ctx.terminus_label.exchange(0, std::memory_order_acq_rel);
     const std::uint32_t bits = ctx.path_label.exchange(0, std::memory_order_acq_rel);
-    if (bits == 0 || labels_ == nullptr) return;
+    if (labels_ == nullptr) return;
     // The generation bump IS the invalidation (§7.1) — there is no withdraw frame, no unbind,
     // no lease and no TTL (§7.3). The peer's next frame discovers it, answers NOT_FOUND, and
     // the peer falls back to the string path it still holds. A bump that saturates retires the
     // slot permanently (§4.3.1); that is the table's rule, not this call site's.
-    (void)labels_->release(wire::path_label_from_bits(bits));
+    if (term_bits != 0) (void)labels_->release(wire::path_label_from_bits(term_bits));
+    if (bits != 0) (void)labels_->release(wire::path_label_from_bits(bits));
 }
 
 template <class Cursor>

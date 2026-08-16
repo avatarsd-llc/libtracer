@@ -161,6 +161,15 @@ if(LIBTRACER_NET_PLANE)
         LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
     libtracer_test_warnings(path_label_forward_test)
     add_test(NAME path_label_forward COMMAND path_label_forward_test)
+
+    # RFC-0027 §6.1 point 3 — the TERMINUS: the residual half of the same reply-leg rewrite,
+    # bound against the production `fwd_router_t` + `op_resolver_t` wiring for the same reason.
+    add_executable(path_label_terminus_test path_label_terminus_test.cpp)
+    target_link_libraries(path_label_terminus_test PRIVATE libtracer)
+    target_compile_definitions(path_label_terminus_test PRIVATE
+        LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
+    libtracer_test_warnings(path_label_terminus_test)
+    add_test(NAME path_label_terminus COMMAND path_label_terminus_test)
 endif()
 
 # The wire grammar's total-encoded-size bound (grammar.hpp, #921) — pinned at

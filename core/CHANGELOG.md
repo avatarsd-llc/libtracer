@@ -16,6 +16,51 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **The RFC-0027 TERMINUS mint — `graph::op_resolver_t::path_label_fn_t` and
+  `op_resolver_t::on_path_label`**
+  ([#1357](https://github.com/avatarsd-llc/libtracer/issues/1357)). §6.1 point 3 — *"the
+  terminus does the same for the residual it resolved"* — is the residual half of the reply-leg
+  rewrite whose forwarding half landed with car 4. It is **off by default** on the same terms:
+  a node with no injected `path_label_table_t` installs no supplier, echoes the request's `dst`
+  as the reply's `src` exactly as it does today, and no shipped reply's bytes move (§6.3).
+  - **The reply's `src` IS the request's `dst`**, and at a terminus the request's `dst` IS the
+    residual — so the region the rewrite lands in and the part being rewritten are the same
+    bytes, and §6.1's *"replaces, never appends"* is **literal** here rather than accounted for
+    (the forwarding half's erratum-2 reading): the whole `src` becomes one 7-byte label element
+    and the frame gets **shorter**. It is also what makes §6.1 point 4's *fully-minted `src`*
+    reachable at all — the forwarding hops' labels stack in front of this one.
+  - **`on_path_label(fn, ctx)`** — the ADR-0047 captureless `{fn, ctx}` seam, the shape
+    `on_reverse_ref` already uses. A label is minted against a `peer_handle_t` out of a table
+    the transport plane owns, and this graph-layer resolver deliberately cannot name either;
+    `fwd_router_t::configure_path_labels` installs the supplier, and **only** when a table is
+    injected, so a string-only terminus tests one null pointer and never makes a call.
+  - **§8.1 is post-auth, and structurally so.** The supplier is invoked only on the success
+    arms — after `graph_t::read` / `write` / `await` / `subscribe_wire` answered success — so a
+    denied operation answers denied and nothing else, and spends no slot. RFC-0024's `PATH_REF`
+    mint may be computed eagerly because reading a vertex slot allocates nothing; a label
+    cannot, so it is not.
+  - **§11.2's mutual exclusion is structural here too**: a `PATH_REF` dst is already one
+    compression of this address and a mint-flagged (`op` bit 7) request is *asking* for one, so
+    neither leg reaches the label mint. The two forms never meet on one frame.
+  - **One terminus label per child, first come.** A second, different residual on the same
+    child is left as the string it already is, which keeps the table's row count bounded by
+    LINKS rather than by how many addresses a peer happens to touch (§6.3 makes the refusal
+    free). The `(egress peer, target)` pair table that would label them all is the same
+    deferred shape car 4's `path_label_for` names.
+  - **§7.1's departure bump covers both halves**: `release_child_label` now releases the
+    terminus label beside the forwarding one, so a departing child leaves no live slot owned by
+    a peer identity that is about to be re-stamped.
+  - **NOT included, and stated rather than discovered:** the terminus-local **deref** — a
+    labelled `dst` whose target is a local vertex rather than an egress link. `route_label_forward`
+    resolves a label only to a link, so such a frame takes §7.2's counted `NOT_FOUND` today.
+    Nothing can send one yet (origin-side adoption is still unwired), but **§12.4 axis 2 needs
+    it**, not the mint: what axis 2 times is a terminus RESOLVING a labelled residual.
+  - Measured code-shape delta (`-O3 -DNDEBUG`, x86-64, object-file `.text` sum):
+    `op_resolve.cpp.o` +634 B, `op_resolve_view.cpp.o` +700 B, `fwd_router.cpp.o` +900 B —
+    **+2 234 B (+1.34 %)** across the three. `bench/symbol_ratchet.json` is unmoved (`+0` on
+    every pinned symbol). **Not priced on the bench** — §12.4's axis 2 and the mandatory
+    four-link `reply-spread` arm are a follow-up pass.
+
 - **The RFC-0027 forwarder: mint on reply, deref on receipt, `NOT_FOUND` on stale —
   `fwd_router_t::configure_path_labels`, `fwd_router_t::path_labels`,
   `fwd_router_t::label_not_found`, `fwd_router_t::label_resolves`, and

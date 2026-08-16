@@ -39,6 +39,7 @@
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/op_resolve.hpp"
 #include "libtracer/packed_path.hpp"
+#include "libtracer/path_label.hpp"
 #include "libtracer/pin_instrument.hpp"
 #include "libtracer/tlv_emit.hpp"
 
@@ -607,13 +608,12 @@ template <class N>
  * exactly what probing the canonical form yields (§6.1's anti-enumeration property).
  */
 template <class N>
-[[nodiscard]] result_t<rope_t> apply_op(graph_t& graph, const parsed_fwd_t<N>& req,
-                                        vertex_handle_t v, std::string_view inbound_link,
-                                        const view_t* frame_view, mem::mem_backend_t& flat,
-                                        mem::mem_backend_t& egress, const reply_route_t& route,
-                                        const field_path_t& field, bool has_field,
-                                        op_resolver_t::reverse_ref_fn_t reverse_ref_fn = nullptr,
-                                        void* reverse_ref_ctx = nullptr) {
+[[nodiscard]] result_t<rope_t> apply_op(
+    graph_t& graph, const parsed_fwd_t<N>& req, vertex_handle_t v, std::string_view inbound_link,
+    const view_t* frame_view, mem::mem_backend_t& flat, mem::mem_backend_t& egress,
+    const reply_route_t& route, const field_path_t& field, bool has_field,
+    op_resolver_t::reverse_ref_fn_t reverse_ref_fn = nullptr, void* reverse_ref_ctx = nullptr,
+    op_resolver_t::path_label_fn_t path_label_fn = nullptr, void* path_label_ctx = nullptr) {
     // The mint answer (RFC-0024 §7.5): this node's own reference to the target vertex, as a
     // one-element `PATH_REF` the origin stacks under whatever it already holds for the hops
     // in front of it. 4 + 8 bytes, on the reply only, and only when asked — the request side
@@ -648,6 +648,57 @@ template <class N>
         }
     }
 
+    // RFC-0027 §6.1 point 3 — THE TERMINUS'S OWN REWRITE: *"the terminus does the same for the
+    // residual it resolved"*. The reply's `src` IS the request's `dst` (`reply_route_t`'s
+    // pre-swap), and the request's `dst` at a terminus IS the residual every forwarding hop
+    // left it — so this node's local part and the region the rewrite lands in are the same
+    // bytes, and the rewrite is a SUBSTITUTION of that whole region. §6.1's *"replaces, never
+    // appends"* is therefore literal here rather than accounted for (erratum 2's forwarder
+    // reading): the label stands where the string stood and the frame gets shorter.
+    //
+    // It is a LAMBDA and not a value because §8.1 is not negotiable: minting spends a table
+    // slot, so it must not happen until the operation's own ACL gate has answered. RFC-0024's
+    // `mint` above may be computed eagerly precisely because it spends nothing — a vertex slot
+    // is read, not allocated — and it rides success by being ATTACHED only on the success arms.
+    // A label cannot take that shape, so the call sites below invoke this after their
+    // `graph_t` call succeeded, and never on an error arm. Exactly one arm runs per call, so
+    // "at most once per resolved operation" needs no memo.
+    constexpr std::size_t kPathHeadBytes = 4;  // type, opt, u16 LE length — the short envelope
+    std::array<std::byte, kPathHeadBytes + wire::kPathLabelRecordBytes> label_buf{};
+    const auto labelled_route = [&]() -> reply_route_t {
+        // §11.2's mutual exclusion, structural at the mint site exactly as car 4 made it on the
+        // forwarding half. A `PATH_REF` dst is already one compression of this address and a
+        // mint-flagged request is ASKING for one, so neither leg may reach the label mint and
+        // the two forms never meet on one frame. Both are argument-shaped rather than
+        // flag-shaped: there is no runtime switch here that could be forgotten.
+        if (path_label_fn == nullptr || req.dst_bound || req.mint_request) return route;
+        // What the label ALIASES: this node's own reference to the vertex the residual
+        // resolved to, read as ONE pair under one lock hold (`vertex_slot`'s whole contract —
+        // an index without the generation current when it was read names a slot, not a
+        // vertex). It is the identical element RFC-0024's bind mint hands back, which is what
+        // lets the deref side be one implementation rather than two.
+        const std::optional<vertex_slot_t> slot = graph.vertex_slot(v);
+        if (!slot) return route;  // a saturated generation ⇒ unbindable ⇒ the string spelling
+        const std::span<const std::byte> rec = path_label_fn(
+            path_label_ctx, inbound_link,
+            wire::path_ref_element_t{.index = slot->index, .generation = slot->generation});
+        // An empty answer is the CONFORMANT default and covers every refusal at once (§6.3):
+        // no injected table, a peer at its §8.3 ceiling, a table at capacity, a bus child this
+        // car does not label. The part stays a string and nothing on the route notices.
+        if (rec.size() != wire::kPathLabelRecordBytes) return route;
+        // A packed `PATH` whose whole body is that one element: `opt` is 0 (PL=0 — a packed
+        // body is opaque to the codec, RFC-0018) and the length is the record's, written LE
+        // into the 4-byte header the reply builder then copies verbatim.
+        label_buf[0] = static_cast<std::byte>(std::to_underlying(type_t::PATH));
+        label_buf[1] = std::byte{0};
+        label_buf[2] = static_cast<std::byte>(wire::kPathLabelRecordBytes & 0xFFu);
+        label_buf[3] = static_cast<std::byte>((wire::kPathLabelRecordBytes >> 8) & 0xFFu);
+        std::memcpy(label_buf.data() + kPathHeadBytes, rec.data(), rec.size());
+        return reply_route_t{.dst_wire = route.dst_wire,
+                             .src_wire = std::span<const std::byte>(label_buf),
+                             .echo_ts = route.echo_ts};
+    };
+
     switch (req.op) {
         case fwd_op_t::READ: {
             if (has_field && is_subscribers_array(field)) {
@@ -662,11 +713,12 @@ template <class N>
                 const bool wll = sub_len > 0xFFFFu;
                 emit_cursor_t wout{wrapper.data()};
                 wout.struct_header(type_t::POINT, wll, sub_len);
+                const reply_route_t ok = labelled_route();
                 return or_backpressure(
-                    assemble_reply(route, reply_kind_t::RESULT,
+                    assemble_reply(ok, reply_kind_t::RESULT,
                                    std::span<const std::byte>(wrapper.data(), wll ? 6u : 4u), *subs,
                                    sub_len, egress, mint),
-                    route, egress);
+                    ok, egress);
             }
             // A `:field` read composes a value and is rope-valued; a plain value read hands
             // back a REFERENCE to the published one. Both feed the same reply assembly, which
@@ -681,7 +733,8 @@ template <class N>
             // The composed-root case: graph.read may SUCCEED (a folded ~hundreds-of-links
             // snapshot) yet the reply's own link-table reserve fail on the fragmented heap.
             // or_backpressure keeps that from becoming a silent drop (the dead-web-ui bug).
-            return or_backpressure(assemble_result_rope(route, **r, egress, mint), route, egress);
+            const reply_route_t ok = labelled_route();
+            return or_backpressure(assemble_result_rope(ok, **r, egress, mint), ok, egress);
         }
         case fwd_op_t::WRITE: {
             if (!req.payload.has_value())
@@ -768,8 +821,9 @@ template <class N>
                     graph.subscribe_wire(v, sub_value, return_route, std::string(inbound_link),
                                          std::move(reverse_route));
                 if (!w) return assemble_error_reply(route, w.error(), egress);
+                const reply_route_t ok = labelled_route();
                 return or_backpressure(
-                    assemble_reply(route, reply_kind_t::RESULT, {}, {}, 0, egress, mint), route,
+                    assemble_reply(ok, reply_kind_t::RESULT, {}, {}, 0, egress, mint), ok,
                     egress);  // OK, empty payload
             }
 
@@ -798,8 +852,9 @@ template <class N>
             result_t<void> w =
                 graph.write(v, has_field ? field : field_path_t{}, value, inbound_link);
             if (!w) return assemble_error_reply(route, w.error(), egress);
+            const reply_route_t ok = labelled_route();
             return or_backpressure(
-                assemble_reply(route, reply_kind_t::RESULT, {}, {}, 0, egress, mint), route,
+                assemble_reply(ok, reply_kind_t::RESULT, {}, {}, 0, egress, mint), ok,
                 egress);  // OK, empty payload
         }
         case fwd_op_t::AWAIT: {
@@ -828,7 +883,8 @@ template <class N>
             if (!r)
                 return assemble_error_reply(route, r.error(),
                                             egress);  // TIMEOUT => tr::flow::timeout
-            return or_backpressure(assemble_result_rope(route, **r, egress, mint), route, egress);
+            const reply_route_t ok = labelled_route();
+            return or_backpressure(assemble_result_rope(ok, **r, egress, mint), ok, egress);
         }
         case fwd_op_t::REPLY:
             break;  // unreachable — handled above
@@ -849,7 +905,8 @@ template <class N>
 [[nodiscard]] result_t<rope_t> resolve_node(
     graph_t& graph, const N& root, std::string_view inbound_link, const view_t* frame_view,
     mem::mem_backend_t& flat, mem::mem_backend_t& egress,
-    op_resolver_t::reverse_ref_fn_t reverse_ref_fn = nullptr, void* reverse_ref_ctx = nullptr) {
+    op_resolver_t::reverse_ref_fn_t reverse_ref_fn = nullptr, void* reverse_ref_ctx = nullptr,
+    op_resolver_t::path_label_fn_t path_label_fn = nullptr, void* path_label_ctx = nullptr) {
     result_t<parsed_fwd_t<N>> parsed = parse_fwd(root);
     if (!parsed) return std::unexpected(parsed.error());
     const parsed_fwd_t<N>& req = *parsed;
@@ -967,7 +1024,7 @@ template <class N>
         // and an element is not one. A vref names a vertex that existed when it was minted, so
         // "it is not there any more" is exactly the stale case the deref just refused.
         return apply_op(graph, req, *bound, inbound_link, frame_view, flat, egress, route, field,
-                        has_field, reverse_ref_fn, reverse_ref_ctx);
+                        has_field, reverse_ref_fn, reverse_ref_ctx, path_label_fn, path_label_ctx);
     }
 
     // dst resolution is the router's PATH-keyed dispatch — span-aliased for a
@@ -1011,7 +1068,7 @@ template <class N>
     // the point of the amendment, not an oversight left in it.
     if (!found) return assemble_error_reply(route, status_t::NOT_FOUND, egress);
     return apply_op(graph, req, *found, inbound_link, frame_view, flat, egress, route, field,
-                    has_field, reverse_ref_fn, reverse_ref_ctx);
+                    has_field, reverse_ref_fn, reverse_ref_ctx, path_label_fn, path_label_ctx);
 }
 
 }  // namespace

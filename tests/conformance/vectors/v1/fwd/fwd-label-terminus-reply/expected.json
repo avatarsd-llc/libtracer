@@ -1,0 +1,12 @@
+{
+  "name": "fwd-label-terminus-reply",
+  "category": "fwd",
+  "hex": "0F402A00010001000306000900087265706C792D65700600070000160400000100010001000001000400D2040000",
+  "total_bytes": 46,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "meaning": "FWD{ op=REPLY, dst=/reply-ep, src=<path label 0:1>, kind=RESULT, VALUE u32=1234 } - the reply a MINTING TERMINUS emits (RFC-0027 6.1 point 3). The residual this node resolved, `/sensor/temp`, is spelled as one 7-byte path-label element instead of the 12 bytes of string it stands for, so the whole `src` IS the label.",
+    "note": "The label is the RFC-0018 escape record `00 16 04 <u32 LE>`, index 0 at generation 1 (RFC-0027 5.3.2, amendment 5). A terminus that mints nothing echoes the request's dst as the reply's src unchanged and is fully conformant (6.3)."
+  }
+}
