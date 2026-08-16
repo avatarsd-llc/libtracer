@@ -1,0 +1,28 @@
+{
+  "name": "path-escape-in-key-context",
+  "category": "path",
+  "hex": "06000E000673656E736F7200160401000200",
+  "total_bytes": 18,
+  "decoded": {
+    "type": "0x06 PATH",
+    "opt": {
+      "raw": "0x00",
+      "PL": 0,
+      "TS": 0,
+      "CR": 0,
+      "LL": 0,
+      "CW": 0,
+      "TF": 0,
+      "reserved_bit7": 0,
+      "reserved_bit0": 0
+    },
+    "length": 14,
+    "payload_hex": "0673656E736F7200160401000200",
+    "trailer": {
+      "ts": null,
+      "crc": null
+    },
+    "meaning": "A PATH whose second record is the RFC-0018 §5.4 escape (`00 <kind=0x16> <len=4> <u32>`). The escape is ADMISSIBLE in a frame path — a forwarder that does not implement `kind` steps over it by its declared length — and REJECTED wherever the path is used as a CANONICAL KEY. A resolver asked to address a vertex with these bytes MUST answer ERROR{tr::path::invalid} (0x0021).",
+    "note": "Not a reject.bin case: reject.bin means DECODE must fail (HARNESS.md §negative cases), and a packed PATH body is opaque to the codec — there is nothing here for a codec to refuse. See description.md."
+  }
+}

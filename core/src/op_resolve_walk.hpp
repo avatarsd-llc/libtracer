@@ -38,6 +38,7 @@
 #include "libtracer/error.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/op_resolve.hpp"
+#include "libtracer/packed_path.hpp"
 #include "libtracer/pin_instrument.hpp"
 #include "libtracer/tlv_emit.hpp"
 
@@ -82,7 +83,6 @@ struct arena_node {
     [[nodiscard]] bool structured() const noexcept { return node().opt.pl; }
     [[nodiscard]] std::span<const std::byte> wire() const noexcept { return node().wire; }
     [[nodiscard]] std::span<const std::byte> body() const noexcept { return node().body; }
-    [[nodiscard]] bool canonical_path() const noexcept { return node().canonical_path; }
 
     /**
      * @brief The decoded trailer timestamp — ROOT node only on this tier (#1109).
@@ -552,42 +552,40 @@ template <class N>
 }
 
 /**
- * @brief The vertex-map key for an arena-decoded PATH: span-aliased when canonical (ADR-0041 §3 —
- *        the PATH body IS the key, zero materialization), re-emitted into `fallback` otherwise (a
- *        foreign encoder's LL-widened / trailer-carrying NAMEs).
+ * @brief The vertex-map key for a decoded PATH: the body, span-aliased, ALWAYS (ADR-0041 §3 —
+ *        the PATH body IS the key, zero materialization) — after the packed record framing is
+ *        checked in **canonical / key** context (RFC-0018 §5.4).
  *
- * Our own encoders always produce the canonical form.
+ * @par What RFC-0018 deleted here
+ * This function used to have two arms. A `PATH` body was the key only when every child header
+ * was exactly `02 00 <u16 len>`; otherwise the segments were RE-EMITTED into a caller-supplied
+ * `fallback` vector, because a legal peer could spell the same address with `opt.LL = 1` or a
+ * per-segment trailer and a raw byte key would then miss (ADR-0062 §"Considered options").
+ * The re-emit arm is what carried #436: `wire::emit_name` ran over every child body regardless
+ * of type, so an illegal `PATH{VALUE "sensor"}` was silently rewritten into the key of the
+ * legal `PATH{NAME "sensor"}` and resolved `/sensor`, returning the stored value where an
+ * error was owed — two byte-different PATHs addressing one vertex, against the injectivity
+ * `reference/02` depends on. A packed body has no per-segment option byte and no per-segment
+ * type byte, so there is exactly one spelling per address: **both** the fallback and the
+ * mistype it enabled are structurally gone, and the span-alias is guaranteed rather than
+ * tested. The `fallback` parameter went with them.
  *
- * @par Why the fallback checks the child's TYPE (#436)
- * "Non-canonical" is two different things wearing one flag. `is_canonical_name`
- * (`tlv_arena.cpp:20`) demands `type == NAME && opt == {}`, so a PATH is non-canonical
- * either because a child is a legal NAME carrying options — an LL-widened length or a
- * trailer, which is exactly what this fallback exists to normalize — or because a child is
- * **not a NAME at all**, which `reference/05` §PATH forbids: *"Each child MUST be a NAME
- * TLV; other types are invalid in PATH context"* (normative by incorporation, ADR-0007).
+ * @par What survives, and why it is here rather than at the frame gate
+ * The `len == 0` ESCAPE (RFC-0018 §5.4 Amendment 1) is admissible in a frame path and
+ * REJECTED in key context — a label is not canonical bytes, and admitting one would put a
+ * non-string record inside a vertex-map key, where `key_view_t`'s
+ * byte-prefix-implies-ancestor invariant is stated. So the check runs HERE, at the moment a
+ * path becomes a key, not at the door: a forwarder that only relays the same frame steps over
+ * the escape and never reaches this function.
  *
- * Re-emitting blindly conflated the two. `wire::emit_name` was called on every child body
- * regardless of type, so an illegal `PATH{VALUE "sensor"}` was silently REWRITTEN into the
- * legal `PATH{NAME "sensor"}`'s key and resolved `/sensor` — measured, before this fix, as
- * a `RESULT` carrying the stored value rather than an error. That breaks the injectivity
- * `reference/02` depends on: two byte-different PATHs addressed one vertex, so any peer,
- * cache or router keyed on PATH bytes had two spellings for one address.
- *
- * The fallback is still needed for the first case, so the fix is not to delete it — it is
- * to reject a non-NAME child before re-emitting it.
- *
- * @retval INVALID_PATH A child is not a NAME TLV.
+ * @retval INVALID_PATH The body does not tile into literal packed records — a ragged length,
+ *         or an escape record in key context.
  */
 template <class N>
-[[nodiscard]] result_t<std::span<const std::byte>> path_lookup_key(
-    const N& path, std::vector<std::byte>& fallback) {
-    if (path.canonical_path()) return path.body();
-    auto ch = path.children();
-    for (std::optional<N> seg = ch.next(); seg; seg = ch.next()) {
-        if (seg->type() != type_t::NAME) return std::unexpected(status_t::INVALID_PATH);
-        wire::emit_name(fallback, seg->body());
-    }
-    return std::span<const std::byte>(fallback);
+[[nodiscard]] result_t<std::span<const std::byte>> path_lookup_key(const N& path) {
+    const std::span<const std::byte> body = path.body();
+    if (!wire::packed_path_valid_key(body)) return std::unexpected(status_t::INVALID_PATH);
+    return body;
 }
 
 /**
@@ -974,13 +972,13 @@ template <class N>
     // dst resolution is the router's PATH-keyed dispatch — span-aliased for a
     // canonical PATH (ADR-0041 §3: the frame IS the key). Local-only: a dst
     // naming a transport child / unknown path is not local => ERROR(NOT_FOUND).
-    std::vector<std::byte> key_fallback;
-    // An illegal non-NAME child makes the dst unaddressable, not merely unknown: it is a
-    // malformed address, so it answers INVALID_PATH rather than NOT_FOUND (#436). The
-    // distinction outlives the write-creates arm this used to guard (#1139): the two
-    // refusals carry different dispositions, and a malformed address must not be reported
-    // as an address that merely does not exist yet and might on the next retry.
-    const result_t<std::span<const std::byte>> dst_key_r = path_lookup_key(req.dst, key_fallback);
+    // A body that does not tile into literal packed records makes the dst unaddressable, not
+    // merely unknown: it is a malformed address, so it answers INVALID_PATH rather than
+    // NOT_FOUND (#436, and RFC-0018's escape-in-key-context rule). The distinction outlives
+    // the write-creates arm this used to guard (#1139): the two refusals carry different
+    // dispositions, and a malformed address must not be reported as an address that merely
+    // does not exist yet and might on the next retry.
+    const result_t<std::span<const std::byte>> dst_key_r = path_lookup_key(req.dst);
     if (!dst_key_r) return reply_error(dst_key_r.error());
     const std::span<const std::byte> dst_key = *dst_key_r;
     // #766, guard 2 of 2 — everything the walk READ before it touches the graph: the op

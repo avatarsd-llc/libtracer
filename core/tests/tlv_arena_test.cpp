@@ -23,6 +23,7 @@
 #include "libtracer/tlv_arena.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -35,6 +36,7 @@
 #include <vector>
 
 #include "libtracer/frame.hpp"
+#include "libtracer/packed_path.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "test_support.hpp"
 
@@ -118,11 +120,19 @@ tlv_t make_value(std::span<const std::byte> payload) {
     return v;
 }
 
-tlv_t make_path(std::vector<tlv_t> names) {
+/**
+ * @brief A packed `PATH` over @p segs (RFC-0018): `opt.PL = 0`, body = `[u8 len][bytes]`
+ *        records. The body bytes are OWNED by @p storage, which must outlive the returned TLV.
+ */
+tlv_t make_path(std::span<const std::string_view> segs, std::vector<std::byte>& storage) {
+    storage.clear();
+    for (const std::string_view seg : segs) {
+        const bool ok = tr::wire::emit_path_segment(storage, seg);
+        (void)ok;
+    }
     tlv_t p;
     p.type = type_t::PATH;
-    p.opt.pl = true;
-    p.children = std::move(names);
+    p.payload = std::span<const std::byte>(storage);
     return p;
 }
 
@@ -212,7 +222,9 @@ int main() {
         fwd.opt.pl = true;
         const std::array<std::byte, 1> op{std::byte{0x00}};
         fwd.children.push_back(make_value(op));
-        fwd.children.push_back(make_path({make_name("a"), make_name("b")}));
+        std::vector<std::byte> ab;
+        const std::array<std::string_view, 2> ab_segs{"a", "b"};
+        fwd.children.push_back(make_path(ab_segs, ab));
         const std::array<std::byte, 2> pl{std::byte{0x01}, std::byte{0x02}};
         fwd.children.push_back(make_value(pl));
 
@@ -221,73 +233,88 @@ int main() {
         const auto arena = decode_into(bytes, mr);
         check(arena.has_value(), "FWD-like tree decodes");
         if (arena) {
-            // Pre-order: 0 FWD, 1 VALUE, 2 PATH, 3 NAME a, 4 NAME b, 5 VALUE.
-            check(arena->size() == 6, "pre-order node count");
-            check(arena->root().end == 6 && (*arena)[2].end == 5 && (*arena)[3].end == 4,
+            // Pre-order: 0 FWD, 1 VALUE, 2 PATH (opaque under RFC-0018 — its packed body
+            // is not a child run, so it contributes no per-segment nodes), 3 VALUE.
+            check(arena->size() == 4, "pre-order node count");
+            check(arena->root().end == 4 && (*arena)[2].end == 3,
                   "end indices encode the subtrees");
             std::vector<std::uint32_t> kids;
             for (std::uint32_t j = tlv_arena_t::first_child(0); j < arena->root().end;
                  j = arena->next_sibling(j))
                 kids.push_back(j);
-            check(kids == std::vector<std::uint32_t>({1, 2, 5}), "sibling iteration walks 1,2,5");
+            check(kids == std::vector<std::uint32_t>({1, 2, 3}), "sibling iteration walks 1,2,3");
             check(equivalent(bytes, "fwd tree"), "FWD tree equivalent to decode()");
         }
     }
 
-    // (2c) canonical_path: body is byte-identical to path_key ⇒ flag true.
+    // (2c) The packed PATH body IS the key, unconditionally (RFC-0018 §4 — the
+    // `canonical_path` flag and its re-emit fallback are gone with the encoding).
     {
-        const tlv_t path = make_path({make_name("net"), make_name("ws"), make_name("peer1")});
+        std::vector<std::byte> body;
+        const std::array<std::string_view, 3> segs{"net", "ws", "peer1"};
+        const tlv_t path = make_path(segs, body);
         const std::vector<std::byte> bytes = encode(path);
         auto& mr = fresh_heap_resource();
         const auto arena = decode_into(bytes, mr);
         const auto tree = decode(bytes);
-        check(arena && arena->root().canonical_path, "canonical PATH flagged");
+        check(arena && arena->size() == 1 && !arena->root().opt.pl,
+              "a packed PATH decodes as ONE opaque node (opt.PL = 0)");
         if (arena && tree) {
             const auto key = path_key(*tree);
-            check(key.has_value(), "a canonical PATH yields a key (all children are NAMEs)");
+            check(key.has_value(), "a packed PATH yields a key");
             check(key && std::ranges::equal(arena->root().body, *key),
-                  "canonical PATH body == path_key bytes");
+                  "packed PATH body == path_key bytes — the span-alias, guaranteed");
         }
     }
 
-    // (2d) Non-canonical PATHs fall back: LL-widened NAME, trailer-carrying
-    // NAME, structured child, and a non-PATH node never sets the flag.
+    // (2d) What the key-context walk refuses (RFC-0018 §5 / §5.4): a ragged record, the
+    // `len == 0` escape, and a STRUCTURED (`opt.PL = 1`) PATH — the pre-RFC spelling.
     {
-        tlv_t ll_name = make_name("x");
-        ll_name.opt.ll = true;
-        const std::vector<std::byte> b1 = encode(make_path({make_name("a"), ll_name}));
-
-        tlv_t crc_name = make_name("y");
-        crc_name.opt.cr = true;
-        const std::vector<std::byte> b2 = encode(make_path({crc_name}));
-
-        tlv_t sub_path = make_path({make_name("z")});
-        const std::vector<std::byte> b3 = encode(make_path({sub_path}));
-
-        tlv_t fwd_names;  // canonical-shaped children under a non-PATH parent
-        fwd_names.type = type_t::FWD;
-        fwd_names.opt.pl = true;
-        fwd_names.children.push_back(make_name("n"));
-        const std::vector<std::byte> b4 = encode(fwd_names);
-
-        bool all = true;
-        for (const auto* b : {&b1, &b2, &b3, &b4}) {
-            auto& mr = fresh_heap_resource();
-            const auto arena = decode_into(*b, mr);
-            all = all && arena && !arena->root().canonical_path && equivalent(*b, "non-canonical");
+        const auto bytes_of = [](std::initializer_list<int> v) {
+            std::vector<std::byte> out;
+            for (const int b : v) out.push_back(static_cast<std::byte>(b));
+            return out;
+        };
+        // A length that runs past the body's end.
+        const std::vector<std::byte> ragged = bytes_of({0x03, 'a', 'b'});
+        // The escape: `00 <kind=0x16> <len=4> <u32>` — admissible in a frame path, and a key
+        // is not a frame path.
+        const std::vector<std::byte> escape =
+            bytes_of({0x03, 'n', 'e', 't', 0x00, 0x16, 0x04, 1, 0, 2, 0});
+        bool refused = true;
+        for (const auto* b : {&ragged, &escape}) {
+            tlv_t p;
+            p.type = type_t::PATH;
+            p.payload = std::span<const std::byte>(*b);
+            const std::vector<std::byte> wire_bytes = encode(p);
+            const auto tree = decode(wire_bytes);
+            refused = refused && tree && !path_key(*tree).has_value();
         }
-        check(all, "LL/trailer/structured children and non-PATH ⇒ canonical_path false");
+        check(refused, "ragged framing and the len==0 escape are refused in key context");
 
-        // Nested canonical PATH inside a FWD is still flagged on the PATH node.
+        // The pre-RFC structured spelling is no longer a key either.
+        tlv_t structured;
+        structured.type = type_t::PATH;
+        structured.opt.pl = true;
+        structured.children.push_back(make_name("a"));
+        const std::vector<std::byte> b_struct = encode(structured);
+        const auto struct_tree = decode(b_struct);
+        check(struct_tree && !path_key(*struct_tree).has_value(),
+              "a structured (opt.PL=1) PATH is not a key");
+
+        // A packed PATH nested inside a FWD stays one opaque node.
+        std::vector<std::byte> a_body;
+        const std::array<std::string_view, 1> a_segs{"a"};
         tlv_t fwd;
         fwd.type = type_t::FWD;
         fwd.opt.pl = true;
-        fwd.children.push_back(make_path({make_name("a")}));
+        fwd.children.push_back(make_path(a_segs, a_body));
         const std::vector<std::byte> b5 = encode(fwd);
         auto& mr = fresh_heap_resource();
         const auto arena = decode_into(b5, mr);
-        check(arena && !arena->root().canonical_path && (*arena)[1].canonical_path,
-              "nested PATH inside FWD flagged on the PATH node only");
+        check(
+            arena && arena->size() == 2 && (*arena)[1].type == type_t::PATH && !(*arena)[1].opt.pl,
+            "a packed PATH inside a FWD is one opaque child node");
     }
 
     // (2e) Depth is receiver-resource-bounded (RFC-0006): a frame far deeper
@@ -375,8 +402,12 @@ int main() {
         fwd.opt.pl = true;
         const std::array<std::byte, 1> op{std::byte{0x00}};
         fwd.children.push_back(make_value(op));
-        fwd.children.push_back(make_path({make_name("net"), make_name("ws"), make_name("peer")}));
-        fwd.children.push_back(make_path({make_name("back")}));
+        std::vector<std::byte> dst_body;
+        std::vector<std::byte> src_body;
+        const std::array<std::string_view, 3> dst_segs{"net", "ws", "peer"};
+        const std::array<std::string_view, 1> src_segs{"back"};
+        fwd.children.push_back(make_path(dst_segs, dst_body));
+        fwd.children.push_back(make_path(src_segs, src_body));
         const std::array<std::byte, 8> pl{};
         fwd.children.push_back(make_value(pl));
         const std::vector<std::byte> bytes = encode(fwd);
@@ -384,7 +415,9 @@ int main() {
         alignas(std::max_align_t) std::array<std::byte, 4096> buf;
         tr::mem::bump_source_t mr(buf, tr::mem::null_source());
         const auto arena = decode_into(bytes, mr);
-        check(arena.has_value() && arena->size() == 9,
+        // 0 FWD, 1 VALUE op, 2 PATH dst (opaque), 3 PATH src (opaque), 4 VALUE payload —
+        // the two PATHs contribute no per-segment nodes under RFC-0018.
+        check(arena.has_value() && arena->size() == 5,
               "typical FWD decodes inside a 4KiB stack buffer (null upstream)");
     }
 

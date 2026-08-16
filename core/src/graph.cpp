@@ -22,6 +22,7 @@
 #include "libtracer/key_view.hpp"
 #include "libtracer/mem_borrowed.hpp"
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/packed_path.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv.hpp"
 #include "libtracer/tlv_arena.hpp"
@@ -36,6 +37,24 @@ using wire::opt_t;
 using wire::tlv_t;
 using wire::type_t;
 namespace {
+
+/** @brief A canonical `NAME` TLV header: type, `opt = 0`, `u16` length. */
+inline constexpr std::size_t kNameHeaderBytes = 4;
+
+/**
+ * @brief One vertex's own path SEGMENT text — its packed key record minus the length byte.
+ *
+ * The seam RFC-0018 opened, in one place. A vertex-map key record used to BE a `NAME` TLV, so
+ * every `:children` / composed-read member borrowed `name().bytes()` verbatim as its POINT
+ * body. A packed record is `[u8 len][text]` and those members are POINT composites, not
+ * `PATH` bodies — the RFC removes `NAME` from `PATH` bodies only — so the text is what the
+ * member carries and the `NAME` framing is emitted around it. Empty for the root, whose
+ * record is empty.
+ */
+[[nodiscard]] std::span<const std::byte> child_segment(const vertex_t& v) noexcept {
+    const std::span<const std::byte> rec = v.name().bytes();
+    return rec.empty() ? rec : rec.subspan(1);
+}
 
 /**
  * @brief Emit a VALUE TLV holding a `width`-byte little-endian integer — the one bespoke emitter
@@ -329,10 +348,12 @@ struct branch_node_t {
             // `-fno-exceptions` probe window (abort() on a lost race, #850) until the whole
             // key type migrates.
             std::vector<std::byte> child_key;
-            if (!detail::try_reserve(child_key, top.key.size() + 6 + a[cn].body.size()))
+            if (!detail::try_reserve(child_key, top.key.size() + 2 + a[cn].body.size()))
                 return std::unexpected(status_t::BACKPRESSURE);
             child_key.assign(top.key.begin(), top.key.end());  // within capacity
-            wire::emit_name(child_key, a[cn].body);            // within capacity
+            // One packed record (RFC-0018) — a length byte plus the name, within capacity.
+            if (!wire::emit_path_segment(child_key, a[cn].body))
+                return std::unexpected(status_t::INVALID_PATH);
             // `top` is invalidated by the push inside open().
             if (const result_t<void> o = open(ci, std::move(child_key)); !o)
                 return std::unexpected(o.error());
@@ -545,12 +566,12 @@ std::uint64_t graph_t::vertex_ceiling_refusals() const noexcept {
  * `build_key` stops at the node whose parent is null, and an anchor's parent (`anchor_root_`)
  * is that node, so this single record IS the key retirement's sweep cleanup sees. The caller
  * composes @p id to contain characters `path::valid_segment` rejects, which is what makes the
- * rendered bytes unreachable from any address; framing it as an ordinary NAME record is what
- * keeps `key_view_t`'s decomposition well-defined over it.
+ * rendered bytes unreachable from any address; framing it as an ordinary packed segment
+ * record is what keeps `key_view_t`'s decomposition well-defined over it.
  */
 static std::vector<std::byte> anchor_record(std::string_view id) {
     std::vector<std::byte> rec;
-    wire::emit_name(rec, id);
+    (void)wire::emit_path_segment(rec, id);
     return rec;
 }
 
@@ -593,13 +614,13 @@ std::optional<graph_t::session_anchor_route_t> graph_t::session_anchor_route(
     vertex_handle_t vh) const noexcept {
     const vertex_t* const v = vh.get();
     if (v == nullptr) return std::nullopt;
-    // The anchor id is one NAME record whose payload is `:<mount>/<peer>` (see
+    // The anchor id is one PACKED segment record whose payload is `:<mount>/<peer>` (see
     // `session_anchor_id`). Both `:` and `/` are characters `path::valid_segment` forbids,
     // so the leading-`:` test alone separates every anchor from every addressable vertex —
     // no parent walk, no lock (the key record is immutable for the vertex's life).
     const std::span<const std::byte> rec = v->name().bytes();
-    if (rec.size() <= 4) return std::nullopt;  // header + at least ":m/p"
-    const std::string_view id{reinterpret_cast<const char*>(rec.data()) + 4, rec.size() - 4};
+    if (rec.size() <= 1) return std::nullopt;  // length byte + at least ":m/p"
+    const std::string_view id{reinterpret_cast<const char*>(rec.data()) + 1, rec.size() - 1};
     if (id.size() < 4 || id.front() != ':') return std::nullopt;
     const std::size_t slash = id.rfind('/');
     // rfind, not find: a mount NAME may itself be qualified (`net/ws`), while a session's
@@ -1121,7 +1142,7 @@ vertex_t* graph_t::find_ptr(std::span<const std::byte> key) const {
 }
 
 std::vector<std::byte> graph_t::build_key(const vertex_t* v) {
-    // Render-on-demand full key (ADR-0057): ancestors' NAME records concatenated
+    // Render-on-demand full key (ADR-0057): ancestors' packed records concatenated
     // root-down. Parent links and name bytes are immutable — no lock. Two passes: size,
     // then a single exact allocation filled deepest-record-last.
     std::size_t total = 0;
@@ -2262,7 +2283,7 @@ result_t<void> graph_t::subscribe(const path_t& src, const path_t& target,
     // and enters the field-write door — subscribe-time is control-plane-cold, so the
     // encode/parse round-trip is irrelevant, and the edge reads back from :subscribers[]
     // byte-identically to a wire-made one. The target path's key IS the PATH payload
-    // (the concatenated NAME children, docs/reference/03), embedded verbatim. Runs under
+    // (the packed segment records, RFC-0018 / docs/reference/03), embedded verbatim. Runs under
     // the empty (local) caller context, so a resolver that assigns local callers a
     // subject sees these too (#81, ADR-0026).
     const std::span<const std::byte> key = target.key();
@@ -2280,7 +2301,7 @@ result_t<void> graph_t::subscribe(const path_t& src, const path_t& target,
     std::vector<std::byte> sub;
     sub.reserve(8 + key.size() + qos.size());
     wire::emit_header(sub, type_t::SUBSCRIBER, opt_t{.pl = true}, 4 + key.size() + qos.size());
-    wire::emit_header(sub, type_t::PATH, opt_t{.pl = true}, key.size());
+    wire::emit_header(sub, type_t::PATH, opt_t{}, key.size());
     sub.insert(sub.end(), key.begin(), key.end());
     sub.insert(sub.end(), qos.begin(), qos.end());
     const std::optional<view_t> value = view::over_bytes(sub);
@@ -2392,7 +2413,7 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view_t source_view, v
                 // later delivery clones by refcount (ADR-0041 §2), the shape the accumulated
                 // `src` arrives in. An empty residual never reaches here: the descent reports
                 // a mount named exactly as `unroutable`.
-                wire::emit_tlv(mount_route_tlv, type_t::PATH, opt_t{.pl = true}, split.residual);
+                wire::emit_tlv(mount_route_tlv, type_t::PATH, opt_t{}, split.residual);
                 std::optional<view_t> route_view = view::over_bytes(mount_route_tlv);
                 if (!route_view) return std::unexpected(status_t::BACKPRESSURE);
                 return_route = *std::move(route_view);
@@ -2720,10 +2741,12 @@ result_t<void> graph_t::create_child(vertex_t* parent, const view_t& spec_value)
         factory = it->second;
     }
 
-    // Compose the child key = parent's canonical PATH-payload + one NAME(child_name).
-    // The graph owns this addressing; the factory only sees the finished key.
+    // Compose the child key = parent's canonical PATH-payload + one packed record for
+    // `child_name` (RFC-0018). The graph owns this addressing; the factory only sees the
+    // finished key.
     std::vector<std::byte> child_key = build_key(parent);
-    wire::emit_name(child_key, child_name);
+    if (!wire::emit_path_segment(child_key, child_name))
+        return std::unexpected(status_t::INVALID_PATH);
 
     result_t<vertex_handle_t> made = factory(*this, std::move(child_key), config);
     if (!made) return std::unexpected(made.error());  // PATH_IN_USE on a duplicate name
@@ -2932,18 +2955,29 @@ result_t<view_t> graph_t::read_children(vertex_t* v) const {
     // Load once — a concurrent retire may swap the seam out between check and call.
     if (const value_handlers_t& h = v->handlers(); h.on_children) return h.on_children();
     // Generic member enumeration (reference 05 §SPEC read-members): the DIRECT
-    // children of v in the vertex map — keys of the form <v.key><one NAME record>.
+    // children of v in the vertex map — keys of the form <v.key><one packed record>.
     // Each member is a minimal POINT{NAME} descriptor; order is unspecified.
     std::vector<std::byte> members;
     {
         const std::shared_lock lock(map_mutex_);
-        // A direct child's own NAME record IS the POINT body verbatim (ADR-0057 — one
+        // A direct child contributes ONE `POINT{NAME <segment>}` member (ADR-0057 — one
         // child-list walk, no whole-map prefix scan). Placeholders (unregistered
         // intermediate levels) are not members, matching the flat map where they did
         // not exist.
+        //
+        // The child's key RECORD used to be the POINT body verbatim, because a vertex-map
+        // key record and a `NAME` TLV were the same four-byte-headed bytes. RFC-0018 packs
+        // the key record to `[u8 len][bytes]` and `:children[]` is a POINT composite, NOT a
+        // PATH — the RFC removes `NAME` from `PATH` bodies only and leaves the type and its
+        // decoder standing everywhere else — so the member is RE-FRAMED here rather than
+        // borrowed: same wire shape as before this RFC, one header write per child.
         v->for_each_child([&members](const vertex_t& c) {
-            if (c.registered())
-                wire::emit_tlv(members, type_t::POINT, opt_t{.pl = true}, c.name().bytes());
+            if (!c.registered()) return;
+            const std::span<const std::byte> seg = child_segment(c);
+            const std::size_t body = kNameHeaderBytes + seg.size();
+            wire::emit_header(members, type_t::POINT, opt_t{.pl = true, .ll = body > 0xFFFFu},
+                              body);
+            wire::emit_name(members, seg);
         });
     }
     std::vector<std::byte> out;
@@ -2970,6 +3004,41 @@ namespace {
  */
 [[nodiscard]] constexpr std::size_t folded_hdr_len(std::size_t body) noexcept {
     return body > 0xFFFFu ? 6u : 4u;
+}
+
+/**
+ * @brief A POINT header for a @p body_len body IMMEDIATELY FOLLOWED by the `NAME` header of
+ *        the node's own @p seg_len-byte segment text — one exactly-sized OWNED segment.
+ *
+ * Two headers in one segment, deliberately. Before RFC-0018 the folds emitted a POINT header
+ * and then BORROWED the node's key record, because that record already WAS a `NAME` TLV. A
+ * packed key record is `[u8 len][bytes]`, so the `NAME` framing has to be written — and
+ * writing it into the same segment as the POINT header keeps both folds at exactly the link
+ * count they had before, which is what their link-table reservations are sized against and
+ * what keeps a wide `:children` listing off the transports' iovec spill. The segment TEXT is
+ * still borrowed in place.
+ *
+ * For `:children` the body is `NAME header + text`; for the composed read it is that plus the
+ * node's stored TLV and its whole folded subtree — hence @p body_len as a parameter rather
+ * than derived. Byte-identical to `read_children`'s materialized emit, which is what
+ * `folded_children_test` differentials.
+ */
+[[nodiscard]] view::segment_ptr_t folded_member_header(mem::mem_backend_t& backend,
+                                                       std::size_t body_len, std::size_t seg_len) {
+    const bool ll = body_len > 0xFFFFu;  // mirror emit_tlv's auto-widen exactly
+    view::segment_ptr_t out =
+        view::segment_alloc(backend, folded_hdr_len(body_len) + kNameHeaderBytes);
+    if (!out) return out;  // the seam refused — a null segment_ptr_t IS the refusal
+    std::byte* p = out->bytes.data();
+    *p++ = static_cast<std::byte>(std::to_underlying(type_t::POINT));
+    *p++ = static_cast<std::byte>(opt_t{.pl = true, .ll = ll}.encode());
+    detail::store_le(std::span<std::byte>(p, ll ? 4u : 2u), static_cast<std::uint32_t>(body_len),
+                     ll ? 4u : 2u);
+    p += ll ? 4u : 2u;
+    *p++ = static_cast<std::byte>(std::to_underlying(type_t::NAME));
+    *p++ = std::byte{0};
+    detail::store_le(std::span<std::byte>(p, 2), static_cast<std::uint32_t>(seg_len), 2);
+    return out;
 }
 
 /**
@@ -3021,12 +3090,14 @@ result_t<rope_t> graph_t::read_children_folded(vertex_handle_t vh) const {
     }
     // The folded projection of read_children: instead of concatenating every member into
     // one buffer and copying the whole listing (twice — into `out`, then into a segment),
-    // gather each POINT{NAME} member as TWO scatter-gather links — the emitted POINT
-    // header, then the child's own NAME-record bytes borrowed IN PLACE (zero copy). The
-    // child vertex is pinned and insert-only and its `name_` is immutable once linked, so
-    // the borrowed bytes outlive this rope. flatten() is byte-identical to read_children:
-    // same header (opt.ll auto-widened at the same 0xFFFF boundary) followed by the same
-    // name bytes, in the same child order.
+    // gather each POINT{NAME} member as TWO scatter-gather links — the emitted
+    // POINT-plus-NAME header, then the child's own segment TEXT borrowed IN PLACE (zero
+    // copy). Under RFC-0018 the borrowed run is the key record minus its length byte, and
+    // the `NAME` framing rides the owned header segment, so the member is still two links.
+    // The child vertex is pinned and insert-only and its `name_` is immutable once linked,
+    // so the borrowed bytes outlive this rope. flatten() is byte-identical to
+    // read_children: same headers (opt.ll auto-widened at the same 0xFFFF boundary)
+    // followed by the same name bytes, in the same child order.
     //
     // Every header here — one per registered child, plus the outer one — is framed by
     // folded_point_header from the ADR-0060 value_backend_, NOT from view::over_bytes' global
@@ -3042,16 +3113,17 @@ result_t<rope_t> graph_t::read_children_folded(vertex_handle_t vh) const {
         const std::shared_lock lock(map_mutex_);
         v->for_each_child([&members, &members_len, &oom, &hdr_backend](const vertex_t& c) {
             if (oom || !c.registered()) return;
-            const std::span<const std::byte> name = c.name().bytes();
-            view::segment_ptr_t mseg = folded_point_header(hdr_backend, name.size());
-            view::segment_ptr_t nseg = view::borrow_const(name);
+            const std::span<const std::byte> seg = child_segment(c);
+            const std::size_t body = kNameHeaderBytes + seg.size();
+            view::segment_ptr_t mseg = folded_member_header(hdr_backend, body, seg.size());
+            view::segment_ptr_t nseg = view::borrow_const(seg);
             if (!mseg || !nseg) {
                 oom = true;
                 return;
             }
-            members.append(view::view_t::over(std::move(mseg)));  // owned POINT header
+            members.append(view::view_t::over(std::move(mseg)));  // owned POINT+NAME headers
             members.append(view::view_t::over(std::move(nseg)));  // borrowed name (zero copy)
-            members_len += folded_hdr_len(name.size()) + name.size();
+            members_len += folded_hdr_len(body) + body;
         });
     }
     if (oom) return std::unexpected(status_t::BACKPRESSURE);
@@ -3141,8 +3213,9 @@ result_t<rope_t> graph_t::read_subtree_folded(vertex_handle_t vh, std::string_vi
             n.v = w.v;
             n.lkv = w.v->read_stored();  // ONE atomic load per node
             n.parent = w.parent;
-            n.body_len = (w.parent == kNoParent ? 0 : w.v->name().bytes().size()) +
-                         (n.lkv ? n.lkv->total_length() : 0);
+            n.body_len =
+                (w.parent == kNoParent ? 0 : kNameHeaderBytes + child_segment(*w.v).size()) +
+                (n.lkv ? n.lkv->total_length() : 0);
             // #981 residual, STATED HERE: on the `-fno-exceptions` profile this growth is a
             // probe-then-commit — `probe_bytes` frees its block before `reserve` takes one,
             // and a task switch in that window makes the `reserve` abort() the node (#850).
@@ -3173,8 +3246,8 @@ result_t<rope_t> graph_t::read_subtree_folded(vertex_handle_t vh, std::string_vi
 
     // Pass 3 preamble — the exact final link count, so the reply rope reserves its heap
     // chain ONCE (nothrow) and every append/concat below is guaranteed non-reallocating:
-    // per node an owned POINT header (1) + the borrowed NAME below the root (0/1) + the
-    // stored TLV's links (0..). A composed-root reply is thousands of links on a
+    // per node an owned header segment (1) + the borrowed name text below the root (0/1) +
+    // the stored TLV's links (0..). A composed-root reply is thousands of links on a
     // fragmented heap — the un-reserved spill is exactly what aborted the node.
     std::size_t total_links = 0;
     for (const snap_node_t& n : nodes)
@@ -3187,11 +3260,11 @@ result_t<rope_t> graph_t::read_subtree_folded(vertex_handle_t vh, std::string_vi
     rope_t out;
     if (!out.try_reserve(total_links)) return std::unexpected(status_t::BACKPRESSURE);
 
-    // Pass 3 — emit, in array (= pre-order = wire) order. Per node: an OWNED POINT header
-    // link, the BORROWED NAME record link (below the root — the root's identity is the
-    // addressed vertex; its own stored TLV leads the root body), then the stored TLV's
-    // links refcount-CLONED (no byte copy). Zero flatten anywhere; a view allocation
-    // failure is the audited BACKPRESSURE pattern.
+    // Pass 3 — emit, in array (= pre-order = wire) order. Per node: an OWNED header link
+    // (the POINT header, plus the NAME header below the root — the root's identity is the
+    // addressed vertex; its own stored TLV leads the root body), the BORROWED name text
+    // below the root, then the stored TLV's links refcount-CLONED (no byte copy). Zero flatten
+    // anywhere; a view allocation failure is the audited BACKPRESSURE pattern.
     for (const snap_node_t& n : nodes) {
         // The POINT header as one exactly-sized OWNED segment, emitted by cursor straight
         // into the segment's bytes (the op_resolve_walk assemble pattern) — no throwing
@@ -3199,15 +3272,22 @@ result_t<rope_t> graph_t::read_subtree_folded(vertex_handle_t vh, std::string_vi
         // retired wire::emit_header(type, {.pl, .ll}, body_len). The bytes come from the
         // ADR-0060 value_backend_ rather than view::heap_alloc's global heap (#831) — the
         // seam argument, shared with read_children_folded, is on folded_point_header.
-        view::segment_ptr_t hseg = folded_point_header(hdr_backend, n.body_len);
-        if (!hseg) return std::unexpected(status_t::BACKPRESSURE);
-        out.append(view::view_t::over(std::move(hseg)));  // owned POINT header
-        if (n.parent != kNoParent) {
-            // The child's own canonical NAME record IS the leading NAME TLV verbatim
-            // (ADR-0057), borrowed in place over the pinned, immutable name bytes —
-            // the read_children_folded lifetime argument.
-            view::segment_ptr_t nseg = view::borrow_const(n.v->name().bytes());
-            if (!nseg) return std::unexpected(status_t::BACKPRESSURE);
+        if (n.parent == kNoParent) {
+            view::segment_ptr_t hseg = folded_point_header(hdr_backend, n.body_len);
+            if (!hseg) return std::unexpected(status_t::BACKPRESSURE);
+            out.append(view::view_t::over(std::move(hseg)));  // owned POINT header
+        } else {
+            // The POINT header AND the leading NAME TLV's header in ONE owned segment, then
+            // the node's segment TEXT borrowed in place over the pinned, immutable name bytes
+            // — the read_children_folded lifetime argument. Under RFC-0018 the key record is
+            // packed, so the NAME framing is emitted rather than borrowed; the per-node link
+            // count is UNCHANGED because that framing shares the segment the POINT header
+            // would otherwise have had to itself.
+            const std::span<const std::byte> seg = child_segment(*n.v);
+            view::segment_ptr_t hseg = folded_member_header(hdr_backend, n.body_len, seg.size());
+            view::segment_ptr_t nseg = view::borrow_const(seg);
+            if (!hseg || !nseg) return std::unexpected(status_t::BACKPRESSURE);
+            out.append(view::view_t::over(std::move(hseg)));  // owned POINT + NAME headers
             out.append(view::view_t::over(std::move(nseg)));  // borrowed name (zero copy)
         }
         if (n.lkv) out.concat(*n.lkv);  // stored TLV verbatim — links cloned, refcount bump

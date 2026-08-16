@@ -35,6 +35,7 @@
 #include "fwd_frame_builder.hpp"
 #include "graph_sinks.hpp"
 #include "libtracer/byteorder.hpp"
+#include "libtracer/packed_path.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "test_support.hpp"
@@ -66,11 +67,10 @@ std::vector<std::byte> b_name(std::string_view s) {
 std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> body;
     for (std::string_view s : segs) {
-        const std::vector<std::byte> n = b_name(s);
-        body.insert(body.end(), n.begin(), n.end());
+        (void)tr::wire::emit_path_segment(body, s);
     }
     std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
     return out;
 }
 std::vector<std::byte> b_value(std::span<const std::byte> p) {
@@ -412,7 +412,7 @@ void test_write_trailer_sliced() {
 }
 
 void test_non_canonical_dst() {
-    std::printf("non-canonical dst PATH (LL-widened NAME) -> path_key fallback resolves:\n");
+    std::printf("dst PATH spellings: ONE canonical body, and what key context refuses:\n");
     graph_t g;
     op_resolver_t resolver(g);
     const auto path = path_t::parse("/sensor/temp");
@@ -420,28 +420,46 @@ void test_non_canonical_dst() {
     const std::vector<std::byte> val = b_value({0x2A});
     (void)g.write(*g.find(path->key()), make_value(val));
 
-    // A dst PATH whose NAMEs use a widened (LL) length — legal wire, but NOT
-    // byte-identical to the canonical vertex key, so the span-aliased lookup
-    // (ADR-0041 §3) must fall back to the re-emit and still find the vertex.
-    tlv_t dst;
-    dst.type = type_t::PATH;
-    dst.opt.pl = true;
-    for (const std::string_view seg : {std::string_view("sensor"), std::string_view("temp")}) {
-        tlv_t n;
-        n.type = type_t::NAME;
-        n.opt.ll = true;  // widened length ⇒ non-canonical header
-        n.payload =
-            std::span<const std::byte>(reinterpret_cast<const std::byte*>(seg.data()), seg.size());
-        dst.children.push_back(n);
-    }
-    const auto fwd = b_fwd(fwd_op_t::READ, tr::wire::encode(dst), b_path({"reply-ep"}));
+    // RFC-0018 §4: there is now exactly ONE spelling per address. The pre-RFC case this
+    // test held — a `dst` whose NAME children carry `opt.LL = 1`, legal wire but not
+    // byte-identical to the vertex key, resolved through `path_lookup_key`'s re-emit
+    // fallback — is unrepresentable: a packed record has no option byte to widen, so the
+    // span-alias is guaranteed rather than tested. What CAN still vary is the PATH's OWN
+    // header, so that is what is exercised here: an LL-widened `PATH` header over the
+    // identical packed body must resolve, because the body is the key either way.
+    std::vector<std::byte> body;
+    (void)tr::wire::emit_path_segment(body, "sensor");
+    (void)tr::wire::emit_path_segment(body, "temp");
+    std::vector<std::byte> dst;
+    tr::wire::emit_header(dst, type_t::PATH, opt_t{.ll = true}, body.size());
+    dst.insert(dst.end(), body.begin(), body.end());
+    const auto fwd = b_fwd(fwd_op_t::READ, dst, b_path({"reply-ep"}));
     auto reply = resolve_bytes(resolver, fwd);
-    check(reply.has_value(), "resolve READ with LL-widened dst produced a reply");
+    check(reply.has_value(), "resolve READ with an LL-widened dst PATH header produced a reply");
     const auto dr = decode_reply(*reply);
     check(value_u8(dr.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::RESULT),
-          "non-canonical dst resolves via the re-emit fallback (kind == RESULT)");
+          "the packed body is the key whatever the PATH header's own width (kind == RESULT)");
     check(dr.tlv.children.size() == 5 && value_u8(dr.tlv.children[4]) == 0x2A,
           "reply payload is the stored value (0x2A)");
+
+    // The RFC-0018 §5.4 escape is admissible in a frame path and REFUSED in key context, so
+    // a TERMINUS dst carrying one answers `tr::path::invalid` — never a resolved vertex.
+    std::vector<std::byte> escaped;
+    (void)tr::wire::emit_path_segment(escaped, "sensor");
+    (void)tr::wire::emit_path_segment(escaped, "temp");
+    escaped.push_back(std::byte{0});                                              // len == 0
+    escaped.push_back(static_cast<std::byte>(tr::wire::kPackedEscapeKindLabel));  // kind
+    escaped.push_back(std::byte{4});                                              // payload len
+    for (int i = 0; i < 4; ++i) escaped.push_back(std::byte{0});
+    std::vector<std::byte> esc_dst;
+    tr::wire::emit_tlv(esc_dst, type_t::PATH, opt_t{}, escaped);
+    const auto esc_fwd = b_fwd(fwd_op_t::READ, esc_dst, b_path({"reply-ep"}));
+    auto esc_reply = resolve_bytes(resolver, esc_fwd);
+    check(esc_reply.has_value(), "a dst carrying the escape still gets an ANSWER");
+    const auto esc_dr = decode_reply(*esc_reply);
+    check(value_u8(esc_dr.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::ERROR) &&
+              status_error_code(esc_dr.tlv.children[4]) == 0x0021,
+          "the len==0 escape in KEY context answers tr::path::invalid (RFC-0018 §5.4)");
 }
 
 /**
@@ -835,12 +853,14 @@ std::string spell(tr::wire::key_view_t key) {
     std::string out;
     const std::span<const std::byte> b = key.bytes();
     std::size_t i = 0;
-    while (i + 4 <= b.size()) {
-        const std::size_t len = tr::detail::load_le<std::uint16_t>(b.subspan(i + 2, 2));
-        if (i + 4 + len > b.size()) break;
+    while (i < b.size()) {
+        // Packed records (RFC-0018): `[u8 len][bytes]`, and a `len == 0` escape is not a
+        // key record at all — spelling stops there, as `key_view_t` does.
+        const std::size_t len = static_cast<std::uint8_t>(b[i]);
+        if (len == 0 || i + 1 + len > b.size()) break;
         out.push_back('/');
-        out.append(reinterpret_cast<const char*>(b.data()) + i + 4, len);
-        i += 4 + len;
+        out.append(reinterpret_cast<const char*>(b.data()) + i + 1, len);
+        i += 1 + len;
     }
     return out;
 }

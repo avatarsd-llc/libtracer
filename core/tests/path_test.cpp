@@ -17,6 +17,7 @@
 #include <fstream>
 #include <iterator>
 #include <ranges>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -45,9 +46,21 @@ std::vector<std::byte> vector_bytes(std::string_view case_dir) {
     return out;
 }
 
-/** @brief A NAME child's payload as text (the segment bytes a PATH child carries). */
-std::string_view name_text(const tr::wire::tlv_t& name) {
-    return {reinterpret_cast<const char*>(name.payload.data()), name.payload.size()};
+/**
+ * @brief The packed segment records of a `PATH` body, as text (RFC-0018).
+ *
+ * A `PATH` body is `[u8 len][bytes]` records with `opt.PL = 0`, so there are no child TLVs
+ * to read a payload off — the segments are sliced out of the body here.
+ */
+std::vector<std::string_view> path_segments(std::span<const std::byte> body) {
+    std::vector<std::string_view> out;
+    for (std::size_t at = 0; at < body.size();) {
+        const auto len = static_cast<std::size_t>(static_cast<std::uint8_t>(body[at]));
+        if (len == 0 || at + 1 + len > body.size()) break;
+        out.emplace_back(reinterpret_cast<const char*>(body.data()) + at + 1, len);
+        at += 1 + len;
+    }
+    return out;
 }
 
 void ok_parse(std::string_view text) {
@@ -116,11 +129,12 @@ int main() {
         check(dec.has_value(), "the vector decodes (codec-tier: NAME bytes are free)");
         if (dec) {
             check(tr::wire::encode(*dec) == bytes, "round-trip is byte-exact");
-            check(dec->children.size() == 2, "two NAME children");
-            check(tr::graph::valid_segment(name_text(dec->children[0])),
-                  "child 0 `camera` passes the predicate (control)");
-            check(!tr::graph::valid_segment(name_text(dec->children[1])),
-                  "child 1 `frame[7]` FAILS the predicate (the #996 verdict)");
+            const std::vector<std::string_view> segs = path_segments(dec->payload);
+            check(segs.size() == 2, "two packed segment records");
+            check(segs.size() == 2 && tr::graph::valid_segment(segs[0]),
+                  "segment 0 `camera` passes the predicate (control)");
+            check(segs.size() == 2 && !tr::graph::valid_segment(segs[1]),
+                  "segment 1 `frame[7]` FAILS the predicate (the #996 verdict)");
         }
     }
 
@@ -138,17 +152,20 @@ int main() {
             const auto r = path_t::parse(repeat_segments(n));
             return !r.has_value() && r.error() == status_t::INVALID_PATH;
         };
-        // A depth the inherited cap of 32 rejected. 33 single-byte segments encode to
-        // 33 * (4 + 1) = 165 bytes, far under kMaxPathBytes — legal at cap 255.
+        // A depth the inherited cap of 32 rejected. 33 single-byte segments pack to
+        // 33 * (1 + 1) = 66 bytes, far under kMaxPathBytes — legal at cap 255.
         check(accepts(33), "33 segments parse (the inherited 32-segment cap rejected this)");
-        // 204 segments = 1020 bytes: the byte-derived ceiling under this body encoding, and
-        // the deepest path today's NAME-TLV grammar can express (RFC-0023 §4.2).
-        check(accepts(204), "204 segments parse (1020 B — the byte-derived ceiling)");
-        // 205 segments = 1025 bytes. Rejected by kMaxPathBytes, NOT by kMaxSegments: under
-        // this encoding the count clause can never fire, which RFC-0023 §4.2 states rather
-        // than smuggles. The count becomes binding only under RFC-0018's packed body.
-        check(refuses(205), "205 segments reject (1025 B — the BYTE cap, not the count)");
-        check(refuses(256), "256 segments reject (over both caps)");
+        // THE CROSSOVER RFC-0018 §5 predicted, now measured here. Under the old NAME-child
+        // encoding a one-byte segment cost 5 bytes, so 204 segments filled 1020 of the 1024
+        // and the BYTE cap bound first — the 255 count clause could never fire, which
+        // RFC-0023 §4.2 stated rather than smuggled. Packed, the same segment costs 2 bytes:
+        // 1024 admits 512 records, so the COUNT is what binds and 255 is a real ceiling.
+        check(accepts(204), "204 segments still parse (408 B packed — nowhere near the cap)");
+        check(accepts(255), "255 segments parse (510 B — the RFC-0023 count cap, reachable)");
+        check(refuses(256), "256 segments reject — by the COUNT now, at half the byte budget");
+        // And the byte cap still exists: 512 one-byte segments would be 1024 bytes, but the
+        // count refuses long before that, so the two clauses no longer trade places.
+        check(refuses(512), "512 segments reject (the count fires first, then the bytes)");
     }
 
     std::printf("The parse-once constructor yields the same key as parse():\n");

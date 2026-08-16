@@ -26,9 +26,10 @@ pub const MAX_SEGMENT_BYTES: usize = 64;
  *
  * Repriced 32 → 255 by RFC-0023: chosen so every per-segment quantity stays `u8`-representable,
  * not inherited from a parser guard. Under the current NAME-TLV body encoding each segment costs
- * `4 + len`, so [`MAX_PATH_BYTES`] admits at most 204 segments and the **byte** cap binds first —
- * this constant is the encoding-independent ceiling, and becomes binding only under RFC-0018's
- * packed body.
+ * Under RFC-0018's packed body a segment costs `1 + len`, so a one-byte segment is 2 bytes and
+ * [`MAX_PATH_BYTES`] admits 512 records — this COUNT is what binds now. (Before the packing a
+ * segment cost `4 + len`, so 204 segments filled the byte cap and the count clause could never
+ * fire.) The `path/path-deep-255-packed` conformance vector pins the crossover.
  */
 pub const MAX_SEGMENTS: usize = 255;
 /**
@@ -304,25 +305,68 @@ pub fn path(segments: &[&str]) -> Result<Tlv, BuildError> {
     if segments.len() > MAX_SEGMENTS {
         return Err(BuildError::TooManySegments);
     }
-    let mut children = Vec::with_capacity(segments.len());
-    let mut payload_bytes = 0usize;
+    let mut payload = Vec::new();
     for seg in segments {
-        let child = name(seg)?;
-        // Each NAME costs 4 (header) + segment bytes; mirror core's kMaxPathBytes
-        // check against the accumulated payload size.
-        payload_bytes += 4 + child.payload.len();
-        if payload_bytes > MAX_PATH_BYTES {
+        validate_segment(seg)?;
+        // RFC-0018: one packed record per segment — `[u8 len][utf8]`, no per-segment TLV
+        // header and therefore no per-segment option byte, which is what gives an address
+        // exactly one spelling. `validate_segment` already bounded the segment at
+        // MAX_SEGMENT_BYTES (64), well inside the record's `u8` length field.
+        payload.push(seg.len() as u8);
+        payload.extend_from_slice(seg.as_bytes());
+        if payload.len() > MAX_PATH_BYTES {
             return Err(BuildError::PathTooLong);
         }
-        children.push(child);
     }
     Ok(Tlv {
         type_code: type_code::PATH,
-        opt: Opt::structured(),
-        payload: Vec::new(),
-        children,
+        // `opt.PL = 0`: a packed body is NOT a child run, and a set PL would make a generic
+        // walker read the first body bytes as a TLV header (RFC-0018 §5).
+        opt: Opt::default(),
+        payload,
+        children: Vec::new(),
         trailer: None,
     })
+}
+
+/**
+ * @brief The `len == 0` ESCAPE record's length byte — RFC-0018 §8 / §5.4 Amendment 1.
+ *
+ * An escape is `00 <u8 kind> <u8 len> <len bytes>`, total `3 + len`. It is **admissible in a
+ * frame path** — a forwarder steps over one whose `kind` it does not implement rather than
+ * dropping a frame it is only relaying — and **rejected in canonical / key context**, because
+ * a label is not canonical bytes. This binding never mints one; `kind = 0x16` is reserved for
+ * RFC-0027's label element.
+ */
+pub const PACKED_ESCAPE_LEN: u8 = 0;
+
+/** @brief Bytes of an escape record beyond its declared payload: `00`, kind, len. */
+pub const PACKED_ESCAPE_OVERHEAD: usize = 3;
+
+/**
+ * @brief Walk @p body as packed segment records in **canonical / key** context.
+ *
+ * Yields each literal segment's bytes in order. The escape is REFUSED here rather than
+ * skipped: this is the context a vertex-map key is built in, and a key that carried a label
+ * would break the byte-prefix-implies-ancestor invariant the whole addressing model rests on
+ * (RFC-0018 §5.1 / §5.4).
+ *
+ * # Errors
+ * [`BuildError::SegmentLength`] when the records do not tile @p body exactly, or when one is
+ * the `len == 0` escape.
+ */
+pub fn packed_segments(body: &[u8]) -> Result<Vec<&[u8]>, BuildError> {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while at < body.len() {
+        let len = body[at] as usize;
+        if len == PACKED_ESCAPE_LEN as usize || at + 1 + len > body.len() {
+            return Err(BuildError::SegmentLength);
+        }
+        out.push(&body[at + 1..at + 1 + len]);
+        at += 1 + len;
+    }
+    Ok(out)
 }
 
 /**

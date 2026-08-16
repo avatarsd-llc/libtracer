@@ -7,6 +7,27 @@ versioning/publish strategy.
 
 ## [Unreleased]
 
+### Changed
+
+- **A `PATH` (`0x06`) body is packed `[u8 len][utf8]` segment records
+  ([RFC-0018](../../docs/spec/rfcs/0018-packed-path-segments.md),
+  [#680](https://github.com/avatarsd-llc/libtracer/issues/680)) — BREAKING.**
+  `encodePath` / `pathTlv` emit `opt.PL = 0` with the records in `payload` and no children, so
+  every `FWD` `dst`/`src` and every `SUBSCRIBER` target this client builds is 3 bytes per
+  segment shorter and does not round-trip against the previous version's vectors.
+- **New `pathSegments(path)`** (exported from `@avatarsd-llc/libtracer-client`) — read a packed
+  `PATH` back into its segments. It is **canonical/key context**, so it throws on the RFC-0018
+  §5.4 `len == 0` escape, on ragged framing, and on a structured (`opt.PL = 1`) `PATH`: the
+  escape is admissible in a frame a node is only forwarding and never in an address a caller
+  is about to look something up by. `PACKED_ESCAPE_LEN` is exported alongside it.
+  Callers that read `path.children` to get segments must switch to this function.
+- **The segment count (255) is now the binding cap.** Packed, a one-byte segment costs 2 bytes,
+  so the 1024-byte body budget admits 512 records; under the retired encoding the byte cap
+  fired at 204 segments first.
+- `nameTlv` still validates a segment and `NAME` is otherwise untouched — it remains the wire's
+  string carrier for SETTINGS keys, `:schema` labels and `:children[]` members. RFC-0018
+  removes `NAME` from `PATH` bodies only.
+
 ### Added
 
 - **`CONN_ENDPOINT_NAME` (`"conn"`), and `walkTopology` skips it** ([#1302](https://github.com/avatarsd-llc/libtracer/issues/1302); RFC-0014 §3, core S2b). Every module's `:children[]` now lists its **creator endpoint** alongside its member connections, because the endpoint is a real vertex under the module. It is not a link: it is the write-only control a creator sends `SPEC`/`NAME` to, with no peer behind it — so the topology walk descended into it, minted a phantom node, and then reported a bogus gap for the subtree that was never there. The reserved name is now skipped, and exported so a caller filtering its own listing spells it the same way. Skipping is right regardless of RFC-0014 **S4** (which will hide the endpoint from that listing at the source): a node older than S4 keeps listing it, and this client talks to those too.

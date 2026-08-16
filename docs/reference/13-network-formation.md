@@ -225,7 +225,7 @@ remain in the devices — RAM, or NVS where the device persists them.
 target routes through a mount.** A `SUBSCRIBER` whose `PATH` names a path *through* a
 transport mount, spelled in the **producer's** frame
 (`/net/<module>/<link>/<consumer-path>`), binds the edge to that mount's link and the
-residual below it (`graph_t::subscribe_wire`, `core/src/graph.cpp:2399`), so
+residual below it (`graph_t::subscribe_wire`, `core/src/graph.cpp:2420`), so
 `fwd_router_t::link_down` → `graph_t::evict_link_edges` on the orchestrator's session no
 longer matches it and the producer keeps delivering. That is RFC-0021 §4.B.1/§4.C, and
 it is what makes the departure above real for a third-party wire.
@@ -327,7 +327,7 @@ framing modes. The bounds to design within:
   every hop and is consumed monotonically, so a delivery travels exactly as far as its explicit
   source route — segment count ≤ 255 ([03 — Addressing](03-addressing.md);
   [RFC-0023](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0023-path-segment-cap-repriced-32-to-255.md); `kMaxSegments`,
-  `core/include/libtracer/path.hpp:35`). For realistically named mounts the **1024-byte PATH
+  `core/include/libtracer/path.hpp:36`). For realistically named mounts the **1024-byte PATH
   budget binds first**, not the segment count: a 3-segment mount run (ADR-0061) costs its NAME
   headers plus its bytes — 20 B/hop for `/net/can/c0`, 32 B/hop for
   `/net/ws-client/board-01` — so the diameter is ≈ **30–50 hops** at 3-segment mount runs, and

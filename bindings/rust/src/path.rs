@@ -7,7 +7,12 @@
  * Mirrors the address-portion parsing of `core/src/path.cpp` (`path_t::parse`):
  * a path is rooted at `/`, split on `/`, each segment validated (1..64 bytes,
  * no reserved character `/ : . [ ] * ?`), at most [`MAX_SEGMENTS`] segments and
- * [`MAX_PATH_BYTES`] total encoded NAME payload. Vector-pinned: `path-sensor-temp`.
+ * [`MAX_PATH_BYTES`] total encoded body bytes. Vector-pinned: `path-sensor-temp`.
+ *
+ * Since RFC-0018 a `PATH` body is `opt.PL = 0` and holds packed `[u8 len][utf8]` segment
+ * RECORDS rather than `NAME` child TLVs, so everything here reads and writes the body
+ * directly. `NAME` itself is untouched — it still spells SETTINGS keys and `:schema`
+ * labels; the RFC removes it from `PATH` bodies only.
  *
  * The two accumulative bounds (segment count, total encoded body) sit at the
  * construction/admission tier — [`split_path`] (count) and `tlv_builders::path`
@@ -21,7 +26,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::tlv_builders::{
-    path as build_path, validate_segment, BuildError, MAX_PATH_BYTES, MAX_SEGMENTS,
+    packed_segments, path as build_path, validate_segment, BuildError, MAX_PATH_BYTES, MAX_SEGMENTS,
 };
 use crate::{type_code, Tlv};
 
@@ -65,7 +70,7 @@ pub fn split_path(text: &str) -> Result<Vec<&str>, BuildError> {
 }
 
 /**
- * @brief Convert a rooted path string into a PATH TLV (`type=0x06`, `PL=1`).
+ * @brief Convert a rooted path string into a PATH TLV (`type=0x06`, `PL=0`, packed body).
  * Vector-pinned: `path-sensor-temp` (`"/sensor/temp"`).
  *
  * # Errors
@@ -79,23 +84,26 @@ pub fn path_to_tlv(text: &str) -> Result<Tlv, BuildError> {
 
 /**
  * @brief Convert a PATH TLV back into its rooted string form (`"/sensor/temp"`). A PATH
- * with no NAME children renders as the root `"/"`.
+ * with an empty body renders as the root `"/"`.
  *
  * This is the **decode tier**: it renders, it does not admit. The segment-count and
  * total-length bounds are enforced by [`admit_path_tlv`] (and, on the encode side, by
  * [`split_path`] / [`crate::tlv_builders::path`]) — see that function for why.
  *
+ * Rendering IS canonical / key context — the caller wants a spelling it can look an address
+ * up by — so the RFC-0018 §5.4 `len == 0` escape is refused here rather than skipped.
+ *
  * # Errors
- * [`BuildError::TypeMismatch`] if the TLV is not a PATH or a child is not a
- * NAME, [`BuildError::InvalidUtf8`] on a non-UTF-8 segment, or
- * [`BuildError::SegmentLength`] / [`BuildError::ReservedChar`] on a segment that
- * could not be rendered back into a re-splittable rooted string.
+ * [`BuildError::TypeMismatch`] if the TLV is not a PATH or carries a structured body,
+ * [`BuildError::InvalidUtf8`] on a non-UTF-8 segment, or
+ * [`BuildError::SegmentLength`] / [`BuildError::ReservedChar`] on ragged framing, an escape
+ * record, or a segment that could not be rendered back into a re-splittable rooted string.
  */
 pub fn tlv_to_path(tlv: &Tlv) -> Result<String, BuildError> {
-    if tlv.type_code != type_code::PATH {
+    if tlv.type_code != type_code::PATH || tlv.opt.pl || !tlv.children.is_empty() {
         return Err(BuildError::TypeMismatch);
     }
-    if tlv.children.is_empty() {
+    if tlv.payload.is_empty() {
         return Ok(String::from("/"));
     }
     // The two ACCUMULATIVE bounds — segment count and total encoded body bytes — are NOT
@@ -111,11 +119,8 @@ pub fn tlv_to_path(tlv: &Tlv) -> Result<String, BuildError> {
     // and they are what makes the rendered string re-splittable — a segment holding `/`, or an
     // empty one, would render an address that does not round-trip through `split_path`.
     let mut out = String::new();
-    for child in &tlv.children {
-        if child.type_code != type_code::NAME {
-            return Err(BuildError::TypeMismatch);
-        }
-        let seg = child.payload_str()?;
+    for record in packed_segments(&tlv.payload)? {
+        let seg = core::str::from_utf8(record).map_err(|_| BuildError::InvalidUtf8)?;
         validate_segment(seg)?;
         out.push('/');
         out.push_str(seg);
@@ -135,34 +140,34 @@ pub fn tlv_to_path(tlv: &Tlv) -> Result<String, BuildError> {
  * depth, which is precisely why the bound does not live in [`tlv_to_path`].
  *
  * The predicate is the encode-time MUST of [`crate::tlv_builders::path`], evaluated over an
- * already-decoded tree: `(children ≤ `[`MAX_SEGMENTS`]`) ∧ (each child a valid NAME) ∧
- * (encoded body ≤ `[`MAX_PATH_BYTES`]`)`. A PATH with no children is the graph root and is
- * admitted.
+ * already-decoded tree: `(records ≤ `[`MAX_SEGMENTS`]`) ∧ (each record a valid literal
+ * segment) ∧ (body ≤ `[`MAX_PATH_BYTES`]`)`. A PATH with an empty body is the graph root and
+ * is admitted. The RFC-0018 §5.4 escape is refused — admission is exactly the canonical/key
+ * door the escape is not admissible at.
  *
  * # Errors
- * [`BuildError::TypeMismatch`] if the TLV is not a PATH or a child is not a NAME,
+ * [`BuildError::TypeMismatch`] if the TLV is not a PATH or carries a structured body,
  * [`BuildError::TooManySegments`] beyond [`MAX_SEGMENTS`], [`BuildError::PathTooLong`]
  * beyond [`MAX_PATH_BYTES`], [`BuildError::InvalidUtf8`] on a non-UTF-8 segment, or
- * [`BuildError::SegmentLength`] / [`BuildError::ReservedChar`] on an invalid segment.
+ * [`BuildError::SegmentLength`] / [`BuildError::ReservedChar`] on ragged framing, an escape
+ * record, or an invalid segment.
  */
 pub fn admit_path_tlv(tlv: &Tlv) -> Result<(), BuildError> {
-    if tlv.type_code != type_code::PATH {
+    if tlv.type_code != type_code::PATH || tlv.opt.pl || !tlv.children.is_empty() {
         return Err(BuildError::TypeMismatch);
     }
-    if tlv.children.len() > MAX_SEGMENTS {
+    // The body IS the encoded path (RFC-0018), so the byte cap is one length check rather
+    // than an accumulation over children.
+    if tlv.payload.len() > MAX_PATH_BYTES {
+        return Err(BuildError::PathTooLong);
+    }
+    let records = packed_segments(&tlv.payload)?;
+    if records.len() > MAX_SEGMENTS {
         return Err(BuildError::TooManySegments);
     }
-    let mut payload_bytes = 0usize;
-    for child in &tlv.children {
-        if child.type_code != type_code::NAME {
-            return Err(BuildError::TypeMismatch);
-        }
-        validate_segment(child.payload_str()?)?;
-        // Each NAME costs 4 (header) + segment bytes — the PATH's own `length` field.
-        payload_bytes += 4 + child.payload.len();
-        if payload_bytes > MAX_PATH_BYTES {
-            return Err(BuildError::PathTooLong);
-        }
+    for record in records {
+        let seg = core::str::from_utf8(record).map_err(|_| BuildError::InvalidUtf8)?;
+        validate_segment(seg)?;
     }
     Ok(())
 }

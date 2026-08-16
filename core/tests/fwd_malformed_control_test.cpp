@@ -90,9 +90,9 @@ class rec_link_t : public transport_t {
 /** @brief A `PATH` TLV over the given `/`-segments. */
 std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> body;
-    for (const std::string_view s : segs) tr::wire::emit_name(body, s);
+    for (const std::string_view s : segs) (void)tr::wire::emit_path_segment(body, s);
     std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
     return out;
 }
 
@@ -256,7 +256,7 @@ int main() {
         {
             std::vector<std::byte> bad_path;
             const std::array<std::byte, 3> junk{std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}};
-            tr::wire::emit_tlv(bad_path, type_t::PATH, opt_t{.pl = true}, junk);
+            tr::wire::emit_tlv(bad_path, type_t::PATH, opt_t{}, junk);
             reject_and_still_work("ADVERTISE whose PATH child has an undecodable body",
                                   b_control(type_t::ADVERTISE, cat({b_label(0x0111u), bad_path})),
                                   arm);

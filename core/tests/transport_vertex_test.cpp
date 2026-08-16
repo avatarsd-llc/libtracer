@@ -277,17 +277,17 @@ void test_fwd_still_routes() {
     std::vector<std::byte> dst;  // PATH{ NAME net, NAME ws-client, NAME up, NAME temp }
     {
         std::vector<std::byte> segs;
-        tr::wire::emit_name(segs, "net");
-        tr::wire::emit_name(segs, "ws-client");
-        tr::wire::emit_name(segs, "up");
-        tr::wire::emit_name(segs, "temp");
-        tr::wire::emit_tlv(dst, type_t::PATH, opt_t{.pl = true}, segs);
+        (void)tr::wire::emit_path_segment(segs, "net");
+        (void)tr::wire::emit_path_segment(segs, "ws-client");
+        (void)tr::wire::emit_path_segment(segs, "up");
+        (void)tr::wire::emit_path_segment(segs, "temp");
+        tr::wire::emit_tlv(dst, type_t::PATH, opt_t{}, segs);
     }
     std::vector<std::byte> src;  // PATH{ NAME reply }
     {
         std::vector<std::byte> segs;
-        tr::wire::emit_name(segs, "reply");
-        tr::wire::emit_tlv(src, type_t::PATH, opt_t{.pl = true}, segs);
+        (void)tr::wire::emit_path_segment(segs, "reply");
+        tr::wire::emit_tlv(src, type_t::PATH, opt_t{}, segs);
     }
     std::vector<std::byte> payload;
     const std::byte pv{0x2A};
@@ -1822,13 +1822,13 @@ void test_structural_vertex_partition() {
         // Spell the key back as a `/`-path for the assertions below.
         std::string spelled;
         std::span<const std::byte> rest = key.bytes();
-        while (rest.size() >= 4) {
-            const auto len =
-                static_cast<std::size_t>(tr::detail::load_le<std::uint16_t>(rest.subspan(2, 2)));
-            if (rest.size() < 4 + len) break;
+        while (!rest.empty()) {
+            // Packed records (RFC-0018): `[u8 len][bytes]`.
+            const auto len = static_cast<std::size_t>(static_cast<std::uint8_t>(rest[0]));
+            if (len == 0 || rest.size() < 1 + len) break;
             spelled.push_back('/');
-            spelled += tr::detail::as_string_view(rest.subspan(4, len));
-            rest = rest.subspan(4 + len);
+            spelled += tr::detail::as_string_view(rest.subspan(1, len));
+            rest = rest.subspan(1 + len);
         }
         (net.is_structural(key) ? structural : ordinary).insert(spelled);
     });

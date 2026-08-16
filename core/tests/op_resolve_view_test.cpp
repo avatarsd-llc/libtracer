@@ -65,11 +65,10 @@ std::vector<std::byte> b_name(std::string_view s) {
 std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> body;
     for (std::string_view s : segs) {
-        const std::vector<std::byte> n = b_name(s);
-        body.insert(body.end(), n.begin(), n.end());
+        (void)tr::wire::emit_path_segment(body, s);
     }
     std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
     return out;
 }
 /**
@@ -87,7 +86,7 @@ std::vector<std::byte> b_path_value_children(std::initializer_list<std::string_v
         tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(p, s.size()));
     }
     std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
     return out;
 }
 std::vector<std::byte> b_value(std::initializer_list<std::uint8_t> bytes) {

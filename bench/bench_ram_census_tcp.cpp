@@ -289,9 +289,9 @@ std::vector<std::byte> fwd_write(const std::vector<std::string>& dst,
     const std::byte op{static_cast<std::uint8_t>(tr::graph::fwd_op_t::WRITE)};
     tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
     std::vector<std::byte> dst_segs;
-    for (const std::string& s : dst) tr::wire::emit_name(dst_segs, s);
-    tr::wire::emit_tlv(body, type_t::PATH, opt_t{.pl = true}, dst_segs);
-    tr::wire::emit_tlv(body, type_t::PATH, opt_t{.pl = true}, std::span<const std::byte>{});
+    for (const std::string& s : dst) (void)tr::wire::emit_path_segment(dst_segs, s);
+    tr::wire::emit_tlv(body, type_t::PATH, opt_t{}, dst_segs);
+    tr::wire::emit_tlv(body, type_t::PATH, opt_t{}, std::span<const std::byte>{});
     body.insert(body.end(), payload_value_tlv.begin(), payload_value_tlv.end());
     std::vector<std::byte> frame;
     tr::wire::emit_tlv(frame, type_t::FWD, opt_t{.pl = true}, body);
@@ -305,11 +305,11 @@ std::vector<std::byte> fwd_read(const std::vector<std::string>& dst,
     const std::byte op{static_cast<std::uint8_t>(tr::graph::fwd_op_t::READ)};
     tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
     std::vector<std::byte> dst_segs;
-    for (const std::string& s : dst) tr::wire::emit_name(dst_segs, s);
-    tr::wire::emit_tlv(body, type_t::PATH, opt_t{.pl = true}, dst_segs);
+    for (const std::string& s : dst) (void)tr::wire::emit_path_segment(dst_segs, s);
+    tr::wire::emit_tlv(body, type_t::PATH, opt_t{}, dst_segs);
     std::vector<std::byte> src_segs;
-    for (const std::string& s : src) tr::wire::emit_name(src_segs, s);
-    tr::wire::emit_tlv(body, type_t::PATH, opt_t{.pl = true}, src_segs);
+    for (const std::string& s : src) (void)tr::wire::emit_path_segment(src_segs, s);
+    tr::wire::emit_tlv(body, type_t::PATH, opt_t{}, src_segs);
     std::vector<std::byte> frame;
     tr::wire::emit_tlv(frame, type_t::FWD, opt_t{.pl = true}, body);
     return frame;

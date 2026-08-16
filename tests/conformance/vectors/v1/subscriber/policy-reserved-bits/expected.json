@@ -1,8 +1,8 @@
 {
   "name": "policy-reserved-bits",
   "category": "subscriber",
-  "hex": "04402B0006400A0002000600636C69656E740B40190002000F0064656C69766572795F706F6C69637901000200C1FF",
-  "total_bytes": 47,
+  "hex": "044028000600070006636C69656E740B40190002000F0064656C69766572795F706F6C69637901000200C1FF",
+  "total_bytes": 44,
   "decoded": {
     "type": "0x04 SUBSCRIBER",
     "structured": true,

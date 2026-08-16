@@ -32,6 +32,12 @@
 
 #include "libtracer/frame.hpp"
 #include "libtracer/mem_pool.hpp"
+// The packed PATH grammar (RFC-0018). Header-only and included DIRECTLY: the three
+// headers that pull it in transitively — `key_view.hpp`, `child_registry.hpp`,
+// `fwd_frame_view.hpp` — are graph and net-plane surfaces this P0 fixture deliberately
+// does not link, so nothing else in the required-module set declares
+// `wire::emit_path_segment`. It adds no translation unit to `REQUIRED_MODULES`.
+#include "libtracer/packed_path.hpp"
 #include "libtracer/path.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/tlv_arena.hpp"
@@ -67,15 +73,12 @@ int main() {
     // path_key returns an optional since #681 (a PATH child that is not a NAME is
     // rejected rather than keyed); the branch is what an MCU caller actually links,
     // so the fixture takes it rather than asserting the value away.
+    std::vector<std::byte> packed_path;
+    for (const std::string_view seg : {std::string_view{"sensor"}, std::string_view{"temp"}})
+        (void)wire::emit_path_segment(packed_path, seg);
     wire::tlv_t root;
-    root.type = wire::type_t::PATH;
-    root.opt.pl = true;
-    for (const std::string_view seg : {std::string_view{"sensor"}, std::string_view{"temp"}}) {
-        wire::tlv_t name;
-        name.type = wire::type_t::NAME;
-        name.payload = to_bytes(seg);
-        root.children.push_back(std::move(name));
-    }
+    root.type = wire::type_t::PATH;  // packed body, PL = 0 (RFC-0018)
+    root.payload = std::span<const std::byte>(packed_path);
     const std::vector<std::byte> bytes = wire::encode(root);
     acc = fold(acc, bytes);
     if (const auto key = wire::path_key(root); key) {

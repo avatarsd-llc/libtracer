@@ -142,8 +142,10 @@ void test_rope_equivalence(const fs::path& vroot) {
     const auto t_rope = tr::wire::decode(materialized);
     check(t_flat.has_value() && t_rope.has_value() && tr::wire::equal(*t_flat, *t_rope),
           "decode(flatten(rope)) == decode(flat)");
-    check(t_rope.has_value() && t_rope->children.size() == 2,
-          "the rope-decoded PATH has its 2 NAME children");
+    // RFC-0018: a PATH body is packed records with `opt.PL = 0`, so it decodes as ONE
+    // opaque node — the rope tier must see the same 12-byte body the flat tier does.
+    check(t_rope.has_value() && t_rope->children.empty() && t_rope->payload.size() == 12,
+          "the rope-decoded PATH carries its 12-byte packed body");
 }
 
 void test_cast_claim_outlives_source(const fs::path& vroot) {

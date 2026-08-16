@@ -14,6 +14,57 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Changed
+
+- **A `PATH` (`0x06`) body is now packed `[u8 len][utf8]` segment records, not `NAME` children
+  ([RFC-0018](../docs/spec/rfcs/0018-packed-path-segments.md),
+  [#680](https://github.com/avatarsd-llc/libtracer/issues/680)) — BREAKING on the wire and on
+  the C++ API.** `opt.PL` is `0`; the body is a self-delimiting run of records and the walk is
+  `p += 1 + body[p]`. `/sensor/temp` goes 18 bytes to 12, a four-hop `dst` 146 B to 104 B, and
+  the resolve leg 34 ns to ~20 ns (`bench_forward_demux` axis 3 grew a `fwd-demux-resolve-literal`
+  arm so the two encodings are timed in ONE binary — RFC-0018 falsifier 1).
+  - **The vertex-map key IS the `PATH` body**, so it moves with the encoding:
+    `path_t::key()`, `graph_t::find`, `key_view_t` and every stored `path_key_t` are packed
+    bytes now. A `key_view_t` record is a one-byte length prefix; `record_end` /
+    `record_from` / `record_cursor_t` / `child_record_under` answer in the new offsets.
+  - **`arena_tlv_t::canonical_path` is REMOVED**, and with it `is_canonical_name` and the
+    per-child bookkeeping the terminus decode ran for it. The flag asked whether a `PATH`'s
+    children were all bare `NAME`s, because a legal peer could spell one address several
+    ways (`opt.LL`, a per-segment trailer) and a byte key would then miss. A packed record has
+    no option byte and no type byte, so there is exactly ONE spelling per address: the body is
+    the key unconditionally, and the span-alias (ADR-0041 §3) is guaranteed rather than tested.
+    That also closes the second, still-open locus of
+    [#436](https://github.com/avatarsd-llc/libtracer/issues/436) — `wire::path_key` could
+    mistype a child; a packed body has none. `path_lookup_key` lost its `fallback` parameter
+    for the same reason.
+  - **`wire::path_key(const tlv_t&)`** now returns the packed body and refuses a structured
+    (`opt.PL = 1`) `PATH`, ragged framing, or an escape record, where it used to refuse a
+    non-`NAME` child.
+  - **New header `libtracer/packed_path.hpp`** (`tr::wire`) owns the grammar in one place:
+    `emit_path_segment`, `packed_record_span` (frame-path context — steps OVER the RFC-0018
+    §5.4 `len == 0` escape), `packed_path_valid_key` (canonical/key context — REJECTS it), and
+    the escape constants. Nothing mints an escape; `kind = 0x16` is reserved for RFC-0027's
+    label element, and building the SKIP path now is what keeps that RFC from reopening this
+    code.
+  - **`net::stack_writer::name` becomes `path_seg`**, and a new `header_path` writes the
+    `opt.PL = 0` `PATH` header the rebuild emits. `encode_mount_tlv` /
+    `child_registry_t`'s mount run emit packed records; `fwd_rebuild_t::extra_hdr` is one byte.
+  - **Unmoved on purpose:** `NAME` (`0x02`) and `wire::emit_name` are untouched — they still
+    spell SETTINGS keys, `:schema` labels and `:children[]` members. RFC-0018 removes `NAME`
+    from `PATH` bodies only, so `read_children` / `read_children_folded` /
+    `read_subtree_folded` keep emitting `POINT{NAME …}` byte-identically; they write the
+    `NAME` header beside the `POINT` one rather than borrowing the key record, which keeps
+    both folds at the link count their reservations are sized against.
+  - **The RFC-0023 caps trade places.** A one-byte segment costs 2 bytes packed instead of 5,
+    so `kMaxPathBytes` (1024) admits 512 records and `kMaxSegments` (255) is what binds —
+    where before the byte cap fired at 204 segments and the count clause could never trigger.
+    Pinned by the new `path/path-deep-255-packed` vector.
+  - **Conformance:** 27 vectors carrying a `PATH` were re-blessed from this reference
+    (ADR-0028). `path/path-value-children-illegal` is **retired** — it is unrepresentable —
+    and replaced by `path/path-escape-in-key-context` and `path/path-record-overruns-body`,
+    which pin what remains of its rule: an illegally-spelled address answers
+    `ERROR{tr::path::invalid}` rather than resolving to something.
+
 ### Added
 
 - **`wire::path_label_t` and `net::path_label_table_t` — the RFC-0027 path label and its mint

@@ -15,31 +15,25 @@ namespace tr::wire {
 namespace {
 
 /**
- * @brief A bare canonical NAME: type 0x02 with opt byte 0x00 — exactly the `02 00 <u16 len>` header
- *        path_key emits, so a PATH made only of these has a body byte-identical to its canonical
- *        vertex-map key (ADR-0041 §3).
- */
-bool is_canonical_name(const grammar::header_t& h) noexcept {
-    return h.type == type_t::NAME && h.opt == opt_t{};
-}
-
-/**
  * @brief The terminus-arena sink for grammar::walk (ADR-0048 §1): appends pre-order arena nodes as
  *        the shared descent visits them.
  *
  * Each node's `wire` is
  * header+body (trailer excluded, so a whole-TLV copy is trailer-less at rest);
- * a structured node's subtree extent (`end`) and its ADR-0041 §3 canonical-PATH
- * flag are sealed on close. The descent logic (pos/total, depth cap, when to
- * descend) lives in the walk; this is the pre-order twin of frame.cpp's
- * owning_sink. Its own open-node stack draws from the arena resource so a
- * slab-bound decode stays heap-free.
+ * a structured node's subtree extent (`end`) is sealed on close. The descent logic
+ * (pos/total, depth cap, when to descend) lives in the walk; this is the pre-order
+ * twin of frame.cpp's owning_sink. Its own open-node stack draws from the arena
+ * resource so a slab-bound decode stays heap-free.
+ *
+ * The per-child canonical-PATH bookkeeping this sink used to carry is GONE with
+ * RFC-0018: a packed `PATH` body has one spelling per address, so the body is the
+ * vertex-map key unconditionally and there is nothing to observe per child. That
+ * removes a compare and a store from EVERY node of every terminus decode.
  */
 struct arena_sink {
     mem::block_array_t<arena_tlv_t>& nodes_;
     struct open_t {
-        std::uint32_t index = 0;
-        bool names_only = true; /**< ADR-0041 §3 canonical-PATH property over direct children */
+        std::uint32_t index = 0; /**< @brief Index of the open node in `nodes_`. */
     };
     mem::block_array_t<open_t> open_;
     /**
@@ -91,24 +85,14 @@ struct arena_sink {
         n->wire = bytes.first(h.header + h.length);
         n->body = bytes.subspan(h.header, h.length);
         n->end = static_cast<std::uint32_t>(nodes_.size());  // opaque default: own index + 1
-        n->canonical_path = false;
-    }
-    /**
-     * @brief A node that is a direct child of the currently-open parent (if any) breaks the
-     *        parent's canonical-PATH property unless it is a bare NAME.
-     */
-    void note_child(const grammar::header_t& h) {
-        if (!open_.empty() && !is_canonical_name(h)) open_.back().names_only = false;
     }
     void on_leaf(const grammar::header_t& h, const grammar::span_cursor& node) {
-        note_child(h);
         push(h, node.buf);
     }
     void on_open(const grammar::header_t& h, const grammar::span_cursor& node) {
-        note_child(h);
         const auto index = static_cast<std::uint32_t>(nodes_.size());
         push(h, node.buf);
-        if (!open_.push_back(open_t{.index = index, .names_only = true})) exhausted_ = true;
+        if (!open_.push_back(open_t{.index = index})) exhausted_ = true;
     }
     void on_close() {
         // One branch, not three: `on_open` latches `exhausted_` if EITHER of its two
@@ -119,7 +103,6 @@ struct arena_sink {
         if (exhausted_) return;
         arena_tlv_t& node = nodes_[open_.back().index];
         node.end = static_cast<std::uint32_t>(nodes_.size());
-        node.canonical_path = node.type == type_t::PATH && open_.back().names_only;
         open_.pop_back();
     }
 };

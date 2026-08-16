@@ -43,6 +43,7 @@
 #include <vector>
 
 #include "libtracer/op_resolve.hpp"
+#include "libtracer/packed_path.hpp"
 #include "libtracer/tlv.hpp"
 #include "libtracer/tlv_emit.hpp"
 
@@ -88,9 +89,10 @@ inline bytes_t fwd_op_child_empty() {
  * The `b_fwd` family takes already-built `dst`/`src` TLV bytes, which suited the 23 files
  * #875 migrated because they had `path_t` bytes in hand. The transport and mount tests
  * instead spell their addresses as segment lists, and each of them re-derived the same two
- * facts to turn one into the other: a segment is a `NAME`, and the containing `PATH` carries
- * `opt_t{.pl = true}` because its body is a child list. Those are layout facts, so they
- * belong here rather than in eight test files.
+ * facts to turn one into the other. Since RFC-0018 those facts are: a segment is a packed
+ * `[u8 len][bytes]` record, and the containing `PATH` carries `opt_t{}` because its body is
+ * NOT a child list. Those are layout facts, so they belong here rather than in eight test
+ * files.
  *
  * An EMPTY @p segs is the reply-route-so-far of an origin hop: a present, zero-length `PATH`
  * that grows one segment per forwarder. It is emitted, never omitted — a missing `src` child
@@ -99,10 +101,37 @@ inline bytes_t fwd_op_child_empty() {
 template <class Segs>
 inline bytes_t b_path(const Segs& segs) {
     bytes_t body;
-    for (std::string_view s : segs) tr::wire::emit_name(body, s);
+    for (std::string_view s : segs) {
+        const bool ok = tr::wire::emit_path_segment(body, s);
+        (void)ok;  // a test that spells an unspellable segment wants the short body
+    }
     bytes_t out;
-    tr::wire::emit_tlv(out, tr::wire::type_t::PATH, tr::wire::opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, tr::wire::type_t::PATH, tr::wire::opt_t{}, body);
     return out;
+}
+
+/**
+ * @brief A `PATH` TLV over already-assembled packed BODY bytes — the escape-bearing and
+ *        deliberately-ragged shapes RFC-0018 §5.4 needs a builder for.
+ */
+inline bytes_t b_path_body(std::span<const std::byte> body) {
+    bytes_t out;
+    tr::wire::emit_tlv(out, tr::wire::type_t::PATH, tr::wire::opt_t{}, body);
+    return out;
+}
+
+/**
+ * @brief One RFC-0018 §5.4 escape record — `00 <kind> <len> <payload>` — appended to @p out.
+ *
+ * Nothing in the core mints one; this exists so a test can put one on the wire and check
+ * that a frame-path walker STEPS OVER it while a key-context walker REFUSES it.
+ */
+inline void append_path_escape(bytes_t& out, std::uint8_t kind,
+                               std::span<const std::byte> payload) {
+    out.push_back(std::byte{0});
+    out.push_back(static_cast<std::byte>(kind));
+    out.push_back(static_cast<std::byte>(payload.size()));
+    out.insert(out.end(), payload.begin(), payload.end());
 }
 
 /** @brief @ref b_path over a braced segment list — `b_path({"node", "leaf"})`. */

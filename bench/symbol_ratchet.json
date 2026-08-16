@@ -20,17 +20,17 @@
     {
       "binary": "bench_libtracer",
       "symbol": "tr::graph::graph_t::dispatch_edge_remote",
-      "bytes": 350
+      "bytes": 297
     },
     {
       "binary": "bench_libtracer",
       "symbol": "tr::graph::graph_t::find_ptr",
-      "bytes": 573
+      "bytes": 546
     },
     {
       "binary": "bench_compact_delivery",
       "symbol": "void tr::net::fwd_router_t::route_fwd_forward<tr::wire::grammar::rope_cursor>",
-      "bytes": 2199
+      "bytes": 2023
     }
   ]
 }

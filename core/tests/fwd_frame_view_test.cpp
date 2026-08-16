@@ -12,6 +12,7 @@
  */
 #include "libtracer/fwd_frame_view.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -28,6 +29,7 @@
 #include "libtracer/byteorder.hpp"
 #include "libtracer/frame.hpp"
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/packed_path.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/rope_decode.hpp"
 #include "libtracer/route_handle.hpp"
@@ -60,11 +62,10 @@ bytes_t b_name(std::string_view s) {
 bytes_t b_path(std::initializer_list<std::string_view> segs) {
     bytes_t body;
     for (std::string_view s : segs) {
-        const bytes_t n = b_name(s);
-        body.insert(body.end(), n.begin(), n.end());
+        (void)tr::wire::emit_path_segment(body, s);
     }
     bytes_t out;
-    tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
     return out;
 }
 
@@ -373,16 +374,56 @@ int main() {
         tr::wire::emit_tlv(no_src, type_t::FWD, opt_t{.pl = true}, no_src_body);
         check(!tr::net::rebuild_fwd_forward(span_cursor{no_src}, "in").has_value(),
               "reject: a missing src PATH");
-        // dst.child[0] is a VALUE, not a NAME — not a routable segment.
-        bytes_t dst_body;
-        tr::wire::emit_tlv(dst_body, type_t::VALUE, opt_t{}, std::span<const std::byte>{});
-        bytes_t bad_dst;
-        tr::wire::emit_tlv(bad_dst, type_t::PATH, opt_t{.pl = true}, dst_body);
+        // dst record[0] is the RFC-0018 §5.4 ESCAPE, not a literal segment — the packed
+        // successor of "the first child is a VALUE, not a NAME". Nothing mints an escape,
+        // and an address that LEADS with one names no transport child here, so the gate
+        // must refuse it exactly as it refused a non-NAME leading child.
+        bytes_t esc_body;
+        const std::array<std::byte, 4> label{std::byte{1}, std::byte{0}, std::byte{2},
+                                             std::byte{0}};
+        tr::testing::append_path_escape(esc_body, tr::wire::kPackedEscapeKindLabel, label);
+        (void)tr::wire::emit_path_segment(esc_body, "sensor");
+        const bytes_t bad_dst = tr::testing::b_path_body(esc_body);
         const bytes_t frame = b_fwd(fwd_op_t::WRITE, bad_dst, b_path({}), {}, payload);
-        check(!tr::net::rebuild_fwd_forward(span_cursor{frame}, "in").has_value(),
-              "reject: a dst whose first child is not a NAME");
+        // The refusal lives at the ROUTING GATE, which is the only tier that asks "is this an
+        // address I can descend". `rebuild_fwd_forward` is frame-path context and steps over
+        // an escape by design (§5.4), so a frame that reaches it has already been routed —
+        // asserting a refusal THERE would put the key-context rule on the relay path.
         check(!tr::net::peek_fwd_first_dst_seg(span_cursor{frame}).has_value(),
-              "reject: first-dst-seg peek agrees (no NAME, no window)");
+              "reject: a dst whose FIRST record is the len==0 escape names no child");
+        {
+            tr::net::fwd_pre_t esc_pre;
+            check(!tr::net::peek_fwd_dst(span_cursor{frame}, esc_pre),
+                  "reject: the dst gate agrees, and clears the carried offsets");
+            check(!esc_pre.valid, "...cleared, so no stale offsets reach a rebuild");
+        }
+        // But an escape BEHIND a literal leading segment is STEPPED OVER, not refused —
+        // that is the forward-plane half of §5.4, and the reason the skip path exists at
+        // all before anything mints.
+        bytes_t skip_body;
+        (void)tr::wire::emit_path_segment(skip_body, "in");
+        tr::testing::append_path_escape(skip_body, tr::wire::kPackedEscapeKindLabel, label);
+        (void)tr::wire::emit_path_segment(skip_body, "sensor");
+        const bytes_t skip_dst = tr::testing::b_path_body(skip_body);
+        const bytes_t skip_frame = b_fwd(fwd_op_t::WRITE, skip_dst, b_path({}), {}, payload);
+        check(tr::net::peek_fwd_first_dst_seg(span_cursor{skip_frame}).has_value(),
+              "an escape BEHIND the leading segment leaves the frame routable");
+        {
+            // The cursor is NAMED, not a temporary: `dst_seg_walk_t` borrows it and reads
+            // through it on every `at()`, unlike the peeks above, which consume theirs
+            // within the call. (Its deleted rvalue constructors now refuse a temporary
+            // outright — this line is what taught them to.)
+            const span_cursor skip_cur{skip_frame};
+            tr::net::fwd_pre_t pre;
+            check(tr::net::peek_fwd_dst(skip_cur, pre), "...and the dst window still opens");
+            tr::net::dst_seg_walk_t<span_cursor> walk(skip_cur, pre);
+            const auto s0 = walk.at(0);
+            const auto s1 = walk.at(1);
+            check(s0 && s0->second == 2, "segment 0 is the two-byte literal `in`");
+            check(s1 && s1->second == 6,
+                  "segment 1 is `sensor` — the escape occupied no segment index");
+            check(!walk.at(2).has_value(), "and there is no third segment");
+        }
         // An empty dst PATH is not forwardable either.
         const bytes_t empty_dst = b_fwd(fwd_op_t::WRITE, b_path({}), b_path({}), {}, payload);
         check(!tr::net::peek_fwd_first_dst_seg(span_cursor{empty_dst}).has_value(),
@@ -412,7 +453,7 @@ int main() {
         // overflow branch into a -Warray-bounds false positive.
         volatile std::size_t over_len = 19;
         const std::string overflow_name(over_len, 'x');
-        w.name(overflow_name);  // 4 + 4 + 19 > 8 — clamps
+        w.path_seg(overflow_name);  // 4 + 1 + 19 > 8 — clamps
         check(!w.ok() && w.span().empty(), "stack_writer: overflow clamps to an empty span");
 
         tr::net::stack_writer<8> wide;

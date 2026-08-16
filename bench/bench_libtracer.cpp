@@ -263,13 +263,9 @@ enum class target_kind_t { STORED, HANDLER };
  * produce, and therefore the thing the rest of this file never measures.
  */
 view_t subscriber_tlv(std::string_view target_segment) {
-    std::vector<std::byte> name_bytes;
-    for (char c : target_segment)
-        name_bytes.push_back(static_cast<std::byte>(static_cast<unsigned char>(c)));
-    tr::wire::tlv_t name{.type = tr::wire::type_t::NAME, .payload = name_bytes};
-    tr::wire::tlv_t path{.type = tr::wire::type_t::PATH};
-    path.opt.pl = true;
-    path.children.push_back(name);
+    std::vector<std::byte> body;
+    (void)tr::wire::emit_path_segment(body, target_segment);
+    tr::wire::tlv_t path{.type = tr::wire::type_t::PATH, .payload = body};  // packed, PL = 0
     tr::wire::tlv_t sub{.type = tr::wire::type_t::SUBSCRIBER};
     sub.opt.pl = true;
     sub.children.push_back(path);

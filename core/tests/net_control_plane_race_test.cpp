@@ -87,8 +87,8 @@ struct sink_t : tr::net::transport_t {
 
 void emit_path(std::vector<std::byte>& out, std::span<const std::string_view> segs) {
     std::vector<std::byte> body;
-    for (const std::string_view s : segs) tr::wire::emit_name(body, s);
-    tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
+    for (const std::string_view s : segs) (void)tr::wire::emit_path_segment(body, s);
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
 }
 
 /** @brief `FWD{ op=WRITE, dst, src, VALUE }` — the frame the forward descent walks. */

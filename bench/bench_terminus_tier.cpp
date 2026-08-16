@@ -143,12 +143,12 @@ std::vector<std::byte> make_write_frame(std::size_t payload_bytes) {
     tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
 
     std::vector<std::byte> dst;
-    for (std::string_view s : {"sensor", "temp"}) tr::wire::emit_name(dst, s);
-    tr::wire::emit_tlv(body, type_t::PATH, opt_t{.pl = true}, dst);
+    for (std::string_view s : {"sensor", "temp"}) (void)tr::wire::emit_path_segment(dst, s);
+    tr::wire::emit_tlv(body, type_t::PATH, opt_t{}, dst);
 
     std::vector<std::byte> src;
-    tr::wire::emit_name(src, "origin");
-    tr::wire::emit_tlv(body, type_t::PATH, opt_t{.pl = true}, src);
+    (void)tr::wire::emit_path_segment(src, "origin");
+    tr::wire::emit_tlv(body, type_t::PATH, opt_t{}, src);
 
     std::vector<std::byte> payload(payload_bytes, std::byte{0xAB});
     tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(payload));

@@ -14,6 +14,7 @@
 #include "libtracer/byteorder.hpp"
 #include "libtracer/crc.hpp"
 #include "libtracer/grammar.hpp"
+#include "libtracer/packed_path.hpp"
 #include "libtracer/path_ref.hpp"
 #include "libtracer/tlv_emit.hpp"
 
@@ -204,27 +205,23 @@ std::vector<std::byte> encode(const tlv_t& tlv) {
 }
 
 std::optional<std::vector<std::byte>> path_key(const tlv_t& path) {
-    // The canonical PATH-payload key = the concatenated NAME-child encodings. Emit each
-    // NAME TLV in place (wire::emit_name appends `02 00 <len> <bytes>` directly) instead
-    // of encode()-per-child into a temporary vector — one reserve + N appends, no per-
-    // segment allocation. A PATH's children are plain NAMEs (opt 0, no trailer), so this
-    // is byte-identical to encode(name); and it matches what path_t/register_vertex store
-    // (which also use emit_name), so the vertex-map key round-trips exactly.
+    // The canonical PATH-payload key IS the PATH body (RFC-0018): a packed sequence of
+    // `[u8 len][bytes]` records with `opt.PL = 0`, so a decoded PATH carries it in
+    // `payload` and there is nothing to re-assemble from children. One copy, no
+    // per-segment append, and byte-identical to what `path_t::parse` / `register_vertex`
+    // store — the vertex-map key round-trips exactly.
     //
-    // The child-type check is the point of the two-pass shape: the loop below used to trust
-    // "a PATH's children are plain NAMEs", which is true of paths THIS node emits and not of
-    // paths a PEER sends. Rejecting BEFORE the first append means a malformed route never
-    // produces a partial key either (#681). `path_lookup_key` in the arena tier has carried
-    // the same check since #436; this locus was missed.
-    std::size_t total = 0;
-    for (const tlv_t& name : path.children) {
-        if (name.type != type_t::NAME) return std::nullopt;
-        total += 4 + name.payload.size();
-    }
-    std::vector<std::byte> key;
-    key.reserve(total);
-    for (const tlv_t& name : path.children) wire::emit_name(key, name.payload);
-    return key;
+    // What this VALIDATES is the whole reason it is still fallible. The pre-RFC-0018 shape
+    // was two passes over the children so a non-`NAME` child could be refused before the
+    // first append (#681 / #436) — the bug where a peer's `PATH{VALUE "sensor"}` bound a
+    // label to `/sensor`. A packed body cannot mistype a child, because it has none; what
+    // it CAN carry is a ragged length or the `len == 0` escape, and this is **canonical /
+    // key context** (this function's callers are the ADVERTISE route resolve and the
+    // SUBSCRIBER target), where RFC-0018 §5.4 rejects the escape. Refusing here means a
+    // malformed route still produces no key at all rather than a partial one.
+    if (path.opt.pl || !path.children.empty()) return std::nullopt;
+    if (!wire::packed_path_valid_key(path.payload)) return std::nullopt;
+    return std::vector<std::byte>(path.payload.begin(), path.payload.end());
 }
 
 bool equal(const tlv_t& a, const tlv_t& b) noexcept {

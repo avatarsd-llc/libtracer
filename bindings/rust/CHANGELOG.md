@@ -8,6 +8,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **A `PATH` (`0x06`) body is packed `[u8 len][utf8]` segment records
+  ([RFC-0018](../../docs/spec/rfcs/0018-packed-path-segments.md),
+  [#680](https://github.com/avatarsd-llc/libtracer/issues/680)) — BREAKING.**
+  `tlv_builders::path` emits `opt.PL = 0` with the records in `payload` and no children;
+  `path::tlv_to_path` and `path::admit_path_tlv` walk that body instead of a child list.
+  A `PATH` built by the previous version does not round-trip against the new vectors.
+- **New `tlv_builders::packed_segments(body)`** — the canonical/key-context walk, returning
+  each literal record. It REFUSES the RFC-0018 §5.4 `len == 0` escape and ragged framing with
+  `BuildError::SegmentLength`: the escape is admissible in a frame path a node is only
+  relaying, and never in a key. `PACKED_ESCAPE_LEN` / `PACKED_ESCAPE_OVERHEAD` are exported
+  for callers that need to describe one.
+- **`admit_path_tlv` and `tlv_to_path` refuse a structured (`opt.PL = 1`) `PATH`** with
+  `BuildError::TypeMismatch` — that spelling is the retired encoding, not a variant.
+- **`MAX_SEGMENTS` (255) is now the binding cap.** Packed, a one-byte segment costs 2 bytes,
+  so `MAX_PATH_BYTES` (1024) admits 512 records; under the retired encoding the byte cap fired
+  at 204 segments and the count clause could never trigger (RFC-0023 §4.2's note, now spent).
+- `NAME` is untouched: it still spells SETTINGS keys and `:schema` labels. RFC-0018 removes it
+  from `PATH` bodies only.
+
 ## [0.12.0] — 2026-08-14
 
 ### Added

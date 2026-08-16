@@ -88,16 +88,11 @@ void check(bool ok, std::string_view what) {
 void append(std::vector<std::byte>& dst, const std::vector<std::byte>& src) {
     dst.insert(dst.end(), src.begin(), src.end());
 }
-std::vector<std::byte> b_name(std::string_view s) {
-    std::vector<std::byte> out;
-    tr::wire::emit_name(out, s);
-    return out;
-}
 std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> body;
-    for (std::string_view s : segs) append(body, b_name(s));
+    for (std::string_view s : segs) (void)tr::wire::emit_path_segment(body, s);
     std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
     return out;
 }
 std::vector<std::byte> b_value_u8(std::uint8_t v) {
@@ -116,7 +111,7 @@ std::vector<std::byte> b_value_u32(std::uint32_t v) {
 /** @brief FIELD{ NAME @p name, VALUE u8 index_mode=ELEMENT } — the ":<name>[]" append. */
 std::vector<std::byte> b_field_append(std::string_view name) {
     std::vector<std::byte> body;
-    append(body, b_name(name));
+    tr::wire::emit_name(body, name);
     append(body, b_value_u8(1));  // index_mode = ELEMENT (append)
     std::vector<std::byte> out;
     tr::wire::emit_tlv(out, type_t::FIELD, opt_t{.pl = true}, body);

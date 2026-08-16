@@ -170,7 +170,7 @@ void test_remote_ancestor_subscriber() {
     vertex_handle_t a = g.register_vertex(path_t("/a"), role_t::STORED_VALUE);
     vertex_handle_t ab = g.register_vertex(path_t("/a/b"), role_t::STORED_VALUE);
 
-    std::vector<std::byte> route{std::byte{0x06}, std::byte{0x40}, std::byte{0x00},
+    std::vector<std::byte> route{std::byte{0x06}, std::byte{0x00}, std::byte{0x00},
                                  std::byte{0x00}};
     std::size_t deliveries = 0;
     std::string seen_link;

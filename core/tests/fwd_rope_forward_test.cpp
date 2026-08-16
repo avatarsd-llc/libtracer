@@ -65,11 +65,10 @@ std::vector<std::byte> b_name(std::string_view s) {
 std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> body;
     for (std::string_view s : segs) {
-        const std::vector<std::byte> n = b_name(s);
-        body.insert(body.end(), n.begin(), n.end());
+        (void)tr::wire::emit_path_segment(body, s);
     }
     std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
     return out;
 }
 /** @brief A one-element `PATH_REF` dst — the BOUND spelling of an address (RFC-0024 §4). */
@@ -377,11 +376,48 @@ int main() {
         check(got == oracle, "one-link-per-byte rope routes byte-identically (max fragmentation)");
     }
 
-    // Two cuts straddling both the /up segment NAME and the src PATH header.
+    // Two cuts straddling both the /up segment record and the src PATH header.
     {
         const std::array<std::size_t, 2> cuts{6, 11};
         const auto got = forward_as_rope(frame, cuts);
         check(got == oracle, "a 3-link split across segment + header routes byte-identically");
+    }
+
+    // RFC-0018 FALSIFIER 5, named: a packed `[u8 len]` record STRADDLING a link boundary.
+    //
+    // The sweep above already covers this — every interior cut of a packed frame lands
+    // inside a record for most of its range — but the RFC states the case explicitly
+    // ("a `[u8 len]` record can straddle a link boundary exactly as a TLV header can"), and a
+    // sweep that happens to include it does not SAY it. This case does: a deeper `dst` whose
+    // records are cut at three places the packed walk is specifically exposed at — between a
+    // length byte and its first payload byte, mid-payload, and exactly ON a length byte, which
+    // is the one-byte "header" the rope cursor now has to stitch where it used to stitch four.
+    {
+        const std::vector<std::byte> deep =
+            b_fwd(fwd_op_t::READ, b_path({"up", "aa", "bbbb", "sensor"}), b_path({"reply-ep"}));
+        const auto deep_oracle = forward_contiguous(deep);
+        check(deep_oracle.size() == 1, "control: the deep frame forwards contiguously");
+        // Offsets into the frame: FWD hdr(4) + op TLV(5) + dst PATH hdr(4) = 13, so the dst
+        // body starts at 13 and its records are 03'up' 02'aa' 04'bbbb' 06'sensor'.
+        constexpr std::size_t kDstBody = 13;
+        const std::array<std::size_t, 3> cuts{
+            kDstBody + 1,      // between the first length byte and its payload
+            kDstBody + 4 + 1,  // mid-payload of the SECOND record
+            kDstBody + 6,      // exactly ON the third record's length byte
+        };
+        const auto got = forward_as_rope(deep, cuts);
+        check(!deep_oracle.empty() && got == deep_oracle,
+              "a packed record straddling a link boundary routes byte-identically (falsifier 5)");
+
+        // And the whole-sweep form of the same claim over the deeper frame, so no single
+        // boundary of a multi-record address is left unexercised.
+        int deep_mismatches = 0;
+        for (std::size_t cut = 1; cut < deep.size(); ++cut) {
+            const std::array<std::size_t, 1> one{cut};
+            if (forward_as_rope(deep, one) != deep_oracle) ++deep_mismatches;
+        }
+        check(deep_mismatches == 0,
+              "every 2-link split of a four-record dst routes byte-identically");
     }
 
     // A BOUND dst over a multi-link rope (RFC-0024 §5): the frame that made the

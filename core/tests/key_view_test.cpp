@@ -8,8 +8,12 @@
  *
  * Those call sites are covered end-to-end by graph/acl/subtree/children tests;
  * this pins the navigation contract directly, including the segment-boundary
- * property (a byte-prefix of a valid key aligns only on a NAME boundary) and the
+ * property (a byte-prefix of a valid key aligns only on a record boundary) and the
  * malformed-framing rejection that gates write-create.
+ *
+ * Under RFC-0018 a key record is `[u8 len][bytes]` rather than a NAME TLV. Only the
+ * fixture at the top of this file moved: every assertion below is the one that guarded
+ * the NAME-record encoding, unchanged, which is what makes falsifier 4 mean something.
  */
 
 #include "libtracer/key_view.hpp"
@@ -31,18 +35,22 @@ using tr::wire::key_view_t;
 
 using tr::testing::check;
 
-/** @brief One NAME TLV record: [type=0x02, opt=0x00, u16 len (LE), payload...]. */
+/**
+ * @brief One packed segment record: `[u8 len][payload]` (RFC-0018).
+ *
+ * The FIXTURE is what this RFC moves; not one `check()` below it changed. That is
+ * deliberate and it is RFC-0018 falsifier 4 — *"the existing `key_view`
+ * ancestor/descendant tests must pass unmodified against packed keys"* — which is only a
+ * falsifier if the assertions stay put while the bytes underneath them change.
+ */
 std::vector<std::byte> name_rec(std::string_view s) {
     std::vector<std::byte> r;
-    r.push_back(std::byte{0x02});
-    r.push_back(std::byte{0x00});
-    r.push_back(static_cast<std::byte>(s.size() & 0xFF));
-    r.push_back(static_cast<std::byte>((s.size() >> 8) & 0xFF));
+    r.push_back(static_cast<std::byte>(s.size()));
     for (const char c : s) r.push_back(static_cast<std::byte>(static_cast<std::uint8_t>(c)));
     return r;
 }
 
-/** @brief A canonical key: the concatenated NAME records of `segs`. */
+/** @brief A canonical key: the concatenated packed records of `segs`. */
 std::vector<std::byte> make_key(std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> k;
     for (const std::string_view s : segs) {
@@ -105,8 +113,8 @@ int main() {
         check(key_view_t{a}.is_ancestor_of(key_view_t{abc}), "/a is an ancestor of /a/b/c");
         check(!key_view_t{ab}.is_ancestor_of(key_view_t{a}), "/a/b is not an ancestor of /a");
         check(!key_view_t{a}.is_ancestor_of(key_view_t{a}), "not a strict ancestor of itself");
-        // The load-bearing property: "/ab" shares no NAME boundary with "/a", so
-        // the byte-prefix test must reject it (differing length header).
+        // The load-bearing property: "/ab" shares no record boundary with "/a", so
+        // the byte-prefix test must reject it (differing length byte).
         check(!key_view_t{a}.is_ancestor_of(key_view_t{ab_word}),
               "/a is NOT an ancestor of /ab (segment-boundary property)");
     }
@@ -143,13 +151,10 @@ int main() {
         check(!key_view_t{}.split_levels(empty_levels), "split_levels of the root fails");
         check(empty_levels.empty(), "root split appends nothing");
 
-        // A ragged key: a valid /a followed by a truncated record (header claims a
+        // A ragged key: a valid /a followed by a truncated record (the length byte claims a
         // payload that runs past the end). Must reject and append nothing.
         std::vector<std::byte> ragged = make_key({"a"});
-        ragged.push_back(std::byte{0x02});
-        ragged.push_back(std::byte{0x00});
         ragged.push_back(std::byte{0x09});  // len=9 but no payload follows
-        ragged.push_back(std::byte{0x00});
         std::vector<key_view_t> ragged_levels;
         check(!key_view_t{ragged}.split_levels(ragged_levels),
               "split_levels rejects ragged framing");
@@ -199,19 +204,19 @@ int main() {
 
     // record_end / record_from over a well-framed key.
     {
-        const std::vector<std::byte> k3 = make_key({"a", "bb", "ccc"});  // 5 + 6 + 7 = 18 bytes
+        const std::vector<std::byte> k3 = make_key({"a", "bb", "ccc"});  // 2 + 3 + 4 = 9 bytes
         const key_view_t k{k3};
-        check(k3.size() == 18, "fixture /a/bb/ccc is 18 bytes");
-        check(k.record_end(0) == 5, "record_end(0) = 5 (4-byte header + 'a')");
-        check(k.record_end(5) == 11, "record_end(5) = 11");
-        check(k.record_end(11) == 18, "record_end(11) = 18 (records tile the key)");
-        check(k.record_end(18) == 0, "record_end at the key's end is ragged (0)");
+        check(k3.size() == 9, "fixture /a/bb/ccc is 9 bytes");
+        check(k.record_end(0) == 2, "record_end(0) = 2 (one length byte + 'a')");
+        check(k.record_end(2) == 5, "record_end(2) = 5");
+        check(k.record_end(5) == 9, "record_end(5) = 9 (records tile the key)");
+        check(k.record_end(9) == 0, "record_end at the key's end is ragged (0)");
 
-        const auto r1 = k.record_from(5);
-        check(r1.has_value(), "record_from(5) is engaged");
-        check(r1 && r1->begin == 5 && r1->end == 11, "record_from(5) spans [5, 11)");
-        check(r1 && as_str(r1->payload) == "bb", "record_from(5) carries 'bb'");
-        check(!k.record_from(18).has_value(), "record_from past the last record is nullopt");
+        const auto r1 = k.record_from(2);
+        check(r1.has_value(), "record_from(2) is engaged");
+        check(r1 && r1->begin == 2 && r1->end == 5, "record_from(2) spans [2, 5)");
+        check(r1 && as_str(r1->payload) == "bb", "record_from(2) carries 'bb'");
+        check(!k.record_from(9).has_value(), "record_from past the last record is nullopt");
         check(!key_view_t{}.record_from(0).has_value(), "the root has no record 0");
 
         // A zero-length payload is ILLEGAL (#932, file header) — record_end is the
@@ -222,18 +227,16 @@ int main() {
 
     // record_end's ragged edges, one per shape the hand-walks guarded against.
     {
+        // A length byte with NOTHING after it. Under RFC-0018 this is what a truncated
+        // header degenerates to: the prefix is one byte, so it is either present or the key
+        // has ended — `record_end` past the end is the same ragged 0.
         std::vector<std::byte> short_hdr = make_key({"a"});
-        short_hdr.push_back(std::byte{0x02});  // 2 of the 4 header bytes, then nothing
-        short_hdr.push_back(std::byte{0x00});
-        check(key_view_t{short_hdr}.record_end(5) == 0, "a truncated HEADER is ragged");
+        check(key_view_t{short_hdr}.record_end(2) == 0, "a length byte past the end is ragged");
 
         std::vector<std::byte> over_len = make_key({"a"});
-        over_len.push_back(std::byte{0x02});
-        over_len.push_back(std::byte{0x00});
         over_len.push_back(std::byte{0x09});  // len = 9, but no payload follows
-        over_len.push_back(std::byte{0x00});
-        check(key_view_t{over_len}.record_end(5) == 0, "an OVERSIZED length is ragged");
-        check(key_view_t{over_len}.record_end(0) == 5, "the well-framed record before it is not");
+        check(key_view_t{over_len}.record_end(2) == 0, "an OVERSIZED length is ragged");
+        check(key_view_t{over_len}.record_end(0) == 2, "the well-framed record before it is not");
 
         // graph.cpp's `segment_end` ragged-tail RULE, expressed in the accessor it now
         // reads the framing through: a record whose REMAINDER is ragged swallows the
@@ -253,8 +256,8 @@ int main() {
         check(!cur.at(3).has_value(), "cursor past the last record is nullopt");
         // Asking BEHIND the walk restarts it and must give the same answer.
         check(cur.at(0) && as_str(cur.at(0)->payload) == "a", "a descending ask still answers 'a'");
-        check(cur.at(2) && cur.at(2)->begin == 11, "re-ascending re-finds record 2 at offset 11");
-        check(cur.at(2) && cur.at(2)->end == 18, "the memoized repeat is the same record");
+        check(cur.at(2) && cur.at(2)->begin == 5, "re-ascending re-finds record 2 at offset 5");
+        check(cur.at(2) && cur.at(2)->end == 9, "the memoized repeat is the same record");
 
         // Every index agrees with a fresh cursor — the incremental walk and the
         // rescan-from-zero it replaces cannot disagree.
@@ -270,9 +273,9 @@ int main() {
         // end_of: the strip-K residual offset. 0 records = 0; all records = the key's size.
         key_view_t::record_cursor_t e{key_view_t{k3}};
         check(e.end_of(0) == 0, "end_of(0) is 0");
-        check(e.end_of(1) == 5, "end_of(1) is 5");
-        check(e.end_of(3) == 18, "end_of(3) is the whole key");
-        check(e.end_of(4) == 18, "end_of past the last record clamps to the key's size");
+        check(e.end_of(1) == 2, "end_of(1) is 2");
+        check(e.end_of(3) == 9, "end_of(3) is the whole key");
+        check(e.end_of(4) == 9, "end_of past the last record clamps to the key's size");
     }
 
     // The cursor's ragged edges, which are `subscribe_toward`'s old `rec_off`/`key_at`
@@ -280,23 +283,22 @@ int main() {
     // `end_of` past it reports the KEY SIZE — while `end_of` AT it reports the ragged
     // tail's offset, which is what the old rescan returned.
     {
-        std::vector<std::byte> ragged = make_key({"a", "bb"});  // 5 + 6 = 11 well-framed
-        ragged.push_back(std::byte{0x02});
-        ragged.push_back(std::byte{0x00});
-        ragged.push_back(std::byte{0x09});  // len = 9, nothing follows
-        ragged.push_back(std::byte{0x00});
+        std::vector<std::byte> ragged = make_key({"a", "bb"});  // 2 + 3 = 5 well-framed
+        ragged.push_back(std::byte{0x09});                      // len = 9, nothing follows
         key_view_t::record_cursor_t cur{key_view_t{ragged}};
-        check(ragged.size() == 15, "ragged fixture is 15 bytes");
+        check(ragged.size() == 6, "ragged fixture is 6 bytes");
         check(cur.at(1) && as_str(cur.at(1)->payload) == "bb", "records before the tail decode");
         check(!cur.at(2).has_value(), "the ragged record itself is nullopt");
         check(!cur.at(9).has_value(), "so is everything past it");
-        check(cur.end_of(2) == 11, "end_of(2) is where the ragged tail starts");
-        check(cur.end_of(3) == 15, "end_of past the ragged record is the key's size");
+        check(cur.end_of(2) == 5, "end_of(2) is where the ragged tail starts");
+        check(cur.end_of(3) == 6, "end_of past the ragged record is the key's size");
     }
 
-    // Zero-length records (#932 — decided once): an empty-payload NAME segment is
-    // ILLEGAL (path syntax rejects `//`), so all four walkers agree it is
-    // malformed framing rather than a valid empty-named level.
+    // Zero-length records (#932 — decided once; RFC-0018 §5.4): a `len == 0` record is the
+    // label ESCAPE, and this module is CANONICAL / KEY context, where the escape is rejected
+    // — so all four walkers agree it is malformed framing rather than a valid level. An
+    // empty-named segment stays illegal for the reason it always was (path syntax rejects
+    // `//`), so no legal address loses a spelling to the reservation.
     {
         const std::vector<std::byte> a_empty_c = make_key({"a", "", "c"});
         const key_view_t k{a_empty_c};

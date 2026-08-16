@@ -252,8 +252,8 @@ class counting_resource_t final : public std::pmr::memory_resource {
 /** @brief Append a NAME-only PATH TLV over `segs`. */
 void emit_path(std::vector<std::byte>& out, std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> body;
-    for (std::string_view s : segs) tr::wire::emit_name(body, s);
-    tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
+    for (std::string_view s : segs) (void)tr::wire::emit_path_segment(body, s);
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
 }
 
 /**

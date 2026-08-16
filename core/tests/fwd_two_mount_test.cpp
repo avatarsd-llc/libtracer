@@ -85,9 +85,9 @@ view_t owned(std::span<const std::byte> bytes) {
 /** @brief Canonical `PATH{ NAME… }` bytes for @p segs, via the production emit helpers. */
 std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> body;
-    for (std::string_view s : segs) tr::wire::emit_name(body, s);
+    for (std::string_view s : segs) (void)tr::wire::emit_path_segment(body, s);
     std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
     return out;
 }
 
@@ -139,7 +139,15 @@ struct hop_probe_t {
             if (seen) return;
             dst = tr::wire::encode(dec->children[1]);
             src = tr::wire::encode(dec->children[2]);
-            dst_segs = dec->children[1].children.size();
+            // Packed records (RFC-0018): count `[u8 len][bytes]` records in the PATH body.
+            dst_segs = 0;
+            for (std::size_t at = 0; at < dec->children[1].payload.size();) {
+                const auto len = static_cast<std::size_t>(
+                    static_cast<std::uint8_t>(dec->children[1].payload[at]));
+                if (len == 0 || at + 1 + len > dec->children[1].payload.size()) break;
+                ++dst_segs;
+                at += 1 + len;
+            }
             seen = true;
         }
         cv.notify_all();
@@ -236,16 +244,15 @@ int main() {
     // The vector's input.bin, pinned here so a divergence between b_fwd's construction and the
     // published bytes fails this test rather than only the Rust encode pin.
     static constexpr std::string_view kVectorHex =
-        "0f405700010001000006403e00020003006e65740200060075706c696e6b0200010062020003006e6574"
-        "0200060075706c696e6b02000100630200060073656e736f720200040074656d7006400c000200080072"
-        "65706c792d6570";
+        "0f403c00010001000006002600036e65740675706c696e6b0162036e65740675706c696e6b0163067365"
+        "6e736f720474656d7006000900087265706c792d6570";
     std::vector<std::byte> expected_bytes;
     for (size_t i = 0; i + 1 < kVectorHex.size(); i += 2) {
         expected_bytes.push_back(
             static_cast<std::byte>(std::stoi(std::string(kVectorHex.substr(i, 2)), nullptr, 16)));
     }
     check(origin == expected_bytes,
-          "the origin frame is byte-identical to fwd/fwd-routed-two-mount's input.bin (91 B)");
+          "the origin frame is byte-identical to fwd/fwd-routed-two-mount's input.bin (64 B)");
     ch_cli.a().send(origin);
 
     // ===== hop 1, at A: strip_k = 3 =====================================================

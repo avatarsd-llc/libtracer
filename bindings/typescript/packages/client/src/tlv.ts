@@ -10,7 +10,7 @@
  * (`@avatarsd-llc/libtracer`) — nothing here invents wire structure:
  *
  *   - encodeValue      -> VALUE TLV (0x01)        : value-bool-true / value-ll-u32 / value-ts-abs
- *   - encodePath       -> PATH TLV (0x06, PL=1)   : path-sensor-temp + spec/v1.md §3.1
+ *   - encodePath       -> PATH TLV (0x06, PL=0)   : path-sensor-temp + spec/v1.md §3.1
  *   - encodeSubscriber -> SUBSCRIBER TLV (0x04)   : subscriber-path  (the subscribe-write payload)
  *
  * Reading back, `firstChild` is the package's single child-by-type accessor and
@@ -55,17 +55,19 @@ export function firstChild(tlv: Tlv | null | undefined, type: number): Tlv | nul
 /** @brief Path-segment constraints from reference/03-addressing.md §path syntax. */
 const MAX_SEGMENT_BYTES = 64;
 /**
- * @brief Maximum NAME segments in one PATH (reference/03 §path syntax; `core` `kMaxSegments`).
+ * @brief Maximum segments in one PATH (reference/03 §path syntax; `core` `kMaxSegments`).
  *
  * Repriced 32 -> 255 by RFC-0023 — chosen so every per-segment quantity stays u8-representable,
- * not inherited from a parser guard. Under this body encoding each segment costs `4 + len`, so
- * {@link MAX_PATH_BYTES} admits at most 204 segments and the BYTE cap binds first; this is the
- * encoding-independent ceiling.
+ * not inherited from a parser guard. Under RFC-0018's packed body a segment costs `1 + len`, so
+ * {@link MAX_PATH_BYTES} admits 512 one-byte records and this COUNT is what binds. (Before the
+ * packing a segment cost `4 + len`, 204 segments filled the byte cap, and the count clause
+ * could never fire.)
  */
 const MAX_SEGMENTS = 255;
 /**
- * @brief Maximum encoded PATH body — the concatenated NAME TLVs, i.e. exactly the PATH TLV's own
- * `length` field (reference/03 §path syntax, 2026-07-31 erratum; `core` `kMaxPathBytes`).
+ * @brief Maximum encoded PATH body — the concatenated packed `[u8 len][utf8]` segment records,
+ * i.e. exactly the PATH TLV's own `length` field (reference/03 §path syntax, 2026-07-31
+ * erratum; RFC-0018 §5; `core` `kMaxPathBytes`).
  */
 const MAX_PATH_BYTES = 1024;
 /** @brief Reserved characters that MUST NOT appear inside a NAME segment (reference/03, /05 §NAME). */
@@ -151,8 +153,8 @@ export function nameTlv(segment: string): Tlv {
 }
 
 /**
- * @brief Build a PATH TLV (`type=0x06`, PL=1) from path segments — a NAME child
- * per segment.
+ * @brief Build a PATH TLV (`type=0x06`, PL=0) from path segments — one packed
+ * `[u8 len][utf8]` record per segment (RFC-0018).
  *
  * Vector-pinned: `path-sensor-temp`; normative byte layout: spec/v1.md §3.1.
  *
@@ -169,21 +171,78 @@ export function pathTlv(segments: string[]): Tlv {
   if (segments.length < 1) throw new RangeError('a path must have at least one segment');
   if (segments.length > MAX_SEGMENTS)
     throw new RangeError(`a path may have at most ${MAX_SEGMENTS} segments (got ${segments.length})`);
-  const children = segments.map(nameTlv);
+  // `nameTlv` is still the SEGMENT PREDICATE — 1..64 UTF-8 bytes, no reserved character — even
+  // though its NAME framing is no longer what a PATH carries. Reusing it keeps one home for
+  // the addressing grammar; only the bytes it is turned into changed (RFC-0018).
+  const records = segments.map((seg) => nameTlv(seg).payload);
   // The encode-time byte check the spec has always required and this client never had
   // (RFC-0023 §5.6): the 1024-byte budget is measured as the PATH TLV's own `length` field —
-  // each NAME costs its 4-byte header plus its UTF-8 bytes. It binds BEFORE the segment count
-  // under this encoding (204 * 5 = 1020), so it is the bound that actually fires.
-  const bodyBytes = children.reduce((n, child) => n + 4 + child.payload.length, 0);
+  // each packed record costs one length byte plus its UTF-8 bytes. Under the packing it is the
+  // segment COUNT that binds first (255 one-byte records are 510 bytes), so this clause now
+  // fires only on genuinely long segments.
+  const bodyBytes = records.reduce((n, r) => n + 1 + r.length, 0);
   if (bodyBytes > MAX_PATH_BYTES)
     throw new RangeError(`a path's encoded body may be at most ${MAX_PATH_BYTES} bytes (got ${bodyBytes})`);
+  const payload = new Uint8Array(bodyBytes);
+  let at = 0;
+  for (const r of records) {
+    payload[at++] = r.length;
+    payload.set(r, at);
+    at += r.length;
+  }
   return {
     type: TYPE.PATH,
-    opt: opt({ pl: true }),
-    payload: new Uint8Array(0),
-    children,
+    // PL = 0: a packed body is NOT a child run, and a set PL would make a generic walker read
+    // the first body bytes as a TLV header and mis-frame the whole address (RFC-0018 §5).
+    opt: opt(),
+    payload,
+    children: [],
     trailer: null,
   };
+}
+
+/**
+ * @brief The `len == 0` ESCAPE record's length byte — RFC-0018 §8 / §5.4 Amendment 1.
+ *
+ * An escape is `00 <u8 kind> <u8 len> <len bytes>`. It is **admissible in a frame path** — a
+ * forwarder steps over one whose `kind` it does not implement instead of dropping a frame it
+ * is only relaying — and **rejected in canonical / key context**, because a label is not
+ * canonical bytes. This client never mints one; `kind = 0x16` is reserved for RFC-0027.
+ */
+export const PACKED_ESCAPE_LEN = 0;
+
+/**
+ * @brief Read a PATH TLV's packed body back into its segments — the inverse of
+ * {@link encodePath}, in **canonical / key** context.
+ *
+ * `encodePath(segs)` then `decode` then this yields `segs` again; the round trip is exact
+ * because a packed record has exactly one spelling per segment (RFC-0018 §4).
+ *
+ * The escape is REFUSED here rather than skipped: a caller reading segments wants an ADDRESS,
+ * and an address carrying a label is not one. A forwarder that only relays the frame never
+ * calls this.
+ *
+ * @param path a decoded PATH TLV
+ * @returns its segments, in order (empty for the graph root)
+ * @throws {RangeError} if the TLV is not a packed PATH, the records do not tile the body, or
+ *         a record is the escape
+ */
+export function pathSegments(path: Tlv): string[] {
+  if (path.type !== TYPE.PATH || path.opt.pl || path.children.length > 0)
+    throw new RangeError('not a packed PATH TLV (RFC-0018: type 0x06 with opt.PL = 0)');
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  const out: string[] = [];
+  let at = 0;
+  while (at < path.payload.length) {
+    const len = path.payload[at];
+    if (len === PACKED_ESCAPE_LEN)
+      throw new RangeError('a PATH escape record (len == 0) is not admissible in key context');
+    if (at + 1 + len > path.payload.length)
+      throw new RangeError('a PATH segment record runs past the body');
+    out.push(decoder.decode(path.payload.subarray(at + 1, at + 1 + len)));
+    at += 1 + len;
+  }
+  return out;
 }
 
 /**

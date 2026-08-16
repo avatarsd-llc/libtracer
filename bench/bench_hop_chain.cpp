@@ -149,9 +149,9 @@ struct wire_link_t : transport_t {
 
 [[nodiscard]] std::vector<std::byte> path_tlv(const std::vector<std::string_view>& segs) {
     std::vector<std::byte> body;
-    for (const std::string_view s : segs) tr::wire::emit_name(body, s);
+    for (const std::string_view s : segs) (void)tr::wire::emit_path_segment(body, s);
     std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
     return out;
 }
 

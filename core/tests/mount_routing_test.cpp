@@ -112,8 +112,8 @@ const child_registry_t::child_t* find(const child_registry_t& reg,
 
 void emit_path(std::vector<std::byte>& out, std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> body;
-    for (std::string_view s : segs) tr::wire::emit_name(body, s);
-    tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
+    for (std::string_view s : segs) (void)tr::wire::emit_path_segment(body, s);
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
 }
 
 std::vector<std::byte> make_fwd_op(std::uint8_t op_byte,
@@ -142,10 +142,13 @@ std::vector<std::vector<std::string>> paths_of(std::span<const std::byte> frame)
     if (!dec || dec->type != type_t::FWD) return out;
     for (const auto& child : dec->children) {
         if (child.type != type_t::PATH) continue;
+        // Packed records (RFC-0018): `[u8 len][bytes]` in the PATH's own payload.
         std::vector<std::string> segs;
-        for (const auto& seg : child.children) {
-            if (seg.type == type_t::NAME)
-                segs.emplace_back(tr::detail::as_string_view(seg.payload));
+        for (std::size_t at = 0; at < child.payload.size();) {
+            const auto len = static_cast<std::size_t>(static_cast<std::uint8_t>(child.payload[at]));
+            if (len == 0 || at + 1 + len > child.payload.size()) break;
+            segs.emplace_back(tr::detail::as_string_view(child.payload.subspan(at + 1, len)));
+            at += 1 + len;
         }
         out.push_back(std::move(segs));
     }
@@ -245,7 +248,7 @@ void test_peek_segments() {
     // Backwards access restarts the walk rather than answering from a stale cursor — the
     // narrower-slot-after-a-wider-one case the single pass takes constantly.
     check(at(1) == "ws-client", "a backwards read restarts the walk and still answers");
-    check(walk.end_of(2) == pre.dst_body_off + 4 + 3 + 4 + 9 + 4 + 3,
+    check(walk.end_of(2) == pre.dst_body_off + 1 + 3 + 1 + 9 + 1 + 3,
           "end_of(k-1) is where the consumed run stops");
 
     const std::vector<std::byte> shortf = make_fwd({"net", "can"}, {"reply"});
@@ -308,8 +311,12 @@ std::vector<std::string> advertised_route(std::span<const std::byte> frame) {
     std::vector<std::string> segs;
     const auto dec = tr::wire::decode(frame);
     if (!dec || dec->children.size() < 2) return segs;
-    for (const auto& seg : dec->children[1].children) {
-        if (seg.type == type_t::NAME) segs.emplace_back(tr::detail::as_string_view(seg.payload));
+    const std::span<const std::byte> body = dec->children[1].payload;
+    for (std::size_t at = 0; at < body.size();) {
+        const auto len = static_cast<std::size_t>(static_cast<std::uint8_t>(body[at]));
+        if (len == 0 || at + 1 + len > body.size()) break;
+        segs.emplace_back(tr::detail::as_string_view(body.subspan(at + 1, len)));
+        at += 1 + len;
     }
     return segs;
 }

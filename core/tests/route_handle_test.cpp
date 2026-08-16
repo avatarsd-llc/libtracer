@@ -43,7 +43,7 @@ using namespace tr::net;
 using tr::testing::check;
 
 std::vector<std::byte> route_bytes(std::uint8_t tag) {
-    return {std::byte{0x06}, std::byte{0x40}, std::byte{0x01}, std::byte{0x00}, std::byte{tag}};
+    return {std::byte{0x06}, std::byte{0x00}, std::byte{0x01}, std::byte{0x00}, std::byte{tag}};
 }
 
 /**

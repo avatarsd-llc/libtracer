@@ -54,8 +54,9 @@ void test_path_parse() {
     std::printf("path_t parse / canonicalize / field tail:\n");
     const auto p = path_t::parse("/sensor/temp");
     check(p.has_value(), "valid path parses");
-    // Canonical PATH payload: 02 00 06 00 'sensor' 02 00 04 00 'temp' = 18 bytes.
-    check(p && p->key().size() == 18, "canonical key is 18 bytes for /sensor/temp");
+    // Canonical PATH payload (RFC-0018, packed): 06 'sensor' 04 'temp' = 12 bytes — the
+    // address string's own length, one byte per '/' included.
+    check(p && p->key().size() == 12, "canonical key is 12 bytes for /sensor/temp");
     check(p && p->segment_count() == 2, "two segments");
 
     // Trailing slash canonicalizes to the same key.
@@ -232,13 +233,10 @@ tr::view::view_t value_tlv(std::span<const std::byte> payload) {
 
 /** @brief A SUBSCRIBER TLV naming a single-segment target path, as an owned view_t. */
 tr::view::view_t subscriber_tlv(std::string_view target_segment) {
-    std::vector<std::byte> name_bytes;
-    for (char c : target_segment)
-        name_bytes.push_back(static_cast<std::byte>(static_cast<unsigned char>(c)));
-    tr::wire::tlv_t name{.type = tr::wire::type_t::NAME, .payload = name_bytes};
-    tr::wire::tlv_t path{.type = tr::wire::type_t::PATH};
-    path.opt.pl = true;
-    path.children.push_back(name);
+    std::vector<std::byte> packed_body;
+    (void)tr::wire::emit_path_segment(packed_body, target_segment);
+    tr::wire::tlv_t path{.type = tr::wire::type_t::PATH,
+                         .payload = packed_body};  // packed, PL = 0 (RFC-0018)
     tr::wire::tlv_t sub{.type = tr::wire::type_t::SUBSCRIBER};
     sub.opt.pl = true;
     sub.children.push_back(path);
@@ -878,12 +876,14 @@ std::string spell(tr::wire::key_view_t key) {
     std::string out;
     const std::span<const std::byte> b = key.bytes();
     std::size_t i = 0;
-    while (i + 4 <= b.size()) {
-        const std::size_t len = tr::detail::load_le<std::uint16_t>(b.subspan(i + 2, 2));
-        if (i + 4 + len > b.size()) break;
+    while (i < b.size()) {
+        // Packed records (RFC-0018): `[u8 len][bytes]`, and a `len == 0` escape is not a
+        // key record at all — spelling stops there, as `key_view_t` does.
+        const std::size_t len = static_cast<std::uint8_t>(b[i]);
+        if (len == 0 || i + 1 + len > b.size()) break;
         out.push_back('/');
-        out.append(reinterpret_cast<const char*>(b.data()) + i + 4, len);
-        i += 4 + len;
+        out.append(reinterpret_cast<const char*>(b.data()) + i + 1, len);
+        i += 1 + len;
     }
     return out;
 }

@@ -107,11 +107,11 @@ them:
 
 | decoder | inline slots | spill source | the depth bound is |
 | --- | --- | --- | --- |
-| `decode` → owning `tlv_t` | 8 (`core/src/frame.cpp:119`) | the nothrow heap source (`frame.cpp:120`) | the heap — an owning-tree decode allocates there regardless |
-| `decode_into` → `tlv_arena_t` | 8 (`core/src/tlv_arena.cpp:151`) | the caller's `mem::block_source_t` (`tlv_arena.cpp:152`) | whatever resource the caller injected |
+| `decode` → owning `tlv_t` | 8 (`core/src/frame.cpp:120`) | the nothrow heap source (`frame.cpp:121`) | the heap — an owning-tree decode allocates there regardless |
+| `decode_into` → `tlv_arena_t` | 8 (`core/src/tlv_arena.cpp:134`) | the caller's `mem::block_source_t` (`tlv_arena.cpp:135`) | whatever resource the caller injected |
 
 The 8 is the typical FWD nesting (three to four levels) with headroom, not a
-ceiling: the arena test decodes a frame nested 100 deep (`core/tests/tlv_arena_test.cpp:297`).
+ceiling: the arena test decodes a frame nested 100 deep (`core/tests/tlv_arena_test.cpp:324`).
 A receiver that wants a hard bound gets one by injecting a small source: a
 stack-buffer `mem::bump_source_t` makes that buffer the whole decode budget
 (`mem_source.hpp`), and exhaustion is then a returned `err_t` rather than an
@@ -178,14 +178,19 @@ structural byte-builder in the tree share it instead of each hand-rolling
 | --- | --- |
 | `emit_header(out, type, opt, body_len)` | the header alone; length is `u16` LE, or `u32` LE when `opt.ll` is set. The width follows `opt.ll` verbatim — this writes a header, it does not decide one |
 | `emit_tlv(out, type, opt, body)` | header + body, auto-setting `opt.ll` when `body` exceeds `0xFFFF`. `encode` routes through here; the forward plane's `fwd_frame_view` / `stack_writer` tiers carry their own copy of the widen rule |
-| `emit_name(out, bytes)` / `emit_name(out, sv)` | a `NAME` TLV with default `opt` — the PATH-segment and metadata-tag workhorse; the `string_view` form needs no temporary buffer |
+| `emit_name(out, bytes)` / `emit_name(out, sv)` | a `NAME` TLV with default `opt` — the metadata-tag workhorse (SETTINGS keys, `:schema` labels, `:children[]` members). It is NO LONGER the PATH-segment emitter: RFC-0018 packed a PATH body into `[u8 len][utf8]` records, which `wire::emit_path_segment` (`packed_path.hpp`) writes. The `string_view` form needs no temporary buffer |
+| `emit_path_segment(out, seg)` | one packed PATH segment record — `[u8 len][utf8]`, RFC-0018 §5. Returns `false`, appending nothing, on an empty segment (it would spell the §5.4 escape) or one past 255 bytes |
 | `emit_path_ref(out, elements[, type])` | a `PATH_REF` TLV — the 4-byte envelope plus the bare 8-byte element array (RFC-0024 §4). `type` selects which bound-path code heads it: `PATH_REF` (`0x14`, the default) or `PATH_REF_REVERSE` (`0x15`, RFC-0024 §7.1 amendment 2), whose body grammar is identical. Returns `false`, emitting nothing, past the 255-element bound: a route that long has no bound spelling and falls back to the canonical `PATH` |
 
-Building a PATH is `emit_name` per segment into one buffer; that concatenation of
-`NAME` encodings is exactly the canonical PATH key `path_key` produces from a
-decoded PATH, and exactly the form `arena_tlv_t::canonical_path` flags as canonical
-in place. Building an FWD request is `emit_tlv` for the outer frame
-over a body built the same way. Pass `opt_t{.pl = true}` for a structured payload.
+Building a PATH is `emit_path_segment` per segment into one buffer
+(`packed_path.hpp`); that concatenation of packed `[u8 len][utf8]` records is exactly
+the canonical PATH key `path_key` produces from a decoded PATH, and — since
+[RFC-0018](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0018-packed-path-segments.md)
+gave an address exactly one spelling — the body a resolver can key on **in place,
+unconditionally**, where a flag on the arena node used to say whether it could. The
+PATH's own header carries `opt_t{}`: a packed body is not a child run, so `PL` stays
+clear. Building an FWD request is `emit_tlv` for the outer frame over a body built the
+same way. Pass `opt_t{.pl = true}` for a structured payload.
 
 These live in `tr::wire` (L2/L3) because they produce wire bytes from wire types;
 the layer-free little-endian byte helper they build on stays in `tr::detail`
@@ -200,7 +205,7 @@ terminus: **`wire::decode_into(span, tr::mem::block_source_t&) → tlv_arena_t`*
 (public header `tlv_arena.hpp`). It parses the same frames with the same
 validation — bounds, reserved bits, type `0x00`, the bound-path (`0x14`/`0x15`) body shape, trailer
 CRC, trailing bytes ⇒ `FRAME_INVALID` — but the result is a **flat, pre-order array of `arena_tlv_t`
-span-nodes**: `{type, opt, wire (trailer-excluded), body, end, canonical_path}`.
+span-nodes**: `{type, opt, wire (trailer-excluded), body, end}`.
 Every span borrows the input frame; every node is drawn from the injected
 `block_source_t`.
 
