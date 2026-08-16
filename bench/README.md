@@ -33,6 +33,7 @@ for a local `preview.html` of the same charts.
 | `bench_conn_ram` | **per-connection RAM census**: what one connection costs on each transport (TCP / WS / UDP / CAN) — link base, per-connection bytes, what survives teardown. **Gated (warn)** on the pinned host — see [the RAM censuses in CI](#the-ram-censuses-in-ci-1228). |
 | `bench_ram_census_tcp` | **whole-node RAM census**: the heap a 100-vertex graph (values 4..64 B, mixed int / array / STREAM) holds, staged from an empty `graph_t` through a `/net:children[]`-created TCP listener to steady state under a real remote peer **process**. **Trend-only** on the pinned host. |
 | `bench_path_label` | **RFC-0027 §12.4's normative gate**: what a minted **path label** saves per hop, as a slope over hop count and over registry width, and what it saves on the TERMINUS RESIDUAL against address depth — clause 2's axis, the one §3.3 nominates as deciding. See [the RFC-0027 gate](#bench_path_label--the-rfc-0027-124-gate-1325-car-5). |
+| `bench_forward_rope` | **the forward hop over a MULTI-LINK ROPE** (`on_frame_rope`, ADR-0053 §5), swept over link count — the only bench that instantiates `rope_cursor`, the specialisation `symbol_ratchet.json` pins. Diagnostic, not gated; quote it only off a quiescent host — see [its A/A null](#bench_forward_rope--the-rope-forward-hop-and-what-its-aa-null-is-worth-1358). |
 | `bench_rx_source_topology` | **RX failable-source topology**: T receive threads forwarding rope frames through a shared heap, one shared pool, or one pool per child — the measurement behind [ADR-0067](../docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md) §3. |
 
 ### `bench_forward_heap` — the 16KB-RAM zero-heap forward gate (ADR-0038)
@@ -449,6 +450,66 @@ the one §3.3 says the byte column cannot show: the label stands for the WHOLE r
 
 Diagnostic, **not** a `perf.yml` gate: both arms are in one binary and the comparison is
 between two *spellings*, not two builds.
+
+### `bench_forward_rope` — the rope forward hop, and what its A/A null is worth (#1358)
+
+```sh
+cmake --build bench/build --target bench_forward_rope -j
+taskset -c 24 ./bench/build/bench_forward_rope   # RESULT mode=fwd-rope-hop, fanout = link count
+```
+
+The multi-link arm of the forward hop (`on_frame_rope`, ADR-0053 §5), swept over link count
+at a fixed frame and registry. It is **the only bench that instantiates `rope_cursor`** — the
+specialisation `symbol_ratchet.json` pins `route_fwd_forward<tr::wire::grammar::rope_cursor>`
+against — so it is the instrument any change to that symbol has to be priced on.
+
+**It was measured at a +0.99…+7.23 % p50 A/A null with bimodal ranges** during #1325 car 5,
+which would make it unable to resolve anything smaller than its own noise. That figure is
+now accounted for, and it was two independent causes, neither of them the rope path:
+
+- **The host, and it is the larger term.** Re-measured on the pinned host, 11 interleaved
+  ABBA rounds of the same binary against itself at `LIBTRACER_BENCH_SECONDS=0.3`, the null is
+  **±0.34 % p50 median-of-rounds / ±0.42 % best-of-rounds** with unimodal ranges (worst
+  max/min 1.06) when the 1-minute load average is quiet. Inject a memory-bandwidth neighbour
+  (`stress-ng --vm 24 --vm-bytes 256M`, load average 16–36) and the SAME pair of binaries
+  reads **+17 % … +81 %**, with ranges that split into two clusters about **2× apart** —
+  `[238..492]` at one link, decaying to `[4290..6055]` (1.4×) at 64. That two-cluster shape is
+  the signature car 5 recorded (`[245..497]`), reproduced on demand. It is **not** a property
+  of this bench: `bench_compact_delivery`, run in the same windows, degraded further
+  (**+30 % … +46 %**) from **±0.00 %** quiet. Pure *CPU* neighbours are harmless by
+  comparison — five spinners, load average 6.8–7.1, just under `host_guard.py`'s 7.75 bar on
+  this 31-CPU host, left the null at **±0.83 % / ±0.27 %**. What poisons the rope hop is
+  memory-subsystem contention, and the existing quiescence bar does separate the two.
+- **The batch calibrator, worth up to ~8 % on its own.** The plateau rule stops doubling at
+  the first batch that is not `kBatchPlateau` better than the last, which is a comparison
+  between two *timed* quantities — so the machine picks the batch, and the batch moves the
+  number, because the sample's two `now_ns()` reads (~22 ns here) are charged per SAMPLE.
+  Forcing the batch on the one-link point measures **260 / 250 / 242 / ~238 ns at batch
+  1 / 2 / 4 / ≥8**, and repeated executions of one binary were seen latching 2, 4, 8, 16 and
+  32 on that point. Two arms could therefore differ by ~8 % with nothing but the calibrator
+  between them — discretely, in clusters, exactly the reported shape. This bench now calls
+  `bench_common.hpp`'s `calibrate_batch_for_window`, which doubles until the *window* reaches
+  20 µs instead: the batch becomes a function of the hop's own cost, lands on
+  128 / 64 / 32 / 32 / 16 / 16 / 8 across the sweep, and repeats. Against the plateau-built
+  binary the change reads **−1.44 % … +0.08 %** best-of-rounds — it removes the clock term it
+  was measuring, and does not step the series.
+
+**Preconditions for quoting this bench, all three of which car 5 was missing.** Run
+`python3 bench/host_guard.py wait` first and record `/proc/loadavg` either side of the
+measurement — a number without its load context is not evidence here. Estimate each arm with
+the **best (or 25th-percentile) of its rounds, never the median of its rounds**: contamination
+is one-sided, so a low order statistic rejects a dirty round while the median simply counts
+them. On a run this car took while a neighbouring agent got busy — load average 13 → 21, not
+injected — median-of-rounds put a binary against itself at **−33 % … +54 %** while
+best-of-rounds on the same samples stayed inside **1.44 %**. And read the `[min..max]` range
+as a *diagnostic*, not decoration: a spread near 2× with the two ends clustered means the
+window was contaminated and the run must be repeated, whatever the medians say.
+
+**The band.** On a quiescent host this instrument's A/A null is **inside ±0.5 % p50**, so it
+resolves effects at the ~1 % level and up — enough to price its pinned symbol. It is a
+**diagnostic, not a `perf.yml` gated point**: adding it to `perf_gate.py`'s `POINTS` is a
+separate decision about wall-clock and about shared-runner variance, which is a different and
+looser noise regime than the pinned host measured above.
 
 ## What is measured
 

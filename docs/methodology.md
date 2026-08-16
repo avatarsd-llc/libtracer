@@ -490,6 +490,37 @@ optional TLS module. An absent transport must never be readable as a tie.
   continuous-looking line that silently stops being about the same thing. If a fix only
   makes the *same* quantity more accurately measured, the name is kept and the
   instrument marker carries the discontinuity.
+- **Across rounds, take each arm's BEST — never its median — and read the range as a
+  contamination diagnostic.** Contamination is one-sided: a busy neighbour can only
+  make a round slower, never faster. A low order statistic across an arm's rounds
+  therefore rejects a dirty round, while the median merely counts them, and the median
+  flips as soon as half the rounds are dirty — which is why the gate estimates
+  best-of-N and why an ad-hoc driver must too. Measured on the pinned host with one
+  binary against itself
+  ([#1358](https://github.com/avatarsd-llc/libtracer/issues/1358)): in a window where a
+  neighbouring job got busy, median-of-rounds put `fwd-rope-hop` at **−33 % … +54 %**
+  while best-of-rounds on the very same samples stayed inside **1.44 %**; quiet, both
+  estimators agree inside **±0.5 %**. The `[min..max]` range is what tells the two
+  situations apart — a spread near **2×** whose ends sit in two clusters rather than
+  spreading smoothly is a contaminated window, and the run must be repeated rather than
+  reported, whatever the medians say.
+- **Record the load context on both sides of every measurement, and wait for
+  quiescence first.** `python3 bench/host_guard.py wait` before the run and
+  `/proc/loadavg` either side of it: an absolute figure without its load context cannot
+  be re-judged later, and this is the fact that the same pair of binaries reads inside
+  ±0.5 % at load average ~2 and up to **+81 %** at load average 16–36. The contaminant
+  that matters is **memory-subsystem** contention, not runnable-task count — five pure
+  CPU spinners (load average 6.8, just under the guard's bar on the 31-CPU host) cost
+  **0.83 %**, while memory-bandwidth neighbours at the same nominal pin cost tens of
+  percent.
+- **A per-op figure is only as honest as the batch it was timed in.** Timing a batch and
+  dividing charges the window's two clock reads (~22 ns on the pinned host) once per
+  *sample*, so the batch size is part of the measurement: forcing it on a ~238 ns
+  operation reads 260 / 250 / 242 / ~238 ns at batch 1 / 2 / 4 / ≥8. A calibrator that
+  picks the batch by comparing two timed quantities therefore lets the machine choose
+  the answer, discretely — `bench_common.hpp`'s `calibrate_batch_for_window` doubles
+  until the *window* reaches 20 µs instead, so the batch follows the operation's own
+  cost and repeats across executions.
 
 **The A/B protocol — what a two-arm comparison may and may not vary.** An A/B of a code change runs two binaries and attributes the difference to the change.
 That attribution is only sound if **nothing else** differed. Two things that look
