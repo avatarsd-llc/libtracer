@@ -8,15 +8,24 @@
  * (§4.2), and node-scoped: a path label means something only on the host that
  * minted it (§4.1's label-scope rule).
  *
- * This header owns the VALUE and its byte order, and nothing else. RFC-0027 §5.3
- * is explicit that the ELEMENT FRAMING is deferred pending the §12.5 conformance
- * vectors — whether a labelled element is a TLV child of `PATH` under a new type
- * code or a tag inside RFC-0018's packed-segment grammar, whether one label may
- * cover a multi-segment part, and whether a labelled `PATH` is admissible as a
- * `path_lookup_key` (it must not be). So no type code is assigned here and no
- * grammar rule is wired: `kPathLabelBodyBytes` and @ref path_label_body_valid
- * carry §5.3's LEADING CANDIDATE and are marked as such. Nothing in this header
- * freezes a wire surface.
+ * This header owns the VALUE, its byte order, and — since RFC-0027 §5.3 closed —
+ * the ELEMENT SPELLING that carries it. All three of §5.3's sub-questions are ruled:
+ *
+ * - **Amendment 4:** a label is a self-describing element of its own, never a variant
+ *   spelling of a name segment.
+ * - **Amendment 5:** those bytes are RFC-0018 §8's escape record —
+ *   `00 <u8 kind=0x16> <u8 len=4> <u32 LE label>`, **7 B per element**. The 8-byte
+ *   `PATH_LABEL` TLV-child spelling of §5.3's candidate block is **never built**, so no
+ *   type code is assigned and there is no per-element option byte to constrain. Amendment 5
+ *   also rules §5.3 sub-question 3: a `PATH` carrying a label is **NOT** admissible as a
+ *   `path_lookup_key` — that refusal is `packed_path_valid_key`'s, unchanged.
+ * - **Amendment 6:** one label covers a hop's whole **local part** (its entire mount run),
+ *   not one segment. That is a property of what a minting hop REPLACES, not of these bytes:
+ *   the record is the same 7 B whether the run it stands for is one segment or five.
+ *
+ * What this header still does NOT do is decide **when** an element is minted or what it
+ * resolves to. Emitting the record is grammar; §6.2's trigger, the reply-leg rewrite and the
+ * deref are the forwarder's (later cars of #1325).
  *
  * Lives in `tr::wire` (L2/L3), beside `path_ref.hpp`, for the identical reason:
  * it turns wire bytes into a wire type and back, and knows nothing about a graph.
@@ -26,16 +35,21 @@
  */
 #pragma once
 
+#include <array>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
+#include <vector>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/packed_path.hpp"
 
 /**
  * @file
- * @brief The RFC-0027 §4 path-label value: `(u16 index, u16 generation)` as a u32 LE.
+ * @brief The RFC-0027 §4 path-label value: `(u16 index, u16 generation)` as a u32 LE, and the
+ *        §5.3 element that carries it — RFC-0018's escape record at `kind = 0x16`.
  */
 
 namespace tr::wire {
@@ -156,23 +170,67 @@ constexpr void path_label_store(std::span<std::byte> out, path_label_t label) no
 }
 
 /**
- * @brief The purely STRUCTURAL body rules of RFC-0027 §5.3's LEADING CANDIDATE layout.
+ * @brief Bytes one label ELEMENT occupies inside a packed `PATH` body — 7 (RFC-0027 §5.3.2).
  *
- * **Candidate, not frozen.** §5.3 defers the byte layout pending the §12.5 conformance
- * vectors, so this predicate is here as the shape the vectors will confirm or replace — it is
- * deliberately wired into no grammar and no decode path until they land. The three clauses are
- * RFC-0024 §4.2's, for identical reasons:
- *
- * - **`opt.PL` MUST be 0** — the body is a fixed-width scalar, not concatenated child TLVs; a
- *   generic `PL = 1` walker would read the four body bytes as a TLV header and mis-frame it.
- * - **`opt.LL` MUST be 0** — a 4-byte body is three orders inside a u16 length, so the wide
- *   form is forbidden rather than merely unused.
- * - **`length == 4`** — a body that is not exactly one label has no reading (§12.5's
- *   `label-wrong-length` vector).
+ * `00 <kind> <len>` framing plus the 4-byte value. The RFC's §3.3 table is re-run at this
+ * width: 18 B for a direct link, 25 B with one forwarder, 32 B with two.
  */
-[[nodiscard]] constexpr bool path_label_body_valid(bool pl, bool ll,
-                                                   std::size_t body_len) noexcept {
-    return !pl && !ll && body_len == kPathLabelBodyBytes;
+inline constexpr std::size_t kPathLabelRecordBytes = kPackedEscapeOverhead + kPathLabelBodyBytes;
+
+/**
+ * @brief The two STRUCTURAL clauses of RFC-0027 §5.3.2's ruled element, kept apart on purpose.
+ *
+ * - **`kind` MUST be `0x16`** — an element is read by its kind and never by its position
+ *   (§5.1). Another kind is somebody else's element: a hop steps over it by its declared
+ *   length and MUST NOT read its payload as a label.
+ * - **`len` MUST be exactly 4** — a payload that is not exactly one label has no reading, and a
+ *   hop that implements labels refuses the address rather than reading a short or long field.
+ *
+ * They are two clauses and the §12.5 vectors keep them in two cases
+ * (`path-label/label-foreign-kind`, `path-label/label-wrong-length`) for RFC-0024 §9.4's
+ * reason: a core that drops one of two clauses sharing a vector passes it anyway.
+ *
+ * @note The candidate `opt.PL` / `opt.LL` clauses this predicate replaces are **unrepresentable**
+ *       under the ruled spelling — an escape record has no option byte, because it is not a TLV.
+ */
+[[nodiscard]] constexpr bool path_label_record_valid(std::uint8_t kind,
+                                                     std::size_t payload_len) noexcept {
+    return kind == kPackedEscapeKindLabel && payload_len == kPathLabelBodyBytes;
+}
+
+/**
+ * @brief Append one label element — `00 16 04 <u32 LE>` — to a packed `PATH` body.
+ * @return False, appending NOTHING, when @p label is not a label a host ever minted (generation
+ *         `0` is reserved "no label", §4.1), so the reserved value cannot reach the wire by
+ *         way of a default-constructed struct.
+ *
+ * Writing the bytes is not §6.2's mint: this says how a label is SPELLED, never that one is due.
+ */
+[[nodiscard]] inline bool emit_path_label(std::vector<std::byte>& out, path_label_t label) {
+    if (!label.valid()) return false;
+    std::array<std::byte, kPathLabelBodyBytes> body{};
+    path_label_store(body, label);
+    return emit_path_escape(out, kPackedEscapeKindLabel, body);
+}
+
+/**
+ * @brief Read the label element at @p at of a packed `PATH` body, or `nullopt` when the record
+ *        there is not one.
+ *
+ * `nullopt` covers every "not a label here" case in one answer — a literal segment, a ragged
+ * record, a foreign kind, a payload that is not 4 bytes, and the reserved zero generation —
+ * because the reading hop's response to all of them is the same and none of them is a label.
+ * What a hop DOES with the distinction (skip a foreign kind, refuse a malformed address) is the
+ * forwarder's, which is why this returns a value rather than a status.
+ */
+[[nodiscard]] constexpr std::optional<path_label_t> path_label_at(std::span<const std::byte> body,
+                                                                  std::size_t at) noexcept {
+    const auto kind = packed_escape_kind(body, at);
+    const auto payload = packed_escape_payload(body, at);
+    if (!kind || !payload || !path_label_record_valid(*kind, payload->size())) return std::nullopt;
+    const path_label_t label = path_label_load(*payload);
+    if (!label.valid()) return std::nullopt;
+    return label;
 }
 
 }  // namespace tr::wire

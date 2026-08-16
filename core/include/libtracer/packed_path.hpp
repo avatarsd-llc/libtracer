@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -29,8 +30,10 @@
  * by its declared length rather than dropping a frame it is only relaying — and
  * **rejected in canonical / key context**, because a label is not canonical bytes
  * and the vertex-map key must stay pure-string for `key_view_t`'s
- * byte-prefix-implies-ancestor invariant to hold. Nothing in this core MINTS an
- * escape; `kind = 0x16` is reserved for RFC-0027's label element.
+ * byte-prefix-implies-ancestor invariant to hold. `kind = 0x16` is RFC-0027's label
+ * element and is spelled in `path_label.hpp`; this header stays KIND-AGNOSTIC — it
+ * frames, spans and skips a record without knowing what any kind means, which is the
+ * property a non-implementing hop relies on.
  *
  * The two contexts are two functions here, named for the rule they enforce
  * (`packed_path_valid_key` vs `packed_record_span`), so no call site has to
@@ -54,8 +57,11 @@ inline constexpr std::uint8_t kPackedEscapeLen = 0;
 inline constexpr std::size_t kPackedEscapeOverhead = 3;
 
 /**
- * @brief The escape `kind` reserved for RFC-0027's label element (a `u32`: u16 index,
- *        u16 generation). Declared so the SKIP path can be described; nothing mints it.
+ * @brief The escape `kind` of RFC-0027's label element (a `u32`: u16 index, u16 generation).
+ *
+ * The kind lives here because the SKIP path is this header's, and skipping is what every hop
+ * must do whether or not it implements labels. What the payload MEANS, and how it is spelled
+ * and read, is `path_label.hpp`'s; nothing here or there decides WHEN one is minted.
  */
 inline constexpr std::uint8_t kPackedEscapeKindLabel = 0x16;
 
@@ -81,6 +87,57 @@ inline constexpr std::uint8_t kPackedEscapeKindLabel = 0x16;
 [[nodiscard]] constexpr bool packed_record_is_escape(std::span<const std::byte> body,
                                                      std::size_t at) noexcept {
     return at < body.size() && static_cast<std::uint8_t>(body[at]) == kPackedEscapeLen;
+}
+
+/**
+ * @brief The `kind` byte of the escape record at @p at, or `nullopt` when the bytes there are
+ *        a literal segment or a ragged record.
+ *
+ * The kind is what an element is READ BY. A record's meaning never comes from its position in
+ * the body — RFC-0027 §5.1 applies RFC-0024 amendment 2's ruling to path elements, and a
+ * positional reading "breaks the moment any future RFC adds a second trailing child".
+ */
+[[nodiscard]] constexpr std::optional<std::uint8_t> packed_escape_kind(
+    std::span<const std::byte> body, std::size_t at) noexcept {
+    if (!packed_record_is_escape(body, at) || packed_record_span(body, at) == 0)
+        return std::nullopt;
+    return static_cast<std::uint8_t>(body[at + 1]);
+}
+
+/**
+ * @brief The declared payload of the escape record at @p at, or `nullopt` when the bytes there
+ *        are not a well-framed escape.
+ *
+ * An empty payload is a legal escape (`00 <kind> 00`) and answers an empty span, which is why
+ * the "not an escape" answer is `nullopt` and not an empty span: the two are different facts and
+ * a caller that conflates them reads a kind it never saw.
+ */
+[[nodiscard]] constexpr std::optional<std::span<const std::byte>> packed_escape_payload(
+    std::span<const std::byte> body, std::size_t at) noexcept {
+    if (!packed_record_is_escape(body, at)) return std::nullopt;
+    const std::size_t span = packed_record_span(body, at);
+    if (span == 0) return std::nullopt;
+    return body.subspan(at + kPackedEscapeOverhead, span - kPackedEscapeOverhead);
+}
+
+/**
+ * @brief Append one escape record — `00 <u8 kind> <u8 len> <payload>` (RFC-0018 §8).
+ * @return False, appending NOTHING, when @p payload is longer than @ref kPackedSegMaxBytes,
+ *         which the record's one-byte length field cannot express.
+ *
+ * Kind-agnostic on purpose: this writes the FRAMING, and the kind's own body rules belong to
+ * whoever owns the kind (RFC-0027's are in `path_label.hpp`). Emitting an escape is not
+ * minting one — WHEN a hop replaces its local part with a label is RFC-0027 §6.2's trigger,
+ * which lives in the forwarder and not in a grammar header.
+ */
+[[nodiscard]] inline bool emit_path_escape(std::vector<std::byte>& out, std::uint8_t kind,
+                                           std::span<const std::byte> payload) {
+    if (payload.size() > kPackedSegMaxBytes) return false;
+    out.push_back(static_cast<std::byte>(kPackedEscapeLen));
+    out.push_back(static_cast<std::byte>(kind));
+    out.push_back(static_cast<std::byte>(payload.size()));
+    out.insert(out.end(), payload.begin(), payload.end());
+    return true;
 }
 
 /**

@@ -128,9 +128,13 @@ add_test(NAME path_ref COMMAND path_ref_test)
 # RFC-0027's path label (path_label.hpp) and its mint table (path_label_table.cpp, so
 # NET_PLANE-gated like every other net-plane TU's test). Carries §4.3.1's
 # saturate-and-retire test, which nothing else can catch: the rule is invisible on the wire.
+# It also pins the §12.5 `path-label/` vectors byte-exactly against the emitter, so it needs
+# LIBTRACER_VECTORS_DIR.
 if(LIBTRACER_NET_PLANE)
     add_executable(path_label_test path_label_test.cpp)
     target_link_libraries(path_label_test PRIVATE libtracer)
+    target_compile_definitions(path_label_test PRIVATE
+        LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
     libtracer_test_warnings(path_label_test)
     add_test(NAME path_label COMMAND path_label_test)
 endif()

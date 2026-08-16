@@ -1064,10 +1064,14 @@ effect sits below the leg's noise floor).
   ledger byte for byte.
 - `path-label/label-mixed` — a `PATH` mixing name and label elements in both orders. This is the
   vector §5.2's ruling lives or dies by.
-- `path-label/label-pl-set` and `path-label/label-ll-set` — `opt.PL=1` / `opt.LL=1` on a
-  `PATH_LABEL` ⇒ reject. Separate clauses need separate vectors: a core that drops one passes every
+- ~~`path-label/label-pl-set` and `path-label/label-ll-set` — `opt.PL=1` / `opt.LL=1` on a
+  `PATH_LABEL` ⇒ reject.~~ **Erratum 1 (2026-08-16) — unrepresentable, replaced; see below.**
+  Separate clauses need separate vectors: a core that drops one passes every
   other vector in the category (RFC-0024 §9.4's lesson).
-- `path-label/label-wrong-length` — a body that is not exactly 4 bytes ⇒ `tr::frame::invalid`.
+- `path-label/label-wrong-length` — a body that is not exactly 4 bytes ⇒ ~~`tr::frame::invalid`~~
+  **`tr::path::invalid` (erratum 1)**.
+- **`path-label/label-multi-segment` (amendment 6)** — a three-segment mount run compacted to one
+  label element, alongside the one-segment case, so the two cannot silently diverge.
 - `fwd/fwd-label-mint-reply` — a reply leg carrying a hop's own part rewritten from strings to a
   label, byte-exact against what the router emits. The harness routes nothing, so the behavioural
   claim is bound by a core test, as `fwd/fwd-bound-forward` is bound by `bound_forward_test.cpp`.
@@ -1076,6 +1080,30 @@ effect sits below the leg's noise floor).
   **byte-identical** outcomes between the two spellings. A by-construction argument is not a test;
   RFC-0014's lesson is that two silent misroutes shipped because no test used the production wiring.
 - Zero existing vectors change: `PATH` with no label element is byte-identical to today's.
+
+#### Erratum 1 (2026-08-16) — the `PL`/`LL` vectors are unrepresentable, and the wrong-length answer is `tr::path::invalid`
+
+An **erratum**, not an amendment: the bullets above were written against §5.3's *candidate*
+8-byte `PATH_LABEL` TLV-child spelling, and they contradict amendment 5, which is already ruled.
+No wire surface moves — the ruled spelling is unchanged.
+
+1. **`label-pl-set` / `label-ll-set` are unrepresentable.** Amendment 5 rules the element to be
+   RFC-0018 §8's escape record, `00 <kind=0x16> <len=4> <u32>`, and states the TLV-child spelling
+   is *"never built"*. An escape record is not a TLV: it has **no option byte**, so there is no
+   `opt.PL` or `opt.LL` to set on it. This is the same fate, for the same reason, as the retired
+   `path/path-value-children-illegal` under RFC-0018.
+2. **What replaces them keeps the discipline they existed for.** The ruled element still has two
+   independent structural clauses — the `kind` MUST be `0x16` and the declared `len` MUST be 4 —
+   and they get **two vectors**, `path-label/label-wrong-length` and the new
+   **`path-label/label-foreign-kind`**, so RFC-0024 §9.4's lesson survives the change of
+   spelling: a core that enforces one clause and not the other fails exactly one of them. The
+   kind clause is the more dangerous of the two, since a length-only check dereferences another
+   kind's payload against the local table — a mis-delivery, not an error.
+3. **`label-wrong-length` answers `tr::path::invalid` (`0x0021`), not `tr::frame::invalid`.** A
+   packed `PATH` body is `opt.PL = 0`, opaque to the codec, so there is nothing for a **codec**
+   to refuse and the case is an `input.bin` vector rather than a `reject.bin` one. The refusal is
+   a **resolver** refusal — a malformed address — which is the answer
+   `path/path-escape-in-key-context` and `path/path-record-overruns-body` already give.
 
 ## 13. Rejected alternatives
 
@@ -1200,10 +1228,13 @@ the maintainer were ruled together with acceptance:
 
 **What acceptance does NOT settle**, and what the acceptance train still owes:
 
-- **§5.3 — the byte layout**, deferred pending conformance vectors in RFC-0014's discipline, with
+- ~~**§5.3 — the byte layout**, deferred pending conformance vectors in RFC-0014's discipline, with
   its three open sub-questions (TLV child vs packed-segment tag; multi-segment vs single-segment
   part; `path_lookup_key` admissibility). The **semantics** of §§4–10 are ruled; the **bytes** are
-  not, and no wire surface is frozen by this acceptance.
+  not, and no wire surface is frozen by this acceptance.~~ **CLOSED 2026-08-15 by amendments 4, 5
+  and 6** (§5.3.1–§5.3.3): the element is RFC-0018 §8's escape record at `kind = 0x16` (7 B), one
+  label covers a hop's whole local part, and a labelled `PATH` is **not** a `path_lookup_key`. The
+  bytes were **implemented and vectored** in #1325 car 2 — see §12.5 and its erratum 1.
 - **§12.4 — the bench gate**, which is normative for acceptance of the **implementation**. An
   implementation that regresses any shipped shape — especially the four-link `reply-spread` arm —
   is rejected regardless of this ruling.

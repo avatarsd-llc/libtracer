@@ -1,0 +1,28 @@
+{
+  "name": "label-multi-segment",
+  "category": "path-label",
+  "hex": "06001300001604030001000673656E736F720474656D70",
+  "total_bytes": 23,
+  "decoded": {
+    "type": "0x06 PATH",
+    "opt": {
+      "raw": "0x00",
+      "PL": 0,
+      "TS": 0,
+      "CR": 0,
+      "LL": 0,
+      "CW": 0,
+      "TF": 0,
+      "reserved_bit7": 0,
+      "reserved_bit0": 0
+    },
+    "length": 19,
+    "payload_hex": "001604030001000673656E736F720474656D70",
+    "trailer": {
+      "ts": null,
+      "crc": null
+    },
+    "meaning": "One label standing for a THREE-segment mount run - RFC-0027 amendment 6: a label covers a hop's whole local part, never one segment. The compacted run is /net/downlink/a (15 bytes packed: `03 net` + `08 downlink` + `01 a`), replaced by one 7-byte element; the residual /sensor/temp travels on as strings for the next hop to resolve.",
+    "note": "Per-segment labelling was rejected: it would cost 21 bytes here instead of 7, keep the multi-element walk and per-element lookup the RFC exists to delete, and make the per-hop mint table scale with address depth - the one term a NARROW node cannot bound."
+  }
+}
