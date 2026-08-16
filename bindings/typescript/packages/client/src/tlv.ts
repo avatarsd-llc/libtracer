@@ -213,7 +213,10 @@ export const PACKED_ESCAPE_LEN = 0;
 
 /**
  * @brief Read a PATH TLV's packed body back into its segments — the inverse of
- * {@link pathTlv}, in **canonical / key** context.
+ * {@link encodePath}, in **canonical / key** context.
+ *
+ * `encodePath(segs)` then `decode` then this yields `segs` again; the round trip is exact
+ * because a packed record has exactly one spelling per segment (RFC-0018 §4).
  *
  * The escape is REFUSED here rather than skipped: a caller reading segments wants an ADDRESS,
  * and an address carrying a label is not one. A forwarder that only relays the frame never
