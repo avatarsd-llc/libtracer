@@ -30,7 +30,8 @@
     {
       "binary": "bench_compact_delivery",
       "symbol": "void tr::net::fwd_router_t::route_fwd_forward<tr::wire::grammar::rope_cursor>",
-      "bytes": 2023
+      "bytes": 2231,
+      "note": "RE-PINNED 2023 -> 2231 (+208) by #1325 car 4 (RFC-0027 forwarder). The growth is ONE pass-through `std::span` \u2014 \u00a76.1's minted reply-leg spelling \u2014 threaded into the three `[[gnu::flatten]]` `rebuild_fwd_forward` instantiations this hop inlines. Two cheaper shapes were measured and rejected: deciding the mint inside this hop cost +688 B, and a lazy supplier closure still cost +512 B; hoisting the decision to `route_fwd_ingress` (unpinned, and already switching on `kind`) leaves only the forwarded span. No new work executes on the request path: the `if (!is_reply)` branch that guarded the mount-run assignment became an `is_reply ? ... : ...` select on the same field. NOT priced on the bench yet \u2014 RFC-0027 \u00a712.4 (car 5) is the gate that must, including the mandatory four-link reply-spread arm."
     }
   ]
 }

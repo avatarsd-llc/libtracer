@@ -16,6 +16,64 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **The RFC-0027 forwarder: mint on reply, deref on receipt, `NOT_FOUND` on stale —
+  `fwd_router_t::configure_path_labels`, `fwd_router_t::path_labels`,
+  `fwd_router_t::label_not_found`, `fwd_router_t::label_resolves`, and
+  `wire::fwd_dst_kind_t::PATH_LABEL`**
+  ([#1325](https://github.com/avatarsd-llc/libtracer/issues/1325) car 4). The behavioural core
+  of RFC-0027, and it is **off by default**: a router with no injected `path_label_table_t`
+  mints nothing, every hop's local part travels as the string it travels as today, and nothing
+  on the route notices (§6.3). That is the conformant default rather than a degraded one, and
+  it is why no shipped vector's bytes move.
+  - **`configure_path_labels(path_label_table_t*)`** — the ADR-0079 injection. The library
+    chooses neither the capacity nor the per-peer ceiling; both come from the embedder's own
+    store (`CONTEXT.md` §Resource bound). A `configure_` verb rather than a constructor
+    parameter, on the same "before frames flow" terms as the router's other seams.
+  - **The label branch beside `resolve_mount_at`.** A `dst` whose first record is an escape is
+    now classified `PATH_LABEL` (it was `NONE`, which fell to the terminus). The branch turns
+    the label straight into the resolution the hop already made — a bounds check, a slot load
+    and a generation compare — and hands it to the **same** `bound_egress` a bound hop runs, so
+    §8.2's ACL re-check at the dereferenced vertex is one implementation and not two.
+  - **§7.2's refusal, with no repair of any kind.** A label this host cannot validate — out of
+    range, generation mismatch, unminted slot, minted for another peer — forwards nothing,
+    applies nothing, and answers `tr::path::not_found`. There is deliberately **no
+    fall-through to the canonical walk**: `graph_t::dispatch_edge_target` can fall through
+    because the canonical spelling sits beside the bound one, and here the label *replaced* the
+    string bytes. What that precedent does supply, and what is copied, is that the refusal is
+    **counted** (`label_not_found`).
+  - **§6.2's trigger is a subscription's first fire and no other condition.** No use counters,
+    no hit thresholds, no hotness estimate, no timers, no aging: the label is minted once per
+    child and reused for every later reply, so the table is touched once and never on a
+    steady-state frame.
+  - **§7.1's departure bump** on `remove_child` and on a re-add's tombstone revive, plus a
+    second independent stamp on the per-child peer identity so a re-added child's predecessor
+    cannot be impersonated. No withdraw frame, no unbind, no lease, no TTL (§7.3).
+  - **§11.2's mutual exclusion is structural**, not a runtime test that could be forgotten:
+    only the canonical-`PATH` leg passes `may_mint_label`, so a bound leg cannot reach the mint
+    call site at all. RFC-0024's shipped `bind` is left exactly as it is — §11.2 is a SHOULD
+    whose enforcement strength is measurement-pending per §12.4.
+  - `reject_bus_name_hop` gained a `status` parameter so a hop's two self-made refusals can be
+    different answers to different questions (`tr::path::invalid` for a malformed bus-name
+    address, `tr::path::not_found` for an unresolvable label) over one refusal machinery.
+  - `rebuild_fwd_forward` gained a defaulted `reply_label` region — the one thing a REPLY's
+    `src` may grow by, and empty for every non-minting hop. See RFC-0027 §6.1 erratum 2, which
+    narrows RFC-0004 §B's "a reply accumulates no return route" to non-minting hops.
+  - **`bench/symbol_ratchet.json` re-pinned**, `route_fwd_forward<rope_cursor>` 2023 → 2231 B
+    (+208). The growth is ONE pass-through `std::span` — §6.1's minted reply-leg spelling —
+    threaded into the three `[[gnu::flatten]]` `rebuild_fwd_forward` instantiations that hop
+    inlines. Two cheaper shapes were measured and rejected first: deciding the mint inside the
+    hop cost **+688 B**, and a lazy supplier closure still cost **+512 B**; hoisting the
+    decision to `route_fwd_ingress` (unpinned, and already switching on `kind`) leaves only the
+    forwarded span. No new work executes on the request path — the `if (!is_reply)` branch that
+    guarded the mount-run assignment became an `is_reply ? … : …` select on the same field. The
+    rationale is recorded in the pins file beside the number. **Not priced on the bench** — §12.4
+    (car 5) is the gate that must, including the mandatory four-link `reply-spread` arm.
+  - **Deferred to a later car, and stated so rather than discovered:** bus/multi-peer children
+    are never labelled (one label per child would stand for a different address per peer behind
+    the bus, which is a mis-delivery — the correct shape is one slot per `(egress peer, inbound
+    target)` pair), and the **origin-side adoption** of a minted reply (the analogue of
+    `adopt_binding`, feeding `path_t::cache_path_label`) is not wired.
+
 - **The RFC-0027 mixed-element codec and the origin-side path-label cache — `path_element.hpp`
   (`wire::path_element_t`, `wire::path_element_kind_t`, `wire::path_element_at`,
   `wire::path_element_cursor_t`, `wire::path_element_census`, `wire::emit_path_labelled`) and

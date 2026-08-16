@@ -1,0 +1,12 @@
+{
+  "name": "fwd-label-stale",
+  "category": "fwd",
+  "hex": "0F403100010001000006001300001604000001000673656E736F720474656D7006000900087265706C792D65700100040009000000",
+  "total_bytes": 53,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "meaning": "FWD{ op=READ, dst=<path label 0:1>/sensor/temp, src=/reply-ep, VALUE u32=9 } - the labelled request a hop refuses once the vertex the label stood for has departed (RFC-0027 7.1/7.2).",
+    "note": "Identical bytes serve both outcomes: against a live slot this forwards over the link the label names, and against a bumped generation it answers tr::path::not_found (0x0020) and delivers nothing. The frame cannot tell you which - staleness is table state, not wire state, which is exactly why this vector's behavioural half is bound by a core test."
+  }
+}

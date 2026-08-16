@@ -1,0 +1,12 @@
+{
+  "name": "fwd-label-mint-reply",
+  "category": "fwd",
+  "hex": "0F403100010001000306000900087265706C792D657006001300001604000001000673656E736F720474656D7001000400D2040000",
+  "total_bytes": 53,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "meaning": "FWD{ op=REPLY, dst=/reply-ep, src=<path label 0:1>/sensor/temp, VALUE u32=1234 } - a reply as a MINTING forwarder relays it (RFC-0027 6.1). The hop's own local part, the three-segment mount run `net/uplink/b`, is spelled as one 7-byte path-label element instead of the 13 bytes of string it stands for.",
+    "note": "The label is the RFC-0018 escape record `00 16 04 <u32 LE>`, index 0 at generation 1 (RFC-0027 5.3.2, amendment 5). One label stands for the hop's WHOLE mount run, never one segment (amendment 6). A hop that does not mint relays this reply with its src untouched and is fully conformant (6.3)."
+  }
+}

@@ -149,6 +149,20 @@ target_link_libraries(path_label_codec_test PRIVATE libtracer)
 libtracer_test_warnings(path_label_codec_test)
 add_test(NAME path_label_codec COMMAND path_label_codec_test)
 
+# RFC-0027 car 4 — the FORWARDER: mint on reply, deref on receipt, NOT_FOUND on stale, and
+# §8.2's mandated label-vs-string ACL pair. Every claim here is behavioural, and the
+# conformance harness routes nothing, so this is the only place they can be false — the same
+# reason `bound_forward_test` exists for `fwd/fwd-bound-forward`. NET_PLANE-gated (it drives
+# `fwd_router_t`) and vector-reading (it pins four vectors byte-exact against the router).
+if(LIBTRACER_NET_PLANE)
+    add_executable(path_label_forward_test path_label_forward_test.cpp)
+    target_link_libraries(path_label_forward_test PRIVATE libtracer)
+    target_compile_definitions(path_label_forward_test PRIVATE
+        LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
+    libtracer_test_warnings(path_label_forward_test)
+    add_test(NAME path_label_forward COMMAND path_label_forward_test)
+endif()
+
 # The wire grammar's total-encoded-size bound (grammar.hpp, #921) — pinned at
 # 32-bit-`size_t` width, because the truncation it closes is unreachable at the
 # host's 64-bit width and a host-only vector would be a vacuous guard.
