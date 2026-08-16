@@ -2361,7 +2361,7 @@ void graph_t::configure_wire_target_resolver(wire_target_fn_t fn, void* ctx) noe
 }
 
 result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view_t source_view, view_t return_route,
-                                       std::string link, view_t reverse_route) {
+                                       std::string link, view_t reverse_route, std::string caller) {
     vertex_t* v = vh.get();
     // The route is this door's precondition, not an optional extra (#1055). Every edge this
     // door admits carries a link, and `dispatch_edge` gates its remote leg on that link while
@@ -2400,9 +2400,11 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view_t source_view, v
     // arrival session, because that silence is exactly what made #491 look like it worked.
     std::vector<std::byte> mount_route_tlv;  // outlives `route_view` below
     // The link this edge DELIVERS over — the arrival link until a mount-routed target moves
-    // it. `link` itself is left alone: it is the ACL subject context the SUBSCRIBE gate and
+    // it. `caller` is left alone: it is the ACL subject context the SUBSCRIBE gate and
     // every delivery run under (#81, ADR-0026, RFC-0021 §E — the gate is the WRITER's, even
-    // when the data goes somewhere else), so the two must not be the same variable.
+    // when the data goes somewhere else), so the two must not be the same variable. Since
+    // #375 Part 2 they are not even the same STRING: at a FLAT listener every peer shares
+    // one delivery link and each has its own subject.
     std::string delivery_link = link;
     if (s.target_key && !s.target_key->empty()) {
         if (const auto slot = wire_target_.get(); slot.fn != nullptr) {
@@ -2431,14 +2433,17 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view_t source_view, v
     // arms REQUIRE, so it stays out of the shared helper.
     s.target_key.reset();
     subscriber_remote_t& r = s.ensure_remote();  // a wire subscriber always carries the cold half
-    r.caller = std::move(link);  // the fan-in gate context this edge's deliveries run under (#81)
+    // The fan-in gate context this edge's deliveries run under (#81) — the WRITER's subject
+    // since #375 Part 2, and the link's own name for every caller that supplied none, which
+    // is byte for byte what this door stored before the two claims were separated (ADR-0082).
+    r.caller = caller.empty() ? std::move(link) : std::move(caller);
     r.return_route = std::move(return_route);
     // The completed reverse bound route (RFC-0024 §7.1 amendment 1) — empty for every
     // canonical-only subscribe, and stored WITHOUT validation beyond what the resolver
     // already did: element 0 is this node's own mint, re-validated on every delivery.
     r.reverse_route = std::move(reverse_route);
     r.link = std::move(delivery_link);
-    const std::string gate_ctx = r.caller;  // the SUBSCRIBE gate runs under the ARRIVAL link
+    const std::string gate_ctx = r.caller;  // the SUBSCRIBE gate runs under the WRITER's subject
                                             // (#81/ADR-0026), not the delivery one
     // A wire subscribe carries no host handle back — discard the slot (unsubscribe is the
     // wire :subscribers[N] clear, not this door's return).

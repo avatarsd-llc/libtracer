@@ -453,6 +453,10 @@ void transport_tcp_server::on_readable(session_base_t& base, const std::byte* da
         [this, &s](view::segment_ptr_t seg, std::size_t flen) {
             // aggregate init — no handle copy (#845)
             view::view_t frame{std::move(seg), 0, flen};
+            // The FLAT tier's WHO (#375 Part 2) — see the ws server's twin of this store:
+            // the peer-named tier passes the handle as an argument, the flat tier has no
+            // per-frame tag at all, and one unconditional 8-byte store serves both.
+            delivering_ = s.handle;
             if (peer_named_)
                 peer_rx_.deliver(s.handle, std::move(frame));
             else

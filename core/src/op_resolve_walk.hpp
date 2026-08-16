@@ -608,15 +608,13 @@ template <class N>
  * exactly what probing the canonical form yields (§6.1's anti-enumeration property).
  */
 template <class N>
-[[nodiscard]] result_t<rope_t> apply_op(graph_t& graph, const parsed_fwd_t<N>& req,
-                                        vertex_handle_t v, std::string_view inbound_link,
-                                        const view_t* frame_view, mem::mem_backend_t& flat,
-                                        mem::mem_backend_t& egress, const reply_route_t& route,
-                                        const field_path_t& field, bool has_field,
-                                        op_resolver_t::reverse_ref_fn_t reverse_ref_fn = nullptr,
-                                        void* reverse_ref_ctx = nullptr,
-                                        op_resolver_t::path_label_fn_t path_label_fn = nullptr,
-                                        void* path_label_ctx = nullptr, bool dst_labelled = false) {
+[[nodiscard]] result_t<rope_t> apply_op(
+    graph_t& graph, const parsed_fwd_t<N>& req, vertex_handle_t v, std::string_view inbound_link,
+    std::string_view subject, const view_t* frame_view, mem::mem_backend_t& flat,
+    mem::mem_backend_t& egress, const reply_route_t& route, const field_path_t& field,
+    bool has_field, op_resolver_t::reverse_ref_fn_t reverse_ref_fn = nullptr,
+    void* reverse_ref_ctx = nullptr, op_resolver_t::path_label_fn_t path_label_fn = nullptr,
+    void* path_label_ctx = nullptr, bool dst_labelled = false) {
     // The mint answer (RFC-0024 §7.5): this node's own reference to the target vertex, as a
     // one-element `PATH_REF` the origin stacks under whatever it already holds for the hops
     // in front of it. 4 + 8 bytes, on the reply only, and only when asked — the request side
@@ -722,7 +720,7 @@ template <class N>
     switch (req.op) {
         case fwd_op_t::READ: {
             if (has_field && is_subscribers_array(field)) {
-                result_t<std::vector<view_t>> subs = graph.read_subscribers(v, inbound_link);
+                result_t<std::vector<view_t>> subs = graph.read_subscribers(v, subject);
                 if (!subs) return assemble_error_reply(route, subs.error(), egress);
                 std::size_t sub_len = 0;
                 for (const view_t& s : *subs) sub_len += s.length;
@@ -744,11 +742,11 @@ template <class N>
             // back a REFERENCE to the published one. Both feed the same reply assembly, which
             // only ever reads the rope, so bind whichever arrived without copying it.
             result_t<value_ref_t> r = has_field ? [&] {
-                auto composed = graph.read(v, field, inbound_link);
+                auto composed = graph.read(v, field, subject);
                 return composed ? result_t<value_ref_t>{value_ref_t::composed(std::move(*composed))}
                                 : result_t<value_ref_t>{std::unexpected(composed.error())};
             }()
-                                                : graph.read(v, inbound_link);
+                                                : graph.read(v, subject);
             if (!r) return assemble_error_reply(route, r.error(), egress);
             // The composed-root case: graph.read may SUCCEED (a folded ~hundreds-of-links
             // snapshot) yet the reply's own link-table reserve fail on the fragmented heap.
@@ -837,9 +835,14 @@ template <class N>
                 // ADR-0049: the wire append enters the graph's single admission door
                 // (subscribe_wire → admit_subscriber) — the SUBSCRIBER TLV is parsed
                 // ONCE there (delivery_compact included), so no parallel parse here.
-                result_t<void> w =
-                    graph.subscribe_wire(v, sub_value, return_route, std::string(inbound_link),
-                                         std::move(reverse_route));
+                // The link is WHERE this edge delivers; the subject is WHO subscribed
+                // (ADR-0082). They are the same string for every caller that supplied no
+                // peer handle, and differ exactly when the terminus derived a per-writer
+                // subject — which is what makes a FLAT listener's peers distinguishable
+                // without making any of them individually routable.
+                result_t<void> w = graph.subscribe_wire(
+                    v, sub_value, return_route, std::string(inbound_link), std::move(reverse_route),
+                    subject == inbound_link ? std::string{} : std::string(subject));
                 if (!w) return assemble_error_reply(route, w.error(), egress);
                 const reply_route_t ok = labelled_route();
                 return or_backpressure(
@@ -869,8 +872,7 @@ template <class N>
             if (value.total_length() == 0)
                 return assemble_error_reply(route, status_t::BACKPRESSURE, egress);
 
-            result_t<void> w =
-                graph.write(v, has_field ? field : field_path_t{}, value, inbound_link);
+            result_t<void> w = graph.write(v, has_field ? field : field_path_t{}, value, subject);
             if (!w) return assemble_error_reply(route, w.error(), egress);
             const reply_route_t ok = labelled_route();
             return or_backpressure(
@@ -899,7 +901,7 @@ template <class N>
             const std::chrono::nanoseconds timeout =
                 req.has_await_timeout ? std::chrono::nanoseconds(req.await_timeout)
                                       : kDefaultAwaitTimeout;
-            result_t<value_ref_t> r = graph.await(v, timeout, inbound_link);
+            result_t<value_ref_t> r = graph.await(v, timeout, subject);
             if (!r)
                 return assemble_error_reply(route, r.error(),
                                             egress);  // TIMEOUT => tr::flow::timeout
@@ -923,8 +925,8 @@ template <class N>
  */
 template <class N>
 [[nodiscard]] result_t<rope_t> resolve_node(
-    graph_t& graph, const N& root, std::string_view inbound_link, const view_t* frame_view,
-    mem::mem_backend_t& flat, mem::mem_backend_t& egress,
+    graph_t& graph, const N& root, std::string_view inbound_link, std::string_view subject,
+    const view_t* frame_view, mem::mem_backend_t& flat, mem::mem_backend_t& egress,
     op_resolver_t::reverse_ref_fn_t reverse_ref_fn = nullptr, void* reverse_ref_ctx = nullptr,
     op_resolver_t::path_label_fn_t path_label_fn = nullptr, void* path_label_ctx = nullptr,
     const wire::path_ref_element_t* dst_label_target = nullptr) {
@@ -1051,8 +1053,9 @@ template <class N>
         // REPLACED the string bytes, so there is nothing left to walk. By value, which the
         // router turns into a drop, exactly as the stale bound element below.
         if (!bound) return std::unexpected(status_t::NOT_FOUND);
-        return apply_op(graph, req, *bound, inbound_link, frame_view, flat, egress, route, field,
-                        has_field, reverse_ref_fn, reverse_ref_ctx, path_label_fn, path_label_ctx,
+        return apply_op(graph, req, *bound, inbound_link, subject, frame_view, flat, egress, route,
+                        field, has_field, reverse_ref_fn, reverse_ref_ctx, path_label_fn,
+                        path_label_ctx,
                         /*dst_labelled=*/true);
     }
 
@@ -1072,8 +1075,9 @@ template <class N>
         // No write-creates on a bound dst, deliberately: `ensure_vertex` mkdir-p's an ADDRESS,
         // and an element is not one. A vref names a vertex that existed when it was minted, so
         // "it is not there any more" is exactly the stale case the deref just refused.
-        return apply_op(graph, req, *bound, inbound_link, frame_view, flat, egress, route, field,
-                        has_field, reverse_ref_fn, reverse_ref_ctx, path_label_fn, path_label_ctx);
+        return apply_op(graph, req, *bound, inbound_link, subject, frame_view, flat, egress, route,
+                        field, has_field, reverse_ref_fn, reverse_ref_ctx, path_label_fn,
+                        path_label_ctx);
     }
 
     // dst resolution is the router's PATH-keyed dispatch — span-aliased for a
@@ -1116,8 +1120,9 @@ template <class N>
     // caller is the node's own trusted code and owns its graph's structure. The asymmetry is
     // the point of the amendment, not an oversight left in it.
     if (!found) return assemble_error_reply(route, status_t::NOT_FOUND, egress);
-    return apply_op(graph, req, *found, inbound_link, frame_view, flat, egress, route, field,
-                    has_field, reverse_ref_fn, reverse_ref_ctx, path_label_fn, path_label_ctx);
+    return apply_op(graph, req, *found, inbound_link, subject, frame_view, flat, egress, route,
+                    field, has_field, reverse_ref_fn, reverse_ref_ctx, path_label_fn,
+                    path_label_ctx);
 }
 
 }  // namespace

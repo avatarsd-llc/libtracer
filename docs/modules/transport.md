@@ -50,7 +50,7 @@ A transport that can hand up *owning* frames implements the rope-receiver seam
 view delivery](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md),
 generalized to ropes by [ADR-0053 — lazy rope-backed decode, view partial-path
 routing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0053-lazy-rope-backed-decode-view-partial-path-routing.md)):
-it overrides `delivers_ropes()` (`core/include/libtracer/transport.hpp:678`) and
+it overrides `delivers_ropes()` (`core/include/libtracer/transport.hpp:612`) and
 delivers each inbound frame as a `rope_t` of refcounted links over segments drawn
 from a host-injected `mem_backend_t`. A contiguous frame is the single-link case; a
 scattered one — a CAN reassembly group, a fragmented WebSocket message — crosses the
@@ -61,8 +61,8 @@ the callback needs this tier.
 There is deliberately no adapter that wraps a borrowed span into a rope; such a rope's
 refcounts would lie about lifetime. `fwd_router_t::add_child` (`core/src/fwd_router.cpp:755`)
 therefore branches on the link's declared capability and installs exactly one sink —
-the rope form for an owning link, the span form otherwise (`fwd_router.cpp:901,799`, and
-`fwd_router.cpp:851,858` for the peer-named bus equivalent).
+the rope form for an owning link, the span form otherwise (`fwd_router.cpp:906,799`, and
+`fwd_router.cpp:855,862` for the peer-named bus equivalent).
 
 Every socket transport in the tree declares the owning tier: UDP
 (`transport_udp.hpp:111`), TCP client and server (`transport_tcp.hpp:218,409`),
@@ -76,7 +76,7 @@ and the tier an out-of-tree transport gets for free.
 A point-to-point link carries one peer, so the child NAME the router registers it
 under fully addresses the far side. A **bus** link reaches many peers over one wire
 and exposes them through the optional `bus_link_t` facet
-(`core/include/libtracer/transport.hpp:141`, [ADR-0044 — stateless transport peer
+(`core/include/libtracer/transport.hpp:75`, [ADR-0044 — stateless transport peer
 enumeration](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0044-stateless-transport-peer-enumeration-separate-paths-client-side-identity.md)):
 `enumerate_peers` synthesizes the currently-audible names from the wire's own live
 traffic, `peer_link` resolves one name to a directed sending endpoint, and
@@ -96,7 +96,7 @@ configured peer-named — one implementation, on the slot-server base both of th
 inherit (`posix_endpoint.hpp:675`); every other kind keeps the `nullptr` default.
 
 Whether a link's peer-named tier exists is one query, `bus_link_t::peer_named()`
-(`transport.hpp:258`): the constructed flag for the two stream servers
+(`transport.hpp:192`): the constructed flag for the two stream servers
 (`posix_endpoint.hpp:687`), `true` by construction for a kind that is a bus outright.
 `bus_link_t` **refuses** each of its peer-named wiring calls — `set_peer_receiver`,
 `set_peer_rope_receiver`, `set_peer_down_notifier` — while it is false. That refusal matters
@@ -116,7 +116,7 @@ Departure follows the same split. A **peer-named** server evicts exactly the dep
 (`notify_peer_down(name)`); a **flat** server has one routing identity for every peer it
 carries — the registered child NAME — so its only seam is the whole link
 (`transport_t::notify_down`), and it therefore waits until the **last** open session departs
-(`posix_endpoint.cpp:714`). Firing it on a mid-life close would evict the surviving peers'
+(`posix_endpoint.cpp:724`). Firing it on a mid-life close would evict the surviving peers'
 edges along with the departed one's.
 
 ## QUIC and WebTransport
@@ -293,7 +293,7 @@ flowchart LR
   and a callable destroyed early dangles exactly like a stale `ctx`.
 - **Overriding `send(iov)` is not optional for a scatter-gather wire.** The base
   implementation gathers into a temporary buffer and, when that allocation fails,
-  **drops the frame** rather than aborting (`transport.hpp:522`). A transport with a
+  **drops the frame** rather than aborting (`transport.hpp:456`). A transport with a
   native `sendmsg`/`writev` that does not override it silently pays a copy per
   forward hop and inherits a drop path it did not intend.
 - **The egress gather draws from the link's own injected store.** That temporary — and

@@ -824,6 +824,10 @@ bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_sou
         // The bus facet the frame paths resolve a peer handle's NAME through (#1294) —
         // recorded before publication, like every other resolved-once fact on this ctx.
         bctx.bus.store(bus, std::memory_order_relaxed);
+        // The link itself, for the SUBJECT seam (#375 Part 2). Recorded on both arms of this
+        // registration and not only the bus one, because ADR-0082 rules the subject a
+        // separate claim from addressing: it has to be askable of a FLAT child too.
+        bctx.link.store(&link, std::memory_order_relaxed);
         publish_ctx(bctx);
         // The session-identity pair (#1223 step 2). Arrival is a NEW seam and only an
         // ACCEPTING listener fires it — `set_peer_up_notifier` is what turns ADR-0044's
@@ -871,6 +875,7 @@ bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_sou
     // this ctx (#884) and a name that used to be a bus mount must not keep answering with
     // the facet it no longer has (#1294).
     ctx.bus.store(nullptr, std::memory_order_relaxed);
+    ctx.link.store(&link, std::memory_order_relaxed);  // the subject seam's door (#375 Part 2)
     // The bound-path join (RFC-0024 §5.1), resolved ONCE per registration: the child's mount
     // run IS the canonical key of its connection vertex, so this is one map lookup of bytes
     // already in hand. A child whose vertex does not exist yet keeps `kNoConnSlot` and is
@@ -1556,6 +1561,37 @@ std::string_view fwd_router_t::resolve_peer_name(const child_rx_ctx_t& ctx, peer
     return bus->peer_name(peer, scratch);
 }
 
+peer_handle_t fwd_router_t::terminus_peer(const child_rx_ctx_t* ctx, peer_handle_t peer) noexcept {
+    if (peer.valid()) return peer;  // the bus seam already tagged this frame
+    if (ctx == nullptr) return {};
+    transport_t* const link = ctx->link.load(std::memory_order_relaxed);
+    // The FLAT arm. The link has one routing identity for every peer it carries — that is
+    // what `peer_named=false` means — so the frame arrived untagged and the only place the
+    // writer's identity still exists is inside the link, which is delivering it right now.
+    // Asked HERE, at the point of consumption, and on the transport's own receive thread:
+    // this call is meaningful only inside the delivery callback we are standing in.
+    return link != nullptr ? link->inbound_peer() : peer_handle_t{};
+}
+
+std::string_view fwd_router_t::peer_subject_of(const child_rx_ctx_t* ctx, peer_handle_t peer,
+                                               std::span<char> scratch) {
+    if (ctx == nullptr || !peer.valid()) return {};
+    transport_t* const link = ctx->link.load(std::memory_order_relaxed);
+    if (link == nullptr) return {};
+    return link->peer_subject(peer, scratch);
+}
+
+std::string_view fwd_router_t::peer_subject_thunk(void* ctx, const graph::inbound_ref_t& inbound,
+                                                  std::span<char> scratch) {
+    // `ctx` is the router and is unused: everything the derivation needs travels on the call
+    // — the handle, and the receive context the terminus stashed in the opaque `origin`. The
+    // {fn, ctx} shape is kept because that is the seam's shape (ADR-0047), not because this
+    // supplier has state.
+    (void)ctx;
+    return peer_subject_of(static_cast<const child_rx_ctx_t*>(inbound.origin), inbound.peer,
+                           scratch);
+}
+
 void fwd_router_t::on_frame_bus(const child_rx_ctx_t& ctx, peer_handle_t peer,
                                 std::span<const std::byte> frame) {
     // The handle is the seam's identity; the routing plane's is the NAME, so it is resolved
@@ -1564,7 +1600,7 @@ void fwd_router_t::on_frame_bus(const child_rx_ctx_t& ctx, peer_handle_t peer,
     std::array<char, kPeerNameChars> scratch{};
     const std::string_view name = resolve_peer_name(ctx, peer, scratch);
     if (name.empty()) return;  // no bus facet, or a handle this kind does not name
-    on_frame_impl(name, frame, nullptr, &ctx, true);
+    on_frame_impl(name, frame, nullptr, &ctx, true, peer);
 }
 
 void fwd_router_t::on_frame_rope(std::string_view inbound_name, view::rope_t frame) {
@@ -1576,7 +1612,7 @@ void fwd_router_t::on_frame_rope_bus(const child_rx_ctx_t& ctx, peer_handle_t pe
     std::array<char, kPeerNameChars> scratch{};
     const std::string_view name = resolve_peer_name(ctx, peer, scratch);
     if (name.empty()) return;  // see on_frame_bus
-    on_frame_rope_impl(name, std::move(frame), &ctx, true);
+    on_frame_rope_impl(name, std::move(frame), &ctx, true, peer);
 }
 
 template <class Cursor, class Observe, class Reject, class Terminus, class Reply>
@@ -1705,7 +1741,8 @@ bool fwd_router_t::route_fwd_ingress(std::string_view inbound_name, const Cursor
 }
 
 void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_t frame,
-                                      const child_rx_ctx_t* inbound_ctx, bool from_peer) {
+                                      const child_rx_ctx_t* inbound_ctx, bool from_peer,
+                                      peer_handle_t peer) {
     // Single-link (every current producer): the link's bytes span feeds the SAME
     // routing as the borrowed path — the forward hop below never touches the
     // refcount (zero-heap, ADR-0038); only the terminus sees the owner, for the
@@ -1713,7 +1750,7 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
     if (frame.link_count() == 1) {
         const view_t& v = frame.links()[0];
         if (v.is_device()) return;  // CPU routing cannot read a DEVICE frame
-        on_frame_impl(inbound_name, v.bytes(), &v, inbound_ctx, from_peer);
+        on_frame_impl(inbound_name, v.bytes(), &v, inbound_ctx, from_peer, peer);
         return;
     }
     // Multi-link: route a FORWARD hop directly over the rope — NO flatten
@@ -1753,7 +1790,8 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
                 [&](const wire::path_ref_element_t* label_target) {
                     // A request FWD is resolved straight off the rope (ADR-0053 3c-iii — NO
                     // flatten, verify-at-access §4).
-                    resolve_terminus_rope(inbound_name, std::move(frame), label_target);
+                    resolve_terminus_rope(inbound_name, std::move(frame), label_target, inbound_ctx,
+                                          peer);
                 },
                 /* reply */
                 [&] {
@@ -1777,12 +1815,12 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
     // Control frame (or a device/short rope): served rope-native (ADR-0055 §2/§3). The
     // route-handle sinks read the label off the rope and materialize only the sub-rope
     // they need contiguous — the interim whole-frame flatten is gone (ADR-0053 ⑥).
-    on_control_rope(inbound_name, std::move(frame));
+    on_control_rope(inbound_name, std::move(frame), inbound_ctx, peer);
 }
 
 void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const std::byte> frame,
                                  const view_t* frame_view, const child_rx_ctx_t* inbound_ctx,
-                                 bool from_peer) {
+                                 bool from_peer, peer_handle_t peer) {
     if (const auto sink = raw_.get(); sink.fn != nullptr) sink.fn(sink.ctx, inbound_name, frame);
     if (frame.size() < 4) return;
 
@@ -1808,7 +1846,7 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
             },
             /* terminus */
             [&](const wire::path_ref_element_t* label_target) {
-                resolve_terminus(inbound_name, frame, frame_view, inbound_ctx, label_target);
+                resolve_terminus(inbound_name, frame, frame_view, inbound_ctx, label_target, peer);
             },
             /* reply */
             [&] {
@@ -1844,9 +1882,10 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
     // The child window is ALREADY contiguous on this tier, so the make-contiguous seam the
     // switch takes is a plain `subspan` — no copy, and the rope tier's OOM arms are inert
     // here because a subspan of a non-empty window cannot come back empty.
-    dispatch_control(inbound_name, cur, [frame](std::size_t off, std::size_t total) {
-        return frame.subspan(off, total);
-    });
+    dispatch_control(
+        inbound_name, cur,
+        [frame](std::size_t off, std::size_t total) { return frame.subspan(off, total); },
+        inbound_ctx, peer);
 }
 
 std::span<const std::byte> fwd_router_t::child_label_record(std::string_view inbound_name,
@@ -2155,7 +2194,8 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
 
 void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<const std::byte> frame,
                                     const view_t* frame_view, const child_rx_ctx_t* inbound_ctx,
-                                    const wire::path_ref_element_t* dst_label_target) {
+                                    const wire::path_ref_element_t* dst_label_target,
+                                    peer_handle_t peer) {
     // Local request terminus (ADR-0041 §5): arena-decode straight from the
     // node's injected resource (ADR-0039 §1) — the library keeps no buffer of
     // its own; a bounded host injects a pool resource over its slab and the
@@ -2170,7 +2210,12 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
     // §7.2's terminus deref rides as the fourth argument and nothing else changes: a labelled
     // `dst` is resolved against the element the label branch already produced, and a `nullptr`
     // — every frame a non-labelling node terminates — is the shipped call byte for byte.
-    auto reply = resolver_.resolve(*arena, inbound_name, frame_view, dst_label_target);
+    // WHERE it arrived and WHO sent it, as two claims rather than one string (ADR-0082).
+    // The handle is the bus seam's when there is one and the FLAT link's in-flight peer
+    // otherwise, so a per-writer subject is reachable at either setting of `peer_named`; the
+    // ctx rides along as the opaque token the router's own subject supplier reads back.
+    const graph::inbound_ref_t inbound{inbound_name, terminus_peer(inbound_ctx, peer), inbound_ctx};
+    auto reply = resolver_.resolve(*arena, inbound, frame_view, dst_label_target);
     if (!reply) return;                    // structurally non-request ⇒ drop
     if (reply->link_count() == 0) return;  // assemble OOM ⇒ empty rope ⇒ drop (no garbage frame)
     if (transport_t* in = registry_.by_name(inbound_name)) {
@@ -2183,7 +2228,8 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
 }
 
 void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::rope_t frame,
-                                         const wire::path_ref_element_t* dst_label_target) {
+                                         const wire::path_ref_element_t* dst_label_target,
+                                         const child_rx_ctx_t* inbound_ctx, peer_handle_t peer) {
     // ADR-0053 3c-iii: the multi-link request terminus, resolved straight off the
     // rope — the interim flatten is gone. Adopt the frame as a lazy view: over()
     // anchors the root header + total-size bounds, and verify() adds the root
@@ -2203,7 +2249,8 @@ void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::ro
     // the reverse, and that misreading nearly justified deleting the tier.) Reply routes
     // back over the inbound link, its dst the request's accumulated src, as at the arena
     // terminus.
-    auto reply = resolver_.resolve(*view, inbound_name, nullptr, dst_label_target);
+    const graph::inbound_ref_t inbound{inbound_name, terminus_peer(inbound_ctx, peer), inbound_ctx};
+    auto reply = resolver_.resolve(*view, inbound, nullptr, dst_label_target);
     if (!reply) return;                    // structurally non-request ⇒ drop
     if (reply->link_count() == 0) return;  // assemble OOM ⇒ empty rope ⇒ drop (no garbage frame)
     if (transport_t* in = registry_.by_name(inbound_name)) {
@@ -2219,7 +2266,8 @@ void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::ro
 
 template <class Cursor, class Contig>
 void fwd_router_t::dispatch_control(std::string_view inbound_name, const Cursor& cur,
-                                    Contig&& contig) {
+                                    Contig&& contig, const child_rx_ctx_t* inbound_ctx,
+                                    peer_handle_t peer) {
     // `crc_check_t::VERIFY` is passed explicitly and is load-bearing on BOTH tiers: a control
     // frame MUTATES routing state, so it is applied only after the trailer proves the bytes
     // intact (CONTEXT.md §Frame integrity, ADR-0041 §1). `peek_control` defaults to DEFER
@@ -2271,7 +2319,7 @@ void fwd_router_t::dispatch_control(std::string_view inbound_name, const Cursor&
             // delivery. Missing one value under exhaustion is valid; corrupting the stored
             // one is not.
             if (payload.empty() && head->child1_total != 0) return;
-            on_compact(inbound_name, head->label, payload);
+            on_compact(inbound_name, head->label, payload, inbound_ctx, peer);
             return;
         }
         default:
@@ -2279,7 +2327,8 @@ void fwd_router_t::dispatch_control(std::string_view inbound_name, const Cursor&
     }
 }
 
-void fwd_router_t::on_control_rope(std::string_view inbound_name, view::rope_t frame) {
+void fwd_router_t::on_control_rope(std::string_view inbound_name, view::rope_t frame,
+                                   const child_rx_ctx_t* inbound_ctx, peer_handle_t peer) {
     // Only a MULTI-link control frame reaches here — a contiguous (single-link) one
     // decodes eagerly in on_frame_impl. A control frame is never a DEVICE payload, so a
     // non-all-host rope is not one; drop it (as the old flatten→failed-decode path did).
@@ -2288,17 +2337,19 @@ void fwd_router_t::on_control_rope(std::string_view inbound_name, view::rope_t f
     // The materialized child sub-rope, held across the handler call: the switch reads it as a
     // span, so its owner has to outlive the arm that asked for it.
     view_t hold;
-    dispatch_control(inbound_name, cur,
-                     [&](std::size_t off, std::size_t total) -> std::span<const std::byte> {
-                         // A REFUSED materialize (an OOM — the frame is all-host-guarded
-                         // above) yields an empty span, which every arm's own guard already
-                         // reads as "drop". Named rather than inferred from `empty()` (#917).
-                         std::expected<view_t, view::flatten_err_t> m =
-                             frame.subrope(off, total).try_materialize(*flat_);
-                         if (!m) return {};
-                         hold = std::move(*m);
-                         return hold.bytes();
-                     });
+    dispatch_control(
+        inbound_name, cur,
+        [&](std::size_t off, std::size_t total) -> std::span<const std::byte> {
+            // A REFUSED materialize (an OOM — the frame is all-host-guarded
+            // above) yields an empty span, which every arm's own guard already
+            // reads as "drop". Named rather than inferred from `empty()` (#917).
+            std::expected<view_t, view::flatten_err_t> m =
+                frame.subrope(off, total).try_materialize(*flat_);
+            if (!m) return {};
+            hold = std::move(*m);
+            return hold.bytes();
+        },
+        inbound_ctx, peer);
 }
 
 void fwd_router_t::on_advertise(std::string_view inbound_name, std::uint16_t label,
@@ -2496,7 +2547,8 @@ inline constexpr std::size_t kCompactRouteInline = graph::kMaxSegmentBytes * 2;
 }  // namespace
 
 void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label,
-                              std::span<const std::byte> payload_bytes) {
+                              std::span<const std::byte> payload_bytes,
+                              const child_rx_ctx_t* inbound_ctx, peer_handle_t peer) {
     // `payload_bytes` is the already-contiguous wire encoding of the COMPACT payload TLV
     // (the span path re-encodes the decoded child; the rope path materializes only the
     // payload sub-rope — ADR-0055 §2). It is never re-decoded here — just stored/forwarded.
@@ -2523,13 +2575,23 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
     }
 
     if (rb.terminus) {
+        // The WRITER's subject (#375 Part 2), derived from the frame's peer handle exactly as
+        // the FWD terminus derives it. A COMPACT is the same write in a compressed spelling,
+        // so it MUST present the same principal: if this arm kept the inbound LINK name while
+        // the full-route form presented the peer, a peer denied by an ACE naming it could
+        // reach the identical vertex through the label-switched door. The scratch outlives
+        // both write sites below, which is what the returned view may point into.
+        std::array<char, kPeerNameChars> subject_scratch{};
+        const std::string_view subject_or_empty =
+            peer_subject_of(inbound_ctx, terminus_peer(inbound_ctx, peer), subject_scratch);
+        const std::string_view caller = subject_or_empty.empty() ? inbound_name : subject_or_empty;
         // WARM: dereference the cached vertex and write. No decode, no path walk, no
         // graph_.find — the whole point of RFC-0004 §E.1's label, finally applied to the
         // RESOLUTION and not merely to the wire. The generation guard is what makes the
         // cached handle safe: retire() bumps it (#511), so a retired-and-revived vertex is
         // detected here rather than silently written through (RFC-0009 §B.6 re-virginize).
         //
-        // `inbound_name` is the ACL caller context (#974), exactly as `inbound_link` is for
+        // `caller` is the ACL caller context (#974), exactly as the derived subject is for
         // the full-route FWD{WRITE} (op_resolve_walk.hpp's WRITE arm). A COMPACT is a
         // delivery-is-a-write (RFC-0004 §E.1 / §D) and RFC-0004 §F gates the target vertex's
         // `:acl` at the final hop, so the two forms of ONE write must present one subject.
@@ -2559,7 +2621,7 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
                 return;
             }
             value.append(*payload_view);
-            if (graph_.write(*rb.target, std::move(value), inbound_name).has_value()) {
+            if (graph_.write(*rb.target, std::move(value), caller).has_value()) {
                 if (const auto sink = delivery_.get(); sink.fn != nullptr)
                     observe_compact_delivery(handles_, sink.fn, sink.ctx, inbound_name, label,
                                              payload_bytes);
@@ -2579,7 +2641,7 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
         }
         // Same caller context as the warm arm above (#974): the cold and warm halves of one
         // flow must not disagree about who is writing.
-        if (deliver_local(binding->local_route, payload_bytes, inbound_name)) {
+        if (deliver_local(binding->local_route, payload_bytes, caller)) {
             if (const auto v = resolve_route_vertex(binding->local_route)) {
                 resolved_binding_t fill = rb;
                 fill.warm = true;

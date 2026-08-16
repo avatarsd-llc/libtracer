@@ -471,6 +471,16 @@ std::string_view slot_server_t::peer_name(peer_handle_t peer, std::span<char> sc
     return std::string_view(scratch.data(), static_cast<std::size_t>(end - scratch.data()));
 }
 
+std::string_view slot_server_t::peer_subject(peer_handle_t peer, std::span<char> scratch) const {
+    // The SUBJECT and the peer NAME coincide for this kind, and deliberately so: the session
+    // token `p<slot>` is the only per-writer discriminator a stream server has until an
+    // authentication layer mints a real one (ADR-0045). What does NOT coincide is their
+    // AVAILABILITY — `peer_name` is reached through the `bus_link_t` facet, which a FLAT
+    // server does not expose, while this is on `transport_t` and answers at either setting of
+    // `peer_named`. That difference IS ADR-0082's decouple, expressed in one override.
+    return peer_name(peer, scratch);
+}
+
 /**
  * @brief Resolve `p<slot>` to that slot's directed endpoint — SLOT-scoped, not
  *        session-scoped (#1153).

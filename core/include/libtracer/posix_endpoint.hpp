@@ -699,6 +699,33 @@ class slot_server_t : public transport_t, public bus_link_t, protected stream_en
                                              std::span<char> scratch) const override;
 
     /**
+     * @brief The in-flight frame's peer — the WHO seam, answered at either setting of
+     *        @ref peer_named (#375 Part 2, ADR-0082).
+     *
+     * A peer-named server tags every frame through the bus seam and never needs this. A FLAT
+     * one cannot: it has exactly one routing identity for every peer it carries, and the
+     * `p<slot>` tag it computes is thrown away at the delivery fork. This is where that tag
+     * survives — stamped on the poll thread immediately before the flat delivery and read
+     * back, on that same thread, by the router's terminus.
+     *
+     * @warning Poll-thread state, meaningful ONLY inside a receive callback. It is a plain
+     *          member and not an atomic on purpose: one server owns one poll thread
+     *          (ADR-0071's shared-nothing epoll), the store and every legitimate load happen
+     *          on it, and paying for an atomic on the per-frame delivery path to make an
+     *          off-thread read merely *defined* rather than *correct* buys nothing.
+     */
+    [[nodiscard]] peer_handle_t inbound_peer() const noexcept override { return delivering_; }
+
+    /**
+     * @brief The SUBJECT token of @p peer — `p<slot>`, this kind's session identity.
+     *
+     * The same string @ref peer_name answers with, reachable without the `bus_link_t` facet;
+     * see the implementation's note on why the two coincide in value and not in availability.
+     */
+    [[nodiscard]] std::string_view peer_subject(peer_handle_t peer,
+                                                std::span<char> scratch) const override;
+
+    /**
      * @brief Resolve an open peer's name to its directed sending endpoint.
      *
      * Owned by the peer's slot and pointer-valid for this server's lifetime (slots are
@@ -953,6 +980,10 @@ class slot_server_t : public transport_t, public bus_link_t, protected stream_en
      *         at construction — never 0, never above the window's ceiling (#1295). */
     std::size_t max_peers_ = 1;
     bool peer_named_ = false; /**< @brief Expose bus() — a wiring-time deployment choice. */
+    /** @brief The peer whose frame is being delivered RIGHT NOW — @ref inbound_peer's
+     *         storage. Stamped by the derived server's receive loop immediately before it
+     *         hands a frame up the FLAT tier, on the poll thread, and never read off it. */
+    peer_handle_t delivering_{};
 
    private:
     /** @brief Admit one inbound connection into a free (or newly grown) slot. */
