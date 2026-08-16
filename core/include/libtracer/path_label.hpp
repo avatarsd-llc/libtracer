@@ -35,6 +35,7 @@
  */
 #pragma once
 
+#include <array>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -207,7 +208,7 @@ inline constexpr std::size_t kPathLabelRecordBytes = kPackedEscapeOverhead + kPa
  */
 [[nodiscard]] inline bool emit_path_label(std::vector<std::byte>& out, path_label_t label) {
     if (!label.valid()) return false;
-    std::byte body[kPathLabelBodyBytes]{};
+    std::array<std::byte, kPathLabelBodyBytes> body{};
     path_label_store(body, label);
     return emit_path_escape(out, kPackedEscapeKindLabel, body);
 }
