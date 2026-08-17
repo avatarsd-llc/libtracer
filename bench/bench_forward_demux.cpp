@@ -46,9 +46,11 @@
 #include <cstdlib>
 #include <initializer_list>
 #include <iterator>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "bench_common.hpp"
@@ -89,36 +91,36 @@ constexpr double kDefaultBudgetSeconds = 1.0;
 }
 
 /**
- * @brief The batch size at which per-hop cost stops falling — CALIBRATED, not chosen.
+ * @brief The batch size a leg is timed in — DERIVED from the target window, not chosen.
  *
- * One hop costs tens of nanoseconds, the same order as `clock_gettime` itself, so timing
- * each hop individually measures the clock rather than the router. (An early draft of
- * this bench did exactly that and reported the whole-table scan *beating* the first-hit
- * lookup — the signature of a clock-dominated window.) Batching amortizes the two clock
- * reads, but the right batch size is a property of the HOST's clock, not a constant to
- * hardcode: pick it too small on a slow-clock runner and the artifact returns silently.
+ * One hop costs tens of nanoseconds, the same order as `clock_gettime` itself, so timing each
+ * hop individually measures the clock rather than the router. (An early draft of this bench
+ * did exactly that and reported the whole-table scan *beating* the first-hit lookup — the
+ * signature of a clock-dominated window.) Batching amortizes the two clock reads, but the
+ * right batch is a property of the HOST's clock, not a constant to hardcode.
  *
- * So derive it. While clock overhead still dominates, doubling the batch nearly halves
- * the apparent per-hop cost; once it is amortized, the curve plateaus. Double until the
- * improvement is under @ref kPlateau — a convergence tolerance, the one number a
- * numerical method legitimately owns — and report the batch size in the output so the
- * measurement states its own assumption instead of hiding it.
+ * This bench used to derive it with a local PLATEAU rule: double until the per-hop figure
+ * stops improving by 5 %. That rule compares two *timed* quantities, so the machine gets a
+ * vote in the answer — see `calibrate_batch_for_window`'s own note (#1358). It bites here.
+ * Over 24 executions of the same three resolve legs on the quiet pinned host the plateau rule
+ * latched batches of **8, 16 and 32** on one leg, and the batch-8 execution read `36 ns`
+ * against `33–34 ns` for the others: ~3 ns (9 %) of pure calibrator, in discrete clusters,
+ * with nothing but the lottery between the two arms. That is precisely the shape of a false
+ * attribution, and this bench's whole third axis is an attribution (#1346).
+ *
+ * So ask the question directly instead: keep doubling until the measured WINDOW reaches
+ * `bench::kMinBatchWindowNs`. The batch then follows the operation's own cost, repeats across
+ * executions, and self-scales across a sweep whose arms differ by an order of magnitude. Every
+ * leg still reports its batch, so the measurement states its own assumption.
+ *
+ * Directionally safe for the banked series: a longer window can only remove clock overhead, so
+ * the smaller-is-better latency rows move down or stay put. The bench source changes in this
+ * commit anyway, which marks every series it feeds.
  * @param hop Runs one forward hop.
  */
-constexpr double kPlateau = 0.05;  // <5% improvement from doubling ⇒ amortized
-
 template <typename Hop>
 [[nodiscard]] std::size_t calibrate_batch(Hop&& hop) {
-    double prev = 0.0;
-    for (std::size_t batch = 1; batch <= (1U << 20); batch *= 2) {
-        const std::uint64_t a = bench::now_ns();
-        for (std::size_t i = 0; i < batch; ++i) hop();
-        const double per_hop =
-            static_cast<double>(bench::now_ns() - a) / static_cast<double>(batch);
-        if (prev > 0.0 && per_hop > prev * (1.0 - kPlateau)) return batch;
-        prev = per_hop;
-    }
-    return 1U << 20;  // pathological clock — cap the calibration, not the measurement
+    return bench::calibrate_batch_for_window(hop);
 }
 
 /**
@@ -195,33 +197,72 @@ std::vector<std::byte> make_fwd(std::initializer_list<std::string_view> dst,
 }
 
 /**
- * @brief The PRE-RFC-0018 resolve leg: open the `dst` window and walk the mount run over a
- *        `NAME`-child body — the same rejections, filling the same @ref tr::net::fwd_pre_t.
+ * @brief The PRE-RFC-0018 `dst` gate, transcribed BYTE-FAITHFULLY from `peek_fwd_dst_any` as
+ *        it stood at `5e7659e3` — the commit before RFC-0018 S1+S2 landed (#1341).
  *
- * A transcription of what `peek_fwd_dst` + `dst_seg_walk_t` did before this RFC, kept here
- * and nowhere else. RFC-0018 falsifier 1 is stated as an in-binary comparison for a reason:
- * *"if the packed arm does not beat the literal arm on the resolve leg, this RFC is void"*,
- * and a comparison against a remembered number cannot falsify anything. So both arms read
- * the SAME frame content through the SAME four structural header reads, fill the same
- * `fwd_pre_t`, and perform the same rejections; only the segment-record grammar differs.
+ * RFC-0018 falsifier 1 is stated as an IN-BINARY comparison for a reason: *"if the packed arm
+ * does not beat the literal arm on the resolve leg, this RFC is void"*, and a comparison
+ * against a remembered number cannot falsify anything. The control arm is therefore only
+ * worth what its faithfulness to the retired code is worth — and the first version of it was
+ * not faithful, which is what #1346 was opened to settle. It hand-rolled a cleaned-up walk,
+ * and each cleanup was worth nanoseconds. Ablated one rung at a time in ONE binary on the
+ * quiet pinned host (best-of-12 rounds, `calibrate_batch_for_window`, A/A null 0.0 %):
  *
- * @return The number of leading segments walked, accumulated by the caller so the optimizer
- *         cannot delete the walk.
+ *  - **+13 ns** — the gate. The hand-rolled one carried the canonical arm only; the retired
+ *    `peek_fwd_dst_any` also tests `PATH_REF`, returns a `fwd_dst_kind_t`, writes a
+ *    `ref_count` out-param, and is reached through the `peek_fwd_dst` wrapper.
+ *  - **+4 ns** — one segment. `prefill` fills `kDstSegCacheSlots` (4) slots and this bench's
+ *    `dst` has five segments, so the retired leg parses a fourth header the hand-rolled arm,
+ *    walking exactly the three it is asked for, never read.
+ *  - **+14 ns** — the walker. `dst_seg_walk_t`'s inline cache stores, its
+ *    `last_`/`have_`/`cached_`/`pos_` bookkeeping and three `at()` calls each returning an
+ *    `std::optional<std::pair<std::size_t, std::size_t>>`, against `pos += h->total; ++n;`
+ *    in registers.
+ *
+ * That is **31 ns of the 56 ns the arm should have read** — more than the whole effect the
+ * falsifier is trying to detect, and enough to invert its verdict: at face value the packed
+ * arm LOST, 32 ns against a 25 ns control.
+ *
+ * So this and @ref legacy_dst_seg_walk_t are TRANSCRIPTIONS, not reimplementations: the
+ * retired code, line for line, kept here and nowhere else because the core no longer emits
+ * the `NAME`-child body and must not learn to again. Do not "simplify" either of them; every
+ * store, branch and `std::optional` below is load-bearing to what this arm claims to be.
+ *
+ * @param cur       Cursor over the frame.
+ * @param pre       Filled exactly as the retired peek filled it.
+ * @param ref_count The retired out-param — element count on the `PATH_REF` answer, else 0.
  */
 template <class Cursor>
-[[nodiscard]] std::size_t resolve_literal(const Cursor& cur, std::size_t want) {
-    tr::net::fwd_pre_t pre{};
+[[gnu::flatten]] [[nodiscard]] tr::net::fwd_dst_kind_t legacy_peek_fwd_dst_any(
+    const Cursor& cur, tr::net::fwd_pre_t& pre, std::size_t& ref_count) {
+    pre = tr::net::fwd_pre_t{};
+    ref_count = 0;
     const auto fwd_h = tr::net::read_fwd_header(cur, 0);
-    if (!fwd_h || fwd_h->type != type_t::FWD || !fwd_h->opt.pl) return 0;
+    if (!fwd_h || fwd_h->type != type_t::FWD || !fwd_h->opt.pl)
+        return tr::net::fwd_dst_kind_t::NONE;
     const std::size_t body_end = fwd_h->body_off + fwd_h->body_len;
     const auto op_h = tr::net::read_fwd_header(cur, fwd_h->body_off);
-    if (!op_h || op_h->type != type_t::VALUE) return 0;
+    if (!op_h || op_h->type != type_t::VALUE) return tr::net::fwd_dst_kind_t::NONE;
     const std::size_t dst_pos = fwd_h->body_off + op_h->total;
-    if (dst_pos >= body_end) return 0;
+    if (dst_pos >= body_end) return tr::net::fwd_dst_kind_t::NONE;
     const auto dst_h = tr::net::read_fwd_header(cur, dst_pos);
-    if (!dst_h || dst_h->type != type_t::PATH || dst_h->body_len == 0) return 0;
-    const auto seg_h = tr::net::read_fwd_header(cur, dst_h->body_off);
-    if (!seg_h || seg_h->type != type_t::NAME) return 0;
+    if (!dst_h) return tr::net::fwd_dst_kind_t::NONE;
+    const bool is_ref = dst_h->type == type_t::PATH_REF;
+    // The gate's own read of segment 0, handed over below rather than discarded. Nothing is
+    // filled until BOTH arms have accepted, so a rejected frame leaves `pre` cleared.
+    std::size_t seg0_off = 0;
+    std::size_t seg0_len = 0;
+    if (is_ref) {
+        if (!tr::wire::path_ref_body_valid(dst_h->opt.pl, dst_h->opt.ll, dst_h->body_len))
+            return tr::net::fwd_dst_kind_t::NONE;
+    } else {
+        if (dst_h->type != type_t::PATH || dst_h->body_len == 0)
+            return tr::net::fwd_dst_kind_t::NONE;
+        const auto seg_h = tr::net::read_fwd_header(cur, dst_h->body_off);
+        if (!seg_h || seg_h->type != type_t::NAME) return tr::net::fwd_dst_kind_t::NONE;
+        seg0_off = seg_h->body_off;
+        seg0_len = seg_h->body_len;
+    }
     pre.valid = true;
     pre.fwd_opt = fwd_h->opt;
     pre.body_end = body_end;
@@ -232,21 +273,99 @@ template <class Cursor>
     pre.dst_body_off = dst_h->body_off;
     pre.dst_end = dst_h->body_off + dst_h->body_len;
     pre.after_dst = dst_pos + dst_h->total;
-    pre.seg0_off = seg_h->body_off;
-    pre.seg0_len = seg_h->body_len;
-    pre.strip_at = dst_h->body_off;
-    // The mount-run walk: one `read_fwd_header` per segment, which is the term this RFC
-    // deletes. Segment 0 came free with the gate above, exactly as it does today.
-    std::size_t n = 1;
-    std::size_t pos = seg_h->body_off + seg_h->body_len;
-    while (n < want && pos < pre.dst_end) {
-        const auto h = tr::net::read_fwd_header(cur, pos);
-        if (!h || h->type != type_t::NAME) break;
-        pos += h->total;
-        ++n;
+    if (!is_ref) {
+        pre.seg0_off = seg0_off;
+        pre.seg0_len = seg0_len;
+        pre.strip_at = dst_h->body_off;  // caller overwrites once strip_k is known
+        return tr::net::fwd_dst_kind_t::PATH;
     }
-    return n;
+    pre.dst_ref = true;
+    pre.strip_at = dst_h->body_off + tr::wire::kPathRefElementBytes;
+    if (pre.strip_at > pre.dst_end) pre.strip_at = pre.dst_end;  // the H = 0 body
+    ref_count = tr::wire::path_ref_element_count(dst_h->body_len);
+    return tr::net::fwd_dst_kind_t::PATH_REF;
 }
+
+/**
+ * @brief The canonical wrapper, transcribed from `peek_fwd_dst` at `5e7659e3` — the entry the
+ *        retired resolve leg actually called.
+ */
+template <class Cursor>
+[[nodiscard]] bool legacy_peek_fwd_dst(const Cursor& cur, tr::net::fwd_pre_t& pre) {
+    std::size_t ref_count = 0;
+    return legacy_peek_fwd_dst_any(cur, pre, ref_count) == tr::net::fwd_dst_kind_t::PATH;
+}
+
+/**
+ * @brief The PRE-RFC-0018 forward-only walker over a `dst`'s leading `NAME` segments,
+ *        transcribed BYTE-FAITHFULLY from `dst_seg_walk_t` at `5e7659e3`.
+ *
+ * Its cache-line-sized inline cache, its split `at` and its `std::optional<std::pair>` returns
+ * are the retired instrument, not an accident of this bench — see @ref legacy_peek_fwd_dst_any
+ * for why they are reproduced rather than tidied. The cache is sized off the SHIPPED
+ * `tr::net::kDstSegCacheSlots` so the retired arm keeps tracking the same config quantity the
+ * live walker does; that is the one thing here that is deliberately not frozen at `5e7659e3`.
+ *
+ * @tparam Cursor A grammar byte-source cursor (span or rope).
+ */
+template <class Cursor>
+class legacy_dst_seg_walk_t {
+   public:
+    /** @brief Walk the `dst` window @p pre describes, over @p cur. */
+    legacy_dst_seg_walk_t(const Cursor& cur, const tr::net::fwd_pre_t& pre) noexcept
+        : cur_(&cur), body_off_(pre.dst_body_off), end_(pre.dst_end), pos_(pre.dst_body_off) {}
+
+    /** @brief Fill the inline cache NOW, in ONE tight loop. */
+    void prefill() {
+        while (cached_ < tr::net::kDstSegCacheSlots && pos_ < end_) {
+            const auto h = tr::net::read_fwd_header(*cur_, pos_);
+            if (!h || h->type != type_t::NAME) return;
+            last_ = {h->body_off, h->body_len};
+            cache_[cached_++] = last_;
+            pos_ += h->total;
+            ++have_;
+        }
+    }
+
+    /**
+     * @brief Segment @p i's `[body_off, body_len)`.
+     * @retval std::nullopt The `dst` has no segment @p i.
+     */
+    [[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>> at(std::size_t i) {
+        if (i < cached_) return cache_[i];
+        return walk_to(i);
+    }
+
+   private:
+    /** @brief The uncached half of `at`: walk forward until segment @p i is in hand. */
+    [[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>> walk_to(std::size_t i) {
+        if (i < have_) {
+            have_ = cached_;
+            pos_ =
+                cached_ == 0 ? body_off_ : cache_[cached_ - 1].first + cache_[cached_ - 1].second;
+        }
+        while (have_ <= i) {
+            if (pos_ >= end_) return std::nullopt;
+            const auto h = tr::net::read_fwd_header(*cur_, pos_);
+            if (!h || h->type != type_t::NAME) return std::nullopt;
+            last_ = {h->body_off, h->body_len};
+            if (have_ < tr::net::kDstSegCacheSlots) cache_[cached_++] = last_;
+            pos_ += h->total;
+            ++have_;
+        }
+        return last_;
+    }
+
+    const Cursor* cur_;
+    std::size_t body_off_;
+    std::size_t end_;
+    std::size_t pos_;
+    std::size_t have_ = 0;   /**< @brief Segments walked; `last_` is number `have_-1`. */
+    std::size_t cached_ = 0; /**< @brief Entries of `cache_` filled (`<= have_`). */
+    std::pair<std::size_t, std::size_t> last_{0, 0};
+    /** @brief Uninitialised on purpose, as the retired walker's was: `cached_` gates reads. */
+    std::array<std::pair<std::size_t, std::size_t>, tr::net::kDstSegCacheSlots> cache_;
+};
 
 /**
  * @brief Time one forward hop with @p links children, the target at @p target_pos.
@@ -396,9 +515,15 @@ std::uint64_t run_point(std::size_t links, std::size_t target_pos, const char* m
 
     const auto leg = [&] {
         if (form == path_form_t::LITERAL) {
-            // Falsifier 1's control arm — the retired encoding, same frame, same rejections,
-            // same `fwd_pre_t` fill, three segments walked.
-            sink += resolve_literal(cur, 3);
+            // Falsifier 1's control arm — the RETIRED code, line for line (#1346), driven
+            // exactly as the packed arm below is: one peek, one walker, prefill, three asks.
+            // Every divergence from that shape was worth nanoseconds; see
+            // `legacy_peek_fwd_dst_any`.
+            tr::net::fwd_pre_t local{};
+            if (!legacy_peek_fwd_dst(cur, local)) return;
+            legacy_dst_seg_walk_t<tr::wire::grammar::span_cursor> w(cur, local);
+            w.prefill();
+            for (std::size_t i = 0; i < 3; ++i) sink += w.at(i).has_value();
             return;
         }
         if (rebuild_leg) {
@@ -433,7 +558,7 @@ std::uint64_t run_point(std::size_t links, std::size_t target_pos, const char* m
     }
     const bench::Latency::Summary s = lat.summarize();
     bench::emit("libtracer", mode, frame.size(), 1, 1, 0.0, 0.0, 0.0, s);
-    std::printf("NOTE mode=%s sink=%zu\n", mode, sink);
+    std::printf("NOTE mode=%s batch=%zu samples=%zu sink=%zu\n", mode, batch, batches, sink);
     return s.p50;
 }
 
@@ -476,8 +601,11 @@ int main() {
     // the literal one, and the SUMMARY below prints their spread alongside the delta.
     // **If the packed arm does not beat the literal arm here, RFC-0018 is void** (§10.1).
     const std::uint64_t resolve_ns = run_leg("fwd-demux-resolve", false);
+    // RENAMED from `fwd-demux-resolve-literal` (#1346). The old row measured a hand-rolled
+    // walk, not the retired one, and read 31 ns light; keeping the name across a change in
+    // WHAT the row measures is the one thing the methodology never allows.
     const std::uint64_t resolve_lit_ns =
-        run_leg("fwd-demux-resolve-literal", false, path_form_t::LITERAL);
+        run_leg("fwd-demux-resolve-legacy", false, path_form_t::LITERAL);
     const std::uint64_t resolve_ns2 = run_leg("fwd-demux-resolve", false);
     const std::uint64_t rebuild_ns = run_leg("fwd-demux-rebuild", true);
 

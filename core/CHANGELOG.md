@@ -50,6 +50,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **ERRATUM to `[0.13.0]`'s RFC-0018 entry — the "resolve leg 34 ns to ~20 ns" figure came from
+  an instrument that was measuring the wrong thing**
+  ([#1346](https://github.com/avatarsd-llc/libtracer/issues/1346)). No API or wire surface
+  changes; only the recorded measurement does. `bench_forward_demux`'s falsifier-1 control arm
+  (`fwd-demux-resolve-literal`) was a hand-rolled walk, not the retired one: it omitted the
+  `PATH_REF` arm of `peek_fwd_dst_any`, walked three `dst` segments where `prefill` walks four,
+  and replaced `dst_seg_walk_t` with `pos += h->total` in registers. Ablated on the quiet pinned
+  host, that made the control arm read **31 ns light** — enough to invert the falsifier's
+  verdict, which at face value had the packed arm LOSING 32 ns to 25 ns. The arm is now a
+  line-for-line transcription of the code at `5e7659e3` and is renamed
+  **`fwd-demux-resolve-legacy`**, because what the row measures changed. With it, falsifier 1
+  passes for the right reason: **56 → 32 ns (−42.9 %)**, one binary, same frame, best-of-12.
+  The bench also moves off the retired plateau batch calibrator onto
+  `bench::calibrate_batch_for_window`.
+
 - **`op_resolver_t::resolve`'s second parameter is a `graph::inbound_ref_t`, not a
   `std::string_view`** ([#375](https://github.com/avatarsd-llc/libtracer/issues/375) Part 2).
   Source-compatible for every existing call: `inbound_ref_t` is implicitly constructible from

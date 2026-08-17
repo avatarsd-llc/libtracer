@@ -568,6 +568,40 @@ resolves effects at the ~1 % level and up — enough to price its pinned symbol.
 separate decision about wall-clock and about shared-runner variance, which is a different and
 looser noise regime than the pinned host measured above.
 
+### `bench_forward_demux` axis 3 — the RFC-0018 falsifier, and what may be quoted off it (#1346)
+
+```sh
+cmake --build bench/build --target bench_forward_demux -j
+python3 bench/host_guard.py wait && taskset -c 24-30 ./bench/build/bench_forward_demux
+```
+
+Axis 3 splits the fixed hop into `fwd-demux-resolve` (what a resolve-once cache could remove)
+and `fwd-demux-rebuild` (what it could not), and alongside them runs
+**`fwd-demux-resolve-legacy`** — the retired pre-RFC-0018 `NAME`-child resolve leg, kept in
+this bench and nowhere else so RFC-0018 falsifier 1 is an **in-binary** comparison rather than
+a comparison against a remembered number.
+
+**That arm is only worth its faithfulness, and the first one was not faithful.** It was a
+cleaned-up walk: no `PATH_REF` arm on the gate, three `dst` segments walked where
+`dst_seg_walk_t::prefill` walks four, and `pos += h->total` in registers instead of the walker.
+Ablated in one binary on the quiet pinned host — best-of-12 rounds, `calibrate_batch_for_window`,
+**A/A null 0.0 %** — those cost **+13 / +4 / +14 ns** respectively, so the arm read `25 ns`
+where the retired code reads `56 ns`. Taken at face value that arm had the packed leg *losing*
+(32 vs 25 ns); it only ever "passed" because the retired plateau calibrator inflated it. It is
+now a line-for-line transcription of `peek_fwd_dst_any` + `dst_seg_walk_t` at `5e7659e3`,
+verified against a build of that actual commit at **56 vs 56 ns** in one binary. **Do not tidy
+`legacy_peek_fwd_dst_any` or `legacy_dst_seg_walk_t`** — every branch, store and
+`std::optional` in them is what the arm claims to be.
+
+**Quote the in-binary delta, never a cross-binary one.** This leg is unusually layout-sensitive:
+with the executed source held **byte-identical** (`read_fwd_header`, `grammar.hpp` and
+`fwd_pre_t` all diff-clean between `5e7659e3` and today's `main`), the same transcription reads
+**44 ns in one binary and 56 ns in another**, and merely adding an unrelated function to the
+translation unit moved the untouched `fwd-demux-resolve` leg from **51 to 56 ns (+9.8 %)**. That
+is the #1235 mechanism, and it is the same size as the effects axis 3 is asked to resolve. The
+`FALSIFIER-1` line the bench prints brackets the packed arm either side of the legacy one and
+reports their spread for exactly this reason: a delta smaller than that spread is not a result.
+
 ## What is measured
 
 The swept axes (`bench_common.hpp`): payload **1..8192 B**, fan-out
