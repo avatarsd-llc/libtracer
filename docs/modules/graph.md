@@ -83,8 +83,9 @@ class graph_t {
     result_t<vertex_handle_t> try_register_vertex(const path_t&, role_t, handlers_t = {});
     result_t<void> retire(vertex_handle_t);                       // logical absence, subtree-wide
     std::uint32_t  retire_generation(vertex_handle_t) const noexcept;
-    void           collect();                    // free the parked value seams — CALLER-timed
-    std::size_t    parked_seam_count() const;    // how many await a collect()
+    void           collect();                    // free BOTH parks (seams + retired {fn,ctx})
+    std::size_t    parked_seam_count() const;    // how many seams await a collect()
+    std::size_t    parked_callback_count() const;  // how many retired {fn,ctx} pairs do
     std::optional<vertex_handle_t> find(std::span<const std::byte> key) const;
 
     // the node-scoped vertex index — bound-path addressing (RFC-0024 §6.4)
@@ -131,6 +132,7 @@ class graph_t {
     template <typename F>
     result_t<subscription_t> subscribe(const path_t& src, F& callback);   // lvalue only
     result_t<void>           unsubscribe(const subscription_t&);
+    result_t<void>           unsubscribe(const subscription_t&, subscriber_release_fn_t);
 };
 ```
 
@@ -142,14 +144,28 @@ exceed the small-buffer size
 The templated overload binds `callback` **by address**, so it takes an lvalue only — a
 temporary lambda does not compile.
 
-```{admonition} `ctx` must outlive every possible delivery
+```{admonition} `ctx` lives until the next `collect()`, not until `unsubscribe` returns
 :class: warning
 Subscription edges are never destroyed while the graph lives. `unsubscribe` only
 **deactivates** the slot; an in-flight delivery has already snapshotted the edge and
 completes. The caller-owned `ctx` (or, for the templated overload, the callable itself)
 must therefore stay alive past any delivery that may still be running, not merely past
-the `unsubscribe` call (`core/include/libtracer/graph.hpp:1289-1290`, `:1309` for the
-callable-by-address form, `:1322`).
+the `unsubscribe` call (`core/include/libtracer/graph.hpp:1339-1340`, `:1363` for the
+callable-by-address form, `:1377`).
+
+The bound on "any delivery that may still be running" is stated, not left open:
+**the callback may still be invoked until the first `collect()` that completes after
+`unsubscribe()` returns; free the `ctx` after that**
+([#894](https://github.com/avatarsd-llc/libtracer/issues/894)). `unsubscribe` swap-parks the
+retired `{fn, ctx}` pair and the embedder-driven `collect()` releases it — the same
+two-phase lifetime `retire` + `collect()` gives a value seam, and the same doctrine: the
+application declares the quiescent point, the library never guesses one. Pass a
+`subscriber_release_fn_t` to `unsubscribe(sub, release)` and `collect()` frees the context
+for you, on the collecting thread and outside every graph lock. This costs the delivery
+path nothing — refcounting the pair, the rejected alternative, would have cost two atomic
+RMWs per callback per delivery, worst exactly on WIDE fan-out. The park has its OWN leaf
+lock, never the graph's map lock: guarding it with the lock the delivery path holds shared
+starves the unsubscriber against a publishing loop.
 ```
 
 ```{admonition} No strings on the hot path
@@ -199,7 +215,7 @@ for (...) g.write(v, p.field(), setpoint_tlv);           // hot loop — zero st
 ## What a read hands back
 
 `read` and `await` return `result_t<value_ref_t>`, not `result_t<rope_t>`
-(`core/include/libtracer/graph.hpp:1077,1164` by handle, `:1594,1600` by path;
+(`core/include/libtracer/graph.hpp:1127,1214` by handle, `:1688,1694` by path;
 `value_ref_t` at `core/include/libtracer/vertex.hpp:237`). A `value_ref_t` is an **owning
 reference** to the value the vertex published: the LKV slot holds it as a
 `std::shared_ptr<const rope_t>`, so handing that reference back costs a refcount clone of
@@ -482,7 +498,8 @@ followed by the owner's own announce write.
 | Rule | The failure mode |
 | --- | --- |
 | `subscribe(src, F& callback)` binds by address | passing a temporary lambda does not compile — which is the intent; a caller that "fixes" it by storing the lambda in a shorter-lived scope than the graph reintroduces the dangle the signature was shaped to prevent |
-| `ctx` outlives every delivery, not every `unsubscribe` | a caller that frees `ctx` immediately after `unsubscribe` returns can be freeing it under an in-flight delivery on another thread |
+| `ctx` outlives every delivery — the bound is the next `collect()`, not the `unsubscribe` return | fan-out snapshots its edges under the producer's stripe lock and dispatches outside it, so a caller that frees `ctx` immediately after `unsubscribe` returns can be freeing it under an in-flight delivery. The bound the API now states is **the first `collect()` that completes after `unsubscribe()` returns** — `unsubscribe` swap-parks the retired `{fn, ctx}` pair and `collect()` releases it, the same two-phase lifetime the value seam has. `unsubscribe(sub, release)` has `collect()` free the context for you; `parked_callback_count()` makes an uncollected park observable ([#894](https://github.com/avatarsd-llc/libtracer/issues/894)) |
+| `collect()` must NOT be called from inside a subscription callback | it is the one context where its precondition is provably false — the delivery running your callback holds a snapshot, so collecting from within it can release the context the enclosing fan-out is about to use for the next edge. It is forbidden rather than detected because detecting it needs a dispatch-depth counter, i.e. work on the delivery path, which the #894 ruling rules out. Two concurrent `collect()` calls, by contrast, are safe: each park is swapped out under its own lock, so each entry is released exactly once |
 | `read` returns a reference | keeping a `value_ref_t` in long-lived state pins that allocation; under an injected pool, a handful of parked references is a pool that never drains |
 | `only()` is the single-link accessor | calling it on a multi-link rope is not the general path; `materialize()` is. A value that arrived as a subview of a frame, or that was written as a rope, has more than one link |
 | A retired handle stays dereferenceable | `retire` empties the vertex in place and never frees it, so a stale handle silently addresses a re-virginized slot. A holder that caches a resolution records `retire_generation` beside it and re-reads before use — and must not cache an authorization decision that way, since a generation match says the vertex is the same one, never that the caller may still act on it |

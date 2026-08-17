@@ -748,11 +748,13 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
 }
 
 /**
- * @brief Free the parked value seams — the embedder-called other end of retirement's park
- *        (#576). The whole point is WHERE the free happens, so read the two scopes below.
+ * @brief Free the parked value seams AND release the parked subscription contexts — the
+ *        embedder-called other end of BOTH parks (#576 retirement, #894 unsubscribe).
+ *        The whole point is WHERE the free happens, so read the two scopes below.
  */
 void graph_t::collect() {
     std::vector<std::unique_ptr<value_handlers_t>> dead;
+    std::vector<parked_callback_t> dead_callbacks;
     {
         // Under the map lock: nothing but the swap. The lock is what serialises us against
         // retire_subtree's append, and it is all it is here for — a free under it would put
@@ -761,14 +763,60 @@ void graph_t::collect() {
         const std::unique_lock lock(map_mutex_);
         dead.swap(retired_seams_);
     }
-    // `dead` destructs HERE — outside every graph lock, on the caller's thread, at a moment
-    // the embedder chose. So a seam callback's destructor may re-enter the graph, and a slow
-    // one blocks no reader or writer. Do not hoist this into the scope above.
+    {
+        // The callback park has its OWN leaf lock, taken in a SEPARATE scope — never nested
+        // inside the map lock, and never the map lock itself. See `park_mutex_`: guarding it
+        // with map_mutex_ starves the unsubscriber against the delivery path's shared holds
+        // (#894, the edge_publish livelock).
+        //
+        // The swap is what makes two concurrent collect() calls safe: an entry leaves the
+        // park exactly once, into exactly one collector's local, so it is released exactly
+        // once and neither caller loses work.
+        const std::lock_guard lock(park_mutex_);
+        dead_callbacks.swap(retired_callbacks_);
+    }
+    // Both locals destruct HERE — outside every graph lock, on the caller's thread, at a
+    // moment the embedder chose. So a seam callback's destructor (or a subscription's release
+    // hook, which `parked_callback_t::~parked_callback_t` runs) may re-enter the graph, and a
+    // slow one blocks no reader or writer. Do not hoist this into the scope above.
+    //
+    // Nothing here waits for or detects a delivery. It does not have to: this call IS the
+    // embedder's declaration that none is in flight, which is precisely why the #894 fix costs
+    // the delivery path zero — there is no counter to bump and no epoch to observe.
 }
 
 std::size_t graph_t::parked_seam_count() const {
     const std::shared_lock lock(map_mutex_);
     return retired_seams_.size();
+}
+
+std::size_t graph_t::parked_callback_count() const {
+    const std::lock_guard lock(park_mutex_);
+    return retired_callbacks_.size();
+}
+
+/**
+ * @brief Park one retired subscription `{fn, ctx}` pair for the next collect() (#894).
+ */
+void graph_t::park_callback(edge_callback_t retired, subscriber_release_fn_t release) {
+    // Nothing to park: a target-only or remote edge has no in-process callback, and a caller
+    // that gave no release hook for a null ctx is owed no signal. Keeps a node that only ever
+    // wires paths to paths at a permanently empty park.
+    if (retired.fn == nullptr && retired.ctx == nullptr && release == nullptr) return;
+    // park_mutex_, NOT map_mutex_. This runs on every unsubscribe, and the delivery path
+    // holds map_mutex_ SHARED on every write (`find_ptr`); taking it exclusively here let a
+    // loop of publishers starve a looping unsubscriber for a full 300 s CI timeout, with the
+    // churn thread parked in `__pthread_rwlock_wrlock` (#894). A leaf mutex the delivery path
+    // never touches costs the publisher nothing and cannot be starved by it.
+    const std::lock_guard lock(park_mutex_);
+    // NOTHROW, capacity-doubling (#477 / #923): a throwing grow would abort a
+    // `-fno-exceptions` node inside a control-plane verb, and a size+1 reserve would make a
+    // churning node quadratic. On failure the entry is DROPPED — `release` never runs and the
+    // caller's ctx leaks. That is the deliberate direction: the alternative is releasing it
+    // here, under a lock, while a snapshot may still hold the pair.
+    parked_callback_t entry{retired, release};
+    if (!tr::detail::try_push_back(retired_callbacks_, std::move(entry)))
+        entry.release = nullptr;  // DISARM: a dropped entry must not release here (see above)
 }
 
 /**
@@ -2326,7 +2374,9 @@ result_t<subscription_t> graph_t::subscribe(const path_t& src, subscriber_fn_t f
     return admit_subscriber(v, std::move(s), {});
 }
 
-result_t<void> graph_t::unsubscribe(const subscription_t& sub) {
+result_t<void> graph_t::unsubscribe(const subscription_t& sub) { return unsubscribe(sub, nullptr); }
+
+result_t<void> graph_t::unsubscribe(const subscription_t& sub, subscriber_release_fn_t release) {
     if (sub.vertex_ == nullptr) return std::unexpected(status_t::NOT_FOUND);
     // The in-process counterpart of the wire ":subscribers[N] clear" (field_write below):
     // deactivate the slot, then unwind the RFC-0005 listener bookkeeping — the SAME order and
@@ -2334,8 +2384,14 @@ result_t<void> graph_t::unsubscribe(const subscription_t& sub) {
     // RECLAIMS the slot's retained state (target key, segment pin, cold remote half) and
     // leaves an inert, index-stable shell that add_edge reuses; an in-flight delivery already
     // snapshotted the edge (ADR-0041 §2) and completes untouched.
-    if (!sub.vertex_->clear_edge(sub.slot_)) return std::unexpected(status_t::NOT_FOUND);
+    edge_callback_t retired;
+    if (!sub.vertex_->clear_edge(sub.slot_, &retired)) return std::unexpected(status_t::NOT_FOUND);
     note_subscriber_removed(sub.vertex_);
+    // #894: the one leg the snapshot does NOT own is the subscriber's own `callback_ctx`, so
+    // the retired pair is PARKED rather than dropped and `collect()` is what releases it. The
+    // park happens AFTER clear_edge returned — never nested inside the stripe lock — and it is
+    // the whole cost of the fix: the delivery path is untouched.
+    park_callback(retired, release);
     return {};
 }
 
@@ -2551,8 +2607,15 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
                 const view_t cleared_tlv = observing_subscriptions(caller)
                                                ? v->edge_source(step0.index).value_or(view_t{})
                                                : view_t{};
-                if (v->clear_edge(step0.index)) {
+                edge_callback_t retired;
+                if (v->clear_edge(step0.index, &retired)) {
                     note_subscriber_removed(v);  // RFC-0005 counter bookkeeping
+                    // A wire clear can land on a slot a LOCAL callback subscribe filled
+                    // (§D.2 indices are shared between the two doors), so it owes the same
+                    // #894 park. No release hook exists on this door — the wire caller does
+                    // not own the ctx — so the entry is the record + the count, and the
+                    // local owner still frees after a collect().
+                    park_callback(retired, nullptr);
                     // Only a slot that WAS active is an unsubscribe; clearing an already-empty
                     // one changed nothing and must not be reported as a removal.
                     notify_subscription(sub_event_t::kind_t::REMOVED, v, caller, cleared_tlv,

@@ -16,6 +16,41 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`graph_t::unsubscribe(sub, release)`, `graph_t::parked_callback_count()`,
+  `graph::subscriber_release_fn_t` and `graph::edge_callback_t` — `unsubscribe` now PARKS the
+  retired `{fn, ctx}` pair and `collect()` is what releases it**
+  ([#894](https://github.com/avatarsd-llc/libtracer/issues/894), the park-and-collect ruling).
+  Fan-out snapshots its edges under the producer's stripe lock and dispatches outside it, so a
+  snapshot taken before an `unsubscribe` still invokes the callback **after that
+  `unsubscribe` returned success** — a caller that freed its `ctx` on the return freed it under
+  a live delivery, and no API surface bounded the wait. The stated contract is now: *the
+  callback may still be invoked until the first `collect()` that completes after
+  `unsubscribe()` returns; free the `ctx` after that.* The two-argument overload takes a
+  `subscriber_release_fn_t` that `collect()` calls with the context, on the collecting thread
+  and outside every graph lock, so the embedder is **signalled** rather than left to track
+  in-flight deliveries it cannot see; `parked_callback_count()` is the observability half, the
+  mirror of `parked_seam_count()`. `collect()` from inside a subscription callback is
+  **forbidden** (it is the one context in which its precondition is provably false); two
+  concurrent `collect()` calls are safe and release each entry exactly once.
+
+  The park has its **own leaf lock**, deliberately not the graph's map lock. Guarding it with
+  `map_mutex_` — the obvious symmetry with the seam park — is a livelock: `park_callback` runs
+  on every unsubscribe and would take that lock exclusively, while the delivery path takes it
+  *shared* on every write, and glibc's reader-preferring `shared_mutex` lets a loop of
+  publishers starve the unsubscriber indefinitely. It was caught by `edge_publish`'s churn
+  test hanging for the full CI timeout with its churn thread parked in
+  `__pthread_rwlock_wrlock`. "Zero delivery-path cost" is about contention as well as
+  instructions.
+
+  **No behaviour change for existing callers** — the one-argument `unsubscribe` keeps its
+  signature and its semantics, `vertex_t::clear_edge`'s new out-parameter is defaulted, and
+  the delivery path gained **nothing**: refcounting the pair (the rejected alternative) would
+  have cost two atomic RMWs per callback per delivery, worst exactly on WIDE fan-out. Measured:
+  the symbol-size ratchet reports **+0 B** on all five pinned dispatch symbols, and an
+  instruction-level diff of the `-O3` bench binary against `main` shows **zero instructions
+  added or removed** anywhere on the delivery/write path (the only differences are struct
+  field displacement constants, `graph_t` having grown by one 24-byte member).
+
 - **`<libtracer/peer_handle.hpp>` — `net::peer_handle_t`, `net::kSolePeerHandle` and
   `net::kPeerNameChars` now live in a header of their own**
   ([#375](https://github.com/avatarsd-llc/libtracer/issues/375) Part 2). Pure relocation out of

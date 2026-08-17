@@ -105,6 +105,33 @@ struct delivery_policy_t {
 using subscriber_fn_t = void (*)(void* ctx, const rope_t& value);
 
 /**
+ * @brief The optional release hook for a subscription's `ctx` — run by
+ *        `%tr::graph::graph_t::collect()`, never by `unsubscribe` (#894).
+ *
+ * `unsubscribe` cannot free the context: a fan-out that snapshotted the edge before the
+ * clear still holds the raw `{fn, ctx}` pair and will invoke it. So the retired pair is
+ * PARKED and this hook is what the embedder-driven collect sweep calls, at the quiescent
+ * point the embedder itself named — the same two-phase lifetime the value seam has.
+ *
+ * The same `{fn, ctx}` shape as @ref subscriber_fn_t and for the same ADR-0047 reason,
+ * though this one is never on a hot path: it runs at most once per unsubscribe.
+ */
+using subscriber_release_fn_t = void (*)(void* ctx);
+
+/**
+ * @brief The in-process delivery leg of one edge, lifted out of the slot — the raw
+ *        `{fn, ctx}` pair `vertex_t::clear_edge` hands back for the caller's park (#894).
+ *
+ * Two words, trivially copyable: reading it out costs the unsubscribe path a copy and the
+ * DELIVERY path nothing at all. Both members null ⇒ the slot carried no in-process
+ * callback (a target-only or remote edge) and there is nothing to park.
+ */
+struct edge_callback_t {
+    subscriber_fn_t fn = nullptr; /**< @brief The retired in-process sink. */
+    void* ctx = nullptr;          /**< @brief The caller-owned context it is invoked with. */
+};
+
+/**
  * @brief The COLD wire/gate half of a subscription edge (#380 §3), lazily allocated:
  *        the in-process edge — the common MCU wiring shape (callback or local target,
  *        empty caller) — keeps `subscriber_t::remote` null and pays one pointer

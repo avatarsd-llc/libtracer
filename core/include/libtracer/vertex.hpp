@@ -1157,10 +1157,18 @@ class vertex_t {
 
     /**
      * @brief Deactivate the edge slot @p idx (unsubscribe — a cleared `:subscribers[N]`).
+     *
+     * @param idx     The `:subscribers[N]` slot number.
+     * @param retired When non-null, receives the slot's in-process `{fn, ctx}` pair BEFORE
+     *                the reclaim overwrites it — the pair the caller parks (#894). Read
+     *                under the same lock hold that clears, so it cannot straddle a
+     *                concurrent `add_edge` reusing this very slot. Left untouched when the
+     *                call returns false; both members stay null for a target-only or
+     *                remote edge, which carries no in-process callback to park.
      * @return true iff the slot existed and was active (the caller then adjusts the
      *         RFC-0005 listener bookkeeping).
      */
-    bool clear_edge(std::size_t idx) {
+    bool clear_edge(std::size_t idx, edge_callback_t* retired = nullptr) {
         edge_block_t* b = nullptr;
         {
             const std::lock_guard lock(vertex_stripe_of(this).m);
@@ -1168,6 +1176,14 @@ class vertex_t {
             if (b == nullptr) return false;
             std::vector<subscriber_t>& subs = b->slots;
             if (idx >= subs.size() || !subs[idx].active) return false;
+            // Lift the callback leg out before the reclaim below overwrites the slot. The
+            // pair is the ONE leg an `edge_view_t` snapshot copies without owning (ADR-0041
+            // §2 covers the route and the key, not the subscriber's own `void*`), so it is
+            // the one leg an unsubscribe must hand onward instead of dropping (#894).
+            if (retired != nullptr) {
+                retired->fn = subs[idx].callback;
+                retired->ctx = subs[idx].callback_ctx;
+            }
             // RECLAIM in place, not merely deactivate. Flipping `active` alone left the slot's
             // `target_key` buffer, its `source_view` segment pin and the whole cold `remote`
             // half resident until an unrelated `add_edge` happened to land on this index — so

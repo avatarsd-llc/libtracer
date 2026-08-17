@@ -145,6 +145,14 @@ using remote_delivery_fn_t = void (*)(void* ctx, const remote_delivery_t& sub, c
  * valid under the graph's locks) nor forge a handle from an arbitrary pointer and index and hand
  * it to @ref graph_t::unsubscribe. A default-constructed handle names no subscription and
  * unsubscribes to a `NOT_FOUND` no-op; @ref operator== is the only observation a caller has.
+ *
+ * **The quiescence guarantee this handle carries (#894).** Unsubscribing it does not stop a
+ * delivery already in flight: fan-out snapshots the edge under the producer's stripe lock and
+ * dispatches outside it, so **the callback may still be invoked until the first
+ * `%tr::graph::graph_t::collect()` that completes after `%unsubscribe()` returns**. That call
+ * is the bound, and it is the embedder's to name — `unsubscribe` swap-parks the retired
+ * `{fn, ctx}` pair and `collect()` releases it, exactly as `retire` parks a value seam. Free
+ * the context after that collect, never on the return from `unsubscribe`.
  */
 class subscription_t {
    public:
@@ -782,7 +790,8 @@ class graph_t {
     [[nodiscard]] bool allows(vertex_handle_t v, std::string_view caller, acl_right_t right) const;
 
     /**
-     * @brief Free every value seam @ref retire parked — the EXPLICIT collector (#576).
+     * @brief Free every value seam @ref retire parked AND release every subscription context
+     *        @ref unsubscribe parked — the EXPLICIT collector (#576, #894).
      *
      * @ref retire detaches a vertex's value seam and **parks** it: the seam is read
      * lock-free, so the retiring thread cannot free the block a concurrent reader may
@@ -830,10 +839,34 @@ class graph_t {
      * `find` a path, retire something else) without deadlocking, and an arbitrarily slow
      * destructor blocks no reader or writer.
      *
+     * **The subscription half (#894).** @ref unsubscribe parks the retired `{fn, ctx}` pair
+     * for exactly the same reason and releases it here, through the optional
+     * `%tr::graph::subscriber_release_fn_t` its two-argument overload takes. The lifetime
+     * rule the pair gets from this is the one @ref unsubscribe states: **the callback may
+     * still be invoked until the first `collect()` that completes after `unsubscribe()`
+     * returns**. Zero delivery-path cost — nothing was added to fan-out to make that true;
+     * it holds because this call IS the embedder's declaration that no delivery is in
+     * flight, the same declaration the seam half already relies on.
+     *
+     * @warning **Never call this from inside a subscription callback or a value seam.** It
+     *          is the one context in which the precondition above is provably false: the
+     *          delivery running your callback holds a snapshot right now, so a `collect()`
+     *          from within it can release the very context the enclosing fan-out is about
+     *          to invoke the NEXT edge with. This is forbidden rather than detected on
+     *          purpose — detecting it needs a dispatch-depth counter, which is work on the
+     *          delivery path, which the #894 ruling forbids outright.
+     *
+     * **Two concurrent `collect()` calls are safe** and neither loses work: each swaps a park
+     * out under that park's own lock, so every parked entry lands in exactly one collector's
+     * local and is released exactly once. They are not, however, jointly a quiescent point — each
+     * caller owes the precondition above on its own, and the contract wording ("the first
+     * `collect()` that COMPLETES") is what makes a racing pair unambiguous: the guarantee
+     * attaches to whichever one returns first having swapped the entry out.
+     *
      * Idempotent, and a no-op when nothing is parked. Not itself a reader-safety
      * mechanism: it neither waits for nor detects readers. An embedder that never calls it
      * keeps the pre-#576 behaviour — the park grows without bound — which @ref
-     * parked_seam_count makes observable.
+     * parked_seam_count and @ref parked_callback_count make observable.
      *
      * @note Whatever is still parked when the graph is destroyed is freed by the graph's
      *       own teardown — a backstop against unbounded growth, NOT a substitute for this
@@ -860,6 +893,23 @@ class graph_t {
      * connection — so on a default deployment this legitimately never leaves 0.
      */
     [[nodiscard]] std::size_t parked_seam_count() const;
+
+    /**
+     * @brief How many retired subscription `{fn, ctx}` pairs are parked, awaiting
+     *        @ref collect (#894).
+     *
+     * The subscription counterpart of @ref parked_seam_count, and the same kind of
+     * observability: an embedder that unsubscribes and never collects has a number to watch
+     * instead of a silent growth. One entry per @ref unsubscribe of a CALLBACK-form
+     * subscription (and per wire `:subscribers[N]` clear of one); a target-only or remote
+     * edge carries no in-process callback and parks nothing, so a node that only ever
+     * subscribes paths to paths legitimately never leaves 0.
+     *
+     * A non-zero count is NOT a leak on its own — it is exactly the set of contexts the
+     * next `collect()` will release, and the set the caller must not free by hand before
+     * then.
+     */
+    [[nodiscard]] std::size_t parked_callback_count() const;
 
     /**
      * @brief Evict every subscriber edge a departed link left behind — the graph half
@@ -1286,9 +1336,11 @@ class graph_t {
      * the SAME single admission step (SUBSCRIBE gate → append → durability latch,
      * ADR-0049) as every other door.
      * @param fn  The per-delivery sink; @p ctx is passed back as its first argument.
-     * @param ctx Caller-owned context; must outlive every possible delivery (edges are
-     *            never destroyed while the graph lives — an unsubscribe only deactivates
-     *            the slot, but an in-flight delivery may still be running).
+     * @param ctx Caller-owned context. It must stay alive until the first
+     *            @ref collect that completes after @ref unsubscribe returns — NOT merely
+     *            until `unsubscribe` returns, which a snapshotted delivery outlives
+     *            (#894). @ref unsubscribe's two-argument overload will free it for you at
+     *            that moment.
      * @param policy This subscription's DELIVERY policy (RFC-0022 §3.A); defaulted to
      *               all-zero, i.e. today's behaviour. A callback edge carries no TLV, so
      *               the policy is set on the slot directly rather than parsed out of one.
@@ -1302,7 +1354,9 @@ class graph_t {
      * @brief Subscribe @p src to a caller-owned callable (sugar over the `{fn, ctx}` form).
      *
      * Zero-erasure sugar mirroring `transport_t::set_receiver`: @p callback is bound by
-     * address (lvalues only — a temporary would dangle) and MUST outlive every delivery.
+     * address (lvalues only — a temporary would dangle) and MUST outlive every delivery —
+     * i.e. it must outlive the first @ref collect that completes after @ref unsubscribe
+     * returns, the #894 bound the `{fn, ctx}` form states in full.
      * @param policy This subscription's DELIVERY policy (RFC-0022 §3.A); all-zero default.
      * @return A @ref subscription_t handle for @ref unsubscribe (as the `{fn, ctx}` form).
      */
@@ -1316,19 +1370,59 @@ class graph_t {
     }
 
     /**
-     * @brief Remove the in-process subscription @p sub returned by @ref subscribe.
+     * @brief Remove the in-process subscription @p sub returned by @ref subscribe —
+     *        PARKING its `{fn, ctx}` pair for @ref collect (#894).
      *
      * The host-SDK-sugar counterpart of the wire `:subscribers[N]` clear (ADR-0049): it
      * deactivates the edge slot and unwinds the RFC-0005 listener bookkeeping (descendants'
      * writes stop bubbling to the producer @p sub names), exactly as the wire path does. The shell
      * stays (index-stable) and a later @ref subscribe reuses it. Idempotent-ish: a
-     * default-constructed or already-cleared handle returns `NOT_FOUND`. Only DEACTIVATES —
-     * an in-flight delivery already snapshotted the edge and completes (ADR-0041 §2), so the
-     * callback's `ctx` must outlive any delivery that may still be running.
+     * default-constructed or already-cleared handle returns `NOT_FOUND`.
+     *
+     * **The lifetime contract — the callback may still be invoked until the first
+     * `collect()` that completes after `unsubscribe()` returns; free the `ctx` after that.**
+     * A fan-out snapshots its edges under the stripe lock and dispatches OUTSIDE it, so a
+     * snapshot taken before this call still holds the raw pair and will invoke it after
+     * this call has returned success. Rather than pretend otherwise, the retired pair is
+     * **swap-parked** on the graph and the embedder-driven @ref collect is what releases
+     * it — the same two-phase lifetime `retire` + @ref collect already gives a value seam,
+     * and the same doctrine: the application declares the quiescent point, the library
+     * never guesses one. This costs the DELIVERY path nothing: no counter, no refcount, no
+     * epoch — every added instruction is here and in @ref collect, both cold.
+     *
+     * @param sub The handle @ref subscribe returned.
      * @note Applies to the callback-form subscriptions; a path→path (`subscribe(src, target)`)
      *       edge is a wire `:subscribers[]` field-write, removed via that wire clear.
+     * @see The two-argument overload to have @ref collect free the context FOR you.
      */
     [[nodiscard]] result_t<void> unsubscribe(const subscription_t& sub);
+
+    /**
+     * @brief Remove the in-process subscription @p sub and have @ref collect release its
+     *        context through @p release (#894).
+     *
+     * Identical to the one-argument overload in every respect but one: the parked entry
+     * carries @p release, so the first @ref collect after this returns calls
+     * `release(ctx)` — on the collecting thread, outside every graph lock. That is the
+     * event-driven half of the contract: the embedder is SIGNALLED that the context is
+     * dead instead of tracking in-flight deliveries itself, which it cannot do.
+     *
+     * @param sub     The handle @ref subscribe returned.
+     * @param release Called once with the subscription's `ctx` at the next @ref collect;
+     *                null behaves exactly as the one-argument overload (the pair is still
+     *                parked and counted, and the caller frees `ctx` itself after a
+     *                `collect()`). Runs at most once per successful unsubscribe, and never
+     *                on a `NOT_FOUND` — nothing was retired, so nothing is owed.
+     * @warning @p release must not free `ctx` early by re-entering the graph or blocking on
+     *          another thread's dispatch; it is called at a point the EMBEDDER declared
+     *          quiescent, and it inherits that declaration rather than checking it.
+     * @note If the park list itself cannot grow (OOM), the entry is DROPPED and @p release
+     *       is never called — a leak of the caller's context, deliberately chosen over
+     *       releasing it while a snapshot may still hold the pair. `-fno-exceptions`
+     *       nodes see the same soft-fail every other #477 site takes.
+     */
+    [[nodiscard]] result_t<void> unsubscribe(const subscription_t& sub,
+                                             subscriber_release_fn_t release);
 
     /**
      * @brief Install (or replace) @p v's field descriptor table — the OWNER declaring its
@@ -1882,6 +1976,14 @@ class graph_t {
     // a newborn's creation-time sum and this walk never double-count).
     void note_subscriber_added(vertex_t* v);
     void note_subscriber_removed(vertex_t* v);
+    // Park the `{fn, ctx}` pair a clear_edge just retired, to be released by `release` at the
+    // next collect() (#894). A no-op when the retired edge carried no in-process callback and
+    // no hook — a target-only or remote edge has nothing to park. Takes ONLY park_mutex_ (a
+    // leaf, see its declaration — never map_mutex_, which the delivery path holds shared),
+    // and never while a stripe lock is held: call it after clear_edge has returned, not from
+    // inside one. Soft-fails on OOM (the entry is dropped, `release` never runs) rather than
+    // releasing a ctx a snapshot may still hold.
+    void park_callback(edge_callback_t retired, subscriber_release_fn_t release);
     // Record that `v` may hold an edge admitted over `link` (#1071 — see link_index_).
     // Called from the ONE admission door, at the note_subscriber_added bump, with no other
     // lock held. An empty `link` is a no-op: that is the LOCAL spelling, and a local edge is
@@ -2009,6 +2111,77 @@ class graph_t {
     // identity vertex only gets an on_children when link->bus() != nullptr) — hence the
     // public parked_seam_count().
     std::vector<std::unique_ptr<value_handlers_t>> retired_seams_;
+
+    /**
+     * @brief One retired subscription `{fn, ctx}` pair, parked by `unsubscribe` until a
+     *        `collect()` releases it (#894).
+     *
+     * Move-only and RAII: the release hook runs in the DESTRUCTOR, so `collect()` needs no
+     * loop of its own — swapping the vector into a local and letting the local die frees
+     * everything outside every graph lock, byte for byte the shape `retired_seams_` already
+     * uses. Graph teardown is the same growth backstop it is for seams, and carries the same
+     * caveat: this member is declared beside `retired_seams_`, before `map_mutex_` and
+     * `root_`, so a release hook that re-enters the graph must be collected explicitly.
+     *
+     * The `fn` member is carried but never called — it is what makes a park entry self-describing
+     * in a debugger and keeps the parked thing the whole retired pair, not half of it.
+     */
+    struct parked_callback_t {
+        subscriber_fn_t fn = nullptr;              /**< @brief The retired sink (never invoked). */
+        void* ctx = nullptr;                       /**< @brief The context the hook below frees. */
+        subscriber_release_fn_t release = nullptr; /**< @brief Null ⇒ the caller frees `ctx`. */
+
+        /** @brief Park @p cb, to be released through @p r. */
+        parked_callback_t(edge_callback_t cb, subscriber_release_fn_t r) noexcept
+            : fn(cb.fn), ctx(cb.ctx), release(r) {}
+        /** @brief Move DISARMS the source, so exactly one destructor ever releases. */
+        parked_callback_t(parked_callback_t&& o) noexcept
+            : fn(o.fn), ctx(o.ctx), release(std::exchange(o.release, nullptr)) {}
+        /** @brief Move-assign, disarming the source for the same reason. */
+        parked_callback_t& operator=(parked_callback_t&& o) noexcept {
+            if (this != &o) {
+                if (release != nullptr) release(ctx);
+                fn = o.fn;
+                ctx = o.ctx;
+                release = std::exchange(o.release, nullptr);
+            }
+            return *this;
+        }
+        parked_callback_t(const parked_callback_t&) = delete;
+        parked_callback_t& operator=(const parked_callback_t&) = delete;
+        /** @brief Run the release hook — the ONE place a parked context is freed. */
+        ~parked_callback_t() {
+            if (release != nullptr) release(ctx);
+        }
+    };
+
+    // The callback park's OWN lock — deliberately NOT map_mutex_ (#894).
+    //
+    // The first cut guarded `retired_callbacks_` with map_mutex_, for symmetry with
+    // `retired_seams_`. That is a LIVELOCK: `park_callback` runs on every unsubscribe and
+    // would take the graph's widest lock EXCLUSIVELY, while the delivery path takes the same
+    // lock SHARED on every write (`find_ptr`). glibc's `shared_mutex` prefers readers, so a
+    // handful of publisher threads writing in a loop starve the unsubscriber indefinitely —
+    // `edge_publish`'s churn test hung there for the full 300 s CI timeout, its churn thread
+    // parked in `__pthread_rwlock_wrlock` while eight publishers span. A leaf mutex the
+    // delivery path never touches removes the interaction entirely, and it is also what the
+    // ruling actually demands: "zero delivery-path cost" is not only about instructions, it
+    // is about contention.
+    //
+    // LOCK ORDER: this is a LEAF. Nothing is acquired while it is held (the release hooks run
+    // after it is dropped), and it is never acquired while a stripe lock or map_mutex_ is
+    // held — `unsubscribe` calls `park_callback` only after `clear_edge` and
+    // `note_subscriber_removed` have both returned. So it participates in no cycle.
+    mutable std::mutex park_mutex_;
+
+    // Subscription callback pairs retired by `unsubscribe` (#894). An `edge_view_t` snapshot
+    // copies the `{fn, ctx}` pair WITHOUT owning the ctx — that is the one leg ADR-0041 §2's
+    // "the snapshot owns its copies" does not cover, because the ctx is the subscriber's own
+    // object. So an unsubscribe cannot free it either: it parks it here, and the embedder's
+    // collect() releases it at the quiescent point only the embedder can name. Declared
+    // beside retired_seams_ for the same destruction-order reason, and AFTER park_mutex_ so
+    // the entries destruct before the lock that guarded them.
+    std::vector<parked_callback_t> retired_callbacks_;
 
     // The node-scoped vertex index (RFC-0024 §6.4) — the ONE new structure a bound path
     // needs, named honestly. The "vertex map" is a Composite tree of non-moving unique_ptr
