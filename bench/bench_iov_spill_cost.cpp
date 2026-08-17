@@ -388,8 +388,11 @@ void arm_d_real_transport(const std::vector<std::vector<std::byte>>& store) {
     constexpr std::size_t kBatch = 4000;
     // A bound sibling makes the datagram deliverable, so `send` takes its real sendmsg path
     // (a peerless udp_transport_t returns early and would measure nothing).
-    tr::net::udp_transport_t tx(47420, "127.0.0.1", 47421);
-    tr::net::udp_transport_t rx(47421, "127.0.0.1", 47420);
+    // Both bind EPHEMERALLY (#1362): a fixed 47xxx literal is not a reservation — that block
+    // is inside the kernel's own ip_local_port_range — so `rx` is constructed first and `tx`
+    // names the port the OS actually granted it.
+    tr::net::udp_transport_t rx(0, "", 0);
+    tr::net::udp_transport_t tx(0, "127.0.0.1", rx.local_port());
     (void)rx;
     std::this_thread::sleep_for(std::chrono::milliseconds(80));
 
@@ -442,8 +445,8 @@ void arm_d_real_transport(const std::vector<std::vector<std::byte>>& store) {
  */
 void arm_d2_real_tcp(const std::vector<std::vector<std::byte>>& store) {
     constexpr std::size_t kBatch = 2000;
-    tr::net::tcp_transport_t server(47422);
-    tr::net::tcp_transport_t client("127.0.0.1", 47422);
+    tr::net::tcp_transport_t server(std::uint16_t{0});  // ephemeral bind (#1362)
+    tr::net::tcp_transport_t client("127.0.0.1", server.local_port());
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
     std::vector<std::span<const std::byte>> a;

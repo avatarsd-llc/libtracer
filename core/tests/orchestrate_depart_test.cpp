@@ -249,9 +249,18 @@ struct misroute_counter_t {
 constexpr auto kBudget = 5000ms;
 constexpr auto kQuietBudget = 300ms;
 
-/** @brief Fixed test ports (repo convention — the 47xxx range; these two are unclaimed). */
-constexpr std::uint16_t kPortA = 47510;      // A's listener (B dials it on C's instruction)
-constexpr std::uint16_t kPortBCtrl = 47511;  // B's ctrl listener (the orchestrator's door)
+/** @brief EPHEMERAL listen ports (#1362): the SPEC asks for 0, the OS picks.
+ *
+ * These two listeners used to ask for fixed 47510/47511. No test port is ever RESERVED on
+ * Linux: the default `net.ipv4.ip_local_port_range` is 32768-60999, so the whole 47xxx
+ * block the repo treated as "unclaimed" is inside the range the kernel hands to ordinary
+ * client sockets. When some other socket in this network namespace already owns the number,
+ * `bind(2)` returns EADDRINUSE — and SO_REUSEADDR only forgives TIME_WAIT, not a live
+ * socket — so `slot_server_t::bind_listen` fails, `ok()` stays false, the factory's
+ * `make_checked` yields null and the SPEC write reports failure in 0.00 s, which is exactly
+ * how #1362 presented. Port 0 removes the assumption instead of scheduling around it: the
+ * bound port is read back from `local_port()` below and handed to the dialling side. */
+constexpr std::uint16_t kPortEphemeral = 0;
 
 /** @brief Poll @p pred with a deadline (control-plane sync only, never a data assert). */
 template <class Pred>
@@ -280,9 +289,9 @@ int main() {
     (void)net_a.register_module(std::string(tr::net::kWsServerSuggestedModule), "ws",
                                 conn_role_t::LISTEN);
     {
-        const auto w =
-            graph_a.write(path_t("/net:children[]"),
-                          conn_spec_view("listener", "l", conn_role_t::LISTEN, kPortA, "ws"));
+        const auto w = graph_a.write(
+            path_t("/net:children[]"),
+            conn_spec_view("listener", "l", conn_role_t::LISTEN, kPortEphemeral, "ws"));
         check(w.has_value(), "A: listener /net/ws-server/l created from a SPEC");
     }
     // The consumer endpoint: a delivery is an ordinary write here (RFC-0004 §D). The
@@ -322,7 +331,7 @@ int main() {
     {
         const auto w = graph_b.write(
             path_t("/net:children[]"),
-            conn_spec_view("listener", "ctrl", conn_role_t::LISTEN, kPortBCtrl, "ws", {},
+            conn_spec_view("listener", "ctrl", conn_role_t::LISTEN, kPortEphemeral, "ws", {},
                            /*peer_named=*/true, /*max_peers=*/8));
         check(w.has_value(), "B: ctrl listener /net/ws-server/ctrl created from a SPEC");
     }

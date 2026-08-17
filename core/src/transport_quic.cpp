@@ -290,7 +290,9 @@ transport_vertex_t::transport_factory_t quic_transport_factory(mem::mem_backend_
             if (!t->ok()) return std::unexpected(graph::status_t::TRANSPORT_DOWN);
             return t;
         }
-        if (s.port == 0 || priv.cert.empty() || priv.key.empty())
+        // `port = 0` on a LISTEN is the EPHEMERAL request (#1362), not a missing key: the
+        // OS picks and `local_port()` reports it. Only an ABSENT key is the config error.
+        if (!s.port_set || priv.cert.empty() || priv.key.empty())
             return std::unexpected(graph::status_t::TYPE_MISMATCH);
         t = std::make_unique<quic_transport_t>(s.port, priv.cert, priv.key, rx_backend,
                                                s.max_frame);

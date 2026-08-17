@@ -8,8 +8,14 @@
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * Built
- * under TSan (the recv thread + receiver handoff) and ASan+UBSan. Uses fixed
- * loopback ports; SO_REUSEADDR is set on the sockets.
+ * under TSan (the recv thread + receiver handoff) and ASan+UBSan.
+ *
+ * Every socket here binds port 0 (#1362). No port number is reserved for tests: the old fixed
+ * 47xxx literals sit INSIDE the kernel's default `net.ipv4.ip_local_port_range` (32768-60999), so
+ * the ephemeral allocator can hand the very same port to an unrelated client socket and bind(2)
+ * then fails with EADDRINUSE. Binding 0 and reading the granted port back with `local_port()`
+ * removes the contention instead of narrowing the window: the receiver is constructed first in
+ * LEARN-PEER mode (empty peer host), and the sender is then aimed at the port the kernel granted.
  */
 
 #include <array>
@@ -72,8 +78,9 @@ void test_raw_frame() {
     auto rx = [&](std::span<const std::byte> f) {
         got.set_value(std::vector<std::byte>(f.begin(), f.end()));
     };
-    tr::net::udp_transport_t a(47100, "127.0.0.1", 47101);
-    tr::net::udp_transport_t b(47101, "127.0.0.1", 47100);
+    // Receiver first (ephemeral bind, learn-peer), then the sender aimed at the granted port.
+    tr::net::udp_transport_t b(0, "", 0);
+    tr::net::udp_transport_t a(0, "127.0.0.1", b.local_port());
     check(a.ok() && b.ok(), "both UDP sockets bound");
 
     b.set_receiver(rx);
@@ -110,8 +117,9 @@ void test_two_nodes_over_udp() {
     graph_t node_a, node_b;
     tr::net::fwd_router_t router_a(node_a);
     tr::net::fwd_router_t router_b(node_b);
-    tr::net::udp_transport_t ta(47102, "127.0.0.1", 47103);
-    tr::net::udp_transport_t tb(47103, "127.0.0.1", 47102);
+    // Within that constraint, tb (the receiving side) binds first so ta can aim at its port.
+    tr::net::udp_transport_t tb(0, "", 0);
+    tr::net::udp_transport_t ta(0, "127.0.0.1", tb.local_port());
 
     // B holds the target vertex and a subscriber; A knows the link to B as "b".
     (void)node_b.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
@@ -148,8 +156,8 @@ void test_scatter_gather() {
     auto rx = [&](std::span<const std::byte> f) {
         got.set_value(std::vector<std::byte>(f.begin(), f.end()));
     };
-    tr::net::udp_transport_t a(47104, "127.0.0.1", 47105);
-    tr::net::udp_transport_t b(47105, "127.0.0.1", 47104);
+    tr::net::udp_transport_t b(0, "", 0);
+    tr::net::udp_transport_t a(0, "127.0.0.1", b.local_port());
     check(a.ok() && b.ok(), "both UDP sockets bound");
 
     b.set_receiver(rx);
@@ -226,8 +234,8 @@ void test_view_delivery() {
         f = tr::view::rope_t{};           // -1: the rope's link is gone before the wake
         got.set_value(std::move(v));      // hand the sole reference to the waiter
     };
-    tr::net::udp_transport_t a(47106, "127.0.0.1", 47107);
-    tr::net::udp_transport_t b(47107, "127.0.0.1", 47106);
+    tr::net::udp_transport_t b(0, "", 0);
+    tr::net::udp_transport_t a(0, "127.0.0.1", b.local_port());
     check(a.ok() && b.ok(), "both UDP sockets bound");
     check(b.delivers_ropes(), "udp_transport_t::delivers_ropes() is true");
 
@@ -267,8 +275,8 @@ void test_view_pool_exhaustion() {
 
     std::atomic<int> delivered{0};
     auto rope_rx = [&](tr::view::rope_t) { delivered.fetch_add(1); };
-    tr::net::udp_transport_t a(47110, "127.0.0.1", 47111);
-    tr::net::udp_transport_t b(47111, "127.0.0.1", 47110, &pool);
+    tr::net::udp_transport_t b(0, "", 0, &pool);
+    tr::net::udp_transport_t a(0, "127.0.0.1", b.local_port());
     check(a.ok() && b.ok(), "both UDP sockets bound");
 
     b.set_rope_receiver(rope_rx);
@@ -326,8 +334,8 @@ void test_settings_max_frame() {
         lens.push_back(v.bytes().size());
         seg_lens.push_back(v.owner ? v.owner->bytes.size() : 0);
     };
-    tr::net::udp_transport_t a(47114, "127.0.0.1", 47115);
-    tr::net::udp_transport_t b(47115, "127.0.0.1", 47114, &tr::mem::heap_backend(), kCap);
+    tr::net::udp_transport_t b(0, "", 0, &tr::mem::heap_backend(), kCap);
+    tr::net::udp_transport_t a(0, "127.0.0.1", b.local_port());
     check(a.ok() && b.ok(), "both UDP sockets bound");
     b.set_rope_receiver(rope_rx);
 
@@ -367,8 +375,8 @@ void test_settings_max_frame() {
     // ----- the borrowed path: no segment is involved, and the cap still holds. -----
     std::atomic<int> spans{0};
     auto span_rx = [&spans](std::span<const std::byte>) { spans.fetch_add(1); };
-    tr::net::udp_transport_t c(47116, "127.0.0.1", 47117);
-    tr::net::udp_transport_t d(47117, "127.0.0.1", 47116, &tr::mem::heap_backend(), kCap);
+    tr::net::udp_transport_t d(0, "", 0, &tr::mem::heap_backend(), kCap);
+    tr::net::udp_transport_t c(0, "127.0.0.1", d.local_port());
     check(c.ok() && d.ok(), "the borrowed-path socket pair bound");
     d.set_receiver(span_rx);
 
@@ -409,8 +417,8 @@ void test_two_nodes_zero_copy_store() {
     graph_t node_a, node_b;
     tr::net::fwd_router_t router_a(node_a);
     tr::net::fwd_router_t router_b(node_b);
-    tr::net::udp_transport_t ta(47112, "127.0.0.1", 47113);
-    tr::net::udp_transport_t tb(47113, "127.0.0.1", 47112, &rec);
+    tr::net::udp_transport_t tb(0, "", 0, &rec);
+    tr::net::udp_transport_t ta(0, "127.0.0.1", tb.local_port());
 
     // B's target vertex carries the §3.D ratio K as its OWNER-side declaration (RFC-0022
     // §3.B, never a remote write). 68 * 1024 >= 65,536 => pin; K = 8 (the old absolute
@@ -460,7 +468,7 @@ void test_tx_drop_counted() {
     std::printf("tx drops are counted and visible through transport_t (#932):\n");
     // Listener (learn-peer) mode: an unresolvable peer host leaves the endpoint
     // unset, so nothing is addressable until a datagram teaches it a source.
-    tr::net::udp_transport_t peerless(47130, "", 0);
+    tr::net::udp_transport_t peerless(0, "", 0);
     check(peerless.ok(), "peer-less listener bound");
     check(peerless.dropped_tx() == 0, "a fresh link has shed nothing");
 

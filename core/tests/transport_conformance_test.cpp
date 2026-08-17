@@ -127,9 +127,23 @@ struct loopback_pair {
     static constexpr const char* name = "loopback";
 };
 
+/**
+ * @brief The `udp` contract pair — both endpoints bind an EPHEMERAL port (#1362).
+ *
+ * No port number is reserved for tests: the fixed 47xxx literals these used to name sit
+ * inside the kernel's default `ip_local_port_range` (32768-60999), so an ordinary client
+ * socket can already own one and `bind(2)` then fails EADDRINUSE. Port 0 removes the
+ * contention rather than narrowing the window — the OS grants a free port and `local_port()`
+ * reports it. `b_` therefore binds FIRST, in learn-peer mode (empty host), and `a_` aims at
+ * the port `b_` actually got.
+ *
+ * Ordering dependency worth knowing: `b_` has no peer until an inbound datagram teaches it
+ * one, so the contract's `b()`→`a()` reverse leg only works because barriers (1) and (2)
+ * have already confirmed a→b traffic by the time it runs.
+ */
 struct udp_pair {
-    tr::net::udp_transport_t a_{47200, "127.0.0.1", 47201};
-    tr::net::udp_transport_t b_{47201, "127.0.0.1", 47200};
+    tr::net::udp_transport_t b_{0, "", 0};
+    tr::net::udp_transport_t a_{0, "127.0.0.1", b_.local_port()};
     [[nodiscard]] bool ok() const { return a_.ok() && b_.ok(); }
     [[nodiscard]] transport_t& a() { return a_; }
     [[nodiscard]] transport_t& b() { return b_; }
@@ -138,11 +152,12 @@ struct udp_pair {
 
 struct tcp_pair {
     /**
-     * @brief Declaration order = construction order: the listener binds first, then the dialer's
-     *        synchronous connect completes the link.
+     * @brief Declaration order = construction order: the listener binds first (port 0, see
+     *        @ref udp_pair for why nothing here uses a fixed port), then the dialer's synchronous
+     *        connect to the granted `local_port()` completes the link.
      */
-    tr::net::tcp_transport_t listener_{47211};
-    tr::net::tcp_transport_t dialer_{"127.0.0.1", 47211};
+    tr::net::tcp_transport_t listener_{0};
+    tr::net::tcp_transport_t dialer_{"127.0.0.1", listener_.local_port()};
     [[nodiscard]] bool ok() const { return listener_.ok() && dialer_.ok(); }
     [[nodiscard]] transport_t& a() { return dialer_; }
     [[nodiscard]] transport_t& b() { return listener_; }
@@ -150,8 +165,9 @@ struct tcp_pair {
 };
 
 struct ws_pair {
-    tr::net::transport_ws_server server_{47221};
-    tr::net::transport_ws_client client_{"127.0.0.1", 47221}; /**< handshake in the ctor */
+    tr::net::transport_ws_server server_{0}; /**< binds an ephemeral port (see @ref udp_pair) */
+    tr::net::transport_ws_client client_{"127.0.0.1",
+                                         server_.local_port()}; /**< handshake in the ctor */
     [[nodiscard]] bool ok() const { return server_.ok() && client_.ok(); }
     [[nodiscard]] transport_t& a() { return client_; }
     [[nodiscard]] transport_t& b() { return server_; }

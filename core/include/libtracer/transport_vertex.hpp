@@ -126,7 +126,16 @@ enum class link_state_t : std::uint8_t {
  */
 struct conn_settings_t {
     std::string addr;                     /**< @brief Peer IPv4 dotted-quad (DIAL). */
-    std::uint16_t port = 0;               /**< @brief Peer port (DIAL) / bind port (LISTEN). */
+    std::uint16_t port = 0;               /**< @brief Peer port (DIAL) / bind port (LISTEN);
+                                                      `0` on a LISTEN is the EPHEMERAL request —
+                                                      see @ref port_set. */
+    bool port_set = false;                /**< @brief Was a `port` key PRESENT in the config?
+                                                      Distinguishes an omitted required key (a
+                                                      `TYPE_MISMATCH` config error) from an
+                                                      explicit `port = 0`, which on a LISTEN asks
+                                                      the OS to pick the bind port (#1362). Read
+                                                      the granted port back off the constructed
+                                                      link (`local_port()`). */
     conn_role_t role = conn_role_t::DIAL; /**< @brief Link direction (type default; config
                                                       `role` overrides). */
     std::uint32_t keepalive_ms = 0;       /**< @brief Keepalive interval (transport-specific;
