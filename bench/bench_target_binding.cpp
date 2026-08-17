@@ -197,11 +197,19 @@ struct point_t {
     const path_t src_path = *path_t::parse("/src");
     const path_t sub_path = *path_t::parse("/src:subscribers[]");
 
-    // ORDER IS THE WHOLE EXPERIMENT. `admit_subscriber` mints only if `find_ptr(target_key)`
-    // already answers, so registering the target before or after the subscribe is what
-    // decides which leg every subsequent delivery takes. Nothing else differs between arms.
-    if (arm == arm_t::BOUND) (void)g.register_vertex(tpath, role_t::STORED_VALUE);
+    // ORDER IS THE WHOLE EXPERIMENT — but only the order across the SUBSCRIBE.
+    // `admit_subscriber` mints only if `find_ptr(target_key)` already answers, so whether the
+    // target is registered before or after the subscribe is what decides which leg every
+    // subsequent delivery takes, and nothing else differs between the arms.
+    //
+    // `/src` is therefore registered FIRST in both arms, not just in the canonical one. That
+    // is not tidiness: `find_ptr` walks the root's child table on its first segment, and if
+    // the arms disagreed about whether `src` or the target subtree was inserted there first,
+    // the canonical arm's very first lookup would carry a per-arm insertion-order term that
+    // has nothing to do with the binding. Registering `/src` up front makes the root's table
+    // identical in both arms and removes the term outright rather than bounding it.
     const vertex_handle_t src = g.register_vertex(src_path, role_t::STORED_VALUE);
+    if (arm == arm_t::BOUND) (void)g.register_vertex(tpath, role_t::STORED_VALUE);
     if (!g.write(sub_path, subscriber_tlv(key)).has_value()) {
         std::printf("SKIP mode=%s depth=%zu: the target edge did not admit\n", mode, depth);
         return {};

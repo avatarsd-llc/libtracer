@@ -634,27 +634,40 @@ measure that atomic in the same binary — **4.70 ns** on this host — and the 
 corrected delta beside the raw one. Only the corrected figure is a claim.
 
 **Measured** on the quiet pinned host, best-of-12 rounds (`taskset -c 24-30`, load average
-2.43 → 3.49 across the window, every round under the 7.75 bar; per-arm `max/min` 1.032–1.065,
+2.05 → 3.91 across the window, every round far under the 7.75 bar; per-arm `max/min` 1.013–1.082,
 unimodal — no two-cluster shape), `calibrate_batch_for_window`, zero ablation failures in
 12 × 14 arms:
 
 | target-key depth | bound (deref) | canonical (`find_ptr`) | corrected delta | A/A null |
 | --- | --- | --- | --- | --- |
-| 1 | 155 ns | 162 ns | **+3.0 ns (1.9 %)** | 0.65 % |
-| 4 | 155 ns | 172 ns | **+12.3 ns (7.9 %)** | 0.00 % |
-| 12 | 155 ns | 218 ns | **+58.6 ns (37.9 %)** | 0.65 % |
+| 1 | 154 ns | 162 ns | **+3.3 ns (2.1 %)** | 0.00 % |
+| 4 | 154 ns | 171 ns | **+12.3 ns (8.0 %)** | 0.00 % |
+| 12 | 154 ns | 212 ns | **+53.0 ns (34.3 %)** | 0.65 % |
 
-The bound leg is **flat at 154–155 ns across depth 1 → 12**, which is the claim the binding was
-built on, and the canonical leg's slope is **5.05 ns per segment** — independently reproducing
-the +5.75 ns/segment #830 measured on `find_ptr` alone before any of this shipped.
+The bound leg is **flat at 154 ns across depth 1 → 12**, which is the claim the binding was built
+on, and the canonical leg's slope is **4.5 ns per segment** — the same order as the
++5.75 ns/segment #830 measured on `find_ptr` alone before any of this shipped.
+
+**Both arms register `/src` first, not just the canonical one.** `find_ptr` walks the ROOT's
+child table on its first segment, so if the arms disagreed about whether `src` or the target
+subtree was inserted there first, the canonical arm would carry an insertion-order term with
+nothing to do with the binding. It is not a hypothetical: an earlier revision that registered
+the target first on the bound arm read the deep point **5.6 ns high** (+58.6 against +53.0 ns).
+Registering `/src` up front in both arms makes the root's table identical and removes the term
+outright rather than bounding it.
 
 **The A/A null, by four constructions.** Each depth runs three arms of the *identical* bound
 construction — two `tgt-bind-bound` readings bracketing the canonical one, plus an adjacent
-`tgt-bind-bound-aa` — and best-of-12 they span **0.65 % / 0.00 % / 0.65 %** at depths 1 / 4 / 12,
-under a nanosecond, an order of magnitude below the shallowest effect. The fourth is the whole
-campaign repeated: two independent best-of-12 runs of this binary agree to **≤ 1 ns on every one
-of the fourteen arms**. Read the `bracket_ns` column the bench prints as the error bar — a delta
-inside it is not a result.
+`tgt-bind-bound-aa` — and best-of-12 they span **0.00 % / 0.00 % / 0.65 %** at depths 1 / 4 / 12,
+under a nanosecond, an order of magnitude below the shallowest effect. The fourth is the campaign
+repeated: independent best-of-12 runs of this binary agree to **≤ 1 ns on every one of the
+fourteen arms**, including one taken in a visibly busier window (one-minute load 7.47 decaying
+from a five-minute 15.28) that best-of-rounds absorbed to within 1 ns. Read the `bracket_ns`
+column the bench prints as the error bar — a delta inside it is not a result.
+
+**A diagnostic, not a gated point.** No perf workflow runs this binary, so it banks no series;
+promoting it to `perf_gate.py`'s `POINTS` would be a separate decision about wall-clock and about
+which arm a gate should watch.
 
 **A discarded warm-up arm runs first, and it is load-bearing.**
 `calibrate_batch_for_window` warms each arm's caches but cannot warm the PROCESS — lazy statics,
