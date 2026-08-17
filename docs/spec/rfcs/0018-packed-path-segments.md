@@ -471,8 +471,19 @@ Stated as runnable experiments, not as sentiment.
    decoder costs more flash than today, the RFC needs re-scoping for the constrained target even
    if the host numbers hold.
 
-Falsifiers 2, 3, 5 and 6 are **currently unrun**. This RFC should not leave draft until 1–4 are
-green and 5–6 are at least measured.
+   **RUN — PASS, both MCU arms ([#1345](https://github.com/avatarsd-llc/libtracer/issues/1345)).**
+   `tools/rv32_footprint.py`, the required-modules sentinel at `-Os` for
+   `rv32imac_zicsr_zifencei`/`ilp32` (ESP32-C6), `riscv32-esp-elf-g++ 15.2.0` (`esp-15.2.0_20251204`,
+   the IDF v6.0 pin), `87878b70` (S3) against the pre-#1341 baseline `5e7659e3`:
+   **−788 B flash** (`.text` −772, `.rodata` −16), `.bss` and `.data` flat. The saving is
+   attributable, not incidental: `path` −310 B, `frame` −370 B, `tlv_arena` −72 B, the fixture
+   −128 B, every other required module byte-identical. The ESP32-C3 ISA (`rv32imc_zicsr_zifencei`)
+   agrees at −784 B. The Cortex-M0 arm, on the same fixture at the same two commits, is
+   **−264 B flash** with `.bss` flat. The packed walker does not cost flash on the constrained
+   target — it *is* the smaller decoder, so no re-scoping is required.
+
+Falsifiers 2, 3 and 5 are **currently unrun**; 6 is run and green. This RFC should not leave draft
+until 1–4 are green and 5 is at least measured.
 
 ## 11. Prerequisites and sequencing
 
@@ -519,9 +530,15 @@ this RFC lands, and it should not be bundled into a wire revision.
 | depth flatness (85 ns at 4 and at 13 segments) | `scratchpad/depth.cpp` | **out of tree — must land as a bench axis** |
 | 459 B / 5 reverse frames; `chain-path-noreply` 965–986 ns | `scratchpad/probe_chain.cpp` | **out of tree — must land as a bench arm** |
 | packed walk 19–21 ns; 104 B frame | `scratchpad/packed.cpp` | **out of tree — this is falsifier 1** |
-| rv32 code size, rv32 latency, RAM, rope tier | — | **UNMEASURED** |
+| rv32 `-Os` flash −788 B, RAM flat (falsifier 6) | `tools/rv32_footprint.py` | in tree, run at `5e7659e3` → `87878b70` |
+| Cortex-M0 `-Os` flash −264 B, RAM flat (falsifier 6) | `tools/cortexm0_footprint.py` | in tree, run at `5e7659e3` → `87878b70` |
+| rv32 latency, rope tier | — | **UNMEASURED** |
 
 All host figures: x86-64, `g++ -O3 -DNDEBUG -std=gnu++23`, Release, arms in one binary, warmed out
-of the idle P-state, p50 over ≥9 reps, order-alternated. Three of the six rows above come from
-probes that do not yet exist in the repository; **no number in this document should be republished
-until its probe has landed as a bench arm.**
+of the idle P-state, p50 over ≥9 reps, order-alternated. The two MCU rows are cross-compiled size
+censuses, not timings: `-Os -fno-exceptions -fno-rtti -DLIBTRACER_NO_ATOMIC -DNDEBUG
+-DLIBTRACER_BACKEND_SET_POOL_ONLY` + `--gc-sections`, stripped, `riscv32-esp-elf-g++ 15.2.0` and
+`arm-none-eabi-g++ 13.2.1` respectively — deterministic, so a delta between two commits on one
+toolchain is exact and host load cannot perturb it. Three of the rows above come from probes that
+do not yet exist in the repository; **no number in this document should be republished until its
+probe has landed as a bench arm.**
