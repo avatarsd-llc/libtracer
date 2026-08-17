@@ -210,6 +210,14 @@ add_executable(bench_reply_leg bench_reply_leg.cpp)
 target_link_libraries(bench_reply_leg PRIVATE libtracer)
 target_compile_options(bench_reply_leg PRIVATE -Wall -Wextra)
 
+# What target_binding_t buys the LOCAL target edge (#830, shipped in #1174): the depth A/B
+# between `deref_vertex_slot` and the `find_ptr` fallback, its A/A null, and the
+# target_canonical_resolves() ablation — all in ONE binary, because both arms are the same
+# shipped `dispatch_edge_target` selected by the shipped mint rule in `admit_subscriber`.
+add_executable(bench_target_binding bench_target_binding.cpp)
+target_link_libraries(bench_target_binding PRIVATE libtracer)
+target_compile_options(bench_target_binding PRIVATE -Wall -Wextra)
+
 add_executable(bench_mount_resolve bench_mount_resolve.cpp)
 target_link_libraries(bench_mount_resolve PRIVATE libtracer)
 target_compile_options(bench_mount_resolve PRIVATE -Wall -Wextra)

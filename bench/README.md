@@ -602,6 +602,101 @@ is the #1235 mechanism, and it is the same size as the effects axis 3 is asked t
 `FALSIFIER-1` line the bench prints brackets the packed arm either side of the legacy one and
 reports their spread for exactly this reason: a delta smaller than that spread is not a result.
 
+### `bench_target_binding` — what `target_binding_t` buys, and why both arms are shipped code (#830)
+
+```sh
+cmake --build bench/build --target bench_target_binding -j
+python3 bench/host_guard.py wait && taskset -c 24-30 ./bench/build/bench_target_binding
+```
+
+#1174 landed `graph::target_binding_t` and #830 stayed open because nothing measured it: the
+`+21.3 ns/segment` and `flat 11 ns` in its changelog are #830's own prior measurement of
+`find_ptr` and `deref_vertex_slot` **in isolation**, not of the shipped delivery leg, and not
+taken on this host.
+
+**Both arms are the same function in the same binary, and neither is hand-written.**
+`dispatch_edge_target` already carries both spellings and picks per edge, so the in-binary form
+costs nothing to arrange: what selects the arm is the shipped mint rule in `admit_subscriber` —
+*a target that does not exist yet stays unbound and keeps the canonical spelling*. Registering
+the target **before** the subscribe produces a bound edge; registering it **after** produces a
+canonical one. Everything downstream of the resolve (the fan-in ACL gate, the nothrow rope
+clone, `store_value`) is byte-identical between them. That removes the #1346 unfaithful-control
+hazard at the root: there is no transcription whose faithfulness has to be argued, because the
+control arm **is** the shipped fallback leg reached through the shipped mint rule — and which
+leg each point took is **counted** by `graph_t::target_canonical_resolves()`, per point, not
+assumed. A point whose count disagrees with its own name prints `ablation=FAIL` and is excluded
+from every summary line.
+
+**The one asymmetry is priced, not waved away.** The canonical arm pays the relaxed `fetch_add`
+on `target_canonical_resolves_`, which the pre-#1174 code did not have, so it INFLATES the
+canonical arm and the raw delta overstates the win. The `tgt-bind-ctr` / `tgt-bind-noctr` legs
+measure that atomic in the same binary — **4.70 ns** on this host — and the summary prints the
+corrected delta beside the raw one. Only the corrected figure is a claim.
+
+**Measured** on the quiet pinned host, best-of-12 rounds (`taskset -c 24-30`, load average
+2.43 → 3.49 across the window, every round under the 7.75 bar; per-arm `max/min` 1.032–1.065,
+unimodal — no two-cluster shape), `calibrate_batch_for_window`, zero ablation failures in
+12 × 14 arms:
+
+| target-key depth | bound (deref) | canonical (`find_ptr`) | corrected delta | A/A null |
+| --- | --- | --- | --- | --- |
+| 1 | 155 ns | 162 ns | **+3.0 ns (1.9 %)** | 0.65 % |
+| 4 | 155 ns | 172 ns | **+12.3 ns (7.9 %)** | 0.00 % |
+| 12 | 155 ns | 218 ns | **+58.6 ns (37.9 %)** | 0.65 % |
+
+The bound leg is **flat at 154–155 ns across depth 1 → 12**, which is the claim the binding was
+built on, and the canonical leg's slope is **5.05 ns per segment** — independently reproducing
+the +5.75 ns/segment #830 measured on `find_ptr` alone before any of this shipped.
+
+**The A/A null, by four constructions.** Each depth runs three arms of the *identical* bound
+construction — two `tgt-bind-bound` readings bracketing the canonical one, plus an adjacent
+`tgt-bind-bound-aa` — and best-of-12 they span **0.65 % / 0.00 % / 0.65 %** at depths 1 / 4 / 12,
+under a nanosecond, an order of magnitude below the shallowest effect. The fourth is the whole
+campaign repeated: two independent best-of-12 runs of this binary agree to **≤ 1 ns on every one
+of the fourteen arms**. Read the `bracket_ns` column the bench prints as the error bar — a delta
+inside it is not a result.
+
+**A discarded warm-up arm runs first, and it is load-bearing.**
+`calibrate_batch_for_window` warms each arm's caches but cannot warm the PROCESS — lazy statics,
+the first heap growth, the first touch of the delivery leg's code pages. Left in the sweep that
+cost showed up as a **24 ns bracket spread at the first depth and nowhere else**, an A/A null
+twenty times worse than the 1 ns the later depths read, which would have swallowed the shallow
+arm's entire effect.
+
+**What this bench does NOT answer.** A with-#1174 against without-#1174 comparison is
+cross-binary and is therefore not quoted here at all, on this host's own evidence (see the
+`bench_forward_demux` section above). The per-edge cost of the binding is instead stated as a
+byte count, which is exact and needs no timing: `pub_edge_t` **48 → 56 B** and `edge_view_t`
+**152 → 160 B**, i.e. the 8 B lands in real storage rather than in existing padding.
+
+### The #504 reply-spread must-not-regress arm, and the honest limit of it (#830)
+
+#830's acceptance gate carries the #504 rejection precedent: *a memo that wins one shape but
+moves the four-link reply spread is a REJECT*. `bench_reply_leg`'s `reply-spread` mode is that
+shape — the same fan-out rotated over `kSpreadLinks` (4) destinations, so consecutive deliveries
+never repeat a link. Best-of-8 rounds on the quiet host (load average 2.55 → 3.74, every round
+under the bar; `max/min` 1.012–1.017 on the spread arm):
+
+| fan-out (w=32) | `reply-last` ×2 | `reply-spread` ×2 | spread A/A null | spread − last |
+| --- | --- | --- | --- | --- |
+| 8 | 625 / 622 ns | 657 / 660 ns | 0.46 % | +5.61 % |
+| 64 | 3950 / 3960 ns | 4240 / 4230 ns | 0.24 % | +7.08 % |
+
+**What that is and is not.** The bench interleaves `LAST, SPREAD, LAST, SPREAD`, so the two
+readings of each arm are an in-binary A/A null and the spread−last figure is an in-binary delta.
+What it is **not** is a with-#830 against without-#830 comparison: that is cross-binary, and this
+harness does not quote cross-binary deltas. Rather than dress one up, the mechanism is closed
+off directly, in two facts that need no timing at all:
+
+- **`dispatch_edge_remote` never reads `e.binding`.** Its `remote_delivery_t` is built from
+  `link`, `return_route`, `reverse_route`, `caller` and `delivery_compact`, and nothing else.
+  There is no code path by which the binding can enter this leg.
+- **The only residual mechanism is bytes streamed, and it has no headroom here.** The fan-out
+  loop streams `F × sizeof(pub_edge_t)`, which the binding grew 48 → 56 B. At this gate's widest
+  arm that is **3584 B against 3072 B** — both L1-resident on this host, which is why the arm
+  the suite relies on to catch a per-edge bytes defect is the wide `inproc` ladder at fan
+  1024/8192 (`kFanoutsMid`, #844 / #841), not a four-link spread that tops out at 64.
+
 ## What is measured
 
 The swept axes (`bench_common.hpp`): payload **1..8192 B**, fan-out

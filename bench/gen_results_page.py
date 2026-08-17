@@ -345,6 +345,16 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "counted exactly by addressing the subscribers through the bus-peer tier.",
         "ns per write, median with range \u00b7 deliveries and resolutions per write"),
     instrument_t(
+        "bench_target_binding.cpp", "inproc", (),
+        "Prices `graph::target_binding_t` (#830) on the LOCAL target-edge delivery leg: the "
+        "same `dispatch_edge_target` in ONE binary, taking its bound `deref_vertex_slot` "
+        "spelling or its canonical `find_ptr` fallback according to the shipped mint rule "
+        "(a target registered before the subscribe binds; one registered after does not), "
+        "swept over the target key's DEPTH. Each point's leg is COUNTED by "
+        "`graph_t::target_canonical_resolves()` rather than assumed, and the canonical arm's "
+        "own instrumentation atomic is priced in the same binary and subtracted.",
+        "ns per delivery, p50 · canonical resolutions per delivery"),
+    instrument_t(
         "bench_mount_resolve.cpp", "framed", (),
         "Drives one whole forward hop — peek, mount descent, head rebuild, egress — through a "
         "registry of N mounts of width W segments, addressed to the last-registered mount, and "

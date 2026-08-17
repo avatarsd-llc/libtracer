@@ -1741,3 +1741,16 @@ if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_TCP)
     libtracer_test_warnings(session_anchor_test)
     add_test(NAME session_anchor COMMAND session_anchor_test)
 endif()
+
+# The #830 ablation: target_canonical_resolves() proves WHICH of dispatch_edge_target's two
+# resolve spellings a local target edge took. The bound and canonical legs deliver identically
+# by design, so a delivery assertion measures nothing here — the counter, together with the two
+# control arms that make it MOVE (an edge admitted before its target existed; a retired-then-
+# revived target), is the whole instrument. Appended at the END of this file deliberately: the
+# citation pins at core/tests/CMakeLists.txt:1575,1588-1589 are enrolled non-source anchors that
+# `check_doc_citations.py --repin` cannot move, so an insertion above them costs a hand re-pin
+# of docs/modules/segment.md and of the anchor table for nothing.
+add_executable(target_binding_ablation_test target_binding_ablation_test.cpp)
+target_link_libraries(target_binding_ablation_test PRIVATE libtracer)
+libtracer_test_warnings(target_binding_ablation_test)
+add_test(NAME target_binding_ablation COMMAND target_binding_ablation_test)
