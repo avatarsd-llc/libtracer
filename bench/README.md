@@ -366,6 +366,63 @@ and invokes `perf_gate.py` nowhere. The seam for making it the blocking tier exi
 tested; the HEAD-vs-parent leg that would use it does not. Do not read "pinned host =
 blocking tier" off any comment until a step in that workflow calls the gate.
 
+### The banked series' own validity (#1301)
+
+`host_guard.py` guards the conditions **one sample** is taken under. `store_guard.py`
+guards the **series** those samples form, which is where the #1173 investigation found
+the last two ways a regression hides. Both run out of `perf-local.yml`; neither measures
+anything, so both are fully testable off a fixture store (`test_store_guard.py`).
+
+```sh
+python3 bench/store_guard.py density   --data data.js --shas-file main.txt --max-gap 8
+python3 bench/store_guard.py drift     --data data.js --window 20 --threshold 15
+python3 bench/store_guard.py toolchain --data data.js
+```
+
+**A gap is a measurement defect, and the guarantee bounds it.** Push-to-`main` behind a
+`paths:` filter publishes nothing when the run does not happen — filtered out, failed,
+skipped by the quiescence guard, or cancelled while *queued* (GitHub keeps one queued run
+per concurrency group, and `cancel-in-progress: false` protects only in-progress ones).
+Sixteen consecutive merges once banked nothing, which is how the compact-forward +41 %
+step became a range rather than a commit. A daily `schedule:` now asks `density` how far
+the store lags the bench-relevant history of `main` and measures HEAD when the gap exceeds
+**8** merges. What is guaranteed is the **bound on the gap**, not a point per commit: any
+regression range stays narrow enough to bisect in three builds.
+
+**A contaminated point is not coverage.** The gap is counted in *trusted* points only. A
+sample the A/A pair flagged records what the machine was doing, not what the code cost, so
+letting it close the gap would satisfy the guarantee with exactly the points it exists to
+distrust — and a density guarantee that raised the sample count while lowering the trust
+per sample would buy nothing.
+
+**The rolling comparator sees the staircase the 115 % bar sleeps through.**
+benchmark-action compares each point with the one immediately before it, so five merges of
++4 % never trip a 15 % step and the series ends 22 % slower with no alert raised. `drift`
+compares the newest trusted point with the **best** of the last 20 trusted points — the
+estimator [`docs/methodology.md`](../docs/methodology.md) makes normative, because
+contamination is one-sided across points of a fixed-host series for the same reason it is
+across rounds of one measurement. Its output prints both figures side by side, so a
+staircase reads as a large baseline delta beside a small point-to-point one.
+
+**A best-of-window baseline is a floor, so a breach must clear the whole range.** Measured
+against the best alone, ordinary run-to-run spread breaches 15 % constantly: on the real
+store, **59** metrics do, and an alert that fires on nothing trains the reader to ignore
+it. Requiring the point to fall outside the window's entire `[min..max]` — the same
+disjoint-ranges criterion an A/B must satisfy before it may be believed — leaves **2**.
+A step-change therefore alerts **once** and then stops, because the step is inside the
+range it established.
+
+**Warn-only, and proved live every run.** The drift leg never fails the job; the hard
+verdicts stay with `perf.yml`'s interleaved gates. A warn-only comparator is invisible when
+it is right and equally invisible when it is broken, so — as with the RAM ratchet above —
+each run doctors the newest point by half a step in the *worse* direction for that suite's
+sign and fails if no warning comes out.
+
+**The compiler stamp finally has a reader.** `host_guard.py stamp --compiler` has written
+the toolchain onto every point since #1301's item 3; `toolchain` reads it back, prints
+every recorded transition and how many points predate the stamp, and `drift` marks any
+alert whose baseline window crosses a bump as not attributable to code.
+
 ### `bench_rx_source_topology` — where a bounded RX source may sit (ADR-0067 §3)
 
 ```sh

@@ -504,6 +504,25 @@ optional TLS module. An absent transport must never be readable as a tie.
   situations apart — a spread near **2×** whose ends sit in two clusters rather than
   spreading smoothly is a contaminated window, and the run must be repeated rather than
   reported, whatever the medians say.
+- **The same estimator rule governs the series, and a gap in it is a measurement
+  defect.** Points of the fixed-host store are rounds of a slower experiment, so they
+  inherit both halves of the rule above. First, a baseline drawn from them is the
+  window's **best**, never its median:
+  [`store_guard.py`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/store_guard.py)
+  compares each banked point with the best of the last 20 **trusted** points, which is
+  the comparison benchmark-action's point-to-point `alert-threshold` cannot express —
+  five merges of +4 % never trip a 15 % step, and the series ends 22 % slower with no
+  alert ever raised. A best is a *floor*, though, so a breach must also land outside
+  that window's whole `[min..max]`: on the real store the percentage bar alone reports
+  **59** breaches where the range guard leaves **2**. Second, a *flagged* point is not
+  a sample — it answers what the machine was doing, not what the code cost — so it
+  neither sets the baseline nor counts as coverage. And coverage is itself guaranteed:
+  a run that never happens (filtered out, failed, or cancelled while queued) leaves a
+  hole nothing notices, which is how one +41 % step became a **16-merge range** instead
+  of a commit ([#1173](https://github.com/avatarsd-llc/libtracer/issues/1173)). A daily
+  catch-up measures HEAD whenever the last trusted point is more than 8 bench-relevant
+  merges behind `main`, so the guarantee is a **bound on the gap** — narrow enough to
+  bisect — rather than a point per commit.
 - **Record the load context on both sides of every measurement, and wait for
   quiescence first.** `python3 bench/host_guard.py wait` before the run and
   `/proc/loadavg` either side of it: an absolute figure without its load context cannot

@@ -94,6 +94,13 @@ jobs:
       # would use exists and is tested; the pinned-host leg that would use it does not.
       - name: Bench-host quiescence-guard tests
         run: python3 bench/test_host_guard.py
+      # The BANKED-SERIES rules (#1301), tested in the same place and for the same
+      # reason: they decide whether the pinned store has a point for a commit at all,
+      # and the rolling comparator is warn-only, so a wrong verdict there is as
+      # invisible as the RAM ratchet's. They read a fixture store and measure nothing,
+      # so they belong before anything is timed.
+      - name: Banked-series validity tests (density, rolling drift, toolchain)
+        run: python3 bench/test_store_guard.py
       # The RAM-census series + warn ratchet (#1228), tested here for the same reason:
       # it runs on the pinned host, and for its whole warn-first life a wrong verdict is
       # INVISIBLE — nothing turns red to report it. These are the only check that the
