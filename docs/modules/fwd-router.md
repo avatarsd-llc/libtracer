@@ -107,13 +107,15 @@ label bound by a prior `ADVERTISE`.
 namespace tr::net {
 
 class fwd_router_t {
-    // graph: terminus op resolution. mr: the route-handle label tables (ADR-0039 §1).
+    // graph: terminus op resolution. label_src: the NOTHROW block source the route-handle
+    // label tables draw from (#603 defect 1 / ADR-0065 — it was a `memory_resource` until a
+    // peer's ADVERTISE proved pmr cannot report exhaustion by value).
     // rx: the NOTHROW block source the terminus decode arena draws from (ADR-0065).
     // flat: the byte backend EVERY rope flatten draws from, forward AND terminus (#730/#766).
     // max_label_bindings_per_link: 0 = unbounded. egress: the reply-egress backend (#795).
     // FOUR independent memory seams, each defaulting to the global heap on its own.
     explicit fwd_router_t(graph::graph_t& graph,
-                          std::pmr::memory_resource* mr = std::pmr::get_default_resource(),
+                          mem::block_source_t* label_src = &mem::heap_source(),
                           mem::block_source_t* rx = &mem::heap_source(),
                           mem::mem_backend_t* flat = &mem::heap_backend(),
                           std::size_t max_label_bindings_per_link = 0,

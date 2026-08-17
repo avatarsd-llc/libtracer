@@ -39,16 +39,28 @@ static std::byte g_slab[24 * 1024];
 tr::esp::critical_pool_t rx_pool{std::span<std::byte>(g_slab, kRxRegion), 1536};
 // ... transport_vertex_t net{graph, router, "/net", &rx_pool};
 
-// Back region: monotonic + synchronized arena — the pmr seam (label tables,
-// LKV control blocks).
+// Back region: monotonic + synchronized arena — the pmr seam (LKV control
+// blocks). NOT the label tables any more: since #603 defect 1 they draw from a
+// FAILABLE seam, because a peer's ADVERTISE reaches that store on a receive
+// thread and pmr cannot report exhaustion by value.
 std::pmr::monotonic_buffer_resource arena{back_region(g_slab).data(),
                                           back_region(g_slab).size()};
 std::pmr::synchronized_pool_resource shared{&arena};
 
-// The FAILABLE seam is separate: everything a PEER can provoke (the terminus
-// decode arena) draws from it, and it reports exhaustion by value instead of
-// throwing (ADR-0065). Injecting only `shared` above leaves those allocations
-// on the global heap — where they at least RECYCLE, which matters below.
+// The FAILABLE seams are separate: everything a PEER can provoke — the terminus
+// decode arena, and the router's label tables — draws from one, and reports
+// exhaustion by value instead of throwing (ADR-0065). Injecting only `shared`
+// above leaves those allocations on the global heap.
+//
+// TWO of them, not one, because their sharing topologies differ. `blocks` is the
+// per-child RX source (see the warning below: give each receive thread its own).
+// `label_blocks` is ONE source shared by the whole label plane and therefore takes
+// a locking policy — it is touched only when a flow is SET UP (`on_advertise` on a
+// receive thread, `ensure_egress` minting on the writer thread); the per-delivery
+// reuse path finds the label already bound and reaches no allocator at all, which
+// is exactly the "wiring frequency" case `sync_mutex_t` is for.
+static tr::mem::size_class_t label_classes[12];
+static tr::mem::pool_source_t<tr::mem::sync_mutex_t> label_blocks{label_region, label_classes};
 //
 // The two BYTE-BUFFER seams — graph_t's `value_backend` and fwd_router_t's `flat`
 // — stay on heap_backend() here; the warning below says why a BARE pool_t is never
@@ -57,19 +69,29 @@ std::pmr::synchronized_pool_resource shared{&arena};
 //
 // ... graph_t graph{&shared, /*value_backend=*/&tr::mem::heap_backend(),
 // ...               /*ctl=*/&blocks};
-// ... fwd_router_t router{graph, &shared, /*rx=*/&blocks,
+// ... fwd_router_t router{graph, /*label_src=*/&label_blocks, /*rx=*/&blocks,
 // ...                     /*flat=*/&tr::mem::heap_backend(),
 // ...                     /*max_label_bindings_per_link=*/64,
 // ...                     /*egress=*/&tr::mem::heap_backend()};
 ```
 
+`integrations/esp-idf/examples/full_node` is this recipe as running code: three slab
+regions (RX pool / label source / pmr arena) and a self-proof that prints the label
+source's own census — `288/2048 B used, 0/12 size classes, 0 block(s) overflowed` for
+one link carrying one compact flow — so the sizing above is a number to check against
+your own node rather than one to copy.
+
 Those are the three injection points of `graph_t`'s constructor — the pmr resource,
 the value backend and the failable control source
 (`core/include/libtracer/graph.hpp:431-433`) — and the **four** of
-`fwd_router_t`: the pmr resource, the failable `rx` source, the `flat` byte backend
-its rope flattens draw from, and the `egress` byte backend the terminus reply head
-draws from (`core/include/libtracer/fwd_router.hpp:179-184`; `egress` is #795 /
-ADR-0074, and the `max_label_bindings_per_link` bound sits between the last two). The full set of
+`fwd_router_t`: the failable `label_src` source its label tables draw from, the
+failable `rx` source, the `flat` byte backend its rope flattens draw from, and the
+`egress` byte backend the terminus reply head draws from
+(`core/include/libtracer/fwd_router.hpp:194-199`; `egress` is #795 /
+ADR-0074, and the `max_label_bindings_per_link` bound sits between the last two).
+`label_src` was a `std::pmr::memory_resource` until #603 defect 1 — it could not
+stay one, because a peer's `ADVERTISE` reaches it and pmr reports exhaustion by
+throwing. The full set of
 build-time and injected bounds is catalogued in
 [the configuration space](../design/config/00-configuration-space.md); the failure
 semantics of the third seam are in
@@ -173,10 +195,13 @@ noisy link cannot starve another's decode:
 router.add_child("up", up_link, /*rx=*/&up_blocks);
 ```
 
-A source shared at **wiring** frequency — a graph's `ctl` — is fine with a locking
-`Sync` policy (`tr::mem::sync_mutex_t` from `mem_source_sync.hpp`, or a target's own
-interrupt-disable section). The policy is the `pool_source_t<Sync>` template
-parameter, defaulting to `sync_none_t`, which compiles to nothing.
+A source shared at **wiring** frequency — a graph's `ctl`, or the router's
+`label_src` — is fine with a locking `Sync` policy (`tr::mem::sync_mutex_t` from
+`mem_source_sync.hpp`, or a target's own interrupt-disable section). The label store
+qualifies on its own terms rather than by analogy: it allocates only when a flow is
+set up, and the per-delivery `COMPACT` leg finds the label already bound and reaches
+no allocator. The policy is the `pool_source_t<Sync>` template parameter, defaulting
+to `sync_none_t`, which compiles to nothing.
 :::
 
 After a soak run, `classes_used()` says how many slots the node really needed and
@@ -191,11 +216,12 @@ Rules that follow:
 - **Allocation failure must not abort.** ESP-IDF's default C++ `new` throws; under
   `-fno-exceptions` that lowers to `abort()`. The seams above are the mechanism for
   alloc-or-backpressure — drop the sample, count it, publish the counter (§6) — but the
-  rule is **not yet met everywhere**: the peer-driven label-table binds of #603
-  (`core/src/route_handle.cpp:82`) and `try_reserve`'s throwing second step under
-  concurrency (#850) still abort on exhaustion. (The CAN egress window table was the third
-  until #1110 deleted it — `view_can.hpp`'s `can_frame_at` now derives each window and
-  allocates nothing.) Price those two before shipping a `-fno-exceptions` image, and audit any
+  rule is **not yet met everywhere**: `try_reserve`'s throwing second step under
+  concurrency (#850) still aborts on exhaustion. (It is the last of three. The CAN egress
+  window table went in #1110 — `view_can.hpp`'s `can_frame_at` now derives each window and
+  allocates nothing — and the peer-driven label-table binds of #603 defect 1 went when
+  `route_handle_t` moved onto the injected `mem::block_source_t`, which answers exhaustion by
+  value.) Price that one before shipping a `-fno-exceptions` image, and audit any
   path that calls throwing `new`; the full accounting is in
   [failable allocation and backpressure](../design/allocation-and-backpressure.md).
 - **Size the pool from the transport, not from hope.** `udp_transport_t` sizes RX

@@ -130,6 +130,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   source refusal alongside a count refusal — one counter, because ADR-0079 makes the injected
   store's size a bound in its own right and an operator is watching one symptom.
 
+  Not to be read together with the ADR-0080 reclamation seam above, which lands in the same
+  release: that one settles **when** a retired subscriber's callback pair may be freed, this
+  one settles **where bytes come from**. ADR-0079 draws the line in as many words — the
+  substrate work "is about *where bytes come from*, not *when a replaced block is freed*" —
+  and neither entry changes the other's answer.
+
   The migration pattern the rest of #873 follows is written down in
   [`docs/reference/09-memory-substrate.md`](../docs/reference/09-memory-substrate.md)
   (§Migrating a STORE onto the substrate — the route-handle pattern).

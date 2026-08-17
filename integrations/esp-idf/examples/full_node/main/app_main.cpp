@@ -60,6 +60,8 @@
 #include "libtracer/byteorder.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/mem_pool.hpp"
+#include "libtracer/mem_source.hpp"
+#include "libtracer/mem_source_sync.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport_vertex.hpp"
@@ -135,21 +137,36 @@ std::vector<std::byte> b_field_subscribers_append() {
  * @brief SUBSCRIBER{ PATH target, SETTINGS{ NAME "delivery_policy" VALUE u16 }? } — the
  *        remote-subscriber record a subscribe appends.
  *
- * The optional SETTINGS child carries this subscription's DELIVERY policy (RFC-0022 §3.A):
- * bits 0–1 reliability, 2–4 priority, 5 `durability_request`, 6–15 reserved. A zero policy
- * emits no child at all — absent ⇒ all-zero ⇒ the default behaviour, byte-identically to
- * what a sender that predates the key produces.
+ * The optional SETTINGS child carries two independent opt-ins, in the SAME child (so
+ * neither introduced new wire structure):
+ *
+ *   - `delivery_policy` (u16, RFC-0022 §3.A): bits 0–1 reliability, 2–4 priority,
+ *     5 `durability_request`, 6–15 reserved;
+ *   - `delivery_compact` (u8, RFC-0004 §E.1): ask the producer to advertise a per-link
+ *     LABEL for this subscription's return route and then stream lean `COMPACT` frames
+ *     instead of re-carrying the whole route on every delivery.
+ *
+ * Both zero emits no child at all — absent ⇒ all-zero ⇒ the default behaviour,
+ * byte-identically to what a sender that predates the keys produces.
  */
 std::vector<std::byte> b_subscriber(const std::vector<std::byte>& target,
-                                    std::uint16_t delivery_policy = 0) {
+                                    std::uint16_t delivery_policy = 0,
+                                    bool delivery_compact = false) {
     std::vector<std::byte> body(target);
-    if (delivery_policy != 0) {
+    if (delivery_policy != 0 || delivery_compact) {
         std::vector<std::byte> members;
-        tr::wire::emit_name(members, "delivery_policy");
-        const std::array<std::byte, 2> bits{
-            std::byte{static_cast<std::uint8_t>(delivery_policy & 0xFF)},
-            std::byte{static_cast<std::uint8_t>(delivery_policy >> 8)}};
-        tr::wire::emit_tlv(members, type_t::VALUE, opt_t{}, std::span<const std::byte>(bits));
+        if (delivery_policy != 0) {
+            tr::wire::emit_name(members, "delivery_policy");
+            const std::array<std::byte, 2> bits{
+                std::byte{static_cast<std::uint8_t>(delivery_policy & 0xFF)},
+                std::byte{static_cast<std::uint8_t>(delivery_policy >> 8)}};
+            tr::wire::emit_tlv(members, type_t::VALUE, opt_t{}, std::span<const std::byte>(bits));
+        }
+        if (delivery_compact) {
+            tr::wire::emit_name(members, "delivery_compact");
+            const std::array<std::byte, 1> one{std::byte{1}};
+            tr::wire::emit_tlv(members, type_t::VALUE, opt_t{}, std::span<const std::byte>(one));
+        }
         tr::wire::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true}, members);
     }
     std::vector<std::byte> out;
@@ -193,24 +210,53 @@ std::uint32_t reply_value_u32(const tr::wire::tlv_t& f) {
  * @brief ADR-0039 one-slab recipe, concretely: ONE static slab, partitioned
  *        once at bring-up.
  *
- * The front region becomes the RX segment pool (a synchronised pool_t — fixed slots,
- * exhaustion = backpressure, ADR-0042); the back region backs the container
- * memory_resource the router draws its LABEL TABLES from.
+ * THREE regions, each behind the seam that owns it:
  *
- * NOT slab-bound (#588): the terminus decode ARENA moved off the pmr resource onto
- * the router's `rx` block source, and this example does not inject one — so the
- * arena, and the graph's own three seams (this example default-constructs the
- * graph), still come from the global heap. Bounding them needs a RECYCLING
- * block_source_t, which `tr::mem::pool_source_t` now is (#597 / ADR-0067) —
- * `bump_source_t` is bounded but never reclaims, so wiring one here would decode a
- * handful of frames and then refuse every frame after. Wiring the pool in is a
- * deliberate follow-on rather than an oversight: it wants a per-child source on the
- * router (ADR-0067 §3) and a class span sized from what this node actually draws.
- * See docs/reference/09 §the second L0 seam and docs/interop/esp32-production-node.md.
+ * | region | seam | what it bounds |
+ * | --- | --- | --- |
+ * | front, 12 KiB | a synchronised `pool_t` (`rx_backend`) | RX datagram segments — fixed slots,
+ * exhaustion = backpressure (ADR-0042) | | middle, 2 KiB | a `tr::mem::pool_source_t` | the
+ * router's LABEL TABLES (#603 defect 1) | | back, 10 KiB | `monotonic_buffer_resource` +
+ * `synchronized_pool_resource` | the remaining pmr containers (LKV control blocks) |
+ *
+ * The label region is new, and it exists to KEEP a bound this example already
+ * advertised rather than to add one. The label tables used to draw from the pmr
+ * resource in the back region; since #603 defect 1 they draw from an injected
+ * `tr::mem::block_source_t`, because a `std::pmr::memory_resource` cannot report
+ * exhaustion by value and a peer's `ADVERTISE` reaches this store on a receive thread,
+ * pre-ACL — on `-fno-exceptions` that was a peer-triggerable reboot. Leaving
+ * `label_src` at its default would have quietly moved the label tables OUT of the slab,
+ * which is the opposite of what this example is for.
+ *
+ * It is a `pool_source_t` and not a `bump_source_t` for the reason ADR-0067 §1 gives:
+ * label state is LONG-LIVED and churns (`clear_link` frees a whole link's tables on
+ * every reconnect), and a bump source never reclaims, so it would serve a few link
+ * flaps and then refuse every one after. Both of its bounds are injected — the slab
+ * span AND the `size_class_t` span — and both are REPORTED at bring-up
+ * (`used`/`classes_used`/`overflowed`), so the sizing below is a measurement to check
+ * rather than a constant to trust.
+ *
+ * STILL not slab-bound (#588): the terminus decode ARENA draws from the router's `rx`
+ * block source, which this example leaves at the default heap, as are the graph's own
+ * three seams (the example default-constructs the graph). Bounding those is a separate
+ * follow-on — ADR-0067 §3 wants a PER-CHILD source there rather than one shared across
+ * receive threads, which is a different topology from the single shared source the
+ * label plane wants. See docs/reference/09 §the second L0 seam and
+ * docs/interop/esp32-production-node.md.
  */
 constexpr std::size_t kSlabBytes = 24 * 1024;
 constexpr std::size_t kRxRegion = 12 * 1024; /**< @brief Synchronised pool: RX datagram segments. */
 constexpr std::size_t kRxSlotPayload = 1536; /**< @brief One UDP/MTU-sized datagram per slot. */
+constexpr std::size_t kLabelRegion = 2 * 1024; /**< @brief Recycling source: the label tables. */
+/**
+ * @brief Free-list slots for the label source — one per distinct `(bytes, align)` shape.
+ *
+ * `pool_source_t` segregates by EXACT size, so the count to size this against is the
+ * number of shapes the label plane draws, not the number of blocks. Running out is safe
+ * but lossy (a freed block stops being recycled), which is why `overflowed()` is
+ * printed at bring-up: a non-zero reading there is the signal to raise this number.
+ */
+constexpr std::size_t kLabelClasses = 12;
 alignas(std::max_align_t) std::byte g_slab[kSlabBytes];
 
 /** @brief The device node: the one-slab substrate, graph, router, and transport vertex. */
@@ -231,18 +277,41 @@ struct device_node_t {
     tr::mem::mem_backend_t& rx_pool =
         rx_backend(std::span<std::byte>(g_slab, kRxRegion), kRxSlotPayload);
     /**
+     * @brief Failable seam: the router's LABEL TABLES, bounded by the slab's middle region.
+     *
+     * A `tr::mem::pool_source_t` — bounded, RECYCLING, and nothrow: exhaustion is a
+     * `nullptr` the store answers by refusing to compact a NEW flow, which degrades it to
+     * the full-route `FWD{WRITE}` form and leaves every established flow alone. That is
+     * what makes an `ADVERTISE` storm from a peer a throughput event on this node instead
+     * of a reboot (#603 defect 1).
+     *
+     * `sync_mutex_t`, not the interrupt-disable policy the RX pool uses, and the
+     * difference is the frequency and the context. The RX pool is touched from an ISR and
+     * on every datagram, so it needs `tr::esp::portmux_sync_t` on a chip. This source is
+     * touched only when a FLOW IS SET UP — `on_advertise` learning a binding on a receive
+     * thread, `ensure_egress` MINTING a label on the writer thread; the per-delivery reuse
+     * path finds the label already bound and reaches no allocator at all. That is exactly
+     * the "wiring frequency" case `sync_mutex_t` documents itself for, and it is portable
+     * across both of this example's targets, so it needs no platform seam of its own.
+     */
+    std::array<tr::mem::size_class_t, kLabelClasses> label_classes{};
+    tr::mem::pool_source_t<tr::mem::sync_mutex_t> label_src{
+        std::span<std::byte>(g_slab + kRxRegion, kLabelRegion), label_classes};
+    /**
      * @brief Container seam: a monotonic arena over the slab's back region.
      *
-     * The synchronized pool on top recycles freed blocks (label tables, LKV
-     * control blocks) and makes the resource safe for the recv threads. Since
-     * #588 the terminus arena is NOT among them — it draws from the router's
-     * `rx` block source, left at the default heap here (see the slab comment).
+     * The synchronized pool on top recycles freed blocks and makes the resource safe for
+     * the recv threads. Two things are NOT among them: the terminus arena (since #588 it
+     * draws from the router's `rx` block source, left at the default heap here) and the
+     * label tables (since #603 defect 1 they draw from `label_src` above — a pmr resource
+     * cannot report exhaustion by value, which is the whole defect).
      */
-    std::pmr::monotonic_buffer_resource arena{g_slab + kRxRegion, kSlabBytes - kRxRegion};
+    std::pmr::monotonic_buffer_resource arena{g_slab + kRxRegion + kLabelRegion,
+                                              kSlabBytes - kRxRegion - kLabelRegion};
     std::pmr::synchronized_pool_resource mr{&arena};
 
     graph_t graph;
-    fwd_router_t router{graph, &mr};
+    fwd_router_t router{graph, &label_src};
     /**
      * @brief Owns the config-created sockets; declared LAST so its recv
      *        threads stop before the router/graph they feed are torn down.
@@ -349,11 +418,20 @@ int run_host_probe(device_node_t& dev) {
     //    producer latches its current value to it immediately — the producer carries no
     //    durability flag of its own, and a sibling subscriber that does not ask gets no
     //    replay.
+    //
+    //    It ALSO opts into label compaction (RFC-0004 §E.1). That is what a streaming
+    //    consumer of a 1 kHz sensor does — re-carrying the whole return route on every
+    //    4-byte sample is ~16x overhead — and it is what makes the device's LABEL SOURCE
+    //    live: the producer advertises a per-link label for this route and thereafter
+    //    streams lean COMPACTs, and the label state that costs is drawn from the bounded
+    //    `label_src` region of the one slab. Without this bit the census printed at the
+    //    end would read 0 B used and prove nothing about the bound.
     router.on_frame(
         "self",
         b_fwd(tr::graph::fwd_op_t::WRITE, b_path({"net", "udp-client", "dev", "sensor", "temp"}),
               b_path({"probe"}), b_field_subscribers_append(),
-              b_subscriber(b_path({"probe"}), tr::graph::delivery_policy_t::kDurabilityRequest)));
+              b_subscriber(b_path({"probe"}), tr::graph::delivery_policy_t::kDurabilityRequest,
+                           /*delivery_compact=*/true)));
 
     // The latch delivery races our next call, so poll-read until it lands.
     bool latched = false;
@@ -401,11 +479,22 @@ extern "C" void app_main(void) {
     }
     std::printf(
         "device node up: /sensor/temp + udp listener /net/udp-server/host (port %u), one-slab "
-        "recipe (pool %u slots x %u B + pmr arena)\n",
+        "recipe (pool %u slots x %u B + label source %u B + pmr arena)\n",
         static_cast<unsigned>(kNodePort), static_cast<unsigned>(rx_backend_slots()),
-        static_cast<unsigned>(kRxSlotPayload));
+        static_cast<unsigned>(kRxSlotPayload), static_cast<unsigned>(kLabelRegion));
 
     const int failures = run_host_probe(dev);
+    // The label source's own census, AFTER the self-proof has driven real advertises and
+    // compact deliveries through it. Both of its bounds are injected, so both are reported:
+    // a `used` near the region size means raise `kLabelRegion`, a non-zero `overflowed`
+    // means raise `kLabelClasses`. Printing them is what makes the sizing above a
+    // measurement rather than a guess, and it is the same discipline `rx_backend_slots()`
+    // already applies to the RX region.
+    std::printf("label source: %u/%u B used, %u/%u size classes, %u block(s) overflowed\n",
+                static_cast<unsigned>(dev.label_src.used()), static_cast<unsigned>(kLabelRegion),
+                static_cast<unsigned>(dev.label_src.classes_used()),
+                static_cast<unsigned>(kLabelClasses),
+                static_cast<unsigned>(dev.label_src.overflowed()));
     std::printf("full_node self-proof: %s (%d failure%s)\n", failures == 0 ? "OK" : "FAILED",
                 failures, failures == 1 ? "" : "s");
 
