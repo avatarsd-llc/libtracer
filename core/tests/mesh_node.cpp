@@ -145,6 +145,17 @@ struct listen_spec_t {
 };
 
 std::string g_name;
+/** @brief The ctrl listener's bind port — FIXED on purpose, and the one exemption from the
+ *         #1362 ephemeral rule.
+ *
+ * Every other bind in this tree asks for port 0 because no number is reserved: the 47xxx
+ * block sits inside the kernel's `ip_local_port_range`, so a fixed literal races the
+ * ephemeral allocator inside its own network namespace. This binary is the exception, for
+ * two reasons. It is a RENDEZVOUS: the peers that dial it are separate PROCESSES that were
+ * handed `host:port` in `tests/testbed/compose.yml` before this one started, so there is no
+ * channel to publish an OS-granted port back over. And it is ISOLATED: each testbed node
+ * runs in its own container with its own network namespace and IP, so it is the only
+ * occupant of its port space. `--ctrl-port` overrides it. */
 std::uint16_t g_ctrl_port = 47300;
 int g_timeout_ms = 180000;
 std::vector<listen_spec_t> g_listens;

@@ -56,9 +56,16 @@ template <class T, class... Args>
 /**
  * @brief The role dispatch every built-in socket factory repeats.
  *
- * DIAL requires `addr` + `port` and constructs the dialer; LISTEN requires `port` and
- * constructs the listener (`TYPE_MISMATCH` on a missing field). The per-transport
- * construction stays in the @p dial / @p listen thunks.
+ * DIAL requires `addr` + a nonzero `port` and constructs the dialer; LISTEN requires the
+ * `port` KEY and constructs the listener (`TYPE_MISMATCH` on a missing field). The
+ * per-transport construction stays in the @p dial / @p listen thunks.
+ *
+ * A LISTEN may now spell `port = 0` (#1362): the key is present, so nothing is missing, and
+ * `0` is what every listener constructor in this tree already documents as EPHEMERAL — the
+ * OS picks a free port and `local_port()` reports it. Before this the LISTEN arm rejected
+ * `0` as if it were an omitted key, which conflated "you forgot the port" with "you do not
+ * care which port", and left an in-band-created listener no way to ask for one. A DIAL still
+ * refuses `0`: there is no such thing as dialling the ephemeral port.
  */
 template <class Dial, class Listen>
 [[nodiscard]] graph::result_t<std::unique_ptr<transport_t>> dial_or_listen(const conn_settings_t& s,
@@ -68,7 +75,7 @@ template <class Dial, class Listen>
         if (s.addr.empty() || s.port == 0) return std::unexpected(graph::status_t::TYPE_MISMATCH);
         return dial();
     }
-    if (s.port == 0) return std::unexpected(graph::status_t::TYPE_MISMATCH);
+    if (!s.port_set) return std::unexpected(graph::status_t::TYPE_MISMATCH);
     return listen();
 }
 

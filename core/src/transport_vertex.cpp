@@ -58,7 +58,10 @@ void parse_config(const tlv_t* config, conn_settings_t& s) {
     const config_reader_t cfg(config);
     if (const auto v = cfg.name("addr")) s.addr = std::string(*v);
     if (const auto v = cfg.name("kind")) s.kind = std::string(*v);
-    if (const auto v = cfg.u16("port")) s.port = *v;
+    if (const auto v = cfg.u16("port")) {
+        s.port = *v;
+        s.port_set = true;
+    }
     if (const auto v = cfg.u8("role")) s.role = *v == 0 ? conn_role_t::DIAL : conn_role_t::LISTEN;
     if (const auto v = cfg.u32("keepalive")) s.keepalive_ms = *v;
     if (const auto v = cfg.u32("max_frame")) s.max_frame = *v;

@@ -185,8 +185,12 @@ int main() {
     {
         // Peer points at a bound sibling so the datagram is deliverable and `send` takes its
         // real path — a udp_transport_t with no peer returns early and would measure nothing.
-        tr::net::udp_transport_t a(47310, "127.0.0.1", 47311);
-        tr::net::udp_transport_t b(47311, "127.0.0.1", 47310);
+        // Both bind EPHEMERALLY (#1362): the 47xxx literals these used to name are inside the
+        // kernel's own ip_local_port_range, so a fixed number is not a reservation — another
+        // socket can already own it and the bind fails, which on a bench reads as a mystery
+        // zero. `b` is constructed first so `a` can name the port the OS actually granted.
+        tr::net::udp_transport_t b(0, "", 0);
+        tr::net::udp_transport_t a(0, "127.0.0.1", b.local_port());
         (void)b;
         for (std::size_t w = 1; w <= kMaxWidth; ++w) udp_rows.push_back(measure(a, store, w));
     }
@@ -195,8 +199,8 @@ int main() {
         // The listen-role ctor takes a bind port; the dial-role one takes host+port. The accept
         // runs on the server's own thread, so the client's first write can race it — a short
         // settle keeps this measuring the gather rather than a connect retry.
-        tr::net::tcp_transport_t server(47312);
-        tr::net::tcp_transport_t client("127.0.0.1", 47312);
+        tr::net::tcp_transport_t server(std::uint16_t{0});  // ephemeral bind (#1362)
+        tr::net::tcp_transport_t client("127.0.0.1", server.local_port());
         std::this_thread::sleep_for(std::chrono::milliseconds(120));
         for (std::size_t w = 1; w <= kMaxWidth; ++w) tcp_rows.push_back(measure(client, store, w));
     }

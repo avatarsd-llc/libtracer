@@ -50,6 +50,23 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **A LISTEN connection SPEC may now spell `port = 0` — the EPHEMERAL request — and
+  `conn_settings_t` gained `port_set`**
+  ([#1362](https://github.com/avatarsd-llc/libtracer/issues/1362)). The LISTEN arm of
+  `dial_or_listen` (and the `quic` / `webtransport` factories' own copies of the check) used
+  to refuse `port == 0` with `TYPE_MISMATCH`, which conflated two different configs: an
+  OMITTED `port` key, which really is a missing required field, and an explicit `0`, which is
+  what every listener constructor in this tree already documents as "the OS picks". The
+  consequence was that an in-band-created listener had no way to ask for an ephemeral port at
+  all, so callers had to name a literal and hope nobody else owned it — and nobody can
+  guarantee that, because no port number is reserved (Linux hands out 32768-60999 to ordinary
+  client sockets). The two cases are now distinguished by the new
+  `conn_settings_t::port_set`, set by `parse_config` when the key is PRESENT: an absent key is
+  still `TYPE_MISMATCH` on a LISTEN, `port = 0` binds an OS-granted port, and the grant is
+  read back off the constructed link with `local_port()`. A DIAL is unchanged and still
+  refuses `0`. Additive to `conn_settings_t`; no existing SPEC changes meaning, since `port =
+  0` on a LISTEN previously only ever produced an error.
+
 - **ERRATUM to `[0.13.0]`'s RFC-0018 entry — the "resolve leg 34 ns to ~20 ns" figure came from
   an instrument that was measuring the wrong thing**
   ([#1346](https://github.com/avatarsd-llc/libtracer/issues/1346)). No API or wire surface

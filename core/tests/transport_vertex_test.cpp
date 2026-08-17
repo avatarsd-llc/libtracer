@@ -94,6 +94,23 @@ using tr::net::conn_spec;
 using tr::net::conn_spec_t;
 
 /**
+ * @brief The LISTEN spelling for "any free port — the OS picks" (#1362).
+ *
+ * No port number is RESERVED on Linux: `net.ipv4.ip_local_port_range` defaults to
+ * 32768-60999, so the 47xxx block these tests used to treat as unclaimed is inside the range
+ * the kernel hands to ordinary client sockets. A fixed literal therefore races the ephemeral
+ * allocator (and any concurrent copy of the suite) for its own port, and losing that race is
+ * an EADDRINUSE at `bind(2)` — creation fails in 0.00 s, which is exactly how #1362
+ * presented. Asking for 0 removes the contention instead of narrowing the window; the
+ * granted port is read back off the constructed link with `local_port()`.
+ */
+constexpr std::uint16_t kEphemeral = 0;
+
+/** @brief A nonzero port for SPECs REFUSED before any socket is constructed — it is never
+ *         bound and never dialled, so its value cannot collide with anything. */
+constexpr std::uint16_t kNeverBound = 1;
+
+/**
  * @brief This test application's module declarations (ADR-0073 §4: declared-only).
  *
  * The library auto-registers NO module names — linking a built-in transport registers
@@ -206,16 +223,20 @@ void test_constructed_link_reports_role_state() {
     declare_builtin_modules(net);  // ADR-0073 §4: the application mints the module names
 
     // A udp LISTENER binds at creation => it reports LISTENING (0x04), not UP.
-    const auto wl = node.write(path_t("/net:children[]"),
-                               conn_spec("listener", "srv", conn_role_t::LISTEN, 47131, "udp"));
+    const auto wl =
+        node.write(path_t("/net:children[]"),
+                   conn_spec("listener", "srv", conn_role_t::LISTEN, kEphemeral, "udp"));
     check(wl.has_value(), "SPEC{listener, kind=udp} constructs the bound socket");
     check(read_link_state_byte(node, "/net/udp-server/srv") == 4,
           "a constructed LISTEN reports LISTENING (0x04)");
+    auto* const srv = dynamic_cast<tr::net::udp_transport_t*>(net.link_of("net/udp-server/srv"));
+    const std::uint16_t srv_port = srv != nullptr ? srv->local_port() : 0;
+    check(srv_port != 0, "the LISTENING socket reports its OS-granted bind port");
 
     // A udp CLIENT is UP the moment its socket is constructed (0x03).
     const auto wc =
         node.write(path_t("/net:children[]"),
-                   conn_spec("client", "cli", conn_role_t::DIAL, 47131, "udp", "127.0.0.1"));
+                   conn_spec("client", "cli", conn_role_t::DIAL, srv_port, "udp", "127.0.0.1"));
     check(wc.has_value(), "SPEC{client, kind=udp} constructs the socket");
     check(read_link_state_byte(node, "/net/udp-client/cli") == 3,
           "a constructed DIAL reports UP (0x03)");
@@ -367,19 +388,24 @@ void test_config_constructed_udp() {
     const std::byte tb{0x2A};
     tr::wire::emit_tlv(tv, type_t::VALUE, opt_t{}, std::span<const std::byte>(&tb, 1));
     (void)node_b.write(path_t("/temp"), owned(tv));
-    const auto wb = node_b.write(path_t("/net:children[]"),
-                                 conn_spec("listener", "a", conn_role_t::LISTEN, 47120, "udp"));
+    const auto wb =
+        node_b.write(path_t("/net:children[]"),
+                     conn_spec("listener", "a", conn_role_t::LISTEN, kEphemeral, "udp"));
     check(wb.has_value(), "B: SPEC{listener, kind=udp, port} constructs the bound socket");
     check(router_b.registry().by_name("net/udp-server/a") != nullptr,
           "B: the socket is wired into the router");
+    // The OS granted the bind port; A dials the port B actually got, not a literal.
+    auto* const b_link = dynamic_cast<tr::net::udp_transport_t*>(net_b.link_of("net/udp-server/a"));
+    const std::uint16_t b_port = b_link != nullptr ? b_link->local_port() : 0;
+    check(b_port != 0, "B: the ephemeral bind port is readable back off the link");
 
     // A: a udp CLIENT dialing B's port — also purely from config.
     const auto wa =
         node_a.write(path_t("/net:children[]"),
-                     conn_spec("client", "b", conn_role_t::DIAL, 47120, "udp", "127.0.0.1"));
+                     conn_spec("client", "b", conn_role_t::DIAL, b_port, "udp", "127.0.0.1"));
     check(wa.has_value(), "A: SPEC{client, kind=udp, addr, port} constructs the dialing socket");
     const auto* s = net_a.settings_of("net/udp-client/b");
-    check(s != nullptr && s->kind == "udp" && s->addr == "127.0.0.1" && s->port == 47120,
+    check(s != nullptr && s->kind == "udp" && s->addr == "127.0.0.1" && s->port == b_port,
           "A: the parsed :settings carry kind/addr/port");
 
     // Construction reported the DIAL socket UP — the /net/b vertex value is VALUE{UP}
@@ -427,7 +453,7 @@ void test_provide_link_wins() {
 
     const auto w =
         node.write(path_t("/net:children[]"),
-                   conn_spec("client", "up", conn_role_t::DIAL, 47121, "udp", "127.0.0.1"));
+                   conn_spec("client", "up", conn_role_t::DIAL, kNeverBound, "udp", "127.0.0.1"));
     check(w.has_value(), "SPEC with kind=udp still creates the connection");
     check(router.registry().by_name("net/udp-client/up") == &channel.a(),
           "the staged provide_link transport is the wired one (no socket constructed)");
@@ -1131,7 +1157,7 @@ void test_creation_errors() {
     // gate — the factory lookup is never reached.
     const auto w1 =
         node.write(path_t("/net:children[]"),
-                   conn_spec("client", "x", conn_role_t::DIAL, 47122, "pigeon", "127.0.0.1"));
+                   conn_spec("client", "x", conn_role_t::DIAL, kNeverBound, "pigeon", "127.0.0.1"));
     check(!w1.has_value() && w1.error() == status_t::SCHEMA_NOT_FOUND,
           "undeclared module => SCHEMA_NOT_FOUND");
     check(!node.find(path_t::parse("/net/x")->key()).has_value(), "no /net/x vertex was created");
@@ -1142,26 +1168,40 @@ void test_creation_errors() {
     // test (the pre-ADR-0073 "pigeon" case used to cover it).
     check(net.register_module("pigeon-x", "pigeon", conn_role_t::DIAL).has_value(),
           "a module can be declared for a kind with no factory (declaration is naming)");
-    const auto w1b =
-        node.write(path_t("/net:children[]"),
-                   conn_spec("client", "x2", conn_role_t::DIAL, 47122, "pigeon", "127.0.0.1"));
+    const auto w1b = node.write(
+        path_t("/net:children[]"),
+        conn_spec("client", "x2", conn_role_t::DIAL, kNeverBound, "pigeon", "127.0.0.1"));
     check(!w1b.has_value() && w1b.error() == status_t::SCHEMA_NOT_FOUND,
           "declared module, missing factory => SCHEMA_NOT_FOUND at the factory gate");
     check(!node.find(path_t::parse("/net/pigeon-x/x2")->key()).has_value(),
           "no vertex was created for the factory-less kind");
 
-    // A udp DIAL without addr (and a LISTEN without port) => TYPE_MISMATCH, no vertex.
+    // A udp DIAL without addr (and a LISTEN without a `port` KEY) => TYPE_MISMATCH, no vertex.
     const auto w2 = node.write(path_t("/net:children[]"),
-                               conn_spec("client", "y", conn_role_t::DIAL, 47123, "udp"));
+                               conn_spec("client", "y", conn_role_t::DIAL, kNeverBound, "udp"));
     check(!w2.has_value() && w2.error() == status_t::TYPE_MISMATCH,
           "udp client without addr => TYPE_MISMATCH");
-    const auto w3 = node.write(path_t("/net:children[]"),
-                               conn_spec("listener", "z", conn_role_t::LISTEN, 0, "udp"));
+    // Built member-by-member because the `conn_spec` one-liner always emits `port` — the
+    // key must be ABSENT for this case. Since #1362 an explicit `port = 0` is the EPHEMERAL
+    // request (covered below), so "missing key" is the only remaining config error here.
+    const auto w3 = node.write(
+        path_t("/net:children[]"),
+        tr::net::conn_spec_t("listener", "z").role(conn_role_t::LISTEN).kind("udp").view());
     check(!w3.has_value() && w3.error() == status_t::TYPE_MISMATCH,
-          "udp listener without port => TYPE_MISMATCH");
+          "udp listener with NO port key => TYPE_MISMATCH");
     check(!node.find(path_t::parse("/net/y")->key()).has_value() &&
               !node.find(path_t::parse("/net/z")->key()).has_value(),
           "no vertices were created for the failed configs");
+
+    // ...and the positive half of the same contract (#1362): an explicit `port = 0` is a
+    // REQUEST, not an omission — the listener comes up on an OS-granted port, and the
+    // grant is readable off the constructed link.
+    const auto w6 = node.write(path_t("/net:children[]"),
+                               conn_spec("listener", "eph", conn_role_t::LISTEN, 0, "udp"));
+    check(w6.has_value(), "udp listener with port = 0 => EPHEMERAL, creation succeeds");
+    auto* const eph = dynamic_cast<tr::net::udp_transport_t*>(net.link_of("net/udp-server/eph"));
+    check(eph != nullptr && eph->ok() && eph->local_port() != 0,
+          "the OS-granted bind port is readable back off the link");
 
     // No kind and no staged link => TYPE_MISMATCH on BOTH roles (#1062): the config is
     // missing a required field (the addr/port precedent), it is not an address to a
@@ -1190,7 +1230,7 @@ void test_link_of_accessor() {
     // A ws LISTENER built purely from config — the owned server socket is otherwise
     // unreachable by the app (no accessor existed before #374).
     const auto w = node.write(path_t("/net:children[]"),
-                              conn_spec("listener", "srv", conn_role_t::LISTEN, 47131, "ws"));
+                              conn_spec("listener", "srv", conn_role_t::LISTEN, kEphemeral, "ws"));
     check(w.has_value(), "SPEC{listener, kind=ws} constructs the owned server");
 
     tr::net::transport_t* const link = net.link_of("net/ws-server/srv");
@@ -1301,12 +1341,13 @@ std::set<std::string> enumerate_peers(graph_t& g, const char* path) {
 }
 
 /**
- * @brief An OS-granted free TCP port (bind 0, read it back, release).
+ * @brief An OS-granted port that nothing is listening on (bind 0, read it back, release).
  *
- * The SPEC config contract forbids `port == 0` for LISTEN (`dial_or_listen`,
- * TYPE_MISMATCH), so an in-band-created listener cannot ask for an ephemeral port —
- * and a fixed literal was an EADDRINUSE flake across parallel CI matrix legs. The
- * tiny close-to-bind race is acceptable in a test.
+ * For the DIAL-side cases only — a connect that must be REFUSED, and the name-validation
+ * SPECs that are rejected before any socket is dialled. A DIAL has to name a concrete port,
+ * so it cannot ask for `0`; the LISTEN side does exactly that instead (#1362) and no longer
+ * calls this. The tiny close-to-bind race is acceptable for a port whose whole job is to be
+ * unserved.
  */
 [[nodiscard]] std::uint16_t free_port() {
     const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -1353,7 +1394,7 @@ void test_udp_max_frame_reaches_the_transport() {
     // The CONTROL: no max_frame in the config => the transport's own kMaxDatagram ceiling.
     const auto plain =
         node.write(path_t("/net:children[]"),
-                   conn_spec("listener", "plain", conn_role_t::LISTEN, free_port(), "udp"));
+                   conn_spec("listener", "plain", conn_role_t::LISTEN, kEphemeral, "udp"));
     check(plain.has_value(), "SPEC{listener, kind=udp} with no max_frame constructs the socket");
     auto* const plain_link =
         dynamic_cast<tr::net::udp_transport_t*>(net.link_of("net/udp-server/plain"));
@@ -1364,7 +1405,7 @@ void test_udp_max_frame_reaches_the_transport() {
     // The SUBJECT: the same write plus `max_frame = 4096`.
     const auto capped = node.write(path_t("/net:children[]"), conn_spec_t("listener", "capped")
                                                                   .role(conn_role_t::LISTEN)
-                                                                  .port(free_port())
+                                                                  .port(kEphemeral)
                                                                   .kind("udp")
                                                                   .max_frame(4096)
                                                                   .view());
@@ -1397,7 +1438,7 @@ void test_ws_peer_named_config() {
     // ----- the CONTROL: no peer_named => a plain point-to-point link, no listing. -----
     const auto plain =
         node.write(path_t("/net:children[]"),
-                   conn_spec("listener", "plain", conn_role_t::LISTEN, free_port(), "ws"));
+                   conn_spec("listener", "plain", conn_role_t::LISTEN, kEphemeral, "ws"));
     check(plain.has_value(), "SPEC{listener, kind=ws} with no peer_named constructs the server");
     auto* const plain_srv =
         dynamic_cast<tr::net::transport_ws_server*>(net.link_of("net/ws-server/plain"));
@@ -1407,7 +1448,7 @@ void test_ws_peer_named_config() {
     // ----- the SUBJECT: peer_named=1 => the bus facet, hence the synthesized listing. -----
     const auto w =
         node.write(path_t("/net:children[]"),
-                   ws_listener_spec("bus", free_port(), /*peer_named=*/true, /*max_peers=*/8));
+                   ws_listener_spec("bus", kEphemeral, /*peer_named=*/true, /*max_peers=*/8));
     check(w.has_value(), "SPEC{listener, kind=ws, peer_named=1} constructs the owned server");
     auto* const srv = dynamic_cast<tr::net::transport_ws_server*>(net.link_of("net/ws-server/bus"));
     check(srv != nullptr && srv->ok(), "the owned transport is a live transport_ws_server");
@@ -1516,8 +1557,9 @@ void test_unregistered_kind_is_schema_not_found() {
     transport_vertex_t net(node, router);
     // Deliberately NO register_module: `udp` has a transport FACTORY (linked built-in),
     // but this application never declared a module for it.
-    const auto w = node.write(path_t("/net:children[]"), conn_spec("client", "x", conn_role_t::DIAL,
-                                                                   47150, "udp", "127.0.0.1"));
+    const auto w =
+        node.write(path_t("/net:children[]"),
+                   conn_spec("client", "x", conn_role_t::DIAL, kNeverBound, "udp", "127.0.0.1"));
     check(!w.has_value() && w.error() == status_t::SCHEMA_NOT_FOUND,
           "kind with a factory but no declared module => SCHEMA_NOT_FOUND");
     check(!node.find(path_t::parse("/net/udp-client/x")->key()).has_value(),
@@ -1569,7 +1611,7 @@ void test_conn_endpoint_constructs_socket() {
     check(net.register_module("udp-server", "udp", conn_role_t::LISTEN).has_value(),
           "declare the listen module");
     const auto w =
-        node.write(path_t("/net/udp-server/conn"), conn_spec_t("srv").port(47161).view());
+        node.write(path_t("/net/udp-server/conn"), conn_spec_t("srv").port(kEphemeral).view());
     check(w.has_value(), "SPEC{name=srv, config{port}} constructs the bound socket");
     check(read_link_state_byte(node, "/net/udp-server/srv") == 4,
           "the constructed LISTEN reports LISTENING (0x04) — the role came from the module");
@@ -1621,7 +1663,7 @@ void test_conn_endpoint_malformed_refuses() {
           "SPEC naming a kind the module does not construct => SCHEMA_NOT_FOUND");
 
     // 6. A config the kind cannot build from (a DIAL with no addr) fails in the factory.
-    const auto no_addr = node.write(endpoint, conn_spec_t("y").port(47162).view());
+    const auto no_addr = node.write(endpoint, conn_spec_t("y").port(kNeverBound).view());
     check(!no_addr.has_value() && no_addr.error() == status_t::TYPE_MISMATCH,
           "SPEC whose config is missing a required key => TYPE_MISMATCH");
 
@@ -1752,21 +1794,25 @@ void test_app_chosen_root_and_module() {
     const std::byte tb{0x5C};
     tr::wire::emit_tlv(tv, type_t::VALUE, opt_t{}, std::span<const std::byte>(&tb, 1));
     (void)node_b.write(path_t("/temp"), owned(tv));
-    const auto wb = node_b.write(path_t("/io:children[]"),
-                                 conn_spec("listener", "a", conn_role_t::LISTEN, 47151, "udp"));
+    const auto wb =
+        node_b.write(path_t("/io:children[]"),
+                     conn_spec("listener", "a", conn_role_t::LISTEN, kEphemeral, "udp"));
     check(wb.has_value(), "B: SPEC{listener, kind=udp} creates under the app-chosen /io/l");
     check(node_b.find(path_t::parse("/io/l/a")->key()).has_value(),
           "B: the connection vertex is /io/l/a — the app's shape, not the library's");
     check(router_b.registry().by_name("io/l/a") != nullptr, "B: the socket is routed under io/l/a");
+    auto* const b_link = dynamic_cast<tr::net::udp_transport_t*>(net_b.link_of("io/l/a"));
+    const std::uint16_t b_port = b_link != nullptr ? b_link->local_port() : 0;
+    check(b_port != 0, "B: the ephemeral bind port is readable back off the app-planed link");
 
     const auto wa =
         node_a.write(path_t("/io:children[]"),
-                     conn_spec("client", "b", conn_role_t::DIAL, 47151, "udp", "127.0.0.1"));
+                     conn_spec("client", "b", conn_role_t::DIAL, b_port, "udp", "127.0.0.1"));
     check(wa.has_value(), "A: SPEC{client, kind=udp} creates under the app-chosen /io/w");
     check(node_a.find(path_t::parse("/io/w/b")->key()).has_value(),
           "A: the connection vertex is /io/w/b");
     const auto* s = net_a.settings_of("io/w/b");
-    check(s != nullptr && s->kind == "udp" && s->port == 47151,
+    check(s != nullptr && s->kind == "udp" && s->port == b_port,
           "A: settings_of resolves by the app-chosen qualified key");
 
     // End-to-end: a READ routed through /io/w/b reaches B and the reply returns.
