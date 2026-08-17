@@ -30,6 +30,19 @@
 # HEAD-vs-parent build and interleaved comparison on this machine — does not. Do not
 # read "pinned host = blocking tier" off this file until a step below invokes the gate.
 #
+# DENSITY (#1301): push-to-main behind a `paths:` filter is not a publication
+# guarantee. A run that never happens leaves a hole nothing notices — filtered out,
+# failed, skipped by the quiescence guard, or cancelled while QUEUED because GitHub
+# keeps only one queued run per concurrency group (`cancel-in-progress: false`
+# protects in-progress runs, not queued ones; that is how two `main` shas lost their
+# point on 2026-08-15). Sixteen consecutive merges once banked nothing, which is how
+# the compact-forward +41% step became a RANGE instead of a commit. So a daily
+# `schedule:` asks `store_guard.py density` how far the store lags the bench-relevant
+# history of `main` and measures HEAD when the gap exceeds the bound. The guarantee
+# is a BOUND ON THE GAP, not a point per commit: any regression range stays narrow
+# enough to bisect. Contaminated points do not count as coverage — a sample the A/A
+# pair flagged answers "what was the machine doing", not "what did the code cost".
+#
 # RAM (#1228): this workflow also carries the two RAM-census instruments. Steady-state
 # RAM is what decides whether a node fits the 16 KB target, and it was the only cost
 # axis with neither a gate nor a recorded trend. Both censuses publish here (same
@@ -49,6 +62,17 @@ on:
       - '**/CMakeLists.txt'
       - '**/*.cmake'
       - '.github/workflows/perf-local.yml'
+  # The catch-up leg (#1301). It measures ONLY when the density check says the store
+  # has fallen behind, so a quiet week costs one cheap hosted-runner job a day and
+  # nothing on the bench machine. Kept off the hour to miss the cron stampede.
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Measure even if the store is inside the density bound'
+        type: boolean
+        default: false
 
 # One measurement at a time; never cancel a measurement mid-run (a half-measured
 # point is worse than a late one — the next push queues behind it).
@@ -57,8 +81,65 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  bench-local:
+  # Reads the banked store and the history of `main`; measures nothing. It runs on a
+  # HOSTED runner on purpose — asking "is the series behind?" must not itself occupy
+  # the one machine the series is measured on, and a daily job that touched the bench
+  # host would be a daily contamination window.
+  density:
     if: github.repository == 'avatarsd-llc/libtracer'
+    runs-on: ubuntu-latest
+    outputs:
+      measure: ${{ steps.decide.outputs.measure }}
+      gap: ${{ steps.gap.outputs.gap }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the gap is counted in commits, so the history is the input
+
+      - name: How far the store lags main
+        id: gap
+        run: |
+          # The same paths: filter above, as a commit list — first-parent, so one
+          # merge is one candidate rather than every commit it carries.
+          git log --first-parent HEAD --format=%H -- \
+            core bench '**/CMakeLists.txt' '**/*.cmake' \
+            .github/workflows/perf-local.yml > "$RUNNER_TEMP/bench_shas.txt"
+          # depth=1: the store is ~28 MB and only its tip is ever read.
+          git fetch --no-tags --depth=1 origin gh-pages
+          git show FETCH_HEAD:dev/bench-local/data.js > "$RUNNER_TEMP/data.js" \
+            || : >"$RUNNER_TEMP/data.js"
+          python3 bench/store_guard.py density \
+            --data "$RUNNER_TEMP/data.js" \
+            --shas-file "$RUNNER_TEMP/bench_shas.txt" \
+            --max-gap 8
+
+      # A push measures unconditionally — that is the primary leg and the density
+      # check is only advice to it. A schedule measures ONLY to close a gap, and a
+      # manual dispatch can override.
+      - name: Decide whether this run measures
+        id: decide
+        env:
+          DUE: ${{ steps.gap.outputs.due }}
+          FORCED: ${{ inputs.force }}
+        run: |
+          if [ "${{ github.event_name }}" = "push" ] || [ "$FORCED" = "true" ] \
+             || [ "$DUE" = "true" ]; then
+            echo "measure=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "measure=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::bench-local catch-up not needed — the store is inside the density bound"
+          fi
+
+  bench-local:
+    needs: density
+    # `always() && != 'false'` and not `== 'true'`: a density check that fails or is
+    # cancelled must never cost a push its point. The check exists to ADD samples the
+    # push trigger misses; letting it subtract one would invert it. Only an explicit
+    # "not needed" — the scheduled-run case — skips the measurement.
+    if: >-
+      always() &&
+      github.repository == 'avatarsd-llc/libtracer' &&
+      needs.density.outputs.measure != 'false'
     runs-on: [self-hosted, bench-local]
     permissions:
       contents: write # benchmark-action pushes the history to the gh-pages branch
@@ -335,6 +416,68 @@ jobs:
           comment-on-alert: true
           fail-on-alert: false
           alert-comment-cc-users: '@avatarsd'
+
+      # SOFT ALERT, ROLLING BASELINE (#1301). The two `alert-threshold: '115%'` bars
+      # above compare each point with the one immediately before it, so a staircase
+      # walks past them: five merges of +4% never trip a 15% step and the series ends
+      # 22% slower with no alert ever raised — which is exactly what the #1173 range
+      # did. This leg compares the point just banked with the BEST of the last 20
+      # trusted points, the estimator docs/methodology.md makes normative because
+      # contamination is one-sided. A breach must also fall outside that window's
+      # whole [min..max]: a best-of-window baseline is a floor, and without the range
+      # guard the real store reports 59 breaches where 2 are readable.
+      #
+      # It reads the store back over the network rather than the file just emitted,
+      # because the baseline is the SERIES and only gh-pages has it. If that fetch
+      # races the pushes above, the newest trusted point is the previous one and the
+      # comparison is one point stale — never wrong, and the next run repeats it.
+      #
+      # WARN-ONLY, deliberately: the hard verdicts stay with perf.yml's interleaved
+      # gates (this workflow renders no pass/fail on a commit — see the header).
+      - name: Rolling-baseline drift + toolchain identity (soft)
+        id: drift
+        if: steps.guard.outputs.bank == 'true'
+        run: |
+          git fetch --no-tags --depth=1 origin gh-pages
+          git show FETCH_HEAD:dev/bench-local/data.js > "$RUNNER_TEMP/data.js"
+          python3 bench/store_guard.py drift --data "$RUNNER_TEMP/data.js" --mode warn
+          # The read side of the compiler stamp: written per point since #1301's
+          # item 3, and until here nothing read it back, so a toolchain bump and a
+          # code change still looked identical to anyone browsing the chart.
+          python3 bench/store_guard.py toolchain --data "$RUNNER_TEMP/data.js"
+
+      # The same live negative control the RAM ratchet carries, for the same reason:
+      # a warn-only comparator is invisible when it is right AND when it is broken.
+      # Inflating the newest point by half must produce the warning; if it does not,
+      # the leg above is decorative and this step says so.
+      - name: The drift comparator must warn on an induced step (dry run)
+        if: steps.guard.outputs.bank == 'true'
+        run: |
+          doctored="${RUNNER_TEMP:-.}/doctored_data.js"
+          python3 - "$RUNNER_TEMP/data.js" "$doctored" <<'PY'
+          import json, pathlib, sys
+          sys.path.insert(0, "bench")
+          import store_guard as sg
+          doc = sg.parse_data_js(pathlib.Path(sys.argv[1]).read_text())
+          for suite, entries in doc["entries"].items():
+              # Move the newest TRUSTED point half a step in the WORSE direction for
+              # that suite's sign — the flagged points the comparator ignores are the
+              # wrong thing to doctor, and +50% is an improvement on a
+              # bigger-is-better series.
+              worse = 0.5 if sg.suite_is_bigger_better(suite) else 1.5
+              for b in sg.trusted(entries)[-1]["benches"]:
+                  if isinstance(b.get("value"), (int, float)):
+                      b["value"] = b["value"] * worse
+          pathlib.Path(sys.argv[2]).write_text(
+              "window.BENCHMARK_DATA = " + json.dumps(doc) + ";\n")
+          PY
+          out=$(python3 bench/store_guard.py drift --data "$doctored" --mode warn)
+          echo "$out"
+          case "$out" in
+            *"::warning::bench-local rolling drift"*) echo "drift warn path is live" ;;
+            *) echo "::error::the comparator did not warn on a +50% induced step — it is vacuous"
+               exit 1 ;;
+          esac
 
       - name: Publish host.txt next to the store
         run: |
