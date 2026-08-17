@@ -456,6 +456,22 @@ Stated as runnable experiments, not as sentiment.
    performing the same rejections. **If the packed arm does not beat the literal arm on the
    resolve leg, this RFC is void.** My probe says 34 → 19–21 ns; if the in-tree arm disagrees,
    the in-tree arm wins.
+
+   **RE-RUN — PASS, on a control arm that is now byte-faithful
+   ([#1346](https://github.com/avatarsd-llc/libtracer/issues/1346)).** The arm this falsifier
+   was first decided on was *not* the retired code: it omitted the `PATH_REF` arm of
+   `peek_fwd_dst_any`, walked three `dst` segments where `dst_seg_walk_t::prefill` walks four,
+   and replaced the walker with `pos += h->total` in registers. Ablated in one binary on the
+   quiet pinned host (best-of-12, `calibrate_batch_for_window`, A/A null 0.0 %) those three
+   omissions are worth **+13 / +4 / +14 ns** — the control arm read `25 ns` where the retired
+   code reads `56 ns`. At face value the falsifier was therefore *refuted*, not passed: `32 ns`
+   packed against a `25 ns` control. It survived only because the retired plateau batch
+   calibrator happened to inflate that arm to `41 ns` on the deciding day.
+   With the transcribed arm (`fwd-demux-resolve-legacy`, verified against the real `5e7659e3`
+   binary at **56 vs 56 ns**, delta 0) the falsifier passes for the right reason:
+   **56 → 32 ns, −42.9 %**, one binary, same frame. Quote the IN-BINARY delta; this leg moves
+   up to 12 ns (~27 %) on code layout alone with the executed source byte-identical, so a
+   cross-binary figure is not safe at this scale — which is what "in one binary" was for.
 2. **The rebuild leg on packed frames.** `rebuild_fwd_forward` (~19 ns, 21.8% of the hop) was
    **not** measured on a packed frame. If it regresses by more than the peek gains, the net is
    zero or negative and the RFC is void.
