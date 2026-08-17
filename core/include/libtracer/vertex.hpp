@@ -1157,10 +1157,15 @@ class vertex_t {
 
     /**
      * @brief Deactivate the edge slot @p idx (unsubscribe — a cleared `:subscribers[N]`).
+     * @param retired_ctx Optional out-parameter receiving the slot's `callback_ctx` — the one
+     *        leg of a dispatch snapshot the library holds no owning copy of, so ADR-0080's
+     *        reclamation seam needs it back to hand to a release hook. Read UNDER the lock,
+     *        before the shell displaces the slot, because after that the pair is gone. Written
+     *        only on the `true` return; left untouched when nothing was cleared.
      * @return true iff the slot existed and was active (the caller then adjusts the
      *         RFC-0005 listener bookkeeping).
      */
-    bool clear_edge(std::size_t idx) {
+    bool clear_edge(std::size_t idx, void** retired_ctx = nullptr) {
         edge_block_t* b = nullptr;
         {
             const std::lock_guard lock(vertex_stripe_of(this).m);
@@ -1168,6 +1173,7 @@ class vertex_t {
             if (b == nullptr) return false;
             std::vector<subscriber_t>& subs = b->slots;
             if (idx >= subs.size() || !subs[idx].active) return false;
+            if (retired_ctx != nullptr) *retired_ctx = subs[idx].callback_ctx;
             // RECLAIM in place, not merely deactivate. Flipping `active` alone left the slot's
             // `target_key` buffer, its `source_view` segment pin and the whole cold `remote`
             // half resident until an unrelated `add_edge` happened to land on this index — so

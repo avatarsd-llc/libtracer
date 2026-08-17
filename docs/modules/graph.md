@@ -36,7 +36,7 @@ subscribing *is* writing a `SUBSCRIBER` TLV into `:subscribers[]`. On each write
 dispatcher clones the value to every subscriber's target vertex and in-process callback.
 A delivery **terminates at its target** — store and notify, never a re-dispatch to the
 target's own `:subscribers[]` — so a dispatch-level cycle cannot form and there is no
-depth cap to tune (`core/include/libtracer/graph.hpp:85-90`;
+depth cap to tune (`core/include/libtracer/graph.hpp:86-91`;
 [ADR-0051 — delivery terminates at target, no dispatch limits](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0051-delivery-terminates-at-target-no-dispatch-limits.md),
 [RFC-0007 — delivery terminates at target](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0007-delivery-terminates-at-target.md)).
 Propagation past a target is exclusively the target's own logic — a controller
@@ -131,6 +131,8 @@ class graph_t {
     template <typename F>
     result_t<subscription_t> subscribe(const path_t& src, F& callback);   // lvalue only
     result_t<void>           unsubscribe(const subscription_t&);
+    result_t<void>           unsubscribe(const subscription_t&, subscriber_release_fn_t);
+    static std::uint64_t     deferred_release_drops() noexcept;
 };
 ```
 
@@ -142,14 +144,26 @@ exceed the small-buffer size
 The templated overload binds `callback` **by address**, so it takes an lvalue only — a
 temporary lambda does not compile.
 
-```{admonition} `ctx` must outlive every possible delivery
-:class: warning
-Subscription edges are never destroyed while the graph lives. `unsubscribe` only
-**deactivates** the slot; an in-flight delivery has already snapshotted the edge and
-completes. The caller-owned `ctx` (or, for the templated overload, the callable itself)
-must therefore stay alive past any delivery that may still be running, not merely past
-the `unsubscribe` call (`core/include/libtracer/graph.hpp:1289-1290`, `:1309` for the
-callable-by-address form, `:1322`).
+```{admonition} `ctx` lives until the reclamation policy's grace point — and the library tells you when
+:class: important
+`unsubscribe` **deactivates** the slot (`core/include/libtracer/graph.hpp:1357`); a
+delivery already in flight snapshotted the edge and completes, and the `{fn, ctx}` pair is
+the one leg of that snapshot the library owns no copy of. So "when may I free `ctx`?" is answered by this build's **reclamation policy**
+([ADR-0080](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0080-reclamation-policy-is-a-build-time-closed-per-target-seam.md),
+[reference/17](../reference/17-reclamation-policy.md)), not by a rule you have to keep in
+your head — and never by asking you to track in-flight state.
+
+Under the default `reclaim_local`, pass a release hook and be told:
+
+    void on_dead(void* ctx) { delete static_cast<my_sink_t*>(ctx); }
+    (void)g.unsubscribe(sub, &on_dead);
+
+The hook runs exactly once, on your thread, outside every graph lock: **inline, before
+`unsubscribe` returns** when you called it from outside a delivery (the ordinary case), or
+**before the enclosing `write()` returns** when you called it from inside one. The
+one-argument overload retires the edge identically and simply carries no signal — which is
+sufficient whenever you unsubscribe from outside a callback, since that call is already
+quiescent on return (`core/include/libtracer/graph.hpp:1315` states the bound on `ctx`).
 ```
 
 ```{admonition} No strings on the hot path
@@ -199,7 +213,7 @@ for (...) g.write(v, p.field(), setpoint_tlv);           // hot loop — zero st
 ## What a read hands back
 
 `read` and `await` return `result_t<value_ref_t>`, not `result_t<rope_t>`
-(`core/include/libtracer/graph.hpp:1077,1164` by handle, `:1594,1600` by path;
+(`core/include/libtracer/graph.hpp:1103,1190` by handle, `:1685,1691` by path;
 `value_ref_t` at `core/include/libtracer/vertex.hpp:237`). A `value_ref_t` is an **owning
 reference** to the value the vertex published: the LKV slot holds it as a
 `std::shared_ptr<const rope_t>`, so handing that reference back costs a refcount clone of
@@ -482,7 +496,9 @@ followed by the owner's own announce write.
 | Rule | The failure mode |
 | --- | --- |
 | `subscribe(src, F& callback)` binds by address | passing a temporary lambda does not compile — which is the intent; a caller that "fixes" it by storing the lambda in a shorter-lived scope than the graph reintroduces the dangle the signature was shaped to prevent |
-| `ctx` outlives every delivery, not every `unsubscribe` | a caller that frees `ctx` immediately after `unsubscribe` returns can be freeing it under an in-flight delivery on another thread |
+| `ctx` is freed at the policy's grace point, not "whenever" | freeing `ctx` on `unsubscribe`'s return is correct under both shipped policies **when the call came from outside a delivery** — and is a use-after-free when it came from inside one, where a live fan-out is still walking a snapshot that names the pair. Pass a `subscriber_release_fn_t` and let the library say which case you are in; it is the only party that can ([reference/17](../reference/17-reclamation-policy.md)) |
+| Both shipped policies speak for ONE thread's dispatch domain | `reclaim_strict` and `reclaim_local` bound the wait by *this* thread unwinding. A node that dispatches from several threads at once and unsubscribes from another is the case ADR-0080's `reclaim_qsbr` is for, and that policy is specified but **not yet implemented** — such a node has no grace point to rely on today |
+| A re-entrant unsubscribe needs a parking slot | `reclaim_local` parks at most `kDeferredReleaseSlots` (default 16) pairs per thread per dispatch stack. Past that a pair is dropped and its hook never runs — a leak, chosen over a use-after-free. `graph_t::deferred_release_drops()` is how an undersized bound shows up before it matters |
 | `read` returns a reference | keeping a `value_ref_t` in long-lived state pins that allocation; under an injected pool, a handful of parked references is a pool that never drains |
 | `only()` is the single-link accessor | calling it on a multi-link rope is not the general path; `materialize()` is. A value that arrived as a subview of a frame, or that was written as a rope, has more than one link |
 | A retired handle stays dereferenceable | `retire` empties the vertex in place and never frees it, so a stale handle silently addresses a re-virginized slot. A holder that caches a resolution records `retire_generation` beside it and re-reads before use — and must not cache an authorization decision that way, since a generation match says the vertex is the same one, never that the caller may still act on it |
@@ -602,6 +618,10 @@ a reply already being assembled.
 ```
 
 ```{doxygentypedef} tr::graph::subscriber_fn_t
+:project: libtracer
+```
+
+```{doxygentypedef} tr::graph::subscriber_release_fn_t
 :project: libtracer
 ```
 
