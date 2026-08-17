@@ -264,7 +264,7 @@ std::vector<std::vector<std::byte>> forward_as_rope_with(std::span<const std::by
                                                          std::span<const std::size_t> cuts,
                                                          tr::mem::block_source_t& rx) {
     graph_t g;
-    fwd_router_t router(g, std::pmr::get_default_resource(), &rx);
+    fwd_router_t router(g, &tr::mem::heap_source(), &rx);
     fake_rope_link_t cli;
     fake_link_t up;
     (void)router.add_child("cli", cli);
@@ -303,7 +303,7 @@ std::vector<std::vector<std::byte>> forward_as_rope_per_child(
     std::span<const std::byte> frame, std::span<const std::size_t> cuts,
     tr::mem::block_source_t& child_rx, tr::mem::block_source_t& router_default) {
     graph_t g;
-    fwd_router_t router(g, std::pmr::get_default_resource(), &router_default);
+    fwd_router_t router(g, &tr::mem::heap_source(), &router_default);
     fake_rope_link_t cli;
     fake_link_t up;
     (void)router.add_child("cli", cli, &child_rx);  // inbound link brings its own slab
@@ -917,7 +917,7 @@ int main() {
         // draws from the router's, which is what every existing call site relies on.
         counting_source_t only_default{"router-default"};
         graph_t g2;
-        fwd_router_t r2(g2, std::pmr::get_default_resource(), &only_default);
+        fwd_router_t r2(g2, &tr::mem::heap_source(), &only_default);
         fake_rope_link_t cli2;
         fake_link_t up2;
         (void)r2.add_child("cli", cli2);

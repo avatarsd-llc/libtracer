@@ -25,6 +25,7 @@
  * step and `ensure_egress` refuses first, which takes nothing and never leaked.
  */
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -108,8 +109,8 @@ class fake_link_t : public transport_t {
 void refused_bind_leaves_no_strand() {
     std::printf("A refused forwarding bind returns the downstream table to its census (#833):\n");
     graph_t g;
-    fwd_router_t node(g, std::pmr::get_default_resource(), &tr::mem::heap_source(),
-                      &tr::mem::heap_backend(), kBound);
+    fwd_router_t node(g, &tr::mem::heap_source(), &tr::mem::heap_source(), &tr::mem::heap_backend(),
+                      kBound);
     fake_link_t up;
     fake_link_t up2;
     fake_link_t down;
@@ -172,8 +173,8 @@ void refused_bind_leaves_no_strand() {
 void established_flow_survives_a_refusal() {
     std::printf("The established-flow reuse path is unaffected by a refusal (#833):\n");
     graph_t g;
-    fwd_router_t node(g, std::pmr::get_default_resource(), &tr::mem::heap_source(),
-                      &tr::mem::heap_backend(), kBound);
+    fwd_router_t node(g, &tr::mem::heap_source(), &tr::mem::heap_source(), &tr::mem::heap_backend(),
+                      kBound);
     fake_link_t up;
     fake_link_t up2;
     fake_link_t down;
@@ -197,7 +198,8 @@ void established_flow_survives_a_refusal() {
     up2.inject(tr::net::encode_advertise(22, shared));  // reuse, then refuse
     check(node.handles().egress_count() == egress_before,
           "a refusal that REUSED a label erases nothing — the entry is not its own take");
-    check(node.handles().egress_route("down", established).has_value(),
+    std::array<std::byte, 256> est_route_buf{};
+    check(node.handles().copy_egress_route("down", established, est_route_buf) != 0,
           "the established flow keeps the route retained under its label");
 
     // And it still re-advertises normally: same label, one more frame downstream.

@@ -347,7 +347,7 @@ void test_span_tier_reply_head_draws_from_egress() {
         (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x2A2A2A2Au))));
         // egress is the 6th ctor arg; flat/rx keep their heap defaults so the ONLY injected
         // backend under test here is the reply-egress one.
-        fwd_router_t router(n.g, std::pmr::get_default_resource(), &tr::mem::heap_source(),
+        fwd_router_t router(n.g, &tr::mem::heap_source(), &tr::mem::heap_source(),
                             &tr::mem::heap_backend(), 0, &egress);
         (void)router.add_child("in", n.in);
         g_allocs = 0;
@@ -405,7 +405,7 @@ void test_mint_site_draws_from_egress() {
     node_t n;
     (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x5A5A5A5Au))));
     arming_backend_t egress;
-    fwd_router_t router(n.g, std::pmr::get_default_resource(), &tr::mem::heap_source(),
+    fwd_router_t router(n.g, &tr::mem::heap_source(), &tr::mem::heap_source(),
                         &tr::mem::heap_backend(), 0, &egress);
     (void)router.add_child("in", n.in);
 
@@ -439,7 +439,7 @@ void test_egress_refusal_is_answered_by_value() {
     node_t n;
     (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x33333333u))));
     arming_backend_t egress;
-    fwd_router_t router(n.g, std::pmr::get_default_resource(), &tr::mem::heap_source(),
+    fwd_router_t router(n.g, &tr::mem::heap_source(), &tr::mem::heap_source(),
                         &tr::mem::heap_backend(), 0, &egress);
     (void)router.add_child("in", n.in);
 
@@ -480,7 +480,7 @@ void test_saturated_reply_degrades_to_addressed_backpressure() {
     node_t n;
     (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x44444444u))));
     arming_backend_t egress;
-    fwd_router_t router(n.g, std::pmr::get_default_resource(), &tr::mem::heap_source(),
+    fwd_router_t router(n.g, &tr::mem::heap_source(), &tr::mem::heap_source(),
                         &tr::mem::heap_backend(), 0, &egress);
     (void)router.add_child("in", n.in);
 

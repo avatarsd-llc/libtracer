@@ -291,7 +291,7 @@ void test_compact_flatten_oom_preserves_last_known_value() {
     graph_t g;
     const vertex_handle_t sink = g.register_vertex(*path_t::parse("/sink"), role_t::STORED_VALUE);
     arming_backend_t fb;
-    fwd_router_t router(g, std::pmr::get_default_resource(), &tr::mem::heap_source(), &fb);
+    fwd_router_t router(g, &tr::mem::heap_source(), &tr::mem::heap_source(), &fb);
     rec_link_t up(/*ropes=*/true);
     (void)router.add_child("up", up);
 
@@ -334,7 +334,7 @@ void test_advertise_flatten_oom_binds_nothing() {
     graph_t g;
     const vertex_handle_t sink = g.register_vertex(*path_t::parse("/sink"), role_t::STORED_VALUE);
     arming_backend_t fb;
-    fwd_router_t router(g, std::pmr::get_default_resource(), &tr::mem::heap_source(), &fb);
+    fwd_router_t router(g, &tr::mem::heap_source(), &tr::mem::heap_source(), &fb);
     rec_link_t up(/*ropes=*/true);
     (void)router.add_child("up", up);
 
@@ -375,7 +375,7 @@ void test_delivery_flatten_oom_sends_nothing() {
     std::printf("a per-delivery COMPACT whose flatten is refused puts nothing on the wire:\n");
     graph_t g;
     arming_backend_t fb;
-    fwd_router_t router(g, std::pmr::get_default_resource(), &tr::mem::heap_source(), &fb);
+    fwd_router_t router(g, &tr::mem::heap_source(), &tr::mem::heap_source(), &fb);
     rec_link_t client;
     (void)router.add_child("client", client);
 
@@ -438,7 +438,7 @@ void test_bus_name_reject_flatten_oom_drops_the_frame() {
     std::printf("a refused bus-name-rejection flatten drops the frame and answers nothing:\n");
     graph_t g;
     arming_backend_t fb;
-    fwd_router_t router(g, std::pmr::get_default_resource(), &tr::mem::heap_source(), &fb);
+    fwd_router_t router(g, &tr::mem::heap_source(), &tr::mem::heap_source(), &fb);
     bus_link_impl_t bus;
     p2p_link_t alice;
     bus.peers.emplace_back("alice", &alice);

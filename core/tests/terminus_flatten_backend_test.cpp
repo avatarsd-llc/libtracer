@@ -455,7 +455,7 @@ void test_terminus_read_draws_from_the_injected_seam() {
     {
         node_t n;
         (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x2A2A2A2Au))));
-        fwd_router_t router(n.g, std::pmr::get_default_resource(), &tr::mem::heap_source(), &seam);
+        fwd_router_t router(n.g, &tr::mem::heap_source(), &tr::mem::heap_source(), &seam);
         (void)router.add_child("in", n.in);
         tr::view::rope_t rope = as_rope(frame, 4);  // built OUTSIDE the window
         g_allocs = 0;
@@ -510,7 +510,7 @@ void test_terminus_read_refusal_is_answered() {
     node_t n;
     (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x33333333u))));
     arming_backend_t seam;
-    fwd_router_t router(n.g, std::pmr::get_default_resource(), &tr::mem::heap_source(), &seam);
+    fwd_router_t router(n.g, &tr::mem::heap_source(), &tr::mem::heap_source(), &seam);
     (void)router.add_child("in", n.in);
 
     seam.arm();
@@ -554,7 +554,7 @@ void test_terminus_write_refusal_stores_nothing() {
     constexpr std::uint32_t kSecond = 0x55555555u;
     (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(kFirst))));
     arming_backend_t seam;
-    fwd_router_t router(n.g, std::pmr::get_default_resource(), &tr::mem::heap_source(), &seam);
+    fwd_router_t router(n.g, &tr::mem::heap_source(), &tr::mem::heap_source(), &seam);
     (void)router.add_child("in", n.in);
 
     const std::vector<std::byte> write = b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}),
@@ -600,7 +600,7 @@ void test_terminus_refusal_sweep() {
     {
         node_t n;
         arming_backend_t seam;
-        fwd_router_t router(n.g, std::pmr::get_default_resource(), &tr::mem::heap_source(), &seam);
+        fwd_router_t router(n.g, &tr::mem::heap_source(), &tr::mem::heap_source(), &seam);
         (void)router.add_child("in", n.in);
         (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x66666666u))));
         n.in.inject(as_rope(frame, 4));
@@ -614,7 +614,7 @@ void test_terminus_refusal_sweep() {
     for (int k = 0; k < total; ++k) {
         node_t n;
         arming_backend_t seam;
-        fwd_router_t router(n.g, std::pmr::get_default_resource(), &tr::mem::heap_source(), &seam);
+        fwd_router_t router(n.g, &tr::mem::heap_source(), &tr::mem::heap_source(), &seam);
         (void)router.add_child("in", n.in);
         (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x66666666u))));
         seam.refuse_after(k);
@@ -692,7 +692,7 @@ void test_single_link_ownership_copy_draws_from_the_seam() {
     std::size_t pool_allocs = 0;
     {
         node_t n;
-        fwd_router_t router(n.g, std::pmr::get_default_resource(), &tr::mem::heap_source(), &seam);
+        fwd_router_t router(n.g, &tr::mem::heap_source(), &tr::mem::heap_source(), &seam);
         (void)router.add_child("in", n.in);
         tr::view::rope_t rope = as_split_rope(w.frame, w.split);  // built OUTSIDE the window
         g_allocs = 0;
@@ -746,7 +746,7 @@ void test_single_link_ownership_copy_refusal_is_answered() {
     node_t n;
     (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_filled(4, kPriorFill))));
     arming_backend_t seam;
-    fwd_router_t router(n.g, std::pmr::get_default_resource(), &tr::mem::heap_source(), &seam);
+    fwd_router_t router(n.g, &tr::mem::heap_source(), &tr::mem::heap_source(), &seam);
     (void)router.add_child("in", n.in);
 
     // Serve everything up to (but not including) the ownership copy, then refuse: the
@@ -755,8 +755,8 @@ void test_single_link_ownership_copy_refusal_is_answered() {
     {
         node_t probe;
         arming_backend_t probe_seam;
-        fwd_router_t probe_router(probe.g, std::pmr::get_default_resource(),
-                                  &tr::mem::heap_source(), &probe_seam);
+        fwd_router_t probe_router(probe.g, &tr::mem::heap_source(), &tr::mem::heap_source(),
+                                  &probe_seam);
         (void)probe_router.add_child("in", probe.in);
         probe.in.inject(as_split_rope(w.frame, w.split));
         int before = 0;
@@ -812,7 +812,7 @@ void test_single_link_ownership_copy_sweep() {
     {
         node_t n;
         arming_backend_t seam;
-        fwd_router_t router(n.g, std::pmr::get_default_resource(), &tr::mem::heap_source(), &seam);
+        fwd_router_t router(n.g, &tr::mem::heap_source(), &tr::mem::heap_source(), &seam);
         (void)router.add_child("in", n.in);
         n.in.inject(as_split_rope(w.frame, w.split));
         total = seam.served();
@@ -825,7 +825,7 @@ void test_single_link_ownership_copy_sweep() {
     for (int k = 0; k < total; ++k) {
         node_t n;
         arming_backend_t seam;
-        fwd_router_t router(n.g, std::pmr::get_default_resource(), &tr::mem::heap_source(), &seam);
+        fwd_router_t router(n.g, &tr::mem::heap_source(), &tr::mem::heap_source(), &seam);
         (void)router.add_child("in", n.in);
         (void)n.g.write(n.temp,
                         tr::view::rope_t(*tr::view::over_bytes(b_value_filled(4, kPriorFill))));
@@ -930,7 +930,7 @@ void test_arena_ownership_copy_draws_from_the_seam() {
     std::size_t pool_allocs = 0;
     {
         node_t n;
-        fwd_router_t router(n.g, std::pmr::get_default_resource(), &tr::mem::heap_source(), &seam);
+        fwd_router_t router(n.g, &tr::mem::heap_source(), &tr::mem::heap_source(), &seam);
         (void)router.add_child("in", n.in);
         g_allocs = 0;
         g_bytes = 0;
@@ -978,7 +978,7 @@ void test_arena_ownership_copy_draws_from_the_seam() {
     seam.reset_counts();
     {
         node_t n;
-        fwd_router_t router(n.g, std::pmr::get_default_resource(), &tr::mem::heap_source(), &seam);
+        fwd_router_t router(n.g, &tr::mem::heap_source(), &tr::mem::heap_source(), &seam);
         (void)router.add_child("in", n.in);
         (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x88888888u))));
         router.on_frame("in", read_frame());
@@ -1012,7 +1012,7 @@ void test_arena_ownership_copy_refusal_is_answered() {
     node_t n;
     (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_filled(4, kPriorFill))));
     arming_backend_t seam;
-    fwd_router_t router(n.g, std::pmr::get_default_resource(), &tr::mem::heap_source(), &seam);
+    fwd_router_t router(n.g, &tr::mem::heap_source(), &tr::mem::heap_source(), &seam);
     (void)router.add_child("in", n.in);
 
     seam.arm();
@@ -1061,7 +1061,7 @@ void test_arena_refusal_sweep() {
     {
         node_t n;
         arming_backend_t seam;
-        fwd_router_t router(n.g, std::pmr::get_default_resource(), &tr::mem::heap_source(), &seam);
+        fwd_router_t router(n.g, &tr::mem::heap_source(), &tr::mem::heap_source(), &seam);
         (void)router.add_child("in", n.in);
         router.on_frame("in", frame);
         total = seam.served();
@@ -1074,7 +1074,7 @@ void test_arena_refusal_sweep() {
     for (int k = 0; k < total; ++k) {
         node_t n;
         arming_backend_t seam;
-        fwd_router_t router(n.g, std::pmr::get_default_resource(), &tr::mem::heap_source(), &seam);
+        fwd_router_t router(n.g, &tr::mem::heap_source(), &tr::mem::heap_source(), &seam);
         (void)router.add_child("in", n.in);
         (void)n.g.write(n.temp,
                         tr::view::rope_t(*tr::view::over_bytes(b_value_filled(4, kPriorFill))));

@@ -143,16 +143,15 @@ The value is delivered as the ordinary constexpr `tr::graph::kVertexLockStripes`
   - **Links clean under `-fno-exceptions -fno-rtti` — true**, for the full-node profile including the examples; CI builds it for esp32c6, esp32c3 and `linux`.
   - **"Never throws" — FALSE.** The data path *reports* by value (`std::expected` / `status_t`) and draws peer-driven allocations from injected **nothrow** seams (ADR-0065), which is the shape worth relying on — but the tree is not throw-free, and under `-fno-exceptions` a throw is not an exception, it is `abort()` — a reboot. See the table below.
 
-### The three throwing sites this component compiles in
+### The throwing site this component compiles in
 
-Each of these still reports exhaustion by throwing and is reachable by a peer or by the local sender, so price them on a node that must not reboot. They are the same two rows [docs/design/allocation-and-backpressure.md](../../docs/design/allocation-and-backpressure.md) §"Where the rule is not met today" names; what this table adds is *why each one is in this component's archive*.
+It still reports exhaustion by throwing and is reachable by the local sender, so price it on a node that must not reboot. It is the same row [docs/design/allocation-and-backpressure.md](../../docs/design/allocation-and-backpressure.md) §"Where the rule is not met today" names; what this table adds is *why it is in this component's archive*.
 
 | Site | Code | Provoked by | In this component because |
 | ---- | ---- | ----------- | ------------------------- |
-| Label-table binds (#603) | `core/src/route_handle.cpp:82`, `:198`, `:273` — `std::pmr::vector::push_back` and the route copy beside it | a **peer**: an ingress `ADVERTISE` binds a label. `max_label_bindings_per_link` bounds the entry *count*, not the allocation's failure mode | `route_handle.cpp` is unconditional in the source list (`libtracer/CMakeLists.txt:61`) |
 | `try_reserve` on `-fno-exceptions` (#923, #850) | `core/include/libtracer/mem_heap.hpp:157-171` — `try_grow` catches the container's own allocation failure on a hosted build; **this component is not one**, so IDF's `-fno-exceptions` build keeps the probe-then-commit fallback | anything concurrent — and single-core is not single-threaded: a FreeRTOS context switch between the probe's free and the `reserve` opens the window. Every `try_*` helper inherits it on this profile | header-only, reached from the graph and every transport |
 
-A third row — the CAN egress window table — used to head this list; #1110 removed it for every build, CAN on or off, by deleting the window vector rather than bounding it. The two that remain are structural until #603 lands and until the remaining `try_*` sites move to the ADR-0065 failable seam.
+Two rows used to sit above it. The CAN egress window table went in #1110, which removed it for every build, CAN on or off, by deleting the window vector rather than bounding it. The peer-driven label-table binds of #603 defect 1 went when `route_handle_t` moved onto the ADR-0065 failable seam — it now draws every byte of label state from an injected `mem::block_source_t` and answers exhaustion by value, so an `ADVERTISE` storm degrades flows to the full-route `FWD{WRITE}` form instead of rebooting the node. The one that remains is structural until the rest of the `try_*` sites move to the same seam.
 
 ## Security posture
 

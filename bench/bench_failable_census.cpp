@@ -171,30 +171,36 @@ namespace {
 namespace ws = tr::net::ws;
 namespace can = tr::net::can;
 
-/** @brief A `std::pmr::memory_resource` that counts what it serves (blocks and bytes). */
-class counting_resource_t final : public std::pmr::memory_resource {
+/**
+ * @brief A `tr::mem::block_source_t` that counts what it serves (blocks and bytes).
+ *
+ * The route-handle rows below used to inject a counting `std::pmr::memory_resource` here,
+ * because that is what the label store took. It does not any more (#603 defect 1): the store
+ * draws every byte from an injected `block_source_t`, so the census follows it. The row
+ * semantics are unchanged — `src_blocks`/`src_bytes` are what went through the INJECTED seam,
+ * `heap_blocks`/`heap_bytes` what ESCAPED to the process heap — and the second pair is the
+ * one that matters, because an escape is what a bounded node cannot price.
+ */
+class counting_source_t final : public tr::mem::block_source_t {
    public:
+    counting_source_t() noexcept : tr::mem::block_source_t("census") {}
     std::size_t allocs = 0; /**< @brief Blocks served since construction. */
     std::size_t bytes = 0;  /**< @brief Bytes served since construction. */
 
-   private:
-    void* do_allocate(std::size_t n, std::size_t align) override {
+    [[nodiscard]] void* try_alloc(std::size_t n, std::size_t align) noexcept override {
         ++allocs;
         bytes += n;
-        return std::pmr::get_default_resource()->allocate(n, align);
+        return tr::mem::heap_source().try_alloc(n, align);
     }
-    void do_deallocate(void* p, std::size_t n, std::size_t align) override {
-        std::pmr::get_default_resource()->deallocate(p, n, align);
-    }
-    [[nodiscard]] bool do_is_equal(const std::pmr::memory_resource& o) const noexcept override {
-        return this == &o;
+    void release(void* p, std::size_t n, std::size_t align) noexcept override {
+        tr::mem::heap_source().release(p, n, align);
     }
 };
 
 /** @brief One census row: blocks through the injected seam and blocks that escaped to the heap. */
 struct census_t {
-    std::size_t mr_blocks = 0;
-    std::size_t mr_bytes = 0;
+    std::size_t mr_blocks = 0; /**< @brief Blocks through the INJECTED seam. */
+    std::size_t mr_bytes = 0;  /**< @brief Bytes through the INJECTED seam. */
     std::size_t heap_blocks = 0;
     std::size_t heap_bytes = 0;
 };
@@ -265,7 +271,7 @@ int run_blocks() {
     // (1) FIRST bind on a NEW link — `fwd_router_t::on_advertise`'s terminus leg reaches this
     //     through `bind_ingress`, which calls `tables()`: the #603-defect-1 `allocate_shared`.
     {
-        counting_resource_t mr;
+        counting_source_t mr;
         tr::net::route_handle_t rh{&mr};
         census_t c;
         const std::size_t mr0 = mr.allocs;
@@ -277,7 +283,7 @@ int run_blocks() {
             std::snprintf(lb, sizeof lb, "link-%05zu", i);
             tr::net::handle_binding_t b;
             b.terminus = true;
-            b.local_route.assign(route.begin(), route.end());
+            b.local_route = route;
             (void)rh.bind_ingress(std::string_view(lb), 1, std::move(b));
         }
         g_armed = false;
@@ -286,12 +292,12 @@ int run_blocks() {
         c.heap_blocks = g_allocs;
         c.heap_bytes = g_bytes;
         print_census("bind_ingress_new_link", c, kN,
-                     "first-touch:allocate_shared+pmr_string+map_node+entry_vector");
+                     "first-touch:ONE_block_node+inline_name+registry+entry_array");
     }
 
     // (2) A further bind on an EXISTING link — the steady-state learn.
     {
-        counting_resource_t mr;
+        counting_source_t mr;
         tr::net::route_handle_t rh{&mr};
         {
             tr::net::handle_binding_t b;
@@ -306,7 +312,7 @@ int run_blocks() {
         for (std::size_t i = 0; i < kN; ++i) {
             tr::net::handle_binding_t b;
             b.terminus = true;
-            b.local_route.assign(route.begin(), route.end());
+            b.local_route = route;
             (void)rh.bind_ingress("link-0", static_cast<std::uint16_t>(i + 1), std::move(b));
         }
         g_armed = false;
@@ -314,12 +320,13 @@ int run_blocks() {
         c.mr_bytes = mr.bytes - mrb0;
         c.heap_blocks = g_allocs;
         c.heap_bytes = g_bytes;
-        print_census("bind_ingress_same_link", c, kN, "steady:entry_vector_growth+local_route");
+        print_census("bind_ingress_same_link", c, kN,
+                     "steady:entry_array_growth+local_route_block");
     }
 
     // (3) `record_egress` — `on_advertise`'s forwarding leg, once per learned label.
     {
-        counting_resource_t mr;
+        counting_source_t mr;
         tr::net::route_handle_t rh{&mr};
         (void)rh.record_egress("link-0", 1, route);
         census_t c;
@@ -334,12 +341,12 @@ int run_blocks() {
         c.mr_bytes = mr.bytes - mrb0;
         c.heap_blocks = g_allocs;
         c.heap_bytes = g_bytes;
-        print_census("record_egress", c, kN, "route_bytes_copy+egress_vector_growth");
+        print_census("record_egress", c, kN, "route_bytes_block+egress_array_growth");
     }
 
     // (4) `ensure_egress` — the DELIVERY path's label allocation (`deliver_remote`).
     {
-        counting_resource_t mr;
+        counting_source_t mr;
         tr::net::route_handle_t rh{&mr};
         (void)rh.ensure_egress("link-0", route);
         std::vector<std::vector<std::byte>> routes;
@@ -360,26 +367,29 @@ int run_blocks() {
         print_census("ensure_egress_new_route", c, kN, "linear_scan_miss+route_copy");
     }
 
-    // (5) `egress_route` — `on_nack`'s owning read: a std::vector COPY out of the table,
-    //     on the GLOBAL heap (the return type is a plain vector, not a pmr one).
+    // (5) `copy_egress_route` — `on_nack`'s read. It was an OWNING `std::vector` copy onto the
+    //     GLOBAL heap (one block per NACK, and a probe-then-commit that could abort under
+    //     `-fno-exceptions`, #850/#981); it now lands in the caller's frame, so the expected
+    //     reading of this row is ZERO on both columns.
     {
-        counting_resource_t mr;
+        counting_source_t mr;
         tr::net::route_handle_t rh{&mr};
         for (std::size_t i = 0; i < 64; ++i)
             (void)rh.record_egress("link-0", static_cast<std::uint16_t>(i + 1), route);
         census_t c;
         const std::size_t mr0 = mr.allocs;
         const std::size_t mrb0 = mr.bytes;
+        std::array<std::byte, 256> out{};
         g_allocs = g_frees = g_bytes = 0;
         g_armed = true;
         for (std::size_t i = 0; i < kN; ++i)
-            (void)rh.egress_route("link-0", static_cast<std::uint16_t>((i % 64) + 1));
+            (void)rh.copy_egress_route("link-0", static_cast<std::uint16_t>((i % 64) + 1), out);
         g_armed = false;
         c.mr_blocks = mr.allocs - mr0;
         c.mr_bytes = mr.bytes - mrb0;
         c.heap_blocks = g_allocs;
         c.heap_bytes = g_bytes;
-        print_census("egress_route_lookup", c, kN, "on_nack:owning_copy_to_GLOBAL_heap");
+        print_census("egress_route_lookup", c, kN, "on_nack:copy_out_to_CALLER_frame");
     }
 
     // (6) What an ADVERTISE emission costs, before and after #885. The BUILDER is retained

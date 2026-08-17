@@ -186,8 +186,8 @@ class child_registry_t {                 // the one NAME -> link demux table (AD
 }  // namespace tr::net
 ```
 
-Signature source: `core/include/libtracer/fwd_router.hpp:179` (constructor), `:351`
-(`add_child`), `:408` (`subscribe_toward`), `:528-540` (the sink function-pointer types);
+Signature source: `core/include/libtracer/fwd_router.hpp:194` (constructor), `:366`
+(`add_child`), `:423` (`subscribe_toward`), `:543-555` (the sink function-pointer types);
 `core/include/libtracer/child_registry.hpp:268` (`add`), `:518` (`resolve_peer`), `:533`
 (`erase`), `:566` (`entry_by_name`), `:587` (`by_name`), `:628`/`:638` (`size`/`live_size`).
 
@@ -216,15 +216,15 @@ flowchart TB
   address size grows with hop count, which is what `ADVERTISE`/`COMPACT` route handles exist to
   amortise on a steady flow.
 - **A reply is delivered as a rope, never flattened by the router**
-  (`core/include/libtracer/fwd_router.hpp:542-551`). A sink that wants contiguous bytes holds
+  (`core/include/libtracer/fwd_router.hpp:557-566`). A sink that wants contiguous bytes holds
   `const view_t m = reply.materialize()` and reads `m.bytes()`; a **single-link reply — the common
   case — is returned zero-copy, no allocation and no copy**, and only a multi-link reply pays one
   flatten, on demand. The escape hatch sits at the consumer, so the router never pays for a
   consumer that did not need contiguity. `m` must stay alive while its span is read.
 - **The default delivery leg copies nothing.** A full-route `FWD{WRITE}` fan-out scatter-gathers a
   fresh stack head, the stored return-route bytes, an empty `src`, and one span per link of the
-  stored value (`core/src/fwd_router.cpp:2924`). The `COMPACT` leg is the one that flattens,
-  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:2725`) — single-link, that
+  stored value (`core/src/fwd_router.cpp:3027`). The `COMPACT` leg is the one that flattens,
+  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:2828`) — single-link, that
   flatten is a zero-copy adopt, and multi-link it draws from the router's injected `flat` backend
   (#730), not the global heap.
 - **All rope flattens on the forward AND terminus paths draw from the injected seam.** `flat`
@@ -253,13 +253,13 @@ flowchart TB
   frame build and `iovec` reserve on the writer thread are all failable: each **drops that one
   delivery** — a subscriber misses a value under exhaustion, which is valid delivery behaviour —
   instead of raising an exception that `-fno-exceptions` would turn into `abort()`. A dropped fresh
-  `ADVERTISE` self-heals through the peer's `HANDLE_NACK`. The residual is the label store: a
-  **compact-flagged** flow's first delivery on a link resolves its label *before* those three steps
-  (`fwd_router.cpp:2732`), and that allocates its `link_tables_t` and its egress entry from the
-  `std::pmr::memory_resource` (`route_handle.cpp:34-42`, `:262-263`), which reports exhaustion by
-  throwing — so that one leg can still abort under `-fno-exceptions`
-  ([#603](https://github.com/avatarsd-llc/libtracer/issues/603)). A flow that is not
-  compact-flagged never reaches it. See
+  `ADVERTISE` self-heals through the peer's `HANDLE_NACK`. The label store used to be the residual
+  here — a **compact-flagged** flow's first delivery on a link resolves its label *before* those
+  three steps, and that allocated its `link_tables_t` and its egress entry from a throwing
+  `std::pmr::memory_resource`, so that one leg could abort under `-fno-exceptions`
+  ([#603](https://github.com/avatarsd-llc/libtracer/issues/603) defect 1). It is closed: the store
+  draws every byte from an injected `mem::block_source_t` and answers exhaustion by value, so the
+  leg degrades to the full-route `FWD{WRITE}` form instead of aborting. See
   [failable allocation and backpressure](../design/allocation-and-backpressure.md).
 - **Per-frame sinks are a function pointer plus a context, not `std::function`**
   ([ADR-0047 — build-time closed module sets and compile-time seams](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md)).
@@ -319,7 +319,7 @@ adopt; `/net` itself is likewise only the recommended root convention (a constru
 **Creation is all-or-nothing.** A connection is built in three steps — register the identity
 vertex, insert the `conns_` entry, wire the link into the router's `child_registry_t` — and only
 the last can be refused: `add_child` answers `false` when the registry cannot grow, and it is the
-only place that can say so (`core/include/libtracer/fwd_router.hpp:351`,
+only place that can say so (`core/include/libtracer/fwd_router.hpp:366`,
 `core/include/libtracer/child_registry.hpp:268`). A refusal unwinds the first two in reverse —
 retire the vertex, then erase the entry, which destroys the config-constructed socket — publishes
 no liveness, and answers `BACKPRESSURE` (`core/src/transport_vertex.cpp:613-616`). Discarding that

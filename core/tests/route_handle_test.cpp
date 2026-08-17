@@ -47,6 +47,46 @@ std::vector<std::byte> route_bytes(std::uint8_t tag) {
 }
 
 /**
+ * @brief What the retired owning `lookup_ingress` used to return, rebuilt in the TEST from the
+ *        allocation-free `copy_binding` (#603 defect 1).
+ *
+ * The owning copy moved out of the library because it was a `std::string` + a `std::vector` on
+ * the throwing global heap, on a peer-provoked arm. A test frame is exactly where it is safe to
+ * own one, so the assertions below read unchanged and keep asserting the same facts.
+ */
+struct read_binding_t {
+    bool terminus = false;
+    std::uint16_t out_label = 0;
+    std::string down_link;
+    std::vector<std::byte> local_route;
+};
+
+/** @brief `copy_binding` into owned storage; `nullopt` where `lookup_ingress` gave `nullopt`. */
+std::optional<read_binding_t> read_binding(const route_handle_t& h, std::string_view link,
+                                           std::uint16_t label) {
+    std::array<char, 256> link_buf{};
+    std::array<std::byte, 8192> route_buf{};
+    const binding_copy_t c = h.copy_binding(link, label, link_buf, route_buf);
+    if (!c.found) return std::nullopt;
+    read_binding_t out;
+    out.terminus = c.terminus;
+    out.out_label = c.out_label;
+    out.down_link.assign(c.down_link);
+    out.local_route.assign(c.local_route.begin(), c.local_route.end());
+    return out;
+}
+
+/** @brief `copy_egress_route` into owned storage; `nullopt` where no route is bound. */
+std::optional<std::vector<std::byte>> read_egress(const route_handle_t& h, std::string_view link,
+                                                  std::uint16_t label) {
+    std::array<std::byte, 8192> route_buf{};
+    const std::size_t n = h.copy_egress_route(link, label, route_buf);
+    if (n == 0 || n > route_buf.size()) return std::nullopt;
+    return std::vector<std::byte>(route_buf.begin(),
+                                  route_buf.begin() + static_cast<std::ptrdiff_t>(n));
+}
+
+/**
  * @brief Build a terminus binding field by field.
  *
  * A designated-initializer brace naming only some members trips
@@ -81,22 +121,22 @@ void exercise(route_handle_t& h) {
             handle_binding_t{
                 .terminus = true, .down_link = {}, .out_label = 0, .local_route = route_bytes(1)}),
         "an unbounded table accepts every bind");
-    auto b = h.lookup_ingress("a", 7);
+    auto b = read_binding(h, "a", 7);
     check(b && b->terminus && b->local_route == route_bytes(1), "ingress bind + lookup");
     check(
         h.bind_ingress("a", 7,
                        handle_binding_t{
                            .terminus = false, .down_link = "b", .out_label = 9, .local_route = {}}),
         "a rebind is accepted (it adds no entry)");
-    b = h.lookup_ingress("a", 7);
+    b = read_binding(h, "a", 7);
     check(b && !b->terminus && b->down_link == "b" && b->out_label == 9,
           "rebinding a label replaces the binding");
-    check(!h.lookup_ingress("a", 8) && !h.lookup_ingress("zz", 7),
+    check(!read_binding(h, "a", 8) && !read_binding(h, "zz", 7),
           "unknown label / unknown link ⇒ stale (nullopt)");
 
     // Egress: record + retrieve (the NACK re-advertise path).
     check(h.record_egress("b", 3, route_bytes(2)), "an unbounded table accepts every record");
-    const auto r = h.egress_route("b", 3);
+    const auto r = read_egress(h, "b", 3);
     check(r && *r == route_bytes(2), "egress route retained for re-advertise");
 
     // ensure_egress: fresh once per (link, route), then reused; distinct per link.
@@ -110,9 +150,9 @@ void exercise(route_handle_t& h) {
 
     // clear_link drops ONE link's state — bindings, egress, and the allocator.
     h.clear_link("a");
-    check(!h.lookup_ingress("a", 7), "cleared link's binding is stale");
+    check(!read_binding(h, "a", 7), "cleared link's binding is stale");
     check(h.alloc_label("a") == 1, "cleared link's allocator restarts at 1");
-    check(h.egress_route("b", 3).has_value(), "other links untouched by clear_link");
+    check(read_egress(h, "b", 3).has_value(), "other links untouched by clear_link");
     check(h.ingress_count() == 0 && h.egress_count() == 3, "counts after clear");
 }
 
@@ -160,7 +200,7 @@ void churn_and_race() {
             (void)h.ensure_egress(name, route_bytes(static_cast<std::uint8_t>(i)));
             (void)h.bind_ingress(name, static_cast<std::uint16_t>((i & 0x7FFF) + 1),
                                  terminus_binding());
-            (void)h.lookup_ingress(name, static_cast<std::uint16_t>((i & 0x7FFF) + 1));
+            (void)read_binding(h, name, static_cast<std::uint16_t>((i & 0x7FFF) + 1));
         }
     };
     auto clearer = [&]() {
@@ -229,7 +269,7 @@ void label_space_exhaustion() {
     const auto [second, second_fresh] = h.ensure_egress("x", route_bytes(2));
     check(second == 0 && !second_fresh, "a new flow is refused, not given a live label");
     check(h.egress_count() == egress_before, "a refused flow records no egress binding");
-    check(h.egress_route("x", 1) == route_bytes(1), "label 1 still aliases the first route");
+    check(read_egress(h, "x", 1) == route_bytes(1), "label 1 still aliases the first route");
 
     // Exhaustion is per link (the label space is per-link by design, ADR-0038 §3) ...
     check(h.alloc_label("y") == 1, "a different link's space is untouched");
@@ -254,7 +294,7 @@ void label_space_exhaustion() {
 void bounded_tables() {
     std::printf(" #603 injected per-link binding bound:\n");
     constexpr std::size_t kMax = 4;
-    route_handle_t h(std::pmr::get_default_resource(), kMax);
+    route_handle_t h(&tr::mem::heap_source(), kMax);
 
     // Fill the ingress table to the bound.
     for (std::uint16_t i = 1; i <= kMax; ++i)
@@ -272,7 +312,7 @@ void bounded_tables() {
     // evicting: a full table degrades new flows and leaves running ones alone.
     check(h.bind_ingress("a", 2, terminus_binding("z")),
           "an already-bound label still rebinds when the table is full");
-    const auto b = h.lookup_ingress("a", 2);
+    const auto b = read_binding(h, "a", 2);
     check(b && !b->terminus && b->down_link == "z", "and the rebind actually took effect");
     check(h.refused_bindings() == 1, "a rebind is not a refusal");
 
@@ -305,40 +345,63 @@ void bounded_tables() {
 }  // namespace
 
 /**
- * @brief `egress_route`'s copy-out soft-fails instead of aborting (#603 defect 1).
+ * @brief Every door REFUSES BY VALUE once the injected source is exhausted (#603 defect 1).
  *
- * This runs on a transport receive thread — `fwd_router_t::on_nack` reaches it from an
- * inbound HANDLE_NACK — so a throwing allocation there is an `abort()` under the shipping
- * `-fno-exceptions` profile. Exhaustion must take the SAME `nullopt` the "no route bound"
- * case already takes, so no caller learns a new shape.
+ * The defect as filed: an inbound ADVERTISE from a remote peer reached four throwing
+ * `std::pmr` allocations here, so on the shipping `-fno-exceptions` profile — against the
+ * reference firmware's aborting `heap_resource_t` — an ADVERTISE storm rebooted the node,
+ * pre-ACL, at wire rate. The fix is not "allocate less"; it is that exhaustion is an ANSWER.
  *
- * The hook gates `tr::detail::probe_bytes` only, never real `operator new`. That is what
- * makes this test discriminating rather than decorative: the previous
- * `std::vector(begin, end)` never consulted the probe, so under this same hook it would
- * allocate successfully and hand back the route — the middle assertion is what fails.
+ * The bound is HARD: a `bump_source_t` whose upstream serves nothing, so the slab's size IS
+ * the cap and there is no global heap to fall back to. Anything in the store still reaching
+ * for `operator new` would be unbounded, which is exactly the property this refutes.
+ *
+ * What separates: with the refusals removed the drain loop never terminates early, so
+ * `bound + 1 < kTries` fails; with them removed and the allocations left throwing, the
+ * process aborts instead of reporting.
  */
-void egress_route_soft_fails_on_exhaustion() {
-    std::printf(" #603 egress_route copy-out is nothrow:\n");
-    route_handle_t h;
-    const std::array<std::byte, 8> route{};
-    check(h.record_egress("up", 7, std::vector<std::byte>(route.begin(), route.end())),
-          "the egress route binds");
-    check(h.egress_route("up", 7).has_value(), "and reads back while memory is available");
+void exhausted_source_refuses_at_every_door() {
+    std::printf(" #603 defect 1 — an exhausted injected source refuses at every door:\n");
+    alignas(std::max_align_t) std::array<std::byte, 4096> slab{};
+    tr::mem::bump_source_t src(slab, tr::mem::null_source());
+    route_handle_t h(&src);
 
-    {
-        struct hook_guard_t {
-            hook_guard_t() {
-                tr::detail::probe_fail_hook = [](std::size_t) noexcept { return false; };
-            }
-            ~hook_guard_t() { tr::detail::probe_fail_hook = nullptr; }
-        } const starve;
-        check(!h.egress_route("up", 7).has_value(),
-              "under exhaustion it answers nullopt — the same answer as an unbound label, "
-              "never an abort");
+    const std::vector<std::byte> route = route_bytes(1);
+    check(h.record_egress("up", 7, route), "a first record fits the slab");
+    check(read_egress(h, "up", 7) == route, "and reads back out of it");
+
+    // Drain the slab through the ingress door. Every refusal must be by value and counted.
+    constexpr std::uint16_t kTries = 4000;
+    std::uint16_t bound = 0;
+    for (std::uint16_t i = 1; i < kTries; ++i) {
+        if (!h.bind_ingress("in", i, terminus_binding())) break;
+        ++bound;
     }
+    check(bound > 0, "binds succeed while the slab can serve them");
+    check(bound + 1 < kTries, "and the slab REFUSES rather than growing without bound");
+    check(h.refused_bindings() > 0,
+          "a refusal is COUNTED — a silent drop is indistinguishable from a bound "
+          "that is never reached");
+    check(h.ingress_count() == bound,
+          "every accepted bind is present and no refused one is — nothing half-recorded");
 
-    check(h.egress_route("up", 7).has_value(), "and reads back again once memory returns");
-    check(h.egress_route("up", 8) == std::nullopt, "an unbound label still answers nullopt");
+    check(read_binding(h, "in", 1).has_value(), "and every ESTABLISHED binding is untouched");
+
+    // Every OTHER door degrades the same way, into an answer its caller already handles. A
+    // store that cannot even mint a link's tables is the sharpest form of the exhaustion: it
+    // exercises the `tables()` refusal that used to be the throwing `std::allocate_shared`.
+    alignas(std::max_align_t) std::array<std::byte, 8> crumbs{};
+    tr::mem::bump_source_t nothing(crumbs, tr::mem::null_source());
+    route_handle_t starved(&nothing);
+    check(starved.ensure_egress("l", route).first == 0,
+          "ensure_egress answers {0,false} — the caller sends the full-route FWD form");
+    check(!starved.record_egress("l", 1, route), "record_egress refuses by value");
+    check(!starved.bind_ingress("l", 1, terminus_binding()), "bind_ingress refuses by value");
+    check(starved.alloc_label("l") == 0, "alloc_label answers the reserved 0 — cannot compact");
+    check(starved.refused_bindings() == 3,
+          "and each resource refusal is counted exactly once (alloc_label reports through its "
+          "own 0 return, which is not a binding refusal)");
+    check(starved.link_count() == 0, "a store that cannot mint tables leaves no shell behind");
 }
 
 /**
@@ -420,15 +483,15 @@ void cross_link_sweep() {
 
     h.clear_link("left");
 
-    check(!h.lookup_ingress("up", 1),
+    check(!read_binding(h, "up", 1),
           "the CROSS-LINK binding pointing at \"left\" is swept — it is as stale as the erased "
           "table it aimed into");
-    check(h.lookup_ingress("up", 2).has_value(),
+    check(read_binding(h, "up", 2).has_value(),
           "the sibling binding through \"right\" is untouched (the sweep is scoped)");
-    check(h.lookup_ingress("up", 3).has_value(),
+    check(read_binding(h, "up", 3).has_value(),
           "the TERMINUS binding is untouched — it has no downstream half to cross anything");
-    check(!h.lookup_ingress("left", 4), "the cleared link's own bindings go with its table");
-    check(!h.egress_route("left", 8).has_value(), "as does its egress table");
+    check(!read_binding(h, "left", 4), "the cleared link's own bindings go with its table");
+    check(!read_egress(h, "left", 8).has_value(), "as does its egress table");
     check(h.ingress_count() == 2, "exactly two bindings survive");
 
     // The sweep must not resurrect or invent a link shell for a name it merely scanned.
@@ -493,7 +556,7 @@ void reconnect_inside_advertise() {
     {
         route_handle_t h;
         const advertise_leg_t r = advertise_forwarding_leg(h, "up", 5, "down", route_bytes(1), nop);
-        check(r.bound && h.lookup_ingress("up", 5).has_value(),
+        check(r.bound && read_binding(h, "up", 5).has_value(),
               "control: with no reconnect in the window the swap binds normally");
     }
     {
@@ -503,9 +566,9 @@ void reconnect_inside_advertise() {
         const advertise_leg_t r = advertise_forwarding_leg(h, "up", 5, "down", route_bytes(1),
                                                            [&h]() { h.clear_link("down"); });
         check(!r.bound, "the swap minted against the PRE-clear table is refused");
-        check(!h.lookup_ingress("up", 5),
+        check(!read_binding(h, "up", 5),
               "no ingress swap survives aiming at the erased egress table");
-        check(!h.egress_route("down", r.out_label).has_value(),
+        check(!read_egress(h, "down", r.out_label).has_value(),
               "corroborating: the egress route it aimed at is indeed gone (true either way)");
     }
     {
@@ -519,7 +582,7 @@ void reconnect_inside_advertise() {
         (void)h.ensure_egress("other", route_bytes(7));
         const advertise_leg_t r = advertise_forwarding_leg(h, "up", 6, "down", route_bytes(2),
                                                            [&h]() { h.clear_link("other"); });
-        check(r.bound && h.lookup_ingress("up", 6).has_value(),
+        check(r.bound && read_binding(h, "up", 6).has_value(),
               "an unrelated link's reconnect in the same window does NOT refuse the swap");
     }
     {
@@ -528,8 +591,8 @@ void reconnect_inside_advertise() {
         route_handle_t h;
         (void)advertise_forwarding_leg(h, "up", 7, "down", route_bytes(3),
                                        [&h]() { h.clear_link("up"); });
-        const auto b = h.lookup_ingress("up", 7);
-        check(!b || h.egress_route("down", b->out_label).has_value(),
+        const auto b = read_binding(h, "up", 7);
+        check(!b || read_egress(h, "down", b->out_label).has_value(),
               "an inbound reconnect leaves no readable swap without its egress route");
     }
 }
@@ -570,8 +633,8 @@ void reconnect_race_invariant() {
         go.store(true, std::memory_order_release);
         adv.join();
         rec.join();
-        const auto b = h.lookup_ingress("up", 5);
-        if (b && !b->terminus && b->down_link == "down" && !h.egress_route("down", b->out_label))
+        const auto b = read_binding(h, "up", 5);
+        if (b && !b->terminus && b->down_link == "down" && !read_egress(h, "down", b->out_label))
             ++violations;
     }
     check(violations == 0, "no round left a readable swap pointing at a dead egress table");
@@ -599,7 +662,7 @@ void refused_bind_unwinds_the_take() {
     const auto nop = []() {};
 
     {
-        route_handle_t h(std::pmr::get_default_resource(), 2);
+        route_handle_t h(&tr::mem::heap_source(), 2);
         // Two established flows through the same stripped route: ingress "up" is now AT the
         // bound with a single egress entry behind both.
         const advertise_leg_t a =
@@ -618,7 +681,7 @@ void refused_bind_unwinds_the_take() {
                     h.egress_count(), h.ingress_count());
         check(!r.bound && r.out_label != 0, "the bind is refused after the label was taken");
         check(h.egress_count() == 1, "the refused take left NO egress entry behind");
-        check(!h.egress_route("down", r.out_label).has_value(),
+        check(!read_egress(h, "down", r.out_label).has_value(),
               "and no retained route under the label it took");
         check(h.ingress_count() == 2, "and no ingress binding, which is the refusal itself");
 
@@ -635,7 +698,7 @@ void refused_bind_unwinds_the_take() {
         // unwound by a newcomer's refusal. "up2" reuses "down"'s existing label for the same
         // route and is refused (its own ingress table is full through another downstream
         // link), so the release lands on an entry that is not its own mint.
-        route_handle_t h(std::pmr::get_default_resource(), 1);
+        route_handle_t h(&tr::mem::heap_source(), 1);
         const advertise_leg_t est =
             advertise_forwarding_leg(h, "up", 10, "down", route_bytes(1), nop);
         const advertise_leg_t fill =
@@ -646,9 +709,9 @@ void refused_bind_unwinds_the_take() {
             advertise_forwarding_leg(h, "up2", 21, "down", route_bytes(1), nop);
         check(!r.bound && r.out_label == est.out_label,
               "the newcomer REUSED the established label and was then refused");
-        check(h.egress_route("down", est.out_label) == route_bytes(1),
+        check(read_egress(h, "down", est.out_label) == route_bytes(1),
               "the established flow keeps its label and its retained route");
-        check(h.lookup_ingress("up", 10).has_value(), "and keeps its ingress binding");
+        check(read_binding(h, "up", 10).has_value(), "and keeps its ingress binding");
         check(h.egress_count() == 2, "no entry was erased on either link");
     }
     {
@@ -718,20 +781,23 @@ int main() {
         exercise(h);
     }
     {
-        // The ADR-0039 claim: the whole label lifecycle draws from the host slab —
-        // a null upstream would throw on ANY global-heap fallback for table state.
-        std::printf(" slab resource (null upstream — zero global heap):\n");
-        alignas(std::max_align_t) static std::array<std::byte, 16384> slab;
-        std::pmr::monotonic_buffer_resource mr(slab.data(), slab.size(),
-                                               std::pmr::null_memory_resource());
-        route_handle_t h(&mr);
+        // The ADR-0039 / ADR-0079 claim: the whole label lifecycle draws from the host slab.
+        // The upstream serves NOTHING, so the slab is a hard bound — any global-heap fallback
+        // for table state would have to come out of it, and there is nowhere else to go.
+        // A `block_source_t` where this used to be a `std::pmr::monotonic_buffer_resource`
+        // over `null_memory_resource`: the pmr pair signalled exhaustion by THROWING, which is
+        // the abort this family exists to remove (#603 defect 1).
+        std::printf(" slab source (null upstream — zero global heap):\n");
+        alignas(std::max_align_t) static std::array<std::byte, 65536> slab;
+        tr::mem::bump_source_t src(slab, tr::mem::null_source());
+        route_handle_t h(&src);
         exercise(h);
     }
 
     churn_and_race();
     label_space_exhaustion();
     bounded_tables();
-    egress_route_soft_fails_on_exhaustion();
+    exhausted_source_refuses_at_every_door();
 
     cache_after_teardown();
     cross_link_sweep();
