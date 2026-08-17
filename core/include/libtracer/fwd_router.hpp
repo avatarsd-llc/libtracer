@@ -36,7 +36,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
-#include <memory_resource>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -83,19 +82,35 @@ class fwd_router_t {
      * use — the same lifetime the held `graph_` reference already requires.
      *
      * @param graph The node's local graph.
-     * @param mr    The node's container memory resource (ADR-0039 §1) — the
-     *              `route_handle` label tables draw from it; the library holds no
-     *              buffer of its own. A bounded node injects a pool resource over
-     *              its static slab (one slab, whole stack — ADR-0039 §2); the
-     *              default is the standard heap. Must outlive the router.
+     * @param label_src
+     *              The nothrow source the `route_handle` LABEL TABLES draw from (#603
+     *              defect 1 / #873 family 3, ADR-0065 / ADR-0079 §Decision 4) — the library
+     *              holds no buffer of its own. A bounded node injects a
+     *              @ref mem::pool_source_t over its static slab (one slab, whole stack —
+     *              ADR-0039 §2); the default is the process-wide nothrow platform heap.
+     *              Must outlive the router, and must be thread-safe: the label tables are
+     *              written from `on_advertise`, which runs on a transport RECEIVE thread and
+     *              is driven entirely by a remote peer.
+     *
+     *              This parameter used to be a `%std::pmr::memory_resource*`. It could not
+     *              stay one: a pmr resource cannot report exhaustion by value, so on the
+     *              shipping `-fno-exceptions` profile a peer's ADVERTISE storm against an
+     *              aborting `heap_resource_t` rebooted the node. Kept in the SAME position
+     *              rather than appended, because feeding the label tables was its only job —
+     *              a call site that passed `%std::pmr::get_default_resource()` now passes
+     *              nothing (or its own source) and gets a compile error rather than a silent
+     *              re-route. Split from @p rx deliberately (ADR-0079's per-plane default):
+     *              @p rx is per-frame decode scratch and may legitimately be a
+     *              `bump_source_t`, while label state is LONG-LIVED and would monotonically
+     *              fill one.
      * @param rx    The nothrow source the TERMINUS ARENA draws from (#588). Split from
-     *              @p mr because the arena is built from a peer's frame, on the RX
+     *              @p label_src because the arena is built from a peer's frame, on the RX
      *              path, behind no ACL: a `std::pmr::memory_resource` cannot report
      *              exhaustion by value, so on `-fno-exceptions` its only failure mode
      *              is `abort()`. Drawing the arena from a @ref mem::block_source_t
      *              instead makes an over-large frame a `TLV_NESTING_TOO_DEEP` reject.
      *              Appended with a default, so every existing call site is unchanged;
-     *              a bounded node points this at the same slab as @p mr. Must outlive
+     *              a bounded node points this at the same slab as @p label_src. Must outlive
      *              the router.
      * @param flat  The byte backend EVERY rope flatten on the router's forward AND terminus
      *              paths draws its owned `segment` from — the router's own four (#730): the
@@ -145,7 +160,7 @@ class fwd_router_t {
      *              synchronisation before injection: `mem::synchronized_pool_t` takes it
      *              as a compile-time policy — @ref mem::sync_pool_t is the multi-core
      *              spinlock, `tr::esp::critical_pool_t` the MCU interrupt-disable one.
-     *              A bounded node points this at the same slab as @p mr / @p rx only
+     *              A bounded node points this at the same slab as @p label_src / @p rx only
      *              through such a composition. Must outlive the router.
      * @param max_label_bindings_per_link
      *              Ceiling on one link's ingress table and, separately, its egress table
@@ -177,7 +192,7 @@ class fwd_router_t {
      *              same terms as @p flat. Must outlive the router.
      */
     explicit fwd_router_t(graph::graph_t& graph,
-                          std::pmr::memory_resource* mr = std::pmr::get_default_resource(),
+                          mem::block_source_t* label_src = &mem::heap_source(),
                           mem::block_source_t* rx = &mem::heap_source(),
                           mem::mem_backend_t* flat = &mem::heap_backend(),
                           std::size_t max_label_bindings_per_link = 0,
@@ -185,11 +200,11 @@ class fwd_router_t {
         : graph_(graph),
           resolver_(graph, flat, egress),  // the terminus tier draws flatten from the SAME
                                            // seam (#766) and reply egress from `egress` (#795)
-          mr_(mr),
+          label_src_(label_src),
           rx_(rx),
           flat_(flat),
           egress_(egress),
-          handles_(mr, max_label_bindings_per_link) {
+          handles_(label_src, max_label_bindings_per_link) {
         // The captureless {fn, ctx} pair the ADR-0047 doctrine prescribes (#1049) — the same
         // shape as `on_reverse_ref` below. The graph publishes it through a `sink_slot_t`,
         // so `this` must outlive every write that can still reach the producer fan-out;
@@ -1124,7 +1139,7 @@ class fwd_router_t {
      * @brief Terminus: arena-decode @p frame (ADR-0041) and resolve + reply.
      *
      * The arena draws from the inbound child's failable source, or the router's when
-     * the child has none (#588 moved this off `mr_`; the doc lagged), and is
+     * the child has none (#588 moved this off the pmr resource; the doc lagged), and is
      * released before returning — the memory policy is entirely the host's. The
      * FWD{REPLY} is sent back over the link the request arrived on. @p frame_view
      * (non-null on the owning-delivery path) is threaded into the resolver for
@@ -1581,7 +1596,12 @@ class fwd_router_t {
     std::atomic<std::size_t> label_not_found_{0}; /**< @brief §7.2 refusals — see @ref
                                                             label_not_found. */
     std::atomic<std::size_t> label_resolves_{0};  /**< @brief Labelled hops taken. */
-    std::pmr::memory_resource* mr_;        // route_handle label-table resource (ADR-0039 §1)
+    // The label plane's substrate (#603 defect 1 / #873 family 3): the route-handle tables
+    // draw from it, and so do the ADVERTISE arm's route re-encodes and the two over-wide
+    // route reads on the COMPACT/NACK arms — every one of which was a throwing allocation on
+    // a peer-provoked receive thread before. Held here as well as inside `handles_` because
+    // those router-side reads are the store's callers, not the store.
+    mem::block_source_t* label_src_;
     mem::block_source_t* rx_;              // DEFAULT terminus-arena source, NOTHROW (#588);
                                            // a child may carry its own (ADR-0067 §3)
     mem::mem_backend_t* flat_;             // every rope flatten the router performs (#730);

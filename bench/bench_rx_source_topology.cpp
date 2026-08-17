@@ -233,7 +233,7 @@ bool run_point(topo_t topo, std::size_t T) {
     tr::mem::block_source_t* router_default =
         topo == topo_t::POOL_SHARED ? static_cast<tr::mem::block_source_t*>(&shared_pool)
                                     : &tr::mem::heap_source();
-    fwd_router_t router(g, std::pmr::get_default_resource(), router_default);
+    fwd_router_t router(g, &tr::mem::heap_source(), router_default);
 
     std::vector<std::unique_ptr<lane_t>> lanes;  // stable addresses: the router holds pointers
     lanes.reserve(T);

@@ -29,19 +29,16 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <map>
-#include <memory>
-#include <memory_resource>
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
 #include <span>
-#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
 #include "libtracer/graph.hpp"
+#include "libtracer/mem_source.hpp"
 
 namespace tr::net {
 
@@ -92,12 +89,24 @@ struct resolved_binding_t {
  * local terminus (resolve `local_route` and apply the write). The trailing fields memoize
  * what that resolution produced (ADR-0062), so an established flow stops re-deriving it; the
  * allocation-free view of them is @ref resolved_binding_t.
+ *
+ * **A NON-OWNING descriptor** (#603 defect 1, ADR-0079). It used to carry a `std::string` and
+ * a `std::vector`, which made it the structural reason this store could not leave `std::pmr`:
+ * an entry holding those types is neither trivially copyable nor trivially destructible, so
+ * `mem::block_array_t` could not hold it and the tables stayed on a throwing allocator that a
+ * peer's ADVERTISE reaches. The bytes are now the CALLER's, borrowed for the duration of the
+ * @ref route_handle_t::bind_ingress call, and the store copies them into blocks drawn from its
+ * injected @ref tr::mem::block_source_t. That inverts the ownership so both halves get what
+ * they need: the caller can point at a decoded frame it already holds (no allocation at all),
+ * and the store's copy fails by value instead of throwing.
+ *
+ * @warning The views must outlive only the bind call. Nothing here is retained.
  */
 struct handle_binding_t {
-    bool terminus = false;     /**< @brief true ⇒ deliver locally; false ⇒ forward + swap. */
-    std::string down_link;     /**< @brief Forward: this node's NAME for the downstream link. */
-    std::uint16_t out_label{}; /**< @brief Forward: label to stamp on the downstream COMPACT. */
-    std::vector<std::byte>
+    bool terminus = false;      /**< @brief true ⇒ deliver locally; false ⇒ forward + swap. */
+    std::string_view down_link; /**< @brief Forward: this node's NAME for the downstream link. */
+    std::uint16_t out_label{};  /**< @brief Forward: label to stamp on the downstream COMPACT. */
+    std::span<const std::byte>
         local_route; /**< @brief Terminus: the local dst PATH TLV bytes to resolve + write. */
     /** @brief ADR-0062: the resolution, filled on first use and re-filled when it goes stale.
      *         `warm == false` means "never resolved"; the two cached forms carry their own
@@ -131,50 +140,111 @@ struct handle_binding_t {
 };
 
 /**
+ * @brief A binding read back OUT of the store into CALLER storage — allocation-free (#603).
+ *
+ * The owning read `lookup_ingress` used to serve, without the owning. It returned a
+ * `std::optional<handle_binding_t>` whose `std::string` + `std::vector` were built on the
+ * global heap on a peer-provoked arm; this reports the same facts into two spans the caller
+ * already has, and reports the SIZES so a caller whose buffer was too small can retry against
+ * a larger one rather than mistake truncation for absence.
+ */
+struct binding_copy_t {
+    bool found = false;          /**< @brief false ⇒ no binding for this (link, label). */
+    bool terminus = false;       /**< @brief true ⇒ deliver locally; false ⇒ forward + swap. */
+    bool truncated = false;      /**< @brief A buffer was too small; the sizes below still hold. */
+    std::uint16_t out_label = 0; /**< @brief Forward: label to stamp downstream. */
+    std::uint32_t mount_gen = 0; /**< @brief The mount-shape generation (#765). */
+    std::string_view down_link;  /**< @brief Forward: a view into the caller's link buffer. */
+    std::span<const std::byte>
+        local_route;                /**< @brief Terminus: a view into the caller's route buffer. */
+    std::size_t down_link_size = 0; /**< @brief The binding's full link-name size. */
+    std::size_t local_route_size = 0; /**< @brief The binding's full route size. */
+};
+
+/**
  * @brief Per-connection `label ↔ route` tables for ws delivery-compaction (RFC-0004 §E.1).
  *
  * The label state lives PER LINK (ADR-0038 §3 / ADR-0039): each connection owns
  * its own small tables — an INGRESS table (a label arriving on the link → its
  * @ref handle_binding_t), an EGRESS table (a label this node advertised over the
  * link → the route it aliases, retained so a NACK can re-advertise), and a
- * monotonic label allocator — drawn from the injected memory resource and guarded
- * by the LINK'S OWN mutex, so label traffic on one connection never contends with
+ * monotonic label allocator — drawn from the injected @ref tr::mem::block_source_t and
+ * guarded by the LINK'S OWN mutex, so label traffic on one connection never contends with
  * another. The only cross-link lock is a `shared_mutex` over the link registry,
  * taken exclusively when a link's tables are first CREATED or when @ref clear_link
- * removes them. Each link's tables are owned by a `shared_ptr`, so the accessors
+ * removes them. Each link's tables are REFCOUNTED, so the accessors
  * hand out a PINNING copy: `clear_link` can erase the registry entry while a
  * concurrent writer still holds the tables — the node is destroyed only when the
  * last outstanding reference drops (no dangling reference), and the registry is
  * bounded to LIVE link names instead of growing one empty shell per departed name
  * (#488). State exists only for flows that opted into compaction, so @ref
  * ingress_count on a node forwarding only one-shot/cold traffic is zero.
+ *
+ * ### Every byte comes from the injected source (#603 defect 1, #873 family 3)
+ *
+ * This store allocates through NOTHING but @ref tr::mem::block_source_t — no `%std::pmr`, no
+ * `%std::string`, no `%std::vector`, no reach for the global heap. That is not hygiene here:
+ * `on_advertise` runs on a transport receive thread, pre-ACL, driven entirely by a remote
+ * peer, and the shipping profile is `-fno-exceptions` against an aborting `heap_resource_t`,
+ * so a `%std::pmr` allocation on this path is a peer-triggerable node reboot. Exhaustion now
+ * answers by VALUE at every door — @ref bind_ingress returns `false`, @ref ensure_egress
+ * returns `{0, false}`, @ref record_egress returns `false` — and each of those is a refusal
+ * the caller ALREADY handles, because it is the same answer a full table (#703) and an
+ * exhausted label space (#701) give. A refused compaction degrades to the full-route
+ * `FWD{WRITE}` form, which carries its own route and always works.
+ *
+ * Concretely, the four allocating shapes and where each one now draws from:
+ *
+ * | what | before | now |
+ * | --- | --- | --- |
+ * | a link's tables node + its name | `%std::allocate_shared` + `%std::pmr::string` (throwing) |
+ * one `try_alloc` block, the name stored INLINE behind the object, intrusive refcount | | the link
+ * registry | a `%std::pmr::map` node per link (throwing) | `mem::block_array_t<link_tables_t*>`,
+ * linear scan | | the ingress / egress tables | `%std::pmr::vector` growth (throwing) |
+ * `mem::block_array_t` growth (`false` on exhaustion) | | a route / link-name byte buffer |
+ * `%std::pmr::vector<std::byte>` (throwing) | one exact-size `try_alloc` block per entry |
+ *
+ * The stored entry types are trivially copyable and trivially destructible, which is what
+ * @ref tr::mem::block_array_t requires and what the OLD @ref handle_binding_t (a `%std::string`
+ * plus a `%std::vector`) made impossible — see that type's note for the ownership inversion
+ * that removed the blocker. Byte blocks are freed explicitly (`block_array_t` runs no
+ * destructors), which is why erasure goes through @ref clear_link / @ref release_egress rather
+ * than through a container's own `erase`.
+ *
+ * The pattern this sets for the rest of #873 is written down in
+ * `docs/reference/09-memory-substrate.md` (§Migrating a STORE onto the substrate).
  */
 class route_handle_t {
    public:
     /**
-     * @brief Draw all label state from @p mr (ADR-0039 §1), bounding each link's tables at
-     *        @p max_bindings_per_link entries.
+     * @brief Draw all label state from @p src (ADR-0065 / ADR-0079), bounding each link's
+     *        tables at @p max_bindings_per_link entries.
      *
-     * A bounded node passes a pool resource over its slab and the label tables
-     * live entirely in host-chosen memory; the default is the standard heap.
-     * @p mr must outlive this object.
+     * A bounded node passes a `mem::pool_source_t` over its slab and the label tables live
+     * entirely in host-chosen memory; the default is the process-wide nothrow platform heap.
+     * @p src must outlive this object, and must be thread-safe if more than one transport
+     * receive thread can reach this store (the RFC-0014 wire-driven paths do).
      *
      * **The bound is injected, never assumed** ([CONTEXT.md §Resource bound]). `0` means
      * unbounded — the default, and the pre-#603 behavior. A bounded host sizes it from its
      * own slab; ADR-0038 §3 calls for exactly this (*"sized by `:settings`"*).
      *
-     * Without a bound the tables are peer-driven and grow to the whole label space: a link
-     * can accumulate 65535 ingress bindings, each a `handle_binding_t` carrying a
-     * `std::string` and a `std::vector`. That is megabytes per link on a node whose whole
-     * budget is 16 KB.
+     * Since #603 defect 1 the SOURCE is a bound in its own right, which is ADR-0079's
+     * "a bounded node is a property the deployer injects": a full source refuses exactly as a
+     * full table does, so a deployment can size the label plane by the slab alone and leave
+     * @p max_bindings_per_link at `0`. The two are complementary rather than redundant — the
+     * count bounds ONE link's share, the slab bounds the node's total.
      *
-     * @param mr                     Where all label state is allocated.
+     * @param src                    Where all label state is allocated (nothrow, by value).
      * @param max_bindings_per_link  Ceiling on a link's ingress table AND, separately, its
      *                               egress table; `0` ⇒ unbounded.
      */
-    explicit route_handle_t(std::pmr::memory_resource* mr = std::pmr::get_default_resource(),
+    explicit route_handle_t(mem::block_source_t* src = &mem::heap_source(),
                             std::size_t max_bindings_per_link = 0)
-        : mr_(mr), max_bindings_(max_bindings_per_link), links_(mr) {}
+        : src_(src), max_bindings_(max_bindings_per_link), links_(*src) {}
+
+    /** @brief Release every live link's tables (and the byte blocks they own). */
+    ~route_handle_t();
 
     route_handle_t(const route_handle_t&) = delete;
     route_handle_t& operator=(const route_handle_t&) = delete;
@@ -188,11 +258,16 @@ class route_handle_t {
      *
      * @param in_link This node's NAME for the link the ADVERTISE/COMPACT arrives on.
      * @param label   The label as seen on that inbound link.
-     * @param binding Its meaning (forward-swap or local terminus).
-     * @retval false The link's ingress table is full — nothing was recorded, and
-     *               @ref refused_bindings was incremented. A COMPACT on the unbound label
-     *               then takes the same drop-and-HANDLE_NACK path a stale label already
-     *               takes, which prompts the peer to re-advertise.
+     * @param binding Its meaning (forward-swap or local terminus). Its `down_link` /
+     *                `local_route` bytes are BORROWED for the call and copied into the store's
+     *                own blocks; nothing is retained.
+     * @retval false The link's ingress table is full, **or the injected source is exhausted**
+     *               — nothing was recorded, and @ref refused_bindings was incremented. A
+     *               COMPACT on the unbound label then takes the same drop-and-HANDLE_NACK path
+     *               a stale label already takes, which prompts the peer to re-advertise. The
+     *               two refusals are deliberately ONE answer: ADR-0079 makes the injected
+     *               store's size a bound, so "the slab said no" degrades exactly as "the count
+     *               said no" already did, and no caller learns a new shape.
      */
     [[nodiscard]] bool bind_ingress(std::string_view in_link, std::uint16_t label,
                                     handle_binding_t binding);
@@ -259,20 +334,42 @@ class route_handle_t {
                                             handle_binding_t binding, std::uint32_t down_epoch);
 
     /**
-     * @brief Look up what a @p label arriving on @p in_link means (nullopt ⇒ stale/unknown).
-     * @param in_link This node's NAME for the inbound link.
-     * @param label   The inbound label.
-     * @return The learned binding, or `std::nullopt` if no binding exists (drop + NACK).
+     * @brief Copy what a @p label arriving on @p in_link means into CALLER storage —
+     *        allocation-free (`found == false` ⇒ stale/unknown).
+     *
+     * Replaces the owning `lookup_ingress` (#603 defect 1). That returned a
+     * `%std::optional<handle_binding_t>` whose `%std::string` + `%std::vector` were built on
+     * the throwing global heap — on the COLD COMPACT arm, which a peer provokes by sending a
+     * frame on a label whose resolution has not been memoized yet, and on the observed-delivery
+     * arm. Both are peer-driven, so both were `abort()` candidates on `-fno-exceptions`. There
+     * is no allocation here at all: the bytes land in @p link_out / @p route_out.
+     *
+     * A buffer that is too small does NOT lose the answer. The binding's real sizes are
+     * reported and `truncated` is set, so a caller can retry against a block grown from its own
+     * injected source (`fwd_router.cpp` does exactly that for a route wider than its frame
+     * buffer). That is the difference between "the route does not fit here" and "there is no
+     * binding", which a plain empty result would have conflated.
+     *
+     * @param in_link   This node's NAME for the inbound link.
+     * @param label     The inbound label.
+     * @param link_out  Destination for a FORWARD binding's downstream link name. A link name
+     *                  is one path segment, so `graph::kMaxSegmentBytes` always suffices.
+     * @param route_out Destination for a TERMINUS binding's local route bytes.
+     * @return The binding's facts, with views into @p link_out / @p route_out that are valid
+     *         only while those buffers are. `found == false` ⇒ drop + NACK, exactly as a
+     *         `nullopt` did.
      */
-    [[nodiscard]] std::optional<handle_binding_t> lookup_ingress(std::string_view in_link,
-                                                                 std::uint16_t label) const;
+    [[nodiscard]] binding_copy_t copy_binding(std::string_view in_link, std::uint16_t label,
+                                              std::span<char> link_out,
+                                              std::span<std::byte> route_out) const;
 
     /**
      * @brief The steady-state lookup: the RESOLVED binding, by value, allocation-free.
      *
-     * Prefer this on the COMPACT hot path. @ref lookup_ingress copies a `std::string` and a
-     * `std::vector` out of the table on every call — two allocations per frame, paid before
-     * anything checks whether the flow was already resolved. This copies ~24 trivially
+     * Prefer this on the COMPACT hot path. The retired owning `lookup_ingress` copied a
+     * `std::string` and a `std::vector` out of the table on every call — two allocations per
+     * frame, paid before anything checked whether the flow was already resolved, and both on
+     * the throwing global heap. This copies ~24 trivially
      * copyable bytes instead, and returns `found=false` for an unknown label so the caller
      * still NACKs identically.
      *
@@ -286,8 +383,8 @@ class route_handle_t {
      * The warm-COMPACT companion to @ref resolved. `resolved_binding_t` deliberately omits
      * the route bytes because a warm delivery does not need them to WRITE — but an installed
      * @ref fwd_router_t::on_compact_delivery observer is handed them, and serving it through
-     * @ref lookup_ingress made the warm path re-pay the whole owning copy (a `std::string`
-     * plus a `std::vector`) that @ref resolved exists to remove, per frame.
+     * the retired owning `lookup_ingress` made the warm path re-pay the whole owning copy (a
+     * `std::string` plus a `std::vector`) that @ref resolved exists to remove, per frame.
      *
      * The bytes are copied under the link's own mutex into caller storage rather than handed
      * to a callback from under it: the observer is host code, and the lock order this class
@@ -300,8 +397,9 @@ class route_handle_t {
      * @return The route's full size in bytes — `0` when no binding exists (or it is a
      *         forwarding swap, which has no local route). A return greater than
      *         `out.size()` means nothing was written and the route is too long for @p out;
-     *         the caller falls back to the owning @ref lookup_ingress. Callers must
-     *         therefore test the returned size against @p out's, never assume a copy.
+     *         the caller retries against a larger buffer (@ref copy_binding reports the same
+     *         size). Callers must therefore test the returned size against @p out's, never
+     *         assume a copy.
      */
     [[nodiscard]] std::size_t copy_local_route(std::string_view in_link, std::uint16_t label,
                                                std::span<std::byte> out) const;
@@ -322,13 +420,14 @@ class route_handle_t {
      * re-deriving the route. Idempotent — re-recording the same key replaces it.
      * @param out_link This node's NAME for the downstream link the ADVERTISE went out on.
      * @param label    The label this node assigned for that downstream flow.
-     * @param route    The (possibly stripped) dst PATH TLV bytes the label aliases.
-     * @retval false The link's egress table is full — nothing was recorded and
-     *               @ref refused_bindings was incremented. The caller must not advertise a
-     *               label it cannot re-advertise on a NACK.
+     * @param route    The (possibly stripped) dst PATH TLV bytes the label aliases. Borrowed
+     *                 for the call and copied into the store's own block.
+     * @retval false The link's egress table is full, or the injected source is exhausted —
+     *               nothing was recorded and @ref refused_bindings was incremented. The caller
+     *               must not advertise a label it cannot re-advertise on a NACK.
      */
     [[nodiscard]] bool record_egress(std::string_view out_link, std::uint16_t label,
-                                     std::vector<std::byte> route);
+                                     std::span<const std::byte> route);
 
     /**
      * @brief Find this link's label for @p route, or allocate + record a fresh one (#136).
@@ -352,9 +451,10 @@ class route_handle_t {
      * @param out_link This node's NAME for the downstream link.
      * @param route    A complete PATH TLV's bytes — the delivery route the label aliases.
      * @return `{label, fresh}` — the (reused or new) label, and whether it was just created.
-     *         `{0, false}` ⇒ **no label is available**: either this link's label space is
-     *         exhausted (see @ref alloc_label) or its egress table is at
-     *         `max_bindings_per_link`. Nothing was recorded; the caller delivers over the
+     *         `{0, false}` ⇒ **no label is available**: this link's label space is
+     *         exhausted (see @ref alloc_label), its egress table is at
+     *         `max_bindings_per_link`, or the injected source could not serve the route copy.
+     *         Nothing was recorded; the caller delivers over the
      *         full-route FWD path. A flow ALREADY in the table is never refused — reuse is
      *         checked before the bound, so a full table degrades new flows only.
      */
@@ -395,13 +495,28 @@ class route_handle_t {
                         std::span<const std::byte> route);
 
     /**
-     * @brief The route this node advertised over @p out_link under @p label (for re-advertise).
+     * @brief Copy the route this node advertised over @p out_link under @p label into @p out —
+     *        allocation-free (for re-advertise).
+     *
+     * Replaces the owning `egress_route` (#603 defect 1). That one was already nothrow, but it
+     * got there by probing the GLOBAL heap through `detail::try_assign` — which on
+     * `-fno-exceptions` frees the probe block and then runs a throwing `assign` on the
+     * inference that the block is still free. This arm is reached from an inbound HANDLE_NACK
+     * on a transport receive thread, so a racer in that window is the normal case, and the
+     * `assign` hitting exhaustion inside a `noexcept` aborts the node (#850, the #981
+     * residual). Copying into caller storage removes the probe, the window and the global-heap
+     * reach in one move.
+     *
      * @param out_link This node's NAME for the downstream link.
      * @param label    The downstream label.
-     * @return The retained route PATH bytes, or `std::nullopt` if unknown.
+     * @param out      Destination; written only when the route FITS.
+     * @return The route's full size in bytes — `0` when no route is bound for this label. A
+     *         return greater than `out.size()` means nothing was written; the caller retries
+     *         against a larger buffer (its own injected source) rather than reading a
+     *         truncated route. Callers MUST test the returned size against @p out's.
      */
-    [[nodiscard]] std::optional<std::vector<std::byte>> egress_route(std::string_view out_link,
-                                                                     std::uint16_t label) const;
+    [[nodiscard]] std::size_t copy_egress_route(std::string_view out_link, std::uint16_t label,
+                                                std::span<std::byte> out) const;
 
     /**
      * @brief Allocate a fresh, per-link, monotonic label (≥1; 0 is reserved "none").
@@ -468,7 +583,13 @@ class route_handle_t {
     [[nodiscard]] std::size_t link_count() const;
 
     /**
-     * @brief Count of bindings refused because a link's table was at its bound (diagnostic).
+     * @brief Count of bindings refused because a link's table was at its bound, or because
+     *        the injected source was exhausted (diagnostic).
+     *
+     * ONE counter for both, because ADR-0079 makes them one fact: the store's size IS a bound,
+     * so "the slab refused" and "the count refused" are the same operator-visible event —
+     * this node is delivering some flows over the full-route form. Splitting them would ask an
+     * operator to watch two counters for one symptom.
      *
      * The counted-drop half of the bounded-resource contract (`can_reassembly_t` keeps
      * `dropped_groups` for the same reason): a bound that silently discards work is
@@ -481,53 +602,199 @@ class route_handle_t {
     }
 
    private:
-    // One connection's label state (ADR-0038 §3): flat pmr entry arrays (a link
-    // carries FEW compact flows, so a linear label scan beats a node-based map —
-    // no per-entry allocation, cache-linear) + the link's own mutex. Non-movable
-    // (the mutex), constructed in place in the node-based registry map below.
+    // An exact-size byte block drawn from `src_`. Trivially copyable BY DESIGN: that is the
+    // whole substrate move (#603 defect 1). A `std::pmr::vector` here made the entry types
+    // non-trivial, which is what barred `mem::block_array_t` and kept the tables on a throwing
+    // allocator a peer's ADVERTISE reaches. Ownership is explicit instead of RAII, because
+    // `block_array_t` runs no destructors — every path that drops an entry calls `free_blob`.
+    // No capacity field: a route is written once and replaced wholesale, so cap == n, which is
+    // also the shape `pool_source_t`'s exact-size classes recycle with zero fragmentation.
+    struct blob_t {
+        std::byte* p = nullptr;
+        std::uint32_t n = 0;
+    };
+
+    // One learned binding as STORED — the trivially-copyable twin of the public
+    // `handle_binding_t`, with the two owning containers replaced by `blob_t`s the tables own.
+    // Field order matches the public type so the copy in/out reads as a field-by-field mirror.
+    struct stored_binding_t {
+        bool terminus = false;
+        bool warm = false;
+        std::uint16_t out_label = 0;
+        blob_t down_link;
+        blob_t local_route;
+        const void* down_slot = nullptr;
+        std::optional<graph::vertex_handle_t> target;
+        std::uint32_t target_gen = 0;
+        std::uint32_t mount_gen = 0;
+    };
+
+    // One connection's label state (ADR-0038 §3): flat entry arrays over the injected source
+    // (a link carries FEW compact flows, so a linear label scan beats a node-based map — no
+    // per-entry node allocation, cache-linear) + the link's own mutex. Non-movable (the mutex),
+    // constructed in place in a block of its own.
     struct ingress_entry_t {
         std::uint16_t label = 0;
-        handle_binding_t binding;
+        stored_binding_t binding;
     };
     struct egress_entry_t {
         std::uint16_t label = 0;
         // Declared HERE, between the label and the route, so it lands in the padding the
-        // u16 already leaves ahead of the vector — the entry's size is unchanged (#833).
+        // u16 already leaves ahead of the blob — the entry's size is unchanged (#833).
         bool sole_take = false; /**< @brief The mint is still the only take of this label. */
-        std::pmr::vector<std::byte> route;
+        blob_t route;
     };
     struct link_tables_t {
-        explicit link_tables_t(std::pmr::memory_resource* mr) : ingress(mr), egress(mr) {}
+        explicit link_tables_t(mem::block_source_t& s) noexcept : src(&s), ingress(s), egress(s) {}
+        mem::block_source_t* src;  // for freeing this table's blobs and the node itself
         std::mutex m;
-        std::pmr::vector<ingress_entry_t> ingress;
-        std::pmr::vector<egress_entry_t> egress;
+        mem::block_array_t<ingress_entry_t> ingress;
+        mem::block_array_t<egress_entry_t> egress;
         std::uint16_t next_label = 1;  // 0 is reserved "none"
-        // The node-wide clear counter these tables were created at (#827). Appended AFTER the
-        // hot fields on purpose: `resolved()` reads `ingress` and nothing else, and keeping
-        // its offset put keeps the per-delivery lookup byte-for-byte what it was.
+        // The node-wide clear counter these tables were created at (#827).
         std::uint32_t born_gen = 0;
+        // Intrusive refcount, replacing the `std::shared_ptr` control block (#603 defect 1):
+        // `std::allocate_shared` is a THROWING allocation and there is no nothrow spelling of
+        // it, so the pinning contract (#488) is served by hand. Same semantics, one block
+        // instead of two, and the link's name lives inline behind this object.
+        std::atomic<std::uint32_t> refs{1};
+        std::uint32_t block_bytes = 0;  // the whole allocation, node + inline name
+        std::uint32_t name_len = 0;     // the link name, stored immediately after this object
+        /** @brief The link name stored inline behind this node. */
+        [[nodiscard]] std::string_view name() const noexcept {
+            return {reinterpret_cast<const char*>(this) + inline_name_offset(), name_len};
+        }
+        /** @brief Byte offset of the inline name from the start of the node's block. */
+        [[nodiscard]] static constexpr std::size_t inline_name_offset() noexcept {
+            return sizeof(link_tables_t);
+        }
     };
 
-    // Each link's tables are heap-owned via a shared_ptr and the registry stores that
-    // pointer, so an accessor hands out a PINNING copy: a table stays alive for as long
-    // as any caller holds its shared_ptr, even after clear_link erases the registry entry
-    // (#488). std::map node stability is no longer relied on for reference validity.
-    /** @brief The link's tables, created on first use (exclusive registry lock). */
-    [[nodiscard]] std::shared_ptr<link_tables_t> tables(std::string_view link);
-    /** @brief The link's tables if they exist (shared registry lock), else nullptr. */
-    [[nodiscard]] std::shared_ptr<link_tables_t> find_tables(std::string_view link) const;
+    // A pinning reference to a link's tables — the intrusive replacement for the shared_ptr
+    // copy the accessors used to hand out (#488). Move-only: a pin is taken once and dropped
+    // once, and the copy that would need an addref never appears at a call site here.
+    class tables_ref_t {
+       public:
+        tables_ref_t() noexcept = default;
+        /** @brief Adopt an ALREADY-counted reference (the accessors retain before returning). */
+        explicit tables_ref_t(link_tables_t* t) noexcept : t_(t) {}
+        ~tables_ref_t() { drop(); }
+        tables_ref_t(const tables_ref_t&) = delete;
+        tables_ref_t& operator=(const tables_ref_t&) = delete;
+        /** @brief Move the pin; the source is left empty. */
+        tables_ref_t(tables_ref_t&& o) noexcept : t_(o.t_) { o.t_ = nullptr; }
+        /** @brief Move-assign the pin, dropping this one first. */
+        tables_ref_t& operator=(tables_ref_t&& o) noexcept {
+            if (this != &o) {
+                drop();
+                t_ = o.t_;
+                o.t_ = nullptr;
+            }
+            return *this;
+        }
+        /** @brief True when this pin holds a table. */
+        explicit operator bool() const noexcept { return t_ != nullptr; }
+        /** @brief The pinned tables. Precondition: non-empty. */
+        [[nodiscard]] link_tables_t* operator->() const noexcept { return t_; }
+        /** @brief The pinned tables. Precondition: non-empty. */
+        [[nodiscard]] link_tables_t& operator*() const noexcept { return *t_; }
+
+       private:
+        void drop() noexcept {
+            if (t_ != nullptr) release_tables(t_);
+            t_ = nullptr;
+        }
+        link_tables_t* t_ = nullptr;
+    };
+
+    /**
+     * @brief A link's tables held under the REGISTRY's shared lock — the READ path's access,
+     *        with no refcount traffic at all (#603 defect 1).
+     *
+     * Measured, and the reason it exists. The pinning `tables_ref_t` below pins by an intrusive
+     * `std::atomic` increment/decrement pair, which is correct but is TWO ATOMIC RMWs on the
+     * per-delivery `COMPACT` path. The `std::shared_ptr` it replaced did not always pay them:
+     * libstdc++ dispatches its refcount policy on whether the program is threaded, so a
+     * single-threaded process got NON-atomic increments for free. Pinning unconditionally
+     * therefore showed up as a per-frame cost the old code did not have — `bench_compact_delivery`
+     * `compact-forward` p50 44 ns -> 52 ns — which is exactly the "#897-style atomic on the hot
+     * path" that #873's cadence rules a reject.
+     *
+     * A reader does not need a refcount. `clear_link` erases only under the registry's
+     * EXCLUSIVE lock, so holding the SHARED one for the duration of the read already keeps the
+     * table alive — and that lock is taken either way, so the whole pin is redundant on this
+     * path. The pin stays on the WRITE doors, which must release the registry lock (creating a
+     * link's tables needs it exclusively, and a shared holder cannot upgrade).
+     *
+     * The cost is that a reader now holds the shared lock across the table's own critical
+     * section — a linear scan of a few entries — instead of only across the registry lookup,
+     * so a concurrent @ref clear_link waits that much longer. The lock ORDER is unchanged
+     * (registry then table), which is what @ref bind_ingress_forward and @ref ingress_count
+     * already establish, so no new ordering obligation appears.
+     */
+    class tables_view_t {
+       public:
+        /** @brief An empty view (no such link). */
+        tables_view_t() noexcept = default;
+        /** @brief Adopt @p lock and the table it keeps alive. */
+        tables_view_t(std::shared_lock<std::shared_mutex>&& lock, link_tables_t* t) noexcept
+            : lock_(std::move(lock)), t_(t) {}
+        /** @brief True when this view holds a table. */
+        explicit operator bool() const noexcept { return t_ != nullptr; }
+        /** @brief The held tables. Precondition: non-empty. */
+        [[nodiscard]] link_tables_t* operator->() const noexcept { return t_; }
+        /** @brief The held tables. Precondition: non-empty. */
+        [[nodiscard]] link_tables_t& operator*() const noexcept { return *t_; }
+
+       private:
+        std::shared_lock<std::shared_mutex> lock_;
+        link_tables_t* t_ = nullptr;
+    };
+
+    /** @brief "No such link" for the registry scan. */
+    static constexpr std::size_t kNoSlot = static_cast<std::size_t>(-1);
+
+    /** @brief Take a fresh reference on @p t and wrap it in a pin. */
+    [[nodiscard]] static tables_ref_t pin(link_tables_t* t) noexcept {
+        t->refs.fetch_add(1, std::memory_order_relaxed);
+        return tables_ref_t{t};
+    }
+    /** @brief Drop one reference, destroying + freeing the node when the last one goes. */
+    static void release_tables(link_tables_t* t) noexcept;
+    /** @brief Free every blob an ingress binding owns. */
+    static void free_binding(link_tables_t& t, stored_binding_t& b) noexcept;
+    /** @brief Return a blob's block to the table's source and null it. */
+    static void free_blob(link_tables_t& t, blob_t& b) noexcept;
+    /** @brief Copy @p src into a FRESH exact-size block; `false` ⇒ exhausted, @p out untouched.
+     */
+    [[nodiscard]] static bool set_blob(link_tables_t& t, blob_t& out,
+                                       std::span<const std::byte> src) noexcept;
+
+    /** @brief The link's tables, created on first use (exclusive registry lock); empty when the
+     *         source cannot serve the node. */
+    [[nodiscard]] tables_ref_t tables(std::string_view link);
+    /** @brief The link's tables if they exist, held under the registry's SHARED lock (the READ
+     *         path — no refcount traffic); empty when the link has none. */
+    [[nodiscard]] tables_view_t view_tables(std::string_view link) const;
+    /** @brief The link's tables if they exist, PINNED (the write path); else empty. */
+    [[nodiscard]] tables_ref_t find_tables(std::string_view link) const;
+    /** @brief The registry slot index for @p link with `links_m_` ALREADY held, or `npos`. */
+    [[nodiscard]] std::size_t find_slot_locked(std::string_view link) const noexcept;
     /** @brief @ref link_epoch with `links_m_` ALREADY held (either mode). */
     [[nodiscard]] std::uint32_t link_epoch_locked(std::string_view link) const;
     /** @brief The bind-or-refuse body shared by @ref bind_ingress and
      *         @ref bind_ingress_forward, with @p t's own mutex ALREADY held. */
     [[nodiscard]] bool bind_locked(link_tables_t& t, std::uint16_t label,
-                                   handle_binding_t&& binding);
+                                   const handle_binding_t& binding);
 
-    std::pmr::memory_resource* mr_;
+    mem::block_source_t* src_;             // the substrate: every byte of label state
     std::size_t max_bindings_ = 0;         // 0 => unbounded; injected, never assumed
     std::atomic<std::size_t> refused_{0};  // counted drops (diagnostic)
     mutable std::shared_mutex links_m_;    // registry only: create/clear, never per delivery
-    std::pmr::map<std::pmr::string, std::shared_ptr<link_tables_t>, std::less<>> links_;
+    // The registry: one POINTER per live link, scanned linearly. A node carries a handful of
+    // links, so the scan compares a length and a few bytes against a `std::pmr::map`'s node
+    // chase — and the map's per-link node was itself a throwing allocation on a peer path.
+    mem::block_array_t<link_tables_t*> links_;
     // The node-wide clear counter (#827), guarded by `links_m_` — every clear_link advances
     // it, every newly created link_tables_t stamps it. Saturating, per RFC-0024 §4.4's rule:
     // see clear_link's body for what the ceiling costs and why it is the safe direction.

@@ -320,6 +320,25 @@ Dropping is the whole answer, not half of one: emitting the entries that did fit
 
 The **single-link** (contiguous) hop allocates nothing: each region yields exactly one sub-span, so the entry count is bounded by the frame layout and a stack array of that layout-derived size holds it (`core/include/libtracer/fwd_frame_view.hpp:1053` — `kFwdMaxIov`).
 
+### Migrating a STORE onto the substrate — the route-handle pattern
+
+The two consumers above are *scoped*: a decode arena and a gather table live for one frame. A **store** is the harder case — per-link label tables, reassembly maps, a registry — because it holds bytes across calls, hands them back out, and is often what a peer grows. The reference implementation's `route_handle_t` was the first store moved onto the seam, and it is deliberately the template for the rest ([#873](https://github.com/avatarsd-llc/libtracer/issues/873), [#603](https://github.com/avatarsd-llc/libtracer/issues/603)). Five rules came out of it, in the order they bite.
+
+**1. Invert the ownership at the public type.** The blocker is never the allocation, it is the *element type*: `block_array_t` requires trivially copyable and trivially destructible elements, and a `std::string` or a `std::vector` member is neither. Do not fix that by making the store's own type owning-but-nothrow. Make the **public descriptor non-owning** — `std::string_view` and `std::span<const std::byte>` where the containers were — and let the store copy the bytes into its own blocks. Both halves get what they need: a caller can point at a decoded frame it already holds and allocate nothing, and the store's copy fails by value.
+
+**2. One block per node, with the variable-length part inline.** A refcounted node held by `std::shared_ptr` costs an `allocate_shared` (throwing; there is no nothrow spelling) plus a separate allocation for its key. Replace the control block with an **intrusive `std::atomic<uint32_t>` refcount** and place the key's bytes immediately behind the object in the same `try_alloc` block. One allocation, one refusal point, and the pinning contract is unchanged — an accessor still hands out a reference that survives a concurrent erase.
+
+**3. Free the byte blocks by hand, at every drop path.** `block_array_t` runs no destructors — that is the price of trivially-copyable elements — so an entry's blocks are not reclaimed when the entry goes. Route every removal through one `free_blob`-style helper, and there are exactly four callers of it: rebind-in-place, erase-one, sweep, and the node's own teardown. Missing one is a leak that no test notices, so keep the helper the *only* place a block is released.
+
+**4. Erase by swap, and check that order is not load-bearing first.** `block_array_t` has no `erase`. Swapping the last element down is O(1) and correct **iff** every scan over the table keys on a field rather than on position — which is worth confirming in the store's own scans before relying on it. Sweeping backwards keeps a swapped-in element in the walk.
+
+**5. Fold the source's refusal into the bound the store already has.** Do not invent a second failure vocabulary. A store that already refuses when a count is reached should give the *same* answer when the block source refuses, and count both in the *same* counter — a bounded node's operator is watching one symptom, and [ADR-0079](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0079-allocation-store-composition.md) makes the injected store's size a bound in its own right. In the label plane that means a source refusal degrades the flow to the full-route `FWD{WRITE}` form, which is exactly what a full table and an exhausted label space already did.
+
+Two consequences worth stating because they are easy to miss:
+
+- **Read-out APIs have to change too, not just the writes.** An accessor returning `std::optional<std::vector<…>>` is a throwing allocation on whatever thread calls it, and for a store the caller is usually a receive thread. The replacement shape is *copy into caller storage and report the true size* — so the caller can tell "too big for my buffer" (retry against a block from its own injected source) from "no such entry", which an empty result conflates. A caller-side stack buffer sized for the common case plus a `block_array_t` spill covers both without an allocation on the ordinary path.
+- **`std::pmr` survives only as an adapter, and only outside.** C++23 has no nothrow `memory_resource`, so a `std::pmr` container fed by an adapter over a `block_source_t` still throws at the adapter's boundary — unavoidable, and fine for an embedder who owns that choice. What must not remain is a *library-internal* path through it: the store itself holds no `std::pmr` type at all.
+
 ### Divergent rejects: an open conformance question
 
 The reject belongs to the operation, not to the seam. That is a deliberate rule, but it leaves the wire status a peer observes on exhaustion **unspecified**, and the three consumers of the block seam in the reference implementation demonstrate the spread:

@@ -31,6 +31,7 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <concepts>
 #include <cstddef>
@@ -736,13 +737,14 @@ void test_router_link_down() {
     check(g.write(path_t("/s"), rope_t{make_value(b_value_u8(0x21))}).has_value(),
           "write /s pre-departure");
     check(cli.count() >= 2, "compact flow established (ADVERTISE + COMPACT to cli)");
-    check(router.handles().egress_route("cli", 1).has_value(),
+    std::array<std::byte, 256> route_buf{};
+    check(router.handles().copy_egress_route("cli", 1, route_buf) != 0,
           "route-handle egress binding exists for cli");
     cli.drain();
     other.drain();
 
     router.link_down("cli");
-    check(!router.handles().egress_route("cli", 1).has_value(),
+    check(router.handles().copy_egress_route("cli", 1, route_buf) == 0,
           "link_down dropped cli's label state");
     check(g.write(path_t("/s"), rope_t{make_value(b_value_u8(0x22))}).has_value(),
           "write /s post-departure");

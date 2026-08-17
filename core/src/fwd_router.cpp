@@ -465,6 +465,53 @@ void emit_advertise(transport_t& link, std::uint16_t label, std::span<const std:
 }
 
 /**
+ * @brief Re-encode a FLAT, trailer-free TLV into @p out — the NOTHROW twin of `wire::encode`
+ *        for the label plane's route bytes (#603 defect 1 / #873 family 3).
+ *
+ * The two route re-encodes on the ADVERTISE arm (the forwarding hop's stripped route and the
+ * terminus's own) were `wire::encode`'s owning `std::vector`, built on the THROWING global heap
+ * on a peer-provoked, pre-ACL receive thread. `wire::encode` cannot be made nothrow in place —
+ * it is the general recursive encoder and its children loop returns vectors by value — but it
+ * does not need to be, because these two TLVs are the ONE shape it never recurses on.
+ *
+ * The shape is checked rather than assumed, and the check is not a new rule: `wire::path_key`
+ * already refuses a route with `opt.pl` or children (`frame.cpp` — the pre-RFC-0018 `#681`
+ * fix), so a structured "route" binds no vertex one step later anyway. Refusing it here binds
+ * NOTHING, which is the same `RFC-0004 §E.1` answer `hit.rejected` and a full table already
+ * give: the peer's COMPACTs draw a `HANDLE_NACK` and the flow stays on the full-route `FWD`
+ * form. A trailer is refused on the same terms — a stamped route is not an address form, and
+ * carrying the trailer here would be a second copy of `frame.cpp`'s trailer rule.
+ *
+ * @param out Destination, drawn from the caller's injected source.
+ * @param t   The TLV to re-encode.
+ * @retval false Not the flat trailer-free shape, or the source is exhausted. @p out is unusable
+ *               and the caller binds nothing.
+ */
+[[nodiscard]] bool encode_flat_into(mem::block_array_t<std::byte>& out, const tlv_t& t) noexcept {
+    if (t.opt.pl || !t.children.empty() || t.opt.ts || t.opt.cr) return false;
+    wire::opt_t opt = t.opt;
+    // The same `> 0xFFFF` widen rule `wire::emit_tlv` and `stack_writer::header` each carry.
+    if (t.payload.size() > 0xFFFFu) opt.ll = true;
+    const std::size_t len_bytes = opt.ll ? 4u : 2u;
+    std::array<std::byte, 6> head{};
+    head[0] = static_cast<std::byte>(std::to_underlying(t.type));
+    head[1] = static_cast<std::byte>(opt.encode());
+    detail::store_le<std::uint32_t>(std::span<std::byte>(head).subspan(2, len_bytes),
+                                    static_cast<std::uint32_t>(t.payload.size()), len_bytes);
+    if (!out.reserve(2u + len_bytes + t.payload.size())) return false;
+    for (std::size_t i = 0; i < 2u + len_bytes; ++i)
+        if (!out.push_back(head[i])) return false;
+    for (const std::byte b : t.payload)
+        if (!out.push_back(b)) return false;
+    return true;
+}
+
+/** @brief The bytes @ref encode_flat_into wrote, as a span. */
+[[nodiscard]] std::span<const std::byte> block_span(mem::block_array_t<std::byte>& a) noexcept {
+    return {a.data(), a.size()};
+}
+
+/**
  * @brief Emit `HANDLE_NACK{ VALUE label(u16) }` over @p link — a FIXED 10-byte frame written
  *        entirely on the stack, so the stale-label answer allocates NOTHING anywhere.
  *
@@ -2413,14 +2460,27 @@ void fwd_router_t::on_advertise(std::string_view inbound_name, std::uint16_t lab
         // Forwarding hop: strip the K segments this node consumed, allocate OUR own
         // out-label, record the swap, retain the stripped egress route (for NACK
         // re-advertise), and re-advertise downstream with the new label (MPLS-style swap).
-        const std::string down_name(hit.link_name);
+        // A STACK copy of the downstream name, not a `std::string` (#603 defect 1). The copy
+        // is still needed — `hit.link_name` points into a registry entry this arm holds no
+        // lock on — but a link name is one path segment, so it fits a frame buffer and needs
+        // no allocator at all. The `std::string` it replaces was a throwing allocation on the
+        // peer-provoked ADVERTISE arm that SSO happened to hide for short names.
+        std::array<char, graph::kMaxSegmentBytes> down_buf{};
+        if (hit.link_name.size() > down_buf.size()) return;  // not a segment ⇒ not routable
+        std::memcpy(down_buf.data(), hit.link_name.data(), hit.link_name.size());
+        const std::string_view down_name(down_buf.data(), hit.link_name.size());
         // Strip the K consumed records off the PACKED body — a byte slice, where it used to
         // be a child-vector erase (RFC-0018). `end_of` is the same cursor the descent walked,
         // so the split cannot disagree with the resolution that produced `strip_k`.
         tlv_t stripped = route;
         stripped.payload =
             route.payload.subspan(std::min(adv_walk.end_of(hit.strip_k), route.payload.size()));
-        const std::vector<std::byte> stripped_bytes = wire::encode(stripped);
+        // Drawn from the injected label source, nothrow. This was `wire::encode`'s owning
+        // vector on the throwing global heap — see `encode_flat_into` for why the flat shape
+        // is the only one this plane can bind and why refusing the rest changes nothing.
+        mem::block_array_t<std::byte> stripped_block(*label_src_);
+        if (!encode_flat_into(stripped_block, stripped)) return;
+        const std::span<const std::byte> stripped_bytes = block_span(stripped_block);
 
         // Sample the downstream link's clear epoch BEFORE minting anything against it (#827).
         // This runs on the INBOUND link's rx thread, so a reconnect of `down_name` on its own
@@ -2479,9 +2539,11 @@ void fwd_router_t::on_advertise(std::string_view inbound_name, std::uint16_t lab
     // Terminus: the route resolves locally here — bind the label to the local route. A
     // refusal (full ingress table) leaves the label unbound, so the peer's COMPACT draws the
     // same HANDLE_NACK a stale label draws and the flow stays on the full-route form.
+    mem::block_array_t<std::byte> local_block(*label_src_);
+    if (!encode_flat_into(local_block, route)) return;
     handle_binding_t term;
     term.terminus = true;
-    term.local_route = wire::encode(route);
+    term.local_route = block_span(local_block);
     // Stamped even here: "no mount matched, so this is local" is itself a claim about the
     // mount shape, and a later registration can falsify it — that is the deeper-mount half of
     // #765, where a COMPACT keeps being absorbed locally after a FWD to the same address
@@ -2518,6 +2580,7 @@ inline constexpr std::size_t kCompactRouteInline = graph::kMaxSegmentBytes * 2;
  * actually installed, not on every COMPACT.
  *
  * @param handles      The label store to read the binding out of.
+ * @param src          The injected source the over-wide fallback draws its block from.
  * @param fn           The installed observer; never null (the caller tests the slot).
  * @param ctx          The observer's opaque context.
  * @param inbound_name This node's NAME for the link the COMPACT arrived on.
@@ -2525,6 +2588,7 @@ inline constexpr std::size_t kCompactRouteInline = graph::kMaxSegmentBytes * 2;
  * @param payload      The delivered payload TLV bytes, borrowed for the call.
  */
 [[gnu::noinline]] void observe_compact_delivery(const route_handle_t& handles,
+                                                mem::block_source_t* src,
                                                 fwd_router_t::compact_delivery_fn_t fn, void* ctx,
                                                 std::string_view inbound_name, std::uint16_t label,
                                                 std::span<const std::byte> payload) {
@@ -2539,9 +2603,14 @@ inline constexpr std::size_t kCompactRouteInline = graph::kMaxSegmentBytes * 2;
         return;
     }
     // Wider than the inline buffer. Rare enough to be worth an allocation rather than a
-    // frame sized for the protocol maximum, and the observation stays complete either way.
-    if (const std::optional<handle_binding_t> b = handles.lookup_ingress(inbound_name, label))
-        fn(ctx, b->local_route, payload);
+    // frame sized for the protocol maximum, and the observation stays complete either way —
+    // but the allocation is now a FAILABLE one from the injected source (#603 defect 1), not
+    // the throwing owning copy `lookup_ingress` used to build on the global heap. A refusal
+    // simply leaves the observer uncalled, which is the same silence a vanished binding gives.
+    mem::block_array_t<std::byte> spill(*src);
+    if (!spill.reserve(n)) return;
+    if (handles.copy_local_route(inbound_name, label, {spill.data(), n}) != n) return;
+    fn(ctx, std::span<const std::byte>(spill.data(), n), payload);
 }
 
 }  // namespace
@@ -2623,26 +2692,45 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
             value.append(*payload_view);
             if (graph_.write(*rb.target, std::move(value), caller).has_value()) {
                 if (const auto sink = delivery_.get(); sink.fn != nullptr)
-                    observe_compact_delivery(handles_, sink.fn, sink.ctx, inbound_name, label,
-                                             payload_bytes);
+                    observe_compact_delivery(handles_, label_src_, sink.fn, sink.ctx, inbound_name,
+                                             label, payload_bytes);
             }
             return;
         }
-        // COLD or STALE: take the owning form, resolve the route, then memoize it.
-        const std::optional<handle_binding_t> binding =
-            handles_.lookup_ingress(inbound_name, label);
+        // COLD or STALE: read the route into this frame, resolve it, then memoize. It used to
+        // be `lookup_ingress`'s OWNING copy — a `std::string` plus a `std::vector` on the
+        // throwing global heap, on an arm a peer reaches by sending a COMPACT on a label whose
+        // resolution has not been memoized yet (#603 defect 1). Nothing here allocates unless
+        // the route is wider than the frame buffer, and then it draws from the injected source.
+        std::array<char, graph::kMaxSegmentBytes> link_buf{};
+        std::array<std::byte, kCompactRouteInline> route_buf{};
+        binding_copy_t binding = handles_.copy_binding(inbound_name, label, link_buf, route_buf);
+        mem::block_array_t<std::byte> spill(*label_src_);
+        if (binding.found && binding.truncated) {
+            // The injected source refusing the spill is an exhaustion drop like any other —
+            // named rather than spelled inline so this locus stays textually distinct from
+            // the warm arm's two, which are byte-identical to each other and to it.
+            constexpr auto kSpillDrop = graph::graph_t::external_drop_t::OUT_OF_MEMORY;
+            const std::size_t n = binding.local_route_size;
+            if (!spill.reserve(n) ||
+                handles_.copy_local_route(inbound_name, label, {spill.data(), n}) != n) {
+                graph_.count_external_drop(kSpillDrop, 1);
+                return;
+            }
+            binding.local_route = std::span<const std::byte>(spill.data(), n);
+        }
         // The label resolved a moment ago (rb.found) and its binding is gone now: a
         // concurrent unbind between the two reads. The delivery was admitted and has no
         // target left, which is what NO_TARGET means (#1068) — it is not the stale-label
         // arm above, which self-heals by NACK; there is nothing here to re-advertise to.
-        if (!binding) {
+        if (!binding.found) {
             graph_.count_external_drop(graph::graph_t::external_drop_t::NO_TARGET, 1);
             return;
         }
         // Same caller context as the warm arm above (#974): the cold and warm halves of one
         // flow must not disagree about who is writing.
-        if (deliver_local(binding->local_route, payload_bytes, caller)) {
-            if (const auto v = resolve_route_vertex(binding->local_route)) {
+        if (deliver_local(binding.local_route, payload_bytes, caller)) {
+            if (const auto v = resolve_route_vertex(binding.local_route)) {
                 resolved_binding_t fill = rb;
                 fill.warm = true;
                 fill.target = *v;
@@ -2650,7 +2738,7 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
                 handles_.cache_resolution(inbound_name, label, fill);
             }
             if (const auto sink = delivery_.get(); sink.fn != nullptr)
-                sink.fn(sink.ctx, binding->local_route, payload_bytes);
+                sink.fn(sink.ctx, binding.local_route, payload_bytes);
         }
         return;
     }
@@ -2670,11 +2758,16 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
         }
         // Tombstoned: fall through and re-resolve, so a re-created link re-warms.
     }
-    const std::optional<handle_binding_t> binding = handles_.lookup_ingress(inbound_name, label);
-    if (!binding) return;
-    if (const child_registry_t::child_t* const slot = registry_.entry_by_name(binding->down_link)) {
+    // A link name is one path segment, so the frame buffer always fits it and this read cannot
+    // truncate; a forwarding binding has no local route, so nothing is asked of the route
+    // buffer either. Allocation-free where the owning `lookup_ingress` copied a string and a
+    // vector off the global heap on every cold forwarded COMPACT (#603 defect 1).
+    std::array<char, graph::kMaxSegmentBytes> link_buf{};
+    const binding_copy_t binding = handles_.copy_binding(inbound_name, label, link_buf, {});
+    if (!binding.found || binding.truncated) return;
+    if (const child_registry_t::child_t* const slot = registry_.entry_by_name(binding.down_link)) {
         if (transport_t* const down = slot->link()) {
-            emit_compact(*down, binding->out_label, payload_bytes);
+            emit_compact(*down, binding.out_label, payload_bytes);
             resolved_binding_t fill = rb;
             fill.warm = true;
             fill.down_slot = slot;
@@ -2686,16 +2779,26 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
 void fwd_router_t::on_nack(std::string_view inbound_name, std::uint16_t label) {
     // A downstream peer lost the binding for `label` on this link — re-advertise the
     // route we hold for it so the flow self-heals without a setup handshake.
-    // `egress_route` is the ONE allocation left on this peer-provoked arm: an owning copy of
-    // the stored route out from under the egress table's lock. It is already NOTHROW (#603) —
-    // exhaustion returns the same `nullopt` an unbound label returns, and the peer simply gets
-    // no re-advertise. The frame build that used to follow it is gone (#885), so the arm's
-    // whole allocation budget is now that one guarded copy; `transport_alloc_softfail_test`
-    // derives the budget from it rather than hard-coding a number.
-    const std::optional<std::vector<std::byte>> route = handles_.egress_route(inbound_name, label);
-    if (!route) return;
+    // ZERO allocations on this peer-provoked arm for the ordinary route (#603 defect 1). The
+    // owning `egress_route` this replaces was already nothrow, but it got there by PROBING the
+    // global heap (`detail::try_assign`) and then running a throwing `assign` on the inference
+    // that the probe block was still free — a window a racer on this receive thread closes into
+    // an abort (#850 / the #981 residual). The route now lands in this frame, and only a route
+    // wider than the frame buffer draws a block, from the INJECTED source. The frame build that
+    // used to follow is gone (#885).
+    std::array<std::byte, kCompactRouteInline> route_buf{};
+    const std::size_t n = handles_.copy_egress_route(inbound_name, label, route_buf);
+    if (n == 0) return;
+    std::span<const std::byte> route(route_buf.data(), n);
+    mem::block_array_t<std::byte> spill(*label_src_);
+    if (n > route_buf.size()) {
+        if (!spill.reserve(n) ||
+            handles_.copy_egress_route(inbound_name, label, {spill.data(), n}) != n)
+            return;  // refused ⇒ no re-advertise, exactly as an unbound label answers
+        route = std::span<const std::byte>(spill.data(), n);
+    }
     if (transport_t* const link = registry_.by_name(inbound_name))
-        emit_advertise(*link, label, *route);
+        emit_advertise(*link, label, route);
 }
 
 std::optional<graph::vertex_handle_t> fwd_router_t::resolve_route_vertex(

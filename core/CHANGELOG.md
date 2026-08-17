@@ -89,6 +89,57 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **BREAKING — `net::route_handle_t` and `net::fwd_router_t` draw their label state from an
+  injected `mem::block_source_t`, not from a `std::pmr::memory_resource`**
+  ([#603](https://github.com/avatarsd-llc/libtracer/issues/603) defect 1, family 3 of
+  [#873](https://github.com/avatarsd-llc/libtracer/issues/873); ADR-0065 / ADR-0079). This is
+  a **security/availability fix, not hygiene**: an inbound `ADVERTISE` from a remote peer
+  reached four throwing `std::pmr` allocations in the label store — the tables node, the link
+  name, and both route copies — on a transport receive thread, pre-ACL. Against the reference
+  firmware's aborting `heap_resource_t` on the shipping `-fno-exceptions` profile, an
+  ADVERTISE storm rebooted the node at wire rate. Exhaustion is now an ANSWER at every door,
+  and every one of those answers already existed: `bind_ingress` returns `false`,
+  `ensure_egress` returns `{0, false}`, `record_egress` returns `false`, `alloc_label` returns
+  the reserved `0` — the same degrade to the full-route `FWD{WRITE}` form that a full table
+  (#703) and an exhausted label space (#701) already produced. The store now contains no
+  `std::pmr` type at all.
+
+  The signature changes, all of them compile errors rather than silent behaviour changes:
+
+  | before | after |
+  | --- | --- |
+  | `route_handle_t(std::pmr::memory_resource*, std::size_t)` | `route_handle_t(mem::block_source_t*, std::size_t)` |
+  | `fwd_router_t(graph, std::pmr::memory_resource* mr, …)` | `fwd_router_t(graph, mem::block_source_t* label_src, …)` |
+  | `handle_binding_t{std::string down_link; std::vector<std::byte> local_route; …}` | `handle_binding_t{std::string_view down_link; std::span<const std::byte> local_route; …}` |
+  | `lookup_ingress(link, label) -> std::optional<handle_binding_t>` | `copy_binding(link, label, std::span<char>, std::span<std::byte>) -> binding_copy_t` |
+  | `egress_route(link, label) -> std::optional<std::vector<std::byte>>` | `copy_egress_route(link, label, std::span<std::byte>) -> std::size_t` |
+  | `record_egress(link, label, std::vector<std::byte>)` | `record_egress(link, label, std::span<const std::byte>)` |
+
+  `fwd_router_t`'s first optional parameter kept its POSITION rather than being appended,
+  because feeding the label tables was its only job — a call site that passed
+  `std::pmr::get_default_resource()` now passes nothing (the default is
+  `&mem::heap_source()`, byte-identical behaviour) or its own source. `handle_binding_t` is
+  now a NON-OWNING descriptor: it is borrowed for the duration of a bind and the store copies
+  the bytes into its own blocks, which is what made the entry types trivially copyable and
+  therefore holdable by `mem::block_array_t` — the structural blocker the file's own comment
+  named. `lookup_ingress` and `egress_route` are removed rather than deprecated: both built an
+  owning `std::string`/`std::vector` on the throwing global heap on peer-provoked arms (the
+  cold `COMPACT` and the `HANDLE_NACK` re-advertise), which is the defect, so a compatibility
+  shim would have preserved it. The replacements copy into caller storage and report the true
+  size, so truncation stays distinguishable from absence. `refused_bindings()` now counts a
+  source refusal alongside a count refusal — one counter, because ADR-0079 makes the injected
+  store's size a bound in its own right and an operator is watching one symptom.
+
+  Not to be read together with the ADR-0080 reclamation seam above, which lands in the same
+  release: that one settles **when** a retired subscriber's callback pair may be freed, this
+  one settles **where bytes come from**. ADR-0079 draws the line in as many words — the
+  substrate work "is about *where bytes come from*, not *when a replaced block is freed*" —
+  and neither entry changes the other's answer.
+
+  The migration pattern the rest of #873 follows is written down in
+  [`docs/reference/09-memory-substrate.md`](../docs/reference/09-memory-substrate.md)
+  (§Migrating a STORE onto the substrate — the route-handle pattern).
+
 - **A LISTEN connection SPEC may now spell `port = 0` — the EPHEMERAL request — and
   `conn_settings_t` gained `port_set`**
   ([#1362](https://github.com/avatarsd-llc/libtracer/issues/1362)). The LISTEN arm of

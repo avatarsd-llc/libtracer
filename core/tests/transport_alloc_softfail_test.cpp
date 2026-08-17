@@ -73,6 +73,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -1361,15 +1362,18 @@ void test_warm_advertise_allocates_nothing() {
 }
 
 /**
- * @brief `on_nack`'s re-advertise adds NOTHING to the one allocation it legitimately owns.
+ * @brief `on_nack`'s re-advertise allocates NOTHING AT ALL (#603 defect 1).
  *
- * This arm cannot be zero: answering a peer's HANDLE_NACK means reading the stored egress
- * route back out from under the table's lock, and `route_handle_t::egress_route` returns it
- * as an owning vector. That copy is already NOTHROW (#603) — exhaustion returns the same
- * `nullopt` an unbound label does — but it is an allocation, so the budget is DERIVED from it
- * exactly as the CAN case above derives its two steps, rather than hard-coded. The frame
- * build that used to sit on top of it is what #885 removed, and restoring it puts the count
- * over budget on every NACK.
+ * This arm used to have an irreducible one: answering a peer's HANDLE_NACK meant reading the
+ * stored egress route back out from under the table's lock, and `route_handle_t::egress_route`
+ * returned it as an OWNING vector. That copy was nothrow but it got there by probing the global
+ * heap, so the budget was derived from it rather than being zero. `copy_egress_route` puts the
+ * bytes in the caller's frame instead, and #885 had already removed the frame build on top, so
+ * the whole arm is now allocation-free for any route that fits the receive frame's buffer — and
+ * a wider one draws from the INJECTED source, never the global heap.
+ *
+ * Zero is the assertion that separates: restoring either the owning read or the frame build
+ * puts the count above it.
  */
 void test_nack_readvertise_adds_no_allocation() {
     std::printf("label plane — on_nack allocates for its route copy and NOTHING else (#885):\n");
@@ -1382,19 +1386,23 @@ void test_nack_readvertise_adds_no_allocation() {
     const std::uint16_t label = router.advertise("up", route);
     check(label != 0, "a label is bound on the link the NACK will arrive on");
 
-    // The budget: the owning read `on_nack` performs, run standalone on its own table. The
-    // result outlives the lambda so the optimizer cannot elide the allocation being counted.
+    // The read `on_nack` performs, run standalone on its own table: it costs no allocation
+    // and still produces the route. The buffer outlives the lambda so nothing is elided.
     tr::net::route_handle_t rh;
     (void)rh.record_egress("up", label, route);
-    std::optional<std::vector<std::byte>> owned;
-    const std::size_t budget = count_allocs([&] { owned = rh.egress_route("up", label); });
-    check(owned.has_value() && *owned == route, "the budget's one step ran and copied the route");
+    std::array<std::byte, 512> owned{};
+    std::size_t owned_n = 0;
+    const std::size_t budget =
+        count_allocs([&] { owned_n = rh.copy_egress_route("up", label, owned); });
+    check(budget == 0, "the store's route read allocates nothing");
+    check(owned_n == route.size() && std::equal(route.begin(), route.end(), owned.begin()),
+          "and it copied the whole route into the caller's frame");
 
     const std::vector<std::byte> nack = tr::net::encode_handle_nack(label);
     router.on_frame("up", nack);  // warm-up, unarmed
     up.reset();
     const std::size_t allocs = count_allocs([&] { router.on_frame("up", nack); });
-    check(allocs == budget, "a NACK costs the owning route copy ONLY — the re-advertise adds none");
+    check(allocs == 0, "a NACK allocates NOTHING — no owning route copy, no frame build");
     check(up.gathers() == 1, "and the re-advertise was actually emitted, gathered");
     check(up.last().size() == 6 + route.size() + 4,
           "carrying the whole stored route back: ADVERTISE hdr + label child + route");
