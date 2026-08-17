@@ -7,6 +7,8 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cassert>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -40,6 +42,134 @@ namespace {
 
 /** @brief A canonical `NAME` TLV header: type, `opt = 0`, `u16` length. */
 inline constexpr std::size_t kNameHeaderBytes = 4;
+
+// ---------------------------------------------------------------------------------------------
+// ADR-0080 — the reclamation seam's `reclaim_local` / `reclaim_strict` machinery.
+//
+// The whole mechanism is ONE per-thread object. That is not an implementation shortcut, it is
+// the design: the grace point both shipped policies name is "this thread's dispatch stack
+// unwinds to depth 0", which is a property OF A THREAD, so the state that tracks it is
+// thread-local and never shared. Three consequences fall out and all three are load-bearing:
+//
+//   * no atomic and no cache line is involved on the dispatch path — the ADR's "non-atomic"
+//     cost, delivered literally;
+//   * `graph_t` gains NO data member, so no existing field's offset moves and the delivery
+//     path's codegen is untouched except where the counter itself lands;
+//   * a parked pair cannot outlive anything. The thread that parks IS the thread that is
+//     dispatching (parking only happens at depth > 0), and it drains before returning to
+//     depth 0 — so this array is provably empty at every instant outside a `write()`.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * @brief The count of retired pairs dropped for want of a parking slot, process-wide.
+ *
+ * Behind `graph_t::deferred_release_drops`. Relaxed: it is a diagnostic tally that orders
+ * nothing, exactly like the graph's own snapshot-drop counters.
+ */
+std::atomic<std::uint64_t> g_deferred_release_drops{0};
+
+/**
+ * @brief One thread's dispatch-stack depth and the pairs retired from inside it (ADR-0080).
+ *
+ * Deliberately a plain aggregate of scalars: it is `thread_local`, so a non-trivial destructor
+ * would register a per-thread `__cxa_thread_atexit` handler and a non-constant initializer would
+ * put a guard variable check on the dispatch path. Neither is acceptable for a counter whose
+ * whole budget is an increment. `retired_callback_t` is trivially copyable for the same reason,
+ * so `parked` is storage rather than a container.
+ */
+struct dispatch_state_t {
+    /** @brief Nesting depth of `fan_out` / latch dispatch on this thread; 0 ⇒ quiescent. */
+    unsigned depth;
+    /** @brief How many of @ref parked are occupied. */
+    unsigned parked_n;
+    /** @brief Pairs retired at depth > 0, awaiting this thread's return to depth 0. */
+    retired_callback_t parked[kDeferredReleaseSlots];
+};
+
+/**
+ * @brief This thread's @ref dispatch_state_t.
+ *
+ * `constinit`-shaped (all-zero, trivially destructible), so the access is a bare TLS address
+ * computation with no guard variable and no lazy-init branch.
+ */
+[[nodiscard]] inline dispatch_state_t& dispatch_state() noexcept {
+    static thread_local dispatch_state_t state{};
+    return state;
+}
+
+/**
+ * @brief Run every pair this thread parked, then empty the park — the grace point itself.
+ *
+ * `noinline` and out of line on purpose: its caller is the dispatch path, whose cost must be
+ * the depth decrement and one predictable-not-taken branch. Nothing here runs under a graph
+ * lock — the caller is a `fan_out` that has already released its edge pin.
+ *
+ * The park is emptied BEFORE the first hook runs. A hook is arbitrary user code that may
+ * publish, and a nested publish re-enters this function; taking the entries first means it
+ * finds an empty park rather than re-running a hook that is already executing.
+ */
+[[gnu::noinline]] void run_parked_releases(dispatch_state_t& s) {
+    retired_callback_t taken[kDeferredReleaseSlots];
+    const unsigned n = s.parked_n;
+    for (unsigned i = 0; i < n; ++i) taken[i] = s.parked[i];
+    s.parked_n = 0;
+    for (unsigned i = 0; i < n; ++i) taken[i].release(taken[i].ctx);
+}
+
+/**
+ * @brief Bracket one dispatch on this thread — ADR-0080's grace-point instrument.
+ *
+ * Constructed once per `fan_out` (and once per ADR-0049 durability latch), never per edge, so
+ * the cost is independent of fan-out width as the ADR requires. Under a non-deferring policy
+ * every member below compiles away and the object is empty.
+ */
+class dispatch_scope_t {
+   public:
+    dispatch_scope_t() noexcept {
+        if constexpr (reclaim_policy_t::kDefersToDispatchExit) ++dispatch_state().depth;
+    }
+    dispatch_scope_t(const dispatch_scope_t&) = delete;
+    dispatch_scope_t& operator=(const dispatch_scope_t&) = delete;
+
+    /** @brief Leaving the OUTERMOST dispatch is the grace point; anything inner is a decrement. */
+    ~dispatch_scope_t() {
+        if constexpr (reclaim_policy_t::kDefersToDispatchExit) {
+            dispatch_state_t& s = dispatch_state();
+            // Both fields live in the same thread-local object, so the common case — unwind to
+            // depth 0 with an empty park — is two loads off one base and a branch nobody takes.
+            if (--s.depth == 0 && s.parked_n != 0) run_parked_releases(s);
+        }
+    }
+};
+
+/**
+ * @brief Whether this thread is currently inside a delivery — the question `unsubscribe` asks.
+ *
+ * Under a non-deferring policy the depth is never maintained, so this is a compile-time
+ * `false` and `unsubscribe`'s release is unconditionally inline.
+ */
+[[nodiscard]] inline bool inside_dispatch() noexcept {
+    if constexpr (reclaim_policy_t::kDefersToDispatchExit) return dispatch_state().depth != 0;
+    return false;
+}
+
+/**
+ * @brief Park @p pair until this thread unwinds to depth 0, or DROP it if there is no room.
+ *
+ * The OOM rule, stated once: on a full park the entry is discarded and its hook is **never**
+ * run. That is a deliberate leak, and it is the only safe answer — running the hook here would
+ * release a context the fan-out one frame up is still holding in its snapshot, which is the
+ * very use-after-free this whole seam exists to close. The drop is counted so an undersized
+ * `kDeferredReleaseSlots` is visible instead of silent.
+ */
+void park_release(const retired_callback_t& pair) {
+    dispatch_state_t& s = dispatch_state();
+    if (s.parked_n >= kDeferredReleaseSlots) {
+        g_deferred_release_drops.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    s.parked[s.parked_n++] = pair;
+}
 
 /**
  * @brief One vertex's own path SEGMENT text — its packed key record minus the length byte.
@@ -1462,6 +1592,13 @@ void graph_t::fan_out(vertex_t* v, const rope_t& value) {
     // and both callers check that separately.
     if (v->own_subs_ordered() == 0) return;
 
+    // ADR-0080's grace-point bracket, taken ONCE for this whole fan-out and deliberately
+    // BELOW the gate above: a publish nobody subscribed to — the cheapest and commonest write
+    // there is — never touches it at all. Everything from here on may invoke user code, so
+    // from here on an `unsubscribe()` reaching this thread is a RE-ENTRANT one and must park
+    // its `{ctx, release}` pair rather than free it under the snapshot built below.
+    const dispatch_scope_t dispatch_scope;
+
     // Snapshot every active edge UNDER AN EDGE PIN (vertex_t::snapshot_edges), released
     // before we dispatch (callbacks / re-dispatch may re-enter the graph). Delivery is
     // value-agnostic — no per-subscriber comparison — so every active edge receives
@@ -2227,7 +2364,14 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
         }
     }
 
-    if (latch.value) dispatch_edge(latch.edge, *latch.value);
+    // The ADR-0049 durability latch is the one dispatch that does NOT come through `fan_out`,
+    // so it brackets itself: a latched replay invokes the same user callback a publish does,
+    // and an `unsubscribe()` issued from inside it is just as re-entrant (ADR-0080). Scoped to
+    // the `if`, so an admission that latched nothing constructs nothing.
+    if (latch.value) {
+        const dispatch_scope_t dispatch_scope;
+        dispatch_edge(latch.edge, *latch.value);
+    }
     // Last, and only on the success path: an edge the caller was told about is an edge that
     // landed. No graph lock is held here — the slot verb released the vertex stripe lock and
     // note_subscriber_added released the map lock — and the durability latch has already been
@@ -2326,17 +2470,56 @@ result_t<subscription_t> graph_t::subscribe(const path_t& src, subscriber_fn_t f
     return admit_subscriber(v, std::move(s), {});
 }
 
-result_t<void> graph_t::unsubscribe(const subscription_t& sub) {
+result_t<void> graph_t::unsubscribe(const subscription_t& sub) { return unsubscribe(sub, nullptr); }
+
+result_t<void> graph_t::unsubscribe(const subscription_t& sub, subscriber_release_fn_t release) {
     if (sub.vertex_ == nullptr) return std::unexpected(status_t::NOT_FOUND);
+
+    // ADR-0080's forbidden op, policed where it is committed rather than described in prose.
+    // Under `reclaim_strict` the grace point IS this return, which is only sound if no dispatch
+    // is walking a snapshot that names the edge — i.e. if this thread is not inside one. A
+    // release build cannot see the violation; that is the trade `reclaim_strict` is FOR, and
+    // the reason `reclaim_local` is the default.
+    if constexpr (!reclaim_policy_t::kReentrantUnsubscribe)
+        assert(!inside_dispatch() &&
+               "reclaim_strict forbids unsubscribing from inside a delivery: the running "
+               "fan-out still names this edge's {fn, ctx} pair in its snapshot, and this "
+               "policy's grace point is THIS return. Bind reclaim_local_t (the default) if "
+               "this node re-entrantly unsubscribes.");
+
     // The in-process counterpart of the wire ":subscribers[N] clear" (field_write below):
     // deactivate the slot, then unwind the RFC-0005 listener bookkeeping — the SAME order and
     // the SAME helper the wire path uses, so both doors leave identical counters. clear_edge
     // RECLAIMS the slot's retained state (target key, segment pin, cold remote half) and
     // leaves an inert, index-stable shell that add_edge reuses; an in-flight delivery already
-    // snapshotted the edge (ADR-0041 §2) and completes untouched.
-    if (!sub.vertex_->clear_edge(sub.slot_)) return std::unexpected(status_t::NOT_FOUND);
+    // snapshotted the edge (ADR-0041 §2) and completes untouched — which is exactly why the
+    // `{fn, ctx}` leg, the one part of that snapshot the library does NOT own a copy of, needs
+    // the grace point below.
+    //
+    // Nothing was retired ⇒ nothing is owed. A NOT_FOUND return must not run the hook: the
+    // caller may hand the same hook to several handles, and a signal for an edge that was
+    // never cleared would free a context another live subscription is still delivering to.
+    void* retired_ctx = nullptr;
+    if (!sub.vertex_->clear_edge(sub.slot_, &retired_ctx))
+        return std::unexpected(status_t::NOT_FOUND);
     note_subscriber_removed(sub.vertex_);
+
+    // The grace point (ADR-0080). Reached HERE — synchronously, before returning — whenever
+    // this thread holds no dispatch, which is every ordinary unsubscribe and every unsubscribe
+    // at all under `reclaim_strict`. Only a RE-ENTRANT one defers, and only as far as the
+    // enclosing dispatch's exit; either way the library decided, and the caller was told.
+    if (release != nullptr) {
+        const retired_callback_t pair{.ctx = retired_ctx, .release = release};
+        if (inside_dispatch())
+            park_release(pair);
+        else
+            release(pair.ctx);
+    }
     return {};
+}
+
+std::uint64_t graph_t::deferred_release_drops() noexcept {
+    return g_deferred_release_drops.load(std::memory_order_relaxed);
 }
 
 void graph_t::set_app_fields(vertex_handle_t v, std::vector<app_field_t> table) {

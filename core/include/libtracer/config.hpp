@@ -41,6 +41,8 @@ struct allow_only_policy_t;  // security_acl.hpp — the ALLOW-only MCU profile 
 struct full_acl_policy_t;    // security_acl.hpp — ordered first-match-per-bit with DENY
 class sp_atomic_slot_t;      // lkv_slot.hpp — atomic<shared_ptr>; reclamation is the refcount
 class hazard_slot_t;         // lkv_slot.hpp — lock-free atomic<node*>; hazard-pointer reclamation
+struct reclaim_strict_t;     // reclaim.hpp — grace point: `unsubscribe()` returns
+struct reclaim_local_t;      // reclaim.hpp — grace point: this thread's dispatch stack unwinds
 
 /**
  * @brief The target's build configuration, as ONE named type (ADR-0070).
@@ -262,6 +264,53 @@ struct default_config_t {
     using lkv_slot_t = sp_atomic_slot_t;
 
     /**
+     * @brief The target's selected RECLAMATION policy (ADR-0080) — WHEN the library may free
+     *        the memory behind a retired subscription's `{fn, ctx}` pair.
+     *
+     * Default: `reclaim_local_t`, whose grace point is "this thread's dispatch stack unwinds
+     * to depth 0". It is the default because it makes the MCU and the host build behave
+     * IDENTICALLY: `reclaim_strict_t` forbids unsubscribing from inside a delivery, which
+     * would make the same application code legal on a host and illegal on the constrained
+     * target — a portability bug that surfaces only where it is hardest to debug.
+     *
+     * What the default costs, and what rebinding buys, is one non-atomic increment,
+     * decrement and branch per `fan_out` on a per-thread counter — once per publish,
+     * regardless of subscriber count, and nothing at all on a publish nobody subscribed to
+     * (the counter sits after `fan_out`'s no-subscriber gate). Override fragment:
+     * `using reclaim_policy_t = reclaim_strict_t;` — worth taking only where the deployment
+     * can show that re-entrant unsubscribe does not occur, because `reclaim_strict_t` cannot
+     * see it outside a debug build.
+     *
+     * `reclaim_qsbr` — ADR-0080's third policy, whose grace point spans every thread — is not
+     * yet implemented; a MULTI-THREADED embedder that unsubscribes off the dispatching thread
+     * is the case neither shipped policy covers (see `%reclaim.hpp`).
+     */
+    using reclaim_policy_t = reclaim_local_t;
+
+    /**
+     * @brief How many retired `{ctx, release}` pairs ONE THREAD may hold parked at once, when
+     *        @ref reclaim_policy_t defers (ADR-0080).
+     *
+     * Read this as "subscriptions unsubscribed from INSIDE a single delivery stack". The
+     * ordinary unsubscribe — from outside any callback — parks nothing at all, so on most
+     * nodes this storage is touched zero times; it exists for the re-entrant case
+     * `reclaim_local_t` supports and `reclaim_strict_t` forbids.
+     *
+     * Sizing: one @ref retired_callback_t per slot, in per-thread storage that is plain bytes
+     * with no destructor and no allocation — 256 B on a 64-bit host at the default, 128 B on a
+     * 32-bit MCU, and only on a thread that actually dispatches. Nothing at all under
+     * `reclaim_strict_t`, which never defers.
+     *
+     * Overflow is a REFUSAL, not a failure: a pair that finds every slot taken is DROPPED and
+     * its hook is never run — a leak, deliberately, because the alternative is running a
+     * release hook while the fan-out that is still walking the snapshot names that context.
+     * `graph_t::deferred_release_drops()` counts every one, so an undersized bound is
+     * observable rather than silent. Override fragment:
+     * `static constexpr std::size_t kDeferredReleaseSlots = 64;`
+     */
+    static constexpr std::size_t kDeferredReleaseSlots = 16;
+
+    /**
      * @brief Whether a task on this target may SPIN-WAIT for a lock another task holds (#1158).
      *
      * An L0 (`tr::mem`) fact, but a member HERE because ADR-0070's rule is that the
@@ -359,12 +408,16 @@ inline constexpr std::size_t kHazardReaderSlots = config_t::kHazardReaderSlots;
 inline constexpr std::size_t kEdgePinSlots = config_t::kEdgePinSlots;
 /** @brief @ref default_config_t::kPinPayloadRatio for this build. */
 inline constexpr std::uint32_t kPinPayloadRatio = config_t::kPinPayloadRatio;
+/** @brief @ref default_config_t::kDeferredReleaseSlots for this build. */
+inline constexpr std::size_t kDeferredReleaseSlots = config_t::kDeferredReleaseSlots;
 /** @brief @ref default_config_t::kWeaklyOrdered for this build. */
 inline constexpr bool kWeaklyOrdered = config_t::kWeaklyOrdered;
 /** @brief @ref default_config_t::acl_policy_t for this build. */
 using acl_policy_t = config_t::acl_policy_t;
 /** @brief @ref default_config_t::lkv_slot_t for this build. */
 using lkv_slot_t = config_t::lkv_slot_t;
+/** @brief @ref default_config_t::reclaim_policy_t for this build. */
+using reclaim_policy_t = config_t::reclaim_policy_t;
 
 }  // namespace tr::graph
 

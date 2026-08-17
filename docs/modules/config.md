@@ -164,6 +164,14 @@ satisfy.
 :project: libtracer
 ```
 
+```{doxygentypedef} tr::graph::reclaim_policy_t
+:project: libtracer
+```
+
+```{doxygenvariable} tr::graph::kDeferredReleaseSlots
+:project: libtracer
+```
+
 The one derived constant that is *not* in `tr::graph`: the memory layer reads its own
 spelling, so that L0 never has to name an L4 type.
 
@@ -184,6 +192,21 @@ spelling, so that L0 never has to name an L4 type.
 ```
 
 ```{doxygenclass} tr::graph::sp_atomic_slot_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::graph::reclaim_strict_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::graph::reclaim_local_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::graph::retired_callback_t
 :project: libtracer
 :members:
 ```

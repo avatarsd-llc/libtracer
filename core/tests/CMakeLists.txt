@@ -1754,3 +1754,11 @@ add_executable(target_binding_ablation_test target_binding_ablation_test.cpp)
 target_link_libraries(target_binding_ablation_test PRIVATE libtracer)
 libtracer_test_warnings(target_binding_ablation_test)
 add_test(NAME target_binding_ablation COMMAND target_binding_ablation_test)
+
+# #894 / ADR-0080 — the reclamation seam. Runs under whatever `reclaim_policy_t` this build
+# bound: the re-entrant cases compile out under `reclaim_strict_t`, which forbids them, so one
+# executable serves both bindings and the CI matrix needs no second target.
+add_executable(reclaim_test reclaim_test.cpp)
+target_link_libraries(reclaim_test PRIVATE libtracer Threads::Threads)
+libtracer_test_warnings(reclaim_test)
+add_test(NAME reclaim COMMAND reclaim_test)

@@ -68,12 +68,12 @@ again (`op_resolve_walk.hpp:1073` and `fwd_router.cpp:1246-1252` → `deref_vert
 `map_mutex_` on both ends of the round trip that bound paths exist to make cheap. The two are not
 the same cost: `vertex_slot` **scans `vertex_slots_` linearly** inside the hold, while
 `deref_vertex_slot` and `vertex_slot_at` are a bounds check and one compare — the asymmetry
-`graph.hpp:688-695` states in the header. The hold is not incidental in either: one shared
+`graph.hpp:714-721` states in the header. The hold is not incidental in either: one shared
 acquisition is what stops the slot index and the retire generation straddling a concurrent
 `retire`, which is how an element gets stamped with the successor tenant's number.
 
 The leaf/branch fork reads a per-vertex bit (`vertex_t::has_registered_child`,
-`core/include/libtracer/vertex.hpp:729`), called from `core/src/graph.cpp:1312`, and takes no
+`core/include/libtracer/vertex.hpp:729`), called from `core/src/graph.cpp:1442`, and takes no
 lock. The symbol exists on the vertex rather than on the graph, so a reader grepping for it finds
 a flag test rather than a lock acquisition.
 
@@ -90,7 +90,7 @@ The stripe count is an ordinary config constant shared through one header
 default 16, the sharing rationale at `vertex_stripe.hpp:33-37`). The stripe is selected by
 `vertex_stripe_of` (`:115`) from the vertex address, hashed `(h >> 6) % kVertexLockStripes`
 (`:111`). The stripes guard the fan-out edge list, the STREAM ring, the write-sequence bump and
-the ACL state. `add_edge`, `clear_edge` and `set_acl` take one; **`snapshot_edges` (`vertex.hpp:1488-1489`) no
+the ACL state. `add_edge`, `clear_edge` and `set_acl` take one; **`snapshot_edges` (`vertex.hpp:1494-1495`) no
 longer does.** Delivery reads a published, immutable edge array under a bounded edge pin
 instead — the stripe mutex left the publish path and kept the control plane
 ([ADR-0075](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0075-a-vertexs-edges-are-published-and-read-under-an-edge-pin.md)),
@@ -115,7 +115,7 @@ what the `stripe1` bench topology exists to measure.
 
 ### 2.3 The LKV slot — per vertex, policy-selected
 
-`lkv_slot_t` is a compile-time policy (`core/include/libtracer/config.hpp:262`,
+`lkv_slot_t` is a compile-time policy (`core/include/libtracer/config.hpp:264`,
 [ADR-0069 — LKV slot is a compile-time policy](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0069-lkv-slot-is-a-compile-time-policy-hazard-reclamation.md)).
 Two bindings ship:
 
@@ -174,7 +174,7 @@ Two limits, and the second hides the first:
    There the limit is the value's own reference count, and the `sp-load` calibration arm —
    1.4 M/s at T=24 — accounts for nearly all of the 1.74 M/s stock rate.
 
-The write path takes no map lock (`write_impl`, `graph.cpp:1584`), which is the entire "writes
+The write path takes no map lock (`write_impl`, `graph.cpp:1721`), which is the entire "writes
 scale 5×, reads do not" asymmetry.
 
 **A caution on the calibration arms.** `sp-load` measures 710 ns/op at T=24 against a whole real
@@ -281,7 +281,7 @@ during the walk. A count of 11–12 ThreadSanitizer-reported races with the lock
 without a named build, shape set or test list, and is **not verified here**. The check that
 settles it: the CI ThreadSanitizer configuration — `-fsanitize=thread -g -O1`,
 `CMAKE_BUILD_TYPE=Debug`, both `LIBTRACER_LKV_SLOT` bindings, `ctest` over `core/`
-(`.github/workflows/core-ci.yml:234-245`) — rebuilt with `find_ptr`'s `shared_lock` removed,
+(`.github/workflows/core-ci.yml:279-290`) — rebuilt with `find_ptr`'s `shared_lock` removed,
 recording each reported race site rather than a count.
 
 ### Two approaches that do not work
@@ -325,7 +325,7 @@ re-measurement — never by further reasoning about a curve.
 
 | A plausible claim | What checking shows | The check that decides it |
 | --- | --- | --- |
-| The read-path residual is `snapshot_edges`' stripe lock | `snapshot_edges` (`vertex.hpp:1488-1489`) is on the **delivery** path; `read` never calls it — and since ADR-0075 it takes no stripe lock at all | reading the call graph |
+| The read-path residual is `snapshot_edges`' stripe lock | `snapshot_edges` (`vertex.hpp:1494-1495`) is on the **delivery** path; `read` never calls it — and since ADR-0075 it takes no stripe lock at all | reading the call graph |
 | "Nothing process-wide is serializing — not the map lock" | Every read acquired `map_mutex_` shared through the fork check — the one lock the claim named | the §3 ablation |
 | Distinct-vertex reads "retain 94%/91% of their T=1 rate", read as healthy | The arithmetic used the wrong shape's denominator — real figures 106%/96% — and retention of a T=1 *aggregate* is a serializer signature, not a health signature | recomputing it |
 | Only a config traits template can recover the stripe table's 896 B, "because the alignment is part of the type" | The *count* cannot reach the alignment; the **alignment itself is a config constant**. One `constexpr` and one token recover the identical 896 B, zero templates | building it both ways on rv32 |

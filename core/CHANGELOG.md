@@ -16,6 +16,45 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **The ADR-0080 reclamation seam — `reclaim_policy_t`, `reclaim_local_t`, `reclaim_strict_t`,
+  `subscriber_release_fn_t`, `graph_t::unsubscribe(sub, release)` and
+  `graph_t::deferred_release_drops()`** ([#894](https://github.com/avatarsd-llc/libtracer/issues/894),
+  [#897](https://github.com/avatarsd-llc/libtracer/issues/897)). `unsubscribe()` previously returned
+  with **no quiescence guarantee**: the publish path snapshots a vertex's edges and dispatches
+  outside every lock, and the subscriber's `{fn, callback_ctx}` pair is the one leg of that snapshot
+  the library owns no copy of — so a snapshot taken before the retirement still invoked the callback
+  after `unsubscribe()` returned success. WHEN that pair may be freed is now a **build-time-closed,
+  per-target policy** (new `libtracer/reclaim.hpp`, bound by `default_config_t::reclaim_policy_t` on
+  the ADR-0068 override-fragment seam, exactly like `acl_policy_t` and `lkv_slot_t`) rather than a
+  runtime contract asking the caller to reason about in-flight state.
+
+  **`reclaim_local_t` is the default**, and its grace point is "this thread's dispatch stack unwinds
+  to depth 0" — so an `unsubscribe()` from outside a delivery releases **inline, before it returns**,
+  and one from inside a delivery releases before the enclosing `write()` returns. Either way the
+  **library owns the tracking and signals** through the new `unsubscribe(sub, release)` overload; there
+  is nothing to poll and nothing to wait on. It is the default because it makes the MCU and host builds
+  behave identically: `reclaim_strict_t` (the opt-in zero-cost mode, which forbids re-entrant
+  unsubscribe and debug-asserts on it) would make the same application code legal on a host and illegal
+  on the constrained target. The one-argument `unsubscribe(sub)` is **unchanged** in signature and in
+  what it retires; `vertex_t::clear_edge` gains a **defaulted** out-parameter for the retired context.
+
+  Measured, best-of-rounds against a same-run A/A null of ±0.8 % on p50 (`g++ 13.3.0`, `-O3`): the
+  batch-calibrated bare-notify-one-subscriber case is **102 ns → 102 ns, +0.00 %**, and every fan-out
+  width is at or inside the null — the counter is bumped once per `fan_out`, never per edge, and sits
+  below the no-subscriber early return so a publish nobody listens to pays nothing. Footprint on rv32
+  (`-Os`, GCC 15.2): `reclaim_local_t` costs **+328 B flash / +8 B static RAM / +136 B per dispatching
+  thread**, of which **+24 B lands in `fan_out`**; `reclaim_strict_t` costs **+68 B flash and produces a
+  byte-identical dispatch path** (+0 instructions). The Cortex-M0 hard size gate is **+0 B**.
+
+  Scope: **`reclaim_qsbr` — ADR-0080's third policy, whose grace period spans every thread — is
+  specified but not implemented here.** Both shipped policies state their guarantee over one thread's
+  dispatch domain, so a multi-threaded embedder that unsubscribes off the dispatching thread is not yet
+  covered; that policy also carries #897's many-core answer (a thread self-draining its own retired LKV
+  list at its own quiescent point), which is why #897 is **absent** under both shipped policies rather
+  than fixed by them — single-threaded, there is no other thread's list to reach across.
+
+### Added
+
 - **`<libtracer/peer_handle.hpp>` — `net::peer_handle_t`, `net::kSolePeerHandle` and
   `net::kPeerNameChars` now live in a header of their own**
   ([#375](https://github.com/avatarsd-llc/libtracer/issues/375) Part 2). Pure relocation out of

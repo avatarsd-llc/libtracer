@@ -39,6 +39,7 @@
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/path.hpp"
+#include "libtracer/reclaim.hpp"
 #include "libtracer/sink_slot.hpp"
 #include "libtracer/status.hpp"
 #include "libtracer/vertex.hpp"
@@ -145,6 +146,31 @@ using remote_delivery_fn_t = void (*)(void* ctx, const remote_delivery_t& sub, c
  * valid under the graph's locks) nor forge a handle from an arbitrary pointer and index and hand
  * it to @ref graph_t::unsubscribe. A default-constructed handle names no subscription and
  * unsubscribes to a `NOT_FOUND` no-op; @ref operator== is the only observation a caller has.
+ *
+ * @section subscription_reclamation The reclamation guarantee this handle carries (ADR-0080)
+ *
+ * `unsubscribe()` retires the edge, but the fan-out path snapshots a vertex's edges and
+ * dispatches OUTSIDE every lock, so a snapshot taken before the retirement still names the
+ * subscriber's `{fn, callback_ctx}` pair — the one leg of an `%edge_view_t` snapshot the
+ * library does not own a copy of. WHEN that pair becomes safe to free is therefore a real
+ * question, and ADR-0080 answers it with a **build-time-closed, per-target policy**
+ * (@ref tr::graph::default_config_t::reclaim_policy_t), not with a runtime contract asking
+ * the caller to reason about in-flight state.
+ *
+ * **This build's guarantee is the one stated on the bound policy** —
+ * @ref tr::graph::reclaim_local_t (the default) or @ref tr::graph::reclaim_strict_t. Under
+ * both, the library owns the tracking and SIGNALS release through the
+ * @ref tr::graph::subscriber_release_fn_t hook of
+ * @ref graph_t::unsubscribe(const subscription_t&, subscriber_release_fn_t): the hook runs
+ * exactly once, on the caller's own thread, outside every graph lock, and by the time the
+ * enclosing `write()` / `propagate()` (or `unsubscribe()` itself, at dispatch depth 0)
+ * returns. **There is nothing to poll and nothing to wait on** — that shape is precisely what
+ * ADR-0080 §Decision 4 rejects.
+ *
+ * Both shipped policies state their guarantee over ONE thread's dispatch domain, which is
+ * the single-threaded WIDE / MCU target they are for. An embedder that dispatches from
+ * several threads at once and unsubscribes from another needs a grace period spanning every
+ * thread — ADR-0080's `reclaim_qsbr`, which is not yet implemented.
  */
 class subscription_t {
    public:
@@ -1286,9 +1312,15 @@ class graph_t {
      * the SAME single admission step (SUBSCRIBE gate → append → durability latch,
      * ADR-0049) as every other door.
      * @param fn  The per-delivery sink; @p ctx is passed back as its first argument.
-     * @param ctx Caller-owned context; must outlive every possible delivery (edges are
-     *            never destroyed while the graph lives — an unsubscribe only deactivates
-     *            the slot, but an in-flight delivery may still be running).
+     * @param ctx Caller-owned context, passed back to @p fn on every delivery. Its lifetime
+     *            is bounded by this build's reclamation policy (ADR-0080), not by prose: keep
+     *            it alive until @ref unsubscribe releases it — under the default
+     *            @ref tr::graph::reclaim_local_t that is before `unsubscribe()` returns when
+     *            called from outside a delivery, and before the enclosing `write()` returns
+     *            when called from inside one. Pass a
+     *            @ref tr::graph::subscriber_release_fn_t to
+     *            @ref unsubscribe(const subscription_t&, subscriber_release_fn_t) to be TOLD
+     *            which; there is no in-flight state to poll. See @ref subscription_t.
      * @param policy This subscription's DELIVERY policy (RFC-0022 §3.A); defaulted to
      *               all-zero, i.e. today's behaviour. A callback edge carries no TLV, so
      *               the policy is set on the slot directly rather than parsed out of one.
@@ -1302,7 +1334,10 @@ class graph_t {
      * @brief Subscribe @p src to a caller-owned callable (sugar over the `{fn, ctx}` form).
      *
      * Zero-erasure sugar mirroring `transport_t::set_receiver`: @p callback is bound by
-     * address (lvalues only — a temporary would dangle) and MUST outlive every delivery.
+     * address (lvalues only — a temporary would dangle). Its lifetime bound is the `{fn, ctx}`
+     * form's, since it IS the `ctx`: it must stay alive until @ref unsubscribe releases it,
+     * which this build's reclamation policy (ADR-0080) pins to a moment the library reaches
+     * on its own — see @ref subscription_t.
      * @param policy This subscription's DELIVERY policy (RFC-0022 §3.A); all-zero default.
      * @return A @ref subscription_t handle for @ref unsubscribe (as the `{fn, ctx}` form).
      */
@@ -1322,13 +1357,69 @@ class graph_t {
      * deactivates the edge slot and unwinds the RFC-0005 listener bookkeeping (descendants'
      * writes stop bubbling to the producer @p sub names), exactly as the wire path does. The shell
      * stays (index-stable) and a later @ref subscribe reuses it. Idempotent-ish: a
-     * default-constructed or already-cleared handle returns `NOT_FOUND`. Only DEACTIVATES —
-     * an in-flight delivery already snapshotted the edge and completes (ADR-0041 §2), so the
-     * callback's `ctx` must outlive any delivery that may still be running.
+     * default-constructed or already-cleared handle returns `NOT_FOUND`.
+     *
+     * **On the `ctx`.** Retirement takes effect at once — the next snapshot skips the slot —
+     * but a fan-out ALREADY walking a snapshot still names the retired `{fn, ctx}` pair. Under
+     * the default @ref tr::graph::reclaim_local_t there is exactly one case where that can be
+     * true of THIS call: unsubscribing from inside a delivery. So when this overload is called
+     * from outside any delivery — the ordinary case — it returns already quiescent and the
+     * caller may free its `ctx` on the return. Called from INSIDE a delivery it cannot tell the
+     * caller when the pair died, because it was given no way to: use the two-argument overload
+     * below, which is the form that carries a signal. Under
+     * @ref tr::graph::reclaim_strict_t re-entrant unsubscribe is forbidden outright, so this
+     * overload is always quiescent on return.
      * @note Applies to the callback-form subscriptions; a path→path (`subscribe(src, target)`)
      *       edge is a wire `:subscribers[]` field-write, removed via that wire clear.
      */
     [[nodiscard]] result_t<void> unsubscribe(const subscription_t& sub);
+
+    /**
+     * @brief Remove the in-process subscription @p sub and be TOLD when its `ctx` is dead —
+     *        ADR-0080's event-driven half.
+     *
+     * Identical to the one-argument overload in what it retires; it adds the one thing that
+     * overload structurally cannot provide, a **signal**. @p release is invoked exactly once
+     * with the subscription's `callback_ctx`, on THIS thread, outside every graph lock, at the
+     * grace point the bound @ref tr::graph::default_config_t::reclaim_policy_t names:
+     *
+     * | bound policy | called from OUTSIDE a delivery | called from INSIDE one |
+     * | --- | --- | --- |
+     * | @ref tr::graph::reclaim_strict_t | inline, before this call returns | forbidden |
+     * | @ref tr::graph::reclaim_local_t | inline, before this call returns | before the enclosing
+     *   `write()` / `propagate()` returns |
+     *
+     * So the caller frees its context from @p release and never asks a question about
+     * in-flight state — the library owns that tracking. A hook is run ONLY for a call that
+     * actually retired an edge: a `NOT_FOUND` return (a default-constructed handle, an
+     * already-cleared slot) owes no signal and runs nothing.
+     *
+     * @param sub     The handle @ref subscribe returned.
+     * @param release The release hook; `nullptr` degrades this to the one-argument overload.
+     *                It must not itself unsubscribe the same handle, and it runs on whichever
+     *                thread reached the grace point.
+     * @return `{}` on success; `NOT_FOUND` when @p sub names no active edge — and then
+     *         @p release is *not* called.
+     * @note A deferred hook needs one of this thread's
+     *       @ref tr::graph::default_config_t::kDeferredReleaseSlots parking slots. If every
+     *       one is taken the pair is DROPPED and the hook never runs — a deliberate leak in
+     *       preference to a use-after-free — and @ref deferred_release_drops counts it.
+     */
+    [[nodiscard]] result_t<void> unsubscribe(const subscription_t& sub,
+                                             subscriber_release_fn_t release);
+
+    /**
+     * @brief How many retired `{ctx, release}` pairs this PROCESS has dropped for want of a
+     *        parking slot — each one a release hook that will never run (ADR-0080).
+     *
+     * The observability half of the bounded park: a leak is the safe answer to an exhausted
+     * bound, but a silent one is not. A non-zero reading means
+     * @ref tr::graph::default_config_t::kDeferredReleaseSlots is undersized for how many
+     * subscriptions this node retires from inside a single delivery stack — raise it in the
+     * override fragment. It is process-wide (summed across threads) and monotonic, and it
+     * stays 0 forever on a node that never unsubscribes re-entrantly, which is most of them.
+     */
+    [[nodiscard]] static std::uint64_t deferred_release_drops() noexcept;
 
     /**
      * @brief Install (or replace) @p v's field descriptor table — the OWNER declaring its

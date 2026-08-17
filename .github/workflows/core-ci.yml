@@ -134,6 +134,51 @@ jobs:
           cmake --build core/build-minimal -j "$(nproc)"
           ctest --test-dir core/build-minimal --output-on-failure
 
+  # THE SECOND RECLAMATION POLICY (#894, ADR-0080). `reclaim_local_t` is the default and every
+  # other leg here compiles it; `reclaim_strict_t` is the opt-in zero-cost MCU mode, and a seam
+  # whose other member nothing ever builds is a seam that has already rotted. This leg binds it
+  # and runs the whole suite — `reclaim_test` follows the binding by `if constexpr`, dropping
+  # the three re-entrant cases the policy forbids, so one executable serves both.
+  #
+  # It is bound with an ORDINARY override fragment rather than a `-D` knob, per ADR-0068: a new
+  # configuration member does not get a CMake variable, it is set in `config_override.hpp` as
+  # plain C++. Three lines that inherit the defaults, so it cannot drift from them.
+  build-test-reclaim-strict:
+    runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
+    container: ubuntu:24.04
+    steps:
+      - name: Toolchain (container has no preinstalled tool set)
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            build-essential cmake git ca-certificates
+      - uses: actions/checkout@v4
+      - name: Bind reclaim_strict_t, build + ctest
+        run: |
+          mkdir -p "$PWD/reclaim-strict/libtracer"
+          cat > "$PWD/reclaim-strict/libtracer/config_override.hpp" <<'FRAGMENT'
+          /**
+           * @file
+           * @brief GENERATED CI fixture — the ADR-0080 zero-cost reclamation policy bound.
+           */
+          #pragma once
+
+          namespace tr::graph {
+
+          /** @brief The defaults, with re-entrant unsubscribe forbidden (an MCU target). */
+          struct reclaim_strict_config_t : default_config_t {
+              using reclaim_policy_t = reclaim_strict_t;
+          };
+
+          using config_t = reclaim_strict_config_t;
+
+          }  // namespace tr::graph
+          FRAGMENT
+          cmake -S core -B core/build-strict -DBUILD_TESTING=ON \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS="-I$PWD/reclaim-strict"
+          cmake --build core/build-strict -j "$(nproc)"
+          ctest --test-dir core/build-strict --output-on-failure
+
   # WEAKLY-ORDERED host gate (#1140). Every other leg here runs x86-64, whose TSO model
   # hides an entire class of defect: a seq_cst store lowers to a locked `xchg`, so a LATER
   # RELAXED load of zero still cannot observe the pre-store world. Every acquire/release and

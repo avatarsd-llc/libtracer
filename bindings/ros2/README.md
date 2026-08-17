@@ -25,7 +25,7 @@ code changes. Architecture and rationale: **[ADR-0023](../../docs/adr/0023-ros2-
 | message type name | `:schema` POINT (introspection only) |
 | `rmw_qos_profile_t` | **no single carrier** — see [QoS](#qos-there-is-no-settings-to-map-onto) below |
 | publisher | a writer handle on the topic path |
-| subscription | `subscribe(path)` — an edge appended to the *producer* vertex; delivery is a push, and the retained history is that **vertex's** STREAM ring (owner-sized and with no wire surface at all — `core/include/libtracer/graph.hpp:1079-1087`), never a per-subscriber queue |
+| subscription | `subscribe(path)` — an edge appended to the *producer* vertex; delivery is a push, and the retained history is that **vertex's** STREAM ring (owner-sized and with no wire surface at all — `core/include/libtracer/graph.hpp:1105-1113`), never a per-subscriber queue |
 | service / client | a `…/_request` + `…/_response` path pair |
 
 ## RMW entry points → graph operations (the implementation checklist)
@@ -61,9 +61,9 @@ per-vertex `:settings` container — `:settings.reliability`, `:settings.durabil
 [RFC-0022](../../docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md)
 (with its Amendment 1) deleted `settings_t` outright and removed the whole
 `:settings.<knob>` **write** surface: a write to any of the seven names now answers
-`SCHEMA_NOT_FOUND`, caller-independently (`core/src/graph.cpp:2544-2550`). The `:settings`
+`SCHEMA_NOT_FOUND`, caller-independently (`core/src/graph.cpp:2727-2733`). The `:settings`
 **read** container survives with its shape and none
-of its knobs — `SETTINGS{ [NAME "app" SETTINGS{…}] }`, `core/src/graph.cpp:2901` — so
+of its knobs — `SETTINGS{ [NAME "app" SETTINGS{…}] }`, `core/src/graph.cpp:3084` — so
 there is nothing left for QoS to round-trip through, and no wire surface a namespaced
 extension could ride. See [ADR-0023](../../docs/adr/0023-ros2-binding-via-rmw-tracer.md)'s
 two errata. Nothing shipped against the old mapping: this package has one real TU
@@ -73,8 +73,8 @@ What `qos.c` maps onto instead — **three carriers, not one**:
 
 | `rmw_qos_profile_t` field | libtracer carrier | where |
 | --- | --- | --- |
-| `reliability`, `durability` (libtracer packs a third bit-field, `priority`, that ROS has no profile member for) | the **subscription's** packed 16-bit `delivery_policy`, set at `rmw_create_subscription` time and carried in the `SUBSCRIBER`'s existing `SETTINGS` child as `NAME "delivery_policy" VALUE u16` | `core/include/libtracer/subscriber.hpp:70`, decoded at `core/src/graph.cpp:1972`, RFC-0022 §3.A |
-| `history` + `depth` | **owner-side** ring depth — the topic's owner calls `graph_t::set_history_depth`; a remote subscriber cannot set it | `core/include/libtracer/graph.hpp:1087` |
+| `reliability`, `durability` (libtracer packs a third bit-field, `priority`, that ROS has no profile member for) | the **subscription's** packed 16-bit `delivery_policy`, set at `rmw_create_subscription` time and carried in the `SUBSCRIBER`'s existing `SETTINGS` child as `NAME "delivery_policy" VALUE u16` | `core/include/libtracer/subscriber.hpp:70`, decoded at `core/src/graph.cpp:2109`, RFC-0022 §3.A |
+| `history` + `depth` | **owner-side** ring depth — the topic's owner calls `graph_t::set_history_depth`; a remote subscriber cannot set it | `core/include/libtracer/graph.hpp:1113` |
 | `deadline`, `liveliness`, `lifespan` | **no mapping at all** | — |
 
 This is *closer* to DDS than the retracted shape, not further: DDS puts reliability and
@@ -92,7 +92,7 @@ Two consequences `qos.c` has to live with:
 - **A libtracer-only delivery mode is `rmw_tracer`-local, not a QoS extension.**
   `delivery_mode_t` (`vertex.hpp:385` — `IF_NEWER` / `UNCONDITIONAL` / `EXPLICIT`; there is
   no `ON_CHANGE` member) is owner-side and wiring-time via `graph_t::set_delivery_mode`
-  (`core/src/graph.cpp:1875`) with no wire spelling. `rmw_tracer` may set it on vertices it
+  (`core/src/graph.cpp:2012`) with no wire spelling. `rmw_tracer` may set it on vertices it
   owns; it cannot round-trip it to a remote peer.
 
 ## Transports & the differentiators

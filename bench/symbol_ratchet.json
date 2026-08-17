@@ -15,7 +15,8 @@
     {
       "binary": "bench_libtracer",
       "symbol": "tr::graph::graph_t::fan_out(",
-      "bytes": 1474
+      "bytes": 1613,
+      "note": "RE-PINNED 1474 -> 1613 (+139) by #894 (ADR-0080 reclaim_local). The ONLY pinned symbol this change moves \u2014 the other four are byte-identical \u2014 and the growth is fully attributed at instruction level: ONE `addl $1,%fs:` on entry, plus a 5-instruction exit epilogue emitted THREE times (the wide TLS-buffer path, the small/stack path, and the .cold unwind clone), plus `nop` re-padding and two cleanup-frame displacement changes that add no instruction. The per-edge dispatch loop body is byte-identical, so the cost is once per fan_out regardless of subscriber count, and the no-subscriber early return is untouched. Priced on the bench: `inproc-batch` fanout-1 (the batch-calibrated bare-notify case) 102 ns -> 102 ns p50, +0.00%, against a same-day A/A null of +/-0.8%. rv32 (-Os, GCC 15.2) is +24 B and +6 instructions on entry; `reclaim_strict` is +0 instructions here."
     },
     {
       "binary": "bench_libtracer",
