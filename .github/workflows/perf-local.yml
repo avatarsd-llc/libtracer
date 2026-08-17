@@ -132,9 +132,14 @@ jobs:
 
   bench-local:
     needs: density
+    # `always() && != 'false'` and not `== 'true'`: a density check that fails or is
+    # cancelled must never cost a push its point. The check exists to ADD samples the
+    # push trigger misses; letting it subtract one would invert it. Only an explicit
+    # "not needed" — the scheduled-run case — skips the measurement.
     if: >-
+      always() &&
       github.repository == 'avatarsd-llc/libtracer' &&
-      needs.density.outputs.measure == 'true'
+      needs.density.outputs.measure != 'false'
     runs-on: [self-hosted, bench-local]
     permissions:
       contents: write # benchmark-action pushes the history to the gh-pages branch

@@ -311,6 +311,13 @@ class WorkflowWiring(unittest.TestCase):
         self.assertRegex(self.text, r"store_guard\.py density")
         self.assertIn("needs.density.outputs.measure", self.text)
 
+    def test_the_density_check_can_only_add_measurements(self):
+        """It exists to add samples the push trigger misses; a check that failed and
+        subtracted one would invert it, so the gate is `!= 'false'`, not `== 'true'`,
+        under `always()`."""
+        self.assertIn("needs.density.outputs.measure != 'false'", self.text)
+        self.assertNotIn("needs.density.outputs.measure == 'true'", self.text)
+
     def test_the_rolling_comparator_and_the_toolchain_read_are_wired(self):
         self.assertRegex(self.text, r"store_guard\.py drift")
         self.assertRegex(self.text, r"store_guard\.py toolchain")
