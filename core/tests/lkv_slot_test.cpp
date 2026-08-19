@@ -43,6 +43,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -128,10 +129,27 @@ void contract(const char* name) {
 }
 
 /**
+ * @brief How long a writer waits for the readers to be inside their loop (#1378).
+ *
+ * A bound, not a timing assumption. The writers' work is bounded, so without a start latch
+ * they can finish and set `stop` before a reader's first iteration on an oversubscribed
+ * host — which is what made "the readers actually ran" a ~0.7 %-per-run flake rather than a
+ * statement about the slot. The latch removes that; the deadline keeps a host that genuinely
+ * cannot schedule a reader from hanging the suite, and the non-vacuity check below is what
+ * reports it.
+ */
+constexpr auto kReaderLatchWait = std::chrono::seconds(2);
+
+/**
  * @brief Writers replacing one slot while readers read it.
  *
  * The readers' job is to fail loudly on anything that is not a value some writer published:
  * a null where one was published, or an identity that does not re-derive.
+ *
+ * Every reader runs one UNCONDITIONAL pass before it ever consults `stop`, and the writers
+ * wait (bounded) for all of them to announce that pass before storming. Both halves are
+ * about the same thing: the overlap this function is named for is established by the test
+ * rather than hoped for from the scheduler (#1378).
  */
 template <typename slot_t>
 void concurrent(const char* name, std::size_t writers, std::size_t readers, std::size_t rounds) {
@@ -142,25 +160,33 @@ void concurrent(const char* name, std::size_t writers, std::size_t readers, std:
     std::atomic<bool> stop{false};
     std::atomic<std::size_t> bad{0};
     std::atomic<std::size_t> reads{0};
+    std::atomic<std::size_t> started{0};
     std::vector<std::thread> pool;
 
     for (std::size_t r = 0; r < readers; ++r) {
         pool.emplace_back([&] {
             std::size_t n = 0;
-            while (!stop.load(std::memory_order_relaxed)) {
-                // Hold two handles at once: the N-simultaneous-pins property
-                // read_subtree_folded needs, which one hazard slot per thread cannot express
-                // and which is exactly why the read has to promote (ADR-0069 §5).
+            // Hold two handles at once: the N-simultaneous-pins property
+            // read_subtree_folded needs, which one hazard slot per thread cannot express
+            // and which is exactly why the read has to promote (ADR-0069 §5).
+            const auto pass = [&] {
                 const auto a = slot.load();
                 const auto b = slot.load();
                 if (!intact(a) || !intact(b)) bad.fetch_add(1, std::memory_order_relaxed);
                 ++n;
-            }
+            };
+            pass();
+            started.fetch_add(1, std::memory_order_release);
+            while (!stop.load(std::memory_order_relaxed)) pass();
             reads.fetch_add(n, std::memory_order_relaxed);
         });
     }
     for (std::size_t w = 0; w < writers; ++w) {
         pool.emplace_back([&, w] {
+            const auto deadline = std::chrono::steady_clock::now() + kReaderLatchWait;
+            while (started.load(std::memory_order_acquire) < readers &&
+                   std::chrono::steady_clock::now() < deadline)
+                std::this_thread::yield();
             for (std::size_t i = 0; i < rounds; ++i) {
                 if (!slot.store(make_tagged(w * rounds + i + 1))) bad.fetch_add(1, relaxed_);
             }
@@ -171,7 +197,10 @@ void concurrent(const char* name, std::size_t writers, std::size_t readers, std:
     for (std::size_t i = 0; i < readers; ++i) pool[i].join();
 
     check(bad.load() == 0, "every concurrent read returned an intact published value");
-    check(reads.load() > 0, "the readers actually ran");
+    // Non-vacuity, and now structural: the readers are joined above, and each of them ran a
+    // pass that no `stop` could cut short. A shortfall here means a reader died, not that it
+    // lost a race.
+    check(reads.load() >= readers, "every reader ran at least its unconditional pass");
     check(intact(slot.load()), "the slot still holds a good value afterwards");
 }
 

@@ -39,6 +39,7 @@
  */
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -118,21 +119,36 @@ void test_concurrent_publish_and_churn(std::size_t publishers, const char* label
     const payload_t p = make_payload(std::byte{0x11});
     std::atomic<bool> stop{false};
     std::atomic<std::size_t> writes{0};
+    std::atomic<std::size_t> started{0};
 
     std::vector<std::thread> ts;
     ts.reserve(publishers + 1);
     for (std::size_t i = 0; i < publishers; ++i) {
         ts.emplace_back([&]() {
-            while (!stop.load(std::memory_order_relaxed)) {
+            const auto batch = [&] {
                 for (int k = 0; k < 64; ++k) (void)g.write(src, p.view());
                 writes.fetch_add(64, std::memory_order_relaxed);
-            }
+            };
+            // One unconditional batch before `stop` is ever consulted, then announce: the
+            // churn's work is BOUNDED, so without this it could finish and set `stop` before
+            // a publisher's first iteration and turn a scheduling accident into a red
+            // "the publishers ran" (#1378).
+            batch();
+            started.fetch_add(1, std::memory_order_release);
+            while (!stop.load(std::memory_order_relaxed)) batch();
         });
     }
     // The churn thread: each iteration DISPLACES the published array twice (an append and a
     // clear), so publishers are constantly copying an array the churn is retiring.
     std::vector<sink_t> transient(8);
     ts.emplace_back([&]() {
+        // Bounded wait for the publishers to be in their loop, so the overlap this test is
+        // about is established rather than hoped for. A host that cannot schedule them
+        // inside the deadline still runs the churn — the guards below report it.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (started.load(std::memory_order_acquire) < publishers &&
+               std::chrono::steady_clock::now() < deadline)
+            std::this_thread::yield();
         for (std::size_t round = 0; round < 4000 && !stop.load(std::memory_order_relaxed);
              ++round) {
             sink_t& t = transient[round % transient.size()];
@@ -143,7 +159,10 @@ void test_concurrent_publish_and_churn(std::size_t publishers, const char* label
     });
     for (auto& th : ts) th.join();
 
-    check(writes.load() > 0, "the publishers ran");
+    // Both are structural rather than statistical: every publisher is joined above and each
+    // ran a batch no `stop` could cut short, and `g.write` delivers to the standing edge
+    // inline on the writing thread (#1378).
+    check(writes.load() >= 64 * publishers, "every publisher ran at least its first batch");
     check(standing.hits.load() > 0, "the standing subscriber received deliveries throughout");
     check(standing.torn.load() == 0, "no delivery reached a torn standing context");
     std::size_t torn = 0;
