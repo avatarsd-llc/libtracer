@@ -172,6 +172,10 @@ satisfy.
 :project: libtracer
 ```
 
+```{doxygenvariable} tr::graph::kQsbrParticipants
+:project: libtracer
+```
+
 The one derived constant that is *not* in `tr::graph`: the memory layer reads its own
 spelling, so that L0 never has to name an L4 type.
 
@@ -202,6 +206,11 @@ spelling, so that L0 never has to name an L4 type.
 ```
 
 ```{doxygenstruct} tr::graph::reclaim_local_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::graph::reclaim_qsbr_t
 :project: libtracer
 :members:
 ```

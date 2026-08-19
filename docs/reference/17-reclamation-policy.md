@@ -50,7 +50,7 @@ using config_t = my_node_config_t;
 | **`reclaim_local`** (default) | this thread's dispatch stack unwinds to depth 0 | WIDE / MCU, re-entrant ok | one non-atomic inc/dec/branch **per publish** | supported |
 | `reclaim_qsbr` | every thread has passed a quiescent state | MID / NARROW host | ~zero, deferred batched free | supported |
 
-`reclaim_qsbr` is **specified but not yet implemented**. Until it lands, the shipped policies state their guarantee over **one thread's dispatch domain**; a node that dispatches from several threads at once and unsubscribes from another is the case neither covers.
+All three are shipped. The first two state their guarantee over **one thread's dispatch domain**, which is what the WIDE / MCU target needs and all it needs; `reclaim_qsbr` is the one to bind when a node dispatches from several threads at once and may unsubscribe from another — the case neither of the others covers.
 
 ### The rule that shapes all of them
 
@@ -79,6 +79,26 @@ The counter is a **per-thread** dispatch depth, incremented once when a fan-out 
 
 Parking allocates nothing. It uses a bounded per-thread array (`kDeferredReleaseSlots`, default 16), and on overflow the pair is **dropped and its hook never runs** — a deliberate leak, because the alternative is releasing a context a live fan-out still names. `graph_t::deferred_release_drops()` counts every drop, so an undersized bound is visible rather than silent.
 
+### `reclaim_qsbr` — the cross-thread grace period
+
+The other two policies decide by asking **this thread** a question. That is exactly what fails when thread A is mid-delivery and thread B unsubscribes: B's own dispatch depth is 0, so a per-thread grace point concludes "nothing is in flight" and frees a context A is still holding. `reclaim_qsbr` replaces the question with one no single thread can answer alone.
+
+It is quiescent-state reclamation in the URCU sense, and the announcement it needs was **already being computed**. The dispatch bracket the other policies use maintains a per-thread depth whose transition to 0 is precisely the proof that this thread holds no snapshot. `reclaim_qsbr` reuses it verbatim and adds, at the *outermost* bracket only:
+
+- **entry**: one relaxed load of a global epoch — a read-mostly line, bumped only on the control plane — and one store into this thread's own cache-line-isolated cell, marking it online at that epoch. **No atomic read-modify-write.**
+- **exit**: one store of `0` to the same cell. Zero means "holds nothing", which is what makes a thread idling in `epoll` non-blocking — the classic QSBR liveness hole, closed structurally rather than by a `thread_offline()` verb the embedder must remember to call.
+
+`unsubscribe()` then bumps the epoch once and scans the participant table. A pair retired at epoch `E` is free once every participant is either offline or online at an epoch greater than `E`. **The scan is on the reclaim path only** — that is the precise difference from the hazard-pointer shape in the table above, which put its scan on the *read* path and is why that one collapsed throughput.
+
+Two consequences the API states rather than hides:
+
+- **The retired pairs live in one shared table, not per-thread.** They have to. The case this policy exists for is B retiring while A dispatches; if B parked the pair in B's own storage nothing would ever drain it, because B is not dispatching and "unsubscribe once, then never touch the graph again" is the dominant teardown shape.
+- **So the hook may run on a thread other than the `unsubscribe()` caller** — whichever participant's quiescence completed the grace period. Both other policies promise the caller's own thread; a grace period that spans threads structurally cannot, because the only alternatives are to block the caller (which the rule below forbids) or to leak. A release hook under this policy must therefore be thread-safe with respect to its own context. This is the reason `reclaim_qsbr` is opt-in and not the default.
+
+When the same build also binds `hazard_slot_t`, each thread's quiescent point additionally self-drains its **own** private retired LKV list. That is the half of [#897](https://github.com/avatarsd-llc/libtracer/issues/897) ADR-0080 assigns to this policy — `~hazard_slot_t` never has to reach across a live thread's private list — and it costs `lkv_slot.hpp` no code at all: the quiescent point calls the already-shipped `retire_and_flush`, whose own early-out makes it free on a thread that parked nothing. **No `store()`-path atomic is added**, and that is a `cmp` rather than a sentence: every out-of-line `hazard_slot_t` entity is byte-identical between a `reclaim_local` and a `reclaim_qsbr` build.
+
+`graph_t::thread_quiescent()` exists for the thread the automatic path cannot reach — one that displaces LKV nodes without ever dispatching, and the stated teardown precondition before an injected `std::pmr` resource dies. **No policy's guarantee depends on an embedder calling it**; every dispatching thread announces and drains automatically, and under the other two policies it is an empty inline function.
+
 ### `reclaim_strict` — the opt-in zero
 
 For an MCU deployment that can show it never unsubscribes from inside a delivery. Nothing is tracked, nothing is stored, `unsubscribe()` always releases inline. Re-entrant unsubscribe is a **forbidden operation with a guard on it** (a debug assert), not a warning in a paragraph — but a release build cannot see the violation, which is the trade this policy is for.
@@ -99,6 +119,43 @@ Pinned on the bench host (`g++ 13.3.0`, `-O3`), best-of-rounds, against a same-r
 
 The counter is bumped **once per fan-out**, never per edge, so it amortizes to nothing as fan-out widens — the wide rows are at or inside the null throughout.
 
+For `reclaim_qsbr` the primary instrument is the same one, and the structural half carries the claim (a policy that is off by default must be shown to cost nothing when it is off):
+
+| statement | instrument | result |
+| --- | --- | --- |
+| the default build pays nothing for this policy existing | object-file `cmp`, before vs after, same build dir | 50 / 51 objects byte-identical; the 51st has identical `.text`, `.bss` and `.tbss` **sizes** and every function's instruction stream identical |
+| `fan_out` is untouched in the default build | `objdump` instruction diff | **0** instructions changed |
+| the QSBR domain is not emitted where it is not bound | `nm` | **0** `detail_qsbr` symbols; its `.bss` is 0 B |
+| only the policy's own translation unit changes when it IS bound | object-file `cmp`, `reclaim_local` vs `reclaim_qsbr` | 49 / 51 identical — the whole wire codec, every transport, the router, the memory substrate and the path layer provably untouched |
+| the cost is per fan-out, not per edge | `objdump` of the dispatch loop | the per-edge loop body is **instruction-identical**; +36 instructions total, all in the entry bracket and the exit epilogues |
+| a publish nobody subscribed to pays nothing | `objdump` | the announce sits **below** the no-subscriber gate; the first 13 instructions are identical |
+
+The per-edge identity is the load-bearing one: it is what makes the cost independent of subscriber count, which is what ADR-0080 requires of any policy on this path.
+
+The timing half, same commit and same directory, differing only by the override fragment — `taskset -c 2` on both arms, arms interleaved round-robin in one session, first execution discarded, **best-of-rounds** with `[min..max]` beside each figure, against a same-session A/A null of **±1.0 %** on the `inproc-batch` rows:
+
+| `inproc-batch` row | `reclaim_local` | `reclaim_qsbr` | Δ |
+| --- | ---: | ---: | ---: |
+| fan-out 1 (bare notify, one trivial subscriber) | 101 ns | 106 ns | **+4.95 %** |
+| fan-out 8 | 227 ns | 230 ns | +1.32 % |
+| fan-out 16 | 310 ns | 302 ns | −2.58 % |
+| fan-out 64 | 1,002 ns | 952 ns | −4.99 % |
+| fan-out 1024 | 14,490 ns | 13,655 ns | −5.76 % |
+
+**Read the first row as the policy's price and the rest as noise.** Fan-out 1 is the arm ADR-0080 names as decisive, and it costs a reproducible **+4–5 ns** — measured in two independent windows (+3.92 % and +4.95 %), both outside the null. Roughly half of that is the `seq_cst` announcing store itself: rebuilding the arm with a (deliberately unsound) `release` store moves the row to +1.98 %, which is what the full barrier buys and why it is not negotiated away. The favourable wide rows are **not** claimed as a win — a policy binding cannot make a 1,024-way fan-out faster, and they are code-layout luck reported rather than hidden.
+
+The cost is bounded above by construction: it is paid **once per fan-out**, so it amortizes from +5 % at fan-out 1 to inside the null by fan-out 8, and a publish with no subscribers pays nothing at all.
+
+Footprint of the third policy, extending the table above (same rv32 profile and pinned GCC 15.2, measured on the real `core/src/graph.cpp` rather than inferred):
+
+| arm | flash | static RAM | per-thread TLS |
+| --- | ---: | ---: | ---: |
+| `reclaim_strict` | −254 B | +0 B | **24 B** |
+| `reclaim_local` (default) | baseline | baseline | 176 B |
+| `reclaim_qsbr` | +884 B | **+2,560 B `.bss`** | **72 B** |
+
+`reclaim_qsbr` is the only policy that costs static RAM, and all of it is the participant table plus the shared retired table — `kQsbrParticipants × max(kCacheLineBytes, 8)` and `kDeferredReleaseSlots` entries. It **buys back** 104 B of per-thread TLS against the default, because its retired pairs live in that shared table instead of in every dispatching thread's park. All of it is `.bss` rather than `.data`, which is deliberate: the global epoch starts at 0 precisely so no non-zero initializer drags the whole registry into flash-backed initialized RAM (it did, at 2,560 B, until that was measured and fixed). **And every byte of it is 0 on a target that does not bind the policy** — which the object-file identity above proves rather than asserts.
+
 Footprint, on rv32 (`-Os -fno-exceptions -fno-rtti`, GCC 15.2, real `core/src/graph.cpp`):
 
 | arm | flash | static RAM | per-thread TLS |
@@ -110,7 +167,9 @@ Of `reclaim_local`'s flash, **+24 B lands in `fan_out`** — the dispatch path �
 
 ## The theoretical best — shard, don't reclaim
 
-To know "no reader is using X" one must make readers announce themselves (hot-path cost), wait for a grace period (deferred free), or **never share X across threads** so the freeing thread is the only possible user. The third door is the ideal, and it is reached by architecture rather than a cleverer algorithm: **shard subscription ownership per RX thread**. A subscription only ever dispatched *and* unsubscribed by one thread is instantly quiescent on unsubscribe, and an N-core host degenerates into N independent single-threaded problems. `reclaim_qsbr` is then needed only for the genuine residual — a subscription whose one publish fans callbacks across several threads.
+To know "no reader is using X" one must make readers announce themselves (hot-path cost), wait for a grace period (deferred free), or **never share X across threads** so the freeing thread is the only possible user. The third door is the ideal, and it is reached by architecture rather than a cleverer algorithm: **shard subscription ownership per RX thread**. A subscription only ever dispatched *and* unsubscribed by one thread is instantly quiescent on unsubscribe, and an N-core host degenerates into N independent single-threaded problems.
+
+That advice survives `reclaim_qsbr` landing, and is worth restating now that the residual mechanism exists rather than being hypothetical: **binding `reclaim_qsbr` is not a substitute for sharding.** A sharded design pays nothing and needs no grace period at all; this policy is for the genuine residual — a subscription whose one publish fans callbacks across several threads, or a teardown path that unsubscribes from a thread other than the one delivering. Reach for it when the sharding argument does not close, not before, and keep the default everywhere else. That the default provably pays **zero** for this policy's existence is what makes "not before" a free choice rather than a hedge.
 
 ## See also
 

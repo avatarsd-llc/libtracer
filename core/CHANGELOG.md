@@ -41,6 +41,56 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   does not use it compiles byte-identical objects. Opting in costs, on
   `riscv32-esp-elf-g++ 15.2.0` at `-Os -fno-exceptions -fno-rtti`: 92 B `.text`, a 28 B
   vtable, and 8 B per instance.
+- **`reclaim_qsbr_t` — ADR-0080's third reclamation policy, `graph_t::thread_quiescent()`, the
+  `kQsbrParticipants` knob and the `kGraceSpansThreads` policy trait**
+  ([#1376](https://github.com/avatarsd-llc/libtracer/issues/1376), closing
+  [#894](https://github.com/avatarsd-llc/libtracer/issues/894) and
+  [#897](https://github.com/avatarsd-llc/libtracer/issues/897)). The grace point spans **every**
+  dispatching thread, which is the one case the two shipped policies do not cover: with
+  `reclaim_local_t` bound, a thread that unsubscribes while a *sibling* thread is mid-delivery frees a
+  context that sibling is still holding, because a per-thread dispatch depth cannot see another
+  thread's snapshot. Bind it with `using reclaim_policy_t = reclaim_qsbr_t;` in
+  `libtracer/config_override.hpp`. New public names, all in `<libtracer/reclaim.hpp>` /
+  `<libtracer/config.hpp>` / `<libtracer/graph.hpp>`, plus the new header
+  `<libtracer/qsbr.hpp>` (the `tr::graph::detail_qsbr` domain).
+
+  **One contract widening, and it is the reason this is opt-in rather than the default.** Under this
+  policy the `subscriber_release_fn_t` hook may run **on a thread other than the `unsubscribe()`
+  caller** — whichever participant's quiescence completed the grace period. Both other policies promise
+  the caller's own thread; a cross-thread grace period structurally cannot, since the alternatives are
+  to block the caller (ADR-0080 §Decision 4 rejects waiting outright) or to leak the pair. A release
+  hook under `reclaim_qsbr_t` must therefore be thread-safe with respect to its own context. Nothing
+  changes for the two per-thread policies, and `unsubscribe()` still never blocks under any of them.
+
+  **The default build is unaffected, and that is measured rather than asserted.** Against the
+  pre-#1376 tree at `-O3`, 50 of 51 objects are byte-identical; the 51st (`graph.cpp.o`) has identical
+  `.text`, `.bss` and `.tbss` sizes, an identical total, and every function's instruction stream
+  identical — `fan_out`, both `unsubscribe` overloads and `deferred_release_drops` included — the sole
+  difference being two unrelated `std::vector<std::byte>` COMDAT instantiations emitted in the opposite
+  order. `nm` reports **zero** `detail_qsbr` symbols and **0 B** of its `.bss` in any build that does
+  not bind the policy. Symbol ratchet: all six pins at **+0**, no re-pin.
+
+  **What it costs where it IS bound**, measured at `-O3` against a `reclaim_local` arm of the *same*
+  commit differing only by the override fragment: 49 of 51 objects byte-identical (the whole wire
+  codec, every transport, the router, the memory substrate and the path layer provably untouched);
+  `fan_out` +36 instructions / +206 B, **all** of it in the entry bracket and the exit epilogues. The
+  **per-edge dispatch loop body is instruction-identical**, so the cost is once per fan-out regardless
+  of subscriber count, and the announce sits **below** the no-subscriber gate, so a publish nobody
+  subscribed to pays nothing. Per outermost fan-out the policy adds one relaxed load of a read-mostly
+  global epoch plus one `seq_cst` store to this thread's own cache-line-isolated cell on entry, and one
+  `release` store plus one relaxed load and a predictable branch on exit — **no atomic
+  read-modify-write on the dispatch path**. The `O(kQsbrParticipants)` scan is on the reclaim path
+  only, which is the precise difference from the hazard shape #635 rejected.
+
+  **#897 is discharged with zero code changes to `lkv_slot.hpp`.** Each thread self-drains its own
+  private retired LKV list at its own quiescent point via the already-shipped
+  `detail_hp::retire_and_flush`, so `~hazard_slot_t` never reaches across a live thread's list. No
+  `store()`-path atomic is added, and that is a `cmp`: every out-of-line `hazard_slot_t` entity is
+  byte-identical between a `reclaim_local` and a `reclaim_qsbr` build at the `hazard_slot_t` binding.
+  #897's other half — the `retire_and_flush` relaxed-probe check-then-act — remains **out of scope**,
+  already ruled by [#1037](https://github.com/avatarsd-llc/libtracer/issues/1037) and ADR-0039
+  §Erratum 8.
+
 - **The ADR-0080 reclamation seam — `reclaim_policy_t`, `reclaim_local_t`, `reclaim_strict_t`,
   `subscriber_release_fn_t`, `graph_t::unsubscribe(sub, release)` and
   `graph_t::deferred_release_drops()`** ([#894](https://github.com/avatarsd-llc/libtracer/issues/894),
@@ -71,12 +121,10 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   thread**, of which **+24 B lands in `fan_out`**; `reclaim_strict_t` costs **+68 B flash and produces a
   byte-identical dispatch path** (+0 instructions). The Cortex-M0 hard size gate is **+0 B**.
 
-  Scope: **`reclaim_qsbr` — ADR-0080's third policy, whose grace period spans every thread — is
-  specified but not implemented here.** Both shipped policies state their guarantee over one thread's
-  dispatch domain, so a multi-threaded embedder that unsubscribes off the dispatching thread is not yet
-  covered; that policy also carries #897's many-core answer (a thread self-draining its own retired LKV
-  list at its own quiescent point), which is why #897 is **absent** under both shipped policies rather
-  than fixed by them — single-threaded, there is no other thread's list to reach across.
+  Scope: this entry ships the two per-thread policies only. **`reclaim_qsbr` — ADR-0080's third
+  policy, whose grace period spans every thread — lands separately below (#1376)**, and with it #897's
+  many-core answer; under the two policies here #897 is **absent** rather than fixed, because
+  single-threaded there is no other thread's list to reach across.
 
 ### Added
 

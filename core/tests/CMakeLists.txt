@@ -1776,9 +1776,11 @@ target_link_libraries(target_binding_ablation_test PRIVATE libtracer)
 libtracer_test_warnings(target_binding_ablation_test)
 add_test(NAME target_binding_ablation COMMAND target_binding_ablation_test)
 
-# #894 / ADR-0080 — the reclamation seam. Runs under whatever `reclaim_policy_t` this build
-# bound: the re-entrant cases compile out under `reclaim_strict_t`, which forbids them, so one
-# executable serves both bindings and the CI matrix needs no second target.
+# #894 / #1376 / ADR-0080 — the reclamation seam. Runs under whatever `reclaim_policy_t` this
+# build bound: the re-entrant cases compile out under `reclaim_strict_t`, which forbids them, and
+# the cross-thread case compiles out unless the bound policy's grace point spans threads. So ONE
+# executable serves all three bindings and the CI matrix needs no second target. `Threads::Threads`
+# is what property (g) needs — it parks a real second thread inside a delivery.
 add_executable(reclaim_test reclaim_test.cpp)
 target_link_libraries(reclaim_test PRIVATE libtracer Threads::Threads)
 libtracer_test_warnings(reclaim_test)

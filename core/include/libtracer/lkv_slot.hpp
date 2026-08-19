@@ -598,6 +598,22 @@ inline void retire(lists_t& l, node_t* n) {
  * ADR-0039 §Erratum 8 requires the resource to outlive every thread that wrote through it
  * **and** a domain quiescence point. Where that holds, "or at the next scan" is sufficient;
  * where it does not, no probe ordering here would have saved it.
+ *
+ * ## Who supplies the "next domain scan" (#897, #1376)
+ *
+ * Under `%tr::graph::reclaim_qsbr_t` that scan stops being the embedder's obligation and becomes
+ * ROUTINE: every participant calls this function with a null node at its own quiescent point —
+ * each outermost dispatch exit, and @ref tr::graph::graph_t::thread_quiescent for a thread that
+ * displaces nodes without ever dispatching. So a writer thread drains ITS OWN list on ITS OWN
+ * thread, which is exactly the half of ADR-0080 §"#897 maps onto the same seam" that policy is
+ * asked to discharge: `%~hazard_slot_t` never has to reach across a still-live other thread's
+ * private `%lists_t`, the thing the code before it tried and failed structurally to do.
+ *
+ * Note what that does NOT require, because it is the point: **nothing in this file changes, and
+ * no `%store()`-path atomic is added.** The early return above is what makes the self-drain free
+ * on a thread that parked nothing, so putting it at a quiescent point costs a publish nothing.
+ * Under the two per-thread policies the guarantee is unchanged and stays "at slot death or at
+ * the next domain scan", with the scan still owed by ADR-0039 §Erratum 8's lifetime rule.
  */
 inline void retire_and_flush(node_t* n) {
     registry_t& r = registry();
