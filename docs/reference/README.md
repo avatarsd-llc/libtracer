@@ -59,6 +59,7 @@ The toctrees at the foot of this page are the order of record: the table below c
 | [18-composition-over-the-network.md](18-composition-over-the-network.md) | L4 | What the graph model becomes when it crosses a node boundary: the transport-vertex mount as the whole mechanism; what a remote vertex is (a path, never a replica, proxy or handle); what survives the boundary unchanged and what necessarily differs (location-dependent addresses, the local/remote creation asymmetry, the mount-routed-only wire subscribe door, no cross-node atomicity or ordering); the three failure modes composition introduces — partition, late join, retire. |
 | [19-transports-are-vertices.md](19-transports-are-vertices.md) | L4 | The transport-as-vertex commitment: what is a vertex on the net plane (`/net`, `/net/<module>`, the creator endpoint, the connection vertex) and what deliberately is not (bus peers, connection config, `:stats`); what uniform addressing, lifecycle and introspection buy; what they cost (path bytes per hop, two lifecycles, structural vertices, control-plane work on a receive thread, a peer-drivable creation door, no reconfiguration door); and the standing leanness rule that keeps `conn_settings_t` free of kind-private fields. |
 | [20-bindings-map.md](20-bindings-map.md) | cross-cutting | The map of every implementation and package in this repository: the core / port / adapter distinction and why the directory does not tell you which is which; the three native cores (C++ golden, Rust `no_std` codec, TypeScript codec plus a client and two transports) and exactly what each one is missing; the ports and adapters (ESP-IDF, PlatformIO, ESPHome, Arduino, `rmw_tracer`); the four mechanisms that hold the cores to one wire format, and what none of them covers; a routing table for picking one. |
+| [21-ros2-integration.md](21-ros2-integration.md) | L4/L5 | The ROS 2 story in one place: `rmw_tracer` as an RMW implementation rather than a bridge; the concept mapping that is one-for-one (topic ↔ path, CDR message ↔ opaque VALUE, `view_t` ↔ loaned message); the seven places the ROS/DDS model and the libtracer model genuinely differ (path-as-route, producer-held and ACL-gated subscribe, no per-subscription queue, no create-by-remote-write, terminate-at-target plus subtree subscriptions, no discovery flood, ACL-decided fan-in); the settled QoS direction (rmw-local emulation, `SUBSCRIBER.qos_settings` as the only sanctioned carrier, deadline/liveliness deferred to one RFC shared with time-aware delivery); and what is built today versus what is direction. |
 
 > **File numbers are authoring order, not significance order.** 00–07 is the original layer-agnostic narrative (overview → wire → graph → addressing → flows → TLV registry → user data → host embedding); 08–09 are the substrate layers, appended when the substrate split into its own pair of documents; 10 and above are cross-cutting or later topics. Layer numbers (L0..L5) are bottom-up by architecture and bear no relation to file order. The `NN` prefixes are the citation key used throughout the repository and in source comments, so they are stable even where the narrative order has moved on.
 
@@ -177,4 +178,12 @@ Transports are vertices <19-transports-are-vertices>
 :maxdepth: 1
 
 Bindings map <20-bindings-map>
+```
+
+```{toctree}
+:caption: Ecosystem integrations
+:hidden:
+:maxdepth: 1
+
+ROS 2 integration (rmw_tracer) <21-ros2-integration>
 ```
