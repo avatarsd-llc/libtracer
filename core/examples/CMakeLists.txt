@@ -136,3 +136,39 @@ if(LIBTRACER_REGISTER_GRAPH_EXAMPLE_TESTS)
         add_test(NAME example_${example} COMMAND ${example})
     endforeach()
 endif()
+
+# The subscriptions domain (#1383) — one concept per target, no threads, no net plane.
+# Declared as a list rather than seven near-identical blocks: they differ only in name,
+# and a new one is then a single line rather than a copied block that can drift.
+#
+# Every one of them builds under EVERY binding, including `sub_unsubscribe_from_dispatch`,
+# whose subject `reclaim_strict_t` forbids. There is deliberately no exclusion for it here:
+# the reclamation policy is a C++ type bound in `config_override.hpp`, not a CMake variable
+# (ADR-0068), so CMake cannot see which one is in force — the example follows the binding
+# with `if constexpr` and skips at run time, exactly as `reclaim_test` does.
+set(LIBTRACER_SUBSCRIPTION_EXAMPLES
+    sub_callback                    # subscribe to one vertex; the delivery-callback contract
+    sub_subtree                     # one edge covers a whole subtree (RFC-0005)
+    sub_terminal_delivery           # delivery terminates at the target (RFC-0007)
+    sub_durability_latch            # the per-subscription delivery policy (RFC-0022 §3.A)
+    sub_unsubscribe                 # unsubscribe + the release hook (ADR-0080)
+    sub_unsubscribe_from_dispatch   # the re-entrant case and its deferred grace point
+    sub_retire                      # retiring a producer drops its subscriptions (RFC-0009 §B)
+)
+foreach(example IN LISTS LIBTRACER_SUBSCRIPTION_EXAMPLES)
+    add_executable(${example} ${example}.cpp)
+    target_link_libraries(${example} PRIVATE libtracer)
+    if(MSVC)
+        target_compile_options(${example} PRIVATE /W4)
+    else()
+        target_compile_options(${example} PRIVATE -Wall -Wextra)
+    endif()
+endforeach()
+
+# Same alias as the graph block above, and for the same reason: a second bare spelling of
+# the test guard anywhere in this file would make the line-87 citation anchor ambiguous.
+if(LIBTRACER_REGISTER_GRAPH_EXAMPLE_TESTS)
+    foreach(example IN LISTS LIBTRACER_SUBSCRIPTION_EXAMPLES)
+        add_test(NAME example_${example} COMMAND ${example})
+    endforeach()
+endif()

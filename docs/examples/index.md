@@ -22,6 +22,13 @@ verbatim from that file, so it cannot drift from what actually compiles.
 | [Retirement](graph-retire.md) | L4 graph | logically absent, not erased: `NOT_FOUND`, live handles, the generation stamp |
 | [A HANDLER vertex](graph-handler-vertex.md) | L4 graph | the role decides what a write means: `on_write` executes, `on_read` computes |
 | [A STREAM vertex](graph-stream.md) | L4 graph | the bounded history ring and its owner-declared depth (no wire surface) |
+| [Subscribe to one vertex](sub-callback.md) | L4 graph | `subscribe(src, callable)`, the `subscription_t` handle, and the inline delivery contract |
+| [One edge, a whole subtree](sub-subtree.md) | L4 graph | RFC-0005 vertical bubbling; `own_subs` vs `has_subscribers`; provenance rides in the data |
+| [Delivery terminates at the target](sub-terminal-delivery.md) | L4 graph | RFC-0007: `A → B` plus `B → C` does not relay; a cycle cannot loop |
+| [The delivery policy is per subscription](sub-durability-latch.md) | L4 graph | RFC-0022 §3.A `delivery_policy_t`; `durability_request` latches the last value on join |
+| [Unsubscribe & the release hook](sub-unsubscribe.md) | L4 graph | `unsubscribe(sub, release)`; when the `{fn, ctx}` pair is safe to free |
+| [Unsubscribing from inside a delivery](sub-unsubscribe-from-dispatch.md) | L4 graph | ADR-0080's deferred grace point; `reclaim_local` vs `reclaim_strict` |
+| [Retire drops a producer's subscriptions](sub-retire.md) | L4 graph | RFC-0009 §B re-virginize; what survives a retire, and what liveness does not do yet |
 
 The toctree below is the order of record; this table adds the layer and the summary.
 Each example's layer column names the module that owns the types it uses — the
@@ -87,4 +94,11 @@ Write-creates <graph-write-creates>
 Retirement <graph-retire>
 A HANDLER vertex <graph-handler-vertex>
 A STREAM vertex <graph-stream>
+Subscribe to one vertex <sub-callback>
+One edge, a whole subtree <sub-subtree>
+Delivery terminates at the target <sub-terminal-delivery>
+The delivery policy is per subscription <sub-durability-latch>
+Unsubscribe & the release hook <sub-unsubscribe>
+Unsubscribing from inside a delivery <sub-unsubscribe-from-dispatch>
+Retire drops a producer's subscriptions <sub-retire>
 ```
