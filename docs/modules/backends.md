@@ -119,6 +119,17 @@ This page documents only the API.
 :members:
 ```
 
+The `std::pmr` adapter — one direction only, and outside the library. It lets an
+embedder point a `std::pmr` container at an injected `block_source_t`; it does **not**
+make that container failable. See
+[the memory substrate reference](../reference/09-memory-substrate.md) for when to reach
+for it and when to migrate the store instead.
+
+```{doxygenclass} tr::mem::source_resource_t
+:members:
+:protected-members:
+```
+
 ```{doxygenstruct} tr::mem::sync_none_t
 :members:
 ```
@@ -259,6 +270,12 @@ classDiagram
 - **A `bump_source_t` buffer is not a hard bound by default.** Its upstream defaults to
   `heap_source()`, so overflow spills to the platform heap. Passing `null_source()` as
   the upstream is what makes the buffer the limit and turns overflow into a rejection.
+- **`source_resource_t` is placement, not failability.** The `std::pmr` adapter draws its
+  bytes from an injected `block_source_t`, but `std::pmr`'s only exhaustion signal is a
+  throw — so its boundary is `std::bad_alloc`, and `std::abort()` under `-fno-exceptions`.
+  Do not move a peer-provoked store onto a `std::pmr` container because the adapter
+  exists; migrate it onto `block_array_t` instead. The adapter runs one direction only,
+  and the reverse (a `memory_resource` used *as* a `block_source_t`) must never be added.
 - **`block_source_t::release` is sized.** The `bytes` and `align` passed to `release`
   must match the originating `try_alloc` call — that is what lets a bump or pool source
   carry no per-block header. A mismatched pair corrupts the source's accounting rather
