@@ -243,6 +243,37 @@ int main() {
               "on_prefix: ACCEPT carries a segment holding the frame");
     }
 
+    // 8b. (#934) The cap BOUNDARY, both sides, pinned explicitly. `len == cap` is
+    //     accepted and `len == cap + 1` is malformed — the off-by-one this pair
+    //     exists to catch is invisible to case 8, which only ever probes `cap + 1`.
+    //     The backend's slot is deliberately WIDER than the cap so DROP cannot stand
+    //     in for either answer: with `max_seg == cap` the at-cap side would still
+    //     pass while the framer silently shed the frame instead of delivering it.
+    //     Flipping `on_prefix`'s comparison to `>=` fails the ACCEPT half; dropping
+    //     the comparison entirely fails the MALFORMED half.
+    {
+        using framer_t = tr::net::length_prefix_framer;
+        using kind_t = framer_t::prefix_decision_t::kind_t;
+        constexpr std::size_t kCap = 1000;
+        toggle_backend_t be;
+        be.max_seg = kCap * 4;  // wider than the cap: DROP is off the table here
+
+        check(framer_t::effective_cap(be, kCap) == kCap,
+              "effective_cap: the caller ceiling is the bound while the backend is wider");
+        check(framer_t::effective_cap(be, be.max_seg) == be.max_seg,
+              "effective_cap: equal seams resolve to that one value (no off-by-one)");
+
+        auto at_cap = framer_t::on_prefix(be, kCap, kCap);
+        check(at_cap.kind == kind_t::ACCEPT, "on_prefix: len == the cap is ACCEPTED, not refused");
+        check(at_cap.seg && at_cap.seg->bytes.size() >= kCap,
+              "on_prefix: the at-cap frame's segment holds exactly the declared length");
+
+        check(framer_t::on_prefix(be, kCap, kCap - 1).kind == kind_t::ACCEPT,
+              "on_prefix: one byte under the cap is ACCEPTED");
+        check(framer_t::on_prefix(be, kCap, kCap + 1).kind == kind_t::MALFORMED,
+              "on_prefix: ONE byte over the cap is MALFORMED (refuse-and-close)");
+    }
+
     // 9. configured_cap — the :settings max_frame resolution every framed transport
     //    assigns through — is TIGHTEN-ONLY against kDefaultMaxFrame (#1035): a
     //    config-writable key must not raise the ingress cap.

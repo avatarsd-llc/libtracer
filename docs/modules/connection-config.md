@@ -140,7 +140,7 @@ factory receives the parsed record alongside the raw config TLV.
 | `port` | `VALUE` u16 | both | absent | Peer port on a DIAL, bind port on a LISTEN. On a **DIAL**, `0` answers `TYPE_MISMATCH` in the same five socket factories — there is no such thing as dialling the ephemeral port. On a **LISTEN** the *key* is what is required, not a nonzero value: an **absent** key answers `TYPE_MISMATCH` (the config is missing a required field), while an explicit `port = 0` is the **EPHEMERAL request** — the OS picks a free bind port and the grant is read back off the constructed link with `local_port()` (#1362). Before that the LISTEN arm rejected `0` as if it were an omitted key, which conflated "you forgot the port" with "you do not care which port" and left an in-band-created listener no way to ask for one. `can` never reads it. |
 | `role` | `VALUE` u8 | both | the child type's default | `0` = DIAL, non-zero = LISTEN. Overrides the default the catalog type carries (`client` = DIAL, `listener` = LISTEN), and selects which declared module the connection mounts under. |
 | `keepalive` | `VALUE` u32 | both | `0` | Keepalive interval in ms. **Nothing reads it**: `conn_settings_t::keepalive_ms` has no consumer outside the parse that fills it. UDP is connectionless, TCP has its own, WS handles PING/PONG at the protocol layer. |
-| `max_frame` | `VALUE` u32 | both | `0` | Per-connection inbound frame cap in bytes, honoured by five of the six kinds — `tcp`, `quic` and `webtransport` read it off their u32 length prefix, `ws` off the RFC 6455 header, `udp` off the received datagram's length (one datagram = one frame). `0` = the 16 MiB protocol default on the framed kinds, and `udp_transport_t::kMaxDatagram` (64 KiB) on `udp`. On the four framed kinds the effective cap is `min(configured value, the injected backend's `max_segment_size()`)` and it does **not** only tighten: the default heap backend reports `SIZE_MAX`, so on a host a value above 16 MiB genuinely RAISES the ingress bound (#1035). On `udp` it can only tighten — a datagram cannot exceed 64 KiB, so a larger configured value is inert. `can` (its own fragmentation) does not read it. |
+| `max_frame` | `VALUE` u32 | both | `0` | Per-connection inbound frame cap in bytes, honoured by five of the six kinds — `tcp`, `quic` and `webtransport` read it off their u32 length prefix, `ws` off the RFC 6455 header, `udp` off the received datagram's length (one datagram = one frame). `0` = the 16 MiB protocol default on the framed kinds, and `udp_transport_t::kMaxDatagram` (64 KiB) on `udp`. It **only ever tightens**, on every kind that reads it. On the four framed kinds each transport resolves the configured value through `length_prefix_framer::configured_cap` — `0` → the 16 MiB default, otherwise `min(value, 16 MiB)` — so a config-writable key can narrow what the node buffers off the wire but never widen it (#1035); the effective cap is then further bounded by the injected backend's `max_segment_size()`. On `udp` it can only tighten for a different reason — a datagram cannot exceed 64 KiB, so a larger configured value is inert. A declared length **over** the cap is refuse-and-close on the framed kinds (`malformed_rx()`, then the link is torn down: a desynced stream cannot be re-framed) and refuse-and-continue on `udp` (`malformed_rx()`, socket unaffected — datagrams need no resync). A length **at** the cap is legal and delivered whole. `can` (its own fragmentation) does not read it. |
 | `backoff` | `VALUE` u32 | DIAL | `0` | Self-heal retry interval in ms (RFC-0014 §4). **Parsed but dormant** — the liveness engine that would consume it is not implemented. |
 | `connect_timeout` | `VALUE` u32 | DIAL | `0` | How long one dial attempt waits for `UP`, in ms (RFC-0014 §4). **Parsed but dormant**, same reason. |
 
@@ -326,14 +326,15 @@ out of the raw config TLV it already receives, and in a block on this page. Not 
   transport in the tree reads the field.
 - **`backoff` and `connect_timeout` are dormant.** They parse, they land in
   `conn_settings_t`, and nothing reads them yet.
-- **`max_frame` does not only tighten *on the four framed kinds*.** Each of `tcp`,
-  `quic`, `webtransport` and `ws` REPLACES the 16 MiB default with whatever non-zero
-  value it is given, and the only other bound is the injected backend's
-  `max_segment_size()` — `SIZE_MAX` on the default heap backend. So on a host,
-  `max_frame = 32 MiB` accepts a 20 MiB frame the default tears down as malformed.
-  Treat it as an ingress bound you can loosen, not just clamp (#1035). `udp` is the
-  exception, and not by policy: a datagram cannot exceed 64 KiB, so a value above that
-  is simply inert there.
+- **`max_frame` cannot be used to buy headroom.** It is TIGHTEN-ONLY: every framed kind
+  resolves it through `length_prefix_framer::configured_cap`, which clamps a non-zero
+  value to the 16 MiB protocol default, so `max_frame = 32 MiB` still tears down a
+  20 MiB frame as malformed (#1035). It is an ingress bound you can clamp, never loosen —
+  a config-writable key must not be able to widen what an unauthenticated peer can make
+  the node buffer. `udp` tightens too, for its own reason: a datagram cannot exceed
+  64 KiB, so a value above that is simply inert there. If a deployment genuinely needs
+  larger frames, the 16 MiB ceiling is a source-level constant
+  (`length_prefix_framer::kDefaultMaxFrame`), not a knob.
 - **`peer_named` is off by default**, so a SPEC-created `tcp`/`ws` listener is a
   broadcast link and one request over it draws one reply *per peer*.
 - **The builder types the universal keys, not the kind-private ones.**

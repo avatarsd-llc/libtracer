@@ -307,6 +307,10 @@ void test_view_pool_exhaustion() {
  *    never delivered, counted in `malformed_rx()`, and the socket still serves the next one;
  *  - the RX segment is drawn at the cap, not at `kMaxDatagram` — so a tight cap is a RAM
  *    lever on a bounded node, not only an admission rule.
+ *
+ * #934 adds the BOUNDARY's other side on both paths: a datagram of EXACTLY the cap is the
+ * largest legal one and lands. Refusing only `kCap + 1` is satisfied by an off-by-one
+ * `n >= frame_cap` too, which would silently cost a conforming peer its largest frame.
  */
 void test_settings_max_frame() {
     std::printf("UDP transport — a :settings max_frame bounds the accepted datagram (#926):\n");
@@ -372,9 +376,36 @@ void test_settings_max_frame() {
               "the RX segment was drawn at the configured cap, not at kMaxDatagram");
     }
 
+    // ----- the BOUNDARY, owning path (#934): a datagram of EXACTLY the cap is the largest
+    //       legal one and must LAND, next to the kCap + 1 refusal above. Only the pair
+    //       distinguishes the shipped `n > frame_cap` from an off-by-one `n >= frame_cap`,
+    //       and this is the boundary the deliberate `alloc_cap = min(rx_cap, frame_cap + 1)`
+    //       sizing exists to serve: a segment bounded at the cap itself would truncate the
+    //       at-cap datagram before its length could be judged (#1074).
+    const std::uint64_t malformed_before_boundary = b.malformed_rx();
+    const std::vector<std::byte> exactly(kCap, std::byte{0xDD});
+    a.send(std::span<const std::byte>(exactly));
+    check(wait_until(
+              [&] {
+                  const std::lock_guard lock(m);
+                  return lens.size() >= 2;
+              },
+              3s),
+          "a datagram of EXACTLY the cap is delivered, not refused (owning path)");
+    {
+        const std::lock_guard lock(m);
+        if (lens.size() >= 2) check(lens.back() == kCap, "and arrives whole, all kCap bytes of it");
+    }
+    check(b.malformed_rx() == malformed_before_boundary, "an at-cap datagram counts no refusal");
+    check(b.dropped_rx() == 0, "and no backpressure drop");
+
     // ----- the borrowed path: no segment is involved, and the cap still holds. -----
     std::atomic<int> spans{0};
-    auto span_rx = [&spans](std::span<const std::byte>) { spans.fetch_add(1); };
+    std::atomic<std::size_t> last_span_len{0};
+    auto span_rx = [&](std::span<const std::byte> f) {
+        last_span_len.store(f.size(), std::memory_order_relaxed);
+        spans.fetch_add(1);
+    };
     tr::net::udp_transport_t d(0, "", 0, &tr::mem::heap_backend(), kCap);
     tr::net::udp_transport_t c(0, "127.0.0.1", d.local_port());
     check(c.ok() && d.ok(), "the borrowed-path socket pair bound");
@@ -388,6 +419,23 @@ void test_settings_max_frame() {
     c.send(std::span<const std::byte>(under));
     check(wait_until([&] { return spans.load() > 0; }, 3s),
           "an under-cap datagram still reaches the span receiver");
+
+    // ----- and the same boundary on the borrowed path (#934). -----
+    const std::uint64_t span_malformed_at_cap = d.malformed_rx();
+    c.send(std::span<const std::byte>(exactly));
+    check(wait_until([&] { return spans.load() > 1; }, 3s),
+          "a datagram of EXACTLY the cap reaches the span receiver too (borrowed path)");
+    check(last_span_len.load(std::memory_order_relaxed) == kCap,
+          "and the borrowed span is the whole kCap bytes, not one short");
+    check(d.malformed_rx() == span_malformed_at_cap,
+          "the at-cap datagram counted no refusal on the borrowed path either");
+
+    // The refusal side, restated one byte over on this path: the pair, not the far-over
+    // datagram alone, is what an off-by-one would fail.
+    c.send(std::span<const std::byte>(just_over));
+    check(wait_until([&] { return d.malformed_rx() > span_malformed_at_cap; }, 3s),
+          "and ONE byte over it is still refused (borrowed path)");
+    check(spans.load() == 2, "nothing over the cap was handed to the span receiver");
 }
 
 /**
