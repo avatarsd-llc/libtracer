@@ -26,6 +26,31 @@
  * (the RFC-0004 §E.1 self-heal, reached only by an unknown-label COMPACT). Each scenario
  * also carries a positive control, so a "fix" that quietly stopped dispatching would fail
  * rather than pass by silence.
+ *
+ * @par Why no SHARE of dispatches is asserted, only that some landed (#1380)
+ * There used to be a `kFloor = kIters / 50` here and a "fired on a large share of frames"
+ * check, and the share it named was never measured — it was a round fraction, and it landed
+ * exactly on the observable: the aarch64 leg scored 3870 against a floor of 4000 and
+ * reddened an unrelated PR. That is not a marginal bar, it is a bar placed at the value it
+ * is judging. The share is not a property of the router either. The flipper publishes
+ * back-to-back for the whole window — which is what makes the pre-fix tear reproducible —
+ * and a slot under a publish reads as EMPTY by design, so what fraction of dispatches
+ * survive is decided by the ratio between the cost of one `set` and the cost of the loop
+ * branch between two of them. That ratio is a property of the MICROARCHITECTURE: on
+ * x86-64's TSO the release fence inside `set` is free and the share is tens of percent; on
+ * aarch64 it is a real `dmb ish` and the same code legitimately swallows fifty times more.
+ * Asserting a majority made this test flaky at ~12 % on the stale path; asserting 2 % moved
+ * the flake to the other leg. So the verdict is the torn-pair invariant alone, plus the two
+ * DETERMINISTIC positive controls (every frame still forwarded / NACKed back) and a
+ * non-vacuity check that a sink was reached at all. The share itself is PRINTED, which is
+ * the number a human reads when a host looks degenerate.
+ *
+ * @par The `armed` latch
+ * Non-vacuity gets a structural half as well: both threads wait on `go`, so nothing stopped
+ * the pump from running its whole storm before the flipper's first publish and scoring a
+ * legitimate zero. The flipper now installs one sink and announces it, and the pump does not
+ * send its first frame until it sees that — so the storm always runs against an installed
+ * sink, for a reason that has nothing to do with the scheduler.
  */
 
 #include <atomic>
@@ -104,19 +129,8 @@ class counting_link_t : public transport_t {
     std::size_t sent_ = 0;
 };
 
+/** @brief Frames each storm pumps through the router. */
 constexpr int kIters = 200000;
-
-/**
- * @brief How many dispatches must land for the torn-pair verdict to mean anything.
- *
- * Deliberately not "most frames". The flipper here publishes back-to-back for the whole
- * window — which is what makes the pre-fix tear reproducible — and a slot under a publish
- * reads as EMPTY by design, so a continuous setter storm legitimately swallows a large and
- * variable share of dispatches. Asserting a majority made this test flaky at ~12% on the
- * stale path. The number that matters is that tens of thousands of dispatches DID run and
- * every one of them was handed its own context; the exact share is printed, not asserted.
- */
-constexpr long kFloor = kIters / 50;
 
 /**
  * @brief The raw-frame observer: flipped from one thread while frames flow on another.
@@ -136,6 +150,7 @@ void raw_sink_flip_race() {
         b_fwd(fwd_op_t::READ, b_path({"up", "sensor"}), b_path({"reply-ep"}));
 
     std::atomic<bool> go{false};
+    std::atomic<bool> armed{false};
     std::atomic<bool> stop{false};
     // The flipper runs for as long as frames flow, NOT for a fixed count: a forward hop
     // costs far more than a `set`, so a counted flipper finishes in the first few percent
@@ -144,6 +159,10 @@ void raw_sink_flip_race() {
     std::thread flipper([&] {
         while (!go.load(std::memory_order_acquire)) {
         }
+        // Arm with A installed and say so, so the storm never runs against an empty slot
+        // for a reason that has nothing to do with the seam under test.
+        router.on_raw(&raw_a, &a);
+        armed.store(true, std::memory_order_release);
         while (!stop.load(std::memory_order_relaxed)) {
             router.on_raw(&raw_a, &a);
             router.on_raw(&raw_b, &b);
@@ -151,6 +170,8 @@ void raw_sink_flip_race() {
     });
     std::thread pump([&] {
         while (!go.load(std::memory_order_acquire)) {
+        }
+        while (!armed.load(std::memory_order_acquire)) {
         }
         for (int i = 0; i < kIters; ++i) router.on_frame("cli", frame);
         stop.store(true, std::memory_order_relaxed);
@@ -162,9 +183,11 @@ void raw_sink_flip_race() {
     const long hits = a.hits.load() + b.hits.load();
     std::printf("    (%ld of %d frames reached a sink)\n", hits, kIters);
     // Positive control: the storm must not have cost the router its day job, and the
-    // observer must actually have observed — a sink that never fired proves nothing.
+    // observer must actually have observed — a sink that never fired proves nothing. The
+    // SHARE is printed above, never asserted; see the file header for why.
     check(up.sent() == static_cast<std::size_t>(kIters), "every frame still forwarded");
-    check(hits > kFloor, "the raw observer fired on a large share of frames");
+    check(hits > 0,
+          "the raw observer was reached during the storm (the torn check is not vacuous)");
     check(g_torn.load() == 0, "no sink was handed the other sink's context");
 }
 
@@ -188,10 +211,13 @@ void stale_sink_flip_race() {
 
     const long torn_before = g_torn.load();
     std::atomic<bool> go{false};
+    std::atomic<bool> armed{false};
     std::atomic<bool> stop{false};
     std::thread flipper([&] {
         while (!go.load(std::memory_order_acquire)) {
         }
+        router.on_stale_label(&stale_a, &a);
+        armed.store(true, std::memory_order_release);
         while (!stop.load(std::memory_order_relaxed)) {
             router.on_stale_label(&stale_a, &a);
             router.on_stale_label(&stale_b, &b);
@@ -199,6 +225,8 @@ void stale_sink_flip_race() {
     });
     std::thread pump([&] {
         while (!go.load(std::memory_order_acquire)) {
+        }
+        while (!armed.load(std::memory_order_acquire)) {
         }
         for (int i = 0; i < kIters; ++i) router.on_frame("in", frame);
         stop.store(true, std::memory_order_relaxed);
@@ -210,7 +238,8 @@ void stale_sink_flip_race() {
     const long hits = a.hits.load() + b.hits.load();
     std::printf("    (%ld of %d frames reached a sink)\n", hits, kIters);
     check(in.sent() == static_cast<std::size_t>(kIters), "every stale label still NACKed back");
-    check(hits > kFloor, "the stale observer fired on a large share of frames");
+    check(hits > 0,
+          "the stale observer was reached during the storm (the torn check is not vacuous)");
     check(g_torn.load() == torn_before, "no sink was handed the other sink's context");
 }
 

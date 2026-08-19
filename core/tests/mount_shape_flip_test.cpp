@@ -40,6 +40,7 @@
  */
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -124,6 +125,29 @@ std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
 constexpr int kRebinds = 60000;
 
 /**
+ * @brief How long the rebind storm waits for its reader to be inside the loop (#1378).
+ *
+ * A bound, not a timing assumption. Both storms below are BOUNDED (`kRebinds` rebinds) while
+ * their reader spins `while (!stop)`, so nothing stopped the storm from finishing and
+ * setting `stop` before the reader's first iteration on an oversubscribed host — and the
+ * instrument controls ("the reader sampled the slot at all" / "the forwarder ran at all")
+ * would then report a scheduling accident as a defect. Each reader now takes one
+ * UNCONDITIONAL sample and announces it before the storm is allowed to start. The deadline
+ * keeps a host that genuinely cannot schedule the reader from hanging the suite; the
+ * controls are what report that.
+ */
+constexpr auto kReaderLatchWait = std::chrono::seconds(2);
+
+/**
+ * @brief Block until @p started, or until @ref kReaderLatchWait elapses; then storm anyway.
+ */
+void await_reader(const std::atomic<bool>& started) {
+    const auto deadline = std::chrono::steady_clock::now() + kReaderLatchWait;
+    while (!started.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::yield();
+}
+
+/**
  * @brief GUARD 1 — a slot's egress snapshot must never disagree with itself.
  *
  * The reader samples the slot exactly as the forward descent does and asks the link it just
@@ -145,6 +169,7 @@ void shape_snapshot_is_coherent() {
     if (slot == nullptr) return;
 
     std::atomic<bool> go{false};
+    std::atomic<bool> started{false};
     std::atomic<bool> stop{false};
     std::atomic<std::uint64_t> samples{0};
     std::atomic<std::uint64_t> incoherent{0};
@@ -156,23 +181,28 @@ void shape_snapshot_is_coherent() {
         std::uint64_t n = 0;
         std::uint64_t bad = 0;
         std::uint64_t hot = 0;
-        while (!stop.load(std::memory_order_relaxed)) {
+        const auto sample = [&] {
             const child_registry_t::egress_t eg = slot->egress();
             ++n;
-            if (eg.link == nullptr) continue;
+            if (eg.link == nullptr) return;
             const bool really_a_bus = eg.link->bus() != nullptr;
             if (really_a_bus != eg.multi_peer) {
                 ++bad;
                 // The DANGEROUS half: a bus link the descent would treat as directed.
                 if (really_a_bus && !eg.multi_peer) ++hot;
             }
-        }
+        };
+        // One unconditional sample before `stop` is ever consulted, announced to the storm.
+        sample();
+        started.store(true, std::memory_order_release);
+        while (!stop.load(std::memory_order_relaxed)) sample();
         samples.store(n, std::memory_order_relaxed);
         incoherent.store(bad, std::memory_order_relaxed);
         misroutable.store(hot, std::memory_order_relaxed);
     });
 
     go.store(true, std::memory_order_release);
+    await_reader(started);
     for (int i = 0; i < kRebinds; ++i) {
         if ((i & 1) == 0) {
             (void)router.add_child("m/a", bus);
@@ -188,7 +218,9 @@ void shape_snapshot_is_coherent() {
                 static_cast<unsigned long long>(samples.load(std::memory_order_relaxed)),
                 static_cast<unsigned long long>(incoherent.load(std::memory_order_relaxed)),
                 static_cast<unsigned long long>(misroutable.load(std::memory_order_relaxed)));
-    // The instrument control: a reader that never sampled proves nothing.
+    // The instrument control: a reader that never sampled proves nothing. Structural, not
+    // statistical — the reader is joined above and its first sample cannot be cut short by
+    // `stop` (#1378).
     check(samples.load(std::memory_order_relaxed) > 0, "the reader sampled the slot at all");
     check(misroutable.load(std::memory_order_relaxed) == 0,
           "no sample pairs a BUS link with a point-to-point shape (#882)");
@@ -220,6 +252,7 @@ void forward_never_broadcasts() {
         tr::testing::b_fwd(fwd_op_t::READ, b_path({"m", "a", "leaf"}), b_path({"reply-ep"}));
 
     std::atomic<bool> go{false};
+    std::atomic<bool> started{false};
     std::atomic<bool> stop{false};
     std::atomic<std::uint64_t> forwards{0};
 
@@ -227,6 +260,10 @@ void forward_never_broadcasts() {
         while (!go.load(std::memory_order_acquire)) {
         }
         std::uint64_t n = 0;
+        // One unconditional forward before `stop` is ever consulted, announced to the storm.
+        router.on_frame("in", frame);
+        ++n;
+        started.store(true, std::memory_order_release);
         while (!stop.load(std::memory_order_relaxed)) {
             router.on_frame("in", frame);
             ++n;
@@ -235,6 +272,7 @@ void forward_never_broadcasts() {
     });
 
     go.store(true, std::memory_order_release);
+    await_reader(started);
     for (int i = 0; i < kRebinds; ++i) {
         if ((i & 1) == 0) {
             (void)router.add_child("m/a", bus);
@@ -253,7 +291,9 @@ void forward_never_broadcasts() {
                 static_cast<unsigned long long>(peer.sends.load(std::memory_order_relaxed)),
                 static_cast<unsigned long long>(fan));
     // Instrument control: a storm that forwarded nothing, or one where no forward ever
-    // egressed, would report zero broadcasts for the wrong reason.
+    // egressed, would report zero broadcasts for the wrong reason. Structural, not
+    // statistical — the first forward happens before `stop` can be consulted (#1378), and
+    // it egresses over the p2p link the slot was bound to before the storm started.
     check(forwards.load(std::memory_order_relaxed) > 0, "the forwarder ran at all");
     check(
         p2p.sends.load(std::memory_order_relaxed) + peer.sends.load(std::memory_order_relaxed) > 0,
