@@ -70,6 +70,14 @@ their test registrations (`core/examples/CMakeLists.txt:87-96`). The option defa
 `ctest --test-dir build -R example_` runs **two fewer** — a pass with two examples
 absent rather than skipped, which no ctest output distinguishes from a clean full run.
 
+One target is conditional at **run** time rather than build time, which is a different hazard
+with the same ending. [`sub_unsubscribe_from_dispatch`](sub-unsubscribe-from-dispatch) demonstrates
+unsubscribing from inside a delivery — a shape `reclaim_strict_t` forbids. It is always built, but
+under a strict binding it prints `skipped:` and exits `0`, so `ctest` records a **pass for an
+example that demonstrated nothing**. The reclamation policy is bound as plain C++ rather than as a
+CMake option, so neither CMake nor ctest can label that case; the binary announces the bound policy
+on its first line, and that line is the only place the distinction is visible.
+
 The eight `graph_*` targets are pure in-process L4 and are built unconditionally; run them
 together with `ctest --test-dir build -R example_graph_`.
 :::
