@@ -140,6 +140,12 @@ endif()
 # The subscriptions domain (#1383) — one concept per target, no threads, no net plane.
 # Declared as a list rather than seven near-identical blocks: they differ only in name,
 # and a new one is then a single line rather than a copied block that can drift.
+#
+# Every one of them builds under EVERY binding, including `sub_unsubscribe_from_dispatch`,
+# whose subject `reclaim_strict_t` forbids. There is deliberately no exclusion for it here:
+# the reclamation policy is a C++ type bound in `config_override.hpp`, not a CMake variable
+# (ADR-0068), so CMake cannot see which one is in force — the example follows the binding
+# with `if constexpr` and skips at run time, exactly as `reclaim_test` does.
 set(LIBTRACER_SUBSCRIPTION_EXAMPLES
     sub_callback                    # subscribe to one vertex; the delivery-callback contract
     sub_subtree                     # one edge covers a whole subtree (RFC-0005)

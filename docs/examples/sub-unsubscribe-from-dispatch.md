@@ -1,5 +1,18 @@
 # Unsubscribing from inside a delivery (L4 graph)
 
+:::{admonition} Applies to `reclaim_local_t` only
+:class: important
+
+This is the one example whose subject is **policy-dependent**. It demonstrates a shape that
+the default `reclaim_local_t` supports and that `reclaim_strict_t` forbids outright, so it
+runs its body under the default binding and **skips** under `reclaim_strict_t`, printing
+`skipped: this build forbids unsubscribing from inside a delivery` and passing. The policy is
+a build-time type rather than a CMake option ([ADR-0068](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0068-build-configuration-is-plain-cpp-config-header.md)),
+so the target is always built and always linked — it follows the binding with `if constexpr`,
+exactly as `core/tests/reclaim_test.cpp` does for its own re-entrant cases. Every other
+example on this site applies to both policies.
+:::
+
 A subscriber callback that retires its own subscription is the one case where "the edge is
 gone" and "the `{fn, ctx}` pair is dead" are not the same moment: the fan-out that invoked
 the callback is still walking a snapshot that names that pair. The default
@@ -24,8 +37,11 @@ delivery hands control back
   `reclaim_policy_t::kName` so a run says which one it exercised.
 - **`reclaim_strict_t` forbids this shape outright.** It is the opt-in zero-cost mode for a
   deployment that provably never unsubscribes from inside a dispatch; a debug build asserts,
-  an `NDEBUG` build cannot see it. The example makes that a `static_assert` on
-  `kReentrantUnsubscribe` rather than a run-time failure.
+  an `NDEBUG` build cannot see it. The example branches on `kReentrantUnsubscribe` with
+  `if constexpr` and skips its body there — the constant is the portable way to ask "may I
+  do this on this target?", and asking it is the point. Note what it is *not*: an example
+  that does not apply to a binding must skip, never fail to compile, so the branch is a
+  runtime skip rather than a `static_assert`.
 - **The guarantee is stated over one thread's dispatch domain — the NARROW/MCU target.** An
   embedder dispatching from several threads and unsubscribing from another needs a grace
   period spanning every thread. That is `reclaim_qsbr`, ADR-0080's third policy, which is

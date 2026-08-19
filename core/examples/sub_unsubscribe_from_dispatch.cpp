@@ -14,11 +14,15 @@
  * `write()` that started the delivery returns. The retirement itself is immediate: the
  * next fan-out skips the slot.
  *
- * `reclaim_strict_t` forbids this shape outright, which is why the example prints the
- * policy this build bound. Both live in `libtracer/reclaim.hpp`.
+ * `reclaim_strict_t` forbids this shape outright — it debug-asserts on a re-entrant
+ * unsubscribe — so THIS EXAMPLE APPLIES TO `reclaim_local_t` ONLY. Both policies live in
+ * `libtracer/reclaim.hpp`, and the binding is a build-time type, so the example follows it
+ * with `if constexpr` and SKIPS its body where the policy forbids the shape (the same way
+ * `core/tests/reclaim_test.cpp` drops its re-entrant cases). A policy the example does not
+ * apply to must not break the build — every example compiles under every binding.
  *
  * Runs under ctest as `example_sub_unsubscribe_from_dispatch`; it self-checks and returns
- * non-zero on any mismatch.
+ * non-zero on any mismatch. Under `reclaim_strict_t` it prints a skip line and passes.
  */
 
 #include <cstddef>
@@ -67,18 +71,15 @@ void check(bool& ok, bool cond, const char* what) {
     }
 }
 
-// A build that bound `reclaim_strict_t` forbids the shape this example is ABOUT, so say so
-// at compile time rather than failing the smoke test at run time.
-static_assert(tr::graph::reclaim_policy_t::kReentrantUnsubscribe,
-              "this example unsubscribes from inside a delivery; reclaim_strict forbids that");
-
-}  // namespace
-
-int main() {
-    const auto policy = tr::graph::reclaim_policy_t::kName;
-    std::printf("reclamation policy bound by this build: %.*s\n", static_cast<int>(policy.size()),
-                policy.data());
-
+/**
+ * @brief The example proper — retire a subscription from inside its own delivery.
+ *
+ * Written unguarded, because under `reclaim_local_t` every line of it is valid; the ONE
+ * policy branch lives in `main`, so what a reader studies here is the pattern itself.
+ *
+ * @return True when every expectation held.
+ */
+bool run_reentrant_unsubscribe() {
     tr::graph::graph_t g;
     const tr::graph::vertex_handle_t src =
         g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
@@ -97,6 +98,26 @@ int main() {
     check(ok, sink.released, "the hook ran before write() returned");
     check(ok, !sink.released_inside_cb,
           "and not one moment earlier — the fan-out was still walking the snapshot");
+    return ok;
+}
+
+}  // namespace
+
+int main() {
+    const auto policy = tr::graph::reclaim_policy_t::kName;
+    std::printf("reclamation policy bound by this build: %.*s\n", static_cast<int>(policy.size()),
+                policy.data());
+
+    bool ok = true;
+    if constexpr (tr::graph::reclaim_policy_t::kReentrantUnsubscribe) {
+        ok = run_reentrant_unsubscribe();
+    } else {
+        // `reclaim_strict_t` FORBIDS the shape this whole example is about, and debug-asserts
+        // on it — running the body would be asserting that an abort happens. The example is
+        // therefore skipped, not failed, and certainly not made to break the build: it simply
+        // does not apply to this binding. Read it against the default policy.
+        std::printf("skipped: this build forbids unsubscribing from inside a delivery\n");
+    }
     std::printf("RESULT %s\n", ok ? "ok" : "FAILED");
     return ok ? 0 : 1;
 }
