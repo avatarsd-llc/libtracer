@@ -24,7 +24,7 @@ programmatically built tree therefore cannot serialize a length truncated to
 `size & 0xFFFF`; bodies at or under `0xFFFF` are unchanged and `opt.ll` is never
 cleared. Decode failure is one of `FRAME_TRUNCATED`, `FRAME_INVALID`, `FRAME_CRC_FAIL`
 or `TLV_NESTING_TOO_DEEP` — the RFC-0002 registry codes, not a decode-only error
-vocabulary (`core/include/libtracer/frame.hpp:25-30`).
+vocabulary (`core/include/libtracer/frame.hpp:26-31`).
 
 ```{mermaid}
 flowchart TD
@@ -107,7 +107,7 @@ them:
 
 | decoder | inline slots | spill source | the depth bound is |
 | --- | --- | --- | --- |
-| `decode` → owning `tlv_t` | 8 (`core/src/frame.cpp:120`) | the nothrow heap source (`frame.cpp:121`) | the heap — an owning-tree decode allocates there regardless |
+| `decode` → owning `tlv_t` | 8 (`core/src/frame.cpp:126`) | the nothrow heap source (`frame.cpp:127`) | the heap — an owning-tree decode allocates there regardless |
 | `decode_into` → `tlv_arena_t` | 8 (`core/src/tlv_arena.cpp:134`) | the caller's `mem::block_source_t` (`tlv_arena.cpp:135`) | whatever resource the caller injected |
 
 The 8 is the typical FWD nesting (three to four levels) with headroom, not a

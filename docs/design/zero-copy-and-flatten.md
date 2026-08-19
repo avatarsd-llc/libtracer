@@ -140,7 +140,7 @@ correspondingly smaller; that figure has not been compiled here and is not asser
 
 ### 3.2 Why the rope cursor does not remove the arena
 
-`rope_cursor` (`core/include/libtracer/rope_decode.hpp:71`) is a **byte source**. It lets the
+`rope_cursor` (`core/include/libtracer/rope_decode.hpp:72`) is a **byte source**. It lets the
 grammar read fields off a scatter-gather rope by stitching straddling headers a byte at a time and
 feeding the CRC link by link, satisfying the same `Cursor` concept as `span_cursor`. But
 `decode_into` does not only read bytes — it stores structure: a random-accessible `arena_tlv_t`
@@ -179,7 +179,7 @@ deep receive task.
 A stack budget for that task counts four such buffers, not one. The decode arena is the only one
 this document covers; the other three are transport receive and chunk scratch, each a 4096-byte
 `std::array` — `core/src/transport_tcp.cpp:261` (the backpressure drain),
-`core/src/transport_ws.cpp:693` (the WS client's receive loop), and
+`core/src/transport_ws.cpp:704` (the WS client's receive loop), and
 `core/src/posix_endpoint.cpp:652` — the ONE per-chunk scratch both multi-peer servers now
 share, since #871 folded their duplicated poll loops into `slot_server_t::service_peer` (it
 was two buffers, one apiece, before that). They are not decode arenas and carry no structure,
