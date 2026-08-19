@@ -60,6 +60,14 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # `build` is a REQUIRED status check, so a hung step here does not fail a PR — it
+    # blocks every merge behind it for GitHub's 6-hour default. That is not theoretical:
+    # on 2026-08-19 the `Install dependencies` step below wedged twice in one afternoon,
+    # sitting `in_progress` for 56 and 36 minutes with no step progress, while the rest of
+    # the matrix sat green. Both times cancel+rerun cleared it and the rerun passed in ~17
+    # minutes, so the fault is transient and NOT this repo's content. The ceiling exists to
+    # convert "wedged forever" into "red in an hour, retry it".
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -72,8 +80,14 @@ jobs:
           cache: pip
           cache-dependency-path: docs/requirements.txt
       - name: Install dependencies
+        # The step that wedged (see the job-level note). Ten minutes is ~4x its healthy
+        # runtime, so a genuine slow mirror still passes while a wedge fails fast and
+        # names itself, instead of being read as "still running" for hours.
+        timeout-minutes: 10
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update && sudo apt-get install -y doxygen unzip
+          sudo -E apt-get update && sudo -E apt-get install -y --no-install-recommends doxygen unzip
           pip install -r docs/requirements.txt
       - uses: actions/setup-node@v4
         with:
