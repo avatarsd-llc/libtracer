@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0027 |
 | **Title** | Label-switched path compression: minting a per-host path label across the wire |
-| **Status** | **accepted** (2026-08-15; proposed 2026-08-15), maintainer-ratified; comment window waived by default per [GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window" (solo-maintainer clause) and not invoked. The design of §§4–10 was **ruled** in the 2026-08-15 grilling session; this document is its transcription in normative form, not a proposal seeking a direction. **All three §11.1 collisions the draft flagged are RESOLVED at acceptance** — see §11.1 and §16: **collision 1 (vocabulary)** is ruled **(a) qualify**, "**path label**" is ratified as a term distinct from RFC-0004 §E.1's per-link `u16` "label", carried into [RFC-0024](0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §2.1 by **amendment 3**; **collision 2 (generation)** is ruled **saturate-and-retire, NOT wrap** — a slot whose 16-bit generation reaches its maximum saturates and is **retired permanently**, never reused and never wrapped, which preserves RFC-0024 §4.4 rule 3 / §9.3's "MUST saturate, never wrap" at **zero wire cost**; **collision 3 (per-hop state)** is **accepted knowingly** as a recorded decision — RFC-0027 buys per-element degradation and terminus compaction at the price of a per-hop mint table, and the doc set states that trade rather than claiming statelessness on both forms. What remains open is **only the byte layout** (§5.3, deferred pending conformance vectors in the RFC-0014 discipline) and the §12.4 bench gate, which is normative for acceptance of the **implementation**, not of this document. **Amendment 4 (2026-08-15, §5.3.1) rules §5.3 sub-question 1 — the label element is a TLV child of `PATH`, not a tag in RFC-0018's packed segment grammar — and corrects that sub-question's premise: RFC-0018 and this RFC amend the same `PATH` body grammar and are NOT independent. **Amendment 5 (2026-08-15, §5.3.2) settles the wire spelling: RFC-0018's `len == 0` escape record (`00 <kind=0x16> <len=4> <u32>`, 7 B), sub-question 3 ruled NOT admissible as a `path_lookup_key`, and RFC-0018 implements before this RFC's element car. **Amendment 6 (2026-08-15, §5.3.3) rules sub-question 2: one label covers a hop's whole local part (its entire mount run), not one segment — with which §5.3 is CLOSED and no byte-layout question remains open.** Spec, `CONTEXT.md` and code edits land after acceptance, car by car (§12). |
+| **Status** | **accepted** (2026-08-15; proposed 2026-08-15), maintainer-ratified; comment window waived by default per [GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window" (solo-maintainer clause) and not invoked. The design of §§4–10 was **ruled** in the 2026-08-15 grilling session; this document is its transcription in normative form, not a proposal seeking a direction. **All three §11.1 collisions the draft flagged are RESOLVED at acceptance** — see §11.1 and §16: **collision 1 (vocabulary)** is ruled **(a) qualify**, "**path label**" is ratified as a term distinct from RFC-0004 §E.1's per-link `u16` "label", carried into [RFC-0024](0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §2.1 by **amendment 3**; **collision 2 (generation)** is ruled **saturate-and-retire, NOT wrap** — a slot whose 16-bit generation reaches its maximum saturates and is **retired permanently**, never reused and never wrapped, which preserves RFC-0024 §4.4 rule 3 / §9.3's "MUST saturate, never wrap" at **zero wire cost**; **collision 3 (per-hop state)** is **accepted knowingly** as a recorded decision — RFC-0027 buys per-element degradation and terminus compaction at the price of a per-hop mint table, and the doc set states that trade rather than claiming statelessness on both forms. What remains open is **only the byte layout** (§5.3, deferred pending conformance vectors in the RFC-0014 discipline) and the §12.4 bench gate, which is normative for acceptance of the **implementation**, not of this document. **Amendment 4 (2026-08-15, §5.3.1) rules §5.3 sub-question 1 — the label element is a TLV child of `PATH`, not a tag in RFC-0018's packed segment grammar — and corrects that sub-question's premise: RFC-0018 and this RFC amend the same `PATH` body grammar and are NOT independent. **Amendment 5 (2026-08-15, §5.3.2) settles the wire spelling: RFC-0018's `len == 0` escape record (`00 <kind=0x16> <len=4> <u32>`, 7 B), sub-question 3 ruled NOT admissible as a `path_lookup_key`, and RFC-0018 implements before this RFC's element car. **Amendment 6 (2026-08-15, §5.3.3) rules sub-question 2: one label covers a hop's whole local part (its entire mount run), not one segment — with which §5.3 is CLOSED and no byte-layout question remains open.** **Amendment 7 (2026-08-17, §3.4) discharges §12.4's bench gate: the terminus-compaction case is BANKED on measurement, the per-hop claim is narrowed to WIDE nodes, and the label table is opt-in and off by default on NARROW — with which nothing this RFC left open remains open.** Spec, `CONTEXT.md` and code edits land after acceptance, car by car (§12). |
 | **Author(s)** | AvatarSD (maintainer), with AI drafting |
 | **Created** | 2026-08-15 |
 | **Comment window** | waived by default while solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"); invoke explicitly if outside input is wanted. Verified: `docs/implementations.md:13` still reads `_(none yet)_`, so the waiver's revert trigger has not fired. |
@@ -215,15 +215,67 @@ RFC ties the bound path and beats nothing it does not already beat**. The byte c
 - **it needs no request** — no bind-request flag, no `op`-byte masking rule, no round trip spent
   asking. Minting rides a reply that was travelling anyway.
 
-### 3.4 What is deliberately not claimed
+### 3.4 What is claimed on measurement, and what is deliberately not claimed
+
+#### Amendment 7 (2026-08-17, ruled) — the measurement condition is DISCHARGED, and the per-hop claim is narrowed to WIDE
+
+**What this replaces.** Until this amendment, the last bullet of this section read:
+
+> ~~**No measured per-hop figure for this design.** RFC-0024's bound hop measured 261.7 ns/hop
+> against a canonical 304.7 (RFC-0024 §3.4), and a label deref is structurally the same work as a
+> vref deref, but *structurally the same* is an argument, not an instrument. §14 labels it, and
+> §12.4 makes the measurement a condition of acceptance under the same bench protocol RFC-0024 §8
+> fixed.~~
+
+That abstention is **retired**: §12.4's bench gate has run on the completed mint + deref pair and is
+**DISCHARGED** (see §12.4). The instrument now exists, so this RFC states what it measured — and
+what the measurement took away from it, which is the per-hop claim's generality. The evidence is
+`bench/bench_path_label.cpp` and `bench/bench_reply_leg.cpp` under the A/B protocol §12.4 fixes,
+recorded on [#1325](https://github.com/avatarsd-llc/libtracer/issues/1325) (car-5 rulings, car-7
+verdict) and [#1364](https://github.com/avatarsd-llc/libtracer/pull/1364).
+
+**What is CLAIMED, on measurement:**
+
+- **Terminus compaction is BANKED — this is the case, and it is the axis §3.3 nominated as the one
+  that decides.** One hop, width 8, residual depth 1/2/4/8/12: the string spelling costs
+  757 / 820 / 827 / 870 / 905 ns and the label spelling is **flat at 720 ns at every depth**, i.e.
+  **−4.9 % / −12.2 % / −12.9 % / −17.2 % / −20.4 %**, with the frame going 51 / 54 / 60 / 72 / 86 B
+  → **45 B**. String costs **13.45 ns per residual segment**; the label spelling costs **0.00**. All
+  five pairs are **disjoint** in min..max against an A/A null of **≤ 0.42 %** on the reported cells
+  (worst excursion ±1.38 % across all 34 modes). This is precisely what §3.3 said the byte column
+  cannot show: `PATH_REF` **ties** the byte column and still cannot flatten the terminus's residual
+  walk, because one label covers a whole local part (§5.3.3) and so does not grow with the address
+  it replaces.
+- **The per-hop saving is real but WIDE-ONLY, and that is a scope limit on the claim, not a
+  footnote.** Slope over hops H ∈ {1, 2, 4, 8} at residual depth 1: **+2.3 ns/hop at width 1
+  (−0.7 %)**, **+7.3 ns/hop at width 8 (−2.2 %)**, **+64.0 ns/hop at width 64 (−12.9 %)**. The label
+  arm carries a higher fixed cost and a lower per-hop cost, so the win arrives with registry width.
+  At width 1 the difference is below what this instrument should be asked to resolve. **On a NARROW
+  node the per-hop claim is not made at all.**
+- **Therefore the label table is opt-in and OFF BY DEFAULT, and must stay that way.** A node with no
+  injected table never enters the label branch (§8.3). Nothing in this RFC justifies enabling
+  minting by default on a narrow build, and an integrator reading "−12.9 %" must read the width it
+  was measured at with it.
+- **No shipped shape regressed.** §15 clause 1 is **NOT triggered**: the mandatory four-link
+  `reply-spread` must-not-regress arm (§12.4 clause 3) came back with HEAD **faster** by 2.8–3.0 %
+  against a baseline A/A null of ±0.18 %, and no point of the sweep regressed. The faster reading is
+  attributed to code layout on a leg that executes none of this RFC's code, and **nothing is banked
+  on it**. The symbol-size ratchet moved **+0 on all six pinned symbols**.
+
+**What is still deliberately not claimed:**
 
 - **No local-IO claim** (§9, §2.3).
 - **No claim against §E.1** on long-lived one-way delivery (§2.1).
-- **No claim of a byte win over a bound path** (§3.3).
-- **No measured per-hop figure for this design.** RFC-0024's bound hop measured 261.7 ns/hop against
-  a canonical 304.7 (RFC-0024 §3.4), and a label deref is structurally the same work as a vref
-  deref, but *structurally the same* is an argument, not an instrument. §14 labels it, and §12.4
-  makes the measurement a condition of acceptance under the same bench protocol RFC-0024 §8 fixed.
+- **No claim of a byte win over a bound path** (§3.3). The measurement above does not disturb this:
+  it wins on the terminus *walk*, not on the byte column, which still ties `PATH_REF` at full mint.
+- **No per-hop claim on a NARROW node**, per the scope limit above.
+
+**Instrument.** Amendment, not erratum: the bullet being retired is an abstention this RFC was
+accepted with, and its replacement **narrows** a claim (per-hop → WIDE-only) and states a default
+(off on NARROW). No wire byte, no conformance vector, no MUST/SHOULD of §§4–12 moves, and no
+conforming peer observes anything different — which is why the comment window, already waived by
+default under `GOVERNANCE.md`'s solo-maintainer clause, is not invoked. This is the instrument the
+car-5 ruling of 2026-08-16 on #1325 directed ("take it as an amendment to §3.4").
 
 ### 3.5 Editorial note (2026-08-16) — the vocabulary this RFC's prose is read in
 
@@ -1121,6 +1173,16 @@ Public-header changes go in `core/CHANGELOG.md`.
 
 ### 12.4 The bench gate — normative for acceptance of the implementation
 
+> **DISCHARGED (2026-08-17).** All five clauses have run on the completed mint + deref pair —
+> clauses 1, 2 and 3 on car 7 ([#1364](https://github.com/avatarsd-llc/libtracer/pull/1364)),
+> clauses 4 and 5 on car 5 ([#1356](https://github.com/avatarsd-llc/libtracer/pull/1356)) — and the
+> verdict is recorded on [#1325](https://github.com/avatarsd-llc/libtracer/issues/1325). Clause 2
+> **banks** this RFC's case (§3.4, amendment 7); clause 1 **narrows** the per-hop claim to WIDE
+> nodes; clause 3 did not trigger §15 clause 1; clause 4 passed by object identity
+> (`graph.cpp.o` byte-identical between arms); clause 5 measured +3 388 B flash and 0 B static-RAM
+> delta on rv32, with the table at 24 B/slot and a 304 B peak store at 8 mints. The clauses below
+> stand as written — they are the gate that ran, not a gate still pending.
+
 An implementation is **not acceptable** until it answers these with measurements taken under the A/B
 protocol RFC-0024 §8.2 made normative (`docs/methodology.md` §"The A/B protocol": pin both arms to
 one logical CPU on one core class, interleave ≥ 10 rounds per arm, report medians *and* ranges,
@@ -1238,10 +1300,14 @@ Labelled per the standing rule — a quantitative claim names its instrument or 
   (`docs/reference/05-protocol-tlvs.md:381`) and the recorded mount-run shapes (RFC-0023:185-188),
   **under a byte layout that is itself deferred** (§5.3). Not a capture. If §5.3 question 1 lands on
   the packed-segment spelling, the table changes.
-- **The per-hop and terminus savings of this design are UNMEASURED.** §3.2's numbers are #830's, for
-  the *local* binding, and §2.3/§3.4 forbid transferring them. RFC-0024 §3.4's 261.7 vs 304.7 ns/hop
-  is the closest available evidence and it is for a **different form**. §12.4 makes the measurement
-  a condition of acceptance rather than a promise made here.
+- ~~**The per-hop and terminus savings of this design are UNMEASURED.** §3.2's numbers are #830's,
+  for the *local* binding, and §2.3/§3.4 forbid transferring them. RFC-0024 §3.4's 261.7 vs
+  304.7 ns/hop is the closest available evidence and it is for a **different form**. §12.4 makes the
+  measurement a condition of acceptance rather than a promise made here.~~ **MEASURED 2026-08-17 —
+  §12.4 discharged; the figures and their scope limit are in §3.4 (amendment 7).** What remains
+  unmeasured on this axis is the **generality** of those figures: they are one host (EPYC 9115 vCPU,
+  one pinned logical CPU), one link class, and the per-hop slope is read at widths 1, 8 and 64 only.
+  Nothing here prices a different core class or a real deployment's mix.
 - **The receiver-demux band (140–184 ns across fan 1–64) is measured** by
   `bench/bench_forward_demux.cpp`, on one host, one link class. Its GENERALITY is unmeasured, and it
   prices *today's* hop, not the labelled one.
@@ -1256,8 +1322,11 @@ Labelled per the standing rule — a quantitative claim names its instrument or 
   arithmetic**: it prices how cheap slot retirement is, and it is no longer load-bearing for
   correctness. What is still unmeasured is the **retirement rate** — how often a real deployment
   saturates a slot at all — which is §15 clause 3's remaining falsifier.
-- **rv32 flash/RAM delta is UNMEASURED**, including the label table. The size census is the
-  instrument; no "beat" is banked without it.
+- ~~**rv32 flash/RAM delta is UNMEASURED**, including the label table. The size census is the
+  instrument; no "beat" is banked without it.~~ **MEASURED (car 5): +3 388 B flash, 0 B static-RAM
+  delta; the table is 60 B on rv32 at 24 B/slot, with a 304 B peak store at 8 mints.** The figure is
+  an upper bound (whole-TU, pre-`--gc-sections`), and §15 clause 4 is answered honestly rather than
+  by assertion: the table is **not** zero.
 
 ## 15. What would falsify this RFC
 
