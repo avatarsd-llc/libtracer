@@ -505,8 +505,19 @@ bool transport_ws_server::drain_frames(session_t& s) {
 transport_ws_client::transport_ws_client(const std::string& host, std::uint16_t port,
                                          mem::mem_backend_t* backend, std::size_t max_frame,
                                          std::size_t recv_stack, bool defer_recv,
-                                         std::uint32_t liveness_window_ms)
-    : backend_(backend), recv_stack_(recv_stack) {
+                                         std::uint32_t liveness_window_ms,
+                                         mem::block_source_t* egress_src)
+    : backend_(backend),
+      // `block_array_t` binds its source ONCE, here (#873): a post-construction
+      // set_egress_source can never re-seat this member, which is why the store is a
+      // constructor argument on this class and not only a base-class setter.
+      tx_buf_(egress_src != nullptr ? *egress_src : mem::heap_source()),
+      recv_stack_(recv_stack) {
+    // Wire the BASE's egress store to the same one, before anything can send: the gather
+    // temporary of `transport_t::send(iov)` and this class's `tx_buf_` are then one store,
+    // not two. First statement on purpose — `start_receiving()` at the end of this body
+    // spawns the recv thread.
+    if (egress_src != nullptr) set_egress_source(*egress_src);
     liveness_window_ms_ = liveness_window_ms;                      // the #838 send bound's source
     max_frame_ = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
     // Seed the per-frame masking-key stream with something that varies between

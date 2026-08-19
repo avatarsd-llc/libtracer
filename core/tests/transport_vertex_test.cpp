@@ -50,6 +50,7 @@
 #include "libtracer/error.hpp"
 #include "libtracer/key_view.hpp"
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_source.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport_tcp.hpp"
@@ -340,6 +341,52 @@ void test_local_path_untouched() {
     const std::byte b{0x7B};
     (void)node.write(path_t("/sensor"), owned(std::span<const std::byte>(&b, 1)));
     check(hits.load() == 1, "local subscriber fired inline on the write (direct call, no /net)");
+}
+
+/**
+ * @brief #873: a SLIM-constructed net plane REPORTS the egress store it was built with.
+ *
+ * Before this ctor took the argument, `egress_src_` was a body-internal `&mem::heap_source()`
+ * on the SLIM path — so `egress_source()` answered the process heap on a slim node no matter
+ * what the composition root had chosen, and a factory registered through
+ * `register_transport_type` (the documented consumer of that accessor) was handed the wrong
+ * store. There was no way to observe that from a test, which is exactly why it went unnoticed.
+ *
+ * Both halves matter: the injected node must report the injected store, and the DEFAULTED node
+ * must still report `mem::heap_source()` — behaviour unchanged for every existing caller.
+ */
+void test_slim_net_reports_its_injected_egress_store() {
+    std::printf("SLIM transport_vertex_t: egress_source() answers for the injected store:\n");
+    std::array<std::byte, 256> slab{};
+    tr::mem::bump_source_t store(std::span<std::byte>(slab), tr::mem::null_source());
+
+    graph_t injected_graph;
+    fwd_router_t injected_router(injected_graph);
+    transport_vertex_t injected(injected_graph, injected_router, "/net", &tr::mem::heap_backend(),
+                                tr::net::slim_net, &store);
+    check(&injected.egress_source() == &store,
+          "a SLIM node reports the store its constructor was given");
+
+    graph_t defaulted_graph;
+    fwd_router_t defaulted_router(defaulted_graph);
+    transport_vertex_t defaulted(defaulted_graph, defaulted_router, "/net",
+                                 &tr::mem::heap_backend(), tr::net::slim_net);
+    check(&defaulted.egress_source() == &tr::mem::heap_source(),
+          "and the DEFAULTED SLIM node still reports the process heap (unchanged)");
+
+    // The nullptr guard moved from the FULL ctor into the SLIM one, so it must still hold on
+    // BOTH doors — an explicit null means the process heap, not a null dereference.
+    graph_t null_graph;
+    fwd_router_t null_router(null_graph);
+    transport_vertex_t null_slim(null_graph, null_router, "/net", &tr::mem::heap_backend(),
+                                 tr::net::slim_net, nullptr);
+    check(&null_slim.egress_source() == &tr::mem::heap_source(),
+          "an explicit nullptr on the SLIM ctor is still the process heap");
+
+    graph_t full_graph;
+    fwd_router_t full_router(full_graph);
+    transport_vertex_t full(full_graph, full_router, "/net", &tr::mem::heap_backend(), &store);
+    check(&full.egress_source() == &store, "and the FULL ctor still threads its own store");
 }
 
 /** @brief FWD{ op, dst=<segs...>, src=<segs...> } with no payload — a remote READ request. */
@@ -2116,6 +2163,7 @@ int main() {
     test_backoff_connect_timeout_parsed();
     test_fwd_still_routes();
     test_local_path_untouched();
+    test_slim_net_reports_its_injected_egress_store();
     test_config_constructed_udp();
     test_provide_link_wins();
     test_same_leaf_name_under_two_modules();

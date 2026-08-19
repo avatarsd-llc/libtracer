@@ -290,11 +290,11 @@ Headers: `frame.hpp`, `tlv.hpp`, `tlv_emit.hpp`, `tlv_arena.hpp`, `path_ref.hpp`
 :members:
 ```
 
-```{doxygenfunction} tr::wire::decode(std::span<const std::byte>)
+```{doxygenfunction} tr::wire::decode(std::span<const std::byte>, mem::block_source_t&)
 :project: libtracer
 ```
 
-```{doxygenfunction} tr::wire::decode(const view::view_t&)
+```{doxygenfunction} tr::wire::decode(const view::view_t&, mem::block_source_t&)
 :project: libtracer
 ```
 

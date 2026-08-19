@@ -524,6 +524,14 @@ class transport_t {
      *          the reason it is per-link rather than one node-wide store. None of the six
      *          egress sites holds a transport lock across the allocation, so a locking
      *          @p src introduces no lock-ordering obligation here (#1049).
+     *
+     * @warning This setter reaches the allocations a send makes THROUGH this base — it does
+     *          not re-seat a concrete link's CONSTRUCTION-BOUND buffers. A
+     *          `mem::block_array_t` member takes its source in its own constructor and keeps
+     *          it for life, so a link that owns one (e.g. `transport_ws_client::tx_buf_`)
+     *          takes the store as a CONSTRUCTOR argument and applies it to both halves
+     *          there (#873). Wiring such a link only through this setter would leave that
+     *          buffer on whatever source it was built with.
      */
     void set_egress_source(mem::block_source_t& src) noexcept { egress_src_ = &src; }
 

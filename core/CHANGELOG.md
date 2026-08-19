@@ -89,6 +89,39 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **The four remaining body-internal `mem::heap_source()` calls are now defaulted parameters on
+  an injectable seam** ([#873](https://github.com/avatarsd-llc/libtracer/issues/873), ADR-0079).
+  Every one of these was a store the library **named for you**, so a deployer who had injected a
+  bounded source still had these four allocations land on the process heap. All four defaults are
+  `mem::heap_source()` / `&mem::heap_source()`, so **no existing caller changes behaviour** — the
+  point is that a caller can now say otherwise. **Source-compatible in all four cases** (defaulted
+  parameters appended, or added after an existing tag argument).
+  - `wire::decode(std::span<const std::byte>, mem::block_source_t& spill = mem::heap_source())`
+    and the `view_t` overload — the walk stack's spill. `decode(bytes, mem::null_source())` is now
+    the spelling of a hard nesting bound: a frame deeper than the 8 inline slots answers
+    `TLV_NESTING_TOO_DEEP` instead of growing. **Only the walk stack moves onto the seam** — the
+    returned owning `tlv_t` tree holds `std::vector` children and still allocates on the global
+    heap by construction; a caller that wants the whole decode bounded wants `wire::decode_into`.
+  - `wire::validate_rope(const view::rope_t&, mem::block_source_t& spill = mem::heap_source())` —
+    the same spill on the rope validator. Its sink models nothing, so this one really is
+    allocation-free with respect to the process heap once a source is injected.
+  - `net::transport_ws_client`'s constructor takes a trailing
+    `mem::block_source_t* egress_src = &mem::heap_source()`. This is a **defect fix, not just a
+    seam**: `tx_buf_` (the masked-frame buffer, the one WS egress path that needs a buffer) is a
+    `mem::block_array_t` member, and a `block_array_t` binds its source at CONSTRUCTION — so
+    `transport_t::set_egress_source`, the documented injection point that the built-in `ws`
+    factory used, **could never reach it**. An injected egress store was silently ignored by this
+    one buffer and it kept growing on the process heap. The built-in `ws` factory now passes the
+    store through the constructor, and `transport_t::set_egress_source`'s documentation states
+    that a link's construction-bound buffers take their store from the constructor.
+  - `net::transport_vertex_t`'s SLIM constructor takes a trailing
+    `mem::block_source_t* egress_src = &mem::heap_source()`, **after** the `slim_net_t` tag (the
+    tag keeps its overload-disambiguating position). `transport_vertex_t::egress_source()`
+    previously answered the process heap on a slim node whatever the composition root had chosen,
+    so it misreported the store to any factory registered via `register_transport_type`. The
+    `nullptr` guard moved from the FULL constructor into the delegated SLIM one, so both doors
+    behave identically and an explicit `nullptr` still means the process heap.
+
 - **BREAKING — `net::route_handle_t` and `net::fwd_router_t` draw their label state from an
   injected `mem::block_source_t`, not from a `std::pmr::memory_resource`**
   ([#603](https://github.com/avatarsd-llc/libtracer/issues/603) defect 1, family 3 of

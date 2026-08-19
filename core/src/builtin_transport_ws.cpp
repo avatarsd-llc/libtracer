@@ -77,9 +77,17 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
                 // flight through that whole window, and a recv thread running inside it would
                 // decode it into an empty sink and drop it with no counter moving. The vertex
                 // calls `start_receiving()` once the link is fully wired.
+                //
+                // The egress store goes in HERE, not through `with_egress_source` below:
+                // the client's masked-frame buffer is a `block_array_t` member that binds
+                // its source at construction (#873), so a setter applied afterwards would
+                // leave that one buffer on the process heap. `with_egress_source` still
+                // runs — it is what wires the LISTEN arm and the base gather — and this
+                // argument is what makes the DIAL arm's own buffer agree with it.
                 return make_checked<transport_ws_client>(s.addr, s.port, rx_backend, s.max_frame,
                                                          /*recv_stack=*/std::size_t{0},
-                                                         /*defer_recv=*/true, liveness_window);
+                                                         /*defer_recv=*/true, liveness_window,
+                                                         egress_src);
             },
             [&] {
                 return make_checked<transport_ws_server>(s.port, rx_backend, s.max_frame, max_peers,

@@ -390,11 +390,20 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
      *             write-mutex hold it takes), so a server that stops reading cannot freeze
      *             the sending thread; `kMaxConsecutiveStalls` stalled records in a row,
      *             or one that half-reached the wire, close the connection.
+     * @param egress_src The ADR-0079 EGRESS store (#873) this link's masked-frame buffer
+     *             (`%tx_buf_`) is drawn from. It is passed to the CONSTRUCTOR rather than
+     *             wired afterwards because `mem::block_array_t` binds its source once, at
+     *             construction: a later @ref transport_t::set_egress_source moves the
+     *             base's gather temporary but can no longer reach this member. This
+     *             constructor applies @p egress_src to both, so a link built here has ONE
+     *             egress store. `nullptr` (and the default) means the process heap —
+     *             today's behaviour unchanged. Must outlive this transport.
      */
     transport_ws_client(const std::string& host, std::uint16_t port,
                         mem::mem_backend_t* backend = &mem::heap_backend(),
                         std::size_t max_frame = 0, std::size_t recv_stack = 0,
-                        bool defer_recv = false, std::uint32_t liveness_window_ms = 0);
+                        bool defer_recv = false, std::uint32_t liveness_window_ms = 0,
+                        mem::block_source_t* egress_src = &mem::heap_source());
 
     /** @brief Stop the recv thread and close the socket. */
     ~transport_ws_client() override;
@@ -524,8 +533,12 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
      * from the failable seam (ADR-0065) so exhaustion is a `nullptr` the send turns into a
      * dropped frame, never the `abort()` a throwing grow becomes under `-fno-exceptions`
      * (#848).
+     *
+     * The source is the constructor's `egress_src` (#873), NOT the process heap: a
+     * `block_array_t` binds its source at construction, so this member is the reason that
+     * argument exists rather than relying on @ref transport_t::set_egress_source.
      */
-    mem::block_array_t<std::byte> tx_buf_{mem::heap_source()};
+    mem::block_array_t<std::byte> tx_buf_;
     /** @brief The came-up fact `ok()` reports: written once, in the constructor, on
      *         handshake success — before any thread this object owns exists — and never
      *         again, so a plain bool is race-free here. */

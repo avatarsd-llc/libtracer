@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "libtracer/error.hpp"
+#include "libtracer/mem_source.hpp"
 #include "libtracer/tlv.hpp"
 #include "libtracer/view.hpp"
 
@@ -128,10 +129,26 @@ inline void stamp_ts(tlv_t& tlv, wire_clock_t& clock) noexcept { stamp_ts(tlv, c
 
 /**
  * @brief Decode exactly one TLV that fills @p input.
+ *
+ * The structural descent's open-node stack starts in inline slots sized for the typical
+ * FWD nesting and SPILLS to @p spill for deeper frames, so the RFC-0006 decode-resource
+ * bound is a property the caller injects rather than one this function fixes (#873,
+ * ADR-0079). `decode(input, mem::null_source())` is the spelling of "no spill at all":
+ * a frame nested past the inline slots is refused with `TLV_NESTING_TOO_DEEP` instead of
+ * growing (@ref grammar::walk_stack_t).
+ *
+ * @note @p spill bounds the WALK STACK only. The returned tree is an OWNING `tlv_t`, whose
+ *       child vectors allocate on the global heap by construction — this parameter does not
+ *       make an owning decode allocation-free, and a caller that needs the whole decode on
+ *       an injected store wants the terminus arena (`wire::decode_into`) instead.
+ *
  * @param input The bytes to decode — must be exactly one TLV; trailing bytes ⇒ `FrameInvalid`.
+ * @param spill The block source the walk stack spills into once its inline slots are full.
+ *              Default: the process heap, i.e. today's behaviour unchanged.
  * @return The decoded @ref tlv_t (borrowing @p input), or an `err_t` on failure.
  */
-[[nodiscard]] std::expected<tlv_t, err_t> decode(std::span<const std::byte> input);
+[[nodiscard]] std::expected<tlv_t, err_t> decode(std::span<const std::byte> input,
+                                                 mem::block_source_t& spill = mem::heap_source());
 
 /**
  * @brief Encode a TLV to its wire bytes (recomputing the trailer CRC when `opt.cr` is set).
@@ -197,10 +214,13 @@ inline void stamp_ts(tlv_t& tlv, wire_clock_t& clock) noexcept { stamp_ts(tlv, c
  * it.
  *
  * @param v The view whose bytes are exactly one TLV.
+ * @param spill Forwarded to the span overload — the walk stack's spill source, defaulting
+ *              to the process heap.
  * @return The decoded @ref tlv_t (borrowing @p v's bytes), or an `err_t` on failure.
  */
-[[nodiscard]] inline std::expected<tlv_t, err_t> decode(const view::view_t& v) {
-    return decode(v.bytes());
+[[nodiscard]] inline std::expected<tlv_t, err_t> decode(
+    const view::view_t& v, mem::block_source_t& spill = mem::heap_source()) {
+    return decode(v.bytes(), spill);
 }
 
 }  // namespace tr::wire
