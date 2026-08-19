@@ -634,6 +634,8 @@ ANCHORS = [
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'transport_ws_client& operator=(const transport_ws_client&) = delete;'),
     # core/include/libtracer/vertex.hpp
+    ('core/include/libtracer/vertex.hpp:206',
+     'STREAM,       /**< @brief Role 2: bounded history ring, depth declared owner-side by'),
     ('core/include/libtracer/vertex.hpp:232',
      "* Holding one keeps that value alive, exactly as the reader's own reference did before. Under"),
     ('core/include/libtracer/vertex.hpp:237', 'class value_ref_t {'),

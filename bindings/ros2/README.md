@@ -74,7 +74,7 @@ What `qos.c` maps onto instead — **three carriers, not one**:
 | `rmw_qos_profile_t` field | libtracer carrier | where |
 | --- | --- | --- |
 | `reliability`, `durability` (libtracer packs a third bit-field, `priority`, that ROS has no profile member for) | the **subscription's** packed 16-bit `delivery_policy`, set at `rmw_create_subscription` time and carried in the `SUBSCRIBER`'s existing `SETTINGS` child as `NAME "delivery_policy" VALUE u16` | `core/include/libtracer/subscriber.hpp:70`, decoded at `core/src/graph.cpp:2109`, RFC-0022 §3.A |
-| `history` + `depth` | **owner-side** ring depth — the topic's owner calls `graph_t::set_history_depth`; a remote subscriber cannot set it | `core/include/libtracer/graph.hpp:1113` |
+| `history` + `depth` | **owner-side** ring depth, declared independently at each end — the subscription's own target vertex is a STREAM whose depth `rmw_tracer` sets locally (that ring is what `rmw_take` pops); what a subscriber cannot set is the *producer's* depth, which has no wire surface | `core/include/libtracer/graph.hpp:1113`, `core/include/libtracer/vertex.hpp:206` |
 | `deadline`, `liveliness`, `lifespan` | **no mapping at all** | — |
 
 This is *closer* to DDS than the retracted shape, not further: DDS puts reliability and
@@ -85,10 +85,13 @@ honest state and were already the effective one — nothing ever enforced `deadl
 
 Two consequences `qos.c` has to live with:
 
-- **`depth` is not the subscriber's to choose.** `rmw_create_subscription` on a *remote*
-  topic can request durability but not ring depth. An `rmw_tracer` that wants ROS's
-  per-subscription `depth` semantics must either enforce them in its own take-side buffer
-  or report the owner's depth back through `rmw_get_subscriptions_info_by_topic`.
+- **`depth` is declared at each end, not negotiated between them.** ROS's per-subscription
+  `depth` maps directly: the subscription's target vertex lives on *this* node, and
+  `rmw_create_subscription` sizes its ring with `graph_t::set_history_depth` — the same ring
+  `rmw_take` pops in R1. What `rmw_create_subscription` cannot do is set or read the
+  **producer's** depth, since that has no wire surface (RFC-0022 §3.C) — so there is no basis
+  for a DDS-style QoS-compatibility check, and what `rmw_get_subscriptions_info_by_topic`
+  should report about a remote publisher's depth is still open.
 - **A libtracer-only delivery mode is `rmw_tracer`-local, not a QoS extension.**
   `delivery_mode_t` (`vertex.hpp:385` — `IF_NEWER` / `UNCONDITIONAL` / `EXPLICIT`; there is
   no `ON_CHANGE` member) is owner-side and wiring-time via `graph_t::set_delivery_mode`

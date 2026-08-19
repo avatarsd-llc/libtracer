@@ -143,26 +143,50 @@ wire two peers together and depart without the edge dying with it
 ([RFC-0021](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0021-wire-subscriber-target-frame-of-reference.md);
 the flow is [13-network-formation.md](13-network-formation.md)).
 
-### 3. There is no per-subscription queue
+### 3. Depth is declared at each end, never negotiated
 
-ROS's `KEEP_LAST(depth)` is a property of an endpoint, and each reader gets its own. In
-libtracer the retained history is the **producer vertex's** STREAM ring — owner-sized through
-the host API (`graph_t::set_history_depth`), with no wire surface at all, and explicitly not
-inherited down the tree
+ROS's `KEEP_LAST(depth)` is a property of an endpoint, and each reader gets its own. libtracer
+keeps that shape, by a different mechanism.
+
+Delivery to a subscriber **is an ordinary write to that subscription's target vertex**, and the
+target lives on the *consumer's* node
+([RFC-0007](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0007-delivery-terminates-at-target.md);
+[CONTEXT.md](../../CONTEXT.md) §SUBSCRIBER direction). Fan-in resolves by the **target's** role —
+overwrite for a stored value, **append for a stream** — so a consumer that declares its target
+STREAM gets its own bounded history ring, trimmed to a depth its own application declares through
+its own `graph_t::set_history_depth`: *"Role 2: bounded history ring, depth declared owner-side"*
+(`core/include/libtracer/vertex.hpp:206`). Each reader does get its own queue, sized by the reader.
+That ring is what `rmw_take` pops.
+
+What has no analogue is **negotiation**. `set_history_depth` has no wire surface and nothing is
+inherited
 ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md)
-§3.B/§3.F; [CONTEXT.md](../../CONTEXT.md) §Owner-side storage declaration).
+§3.C/§3.F), so each end declares its own retention and neither can read or constrain the other's.
+A remote subscriber cannot choose the **producer's** depth, and no DDS-style QoS-compatibility
+check between two endpoints has any wire basis to run on.
 
-A remote subscriber therefore **cannot choose its own depth**. `bindings/ros2/README.md`
-names the two ways out and picks neither: `rmw_tracer` either enforces ROS depth semantics in
-its own take-side buffer, or reports the owner's depth back through
-`rmw_get_subscriptions_info_by_topic`. That decision is open.
+Per-subscription delivery policy *does* exist, and is **per-edge rather than per-vertex** —
+`reliability`, `priority` and `durability_request`, packed in the SUBSCRIBER's `SETTINGS` child and
+enforced producer-side before fan-out (RFC-0022 §3.A; [CONTEXT.md](../../CONTEXT.md)
+§Per-subscriber delivery policy, which names *"delivery policy is per-vertex"* as a thing to
+avoid saying). What it deliberately excludes is **magnitudes**: a depth or a queue bound is never
+packed into policy bits, and would arrive as a full-width field in the subscription's cold half if
+something ever implemented one (§3.A, §3.E).
 
-### 4. A remote write does not conjure the topic
+So for `rmw_tracer` the depth mapping is direct — `KEEP_LAST(depth)` is the reader-side target
+vertex's ring depth, set locally at `rmw_create_subscription`. What stays genuinely open is only
+the *reporting* question: what `rmw_get_subscriptions_info_by_topic` should say about a publisher
+whose depth is, by construction, not observable from the reader.
+
+### 4. A publisher creates its own topic; a remote write does not
 
 A ROS node's own topics are vertices it owns, and a **local** data write to a nonexistent
 path creates it `mkdir -p` style, gated by the CREATE bit on the nearest existing ancestor
 ([RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md)
-§Write-creates). So `rmw_create_publisher` for a node's own topic has a direct analogue.
+§Write-creates). So `rmw_create_publisher` for a node's own topic has a direct analogue: the
+publisher brings its vertex into being on its own node, and remote peers then subscribe to it by
+writing a SUBSCRIBER into its `:subscribers[]` ([CONTEXT.md](../../CONTEXT.md) §SUBSCRIBER
+direction). That is the ordinary formation path, and nothing below narrows it.
 
 What has no DDS analogue is the remote arm: a remote fieldless `FWD{WRITE}` to an unresolved
 `dst` **answers `not_found` and creates nothing** (RFC-0005 §D amendment 1). Creating a
