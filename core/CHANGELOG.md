@@ -531,6 +531,38 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   required-modules sentinel: **+28 B flash, +0 B RAM** — an unlabelled path holds one empty
   vector, allocates nothing, and nothing on the canonical hot path reads it.
 
+### Fixed
+
+- **`docs/modules/connection-config.md` said `max_frame` could be RAISED; it has been
+  tighten-only since [#1035](https://github.com/avatarsd-llc/libtracer/issues/1035)
+  ([#934](https://github.com/avatarsd-llc/libtracer/issues/934) car A).** The key's table
+  row and the matching pitfall both told an operator to "treat it as an ingress bound you
+  can loosen, not just clamp", and offered `max_frame = 32 MiB accepts a 20 MiB frame` as
+  the worked example. Neither has been true since #1035 clamped every framed transport's
+  assignment through `length_prefix_framer::configured_cap`: a non-zero value resolves to
+  `min(value, kDefaultMaxFrame)`, so 32 MiB accepts nothing the 16 MiB default would not.
+  The page now states the tighten-only rule, names `configured_cap` as the one home that
+  enforces it, and records the over-cap disposition each kind applies (refuse-and-close on
+  the framed kinds, refuse-and-continue on `udp`, whose datagrams need no resync). Prose
+  only — no header, config key, or ingress code path changed. The reason it mattered: this
+  is the page an operator reads before setting an ingress bound on a pre-auth link, and it
+  advertised a headroom knob the code does not implement.
+
+- **The frame cap's BOUNDARY is now pinned from both sides
+  ([#934](https://github.com/avatarsd-llc/libtracer/issues/934) car A).** Every existing
+  test of the cap declared a length *past* it, so an off-by-one `len >= max_frame` would
+  have passed the whole suite while costing a conforming peer its largest legal frame.
+  Three suites gain the missing half: `length_prefix_framer` asserts
+  `on_prefix(be, cap, cap) == ACCEPT` on a backend wider than the cap (so `DROP` cannot
+  stand in for the answer) alongside `cap + 1 => MALFORMED`; `tcp` delivers a frame of
+  exactly `max_frame` whole with `malformed_rx() == 0` and then refuses `max_frame + 1`
+  with an EOF at the peer; `udp` lands a datagram of exactly the cap on both the owning
+  and the borrowed path. The `tcp` case also injects a size-recording backend to pin the
+  *order* the refusal depends on — the over-cap prefix costs **zero** allocations, so the
+  cap is judged before `backend.alloc`, never allocate-then-fail. Tests only; no behaviour
+  changed, and each new assertion was verified to fail under the mutation it exists to
+  catch.
+
 ## [0.13.0] — 2026-08-16
 
 ### Added

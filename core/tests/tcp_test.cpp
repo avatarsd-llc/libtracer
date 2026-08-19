@@ -281,6 +281,109 @@ void test_settings_max_frame_cannot_raise_the_cap() {
 }
 
 /**
+ * @brief A heap-delegating backend that RECORDS the size of every allocation asked of it — the
+ *        instrument for "the refusal happened BEFORE any allocation proportional to the declared
+ *        length", which a `malformed_rx()` count alone cannot show.
+ *
+ * @note `alloc` runs on the transport's recv thread while the test reads the counters, so both are
+ *       atomics rather than a plain size/count pair.
+ */
+class alloc_watch_backend_t final : public tr::mem::mem_backend_t {
+   public:
+    alloc_watch_backend_t() noexcept : mem_backend_t("alloc_watch") {}
+
+    tr::view::segment_t* alloc(std::size_t size,
+                               tr::mem::alloc_hint_t hint = tr::mem::alloc_hint_t::NONE) override {
+        calls_.fetch_add(1, std::memory_order_relaxed);
+        std::size_t seen = largest_.load(std::memory_order_relaxed);
+        while (size > seen) {
+            if (largest_.compare_exchange_weak(seen, size, std::memory_order_relaxed)) break;
+        }
+        return tr::mem::heap_backend().alloc(size, hint);
+    }
+    void destroy(tr::view::segment_t* seg) noexcept override {
+        tr::mem::heap_backend().destroy(seg);
+    }
+    [[nodiscard]] std::size_t max_segment_size() const noexcept override {
+        return tr::mem::heap_backend().max_segment_size();
+    }
+
+    /** @brief How many allocations have been asked of this backend so far. */
+    [[nodiscard]] std::size_t calls() const noexcept {
+        return calls_.load(std::memory_order_relaxed);
+    }
+    /** @brief The largest size ever requested (0 if nothing was ever allocated). */
+    [[nodiscard]] std::size_t largest() const noexcept {
+        return largest_.load(std::memory_order_relaxed);
+    }
+
+   private:
+    std::atomic<std::size_t> calls_{0};
+    std::atomic<std::size_t> largest_{0};
+};
+
+/**
+ * @brief #934 — the frame cap's BOUNDARY, both sides, on a live stream: a frame of EXACTLY
+ *        `max_frame` is delivered whole and counts nothing, and `max_frame + 1` is refused and the
+ *        link closed — with the refusal proven to precede any allocation of the declared size.
+ *
+ * The complement of @ref test_settings_max_frame, which only ever declares a length far past the
+ * cap and so passes under a `>=` comparison too. An off-by-one at this seam is either a node that
+ * tears down a conforming peer's largest legal frame or a node that buffers one byte more than its
+ * operator configured; only asserting both sides distinguishes them.
+ *
+ * The allocation evidence is the point of the injected `alloc_watch_backend_t`: after the at-cap
+ * frame the backend has been asked for exactly `kCap` bytes, and the over-cap prefix adds NO
+ * further request at all — refuse-and-close, not allocate-then-fail. `length_prefix_framer`'s
+ * `len > max_frame` test runs before `backend.alloc(len)`, and this is what pins that order.
+ */
+void test_settings_max_frame_boundary() {
+    std::printf("TCP transport — the max_frame boundary: at the cap delivers, one over closes:\n");
+    constexpr std::size_t kCap = 4096;
+
+    frame_sink_t sink;
+    auto rx = [&](std::span<const std::byte> f) { sink.push(f); };
+    alloc_watch_backend_t watch;
+    tcp_transport_t listener(std::uint16_t{0}, &watch, /*max_frame=*/kCap);
+    check(listener.ok(), "listener bound with a 4 KiB max_frame");
+    listener.set_receiver(rx);
+
+    raw_client_t client(listener.local_port());
+    check(client.fd >= 0, "raw client connected");
+
+    // ----- at the cap: accepted, delivered whole, nothing counted. -----
+    const auto at_cap = test_frame(kCap, 0x11);
+    client.write(record(at_cap));
+    check(sink.wait_for_count(1, 4000ms), "a frame of EXACTLY max_frame is delivered");
+    check(sink.count() == 1 && sink.at(0) == at_cap, "and arrives byte-identical, whole");
+    check(listener.malformed_rx() == 0, "an at-cap frame is not malformed");
+    check(listener.dropped_rx() == 0, "nor shed as backpressure");
+    check(watch.largest() == kCap, "the segment drawn for it was the declared length exactly");
+
+    // ----- one byte over: refused off the PREFIX, before any body-sized allocation. -----
+    const std::size_t calls_before = watch.calls();
+    std::vector<std::byte> over_prefix;
+    tr::detail::append_le(over_prefix, static_cast<std::uint32_t>(kCap + 1));
+    client.write(over_prefix);  // the prefix alone — no body ever follows
+
+    const auto deadline = std::chrono::steady_clock::now() + 4s;
+    while (listener.malformed_rx() == 0 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(5ms);
+    check(listener.malformed_rx() == 1, "ONE byte over the cap is malformed");
+    check(sink.count() == 1, "and nothing further was delivered");
+    check(watch.calls() == calls_before,
+          "the refusal cost ZERO allocations — the cap is checked before backend.alloc (#934)");
+    check(watch.largest() == kCap,
+          "so no segment of the over-cap declared length was ever asked for");
+
+    // Refuse-AND-CLOSE: a desynced stream cannot be re-framed, so the peer sees EOF.
+    timeval tv{4, 0};
+    ::setsockopt(client.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    std::array<std::byte, 1> b;
+    check(::recv(client.fd, b.data(), 1, 0) == 0, "the connection was closed (EOF at the peer)");
+}
+
+/**
  * @brief A heap-delegating backend that RECORDS every segment it hands out (segment identity) and
  *        can FAIL its first `fail_first` allocations (backpressure).
  */
@@ -1305,6 +1408,7 @@ int main() {
     test_oversize_prefix();
     test_settings_max_frame();
     test_settings_max_frame_cannot_raise_the_cap();
+    test_settings_max_frame_boundary();
     test_view_delivery_segment_identity();
     test_backpressure_drain();
     test_scatter_gather();
