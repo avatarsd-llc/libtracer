@@ -83,7 +83,7 @@ your own node rather than one to copy.
 
 Those are the three injection points of `graph_t`'s constructor — the pmr resource,
 the value backend and the failable control source
-(`core/include/libtracer/graph.hpp:431-433`) — and the **four** of
+(`core/include/libtracer/graph.hpp:462-464`) — and the **four** of
 `fwd_router_t`: the failable `label_src` source its label tables draw from, the
 failable `rx` source, the `flat` byte backend its rope flattens draw from, and the
 `egress` byte backend the terminus reply head draws from
@@ -284,8 +284,8 @@ replaces, not by shaving the core.
   mutable buffer libtracer links: `N * sizeof(vertex_stripe_t)` bytes of `.bss`
   reserved at link time, plus the same for the condvar table. Sixteen stripes suit a
   multi-core host — that is the default (`kVertexLockStripes = 16`,
-  `core/include/libtracer/config.hpp:97`) — while a single-core chip reclaims RAM at
-  **4–8** (`config.hpp:87`). A stripe's platform mutex is lazy: on FreeRTOS it
+  `core/include/libtracer/config.hpp:98`) — while a single-core chip reclaims RAM at
+  **4–8** (`config.hpp:88`). A stripe's platform mutex is lazy: on FreeRTOS it
   costs ~90 B of heap on its first lock, so an untouched stripe costs its struct and
   no heap.
 - **Pin task priorities deliberately**: transport RX threads just below the
@@ -355,8 +355,8 @@ itself, described via `:schema` like any other data
 ```
 
 The backpressure counters come from `graph_t::delivery_drops()`
-(`core/include/libtracer/graph.hpp:1817`), which snapshots four per-cause totals —
-`no_target`, `denied`, `out_of_memory`, `fan_out_truncated` (`graph.hpp:1785-1807`). Each
+(`core/include/libtracer/graph.hpp:1881`), which snapshots four per-cause totals —
+`no_target`, `denied`, `out_of_memory`, `fan_out_truncated` (`graph.hpp:1849-1871`). Each
 counts shed **deliveries**, not events, so a fan-out shed whole under memory pressure moves
 them by its width. `denied` counts an `:acl` refusal on every plane — a local API write, a
 `FWD{WRITE}` terminus, a `COMPACT` terminus and a subscription edge alike (#1068) — so on a

@@ -179,6 +179,42 @@ jobs:
           cmake --build core/build-strict -j "$(nproc)"
           ctest --test-dir core/build-strict --output-on-failure
 
+  build-test-reclaim-qsbr:
+    runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
+    container: ubuntu:24.04
+    steps:
+      - name: Toolchain (container has no preinstalled tool set)
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            build-essential cmake git ca-certificates
+      - uses: actions/checkout@v4
+      - name: Bind reclaim_qsbr_t, build + ctest
+        run: |
+          mkdir -p "$PWD/reclaim-qsbr/libtracer"
+          cat > "$PWD/reclaim-qsbr/libtracer/config_override.hpp" <<'FRAGMENT'
+          /**
+           * @file
+           * @brief GENERATED CI fixture — the ADR-0080 CROSS-THREAD reclamation policy bound.
+           */
+          #pragma once
+
+          namespace tr::graph {
+
+          /** @brief The defaults, with a grace point spanning every thread (a many-core host). */
+          struct reclaim_qsbr_config_t : default_config_t {
+              using reclaim_policy_t = reclaim_qsbr_t;
+          };
+
+          using config_t = reclaim_qsbr_config_t;
+
+          }  // namespace tr::graph
+          FRAGMENT
+          cmake -S core -B core/build-qsbr -DBUILD_TESTING=ON \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS="-I$PWD/reclaim-strict"
+          cmake --build core/build-qsbr -j "$(nproc)"
+          ctest --test-dir core/build-qsbr --output-on-failure
+
   # WEAKLY-ORDERED host gate (#1140). Every other leg here runs x86-64, whose TSO model
   # hides an entire class of defect: a seq_cst store lowers to a locked `xchg`, so a LATER
   # RELAXED load of zero still cannot observe the pre-store world. Every acquire/release and
@@ -288,6 +324,46 @@ jobs:
             -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"
           cmake --build core/build-tsan -j "$(nproc)"
           setarch "$(uname -m)" -R ctest --test-dir core/build-tsan --output-on-failure
+
+  # The SAME TSan matrix with `reclaim_qsbr_t` bound (#1376). A separate job rather than a third
+  # matrix axis because it needs the override fragment generated first. This is the gate that
+  # matters most for this policy: it is the first one with real cross-thread ordering (a seq_cst
+  # announce paired against the retiring thread's epoch RMW — a Dekker shape), and it must run at
+  # BOTH lkv_slot bindings because `hazard_slot_t` is the leg that exercises #897's self-drain.
+  tsan-reclaim-qsbr:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        lkv_slot: [sp_atomic_slot_t, hazard_slot_t]
+    name: tsan qsbr (slot=${{ matrix.lkv_slot }})
+    steps:
+      - uses: actions/checkout@v4
+      - name: ThreadSanitizer build + ctest (reclaim_qsbr grace period)
+        run: |
+          mkdir -p "$PWD/reclaim-qsbr-tsan/libtracer"
+          cat > "$PWD/reclaim-qsbr-tsan/libtracer/config_override.hpp" <<'FRAGMENT'
+          /**
+           * @file
+           * @brief GENERATED CI fixture — the ADR-0080 CROSS-THREAD reclamation policy bound.
+           */
+          #pragma once
+
+          namespace tr::graph {
+
+          /** @brief The defaults, with a grace point spanning every thread (a many-core host). */
+          struct reclaim_qsbr_config_t : default_config_t {
+              using reclaim_policy_t = reclaim_qsbr_t;
+          };
+
+          using config_t = reclaim_qsbr_config_t;
+
+          }  // namespace tr::graph
+          FRAGMENT
+          cmake -S core -B core/build-tsan-qsbr -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Debug \
+            -DLIBTRACER_LKV_SLOT=${{ matrix.lkv_slot }} \
+            -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1 -I$PWD/reclaim-qsbr-tsan"
+          cmake --build core/build-tsan-qsbr -j "$(nproc)"
+          setarch "$(uname -m)" -R ctest --test-dir core/build-tsan-qsbr --output-on-failure
 
   # Regression guard for the CMake install/export (find_package packaging). Builds
   # + installs core to a staging prefix, then configures the tests/packaging fixture

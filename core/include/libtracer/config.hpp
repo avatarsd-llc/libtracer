@@ -43,6 +43,7 @@ class sp_atomic_slot_t;      // lkv_slot.hpp — atomic<shared_ptr>; reclamation
 class hazard_slot_t;         // lkv_slot.hpp — lock-free atomic<node*>; hazard-pointer reclamation
 struct reclaim_strict_t;     // reclaim.hpp — grace point: `unsubscribe()` returns
 struct reclaim_local_t;      // reclaim.hpp — grace point: this thread's dispatch stack unwinds
+struct reclaim_qsbr_t;  // reclaim.hpp — grace point: EVERY thread has passed a quiescent state
 
 /**
  * @brief The target's build configuration, as ONE named type (ADR-0070).
@@ -281,9 +282,12 @@ struct default_config_t {
      * can show that re-entrant unsubscribe does not occur, because `reclaim_strict_t` cannot
      * see it outside a debug build.
      *
-     * `reclaim_qsbr` — ADR-0080's third policy, whose grace point spans every thread — is not
-     * yet implemented; a MULTI-THREADED embedder that unsubscribes off the dispatching thread
-     * is the case neither shipped policy covers (see `%reclaim.hpp`).
+     * `reclaim_qsbr` — ADR-0080's third policy, whose grace point spans EVERY thread — is the
+     * one to bind when this node dispatches from several threads at once and unsubscribes from
+     * another, the case neither policy above covers. Override fragment:
+     * `using reclaim_policy_t = reclaim_qsbr_t;`. It prices one relaxed load and one `seq_cst`
+     * store per OUTERMOST fan-out (not per edge), and it is the only policy whose release hook
+     * may run on a thread other than the `unsubscribe()` caller — see `%reclaim.hpp`.
      */
     using reclaim_policy_t = reclaim_local_t;
 
@@ -307,8 +311,43 @@ struct default_config_t {
      * `graph_t::deferred_release_drops()` counts every one, so an undersized bound is
      * observable rather than silent. Override fragment:
      * `static constexpr std::size_t kDeferredReleaseSlots = 64;`
+     *
+     * **Under `reclaim_qsbr_t` read it differently.** There the pairs are held across a
+     * cross-thread GRACE PERIOD rather than a dispatch stack, in ONE shared table rather than
+     * per-thread storage, so the quantity it bounds is "retirements in flight process-wide
+     * while some participant has yet to quiesce" — a larger and less predictable number. Raise
+     * it (64 is a sane starting point) on any node that unsubscribes in bulk while other
+     * threads dispatch. The overflow rule is identical, and so is its observability: a QSBR
+     * build retries the scan once after publishing the pair, so a drop means a participant
+     * thread genuinely never reached a quiescent state — an embedder defect
+     * @ref tr::graph::graph_t::deferred_release_drops now names.
      */
     static constexpr std::size_t kDeferredReleaseSlots = 16;
+
+    /**
+     * @brief How many threads may participate in the `reclaim_qsbr_t` grace period at once
+     *        (#1376) — the per-thread quiescent-state announcement a retiring thread scans.
+     *
+     * Read this as "threads that may dispatch (`fan_out`, or an ADR-0049 durability latch)
+     * concurrently". Derived from @ref kEdgePinSlots rather than picked out of the air, the way
+     * `lkv_slot.hpp`'s `kRetireBatch` is derived from @ref kHazardReaderSlots — the two sets are
+     * the same threads, since a thread that publishes is a thread that dispatches.
+     *
+     * **Unlike @ref kEdgePinSlots, correctness is not indifferent to this number** — but it
+     * fails SAFE, not silently. A thread that finds every index taken cannot announce itself,
+     * and a thread a scan cannot see is one no grace period may conclude past; so it counts
+     * itself into an overflow tally instead, and any non-zero reading blocks all reclamation
+     * until it clears. The failure mode is therefore deferred frees (visible as
+     * @ref tr::graph::graph_t::deferred_release_drops rising), never a use-after-free.
+     *
+     * Its `.bss` is `N * max(kCacheLineBytes, alignof(std::uint64_t))` bytes — at N = 32 that
+     * is 2,048 B on a host — plus the shared retired table. **It is emitted only in a build
+     * that actually binds `reclaim_qsbr_t`**: `%graph.cpp` reaches the domain exclusively from
+     * `if constexpr` branches a non-QSBR build discards, and GCC emits nothing at all for those
+     * — 0 symbols and 0 B of `.bss`, verified. Override fragment:
+     * `static constexpr std::size_t kQsbrParticipants = 64;`
+     */
+    static constexpr std::size_t kQsbrParticipants = kEdgePinSlots;
 
     /**
      * @brief Whether a task on this target may SPIN-WAIT for a lock another task holds (#1158).
@@ -410,6 +449,8 @@ inline constexpr std::size_t kEdgePinSlots = config_t::kEdgePinSlots;
 inline constexpr std::uint32_t kPinPayloadRatio = config_t::kPinPayloadRatio;
 /** @brief @ref default_config_t::kDeferredReleaseSlots for this build. */
 inline constexpr std::size_t kDeferredReleaseSlots = config_t::kDeferredReleaseSlots;
+/** @brief @ref default_config_t::kQsbrParticipants for this build. */
+inline constexpr std::size_t kQsbrParticipants = config_t::kQsbrParticipants;
 /** @brief @ref default_config_t::kWeaklyOrdered for this build. */
 inline constexpr bool kWeaklyOrdered = config_t::kWeaklyOrdered;
 /** @brief @ref default_config_t::acl_policy_t for this build. */

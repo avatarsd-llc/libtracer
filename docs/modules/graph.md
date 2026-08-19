@@ -146,7 +146,7 @@ temporary lambda does not compile.
 
 ```{admonition} `ctx` lives until the reclamation policy's grace point — and the library tells you when
 :class: important
-`unsubscribe` **deactivates** the slot (`core/include/libtracer/graph.hpp:1357`); a
+`unsubscribe` **deactivates** the slot (`core/include/libtracer/graph.hpp:1388`); a
 delivery already in flight snapshotted the edge and completes, and the `{fn, ctx}` pair is
 the one leg of that snapshot the library owns no copy of. So "when may I free `ctx`?" is answered by this build's **reclamation policy**
 ([ADR-0080](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0080-reclamation-policy-is-a-build-time-closed-per-target-seam.md),
@@ -163,7 +163,7 @@ The hook runs exactly once, on your thread, outside every graph lock: **inline, 
 **before the enclosing `write()` returns** when you called it from inside one. The
 one-argument overload retires the edge identically and simply carries no signal — which is
 sufficient whenever you unsubscribe from outside a callback, since that call is already
-quiescent on return (`core/include/libtracer/graph.hpp:1315` states the bound on `ctx`).
+quiescent on return (`core/include/libtracer/graph.hpp:1346` states the bound on `ctx`).
 ```
 
 ```{admonition} No strings on the hot path
@@ -213,7 +213,7 @@ for (...) g.write(v, p.field(), setpoint_tlv);           // hot loop — zero st
 ## What a read hands back
 
 `read` and `await` return `result_t<value_ref_t>`, not `result_t<rope_t>`
-(`core/include/libtracer/graph.hpp:1103,1190` by handle, `:1685,1691` by path;
+(`core/include/libtracer/graph.hpp:1134,1221` by handle, `:1749,1755` by path;
 `value_ref_t` at `core/include/libtracer/vertex.hpp:237`). A `value_ref_t` is an **owning
 reference** to the value the vertex published: the LKV slot holds it as a
 `std::shared_ptr<const rope_t>`, so handing that reference back costs a refcount clone of
@@ -497,7 +497,7 @@ followed by the owner's own announce write.
 | --- | --- |
 | `subscribe(src, F& callback)` binds by address | passing a temporary lambda does not compile — which is the intent; a caller that "fixes" it by storing the lambda in a shorter-lived scope than the graph reintroduces the dangle the signature was shaped to prevent |
 | `ctx` is freed at the policy's grace point, not "whenever" | freeing `ctx` on `unsubscribe`'s return is correct under both shipped policies **when the call came from outside a delivery** — and is a use-after-free when it came from inside one, where a live fan-out is still walking a snapshot that names the pair. Pass a `subscriber_release_fn_t` and let the library say which case you are in; it is the only party that can ([reference/17](../reference/17-reclamation-policy.md)) |
-| Both shipped policies speak for ONE thread's dispatch domain | `reclaim_strict` and `reclaim_local` bound the wait by *this* thread unwinding. A node that dispatches from several threads at once and unsubscribes from another is the case ADR-0080's `reclaim_qsbr` is for, and that policy is specified but **not yet implemented** — such a node has no grace point to rely on today |
+| Two of the three policies speak for ONE thread's dispatch domain | `reclaim_strict` and `reclaim_local` bound the wait by *this* thread unwinding, so a node that dispatches from several threads at once and unsubscribes from another gets no guarantee from either — `reclaim_local` will free a context a sibling thread is still delivering to. Bind **`reclaim_qsbr_t`** for that node (`using reclaim_policy_t = reclaim_qsbr_t;`): its grace point spans every dispatching thread. The trade is that its release hook may then run on a thread other than the `unsubscribe()` caller, so the hook must be thread-safe with respect to its own context |
 | A re-entrant unsubscribe needs a parking slot | `reclaim_local` parks at most `kDeferredReleaseSlots` (default 16) pairs per thread per dispatch stack. Past that a pair is dropped and its hook never runs — a leak, chosen over a use-after-free. `graph_t::deferred_release_drops()` is how an undersized bound shows up before it matters |
 | `read` returns a reference | keeping a `value_ref_t` in long-lived state pins that allocation; under an injected pool, a handful of parked references is a pool that never drains |
 | `only()` is the single-link accessor | calling it on a multi-link rope is not the general path; `materialize()` is. A value that arrived as a subview of a frame, or that was written as a rope, has more than one link |

@@ -131,6 +131,36 @@ struct remote_delivery_t {
 using remote_delivery_fn_t = void (*)(void* ctx, const remote_delivery_t& sub, const rope_t& value);
 
 /**
+ * @brief Announce that THIS thread holds no `%edge_view_t` snapshot and drain whatever that
+ *        made reclaimable — the quiescent point of a cross-thread grace period (ADR-0080).
+ *
+ * Compiles to nothing at all unless this build binds a policy whose grace point spans threads,
+ * which today means @ref tr::graph::reclaim_qsbr_t. It does two things there, and both are
+ * cheap-and-early-out rather than conditional on the caller knowing anything:
+ *
+ * 1. drains the shared retired table of every `{ctx, release}` pair whose grace period has now
+ *    elapsed — guarded by one relaxed load of a count that is 0 on a node not mid-teardown;
+ * 2. when this build also binds `%hazard_slot_t`, self-drains THIS thread's private retired LKV
+ *    list via the already-shipped `%tr::graph::detail_hp::retire_and_flush`, which is the half
+ *    of [#897](https://github.com/avatarsd-llc/libtracer/issues/897) ADR-0080 asks this policy
+ *    to discharge: the displacing thread frees its own parked nodes at its own quiescent point,
+ *    so `~hazard_slot_t` never has to reach across a live thread's private list. It costs
+ *    `%lkv_slot.hpp` no code — the function's own early-out makes it free on a thread that
+ *    parked nothing.
+ *
+ * Called automatically by every outermost dispatch exit; @ref graph_t::thread_quiescent is the
+ * opt-in spelling for a thread that reaches a quiescent state WITHOUT dispatching.
+ */
+template <class P>
+inline void pass_quiescent_state() noexcept {
+    if constexpr (P::kGraceSpansThreads) {
+        detail_qsbr::drain();
+        if constexpr (std::is_same_v<lkv_slot_t, hazard_slot_t>)
+            detail_hp::retire_and_flush(nullptr);
+    }
+}
+
+/**
  * @brief An opaque handle to ONE in-process subscription — the token @ref graph_t::unsubscribe
  *        removes it by (ADR-0049 host-SDK sugar for the wire `:subscribers[N]` clear).
  *
@@ -158,19 +188,20 @@ using remote_delivery_fn_t = void (*)(void* ctx, const remote_delivery_t& sub, c
  * the caller to reason about in-flight state.
  *
  * **This build's guarantee is the one stated on the bound policy** —
- * @ref tr::graph::reclaim_local_t (the default) or @ref tr::graph::reclaim_strict_t. Under
- * both, the library owns the tracking and SIGNALS release through the
- * @ref tr::graph::subscriber_release_fn_t hook of
+ * @ref tr::graph::reclaim_local_t (the default), @ref tr::graph::reclaim_strict_t or
+ * @ref tr::graph::reclaim_qsbr_t. Under all three the library owns the tracking and SIGNALS
+ * release through the @ref tr::graph::subscriber_release_fn_t hook of
  * @ref graph_t::unsubscribe(const subscription_t&, subscriber_release_fn_t): the hook runs
- * exactly once, on the caller's own thread, outside every graph lock, and by the time the
- * enclosing `write()` / `propagate()` (or `unsubscribe()` itself, at dispatch depth 0)
- * returns. **There is nothing to poll and nothing to wait on** — that shape is precisely what
- * ADR-0080 §Decision 4 rejects.
+ * exactly once, outside every graph lock, at that policy's grace point. **There is nothing to
+ * poll and nothing to wait on** — that shape is precisely what ADR-0080 §Decision 4 rejects.
  *
- * Both shipped policies state their guarantee over ONE thread's dispatch domain, which is
- * the single-threaded WIDE / MCU target they are for. An embedder that dispatches from
- * several threads at once and unsubscribes from another needs a grace period spanning every
- * thread — ADR-0080's `reclaim_qsbr`, which is not yet implemented.
+ * The two per-thread policies state their guarantee over ONE thread's dispatch domain, which
+ * is the single-threaded WIDE / MCU target they are for, and run the hook on the caller's own
+ * thread. An embedder that dispatches from several threads at once and unsubscribes from
+ * another needs a grace period spanning every thread: bind
+ * @ref tr::graph::reclaim_qsbr_t. Its one API difference — the hook may then run on a thread
+ * other than the `unsubscribe()` caller, because a cross-thread grace period cannot promise
+ * otherwise without blocking — is stated on the policy itself.
  */
 class subscription_t {
    public:
@@ -1388,6 +1419,8 @@ class graph_t {
      * | @ref tr::graph::reclaim_strict_t | inline, before this call returns | forbidden |
      * | @ref tr::graph::reclaim_local_t | inline, before this call returns | before the enclosing
      *   `write()` / `propagate()` returns |
+     * | @ref tr::graph::reclaim_qsbr_t | inline when NO participant is mid-dispatch | once every
+     *   participant has passed a quiescent state — possibly on another thread |
      *
      * So the caller frees its context from @p release and never asks a question about
      * in-flight state — the library owns that tracking. A hook is run ONLY for a call that
@@ -1400,10 +1433,11 @@ class graph_t {
      *                thread reached the grace point.
      * @return `{}` on success; `NOT_FOUND` when @p sub names no active edge — and then
      *         @p release is *not* called.
-     * @note A deferred hook needs one of this thread's
-     *       @ref tr::graph::default_config_t::kDeferredReleaseSlots parking slots. If every
-     *       one is taken the pair is DROPPED and the hook never runs — a deliberate leak in
-     *       preference to a use-after-free — and @ref deferred_release_drops counts it.
+     * @note A deferred hook needs one of the
+     *       @ref tr::graph::default_config_t::kDeferredReleaseSlots parking slots — this
+     *       thread's, or under `reclaim_qsbr_t` the shared table's. If every one is taken the
+     *       pair is DROPPED and the hook never runs — a deliberate leak in preference to a
+     *       use-after-free — and @ref deferred_release_drops counts it.
      */
     [[nodiscard]] result_t<void> unsubscribe(const subscription_t& sub,
                                              subscriber_release_fn_t release);
@@ -1418,8 +1452,38 @@ class graph_t {
      * subscriptions this node retires from inside a single delivery stack — raise it in the
      * override fragment. It is process-wide (summed across threads) and monotonic, and it
      * stays 0 forever on a node that never unsubscribes re-entrantly, which is most of them.
+     *
+     * Under @ref tr::graph::reclaim_qsbr_t it counts the SHARED retired table's drops and means
+     * something sharper: that domain republishes and rescans before it gives up, so a non-zero
+     * reading says a participant thread genuinely never reached a quiescent state while the
+     * table filled. That is an embedder defect — a dispatching thread that never returns to its
+     * event loop, or more concurrent dispatchers than
+     * @ref tr::graph::default_config_t::kQsbrParticipants — and this counter is how it surfaces.
      */
     [[nodiscard]] static std::uint64_t deferred_release_drops() noexcept;
+
+    /**
+     * @brief Declare that this thread holds no in-flight delivery — the OPT-IN quiescent point
+     *        of a cross-thread grace period (ADR-0080, #1376).
+     *
+     * **No policy's guarantee depends on an embedder calling this**, and that is deliberate: it
+     * would otherwise contradict ADR-0080 §Decision 4 and the reference article's "there is no
+     * verb the embedder must remember to call". Every dispatching thread announces and drains
+     * AUTOMATICALLY at its outermost dispatch exit, which already covers ADR-0080 §Decision 3's
+     * named case — an RX thread that has finished a message and returned to its event loop.
+     *
+     * It exists for the thread the automatic path cannot reach: one that mutates LKV slots
+     * (displacing nodes onto its own private retired list) **without ever dispatching**, and
+     * one that wants a stated teardown precondition before an injected `%std::pmr` resource
+     * dies (ADR-0039 §Erratum 8's "domain quiescence point", which #897 asks be nameable). Call
+     * it at the top of an event loop, or once before joining such a thread.
+     *
+     * Under the two per-thread policies it is an empty inline function — it compiles to
+     * literally nothing, and `graph.cpp` is not even aware of it. It must NOT be confused with
+     * @ref collect, which is the ADR-0072 value-seam park and answers an unrelated question;
+     * this verb is not a poll of in-flight state and returns nothing.
+     */
+    static void thread_quiescent() noexcept { pass_quiescent_state<reclaim_policy_t>(); }
 
     /**
      * @brief Install (or replace) @p v's field descriptor table — the OWNER declaring its

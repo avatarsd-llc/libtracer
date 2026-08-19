@@ -16,6 +16,7 @@
 #include <mutex>
 #include <optional>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 #include "libtracer/byteorder.hpp"
@@ -44,29 +45,59 @@ namespace {
 inline constexpr std::size_t kNameHeaderBytes = 4;
 
 // ---------------------------------------------------------------------------------------------
-// ADR-0080 — the reclamation seam's `reclaim_local` / `reclaim_strict` machinery.
+// ADR-0080 — the reclamation seam's machinery, for all three policies.
 //
-// The whole mechanism is ONE per-thread object. That is not an implementation shortcut, it is
-// the design: the grace point both shipped policies name is "this thread's dispatch stack
-// unwinds to depth 0", which is a property OF A THREAD, so the state that tracks it is
-// thread-local and never shared. Three consequences fall out and all three are load-bearing:
+// The whole mechanism is ONE per-thread object plus, under `reclaim_qsbr` alone, an announcement
+// into the shared domain in `%qsbr.hpp`. Both grace points are decided by the SAME per-thread
+// depth counter, which is why one bracket serves all three policies:
 //
-//   * no atomic and no cache line is involved on the dispatch path — the ADR's "non-atomic"
-//     cost, delivered literally;
-//   * `graph_t` gains NO data member, so no existing field's offset moves and the delivery
-//     path's codegen is untouched except where the counter itself lands;
-//   * a parked pair cannot outlive anything. The thread that parks IS the thread that is
-//     dispatching (parking only happens at depth > 0), and it drains before returning to
-//     depth 0 — so this array is provably empty at every instant outside a `write()`.
+//   * `reclaim_local` — the grace point is a property OF THIS THREAD ("my dispatch stack
+//     unwound"), so the state that tracks it is thread-local and never shared. No atomic and no
+//     cache line is involved on the dispatch path, and a parked pair provably cannot outlive
+//     anything: the thread that parks IS the thread dispatching, and it drains before returning
+//     to depth 0.
+//   * `reclaim_qsbr` — the grace point is a property OF EVERY THREAD. The depth counter is still
+//     what decides WHEN (the transition to 0 is this thread's quiescent state, and the
+//     transition from 0 is its announcement), but the retired pairs cannot live here: the thread
+//     that retires is typically NOT the thread that will complete the grace period. See
+//     `%qsbr.hpp` §qsbr_why_global for why a per-thread retired list would never drain in the
+//     very case this policy exists for.
+//
+// `graph_t` gains NO data member under any policy, so no existing field's offset moves.
+//
+// NOTHING HERE IS A TEMPLATE, and that is a measured decision rather than an oversight. The
+// obvious way to keep the QSBR domain out of a build that does not bind it is to parameterise
+// this trio on the policy, on the theory that an `if constexpr` discarded statement outside a
+// template still odr-uses what it names. GCC does not behave that way: a discarded branch
+// naming `detail_qsbr::registry()` emits ZERO bytes of it at -O0, -O1 -g and -O3 alike (the
+// `.bss` is confirmed absent from the default build by `nm`). Templatising anyway is not free —
+// it changes every mangled name in this block, which is what stopped the default build's
+// `graph.cpp.o` from comparing byte-identical to the one before this policy existed. So the
+// trio keeps its shipped shape, and the ONE thing that genuinely must vary with the policy —
+// how much parking storage the thread-local carries — varies as an array bound.
 // ---------------------------------------------------------------------------------------------
 
 /**
  * @brief The count of retired pairs dropped for want of a parking slot, process-wide.
  *
- * Behind `graph_t::deferred_release_drops`. Relaxed: it is a diagnostic tally that orders
- * nothing, exactly like the graph's own snapshot-drop counters.
+ * Behind `graph_t::deferred_release_drops`, which sums this with the QSBR domain's own tally.
+ * Relaxed: it is a diagnostic that orders nothing, exactly like the graph's snapshot-drop
+ * counters.
  */
 std::atomic<std::uint64_t> g_deferred_release_drops{0};
+
+/**
+ * @brief How many pairs one thread parks locally — @ref kDeferredReleaseSlots, or none under a
+ *        policy whose retired pairs live in the SHARED table instead.
+ *
+ * A QSBR build never calls @ref park_release, so the full array would be dead TLS on every
+ * dispatching thread (256 B a piece on a 64-bit host); it collapses to one unused entry, a
+ * zero-length array being an extension rather than standard C++. Collapsing the BOUND rather
+ * than the struct is what lets the default build's thread-local keep byte-for-byte the layout
+ * it had — the array is the only thing that may differ, and only where it is never touched.
+ */
+inline constexpr std::size_t kLocalParkSlots =
+    reclaim_policy_t::kGraceSpansThreads ? 1 : kDeferredReleaseSlots;
 
 /**
  * @brief One thread's dispatch-stack depth and the pairs retired from inside it (ADR-0080).
@@ -80,10 +111,10 @@ std::atomic<std::uint64_t> g_deferred_release_drops{0};
 struct dispatch_state_t {
     /** @brief Nesting depth of `fan_out` / latch dispatch on this thread; 0 ⇒ quiescent. */
     unsigned depth;
-    /** @brief How many of @ref parked are occupied. */
+    /** @brief How many of @ref parked are occupied. Stays 0 under `reclaim_qsbr`. */
     unsigned parked_n;
     /** @brief Pairs retired at depth > 0, awaiting this thread's return to depth 0. */
-    retired_callback_t parked[kDeferredReleaseSlots];
+    retired_callback_t parked[kLocalParkSlots];
 };
 
 /**
@@ -100,16 +131,18 @@ struct dispatch_state_t {
 /**
  * @brief Run every pair this thread parked, then empty the park — the grace point itself.
  *
- * `noinline` and out of line on purpose: its caller is the dispatch path, whose cost must be
- * the depth decrement and one predictable-not-taken branch. Nothing here runs under a graph
- * lock — the caller is a `fan_out` that has already released its edge pin.
+ * `noinline` and out of line on purpose: its caller is the dispatch path, whose cost must be the
+ * depth decrement and one predictable-not-taken branch. Nothing here runs under a graph lock —
+ * the caller is a `fan_out` that has already released its edge pin.
  *
- * The park is emptied BEFORE the first hook runs. A hook is arbitrary user code that may
- * publish, and a nested publish re-enters this function; taking the entries first means it
- * finds an empty park rather than re-running a hook that is already executing.
+ * The park is emptied BEFORE the first hook runs. A hook is arbitrary user code that may publish,
+ * and a nested publish re-enters this function; taking the entries first means it finds an empty
+ * park rather than re-running a hook that is already executing.
+ *
+ * `maybe_unused` because a `reclaim_qsbr` build parks nothing locally and never reaches it.
  */
-[[gnu::noinline]] void run_parked_releases(dispatch_state_t& s) {
-    retired_callback_t taken[kDeferredReleaseSlots];
+[[maybe_unused]] [[gnu::noinline]] void run_parked_releases(dispatch_state_t& s) {
+    retired_callback_t taken[kLocalParkSlots];
     const unsigned n = s.parked_n;
     for (unsigned i = 0; i < n; ++i) taken[i] = s.parked[i];
     s.parked_n = 0;
@@ -126,7 +159,16 @@ struct dispatch_state_t {
 class dispatch_scope_t {
    public:
     dispatch_scope_t() noexcept {
-        if constexpr (reclaim_policy_t::kDefersToDispatchExit) ++dispatch_state().depth;
+        if constexpr (reclaim_policy_t::kDefersToDispatchExit) {
+            dispatch_state_t& s = dispatch_state();
+            if constexpr (reclaim_policy_t::kGraceSpansThreads) {
+                // Only the OUTERMOST bracket announces. An inner one is already covered by the
+                // announcement the outer one made, and re-announcing at a NEWER epoch would let
+                // a scan conclude past a retirement the outer snapshot still names.
+                if (s.depth == 0) detail_qsbr::go_online();
+            }
+            ++s.depth;
+        }
     }
     dispatch_scope_t(const dispatch_scope_t&) = delete;
     dispatch_scope_t& operator=(const dispatch_scope_t&) = delete;
@@ -135,9 +177,19 @@ class dispatch_scope_t {
     ~dispatch_scope_t() {
         if constexpr (reclaim_policy_t::kDefersToDispatchExit) {
             dispatch_state_t& s = dispatch_state();
-            // Both fields live in the same thread-local object, so the common case — unwind to
-            // depth 0 with an empty park — is two loads off one base and a branch nobody takes.
-            if (--s.depth == 0 && s.parked_n != 0) run_parked_releases(s);
+            if constexpr (reclaim_policy_t::kGraceSpansThreads) {
+                if (--s.depth != 0) return;
+                // Go quiescent FIRST, so this thread's own announcement is already withdrawn
+                // when the drain scans — otherwise every drain would see itself as a reason to
+                // defer, and a node with one dispatching thread would reclaim nothing, ever.
+                detail_qsbr::go_offline();
+                pass_quiescent_state<reclaim_policy_t>();
+            } else {
+                // Both fields live in the same thread-local object, so the common case — unwind
+                // to depth 0 with an empty park — is two loads off one base and a branch nobody
+                // takes.
+                if (--s.depth == 0 && s.parked_n != 0) run_parked_releases(s);
+            }
         }
     }
 };
@@ -162,13 +214,39 @@ class dispatch_scope_t {
  * very use-after-free this whole seam exists to close. The drop is counted so an undersized
  * `kDeferredReleaseSlots` is visible instead of silent.
  */
-void park_release(const retired_callback_t& pair) {
+[[maybe_unused]] void park_release(const retired_callback_t& pair) {
     dispatch_state_t& s = dispatch_state();
-    if (s.parked_n >= kDeferredReleaseSlots) {
+    if (s.parked_n >= kLocalParkSlots) {
         g_deferred_release_drops.fetch_add(1, std::memory_order_relaxed);
         return;
     }
     s.parked[s.parked_n++] = pair;
+}
+
+/**
+ * @brief Retire one `{ctx, release}` pair at the bound policy's grace point — the whole of
+ *        `unsubscribe`'s policy body, in one place.
+ *
+ * Every branch releases INLINE in the case where nothing can still be holding the pair, which is
+ * why "quiescent on return" is true of an ordinary unsubscribe under all three policies.
+ */
+inline void retire_pair(const retired_callback_t& pair) {
+    if constexpr (reclaim_policy_t::kGraceSpansThreads) {
+        // The domain decides inline-vs-defer by SCANNING, not by asking about this thread: a
+        // sibling thread's live snapshot is exactly what the depth counter cannot see. It counts
+        // its own drops, which `deferred_release_drops` folds back in below.
+        detail_qsbr::retire(pair.ctx, pair.release);
+    } else if (inside_dispatch()) {
+        park_release(pair);
+    } else {
+        pair.release(pair.ctx);
+    }
+}
+
+/** @brief The QSBR domain's drop tally, or a compile-time 0 for a policy that has no domain. */
+[[nodiscard]] inline std::uint64_t qsbr_drops() noexcept {
+    if constexpr (reclaim_policy_t::kGraceSpansThreads) return detail_qsbr::drops();
+    return 0;
 }
 
 /**
@@ -2505,21 +2583,20 @@ result_t<void> graph_t::unsubscribe(const subscription_t& sub, subscriber_releas
     note_subscriber_removed(sub.vertex_);
 
     // The grace point (ADR-0080). Reached HERE — synchronously, before returning — whenever
-    // this thread holds no dispatch, which is every ordinary unsubscribe and every unsubscribe
-    // at all under `reclaim_strict`. Only a RE-ENTRANT one defers, and only as far as the
-    // enclosing dispatch's exit; either way the library decided, and the caller was told.
-    if (release != nullptr) {
-        const retired_callback_t pair{.ctx = retired_ctx, .release = release};
-        if (inside_dispatch())
-            park_release(pair);
-        else
-            release(pair.ctx);
-    }
+    // nothing can still be holding the pair: this thread holds no dispatch under the two
+    // per-thread policies, and NO participant is mid-dispatch under `reclaim_qsbr`. That is
+    // every ordinary unsubscribe, and every unsubscribe at all under `reclaim_strict`. Only the
+    // cases that genuinely overlap a live snapshot defer; either way the library decided by
+    // itself, and the caller was told rather than asked.
+    if (release != nullptr) retire_pair({.ctx = retired_ctx, .release = release});
     return {};
 }
 
 std::uint64_t graph_t::deferred_release_drops() noexcept {
-    return g_deferred_release_drops.load(std::memory_order_relaxed);
+    // Two tallies, one reading: the per-thread park's and — under `reclaim_qsbr` — the shared
+    // retired table's. The second term folds to a literal 0 under the other two policies, so
+    // this stays a single relaxed load in the build that is not paying for a grace period.
+    return g_deferred_release_drops.load(std::memory_order_relaxed) + qsbr_drops();
 }
 
 void graph_t::set_app_fields(vertex_handle_t v, std::vector<app_field_t> table) {
