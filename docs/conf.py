@@ -116,6 +116,10 @@ include_patterns = [
     "docs/spec/v1.md",
     "docs/spec/index.md",
     "CONTEXT.md",
+    # The intent-routed entry funnel (#1382). Appended rather than filed next to
+    # getting-started.md so a parallel doc car adding its own entry conflicts on one
+    # line at most.
+    "docs/start-here.md",
 ]
 exclude_patterns = [
     "_build",

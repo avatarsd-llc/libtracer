@@ -148,3 +148,11 @@ Test report <docs/test-report>
 
 Context glossary <CONTEXT>
 ```
+
+```{toctree}
+:caption: Start here
+:hidden:
+:maxdepth: 1
+
+Route by intent <docs/start-here>
+```
