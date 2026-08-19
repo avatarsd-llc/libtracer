@@ -21,7 +21,8 @@
  * stream a CLOSE or an RFC 6455 violation the checked decode reports (an
  * oversized or non-final control frame, §5.5/§7.1.7, or a DATA frame declaring
  * more than the injected receive cap, #872); during the opening
- * HANDSHAKE a request that overruns 16 KiB or carries no `Sec-WebSocket-Key`.
+ * HANDSHAKE a request that overruns the deployment's pre-auth budget
+ * (`max_handshake`, #934) or carries no `Sec-WebSocket-Key`.
  *
  * INGRESS IS BOUNDED BY AN INJECTED SEAM, not by the peer. Both roles take the same
  * `(mem::mem_backend_t*, max_frame)` pair tcp/quic/webtransport take, and both expose the
@@ -141,6 +142,35 @@ class transport_ws_server : public slot_server_t {
     static constexpr std::size_t kMaxFrame = length_prefix_framer::kDefaultMaxFrame;
 
     /**
+     * @brief The largest OPENING HANDSHAKE a PRE-AUTH peer may make this node buffer
+     *        (16 KiB) — the ceiling `max_handshake` tightens against (#934).
+     *
+     * A different budget from @ref kMaxFrame and deliberately so: a frame arrives on an
+     * established connection under whatever the deployment allowed, while an HTTP Upgrade
+     * request arrives from a host that has done nothing but complete a TCP connect — no
+     * ACL, no subscription, no router, nothing authenticated. Pre-auth work is REFUSED
+     * EARLY, not carefully allocated: an accumulation that would pass this budget is
+     * refused BEFORE the byte that would exceed it is copied, @ref malformed_rx ticks, and
+     * the link is closed (the count-then-close disposition, #838's shape).
+     */
+    static constexpr std::size_t kMaxHandshakeBytes = 16u * 1024u;
+
+    /**
+     * @brief Resolve a `max_handshake` request into the honored budget — TIGHTEN-ONLY
+     *        against @ref kMaxHandshakeBytes, exactly as
+     *        `length_prefix_framer::configured_cap` is against `kDefaultMaxFrame`.
+     *
+     * `0` (unset) keeps the default; a nonzero value yields
+     * `min(max_handshake, kMaxHandshakeBytes)`. The value arrives through a config-writable
+     * key (`ws`-private `max_handshake`), and a config-writable key must never RAISE a
+     * pre-auth bound — only narrow it.
+     */
+    [[nodiscard]] static constexpr std::size_t handshake_cap(std::size_t max_handshake) noexcept {
+        if (max_handshake == 0) return kMaxHandshakeBytes;
+        return max_handshake < kMaxHandshakeBytes ? max_handshake : kMaxHandshakeBytes;
+    }
+
+    /**
      * @brief Bind+listen on @p bind_port (0 = ephemeral; see local_port()).
      *
      * Spawns the poll/serve thread immediately. Use ok() to confirm the listen
@@ -191,12 +221,22 @@ class transport_ws_server : public slot_server_t {
      *                   it, on either path; a session that stalls `kMaxConsecutiveStalls`
      *                   records in a row, or once mid-record, is closed. It also SIZES the
      *                   peer cap: see @p max_peers.
+     * @param max_handshake PRE-AUTH request-size budget for the opening handshake in
+     *                   bytes (0 → @ref kMaxHandshakeBytes, today's behaviour).
+     *                   TIGHTEN-ONLY: a value above the default is clamped to it
+     *                   (@ref handshake_cap) — the peer on this path has authenticated
+     *                   nothing, so a config-writable key may narrow what it may cost the
+     *                   node and never widen it. The budget is a TOTAL-REQUEST one, not a
+     *                   per-read one, and it is enforced BEFORE the append: the byte that
+     *                   would exceed it is never copied into the slot. Over budget ⇒
+     *                   @ref malformed_rx ticks and the link is closed (#934).
      */
     explicit transport_ws_server(std::uint16_t bind_port,
                                  mem::mem_backend_t* backend = &mem::heap_backend(),
                                  std::size_t max_frame = 0, std::size_t max_peers = 0,
                                  bool peer_named = false, std::size_t recv_stack = 0,
-                                 std::uint32_t liveness_window_ms = 0);
+                                 std::uint32_t liveness_window_ms = 0,
+                                 std::size_t max_handshake = 0);
 
     /** @brief Stop the recv thread and close all sockets. */
     ~transport_ws_server() override;
@@ -247,8 +287,9 @@ class transport_ws_server : public slot_server_t {
     }
 
     /** @brief RFC 6455 violations seen: an over-cap declared length (see @ref kMaxFrame),
-     *         a reassembled message past the cap, or a §5.5 control-frame breach. Each one
-     *         fails its connection (§7.1.7). Summed over every peer. */
+     *         a reassembled message past the cap, a §5.5 control-frame breach, or an
+     *         opening handshake past its pre-auth budget (see @ref kMaxHandshakeBytes,
+     *         #934). Each one fails its connection (§7.1.7). Summed over every peer. */
     [[nodiscard]] std::uint64_t malformed_rx() const noexcept {
         return malformed_rx_.load(std::memory_order_relaxed);
     }
@@ -270,6 +311,12 @@ class transport_ws_server : public slot_server_t {
     [[nodiscard]] std::size_t effective_max_frame() const noexcept {
         return length_prefix_framer::effective_cap(*backend_, max_frame_);
     }
+
+    /** @brief The pre-auth handshake budget actually honored: `handshake_cap(max_handshake)`
+     *         as constructed (#934). Unlike @ref effective_max_frame it names no backend —
+     *         a handshake is accumulated in the slot's own request buffer, not in an RX
+     *         segment, so there is no second injected resource to take the min against. */
+    [[nodiscard]] std::size_t effective_max_handshake() const noexcept { return max_handshake_; }
 
    private:
     struct session_t;  // one peer slot's connection state (defined in the .cpp)
@@ -335,6 +382,9 @@ class transport_ws_server : public slot_server_t {
     // its counters — the same four members tcp/quic/webtransport carry.
     mem::mem_backend_t* backend_;
     std::size_t max_frame_ = kMaxFrame;  // per-connection receive cap (:settings; 0 => kMaxFrame)
+    // The PRE-AUTH handshake budget (#934): a separate bound from max_frame_ because it
+    // guards a separate phase — bytes from a host that has authenticated nothing.
+    std::size_t max_handshake_ = kMaxHandshakeBytes;
     std::atomic<std::uint64_t> dropped_rx_{0};
     std::atomic<std::uint64_t> malformed_rx_{0};
     std::atomic<std::uint64_t> dropped_tx_{0};
@@ -398,12 +448,23 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
      *             constructor applies @p egress_src to both, so a link built here has ONE
      *             egress store. `nullptr` (and the default) means the process heap —
      *             today's behaviour unchanged. Must outlive this transport.
+     * @param max_handshake The DIAL half of the pre-auth handshake budget (#934), resolved
+     *             through `transport_ws_server::handshake_cap` so both roles read one home
+     *             (0 → `transport_ws_server::kMaxHandshakeBytes`; above it is clamped —
+     *             tighten-only). It bounds the RESPONSE header block the dialled server may
+     *             make this node accumulate: the recv is sized by what is left of the
+     *             budget, so the accumulation never passes it, and a budget exhausted with
+     *             no CRLFCRLF in hand ticks @ref malformed_rx and fails the dial. It does
+     *             NOT bound what the server pipelines BEHIND its `101` — those are frame
+     *             bytes, bounded by @p max_frame, and whatever does not fit the budget is
+     *             simply left on the socket for the recv loop.
      */
     transport_ws_client(const std::string& host, std::uint16_t port,
                         mem::mem_backend_t* backend = &mem::heap_backend(),
                         std::size_t max_frame = 0, std::size_t recv_stack = 0,
                         bool defer_recv = false, std::uint32_t liveness_window_ms = 0,
-                        mem::block_source_t* egress_src = &mem::heap_source());
+                        mem::block_source_t* egress_src = &mem::heap_source(),
+                        std::size_t max_handshake = 0);
 
     /** @brief Stop the recv thread and close the socket. */
     ~transport_ws_client() override;
@@ -466,7 +527,8 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
     }
 
     /** @brief RFC 6455 violations seen — an over-cap declared length, an over-cap
-     *         reassembled message, or a §5.5 control breach. Each fails the connection. */
+     *         reassembled message, a §5.5 control breach, or an opening-handshake RESPONSE
+     *         past its budget (#934). Each fails the connection. */
     [[nodiscard]] std::uint64_t malformed_rx() const noexcept {
         return malformed_rx_.load(std::memory_order_relaxed);
     }
@@ -498,6 +560,10 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
         return length_prefix_framer::effective_cap(*backend_, max_frame_);
     }
 
+    /** @brief The pre-auth handshake budget actually honored — the server-side accessor's
+     *         twin, same name, same tighten-only resolution (#934). */
+    [[nodiscard]] std::size_t effective_max_handshake() const noexcept { return max_handshake_; }
+
    private:
     /**
      * @brief Send the GET Upgrade, verify the 101, and hand back what came after it.
@@ -521,6 +587,8 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
     // The RX seam + ingress bound + counters, identical to the server's (and to tcp's).
     mem::mem_backend_t* backend_;
     std::size_t max_frame_ = transport_ws_server::kMaxFrame;
+    /** @brief The pre-auth handshake budget (#934) — the server-side member's twin. */
+    std::size_t max_handshake_ = transport_ws_server::kMaxHandshakeBytes;
     std::atomic<std::uint64_t> dropped_rx_{0};
     std::atomic<std::uint64_t> malformed_rx_{0};
     std::atomic<std::uint64_t> dropped_tx_{0};
