@@ -39,6 +39,11 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-24.04
+    # Measured max 0.13 min (8 seconds), p50 0.07 over the full release history — it only
+    # resolves the version from the tag. 10 = the short-job floor. Observed
+    # queue-before-start hit 5.03 min, which does not consume timeout-minutes. The
+    # ceilings on the publish jobs below are deliberately generous — see `preflight`.
+    timeout-minutes: 10
     outputs:
       version: ${{ steps.v.outputs.version }}
       tag: ${{ steps.v.outputs.tag }}
@@ -67,6 +72,13 @@ jobs:
   preflight:
     needs: verify
     runs-on: ubuntu-24.04
+    # Measured max 1.42 min, p50 0.92 — the heavy release leg (3-core conformance + diff
+    # fuzzer + npm ci + cargo test). 20 = ~14x, and every publish job below shares that
+    # number for one reason: each is a network round-trip to an external registry whose
+    # latency is not ours to predict, several `pip install` or `npm ci` a publishing
+    # client first, and a false trip on a release is far more expensive than on a PR
+    # check. Release jobs are not merge gates, so a generous ceiling costs nothing.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -87,6 +99,9 @@ jobs:
         run: cargo test --manifest-path bindings/rust/Cargo.toml
       - name: TypeScript package tests
         working-directory: bindings/typescript
+        # Its `npm ci` is INLINE rather than in the step name, so it is easy to miss when
+        # grepping for install steps. 8 = the registry install-step floor.
+        timeout-minutes: 8
         run: |
           npm ci
           npm run build
@@ -98,6 +113,8 @@ jobs:
   github-release:
     needs: [verify, preflight]
     runs-on: ubuntu-24.04
+    # Measured max 0.92 min. 20 = the release-job ceiling (see `preflight`).
+    timeout-minutes: 20
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       GH_TOKEN: ${{ github.token }}
@@ -136,6 +153,8 @@ jobs:
   npm:
     needs: [verify, preflight]
     runs-on: ubuntu-24.04
+    # Measured max 0.72 min. 20 = the release-job ceiling (see `preflight`).
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: bindings/typescript
@@ -156,6 +175,8 @@ jobs:
       # manifests, and npm publish never consults it.
       - name: Install (pristine lockfile)
         if: ${{ env.NPM_TOKEN != '' }}
+        # Registry round-trip. 8 = the install-step floor.
+        timeout-minutes: 8
         run: npm ci
       - name: Stamp package versions from the tag
         if: ${{ env.NPM_TOKEN != '' }}
@@ -173,6 +194,8 @@ jobs:
   crates:
     needs: [verify, preflight]
     runs-on: ubuntu-24.04
+    # Measured max 0.33 min. 20 = the release-job ceiling (see `preflight`).
+    timeout-minutes: 20
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
@@ -192,6 +215,8 @@ jobs:
   platformio:
     needs: [verify, preflight]
     runs-on: ubuntu-24.04
+    # Measured max 0.38 min. 20 = the release-job ceiling (see `preflight`).
+    timeout-minutes: 20
     env:
       PLATFORMIO_AUTH_TOKEN: ${{ secrets.PLATFORMIO_AUTH_TOKEN }}
     steps:
@@ -207,6 +232,10 @@ jobs:
         run: python3 tools/sync-version.py "${{ needs.verify.outputs.version }}"
       - name: Publish to the PlatformIO registry
         if: ${{ env.PLATFORMIO_AUTH_TOKEN != '' }}
+        # `pip install` is INLINE before the publish, so this step is easy to miss when
+        # grepping for install steps. 10 covers the client install AND the registry
+        # upload it fronts.
+        timeout-minutes: 10
         run: |
           pip install --quiet platformio
           pio pkg publish --no-interactive
@@ -214,6 +243,8 @@ jobs:
   esp-component:
     needs: [verify, preflight]
     runs-on: ubuntu-24.04
+    # Measured max 0.55 min. 20 = the release-job ceiling (see `preflight`).
+    timeout-minutes: 20
     env:
       IDF_COMPONENT_API_TOKEN: ${{ secrets.IDF_COMPONENT_API_TOKEN }}
       # Set the repo variable ESP_COMPONENT_NAMESPACE if your ESP registry
@@ -241,6 +272,9 @@ jobs:
       - name: Upload to the ESP Component Registry
         if: ${{ env.IDF_COMPONENT_API_TOKEN != '' }}
         working-directory: integrations/esp-idf/libtracer
+        # Same inline-`pip install` shape as the PlatformIO publish above; 10 covers the
+        # client install and the registry upload together.
+        timeout-minutes: 10
         run: |
           pip install --quiet idf-component-manager
           compote component upload --namespace "${NAMESPACE}" --name libtracer

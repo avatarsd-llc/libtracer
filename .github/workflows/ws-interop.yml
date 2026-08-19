@@ -32,6 +32,10 @@ on:
 jobs:
   ws-interop:
     runs-on: ubuntu-24.04
+    # Measured max 1.15 min (healthy 1.07), p50 ~0.9. 15 = the short-job floor, ~13x
+    # observed: the ceiling exists for the `npm ci` below, not for the work. See
+    # core-ci.yml's header for the tree-wide policy.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -48,6 +52,9 @@ jobs:
 
       - name: Install + build the TypeScript workspace
         working-directory: bindings/typescript
+        # `npm ci` is a registry round-trip; measured 0.02-0.13 min. 8 = the install-step
+        # floor, so a hung registry names itself instead of stalling the job.
+        timeout-minutes: 8
         run: |
           npm ci
           npm run build
@@ -68,6 +75,8 @@ jobs:
   # from a transport-ws failure. Same path-filter as this whole workflow.
   fwd-interop:
     runs-on: ubuntu-24.04
+    # Measured max 1.38 min (healthy 1.08), p50 ~0.9. Short-job floor, same `npm ci`.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -84,6 +93,9 @@ jobs:
 
       - name: Install + build the TypeScript workspace
         working-directory: bindings/typescript
+        # `npm ci` is a registry round-trip; measured 0.02-0.13 min. 8 = the install-step
+        # floor, so a hung registry names itself instead of stalling the job.
+        timeout-minutes: 8
         run: |
           npm ci
           npm run build
@@ -104,6 +116,8 @@ jobs:
   # doxygen) on a Node toolchain.
   ws-diff-fuzz:
     runs-on: ubuntu-24.04
+    # Measured max 1.35 min (healthy 1.07), p50 ~0.9. Short-job floor, same `npm ci`.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -120,6 +134,9 @@ jobs:
 
       - name: Install + build the TypeScript workspace
         working-directory: bindings/typescript
+        # `npm ci` is a registry round-trip; measured 0.02-0.13 min. 8 = the install-step
+        # floor, so a hung registry names itself instead of stalling the job.
+        timeout-minutes: 8
         run: |
           npm ci
           npm run build

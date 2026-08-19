@@ -40,6 +40,10 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-24.04
+    # Measured max 0.20 min (12 seconds), p50 0.08 — checkout plus a python script, no
+    # package install at all. 10 = the short-job floor (~50x observed); 3x would be 36
+    # seconds and any transient runner stall would breach it.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Capability matrix matches real test evidence

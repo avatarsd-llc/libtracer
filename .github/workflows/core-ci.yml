@@ -35,6 +35,38 @@
 # EPERM — so the container route cannot run them, while the direct-on-host route would
 # assume a toolchain these runners are not yet asserted to carry. The arm64 leg is a
 # different architecture and stays hosted permanently.
+#
+# ── TIMEOUT CEILINGS (the tree-wide policy; the fuller explanation lives here) ──────
+# Every job in this repo carries a `timeout-minutes`, and this file is where the policy
+# is written down once rather than pasted onto each job.
+#
+# WHY. On 2026-08-19 a transient apt/network event wedged package-install steps across
+# the tree: `docs / build` sat in_progress for 56 and 36 minutes with no step progress,
+# `perf / compose-audit` for 27, and footprint-cortexm0's arm toolchain install for 36.4
+# minutes inside a run that still went GREEN. `build-test` here is a REQUIRED check, so a
+# wedge does not fail a PR — it holds the merge queue against GitHub's 6-hour default.
+# Every occurrence cleared on cancel+rerun, so the fault is infrastructure, not content.
+# A ceiling does not make the hang less likely; it converts "wedged forever, and
+# indistinguishable from running" into "red in N minutes, named, and retryable". Same
+# treatment docs.yml's `build` got in #1403.
+#
+# HOW THE NUMBERS WERE PICKED. Per-job runtimes were measured from the Actions REST API
+# (40 successful runs per workflow, per-job and per-step timings), and each ceiling is
+# quoted against the HEALTHY figure — the 2026-08-19 incident runs are excluded from
+# "healthy" and named separately. Jobs longer than a couple of minutes get ~3x their
+# measured max; jobs shorter than that get a flat floor of 10 minutes (no package
+# install) or 15 (with one), because 3x a 40-second job is two minutes and any transient
+# runner stall would breach it. A ceiling that reds a healthy run is worse than none —
+# the cost of a false red is a maintainer learning to ignore the colour, and the cost of
+# a loose ceiling on a short job is at worst ten wasted minutes.
+#
+# STEP CEILINGS. The job ceiling only turns a wedge red an hour later; the per-step
+# `timeout-minutes` on each package install is what NAMES the culprit in the checks UI.
+# Those are tight (5-10 min against sub-two-minute healthy installs) because a wedged
+# apt is never a slow apt. Queue time is not covered by either — `timeout-minutes` starts
+# when the job begins executing, and GitHub counts queued jobs against its own 24-hour
+# limit — so the self-hosted legs' measured queue waits (up to 11.6 min here) do not eat
+# into any number below.
 name: core-ci
 
 on:
@@ -67,6 +99,10 @@ jobs:
   build-test:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container: ubuntu:24.04
+    # Measured healthy max 4.82 min across the three legs (p50 ~4.5). 20 = ~4x, with
+    # extra room over a bare 3x because the image pull and the apt step below are inside
+    # the measured job time and are exactly the wedge surface.
+    timeout-minutes: 20
     # Build + ctest under BOTH ACL policy configs: the default ALLOW-only MCU
     # subset (acl_full=OFF) and the full security_acl host policy with DENY
     # (acl_full=ON). LIBTRACER_ACL_FULL swaps acl_policy_t at compile time, so
@@ -91,9 +127,12 @@ jobs:
       # user does not have. `git` + `ca-certificates` come first because checkout falls
       # back to a REST tarball without them.
       - name: Toolchain (container has no preinstalled tool set)
+        # The wedge surface. Measured over 90 runs of this step across the jobs below:
+        # p50 0.67 min, max 1.32. 8 = ~6x the worst healthy install.
+        timeout-minutes: 8
         run: |
           apt-get update -qq
-          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
             build-essential cmake git ca-certificates
       - uses: actions/checkout@v4
       - name: Configure + build (C++23) + ctest
@@ -118,11 +157,17 @@ jobs:
   build-test-minimal-set:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container: ubuntu:24.04
+    # Measured healthy max 2.97 min. Held at the build-test group's 20 rather than
+    # tightened: same container + apt step, same wedge surface.
+    timeout-minutes: 20
     steps:
       - name: Toolchain (container has no preinstalled tool set)
+        # The wedge surface. Measured over 90 runs of this step across the jobs below:
+        # p50 0.67 min, max 1.32. 8 = ~6x the worst healthy install.
+        timeout-minutes: 8
         run: |
           apt-get update -qq
-          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
             build-essential cmake git ca-certificates
       - uses: actions/checkout@v4
       - name: Configure + build (minimal module set) + ctest
@@ -146,11 +191,16 @@ jobs:
   build-test-reclaim-strict:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container: ubuntu:24.04
+    # Measured healthy max 4.88 min. 20 = ~4x; same group, same container apt step.
+    timeout-minutes: 20
     steps:
       - name: Toolchain (container has no preinstalled tool set)
+        # The wedge surface. Measured over 90 runs of this step across the jobs below:
+        # p50 0.67 min, max 1.32. 8 = ~6x the worst healthy install.
+        timeout-minutes: 8
         run: |
           apt-get update -qq
-          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
             build-essential cmake git ca-certificates
       - uses: actions/checkout@v4
       - name: Bind reclaim_strict_t, build + ctest
@@ -236,6 +286,9 @@ jobs:
   # permanently.
   build-test-arm64:
     runs-on: ubuntu-24.04-arm
+    # Measured healthy max 4.92 min. 20 = ~4x. No container and no apt step here, but the
+    # number is kept equal to the rest of the build-test group so one review covers them.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Configure + build (C++23, aarch64) + ctest
@@ -252,18 +305,24 @@ jobs:
   build-test-gcc15:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container: ubuntu:24.04
+    # Measured healthy max 4.68 min (5.17 on the incident day) — the worst of the
+    # build-test group, because it adds an `add-apt-repository` PPA round-trip on top of
+    # the container apt step. 20 = ~3.9x.
+    timeout-minutes: 20
     steps:
       # Same PPA as before, minus `sudo` (root in the container) plus
       # software-properties-common, which the hosted image preinstalls and a bare
       # ubuntu:24.04 does not. Same noble base, so apt resolves g++-15 identically.
       - name: Install g++-15 (toolchain PPA)
+        # Two apt-updates plus a PPA add: measured p50 1.55 min, max 2.60. 10 = ~4x.
+        timeout-minutes: 10
         run: |
           apt-get update -qq
-          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
             build-essential cmake git ca-certificates software-properties-common
           add-apt-repository -y ppa:ubuntu-toolchain-r/test
           apt-get update -qq
-          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq g++-15 gcc-15
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends g++-15 gcc-15
       - uses: actions/checkout@v4
       - name: Configure + build (C++23, GCC 15) + ctest
         env:
@@ -293,6 +352,9 @@ jobs:
   # it needs a runner-side `--security-opt seccomp=unconfined` decision first.
   sanitizers:
     runs-on: ubuntu-24.04
+    # Measured healthy max 7.98 min, p50 7.4-7.6, min 7.33 — a very tight distribution.
+    # 25 = ~3.1x the observed max; ASan/UBSan runtime here is stable.
+    timeout-minutes: 25
     strategy:
       matrix:
         lkv_slot: [sp_atomic_slot_t, hazard_slot_t]
@@ -311,6 +373,11 @@ jobs:
   # NOT routed to `ci-local` (phase 2) — same `setarch -R` seccomp bar as `sanitizers`.
   tsan:
     runs-on: ubuntu-24.04
+    # The longest core-ci jobs and legitimately the most variable: measured healthy max
+    # 12.27 min (sp_atomic) / 8.22 (hazard) against a p50 of 6.5, and 15.67 on the
+    # incident day. 35 = ~2.9x the healthy max — deliberately loose, because a false red
+    # on a sanitizer leg is read as flakiness rather than as a wedge.
+    timeout-minutes: 35
     strategy:
       matrix:
         lkv_slot: [sp_atomic_slot_t, hazard_slot_t]
@@ -374,11 +441,18 @@ jobs:
   install-consume:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container: ubuntu:24.04
+    # Measured max 1.78 min (p50 ~1.1). Short-job floor of 15 rather than 3x (~5 min):
+    # the entire risk here is the container apt step, so the ceiling answers "how long is
+    # it acceptable to be wedged", not "how long does the work take".
+    timeout-minutes: 15
     steps:
       - name: Toolchain (container has no preinstalled tool set)
+        # The wedge surface. Measured over 90 runs of this step across the jobs below:
+        # p50 0.67 min, max 1.32. 8 = ~6x the worst healthy install.
+        timeout-minutes: 8
         run: |
           apt-get update -qq
-          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
             build-essential cmake git ca-certificates
       - uses: actions/checkout@v4
       - name: Build + install core to a staging prefix
@@ -410,11 +484,17 @@ jobs:
   bench-compile:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container: ubuntu:24.04
+    # Measured max 2.10 min (p50 ~1.3) — the longest of the short container jobs.
+    # Short-job floor of 15; see install-consume for why it is not 3x.
+    timeout-minutes: 15
     steps:
       - name: Toolchain (container has no preinstalled tool set)
+        # The wedge surface. Measured over 90 runs of this step across the jobs below:
+        # p50 0.67 min, max 1.32. 8 = ~6x the worst healthy install.
+        timeout-minutes: 8
         run: |
           apt-get update -qq
-          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
             build-essential cmake git ca-certificates
       - uses: actions/checkout@v4
       - name: Configure + build every bench target (compile only, nothing is run)
@@ -444,13 +524,17 @@ jobs:
   ci-paths:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container: ubuntu:24.04
+    # Measured max 1.80 min (p50 ~1.0). Short-job floor of 15 (has a package install).
+    timeout-minutes: 15
     steps:
       # `gen_ci_paths.py --check` runs a REAL configure of the core project and reads
       # the CMake file-api back, so this leg needs the compiler too — not just python.
       - name: Toolchain (container has no preinstalled tool set)
+        # Same step, same measured distribution as the build legs' (p50 0.67, max 1.32).
+        timeout-minutes: 8
         run: |
           apt-get update -qq
-          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
             build-essential cmake git python3 ca-certificates
       - uses: actions/checkout@v4
       - name: core-ci's paths trigger covers everything core-ci builds
@@ -465,11 +549,16 @@ jobs:
   format:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container: ubuntu:24.04
+    # Measured max 1.17 min (p50 0.7) — but it apt-installs TWICE (the toolchain step and
+    # clang-format below), so the short-job floor of 15 covers both round-trips.
+    timeout-minutes: 15
     steps:
       - name: Toolchain (container has no preinstalled tool set)
+        # Same step, same measured distribution as the build legs' (p50 0.67, max 1.32).
+        timeout-minutes: 8
         run: |
           apt-get update -qq
-          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git ca-certificates
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends git ca-certificates
       - uses: actions/checkout@v4
       # `clang-format` comes from the same noble archive the hosted image installed it
       # from, so the enforced style is the same version's, not a second dialect.
@@ -477,8 +566,11 @@ jobs:
         # The step needs bash for `mapfile` and process substitution; inside a
         # `container:` job the runner may resolve the default shell to plain sh.
         shell: bash
+        # It apt-installs INLINE before doing its real work, so the cap covers both
+        # halves; the whole step measures well under a minute.
+        timeout-minutes: 8
         run: |
-          apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq clang-format
+          apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends clang-format
           mapfile -t files < <(find core/include core/src core/tests core/examples \
             tests/packaging -name '*.hpp' -o -name '*.cpp')
           clang-format --dry-run --Werror "${files[@]}"
@@ -492,15 +584,22 @@ jobs:
   doxygen-gate:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container: ubuntu:24.04
+    # Measured max 1.30 min (p50 0.8). Short-job floor of 15; like `format` it
+    # apt-installs twice, so both round-trips are inside this ceiling.
+    timeout-minutes: 15
     steps:
       - name: Toolchain (container has no preinstalled tool set)
+        # Same step, same measured distribution as the build legs' (p50 0.67, max 1.32).
+        timeout-minutes: 8
         run: |
           apt-get update -qq
-          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git ca-certificates
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends git ca-certificates
       - uses: actions/checkout@v4
       - name: Doxygen strict gate (undocumented public symbol = failure)
+        # Also apt-installs inline before its real work; same cap as `clang-format`.
+        timeout-minutes: 8
         run: |
-          apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq doxygen
+          apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends doxygen
           doxygen core/Doxyfile
       - name: Restore workspace ownership for the host runner
         # This job runs as root inside `container:` on a self-hosted runner whose

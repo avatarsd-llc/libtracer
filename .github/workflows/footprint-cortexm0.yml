@@ -53,6 +53,15 @@ on:
 jobs:
   sentinel:
     runs-on: ubuntu-24.04
+    # This is the WORST measured wedge in the repo, and it went unreported because the
+    # job eventually succeeded: on 2026-08-19 the install step below ran 36.4, 35.3,
+    # 28.4, 28.1 and 23.9 minutes, and in the slowest run 36.38 of those 36.57 job
+    # minutes were inside that single apt step. A 36-minute "success" is invisible in the
+    # checks UI. Measured healthy (26 runs off the incident day): max 1.22 min, p50 0.70.
+    # 20 is ~16x the healthy job time — absurdly generous on purpose, because the only
+    # thing this ceiling has to catch is a multi-tens-of-minutes hang. See core-ci.yml's
+    # header note for the tree-wide policy.
+    timeout-minutes: 20
     # actions: read lets the drift baseline step download the previous main
     # run's artifact with the default token.
     permissions:
@@ -62,12 +71,24 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install arm-none-eabi toolchain
+        # The step that wedged. Measured healthy p50 0.68 min, max 1.0 off the incident
+        # day; 10 is ~15x that and would have caught all five multi-tens-of-minutes
+        # hangs. Over 50 runs, 41 of these installs finished under two minutes and every
+        # one of the six over five minutes is dated 2026-08-19.
+        timeout-minutes: 10
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update
+          sudo -E apt-get update
           # gcc-arm-none-eabi on 24.04 is 13.2 (has -std=c++23, <expected>,
           # <memory_resource>); it pulls in binutils (arm-none-eabi-size) and
           # newlib-nano (nano.specs / nosys.specs) as dependencies.
-          sudo apt-get install -y -qq gcc-arm-none-eabi
+          #
+          # NOT --no-install-recommends, unlike every other apt call hardened alongside
+          # this one: `gcc-arm-none-eabi` carries `Recommends: libnewlib-arm-none-eabi`,
+          # which is where nano.specs / nosys.specs come from. Dropping recommends here
+          # would change WHICH packages are installed and break the link.
+          sudo -E apt-get install -y -qq gcc-arm-none-eabi
           arm-none-eabi-g++ --version | head -1
 
       - name: Fetch the previous main measurement (drift baseline)

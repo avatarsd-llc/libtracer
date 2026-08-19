@@ -49,6 +49,9 @@ on:
 jobs:
   mesh-testbed:
     runs-on: ubuntu-24.04
+    # Measured max 1.65 min, p50 1.47, min 1.27. 15 = the short-job floor (~9x observed);
+    # it exists for the `npm ci` below. See core-ci.yml's header for the policy.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -67,6 +70,8 @@ jobs:
 
       - name: Install + build the TypeScript workspace
         working-directory: bindings/typescript
+        # `npm ci` is a registry round-trip; measured 0.02-0.13 min. 8 = install floor.
+        timeout-minutes: 8
         run: |
           npm ci
           npm run build

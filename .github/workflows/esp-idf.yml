@@ -75,6 +75,10 @@ jobs:
   # conditionally, the ESP list is a flat subset — so they can't share a fragment).
   srcs-drift:
     runs-on: ubuntu-24.04
+    # Measured max 0.13 min (8 seconds), p50 0.08 — a pure file-list comparison with no
+    # network beyond checkout. 10 = the short-job floor, and still fails an hour and a
+    # half sooner than doing nothing. See core-ci.yml's header for the policy.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Guard ESP-IDF LIBTRACER_SRCS against core/src drift
@@ -83,6 +87,9 @@ jobs:
   build:
     needs: srcs-drift
     runs-on: ubuntu-24.04
+    # Measured worst leg 6.07 min (esp32c6, p50 5.83); the other three targets 3.5-3.7.
+    # 20 = ~3.3x. The espressif/idf image pull is inside the measured job time.
+    timeout-minutes: 20
     # Pinned ESP-IDF v6.0 release (GCC 15 RISC-V toolchain — C++23: std::expected,
     # std::span; matches the origin firmware's IDF v6.0-dev toolchain). Bumped from v5.3/GCC13.
     container: espressif/idf:release-v6.0
@@ -135,6 +142,9 @@ jobs:
     needs: srcs-drift
     runs-on: ubuntu-24.04
     container: espressif/idf:release-v6.0
+    # Measured 3.90-4.15 min across the four targets. 20 = ~4.8x, kept equal to `build`
+    # so the container-image pull is covered by one reviewable number.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -227,6 +237,8 @@ jobs:
     needs: srcs-drift
     runs-on: ubuntu-24.04
     container: espressif/idf:release-v6.0
+    # Measured max 3.92 min. 20 = ~5x, same group and same image pull as `full-node`.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -273,14 +285,22 @@ jobs:
   full-node-host:
     runs-on: ubuntu-24.04
     container: espressif/idf:release-v5.5
+    # Measured max 2.83 min, p50 2.50. 15 = ~5.3x — extra headroom over 3x because this
+    # job apt-installs g++-12 inside the IDF container, i.e. the demonstrated wedge point.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
       - name: Install g++-12 (C++23 <expected> for the host/linux toolchain)
         shell: bash
+        # Measured p50 0.15 min, max 0.20. 8 = the install-step floor (~40x), so a wedged
+        # apt inside the IDF container reds as itself. Runs as root — no sudo here.
+        timeout-minutes: 8
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           apt-get update -qq
-          apt-get install -y -qq g++-12 gcc-12
+          apt-get install -y -qq --no-install-recommends g++-12 gcc-12
 
       - name: Build full_node for the linux target
         shell: bash
@@ -322,14 +342,22 @@ jobs:
   host-build:
     runs-on: ubuntu-24.04
     container: espressif/idf:release-v5.5
+    # Measured max 2.83 min, p50 2.37. 15 = ~5.3x, same reasoning as full-node-host: it
+    # carries the same g++-12 apt step inside the container.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
       - name: Install g++-12 (C++23 <expected> for the host/linux toolchain)
         shell: bash
+        # Measured p50 0.15 min, max 0.20. 8 = the install-step floor (~40x), so a wedged
+        # apt inside the IDF container reds as itself. Runs as root — no sudo here.
+        timeout-minutes: 8
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           apt-get update -qq
-          apt-get install -y -qq g++-12 gcc-12
+          apt-get install -y -qq --no-install-recommends g++-12 gcc-12
 
       - name: Build host_smoke (P0 in-process component) for the linux target
         shell: bash

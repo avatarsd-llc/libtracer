@@ -68,6 +68,15 @@ env:
 jobs:
   quic-build-test:
     runs-on: ubuntu-24.04
+    # Measured on the msquic cache-HIT path only: quic-tsan max 9.95 min (healthy 9.30,
+    # p50 6.58), quic-asan 8.92, quic-release 6.22. 3x would be ~30 — but across 500
+    # sampled successful runs of this workflow and wt-interop.yml the
+    # `Build msquic from source (cache miss only)` step below executed ZERO times, so the
+    # miss path is entirely UNMEASURED. It fires on the next MSQUIC_TAG bump or a 7-day
+    # cache eviction and is a full from-source msquic build. 45 covers the measured
+    # 10-min hit path at 4.5x AND leaves ~35 min for a cold build. This number is
+    # measurement PLUS declared headroom — re-measure it after the first real cache miss.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -95,6 +104,10 @@ jobs:
 
       - name: Build msquic from source (cache miss only)
         if: steps.msquic-cache.outputs.cache-hit != 'true'
+        # NOT a tight cap, unlike the other install steps hardened alongside it: this one
+        # has never executed in the sampled history, so there is no healthy figure to
+        # take a multiple of. 30 is headroom for a clone + submodules + full cmake build.
+        timeout-minutes: 30
         run: |
           git clone --depth 1 --branch "$MSQUIC_TAG" --recurse-submodules --shallow-submodules \
             https://github.com/microsoft/msquic.git ~/msquic-src

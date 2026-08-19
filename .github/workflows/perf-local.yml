@@ -88,6 +88,10 @@ jobs:
   density:
     if: github.repository == 'avatarsd-llc/libtracer'
     runs-on: ubuntu-latest
+    # Measured healthy max 0.70 min, p50 0.67; the 4.40 max is a slow actions/checkout on
+    # the 2026-08-19 incident day. 20 = ~4.5x the worst observed. Hosted runner, pure
+    # banked-series validity checks. See core-ci.yml's header for the tree-wide policy.
+    timeout-minutes: 20
     outputs:
       measure: ${{ steps.decide.outputs.measure }}
       gap: ${{ steps.gap.outputs.gap }}
@@ -141,6 +145,14 @@ jobs:
       github.repository == 'avatarsd-llc/libtracer' &&
       needs.density.outputs.measure != 'false'
     runs-on: [self-hosted, bench-local]
+    # The loosest ceiling in the repo, deliberately. Measured max 18.15 min, p50 6.62,
+    # min 3.23 over 37 runs — an enormous LEGITIMATE spread, because the
+    # `Wait for the host to go quiet` step below is designed to burn up to 15 min and
+    # measured exactly 15.00 in the slowest run. 60 = ~3.3x the observed max. Do NOT go
+    # tighter: a 15-min quiet-wait plus a full bench sweep plus both RAM censuses is the
+    # shape of a HEALTHY run here, and anything under ~40 would red a correctly-behaving
+    # soak. Queue-before-start (measured up to 7.17 min) does not count against this.
+    timeout-minutes: 60
     permissions:
       contents: write # benchmark-action pushes the history to the gh-pages branch
     env:
