@@ -66,7 +66,7 @@ the rope form for an owning link, the span form otherwise (`fwd_router.cpp:953,8
 
 Every socket transport in the tree declares the owning tier: UDP
 (`transport_udp.hpp:111`), TCP client and server (`transport_tcp.hpp:218,409`),
-WebSocket server and client (`transport_ws.hpp:240,445`), CAN
+WebSocket server and client (`transport_ws.hpp:280,506`), CAN
 (`transport_can.hpp:606`), QUIC (`transport_quic.hpp:153`) and WebTransport
 (`transport_webtransport.hpp:182`). The borrowed-span path is the base-class default
 and the tier an out-of-tree transport gets for free.

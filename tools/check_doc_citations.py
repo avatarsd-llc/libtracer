@@ -627,10 +627,10 @@ ANCHORS = [
     ('core/include/libtracer/transport_webtransport.hpp:182',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }'),
     # core/include/libtracer/transport_ws.hpp
-    ('core/include/libtracer/transport_ws.hpp:240',
+    ('core/include/libtracer/transport_ws.hpp:280',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'void send(std::span<const std::span<const std::byte>> iov) override;'),
-    ('core/include/libtracer/transport_ws.hpp:445',
+    ('core/include/libtracer/transport_ws.hpp:506',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'transport_ws_client& operator=(const transport_ws_client&) = delete;'),
     # core/include/libtracer/vertex.hpp
@@ -779,13 +779,13 @@ ANCHORS = [
     ('core/src/transport_ws.cpp:100',
      'const std::optional<tr::view::view_t> link = tr::view::over_bytes(payload, backend);'),
     ('core/src/transport_ws.cpp:150', 'constexpr std::size_t kMaxServerIov = kMaxInlineIov;'),
-    ('core/src/transport_ws.cpp:267', '// no flatten, no re-copy (server frames are UNMASKED, RFC 6455 §5.1). Lock'),
-    ('core/src/transport_ws.cpp:275', 'std::array<::iovec, kMaxServerIov + 1> gather_inline;'),
+    ('core/src/transport_ws.cpp:274', '// no flatten, no re-copy (server frames are UNMASKED, RFC 6455 §5.1). Lock'),
+    ('core/src/transport_ws.cpp:282', 'std::array<::iovec, kMaxServerIov + 1> gather_inline;'),
     # The broadcast's gather store. Its old scope named the constructor's `::socket` call,
     # which #871 moved out of this TU into slot_server_t::bind_listen; the entry sheds the
     # scope entirely instead, because the array is now spelled `pristine_inline` here and
     # `inline_vec` only in the directed facade — one anchor, one hit, no positional filter.
-    ('core/src/transport_ws.cpp:704', 'std::array<std::byte, 4096> chunk;',
+    ('core/src/transport_ws.cpp:734', 'std::array<std::byte, 4096> chunk;',
      'void transport_ws_client::serve(int fd, std::vector<std::byte> pipelined) {'),
     # core/tests/registry_teardown_test.cpp
     ('core/tests/registry_teardown_test.cpp:275', 'void test_digest_paths_agree() {'),
@@ -834,9 +834,9 @@ ANCHORS = [
     ('tools/cortexm0_footprint.py:151', 'cxx_flags = ['),
     ('tools/cortexm0_footprint.py:158', '"-DLIBTRACER_NO_ATOMIC",'),
     ('tools/cortexm0_footprint.py:172', '"--specs=nano.specs",'),
-    ('core/tests/CMakeLists.txt:1596', 'add_executable(substrate_test_no_atomic'),
-    ('core/tests/CMakeLists.txt:1609', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
-    ('core/tests/CMakeLists.txt:1610', '    LIBTRACER_NO_ATOMIC'),
+    ('core/tests/CMakeLists.txt:1608', 'add_executable(substrate_test_no_atomic'),
+    ('core/tests/CMakeLists.txt:1621', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
+    ('core/tests/CMakeLists.txt:1622', '    LIBTRACER_NO_ATOMIC'),
     # The leading indent is load-bearing: the bare token also appears in the comment
     # three lines above the executable, and an anchor that matches both is not an anchor.
 

@@ -207,9 +207,11 @@ struct transport_ws_server::session_t : slot_server_t::session_base_t {
 transport_ws_server::transport_ws_server(std::uint16_t bind_port, mem::mem_backend_t* backend,
                                          std::size_t max_frame, std::size_t max_peers,
                                          bool peer_named, std::size_t recv_stack,
-                                         std::uint32_t liveness_window_ms)
+                                         std::uint32_t liveness_window_ms,
+                                         std::size_t max_handshake)
     : slot_server_t(max_peers, peer_named, liveness_window_ms), backend_(backend) {
     max_frame_ = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
+    max_handshake_ = handshake_cap(max_handshake);                 // tighten-only (#934)
     if (!bind_listen(bind_port)) return;
     start([this] { run(); }, recv_stack);
 }
@@ -248,6 +250,11 @@ void transport_ws_server::on_slot_reset(session_base_t& base) {
     s.buf.clear();
     s.buf.shrink_to_fit();
     s.hs_buf.clear();
+    // Return the handshake capacity too, not just the size (#934). A slot is RECYCLED for
+    // the next accept, so a `clear()` alone left whatever capacity the worst pre-auth peer
+    // grew it to attached to the slot for the process lifetime — one sweep across every
+    // slot was a permanent max_peers x budget heap tax that no refusal ever gave back.
+    s.hs_buf.shrink_to_fit();
     s.assembler.reset();
 }
 
@@ -332,12 +339,22 @@ void transport_ws_server::on_readable(session_base_t& base, const std::byte* dat
     session_t& s = static_cast<session_t&>(base);
     if (!s.open.load(std::memory_order_relaxed)) {
         const int fd = s.fd.load(std::memory_order_relaxed);
-        // Opening handshake: accumulate the HTTP Upgrade request until CRLFCRLF.
-        s.hs_buf.append(reinterpret_cast<const char*>(data), len);
-        if (s.hs_buf.size() > 16384) {  // runaway request guard
+        // Opening handshake: accumulate the HTTP Upgrade request until CRLFCRLF, under the
+        // deployment's PRE-AUTH budget. The peer here has completed a TCP connect and
+        // nothing else — no ACL, no subscription, no router — so the budget is checked
+        // BEFORE the append, not after it: refuse early, never carefully allocate (#934).
+        // Written as a subtraction because `size() + len` can wrap; `size() <= cap` holds by
+        // induction, since this is the only site that grows the buffer.
+        if (len > max_handshake_ - s.hs_buf.size()) {
+            // Count it, then close — the same disposition an over-cap frame declaration
+            // gets, and for the same reason (#838's shape, ruled for this path 2026-08-15):
+            // backpressure would let the attacker's own stall hold the slot, and a silent
+            // drop would leave the attack invisible to every counter.
+            malformed_rx_.fetch_add(1, std::memory_order_relaxed);
             teardown_slot(s);
             return;
         }
+        s.hs_buf.append(reinterpret_cast<const char*>(data), len);
         const std::size_t hdr_end = s.hs_buf.find("\r\n\r\n");
         if (hdr_end == std::string::npos) return;  // keep accumulating
 
@@ -506,7 +523,7 @@ transport_ws_client::transport_ws_client(const std::string& host, std::uint16_t 
                                          mem::mem_backend_t* backend, std::size_t max_frame,
                                          std::size_t recv_stack, bool defer_recv,
                                          std::uint32_t liveness_window_ms,
-                                         mem::block_source_t* egress_src)
+                                         mem::block_source_t* egress_src, std::size_t max_handshake)
     : backend_(backend),
       // `block_array_t` binds its source ONCE, here (#873): a post-construction
       // set_egress_source can never re-seat this member, which is why the store is a
@@ -520,6 +537,9 @@ transport_ws_client::transport_ws_client(const std::string& host, std::uint16_t 
     if (egress_src != nullptr) set_egress_source(*egress_src);
     liveness_window_ms_ = liveness_window_ms;                      // the #838 send bound's source
     max_frame_ = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
+    // One home for the resolution, shared with the accept side (#934): a dialled server is
+    // no more trusted with our pre-auth memory than a peer that dialled us.
+    max_handshake_ = transport_ws_server::handshake_cap(max_handshake);
     // Seed the per-frame masking-key stream with something that varies between
     // connections (steady_clock + this address). Not crypto-strong — RFC 6455
     // masking exists for proxy/cache safety, not to defend against a peer.
@@ -670,17 +690,27 @@ bool transport_ws_client::handshake(int fd, const std::string& host, std::uint16
     std::size_t hdr_end = std::string::npos;
     while (hdr_end == std::string::npos) {
         if (stop_.load(std::memory_order_relaxed)) return false;
+        // The PRE-AUTH budget, applied to the READ rather than to the buffer afterwards
+        // (#934): ask the socket for only what is left of it, so the accumulation can never
+        // pass the budget by even one byte and nothing has to be discarded after the fact.
+        // Exhausted with no CRLFCRLF in hand ⇒ the server is not answering a handshake:
+        // count it and fail the dial (the count-then-close disposition).
+        const std::size_t room = max_handshake_ - resp.size();
+        if (room == 0) {
+            malformed_rx_.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
         const int pr = poll_readable(fd);  // one bounded 100 ms readability wait
         if (pr < 0) return false;
         if (pr == 0) continue;  // timeout → re-check stop_
-        const ssize_t n = ::recv(fd, chunk.data(), chunk.size(), 0);
+        const ssize_t n = ::recv(fd, chunk.data(), std::min(chunk.size(), room), 0);
         if (n <= 0) return false;  // peer closed / error
         resp.append(chunk.data(), static_cast<std::size_t>(n));
         hdr_end = resp.find("\r\n\r\n");
-        // Runaway-response guard: it bounds the HEADER scan only. Once CRLFCRLF is in hand
-        // everything past it is frame bytes, and a large frame pipelined behind the 101
-        // must not be read as a header block that never ends.
-        if (hdr_end == std::string::npos && resp.size() > 16384) return false;
+        // The budget bounds the HEADER scan only. Once CRLFCRLF is in hand everything past
+        // it is frame bytes — bounded by `max_frame`, not by this — and a large frame
+        // pipelined behind the 101 must not be read as a header block that never ends.
+        // Whatever of it did not fit the budget is still on the socket for `serve` to read.
     }
 
     // Validate against the HEADER BLOCK alone: the tail may be arbitrary frame bytes, and

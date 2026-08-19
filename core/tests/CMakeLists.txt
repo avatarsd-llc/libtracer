@@ -1536,6 +1536,18 @@ if(LIBTRACER_TRANSPORT_WS)
     add_test(NAME ws_rx_bound COMMAND ws_rx_bound_test)
 endif()
 
+if(LIBTRACER_TRANSPORT_WS)
+    # #934 car B — the WS OPENING HANDSHAKE is bounded by an injected PRE-AUTH budget: a
+    # never-terminated Upgrade request is refused BEFORE it is buffered (measured against the
+    # process peak RSS, not inferred), the refusal is counted and closes the link, the honored
+    # budget is the configured tighten-only `max_handshake`, and a legal dribbled request still
+    # completes — the budget is the whole request, not one read of it.
+    add_executable(ws_handshake_bound_test ws_handshake_bound_test.cpp)
+    target_link_libraries(ws_handshake_bound_test PRIVATE libtracer)
+    libtracer_test_warnings(ws_handshake_bound_test)
+    add_test(NAME ws_handshake_bound COMMAND ws_handshake_bound_test)
+endif()
+
 if(LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_UDP AND LIBTRACER_TRANSPORT_WS)
     # transport_t seam conformance — ONE parameterized contract (send/receive, byte-identity,
     # scatter-gather, bidirectional, multi-frame, ADR-0042 owning view) over every

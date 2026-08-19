@@ -16,6 +16,39 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **A PRE-AUTH request-size budget on the WebSocket opening handshake —
+  `transport_ws_server::kMaxHandshakeBytes`, `transport_ws_server::handshake_cap()`, a trailing
+  `max_handshake` constructor parameter and an `effective_max_handshake()` accessor on BOTH
+  `tr::net::transport_ws_server` and `tr::net::transport_ws_client`, plus the `ws`-private
+  `max_handshake` config key** ([#934](https://github.com/avatarsd-llc/libtracer/issues/934)
+  car B). **Default behaviour is unchanged**: the default budget is the 16 KiB the path already
+  enforced as a literal.
+
+  **What an unauthenticated peer could do before.** Any host that completed a bare TCP connect
+  — no ACL, no subscription, no router, nothing authenticated — made the node buffer up to
+  16 KiB *plus one recv chunk* of arbitrary bytes per slot and then copy that whole block again,
+  lowercased, in the header lookup. The ceiling was a literal no deployment could tighten; the
+  overshoot past it was the peer's to choose, because the check ran *after* the append; the
+  refusal was invisible, moving no counter; and the grown capacity was never returned to the
+  allocator, so one sweep across every slot left a permanent `max_peers x ~20 KiB` heap tax.
+
+  **What it can do after.** The budget is deployment-injected and **tighten-only** — a
+  config-writable key may narrow a pre-auth bound and never raise it, so `handshake_cap`
+  clamps a larger request back to `kMaxHandshakeBytes`. The refusal happens **before** the byte
+  that would exceed the budget is copied (a subtraction against the remaining room on the
+  accept side; a recv sized by the remaining room on the dial side), it ticks `malformed_rx()`
+  and closes the link — the count-then-close disposition ruled for this path — and
+  `on_slot_reset` now `shrink_to_fit`s the handshake buffer, so a refused peer leaves no
+  residual per-slot capacity behind. The budget is a **total-request** bound, not a per-read
+  one; on the dial side it bounds the response *header block* only, so frame bytes a server
+  pipelines behind its `101` are still governed by `max_frame` and whatever does not fit is
+  simply left on the socket for the receive loop.
+
+  Scope: the HOST/POSIX WebSocket plane only. The ESP-IDF WS link parses its request inside
+  `esp_http_server`'s own bounded scratch and never links `transport_ws.cpp` into a chip image
+  (`tools/check_esp_ws_plane.py`), so there is no libtracer-owned handshake buffer there to cap.
+  Explicitly **not** a nothrow rewrite of the handshake crypto helpers — pre-auth work is
+  refused early, not carefully allocated.
 - **`tr::mem::source_resource_t` — the `std::pmr` adapter over the block seam**
   (new header `libtracer/mem_source_pmr.hpp`;
   [#873](https://github.com/avatarsd-llc/libtracer/issues/873) family 5,

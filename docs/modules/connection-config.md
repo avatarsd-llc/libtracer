@@ -176,6 +176,7 @@ a peer.
 | `peer_named` | `VALUE` u8 (flag) | LISTEN | `0` | As `tcp`: the ADR-0044 per-peer identity facet instead of a broadcast link. |
 | `max_peers` | `VALUE` u32 | LISTEN | `0` | As `tcp`: the concurrent-peer admission cap, with `0` resolving to the liveness window's ceiling rather than "uncapped" (#1295). |
 | `liveness_window` | `VALUE` u32 | DIAL + LISTEN | `0` | As `tcp`: the peer liveness window every send is bounded by (#838). The shipped case here is a throttled background browser tab that stops reading — it now costs counted frames and its own session, not the server's sending thread. |
+| `max_handshake` | `VALUE` u32 | DIAL + LISTEN | `0` | Bytes. The **pre-auth** opening-handshake request budget (#934): the most an unauthenticated host — one that has completed a TCP connect and nothing else, no ACL, no subscription, no router — may make this node accumulate before its HTTP Upgrade request (LISTEN) or `101` response header block (DIAL) is refused. `0` = the 16 KiB `transport_ws_server::kMaxHandshakeBytes` default, and the key is **tighten-only**: a larger value is clamped to that default, because a config-writable key must never *raise* a pre-auth bound. The budget is a **total-request** one, not a per-read one, and it is enforced *before* the bytes that would exceed it are copied — over budget ticks `malformed_rx` and closes the link (count-then-close). It does not bound what a server pipelines *behind* its `101`; those are frame bytes under `max_frame`. |
 
 <!-- config-keys:end -->
 

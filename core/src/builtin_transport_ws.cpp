@@ -50,13 +50,20 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
     //    derive_max_peers, so an omitted key takes the liveness window's own ceiling and
     //    an over-ceiling request is clamped to it. The cap is the denominator every send
     //    bound divides by, so "no cap" would mean "no bound".
-    // A third ws-private key, honored on BOTH halves (#838):
+    // Two more ws-private keys, honored on BOTH halves:
     //  - `liveness_window` (VALUE u32, ms; default 0 = kDefaultLivenessWindowMs) — how long
     //    a peer may fail to take bytes before it is broken. It is the send bound's
     //    provenance: a host has no task watchdog to derive one from the way the MCU link
     //    does (#835), so the number comes from the deployer, exactly as `connect_timeout`
     //    and CAN's `peer_ttl` (ADR-0044) do. Kind-private, not conn_settings_t: it is a
     //    property of a STREAM peer, not of every kind.
+    //  - `max_handshake` (VALUE u32, bytes; default 0 = kMaxHandshakeBytes, 16 KiB) — the
+    //    PRE-AUTH opening-handshake request budget (#934). TIGHTEN-ONLY through
+    //    transport_ws_server::handshake_cap: a config-writable key may narrow what a host
+    //    that has done nothing but complete a TCP connect can make this node buffer, and
+    //    must never widen it. Kind-private for the same reason `liveness_window` is — an
+    //    HTTP Upgrade budget is a property of the WS opening handshake, not of every kind,
+    //    so it does not belong in the shared conn_settings_t (ADR-0043 §5 leanness).
     // ws has both a dial and a listen shape, so it is TWO modules (RFC-0014 §1) — but the
     // library registers NEITHER (ADR-0073 §4): the application declares each module under a
     // name IT chooses via register_module (kWsClientSuggestedModule / kWsServerSuggestedModule
@@ -67,6 +74,7 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
         const bool peer_named = cfg.flag("peer_named").value_or(false);
         const auto max_peers = static_cast<std::size_t>(cfg.u32("max_peers").value_or(0));
         const std::uint32_t liveness_window = cfg.u32("liveness_window").value_or(0);
+        const auto max_handshake = static_cast<std::size_t>(cfg.u32("max_handshake").value_or(0));
         auto link = dial_or_listen(
             s,
             [&] {
@@ -87,12 +95,12 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
                 return make_checked<transport_ws_client>(s.addr, s.port, rx_backend, s.max_frame,
                                                          /*recv_stack=*/std::size_t{0},
                                                          /*defer_recv=*/true, liveness_window,
-                                                         egress_src);
+                                                         egress_src, max_handshake);
             },
             [&] {
                 return make_checked<transport_ws_server>(s.port, rx_backend, s.max_frame, max_peers,
                                                          peer_named, /*recv_stack=*/std::size_t{0},
-                                                         liveness_window);
+                                                         liveness_window, max_handshake);
             });
         // The ADR-0079 egress store, wired before the link is handed to the router (#873).
         return with_egress_source(std::move(link), egress_src);
