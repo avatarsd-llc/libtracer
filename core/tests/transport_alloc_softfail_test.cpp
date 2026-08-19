@@ -1011,6 +1011,71 @@ void test_ws_server_iov_uses_injected_egress_source() {
     ::close(cfd);
 }
 
+/**
+ * @brief #873: the WS CLIENT's masked-frame buffer draws from the store handed to its
+ *        CONSTRUCTOR — the one egress buffer `set_egress_source` provably cannot reach.
+ *
+ * `tx_buf_` is a `mem::block_array_t` MEMBER, and a `block_array_t` binds its source in its own
+ * constructor. So every sibling case on this page — which wires the store afterwards through
+ * `set_egress_source` — is structurally incapable of moving this buffer: before #873 an
+ * injected egress store was silently ignored by the one WS client buffer, and a "bounded" node
+ * still grew this block on the process heap. The store is therefore a constructor argument
+ * here, and this case is what says so.
+ *
+ * Placed with the injected-store family rather than beside
+ * `test_ws_client_send_drops_then_recovers` because it needs `bounded_egress_t`, declared above.
+ */
+void test_ws_client_tx_buf_uses_injected_egress_source() {
+    std::printf("ws client tx_buf_ — drawn from the CONSTRUCTOR's store (#873):\n");
+    sink_t at_server;
+    auto srv_rx = [&](std::span<const std::byte> f) { at_server.push(f); };
+    tr::net::transport_ws_server server(0);
+    check(server.ok(), "server bound");
+    server.set_receiver(srv_rx);
+
+    const std::vector<std::byte> payload(64, std::byte{0x5A});
+
+    // The BASELINE, and the non-vacuous half: an un-injected client's cold send draws exactly
+    // one block from the process heap. If this ever reads 0 the arm below proves nothing.
+    {
+        tr::net::transport_ws_client bare("127.0.0.1", server.local_port());
+        check(bare.ok(), "un-injected ws client handshaken");
+        check(count_allocs([&] { bare.send(payload); }) == 1,
+              "un-injected, a cold send draws ONE block from the process heap");
+        check(at_server.wait_for(1, 2s), "and that baseline frame arrived");
+    }
+
+    // The wired arm: same cold send, but the store came in through the constructor.
+    roomy_egress_t roomy;
+    {
+        tr::net::transport_ws_client wired("127.0.0.1", server.local_port(),
+                                           &tr::mem::heap_backend(), /*max_frame=*/0,
+                                           /*recv_stack=*/std::size_t{0}, /*defer_recv=*/false,
+                                           /*liveness_window_ms=*/0u, &roomy.store);
+        check(wired.ok(), "store-injected ws client handshaken");
+        check(count_allocs([&] { wired.send(payload); }) == 0,
+              "wired, the cold send draws NOTHING from the process heap");
+        check(roomy.store.used() > 0, "and the INJECTED store is where tx_buf_ came from");
+        check(at_server.wait_for(2, 2s), "the wired frame still reaches the peer");
+        check(at_server.bytes() == payload, "with its bytes intact");
+    }
+
+    // A store too small to serve the masked frame bounds this link: the send is DROPPED and
+    // counted, never truncated and never escalated to the process heap.
+    {
+        tight_egress_t tight;
+        tr::net::transport_ws_client bounded("127.0.0.1", server.local_port(),
+                                             &tr::mem::heap_backend(), /*max_frame=*/0,
+                                             /*recv_stack=*/std::size_t{0}, /*defer_recv=*/false,
+                                             /*liveness_window_ms=*/0u, &tight.store);
+        check(bounded.ok(), "hard-bounded ws client handshaken");
+        check(count_allocs([&] { bounded.send(payload); }) == 0,
+              "a refused injected store draws NOTHING from the heap");
+        std::this_thread::sleep_for(150ms);
+        check(at_server.n() == 2, "and the refused frame was DROPPED (no third arrival)");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CAN (A1 — the allocation is DELETED, not made failable)
 // ---------------------------------------------------------------------------
@@ -1602,6 +1667,7 @@ int main() {
     test_tcp_server_iov_uses_injected_egress_source();
     test_udp_send_iov_uses_injected_egress_source();
     test_ws_server_iov_uses_injected_egress_source();
+    test_ws_client_tx_buf_uses_injected_egress_source();
     test_can_advertise_header_is_allocation_free();
     test_can_over_long_path_refused();
     test_can_emit_advertise_wire_identical();

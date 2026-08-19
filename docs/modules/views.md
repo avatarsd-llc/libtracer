@@ -68,7 +68,8 @@ class rope_t {                                           // rope.hpp — ordered
 
 }  // namespace tr::view
 
-std::expected<tlv_t, err_t> tr::wire::decode(const view_t&);   // the L1 → L2 cast  frame.hpp:202
+std::expected<tlv_t, err_t> tr::wire::decode(const view_t&, block_source_t& = heap_source());
+                                                               // the L1 → L2 cast  frame.hpp:221
 ```
 
 ## Rope = one message, many buffers
@@ -149,7 +150,7 @@ multi-link value is read as if the first buffer were the whole message — a sil
 truncation, not a diagnostic. This is invisible on a purely local graph, where every
 value is one segment, and appears the moment a real transport is attached: every
 transport whose `transport_t::delivers_ropes()` returns true
-(`core/include/libtracer/transport.hpp:612`; TCP, UDP, WS, QUIC, WebTransport and CAN
+(`core/include/libtracer/transport.hpp:620`; TCP, UDP, WS, QUIC, WebTransport and CAN
 all override it) can hand up a chain. A CAN reassembly group chains one link per slice
 (`can_reassembly_t::assemble`, `core/include/libtracer/can_reassembly.hpp:191-199`), and
 a fragmented WebSocket message chains one link per fragment

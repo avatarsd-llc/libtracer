@@ -287,11 +287,26 @@ class transport_vertex_t {
      * call, so a node that binds its links directly (@ref provide_link) sheds the
      * unused socket transports on a `--gc-sections` target (see @ref slim_net_t). The
      * composition root registers whatever factories it does want afterward via
-     * @ref register_transport_type. All arguments are required (the tag is last, so
-     * there is nothing to default against).
+     * @ref register_transport_type. Every argument up to the tag is required — the tag
+     * keeps its overload-disambiguating position, so the one defaultable argument
+     * (@p egress_src) follows it.
+     *
+     * @param graph      The graph the `/net` subtree is registered on.
+     * @param router     The forwarding router connections are wired into.
+     * @param net_root   The parent path for connection vertices (e.g. "/net").
+     * @param rx_backend The ADR-0042 §2 RX memory seam — as on the default ctor.
+     * @param egress_src The ADR-0079 net-plane EGRESS store this vertex REPORTS through
+     *                   @ref egress_source (#873). A slim node registers its own factories,
+     *                   so nothing here wires it into a link automatically — but the
+     *                   accessor is the documented way a factory reaches "this net plane's
+     *                   store", and before this parameter existed it answered the process
+     *                   heap on a slim node no matter what the composition root had chosen.
+     *                   `nullptr` (and the default) means the process heap, i.e. today's
+     *                   behaviour unchanged. Must outlive this object.
      */
     transport_vertex_t(graph::graph_t& graph, fwd_router_t& router, std::string net_root,
-                       mem::mem_backend_t* rx_backend, slim_net_t);
+                       mem::mem_backend_t* rx_backend, slim_net_t,
+                       mem::block_source_t* egress_src = &mem::heap_source());
 
     transport_vertex_t(const transport_vertex_t&) = delete;
     transport_vertex_t& operator=(const transport_vertex_t&) = delete;

@@ -43,16 +43,18 @@ std::expected<void, err_t> check_frame(const view::rope_t& r) {
     return {};
 }
 
-std::expected<void, err_t> validate_rope(const view::rope_t& r) {
+std::expected<void, err_t> validate_rope(const view::rope_t& r, mem::block_source_t& spill) {
     // Same all-host precondition as check_frame: the grammar reads payload bytes
     // to verify each CRC.
     if (!r.all_host()) return std::unexpected(err_t::FRAME_INVALID);
-    // The walk stack starts inline and spills to the heap: this strict validator
-    // is a host-side opt-in, so its RFC-0006 depth bound is the heap source
-    // — matching decode(flatten(r)), whose verdict it must reproduce exactly.
+    // The walk stack starts inline and spills to `spill` — the INJECTED source since
+    // #873, defaulted to the process heap so the verdict still matches
+    // decode(flatten(r)) for every existing caller. The RFC-0006 depth bound is the
+    // caller's: hand it the same source you hand `decode` and the two agree.
+    // `null_sink_t` models nothing, so this block is the whole allocation footprint.
     null_sink_t sink;
     std::array<grammar::walk_frame_t<grammar::rope_cursor>, 8> slots;
-    grammar::walk_stack_t<grammar::rope_cursor> stack(slots, &mem::heap_source());
+    grammar::walk_stack_t<grammar::rope_cursor> stack(slots, &spill);
     return grammar::walk(grammar::rope_cursor{r}, sink, stack);
 }
 

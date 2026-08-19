@@ -32,6 +32,7 @@
 
 #include "libtracer/error.hpp"
 #include "libtracer/grammar.hpp"
+#include "libtracer/mem_source.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/view.hpp"
 
@@ -322,18 +323,26 @@ namespace tr::wire {
  * reject, reserved-bit reject, `LL` width, trailer sizing, the two-region CRC,
  * and trailing-bytes reject — over EVERY level of the rope's links WITHOUT
  * flattening. Iterative (no recursion) via the one `grammar::walk`; nesting
- * depth is bounded by this host validator's heap-spilled walk stack (RFC-0006 —
- * no depth constant). NOT an ingress step (ingress is `check_frame`): this is
- * the strict mode a verify-all-then-apply consumer or a differential test opts
- * into (ADR-0053 §4).
+ * depth is bounded by the walk stack's spill source (RFC-0006 — no depth
+ * constant), which is @p spill. NOT an ingress step (ingress is `check_frame`):
+ * this is the strict mode a verify-all-then-apply consumer or a differential
+ * test opts into (ADR-0053 §4).
+ *
+ * The sink models nothing, so the spill block is the ONLY allocation this call can
+ * make: validating over an injected @p spill is allocation-free with respect to the
+ * process heap, and `%mem::null_source()` turns it into a fixed 8-level bound that
+ * answers `TLV_NESTING_TOO_DEEP` (#873, ADR-0079).
  *
  * @param r The reassembled frame. Every link MUST be HOST (@ref
  *          view::rope_t::all_host) — a device link cannot be CPU-read to verify a
  *          CRC and is rejected with `FRAME_INVALID`.
+ * @param spill The block source the walk stack spills into once its inline slots are
+ *              full. Default: the process heap, i.e. today's behaviour unchanged.
  * @return `{}` when @p r is exactly one valid frame; otherwise the `err_t` the
  *         grammar rejects with — identical to `decode(flatten(r))`'s error for the
- *         same bytes.
+ *         same bytes, PROVIDED both are given the same depth resources.
  */
-[[nodiscard]] std::expected<void, err_t> validate_rope(const view::rope_t& r);
+[[nodiscard]] std::expected<void, err_t> validate_rope(
+    const view::rope_t& r, mem::block_source_t& spill = mem::heap_source());
 
 }  // namespace tr::wire

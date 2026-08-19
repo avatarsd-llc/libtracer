@@ -77,10 +77,14 @@
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/graph.hpp"
 #include "libtracer/iov_table.hpp"
+#include "libtracer/mem_borrowed.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
+#include "libtracer/rope.hpp"
+#include "libtracer/rope_decode.hpp"
 #include "libtracer/route_handle.hpp"
 #include "libtracer/tlv_emit.hpp"
+#include "libtracer/view.hpp"
 #include "libtracer/ws.hpp"
 
 // --- global operator-new counter (this TU owns the override) -----------------
@@ -180,6 +184,9 @@ namespace can = tr::net::can;
  * semantics are unchanged — `src_blocks`/`src_bytes` are what went through the INJECTED seam,
  * `heap_blocks`/`heap_bytes` what ESCAPED to the process heap — and the second pair is the
  * one that matters, because an escape is what a bounded node cannot price.
+ *
+ * @note The two counters are only disjoint because this class serves from `std::aligned_alloc`
+ *       rather than from `tr::mem::heap_source()` — see @ref try_alloc.
  */
 class counting_source_t final : public tr::mem::block_source_t {
    public:
@@ -190,11 +197,18 @@ class counting_source_t final : public tr::mem::block_source_t {
     [[nodiscard]] void* try_alloc(std::size_t n, std::size_t align) noexcept override {
         ++allocs;
         bytes += n;
-        return tr::mem::heap_source().try_alloc(n, align);
+        // `std::aligned_alloc`, NOT `tr::mem::heap_source()`. That is the whole reason the two
+        // counters mean different things: `heap_source_t::try_alloc` is `::operator new`, which
+        // THIS TU overrides and counts — so forwarding to it charged every seam-served block to
+        // `heap_blocks` as well, and the two columns printed the same number on every row where
+        // the seam served anything (`mr_blocks=3.02 heap_blocks=3.02`). A row could then never
+        // report the zero-escape result the census exists to show. Going straight to the C
+        // allocator keeps the counters DISJOINT, so `heap_blocks` is what actually escaped.
+        // `aligned_alloc` requires a size that is a multiple of the alignment.
+        const std::size_t rounded = (n + align - 1) / align * align;
+        return std::aligned_alloc(align, rounded != 0 ? rounded : align);
     }
-    void release(void* p, std::size_t n, std::size_t align) noexcept override {
-        tr::mem::heap_source().release(p, n, align);
-    }
+    void release(void* p, std::size_t, std::size_t) noexcept override { std::free(p); }
 };
 
 /** @brief One census row: blocks through the injected seam and blocks that escaped to the heap. */
@@ -226,6 +240,27 @@ std::vector<std::byte> make_route(std::size_t segs) {
     std::vector<std::byte> out;
     tr::wire::emit_tlv(out, tr::wire::type_t::PATH, tr::wire::opt_t{}, body);
     return out;
+}
+
+/**
+ * @brief A frame nested @p depth levels deep — @p depth structured SETTINGS wrappers around
+ *        one opaque VALUE leaf.
+ *
+ * `grammar::walk_stack_t` opens with 8 INLINE slots, so a depth past 8 is the only thing that
+ * reaches `grow()` and draws a spill block. That is the allocation the #873 residual rows
+ * below move onto an injected seam; a shallower frame would make them vacuous.
+ */
+std::vector<std::byte> make_deep_frame(std::size_t depth) {
+    static constexpr std::array<std::byte, 4> kLeaf{std::byte{1}, std::byte{2}, std::byte{3},
+                                                    std::byte{4}};
+    std::vector<std::byte> cur;
+    tr::wire::emit_tlv(cur, tr::wire::type_t::VALUE, tr::wire::opt_t{}, kLeaf);
+    for (std::size_t i = 0; i < depth; ++i) {
+        std::vector<std::byte> next;
+        tr::wire::emit_tlv(next, tr::wire::type_t::SETTINGS, tr::wire::opt_t{.pl = true}, cur);
+        cur = std::move(next);
+    }
+    return cur;
 }
 
 /**
@@ -469,6 +504,69 @@ int run_blocks() {
         d.heap_blocks = g_allocs;
         d.heap_bytes = g_bytes;
         print_census("tlv_deep_copy_4seg", d, kN, "on_advertise:stripped=route:UNGUARDED");
+    }
+
+    // (9)-(10) The #873 body-internal residuals in `tr::wire`: the two walk-stack SPILLS that
+    //          used to name `mem::heap_source()` inside the function body and are now a
+    //          defaulted parameter. Both rows are run at depth 12, past the 8 inline slots, so
+    //          `walk_stack_t::grow` really fires — a shallower frame makes them vacuous.
+    {
+        const std::vector<std::byte> deep = make_deep_frame(12);
+
+        // `wire::decode` — the OWNING tree. Only the spill moves onto the seam: the tlv_t
+        // children are std::vectors and allocate on the process heap by construction, so the
+        // honest claim is "the spill block moved", NOT "zero escapes". `heap_blocks` stays
+        // well above zero here and that is the correct reading.
+        {
+            counting_source_t src;
+            census_t c;
+            const std::size_t s0 = src.allocs;
+            const std::size_t sb0 = src.bytes;
+            g_allocs = g_frees = g_bytes = 0;
+            g_armed = true;
+            for (std::size_t i = 0; i < kN; ++i) {
+                const auto t = tr::wire::decode(std::span<const std::byte>(deep), src);
+                asm volatile("" : : "r"(t.has_value()) : "memory");
+            }
+            g_armed = false;
+            c.mr_blocks = src.allocs - s0;
+            c.mr_bytes = src.bytes - sb0;
+            c.heap_blocks = g_allocs;
+            c.heap_bytes = g_bytes;
+            print_census("wire_decode_deep_spill", c, kN,
+                         "depth12:spill_on_the_seam:owning_tlv_tree_STILL_on_the_heap");
+        }
+
+        // `wire::validate_rope` — the same frame as a borrowed 2-link rope. `null_sink_t`
+        // models nothing, so once the spill is injected this row is a TRUE zero-escape:
+        // `heap_blocks` must read 0.00. The rope and its links are built OUTSIDE the armed
+        // window, so their own allocations are not charged to the validator.
+        {
+            const std::size_t cut = deep.size() / 2;
+            std::vector<std::byte> a(deep.begin(), deep.begin() + static_cast<std::ptrdiff_t>(cut));
+            std::vector<std::byte> b(deep.begin() + static_cast<std::ptrdiff_t>(cut), deep.end());
+            tr::view::rope_t rope;
+            rope.append(tr::view::view_t::over(tr::view::borrow(std::span<std::byte>(a))));
+            rope.append(tr::view::view_t::over(tr::view::borrow(std::span<std::byte>(b))));
+
+            counting_source_t src;
+            census_t c;
+            const std::size_t s0 = src.allocs;
+            const std::size_t sb0 = src.bytes;
+            g_allocs = g_frees = g_bytes = 0;
+            g_armed = true;
+            for (std::size_t i = 0; i < kN; ++i) {
+                const auto r = tr::wire::validate_rope(rope, src);
+                asm volatile("" : : "r"(r.has_value()) : "memory");
+            }
+            g_armed = false;
+            c.mr_blocks = src.allocs - s0;
+            c.mr_bytes = src.bytes - sb0;
+            c.heap_blocks = g_allocs;
+            c.heap_bytes = g_bytes;
+            print_census("validate_rope_deep_spill", c, kN,
+                         "depth12:2link_borrowed_rope:ZERO_heap_escapes");
+        }
     }
     return 0;
 }

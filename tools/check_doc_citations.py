@@ -198,40 +198,40 @@ ANCHORS = [
     # both are cited. No text ABOVE :94 tells them apart (:98's window contains :94's), so the
     # discriminator is a NEGATIVE scope: the `DIAL` lambda body sits BETWEEN them, above :98
     # only. Its mirror at :98 selects the later one positively, off the same line.
-    ("core/src/transport_vertex.cpp:102", "graph_.register_child_type(",
+    ("core/src/transport_vertex.cpp:107", "graph_.register_child_type(",
      "!config, conn_role_t::DIAL);"),
-    ("core/src/transport_vertex.cpp:136",
+    ("core/src/transport_vertex.cpp:140",
      "void transport_vertex_t::register_transport_type(std::string kind, transport_factory_t factory) {"),
-    ("core/src/transport_vertex.cpp:141", "transport_vertex_t::register_module"),
+    ("core/src/transport_vertex.cpp:145", "transport_vertex_t::register_module"),
     # Three lines now spell SCHEMA_NOT_FOUND in this file — `module_for_locked`'s
     # declared-only refusal (this one), `declaration_for_locked`'s unsupported-(module, kind)
     # refusal that RFC-0014 S2b added below it, and the unregistered-kind refusal in creation.
     # No scope separates all three, so the anchor is the WHOLE indented statement instead: the
     # other two carry a leading `if (…)` on the same line and no longer match.
-    ("core/src/transport_vertex.cpp:179",
+    ("core/src/transport_vertex.cpp:183",
      "    return std::unexpected(status_t::SCHEMA_NOT_FOUND);"),
     # RFC-0014 S2b's creator endpoint: the mint site CONTEXT.md cites for "declaring a
     # module mints /net/<module>/conn", and the dispatch site it cites for "the written
     # TLV's TYPE selects the operation".
-    ("core/src/transport_vertex.cpp:206", "transport_vertex_t::mint_module_locked"),
-    ("core/src/transport_vertex.cpp:242", "transport_vertex_t::endpoint_write"),
-    ("core/src/transport_vertex.cpp:395", "transport_vertex_t::provide_link"),
-    ("core/src/transport_vertex.cpp:487", "routing key IS the mount path"),
+    ("core/src/transport_vertex.cpp:210", "transport_vertex_t::mint_module_locked"),
+    ("core/src/transport_vertex.cpp:246", "transport_vertex_t::endpoint_write"),
+    ("core/src/transport_vertex.cpp:399", "transport_vertex_t::provide_link"),
+    ("core/src/transport_vertex.cpp:491", "routing key IS the mount path"),
     # The qualified-key compose repeats since S2b: the creation path builds it here, and
     # the endpoint's `NAME` remove builds the same key earlier in the file. The mount-path
     # comment sits directly above THIS one and below the other.
-    ("core/src/transport_vertex.cpp:494", "qualified += name", "routing key IS the mount path"),
-    ("core/src/transport_vertex.cpp:512", "structural vertex, created lazily"),
+    ("core/src/transport_vertex.cpp:498", "qualified += name", "routing key IS the mount path"),
+    ("core/src/transport_vertex.cpp:516", "structural vertex, created lazily"),
     # Two module-vertex mints since S2b — `register_module`'s eager one and creation's
     # lazy one. The lazy-mint comment selects this (later) one.
-    ("core/src/transport_vertex.cpp:520", "register_vertex_key(mod_key",
+    ("core/src/transport_vertex.cpp:524", "register_vertex_key(mod_key",
      "structural vertex, created lazily"),
-    ("core/src/transport_vertex.cpp:613", "if (!router_.add_child(qualified, *link))"),
-    ("core/src/transport_vertex.cpp:622", "pending_links_.erase(pl)"),
-    ("core/src/transport_vertex.cpp:641", "if (constructed)"),
-    ("core/src/transport_vertex.cpp:643", "? link_state_t::LISTENING"),
+    ("core/src/transport_vertex.cpp:617", "if (!router_.add_child(qualified, *link))"),
+    ("core/src/transport_vertex.cpp:626", "pending_links_.erase(pl)"),
+    ("core/src/transport_vertex.cpp:645", "if (constructed)"),
+    ("core/src/transport_vertex.cpp:647", "? link_state_t::LISTENING"),
     ('core/src/transport_vertex.cpp:73', '[[nodiscard]] view_t link_state_value(link_state_t state) {'),
-    ('core/src/transport_vertex.cpp:438', 'std::string module;'),
+    ('core/src/transport_vertex.cpp:442', 'std::string module;'),
     # fwd-router.md's "Signature source" line — bare :NNN shorthands that had ALL rotted
     # silently (they cited the pre-#739 header). Anchored so they cannot rot again.
     # zero-copy-and-flatten.md's rope-tier citations and ADR-0072's stale-comment pointer —
@@ -259,9 +259,9 @@ ANCHORS = [
      "[[nodiscard]] transport_t* by_name(std::string_view name) const {"),
     ("core/include/libtracer/child_registry.hpp:628", "std::size_t size()"),
     ("core/include/libtracer/child_registry.hpp:638", "live_size"),
-    ("core/src/transport_vertex.cpp:616", "return std::unexpected(status_t::BACKPRESSURE);",
+    ("core/src/transport_vertex.cpp:620", "return std::unexpected(status_t::BACKPRESSURE);",
      "if (!router_.add_child(qualified, *link))"),
-    ("core/include/libtracer/transport_vertex.hpp:357", "result_t<void> register_module"),
+    ("core/include/libtracer/transport_vertex.hpp:372", "result_t<void> register_module"),
     ("core/include/libtracer/transport_vertex.hpp:99", "enum class link_state_t"),
     ("core/src/graph.cpp:2666", "sel == field_sel_t::TAIL", 'step0.name == "subscribers"'),
     ("core/src/graph.cpp:2785", "!whole_field(field)", 'step0.name == "acl"'),
@@ -285,7 +285,7 @@ ANCHORS = [
     ('core/include/libtracer/mem_heap.hpp:183', '[[nodiscard]] bool try_reserve(std::vector<T>& v, std::size_t n) noexcept {'),
     ('core/include/libtracer/mem_heap.hpp:377', '[[nodiscard]] inline std::optional<view_t> over_bytes(std::span<const std::byte> bytes,'),
     ("core/include/libtracer/view.hpp:26", "namespace tr::view {"),
-    ("core/include/libtracer/frame.hpp:23", "namespace tr::wire {"),
+    ("core/include/libtracer/frame.hpp:24", "namespace tr::wire {"),
     ("core/include/libtracer/graph.hpp:52", "namespace tr::graph {"),
     ('core/include/libtracer/graph.hpp:1279', '[[nodiscard]] result_t<rope_t> read_subtree_folded(vertex_handle_t v,'),
     ('core/include/libtracer/graph.hpp:1344', 'template <typename F>'),
@@ -460,10 +460,10 @@ ANCHORS = [
     ('core/include/libtracer/crc.hpp:168',
      '[[nodiscard]] inline std::uint32_t crc32c_update_runtime(std::uint32_t c,'),
     # core/include/libtracer/frame.hpp
-    ('core/include/libtracer/frame.hpp:25',
+    ('core/include/libtracer/frame.hpp:26',
      '// Decode failures reuse the RFC-0002 registry codes (error.hpp) directly — the'),
-    ('core/include/libtracer/frame.hpp:202',
-     '[[nodiscard]] inline std::expected<tlv_t, err_t> decode(const view::view_t& v) {'),
+    ('core/include/libtracer/frame.hpp:221',
+     '[[nodiscard]] inline std::expected<tlv_t, err_t> decode('),
     # core/include/libtracer/fwd_frame_view.hpp
     # core/include/libtracer/fwd_router.hpp
     ('core/include/libtracer/fwd_router.hpp:115',
@@ -561,7 +561,7 @@ ANCHORS = [
     # core/include/libtracer/rope_decode.hpp
     ('core/include/libtracer/rope_decode.hpp:17',
      '* SINK NOTE: this validates STRUCTURE + CRC over a rope; it does not yet'),
-    ('core/include/libtracer/rope_decode.hpp:71', 'class rope_cursor {'),
+    ('core/include/libtracer/rope_decode.hpp:72', 'class rope_cursor {'),
     # core/include/libtracer/segment.hpp
     ('core/include/libtracer/segment.hpp:52',
      'void inc_relaxed() noexcept { count_.fetch_add(1, std::memory_order_relaxed); }'),
@@ -593,7 +593,7 @@ ANCHORS = [
     # core/include/libtracer/transport.hpp
     ('core/include/libtracer/transport.hpp:456',
      'virtual void send(std::span<const std::span<const std::byte>> iov) {'),
-    ('core/include/libtracer/transport.hpp:612',
+    ('core/include/libtracer/transport.hpp:620',
      '[[nodiscard]] virtual bool delivers_ropes() const { return false; }',
      'rx_.set_rope([](void* c, view::rope_t f) { (*static_cast<F*>(c))(std::move(f)); }, &sink);'),
     # core/include/libtracer/transport_can.hpp
@@ -630,7 +630,7 @@ ANCHORS = [
     ('core/include/libtracer/transport_ws.hpp:240',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'void send(std::span<const std::span<const std::byte>> iov) override;'),
-    ('core/include/libtracer/transport_ws.hpp:436',
+    ('core/include/libtracer/transport_ws.hpp:445',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'transport_ws_client& operator=(const transport_ws_client&) = delete;'),
     # core/include/libtracer/vertex.hpp
@@ -667,8 +667,8 @@ ANCHORS = [
     ('core/include/libtracer/vertex.hpp:2633',
      'static_assert(sizeof(void*) != 4 || sizeof(vertex_t) <= config_t::kMaxVertexBytes32,'),
     # core/src/frame.cpp
-    ('core/src/frame.cpp:120', 'std::array<grammar::walk_frame_t<grammar::span_cursor>, 8> slots;'),
-    ('core/src/frame.cpp:121', 'grammar::walk_stack_t<grammar::span_cursor> stack(slots, &mem::heap_source());'),
+    ('core/src/frame.cpp:126', 'std::array<grammar::walk_frame_t<grammar::span_cursor>, 8> slots;'),
+    ('core/src/frame.cpp:127', 'grammar::walk_stack_t<grammar::span_cursor> stack(slots, &spill);'),
     # core/src/fwd_router.cpp
     ('core/src/fwd_router.cpp:802',
      'bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_source_t* rx) {'),
@@ -742,7 +742,8 @@ ANCHORS = [
     ('core/src/rope.cpp:41', 'if (!b.empty()) std::memcpy(seg->bytes.data() + pos, b.data(), b.size());'),
     # core/src/rope_decode.cpp
     ('core/src/rope_decode.cpp:32', 'std::expected<void, err_t> check_frame(const view::rope_t& r) {'),
-    ('core/src/rope_decode.cpp:46', 'std::expected<void, err_t> validate_rope(const view::rope_t& r) {'),
+    ('core/src/rope_decode.cpp:46',
+     'std::expected<void, err_t> validate_rope(const view::rope_t& r, mem::block_source_t& spill'),
     # core/src/tlv_arena.cpp
     ('core/src/tlv_arena.cpp:134', 'std::array<grammar::walk_frame_t<grammar::span_cursor>, 8> slots;'),
     ('core/src/tlv_arena.cpp:135', 'grammar::walk_stack_t<grammar::span_cursor> stack(slots, &src);'),
@@ -765,12 +766,12 @@ ANCHORS = [
     # core/src/transport_vertex.cpp
     ('core/src/transport_vertex.cpp:49',
      '*        NAME <utf8>, NAME "kind" NAME <utf8>, NAME "port" VALUE u16, NAME "role" VALUE u8'),
-    ('core/src/transport_vertex.cpp:106',
+    ('core/src/transport_vertex.cpp:111',
      'graph_.register_child_type(',
      'return make_connection(std::move(key), config, conn_role_t::DIAL);'),
-    ('core/src/transport_vertex.cpp:161',
+    ('core/src/transport_vertex.cpp:165',
      'result_t<std::string> transport_vertex_t::module_for(std::string_view kind,'),
-    ('core/src/transport_vertex.cpp:504',
+    ('core/src/transport_vertex.cpp:508',
      '// Compose the mount key: `<net_root>/<module>/<name>`, replacing the flat key the'),
     # core/src/transport_ws.cpp
     ('core/src/transport_ws.cpp:86',
@@ -784,7 +785,7 @@ ANCHORS = [
     # which #871 moved out of this TU into slot_server_t::bind_listen; the entry sheds the
     # scope entirely instead, because the array is now spelled `pristine_inline` here and
     # `inline_vec` only in the directed facade — one anchor, one hit, no positional filter.
-    ('core/src/transport_ws.cpp:693', 'std::array<std::byte, 4096> chunk;',
+    ('core/src/transport_ws.cpp:704', 'std::array<std::byte, 4096> chunk;',
      'void transport_ws_client::serve(int fd, std::vector<std::byte> pipelined) {'),
     # core/tests/registry_teardown_test.cpp
     ('core/tests/registry_teardown_test.cpp:275', 'void test_digest_paths_agree() {'),
@@ -1032,9 +1033,9 @@ ANCHORS = [
      '*        count is chosen by the sending peer) and answered by DROPPING the'),
     ('core/src/transport_vertex.cpp:68',
      'if (const auto v = cfg.u32("backoff")) s.backoff_ms = *v;'),
-    ('core/src/transport_vertex.cpp:107',
+    ('core/src/transport_vertex.cpp:112',
      '"listener", [this](graph::graph_t&, std::vector<std::byte> key, const tlv_t* config) {'),
-    ('core/src/transport_vertex.cpp:403',
+    ('core/src/transport_vertex.cpp:407',
      'result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::byte> child_key,'),
     ('integrations/esp-idf/libtracer/include/libtracer_esp/esp_ws_client_link.hpp:176',
      '#include "esp_transport.h"'),

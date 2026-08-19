@@ -87,12 +87,17 @@ void parse_config(const tlv_t* config, conn_settings_t& s) {
 // references). The full ctor below delegates here and adds the builtins.
 transport_vertex_t::transport_vertex_t(graph::graph_t& graph, fwd_router_t& router,
                                        std::string net_root, mem::mem_backend_t* rx_backend,
-                                       slim_net_t)
+                                       slim_net_t, mem::block_source_t* egress_src)
     : graph_(graph),
       router_(router),
       net_root_(std::move(net_root)),
       rx_backend_(rx_backend),
-      egress_src_(&mem::heap_source()) {
+      // The nullptr guard the FULL ctor used to hold, MOVED here (#873): both ctors reach
+      // this one line, so a null argument still means the process heap and behaviour is
+      // bit-identical for every existing caller. Before this parameter a SLIM node's
+      // `egress_source()` answered the process heap unconditionally — it could not be told
+      // otherwise, so the accessor lied about that node's store.
+      egress_src_(egress_src != nullptr ? egress_src : &mem::heap_source()) {
     // Register the `/net` parent if it isn't already (it is the `:children[]` target).
     if (!graph_.find(path_t::parse(net_root_)->key())) {
         (void)graph_.register_vertex(*path_t::parse(net_root_), graph::role_t::STORED_VALUE);
@@ -125,11 +130,10 @@ transport_vertex_t::transport_vertex_t(graph::graph_t& graph, fwd_router_t& rout
 transport_vertex_t::transport_vertex_t(graph::graph_t& graph, fwd_router_t& router,
                                        std::string net_root, mem::mem_backend_t* rx_backend,
                                        mem::block_source_t* egress_src)
-    : transport_vertex_t(graph, router, std::move(net_root), rx_backend, slim_net) {
-    // The ADR-0079 net-plane egress store (#873 family 1). A SLIM node never reaches here,
-    // so its `egress_src_` stays the process default the delegated ctor set — it registers
-    // its own factories and injects whatever store it wants into them directly.
-    if (egress_src != nullptr) egress_src_ = egress_src;
+    : transport_vertex_t(graph, router, std::move(net_root), rx_backend, slim_net, egress_src) {
+    // The ADR-0079 net-plane egress store (#873 family 1) is now set by the delegated ctor —
+    // the nullptr guard lives there, so a SLIM node gets the same treatment this one does
+    // and `egress_source()` answers for both. All that is left here is the builtin catalog.
     register_builtin_transports(*this, rx_backend_, egress_src_);
 }
 
