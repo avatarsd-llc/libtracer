@@ -95,3 +95,44 @@ if(BUILD_TESTING)
         add_test(NAME example_tree_of_ropes COMMAND tree_of_ropes)
     endif()
 endif()
+
+# --- The L4 graph domain: one concept per example (#1383) --------------------
+#
+# Deliberately APPENDED below the pre-existing block rather than merged into it: the
+# doc-citation gate pins `core/examples/CMakeLists.txt:59,74,87,92`, so anything inserted
+# above line 97 moves an anchored citation on `docs/examples/index.md`.
+#
+# None of these needs the FWD net plane (they are pure in-process graph), so all eight are
+# unconditional; none needs Threads except `graph_await`, which parks a waiter thread.
+set(LIBTRACER_GRAPH_EXAMPLES
+    graph_register
+    graph_read_write
+    graph_await
+    graph_write_creates
+    graph_children
+    graph_retire
+    graph_handler_vertex
+    graph_stream)
+
+foreach(example IN LISTS LIBTRACER_GRAPH_EXAMPLES)
+    add_executable(${example} ${example}.cpp)
+    target_link_libraries(${example} PRIVATE libtracer)
+    if(MSVC)
+        target_compile_options(${example} PRIVATE /W4)
+    else()
+        target_compile_options(${example} PRIVATE -Wall -Wextra)
+    endif()
+endforeach()
+
+find_package(Threads REQUIRED)
+target_link_libraries(graph_await PRIVATE Threads::Threads)
+
+# Spelled through a local alias rather than a second bare test-guard condition: the
+# doc-citation gate pins the guard at line 87 by its TEXT, and a second occurrence of that
+# text anywhere in this file makes the anchor ambiguous. Same condition, one anchor.
+set(LIBTRACER_REGISTER_GRAPH_EXAMPLE_TESTS ${BUILD_TESTING})
+if(LIBTRACER_REGISTER_GRAPH_EXAMPLE_TESTS)
+    foreach(example IN LISTS LIBTRACER_GRAPH_EXAMPLES)
+        add_test(NAME example_${example} COMMAND ${example})
+    endforeach()
+endif()

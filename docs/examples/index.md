@@ -14,6 +14,14 @@ verbatim from that file, so it cannot drift from what actually compiles.
 | [Rope scatter-gather](rope-scatter.md) | L1 views | compose a multi-link `rope_t`; `to_iovec` (zero copy) vs `flatten` (one copy) |
 | [Two nodes over a wire — FWD delivery](two-node-fwd.md) | L4 + transport | `fwd_router_t` source-routing across a channel; cross-wire latency |
 | [Composition axes](tree-of-ropes.md) | L1 + L4 + transport | why a node is a tree of ropes and not a rope of ropes; rope over two backends; mount = identity, not memory |
+| [Register a vertex, and address it](graph-register.md) | L4 graph | `path_t` parses once; the vertex map is keyed on PATH bytes; `PATH_IN_USE`; placeholders |
+| [Read and write](graph-read-write.md) | L4 graph | one store per vertex, last-writer-wins; `read` returns a reference to the published value |
+| [`await`](graph-await.md) | L4 graph | the readiness plane: single-shot, at its own vertex only, `TIMEOUT` on the deadline |
+| [Write-creates](graph-write-creates.md) | L4 graph | a LOCAL data write materializes its target and its missing intermediates |
+| [`:children[]`](graph-children.md) | L4 graph | enumerate a parent's members, one level, through the `:` control plane |
+| [Retirement](graph-retire.md) | L4 graph | logically absent, not erased: `NOT_FOUND`, live handles, the generation stamp |
+| [A HANDLER vertex](graph-handler-vertex.md) | L4 graph | the role decides what a write means: `on_write` executes, `on_read` computes |
+| [A STREAM vertex](graph-stream.md) | L4 graph | the bounded history ring and its owner-declared depth (no wire surface) |
 
 The toctree below is the order of record; this table adds the layer and the summary.
 Each example's layer column names the module that owns the types it uses — the
@@ -46,14 +54,17 @@ $ ./build/examples/tree_of_ropes
 Or run them the way CI does — as ctest smoke tests that self-check and fail on any
 mismatch: `ctest --test-dir build -R example_`.
 
-Two of the seven targets need the FWD routing plane and exist only when
+Two targets need the FWD routing plane and exist only when
 `LIBTRACER_NET_PLANE` is on: `two_node_fwd` and `tree_of_ropes` are declared inside
 `if(LIBTRACER_NET_PLANE)` blocks (`core/examples/CMakeLists.txt:59,74`), and so are
 their test registrations (`core/examples/CMakeLists.txt:87-96`). The option defaults to
-`ON` (`core/CMakeLists.txt:63-65`), so the recipe above builds all seven. Configured with
+`ON` (`core/CMakeLists.txt:63-65`), so the recipe above builds every example. Configured with
 `-DLIBTRACER_NET_PLANE=OFF`, those two binaries are never produced and
-`ctest --test-dir build -R example_` runs **five of seven** — a pass with two examples
+`ctest --test-dir build -R example_` runs **two fewer** — a pass with two examples
 absent rather than skipped, which no ctest output distinguishes from a clean full run.
+
+The eight `graph_*` targets are pure in-process L4 and are built unconditionally; run them
+together with `ctest --test-dir build -R example_graph_`.
 :::
 
 ```{toctree}
@@ -68,4 +79,12 @@ Wire codec deep-dive & throughput <wire-codec>
 Rope scatter-gather <rope-scatter>
 Two nodes over a wire — FWD delivery <two-node-fwd>
 Composition axes <tree-of-ropes>
+Register a vertex, and address it <graph-register>
+Read and write <graph-read-write>
+await <graph-await>
+Write-creates <graph-write-creates>
+:children[] <graph-children>
+Retirement <graph-retire>
+A HANDLER vertex <graph-handler-vertex>
+A STREAM vertex <graph-stream>
 ```
