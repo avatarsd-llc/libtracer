@@ -44,10 +44,18 @@ on:
       - "core/include/libtracer/receiver_slot.hpp"  # the delivery-tier slot transport.hpp embeds
       - "core/src/transport_vertex.cpp"
       - "core/include/libtracer/transport_vertex.hpp"
+      - "core/include/libtracer/mem_heap.hpp"  # tr::detail::try_* — the nothrow growth both TUs refuse through
       - "core/tests/quic_test.cpp"
       - "core/tests/webtransport_test.cpp"
       - "core/tests/wt_interop_server.cpp"
       - "core/tests/tsan-msquic.supp"
+      # #934 — the tight-heap gate and its out-of-process peer. Without these four entries a
+      # PR that only touches the gate (or the driver, or the shared raw client they both take
+      # their peer from) never runs this job at all, so the one test that proves a pre-auth
+      # allocation refuses instead of aborting would go unexecuted on the PR that changed it.
+      - "core/tests/webtransport_alloc_gate_test.cpp"
+      - "core/tests/wt_peer_driver.cpp"
+      - "core/tests/raw_wt_client.hpp"
       # #874 — the shared test runner. quic_test.cpp and webtransport_test.cpp take their
       # runner, their frame collector AND their TSan happens-before shims from test_support.hpp,
       # so a change confined to it can break both of these TUs without touching either. This

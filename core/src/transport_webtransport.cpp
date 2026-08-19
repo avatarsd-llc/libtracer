@@ -8,16 +8,31 @@
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * @par The #981 `-fno-exceptions` probe residual does NOT reach this file
- * The three `%tr::detail::try_reserve` sites below (`open_stream`,
- * `on_peer_stream_started`, `accumulate`) keep that helper rather than migrating to the
- * ADR-0065 failable seam, and the reason is the build, not the element type. This TU is
- * compiled ONLY into `libtracer_quic`, an opt-in module gated on `LIBTRACER_WITH_QUIC` and
- * on an installed msquic — a hosted-profile target. On every profile that compiles it the
- * growth THROWS and `try_grow` catches in-frame (#923): ONE allocation, no probe, no window.
- * The abort()-on-a-lost-race mode (#850) needs `-fno-exceptions`, which no build of this
- * file uses. If msquic ever lands on an exception-free target, all three sites become live
- * residuals and must migrate — their element types (`stream_ctx_t*`, `std::uint8_t`) are
- * trivially copyable, so `%tr::mem::block_array_t` would take them directly.
+ * The `%tr::detail::try_*` sites below (`open_stream`, `on_peer_stream_started`,
+ * `accumulate`, and the `:path` copy in `classify_bidi`) keep those helpers rather than
+ * migrating to the ADR-0065 failable seam, and the reason is the build, not the element
+ * type. This TU is compiled ONLY into `libtracer_quic`, an opt-in module gated on
+ * `LIBTRACER_WITH_QUIC` and on an installed msquic — a hosted-profile target. On every
+ * profile that compiles it the growth THROWS and `try_grow` catches in-frame (#923): ONE
+ * allocation, no probe, no window. The abort()-on-a-lost-race mode (#850) needs
+ * `-fno-exceptions`, which no build of this file uses. If msquic ever lands on an
+ * exception-free target, all of them become live residuals and must migrate — the two
+ * `%tr::detail::try_reserve` element types (`stream_ctx_t*`, `std::uint8_t`) are trivially
+ * copyable, so `%tr::mem::block_array_t` would take them directly; the `:path` copy is a
+ * `std::string` and would move to the seam by changing what holds those bytes, not by
+ * getting a better helper.
+ *
+ * @par Every peer-reachable allocation on this path is failable (#934)
+ * The #934 quic/webtransport ingress audit found the extended-CONNECT ANSWER still
+ * throwing: the `:path` copy, the response-vector builders, and the send buffer, all
+ * reached PRE-AUTH from one QUIC handshake plus one HEADERS frame, all on an msquic
+ * callback where a `bad_alloc` unwinds into libmsquic's C frames and this module holds no
+ * `catch`. Three of the four are DELETED rather than guarded — the H3 face's preambles and
+ * the 200 response are protocol CONSTANTS, so `wt_h3` now serves them as `constexpr` views
+ * of static storage — and the two that remain (the `:path` copy, the one send-buffer copy
+ * msquic owns until SEND_COMPLETE) refuse by value. A refusal on the CONNECT is
+ * COUNT-THEN-CLOSE (`refuse_session`), which is a DIFFERENT scope from `accumulate`'s
+ * stream-scoped OOM refusal on purpose — see both functions.
  *
  * The same msquic investment as Phase A; the core library never references any
  * of this. The H3/QPACK surface is the deliberately minimal subset in
@@ -69,6 +84,7 @@
 #include <cstring>
 #include <memory>
 #include <new>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -147,6 +163,16 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
     std::atomic<bool> session{false};
     /** @brief The CONNECT stream's id (the 0x41 preamble references it). */
     std::uint64_t connect_stream_id = 0;
+    /**
+     * @brief Extended CONNECTs this node REFUSED because it could not afford to answer
+     *        them (#934) — a `:path` it could not record, or a 200 response whose one
+     *        owned copy the heap declined.
+     *
+     * The counter half of the count-then-close disposition: the refusal is the node
+     * protecting itself on a pre-auth path, so it must name itself in the observability
+     * surface rather than degrading silently.
+     */
+    std::atomic<std::uint64_t> refused_sessions{0};
 
     /**
      * @name DIAL rendezvous stage 2: session established (stage 1, the QUIC
@@ -193,15 +219,18 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
      *                 channel, under the same lock.
      * @param preamble Bytes written on the stream immediately after it starts
      *                 (the stream-type varint, the CONNECT request, or the
-     *                 0x41 + session-id header).
+     *                 0x41 + session-id header). BORROWED — @ref send_raw copies
+     *                 before it returns, so the LISTEN side passes a view of the
+     *                 constant preambles in static storage (#934).
      * @param expect   The connection the caller means — a callback's event
      *                 handle, refusing the open if the peer has since been
      *                 replaced. Null means "whatever connection is live now"
      *                 (the dial constructor, which holds no event handle).
-     * @return The started stream handle, or null when nothing was opened.
+     * @return The started stream handle, or null when nothing was opened (or when
+     *         its preamble could not be written — see the body).
      */
     HQUIC open_stream(QUIC_STREAM_OPEN_FLAGS flags, stream_ctx_t::kind_t kind,
-                      std::vector<std::uint8_t> preamble, HQUIC expect = nullptr) {
+                      std::span<const std::uint8_t> preamble, HQUIC expect = nullptr) {
         const std::lock_guard lock(conn_m);
         HQUIC on_conn = conn;
         if (on_conn == nullptr) return nullptr;                      // tearing down
@@ -223,7 +252,15 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
             api->StreamClose(s);
             return nullptr;
         }
-        send_raw(s, std::move(preamble));
+        // The preamble copy is the LAST allocation on this path, and it is FAILABLE
+        // (#934): on a tight heap the stream is aborted rather than left started but
+        // un-announced, and its ctx still joins `ctxs` so a harvester closes the handle
+        // (callbacks never close handles — the base's discipline).
+        if (!send_raw(s, preamble)) {
+            api->StreamShutdown(s, QUIC_STREAM_SHUTDOWN_FLAG_ABORT, kAppErrBadRequest);
+            ctxs.push_back(ctx.release());
+            return nullptr;
+        }
         // Only after the preamble is queued: a send() racing this open must not
         // slip a length-prefixed record in front of the 0x41 header.
         if (kind == stream_ctx_t::kind_t::FRAME) {
@@ -243,19 +280,20 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
      *         (SETTINGS) plus the two mandatory QPACK streams (RFC 9204 §4.2 —
      *         empty beyond their type byte, since the dynamic table stays at
      *         capacity 0). Null @p on_conn = the live connection (the dial
-     *         constructor); the LISTEN side passes its CONNECTED event handle. */
+     *         constructor); the LISTEN side passes its CONNECTED event handle.
+     *
+     * All three preambles are protocol CONSTANTS, so since #934 they are `constexpr`
+     * views of static storage: the LISTEN side runs this from a connection callback the
+     * instant an unauthenticated peer completes the QUIC handshake, and it now builds no
+     * container at all to do it. */
     void open_h3_face(HQUIC on_conn = nullptr) {
         using kind_t = stream_ctx_t::kind_t;
         (void)open_stream(QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL, kind_t::LOCAL,
                           wt_h3::control_stream_bytes(), on_conn);
-        std::vector<std::uint8_t> enc;
-        wt_h3::append_varint(enc, wt_h3::kStreamTypeQpackEncoder);
-        (void)open_stream(QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL, kind_t::LOCAL, std::move(enc),
-                          on_conn);
-        std::vector<std::uint8_t> dec;
-        wt_h3::append_varint(dec, wt_h3::kStreamTypeQpackDecoder);
-        (void)open_stream(QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL, kind_t::LOCAL, std::move(dec),
-                          on_conn);
+        (void)open_stream(QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL, kind_t::LOCAL,
+                          wt_h3::kQpackEncoderStreamBytes, on_conn);
+        (void)open_stream(QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL, kind_t::LOCAL,
+                          wt_h3::kQpackDecoderStreamBytes, on_conn);
     }
 
     // ---- inbound stream classification + the H3 handshake ----
@@ -315,6 +353,25 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
         c.acc.shrink_to_fit();
         if (c.h != nullptr)
             api->StreamShutdown(c.h, QUIC_STREAM_SHUTDOWN_FLAG_ABORT, kAppErrBadRequest);
+    }
+
+    /**
+     * @brief Refuse an extended CONNECT this node cannot afford to answer: count it,
+     *        then shut the connection down (#934's count-then-close ruling).
+     *
+     * The scope differs from @ref refuse_stream on purpose. That one protects a session
+     * the peer ALREADY established (#919), so an OOM there may not exceed the stream.
+     * Here there is no such session — the CONNECT is what would have created it — and the
+     * two alternatives the ruling weighed are both worse: a silent stream-scoped drop
+     * would leave the peer holding a connection whose handshake will never be answered
+     * (backpressure the attacker controls), and no counter would name the event.
+     *
+     * @return False — the caller's "stop consuming, the connection is going down".
+     */
+    bool refuse_session() {
+        refused_sessions.fetch_add(1, std::memory_order_relaxed);
+        shutdown_conn(kAppErrBadRequest);
+        return false;
     }
 
     /**
@@ -452,14 +509,23 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
                 // handle (its closure ends the session). Any path is served —
                 // the resource is RECORDED for session_path(), never used to
                 // admit or refuse.
+                //
+                // Both steps below are PRE-AUTH and were the last two throwing
+                // allocations on this path (#934). They are now failable, and a refusal
+                // is COUNT-THEN-CLOSE (#934's 2026-08-15 ruling, #838's shape): the
+                // session was never established, so unlike `accumulate`'s stream-scoped
+                // OOM there is nothing for #919 to protect — a half-answered CONNECT
+                // must not be left looking live, and holding the peer's connection open
+                // after refusing it is the backpressure arm that ruling rejected.
+                bool recorded = false;
                 {
                     const std::lock_guard lock(conn_m);
-                    path = std::string(req_path);
+                    recorded = detail::try_assign(path, req_path);  // peer-SIZED (#1108 shape)
                 }
-                std::vector<std::uint8_t> resp;
-                wt_h3::append_h3_frame(resp, wt_h3::kFrameHeaders,
-                                       wt_h3::encode_status_200_field_section());
-                send_raw(c.h, std::move(resp));
+                if (!recorded) return refuse_session();
+                // The response bytes are a `constexpr` view of static storage since #934;
+                // the only allocation left is the one copy msquic owns, and it refuses.
+                if (!send_raw(c.h, wt_h3::status_200_headers_frame())) return refuse_session();
                 std::uint64_t sid = 0;
                 std::uint32_t sz = sizeof(sid);
                 if (QUIC_SUCCEEDED(api->GetParam(c.h, QUIC_PARAM_STREAM_ID, &sz, &sid)))
@@ -870,11 +936,15 @@ webtransport_transport_t::webtransport_transport_t(const std::string& peer_host,
     // open through impl_t::open_stream, which rechecks the connection under
     // conn_m and publishes the ctx before dropping it.
     i.open_h3_face();
+    // The DIAL request is the one handshake buffer whose length is NOT a protocol
+    // constant (it carries the configured `:authority` and `:path`), so it keeps its
+    // vector — built here, on the owner's own constructor thread, where a throw is the
+    // caller's to catch. `open_stream` only borrows it (#934).
     std::vector<std::uint8_t> req;
     wt_h3::append_h3_frame(req, wt_h3::kFrameHeaders,
                            wt_h3::encode_connect_field_section(i.authority, i.path));
-    HQUIC connect_stream = i.open_stream(
-        QUIC_STREAM_OPEN_FLAG_NONE, impl_t::stream_ctx_t::kind_t::CONNECT_CLIENT, std::move(req));
+    HQUIC connect_stream = i.open_stream(QUIC_STREAM_OPEN_FLAG_NONE,
+                                         impl_t::stream_ctx_t::kind_t::CONNECT_CLIENT, req);
     if (connect_stream == nullptr) return;
     // The id is read AFTER the request is queued (the request never carries it);
     // the 0x41 frame-channel header below is what needs it.
@@ -892,8 +962,8 @@ webtransport_transport_t::webtransport_transport_t(const std::string& peer_host,
     std::vector<std::uint8_t> preamble;
     wt_h3::append_varint(preamble, wt_h3::kFrameWtStream);
     wt_h3::append_varint(preamble, i.connect_stream_id);
-    if (i.open_stream(QUIC_STREAM_OPEN_FLAG_NONE, impl_t::stream_ctx_t::kind_t::FRAME,
-                      std::move(preamble)) == nullptr)
+    if (i.open_stream(QUIC_STREAM_OPEN_FLAG_NONE, impl_t::stream_ctx_t::kind_t::FRAME, preamble) ==
+        nullptr)
         return;
     i.open_ok = true;
 }
@@ -959,6 +1029,10 @@ std::uint64_t webtransport_transport_t::malformed_rx() const noexcept {
 
 std::uint64_t webtransport_transport_t::dropped_tx() const noexcept {
     return impl_->dropped_tx.load(std::memory_order_relaxed);
+}
+
+std::uint64_t webtransport_transport_t::refused_sessions() const noexcept {
+    return impl_->refused_sessions.load(std::memory_order_relaxed);
 }
 
 std::size_t webtransport_transport_t::live_streams() const noexcept {

@@ -226,6 +226,26 @@ class webtransport_transport_t : public transport_t {
      *         refused. H3 handshake material is not counted — it is not a frame. */
     [[nodiscard]] std::uint64_t dropped_tx() const noexcept;
 
+    /**
+     * @brief Extended CONNECT handshakes REFUSED because the node could not afford to
+     *        answer them ([#934](https://github.com/avatarsd-llc/libtracer/issues/934)).
+     *
+     * The LISTEN side reaches two allocations on the strength of one unauthenticated
+     * peer's HEADERS frame: recording the requested `:path`, and the one owned copy of the
+     * 200 response msquic borrows until SEND_COMPLETE. Both are nothrow, and a refusal is
+     * COUNT-THEN-CLOSE — this counter, then the connection is shut down with the
+     * bad-request code, so the peer's memory is freed at once and nothing is left
+     * half-established. Never moves on a healthy node; a rising value means the node is
+     * shedding pre-auth work under memory pressure, which is the event the standing
+     * "no peer-provoked path may abort the node" commitment
+     * (docs/reference/07-host-embedding.md) makes observable rather than fatal.
+     *
+     * Distinct from @ref dropped_rx (a FRAME shed for backpressure on an established
+     * session) and from the stream-scoped handshake-buffer refusal, which aborts one
+     * stream and leaves an already-established session alone (#919).
+     */
+    [[nodiscard]] std::uint64_t refused_sessions() const noexcept;
+
     /** @brief The interface-level snapshot (#932) — the concrete accessors above, as the
      *         one shape a generic `transport_t*` holder reads. */
     [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {

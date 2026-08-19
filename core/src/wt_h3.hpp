@@ -83,6 +83,39 @@ struct varint_t {
     std::size_t consumed;
 };
 
+/**
+ * @brief A FIXED-CAPACITY byte sink — the encode target for a byte count that is a
+ *        protocol constant rather than a peer's number (#934).
+ *
+ * The handshake preambles this codec emits (the control stream's SETTINGS, the two QPACK
+ * stream types, the 200 response) have lengths fixed by the RFCs, so nothing about them
+ * needs a growable container. Building them into one of these instead lets the whole
+ * sequence be `constexpr`, which is what DELETES the allocation rather than making it
+ * failable: the bytes end up in static storage and the LISTEN-side handshake — the
+ * pre-auth path an unauthenticated peer reaches with one QUIC handshake — allocates
+ * nothing at all to answer.
+ *
+ * It is a `push_back` sink on purpose, so the appenders below take it and a
+ * `std::vector` through the SAME code (the DIAL-side request, whose length depends on a
+ * configured `:authority`/`:path`, keeps its vector).
+ *
+ * @warning Writing past @p N is undefined; every builder here is checked by a
+ *          `static_assert` on the resulting length.
+ */
+template <std::size_t N>
+struct fixed_bytes_t {
+    std::array<std::uint8_t, N> data{}; /**< @brief The storage. */
+    std::size_t len = 0;                /**< @brief Bytes written, in [0, N]. */
+
+    /** @brief Append one byte. */
+    constexpr void push_back(std::uint8_t b) { data[len++] = b; }
+
+    /** @brief The bytes written so far. */
+    [[nodiscard]] constexpr std::span<const std::uint8_t> bytes() const {
+        return std::span<const std::uint8_t>(data.data(), len);
+    }
+};
+
 /** Decode one QUIC varint; nullopt = the buffer does not yet hold all its bytes. */
 inline std::optional<varint_t> read_varint(std::span<const std::uint8_t> in) {
     if (in.empty()) return std::nullopt;
@@ -93,8 +126,10 @@ inline std::optional<varint_t> read_varint(std::span<const std::uint8_t> in) {
     return varint_t{v, len};
 }
 
-/** Append @p v as a QUIC varint (shortest encoding). */
-inline void append_varint(std::vector<std::uint8_t>& out, std::uint64_t v) {
+/** Append @p v as a QUIC varint (shortest encoding) to any `push_back` byte sink —
+ *  a `std::vector` (the DIAL request) or a @ref fixed_bytes_t (the constant preambles). */
+template <class Out>
+constexpr void append_varint(Out& out, std::uint64_t v) {
     if (v < 0x40) {
         out.push_back(static_cast<std::uint8_t>(v));
     } else if (v < 0x4000) {
@@ -472,23 +507,26 @@ struct field_section_t {
 
 // ---- handshake byte builders ----
 
-/** Append one H3 frame: varint type, varint length, payload. */
-inline void append_h3_frame(std::vector<std::uint8_t>& out, std::uint64_t type,
-                            std::span<const std::uint8_t> payload) {
+/** Append one H3 frame: varint type, varint length, payload — to any `push_back`
+ *  byte sink (see @ref append_varint). */
+template <class Out>
+constexpr void append_h3_frame(Out& out, std::uint64_t type,
+                               std::span<const std::uint8_t> payload) {
     append_varint(out, type);
     append_varint(out, payload.size());
-    out.insert(out.end(), payload.begin(), payload.end());
+    for (const std::uint8_t b : payload) out.push_back(b);
 }
 
+namespace detail {
+
 /**
- * The complete bytes an endpoint writes on its control stream: the stream type
- * (0x00) followed by ONE SETTINGS frame advertising the WebTransport-enabling
- * settings (extended CONNECT per RFC 9220, H3 datagrams per RFC 9297, and both
- * the draft-02 ENABLE_WEBTRANSPORT and draft-07+ WT_MAX_SESSIONS ids — an
- * endpoint of either vintage finds the one it knows; unknown ids are ignored).
+ * @brief Build the control-stream preamble at COMPILE time (see @ref control_stream_bytes).
+ *
+ * The two scratch capacities are generous upper bounds on encodings whose real lengths the
+ * `static_assert`s below pin exactly; nothing here is peer-influenced.
  */
-inline std::vector<std::uint8_t> control_stream_bytes() {
-    std::vector<std::uint8_t> settings;
+[[nodiscard]] constexpr fixed_bytes_t<32> build_control_stream() {
+    fixed_bytes_t<24> settings;
     append_varint(settings, kSettingEnableConnectProtocol);
     append_varint(settings, 1);
     append_varint(settings, kSettingH3Datagram);
@@ -497,11 +535,42 @@ inline std::vector<std::uint8_t> control_stream_bytes() {
     append_varint(settings, 1);
     append_varint(settings, kSettingWtMaxSessions);
     append_varint(settings, 1);
-    std::vector<std::uint8_t> out;
+    fixed_bytes_t<32> out;
     append_varint(out, kStreamTypeControl);
-    append_h3_frame(out, kFrameSettings, settings);
+    append_h3_frame(out, kFrameSettings, settings.bytes());
     return out;
 }
+
+/** @brief The control-stream preamble, in static storage (#934). */
+inline constexpr fixed_bytes_t<32> kControlStream = build_control_stream();
+static_assert(kControlStream.len == 21, "the SETTINGS preamble is a 21-byte protocol constant");
+
+}  // namespace detail
+
+/**
+ * The complete bytes an endpoint writes on its control stream: the stream type
+ * (0x00) followed by ONE SETTINGS frame advertising the WebTransport-enabling
+ * settings (extended CONNECT per RFC 9220, H3 datagrams per RFC 9297, and both
+ * the draft-02 ENABLE_WEBTRANSPORT and draft-07+ WT_MAX_SESSIONS ids — an
+ * endpoint of either vintage finds the one it knows; unknown ids are ignored).
+ *
+ * A view of static storage, computed at compile time: the LISTEN side opens its H3 face
+ * from an msquic connection callback the moment an UNAUTHENTICATED peer completes the
+ * QUIC handshake, and that path must not be able to allocate (#934).
+ */
+[[nodiscard]] inline constexpr std::span<const std::uint8_t> control_stream_bytes() {
+    return detail::kControlStream.bytes();
+}
+
+/** @brief The QPACK encoder stream's whole preamble — its type varint and nothing else
+ *         (RFC 9204 §4.2: the dynamic table stays at capacity 0). */
+inline constexpr std::array<std::uint8_t, 1> kQpackEncoderStreamBytes{
+    static_cast<std::uint8_t>(kStreamTypeQpackEncoder)};
+/** @brief The QPACK decoder stream's whole preamble (see @ref kQpackEncoderStreamBytes). */
+inline constexpr std::array<std::uint8_t, 1> kQpackDecoderStreamBytes{
+    static_cast<std::uint8_t>(kStreamTypeQpackDecoder)};
+static_assert(kStreamTypeQpackEncoder < 0x40 && kStreamTypeQpackDecoder < 0x40,
+              "both QPACK stream types encode as a ONE-byte QUIC varint");
 
 namespace detail {
 
@@ -540,9 +609,41 @@ inline std::vector<std::uint8_t> encode_connect_field_section(std::string_view a
     return out;
 }
 
-/** The QPACK encoded field section of the `200` CONNECT response. */
-inline std::vector<std::uint8_t> encode_status_200_field_section() {
+/** The QPACK encoded field section of the `200` CONNECT response — a 3-byte protocol
+ *  constant, so it owns fixed storage rather than a vector (#934). */
+[[nodiscard]] inline constexpr std::array<std::uint8_t, 3> encode_status_200_field_section() {
     return {0x00, 0x00, static_cast<std::uint8_t>(0xc0 | 25)};  // :status: 200 (static 25)
+}
+
+namespace detail {
+
+/** @brief Build the whole 200-response HEADERS frame at COMPILE time (see
+ *         @ref status_200_headers_frame). */
+[[nodiscard]] constexpr fixed_bytes_t<8> build_status_200_headers_frame() {
+    fixed_bytes_t<8> out;
+    const std::array<std::uint8_t, 3> section = encode_status_200_field_section();
+    append_h3_frame(out, kFrameHeaders, std::span<const std::uint8_t>(section));
+    return out;
+}
+
+/** @brief The 200-response HEADERS frame, in static storage (#934). */
+inline constexpr fixed_bytes_t<8> kStatus200Frame = build_status_200_headers_frame();
+static_assert(kStatus200Frame.len == 5, "the 200 response is a 5-byte protocol constant");
+
+}  // namespace detail
+
+/**
+ * The COMPLETE HEADERS frame answering an accepted extended CONNECT: `0x01` (HEADERS),
+ * its length, and the 3-byte `:status: 200` field section.
+ *
+ * A view of static storage, computed at compile time. The LISTEN side writes it from a
+ * stream callback on the strength of ONE unauthenticated peer's HEADERS frame, so the
+ * answer itself must cost no allocation (#934); the only heap left on that path is the
+ * one copy msquic owns until SEND_COMPLETE, and that one is failable
+ * (`send_ctx_t::make_raw`).
+ */
+[[nodiscard]] inline constexpr std::span<const std::uint8_t> status_200_headers_frame() {
+    return detail::kStatus200Frame.bytes();
 }
 
 }  // namespace tr::net::wt_h3
