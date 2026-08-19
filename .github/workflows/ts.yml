@@ -30,6 +30,10 @@ on:
 jobs:
   build-test:
     runs-on: ubuntu-24.04
+    # Measured max 0.50 min, p50 0.40. 15 = the short-job floor (30x observed): the job
+    # runs `npm ci` TWICE — the workspace install plus a clean throwaway install in the
+    # published-package smoke — so both registry round-trips sit under this ceiling.
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: bindings/typescript
@@ -43,6 +47,8 @@ jobs:
           cache-dependency-path: bindings/typescript/package-lock.json
 
       - name: Install (clean, from the committed lockfile)
+        # Registry round-trip, measured well under a minute. 8 = the install-step floor.
+        timeout-minutes: 8
         run: npm ci
 
       - name: Build the workspace (tsc)
@@ -58,6 +64,9 @@ jobs:
       # catch. Guards against a broken `files`/`exports` field shipping a package
       # that installs but won't import (the ESP-archive class of packaging bug).
       - name: Published-package smoke (pack + clean install + import)
+        # The install is INLINE here (`npm install` on a packed tarball), so it is easy to
+        # miss when grepping for install steps. Same 8-minute registry floor.
+        timeout-minutes: 8
         run: |
           set -euo pipefail
           tmp="$(mktemp -d)"

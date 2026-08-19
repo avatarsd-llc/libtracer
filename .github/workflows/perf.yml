@@ -53,6 +53,11 @@ jobs:
   gate-pr:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
+    # Measured healthy max 8.27 min, p50 8.12, min 7.15 (9.37 on the incident day), of
+    # which the blocking interleaved A/B step alone is 5.7 min of TIMED measurement that
+    # must not be clipped. 30 = ~3.2x. This is the BLOCKING perf tier, so the ceiling is
+    # set where it can never trip on a slow-but-honest sample. See core-ci.yml's header.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -157,6 +162,10 @@ jobs:
   # still needs the bench, and a green ratchet is not a performance verdict.
   symbol-ratchet:
     runs-on: ubuntu-24.04
+    # Measured max 0.85 min, p50 0.70, min 0.53 — the tightest distribution in the repo
+    # (it only builds the pinned-symbol bench targets). 15 = the short-job floor rather
+    # than 3x, which would be 2.5 min and would red on any transient runner stall.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Build the bench targets carrying the pinned symbols (Release = -O3 -DNDEBUG)
@@ -186,13 +195,23 @@ jobs:
   # matching how the ratchet job treats the Zenoh control series: absent is not a failure.
   compose-audit:
     runs-on: ubuntu-24.04
+    # One of the two jobs the wedge report names. Measured healthy max 1.35 min, p50
+    # 1.22; the 4.60 max is 2026-08-19 with 3.42 min of it inside `Install strace`.
+    # 20 = ~4.3x the worst observed and ~15x healthy — generous because the risk here is
+    # entirely apt/network, not compute.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       # strace is the instrument. Without it syscall_guard.py reports verdict=UNAVAILABLE,
       # and check_compose_audit.py treats that as a FAILURE rather than a pass — a guard that
       # silently downgrades to measuring nothing is the shape this leg exists to remove.
       - name: Install strace (the wire-use instrument)
-        run: sudo apt-get update && sudo apt-get install -y strace
+        # The step that wedged here: measured healthy p50 0.12 min, healthy max ~1.0,
+        # 3.42 on the incident day. 5 = ~5x the healthy max.
+        timeout-minutes: 5
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: sudo -E apt-get update && sudo -E apt-get install -y --no-install-recommends strace
       - name: Build the composition arm
         run: |
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
@@ -227,6 +246,12 @@ jobs:
   ratchet:
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
+    # Measured healthy max 9.92 min, p50 ~9.1, min 7.67 (16.45 on the incident day, 6.78
+    # of it in checkout). The dominant step is the interleaved A/B ratchet at ~6-6.8 min,
+    # which is a real measurement and must not be clipped. 35 = ~3.5x the healthy max.
+    # Advisory tier with three replicas, so a false trip is cheap to ignore and therefore
+    # especially corrosive — set loose on purpose.
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -361,6 +386,9 @@ jobs:
     if: github.event_name == 'push' && always()
     needs: ratchet
     runs-on: ubuntu-24.04
+    # Measured healthy max 1.00 min, p50 0.85; the 6.20 outlier is one slow
+    # drift-tracking step on the incident day. 20 = ~3.2x the worst observed.
+    timeout-minutes: 20
     # contents: write lets the tracker push the history to the gh-pages branch and
     # post a commit comment when a metric drifts past the soft alert.
     permissions:

@@ -54,6 +54,12 @@ env:
 jobs:
   wt-interop:
     runs-on: ubuntu-24.04
+    # Measured max 1.42 min, healthy max 1.38, p50 1.23 — trivially short on the msquic
+    # cache-HIT path. Set to 45 for the same unmeasured reason as quic.yml: this job
+    # carries the identical `Build msquic from source (cache miss only)` step, which never
+    # executed in 500 sampled runs, and it also pulls ~200 MB of Chromium below. Kept
+    # EQUAL to quic.yml so the two msquic consumers share one reviewable ceiling.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -66,6 +72,9 @@ jobs:
 
       - name: Build msquic from source (cache miss only)
         if: steps.msquic-cache.outputs.cache-hit != 'true'
+        # Deliberately NOT a tight cap — never executed in the sampled history, so there
+        # is no healthy figure to multiply. Same 30 as quic.yml's identical step.
+        timeout-minutes: 30
         run: |
           git clone --depth 1 --branch "$MSQUIC_TAG" --recurse-submodules --shallow-submodules \
             https://github.com/microsoft/msquic.git ~/msquic-src
@@ -90,6 +99,9 @@ jobs:
 
       - name: Install + build the TypeScript workspace
         working-directory: bindings/typescript
+        # `npm ci` is a registry round-trip; measured 0.02-0.13 min. 8 = the install-step
+        # floor, so a hung registry names itself instead of stalling the job.
+        timeout-minutes: 8
         run: |
           npm ci
           npm run build
@@ -103,6 +115,8 @@ jobs:
       # same committed lockfile.
       - name: Install puppeteer for the browser harness
         working-directory: bindings/typescript
+        # Measured max 0.22 min warm; ~200 MB of Chromium cold, hence 10 rather than 8.
+        timeout-minutes: 10
         run: npm i --no-save puppeteer
 
       # Only the interop case — the package's mocked unit tests are ts.yml's job,

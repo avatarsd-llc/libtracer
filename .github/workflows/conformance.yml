@@ -18,6 +18,11 @@ on:
 jobs:
   conformance:
     runs-on: ubuntu-24.04
+    # Measured max 2.90 min, p50 1.07, min 0.75. This workflow is unfiltered and runs on
+    # every PR, so all 40 sampled runs land on the 2026-08-19 incident day and there is
+    # no incident-free window in the sample. 15 = ~5.2x the observed max; the loose
+    # multiple is warranted by the Rust toolchain + cargo cache it pulls.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

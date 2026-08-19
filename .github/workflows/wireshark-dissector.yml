@@ -27,10 +27,17 @@ on:
 jobs:
   dissector:
     runs-on: ubuntu-24.04
+    # Measured max 0.47 min, p50 0.27. 15 = the short-job floor (~32x observed); the
+    # job's only real risk is the apt step below. See core-ci.yml's header.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Install Lua (interpreter + compiler)
-        run: sudo apt-get update && sudo apt-get install -y lua5.4
+        # Measured max 0.37 min. 8 = the install-step floor.
+        timeout-minutes: 8
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: sudo -E apt-get update && sudo -E apt-get install -y --no-install-recommends lua5.4
       - name: Syntax-check the dissector (all Lua versions must parse it)
         run: luac5.4 -p tools/wireshark/libtracer.lua
       - name: Decode every conformance vector through the dissector

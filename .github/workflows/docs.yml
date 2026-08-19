@@ -237,6 +237,11 @@ jobs:
     needs: build
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # #1403 bounded `build` above and left this job unbounded — it is a single
+    # actions/deploy-pages@v4 call against a GitHub service and can hang the same way.
+    # Measured max 1.05 min over the 10 deploy runs (healthy max 0.38, p50 0.23);
+    # 10 = ~9.5x the worst observed.
+    timeout-minutes: 10
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

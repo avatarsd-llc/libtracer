@@ -40,6 +40,12 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-24.04
+    # Measured p50 0.70 min, max 7.77 — of which 7.63 was inside actions/checkout@v4,
+    # which fetches full history here to scan the diff. All 40 sampled runs fall on the
+    # 2026-08-19 incident day (the workflow has only ~70 successful runs total), so
+    # healthy and incident cannot be separated by date and the max is almost certainly
+    # inflated. 20 = ~2.6x the worst observed. See core-ci.yml's header for the policy.
+    timeout-minutes: 20
     steps:
       # Full history: the check diffs against the MERGE BASE, so both endpoints and
       # their common ancestor have to be present.

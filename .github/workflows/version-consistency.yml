@@ -60,6 +60,9 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-24.04
+    # Measured max 0.27 min, p50 0.22, min 0.20. Its only network step is
+    # actions/setup-python@v5. 10 = the short-job floor, ~37x observed.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

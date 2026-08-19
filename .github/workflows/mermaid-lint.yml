@@ -34,6 +34,9 @@ permissions:
 jobs:
   mermaid-lint:
     runs-on: ubuntu-latest
+    # Measured max 0.32 min, p50 0.23. 10 = the short-job floor (~31x observed); the only
+    # network step is the pinned mermaid parser install below.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -43,6 +46,8 @@ jobs:
           cache-dependency-path: tools/mermaid-lint/package-lock.json
       - name: Install the pinned mermaid parser
         working-directory: tools/mermaid-lint
+        # Registry round-trip, measured in seconds. 8 = the install-step floor.
+        timeout-minutes: 8
         run: npm ci
       - name: Parse every docs mermaid block
         run: node tools/mermaid-lint/check-mermaid.mjs

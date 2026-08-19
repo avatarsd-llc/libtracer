@@ -48,6 +48,11 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-24.04
+    # Only 3 successful runs exist (workflow_dispatch only): max 0.50 min, p50 0.42, min
+    # 0.27 — a thin sample, and stated as one. 15 = the short-job floor plus
+    # registry-publish headroom, matching release.yml's publish jobs; `npm ci` and
+    # `npm publish` are both registry round-trips. See core-ci.yml's header.
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: bindings/typescript
@@ -62,6 +67,8 @@ jobs:
           cache-dependency-path: bindings/typescript/package-lock.json
 
       - name: Install (clean, from the committed lockfile)
+        # Registry round-trip. 8 = the install-step floor.
+        timeout-minutes: 8
         run: npm ci
 
       - name: Build the workspace (tsc)

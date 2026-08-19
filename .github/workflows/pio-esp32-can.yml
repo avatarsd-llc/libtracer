@@ -76,6 +76,9 @@ on:
 jobs:
   pio-run:
     runs-on: ubuntu-24.04
+    # Measured max 3.57 min, p50 3.32, min 3.25 — extremely tight. 15 = ~4.2x, kept above
+    # 3x because PlatformIO downloads a full ESP32 toolchain+framework on a cold cache.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -90,6 +93,9 @@ jobs:
       # move that under us and red main for a reason outside this repo; bumping
       # this pin is the visible, reviewable act that re-validates the assumption.
       - name: Install PlatformIO Core
+        # Measured max 0.18 min, but a cold PlatformIO cache pulls a full toolchain later
+        # in the job, so this install step gets 10 rather than the 8-minute floor.
+        timeout-minutes: 10
         run: pip install --quiet "platformio==6.1.18"
 
       # Pack the package the way the release job publishes it, so the consumer

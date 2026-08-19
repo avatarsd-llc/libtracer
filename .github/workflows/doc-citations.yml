@@ -105,13 +105,20 @@ jobs:
   check:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container: ubuntu:24.04
+    # Measured max 0.87 min, p50 0.65, min 0.48. 15 = the short-job floor (~17x): it runs
+    # in a bare ubuntu container with the apt step below, and it is routed to the
+    # self-hosted ci-local pool where queue-before-start reached 3.20 min (queue time does
+    # NOT count against timeout-minutes). See core-ci.yml's header for the policy.
+    timeout-minutes: 15
     steps:
       # Runs as root inside the container — never `sudo`. `git` + `ca-certificates`
       # come first because checkout falls back to a REST tarball without them.
       - name: python3 + git (container has no preinstalled tool set)
+        # Measured p50 0.22 min, max 0.45. 8 = the install-step floor.
+        timeout-minutes: 8
         run: |
           apt-get update -qq
-          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3 git ca-certificates
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3 git ca-certificates
       - uses: actions/checkout@v4
       # The resolver reads three citation spellings (full path, basename shorthand,
       # bare `:N` continuation) and must not guess; its unit tests run FIRST so a
