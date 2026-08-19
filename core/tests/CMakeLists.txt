@@ -41,6 +41,27 @@ target_link_libraries(mem_source_test PRIVATE libtracer)
 libtracer_test_warnings(mem_source_test)
 add_test(NAME mem_source COMMAND mem_source_test)
 
+# The std::pmr ADAPTER over the block seam (mem_source_pmr.hpp, #873) — the one direction
+# ADR-0079 leaves std::pmr alive in: block_source_t -> std::pmr::memory_resource. Pins the
+# pass-through, the sized+aligned release round-trip that makes a pool_source_t RECYCLE
+# under it, the family-5 consumer (can_reassembly_t, whose refcounted view_t map cannot be
+# retyped to block_array_t), and the adapter's throwing boundary.
+#
+# THE ABLATION, run by hand (deliberately not an add_test — it is a build-flag variant, and
+# an add_test that is expected to FAIL is a green nobody reads):
+#   g++ -std=c++23 -O2 -DLIBTRACER_ABLATE_PMR_ADAPTER -I core/include -I core/tests \
+#       core/tests/mem_source_pmr_test.cpp core/src/mem_source.cpp core/src/mem_heap.cpp \
+#       core/src/backend_set.cpp core/src/mem_pool.cpp core/src/rope.cpp -o ablate_pmr
+# (Only these TUs — core/src/*.cpp would drag in the msquic-dependent transports.)
+# Ablated, the containers sit on std::pmr::new_delete_resource() and sections 2/3/4/5 go
+# RED — 6 failures, because the injected source serves nothing (`allocs_ > 0`, the
+# alignment witness, and both `pool.used() > 0` claims all fail). Unablated the same binary
+# reports ALL PASS.
+add_executable(mem_source_pmr_test mem_source_pmr_test.cpp)
+target_link_libraries(mem_source_pmr_test PRIVATE libtracer)
+libtracer_test_warnings(mem_source_pmr_test)
+add_test(NAME mem_source_pmr COMMAND mem_source_pmr_test)
+
 # The bounded RECYCLING source (pool_source_t, #597) — the long-lived-seam gap that
 # heap_source (unbounded) and bump_source (never recycles) between them left open.
 add_executable(mem_pool_source_test mem_pool_source_test.cpp)

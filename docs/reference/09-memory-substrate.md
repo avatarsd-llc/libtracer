@@ -337,7 +337,54 @@ The two consumers above are *scoped*: a decode arena and a gather table live for
 Two consequences worth stating because they are easy to miss:
 
 - **Read-out APIs have to change too, not just the writes.** An accessor returning `std::optional<std::vector<…>>` is a throwing allocation on whatever thread calls it, and for a store the caller is usually a receive thread. The replacement shape is *copy into caller storage and report the true size* — so the caller can tell "too big for my buffer" (retry against a block from its own injected source) from "no such entry", which an empty result conflates. A caller-side stack buffer sized for the common case plus a `block_array_t` spill covers both without an allocation on the ordinary path.
-- **`std::pmr` survives only as an adapter, and only outside.** C++23 has no nothrow `memory_resource`, so a `std::pmr` container fed by an adapter over a `block_source_t` still throws at the adapter's boundary — unavoidable, and fine for an embedder who owns that choice. What must not remain is a *library-internal* path through it: the store itself holds no `std::pmr` type at all.
+- **`std::pmr` survives only as an adapter, and only outside.** C++23 has no nothrow `memory_resource`, so a `std::pmr` container fed by an adapter over a `block_source_t` still throws at the adapter's boundary — unavoidable, and fine for an embedder who owns that choice. What must not remain is a *library-internal* path through it: the store itself holds no `std::pmr` type at all. That adapter is now shipped, and is the subject of the next section.
+
+### The `std::pmr` adapter: `source_resource_t`
+
+The adapter the rule above leaves room for is `tr::mem::source_resource_t`, in `core/include/libtracer/mem_source_pmr.hpp`. It is a `std::pmr::memory_resource` holding one `block_source_t*`: `do_allocate` forwards to `try_alloc`, `do_deallocate` forwards to the seam's **sized** `release` (`std::pmr` carries the original size and alignment into `deallocate`, which is exactly the pair a header-free pool needs), and `do_is_equal` is address identity.
+
+```cpp
+std::array<std::byte, 8 * 1024> slab{};
+std::array<tr::mem::size_class_t, 8> classes{};
+tr::mem::pool_source_t<> pool{slab, classes};
+tr::mem::source_resource_t pmr{pool};
+
+tr::net::can_reassembly_t reasm{&pmr, /*max_groups=*/16};
+```
+
+**It runs one direction, and the reverse is forbidden.** `block_source_t` → `memory_resource` is offered; `memory_resource` → `block_source_t` is not, and must not be added. A wrapper in that direction would have to answer `nullptr` from a `try_alloc` built on an `allocate` that is annotated `returns_nonnull` and signals only by throwing — so the caller's null check is deleted at exactly the `-Os`/`-Oz` levels the reference node ships at (the table earlier in this section), and the throw reaches the `__cxa_throw` → `abort()` stub. That is the defect [ADR-0065](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md) created the block seam to escape, and `core/tests/mem_source_pmr_test.cpp` asserts the two types stay non-interconvertible.
+
+:::{warning}
+**This delivers PLACEMENT and BOUNDING, not FAILABILITY.** The adapter's boundary is a
+`std::bad_alloc` on a hosted build and an `abort()` under `-fno-exceptions`. So it is not
+a way to put a **peer-provoked** store on a bounded slab and call it bounded — a store
+that must *survive* exhaustion migrates onto `block_array_t` by the five rules above and
+fails by value. What the adapter buys is that the bytes come from the deployer's slab
+instead of the global heap, and that the slab's size is the bound.
+:::
+
+**When to reach for it.** Exactly one case: a `std::pmr` container whose element type is
+neither trivially copyable nor trivially destructible, so `block_array_t`'s two static
+assertions reject it and rule 1 (invert the ownership at the public type) cannot be
+applied without changing a type the store does not own. `tr::net::can_reassembly_t` is
+the shipped example — its slice map holds a refcounted `tr::view::view_t` — which is why
+the adapter was owed to [#873](https://github.com/avatarsd-llc/libtracer/issues/873)'s
+family 5 rather than built speculatively alongside the route-handle migration.
+
+**One source per receiver still applies.** The adapter holds no shared state of its own,
+so concurrency is entirely the injected source's contract: a shared `pool_source_t` behind
+a `memory_resource` inherits [ADR-0060 erratum 1](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0060-lkv-copy-store-injected-value-backend.md)'s ~15× collapse
+unchanged. Wrapping it does not make sharing safe. Two adapters over the *same* source also
+compare **unequal** (address identity, not RTTI — the reference node ships `-fno-rtti`), so
+construct one adapter per source and pass it around rather than one per container.
+
+**It costs nothing to a target that does not name it.** No library translation unit
+includes the header and it is deliberately absent from the `tracer.hpp` umbrella, so a
+build that does not use it produces byte-identical objects. A NARROW target that *does*
+opt in pays, measured on `riscv32-esp-elf-g++ 15.2.0` at `-Os -fno-exceptions -fno-rtti`
+(`rv32imac_zicsr_zifencei`/`ilp32`): 92 B of `.text` across the four out-of-line bodies
+(`do_allocate` 28 B, `do_deallocate` 8 B, `do_is_equal` 8 B, the two destructor forms 48 B),
+a 28 B vtable in `.rodata`, and **8 B per instance** — one vptr and one source pointer.
 
 ### Migrating a SCOPED consumer — the cheap variant, and the one trap in it
 

@@ -16,6 +16,31 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`tr::mem::source_resource_t` — the `std::pmr` adapter over the block seam**
+  (new header `libtracer/mem_source_pmr.hpp`;
+  [#873](https://github.com/avatarsd-llc/libtracer/issues/873) family 5,
+  [ADR-0079](../docs/adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md)).
+  A `std::pmr::memory_resource` whose bytes come from an injected `tr::mem::block_source_t`:
+  `do_allocate` forwards to `try_alloc`, `do_deallocate` to the seam's **sized** `release`
+  (so a `pool_source_t` under it recycles with no per-block header), `do_is_equal` is
+  address identity (the reference node ships `-fno-rtti`). It exists for the one case a
+  store migration cannot solve by retyping — a `std::pmr` container whose element type is
+  neither trivially copyable nor trivially destructible, so `block_array_t` rejects it;
+  `tr::net::can_reassembly_t`'s refcounted-`view_t` slice map is the shipped example.
+
+  **It delivers placement and bounding, NOT failability.** `std::pmr`'s only exhaustion
+  signal is a throw, so the adapter's boundary is `std::bad_alloc` (and `std::abort()`
+  under `-fno-exceptions`). A store that must *survive* exhaustion still migrates onto
+  `block_array_t` by the route-handle pattern. The reverse adapter — a
+  `std::pmr::memory_resource` used *as* a `block_source_t` — is deliberately **not**
+  offered and must not be added: `memory_resource::allocate` is `returns_nonnull`, so the
+  caller's null check is deleted at the `-Os`/`-Oz` levels the reference node ships at.
+
+  **Zero cost to a target that does not name it.** No library translation unit includes
+  the header and it is absent from the `tracer.hpp` umbrella on purpose, so a build that
+  does not use it compiles byte-identical objects. Opting in costs, on
+  `riscv32-esp-elf-g++ 15.2.0` at `-Os -fno-exceptions -fno-rtti`: 92 B `.text`, a 28 B
+  vtable, and 8 B per instance.
 - **The ADR-0080 reclamation seam — `reclaim_policy_t`, `reclaim_local_t`, `reclaim_strict_t`,
   `subscriber_release_fn_t`, `graph_t::unsubscribe(sub, release)` and
   `graph_t::deferred_release_drops()`** ([#894](https://github.com/avatarsd-llc/libtracer/issues/894),
