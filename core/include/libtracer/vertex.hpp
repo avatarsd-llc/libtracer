@@ -2107,7 +2107,7 @@ class vertex_t {
                                      *          member (RFC-0014 §3, S4). */
     };
 
-    /** @brief Set or clear @p f. An RMW, because the two bits have two different writers. */
+    /** @brief Set or clear @p f. An RMW, because the bits have different writers. */
     void set_flag(flag_t f, bool on) noexcept {
         const auto bit = static_cast<std::uint8_t>(f);
         if (on) {
@@ -2539,11 +2539,13 @@ class vertex_t {
     // writes it under the graph's sweep lock, so a plain byte here was a data race — UB,
     // not a benign torn read. Byte-wide as an atomic too, so the group stays four bytes.
     std::atomic<delivery_mode_t> delivery_mode_{delivery_mode_t::IF_NEWER};
-    // Two lock-free predicates, packed into ONE byte so the flag group stays exactly four
+    // Three lock-free predicates, packed into ONE byte so the flag group stays exactly four
     // bytes wide and `sizeof(vertex_t)` stays at the 112 the #361 diet measured — the size
     // gate's own failure message says to put a new member behind vertex_ext_t rather than
-    // inline it, and a bit costs less than either. Written under a lock (a different one
-    // per bit), read lock-free off hot paths, so the writes are RMWs and compose.
+    // inline it, and a bit costs less than either. (`ENUM_HIDDEN`, the RFC-0014 §3 hide seam,
+    // is the third: it went here rather than beside `registered_` for exactly that reason.)
+    // Written under a lock (a different one per bit), read lock-free off hot paths, so the
+    // writes are RMWs and compose.
     std::atomic<std::uint8_t> flags_{0};
     bool registered_ = false;  // false => placeholder intermediate (invisible to find)
     /**
