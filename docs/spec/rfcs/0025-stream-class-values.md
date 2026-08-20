@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0025 |
 | **Title** | Stream-class values: delivery classes over the rope primitive |
-| **Status** | **accepted** (opened 2026-08-12, accepted 2026-08-12 by the merge of [PR #1192](https://github.com/avatarsd-llc/libtracer/pull/1192); implementation tracked by [#1204](https://github.com/avatarsd-llc/libtracer/issues/1204)). The comment window is **waived by default** per [GOVERNANCE](../../../.github/GOVERNANCE.md) single-maintainer rule — invoked explicitly only if outside input is wanted, and it was not invoked here. This line previously read `in-comment`, which under the waived-by-default rule is a state the RFC never occupied. |
+| **Status** | **accepted** (opened 2026-08-12, accepted 2026-08-12 by the merge of [PR #1192](https://github.com/avatarsd-llc/libtracer/pull/1192); implementation tracked by [#1204](https://github.com/avatarsd-llc/libtracer/issues/1204)). The comment window is **waived by default** per [GOVERNANCE](../../../.github/GOVERNANCE.md) single-maintainer rule — invoked explicitly only if outside input is wanted, and it was not invoked here. This line previously read `in-comment`, which under the waived-by-default rule is a state the RFC never occupied. **Amendment 1 (2026-08-21, §4.2.1) replaces §4.2's single-clock timestamp spelling with the three-clock model — wire/TX on the trailer (outermost frame, always `TF=0`), SAMPLE in a payload `TIME` (`0x0C`) child, PLAYOUT receiver-derived — and re-shapes the batch accordingly: a `TIME{u64 base}` child, per-sample time derived at **0 bytes/sample** for a uniform stream, a packed `i32` offset array for a non-uniform one. **Amendment 2 (2026-08-21, §4.6.1) relocates the ring: a producer never queues — the queue belongs to whoever consumes it, materializes at the *receiving* vertex as a STREAM, and is bounded in BYTES by that vertex's own injected `mem::block_source_t`; §4.4's pressure contract binds at the receiver ring, cross-writer total order is delegated to ADR-0019 HLC stamps, and the per-edge credit window is PARKED as the v2 wire-level escalation. Both amendments transcribe the 2026-08-20 grilling rulings (Q8, Q9, Q10) and neither adds a wire byte. |
 | **Author(s)** | AvatarSD (maintainer), with AI drafting |
 | **Created** | 2026-08-12 |
 | **Tracking issue** | [#879](https://github.com/avatarsd-llc/libtracer/issues/879) (folds [#863](https://github.com/avatarsd-llc/libtracer/issues/863), per-subscription delivery QoS) |
@@ -34,7 +34,11 @@ protocol already has**, with **zero new wire grammar**:
   written value whose children are the sample frames, timestamped with the trailer
   forms [01-data-format.md](../../reference/01-data-format.md) already specifies —
   an absolute `TF=0` u64 base on the parent, a compact `TF=1` i32 per-child offset.
-  No new TLV type, no new `opt` bit, no header layout.
+  No new TLV type, no new `opt` bit, no header layout. **Amendment 1 (§4.2.1)
+  supersedes that timestamp spelling**: the trailer carries wire/TX time only, and a
+  batch's sample time is a payload `TIME{u64 base}` child — 0 bytes/sample on a
+  uniform stream, a packed `i32` offset array on a non-uniform one. Still zero new
+  grammar.
 - The **stream descriptor is a separate LKV vertex** beside the data vertex —
   declared once, never repeated per batch, browseable by every existing tool.
 - The QoS folded in from #863 becomes a **delivery-class field in bits 6–7 of
@@ -50,6 +54,10 @@ protocol already has**, with **zero new wire grammar**:
   Every loss is accounted; silence is non-conforming.
 - The stream ring is **PMR-backed** — bounded by the injected resource, never a
   magic number — and reconciles with RFC-0022 §8 by composition (§4.6).
+  **Amendment 2 (§4.6.1) relocates that ring**: a producer never queues. The queue
+  belongs to whoever consumes it — it materializes at the **receiving** vertex,
+  bounded in **bytes** by that vertex's **own** injected `mem::block_source_t`, never
+  a shared pool.
 - At extreme rates the graph is a **control plane only** (§4.7): the descriptor
   negotiates an out-of-band channel, carries credentials **by reference only**, and
   the graph never carries the sample bytes.
@@ -162,8 +170,11 @@ subscription edge's cold half and meaningful only under their class:
 qos_settings += SETTINGS {
   NAME "batch_count"      VALUE <u32>   ; class 2 — flush after N sample frames
   NAME "batch_window_ns"  VALUE <u64>   ; class 2 — flush after T elapsed
-  NAME "stream_depth"     VALUE <u32>   ; class 3 — requested per-subscription
-                                        ;   ring depth, in deliveries
+  NAME "stream_depth"     VALUE <u32>   ; class 3 — RETIRED by Amendment 2 (§4.6.1):
+                                        ;   depth is the CONSUMER's, sized in bytes
+                                        ;   by its own injected source, never
+                                        ;   requested from the producer. Carried
+                                        ;   verbatim and ignored if present.
 }
 ```
 
@@ -212,6 +223,101 @@ scoped so a trailer-sliced copy stays self-consistent (the documented invariant 
 `op_resolve_walk.hpp` is kept, not removed). These fixes are independently useful
 (RTT/latency measurement over FWD) and gate nothing else in this RFC.
 
+#### 4.2.1 Amendment 1 (2026-08-21, ruled) — three clocks, and the batch's sample time is a payload `TIME` child
+
+**Instrument.** Amendment, not erratum: §4.2's batch spelling above is *replaced*, not clarified,
+and the replacement changes which TLV carries a sample's time. No new type code and no new `opt`
+bit is minted — `TIME` (`0x0C`) and the trailer both already exist and both are already normative
+— but a conforming producer that followed §4.2 as written emits different bytes after this
+amendment, which is amendment territory rather than erratum territory. Ruled by the maintainer in
+the 2026-08-20 grilling session (Q9, Q10), against the implemented reality recorded in
+[01-data-format.md](../../reference/01-data-format.md) §"Writer-side status (#1109)". The comment
+window is waived by default under [GOVERNANCE.md](../../../.github/GOVERNANCE.md)'s solo-maintainer
+clause and is not invoked.
+
+**What this replaces.** Until this amendment §4.2 read:
+
+> ~~the **parent** batch TLV carries `opt.TS=1, TF=0` — the absolute base timestamp, u64 LE ns;
+> **each child** sample frame carries `opt.TS=1, TF=1` — a signed i32 LE ns offset relative to the
+> parent's timestamp. […] Receivers interpret the timestamps as **scheduled playout time**.~~
+
+That spelling conflated three distinct clocks onto one carrier and spent 4 trailer bytes per
+sample to do it. It is retired in full. The trailer keeps exactly one job.
+
+##### The three clocks
+
+There are **three** times in a stream-class delivery, they are not interchangeable, and each has
+exactly one carrier:
+
+| clock | what it means | where it lives | stamped by |
+| --- | --- | --- | --- |
+| **WIRE / TX** | when this frame left an interface | the **optional trailer** (`opt.TS=1`), on the **OUTERMOST frame only**, **always `TF=0`** (absolute u64 LE ns) | the sender, at interface transmit |
+| **SAMPLE** | when the datum was acquired | a payload **`TIME` (`0x0C`)** TLV **inside the value** | the producer, at acquisition |
+| **PLAYOUT** | when the consumer should present it | **nowhere on the wire** — derived by the receiver | the receiver, from its own RTT/offset estimate |
+
+Consequences, each of which is a MUST unless marked otherwise:
+
+1. **The trailer TS is wire/TX time and nothing else.** It is stamped at interface transmit, on
+   the outermost frame only, and is **always `TF=0`**. A relay that rebuilds a frame re-stamps its
+   own outermost trailer (the FWD hop already re-emits it verbatim today; re-stamping is the
+   sender's own transmit time and is the conforming reading of "wire time"). Inner TLVs of a
+   structured value carry no trailer TS in this model. This is what the reference codec already
+   does — "**TF=0 only, on purpose**" in 01-data-format.md's writer-side status is now the
+   *design*, not a temporary gate.
+2. **SAMPLE time is a payload `TIME` (`0x0C`) TLV inside the value**, exactly the
+   application-domain use [05-protocol-tlvs.md](../../reference/05-protocol-tlvs.md) §`0x0C`
+   already names ("sample-acquisition time"). The graph never interprets it (claim 5); the §4.3
+   descriptor tells the consumer how to read it.
+3. **PLAYOUT time is never transmitted.** It is receiver-derived from the RTT and clock offset the
+   receiver estimates off the **read/write carrier echoes** — the terminus's TF=0 stamp echo on a
+   reply, `RTT = origin_now − echoed_stamp`, computed entirely on the origin's clock with no
+   request id, no clock sync, and no per-request state. The jitter-buffer / latency offset stays
+   receiver-side library policy (§4.7), never a router duty and never a wire field. §4.2's
+   sentence "receivers interpret the timestamps as **scheduled playout time**" was wrong on both
+   counts and is withdrawn: what arrives is a sample time, and playout is the receiver's own
+   arithmetic on top of it.
+4. **`TF=1` is RESERVED grammar, not removed** (Q10). A decoder MUST still record the relative flag
+   and its delta and succeed; a relay MUST carry a `TF=1` frame verbatim; the reply-echo path
+   MUST decline a `TF=1` root (it has no anchor to echo against); and the reference writer stays
+   **gated** — it does not mint `TF=1` until the anchorless-reject rule of
+   [01-data-format.md](../../reference/01-data-format.md) is enforced where the stamp is
+   **consumed**. `TF=1` is additive future surface this RFC does not use, not surface this RFC
+   deletes.
+5. **The ordering substrate is ADR-0019**, not any of the three clocks. Per-producer monotonic HLC
+   stamps are what give a cross-writer total order
+   ([ADR-0019](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0019-per-producer-monotonic-origin-timestamp.md));
+   wire time is advisory, sample time is application-domain, and neither is a sequence number.
+
+##### The batch shape, restated
+
+A batch remains a structured (`opt.PL=1`) written value whose children are the sample frames
+(§4.2's zero-new-grammar tenet is untouched). Its timing is now:
+
+```
+BATCH  (opt.PL=1, user-range record type)
+  ├─ TIME  <u64 LE ns>          ; the batch BASE — sample time of frame 0
+  ├─ [ VALUE <i32[] LE ns> ]    ; NON-UNIFORM streams only: packed per-sample
+  │                             ;   offsets from base, one i32 per frame
+  └─ <sample frames…>           ; homogeneous children, ADR-0008 array shape
+```
+
+- **A `TIME{u64 base}` child carries the batch's base sample time.** One per batch, not one per
+  sample.
+- **A UNIFORM stream spends 0 bytes per sample on time.** Per-sample time is *derived*:
+  `t(i) = base + i × dt_ns`, where `dt_ns` is the §4.3 descriptor's nominal sample period. A
+  uniform stream is exactly one whose descriptor declares `dt_ns != 0`. Nothing per-sample is
+  transmitted, and this is the recommended shape for every regular acquisition — an ADC scope, a
+  PWM timeline, a fixed-rate capture.
+- **A NON-UNIFORM stream (`dt_ns == 0`) carries a packed `i32` offset array**: one signed i32 LE ns
+  offset from `base` per sample frame, in one child, in frame order — **not** one trailer per
+  child. 4 bytes per sample in one contiguous run, decodable in one span, with no per-child TLV
+  header and no anchor walk.
+- **A single value write remains the degenerate one-frame case** — a `TIME` child is optional on
+  it, and its absence means "no acquisition time is claimed", never epoch zero.
+
+The §7 vector `stream/batch-trailer-roundtrip` is restated by this amendment as
+`stream/batch-time-roundtrip` (§7).
+
 ### 4.3 The descriptor — a separate LKV beside the data vertex
 
 Sample rate, sample format, and channel count belong in a **descriptor**: a
@@ -246,6 +352,13 @@ Ruled consequences:
   read and write this shape.
 
 ### 4.4 The pressure contract — `reliability` × class, no new knob
+
+> **Amended 2026-08-21 by Amendment 2 (§4.6.1).** Everything this section says about
+> *what* happens under pressure stands verbatim. *Where* it binds moves: the ring is
+> the **receiver's**, not the producer's, so read "a producer's fan-out edge cannot
+> enqueue" below as "**the receiving vertex's STREAM ring cannot admit**", and read
+> the reliable arm's `FLOW_BACKPRESSURE` as travelling **back to the rate-aware
+> producer**, which slows. The table's two contracts are unchanged.
 
 When a producer's fan-out edge cannot enqueue a delivery for a subscriber (ring
 full, resource exhausted), behaviour is selected by the subscription's **existing
@@ -291,6 +404,10 @@ slicing reassembly or at a producer's ring. The per-context classification
 
 ### 4.6 The stream ring — PMR-backed, reconciled with RFC-0022 §8
 
+> **Amended 2026-08-21 by Amendment 2 (§4.6.1).** The ring described below moves from the
+> producer's fan-out edge to the **receiving vertex**, and its bound moves from deliveries to
+> **bytes**. Read this section through §4.6.1; the reconciliation logic it states is kept.
+
 The ring behind class-3 delivery draws from the **injected PMR/arena** (the
 standing hot-path rule; the same substrate direction as the arena and label-table
 work) and is bounded by that resource — not by a synthetic constant.
@@ -307,6 +424,118 @@ the subscription's `reliability`), never as a silent shrink of the declared dept
 The implementation builds on the **existing STREAM-role ring/drain machinery**
 rather than greenfield: this RFC makes that machinery demand-driven (installed by a
 class-3 subscription) and resource-bounded, not a new subsystem.
+
+#### 4.6.1 Amendment 2 (2026-08-21, ruled) — a producer never queues: the ring belongs to the consumer
+
+**Instrument.** Amendment, not erratum: §4.6 as written put the ring on the producer's fan-out
+edge and sized it in *deliveries*; this moves it to the receiver and sizes it in *bytes*, and it
+retires the `stream_depth` request key of §4.1.1. No wire byte, no type code, no `opt` bit and no
+`delivery_policy` bit moves — the relocation is entirely a property of where an implementation
+holds state — but it changes a normative *where*, so it is an amendment. Ruled by the maintainer
+in the 2026-08-20 grilling session (Q8), on the measurement banked in §4.6.2. The comment window
+is waived by default under [GOVERNANCE.md](../../../.github/GOVERNANCE.md)'s solo-maintainer
+clause and is not invoked.
+
+##### The judgement
+
+> **A producer never queues. The queue belongs to whoever consumes it, sized in BYTES by that
+> party's own injected memory source. The producer knows the consumer's sampling rate and shapes
+> traffic to it.**
+
+Everything below is that sentence unpacked.
+
+1. **Producer writes are always lock-free.** The producer-side ring machinery is *deleted*, not
+   made optional. A write is the baseline lock-free store on every class, including class 3 —
+   there is no depth-dependent producer path and no producer-side accumulation to pay for. §4.6.2
+   measures what the deleted machinery cost: a **fixed +29 ns (+54 %) per write regardless of
+   depth**.
+2. **The stream-class queue materializes at the RECEIVING vertex.** Depth is a property of the
+   party that *wants* depth, expressed where that party owns state: a subscriber that wants a
+   queue **makes its own target vertex a STREAM**. This is not a new mechanism — it is the
+   existing STREAM role, read from the consumer's side, and it is already the ruled reading of the
+   ring in [CONTEXT.md](../../../CONTEXT.md) §Element addressing ("the ring is drain-only; a
+   consumer wanting a queue makes **its own** receiving vertex a STREAM").
+3. **Every ring is bounded in BYTES by that vertex's own injected `mem::block_source_t`** —
+   **per-injection-point, never a shared pool**. The byte bound replaces §4.1.1's
+   count-of-deliveries bound because a count is not a RAM budget on a variable-size value.
+   "Never shared" is not a preference:
+   [ADR-0079](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md)'s
+   2026-08-20 amendment measured a **shared** source collapsing to **0.01x of its own
+   single-thread rate at T = 24** — identical to the widest arm — while the **per-thread**
+   composition scaled at 0.46x and ran **−9.2 %** on net-leg latency. A shared ring behind a
+   fan-out is that same shape at a different granularity. Composition remains **multiple knobs,
+   varied always per target** (folded / per-plane / per-thread — no universal default), each of
+   the ~12 injection seams defaulting to `&mem::heap_source()`.
+4. **§4.4's pressure contract binds at the RECEIVER ring.** Best-effort =
+   **drop-oldest + `FLOW_ADDRESS_SHIFT_GAP` + loss accounting**, exactly as §4.4/§4.5 specify,
+   applied when the receiving vertex's ring cannot admit. Reliable = **`FLOW_BACKPRESSURE`
+   propagated back to the rate-aware producer, which slows**. Silence remains the one
+   non-conforming behaviour.
+5. **`set_history_depth` stays a HOST-ONLY intent.** It is the owner's retention *declaration* on
+   its own vertex, with **no wire surface** — unchanged by this amendment, and now doubly
+   coherent: the vertex declaring depth is the vertex holding the ring. The conformance vector
+   `stream/history-depth-host-only` (§7) stays valid precisely because nothing about it is on the
+   wire.
+6. **Cross-writer total order is delegated to
+   [ADR-0019](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0019-per-producer-monotonic-origin-timestamp.md)
+   per-producer HLC timestamps.** A receiver ring fed by N producers orders by stamp; it does not
+   mint a sequence number, and no producer coordinates with another to write.
+7. **The per-edge credit window is PARKED**, named here so it is a decision and not an omission:
+   it is the **v2 wire-level escalation** for flow control, to be taken up if and only if the
+   receiver-ring contract above proves insufficient. It is not v1 surface.
+8. **Batch folding (`delivery_class = 2`, batch) is the PREFERRED stream carrier.** §4.6.2
+   measures **32.0x per-sample amortization** (2.54 ns/sample), **~9.3 B/sample retained against
+   172 B**, and — with Amendment 1's uniform-stream rule — **timestamps at 0 bytes per sample**. A
+   producer that batches to the consumer's declared sampling rate is doing the traffic shaping
+   this judgement's last clause names.
+
+##### What §4.6 and §4.1.1 keep, and what they lose
+
+- **Kept:** §4.6's reconciliation shape — the owner *declares* retention intent, the injected
+  resource *bounds* what is satisfiable, and a shortfall surfaces through §4.4's pressure
+  contract rather than as a silent shrink. RFC-0022 §8 still stands untouched.
+- **Kept:** the implementation builds on the existing STREAM-role ring/drain machinery rather than
+  greenfield.
+- **Lost:** the ring's *location* (producer fan-out edge → receiving vertex), its *unit*
+  (deliveries → bytes), and the `stream_depth` **subscription request key of §4.1.1**, which is
+  **retired**: a subscriber does not request a window from a producer, it sizes its own. A
+  `stream_depth` key appearing on the wire is carried verbatim and **ignored**, under the standing
+  absent-⇒-default doctrine.
+- **Lost:** any reading of §4.8 clause 3 ("the producer retains a ring *because* a stream-class
+  subscriber exists") as producer-side retention. The subscription still carries the demand — what
+  it installs is append-preserving *delivery*, and the retention it provokes is the **consumer's**.
+  §4.8's four arguments for QoS-on-the-subscription are otherwise unaffected.
+
+#### 4.6.2 Evidence for Amendment 2 (measured)
+
+The basis for the judgement above, banked 2026-08-20:
+
+| measurement | figure |
+| --- | ---: |
+| STREAM ring premium per write | **+29 ns (+54 %)**, **fixed — independent of depth** |
+| …decomposed: probe-alloc | 7.4 ns |
+| …decomposed: deque op | 4.4 ns |
+| …decomposed: double stripe-mutex / drain | ~17 ns |
+| Baseline lock-free write (0 subscribers / 1 subscriber) | **53 ns / 71 ns** |
+| 4 writers on one vertex — lock-free | **4.59 M/s** |
+| 4 writers on one vertex — STREAM | **1.73 M/s** (**0.14x** of the single-threaded rate) |
+| Batch folding — per-sample amortization | **32.0x** (**2.54 ns/sample**) |
+| Batch folding — bytes retained per sample | **~9.3 B** vs **172 B** unfolded |
+| Batch folding — per-sample timestamp cost (uniform, Amendment 1) | **0 B** |
+
+Two readings decide the amendment:
+
+1. **The premium is fixed, not proportional.** +29 ns is paid on *every* write at *every* depth,
+   including depth 1 — so a producer-side ring taxes the whole write path for a service only some
+   consumers want. Moving it to the receiver makes the party that wants depth the party that pays
+   for it.
+2. **The producer-side ring does not survive fan-out.** Four writers on one vertex go from
+   4.59 M/s lock-free to 1.73 M/s with the ring — 0.14x of the single-threaded rate — which is the
+   same collapse shape ADR-0079's amendment measured for a shared allocation store. Both have one
+   cause: one shared, locked structure behind a many-writer path.
+
+Contextual composition figures are ADR-0079's, quoted in clause 3 above; they are that ADR's
+banked #941 sweep, not a measurement of this RFC.
 
 ### 4.7 Cold start, tiers, and the T2 control plane
 
@@ -396,6 +625,10 @@ fan-out pressure.
   convention (`TF=0` parent base + `TF=1` child offsets) — illustrative only; the
   normative forms already exist there.
 - `docs/spec/v1.md` — §3 incorporation changelog line.
+- `docs/reference/11-vertex-roles-and-aggregation.md`, `docs/reference/09-memory-substrate.md`,
+  `docs/reference/04-communication-flows.md` — the ring's location and unit, transcribed to
+  Amendment 2 (§4.6.1): the ring is the **receiving** vertex's, bounded in **bytes** by that
+  vertex's **own** injected source.
 - `CONTEXT.md` — the widened `tr::flow::address_shift_gap` glossary entry
   (**edited in this PR**, §4.5) plus entries for *delivery class* / *batch
   convention* / *stream descriptor* when the reference pages land.
@@ -429,10 +662,23 @@ New vectors (the `stream/*` family, phase-3 unless noted):
    `tr::flow::backpressure` at the producer; nothing is delivered late.
 7. `stream/attach-forward` — a class-3 subscriber's first delivery is the first
    post-attach fan-out; with `durability_request` set, the latch precedes it.
-8. `stream/batch-trailer-roundtrip` (phase 1/2) — a `TF=0` parent + `TF=1`
-   children batch survives origin → FWD hop → delivery with trailers intact.
+8. ~~`stream/batch-trailer-roundtrip`~~ → **`stream/batch-time-roundtrip`** (phase 1/2,
+   restated by Amendment 1 §4.2.1) — a batch carrying a payload `TIME{u64 base}` child
+   (plus, for a non-uniform stream, its packed `i32` offset array) survives origin → FWD
+   hop → delivery intact, and the **outermost** frame's trailer TS is `TF=0` wire/TX time
+   at every hop.
 9. `stream/loss-accounting` — every shed/skip increments a counter a client can
    read.
+10. `stream/history-depth-host-only` (Amendment 2 §4.6.1) — `set_history_depth` has **no
+    wire surface**: a peer write of any `history_keep_last`-shaped `:settings` knob answers
+    `SCHEMA_NOT_FOUND`, and no read exposes the declared depth. Unaffected by the ring's
+    relocation, precisely because the relocation is host-side only.
+11. `stream/tf1-reserved` (Amendment 1 §4.2.1, Q10) — a `TF=1` frame decodes and records
+    its flag and delta rather than being rejected at decode; a relay carries it verbatim;
+    the reply-echo path declines a `TF=1` root.
+12. `stream/receiver-ring-flood` (Amendment 2 §4.6.1) — exhausting the **net-plane** store
+    under a flood leaves the **graph plane** still able to allocate; the receiver ring
+    sheds under §4.4 rather than starving the node.
 
 **Migration.** Existing app-level conventions keep working untouched — they are
 opaque `VALUE` writes and remain so. The downstream scope and PWM-timeline vertices
