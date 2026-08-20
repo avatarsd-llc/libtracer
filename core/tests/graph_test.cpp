@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <latch>
 #include <memory>
 #include <span>
 #include <string_view>
@@ -311,14 +312,18 @@ void test_concurrent_stress() {
     constexpr int kWritesEach = 20000;
     constexpr int kReadsEach = 20000;
 
-    std::atomic<bool> go{false};
+    // A REAL rendezvous, not a spin (#1425): what this arm wants is for all eight threads to
+    // enter the loop together, and `std::latch` gives exactly that — every arrival blocks in
+    // the kernel until the count-down releases them all. The `std::atomic<bool>` flag it
+    // replaces was polled in a loop with no yield, so the threads spawned first burned their
+    // slices fighting the very thread that still had to spawn the rest.
+    std::latch go{1};
     std::atomic<long> reads_done{0};
     std::vector<std::thread> threads;
 
     for (int w = 0; w < kWriters; ++w) {
         threads.emplace_back([&, w] {
-            while (!go.load(std::memory_order_acquire)) {
-            }
+            go.wait();
             std::array<std::byte, 8> buf{};
             buf[0] = static_cast<std::byte>(w);
             for (int i = 0; i < kWritesEach; ++i) {
@@ -329,8 +334,7 @@ void test_concurrent_stress() {
     }
     for (int r = 0; r < kReaders; ++r) {
         threads.emplace_back([&] {
-            while (!go.load(std::memory_order_acquire)) {
-            }
+            go.wait();
             for (int i = 0; i < kReadsEach; ++i) {
                 auto rr = g.read(v);
                 // Any non-empty read must be a well-formed 8-byte value (no torn read).
@@ -341,7 +345,7 @@ void test_concurrent_stress() {
         });
     }
 
-    go.store(true, std::memory_order_release);
+    go.count_down();
     for (auto& t : threads) t.join();
 
     check(reads_done.load() == static_cast<long>(kReaders) * kReadsEach,
@@ -676,6 +680,97 @@ void test_admission_door_uniformity() {
 }
 
 /**
+ * @brief Wait for `slot` to reach `round` — a BOUNDED hot spin, then a real park (#1425).
+ *
+ * The two race guards below hand off between exactly two threads once per round, and the
+ * window they aim at is tens of nanoseconds wide, so the wait genuinely has to start as a
+ * spin: parking costs microseconds and swamps the window, which is the measurement each
+ * guard's own doc block records. That is the reason the spin exists, and `kHotBudget` is its
+ * bound.
+ *
+ * **Why the bound is 200 us, measured.** The bound has to exceed the real handoff latency or
+ * the guard goes vacuous, and that latency is not the window — it is one `subscribe` plus the
+ * writer's offset loop, single-digit microseconds. Calibrated against the #635 defect itself
+ * (the `note_subscriber_added` bump moved back to trailing the append) on an idle host, one
+ * process pinned to two CPUs, 8 runs per budget per guard: at **20 us and 50 us both guards
+ * MISS the reintroduced bug outright** on some runs — the fall-through fires on ordinary
+ * rounds and the two threads stop racing at all. At **200 us both guards catch it 8/8**, at
+ * 189-1039 lost rounds out of 20000, matching the unbounded spin's own 55-500. A first draft
+ * bounded the spin by ITERATION count instead (512 acquire loads, ~0.5 us): it detected
+ * nothing, 0/6, while still printing PASS — a bound too small does not weaken this guard, it
+ * silently deletes it.
+ *
+ * **Past the bound, park — do not yield.** Once 200 us of spinning has not produced the
+ * partner, the partner is not merely late, it is off-CPU waiting for the core this thread is
+ * holding; spinning on starves the very thread being waited for. `yield` fixes the burn but
+ * not the latency, because a yield returns to the back of a runqueue that (under the recipe
+ * this issue is about) is 32 threads deep. `std::atomic::wait` + `notify_one` is the real
+ * rendezvous: the waiter sleeps in a futex and the store wakes it directly.
+ *
+ * What the parked path gives up is the CALIBRATION — an oversubscribed run no longer reliably
+ * lands the writer inside the window — never the ASSERTION: `missed == 0` holds at every
+ * interleaving, so the guard stays sound there and is merely less sensitive. The sensitive run
+ * is the ordinary one, which is where CI and every developer execute it. Measured against the
+ * same reintroduced defect with competing spinners pinned to the same two CPUs: at 2x
+ * oversubscription this still detects 10/10, and at 4x it detects 5/5 where the UNBOUNDED spin
+ * it replaces itself missed 2 of 8. Only a runqueue far past the recipe's own (a 30-way build
+ * sharing the pair) degrades it, to ~6/10 — and there the fall-through is the point.
+ *
+ * **And the budget itself adapts, because paying it 40000 times is the whole remaining bill.**
+ * A fixed 200 us bound still burns 8 CPU-seconds per process over the two guards, which under
+ * the 16-way recipe is 16 of those on two cores: measured, that alone is a **~120 s batch**,
+ * against **1.8 s** for the same binary with the budget set to zero. So `misses_` tracks
+ * CONSECUTIVE fall-throughs and stops paying after `kColdAfter` of them, re-probing every
+ * `kReprobe` rounds in case the machine frees up; any hot hit resets it to fully hot. The
+ * counter is consecutive, not cumulative, precisely so that the isolated fall-through an idle
+ * host does produce — the very first round, where the writer thread is still being created —
+ * cannot latch the whole run cold.
+ */
+class handoff_t {
+   public:
+    /** @brief Wait until `slot` reads `round`, adapting the hot budget as described above. */
+    void wait(std::atomic<int>& slot, int round) {
+        constexpr auto kHotBudget = 200us;
+        constexpr int kColdAfter = 8;   // consecutive fall-throughs that stop the spin
+        constexpr int kReprobe = 1024;  // cold rounds between spin re-probes
+        if (misses_ < kColdAfter || ++since_probe_ >= kReprobe) {
+            since_probe_ = 0;
+            const auto deadline = std::chrono::steady_clock::now() + kHotBudget;
+            do {
+                // The clock read is hoisted out of the inner spin: it costs ~20 ns against a
+                // ~1 ns acquire load, and paying it every iteration would blunt the very
+                // reaction time the hot half exists to buy.
+                for (int i = 0; i < 64; ++i)
+                    if (slot.load(std::memory_order_acquire) == round) {
+                        misses_ = 0;
+                        return;
+                    }
+            } while (std::chrono::steady_clock::now() < deadline);
+            ++misses_;
+        }
+        // No lost wake: `wait` re-compares under the futex, so a `post_handoff` landing
+        // between this load and the wait returns immediately rather than sleeping on a stale
+        // value.
+        for (int cur = slot.load(std::memory_order_acquire); cur != round;
+             cur = slot.load(std::memory_order_acquire))
+            slot.wait(cur, std::memory_order_acquire);
+    }
+
+   private:
+    int misses_ = 0;      /**< consecutive rounds whose hot budget bought nothing */
+    int since_probe_ = 0; /**< rounds parked without spinning since the last re-probe */
+};
+
+/** @brief Release a `handoff_t::wait`ing partner: publish `round`, then wake a parked waiter.
+ *
+ *  The `notify_one` is free on the hot path — libstdc++ skips the syscall when its waiter
+ *  count is zero, which is every handoff that stayed inside the budget. */
+void post_handoff(std::atomic<int>& slot, int round) {
+    slot.store(round, std::memory_order_release);
+    slot.notify_one();
+}
+
+/**
  * @brief #635: the fan-out gate must not open a hole in ADR-0049's latch.
  *
  * `fan_out` now SKIPS `snapshot_edges` entirely when the vertex's own-subscriber count
@@ -698,6 +793,8 @@ void test_admission_door_uniformity() {
  * ~8000 rounds, because the spawn jitter still swamped the window. Both threads therefore
  * stay HOT here and hand off through one atomic, which drops the per-round noise to the
  * order of the window itself and turns a stochastic near-miss into a reliable failure.
+ * `handoff_t::wait` is that hot spin, BOUNDED (#1425): the bound is never reached when the
+ * partner has a CPU, and past it the spin would be starving the partner rather than racing it.
  */
 void test_subscribe_never_misses_a_racing_write() {
     std::printf("#635: a write racing subscribe arrives by the latch or the fan-out:\n");
@@ -728,25 +825,25 @@ void test_subscribe_never_misses_a_racing_write() {
                       std::memory_order_relaxed);
     };
 
+    handoff_t gate_wait;  // the writer's own adaptive state; `done_wait` below is the main
+    handoff_t done_wait;  // thread's — one per waiting side, never shared
     std::thread w([&] {
         for (int i = 0; i < kRounds; ++i) {
-            while (gate.load(std::memory_order_acquire) != i) { /* hot handoff */
-            }
-            std::atomic<int> step{0};  // a REAL RMW — a signal fence is compiler-only, and
-            for (int k = 0; k < i % kOffsets; ++k)  // an empty loop optimizes to nothing
-                step.fetch_add(1, std::memory_order_relaxed);
+            gate_wait.wait(gate, i);                           // hot handoff, bounded
+            std::atomic<int> step{0};                          // a REAL RMW — a signal fence is
+            for (int k = 0; k < i % kOffsets; ++k)             // compiler-only, and an empty loop
+                step.fetch_add(1, std::memory_order_relaxed);  // optimizes to nothing
             (void)g.write(verts[i], make_value({0x02}));
-            done.store(i, std::memory_order_release);
+            post_handoff(done, i);
         }
     });
 
     int missed = 0;
     for (int i = 0; i < kRounds; ++i) {
         seen.store(0, std::memory_order_relaxed);
-        gate.store(i, std::memory_order_release);
+        post_handoff(gate, i);
         (void)g.subscribe(paths[i], on_value, kDurableSub);
-        while (done.load(std::memory_order_acquire) != i) { /* both legs have run */
-        }
+        done_wait.wait(done, i);  // both legs have run
         if ((seen.load(std::memory_order_relaxed) & (1U << 2)) == 0) ++missed;
     }
     w.join();
@@ -786,7 +883,8 @@ void test_subscribe_never_misses_a_racing_write() {
  *   leg kept a relaxed read for as long as it did.
  *
  * Shaped like `test_subscribe_never_misses_a_racing_write` and for the same reason: the
- * window is tens of nanoseconds, so both threads stay HOT and hand off through one atomic.
+ * window is tens of nanoseconds, so both threads stay HOT and hand off through one atomic
+ * (`handoff_t::wait`, bounded — see there).
  * Differences are `assign` instead of `write` (the STATE half — it marks, it never fans out),
  * one shared parent whose `propagate` is the sweep that would deliver the mark, and the check
  * running AFTER that sweep.
@@ -823,26 +921,26 @@ void test_assign_never_misses_a_racing_subscribe() {
                       std::memory_order_relaxed);
     };
 
+    handoff_t gate_wait;  // the writer's own adaptive state; `done_wait` below is the main
+    handoff_t done_wait;  // thread's — one per waiting side, never shared
     std::thread w([&] {
         for (int i = 0; i < kRounds; ++i) {
-            while (gate.load(std::memory_order_acquire) != i) { /* hot handoff */
-            }
-            std::atomic<int> step{0};  // a REAL RMW — a signal fence is compiler-only, and
-            for (int k = 0; k < i % kOffsets; ++k)  // an empty loop optimizes to nothing
-                step.fetch_add(1, std::memory_order_relaxed);
+            gate_wait.wait(gate, i);                           // hot handoff, bounded
+            std::atomic<int> step{0};                          // a REAL RMW — a signal fence is
+            for (int k = 0; k < i % kOffsets; ++k)             // compiler-only, and an empty loop
+                step.fetch_add(1, std::memory_order_relaxed);  // optimizes to nothing
             (void)g.assign(verts[i], make_value({0x02}));
-            done.store(i, std::memory_order_release);
+            post_handoff(done, i);
         }
     });
 
     int missed = 0;
     for (int i = 0; i < kRounds; ++i) {
         seen.store(0, std::memory_order_relaxed);
-        gate.store(i, std::memory_order_release);
+        post_handoff(gate, i);
         (void)g.subscribe(paths[i], on_value, kDurableSub);
-        while (done.load(std::memory_order_acquire) != i) { /* both legs have run */
-        }
-        g.propagate(parent);  // the covering sweep: it drains the mark, or there is none
+        done_wait.wait(done, i);  // both legs have run
+        g.propagate(parent);      // the covering sweep: it drains the mark, or there is none
         if ((seen.load(std::memory_order_relaxed) & (1U << 2)) == 0) ++missed;
     }
     w.join();
