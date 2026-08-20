@@ -228,16 +228,6 @@ subscriptions routed through it. That is the cost of "the vertex is the identity
 is creation-time": there is no in-place edit of a thing whose whole existence is defined at
 creation.
 
-```{admonition} A contradiction this page does not inherit
-:class: warning
-[13](13-network-formation.md) §Pitfalls still ends its re-`SPEC` entry with "the address
-lives in `:settings`". That clause predates
-[RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md)
-§3.B emptying the core `:settings` namespace, and contradicts the same page's own §Creation.
-The rule above is the correct one; the stale clause is tracked as an erratum in
-[#1392](https://github.com/avatarsd-llc/libtracer/issues/1392).
-```
-
 ### 7. The config vocabulary is not yet self-describing
 
 Uniform introspection covers the liveness value and the children, but not the *creation

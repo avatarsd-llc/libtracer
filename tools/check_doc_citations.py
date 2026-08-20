@@ -193,6 +193,15 @@ ANCHORS = [
      "result_t<void> graph_t::set_identity(std::uint8_t kind, std::span<const std::byte> key) {"),
     ("core/src/graph.cpp:3274", "result_t<view_t> graph_t::read_identity() const {"),
     ("core/src/graph.cpp:3796", 'field.steps[0].name == "identity"'),
+    # The RFC-0022 §3.B pair, cited by the #1392 erratum: the WRITE arm's terminal fall-through
+    # (every flat `:settings.<knob>` name ⇒ SCHEMA_NOT_FOUND, caller-independently) and the READ
+    # container that survives it. The write arm is pinned on its EXPLANATORY COMMENT, not on the
+    # `return std::unexpected(status_t::SCHEMA_NOT_FOUND);` four lines below it: that return text
+    # occurs 21× in graph.cpp, its enclosing `field_write` signature is 254 lines up (far outside
+    # SCOPE_LINES), and no scope separates it from the next one — so the comment is the only
+    # unambiguous pin, and it is also the line that states the rule the doc sentence asserts.
+    ("core/src/graph.cpp:3108", "Everything else under `settings`"),
+    ("core/src/graph.cpp:3306", "result_t<view_t> graph_t::read_settings(vertex_t* v) const {"),
     ("core/src/transport_vertex.cpp:60", 'cfg.name("kind")'),
     # `graph_.register_child_type(` is BYTE-IDENTICAL at :94 and :98, four lines apart, and
     # both are cited. No text ABOVE :94 tells them apart (:98's window contains :94's), so the
@@ -263,6 +272,15 @@ ANCHORS = [
      "if (!router_.add_child(qualified, *link))"),
     ("core/include/libtracer/transport_vertex.hpp:372", "result_t<void> register_module"),
     ("core/include/libtracer/transport_vertex.hpp:99", "enum class link_state_t"),
+    # The #1392 erratum's two pins for "a connection's config is creation-time and const":
+    # the record itself, and its ONLY accessor — whose `const conn_settings_t*` return is the
+    # whole no-reconfiguration-door argument, so the anchor keeps the `const` in it.
+    ("core/include/libtracer/transport_vertex.hpp:127", "struct conn_settings_t {"),
+    ("core/include/libtracer/transport_vertex.hpp:505",
+     "const conn_settings_t* settings_of(std::string_view name) const;"),
+    # The synthesized `:children[]` a bus connection answers accepted-peer enumeration from —
+    # the fact that replaced reference/13's stale "`:children[]` / `:settings`".
+    ("core/src/transport_vertex.cpp:574", "handlers.on_children = [bus]() -> result_t<view_t> {"),
     ("core/src/graph.cpp:2888", "sel == field_sel_t::TAIL", 'step0.name == "subscribers"'),
     ("core/src/graph.cpp:3007", "!whole_field(field)", 'step0.name == "acl"'),
     ("core/src/graph.cpp:3047", "field_selector(field) != field_sel_t::APPEND"),
