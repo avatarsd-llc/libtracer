@@ -226,6 +226,9 @@ void test_seam_over_slot_server() {
 int main() {
     test_handle_pod_contract();
     test_seam_over_slot_server();
-    std::printf("peer_handle_seam_test: OK\n");
-    return 0;
+    // `summary`, not a literal 0: this harness used to print "OK" and return 0 whatever the
+    // checks said, so every [FAIL] it emitted was invisible to ctest. Surfaced by #375
+    // deliverable 3 — deselecting this suite on a bus-less build needed its verdict to be real
+    // first, because a guard that cannot fail the build is not a guard.
+    return tr::testing::summary("peer_handle_seam");
 }

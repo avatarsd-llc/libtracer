@@ -14,6 +14,43 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Added
+
+- **`tr::graph::default_config_t::kBusLinks` — the ADR-0044 BUS module as a build-time-closed
+  seam** ([#375](https://github.com/avatarsd-llc/libtracer/issues/375) deliverable 3,
+  [ADR-0047](../docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md) §1). A node
+  whose links are all point-to-point paid flash for a peer-named addressing tier it never
+  reaches: the registry's mount-shape stamp and its two peer-resolution paths,
+  `fwd_router_t::add_child`'s peer wiring and both peer-lifecycle notifiers, and the connection
+  vertex's synthesized `:children[]` peer listing. Bound `false` by an
+  [ADR-0068](../docs/adr/0068-build-configuration-is-plain-cpp-config-header.md) override
+  fragment — `static constexpr bool kBusLinks = false;`, never a `-D` — all of it folds away at
+  compile time. Measured on rv32 (`-Os -fno-exceptions -fno-rtti`,
+  `rv32imac_zicsr_zifencei`/`ilp32`, GCC 15.2): **−2,078 B of flash** (`fwd_router.cpp` −1,400,
+  `transport_vertex.cpp` −678) and **±0 B of `.bss`** — the tier is code and per-instance state,
+  not a static table. A `LIBTRACER_NET_PLANE=OFF` build gains **0 B**: it never compiled those
+  translation units.
+
+  The routing plane asks through one new public door, **`tr::net::bus_of(transport_t&)`**
+  (`transport.hpp`), which is `link.bus()` at the default binding and a compile-time `nullptr`
+  when the module is closed. `transport_t::bus()` is unchanged — still a virtual, still
+  `nullptr` by default — so a transport may still *be* a bus; ADR-0047 §4's ruling that peer
+  wiring stays a virtual is untouched and nothing is templated over a transport list. **The
+  default binding is byte-identical**: 68 of 68 object files compare equal against the baseline
+  tree at `-O3`, and all six `bench/symbol_ratchet.json` pins are `+0 B`.
+
+  **Asking for a bus on a bus-less build is REFUSED, never quietly demoted to FLAT.** Compiling
+  `LIBTRACER_TRANSPORT_CAN` is a `static_assert` (CAN is a bus by construction); a
+  `SPEC{listener, kind=tcp|ws, peer_named=1}` write is answered `TYPE_MISMATCH` — the permanent
+  status, because no retry grows a build a bus facet — and creates no connection; a directly
+  constructed peer-named `slot_server_t`, and `httpd_ws_link_t` on ESP-IDF, report
+  `ok() == false`, the came-up predicate every caller already checks. A silent demotion would be
+  worse than either: a listener's own per-frame tier select reads its constructed mode, so one
+  demoted at the router alone would keep delivering peer-named into a sink nothing installed.
+
+  Nothing changes for a build that leaves `kBusLinks` at its default `true` — including every
+  existing consumer, since the knob is new and inherited from `default_config_t`.
+
 ### Changed
 
 - **A SECOND extended CONNECT on a live WebTransport session is now REFUSED, and
@@ -82,6 +119,40 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     arms (`HEAP` / `POOL` / `BORROWED` / `BORROWED_DEVICE`) are instruction-identical.
 
 ### Added
+
+- **`tr::graph::default_config_t::kBusLinks`, its transport-plane spelling `tr::net::kBusLinks`,
+  and the gate `tr::net::bus_of(transport_t&)` — the ADR-0044 bus tier is now a module a target
+  can close out at build time** ([#375](https://github.com/avatarsd-llc/libtracer/issues/375)
+  deliverable 3, [ADR-0047](../docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md)
+  §1). A bus link reaches many peers and names each of them, so the routing plane carries a
+  second addressing tier for it: the mount's bus SHAPE bit, per-peer resolution, `by_name`'s peer
+  fallback, the peer-named receiver, the two peer-lifecycle notifiers and a connection vertex's
+  synthesized `:children[]`. A node whose links are all point-to-point paid flash for every byte
+  of it. Bound `false` by an
+  [ADR-0068](../docs/adr/0068-build-configuration-is-plain-cpp-config-header.md) override
+  fragment, every consumer folds to the point-to-point answer at compile time through the one
+  gate — measured **−2,078 B of flash** (`fwd_router.cpp` −1,400, `transport_vertex.cpp` −678)
+  and **±0 B of `.bss`** on rv32 (`-Os -fno-exceptions -fno-rtti`,
+  `rv32imac_zicsr_zifencei`/`ilp32`, GCC 15.2, per-TU `.text`).
+
+  It is stated as a *configuration member* rather than as a CMake module option — the one module
+  in the tree that is not a translation-unit list — because whether a `tcp`/`ws` listener is
+  peer-named is a wiring-time choice inside a TU a bus-less target still compiles for its flat
+  half. **Nothing changes at the default binding**: `kBusLinks` is `true`, `bus_of` is
+  `link.bus()`, `transport_t::bus()` is untouched (still a virtual, still `nullptr` by default),
+  and the generated code is byte-identical.
+
+- **BEHAVIOUR under `kBusLinks = false` — asking for a bus is REFUSED, never quietly served as a
+  flat link.** A `peer_named = 1` listener SPEC is answered `status_t::TYPE_MISMATCH` (the
+  *permanent* status, not the transient `TRANSPORT_DOWN` a failed bind gets — no retry grows a
+  build a bus facet) and creates no connection; a directly-constructed peer-named
+  `slot_server_t` — and `libtracer_esp`'s `httpd_ws_link_t`, which is peer-named by construction
+  and has no flat mode — reports `ok() == false`, the came-up predicate every caller already
+  checks; and compiling `LIBTRACER_TRANSPORT_CAN` (a bus by construction) is a `static_assert`.
+  A silent demotion would be worse than either, because the listener's own per-frame tier select
+  reads its constructed mode: a server demoted only at the router would keep delivering
+  peer-named into a sink the router never installed. **No default binding changes, so no shipped
+  configuration is affected and the wire surface does not move.**
 
 - **`webtransport_transport_t::kMaxHandshakeBytes`, `::handshake_cap(std::size_t)`,
   `::effective_max_handshake()`, a defaulted `max_handshake` parameter on BOTH constructors, and

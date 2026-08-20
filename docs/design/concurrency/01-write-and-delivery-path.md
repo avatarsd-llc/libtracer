@@ -180,19 +180,19 @@ target](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0007-
 
 ## 5. Remote delivery legs
 
-`fwd_router_t::deliver_remote` (`core/src/fwd_router.cpp:2925`) is the sink the remote leg calls.
+`fwd_router_t::deliver_remote` (`core/src/fwd_router.cpp:2929`) is the sink the remote leg calls.
 It has two legs, and only one of them copies payload bytes.
 
 **The default full-route leg copies nothing.** It emits
 `FWD{ op=WRITE, dst=<stored return route>, src=<empty PATH>, payload=<VALUE> }` as a
 scatter-gather send: a fresh stack header, the stored route, an empty `src`, and one span per
-rope link (`fwd_router.cpp:3026-3033`). The header is a `stack_writer<16>` — the FWD header of at
+rope link (`fwd_router.cpp:3030-3037`). The header is a `stack_writer<16>` — the FWD header of at
 most 6 bytes plus the 5-byte op TLV — and both constant TLVs are `constexpr` arrays with no
-runtime construction (`fwd_router.cpp:3023-3027`). The route bytes were copied once at subscribe
+runtime construction (`fwd_router.cpp:3027-3031`). The route bytes were copied once at subscribe
 time, so a delivery re-uses them by reference; a multi-link value crosses as its own segments,
 with no flatten. The iov table is a `mem::block_array_t` over the graph's injected `ctl`
 `block_source_t`, sized once up front to its exact final entry count, and a refused reservation
-drops that delivery rather than emitting a truncated frame (`fwd_router.cpp:3047-3048`). Its entry
+drops that delivery rather than emitting a truncated frame (`fwd_router.cpp:3051-3052`). Its entry
 count is the *sending* side's choice — `3 + link_count` — so a bounded node bounds it by sizing
 that source.
 
@@ -210,10 +210,10 @@ element types cannot ride that relocation keep the residual, tabulated in
 [`../allocation-and-backpressure.md`](../allocation-and-backpressure.md) and stated at each site.
 
 **The COMPACT leg is the one that flattens.** `value.try_materialize(*flat_)`
-(`fwd_router.cpp:2963`) precedes the compact encode, because a COMPACT wraps a contiguous
+(`fwd_router.cpp:2967`) precedes the compact encode, because a COMPACT wraps a contiguous
 payload. Single-link — the common case — that materialize is a zero-copy adopt; a multi-link
 value pays one flatten per delivery, out of the router's INJECTED byte backend rather than the
-global heap. A REFUSED flatten drops the delivery (`fwd_router.cpp:2964`) — since #917 that is a
+global heap. A REFUSED flatten drops the delivery (`fwd_router.cpp:2968`) — since #917 that is a
 test on the named refusal, so a legitimately empty value is delivered rather than swept up with
 the OOM by an `empty()` guess.
 Auto-promotion advertises the label once per flow and then streams
@@ -249,8 +249,8 @@ struct delivery_drops_t {
 | `no_target` | the target PATH resolved to no live vertex — retired, or never created | `graph.cpp:1581-1584` |
 | `denied` | a subscription edge's delivery was refused by the target's `:acl`, gated on the **edge's stored caller**, not the writer's | `graph.cpp:1588-1591` |
 | `denied` | a WRITE was refused at the graph's own gate — the API write, the `FWD{WRITE}` terminus and both `COMPACT` terminus arms enter through it | `graph.cpp:1799-1837` |
-| `no_target` | a net-plane route resolved to no vertex (`fwd_router.cpp:2832`), or its binding vanished under a concurrent unbind (`:2727`) | `fwd_router.cpp:2727`, `:2832` |
-| `out_of_memory` | a `COMPACT` terminus could not take the payload view or reserve its rope | `fwd_router.cpp:2678-2680`, `:2689`, `:2839` |
+| `no_target` | a net-plane route resolved to no vertex (`fwd_router.cpp:2836`), or its binding vanished under a concurrent unbind (`:2731`) | `fwd_router.cpp:2731`, `:2836` |
+| `out_of_memory` | a `COMPACT` terminus could not take the payload view or reserve its rope | `fwd_router.cpp:2682-2684`, `:2693`, `:2843` |
 | `out_of_memory` | the nothrow delivery clone could not be allocated | `graph.cpp:1591-1594` |
 | `out_of_memory` | a HANDLER write's notify clone failed — the WHOLE fan-out is shed, one count per subscriber | `graph.cpp:1846` |
 | `out_of_memory` | an edge's owning copies (link NAME / stored caller) could not be allocated, so the snapshot skipped it | `vertex.hpp:2278` |

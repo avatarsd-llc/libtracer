@@ -169,7 +169,7 @@ reporting `listening` says its listen socket is bound — **not** that any peer 
 
 **The liveness engine is not implemented.** Today the value is written by whoever knows: a
 config-constructed socket publishes `UP` or `LISTENING` at creation
-(`core/src/transport_vertex.cpp:645`, `:647`), and a provided link reports through
+(`core/src/transport_vertex.cpp:648`, `:650`), and a provided link reports through
 `set_link_state`. The automatic dial / backoff / reconnect transitions RFC-0014 §4 describes
 are RFC-0014 S5 and do not run yet.
 
@@ -208,7 +208,7 @@ tree, and one is not:
 
 - The registry's refusal is the whole creation's verdict: when `add_child` cannot grow, the
   creation rolls back — retire the vertex, drop the entry, destroy the socket — and answers
-  `BACKPRESSURE` (`core/src/transport_vertex.cpp:617`, `:620`). Without that, a bounded node
+  `BACKPRESSURE` (`core/src/transport_vertex.cpp:620`, `:623`). Without that, a bounded node
   could be driven to publish connections that no `dst` resolves and no removal can take down.
 - `SPEC` naming an existing name answers `PATH_IN_USE`, and the reserved `conn` name is
   refused in both directions, so the endpoint cannot be made to destroy itself.

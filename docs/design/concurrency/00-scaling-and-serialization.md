@@ -64,7 +64,7 @@ hold and recurses under it. The doc comment at `:535` states the same contract f
 
 **The RFC-0024 bound-path slot API is on this list, and it is not control plane.** Minting an
 element takes the lock (`op_resolve_walk.hpp:637` → `vertex_slot`) and honouring one takes it
-again (`op_resolve_walk.hpp:1073` and `fwd_router.cpp:1293-1299` → `deref_vertex_slot`), so a bound-path hop pays
+again (`op_resolve_walk.hpp:1073` and `fwd_router.cpp:1297-1303` → `deref_vertex_slot`), so a bound-path hop pays
 `map_mutex_` on both ends of the round trip that bound paths exist to make cheap. The two are not
 the same cost: `vertex_slot` **scans `vertex_slots_` linearly** inside the hold, while
 `deref_vertex_slot` and `vertex_slot_at` are a bounds check and one compare — the asymmetry
@@ -281,7 +281,7 @@ during the walk. A count of 11–12 ThreadSanitizer-reported races with the lock
 without a named build, shape set or test list, and is **not verified here**. The check that
 settles it: the CI ThreadSanitizer configuration — `-fsanitize=thread -g -O1`,
 `CMAKE_BUILD_TYPE=Debug`, both `LIBTRACER_LKV_SLOT` bindings, `ctest` over `core/`
-(`.github/workflows/core-ci.yml:384-393`) — rebuilt with `find_ptr`'s `shared_lock` removed,
+(`.github/workflows/core-ci.yml:445-452`) — rebuilt with `find_ptr`'s `shared_lock` removed,
 recording each reported race site rather than a count.
 
 ### Two approaches that do not work

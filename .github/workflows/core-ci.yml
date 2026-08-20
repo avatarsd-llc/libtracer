@@ -229,6 +229,67 @@ jobs:
           cmake --build core/build-strict -j "$(nproc)"
           ctest --test-dir core/build-strict --output-on-failure
 
+  # THE BUS MODULE CLOSED OUT (#375 deliverable 3, ADR-0044 + ADR-0047 §1). Every other leg
+  # here compiles `kBusLinks = true`; a seam whose other member nothing ever builds is a seam
+  # that has already rotted. Bound with an ORDINARY override fragment rather than a `-D`, per
+  # ADR-0068: a new configuration member does not get a CMake variable.
+  #
+  # `-DLIBTRACER_TRANSPORT_CAN=OFF` is MANDATORY, not tidiness — `transport_can.cpp` carries a
+  # `static_assert(kBusLinks)` because a CAN link is peer-named by construction, so a
+  # bus-less CAN build is broken rather than smaller, and this leg would not compile with it on.
+  # That refusal is not conceded coverage: the DEFAULT leg's suite carries `bus_can_guard`,
+  # which drives the compiler over that real TU under both bindings and asserts the rejection
+  # names `kBusLinks` — a build refusal is not observable from any binary that already linked.
+  #
+  # `ctest -LE bus` deselects the tests that need the module PRESENT (the `bus` label is
+  # declared in core/tests/CMakeLists.txt). Those are not skipped coverage — they are the
+  # module's own tests, and this is the build that does not carry it, exactly as a CAN-less
+  # build does not run `transport_can`. `bus_module_test` deliberately carries NO label: it
+  # follows the binding by `if constexpr` and runs in BOTH legs, asserting here that the tier
+  # is absent AND that every door which could ask for it refuses rather than degrading.
+  build-test-bus-closed:
+    runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
+    container: ubuntu:24.04
+    # Same container + apt step as the group above; held at its 20-minute wedge bound.
+    timeout-minutes: 20
+    steps:
+      - name: Toolchain (container has no preinstalled tool set)
+        timeout-minutes: 8
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            build-essential cmake git ca-certificates
+      - uses: actions/checkout@v4
+      - name: Bind kBusLinks = false, build + ctest
+        run: |
+          mkdir -p "$PWD/bus-closed/libtracer"
+          cat > "$PWD/bus-closed/libtracer/config_override.hpp" <<'FRAGMENT'
+          /**
+           * @file
+           * @brief GENERATED CI fixture — the ADR-0044 bus module closed out (#375).
+           */
+          #pragma once
+
+          namespace tr::graph {
+
+          /** @brief The defaults, with no peer-named links at all (a point-to-point node). */
+          struct bus_closed_config_t : default_config_t {
+              static constexpr bool kBusLinks = false;
+          };
+
+          using config_t = bus_closed_config_t;
+
+          }  // namespace tr::graph
+          FRAGMENT
+          cmake -S core -B core/build-bus-closed -DBUILD_TESTING=ON \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo -DLIBTRACER_TRANSPORT_CAN=OFF \
+            -DCMAKE_CXX_FLAGS="-I$PWD/bus-closed"
+          cmake --build core/build-bus-closed -j "$(nproc)"
+          ctest --test-dir core/build-bus-closed -LE bus --output-on-failure
+      - name: Restore workspace ownership for the host runner
+        if: always()
+        run: chown -R "$(stat -c '%u:%g' ..)" .
+
   build-test-reclaim-qsbr:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container: ubuntu:24.04

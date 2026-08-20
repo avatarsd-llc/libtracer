@@ -446,10 +446,12 @@ bool transport_ws_server::drain_frames(session_t& s) {
                 // deliver point-to-point under the link's own registered name.
                 // Reading the stored flag, not `peer_rx_.has_any()`: a mode is a
                 // wiring-time fact, not a per-frame consequence of which sink someone
-                // happened to install. WITHIN the chosen tier a sink installed
+                // happened to install. `bus_mode()` is that flag conjoined with whether
+                // this BUILD carries a bus module at all (#375 deliverable 3); at the
+                // default binding it IS the flag. WITHIN the chosen tier a sink installed
                 // mid-stream still takes effect on the next data frame. Unfragmented
                 // fast path on the span tier: borrowed payload, no owning copy.
-                const bool to_peer = peer_named_;
+                const bool to_peer = bus_mode();
                 const bool want_rope = to_peer ? peer_rx_.has_rope() : rx_.has_rope();
                 // The FLAT tier carries no per-frame tag by construction, so the WHO the
                 // subject seam needs is stamped here instead (#375 Part 2, ADR-0082): the
