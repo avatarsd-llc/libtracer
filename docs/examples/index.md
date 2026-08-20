@@ -61,6 +61,14 @@ verbatim from that file, so it cannot drift from what actually compiles.
 | [`expires_ns` is checked against your clock](acl-expiry.md) | L4 auth / ACL | ADR-0050: one merge, many verdicts; an expired ACE still closes |
 | [Two evaluators, and DENY](acl-policy-profiles.md) | L4 auth / ACL | `allow_only_policy_t` vs `full_acl_policy_t`; why parse refuses a DENY |
 | [An ACL is a security document](acl-parse-strict.md) | L4 auth / ACL | `parse_acl` refuses what `encode_acl` never emits; leniency widens grants |
+| [The `dst` is a source route](route-dst-is-source-route.md) | L4 routing | the route rides in the frame; `dst` shrinks and `src` grows by a mount run, byte-exact |
+| [Terminus or forward — one test decides](route-terminus-or-forward.md) | L4 routing | the leading `dst` route segment names a child, or this node is the terminus; `ERROR` is addressed |
+| [One NAME, one slot](route-child-table.md) | L4 routing | `add_child`'s `[[nodiscard]] bool`; a refusal registers nothing; removal tombstones |
+| [A mount run is consumed whole](route-qualified-mount.md) | L4 routing | RFC-0014 strip-K and its grow-K dual; longest prefix, per-slot width |
+| [Three nodes, and a forwarder that stores nothing](route-multi-hop.md) | L4 routing | the one-hop rule again; memory bounded by topology, not by traffic |
+| [The `src` you accumulated is the way home](route-reply-home.md) | L4 routing | the REPLY retraces per hop; no reply address, no correlation id |
+| [A repeating flow buys its route back](route-label-compact.md) | L4 routing | ADR-0035 `advertise` binds `label ↔ route` per link; the measured byte delta |
+| [A stale label is dropped and NACK'd](route-label-stale.md) | L4 routing | `clear_link`, `on_stale_label`, and why re-advertising IS the self-heal |
 
 The toctree below is the order of record; this table adds the layer and the summary.
 Each example's layer column names the module that owns the types it uses — the
@@ -93,14 +101,20 @@ $ ./build/examples/tree_of_ropes
 Or run them the way CI does — as ctest smoke tests that self-check and fail on any
 mismatch: `ctest --test-dir build -R example_`.
 
-Two targets need the FWD routing plane and exist only when
+Ten targets need the FWD routing plane and exist only when
 `LIBTRACER_NET_PLANE` is on: `two_node_fwd` and `tree_of_ropes` are declared inside
 `if(LIBTRACER_NET_PLANE)` blocks (`core/examples/CMakeLists.txt:59,74`), and so are
-their test registrations (`core/examples/CMakeLists.txt:87-96`). The option defaults to
+their test registrations (`core/examples/CMakeLists.txt:87-96`); the eight `route_*` targets sit
+inside a third such block at the end of the file. The option defaults to
 `ON` (`core/CMakeLists.txt:63-65`), so the recipe above builds every example. Configured with
-`-DLIBTRACER_NET_PLANE=OFF`, those two binaries are never produced and
-`ctest --test-dir build -R example_` runs **two fewer** — a pass with two examples
-absent rather than skipped, which no ctest output distinguishes from a clean full run.
+`-DLIBTRACER_NET_PLANE=OFF`, those ten binaries are never produced and
+`ctest --test-dir build -R example_` runs **ten fewer** — a pass with ten examples
+absent rather than skipped, which no ctest output distinguishes from a clean full run. For the
+`route_*` group that absence is not a choice: `fwd_router_t`, `route_handle_t` and `op_resolve`
+are the net plane, so at `-DLIBTRACER_NET_PLANE=OFF` the types those examples name do not exist
+and there is nothing to compile, let alone to skip. The count is the mitigation — the
+minimal-set leg is short by exactly ten, and that number is written down here so a *further*
+disappearance is visible.
 
 Two targets are conditional at **run** time rather than build time, which is a different hazard
 with the same ending. [`sub_unsubscribe_from_dispatch`](sub-unsubscribe-from-dispatch) demonstrates
@@ -116,7 +130,11 @@ The eight `graph_*` targets are pure in-process L4 and are built unconditionally
 together with `ctest --test-dir build -R example_graph_`. The eight `wire_*`, eight `view_*`,
 eight `mem_*` and eight `acl_*` targets are likewise unconditional — pure L0/L1/L2/L3/L4, no net
 plane, no sockets — and run with `ctest --test-dir build -R example_wire_`, `-R example_view_`,
-`-R example_mem_` and `-R example_acl_`. Those per-domain `ctest -R`
+`-R example_mem_` and `-R example_acl_`. The eight `route_*` targets are the one group that is
+build-conditional as a whole (`-R example_route_`); within a net-plane build nothing in it is
+conditional at run time — no `config_override.hpp` knob is in reach, no socket is opened, no port
+is bound and no thread is started, because every link is a recording stub driven synchronously.
+Those per-domain `ctest -R`
 spellings are the maintained way to run a group; the explicit `./build/examples/…` list above
 predates them and is deliberately left as the original seven rather than grown to every target.
 
@@ -134,6 +152,18 @@ other groups cannot claim for themselves:
   run in every build and the bound choice is only *printed*. Where an example's subject is a
   build-configuration seam, naming the seam's arms beats following the binding; a skip should be
   the last resort, not the first reflex.
+
+`route_*` is the third case and worth naming as its own, because it is the one where neither of
+those two moves was available. Its subject *is* the net plane, so it cannot name both arms (there
+is no second arm — with the plane off there is no routing to demonstrate) and it must not follow
+the binding with a run-time skip (the types would not compile, and a skip that did compile would
+be the vacuous pass this whole admonition exists to warn about). What is left is honest
+build-time absence, and the discipline that goes with it: the group is guarded as a whole rather
+than target by target, the exact number missing from a `-DLIBTRACER_NET_PLANE=OFF` run is written
+down above, and every `route_*` page says on its own face that its target needs the plane. The
+ranking, for whoever takes the remaining domains: **name the arms** if you can, **absent by
+build** with the count recorded if you cannot, and **skip at run time with a printed line** only
+when the target must exist in a configuration it cannot run in.
 :::
 
 ```{toctree}
@@ -195,4 +225,12 @@ Effective ACL = own + inherited <acl-inherit>
 expires_ns is checked against your clock <acl-expiry>
 Two evaluators, and DENY <acl-policy-profiles>
 An ACL is a security document <acl-parse-strict>
+The dst is a source route <route-dst-is-source-route>
+Terminus or forward — one test decides <route-terminus-or-forward>
+One NAME, one slot <route-child-table>
+A mount run is consumed whole <route-qualified-mount>
+Three nodes, and a forwarder that stores nothing <route-multi-hop>
+The src you accumulated is the way home <route-reply-home>
+A repeating flow buys its route back <route-label-compact>
+A stale label is dropped and NACK'd <route-label-stale>
 ```
