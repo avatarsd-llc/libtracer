@@ -174,11 +174,34 @@ void test_await_link_state() {
         const auto r = node.await(path_t("/net/ws-client/up"), 2s);
         woke.set_value(r.has_value());
     });
-    std::this_thread::sleep_for(20ms);  // let the waiter reach the wait
-    const auto ls = net.set_link_state("net/ws-client/up", link_state_t::UP);
+    // `await` is EDGE-triggered: `graph_t::await` snapshots `write_seq_` on ENTRY, on the
+    // WAITER's own thread (`seq0 = v->current_seq()`, core/src/graph.cpp), then blocks for a
+    // bump past it. A link-up write that lands before the waiter got there is therefore never
+    // observed, and the waiter runs to its full 2 s timeout. That is intended — reference/04
+    // says await blocks until the NEXT write — so the fix is here, not in the library. The
+    // `sleep_for(20ms)` this replaced was a guess that 20 ms is enough for a thread to reach a
+    // blocking call, and on a loaded CI container it is not (#1418).
+    //
+    // Re-arm the edge instead, until the waiter is SEEN to have taken it: `set_link_state` has
+    // no "already UP" short-circuit, so every repeat reaches `graph_.write` and bumps the
+    // sequence again. The deadline is mandatory and exceeds the waiter's own 2 s timeout, so a
+    // genuinely broken wake path still FAILS (the waiter times out, sets `false`, and the
+    // check below rejects it) instead of spinning here forever.
+    auto ls = net.set_link_state("net/ws-client/up", link_state_t::UP);
     check(ls.has_value(), "set_link_state(UP) writes the vertex");
-    check(fut.wait_for(2s) == std::future_status::ready && fut.get(),
-          "the awaiter woke on the link-up write");
+    std::future_status st = fut.wait_for(20ms);
+    // A BACKSTOP, not a synchronization window: a broken wake path still makes the waiter's own
+    // 2 s `await` time out and set the promise, which ends this loop and fails the check below
+    // at ~2 s. So the deadline never fires in a real failure, and making it generous costs
+    // nothing while removing the one way this fix could reintroduce the defect it removes —
+    // giving up re-arming while the waiter is merely starved (reachable under oversubscription).
+    const auto deadline = std::chrono::steady_clock::now() + 30s;
+    while (st != std::future_status::ready && ls.has_value() &&
+           std::chrono::steady_clock::now() < deadline) {
+        ls = net.set_link_state("net/ws-client/up", link_state_t::UP);
+        st = fut.wait_for(20ms);
+    }
+    check(st == std::future_status::ready && fut.get(), "the awaiter woke on a link-up write");
     waiter.join();
     check(!net.set_link_state("net/ws-client/nope", link_state_t::UP).has_value(),
           "unknown connection => NotFound");

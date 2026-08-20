@@ -17,6 +17,7 @@
  */
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -223,11 +224,27 @@ void test_await() {
     tr::detail::store_le<std::uint64_t>(tobuf, 5'000'000'000ull);  // 5s
     const auto fwd = b_fwd(fwd_op_t::AWAIT, b_path({"sensor", "temp"}), b_path({"reply-ep"}), {},
                            b_value(tobuf));
+    // The AWAIT op resolves through `graph_t::await`, which is EDGE-triggered (it snapshots
+    // `write_seq_` on entry), so a write landing before the resolve gets there is never
+    // observed — the #1418 defect. The `sleep_for(40ms)` this replaced was a guess about how
+    // long that takes. Re-arm from the writer until the resolve is out, under a deadline that
+    // exceeds the 5 s await timeout above so a broken wake path still fails rather than hangs.
+    // Every re-arm writes the same 0x7B, so the payload assertion is unchanged.
+    std::atomic<bool> resolved{false};
     std::thread writer([&] {
-        std::this_thread::sleep_for(40ms);
-        (void)g.write(v, make_value(b_value({0x7B})));  // VALUE u8=123
+        // A BACKSTOP against a resolve that never returns, not a synchronization window: the
+        // 5 s await above always releases this loop, so the deadline cannot fire in a real
+        // failure. Generous on purpose — giving up while the resolving thread is merely
+        // starved would reintroduce the defect this fix removes.
+        const auto deadline = std::chrono::steady_clock::now() + 30s;
+        while (!resolved.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < deadline) {
+            (void)g.write(v, make_value(b_value({0x7B})));  // VALUE u8=123
+            std::this_thread::sleep_for(2ms);
+        }
     });
     auto reply = resolve_bytes(resolver, fwd);
+    resolved.store(true, std::memory_order_release);
     writer.join();
     check(reply.has_value(), "resolve AWAIT returned");
     const auto dr = decode_reply(*reply);

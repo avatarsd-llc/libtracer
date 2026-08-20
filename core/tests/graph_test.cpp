@@ -143,11 +143,28 @@ void test_assign_lkv_and_seq_bump() {
                     const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> { return {}; };
     tr::graph::vertex_handle_t hv =
         g.register_vertex(path_t("/lkv/sink"), role_t::HANDLER, std::move(h));
+    // The #1418 edge-trigger again, on the HANDLER arm: `note_write` bumps the same sequence
+    // `await` snapshots on entry, so a write that beats this thread into `await` is missed and
+    // the await times out — which would report TIMEOUT where the assertion demands NOT_FOUND.
+    // Re-arm from the writer under a deadline, exactly as `test_await` below does.
+    std::atomic<bool> awaited{false};
     std::thread writer([&] {
-        std::this_thread::sleep_for(40ms);
-        (void)g.write(hv, make_value({0x99}));
+        // A pure BACKSTOP against an `await` that never returns, not a synchronization window:
+        // in every reachable case the latch is set within (scheduling delay + the 2 s await
+        // timeout), because a broken wake path still makes `await` return TIMEOUT and release
+        // this loop. So the deadline never fires in a real failure — the assertion below does,
+        // at ~2 s — and making it generous costs nothing while removing the one way this fix
+        // could reintroduce the very defect it removes: giving up re-arming while the awaiting
+        // thread is merely starved (observed reachable under 16-way oversubscription).
+        const auto deadline = std::chrono::steady_clock::now() + 30s;
+        while (!awaited.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < deadline) {
+            (void)g.write(hv, make_value({0x99}));
+            std::this_thread::sleep_for(2ms);
+        }
     });
     const auto woke = g.await(hv, 2s);
+    awaited.store(true, std::memory_order_release);
     writer.join();
     check(!woke.has_value() && woke.error() == status_t::NOT_FOUND,
           "a handler write bumps the await cursor without storing (a wake, not a timeout)");
@@ -256,12 +273,24 @@ void test_await() {
     graph_t g;
     tr::graph::vertex_handle_t v = g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
 
-    // A writer publishes shortly after we begin awaiting.
+    // Same edge-trigger as #1418: `await` snapshots `write_seq_` on entry, so a write that
+    // lands before THIS thread gets into `await` is never observed and the await runs to its
+    // full timeout. The `sleep_for(40ms)` this replaced was a guess that the awaiter would be
+    // parked by then. Re-arm from the writer instead, until the awaiter is out; the writer's
+    // deadline exceeds the 2 s await timeout, so a broken wake path still fails the assertion
+    // below rather than hanging the suite. Every re-arm writes the same 0x7E, so the value
+    // assertion is unchanged.
+    std::atomic<bool> awaited{false};
     std::thread writer([&] {
-        std::this_thread::sleep_for(40ms);
-        (void)g.write(v, make_value({0x7E}));
+        const auto deadline = std::chrono::steady_clock::now() + 30s;  // backstop; see above
+        while (!awaited.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < deadline) {
+            (void)g.write(v, make_value({0x7E}));
+            std::this_thread::sleep_for(2ms);
+        }
     });
     auto r = g.await(v, 2s);
+    awaited.store(true, std::memory_order_release);
     writer.join();
     check(r.has_value() && std::to_integer<int>((*r)->only().bytes()[0]) == 0x7E,
           "await wakes on a concurrent write and delivers it");
