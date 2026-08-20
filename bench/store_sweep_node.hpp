@@ -656,8 +656,7 @@ class node_t {
         }
 
         // The `mr` channel is a `std::pmr` seam, so it reaches its store through #1401's
-        // adapter. The baseline keeps the process-default resource, which is what ships.
-        // The baseline is the ONE arm whose `mr` normally stays on the process-default
+        // adapter. The baseline is the ONE arm whose `mr` normally stays on the process-default
         // resource, which is exactly what makes it the control. It is routed through the
         // adapter ONLY when counting, so the census can say how many blocks the channel draws
         // at all — a reference the injected arms' counts are read against. The consequence is
