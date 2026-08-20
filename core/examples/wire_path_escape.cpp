@@ -15,9 +15,10 @@
  * the vertex-map key must stay pure-string.
  *
  * Both halves are checked here, including the skip over a kind this build has never heard
- * of. `kPackedEscapeKindLabel` (`0x16`) is the kind RESERVED for RFC-0027's path-label
- * element; nothing in the library mints one today, so an escape only ever appears in a
- * frame because a peer put it there.
+ * of. `kPackedEscapeKindLabel` (`0x16`) is the kind RFC-0027's path-label element uses.
+ * **This layer never mints one**: `packed_path.hpp` is kind-agnostic and emitting an escape
+ * is not minting a label — that is the forwarder's business, and only on a node given a
+ * mint table (RFC-0027 §8.3, off by default). Here the escape is simply bytes that arrived.
  *
  * Runs under ctest as `example_wire_path_escape`; returns non-zero on any failed check.
  */

@@ -343,7 +343,7 @@ An address has two normative spellings, and everything above this heading descri
 | --- | --- | --- |
 | what it spells | names, from the caller's own root | resolutions — one element per **host** on the route |
 | who can read it | any peer, including one that has never spoken to you | only the host that minted each element |
-| what it costs | `4 + len` per segment, and a hop costs a whole mount run | `4 + 8H` |
+| what it costs | `1 + len` per segment record, and a hop costs a whole mount run | `4 + 8H` |
 | when it works | always | until the vertex it names is retired |
 
 **Canonical is the mint key and the fallback.** A bound path is derived from a canonical one and never from anything else, which is what makes three things true at once: no address is reachable *only* in bound form; a failed bound path always has somewhere to fall back to; and a bound path can be re-minted from the address its holder still has. Canonical support is therefore mandatory and bound support is optional — to emit and to accept alike.
@@ -351,6 +351,22 @@ An address has two normative spellings, and everything above this heading descri
 Everything this document specifies — the segment grammar, the 64-byte name limit, the 255-segment and 1024-byte caps, canonicalization, the reserved characters — governs the **canonical** form alone. A `PATH_REF` carries no names, so none of it applies to one; its own bound is a host count, derived in [RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §4.3. The byte layout and the routing semantics are in [05-protocol-tlvs.md](05-protocol-tlvs.md) §`0x14`.
 
 A bound element is an **address, never a capability**: an operation arriving on one is authorized by the same per-operation access check at the target vertex that the canonical form performs, so a bound path can reach nothing its holder could not reach by name.
+
+### The label arm — a compressed spelling of the canonical form, not a third form
+
+There are still **two** forms. A **path label** ([RFC-0027](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0027-label-switched-path-compression.md), accepted 2026-08-15, implemented) compresses **one hop's local part** of a canonical address *in place*: the `PATH` stays a `0x06`, its other elements are untouched, and only the run of names one host resolves is replaced by that host's 32-bit alias for the resolution it already made. That is what separates it from a bound path, which replaces the **whole** address with one element per host.
+
+| | **Canonical** `PATH` (`0x06`) | **Bound** `PATH_REF` (`0x14`) | **Path label** — an element *inside* `0x06` |
+| --- | --- | --- | --- |
+| granularity | one element per **segment** | one element per **host**, replacing the address | one element per **hop's whole local part**, in place |
+| who can read it | any peer | only the host that minted each element | only the host that minted that element |
+| what it costs | `1 + len` per segment, and a hop costs a whole mount run | `4 + 8H` for the whole address | 7 bytes for the part it replaces |
+| how it is asked for | — | an `op` bit on an ordinary operation | not at all: a hop rewrites its own part of a reply it was relaying anyway |
+| when it works | always | until the vertex it names is retired | until the slot's generation moves |
+
+**Canonical is the mint key and the fallback here too**, for the identical reason: a label is minted from a canonical resolution and from nothing else, so no address is ever reachable in labelled form alone, a refused label always has a string original to fall back to, and the next reply re-mints. A labelled `PATH` is therefore **never admissible as a canonical key** — not as a vertex-map lookup key, not as an `ADVERTISE` route, not as a pre-encoded path handle — which is what keeps one spelling per address and keeps byte-prefix-implies-ancestor true.
+
+Everything this document specifies about the canonical grammar governs the **name** elements of a path and not the label ones: a label element carries no segment, so the 64-byte name limit, the reserved characters and canonicalization do not apply to it, while the 1024-byte body cap does, since it is measured on the encoded `PATH` body. The byte layout and the routing semantics — mint on the reply, `NOT_FOUND` and string fallback on a stale one, no withdraw and no aging — are in [05-protocol-tlvs.md](05-protocol-tlvs.md) §`0x06` §path label element. Like a bound element, a path label is an **address, never a capability**: every labelled operation re-checks access at the dereferenced vertex, exactly as the string spelling does.
 
 ---
 

@@ -1091,6 +1091,12 @@ true, this RFC is now **accepted but not yet implemented**, and the note says ex
 promotion of these notes to the fully qualified statement is §12.1's acceptance-train item, landing
 with the code that mints.
 
+> **Promoted (2026-08-20), in the incorporation car.** The code that mints shipped with cars 4 and
+> 6, so all three notes now read *"accepted 2026-08-15, implemented"* and each carries the fact
+> that decides how a reader should take it: **minting is opt-in and off by default**, so a hop with
+> no injected label table is the bare stateless hop still. The paragraph above is left as written —
+> it is the dated record of what the proposal PR did.
+
 **Deliberately NOT edited, and listed here instead** — an ADR is a dated record of a decision and is
 not revised because a later RFC is proposed against it (`CLAUDE.md`: *"design rationale and history
 … explains why it looks the way it does"*). These carry claims a shipped RFC-0027 would qualify, and
@@ -1137,9 +1143,18 @@ RFC's own PR adds this document and §11.4's three reference-page notes, and not
 
 ### 12.1 New normative text (on acceptance)
 
-- `docs/reference/05-protocol-tlvs.md` — a new `## 0x16 — PATH_LABEL` section carrying §4's label
+> **DISCHARGED (2026-08-20).** Every bullet below has landed, in the incorporation car of
+> [#1325](https://github.com/avatarsd-llc/libtracer/issues/1325) — with bullet 1 corrected by
+> **erratum 3**, immediately after this list, because amendment 5 overtook it. The reference set
+> now carries the label element's routing semantics (`docs/reference/05-protocol-tlvs.md` §`0x06`
+> §path label element), the label arm beside the two path forms
+> (`docs/reference/03-addressing.md`), the `docs/spec/v1.md` §3 incorporation clause, and §11.4's
+> three notes promoted to the qualified statement. §12.2's `CONTEXT.md` entries landed with car 1.
+
+- ~~`docs/reference/05-protocol-tlvs.md` — a new `## 0x16 — PATH_LABEL` section carrying §4's label
   shape, §5.3's ledger, the `PL=0`/`LL=0` MUSTs, and the node-scope rule; the unassigned-range census
-  line moves from `0x16`–`0x1F` to `0x17`–`0x1F`.
+  line moves from `0x16`–`0x1F` to `0x17`–`0x1F`.~~ **Erratum 3 (2026-08-20) — there is no
+  `PATH_LABEL` type code; see below.**
 - `docs/reference/05-protocol-tlvs.md` §`0x06` — a `PATH` element MAY be a `PATH_LABEL`; elements
   self-describe by type; mixed paths are legal (§5.2).
 - `docs/reference/05-protocol-tlvs.md` §routing semantics — the mint-on-reply rewrite (§6.1), the
@@ -1150,6 +1165,29 @@ RFC's own PR adds this document and §11.4's three reference-page notes, and not
   there, with the rule that strings are the mint key and the fallback.
 - `docs/reference/00-overview.md`, `02-graph-model.md`, `04-communication-flows.md` — §11.4's notes
   are promoted from "proposed" to the qualified statement.
+
+#### Erratum 3 (2026-08-20) — there is no `PATH_LABEL` section to write, and the census line does not move
+
+An **erratum**, not an amendment: bullet 1 above was written against §5.3's *candidate* 8-byte
+`PATH_LABEL` TLV-child spelling and it contradicts **amendment 5**, which is already ruled and
+already shipped. No wire surface moves — the ruled spelling is unchanged, and this erratum only
+retires an instruction that would have written down a type code that does not exist. Same
+instrument, same reason, as §12.5's erratum 1.
+
+1. **No `## 0x16 — PATH_LABEL` section is written.** Amendment 5 rules the element to be
+   RFC-0018 §8's escape record and states the TLV-child spelling is *"never built"*. The label's
+   shape, node-scope rule and routing semantics therefore land as a **§path label element**
+   subsection **inside** `docs/reference/05-protocol-tlvs.md` §`0x06` — the section the element
+   actually lives in — rather than as a section of its own in the type-code registry.
+2. **The `PL=0` / `LL=0` MUSTs are unwritable, for erratum 1's reason.** An escape record has no
+   option byte. What replaces them is the structural pair the shipped element does have — the
+   `kind` MUST be `0x16` and the declared `len` MUST be 4 — already carried by the
+   `path-label/label-foreign-kind` and `path-label/label-wrong-length` vectors.
+3. **The unassigned-range census line does NOT move.** `0x16`–`0x1F` stays unassigned in the
+   **type-code** registry, because `0x16` is an **escape kind** and the two are different
+   namespaces. The census line instead gains a note saying exactly that, so a future assignment of
+   TLV `0x16` is not read as a collision and a `16` met inside a `PATH` body is not read as a type
+   code.
 
 ### 12.2 `CONTEXT.md` — unblocked by the collision-1 ruling, lands in the acceptance train
 
