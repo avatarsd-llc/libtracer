@@ -77,6 +77,7 @@ INPUT                  = core/include/libtracer/config.hpp \
                          core/include/libtracer/transport_webtransport.hpp \
                          core/include/libtracer/transport_ws.hpp \
                          core/include/libtracer/transport_vertex.hpp \
+                         core/include/libtracer/self_heal_link.hpp \
                          core/include/libtracer/fwd_router.hpp \
                          core/include/libtracer/fwd_frame_view.hpp \
                          core/include/libtracer/grammar.hpp \

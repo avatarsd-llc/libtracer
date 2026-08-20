@@ -66,6 +66,7 @@ set(LIBTRACER_SRCS
     "${LIBTRACER_ROOT}/core/src/path_label_table.cpp"
     "${LIBTRACER_ROOT}/core/src/fwd_router.cpp"
     "${LIBTRACER_ROOT}/core/src/transport_vertex.cpp"
+    "${LIBTRACER_ROOT}/core/src/self_heal_link.cpp"
     "${LIBTRACER_ROOT}/core/src/loopback.cpp"
 )
 

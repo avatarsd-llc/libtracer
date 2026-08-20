@@ -275,7 +275,7 @@ It is a **control-plane** surface: it snapshots and sorts the whole vertex set, 
 When a remote link fails — transport disconnect, peer crash, network partition:
 
 - The connection vertex publishes a **link-state value**. Six states are defined: `DORMANT`, `DIALING`, `RECONNECTING` and `UP` for a DIAL link; `LISTENING` and `BIND_FAILED` for a LISTEN link, which report listen-socket reachability and never per-accepted-peer state. The value is an ordinary vertex value: readable, subscribable, and awaitable.
-- The **liveness engine** that would drive those transitions automatically is RFC-0014 §S5 and is not realised; the value is set by the node that owns the link. A consumer therefore treats link state as advisory and uses an `await` timeout on the data path as the ground truth.
+- The **liveness engine** driving those transitions automatically (RFC-0014 §S5, `tr::net::self_heal_link_t`) runs for DIAL connections of kinds registered with `transport_kind_traits_t::self_heal_dial`; for everything else — provided links, LISTEN links, and the built-in kinds (not yet opted in) — the value is set by the node that owns the link. A consumer therefore still treats link state as advisory and uses an `await` timeout on the data path as the ground truth.
 - This is the **same read/write/await API** as a local vertex going down — a sensor driver crashing may instead deliver a typed `STATUS=ERROR(<reason>)` in place of its value.
 - Application failover logic does not have to distinguish remote from local; it reacts to the delivered writes on the paths it cares about.
 

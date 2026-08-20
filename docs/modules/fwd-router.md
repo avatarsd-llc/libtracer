@@ -283,12 +283,12 @@ vertex.
 
 **Creation is an ordinary write.** A `SPEC` appended to the `/net` catalog field —
 `write /net:children[] += SPEC{...}` — instantiates a connection. The SPEC's config carries a
-`kind` selector naming a registered transport factory (`core/src/transport_vertex.cpp:49` documents
-the config shape; `kind` is read at `:60`), plus the universal keys `addr`, `port`, `role`,
+`kind` selector naming a registered transport factory (`core/src/transport_vertex.cpp:50` documents
+the config shape; `kind` is read at `:61`), plus the universal keys `addr`, `port`, `role`,
 `keepalive`, `max_frame`, `backoff` and `connect_timeout`. Two catalog child types are registered
-against the graph, `client` and `listener` (`core/src/transport_vertex.cpp:107,111`), which supply
+against the graph, `client` and `listener` (`core/src/transport_vertex.cpp:124,128`), which supply
 the role default. Extra transport kinds join the catalog through `register_transport_type`
-(`core/src/transport_vertex.cpp:140`) — that is how the QUIC module extends a node without this
+(`core/src/transport_vertex.cpp:157`) — that is how the QUIC module extends a node without this
 file ever learning about it.
 
 **The write is ACL-gated.** The `:children[]` append is gated on the parent vertex's `CREATE`
@@ -332,7 +332,7 @@ registry slab exhausted. A `provide_link` staging is consumed only once the wiri
 
 **Liveness is the connection vertex's value.** `link_state_t` is six states —
 `DORMANT`, `DIALING`, `RECONNECTING`, `UP`, `LISTENING`, `BIND_FAILED`
-(`core/include/libtracer/transport_vertex.hpp:99-106`). `DIAL` links use the first four; `LISTEN`
+(`core/include/libtracer/transport_vertex.hpp:102-109`). `DIAL` links use the first four; `LISTEN`
 links report listen-socket reachability with the last two, never a per-accepted-peer state. The
 value is a 1-byte `VALUE` on the vertex, so it is `await`-able and subscribable: `subscribe
 /net/<module>/<name>` streams every transition. The liveness *engine* that would drive these
@@ -345,9 +345,10 @@ reports `UP` or `LISTENING` at creation (`core/src/transport_vertex.cpp:657-660`
 module mints it, a `SPEC{name, config}` written there creates `/net/<module>/<name>` and a
 `NAME{<name>}` removes it, with transport and role positional. What is **not** implemented is the
 rest of the surface around it — the `conn:schema` catalog read (S3), hiding `conn` from
-`/net/<module>:children[]` (S4), the `CREATE`/`WRITE` gating split (S2c) and the link-liveness
-engine (S5) — and the `/net:children[]` catalog described above still works in parallel until S7
-retires it. One further
+`/net/<module>:children[]` (S4) and the `CREATE`/`WRITE` gating split (S2c); the link-liveness
+engine (S5, `self_heal_link_t`) runs for kinds registered `self_heal_dial`, the built-ins not
+yet among them — and the `/net:children[]` catalog described above still works in parallel until
+S7 retires it. One further
 boundary is open by design: RFC-0014 delivers the *link*, while third-party multi-hop `SUBSCRIBER`
 origination — making one node subscribe to another and then departing — is a separate unanswered
 question, so an orchestrator can create the wires' **links** in band without being able to
@@ -355,7 +356,7 @@ originate the **wires** ([#491]).
 
 ### Connection settings are transport-private
 
-`conn_settings_t` (`core/include/libtracer/transport_vertex.hpp:123`) and `conn_role_t` (`:80`) are
+`conn_settings_t` (`core/include/libtracer/transport_vertex.hpp:126`) and `conn_role_t` (`:81`) are
 a **device-private `:settings` facet** of a connection vertex
 ([ADR-0021 — the colon-field plane is the vertex ioctl](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0021-colon-field-plane-is-the-vertex-ioctl.md)
 draws the standard / device-private line). They live on the `tr::net` leaf record and are **never**

@@ -18,6 +18,7 @@
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/packed_path.hpp"
 #include "libtracer/path.hpp"
+#include "libtracer/self_heal_link.hpp"
 #include "libtracer/tlv_emit.hpp"
 
 namespace tr::net {
@@ -67,6 +68,22 @@ void parse_config(const tlv_t* config, conn_settings_t& s) {
     if (const auto v = cfg.u32("max_frame")) s.max_frame = *v;
     if (const auto v = cfg.u32("backoff")) s.backoff_ms = *v;
     if (const auto v = cfg.u32("connect_timeout")) s.connect_timeout_ms = *v;
+}
+
+/**
+ * @brief Re-encode a decoded TLV to owned wire bytes — the S5 engine's copy of the SPEC's
+ *        `config` SETTINGS, taken because the decoded tlv_t BORROWS the write's rope,
+ *        which is gone by the first re-dial. Trailers are not re-emitted (a config
+ *        SETTINGS never carries one; the reader would ignore it anyway).
+ */
+void reemit_tlv(std::vector<std::byte>& out, const tlv_t& tlv) {
+    if (tlv.opt.pl) {
+        std::vector<std::byte> body;
+        for (const tlv_t& child : tlv.children) reemit_tlv(body, child);
+        wire::emit_tlv(out, tlv.type, tlv.opt, body);
+        return;
+    }
+    wire::emit_tlv(out, tlv.type, tlv.opt, tlv.payload);
 }
 
 /** @brief A 1-byte link-liveness VALUE TLV (link_state_t) as an owned view. */
@@ -138,8 +155,14 @@ transport_vertex_t::transport_vertex_t(graph::graph_t& graph, fwd_router_t& rout
 }
 
 void transport_vertex_t::register_transport_type(std::string kind, transport_factory_t factory) {
+    // Default traits: eager construction, exactly as every pre-S5 registration behaved.
+    register_transport_type(std::move(kind), std::move(factory), transport_kind_traits_t{});
+}
+
+void transport_vertex_t::register_transport_type(std::string kind, transport_factory_t factory,
+                                                 transport_kind_traits_t traits) {
     const std::lock_guard ctl(ctl_m_);  // ADR-0063 §3 control-plane serialization
-    transport_types_.insert_or_assign(std::move(kind), std::move(factory));
+    transport_types_.insert_or_assign(std::move(kind), kind_entry_t{std::move(factory), traits});
 }
 
 result_t<void> transport_vertex_t::register_module(std::string module, std::string kind,
@@ -540,6 +563,7 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(const std::
     // A staging under a DIFFERENT module is a different connection and is not considered.
     transport_t* link = nullptr;
     std::unique_ptr<transport_t> owned;
+    self_heal_link_t* engine = nullptr;
     const auto pl = pending_links_.find(staged_key);
     if (pl != pending_links_.end()) {
         link = pl->second;
@@ -548,12 +572,35 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(const std::
         // An unregistered kind is an unsupported catalog entry — same convention as an
         // unknown SPEC `type` (SCHEMA_NOT_FOUND, the ENOTTY of creation).
         if (factory == transport_types_.end()) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-        // The raw config TLV rides along so the kind's factory can parse its own
-        // kind-private keys (ADR-0043 §5 leanness: they never land in settings).
-        auto built = factory->second(settings, config);
-        if (!built) return std::unexpected(built.error());
-        owned = std::move(*built);
-        link = owned.get();
+        if (factory->second.traits.self_heal_dial && settings.role == conn_role_t::DIAL) {
+            // The RFC-0014 §4 S5 engine (#492): creation constructs NO socket — the vertex
+            // is minted DORMANT and the engine dials on demand / self-heals under its own
+            // worker. The factory therefore does not run here, so the universal DIAL keys
+            // it would have validated are gated NOW (the same predicate `dial_or_listen`
+            // applies): creation must refuse a misconfigured SPEC at the write, never
+            // defer it to a first dial that answers success today and failure later.
+            // Kind-PRIVATE config stays the factory's to refuse, at dial time — the §2
+            // catalog validation proper is S3's, pending its own ruling.
+            if (settings.addr.empty() || settings.port == 0)
+                return std::unexpected(status_t::TYPE_MISMATCH);
+            // The engine owns a byte COPY of the raw config: the decoded TLV borrows the
+            // write's rope, which is gone by the first re-dial.
+            std::vector<std::byte> raw;
+            if (config != nullptr) reemit_tlv(raw, *config);
+            auto heal = std::make_unique<self_heal_link_t>(factory->second.factory, settings,
+                                                           std::move(raw),
+                                                           factory->second.traits.delivers_ropes);
+            engine = heal.get();
+            owned = std::move(heal);
+            link = owned.get();
+        } else {
+            // The raw config TLV rides along so the kind's factory can parse its own
+            // kind-private keys (ADR-0043 §5 leanness: they never land in settings).
+            auto built = factory->second.factory(settings, config);
+            if (!built) return std::unexpected(built.error());
+            owned = std::move(*built);
+            link = owned.get();
+        }
     } else {
         // Neither a staged link nor a construction kind — nothing can carry the bytes.
         // Same missing-required-`kind` refusal as the module-resolution gate above (#1062).
@@ -601,11 +648,24 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(const std::
         std::move(mount_key), graph::role_t::STORED_VALUE, std::move(handlers));
     if (!v) return v;  // PATH_IN_USE on a duplicate connection name
 
-    const bool constructed = owned != nullptr;
+    // The engine is the sole writer of this connection's DIAL transitions (RFC-0014 §4):
+    // its publisher writes the vertex VALUE directly — deliberately NOT through
+    // set_link_state, whose ctl_m_ the engine's worker must never take (the teardown
+    // path joins that worker while HOLDING ctl_m_). remove_connection stops the engine
+    // before the vertex retires, so no publish lands on a retired vertex.
+    if (engine != nullptr) {
+        graph::graph_t* const g = &graph_;
+        const vertex_handle_t vh = *v;
+        engine->set_liveness_publisher(
+            [g, vh](link_state_t s) { (void)g->write(vh, link_state_value(s)); });
+    }
+
+    const bool constructed = owned != nullptr && engine == nullptr;
     const conn_role_t effective_role = settings.role;
-    conns_.insert_or_assign(
-        qualified,
-        conn_t{.vertex = *v, .settings = std::move(settings), .owned = std::move(owned)});
+    conns_.insert_or_assign(qualified, conn_t{.vertex = *v,
+                                              .settings = std::move(settings),
+                                              .owned = std::move(owned),
+                                              .engine = engine});
 
     // Wire the link into the router's child_registry_t — the single owner of the
     // NAME→link demux table (Brick 3a). The `/net/<name>` NAME is exactly the router
@@ -658,6 +718,10 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(const std::
         (void)set_link_state_locked(qualified, effective_role == conn_role_t::LISTEN
                                                    ? link_state_t::LISTENING
                                                    : link_state_t::UP);
+    // An engine-managed connection is born RESTING (RFC-0014 §4: vertex exists, no
+    // socket, refcount 0) — the one initial publish the engine's worker does not own,
+    // made here under ctl_m_ before any op can reach the link.
+    if (engine != nullptr) (void)set_link_state_locked(qualified, link_state_t::DORMANT);
     return v;
 }
 
@@ -675,6 +739,11 @@ result_t<void> transport_vertex_t::remove_connection_locked(std::string_view nam
     // Un-route BEFORE anything is destroyed: after this the NAME resolves to nothing,
     // so the socket below can go without a forward ever reaching freed memory (#494).
     (void)router_.remove_child(name);
+    // Stop the S5 engine BEFORE the vertex retires: its worker publishes liveness by
+    // writing that vertex, and stop() joins the worker — after this line nothing can
+    // write a retired vertex. Safe under ctl_m_: the engine's worker never takes it
+    // (its publisher writes the graph directly, see make_connection_locked).
+    if (it->second.engine != nullptr) it->second.engine->stop();
     // Retire the identity vertex (RFC-0009 §B.6): /net/<name> re-virginizes, so a later
     // connection may take the same name — which is exactly the tombstone the registry
     // reuses. Retiring an already-retired or unregistered vertex is a no-op, so a
@@ -719,6 +788,25 @@ result_t<void> transport_vertex_t::set_link_state_locked(std::string_view name,
     // ctl_m_ → graph_t map_mutex_ → the vertex stripe), so descending into the graph from
     // here takes the locks in that order and never against it.
     return graph_.write(it->second.vertex, link_state_value(state));
+}
+
+result_t<void> transport_vertex_t::acquire_link(std::string_view name) {
+    const std::lock_guard ctl(ctl_m_);  // ADR-0063 §3 control-plane serialization
+    const auto it = conns_.find(name);
+    if (it == conns_.end()) return std::unexpected(status_t::NOT_FOUND);
+    // Lock order: ctl_m_ → the engine's own mutex; the engine never takes ctl_m_ back.
+    // A connection without an engine answers success as a no-op (see the header: a
+    // LISTEN ignores refcount per RFC-0014 §4, and a manual link's liveness is manual).
+    if (it->second.engine != nullptr) it->second.engine->acquire();
+    return {};
+}
+
+result_t<void> transport_vertex_t::release_link(std::string_view name) {
+    const std::lock_guard ctl(ctl_m_);  // ADR-0063 §3 control-plane serialization
+    const auto it = conns_.find(name);
+    if (it == conns_.end()) return std::unexpected(status_t::NOT_FOUND);
+    if (it->second.engine != nullptr) it->second.engine->release();
+    return {};
 }
 
 const conn_settings_t* transport_vertex_t::settings_of(std::string_view name) const {

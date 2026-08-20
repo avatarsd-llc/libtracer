@@ -1461,6 +1461,16 @@ if(LIBTRACER_NET_PLANE)
     add_test(NAME fwd_rope_forward COMMAND fwd_rope_forward_test)
 endif()
 
+if(LIBTRACER_NET_PLANE)
+    # RFC-0014 §4 S5 (#492) — the link-liveness engine over a scripted transport kind:
+    # dormant creation, demand dial, self-heal, refcount gating. Threaded by design;
+    # runs under the sanitizer set like the other net-plane tests.
+    add_executable(link_liveness_test link_liveness_test.cpp)
+    target_link_libraries(link_liveness_test PRIVATE libtracer)
+    libtracer_test_warnings(link_liveness_test)
+    add_test(NAME link_liveness COMMAND link_liveness_test)
+endif()
+
 if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_UDP AND LIBTRACER_TRANSPORT_WS)
     # #83 Stage-1 — transport/connection as a / vertex (shell over the live fwd path).
     add_executable(transport_vertex_test transport_vertex_test.cpp)

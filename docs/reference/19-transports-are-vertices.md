@@ -106,7 +106,7 @@ re-virginizes for a later connection of the same name
 The uniformity extends *inward*, not only outward. There are two creation doors — the
 [RFC-0014 — Creator endpoint: connection lifecycle and link liveness](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)
 creator endpoint and the superseded `:children[]` spelling
-(`core/src/transport_vertex.cpp:107`, `:111`) — and they share one body from the staged-link
+(`core/src/transport_vertex.cpp:124`, `:128`) — and they share one body from the staged-link
 lookup onward, so they cannot drift into two creation semantics. Only the module resolution
 differs: the endpoint knows its module positionally, from its own path; the `:children[]`
 door derives it from the SPEC's `kind` through a declared *(kind, role)* mapping, or from a
@@ -131,8 +131,8 @@ flowchart TD
 ### Uniform introspection
 
 **The connection vertex's value is its liveness state** — a 1-byte `link_state_t`
-(`core/include/libtracer/transport_vertex.hpp:99-106`) emitted as an ordinary `VALUE` TLV
-(`core/src/transport_vertex.cpp:73`). Because it is a vertex value and not a side-channel
+(`core/include/libtracer/transport_vertex.hpp:102-109`) emitted as an ordinary `VALUE` TLV
+(`core/src/transport_vertex.cpp:90`). Because it is a vertex value and not a side-channel
 callback, all three primitives already work on it: `read` it, `await` it, or **subscribe** to
 `/net/<module>/<name>` and receive every transition without polling (assign-then-deliver,
 [RFC-0008](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0008-vertex-operations-assign-propagate.md) §D).
@@ -167,11 +167,16 @@ machine that is supposed to run itself (RFC-0014 §4). They can disagree, and th
 is visible on the wire: a vertex can exist while its link is dormant, and a `LISTEN` vertex
 reporting `listening` says its listen socket is bound — **not** that any peer is attached.
 
-**The liveness engine is not implemented.** Today the value is written by whoever knows: a
-config-constructed socket publishes `UP` or `LISTENING` at creation
-(`core/src/transport_vertex.cpp:657`, `:659`), and a provided link reports through
-`set_link_state`. The automatic dial / backoff / reconnect transitions RFC-0014 §4 describes
-are RFC-0014 S5 and do not run yet.
+**The liveness engine runs for opted-in kinds.** The automatic dial / backoff / reconnect
+transitions RFC-0014 §4 describes are implemented by the S5 engine
+(`tr::net::self_heal_link_t`, `core/include/libtracer/self_heal_link.hpp`): a kind
+registered with `transport_kind_traits_t::self_heal_dial` gets DORMANT creation (no
+socket), demand dial bounded by `connect_timeout`, self-heal with `backoff` while a
+standing binding (`acquire_link`/`release_link`) holds the link, and close-to-dormant on
+the last release. The BUILT-IN kinds are not yet opted in, so their value is still written
+by whoever knows: an eagerly-constructed socket publishes `UP` or `LISTENING` at creation
+(`core/src/transport_vertex.cpp:708`, `:710`), and a provided link reports through
+`set_link_state`.
 
 ### 3. Structural vertices nobody declared
 
@@ -247,13 +252,13 @@ does not yet reach.
 **Standing requirement.** `tr::net::conn_settings_t` carries only the keys **every** transport
 kind means the same thing by. A kind's private configuration never lands there — the kind's
 own factory parses it from the raw config `SETTINGS` TLV it receives alongside the parsed
-universal settings (`core/include/libtracer/transport_vertex.hpp:123`, ADR-0043 §3, §5).
+universal settings (`core/include/libtracer/transport_vertex.hpp:126`, ADR-0043 §3, §5).
 
 The mechanism is the factory signature: a factory is
 `(const conn_settings_t&, const wire::tlv_t* raw_config) -> result_t<unique_ptr<transport_t>>`,
 registered at runtime through `transport_vertex_t::register_transport_type`
-(`core/src/transport_vertex.cpp:140`). The central parse reads the universal keys and nothing
-else (`core/src/transport_vertex.cpp:49`, `:60`); unknown pairs are ignored, so a newer peer
+(`core/src/transport_vertex.cpp:157`). The central parse reads the universal keys and nothing
+else (`core/src/transport_vertex.cpp:50`, `:61`); unknown pairs are ignored, so a newer peer
 may send keys this node has never heard of. `quic` reads its own `cert` / `key` / `ca` /
 `insecure`, `ws` and `tcp` read `peer_named` / `max_peers`, `can` reads its bus identity —
 and none of them can see another's vocabulary
@@ -271,8 +276,8 @@ and none of them can see another's vocabulary
   first-class participant rather than a fork.
 - **A shared key that only one kind reads is a dead key.** The failure mode is already
   visible *inside* the universal set: `keepalive_ms` is parsed and no consumer anywhere in
-  the tree reads it, and `backoff_ms` / `connect_timeout_ms` are parsed but dormant until the
-  S5 liveness engine lands (`core/include/libtracer/transport_vertex.hpp:151`, `:154`;
+  the tree reads it (`backoff_ms` / `connect_timeout_ms` escaped that condition when the
+  S5 liveness engine landed — `core/include/libtracer/transport_vertex.hpp:154`, `:158`;
   [13](13-network-formation.md)). One record carrying N kinds' private vocabulary would be
   that condition by construction rather than by accident — and a mistyped or misplaced key is
   silently ignored, so nothing would report it.
@@ -317,13 +322,18 @@ subscribable; application-declared modules with no library-derived fallback
 ([ADR-0073](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0073-naming-authority-the-application-mints-one-predicate-gates.md) §4);
 the structural-vertex predicate; the lean factory signature and the runtime kind catalog;
 hiding `conn` from `/net/<module>:children[]` (S4 — the endpoint is not a member connection,
-but stays addressable so the §6 creatability probe still reaches it).
+but stays addressable so the §6 creatability probe still reaches it); and the S5 liveness
+engine (`self_heal_link_t`) for kinds registered `self_heal_dial`, with the
+standing-binding refcount seam (`acquire_link`/`release_link`).
 
-**Not implemented.** The liveness engine that drives the DIAL transitions (S5) — values are
-written by the creating call and by `set_link_state`; `:schema`-as-catalog on the endpoint
-(S3); the `CREATE`/`WRITE` gating split (S2c). RFC-0014's byte-level clauses — the liveness encoding among them — become normative on
+**Not implemented.** The built-in kinds' opt-in to the S5 engine (they still construct
+eagerly and report through the creating call and `set_link_state`), and the routing-plane
+wiring that makes subscriptions/awaits drive the refcount seam automatically (S6);
+`:schema`-as-catalog on the endpoint
+(S3); the `CREATE`/`WRITE` gating split
+(S2c). RFC-0014's byte-level clauses — the liveness encoding among them — become normative on
 its conformance-vector merge; until then the values in
-`core/include/libtracer/transport_vertex.hpp:99-106` are the reference encoding.
+`core/include/libtracer/transport_vertex.hpp:102-109` are the reference encoding.
 ```
 
 ## Pitfalls

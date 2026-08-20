@@ -35,6 +35,33 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   correct and still matters for older nodes. Discovery of the endpoint is unaffected and is
   what RFC-0014 §6 always specified: `read /net/<module>/conn:schema`, with `PATH_NOT_FOUND`
   meaning "not creatable".
+- **`tr::net::self_heal_link_t` (`self_heal_link.hpp`) — the RFC-0014 §4 S5 link-liveness
+  engine** ([#492](https://github.com/avatarsd-llc/libtracer/issues/492)). A kind
+  registered through the new `register_transport_type(kind, factory, traits)` overload
+  with `transport_kind_traits_t::self_heal_dial` gets its DIAL connections driven through
+  the full `link_state_t` machine by an engine that IS the routing-plane `transport_t`
+  (stable registry identity; the inner socket comes and goes underneath, so subscriber
+  edges survive a transient loss): creation mints the vertex `DORMANT` with **no socket**
+  (universal `addr`/`port` still validated at the write), any op auto-wakes a dormant
+  link (one dial attempt, bounded by `connect_timeout`), loss with a standing binding
+  self-heals with `backoff` **forever** (no give-up bound, no terminal state), ops on a
+  `RECONNECTING` link fail fast (dropped and counted in `drop_stats`), and the last
+  release closes the socket back to dormant. `backoff` / `connect_timeout` are thereby
+  CONSUMED (previously parsed-but-dormant); `0` selects the engine defaults
+  (`kDefaultBackoffMs` = 1000 ms, `kDefaultConnectTimeoutMs` = 5000 ms). The engine is
+  the sole liveness publisher for its connection and is stopped before the vertex
+  retires on the `NAME`-removal path. **No existing kind changes behaviour**: the
+  traits-less `register_transport_type` overload registers `{}` (eager construction,
+  exactly as before), and the built-in `udp`/`tcp`/`ws` factories are not yet opted in
+  (that flip is a named follow-up, after the S7 conformance vectors pin the transitions).
+
+- **`tr::net::transport_vertex_t::acquire_link` / `release_link` — the RFC-0014 §4
+  standing-binding refcount seam** ([#492](https://github.com/avatarsd-llc/libtracer/issues/492)
+  S5). A standing subscription or `await` routed through an engine-managed link holds it
+  acquired for its lifetime; the routing-plane callers that drive this automatically are
+  S6's wiring. On a connection that is not engine-managed the pair is a documented no-op
+  success (a LISTEN ignores refcount per RFC-0014 §4); an unknown name answers
+  `NOT_FOUND`.
 
 - **`tr::net::bus_slot_server_t`, `tr::net::flat_slot_server_t` and
   `tr::net::stream_server_base_t` (`posix_endpoint.hpp`) — the PROVIDER half of the

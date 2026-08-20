@@ -146,9 +146,9 @@ optional `config` SETTINGS carries the instantiation parameters; an unregistered
 returns the parent's **members**, never SPECs.
 
 On the `/net` plane the registered child types are `client` and `listener`
-(`core/src/transport_vertex.cpp:107-114`); the `config` member `kind` selects which
-transport factory builds the link (`core/src/transport_vertex.cpp:60`, factories
-registered through `register_transport_type` at `:140`). The created connection is
+(`core/src/transport_vertex.cpp:124-131`); the `config` member `kind` selects which
+transport factory builds the link (`core/src/transport_vertex.cpp:61`, factories
+registered through `register_transport_type` at `:157`). The created connection is
 mounted and routed at **`/net/<module>/<name>`**, where `module` is **declared by the
 application** through `register_module` — modules are declared-only (ADR-0073 §4); an
 undeclared kind fails creation with `SCHEMA_NOT_FOUND`

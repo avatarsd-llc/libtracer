@@ -42,7 +42,7 @@ example asserts they never merge.
   value at all: the read returns `NOT_FOUND`. Only once the link reports state does
   the vertex hold a value, and that value is a **single-link** rope carrying a
   one-byte link-state VALUE TLV (`link_state_value`,
-  `core/src/transport_vertex.cpp:73`) — categorically not a chained payload. The live
+  `core/src/transport_vertex.cpp:90`) — categorically not a chained payload. The live
   transport is found in `router.registry().by_name("net/can/link0")`, outside the
   graph.
 

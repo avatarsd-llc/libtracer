@@ -98,6 +98,7 @@ if(LIBTRACER_NET_PLANE)
         src/path_label_table.cpp
         src/fwd_router.cpp
         src/transport_vertex.cpp
+        src/self_heal_link.cpp
     )
     # The built-in transport-factory registrations transport_vertex_t wires up. One glue
     # TU per enabled builtin (udp/tcp/ws), plus a dispatcher (register_builtin_transports)

@@ -257,11 +257,11 @@ So compose per deployment role, and load nothing else:
 
 Listeners are **config-created in-band**: a `SPEC` write to `/net:children[]`
 carrying a `kind` field creates a connection. The universal keys are `addr`, `kind`,
-`port`, `role`, `keepalive` (`core/src/transport_vertex.cpp:49`, read at `:60`); the
-two catalog child types are `client` and `listener` (`:107-115`); the created
+`port`, `role`, `keepalive` (`core/src/transport_vertex.cpp:50`, read at `:61`); the
+two catalog child types are `client` and `listener` (`:124-132`); the created
 connection mounts and routes at `/net/<module>/<name>`, the module **declared by the
-application** via `register_module` (`:145`) — declared-only per ADR-0073 §4, so an
-undeclared kind fails creation with `SCHEMA_NOT_FOUND` (`:183`). The accepted direction is
+application** via `register_module` (`:168`) — declared-only per ADR-0073 §4, so an
+undeclared kind fails creation with `SCHEMA_NOT_FOUND` (`:206`). The accepted direction is
 [RFC-0014 — creator endpoint, connection lifecycle and link liveness](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md),
 which replaces the single global catalog with a per-module creator endpoint
 `/net/<module>/conn`; that endpoint is not implemented, so a node built against this
@@ -381,7 +381,7 @@ JTAG session.
   link while host builds stay green.
 - **Platform TU selection is a build-system concern, not an `#ifdef`.** Chip targets
   compile `twai_link.cpp` plus a SocketCAN stub; the `linux` target compiles real
-  SocketCAN and no TWAI (`integrations/esp-idf/libtracer/CMakeLists.txt:177-186`).
+  SocketCAN and no TWAI (`integrations/esp-idf/libtracer/CMakeLists.txt:178-187`).
   Extend that pattern rather than adding macros.
 - Build with `-fno-exceptions -fno-rtti` and treat any throwing construct on the
   delivery path as a defect (§1).
