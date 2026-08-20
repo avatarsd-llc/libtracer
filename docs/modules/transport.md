@@ -429,6 +429,16 @@ they are the reason a new binding is small.
 :project: libtracer
 ```
 
+```{doxygenstruct} tr::net::transport_kind_traits_t
+:project: libtracer
+:members:
+```
+
+```{doxygenclass} tr::net::self_heal_link_t
+:project: libtracer
+:members:
+```
+
 ```{doxygentypedef} tr::net::peer_id_t
 :project: libtracer
 ```
