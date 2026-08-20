@@ -1075,8 +1075,17 @@ struct cell_result_t {
  * The live `sub-wire` arm is sampled differently and the difference is not cosmetic: its unit
  * is one whole freshly-built pass rather than a calibrated batch, for the reason
  * @ref live_pass records.
+ *
+ * NOT INLINED, deliberately. This is the only entry point the latency measurement goes
+ * through and `calibrate` / `run_ram` never reach it, so it is the toggle a profiler collects
+ * on — `valgrind --tool=callgrind --collect-atstart=no --toggle-collect='*run_cell*'` attributes
+ * exactly this arm at exactly the cell `--links` / `--verts` name, with the calibration pass
+ * executed but uncounted. Inlined into `main` (which is what -O3 did, and what made #1436's
+ * first profiling attempt collect zero events) no such toggle exists. It runs ten times in a
+ * full sweep, so the call costs nothing measurable.
  */
-[[nodiscard]] cell_result_t run_cell(arm_t arm, std::size_t links, std::size_t verts) {
+[[gnu::noinline]] [[nodiscard]] cell_result_t run_cell(arm_t arm, std::size_t links,
+                                                       std::size_t verts) {
     counting_resource_t mr;
     driver_t d(arm, links, verts, mr);
     bench::Latency lat;
@@ -1327,6 +1336,29 @@ int calibrate() {
     return bad;
 }
 
+/**
+ * @brief Restrict a swept axis to ONE of its canonical points — the profiler's affordance.
+ *
+ * `--links=` / `--verts=` exist so a profiler can be pointed at a SINGLE grid cell: attributing
+ * the `sub-wire` growth (#1436) to named callees needs one cell's samples uncontaminated by the
+ * other nine, and `perf record` over the whole sweep cannot separate them afterwards.
+ *
+ * An off-grid value is REFUSED rather than accepted, because a cell that is not on
+ * @ref kLinkCounts / @ref kVertexCounts is not on the curve every other number in this file is
+ * quoted against, and a run that silently invented one would be reported as if it were.
+ *
+ * @param sweep The canonical axis.
+ * @param pick  The requested point, or 0 for "the whole axis".
+ * @return The filtered axis; EMPTY iff @p pick is non-zero and not on @p sweep.
+ */
+[[nodiscard]] std::vector<std::size_t> filter_axis(std::span<const std::size_t> sweep,
+                                                   std::size_t pick) {
+    if (pick == 0) return {sweep.begin(), sweep.end()};
+    for (const std::size_t x : sweep)
+        if (x == pick) return {pick};
+    return {};
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1335,6 +1367,8 @@ int main(int argc, char** argv) {
     bool do_calibrate = false;
     bool do_ram = false;
     bool do_door = false;
+    std::size_t pick_links = 0;
+    std::size_t pick_verts = 0;
     const char* tag = "A";
     std::vector<arm_spec_t> arms(std::begin(kAllArms), std::end(kAllArms));
 
@@ -1344,6 +1378,10 @@ int main(int argc, char** argv) {
             rounds = std::atoi(a.c_str() + 9);
         else if (a.rfind("--round0=", 0) == 0)
             round0 = std::atoi(a.c_str() + 9);
+        else if (a.rfind("--links=", 0) == 0)
+            pick_links = std::strtoul(a.c_str() + 8, nullptr, 10);
+        else if (a.rfind("--verts=", 0) == 0)
+            pick_verts = std::strtoul(a.c_str() + 8, nullptr, 10);
         else if (a.rfind("--tag=", 0) == 0)
             tag = argv[i] + 6;
         else if (a == "--calibrate")
@@ -1366,6 +1404,15 @@ int main(int argc, char** argv) {
         }
     }
 
+    const std::vector<std::size_t> links_sweep = filter_axis(kLinkCounts, pick_links);
+    const std::vector<std::size_t> verts_sweep = filter_axis(kVertexCounts, pick_verts);
+    if (links_sweep.empty() || verts_sweep.empty()) {
+        std::fprintf(stderr,
+                     "bench_subscribe_index: --links/--verts must name a swept point "
+                     "(links 4/8/16/32/65, verts 8/32)\n");
+        return 2;
+    }
+
     // Reachability before numbers, every run — not once at authoring time.
     if (calibrate() != 0) {
         std::fprintf(stderr, "bench_subscribe_index: calibration FAILED; refusing to report\n");
@@ -1376,8 +1423,8 @@ int main(int argc, char** argv) {
     if (do_ram) {
         std::printf("# RESULT_SIDX_RAM tag arm links verts live_bytes peak_bytes allocs entries\n");
         for (const arm_spec_t& arm : arms)
-            for (std::size_t verts : kVertexCounts)
-                for (std::size_t links : kLinkCounts)
+            for (std::size_t verts : verts_sweep)
+                for (std::size_t links : links_sweep)
                     emit_ram(tag, arm.label, links, verts, run_ram(arm.arm, links, verts));
         return 0;
     }
@@ -1385,7 +1432,7 @@ int main(int argc, char** argv) {
     if (do_door) {
         std::printf("# RESULT_SIDX_DOOR tag arm links verts ps_per_lookup\n");
         for (const arm_t arm : {arm_t::IDX_STRING, arm_t::IDX_CARRY})
-            for (std::size_t links : kLinkCounts)
+            for (std::size_t links : links_sweep)
                 emit_door(tag, arm == arm_t::IDX_STRING ? "idx-string" : "idx-token-carry", links,
                           kVertexCounts[0], run_door(arm, links, kVertexCounts[0]));
         return 0;
@@ -1401,8 +1448,8 @@ int main(int argc, char** argv) {
         const std::size_t n = arms.size();
         for (std::size_t j = 0; j < n; ++j) {
             const arm_spec_t& arm = arms[(static_cast<std::size_t>(r + round0) + j) % n];
-            for (std::size_t verts : kVertexCounts)
-                for (std::size_t links : kLinkCounts)
+            for (std::size_t verts : verts_sweep)
+                for (std::size_t links : links_sweep)
                     emit_sidx(r + round0, tag, arm.label, links, verts,
                               run_cell(arm.arm, links, verts));
         }
