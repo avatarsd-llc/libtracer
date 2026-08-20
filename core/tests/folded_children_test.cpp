@@ -18,7 +18,9 @@
 #include <cstdio>
 #include <cstring>
 #include <optional>
+#include <span>
 #include <string_view>
+#include <vector>
 
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tlv_view.hpp"
@@ -164,6 +166,70 @@ void test_in_band_created_children() {
     assert_parent(g, "/dev");
 }
 
+/**
+ * @brief RFC-0014 §3 / S4 — an enumeration-hidden child is not a member on EITHER door, and
+ *        hiding costs it nothing else.
+ *
+ * The seam's whole risk is that the two `:children[]` doors could disagree about membership:
+ * the materialized oracle and the fold walk the child list separately, so a predicate applied
+ * to one and not the other would ship a listing whose bytes depend on which door served it.
+ * `assert_parent` is the differential that catches exactly that, so it runs here too.
+ */
+void test_hidden_child_is_not_a_member() {
+    graph_t g;
+    (void)g.register_vertex(path_t("/h"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/h/listed"), role_t::STORED_VALUE);
+    const tr::graph::vertex_handle_t secret =
+        g.register_vertex(path_t("/h/secret"), role_t::STORED_VALUE);
+    check(g.find(path_t("/h/secret").key()).has_value(), "the child to hide registers normally");
+    (void)g.register_vertex(path_t("/h/also"), role_t::STORED_VALUE);
+
+    const auto before = g.read_children_materialized(*g.find(path_t("/h").key()));
+    check(before.has_value() && walk_point_children(*before) == 3, "three members before hiding");
+
+    check(g.hide_from_enumeration(secret).has_value(), "the child is hidden");
+    assert_parent(g, "/h");  // the differential: both doors, same bytes
+    const auto after = g.read_children_materialized(*g.find(path_t("/h").key()));
+    check(after.has_value() && walk_point_children(*after) == 2,
+          "the hidden child is gone from the listing — two members remain");
+
+    // Hidden is a LISTING property only: the vertex still resolves and still takes a write at
+    // its own address — which is the property RFC-0014 §6's creatability probe depends on.
+    check(g.find(path_t("/h/secret").key()).has_value(), "the hidden child still RESOLVES");
+    std::vector<std::byte> val;
+    tr::wire::emit_tlv(val, type_t::VALUE, tr::wire::opt_t{}, std::span<const std::byte>{});
+    tr::view::segment_ptr_t vseg = tr::view::heap_alloc(val.size());
+    std::memcpy(vseg->bytes.data(), val.data(), val.size());
+    check(g.write(path_t("/h/secret"), view_t::over(std::move(vseg))).has_value(),
+          "and is still writable at its own address");
+}
+
+/** @brief RFC-0014 §3 / S4 — retirement re-virginizes the vertex, so the hide bit does NOT
+ *         outlive the occupant that asked for it. */
+void test_retire_clears_the_hide_bit() {
+    graph_t g;
+    (void)g.register_vertex(path_t("/r"), role_t::STORED_VALUE);
+    const tr::graph::vertex_handle_t hidden =
+        g.register_vertex(path_t("/r/c"), role_t::STORED_VALUE);
+    check(g.find(path_t("/r/c").key()).has_value() && g.hide_from_enumeration(hidden).has_value(),
+          "a child is registered and hidden");
+    const auto empty = g.read_children_materialized(*g.find(path_t("/r").key()));
+    check(empty.has_value() && walk_point_children(*empty) == 0,
+          "the parent lists no members while its only child is hidden");
+
+    check(g.retire(hidden).has_value(), "the hidden child is retired");
+    // The guard: the stale handle still points at the (pinned, never-freed) vertex, but it is
+    // a placeholder now, so hiding it would apply to whatever registers there next.
+    const auto stale = g.hide_from_enumeration(hidden);
+    check(!stale.has_value(), "hiding a retired vertex is refused, not silently remembered");
+
+    (void)g.register_vertex(path_t("/r/c"), role_t::STORED_VALUE);
+    check(g.find(path_t("/r/c").key()).has_value(), "the key is registered again — a NEW occupant");
+    const auto listed = g.read_children_materialized(*g.find(path_t("/r").key()));
+    check(listed.has_value() && walk_point_children(*listed) == 1,
+          "the new occupant is LISTED: the hide bit belonged to the retired one");
+}
+
 }  // namespace
 
 int main() {
@@ -172,6 +238,8 @@ int main() {
     test_one_child();
     test_varied_name_lengths();
     test_in_band_created_children();
+    test_hidden_child_is_not_a_member();
+    test_retire_clears_the_hide_bit();
 
     return tr::testing::summary("folded_children");
 }

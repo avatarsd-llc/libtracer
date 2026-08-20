@@ -95,9 +95,11 @@ test('#676 baseline: a walk that reads everything is complete, with no gaps', as
 });
 
 test('RFC-0014 S2b: the reserved `conn` endpoint is not walked as a connection', async () => {
-  // Every module lists its creator endpoint alongside its members until S4 hides it. It is
-  // a control surface with no peer behind it, so descending into it would mint a phantom
-  // node — and, because nothing answers below it, the walk would report a bogus gap too.
+  // A node older than RFC-0014 S4 lists its creator endpoint alongside the module's members
+  // (S4 hides it at the source, but this client talks to pre-S4 nodes too). It is a control
+  // surface with no peer behind it, so descending into it would mint a phantom node — and,
+  // because nothing answers below it, the walk would report a bogus gap too. The stub below
+  // is therefore deliberately a PRE-S4 listing: it is the case the skip exists for.
   const { client, calls } = stubClient({
     ...HEALTHY,
     '/net/ws-client :children[]': listing(['b', 'conn']),

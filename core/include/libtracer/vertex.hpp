@@ -652,6 +652,29 @@ class vertex_t {
     [[nodiscard]] bool registered() const noexcept { return registered_; }
 
     /**
+     * @brief True iff this vertex is a `:children[]` MEMBER of its parent — registered and
+     *        not enumeration-hidden (RFC-0014 §3, S4).
+     *
+     * The enumeration-hide seam RFC-0014 §3 says "the implementation must add": the RFC-0014
+     * creator endpoint `<net_root>/<module>/conn` is a real, registered, addressable vertex —
+     * `find` resolves it, a `SPEC`/`NAME` write executes on it, `conn:schema` reads it — but
+     * it is NOT one of the module's connections, and a topology walker that treats every
+     * `:children[]` member as a link descends into a control vertex with no peer behind it
+     * (the concrete bug the TypeScript client had to work around in #1302).
+     *
+     * Deliberately NARROWER than "invisible": hiding is a member-listing property only.
+     * `registered()` — which governs `find`, retirement walks, the branch/leaf fork
+     * (@ref has_registered_child) and the owner-side `for_each_vertex` census — is untouched,
+     * because RFC-0014 §6 makes `read <module>/conn:schema` the *sanctioned* creatability
+     * probe: the endpoint has to stay addressable precisely BECAUSE it is unlisted.
+     *
+     * @note Read/written under the graph's map lock, like @ref registered.
+     */
+    [[nodiscard]] bool enumerable_member() const noexcept {
+        return registered_ && !test_flag(flag_t::ENUM_HIDDEN, std::memory_order_relaxed);
+    }
+
+    /**
      * @brief This vertex's retirement generation (ADR-0062).
      *
      * Bumped every time retirement re-virginizes this object, so a holder of a CACHED
@@ -697,6 +720,17 @@ class vertex_t {
         // bytes of `vertex_t`, which the size gate does not have to spare.
         if (parent_ != nullptr) parent_->refresh_registered_child();
     }
+
+    /**
+     * @brief Drop this vertex out of its parent's `:children[]` listing without touching
+     *        @ref registered — the RFC-0014 §3 hide seam. Unique-map-lock callers only
+     *        (@ref graph_t::hide_from_enumeration is the sole one).
+     *
+     * One-way on purpose: the only unhide is retirement, which re-virginizes the vertex and
+     * clears the bit with the rest of its identity. A vertex whose listing status could flip
+     * back and forth would be a second, mutable source of truth about what a module contains.
+     */
+    void mark_enumeration_hidden() noexcept { set_flag(flag_t::ENUM_HIDDEN, true); }
 
    public:
     /** @brief Recompute `flag_t::REGISTERED_CHILD`. Unique-map-lock callers only. */
@@ -1597,6 +1631,10 @@ class vertex_t {
                 break;
         }
         set_flag(flag_t::OWN_ACES, false);
+        // The hide bit is part of the retiring occupant's identity, not of the address: the
+        // next registration at this key is a different vertex kind and must be listed unless
+        // it asks not to be (RFC-0014 §3 / S4).
+        set_flag(flag_t::ENUM_HIDDEN, false);
         lkv_.clear(std::memory_order_release);  // a mid-read reader holds its own
                                                 // reference — safe under either policy.
         own_subs_.store(0, std::memory_order_relaxed);
@@ -2065,9 +2103,11 @@ class vertex_t {
     enum class flag_t : std::uint8_t {
         OWN_ACES = 1U << 0,         /**< @brief `ext_` holds a non-empty own-ACE list (#361 §3). */
         REGISTERED_CHILD = 1U << 1, /**< @brief At least one DIRECT child is registered (#652). */
+        ENUM_HIDDEN = 1U << 2,      /**< @brief Registered, addressable, but NOT a `:children[]`
+                                     *          member (RFC-0014 §3, S4). */
     };
 
-    /** @brief Set or clear @p f. An RMW, because the two bits have two different writers. */
+    /** @brief Set or clear @p f. An RMW, because the bits have different writers. */
     void set_flag(flag_t f, bool on) noexcept {
         const auto bit = static_cast<std::uint8_t>(f);
         if (on) {
@@ -2499,11 +2539,13 @@ class vertex_t {
     // writes it under the graph's sweep lock, so a plain byte here was a data race — UB,
     // not a benign torn read. Byte-wide as an atomic too, so the group stays four bytes.
     std::atomic<delivery_mode_t> delivery_mode_{delivery_mode_t::IF_NEWER};
-    // Two lock-free predicates, packed into ONE byte so the flag group stays exactly four
+    // Three lock-free predicates, packed into ONE byte so the flag group stays exactly four
     // bytes wide and `sizeof(vertex_t)` stays at the 112 the #361 diet measured — the size
     // gate's own failure message says to put a new member behind vertex_ext_t rather than
-    // inline it, and a bit costs less than either. Written under a lock (a different one
-    // per bit), read lock-free off hot paths, so the writes are RMWs and compose.
+    // inline it, and a bit costs less than either. (`ENUM_HIDDEN`, the RFC-0014 §3 hide seam,
+    // is the third: it went here rather than beside `registered_` for exactly that reason.)
+    // Written under a lock (a different one per bit), read lock-free off hot paths, so the
+    // writes are RMWs and compose.
     std::atomic<std::uint8_t> flags_{0};
     bool registered_ = false;  // false => placeholder intermediate (invisible to find)
     /**

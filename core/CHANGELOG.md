@@ -16,6 +16,26 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`tr::graph::graph_t::hide_from_enumeration` — the RFC-0014 §3 enumeration-hide seam
+  (S4)** ([#492](https://github.com/avatarsd-llc/libtracer/issues/492)). RFC-0014 §3 says the
+  creator endpoint `conn` is *hidden* from `/net/<module>:children[]`, and noted that "no
+  mechanism to hide a registered child from enumeration exists today". This is that
+  mechanism: a one-way per-vertex bit that drops a vertex out of its parent's member listing
+  — both the materialized and the folded `:children[]` door, so the two cannot disagree about
+  membership — while changing nothing else. `find` still resolves the vertex, reads and
+  writes still reach it, the RFC-0016 composed branch read still descends into it, and the
+  owner-side `for_each_vertex` census still visits it. Retirement clears the bit: it belongs
+  to the occupant of the key, not to the address.
+
+  **Behaviour change:** `read /net/<module>:children[]` no longer lists `conn`. That listing
+  is now exactly the module's member connection vertices, which is what a peer walking it as
+  a topology of links always assumed — the TypeScript client had to filter the endpoint out
+  by name ([#1302](https://github.com/avatarsd-llc/libtracer/issues/1302)) because descending
+  into a control vertex with no peer behind it minted a phantom node. That filter stays
+  correct and still matters for older nodes. Discovery of the endpoint is unaffected and is
+  what RFC-0014 §6 always specified: `read /net/<module>/conn:schema`, with `PATH_NOT_FOUND`
+  meaning "not creatable".
+
 - **`tr::net::bus_slot_server_t`, `tr::net::flat_slot_server_t` and
   `tr::net::stream_server_base_t` (`posix_endpoint.hpp`) — the PROVIDER half of the
   `kBusLinks` fold** ([#1438](https://github.com/avatarsd-llc/libtracer/issues/1438),

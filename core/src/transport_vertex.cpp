@@ -240,6 +240,15 @@ result_t<void> transport_vertex_t::mint_module_locked(const std::string& module)
     auto endpoint = graph_.register_vertex_key(std::move(endpoint_key), graph::role_t::HANDLER,
                                                std::move(handlers));
     if (!endpoint) return std::unexpected(endpoint.error());
+    // RFC-0014 §3 (S4): `conn` is HIDDEN from `<net_root>/<module>:children[]`, which returns
+    // the module's member CONNECTIONS. The endpoint is the control that creates them, not one
+    // of them, so a peer walking the listing as a topology of links would descend into a
+    // vertex with no peer behind it. It stays registered and addressable — §6 makes `read
+    // <module>/conn:schema` the sanctioned creatability probe, so being unlisted is exactly
+    // why it must still resolve. Hiding cannot fail on a vertex just registered, and the
+    // status is discarded for that reason: a failure would mean the endpoint vanished between
+    // two calls under `ctl_m_`, which the graph's insert-only discipline (ADR-0057) excludes.
+    (void)graph_.hide_from_enumeration(*endpoint);
     return {};
 }
 

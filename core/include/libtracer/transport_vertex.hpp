@@ -170,6 +170,12 @@ struct conn_settings_t {
  * The name is reserved per module in BOTH directions (RFC-0014 §3): a SPEC may not name a
  * connection `conn` (the endpoint vertex already occupies the key), and `NAME{conn}` is
  * refused, so the endpoint cannot be made to destroy itself.
+ *
+ * It is also **hidden** from `<net_root>/<module>:children[]` (RFC-0014 §3, S4 — the graph's
+ * @ref tr::graph::graph_t::hide_from_enumeration seam): that listing returns the module's
+ * member CONNECTIONS, and the endpoint is the control that creates them, not one of them.
+ * Hidden is not unreachable — `read <module>/conn:schema` is §6's creatability probe, so the
+ * endpoint stays addressable precisely because it is unlisted.
  */
 inline constexpr std::string_view kConnEndpointName = "conn";
 
@@ -360,7 +366,8 @@ class transport_vertex_t {
      * vertex and, below it, the write-driven `<net_root>/<module>/conn`
      * endpoint whose `SPEC`/`NAME` writes create and remove the module's connections. Both
      * are idempotent — a second declaration naming the same module (a module serving two
-     * kinds) finds them and mints nothing.
+     * kinds) finds them and mints nothing. The endpoint is minted HIDDEN from the module's
+     * `:children[]` (RFC-0014 §3, S4) — see `%kConnEndpointName`.
      * @param module The module segment (e.g. `"ws-client"`, `"can"`); must satisfy
      *               `tr::graph::valid_segment`.
      * @param kind   The config `kind` this module constructs (e.g. `"ws"`).
