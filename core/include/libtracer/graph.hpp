@@ -1207,6 +1207,16 @@ class graph_t {
      * declaration and not, since RFC-0022 §3.B, a remotely writable knob. Nothing is
      * inherited (§3.F).
      *
+     * What "for the value's lifetime" costs on a POOLED RX backend: the pin is a **borrow** of
+     * a pool slot — receive capacity — held until the value is displaced, not merely for the
+     * delivery window. The library keeps that deferred release safe (atomic segment refcounts);
+     * the APPLICATION owns the occupancy budget, since only it knows the pool geometry and the
+     * retention pattern. Size against `live pinned values x segment_bytes`: @p k bounds the
+     * waste per value and never the number of values. Declaring a non-sentinel @p k on a
+     * long-held vertex — a config vertex, a rarely-updated setpoint — is exactly the shape that
+     * starves a small pool. See @ref tr::graph::config_t::kPinPayloadRatio for the target-class
+     * guidance (NARROW sets the sentinel; WIDE/MID may borrow freely).
+     *
      * @note This is a per-vertex OVERRIDE of `config_t::kPinPayloadRatio`, which Amendment 2
      *       fixes at the sentinel on both targets. It exists so §6-style measurement arms
      *       rotate inside one process — measuring them as separate binaries is what produced
