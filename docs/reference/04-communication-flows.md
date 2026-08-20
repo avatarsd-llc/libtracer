@@ -237,6 +237,16 @@ A declaration reaches exactly the vertex it names. **Nothing is inherited** (§3
 push, no ancestor walk, and no propagation question when a parent is reconfigured after its
 children exist.
 
+**The vertex an owner declares depth on is the vertex that holds the ring — the RECEIVING one.**
+A producer never queues ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md)
+§4.6.1, Amendment 2): its writes are always the lock-free path, and there is no fan-out-edge ring
+to configure. A consumer that wants depth makes **its own target vertex** a STREAM and declares
+depth there, bounded in **bytes** by that vertex's **own** injected source. So there is no flow
+here for the same reason twice over: the declaration is host-side, and the party declaring it is
+the party that owns the memory. Under overload the receiver ring is where the pressure contract
+binds — best-effort sheds oldest with `FLOW_ADDRESS_SHIFT_GAP` and accounting, reliable answers
+`FLOW_BACKPRESSURE` back to the producer, which slows to the consumer's rate.
+
 `settings.app.*` is the only writable namespace below `settings` (RFC-0010 §A), and there is no
 atomic multi-field settings write: writes are per-field, and a bare `:settings` write resolves
 nothing.

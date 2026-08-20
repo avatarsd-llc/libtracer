@@ -434,6 +434,8 @@ A producer's selective subtree flush reaches a **remote** subtree subscriber as 
 
 The write-sequence coalescing above is the **stored-value** semantic (last-writer-wins: flush the latest once). A **stream** vertex — one with a bounded history ring — is a queue: its contract is "observe every buffered entry," not "the latest." Its propagation is a **drain**, in order, of the entries appended since the previous flush. Propagate dispatches on the vertex role.
 
+**A producer never queues; the queue belongs to whoever consumes it** ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.6.1, Amendment 2). Writing is always the lock-free path — there is no producer-side ring on any delivery class, at any depth. Depth materializes at the **receiving** vertex: a party that wants a queue makes **its own target vertex** a STREAM, and that ring is bounded in **bytes** by **that vertex's own** injected `mem::block_source_t` — per injection point, never a pool shared across vertices or planes ([ADR-0079](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md) Amendment, 2026-08-20: a shared source collapses to 0.01x of its single-thread rate at T = 24, while a per-thread source scales at 0.46x). The pressure contract binds **at that receiver ring**: best-effort sheds oldest with `FLOW_ADDRESS_SHIFT_GAP` and loss accounting; reliable answers `FLOW_BACKPRESSURE` back to the producer, which — knowing the consumer's sampling rate — slows and shapes its traffic to it. Order across writers is [ADR-0019](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0019-per-producer-monotonic-origin-timestamp.md)'s per-producer monotonic stamps, never a ring-minted sequence number. The measured basis: the retired producer-side ring cost a **fixed +29 ns (+54 %) per write regardless of depth**, and four writers on one vertex fell from 4.59 M/s lock-free to 1.73 M/s through it. Batch folding is the preferred stream carrier — **32.0x** per-sample amortization (2.54 ns/sample) at ~9.3 B/sample retained against 172.
+
 The host-side spelling of these operations is on [../modules/graph.md](../modules/graph.md); nothing in this section requires a particular signature.
 
 ---
@@ -528,7 +530,15 @@ parameters** ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/doc
 | what | who supplies it | how |
 | ---- | ---- | ---- |
 | STREAM ring depth | the application — a retention *intent* no peer and no injected resource can supply | `graph_t::set_history_depth(v, keep)` |
+| the ring's *capacity* | the vertex's **own** injected `mem::block_source_t` — the intent above is bounded in **bytes** by it, and a shortfall surfaces as a shed-with-gap or as backpressure, never as a silent shrink | the source injected at that vertex, never a shared pool |
 | pin amplification ratio `K` | the deployment — a copy/pin trade ([ADR-0042](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md) §3, [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.D) | `graph_t::set_pin_payload_ratio(v, k)` |
+
+`set_history_depth` is a **host-only intent** and stays one: it is declared on the vertex that
+**holds** the ring — which, since [RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md)
+§4.6.1, is the **receiving** vertex of the party that wants depth, not a producer's fan-out edge.
+A subscriber that wants a queue makes its own target vertex a STREAM and sizes it with its own
+injected source; it does not ask a producer to retain on its behalf, and no `stream_depth` request
+travels on the wire.
 
 Both are owner-side wiring calls in the shape of `set_delivery_mode` and `set_app_fields` —
 declarations the owner makes host-side after registration — and **neither has any wire surface**:
