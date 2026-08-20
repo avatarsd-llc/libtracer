@@ -37,6 +37,7 @@ for a local `preview.html` of the same charts.
 | `bench_rx_source_topology` | **RX failable-source topology**: T receive threads forwarding rope frames through a shared heap, one shared pool, or one pool per child — the measurement behind [ADR-0067](../docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md) §3. |
 | `bench_pin_ratio` (`run_pin_ratio.sh`) | **RFC-0022 §6, the LATENCY half**: the WRITE store leg over a (payload × segment) grid, every `K` arm rotating inside ONE process. Answered §8 Q3 → Amendment 2 (the on-by-default flip does not land). Collated by `collate_pin.py`. |
 | `bench_pin_net` (`run_pin_net.sh`) | **RFC-0022 §6, the RAM half**: two processes over real UDP, deliveries counted by the RECEIVER, receiver backed by a **bounded RX pool** whose free-slot floor and `dropped_rx()` are the occupancy instrument. Sweeps the live-vertex count across the slot count — the axis on which a pin's borrow starves receive. See [receive-pool occupancy](#bench_pin_net--rfc-0022-6-receive-pool-occupancy-760). |
+| `bench_subscribe_index` (`run_subscribe_index.sh`) | **#1266's subscriber-index interning A/B**: what keying `link_index_` by an interned token instead of a link NAME costs and saves, in latency and in bytes at rest, over 4/8/16/32/65 links. Four index arms in one binary plus the live `subscribe_wire` path, and the A/A null is collected in the same window. Collated by `collate_subscribe_index.py`. See [what it resolves](#bench_subscribe_index--link-identity-interning-1266). |
 
 ### `bench_forward_heap` — the 16KB-RAM zero-heap forward gate (ADR-0038)
 
@@ -610,6 +611,144 @@ the one §3.3 says the byte column cannot show: the label stands for the WHOLE r
 
 Diagnostic, **not** a `perf.yml` gate: both arms are in one binary and the comparison is
 between two *spellings*, not two builds.
+
+### `bench_subscribe_index` — link-identity interning (#1266)
+
+```
+cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
+cmake --build bench/build --target bench_subscribe_index -j
+python3 bench/host_guard.py wait --timeout 900
+bash bench/run_subscribe_index.sh bench/build 13 2 > /tmp/sidx.tsv
+python3 bench/collate_subscribe_index.py /tmp/sidx.tsv
+```
+
+`graph_t::index_link_vertex` keys the per-link departure index by the link's NAME: a hash, a
+map find, and a `std::pmr::string` key copy on a miss, all under `link_index_mutex_`. #1266
+asks whether keying it by an interned token instead is worth doing. Two attempts stalled for
+want of an instrument — #1290 measured an interned probe table with a purpose-built variant
+that was then discarded, and #1366 recorded *"Measurement: not taken. No checked-in A/B
+harness for the subscribe path exists."*
+
+**Four index arms in ONE binary**, because this host's cross-build layout sensitivity runs to
++9.8 % on an untouched leg (below) — larger than part of the effect being hunted, so a
+two-build A/B could not resolve it:
+
+| arm | what it is |
+| --- | --- |
+| `S-sentinel` | the driver loop with no index operation — the control every delta is taken against |
+| `idx-string` | today's shape, transcribed line-for-line from `core/src/graph.cpp` |
+| `idx-token` | interning with the token **already in hand**: no hash, no map, no key copy |
+| `idx-token-intern` | the **graph-only re-key**: the name still arrives as a `string_view`, so the hash is still paid and the token vector is paid on top |
+| `sub-wire` | the live `graph_t::subscribe_wire`, for proportion — never compared to the control |
+
+`idx-token` deliberately charges **nothing** for obtaining the token, so `idx-string −
+idx-token` is the **ceiling** on what interning could ever save, not an estimate of it. In the
+real system the token has to be minted upstream and carried across the `tr::net`/`tr::graph`
+seam, and that carry is not free.
+
+#### The faithfulness oracle — why the transcription can be trusted
+
+A `graph_t` draws **nothing** from its injected `std::pmr::memory_resource` during
+construction or vertex registration (measured: 0 bytes, 0 allocations after a ctor plus eight
+`register_vertex` calls — vertex storage comes from the `ctl` block source and the global
+heap). In this workload the counted arena therefore sees exactly one structure: `link_index_`
+itself. So the live arm's byte count **is** the shipped index's byte count, and `--calibrate`
+asserts on every invocation that `idx-string` reproduces it **byte-for-byte and
+allocation-for-allocation** at 4, 8 and 65 links (746 B / 23 allocs, 1388 B / 45, 11467 B /
+361). A transcription that drifts from the code it claims to transcribe fails the run rather
+than quietly mis-reporting it.
+
+#### What the harness can and cannot resolve
+
+It **can** price the index operation itself to well under a nanosecond, separate the lookup
+from the list maintenance and the mutex, and report bytes at rest on the same axis.
+
+It **cannot** answer whether the carry is affordable. It measures what a carried token would
+be worth *at the index*; the cost of minting one per admitted link and threading it through
+the router's per-link state is a different measurement against different code.
+
+It also does **not** measure a name-digest probe table. #1290 built one and recorded the
+hazard: real link names share long prefixes (`p0`, `p1`, …, `192.168.4.N:PORT`), so a digest
+that folds the tail without mixing strands the entropy and degrades the table to a full scan.
+The link names this bench generates carry that prefix structure deliberately, so any future
+probe-table arm added here is measured against names that can expose it.
+
+#### The estimator, and the two calibration rules it rests on
+
+Best-of-rounds on the per-round p50, never median (`docs/methodology.md`). The batch is sized
+by **window** (`calibrate_batch_for_window`), never by plateau: the plateau rule compares two
+timed quantities, so the machine votes on which batch is latched, and `bench_common.hpp`
+records same-binary A/A differences of up to ~8 % from nothing but that lottery — which would
+eat the entire effect. Arms rotate their order every round inside one process, on the
+`run_pin_ratio.sh` template.
+
+The **A/A null is carried in the run**, not quoted from history: each round executes the same
+binary twice under tags `A` and `B`, ABBA-interleaved, and the collator takes the widest
+per-cell excursion as the band. Any delta below it prints `within-null`.
+
+#### Measured, 2026-08-20, pinned host, `taskset -c 2`, 13 rounds x 2 tags
+
+Load average 6.87 before / 5.34 after; no orphaned busy-loops; no `perf-local` run queued.
+Null band **0.89 %**. **Four** independent windows were taken across two source revisions and
+a `clang-format` reflow, and every one reproduced the table below to ~0.2 % — which also says
+the in-binary comparison is insensitive to the layout term that defeats a cross-build one.
+
+The window quoted here was taken while the host's 5-minute load average was still decaying
+from 17.9, and it is quoted anyway **because its own A/A null certifies it**: at 0.89 % it is
+tighter than a window taken at load 0.82 (2.23 %). That is the point of carrying the null in
+the run rather than asserting quiescence from `uptime` — the instrument, not the operator,
+decides whether the window was clean.
+
+ns per index operation, best-of-rounds, at 8 vertices:
+
+| links | sentinel | `idx-string` | `idx-token` | `idx-token-intern` | ceiling | verdict | graph-only | verdict | whole subscribe |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | --- | ---: |
+| 4 | 3.39 | 13.74 (+10.35) | 5.82 (+2.43) | 13.78 (+10.39) | +7.92 | FASTER | −0.04 | within-null | 389 |
+| 8 | 3.39 | 14.77 (+11.38) | 5.82 (+2.42) | 14.80 (+11.41) | +8.95 | FASTER | −0.03 | within-null | 471 |
+| 16 | 3.39 | 16.05 (+12.65) | 5.83 (+2.43) | 16.09 (+12.70) | +10.22 | FASTER | −0.04 | within-null | 788 |
+| 32 | 3.39 | 15.44 (+12.05) | 5.82 (+2.42) | 15.61 (+12.22) | +9.63 | FASTER | −0.17 | **SLOWER** | 1417 |
+| 65 | 3.39 | 16.70 (+13.31) | 5.81 (+2.42) | 16.79 (+13.39) | +10.89 | FASTER | −0.08 | within-null | 2378 |
+
+At 32 vertices: ceiling +8.36 → +11.12 ns, graph-only `within-null` at all five points
+(−0.04 … +0.10).
+
+Note the graph-only column: `within-null` at nine of the ten cells and **SLOWER** at the
+tenth. It never wins anywhere. Parenthesised figures are net of the control.
+
+Note also that `idx-token` is **flat in link count** — 5.82 ns at 4 links, 5.81 ns at 65 —
+while both name-keyed arms climb ~21 % across the sweep. That flatness states the interning
+result structurally rather than statistically: a vector subscript does not care how many links
+exist, and a hash over a set of long-shared-prefix names does.
+
+Bytes at rest, 8 vertices — and these are the SHIPPED index's bytes, per the oracle above:
+
+| links | `idx-string` | `idx-token` | `idx-token-intern` |
+| ---: | ---: | ---: | ---: |
+| 4 | 746 | 416 | 778 |
+| 65 | 11467 | 6760 | 11987 |
+| **per link** | **175.8 B** | **104.0 B** | **183.8 B** |
+
+**Three findings.**
+
+1. **A carried token is worth having.** It removes 7.9–11.1 ns of a 13.7–17.9 ns operation —
+   77 % of the index's cost net of the control at 4 links, 82 % at 65 — and 41 % of its bytes,
+   at every one of the ten cells, far outside the null band.
+2. **A graph-only re-key is worth nothing.** `idx-token-intern` is `within-null` at nine of the
+   ten cells and measurably **SLOWER** at the tenth, negative-signed at eight, and it wins
+   nowhere: the hash does not go away, the token vector is paid on top, and the footprint goes
+   **up** (175.8 → 183.8 B/link). The saving is entirely in the carry, not in the keying.
+3. **Read against a whole subscribe, the latency win is small.** `subscribe_wire` costs
+   389 ns at 4 links and 2378 ns at 65, so the ceiling is **2.0 % of a subscribe at 4 links
+   falling to 0.46 % at 65** — the whole-subscribe cost grows ~6x across the sweep while the
+   index saving grows ~1.4x. The RAM figure, not the latency figure, is what this change is
+   worth on a user-pinned arena.
+
+   That ~6x is itself worth recording: it is not the index (whose whole contribution is
+   ~13 ns), so a subscribe on this path gets steadily dearer with peer count for reasons this
+   bench localises but does not explain. It is a larger effect than the one #1266 is about.
+
+Diagnostic, **not** a `perf.yml` gate: the arms are four spellings in one binary, not two
+builds, and nothing here is banked to the perf store.
 
 ### `bench_forward_rope` — the rope forward hop, and what its A/A null is worth (#1358)
 

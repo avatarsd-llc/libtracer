@@ -302,3 +302,13 @@ target_compile_options(bench_pin_net PRIVATE -Wall -Wextra)
 add_executable(bench_path_label bench_path_label.cpp)
 target_link_libraries(bench_path_label PRIVATE libtracer)
 target_compile_options(bench_path_label PRIVATE -Wall -Wextra)
+
+# #1266 — the subscriber-index interning A/B. Four index arms in ONE binary (sentinel /
+# string-keyed / token-keyed / graph-only re-key) plus the live subscribe_wire path, swept over
+# 4/8/16/32/65 links at two vertex populations, with a counting pmr resource reporting bytes at
+# rest on the same axis. In-binary because this host's cross-build layout sensitivity is up to
+# +9.8% on an untouched leg (bench/README.md) — larger than part of the effect being hunted.
+# Driven by run_subscribe_index.sh, collated by collate_subscribe_index.py.
+add_executable(bench_subscribe_index bench_subscribe_index.cpp)
+target_link_libraries(bench_subscribe_index PRIVATE libtracer)
+target_compile_options(bench_subscribe_index PRIVATE -Wall -Wextra)
