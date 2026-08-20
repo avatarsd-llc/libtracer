@@ -172,3 +172,59 @@ if(LIBTRACER_REGISTER_GRAPH_EXAMPLE_TESTS)
         add_test(NAME example_${example} COMMAND ${example})
     endforeach()
 endif()
+
+# The wire domain (#1383) — the L2/L3 codec, one concept per target. Appended at EOF for the
+# same reason the graph block was: `docs/examples/index.md` pins line-numbered citations into
+# the block above, and anything inserted there moves them.
+#
+# All eight are pure L2/L3 over L0/L1: no net plane, no transports, no threads. They build and
+# run identically under `-DLIBTRACER_NET_PLANE=OFF`.
+set(LIBTRACER_WIRE_EXAMPLES
+    wire_tlv_header            # the 4-byte header and the opt byte; the LL widen rule
+    wire_structured_vs_opaque  # opt.PL — children vs payload over the SAME body bytes
+    wire_packed_path           # RFC-0018 packed segment records; the body IS the vertex key
+    wire_path_escape           # RFC-0018 §5.4: skippable in a frame, rejected as a key
+    wire_trailer               # the opt-in CRC and timestamp trailer, and its loud refusal
+    wire_decode_refusals       # the four decode verdicts; the injected walk-stack bound
+    wire_arena_decode          # decode_into over a stack bump source — a flat, heap-free arena
+    wire_lazy_view             # ADR-0053 tlv_view_t: a link boundary that falls mid-header
+)
+
+# The view / ownership domain (#1383) — the L0/L1 substrate every other example stands on.
+# `view_sync_pool` is the ONE target here a build configuration can forbid: a target that sets
+# `tr::mem::kSpinWaitSafe = false` may not instantiate `sync_pool_t` at all. That is a C++ type
+# knob in `config_override.hpp` (ADR-0068), invisible to CMake, so there is deliberately no
+# exclusion for it here — the example puts its body in a template, follows the binding with
+# `if constexpr`, and SKIPS at run time. An example a binding does not apply to must never
+# break the build.
+set(LIBTRACER_VIEW_EXAMPLES
+    view_segment_refcount  # the refcounted segment; copy == clone; reclaim at the last drop
+    view_subview           # the {owner, offset, length} window, narrowed without a copy
+    view_borrow            # route the app's OWN bytes (ADR-0012) vs over_bytes, which copies
+    view_rope_compose      # the rope: assembly is chaining, never memcpy
+    view_rope_subrope      # a sub-range starting mid-link; walk() and the iovec egress
+    view_pool_backend      # a bounded caller-owned slab; exhaustion by value, not by OOM
+    view_device_rope       # a DEVICE link: NOT_HOST is permanent, NO_MEMORY is not
+    view_sync_pool         # ADR-0060 §2 — a shared seam needs a thread-safe backend
+)
+
+foreach(example IN LISTS LIBTRACER_WIRE_EXAMPLES LIBTRACER_VIEW_EXAMPLES)
+    add_executable(${example} ${example}.cpp)
+    target_link_libraries(${example} PRIVATE libtracer)
+    if(MSVC)
+        target_compile_options(${example} PRIVATE /W4)
+    else()
+        target_compile_options(${example} PRIVATE -Wall -Wextra)
+    endif()
+endforeach()
+
+# `Threads::Threads` was already found in this directory scope (the graph block above).
+target_link_libraries(view_sync_pool PRIVATE Threads::Threads)
+
+# The same alias as the two blocks above, and for the same reason: a second bare spelling of
+# the test guard anywhere in this file would make the line-87 citation anchor ambiguous.
+if(LIBTRACER_REGISTER_GRAPH_EXAMPLE_TESTS)
+    foreach(example IN LISTS LIBTRACER_WIRE_EXAMPLES LIBTRACER_VIEW_EXAMPLES)
+        add_test(NAME example_${example} COMMAND ${example})
+    endforeach()
+endif()

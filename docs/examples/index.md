@@ -29,6 +29,22 @@ verbatim from that file, so it cannot drift from what actually compiles.
 | [Unsubscribe & the release hook](sub-unsubscribe.md) | L4 graph | `unsubscribe(sub, release)`; when the `{fn, ctx}` pair is safe to free |
 | [Unsubscribing from inside a delivery](sub-unsubscribe-from-dispatch.md) | L4 graph | ADR-0080's deferred grace point; `reclaim_local` vs `reclaim_strict` |
 | [Retire drops a producer's subscriptions](sub-retire.md) | L4 graph | RFC-0009 §B re-virginize; what survives a retire, and what liveness does not do yet |
+| [The TLV header and the `opt` byte](wire-tlv-header.md) | L2/L3 codec | four header bytes, the reserved `opt` bits, and who decides the length width |
+| [Structured or opaque — one bit decides](wire-structured-vs-opaque.md) | L2/L3 codec | `opt.PL` over the same body bytes: two children, or one payload |
+| [A `PATH` body is packed segment records](wire-packed-path.md) | L2/L3 codec | RFC-0018: one spelling per address, and the body IS the vertex-map key |
+| [The escape record](wire-path-escape.md) | L2/L3 codec | RFC-0018 §5.4: stepped over by an unknowing hop, refused in canonical context |
+| [The trailer: CRC and timestamp](wire-trailer.md) | L2/L3 codec | opt-in integrity at the end; `FRAME_CRC_FAIL`; the loud `opt.ts` refusal |
+| [What `decode` refuses](wire-decode-refusals.md) | L2/L3 codec | the four verdicts; RFC-0006 nesting bounded by the caller's injected source |
+| [`decode_into`: a flat arena](wire-arena-decode.md) | L2/L3 codec | a pre-order node array over a stack bump source — zero heap, borrowed spans |
+| [`tlv_view_t`: a scattered frame](wire-lazy-view.md) | L1 + L2/L3 | ADR-0053 lazy decode over a rope split mid-header; `verify` and `materialize` |
+| [The segment, and its refcount](view-segment-refcount.md) | L1 views | copy == clone; the last drop reclaims; what every other example's first line means |
+| [`subview`](view-subview.md) | L1 views | the `{owner, offset, length}` window narrowed by arithmetic, not by copying |
+| [`borrow`: the app's own bytes](view-borrow.md) | L0/L1 substrate | ADR-0012 transparent byte router; pointer identity vs `over_bytes`, which copies |
+| [The rope](view-rope-compose.md) | L1 views | assembly is chaining; `only()`; the inline link count is a cost knob, not a limit |
+| [`subrope` and the iovec egress](view-rope-subrope.md) | L1 views | a sub-range starting mid-link; `walk()`; `try_to_iovec` vs `to_iovec` |
+| [A bounded backend](view-pool-backend.md) | L0/L1 substrate | a caller-owned slab; exhaustion by value; `NO_MEMORY` is transient |
+| [A `DEVICE` link](view-device-rope.md) | L0/L1 substrate | a heterogeneous rope; `NOT_HOST` is permanent; `mem::transfer` declines |
+| [A shared seam needs a thread-safe backend](view-sync-pool.md) | L0/L1 substrate | ADR-0060 §2 `sync_pool_t`; the `kSpinWaitSafe` run-time skip |
 
 The toctree below is the order of record; this table adds the layer and the summary.
 Each example's layer column names the module that owns the types it uses — the
@@ -70,16 +86,22 @@ their test registrations (`core/examples/CMakeLists.txt:87-96`). The option defa
 `ctest --test-dir build -R example_` runs **two fewer** — a pass with two examples
 absent rather than skipped, which no ctest output distinguishes from a clean full run.
 
-One target is conditional at **run** time rather than build time, which is a different hazard
+Two targets are conditional at **run** time rather than build time, which is a different hazard
 with the same ending. [`sub_unsubscribe_from_dispatch`](sub-unsubscribe-from-dispatch) demonstrates
-unsubscribing from inside a delivery — a shape `reclaim_strict_t` forbids. It is always built, but
-under a strict binding it prints `skipped:` and exits `0`, so `ctest` records a **pass for an
-example that demonstrated nothing**. The reclamation policy is bound as plain C++ rather than as a
-CMake option, so neither CMake nor ctest can label that case; the binary announces the bound policy
-on its first line, and that line is the only place the distinction is visible.
+unsubscribing from inside a delivery — a shape `reclaim_strict_t` forbids — and
+[`view_sync_pool`](view-sync-pool) binds a spin-waiting critical section, which a target that sets
+`tr::mem::kSpinWaitSafe = false` may not instantiate at all. Both are always built; under a
+binding an example does not apply to, it prints `skipped:` and exits `0`, so `ctest` records a
+**pass for an example that demonstrated nothing**. Both knobs are bound as plain C++ rather than CMake
+options, so neither CMake nor ctest can label that case; each binary announces the bound value on
+its first line, and that line is the only place the distinction is visible.
 
 The eight `graph_*` targets are pure in-process L4 and are built unconditionally; run them
-together with `ctest --test-dir build -R example_graph_`.
+together with `ctest --test-dir build -R example_graph_`. The eight `wire_*` and eight `view_*`
+targets are likewise unconditional — pure L0/L1/L2/L3, no net plane, no sockets — and run with
+`ctest --test-dir build -R example_wire_` and `-R example_view_`. Those per-domain `ctest -R`
+spellings are the maintained way to run a group; the explicit `./build/examples/…` list above
+predates them and is deliberately left as the original seven rather than grown to every target.
 :::
 
 ```{toctree}
@@ -109,4 +131,20 @@ The delivery policy is per subscription <sub-durability-latch>
 Unsubscribe & the release hook <sub-unsubscribe>
 Unsubscribing from inside a delivery <sub-unsubscribe-from-dispatch>
 Retire drops a producer's subscriptions <sub-retire>
+The TLV header and the opt byte <wire-tlv-header>
+Structured or opaque — one bit decides <wire-structured-vs-opaque>
+A PATH body is packed segment records <wire-packed-path>
+The escape record <wire-path-escape>
+The trailer: CRC and timestamp <wire-trailer>
+What decode refuses <wire-decode-refusals>
+decode_into: a flat arena <wire-arena-decode>
+tlv_view_t: a scattered frame <wire-lazy-view>
+The segment, and its refcount <view-segment-refcount>
+subview <view-subview>
+borrow: the app's own bytes <view-borrow>
+The rope <view-rope-compose>
+subrope and the iovec egress <view-rope-subrope>
+A bounded backend <view-pool-backend>
+A DEVICE link <view-device-rope>
+A shared seam needs a thread-safe backend <view-sync-pool>
 ```
