@@ -508,6 +508,58 @@ jobs:
         if: always()
         run: chown -R "$(stat -c '%u:%g' ..)" .
 
+  # The failable census, RUN rather than compiled (#1414). Both of its modes are
+  # deterministic gates over counts, not timings, so neither needs a quiesced host and
+  # neither can be confounded by a shared runner's load — the same property that lets
+  # perf-local.yml's `Zero-heap forward gate` run there.
+  #
+  # It is a SEPARATE job on purpose: bench-compile above contracts "compile EVERY bench
+  # target, run none of them", and quietly running one target inside it would make that
+  # header a lie and put a runtime failure under a compile gate's name.
+  #
+  # What it defends: `guard` is the #848 escape gate; `blocks` is the block census, which
+  # until #1402 could not report a zero-escape row at all because its two columns were not
+  # disjoint — and NOTHING ran it, so the rot was found by hand months later. The two
+  # `census_canary_*` rows assert the disjointness in both directions. Ablate by pointing
+  # `counting_source_t::try_alloc` back at `tr::mem::heap_source()`: the job goes red on
+  # `census_canary_seam_only ... verdict=FAIL`.
+  census-gate:
+    runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
+    container: ubuntu:24.04
+    # One bench target plus libtracer, then two sub-second runs. Short-job floor of 15.
+    timeout-minutes: 15
+    steps:
+      - name: Toolchain (container has no preinstalled tool set)
+        # Same step and same measured distribution as bench-compile's (p50 0.67, max 1.32).
+        timeout-minutes: 8
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            build-essential cmake git ca-certificates
+      - uses: actions/checkout@v4
+      - name: Build bench_failable_census only
+        # Its own build tree: bench-compile writes bench/build, and on the self-hosted
+        # runner the two jobs can share a workspace.
+        run: |
+          cmake -S bench -B bench/build-census -DCMAKE_BUILD_TYPE=Release
+          cmake --build bench/build-census --target bench_failable_census -j "$(nproc)"
+      # Each gate is ONE command, not a pipeline. `container:` has no bash, so every `run:`
+      # here is `sh -e {0}` — dash, whose `set` has no `-o pipefail`. A first cut wrote
+      # `set -o pipefail && … | tee …` and the step died on `Illegal option -o pipefail`
+      # before the census ran at all. A bare command needs neither: `sh -e` fails the step
+      # on its exit status, and the transcript is already the step's log.
+      - name: "Block census gate (blocks) — the two columns must stay disjoint"
+        run: ./bench/build-census/bench_failable_census blocks
+      # Quoted because an unquoted YAML scalar treats ` #848` as a comment and silently
+      # truncates the name — which it did, on the first cut.
+      - name: "Allocation escape gate (guard) — #848"
+        run: ./bench/build-census/bench_failable_census guard
+      - name: Restore workspace ownership for the host runner
+        # Same reason as bench-compile's: root-owned leftovers in the shared _work tree
+        # break the non-container jobs' checkout cleanup.
+        if: always()
+        run: chown -R "$(stat -c '%u:%g' ..)" .
+
   # This workflow's own `paths:` trigger, gated against what its jobs actually build
   # (#1082). The list used to be hand-written — `core/**`, `bench/**`,
   # `tests/packaging/**` — while ctest targets defined in core/tests/CMakeLists.txt
