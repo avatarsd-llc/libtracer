@@ -353,3 +353,97 @@ if(LIBTRACER_NET_PLANE)
         endforeach()
     endif()
 endif()
+
+# The net-per-kind domain (#1383) — one page per wire technology, plus the seam they all
+# implement and the registry that selects between them by name. Appended at EOF for the same
+# reason every block above it was: `docs/examples/index.md` pins line-numbered citations into
+# the first block, and anything inserted there moves them.
+#
+# This is the first group whose targets are guarded INDIVIDUALLY rather than as a whole. The
+# routing block above is one `if(LIBTRACER_NET_PLANE)` because its subject is that one option;
+# here each example's subject is a different option, and folding them into one guard would
+# make a UDP-only build lose the UDP example. So the absence is recorded per kind:
+#
+#   net_transport_seam        (none)                      — transport_t + loopback are core
+#   net_kind_catalog          LIBTRACER_NET_PLANE         — transport_vertex_t is the plane
+#   net_udp_datagram          LIBTRACER_TRANSPORT_UDP
+#   net_dial_and_listen       LIBTRACER_TRANSPORT_TCP
+#   net_tcp_stream_framing    LIBTRACER_TRANSPORT_TCP
+#   net_multi_peer_listener   LIBTRACER_TRANSPORT_TCP
+#   net_ws_upgrade            LIBTRACER_TRANSPORT_WS
+#   net_can_bus_peers         LIBTRACER_TRANSPORT_CAN
+#
+# `net_multi_peer_listener` is additionally the ONE target in the whole examples tree whose
+# subject a build can compile out WITHOUT CMake being able to see it: the ADR-0044 bus module
+# is bound by `kBusLinks` in config_override.hpp (ADR-0068), which is plain C++. It follows the
+# binding with `if constexpr`, states the skip, and exits 77 — and the SKIP_RETURN_CODE
+# property below is what makes ctest read that as `Skipped` rather than as a pass. That is
+# strictly better than the two older run-time skips in this file, which exit 0 and are
+# therefore indistinguishable from a real pass; prefer this shape for any new one.
+set(LIBTRACER_NET_KIND_EXAMPLES_CORE
+    net_transport_seam        # the three-call seam every kind implements, and nothing else
+)
+set(LIBTRACER_NET_KIND_EXAMPLES_PLANE
+    net_kind_catalog          # a kind is a NAME: two registries, both open, both strict
+)
+set(LIBTRACER_NET_KIND_EXAMPLES_UDP
+    net_udp_datagram          # a datagram already has boundaries, so udp adds no framing
+)
+set(LIBTRACER_NET_KIND_EXAMPLES_TCP
+    net_dial_and_listen       # DIAL and LISTEN are two constructors of one type
+    net_tcp_stream_framing    # a stream has no boundaries, so the kind supplies a prefix
+    net_multi_peer_listener   # one listener, many slots; p<slot> is a POSITION, not an identity
+)
+set(LIBTRACER_NET_KIND_EXAMPLES_WS
+    net_ws_upgrade            # no frame crosses a ws link until the HTTP Upgrade completes
+)
+set(LIBTRACER_NET_KIND_EXAMPLES_CAN
+    net_can_bus_peers         # the one BUS kind: peers synthesized from traffic, ADR-0044
+)
+
+set(LIBTRACER_NET_KIND_EXAMPLES ${LIBTRACER_NET_KIND_EXAMPLES_CORE})
+if(LIBTRACER_NET_PLANE)
+    list(APPEND LIBTRACER_NET_KIND_EXAMPLES ${LIBTRACER_NET_KIND_EXAMPLES_PLANE})
+endif()
+if(LIBTRACER_TRANSPORT_UDP)
+    list(APPEND LIBTRACER_NET_KIND_EXAMPLES ${LIBTRACER_NET_KIND_EXAMPLES_UDP})
+endif()
+if(LIBTRACER_TRANSPORT_TCP)
+    list(APPEND LIBTRACER_NET_KIND_EXAMPLES ${LIBTRACER_NET_KIND_EXAMPLES_TCP})
+endif()
+if(LIBTRACER_TRANSPORT_WS)
+    list(APPEND LIBTRACER_NET_KIND_EXAMPLES ${LIBTRACER_NET_KIND_EXAMPLES_WS})
+endif()
+if(LIBTRACER_TRANSPORT_CAN)
+    list(APPEND LIBTRACER_NET_KIND_EXAMPLES ${LIBTRACER_NET_KIND_EXAMPLES_CAN})
+endif()
+
+foreach(example IN LISTS LIBTRACER_NET_KIND_EXAMPLES)
+    add_executable(${example} ${example}.cpp)
+    target_link_libraries(${example} PRIVATE libtracer)
+    if(MSVC)
+        target_compile_options(${example} PRIVATE /W4)
+    else()
+        target_compile_options(${example} PRIVATE -Wall -Wextra)
+    endif()
+endforeach()
+
+# `Threads::Threads` was already found in this directory scope; every kind here spawns a
+# receive thread (or, for the loopback and the in-memory CAN bus, drives one of its own).
+foreach(example IN LISTS LIBTRACER_NET_KIND_EXAMPLES)
+    target_link_libraries(${example} PRIVATE Threads::Threads)
+endforeach()
+
+# The same alias as every block above, for the same anchor reason.
+if(LIBTRACER_REGISTER_GRAPH_EXAMPLE_TESTS)
+    foreach(example IN LISTS LIBTRACER_NET_KIND_EXAMPLES)
+        add_test(NAME example_${example} COMMAND ${example})
+    endforeach()
+    # 77 is the autotools convention ctest documents, spelled `kSkipExitCode` on the C++ side
+    # of `net_multi_peer_listener.cpp` — change both together. Without this property that exit
+    # is a FAILURE; with it, a bus-closed build reports the example as Skipped, which is the
+    # honest answer and the one no `return 0` can give.
+    if(TEST example_net_multi_peer_listener)
+        set_property(TEST example_net_multi_peer_listener PROPERTY SKIP_RETURN_CODE 77)
+    endif()
+endif()
