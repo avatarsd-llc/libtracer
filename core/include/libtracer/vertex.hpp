@@ -1196,9 +1196,9 @@ class vertex_t {
             // half resident until an unrelated `add_edge` happened to land on this index — so
             // an unsubscribed edge kept a frame segment alive indefinitely. This is the same
             // move-an-inert-shell reclaim @ref evict_link_edges already performs under this
-            // very lock, and it is safe for the same reason: an @ref edge_view_t snapshot owns
-            // its copies and a refcount clone of the route (ADR-0041 §2), so releasing the pin
-            // here can never dangle a dispatch already in flight.
+            // very lock, and it is safe for the same reason: an @ref edge_view_t snapshot HOLDS
+            // the target key and the whole cold half by refcount (ADR-0041 §2, #1448), so
+            // releasing the pin here can never dangle a dispatch already in flight.
             //
             // The 80-byte slot SHELL stays — RFC-0009 §D.2 makes `:subscribers[]` indices
             // stable, so the vector must not shrink; only the retained state is freed.
@@ -1309,8 +1309,9 @@ class vertex_t {
      * refcount pin, the target key, and the whole `subscriber_remote_t` block are
      * released in place (the slot shell stays — §D.2 index stability — and
      * @ref add_edge reuses it). An in-flight delivery is unaffected: its
-     * @ref edge_view_t snapshot owns copies and a refcount CLONE of the route
-     * (ADR-0041 §2), so releasing the slot's pin here never dangles a dispatch.
+     * @ref edge_view_t snapshot HOLDS the target key and the whole `subscriber_remote_t`
+     * by refcount (ADR-0041 §2, #1448), so releasing the slot's pin here never dangles a
+     * dispatch — the record it reads outlives this eviction by construction.
      * @return The number of edges evicted (the caller unwinds exactly this many
      *         from the RFC-0005 listener bookkeeping).
      */
@@ -1437,28 +1438,29 @@ class vertex_t {
      * @brief What a snapshot DECLINED to hand back: the deliveries a vertex shed before
      *        the graph could dispatch them (#896).
      *
-     * `snapshot_edges` is allowed to come back short, and both ways it can are specified
-     * drops rather than aborts (#477). A drop nobody counts, though, is indistinguishable
+     * `snapshot_edges` is allowed to come back short, and the way it can is a specified
+     * drop rather than an abort (#477). A drop nobody counts, though, is indistinguishable
      * from a delivery that never had to happen — which is how a whole fan-out could be
      * shed under memory pressure while `graph_t::delivery_drops()`, the one observable,
      * read zero. `vertex_t` owns no counters (it is the storage layer, not the
      * instrumentation layer): it reports the tally by reference and `graph_t::fan_out`
      * folds it into the graph's per-cause counters at the frame that owns them.
      *
-     * The two causes stay separate all the way out: an operator reading a rising
-     * `truncated` is looking at a fan-out wider than the inline snapshot on a heap that
-     * would not lend it a buffer, which is a capacity story, not the per-edge allocation
-     * failure `out_of_memory` reports.
+     * **There used to be a second cause, and #1448 deleted the failure, not the report.**
+     * A per-edge `out_of_memory` counted the edges whose owning link / caller copies could
+     * not be allocated. @ref edge_view_t no longer copies them — it takes a refcount share
+     * of the immutable cold half — so the per-edge snapshot reaches no allocator on any
+     * edge shape and cannot fail. What remains is the capacity degrade: a fan-out wider
+     * than the inline snapshot, on a heap that would not lend it a buffer. The
+     * OUT_OF_MEMORY *delivery* cause is untouched and still counted from the legs that can
+     * still hit it (`graph_t::dispatch_edge_target`'s rope clone, the store legs).
      */
     struct snapshot_drops_t {
-        /** @brief Edges skipped because an owning copy (target key / link / caller) could
-         *         not be allocated — one delivery each. */
-        std::uint32_t out_of_memory = 0;
         /** @brief Edges past the inline prefix, abandoned because the overflow buffer for a
          *         wide fan-out could not be reserved — the capacity degrade. */
         std::uint32_t truncated = 0;
         /** @brief Did this snapshot shed anything? The ONE test a clean fan-out pays. */
-        [[nodiscard]] bool any() const noexcept { return (out_of_memory | truncated) != 0; }
+        [[nodiscard]] bool any() const noexcept { return truncated != 0; }
     };
 
     /**
@@ -1470,15 +1472,14 @@ class vertex_t {
      * larger subscriber list reserves @p overflow once and fills it instead (then
      * @p overflow is non-empty and holds ALL views).
      *
-     * Every allocation here is NOTHROW (#477 — this runs on the writer thread's
-     * fan-out, where a bad_alloc is an abort() under `-fno-exceptions`): an
-     * unreservable @p overflow degrades the snapshot to the first `kInlineFanout`
-     * views in @p inline_buf (the rest of this delivery is dropped), and an edge
-     * whose owning copies cannot be cloned is skipped (that one delivery dropped).
-     * Both are TALLIED into @p drops (@ref snapshot_drops_t) so the caller can report
-     * them; neither is silent any more (#896).
-     * The small local fan-out (empty target/link/caller strings) stays allocation-
-     * free end to end, so the hot path cannot even reach a probe.
+     * The ONE way this can come back short is NOTHROW (#477 — this runs on the writer
+     * thread's fan-out, where a bad_alloc is an abort() under `-fno-exceptions`): an
+     * unreservable @p overflow degrades the snapshot to the first `kInlineFanout` views in
+     * @p inline_buf, and the rest of this delivery is dropped. It is TALLIED into @p drops
+     * (@ref snapshot_drops_t) so the caller can report it; it is not silent (#896).
+     * The per-edge copy itself cannot fail at all since #1448 — it is two pointer copies
+     * and two refcounts on EVERY edge shape, remote included — so the whole snapshot
+     * reaches an allocator only for that one overflow reservation.
      * **NO LOCK (#635).** The source is the vertex's PUBLISHED, immutable-after-publish edge
      * array, read under a bounded per-participant EDGE PIN (`%edge_pin.hpp`) whose scope is
      * this copy loop and nothing else — released before the caller's first `dispatch_edge`, so
@@ -2115,29 +2116,24 @@ class vertex_t {
 #endif
     }
 
-    // The dispatch view of one slot; call with m_ held. Owning copies of the byte/string
-    // fields (the slot may be cleared while dispatch runs outside the lock); the route
-    // copy is a refcount clone (ADR-0041 §2 — keeps it alive across an unsubscribe).
+    // The dispatch view of one slot; call with m_ held. Every field is a pointer copy or a
+    // refcount: the target key and the cold half are both immutable shared records, so the
+    // view keeps each alive across a concurrent unsubscribe without owning any bytes
+    // (ADR-0041 §2's "one copy at subscribe, rope it thereafter", now for the whole half).
     //
-    // Single named return (NRVO), filled in place: this runs once per active edge on
-    // every fan-out (snapshot_edges), so it is a dispatch hot path. The earlier
-    // two-branch double-return brace-initialized the empty cold members and defeated
-    // NRVO, costing ~7 ns/edge — ~+7 µs/publish at fan-out 1024 (the #385
-    // subscriber-cold-split regression). The cold `remote` fields keep their
-    // default-member-init values (empty link/route/caller, non-compact) when local.
+    // The cold branch is GONE with #1448 — a null handle assigns as cheaply as a populated
+    // one, so there is nothing left to predicate. That also retires the NRVO hazard this
+    // comment used to carry: the earlier two-branch double-return brace-initialized the
+    // empty cold members and cost ~7 ns/edge (~+7 µs/publish at fan-out 1024, the #385
+    // subscriber-cold-split regression). The single named return stays anyway — it is the
+    // shape `try_copy_published`'s successor shares.
     [[nodiscard]] edge_view_t edge_view_of(const subscriber_t& s) const {
         edge_view_t e;
         e.callback = s.callback;
         e.callback_ctx = s.callback_ctx;
         e.target_key = s.target_key;
         e.binding = s.binding;
-        if (s.remote != nullptr) {
-            e.link = s.remote->link;
-            e.return_route = s.remote->return_route;
-            e.reverse_route = s.remote->reverse_route;
-            e.delivery_compact = s.remote->delivery_compact;
-            e.caller = s.remote->caller;
-        }
+        e.remote = s.remote;
         return e;
     }
 
@@ -2226,8 +2222,8 @@ class vertex_t {
                 // the entry names the slot's record instead of reproducing it. One relaxed
                 // increment, nothrow, and no `#981` string-copy residual to carry here — the
                 // two `try_assign` probe windows that used to live on this line are gone from
-                // the republish entirely (they remain on the delivery path, in
-                // `try_copy_published`, which this change deliberately does not touch).
+                // the republish entirely. #1448 then took the same two off the DELIVERY path
+                // (`copy_entry`), so no holder of this record copies its bytes any more.
                 e.remote = s.remote;
             }
         }
@@ -2242,13 +2238,15 @@ class vertex_t {
      * @brief Copy every ACTIVE entry of @p p into the caller's buffers — the pinned reader's
      *        whole critical section, and the only work an edge pin covers.
      *
-     * Bounded, allocation-light and provably non-re-entrant: every allocation here is NOTHROW
-     * (#477), and the small local fan-out (empty target/link/caller strings) reaches no probe
-     * at all — it is refcount clones and POD copies, exactly what it was under the lock.
+     * Bounded, provably non-re-entrant and — since #1448 — reaching an allocator at exactly
+     * ONE place, the wide-fan-out overflow reservation below. The per-entry copy is four
+     * words and two refcounts on EVERY edge shape (`%copy_entry`): the remote edge's two
+     * `std::string` copies are gone, so there is no per-edge probe left to fail and no
+     * per-edge OOM leg to take.
      *
-     * Both shed legs TALLY into @p drops at the site the delivery is actually abandoned —
-     * not at the caller's frame, which cannot tell a truncated snapshot from a short
-     * subscriber list (#896).
+     * The one remaining shed TALLIES into @p drops at the site the delivery is actually
+     * abandoned — not at the caller's frame, which cannot tell a truncated snapshot from a
+     * short subscriber list (#896).
      */
     [[nodiscard]] static std::size_t copy_published(const edge_pub_t* p,
                                                     edge_snapshot_t& inline_buf,
@@ -2257,10 +2255,11 @@ class vertex_t {
         if (p == nullptr) return 0;
         // #981 residual: the wide-fan-out overflow buffer keeps `try_reserve`'s
         // `-fno-exceptions` probe window — a task switch between the probe's free and the
-        // `reserve` abort()s the node (#850). `edge_view_t` owns `std::string`s and
-        // refcounted views, so `block_array_t` (memcpy relocation) cannot hold it. The
-        // inline prefix below is the mitigation that exists today: a fan-out up to
-        // `kCapacity` reaches no allocator at all.
+        // `reserve` abort()s the node (#850). `edge_view_t` still holds refcounted handles,
+        // so `block_array_t` (memcpy relocation) cannot hold it — the handles would be
+        // relocated without their destructors and the counts would leak. The inline prefix
+        // below is the mitigation that exists today: a fan-out up to `kCapacity` reaches no
+        // allocator at all, and since #1448 that is true whatever the edges are.
         const bool use_heap =
             p->count > edge_snapshot_t::kCapacity && tr::detail::try_reserve(overflow, p->count);
         const pub_edge_t* src = p->entries();
@@ -2277,10 +2276,7 @@ class vertex_t {
                 break;
             }
             edge_view_t e;
-            if (!try_copy_published(src[i], e)) {
-                ++drops.out_of_memory;  // OOM: drop this one edge's delivery
-                continue;
-            }
+            copy_entry(src[i], e);
             if (use_heap)
                 overflow.push_back(std::move(e));  // reserved above — no reallocation
             else
@@ -2291,32 +2287,26 @@ class vertex_t {
     }
 
     /**
-     * @brief The NOTHROW copy of one published entry into a dispatch view (#477).
+     * @brief Copy one published entry into a dispatch view — the DELIVERY hot path's whole
+     *        per-edge cost, and it cannot fail (#1448).
      *
-     * A single named return filled in place, with the cold half touched only when it exists —
-     * the shape inherited from the pre-#635 `try_edge_view_of`, which this replaced on the
-     * fan-out path and which #1003 deleted once nothing called it any more. The
-     * plain in-process edge — the fan-1-vs-Zenoh case and the bulk of a wide fan-out — copies
-     * two pointers and takes one refcount clone, reaching no allocator and therefore no probe.
-     * @retval false An owning copy failed (OOM) — drop this edge's delivery.
+     * Two pointer copies and two refcounts, with **no branch on the edge shape**: the cold
+     * half is a share, so a remote edge costs a relaxed increment where it used to cost two
+     * probe-guarded `std::string` copies plus two `view_t` clones, per edge, PER DELIVERY.
+     * The predecessor was `try_copy_published`, and its `false` leg — the one thing on this
+     * path that could allocate — is what disappeared; `copy_published` therefore has no
+     * per-edge OOM tally left to keep.
+     *
+     * Named `copy_entry` rather than anything prefixed `copy_published`: `bench/symbol_ratchet.py`
+     * matches its pins by demangled PREFIX, and a sibling called `copy_published_entry` would
+     * be silently summed into the `vertex_t::copy_published` pin.
      */
-    [[nodiscard]] static bool try_copy_published(const pub_edge_t& in, edge_view_t& out) noexcept {
+    static void copy_entry(const pub_edge_t& in, edge_view_t& out) noexcept {
         out.callback = in.callback;
         out.callback_ctx = in.callback_ctx;
         out.target_key = in.target_key;  // refcount clone — nothrow
         out.binding = in.binding;        // two words, trivially copyable
-        if (in.remote == nullptr) return true;
-        // #981 residual, same as `try_publish_edges`: these two `std::string` copies keep
-        // `try_assign`'s `-fno-exceptions` probe window (abort() on a lost race, #850) and
-        // cannot take the ADR-0065 seam. The in-process edge above returns before reaching
-        // them, so the hot fan-out leg is unaffected either way.
-        if (!tr::detail::try_assign(out.link, in.remote->link) ||
-            !tr::detail::try_assign(out.caller, in.remote->caller))
-            return false;
-        out.return_route = in.remote->return_route;    // refcount clone — nothrow
-        out.reverse_route = in.remote->reverse_route;  // refcount clone — nothrow
-        out.delivery_compact = in.remote->delivery_compact;
-        return true;
+        out.remote = in.remote;          // refcount clone of the shared cold half — nothrow
     }
 
     /** @brief The slot index of the descriptor-table entry named @p name, or `-1` (no

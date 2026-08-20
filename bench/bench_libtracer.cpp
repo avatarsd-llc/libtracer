@@ -375,6 +375,118 @@ void run_inproc_target(std::size_t S, std::size_t F, target_kind_t kind, const c
 }
 
 /**
+ * @brief The REMOTE fan-out sweep (#1448) — mode `inproc-remote`, reachable only as the
+ *        isolated `fan-remote` sweep.
+ *
+ * The third of `dispatch_edge`'s legs, and the one no row in this file measured. `inproc`
+ * subscribes with `g.subscribe(path, callback)`, whose edge carries NO cold half at all
+ * (`subscriber_t::remote` stays null); `inproc-target-*` writes a `SUBSCRIBER` naming a local
+ * PATH, whose cold half is null too unless a caller context is supplied. So the whole
+ * remote-subscriber machinery — the link NAME, the stored return route, the fan-in caller —
+ * was invisible to the fan-out curves, in exactly the way #619 found `dispatch_edge_target`
+ * invisible before it.
+ *
+ * That blind spot has cost something concrete twice now. #1442 took a deep copy of the cold
+ * half off the SUBSCRIBE path and had to be priced on `bench_subscribe_index` because no
+ * fan-out row could see it; #1448 took the same copy off the DELIVERY path — two `std::string`
+ * copies per remote edge per write — and this row is what prices it.
+ *
+ * **NOT part of the default sweep, deliberately.** `perf_gate.py`, `render_history.py` and
+ * `collate.py` join on the default run's `(mode, size, fan, ep)` keys, and a new row there is
+ * a new series with no history. This one is reached only through `argv[1] == "fan-remote"`,
+ * for A/B runs, exactly as `fan` and `target` are.
+ *
+ * The sink is a `{fn, ctx}` counter and nothing else. That is the point rather than a
+ * shortcut: what is under test is the graph's per-edge snapshot and dispatch, not a
+ * transport, and a real egress would bury the term in `sendmsg`. The counter is checked
+ * before the timed phase — a remote edge whose link never populated delivers nothing and this
+ * row would happily report the cost of not delivering.
+ *
+ * Links are named `192.168.4.N:9000`-style and therefore past the small-string buffer, which
+ * is #1441's finding restated: a deployment naming links `host:port` sits on the expensive
+ * side of the SSO boundary by default, and an SSO-sized link would hide most of what the
+ * removed copy cost.
+ */
+void run_inproc_remote(std::size_t S, std::size_t F, const char* mode,
+                       std::uint64_t budget = kDeliveryBudget,
+                       std::uint64_t latbudget = kLatencyDeliveryBudget) {
+    graph_t g;
+    std::atomic<std::uint64_t> recv{0};
+    struct sink_ctx_t {
+        std::atomic<std::uint64_t>* n;
+        std::size_t link_bytes;
+    };
+    sink_ctx_t sink_ctx{&recv, 0};
+    g.configure_remote_delivery_sink(
+        [](void* ctx, const tr::graph::remote_delivery_t& d, const rope_t&) {
+            auto* s = static_cast<sink_ctx_t*>(ctx);
+            s->n->fetch_add(1, std::memory_order_relaxed);
+            s->link_bytes += d.link.size();  // READ the borrowed spelling, don't just count
+        },
+        &sink_ctx);
+
+    const path_t src_path = *path_t::parse("/bench/remote-src");
+    const vertex_handle_t src = g.register_vertex(src_path, role_t::STORED_VALUE);
+    // A bare SUBSCRIBER (no PATH child) is the remote form: no local target, delivery rides
+    // the return route over the link. The route is the smallest well-formed PATH TLV.
+    const view_t sub_tlv = owned_view(
+        std::vector<std::byte>{std::byte{0x04}, std::byte{0x40}, std::byte{0x00}, std::byte{0x00}});
+    const view_t route_tlv = owned_view(
+        std::vector<std::byte>{std::byte{0x06}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}});
+    std::size_t admitted = 0;
+    for (std::size_t f = 0; f < F; ++f) {
+        std::string link =
+            "192.168." + std::to_string(f / 250) + "." + std::to_string(f % 250) + ":9000";
+        if (g.subscribe_wire(src, sub_tlv, route_tlv, std::move(link)).has_value()) ++admitted;
+    }
+    if (admitted != F) {
+        std::fprintf(stderr, "SKIP mode=%s fanout=%zu: admitted %zu of %zu remote edges\n", mode, F,
+                     admitted, F);
+        return;
+    }
+
+    const std::vector<std::byte> tlv = value_tlv(S);
+    const auto put = [&](std::size_t) { (void)g.write(src, owned_view(tlv)); };
+
+    recv.store(0);
+    put(0);
+    if (recv.load() == 0) {
+        std::fprintf(stderr, "SKIP mode=%s fanout=%zu: no remote delivery reached the sink\n", mode,
+                     F);
+        return;
+    }
+
+    const std::size_t MSGS = publishes_for(F, budget);
+    const std::size_t LATN = publishes_for(F, latbudget);
+    for (std::size_t i = 0; i < 1000; ++i) put(i);  // warmup
+
+    recv.store(0);
+    const auto t0 = now_ns();
+    for (std::size_t i = 0; i < MSGS; ++i) put(i);
+    const double secs = (now_ns() - t0) / 1e9;
+    const double pub_s = MSGS / secs;
+    const double deliv_s = pub_s * static_cast<double>(F);
+    const double mb_s = deliv_s * static_cast<double>(S) / 1e6;
+    if (recv.load() != static_cast<std::uint64_t>(MSGS) * F) {
+        std::fprintf(stderr, "SKIP mode=%s fanout=%zu: %llu deliveries, expected %zu\n", mode, F,
+                     static_cast<unsigned long long>(recv.load()), MSGS * F);
+        return;
+    }
+
+    Latency lat;
+    for (std::size_t i = 0; i < LATN; ++i) {
+        const auto a = now_ns();
+        put(i);
+        lat.add(now_ns() - a);
+    }
+    emit("libtracer", mode, S, F, 1, pub_s, deliv_s, mb_s, lat.summarize());
+    // The sink's borrowed-link read must not be optimized away — it is the only thing that
+    // makes this row exercise the shared record rather than a pointer nobody dereferences.
+    if (sink_ctx.link_bytes == 0)
+        std::fprintf(stderr, "NOTE mode=%s fanout=%zu: sink read no link bytes\n", mode, F);
+}
+
+/**
  * @brief Deliver-only row (mode `inproc-deliver`): RFC-0008's edge-transition
  *        primitive, timed alone.
  *
@@ -1159,6 +1271,22 @@ void run_mode_fan() {
         run_inproc(kRefSize, F, kRefEndpoints, alloc_t::HEAP, false, "inproc");
 }
 
+/**
+ * @brief `fan-remote`: the same ladder over REMOTE wire subscribers (#1448).
+ *
+ * The `fan` ladder's edges are local callbacks and carry no cold half, so they price the
+ * dispatch WIDTH and nothing about the remote-subscriber record. This is the arm that does.
+ * The ladder is shared with @ref run_mode_fan on purpose — the two rows are meant to be read
+ * side by side at the same fan-out.
+ */
+void run_mode_fan_remote() {
+    constexpr std::size_t kLadder[] = {1, 8, 16, 32, 64, 128, 256, 512, 1024, 8192};
+    static_assert(std::size(kLadder) == std::size(kFanouts) + std::size(kFanoutsMid),
+                  "kLadder must be the union of kFanouts and kFanoutsMid — it is read against "
+                  "the `fan` ladder point for point");
+    for (std::size_t F : kLadder) run_inproc_remote(kRefSize, F, "inproc-remote");
+}
+
 /** @brief One selectable isolated sweep: its `argv[1]` spelling and the runner behind it. */
 struct bench_mode_t {
     std::string_view name; /**< What `argv[1]` must equal to select this sweep. */
@@ -1181,8 +1309,13 @@ struct bench_mode_t {
  * its sweep, with no second list to keep in step.
  */
 constexpr bench_mode_t kModes[] = {
-    {"grid", run_grid},          {"acl", run_mode_acl}, {"deliver", run_mode_deliver},
-    {"target", run_mode_target}, {"fan", run_mode_fan}, {"lkv", run_lkv_store_gate},
+    {"grid", run_grid},
+    {"acl", run_mode_acl},
+    {"deliver", run_mode_deliver},
+    {"target", run_mode_target},
+    {"fan", run_mode_fan},
+    {"lkv", run_lkv_store_gate},
+    {"fan-remote", run_mode_fan_remote},
 };
 
 /** @brief The usage text, on stderr, listing every entry of @ref kModes. */
