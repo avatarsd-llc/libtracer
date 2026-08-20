@@ -45,6 +45,14 @@ verbatim from that file, so it cannot drift from what actually compiles.
 | [A bounded backend](view-pool-backend.md) | L0/L1 substrate | a caller-owned slab; exhaustion by value; `NO_MEMORY` is transient |
 | [A `DEVICE` link](view-device-rope.md) | L0/L1 substrate | a heterogeneous rope; `NOT_HOST` is permanent; `mem::transfer` declines |
 | [A shared seam needs a thread-safe backend](view-sync-pool.md) | L0/L1 substrate | ADR-0060 §2 `sync_pool_t`; the `kSpinWaitSafe` run-time skip |
+| [The failable block seam](mem-block-source.md) | L0 substrate | nothrow `try_alloc`, sized `release`, `nullptr` on exhaustion; writing one |
+| [Two L0 seams, and the question that picks](mem-source-vs-backend.md) | L0 substrate | refcounted `segment_t` vs single-owner block — the owner count decides |
+| [A bump source](mem-bump-source.md) | L0 substrate | a cursor over a caller buffer; `release` is a no-op, `reset()` is not |
+| [The upstream decides what the buffer means](mem-bump-upstream.md) | L0 substrate | `heap_source()` makes it a fast path; `null_source()` makes it the bound |
+| [A long-lived seam has to recycle](mem-pool-source.md) | L0 substrate | ADR-0067 `pool_source_t`; `used()` is a high-water mark, not a total |
+| [Classes do not share](mem-size-classes.md) | L0 substrate | exact `(bytes, align)` classes; `classes_used()` / `overflowed()` size the span |
+| [A container that fails by value](mem-block-array.md) | L0 substrate | `block_array_t`: growth returns `false`; `push_slot`; the two static asserts |
+| [The `std::pmr` adapter](mem-source-resource.md) | L0 substrate | ADR-0079 `source_resource_t` — placement and bounding, never failability |
 
 The toctree below is the order of record; this table adds the layer and the summary.
 Each example's layer column names the module that owns the types it uses — the
@@ -97,11 +105,18 @@ options, so neither CMake nor ctest can label that case; each binary announces t
 its first line, and that line is the only place the distinction is visible.
 
 The eight `graph_*` targets are pure in-process L4 and are built unconditionally; run them
-together with `ctest --test-dir build -R example_graph_`. The eight `wire_*` and eight `view_*`
-targets are likewise unconditional — pure L0/L1/L2/L3, no net plane, no sockets — and run with
-`ctest --test-dir build -R example_wire_` and `-R example_view_`. Those per-domain `ctest -R`
+together with `ctest --test-dir build -R example_graph_`. The eight `wire_*`, eight `view_*` and
+eight `mem_*` targets are likewise unconditional — pure L0/L1/L2/L3, no net plane, no sockets —
+and run with `ctest --test-dir build -R example_wire_`, `-R example_view_` and
+`-R example_mem_`. Those per-domain `ctest -R`
 spellings are the maintained way to run a group; the explicit `./build/examples/…` list above
 predates them and is deliberately left as the original seven rather than grown to every target.
+
+The `mem_*` group is the one domain with **no** conditional target of either kind: no
+`if(LIBTRACER_NET_PLANE)` guard and no `if constexpr` run-time skip, because L0 has no knob that
+can forbid one of them. A green `ctest -R example_mem_` is therefore a pass for eight examples
+that all demonstrated something — which is exactly the property the two paragraphs above say the
+other groups cannot claim for themselves.
 :::
 
 ```{toctree}
@@ -147,4 +162,12 @@ subrope and the iovec egress <view-rope-subrope>
 A bounded backend <view-pool-backend>
 A DEVICE link <view-device-rope>
 A shared seam needs a thread-safe backend <view-sync-pool>
+The failable block seam <mem-block-source>
+Two L0 seams, and the question that picks <mem-source-vs-backend>
+A bump source <mem-bump-source>
+The upstream decides what the buffer means <mem-bump-upstream>
+A long-lived seam has to recycle <mem-pool-source>
+Classes do not share <mem-size-classes>
+A container that fails by value <mem-block-array>
+The std::pmr adapter <mem-source-resource>
 ```
