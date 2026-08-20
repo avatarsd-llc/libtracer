@@ -1035,6 +1035,120 @@ void test_unknown_h3_frames_skipped() {
 }
 
 /**
+ * @brief #1408 — the pre-auth H3 handshake ceiling MOVES with the configured budget.
+ *
+ * The bound used to be a file-local `constexpr std::size_t kMaxHandshakeBytes = 16'384`, which is
+ * a real bound but the wrong spelling: under the no-synthetic-limits rule a bound comes from an
+ * injected resource or per-target config, never from a magic constant. So the acceptance
+ * criterion is NOT "16 KiB is refused" — a test that re-asserts the literal passes on the
+ * unfixed build. Every leg is therefore a PAIR: the same bytes against a TIGHTENED listener and
+ * against a DEFAULT one, and only the pair distinguishes "the budget is honored" from "the
+ * endpoint refuses everything" (the #920 vectors' own shape).
+ *
+ * Each leg gets its own listener + client: the refusals here are CONNECTION-fatal (over-budget is
+ * a statement about the peer, unchanged by this issue), so a shared connection could not carry a
+ * second leg.
+ */
+void test_the_handshake_budget_is_the_configured_one() {
+    std::printf("WebTransport — the handshake budget is the CONFIGURED one (#1408):\n");
+    constexpr std::size_t kTight = 2048;
+
+    // Leg 1, tightened: an unknown/GREASE frame DECLARING 4096 bytes — under the 16 KiB
+    // default, over a 2048-byte budget. Only the two varints are written, so nothing but the
+    // declared length can decide this.
+    {
+        webtransport_transport_t tight(std::uint16_t{0}, g_cert, g_key, &tr::mem::heap_backend(),
+                                       /*max_frame=*/0, kTight);
+        check(tight.ok(), "leg 1: the 2048-byte-budget listener is up");
+        raw_wt_client_t cli(tight.local_port());
+        auto* s = cli.open_bidi();
+        std::vector<std::uint8_t> declared;
+        tr::net::wt_h3::append_varint(declared, grease_type(5));
+        tr::net::wt_h3::append_varint(declared, 4096);
+        cli.write(s, declared);
+        check(cli.wait_shutdown(3000ms),
+              "leg 1: a frame DECLARING 4096 bytes is refused under a 2048-byte budget");
+    }
+    // Leg 1, default budget: the SAME declaration, and the whole 4096-byte body behind it, is
+    // skipped and the session still establishes. Without this arm "refused" above would also be
+    // satisfied by an endpoint that refuses everything.
+    {
+        webtransport_transport_t wide(std::uint16_t{0}, g_cert, g_key);
+        raw_wt_client_t cli(wide.local_port());
+        auto* s = cli.open_bidi();
+        std::vector<std::uint8_t> bytes = grease_frame(5, 4096);
+        const auto hdr = connect_frame("127.0.0.1:0");
+        bytes.insert(bytes.end(), hdr.begin(), hdr.end());
+        cli.write(s, bytes);
+        check(wait_session(wide, 3000ms),
+              "leg 1: the same 4096-byte frame is skipped whole under the default budget");
+        check(!cli.shut.load(std::memory_order_relaxed),
+              "leg 1: and the default-budget connection was never torn down");
+    }
+
+    // Leg 2, tightened: the ACCUMULATOR, not the declaration. The frame declares exactly the
+    // budget (2048 — legal, the check is strictly greater), but type + length + body is 2052
+    // bytes on the wire, so `accumulate` passes the budget while the declared-length check
+    // does not. That is the byte-copy bound rather than the announcement bound.
+    {
+        webtransport_transport_t tight(std::uint16_t{0}, g_cert, g_key, &tr::mem::heap_backend(),
+                                       /*max_frame=*/0, kTight);
+        raw_wt_client_t cli(tight.local_port());
+        auto* s = cli.open_bidi();
+        cli.write(s, grease_frame(5, kTight));
+        check(cli.wait_shutdown(3000ms),
+              "leg 2: accumulating past the budget is refused even though the DECLARED length "
+              "is within it");
+    }
+    // Leg 2, default budget: the same 2052 bytes are accumulated, skipped whole, and the
+    // CONNECT behind them establishes the session.
+    {
+        webtransport_transport_t wide(std::uint16_t{0}, g_cert, g_key);
+        raw_wt_client_t cli(wide.local_port());
+        auto* s = cli.open_bidi();
+        std::vector<std::uint8_t> bytes = grease_frame(5, kTight);
+        const auto hdr = connect_frame("127.0.0.1:0");
+        bytes.insert(bytes.end(), hdr.begin(), hdr.end());
+        cli.write(s, bytes);
+        check(wait_session(wide, 3000ms),
+              "leg 2: the same 2052 accumulated bytes are fine under the default budget");
+    }
+
+    // Leg 3: the readback, and that the key is TIGHTEN-ONLY.
+    {
+        webtransport_transport_t tight(std::uint16_t{0}, g_cert, g_key, &tr::mem::heap_backend(),
+                                       /*max_frame=*/0, kTight);
+        check(tight.effective_max_handshake() == kTight,
+              "leg 3: a tightened budget is honored verbatim");
+        webtransport_transport_t wide(std::uint16_t{0}, g_cert, g_key, &tr::mem::heap_backend(),
+                                      /*max_frame=*/0, 1u << 20);
+        check(wide.effective_max_handshake() == webtransport_transport_t::kMaxHandshakeBytes,
+              "leg 3: a 1 MiB request is CLAMPED — a config key never raises a pre-auth bound");
+        webtransport_transport_t unset(std::uint16_t{0}, g_cert, g_key);
+        check(unset.effective_max_handshake() == webtransport_transport_t::kMaxHandshakeBytes,
+              "leg 3: 0 means the built-in default");
+        check(webtransport_transport_t::handshake_cap(0) ==
+                      webtransport_transport_t::kMaxHandshakeBytes &&
+                  webtransport_transport_t::handshake_cap(64) == 64 &&
+                  webtransport_transport_t::handshake_cap(1u << 20) ==
+                      webtransport_transport_t::kMaxHandshakeBytes,
+              "leg 3: handshake_cap() itself is 0-means-default, tighten-only");
+
+        // The DIAL half, without hand-rolling an H3 server: the wrong-CA dialer of #918 fails
+        // at TLS, so it never comes up — and must still report the budget it was built with,
+        // because the resolution happens before the dial.
+        webtransport_transport_t peer(std::uint16_t{0}, g_cert, g_key);
+        webtransport_transport_t dead("127.0.0.1", peer.local_port(), "/",
+                                      webtransport_dial_tls_t{.ca_file = g_other_cert},
+                                      &tr::mem::heap_backend(), /*max_frame=*/0,
+                                      /*defer_rx=*/false, /*max_handshake=*/4096);
+        check(!dead.ok(), "leg 3: the wrong-CA dial did not come up");
+        check(dead.effective_max_handshake() == 4096,
+              "leg 3: a DIAL that never came up still reports its own budget");
+    }
+}
+
+/**
  * @brief #1163 — a peer that opens and closes streams must not grow the endpoint forever.
  *
  * The leak: `impl_t::ctxs` gained one entry per peer stream and had no `erase` anywhere in the
@@ -1272,6 +1386,7 @@ int main() {
     test_spec_dial_connect_path();
     test_frame_stream_adoption_gate();
     test_unknown_h3_frames_skipped();
+    test_the_handshake_budget_is_the_configured_one();
     test_peer_stream_cycling_is_bounded();
     test_push_on_session_waits_for_start_receiving();
     test_start_receiving_is_inert_where_it_must_be();

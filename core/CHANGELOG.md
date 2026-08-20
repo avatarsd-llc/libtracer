@@ -47,6 +47,26 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`webtransport_transport_t::kMaxHandshakeBytes`, `::handshake_cap(std::size_t)`,
+  `::effective_max_handshake()`, a defaulted `max_handshake` parameter on BOTH constructors, and
+  the `webtransport`-private `max_handshake` config key**
+  ([#1408](https://github.com/avatarsd-llc/libtracer/issues/1408)). The endpoint's pre-auth H3
+  handshake bound was a file-local `constexpr std::size_t kMaxHandshakeBytes = 16'384` in
+  `core/src/transport_webtransport.cpp` — a real bound, but the wrong spelling under the
+  no-synthetic-limits rule: a bound comes from an injected resource or per-target config, never
+  from a magic constant. It is now injected in the shape
+  [#1407](https://github.com/avatarsd-llc/libtracer/issues/1407) landed for the WS plane —
+  **tighten-only** (`0` = the 16 KiB default; a larger request is clamped; a smaller one is
+  honored), read back through `effective_max_handshake()`, and reachable from a SPEC through the
+  kind-private `max_handshake` key on both roles. `handshake_cap` is *spelled* like
+  `transport_ws_server::handshake_cap` rather than reusing it: `transport_ws.hpp` sits behind
+  `LIBTRACER_TRANSPORT_WS` and may be configured OFF, so consuming its symbol would make an
+  optional core module a hard dependency of the optional `libtracer_quic` module. The new
+  constructor parameters are defaulted and last, so every existing call compiles unchanged, and
+  the two dispositions the module distinguishes are untouched: over-budget stays connection-fatal
+  (a statement about the peer), while exhaustion stays stream-scoped (#919) or count-then-close
+  (`refused_sessions()`, #934).
+
 - **`graph_t::drain_unflushed(vertex_handle_t, std::vector<std::shared_ptr<const rope_t>>&)` and
   `graph_t::mark_flushed(vertex_handle_t)` — the RFC-0008 §E drain cursor, handle-based**
   ([#1300](https://github.com/avatarsd-llc/libtracer/issues/1300), the

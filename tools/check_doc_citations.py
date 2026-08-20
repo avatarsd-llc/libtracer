@@ -624,7 +624,7 @@ ANCHORS = [
     ('core/include/libtracer/transport_vertex.hpp:154',
      'std::uint32_t connect_timeout_ms = 0; /**< @brief DIAL connect-attempt deadline (RFC-0014 §4):'),
     # core/include/libtracer/transport_webtransport.hpp
-    ('core/include/libtracer/transport_webtransport.hpp:182',
+    ('core/include/libtracer/transport_webtransport.hpp:235',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }'),
     # core/include/libtracer/transport_ws.hpp
     ('core/include/libtracer/transport_ws.hpp:280',

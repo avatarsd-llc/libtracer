@@ -238,9 +238,9 @@ decision.
 
 <!-- config-keys:end -->
 
-`webtransport` reads the same four, with the same meanings, plus one key `quic`
+`webtransport` reads the same four, with the same meanings, plus two keys `quic`
 has no use for — it is the only kind here with an HTTP layer, so it is the only
-one with a resource to name:
+one with a resource to name and the only one with an H3 handshake to bound:
 
 <!-- config-keys:begin core/src/transport_webtransport.cpp -->
 
@@ -250,6 +250,7 @@ one with a resource to name:
 | `key` | `NAME` utf-8 | LISTEN | — (required) | PEM private-key path matching `cert`. |
 | `ca` | `NAME` utf-8 | DIAL | empty ⇒ the system trust store | PEM CA-bundle to verify the peer against. |
 | `insecure` | `VALUE` u8 (flag) | DIAL | `0` | **DEV ONLY.** Skips server-certificate validation. |
+| `max_handshake` | `VALUE` u32 | DIAL + LISTEN | `0` | Bytes. The **pre-auth** HTTP/3 handshake budget (#1408): the most a peer that has completed a QUIC handshake and nothing else — no session, no ACL, no subscription, no router — may make this node accumulate before its H3 material is refused. `0` = the 16 KiB `webtransport_transport_t::kMaxHandshakeBytes` default, and the key is **tighten-only**: a larger value is clamped to that default (`webtransport_transport_t::handshake_cap`), because a config-writable key must never *raise* a pre-auth bound. On a **LISTEN** it bounds per-stream classification / HEADERS accumulation *and* the **declared** length of a HEADERS or unknown/GREASE frame, so an over-declaration is refused before one body byte is buffered; on a **DIAL** it bounds the CONNECT response's field section the same way. Over budget is a statement about the *peer*, so the connection is shut down with the bad-request code — distinct from the two exhaustion dispositions, which are stream-scoped (#919) or count-then-close (`refused_sessions()`, #934) and are unchanged by this key. It does not bound frame-channel bytes; those are under `max_frame`. |
 | `path` | `NAME` utf-8 | DIAL | `/` | The extended CONNECT `:path` — which resource the WebTransport session is opened on (`new WebTransport("https://host:port/here")`). Empty is normalised to `/`. **This is an HTTP URL path, not a libtracer graph path**, and it is *not* the `can` kind's `path` key (an advertised group path): kind-private namespaces do not collide, but the two spellings are identical, so read the section heading before copying a row. The LISTEN side of this kind serves every path — it validates `:method`/`:protocol` only — so the key matters when dialing someone else's server (#1023). The accepted shape is **origin-form**: absent, empty (⇒ `/`), or `/`-prefixed. A non-empty value that does not begin with `/` answers `TYPE_MISMATCH` at creation, before any socket or TLS work, because an `https` request's `:path` is `/`-prefixed in origin-form (RFC 9114 §4.3.1 / RFC 9113 §8.3.1) — nothing beyond that leading `/` is judged (#1039). |
 
 <!-- config-keys:end -->
