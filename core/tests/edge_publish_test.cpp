@@ -48,19 +48,23 @@
 #include <thread>
 #include <vector>
 
+#include "graph_sinks.hpp"
 #include "libtracer/tracer.hpp"
 #include "test_support.hpp"
+#include "test_values.hpp"
 
 namespace {
 
 using tr::graph::graph_t;
 using tr::graph::path_t;
+using tr::graph::remote_delivery_t;
 using tr::graph::role_t;
 using tr::graph::subscription_t;
 using tr::view::rope_t;
 using tr::view::view_t;
 
 using tr::testing::check;
+using tr::testing::make_value;
 
 /** @brief A subscriber context that can prove it was not delivered to after teardown. */
 struct sink_t {
@@ -311,6 +315,90 @@ void test_wide_fanout_under_churn() {
 }
 
 /**
+ * @brief The REMOTE half of the churn arm: the SHARED subscription cold half (#1442) read by
+ *        publishers while a mutator creates, publishes, retires and frees the records.
+ *
+ * Since #1442 a published entry no longer OWNS a copy of the wire/gate half — it holds an
+ * intrusive refcounted share of the admitting slot's record, and the last holder out frees it.
+ * The holders are the slot (dropped by the clear) and every published array naming it (dropped
+ * when `scan_retired_edges` reaches that array, which is a DIFFERENT thread from the one that
+ * published it, and may be two threads at once). Every arm above churns LOCAL callback edges,
+ * whose cold half is null — so none of that machinery is exercised by them at all, and TSan
+ * would stay green whatever the refcount did.
+ *
+ * Here the churn admits and clears a WIRE subscriber every round, while the publishers read
+ * that record's `link` and `caller` strings out of whichever array they pinned. The delivered
+ * bytes are CHECKED, not counted: a record freed one holder too early most likely delivers the
+ * right number of times with the wrong bytes, and a counter cannot see that.
+ */
+void test_remote_cold_half_under_churn(std::size_t publishers) {
+    std::printf("concurrent publish + REMOTE subscribe/unsubscribe churn (shared cold half):\n");
+    graph_t g;
+    const path_t src = *path_t::parse("/t/churn/remote");
+    const auto v = g.register_vertex(src, role_t::STORED_VALUE);
+
+    // 64-byte names: past the small-string buffer, so the record genuinely owns heap bytes a
+    // premature free would hand back while a publisher is copying them.
+    const std::string link(64, 'L');
+    const std::string caller(64, 'C');
+    std::atomic<std::size_t> remote_hits{0};
+    std::atomic<std::size_t> remote_torn{0};
+    const tr::testing::remote_sink_guard_t sink(g, [&](const remote_delivery_t& d, const rope_t&) {
+        const bool ok = d.link.size() == 64 && d.caller.size() == 64 &&
+                        d.link.find_first_not_of('L') == std::string_view::npos &&
+                        d.caller.find_first_not_of('C') == std::string_view::npos &&
+                        !d.return_route.bytes().empty();
+        (ok ? remote_hits : remote_torn).fetch_add(1, std::memory_order_relaxed);
+    });
+
+    sink_t standing;  // slot 0, so the churn's wire edge always reoccupies slot 1
+    check(g.subscribe(src, on_value, &standing).has_value(), "the standing local edge is admitted");
+    const auto clear_fp = path_t::parse("/t/churn/remote:subscribers[1]");
+    check(clear_fp.has_value(), "the clear field-path parses");
+    if (!clear_fp) return;
+
+    const payload_t p = make_payload(std::byte{0x66});
+    std::atomic<bool> stop{false};
+    std::atomic<std::size_t> started{0};
+    std::atomic<std::size_t> rounds{0};
+
+    std::vector<std::thread> ts;
+    ts.reserve(publishers + 1);
+    for (std::size_t i = 0; i < publishers; ++i) {
+        ts.emplace_back([&]() {
+            const auto batch = [&] {
+                for (int k = 0; k < 64; ++k) (void)g.write(src, p.view());
+            };
+            batch();  // one unconditional batch before `stop` is consulted (#1378)
+            started.fetch_add(1, std::memory_order_release);
+            while (!stop.load(std::memory_order_relaxed)) batch();
+        });
+    }
+    ts.emplace_back([&]() {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (started.load(std::memory_order_acquire) < publishers &&
+               std::chrono::steady_clock::now() < deadline)
+            std::this_thread::yield();
+        for (std::size_t round = 0; round < 2000 && !stop.load(std::memory_order_relaxed);
+             ++round) {
+            if (!g.subscribe_wire(v, make_value({0x04, 0x40, 0x00, 0x00}),
+                                  make_value({0x06, 0x00, 0x00, 0x00}), link, view_t{}, caller))
+                break;
+            rounds.fetch_add(1, std::memory_order_relaxed);
+            (void)g.write(v, clear_fp->field(), make_value({0x09, 0x00, 0x00, 0x00}));
+        }
+        stop.store(true, std::memory_order_relaxed);
+    });
+    for (auto& th : ts) th.join();
+
+    check(rounds.load() > 0, "the remote churn ran (admissions happened)");
+    check(remote_hits.load() > 0, "the churned remote edge was delivered to while it was live");
+    check(remote_torn.load() == 0,
+          "every remote delivery carried its record's OWN link, caller and route bytes");
+    check(standing.torn.load() == 0, "no local delivery reached a torn context");
+}
+
+/**
  * @brief Churn a graph to destruction: every parked array must be freed by the teardown flush.
  *
  * The contract `edge_block_t`'s destructor states — the graph outlives the threads that
@@ -349,6 +437,7 @@ int main() {
     // the stripe-mutex fallback. Correctness must not depend on the constant.
     test_concurrent_publish_and_churn(tr::graph::kEdgePinSlots + 4,
                                       "more publishers than kEdgePinSlots — mutex fallback");
+    test_remote_cold_half_under_churn(4);
     test_teardown_flushes_the_retire_list();
     return tr::testing::summary("edge_publish");
 }

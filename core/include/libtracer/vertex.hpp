@@ -2188,8 +2188,21 @@ class vertex_t {
      * The array mirrors the slot table one-for-one so that `deactivate_published` can index
      * straight through; an inactive slot contributes an EMPTY entry, so a cleared edge's
      * refcount clones are released here rather than lingering behind a flipped bit.
-     * @retval false The array could not be allocated (or an edge's owning copies could not) —
-     *         NOTHING was published and the array on the slot is exactly as it was.
+     *
+     * **ONE allocation total** (#1442): the array itself. The rebuild is O(slots) and always
+     * will be — #635 bought lock-free fan-out with an immutable published array, so appending
+     * the k-th subscriber rebuilds k+1 entries and retires k, and that is arithmetic rather
+     * than a defect. What used to ride on top of it was not: a REMOTE entry's cold half was
+     * DEEP-COPIED here (`new (std::nothrow) pub_remote_t` plus `try_assign` of the link and
+     * caller) per pre-existing entry, per admission, and `%scan_retired_edges` freed every one
+     * of them again. The cold half is immutable after admission, so each of those copies
+     * reproduced something byte-identical to what it was retiring — ~940 instructions per
+     * pre-existing edge against a ~158 inherent floor at 65 links. Per entry the loop now
+     * copies four words and takes two refcounts (the target key and the cold half).
+     * @retval false The array could not be allocated — NOTHING was published and the array on
+     *         the slot is exactly as it was. There is no longer a second, per-edge OOM leg:
+     *         the cold half's one allocation happens at ADMISSION, behind the door's own
+     *         `BACKPRESSURE`, and a republish reaches no allocator but this one.
      */
     [[nodiscard]] bool try_publish_edges(edge_block_t& b) noexcept {
         edge_pub_t* np = nullptr;
@@ -2209,23 +2222,13 @@ class vertex_t {
                 e.callback_ctx = s.callback_ctx;
                 e.target_key = s.target_key;  // refcount clone — nothrow
                 e.binding = s.binding;
-                if (s.remote == nullptr) continue;  // the plain in-process edge: no cold half
-                e.remote.reset(new (std::nothrow) pub_remote_t{});
-                // #981 residual on the two owning string copies: `try_assign(std::string&)`
-                // is nothrow only where the growth throws. Under `-fno-exceptions` it is
-                // probe-then-commit and abort()s the node if a racer takes the freed probe
-                // block (#850). `std::string` is not trivially copyable, so the ADR-0065
-                // `block_array_t` seam does not apply; a link/caller name that must survive
-                // exhaustion needs an owned-bytes type on the failable seam (#873).
-                if (e.remote == nullptr ||
-                    !tr::detail::try_assign(e.remote->link, s.remote->link) ||
-                    !tr::detail::try_assign(e.remote->caller, s.remote->caller)) {
-                    destroy_edge_pub(np);  // OOM on an owning copy — publish nothing
-                    return false;
-                }
-                e.remote->return_route = s.remote->return_route;    // refcount clone — nothrow
-                e.remote->reverse_route = s.remote->reverse_route;  // refcount clone — nothrow
-                e.remote->delivery_compact = s.remote->delivery_compact;
+                // The cold half is SHARED, not copied (#1442): immutable after admission, so
+                // the entry names the slot's record instead of reproducing it. One relaxed
+                // increment, nothrow, and no `#981` string-copy residual to carry here — the
+                // two `try_assign` probe windows that used to live on this line are gone from
+                // the republish entirely (they remain on the delivery path, in
+                // `try_copy_published`, which this change deliberately does not touch).
+                e.remote = s.remote;
             }
         }
         // seq_cst, not release: this exchange and the pinned reader's validating load must
