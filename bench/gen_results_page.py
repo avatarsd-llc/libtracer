@@ -477,6 +477,18 @@ class probe_t:
 
 
 PROBES: tuple[probe_t, ...] = (
+    # The two instrument self-checks come first here for the same reason they are emitted
+    # first by the bench: every other row on this table is worthless if either one reddens.
+    # They carry no series — their rows lead with `mr_served=` precisely so the emitter and
+    # the ratchet skip them — so they appear here as documentation of the guard, not a trend.
+    probe_t("canary_seam_only",
+            "a `std::pmr::vector` filled over the INJECTED seam — the seam must serve and "
+            "nothing may escape, which is what makes `reg_escape`'s two columns disjoint",
+            "**hard** — instrument self-check, aborts the run (#1420)"),
+    probe_t("canary_heap_escape",
+            "the identical vector filled over the PROCESS HEAP — the escape must be SEEN, "
+            "so an operator-new override gone blind cannot hand every zero below a free pass",
+            "**hard** — instrument self-check, aborts the run (#1420)"),
     probe_t("forward", "one FWD forward hop, from arrival to egress",
             "**zero** allocations, every CI run (ADR-0038 §16KB-RAM)"),
     probe_t("terminus", "one terminus resolve, which may allocate (ADR-0041)", "report-only"),
