@@ -9,12 +9,35 @@
  *
  * Two modes, because the migration has two costs and they are measured differently.
  *
- * `blocks` — a DETERMINISTIC census (counts, not times). A counting `std::pmr::memory_resource`
- * plus this TU's global operator-new override separate the blocks a route-handle operation draws
- * from the injected resource (`mr_served`) from those that ESCAPE to the global heap. Every one
- * of the pmr-served blocks is a throwing allocation on a peer-driven path: on the shipping
- * `-fno-exceptions` profile that is an `abort()`, which is what ADR-0065 exists to remove.
- * The operations mirror `fwd_router_t::on_advertise` / `on_nack`'s calls one for one.
+ * `blocks` — a DETERMINISTIC census (counts, not times) that is also a GATE: it returns non-zero
+ * when any row misses its expectation, so it is runnable in CI rather than a printout somebody
+ * reads. A counting `block_source_t` plus this TU's global operator-new override separate the
+ * blocks a route-handle operation draws from the INJECTED seam (`mr_blocks`) from those that
+ * ESCAPE to the global heap (`heap_blocks`). Every one of the seam-served blocks is a throwing
+ * allocation on a peer-driven path: on the shipping `-fno-exceptions` profile that is an
+ * `abort()`, which is what ADR-0065 exists to remove. The operations mirror
+ * `fwd_router_t::on_advertise` / `on_nack`'s calls one for one.
+ *
+ * @par The disjointness invariant, and the two canaries that defend it (#1414)
+ * The whole census rests on the two columns being DISJOINT — a block counted at the seam must
+ * not also be counted as an escape, and a block that really escapes must be counted. From the
+ * census's inception until #1402 they were not: the seam forwarded to the process heap through
+ * a form this TU overrides, so `heap_blocks == mr_blocks` on every row that used the seam and
+ * NO row could report the zero-escape result the census exists to show. The `guard` arm passed
+ * throughout, because it reads a different counter — a gate stayed green while the diagnostic
+ * column rotted. Two rows now assert the invariant in BOTH directions before any claim-bearing
+ * row is emitted, and both are gated:
+ *   - `census_canary_seam_only`   — a `block_array_t` over `counting_source_t`. The seam MUST
+ *     serve (`mr_blocks` non-zero) and NOTHING may escape (`heap_blocks` ZERO). Re-point
+ *     `counting_source_t::try_alloc` at `tr::mem::heap_source()` — the exact pre-#1402 body —
+ *     and this row reddens.
+ *   - `census_canary_heap_escape` — the identical array over `tr::mem::heap_source()`, with a
+ *     `counting_source_t` built and untouched. The seam must serve NOTHING (`mr_blocks` ZERO)
+ *     and the escape MUST be seen (`heap_blocks` non-zero). This catches the OTHER vacuity: an
+ *     operator-new override gone blind (elided, LTO'd away, a different allocator linked in),
+ *     which would make every "0 escapes" row on the page pass for free.
+ * The claim-bearing rows additionally require their seam column to be non-zero where they draw
+ * at all, so a row cannot satisfy "0 escapes" by ceasing to do any work.
  *
  * `grow` — an INTERLEAVED A/B of the two guard shapes for a growable array of trivially-copyable
  * elements, which is what the 29 `detail::try_reserve` / `try_push_back` sites and the ADR-0065
@@ -134,11 +157,30 @@ void* counted_alloc(std::size_t size) {
     return std::malloc(size != 0 ? size : 1);
 }
 
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmismatched-new-delete"
+#endif
+/**
+ * @brief Reclaim a block from @ref counted_alloc, counting it while armed.
+ *
+ * @note The narrow `-Wmismatched-new-delete` suppression above is a GCC false positive
+ *       intrinsic to what this TU does: it REPLACES the global `operator new`/`operator
+ *       delete` pair with `malloc`/`free`, so once GCC inlines a `std::vector` reclaim all
+ *       the way down to this `free` it has lost sight of the matching `malloc` in
+ *       @ref counted_alloc and calls it a mismatch. Whether it fires is a matter of
+ *       inlining luck rather than of anything in the code — adding an unrelated census row
+ *       was enough to summon it — so it is silenced here, at one function, rather than left
+ *       to blink in and out as rows come and go.
+ */
 void counted_free(void* p) {
     if (p == nullptr) return;
     if (g_armed) ++g_frees;
     std::free(p);
 }
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 }  // namespace
 
@@ -219,14 +261,56 @@ struct census_t {
     std::size_t heap_bytes = 0;
 };
 
-void print_census(const char* op, const census_t& c, std::size_t n, const char* note) {
+/**
+ * @brief What one census COLUMN is REQUIRED to read for the `blocks` gate to pass.
+ *
+ * Deliberately a THRESHOLD and not a pinned count: zero-versus-non-zero is a structural
+ * property of where a path draws its memory, so it survives an allocator's growth ladder
+ * changing under it, whereas a pinned `4.00` would rot into a maintenance chore and get
+ * relaxed the first time it was inconvenient. The exact figures are still printed and are
+ * banked in the PR that produced them.
+ */
+enum class block_expect_t : std::uint8_t {
+    REPORT_ONLY, /**< @brief Printed, never gated. */
+    ZERO,        /**< @brief Nothing may be drawn on this column: the count must be 0. */
+    NONZERO,     /**< @brief Something MUST be drawn here — the non-vacuity arm. */
+};
+
+/** @brief True when a column reading @p blocks satisfies @p e. */
+bool meets(std::size_t blocks, block_expect_t e) noexcept {
+    if (e == block_expect_t::ZERO) return blocks == 0;
+    if (e == block_expect_t::NONZERO) return blocks != 0;
+    return true;
+}
+
+/** @brief The spelling of @p e in the RESULT line. */
+const char* expect_name(block_expect_t e) noexcept {
+    if (e == block_expect_t::ZERO) return "ZERO";
+    if (e == block_expect_t::NONZERO) return "NONZERO";
+    return "REPORT_ONLY";
+}
+
+/**
+ * @brief Emit one census row and judge it against its two column expectations.
+ *
+ * The existing field order and names are kept intact and the verdict fields are APPENDED, so
+ * anything keyed on the `RESULT failable blocks op=` prefix keeps parsing.
+ *
+ * @return true when both columns met their expectation (`REPORT_ONLY` always does).
+ */
+bool print_census(const char* op, const census_t& c, std::size_t n, const char* note,
+                  block_expect_t heap_expect = block_expect_t::REPORT_ONLY,
+                  block_expect_t mr_expect = block_expect_t::REPORT_ONLY) {
+    const bool ok = meets(c.heap_blocks, heap_expect) && meets(c.mr_blocks, mr_expect);
     std::printf(
         "RESULT failable blocks op=%s mr_blocks=%.2f heap_blocks=%.2f mr_bytes=%.1f "
-        "heap_bytes=%.1f n=%zu note=%s\n",
+        "heap_bytes=%.1f n=%zu note=%s heap_expect=%s mr_expect=%s verdict=%s\n",
         op, static_cast<double>(c.mr_blocks) / static_cast<double>(n),
         static_cast<double>(c.heap_blocks) / static_cast<double>(n),
         static_cast<double>(c.mr_bytes) / static_cast<double>(n),
-        static_cast<double>(c.heap_bytes) / static_cast<double>(n), n, note);
+        static_cast<double>(c.heap_bytes) / static_cast<double>(n), n, note,
+        expect_name(heap_expect), expect_name(mr_expect), ok ? "PASS" : "FAIL");
+    return ok;
 }
 
 /** @brief A NAME-only PATH TLV of @p segs segments — a plausible learned route. */
@@ -292,16 +376,87 @@ class null_link_t final : public tr::net::transport_t {
     std::size_t sends_ = 0; /**< @brief Sends seen. */
 };
 
+/** @brief Elements the canary arrays hold — four growths of the 8/16/32/64 ladder. */
+constexpr std::size_t kCanaryElems = 64;
+
 /**
- * @brief The block census of the route-handle control path.
+ * @brief Fill a `block_array_t` over @p src with @ref kCanaryElems elements.
+ *
+ * The canaries' subject: a real substrate consumer whose growth ladder is deterministic
+ * (`block_array_t::grow` doubles from 8, so 64 elements is exactly four blocks), which is why
+ * the rows can be gated on a threshold rather than on a hand-chosen number.
+ */
+void fill_canary_array(tr::mem::block_source_t& src) {
+    tr::mem::block_array_t<std::uint64_t> a(src);
+    for (std::size_t i = 0; i < kCanaryElems; ++i) {
+        std::uint64_t* slot = a.push_slot();
+        if (slot == nullptr) break;
+        *slot = i;
+    }
+    asm volatile("" : : "r"(a.data()) : "memory");
+}
+
+/**
+ * @brief The block census of the route-handle control path, and the gate over it.
  *
  * Each armed window brackets exactly one peer-driven operation repeated @p n times, on a
  * fresh table set, so the per-op figure is an average over a clean state machine rather
  * than a steady-state one.
+ *
+ * @return 0 when every row met its expectation, 1 otherwise.
  */
 int run_blocks() {
     constexpr std::size_t kN = 256;
     const std::vector<std::byte> route = make_route(4);
+
+    int failures = 0;
+    std::size_t rows = 0;
+    // Every row's verdict lands here; the accumulated count IS this mode's exit code.
+    const auto gate = [&failures, &rows](bool ok) noexcept {
+        ++rows;
+        if (!ok) ++failures;
+    };
+
+    // (0a) NON-VACUITY CANARY 1 (#1414) — the seam serves, and NOTHING escapes. This is the
+    //      direct mutant for the defect that made every "0 escapes" row unprintable: re-point
+    //      `counting_source_t::try_alloc` at `tr::mem::heap_source()` and this row reddens.
+    //      It is emitted FIRST so it precedes every claim it underwrites.
+    {
+        counting_source_t src;
+        census_t c;
+        g_allocs = g_frees = g_bytes = 0;
+        g_armed = true;
+        fill_canary_array(src);
+        g_armed = false;
+        c.mr_blocks = src.allocs;
+        c.mr_bytes = src.bytes;
+        c.heap_blocks = g_allocs;
+        c.heap_bytes = g_bytes;
+        gate(print_census("census_canary_seam_only", c, 1,
+                          "64xu64_block_array_over_the_SEAM:columns_must_be_DISJOINT",
+                          block_expect_t::ZERO, block_expect_t::NONZERO));
+    }
+
+    // (0b) NON-VACUITY CANARY 2 (#1414) — the identical array over the PROCESS HEAP, with a
+    //      `counting_source_t` built and left untouched. An escape MUST be reported. This is
+    //      the row the issue asks for by name, and it catches the opposite vacuity from (0a):
+    //      an operator-new override gone blind would silently turn every zero-escape claim on
+    //      this page into a free pass.
+    {
+        counting_source_t unused_src;
+        census_t c;
+        g_allocs = g_frees = g_bytes = 0;
+        g_armed = true;
+        fill_canary_array(tr::mem::heap_source());
+        g_armed = false;
+        c.mr_blocks = unused_src.allocs;
+        c.mr_bytes = unused_src.bytes;
+        c.heap_blocks = g_allocs;
+        c.heap_bytes = g_bytes;
+        gate(print_census("census_canary_heap_escape", c, 1,
+                          "64xu64_block_array_over_the_HEAP:the_escape_MUST_be_seen",
+                          block_expect_t::NONZERO, block_expect_t::ZERO));
+    }
 
     // (1) FIRST bind on a NEW link — `fwd_router_t::on_advertise`'s terminus leg reaches this
     //     through `bind_ingress`, which calls `tables()`: the #603-defect-1 `allocate_shared`.
@@ -326,8 +481,9 @@ int run_blocks() {
         c.mr_bytes = mr.bytes - mrb0;
         c.heap_blocks = g_allocs;
         c.heap_bytes = g_bytes;
-        print_census("bind_ingress_new_link", c, kN,
-                     "first-touch:ONE_block_node+inline_name+registry+entry_array");
+        gate(print_census("bind_ingress_new_link", c, kN,
+                          "first-touch:ONE_block_node+inline_name+registry+entry_array",
+                          block_expect_t::ZERO, block_expect_t::NONZERO));
     }
 
     // (2) A further bind on an EXISTING link — the steady-state learn.
@@ -355,8 +511,9 @@ int run_blocks() {
         c.mr_bytes = mr.bytes - mrb0;
         c.heap_blocks = g_allocs;
         c.heap_bytes = g_bytes;
-        print_census("bind_ingress_same_link", c, kN,
-                     "steady:entry_array_growth+local_route_block");
+        gate(print_census("bind_ingress_same_link", c, kN,
+                          "steady:entry_array_growth+local_route_block", block_expect_t::ZERO,
+                          block_expect_t::NONZERO));
     }
 
     // (3) `record_egress` — `on_advertise`'s forwarding leg, once per learned label.
@@ -376,7 +533,8 @@ int run_blocks() {
         c.mr_bytes = mr.bytes - mrb0;
         c.heap_blocks = g_allocs;
         c.heap_bytes = g_bytes;
-        print_census("record_egress", c, kN, "route_bytes_block+egress_array_growth");
+        gate(print_census("record_egress", c, kN, "route_bytes_block+egress_array_growth",
+                          block_expect_t::ZERO, block_expect_t::NONZERO));
     }
 
     // (4) `ensure_egress` — the DELIVERY path's label allocation (`deliver_remote`).
@@ -399,7 +557,8 @@ int run_blocks() {
         c.mr_bytes = mr.bytes - mrb0;
         c.heap_blocks = g_allocs;
         c.heap_bytes = g_bytes;
-        print_census("ensure_egress_new_route", c, kN, "linear_scan_miss+route_copy");
+        gate(print_census("ensure_egress_new_route", c, kN, "linear_scan_miss+route_copy",
+                          block_expect_t::ZERO, block_expect_t::NONZERO));
     }
 
     // (5) `copy_egress_route` — `on_nack`'s read. It was an OWNING `std::vector` copy onto the
@@ -424,7 +583,8 @@ int run_blocks() {
         c.mr_bytes = mr.bytes - mrb0;
         c.heap_blocks = g_allocs;
         c.heap_bytes = g_bytes;
-        print_census("egress_route_lookup", c, kN, "on_nack:copy_out_to_CALLER_frame");
+        gate(print_census("egress_route_lookup", c, kN, "on_nack:copy_out_to_CALLER_frame",
+                          block_expect_t::ZERO, block_expect_t::ZERO));
     }
 
     // (6) What an ADVERTISE emission costs, before and after #885. The BUILDER is retained
@@ -441,7 +601,7 @@ int run_blocks() {
         g_armed = false;
         c.heap_blocks = g_allocs;
         c.heap_bytes = g_bytes;
-        print_census("encode_advertise_builder", c, kN, "body+out:retained_for_tests_only");
+        gate(print_census("encode_advertise_builder", c, kN, "body+out:retained_for_tests_only"));
     }
     {
         // The production door since #885: a WARM `advertise` (the label is already bound, so
@@ -464,7 +624,8 @@ int run_blocks() {
         g_armed = false;
         c.heap_blocks = g_allocs;
         c.heap_bytes = g_bytes;
-        print_census("fwd_router_warm_advertise", c, kN, "gathered_off_a_stack_head:NO_alloc");
+        gate(print_census("fwd_router_warm_advertise", c, kN, "gathered_off_a_stack_head:NO_alloc",
+                          block_expect_t::ZERO, block_expect_t::ZERO));
     }
     {
         census_t c;
@@ -488,8 +649,8 @@ int run_blocks() {
         g_armed = false;
         c.heap_blocks = g_allocs;
         c.heap_bytes = g_bytes;
-        print_census("wire_encode_4seg_path", c, kN,
-                     "on_advertise:strip+re-encode:UNGUARDED_recursive");
+        gate(print_census("wire_encode_4seg_path", c, kN,
+                          "on_advertise:strip+re-encode:UNGUARDED_recursive"));
 
         // `on_advertise` also DEEP-COPIES the decoded route TLV before stripping
         // (`tlv_t stripped = route;`) — one `std::vector<tlv_t>` per node, also unguarded.
@@ -503,7 +664,7 @@ int run_blocks() {
         g_armed = false;
         d.heap_blocks = g_allocs;
         d.heap_bytes = g_bytes;
-        print_census("tlv_deep_copy_4seg", d, kN, "on_advertise:stripped=route:UNGUARDED");
+        gate(print_census("tlv_deep_copy_4seg", d, kN, "on_advertise:stripped=route:UNGUARDED"));
     }
 
     // (9)-(10) The #873 body-internal residuals in `tr::wire`: the two walk-stack SPILLS that
@@ -533,8 +694,12 @@ int run_blocks() {
             c.mr_bytes = src.bytes - sb0;
             c.heap_blocks = g_allocs;
             c.heap_bytes = g_bytes;
-            print_census("wire_decode_deep_spill", c, kN,
-                         "depth12:spill_on_the_seam:owning_tlv_tree_STILL_on_the_heap");
+            // REPORT_ONLY on the heap column deliberately: the owning `tlv_t` tree's children
+            // are `std::vector`s today, but a future arena could legitimately take that to
+            // zero, and a NONZERO expectation here would pin the row to escaping.
+            gate(print_census("wire_decode_deep_spill", c, kN,
+                              "depth12:spill_on_the_seam:owning_tlv_tree_STILL_on_the_heap",
+                              block_expect_t::REPORT_ONLY, block_expect_t::NONZERO));
         }
 
         // `wire::validate_rope` — the same frame as a borrowed 2-link rope. `null_sink_t`
@@ -564,11 +729,15 @@ int run_blocks() {
             c.mr_bytes = src.bytes - sb0;
             c.heap_blocks = g_allocs;
             c.heap_bytes = g_bytes;
-            print_census("validate_rope_deep_spill", c, kN,
-                         "depth12:2link_borrowed_rope:ZERO_heap_escapes");
+            gate(print_census("validate_rope_deep_spill", c, kN,
+                              "depth12:2link_borrowed_rope:ZERO_heap_escapes", block_expect_t::ZERO,
+                              block_expect_t::NONZERO));
         }
     }
-    return 0;
+
+    std::printf("RESULT failable blocks_gate rows=%zu failed=%d verdict=%s\n", rows, failures,
+                failures == 0 ? "PASS" : "FAIL");
+    return failures == 0 ? 0 : 1;
 }
 
 // --- mode C: the GUARD gate (#848) -------------------------------------------
