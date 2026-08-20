@@ -37,7 +37,7 @@ for a local `preview.html` of the same charts.
 | `bench_rx_source_topology` | **RX failable-source topology**: T receive threads forwarding rope frames through a shared heap, one shared pool, or one pool per child — the measurement behind [ADR-0067](../docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md) §3. |
 | `bench_pin_ratio` (`run_pin_ratio.sh`) | **RFC-0022 §6, the LATENCY half**: the WRITE store leg over a (payload × segment) grid, every `K` arm rotating inside ONE process. Answered §8 Q3 → Amendment 2 (the on-by-default flip does not land). Collated by `collate_pin.py`. |
 | `bench_pin_net` (`run_pin_net.sh`) | **RFC-0022 §6, the RAM half**: two processes over real UDP, deliveries counted by the RECEIVER, receiver backed by a **bounded RX pool** whose free-slot floor and `dropped_rx()` are the occupancy instrument. Sweeps the live-vertex count across the slot count — the axis on which a pin's borrow starves receive. See [receive-pool occupancy](#bench_pin_net--rfc-0022-6-receive-pool-occupancy-760). |
-| `bench_store_sweep` + `bench_store_escape` (`run_store_sweep.sh`) | **ADR-0079's per-configuration allocation-store sweep (#941)**: H-baseline / WIDE / MID / NARROW over ONE whole-node workload that draws all four ADR-0079 channels, reporting latency by leg, fan-out throughput across T={1,2,4,8,16,24}, deterministic store high-water, and what still escapes to the process heap. Collated by `collate_store_sweep.py`. See [what it resolves, and what it cannot](#bench_store_sweep--the-adr-0079-per-configuration-store-sweep-941). |
+| `bench_store_sweep` + `bench_store_escape` (`run_store_sweep.sh`) | **ADR-0079's per-configuration allocation-store sweep (#941)**: H-baseline / WIDE / MID / NARROW over ONE whole-node workload that draws all four ADR-0079 channels, reporting latency by leg, fan-out throughput across T={1,2,4,8,16,24}, deterministic store high-water, and what still escapes to the process heap. Collated by `collate_store_sweep.py`. Its two **deterministic** columns are **banked per `main` push and warn-ratcheted** on the pinned host; the T-sweep and the escape high-water are **never** gated — see [what it resolves, and what it cannot](#bench_store_sweep--the-adr-0079-per-configuration-store-sweep-941) and [which columns are gated](#which-columns-are-gated-and-which-can-never-be-1428). |
 | `bench_subscribe_index` (`run_subscribe_index.sh`) | **#1266's subscriber-index interning A/B**: what keying `link_index_` by an interned token instead of a link NAME costs and saves, in latency and in bytes at rest, over 4/8/16/32/65 links. Five index arms in one binary — including `idx-token-carry`, the shape #1417 shipped, which pays for obtaining the token — plus the live `subscribe_wire` path and the name-door cost, and the A/A null is collected in the same window. Collated by `collate_subscribe_index.py`. See [what it resolves](#bench_subscribe_index--link-identity-interning-1266). |
 
 ### `bench_forward_heap` — the 16KB-RAM zero-heap forward gate (ADR-0038)
@@ -478,6 +478,11 @@ cmake --build bench/build --target bench_store_sweep bench_store_escape -j
 python3 bench/host_guard.py wait --timeout 900
 bash bench/run_store_sweep.sh bench/build 13 2 > /tmp/store.tsv
 python3 bench/collate_store_sweep.py /tmp/store.tsv
+
+# The CI scope: the two DETERMINISTIC columns only, ~4 s, safe to pin to one CPU.
+STORE_SWEEP_SCOPE=deterministic bash bench/run_store_sweep.sh bench/build 13 2 > /tmp/det.tsv
+python3 bench/store_sweep_gate.py gate --sweep-raw /tmp/det.tsv \
+  --pins bench/store_sweep_pins.json --mode warn
 ```
 
 ADR-0079 §Verification commissions "a three-configuration sweep (WIDE / MID / NARROW) over the
@@ -604,15 +609,69 @@ an argument about what the *composition default* buys on a many-core host, and i
 argued from CI-reproducible numbers rather than from memory, which is what §Verification asked
 for.
 
-#### Not wired into `perf-local.yml`, and why that is only a partial answer
+#### Which columns are gated, and which can never be (#1428)
 
-Standing in-tree practice is that thread-contention benches are DIAGNOSTIC-not-gated
-(`bench_rx_source_topology`, `bench_route_handle_contention`, `bench_fanout_clone_storm`), and
-`bench/ram_census_pins.json` records high-water columns moving 66 % across runs — so the T-sweep
-and the escape high-water must never be gated. Only the deterministic columns (store `used()`
-and the T=1 latency cell) are candidates. ADR-0079 §Verification asks for "a standing bench so a
-regression in any configuration is visible"; landing diagnostic-only satisfies that **partially**,
-and the gating series is tracked separately.
+ADR-0079 §Verification asks for "a standing bench so a regression in any configuration is
+visible, and so a future change to the composition default is argued from CI numbers, not
+memory". The sweep landed diagnostic-only, which satisfied that partially; `perf-local.yml`
+now banks its **deterministic half**, and only that half.
+
+| column | tag | where it lands |
+| --- | --- | --- |
+| store `used()` per (arm, T) | `RESULT_STORE_HWM` | **banked** as a series **and** pinned — warn-first ratchet, `bench/store_sweep_pins.json` |
+| store COUNT per (arm, T) | `RESULT_STORE_HWM` | **pinned exactly**, not trended (a constant series can never alert) |
+| T=1 latency per (arm, leg) | `RESULT_STORE_LAT` | **banked** as a series; watched by `store_guard.py drift`, never pinned |
+| fan-out throughput, T ≥ 2 | `RESULT_STORE_TPUT` | **never gated** |
+| process-heap escape | `RESULT_STORE_ESCAPE` | **never gated** |
+
+**Why those two are excluded, in measurements rather than in taste.** The unpinned
+throughput window's own A/A null in the #941 banked run read **58.9 %** (the pinned window's
+read 0.87 % in the same run — the difference IS the exclusion), and standing
+in-tree practice is that thread-contention benches are DIAGNOSTIC-not-gated
+(`bench_rx_source_topology`, `bench_route_handle_contention`, `bench_fanout_clone_storm` all
+decline the gate on that ground). `bench/ram_census_pins.json` records a `tcp-server hw_peak`
+moving **66 %** across runs and ~41 KB within one, which is why `ram_census.py` already keeps
+high-water columns out of its pins. A gate over either would be a flaky red, and a flaky red
+teaches everyone to ignore the gate.
+
+The exclusion is a **mechanism**, not a sentence: `STORE_SWEEP_SCOPE=deterministic` does not
+run those two arms at all, `store_sweep_gate.py` **fails** on a pin naming either column
+(`test_store_sweep_gate.py` pins both directions), and every excluded row it does read is
+counted and announced as dropped in the CI log.
+
+**Why the occupancy is pinned and the latency is not.** Occupancy came back byte-identical
+across **eight** invocations on 2026-08-20 — five at a 1-minute load average of **32.7** and
+three at **4.2–4.9** — so it is not merely quiet, it is deterministic by construction, and its
+band is **0 B**. The latency cell's best-of-13-rounds figure moved up to **1.19 %** across
+three consecutive windows with a same-window A/A null of **1.30 / 1.46 / 2.03 %**; an exact
+pin on a column with a ~1–2 % floor would red on the host rather than on the code, so it is
+banked and left to the rolling best-of-window comparator this repo already owns.
+
+**The gate has been watched failing.** A gate nobody has seen go red is not a gate. Adding
+one `std::size_t` to the composed read's collect-stack element (`work_t` in
+`core/src/graph.cpp`, the `block_array_t` over the injected `ctl_`) widened that channel's
+block from 128 B to 192 B, and the ratchet reddened on **all 18** occupancy pins —
+`+64 B` on MID and NARROW, `+192 B` on WIDE, whose single shared store retains a whole extra
+free-list class — exiting **1** under `--mode fail` and **0-with-`::warning::`** under the
+shipped `--mode warn`. Reverted; the clean tree passes in `--mode fail`. The workflow's own
+negative control (a pin file doctored 64 B low) was run against a clean transcript and
+produced its 18 annotations, so the invisible warn path is proven live on every run rather
+than at authoring time only.
+
+Two knobs that did **not** move it are worth recording, because they say what the column
+prices: widening the VALUE payload (`kValueBytes` 32 → 48) and widening the rope
+(`kRopeLinks` 4 → 6, which moved the `net-fwd` latency cell from ~248 ns to ~485 ns) both
+left every occupancy pin byte-identical. Payload bytes come from `value_backend`, which
+ADR-0079 holds outside this substrate on purpose, and the gather draws one fixed-class block
+whatever the iov width. This column prices what the node ASKS the store for, not how much
+work it does — the T-sweep and the latency cell are the columns that see the second thing.
+
+**Warn-first, with the next step pre-declared.** The ratchet ships `--mode warn` on
+`bench/ram_census_pins.json`'s precedent, and the criterion for flipping it lives in the pin
+file next to the pins it governs. So does the one growth already priced: ADR-0079 **Stage 2**
+(#843, gated on #1285) moves vertex placement onto the injected store, and every `used_total`
+pin will step up by the vertex population's worth. The answer there is a re-pin from a fresh
+transcript (`--emit-pins`), quoted in that PR — never a widened band.
 
 ### `bench_pin_net` — RFC-0022 §6 receive-pool occupancy (#760)
 

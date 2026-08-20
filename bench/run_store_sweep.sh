@@ -22,6 +22,16 @@
 #
 # The directory is a built bench/build. Every raw line is emitted verbatim on stdout.
 #
+# SCOPE (#1428). `STORE_SWEEP_SCOPE=all` (the default) takes every column, which is what a
+# hand-run diagnostic sweep wants. `STORE_SWEEP_SCOPE=deterministic` takes ONLY the columns
+# `perf-local.yml` is allowed to bank — the `hwm` occupancy and the pinned T=1 latency
+# cells — and runs neither the unpinned T-sweep nor the escape census. That is not a
+# shortcut for speed: those two columns may never be gated (a 58.9 % A/A null on the
+# unpinned throughput window; a process-heap high-water that `bench/ram_census_pins.json`
+# records moving 66 % across runs), so a CI leg that measured them would be publishing
+# numbers it must then refuse to read. The deterministic scope costs ~4 s; the full one
+# wants the whole machine and several minutes.
+#
 # TWO MEASUREMENT WINDOWS, AND THEY ARE NOT INTERCHANGEABLE.
 #   * `latency`, `hwm` and `escape` run under `taskset -c "$CPU"`, like every other pinned
 #     bench here.
@@ -41,20 +51,35 @@ set -euo pipefail
 BIN="${1:?bench build dir}"
 ROUNDS="${2:-13}"
 CPU="${3:-2}"
+SCOPE="${STORE_SWEEP_SCOPE:-all}"
+
+case "$SCOPE" in
+all | deterministic) ;;
+*)
+    echo "unknown STORE_SWEEP_SCOPE '$SCOPE' (expected: all | deterministic)" >&2
+    exit 2
+    ;;
+esac
 
 PIN=(taskset -c "$CPU")
 
-# Reachability before numbers, every run — not once at authoring time. BOTH binaries: the
-# seam-reachability canaries live in the timed harness and the escape / disjointness / null-arm
-# canaries live in the census, because only the census overrides `operator new`.
+echo "# scope: $SCOPE"
+
+# Reachability before numbers, every run — not once at authoring time. BOTH binaries in the
+# full scope: the seam-reachability canaries live in the timed harness and the escape /
+# disjointness / null-arm canaries live in the census, because only the census overrides
+# `operator new`. The deterministic scope does not run the census at all, so calibrating it
+# would certify an instrument this transcript carries no column from.
 "${PIN[@]}" "$BIN/bench_store_sweep" calibrate || {
     echo "calibration FAILED (sweep)" >&2
     exit 2
 }
-"${PIN[@]}" "$BIN/bench_store_escape" calibrate || {
-    echo "calibration FAILED (escape)" >&2
-    exit 2
-}
+if [ "$SCOPE" = all ]; then
+    "${PIN[@]}" "$BIN/bench_store_escape" calibrate || {
+        echo "calibration FAILED (escape)" >&2
+        exit 2
+    }
+fi
 
 echo "# loadavg before: $(cat /proc/loadavg)"
 
@@ -71,9 +96,11 @@ for ((r = 0; r < ROUNDS; ++r)); do
     fi
     for tag in $order; do
         "${PIN[@]}" "$BIN/bench_store_sweep" latency --round0="$r" --tag="$tag"
-        "${PIN[@]}" "$BIN/bench_store_escape" escape --round0="$r" --tag="$tag"
-        # UNPINNED on purpose — see the header.
-        "$BIN/bench_store_sweep" throughput --round0="$r" --tag="$tag"
+        if [ "$SCOPE" = all ]; then
+            "${PIN[@]}" "$BIN/bench_store_escape" escape --round0="$r" --tag="$tag"
+            # UNPINNED on purpose — see the header.
+            "$BIN/bench_store_sweep" throughput --round0="$r" --tag="$tag"
+        fi
     done
 done
 
@@ -85,7 +112,9 @@ echo "# loadavg after: $(cat /proc/loadavg)"
     echo "POST calibration FAILED (sweep)" >&2
     exit 2
 }
-"${PIN[@]}" "$BIN/bench_store_escape" calibrate || {
-    echo "POST calibration FAILED (escape)" >&2
-    exit 2
-}
+if [ "$SCOPE" = all ]; then
+    "${PIN[@]}" "$BIN/bench_store_escape" calibrate || {
+        echo "POST calibration FAILED (escape)" >&2
+        exit 2
+    }
+fi
