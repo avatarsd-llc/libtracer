@@ -194,36 +194,37 @@ test('mesh testbed: form a cyclic multi-node mesh in band, then route across it'
     // MODULES, and each module enumerates its member connections — so a node's dials and its
     // listeners now list separately, which is the whole point of per-module scoping.
     //
-    // Each module also lists its `conn` CREATOR ENDPOINT (RFC-0014 S2b) alongside the member
-    // connections: the endpoint is a real vertex under the module. Hiding it from this
-    // listing is S4 (the enumeration-hide seam), which does not exist yet — so it is
-    // asserted here rather than papered over, and these lines change again when S4 lands.
+    // A module's listing is its member CONNECTIONS and nothing else: since S4 the `conn`
+    // CREATOR ENDPOINT is HIDDEN from it (RFC-0014 §3), because the endpoint is the control
+    // that creates connections, not one of them. It stays addressable — §6's creatability
+    // probe reads `/net/<module>/conn:schema` — it is simply not a member.
     assert.deepEqual(listingNames(await cli.a.readField(['net'], ':children[]')),
                      ['ws-client', 'ws-server']);
     assert.deepEqual(listingNames(await cli.a.readField(['net', 'ws-client'], ':children[]')),
-                     ['b', 'bus', 'conn']);
+                     ['b', 'bus']);
     assert.deepEqual(listingNames(await cli.a.readField(['net', 'ws-server'], ':children[]')),
-                     ['c', 'conn', 'ctrl']);
+                     ['c', 'ctrl']);
     // The module lists its children in NAME order, not dial order: b dials c first, yet
     // `bus` is listed first. (`hub` sorted after `c`, which is why this line moved.)
     assert.deepEqual(listingNames(await cli.b.readField(['net', 'ws-client'], ':children[]')),
-                     ['bus', 'c', 'conn']);
+                     ['bus', 'c']);
     assert.deepEqual(listingNames(await cli.b.readField(['net', 'ws-server'], ':children[]')),
-                     ['a', 'conn', 'ctrl']);
+                     ['a', 'ctrl']);
     assert.deepEqual(listingNames(await cli.c.readField(['net', 'ws-client'], ':children[]')),
-                     ['a', 'conn']);
+                     ['a']);
     assert.deepEqual(listingNames(await cli.c.readField(['net', 'ws-server'], ':children[]')),
-                     ['b', 'conn', 'ctrl']);
+                     ['b', 'ctrl']);
     // The bus only ever listens — but `mesh_node` DECLARES both modules, and since S2b a
-    // declared module is minted (with its `conn` endpoint) whether or not it ever carries a
-    // connection. That is the point: a creator has to find `/net/ws-client/conn` before it
-    // can write the first SPEC to it, so an empty module must be discoverable.
+    // declared module is minted whether or not it ever carries a connection. A creator has to
+    // find the module before it can write the first SPEC to its endpoint, so discoverability
+    // lives one level UP: `/net:children[]` names the empty `ws-client` module, and that
+    // module's own listing is legitimately EMPTY — no connections, and the endpoint hidden.
     assert.deepEqual(listingNames(await cli.bus.readField(['net'], ':children[]')),
                      ['ws-client', 'ws-server']);
     assert.deepEqual(listingNames(await cli.bus.readField(['net', 'ws-client'], ':children[]')),
-                     ['conn']);
+                     []);
     assert.deepEqual(listingNames(await cli.bus.readField(['net', 'ws-server'], ':children[]')),
-                     ['conn', 'ctrl', 'mesh']);
+                     ['ctrl', 'mesh']);
   });
 
   await t.test('a local read resolves at the terminus (no hop)', async () => {
@@ -330,10 +331,10 @@ test('mesh testbed: form a cyclic multi-node mesh in band, then route across it'
     assert.equal(new Set(peers).size, 2, 'the two dialers carry two distinct slot names');
 
     // NO vertex exists for a peer — the listing is synthesized on every read, so the module
-    // still holds exactly its two CONNECTIONS however many peers are audible (plus its own
-    // `conn` creator endpoint, which S4 will hide).
+    // still holds exactly its two CONNECTIONS however many peers are audible (and since S4
+    // the `conn` creator endpoint is not among them).
     assert.deepEqual(listingNames(await cli.bus.readField(['net', 'ws-server'], ':children[]')),
-                     ['conn', 'ctrl', 'mesh']);
+                     ['ctrl', 'mesh']);
   });
 });
 
