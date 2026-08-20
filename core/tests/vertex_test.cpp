@@ -142,6 +142,13 @@ void test_await_wake_and_timeout() {
     std::thread waiter([&] {
         if (v.wait_for_change(seq0, 2s)) woke.store(true);
     });
+    // NOT the #1418 sleep-synchronization defect, and the contrast is the discriminator: `seq0`
+    // is captured ABOVE, on THIS thread, BEFORE the waiter is spawned. The predicate is
+    // `write_seq_ != seq0` against a value that predates the bump, so it is LEVEL-triggered —
+    // a waiter that arrives after `note_write()` still observes the change and returns at once
+    // (line 149 asserts exactly that). The defect needs the waiter to snapshot the sequence
+    // ITSELF, after the window, which is what `graph_t::await` does and this test does not.
+    // The sleep here only widens the blocked-waiter case; it is not load-bearing for the pass.
     std::this_thread::sleep_for(20ms);
     v.note_write();
     waiter.join();
