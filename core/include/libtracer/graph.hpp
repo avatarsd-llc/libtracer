@@ -1859,8 +1859,11 @@ class graph_t {
      *
      * @p link_token is the CARRIED interned identity of @p link (#1266 / #1417) — what the
      * transport plane got back from @ref intern_link at link-up and cached in its own
-     * per-link receive context. It saves the index the name hash and find that PR #1416
-     * measured as 78–83 % of the whole index operation. It is an OPTIMISATION and only that:
+     * per-link receive context. It saves the index the name hash and find — **42–56 % of the
+     * whole index operation net of its control**, measured at all ten cells of #1416's own
+     * harness. A token that cost NOTHING to obtain would be worth 72–82 %, so roughly two
+     * thirds of that ceiling survives paying for the carry. It is an OPTIMISATION and only
+     * that:
      * the default is "no token", which is byte-identical to every pre-carry caller, and a
      * token that does not name a slot holding the key the index is about to use is ignored
      * rather than trusted. That is deliberate — the key is not always @p link (a mount-routed
@@ -2532,8 +2535,9 @@ class graph_t {
      * It was a `std::pmr::unordered_map<std::pmr::string, link_entry_t>` with a transparent
      * hash, so every remote subscribe hashed the arriving link name and found it. PR #1416
      * measured what that costs and what removing it could buy, four arms in one binary
-     * against a fresh A/A null: **a CARRIED token removes 78–83 % of the index operation's
-     * cost net of the control, and a GRAPH-ONLY re-key buys nothing at all** — `within-null`
+     * against a fresh A/A null: **a token that costs nothing to obtain removes ~78 % of the
+     * index operation's cost net of the control, and a GRAPH-ONLY re-key buys nothing at
+     * all** — `within-null`
      * at nine of ten cells, and its footprint goes UP. The reason is structural: the peer
      * NAME is materialized per frame into a stack scratch buffer, so something must map that
      * name to whatever the index keys on unless a token is minted upstream and carried.
@@ -2541,15 +2545,25 @@ class graph_t {
      * So the token is carried (`subscribe_wire`'s `link_token`), and this is what it
      * addresses. One structure, not two: the name lives INSIDE the slot it belongs to, which
      * is what makes the carry pay in bytes as well as in nanoseconds. A dense vector PLUS a
-     * name→token map is byte-for-byte the shape #1416 measured at 183.8 B/link against
-     * today's 175.8 — i.e. worse — and this shape measures **128.0 B/link**.
+     * name→token map is byte-for-byte the shape #1416 measured at 183.8 B/link against the
+     * map's 175.8 — i.e. worse — and this shape measures **128.0 B/link**.
+     *
+     * MEASURED on the same harness, with the shipped arm held to the calibration oracle: the
+     * index operation goes **14.1–17.2 ns → 9.4 ns, FLAT in link count** at 8 vertices
+     * (15.5–18.4 → 10.4 at 32), which is **42–56 % of its cost net of the control at every
+     * one of the ten cells**, and its footprint **175.8 → 128.0 B per link**. The gap to the
+     * free-token ceiling is the indirect supplier call, its tier branch, and the name compare
+     * below.
      *
      * The NAME door survives unchanged, which is #1366's first objection answered rather
      * than waived: `link_edge_candidates`, `link_candidates` and therefore `evict_link_edges`
      * all still take a `std::string_view` and all still work with no token in sight (the ESP
      * departure-cost test calls one on a bare `graph_t` with no router at all). They pay a
      * LINEAR SCAN over live slots instead of a hash — a path that runs once per peer hangup
-     * where the one it pays for runs once per subscribe.
+     * where the one it pays for runs once per subscribe. `run_subscribe_index.sh` reports
+     * that scan's cost every run (`RESULT_SIDX_DOOR`) rather than leaving the half of the
+     * trade that got slower unstated: it is CHEAPER than the hash up to about 32 live links
+     * and about 2x dearer at 65.
      */
     /** @brief One link's candidate list, plus where its sorted prefix ends. */
     struct link_entry_t {

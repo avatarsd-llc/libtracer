@@ -503,7 +503,7 @@ class op_resolver_t {
      * of by name hash. The supplier is the transport plane's: it minted the link's
      * `graph_t::intern_link` token when the link (or the bus peer) became audible and cached
      * it in its own per-link receive context, which is what @ref inbound_ref_t::origin points
-     * at. PR #1416 measured the prize at 78–83 % of the index operation and 27 % of its bytes.
+     * at. Worth 42–56 % of the index operation net of its control, and 27 % of its bytes.
      *
      * ASKED LAZILY, at the subscribe branch and nowhere else. That is the load-bearing part
      * of the contract: a control-plane saving paid on every terminus frame is what killed

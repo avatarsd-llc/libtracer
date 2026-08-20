@@ -8,7 +8,8 @@
  *
  * The subscriber index is now a dense slot vector addressed by a `tr::graph::link_id_t` the
  * transport plane mints at link-up and carries to `subscribe_wire`. PR #1416 measured why
- * (78–83 % of the index operation and 27 % of its bytes); this file pins the parts of that
+ * (42–56 % of the index operation net of its control, and 27 % of its bytes); this file pins
+ * the parts of that
  * design whose failure mode is a LEAKED SUBSCRIBER EDGE rather than a slow one — which is the
  * failure #1071 and #943 exist to prevent, and the reason #1366 declined handle-keying twice.
  *

@@ -25,7 +25,7 @@ code changes. Architecture and rationale: **[ADR-0023](../../docs/adr/0023-ros2-
 | message type name | `:schema` POINT (introspection only) |
 | `rmw_qos_profile_t` | **no single carrier** — see [QoS](#qos-there-is-no-settings-to-map-onto) below |
 | publisher | a writer handle on the topic path |
-| subscription | `subscribe(path)` — an edge appended to the *producer* vertex; delivery is a push, and the retained history is that **vertex's** STREAM ring (owner-sized and with no wire surface at all — `core/include/libtracer/graph.hpp:1199-1207`), never a per-subscriber queue |
+| subscription | `subscribe(path)` — an edge appended to the *producer* vertex; delivery is a push, and the retained history is that **vertex's** STREAM ring (owner-sized and with no wire surface at all — `core/include/libtracer/graph.hpp:1200-1208`), never a per-subscriber queue |
 | service / client | a `…/_request` + `…/_response` path pair |
 
 ## RMW entry points → graph operations (the implementation checklist)
@@ -74,7 +74,7 @@ What `qos.c` maps onto instead — **three carriers, not one**:
 | `rmw_qos_profile_t` field | libtracer carrier | where |
 | --- | --- | --- |
 | `reliability`, `durability` (libtracer packs a third bit-field, `priority`, that ROS has no profile member for) | the **subscription's** packed 16-bit `delivery_policy`, set at `rmw_create_subscription` time and carried in the `SUBSCRIBER`'s existing `SETTINGS` child as `NAME "delivery_policy" VALUE u16` | `core/include/libtracer/subscriber.hpp:70`, decoded at `core/src/graph.cpp:2302`, RFC-0022 §3.A |
-| `history` + `depth` | **owner-side** ring depth, declared independently at each end — the subscription's own target vertex is a STREAM whose depth `rmw_tracer` sets locally (that ring is what `rmw_take` pops); what a subscriber cannot set is the *producer's* depth, which has no wire surface | `core/include/libtracer/graph.hpp:1207`, `core/include/libtracer/vertex.hpp:206` |
+| `history` + `depth` | **owner-side** ring depth, declared independently at each end — the subscription's own target vertex is a STREAM whose depth `rmw_tracer` sets locally (that ring is what `rmw_take` pops); what a subscriber cannot set is the *producer's* depth, which has no wire surface | `core/include/libtracer/graph.hpp:1208`, `core/include/libtracer/vertex.hpp:206` |
 | `deadline`, `liveliness`, `lifespan` | **no mapping at all** | — |
 
 This is *closer* to DDS than the retracted shape, not further: DDS puts reliability and

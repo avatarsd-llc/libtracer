@@ -92,10 +92,18 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   parameter is defaulted, and the default is byte-identical in outcome to every pre-carry
   caller. Measured on `bench/bench_subscribe_index` (the harness
   [#1416](https://github.com/avatarsd-llc/libtracer/pull/1416) landed), against a fresh A/A
-  null on the pinned host: the index operation goes from **13.7–16.7 ns to 9.4 ns, flat in link
-  count**, and its footprint from **175.8 to 128.0 bytes per link** — 746 B → 512 B at the
-  narrow 4-link/8-vertex configuration the 2026-08-14 ruling costed, out of the user-pinned
-  arena that is [#1160](https://github.com/avatarsd-llc/libtracer/issues/1160)'s budget.
+  null on the pinned host: the index operation goes from **14.1–17.2 ns to 9.4 ns, flat in link
+  count** (8 vertices; 15.5–18.4 → 10.4 at 32), which is **42–56 % of its cost net of the
+  control at every one of the ten cells**, and its footprint from **175.8 to 128.0 bytes per
+  link** — 746 B → 512 B at the narrow 4-link/8-vertex configuration the 2026-08-14 ruling
+  costed, out of the user-pinned arena that is
+  [#1160](https://github.com/avatarsd-llc/libtracer/issues/1160)'s budget. A token that cost
+  NOTHING to obtain would be worth 72–82 % and 41 % of the bytes, so roughly two thirds of that
+  ceiling survives paying for the carry, on both axes.
+
+  Both footprint figures are x86-64, where the slot is 64 bytes. The C6 is 32-bit and its
+  `link_entry_t` is narrower, so the direction holds but the absolute arithmetic does not
+  transfer — the C6 ratio is deliberately left unquoted rather than extrapolated.
 
   **No name-taking door moved.** `link_edge_candidates`, `link_candidates`, `evict_link_edges`
   and `evict_route_edges` keep their signatures and their answers, and they still work with no
@@ -104,7 +112,11 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   the slot it belongs to instead of in a second container. A dense vector plus a name→token map
   is byte-for-byte the shape #1416 measured at 183.8 B/link, i.e. worse than the map it would
   replace. What those doors pay instead is a **linear scan over live slots** — a path that runs
-  once per peer hangup where the one it pays for runs once per subscribe.
+  once per peer hangup where the one it pays for runs once per subscribe. `run_subscribe_index.sh`
+  now emits `RESULT_SIDX_DOOR` on every run, so the half of the trade that got slower is never
+  left unstated: the scan is **cheaper** than the hash up to about 32 live links and about
+  **2x dearer at 65** — ~35 ns once, when a peer disconnects, against 5–8 ns saved on every
+  subscribe it ever made.
 
   **A wrong token cannot mis-index.** The index verifies that the token's slot spells the key
   it is about to index under, so the two admissions whose key is NOT the arrival link — a

@@ -190,8 +190,8 @@ class child_registry_t {                 // the one NAME -> link demux table (AD
 
 Signature source: `core/include/libtracer/fwd_router.hpp:194` (constructor), `:372`
 (`add_child`), `:429` (`subscribe_toward`), `:549-561` (the sink function-pointer types);
-`core/include/libtracer/child_registry.hpp:268` (`add`), `:518` (`resolve_peer`), `:533`
-(`erase`), `:566` (`entry_by_name`), `:587` (`by_name`), `:628`/`:638` (`size`/`live_size`).
+`core/include/libtracer/child_registry.hpp:280` (`add`), `:538` (`resolve_peer`), `:553`
+(`erase`), `:586` (`entry_by_name`), `:607` (`by_name`), `:648`/`:658` (`size`/`live_size`).
 
 ## Routing one inbound frame
 
@@ -225,8 +225,8 @@ flowchart TB
   consumer that did not need contiguity. `m` must stay alive while its span is read.
 - **The default delivery leg copies nothing.** A full-route `FWD{WRITE}` fan-out scatter-gathers a
   fresh stack head, the stored return-route bytes, an empty `src`, and one span per link of the
-  stored value (`core/src/fwd_router.cpp:3095`). The `COMPACT` leg is the one that flattens,
-  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:2896`) — single-link, that
+  stored value (`core/src/fwd_router.cpp:3099`). The `COMPACT` leg is the one that flattens,
+  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:2900`) — single-link, that
   flatten is a zero-copy adopt, and multi-link it draws from the router's injected `flat` backend
   (#730), not the global heap.
 - **All rope flattens on the forward AND terminus paths draw from the injected seam.** `flat`
@@ -322,13 +322,13 @@ adopt; `/net` itself is likewise only the recommended root convention (a constru
 vertex, insert the `conns_` entry, wire the link into the router's `child_registry_t` — and only
 the last can be refused: `add_child` answers `false` when the registry cannot grow, and it is the
 only place that can say so (`core/include/libtracer/fwd_router.hpp:372`,
-`core/include/libtracer/child_registry.hpp:268`). A refusal unwinds the first two in reverse —
+`core/include/libtracer/child_registry.hpp:280`). A refusal unwinds the first two in reverse —
 retire the vertex, then erase the entry, which destroys the config-constructed socket — publishes
-no liveness, and answers `BACKPRESSURE` (`core/src/transport_vertex.cpp:617-620`). Discarding that
+no liveness, and answers `BACKPRESSURE` (`core/src/transport_vertex.cpp:620-623`). Discarding that
 `bool` left a connection reporting `UP` that no `dst` resolved, no inbound frame reached, and
 `remove_child` did not know about — a ghost a peer could mint by creating connections until the
 registry slab exhausted. A `provide_link` staging is consumed only once the wiring has succeeded
-(`core/src/transport_vertex.cpp:626`), so a retry after the pressure clears still finds its link.
+(`core/src/transport_vertex.cpp:629`), so a retry after the pressure clears still finds its link.
 
 **Liveness is the connection vertex's value.** `link_state_t` is six states —
 `DORMANT`, `DIALING`, `RECONNECTING`, `UP`, `LISTENING`, `BIND_FAILED`
@@ -337,7 +337,7 @@ links report listen-socket reachability with the last two, never a per-accepted-
 value is a 1-byte `VALUE` on the vertex, so it is `await`-able and subscribable: `subscribe
 /net/<module>/<name>` streams every transition. The liveness *engine* that would drive these
 automatically is not implemented — the value is set by the caller, and a config-constructed socket
-reports `UP` or `LISTENING` at creation (`core/src/transport_vertex.cpp:645-648`).
+reports `UP` or `LISTENING` at creation (`core/src/transport_vertex.cpp:648-651`).
 
 **The accepted direction, and what is not realised.** RFC-0014 replaces the single global
 `/net:children[]` catalog with a **per-module creator endpoint** at `/net/<module>/conn`, whose own
