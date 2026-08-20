@@ -1,6 +1,6 @@
 # Allocation-store composition defaults to per-plane (MID), injected per target
 
-Status: **accepted** (2026-08-15; drafted 2026-08-06 and merged 2026-08-06 as [PR #940](https://github.com/avatarsd-llc/libtracer/pull/940), for [#873](https://github.com/avatarsd-llc/libtracer/issues/873)).
+Status: **accepted** (2026-08-15; drafted 2026-08-06 and merged 2026-08-06 as [PR #940](https://github.com/avatarsd-llc/libtracer/pull/940), for [#873](https://github.com/avatarsd-llc/libtracer/issues/873)), **amended 2026-08-20** — the title's "defaults to per-plane (MID)" is **withdrawn**, and the `NARROW` / `MID` / `WIDE` spelling used for composition throughout the body is **retired** in favour of **folded / per-plane / per-thread**. Read the whole document below through §Amendment (2026-08-20), at the end; the filename and the body text stand as the record of what was decided in August 2026.
 
 > **The status line lagged the facts.** This ADR read `proposed` from its merge until 2026-08-15
 > even though PR #940 had merged, the composition below was the one being scheduled against, and
@@ -225,3 +225,100 @@ This bench work is tracked separately (blocked on the substrate itself existing)
 - Reclamation is unchanged: this ADR is about *where bytes come from*, not *when a replaced block is freed* — the per-tenant reclamation of [ADR-0072](0072-one-reclamation-domain-graph-owned-and-backend-injected.md) §Supersession and the open edge-array question (#894/#635) stand untouched.
 - Implementation is **staged and latency-gated** — the programme is §Staging above: each site family moved onto the substrate carries its own pinned A/B; a regression on any read/write hot path is a REJECT. The hot-vertex placement (#843) is the first concrete beneficiary; the net-plane failable moves (#603, #848, #930) are the isolation beneficiaries.
 - The composition default and the WIDE/NARROW folds should be stated in the configuration-space doc so a deployer knows which knob sizes their node.
+
+## Amendment (2026-08-20): the composition triad is renamed, and no composition is the default
+
+Ruled by the maintainer on 2026-08-20 against the banked
+[#941](https://github.com/avatarsd-llc/libtracer/issues/941) sweep
+([PR #1427](https://github.com/avatarsd-llc/libtracer/pull/1427), pins in
+`bench/store_sweep_pins.json`), closing
+[#1429](https://github.com/avatarsd-llc/libtracer/issues/1429). Two things change: **what the
+three points are called**, and **the claim that one of them is the default**. Nothing about the
+substrate, the injection seams, the §Staging programme, or the separation of need C changes.
+
+### 1. The universal-default claim is withdrawn
+
+§Decision 1 ("Default composition is MID") and the title's "defaults to per-plane" are
+**withdrawn**. No composition is *the* default, because there is no one target to default for.
+What ships is neither of the three: every allocation seam in the tree — a dozen-odd of them —
+takes an injected `mem::block_source_t` **defaulting to `&mem::heap_source()`**, which is the
+sweep's `H-baseline` arm and the behaviour of every un-wired build. Composition is therefore
+**multiple knobs, varied always per target**, not a single dial with a factory setting; the ADR
+picks no point on the reader's behalf. §Decision 2 ("composition is injected, build-time") and
+§Decision 4 ("bounded node is a property the deployer injects") are unaffected and carry the
+whole weight now.
+
+### 2. The triad is renamed to descriptive terms
+
+`NARROW` / `MID` / `WIDE` are retired **as composition names**, everywhere in this ADR's body,
+in §Considered options, in the sketches under §Building each configuration, and in §Verification:
+
+| this ADR's old name | canonical name | what it is |
+| --- | --- | --- |
+| **WIDE** (one node-wide store) | **folded** | all stores share one source — "one slab, whole stack" |
+| **MID** (graph store + net-plane store) | **per-plane** | one source per plane, segments still separate |
+| **NARROW** (per-thread / per-connection) | **per-thread** | one source per RX thread (the sweep realises it per lane — per child, per link) |
+
+The rename is the flagship of this amendment, not cosmetics: the old spelling **collided with
+the canonical NARROW/WIDE target spectrum** — constrained MCU … big host — and collided with the
+mapping *inverted*. Composition-`WIDE` was the **MCU** recipe and composition-`NARROW` was the
+**many-core host** recipe, so a sentence like "NARROW ignores this accessor and injects its own
+per-thread source" read, to anyone holding the target spectrum, as advice for the 16 KB part
+when it was advice for the 24-core host. NARROW/WIDE from here on describe **targets only**
+(CONTEXT.md §Store composition); compositions are folded / per-plane / per-thread.
+
+Where the old spelling survives it is a **dated or banked record and stays as written**:
+`bench/README.md`'s banked #941 tables, `bench/store_sweep_pins.json`'s `arm` keys and
+`bench/bench_store_sweep.cpp`'s arm labels (the instrument's own identifiers — renaming them
+would break every banked pin), and [ADR-0080](0080-reclamation-policy-is-a-build-time-closed-per-target-seam.md)
+§3's "ADR-0079's NARROW taken to its end", which means **per-thread**. Read them through the
+table above.
+
+### 3. per-plane is demoted to "the blast-radius point"
+
+Per-plane was made the default on a contention argument that discriminated it from folded. The
+measured sweep says it does not discriminate. On the `net-fwd` leg, T=1 → T=24 (ops/s per
+thread, banked in `bench/README.md`):
+
+| composition | T=1 → T=24 | T=1 `net-fwd` latency |
+| --- | ---: | ---: |
+| `H-baseline` (shipped, all-heap) | 0.45x | 242.73 ns |
+| **folded** | 0.01x | 240.47 ns (within the null) |
+| **per-plane** | **0.01x** | 233.44 ns |
+| **per-thread** | **0.46x** | **220.39 ns (−9.2 %)** |
+
+Per-plane collapses to **0.01x of its own single-thread rate by T = 24 — identical to the widest
+(folded) arm** — because its net-plane store is one `pool_source_t<sync_mutex_t>` shared by every
+receive thread: the same shape at a different granularity, not a different shape. **Only
+per-thread scales** (0.46x, tracking the platform heap's own 0.45x curve) and it is the only arm
+measurably faster than the shipped baseline (−9.2 % on the net leg, outside the 0.87 % A/A null).
+
+So per-plane keeps exactly one claim, and it is a security claim, not a performance one: it is
+**the blast-radius point** — the composition that fences a peer-provoked flood in the net-plane
+store off from the graph plane (§Context, "Blast radius"). Choose it when that isolation is what
+you are buying, and know that you are buying it *instead of* fan-out scaling, not alongside it.
+
+### 4. Per-target recipes, in place of a default
+
+- **Multi-RX host → per-thread.** The only composition that survives a fan-out, and the fastest
+  per hop. Its cost is per-store slack: **3,870 B** measured over folded on the sweep's workload
+  (~161 B/lane over 49 stores). On a host that is nothing.
+- **Single-threaded MCU → folded.** One cap, tightest RAM, and contention-free *by construction*
+  because there is one thread — the contention argument against folded is vacuous on that target.
+  This is §289's "one slab, whole stack".
+- **Anything wanting the net-plane fence → per-plane**, on the blast-radius claim alone.
+- **Un-wired → all-heap**, which is what ships and what `H-baseline` measures.
+
+The ~14 KB per-store-slack estimate in §Context remains an **MCU-target estimate over a different
+channel set** and is not comparable to the 3,870 B above; §Verification's call for a real HWM
+census on the constrained target still stands.
+
+### 5. What this amendment does not touch
+
+The whole-node (`full`) leg collapses in **every** injected composition, per-thread included,
+because the graph plane is one locked store in all of them — that is Stage 2
+([#843](https://github.com/avatarsd-llc/libtracer/issues/843), gated on
+[#1285](https://github.com/avatarsd-llc/libtracer/issues/1285)), not a verdict on composition.
+The §Staging programme, its family order, the gated/never-gated column split
+([#1428](https://github.com/avatarsd-llc/libtracer/issues/1428)), and the separation of need C
+(segments) all stand unchanged.
