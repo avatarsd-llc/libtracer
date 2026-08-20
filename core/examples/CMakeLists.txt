@@ -228,3 +228,39 @@ if(LIBTRACER_REGISTER_GRAPH_EXAMPLE_TESTS)
         add_test(NAME example_${example} COMMAND ${example})
     endforeach()
 endif()
+
+# The mem / substrate domain (#1383) — L0 itself: the two seams a node injects, and the three
+# sources plus one container built on the failable one. Appended at EOF for the same reason
+# every block above it was: `docs/examples/index.md` pins line-numbered citations into the
+# first block, and anything inserted there moves them.
+#
+# All eight are pure L0: no net plane, no transports, no threads, no build-configuration knob
+# that could forbid one of them. Nothing here skips at run time, so a `ctest -R example_mem_`
+# pass is a pass for eight examples that all demonstrated something.
+set(LIBTRACER_MEM_EXAMPLES
+    mem_block_source      # the seam: nothrow try_alloc, sized release, nullptr on exhaustion
+    mem_source_vs_backend # refcounted segment vs single-owner block — the owner count picks
+    mem_bump_source       # a cursor over a caller buffer; release is a no-op, reset() is not
+    mem_bump_upstream     # the upstream decides: a fast path, or the hard bound
+    mem_pool_source       # ADR-0067 — a long-lived bounded seam has to RECYCLE
+    mem_size_classes      # classes do not share; classes_used()/overflowed() size the span
+    mem_block_array       # a growable array whose growth returns false instead of throwing
+    mem_source_resource   # ADR-0079 — the std::pmr adapter: placement and bounding, not failability
+)
+
+foreach(example IN LISTS LIBTRACER_MEM_EXAMPLES)
+    add_executable(${example} ${example}.cpp)
+    target_link_libraries(${example} PRIVATE libtracer)
+    if(MSVC)
+        target_compile_options(${example} PRIVATE /W4)
+    else()
+        target_compile_options(${example} PRIVATE -Wall -Wextra)
+    endif()
+endforeach()
+
+# The same alias again, for the same anchor reason.
+if(LIBTRACER_REGISTER_GRAPH_EXAMPLE_TESTS)
+    foreach(example IN LISTS LIBTRACER_MEM_EXAMPLES)
+        add_test(NAME example_${example} COMMAND ${example})
+    endforeach()
+endif()
