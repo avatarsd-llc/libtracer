@@ -22,6 +22,7 @@
 #include <memory>
 #include <new>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -315,7 +316,8 @@ class remote_ptr_t {
  * `std::vector` has no small-buffer optimisation, so every non-null key allocated, which is
  * the ordinary local-binding case (`/sensor/temp:subscribers[] -> /dev/ctrl0/in/temp`).
  * Refcounting satisfies it for an atomic increment instead, exactly as
- * @ref edge_view_t::return_route already does one field over for the same hazard.
+ * @ref edge_view_t::remote does one field over for the same hazard (#1448 — the whole cold
+ * half went the same way, so the snapshot now takes two refcounts and copies no bytes).
  *
  * Null ⇒ no local re-dispatch target (the callback-only or remote-only edge). The key is
  * built once at admission and never mutated, so sharing it needs no synchronization beyond
@@ -494,33 +496,96 @@ static_assert(sizeof(void*) != 8 || sizeof(remote_ptr_t) == 8,
               "for out of pub_edge_t, on the delivery path");
 
 /**
- * @brief The dispatch-relevant snapshot of one ACTIVE subscription edge.
+ * @brief The dispatch-relevant snapshot of one ACTIVE subscription edge — **four words and
+ *        two refcounts**, no byte copy of anything (#1448).
  *
- * What @ref vertex_t::snapshot_edges copies out under an edge pin so the graph can
- * dispatch with the pin released (callbacks / re-dispatch re-enter the graph): the
- * `{fn, ctx}` callback pair, owning copies of the link / caller strings (the slot may be
- * cleared concurrently once dispatch runs), and refcount CLONES of the target
- * key and the stored return route (ADR-0041 §2 — a bump, not a byte copy; the clone keeps
- * each alive across a concurrent unsubscribe).
+ * What @ref vertex_t::snapshot_edges copies out under an edge pin so the graph can dispatch
+ * with the pin released (callbacks / re-dispatch re-enter the graph): the `{fn, ctx}`
+ * callback pair, the minted binding, and refcount SHARES of the two owned records — the
+ * target key and the whole cold half.
  *
- * The target key is shared rather than copied because the copy was a **malloc + free per
- * edge per delivery**: `std::vector` has no small-buffer optimisation, and this snapshot is
- * a fresh stack object per publish, so every local binding allocated on the fan-out path.
- * `link` and `caller` stay owning copies — they are `std::string`, so the short names that
- * dominate ride the SSO buffer and never reach the allocator.
+ * **Why the cold half is shared here and not copied (#1448).** #1442 made
+ * @ref subscriber_remote_t refcount-shared and immutable after admission, and #1447 spent
+ * that on the SUBSCRIBE path (`%vertex_t::try_publish_edges`). This snapshot is the same
+ * copy on the DELIVERY path, where it is paid once per edge **per write** rather than once
+ * per admission: it used to own `std::string` copies of the link and the caller plus
+ * refcount clones of the two routes, i.e. two probe-guarded assignments and two atomics for
+ * every remote edge of every fan-out. It is now ONE relaxed increment, and the record it
+ * names is exactly the bytes the copy used to reproduce. The lifetime guarantee the copies
+ * bought — the slot may be cleared while dispatch runs outside the pin — is bought instead
+ * by the share itself: this handle is a holder, so the record outlives the unsubscribe that
+ * drops the slot's.
+ *
+ * That also makes the whole snapshot INFALLIBLE. Nothing in it can allocate (a `shared_ptr`
+ * clone and an intrusive increment do not), so `%vertex_t::copy_published` no longer has a
+ * per-edge OOM leg at all and @ref vertex_t::snapshot_drops_t no longer carries an
+ * `out_of_memory` count — the shed it used to describe cannot happen.
+ *
+ * ADR-0041 §2 is satisfied more strongly than before, not stretched: its remote-subscriber
+ * row asks for **one copy at subscribe into a refcounted segment** with every later delivery
+ * *roping* the stored route rather than copying it. The routes already complied as `view_t`
+ * clones; now the delivery does not even clone them, and nothing here is a borrowed span —
+ * the handle owns.
+ *
+ * The width matters on its own: 160 B → 48 B. @ref edge_snapshot_t is `kCapacity` of these
+ * on the publishing thread's stack, and a wide fan-out streams `F` of them through the
+ * overflow vector, which is the `F * sizeof(edge_view_t)` term `bench/bench_common.hpp`
+ * names as the reason the mid fan-out ladder exists.
  */
 struct edge_view_t {
     subscriber_fn_t callback = nullptr; /**< @brief The in-process sink fn (null ⇒ none). */
     void* callback_ctx = nullptr;       /**< @brief The sink's caller-owned context. */
     target_key_t target_key; /**< @brief Local re-dispatch target (refcount share, not a copy). */
     target_binding_t binding{}; /**< @brief The minted slot for that target, or unbound (#830). */
-    std::string link;       /**< @brief Remote-delivery link NAME (owning copy; empty ⇒ local). */
-    view_t return_route{};  /**< @brief Consumer return route (refcount clone). */
-    view_t reverse_route{}; /**< @brief Completed reverse bound route (refcount clone; empty ⇒
-                                 canonical-only delivery — RFC-0024 §7.1 amendment 1). */
-    bool delivery_compact = false; /**< @brief RFC-0004 §E.1 label-compaction opt-in. */
-    std::string caller; /**< @brief The edge's stored ACL fan-in context (#81, owning copy). */
+    /** @brief The shared, immutable cold half (#1442) — null for the plain in-process edge.
+     *         A HOLDER, not a borrow: it keeps the record alive for the whole dispatch, which
+     *         is what the owning string copies used to do. */
+    remote_ptr_t remote;
+
+    /**
+     * @brief This edge's remote-delivery link NAME; empty ⇒ no remote leg.
+     *
+     * Borrowed from the record this view holds, so it is valid for as long as the view is —
+     * which is exactly as long as the `std::string` member it replaces was. Empty for an
+     * in-process edge AND for the `:subscribers[]` field-write arm, which binds a caller
+     * context but deliberately no link (there is no return route to deliver over).
+     */
+    [[nodiscard]] std::string_view link() const noexcept {
+        const subscriber_remote_t* r = remote.get();
+        return r != nullptr ? std::string_view(r->link) : std::string_view{};
+    }
+    /** @brief The edge's stored ACL fan-in context (#81), borrowed from the held record;
+     *         empty for a locally-wired edge. */
+    [[nodiscard]] std::string_view caller() const noexcept {
+        const subscriber_remote_t* r = remote.get();
+        return r != nullptr ? std::string_view(r->caller) : std::string_view{};
+    }
+    /**
+     * @brief Does this edge have a REMOTE-delivery leg — i.e. a non-empty @ref link?
+     *
+     * The gate `graph_t::dispatch_edge` takes per edge, kept as one named test because it is
+     * on the always-inlined per-edge body of the wide fan-out loop. The null check
+     * short-circuits, so the in-process edge — the bulk of any fan-out — pays one load and
+     * one branch, exactly what `link.empty()` cost when the string was inline.
+     */
+    [[nodiscard]] bool has_remote_leg() const noexcept {
+        const subscriber_remote_t* r = remote.get();
+        return r != nullptr && !r->link.empty();
+    }
 };
+
+/**
+ * @brief The dispatch snapshot's WIDTH, pinned — the delivery path's bandwidth (#1448).
+ *
+ * `snapshot_edges` writes one of these per active edge on every fan-out, `kInlineFanout` of
+ * them live on the publishing thread's stack, and a wide fan-out streams `F` through the
+ * overflow vector. #844's mid ladder exists because that array outgrows L1 somewhere in the
+ * 128→1024 gap, so the width is a measured hot-path quantity and not a housekeeping detail.
+ * 160 B before #1448 (two `std::string`s and two `view_t`s inline), 48 B after.
+ */
+static_assert(sizeof(void*) != 8 || sizeof(edge_view_t) == 48,
+              "the dispatch snapshot is 48 B — it is written once per edge per DELIVERY; "
+              "put new per-edge state in the shared cold half, not here");
 
 /**
  * @brief A transient-local durability latch (RFC-0004 §D / Q4): the LKV plus the freshly

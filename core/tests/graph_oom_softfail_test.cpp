@@ -13,7 +13,9 @@
  *   - the HANDLER null-shared_ptr "consumed" sentinel is NOT misread as that OOM;
  *   - DELIVERY legs drop (never abort, never corrupt): a wide fan-out degrades to the
  *     inline prefix, a spilled-rope target clone drops one leg, a stream ring append
- *     is shed (bounded-lossy history);
+ *     is shed (bounded-lossy history) — while the per-edge dispatch SNAPSHOT, which used
+ *     to have a drop of its own, no longer allocates at all (#1448) and is pinned here as
+ *     an inverted assertion: a remote fan-out survives a total heap refusal intact;
  *   - a stream drain under OOM DEFERS (cursor kept) and catches up once memory returns;
  *   - the two sheds that happen BEFORE the fan-out — a STREAM ring append and a
  *     `mark_pending` leg — are COUNTED at one per subscriber while the write still answers
@@ -275,27 +277,48 @@ void test_handler_notify_clone_sheds_fan_out() {
 }
 
 /**
- * @brief A remote edge whose owning link copy OOMs is skipped by the snapshot — one counted
- *        drop per skipped edge (#896).
+ * @brief A remote edge's dispatch snapshot reaches NO allocator, so a total-heap refusal
+ *        cannot shed a single remote delivery (#1448 — inverted from #896's drop).
  *
- * The per-edge half of the snapshot's soft-fail: `try_copy_published` copies the cold half
- * (link NAME, stored caller) of a wire-made subscriber, and those are the only strings in a
- * dispatch view large enough to allocate. A local callback edge copies two pointers and a
- * refcount, which is why the small-fan-out hot path cannot reach this at all — and why the
- * drop needs a REMOTE subscriber to reproduce, not a mocked snapshot.
+ * **This assertion used to be its own opposite, and the inversion is the finding.** Until
+ * #1448 the snapshot deep-copied the cold half (link NAME, stored caller) into every
+ * `edge_view_t`, and those two `std::string`s were the only allocation on the per-edge
+ * delivery path. This test pinned the resulting soft-fail: reject exactly that growth and
+ * every remote edge's delivery is skipped and counted. The cold half is now a refcount
+ * SHARE, so nothing on the path allocates and there is nothing left to fail — the
+ * deliveries land instead of dropping, and `vertex_t::snapshot_drops_t` no longer even
+ * carries an `out_of_memory` cause.
+ *
+ * The assertion is therefore the exact inverse of the one it replaces, taken through the
+ * SAME injection: refuse precisely the byte count the link copy used to ask for and every
+ * REMOTE edge still delivers, in full, with no drop counted by any cause. The old code
+ * read `deliveries == 0` and three counted OOM drops through this identical hook, so this
+ * is an ablation the tree can be put back to rather than a claim. (`fail_all` cannot be
+ * used here: it also refuses the LKV store, so the write soft-fails as BACKPRESSURE and
+ * the fan-out is never reached — the pinpoint hook is what keeps the delivery path in
+ * scope.)
+ *
+ * **Two canaries keep it from passing vacuously.** An injection hook that is not consulted
+ * proves nothing, and "nothing allocated" is exactly what a blinded hook also reports. So
+ * the window first asserts the hook IS live and IS refusing this very growth (a direct
+ * `tr::detail::try_assign` of a link-sized string must fail inside it), and the edges are
+ * built over links well past the SSO boundary so that a copy, if one happened, would have
+ * to reach the allocator.
  */
-void test_remote_edge_copy_drop() {
-    std::printf("remote edge — a snapshot copy that cannot allocate drops that edge:\n");
+void test_remote_edge_snapshot_is_allocation_free() {
+    std::printf("remote edge — the dispatch snapshot allocates nothing, so nothing sheds:\n");
     constexpr int kSubs = 3;               // < kInlineFanout: no overflow reserve in play
-    constexpr std::size_t kLinkLen = 200;  // > SSO, so the copy is a real allocation
+    constexpr std::size_t kLinkLen = 200;  // > SSO, so any copy would be a real allocation
     graph_t g;
     auto v = g.register_vertex(path_t("/s/remote"), role_t::STORED_VALUE);
     int deliveries = 0;
+    std::size_t seen_link_len = 0;
     const tr::testing::remote_sink_guard_t sink_guard(
-        g, [&deliveries](const tr::graph::remote_delivery_t&, const rope_t&) { ++deliveries; });
+        g, [&](const tr::graph::remote_delivery_t& d, const rope_t&) {
+            ++deliveries;
+            seen_link_len = d.link.size();
+        });
     for (int i = 0; i < kSubs; ++i) {
-        // Distinct links, one length: every copy probes the same byte count, so ONE
-        // injected rejection covers the whole set.
         std::string link = "lnk" + std::to_string(i);
         link.append(kLinkLen - link.size(), 'x');
         check(g.subscribe_wire(v, make_value({0x04, 0x40, 0x00, 0x00}),
@@ -307,20 +330,24 @@ void test_remote_edge_copy_drop() {
     {
         g_reject_size = kLinkLen + 1;  // the link copy's growth (+1 for the NUL)
         const hook_guard_t oom(fail_exact);
+        // CANARY: the hook is installed AND it refuses a growth of exactly the size the
+        // copy this path used to make asked for. Without this the whole test would also
+        // pass with the hook blinded, which is the free pass it exists to deny (#1420's
+        // canary discipline).
+        std::string canary;
+        check(!tr::detail::try_assign(canary, std::string(kLinkLen, 'x')),
+              "canary: the injection is live and refuses a link-sized owning copy");
         check(g.write(v, make_value({0x30})).has_value(), "the write itself still succeeds");
     }
-    check(g.read(v).has_value(), "the LKV landed — only the delivery legs were shed");
-    check(deliveries == 0, "no remote delivery was made: every edge's view copy failed");
+    check(g.read(v).has_value(), "the LKV landed");
+    check(deliveries == kSubs,
+          "EVERY remote edge delivered under the refusal — the snapshot copies no bytes");
+    check(seen_link_len == kLinkLen,
+          "and the sink saw the WHOLE link name, borrowed from the shared record");
     const auto d = g.delivery_drops();
-    check(d.out_of_memory == before.out_of_memory + kSubs,
-          "each skipped edge is counted once, by the OOM cause");
-    check(d.fan_out_truncated == before.fan_out_truncated,
-          "a per-edge copy failure is not the capacity degrade");
-
-    check(g.write(v, make_value({0x31})).has_value(), "post-OOM write succeeds");
-    check(deliveries == kSubs, "every remote edge delivers again once memory returns");
-    check(g.delivery_drops().out_of_memory == before.out_of_memory + kSubs,
-          "and the full delivery counts no further drop");
+    check(d.out_of_memory == before.out_of_memory,
+          "no OOM drop was counted: the per-edge snapshot has no allocation left to fail");
+    check(d.fan_out_truncated == before.fan_out_truncated, "and no capacity degrade either");
 }
 
 /** @brief A spilled (>2-link) value's target-edge clone drops that ONE leg on OOM. */
@@ -614,7 +641,7 @@ int main() {
     test_wide_fanout_degrade();
     test_target_clone_drop();
     test_handler_notify_clone_sheds_fan_out();
-    test_remote_edge_copy_drop();
+    test_remote_edge_snapshot_is_allocation_free();
     test_stream_ring_shed();
     test_stream_shed_append_no_redelivery();
     test_stream_shed_is_counted();

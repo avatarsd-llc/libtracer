@@ -1401,7 +1401,10 @@ void graph_t::count_external_drop(external_drop_t why, std::uint64_t n) noexcept
 }
 
 void graph_t::count_snapshot_drops(const vertex_t::snapshot_drops_t& drops) noexcept {
-    if (drops.out_of_memory != 0) count_drop(drop_reason_t::OUT_OF_MEMORY, drops.out_of_memory);
+    // ONE cause since #1448: the per-edge copy cannot fail any more (the cold half is a
+    // refcount share, not an owning string copy), so the snapshot's only shed is the
+    // wide-fan-out capacity degrade. OUT_OF_MEMORY as a DELIVERY cause is unaffected —
+    // `dispatch_edge_target`'s rope clone and the store legs still report it.
     if (drops.truncated != 0) count_drop(drop_reason_t::FAN_OUT_TRUNCATED, drops.truncated);
 }
 
@@ -1700,7 +1703,14 @@ namespace {
     // Fan-in gate (#81, ADR-0026): the delivery is an ordinary write to the target,
     // gated by the TARGET's :acl WRITE right under the edge's stored caller context.
     // Denial drops this delivery.
-    if (!acl_allows(target, e.caller, acl_right_t::WRITE)) {
+    //
+    // Read TWICE, deliberately (#1448). The context is borrowed from the shared cold half
+    // now, so each read is a handle load, a null test and a select — and `acl_allows` may
+    // write through the graph, so the compiler cannot CSE the two. Hoisting it into a local
+    // that stays live across the ACL call and the clone was MEASURED: 148 -> 145 instructions
+    // here, at +36 B of spill, which is the wrong side of the trade for a leg whose byte pin
+    // is otherwise unmoved by this change.
+    if (!acl_allows(target, e.caller(), acl_right_t::WRITE)) {
         count_drop(drop_reason_t::DENIED, 1);
         return;
     }
@@ -1721,7 +1731,7 @@ namespace {
     // does. A shed append therefore loses that deferred delivery, and is counted at the
     // TARGET's own-subs width (the shed is the target's, not the source's).
     vertex_t::store_drops_t store_drops;
-    (void)store_value(target, std::move(clone), store_drops, e.caller);
+    (void)store_value(target, std::move(clone), store_drops, e.caller());
     count_store_drops(target, store_drops);
 }
 
@@ -1737,12 +1747,21 @@ namespace {
     // mid-publish; that edge is skipped for this write, which is the sink_slot_t contract.
     const auto sink = remote_sink_.get();
     if (sink.fn == nullptr) return;
+    // The five wire fields are read straight off the SHARED cold half (#1448) rather than
+    // out of five members the snapshot had copied for us. The snapshot holds a reference to
+    // this record, so the two `string_view`s below are valid for the whole sink call and the
+    // two route clones are the same refcount bumps `remote_delivery_t` always took — what
+    // disappeared is the pair of `std::string` copies and the pair of `view_t` clones the
+    // SNAPSHOT paid, per remote edge, per delivery. `has_remote_leg()` gated this call, so
+    // the handle is non-null here; assert it rather than re-testing on the hot path.
+    const subscriber_remote_t* r = e.remote.get();
+    assert(r != nullptr && "dispatch_edge gates the remote leg on a populated cold half");
     sink.fn(sink.ctx,
-            remote_delivery_t{.link = e.link,
-                              .return_route = e.return_route,
-                              .reverse_route = e.reverse_route,
-                              .caller = e.caller,
-                              .delivery_compact = e.delivery_compact},
+            remote_delivery_t{.link = r->link,
+                              .return_route = r->return_route,
+                              .reverse_route = r->reverse_route,
+                              .caller = r->caller,
+                              .delivery_compact = r->delivery_compact},
             value);
 }
 
@@ -1763,7 +1782,7 @@ namespace {
     if (e.callback != nullptr)
         e.callback(e.callback_ctx, value);  // the rope by const ref (sink may clone links)
     if (e.target_key) dispatch_edge_target(e, value);
-    if (!e.link.empty() && remote_sink_.installed()) dispatch_edge_remote(e, value);
+    if (e.has_remote_leg() && remote_sink_.installed()) dispatch_edge_remote(e, value);
 }
 
 void graph_t::fan_out(vertex_t* v, const rope_t& value) {
@@ -2902,7 +2921,8 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
             // deliver over — the edge fans out to a LOCAL target), so
             // `vertex_t::evict_link_edges` falls back to this context to find the link the
             // edge was admitted over (#943). Do NOT "fix" that by assigning `link` here:
-            // `graph_t::dispatch_edge` gates its remote leg on `!e.link.empty()`, so a
+            // `graph_t::dispatch_edge` gates its remote leg on `edge_view_t::has_remote_leg`
+            // — i.e. on a non-empty cold-half link — so a
             // non-empty link would add a phantom `FWD{WRITE}` per publish carrying an EMPTY
             // return route. That is the invariant `subscribe_wire` now enforces at its own
             // door (#1055, INVALID_PATH on an empty route) — this arm holds up the other half
